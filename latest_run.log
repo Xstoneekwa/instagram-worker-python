@@ -1,0 +1,35 @@
+/Users/admin/Library/Python/3.9/lib/python/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020
+  warnings.warn(
+{"ts": "2026-05-07T01:44:33.851299+00:00", "level": "info", "event": "run_started", "target_username": "xstonekwa", "package": "com.instagram.android"}
+{"ts": "2026-05-07T01:44:35.149188+00:00", "level": "info", "event": "device_connected", "device_info": {"currentPackageName": "com.instagram.android", "displayHeight": 2400, "displayRotation": 0, "displaySizeDpX": 411, "displaySizeDpY": 914, "displayWidth": 1080, "productName": "sdk_gphone64_arm64", "screenOn": true, "sdkInt": 34, "naturalOrientation": true}}
+{"ts": "2026-05-07T01:44:35.149356+00:00", "level": "info", "event": "phase_timing", "phase": "connect_device", "elapsed_ms": 1297.77}
+{"ts": "2026-05-07T01:44:35.318340+00:00", "level": "info", "event": "android_animations_disabled"}
+{"ts": "2026-05-07T01:44:35.318494+00:00", "level": "info", "event": "phase_timing", "phase": "disable_android_animations", "elapsed_ms": 169.06}
+{"ts": "2026-05-07T01:44:35.349703+00:00", "level": "info", "event": "health_check", "ok": true}
+{"ts": "2026-05-07T01:44:35.349758+00:00", "level": "info", "event": "phase_timing", "phase": "health_check", "elapsed_ms": 31.24}
+{"ts": "2026-05-07T01:44:36.806477+00:00", "level": "info", "event": "instagram_warm_session_reused", "reason": "ok"}
+{"ts": "2026-05-07T01:44:36.929386+00:00", "level": "info", "event": "phase_timing", "phase": "warm_session_skip_force_stop", "elapsed_ms": 1579.52}
+{"ts": "2026-05-07T01:44:37.088276+00:00", "level": "info", "event": "app_foreground_check", "package": "com.instagram.android", "current": "com.instagram.android", "ok": true}
+{"ts": "2026-05-07T01:44:37.088449+00:00", "level": "info", "event": "phase_timing", "phase": "verify_app_running", "elapsed_ms": 158.51}
+{"ts": "2026-05-07T01:44:37.421989+00:00", "level": "info", "event": "open_search_clicked", "selector": "rid_matches_search_tab"}
+{"ts": "2026-05-07T01:44:38.869280+00:00", "level": "info", "event": "open_search_timing", "search_click_ms": 333.55, "search_field_ready_ms": 1322.7, "selector": "rid_matches_search_tab", "ok": true}
+{"ts": "2026-05-07T01:44:38.869425+00:00", "level": "info", "event": "phase_timing", "phase": "open_search", "elapsed_ms": 1780.91}
+{"ts": "2026-05-07T01:44:43.338584+00:00", "level": "debug", "event": "fast_input_broadcast", "exit_code": 0, "output_tail": "Broadcasting: Intent { act=ADB_INPUT_TEXT flg=0x400000 (has extras) }\nBroadcast completed: result=0"}
+{"ts": "2026-05-07T01:44:43.339379+00:00", "level": "info", "event": "fast_ime_typing", "typing_method": "fast_ime", "fast_ime_switch_ok": true, "fast_ime_broadcast_ok": true, "command_ok": true}
+{"ts": "2026-05-07T01:44:43.490693+00:00", "level": "info", "event": "search_typed", "username": "xstonekwa", "typing_method": "fast_ime", "typing_confirm_ms": 0.0, "ok": true, "fused_row_confirm_deferred": true, "fast_ime_switch_ok": true, "fast_ime_broadcast_ok": true}
+{"ts": "2026-05-07T01:44:43.491873+00:00", "level": "info", "event": "phase_timing", "phase": "type_search", "elapsed_ms": 4622.33}
+{"ts": "2026-05-07T01:44:46.592829+00:00", "level": "warning", "event": "accounts_tab_not_found", "budget_s": 1.5, "message": "Switching to mixed_results search UI mode."}
+{"ts": "2026-05-07T01:44:46.593017+00:00", "level": "info", "event": "search_ui_mode", "mode": "mixed_results"}
+{"ts": "2026-05-07T01:44:46.593067+00:00", "level": "info", "event": "phase_timing", "phase": "open_accounts_tab", "elapsed_ms": 3101.09}
+{"ts": "2026-05-07T01:44:48.020064+00:00", "level": "info", "event": "row_hot_path_first_match", "username": "xstonekwa", "search_ui_mode": "mixed_results"}
+{"ts": "2026-05-07T01:44:51.889458+00:00", "level": "info", "event": "row_tap_command_done", "row_tap_command_ms": 393.22, "x": 299, "y": 469, "username": "xstonekwa", "tap_mode": "hot_center_jitter", "search_ui_mode": "mixed_results"}
+{"ts": "2026-05-07T01:44:52.885966+00:00", "level": "info", "event": "profile_transition_signal_early", "signal": "action_bar_title", "username": "xstonekwa"}
+{"ts": "2026-05-07T01:44:52.886056+00:00", "level": "info", "event": "account_row_tapped", "x": 299, "y": 469, "username": "xstonekwa", "search_ui_mode": "mixed_results", "tap_bounds": {"left": 211, "top": 442, "right": 388, "bottom": 493}, "tap_mode": "hot_center_jitter"}
+{"ts": "2026-05-07T01:44:52.886092+00:00", "level": "info", "event": "real_account_row_tap_center", "x": 299, "y": 469, "username": "xstonekwa"}
+{"ts": "2026-05-07T01:44:53.177937+00:00", "level": "info", "event": "phase_timing", "phase": "tap_account", "elapsed_ms": 6584.72}
+{"ts": "2026-05-07T01:44:53.525773+00:00", "level": "info", "event": "profile_open_detected", "username": "xstonekwa", "signal": "header_resource_id", "attempt": 1}
+{"ts": "2026-05-07T01:44:53.525978+00:00", "level": "info", "event": "profile_verify_signal_found", "username": "xstonekwa", "signal": "header_resource_id", "attempt": 1}
+{"ts": "2026-05-07T01:44:53.526013+00:00", "level": "info", "event": "profile_verify_success", "username": "xstonekwa", "signal": "header_resource_id", "attempts": 1}
+{"ts": "2026-05-07T01:44:53.526049+00:00", "level": "info", "event": "phase_timing", "phase": "verify_profile", "elapsed_ms": 348.01}
+{"ts": "2026-05-07T01:44:53.526076+00:00", "level": "info", "event": "run_success_stop", "total_ms": 19674.2, "target": "xstonekwa", "message": "Profile verified; safe run complete (no further actions)."}
+{"ts": "2026-05-07T01:44:53.526160+00:00", "level": "info", "event": "performance_summary", "total_ms": 19674.27, "typing_command_ms": 461.88, "row_detect_ms": 1426.98, "row_tap_command_ms": 393.22, "post_tap_settle_ms": 123.26, "profile_transition_wait_ms": 873.02, "profile_verify_ms": 348.0, "search_click_ms": 333.55, "search_field_ready_ms": 1322.7, "typing_confirm_ms": 0.0, "warm_session_used": true, "force_stop_used": false, "xml_fetches": 0, "recovery_used": false, "exit_code": 0}
