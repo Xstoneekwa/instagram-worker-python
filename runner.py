@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import time
+from datetime import datetime, timezone
 
 import config
 import supabase_client
@@ -13,6 +14,7 @@ from instagram_navigation import (
     clear_dm_draft,
     detect_unsupported_start_surface,
     dismiss_android_permission_dialog,
+    finalize_after_real_send,
     finalize_dm_draft_before_back,
     get_perf_snapshot,
     get_last_dm_thread_classify_snapshot,
@@ -46,6 +48,26 @@ from instagram_navigation import (
     verify_profile,
 )
 from logs import log
+
+# Real DM sends per worker process (pairs with SEND_DM_MAX_PER_RUN).
+_RUNTIME_REAL_DM_SENT_COUNT: int = 0
+
+
+def _seconds_since_dm_sent_row(row: dict) -> float | None:
+    """Wall-clock seconds since last send timestamp on target row, if any."""
+    for key in ("dm_sent_at", "processed_at", "updated_at"):
+        raw = row.get(key)
+        if not raw:
+            continue
+        try:
+            ts = str(raw).replace("Z", "+00:00")
+            dt = datetime.fromisoformat(ts)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return (datetime.now(timezone.utc) - dt).total_seconds()
+        except Exception:
+            continue
+    return None
 
 
 def _phase(name: str, phase_start: float) -> float:
@@ -135,6 +157,17 @@ def _emit_performance_summary(
         draft_to_back_profile_ms=round(float(snap.get("draft_to_back_profile_ms", 0.0)), 2),
         profile_to_search_ms=round(float(snap.get("profile_to_search_ms", 0.0)), 2),
         next_username_ready_ms=round(float(snap.get("next_username_ready_ms", 0.0)), 2),
+        post_send_detect_ms=round(float(snap.get("post_send_detect_ms", 0.0)), 2),
+        post_send_back_to_profile_ms=round(
+            float(snap.get("post_send_back_to_profile_ms", 0.0)), 2
+        ),
+        post_send_profile_to_search_ms=round(
+            float(snap.get("post_send_profile_to_search_ms", 0.0)), 2
+        ),
+        post_send_finalize_total_ms=round(
+            float(snap.get("post_send_finalize_total_ms", 0.0)), 2
+        ),
+        post_send_cleanup_reason=snap.get("post_send_cleanup_reason"),
         search_click_ms=round(float(snap.get("search_click_ms", 0.0)), 2),
         search_field_ready_ms=round(float(snap.get("search_field_ready_ms", 0.0)), 2),
         search_surface_reused=bool(snap.get("search_surface_reused", False)),
@@ -185,6 +218,7 @@ def _exit_reason_from_code(code: int) -> str:
         18: "dm_draft_clear_failed",
         19: "dm_send_precheck_failed",
         20: "dm_sent_failed",
+        21: "sent_success_navigation_partial",
     }
     return mapping.get(code, f"exit_code_{code}")
 
@@ -509,18 +543,25 @@ def _insert_dm_log_safe(
     warm_session_used: bool,
     target_perf: dict,
 ) -> None:
-    returned_to_profile = exit_code in (0, 13)
-    returned_to_search = exit_code == 0
-    if exit_code == 12:
-        navigation_flow_status = "dm_back_failed"
-    elif exit_code == 13:
-        navigation_flow_status = "search_back_failed"
+    if exit_code == 21:
+        returned_to_profile = bool(int(target_perf.get("post_finalize_back_profile_ok", 0)))
+        returned_to_search = bool(int(target_perf.get("post_finalize_back_to_search_ok", 0)))
+        navigation_flow_status = "post_send_partial"
     else:
-        navigation_flow_status = "complete"
+        returned_to_profile = exit_code in (0, 13)
+        returned_to_search = exit_code == 0
+        if exit_code == 12:
+            navigation_flow_status = "dm_back_failed"
+        elif exit_code == 13:
+            navigation_flow_status = "search_back_failed"
+        else:
+            navigation_flow_status = "complete"
 
     dm_status = "success"
     if exit_code in (12, 13):
         dm_status = "failed"
+    if exit_code == 21:
+        dm_status = "success"
     if dm_state == "dm_not_available":
         dm_status = "unavailable"
     elif dm_state in ("restricted_account", "unknown"):
@@ -542,6 +583,12 @@ def _insert_dm_log_safe(
         "warm_session_used": warm_session_used,
         "search_surface_reused": bool(target_perf.get("search_surface_reused", False)),
         "dm_thread_classify": get_last_dm_thread_classify_snapshot(),
+        "post_send_detect_ms": round(float(target_perf.get("post_send_detect_ms", 0.0)), 2),
+        "post_send_finalize_total_ms": round(
+            float(target_perf.get("post_send_finalize_total_ms", 0.0)), 2
+        ),
+        "post_send_cleanup_reason": target_perf.get("post_send_cleanup_reason"),
+        "business_navigation_status": ("partial" if exit_code == 21 else "full"),
     }
     try:
         supabase_client.insert_action_log(
@@ -754,6 +801,38 @@ def _run_one_target(
             next_username_ready_ms=round(float(snap.get("next_username_ready_ms", 0.0)), 2),
             exit_code=exit_code,
         )
+
+    def _insert_dm_draft_log(action_type: str, status: str, message: str, payload: dict) -> None:
+        if not (supabase_mode and run_id and account_id):
+            return
+        _safe_supabase_call(
+            "insert_action_log",
+            run_id=run_id,
+            account_id=account_id,
+            target_username=username,
+            action_type=action_type,
+            status=status,
+            message=message,
+            payload=payload,
+        )
+
+    def _dm_composer_actual_text_len() -> int:
+        try:
+            cur = d(resourceIdMatches=r".*:id/row_thread_composer_edittext.*")
+            if cur.exists(timeout=0.05):
+                t = cur.get_text() or ""
+                return len(str(t))
+        except Exception:
+            pass
+        try:
+            for ed in d(className="android.widget.EditText").all():
+                b = (ed.info or {}).get("bounds") or {}
+                if int(b.get("top", 0)) > int(d.window_size()[1] * 0.35):
+                    t = ed.get_text() or ""
+                    return len(str(t))
+        except Exception:
+            pass
+        return 0
     set_perf_metric("first_action_delay_ms", first_action_delay_ms)
     set_perf_metric("next_username_ready_ms", next_username_ready_ms)
     if target_index == 0:
@@ -934,6 +1013,21 @@ def _run_one_target(
     if bool(getattr(config, "DM_DRAFT_TYPING_ENABLED", True)):
         ok_comp, comp_signal = verify_dm_composer_safe(d, pkg)
         if not ok_comp:
+            _insert_dm_draft_log(
+                action_type="dm_draft_blocked_composer_not_visible",
+                status="failed",
+                message="composer not visible/safe",
+                payload={
+                    "reason": str(comp_signal or "dm_composer_not_safe"),
+                    "thread_state": dm_state,
+                    "composer_visible": False,
+                    "expected_text_len": len(str(getattr(config, "SAFE_DRAFT_MESSAGE", "") or "")),
+                    "actual_text_len": _dm_composer_actual_text_len(),
+                    "draft_verify_attempts": 0,
+                    "fastime_used": False,
+                    "set_text_used": False,
+                },
+            )
             log(
                 "error",
                 "run_aborted",
@@ -954,6 +1048,119 @@ def _run_one_target(
 
         draft_text = str(getattr(config, "SAFE_DRAFT_MESSAGE", "") or "")
         ok_type, type_info = type_dm_draft_only(d, draft_text, pkg)
+        type_info_s = str(type_info or "")
+        info = type_info if isinstance(type_info, dict) else {}
+        method = str(info.get("method") or "")
+        fastime_used = bool(info.get("fastime_used")) or method == "fast_ime"
+        set_text_used = bool(info.get("set_text_used")) or method == "set_text"
+
+        def _draft_payload(
+            *,
+            verify_will_continue: bool | None = None,
+            actual_len_override: int | None = None,
+            prefix_override: str | None = None,
+        ) -> dict:
+            expected_len = int(info.get("expected_text_len") or len(draft_text))
+            actual_len = (
+                int(actual_len_override)
+                if actual_len_override is not None
+                else int(info.get("actual_text_len") or _dm_composer_actual_text_len())
+            )
+            prefix = (
+                str(prefix_override)
+                if prefix_override is not None
+                else str(info.get("text_prefix_preview") or "")[:20]
+            )
+            out = {
+                "expected_text_len": expected_len,
+                "actual_text_len": actual_len,
+                "fastime_used": bool(fastime_used),
+                "set_text_used": bool(set_text_used),
+                "thread_state": dm_state,
+                "composer_visible": bool(info.get("composer_visible", True)),
+                "text_prefix_preview": prefix[:20],
+            }
+            if verify_will_continue is not None:
+                out["verify_will_continue"] = bool(verify_will_continue)
+            return out
+
+        if fastime_used:
+            _insert_dm_draft_log(
+                action_type="dm_draft_text_after_fastime",
+                status="success" if ok_type else "failed",
+                message="text observed after fastime",
+                payload=_draft_payload(
+                    verify_will_continue=bool(info.get("verify_will_continue", False)),
+                    actual_len_override=int(info.get("actual_text_len_after_fastime") or 0),
+                    prefix_override=str(info.get("text_prefix_after_fastime") or "")[:20],
+                ),
+            )
+        if bool(info.get("fastime_partial_text")):
+            _insert_dm_draft_log(
+                action_type="dm_draft_fastime_partial_text",
+                status="warning",
+                message="fastime partial text detected",
+                payload=_draft_payload(
+                    verify_will_continue=bool(info.get("fallback_set_text_started", False))
+                ),
+            )
+        if bool(info.get("fastime_truncated")):
+            _insert_dm_draft_log(
+                action_type="dm_draft_fastime_truncated",
+                status="warning",
+                message="fastime text truncated",
+                payload=_draft_payload(
+                    verify_will_continue=bool(info.get("fallback_set_text_started", False))
+                ),
+            )
+        if bool(info.get("fallback_set_text_started")):
+            _insert_dm_draft_log(
+                action_type="dm_draft_fallback_set_text_started",
+                status="started",
+                message="fallback set_text started",
+                payload=_draft_payload(
+                    verify_will_continue=bool(info.get("fallback_set_text_ok", False))
+                ),
+            )
+        if bool(info.get("fallback_set_text_ok")):
+            _insert_dm_draft_log(
+                action_type="dm_draft_fallback_set_text_ok",
+                status="success",
+                message="fallback set_text ok",
+                payload=_draft_payload(
+                    verify_will_continue=True,
+                    actual_len_override=int(info.get("actual_text_len_after_set_text") or 0),
+                    prefix_override=str(info.get("text_prefix_after_set_text") or "")[:20],
+                ),
+            )
+            _insert_dm_draft_log(
+                action_type="dm_draft_text_after_set_text",
+                status="success",
+                message="text observed after set_text",
+                payload=_draft_payload(
+                    verify_will_continue=True,
+                    actual_len_override=int(info.get("actual_text_len_after_set_text") or 0),
+                    prefix_override=str(info.get("text_prefix_after_set_text") or "")[:20],
+                ),
+            )
+        if bool(info.get("fallback_set_text_failed")):
+            _insert_dm_draft_log(
+                action_type="dm_draft_fallback_set_text_failed",
+                status="failed",
+                message="fallback set_text failed",
+                payload=_draft_payload(verify_will_continue=False),
+            )
+
+        if (not ok_type) and ("fast_ime" in type_info_s.lower()) and not fastime_used:
+            _insert_dm_draft_log(
+                action_type="dm_draft_fastime_ui_not_visible",
+                status="failed",
+                message="fastime path failed",
+                payload={
+                    **_draft_payload(verify_will_continue=False),
+                    "reason": type_info_s or "fast_ime_failed",
+                },
+            )
         if not ok_type:
             log(
                 "error",
@@ -971,9 +1178,105 @@ def _run_one_target(
                 target_username=username,
             )
             return exit_code
+        _insert_dm_draft_log(
+            action_type="dm_draft_typed",
+            status="success",
+            message="draft typed",
+            payload={
+                "thread_state": dm_state,
+                "composer_visible": True,
+                "expected_text_len": len(draft_text),
+                "actual_text_len": _dm_composer_actual_text_len(),
+                "draft_verify_attempts": 0,
+                "fastime_used": bool(fastime_used),
+                "set_text_used": bool(set_text_used),
+            },
+        )
 
         if bool(getattr(config, "DM_VERIFY_TYPED_TEXT", True)):
-            if not verify_dm_draft_text(d, draft_text):
+            draft_verify_attempts = 1
+            verify_ok = verify_dm_draft_text(d, draft_text)
+            _insert_dm_draft_log(
+                action_type="dm_draft_verify_ui_match",
+                status="success" if verify_ok else "failed",
+                message="draft verify ui match",
+                payload={
+                    "thread_state": dm_state,
+                    "composer_visible": True,
+                    "expected_text_len": len(draft_text),
+                    "actual_text_len": _dm_composer_actual_text_len(),
+                    "draft_verify_attempts": draft_verify_attempts,
+                    "fastime_used": bool(fastime_used),
+                    "set_text_used": bool(set_text_used),
+                },
+            )
+            if verify_ok:
+                _insert_dm_draft_log(
+                    action_type="dm_draft_verify_ok",
+                    status="success",
+                    message="draft verify ok",
+                    payload={
+                        "thread_state": dm_state,
+                        "composer_visible": True,
+                        "expected_text_len": len(draft_text),
+                        "actual_text_len": _dm_composer_actual_text_len(),
+                        "draft_verify_attempts": draft_verify_attempts,
+                        "fastime_used": bool(fastime_used),
+                        "set_text_used": bool(set_text_used),
+                    },
+                )
+            if not verify_ok:
+                actual_len = _dm_composer_actual_text_len()
+                _insert_dm_draft_log(
+                    action_type="dm_draft_verify_failed",
+                    status="failed",
+                    message="draft verify failed",
+                    payload={
+                        "reason": "dm_draft_verify_failed",
+                        "thread_state": dm_state,
+                        "composer_visible": True,
+                        "expected_text_len": len(draft_text),
+                        "actual_text_len": actual_len,
+                        "draft_verify_attempts": draft_verify_attempts,
+                        "fastime_used": bool(fastime_used),
+                        "set_text_used": bool(set_text_used),
+                    },
+                )
+                _insert_dm_draft_log(
+                    action_type="dm_draft_blocked_text_mismatch",
+                    status="failed",
+                    message="draft text mismatch",
+                    payload={
+                        "reason": "dm_draft_verify_failed",
+                        "thread_state": dm_state,
+                        "composer_visible": True,
+                        "expected_text_len": len(draft_text),
+                        "actual_text_len": actual_len,
+                        "draft_verify_attempts": draft_verify_attempts,
+                        "fastime_used": bool(fastime_used),
+                        "set_text_used": bool(set_text_used),
+                    },
+                )
+                _insert_dm_draft_log(
+                    action_type="dm_draft_exit_17_reason",
+                    status="failed",
+                    message="exit 17 draft verify failed",
+                    payload={
+                        "reason": "dm_draft_verify_failed",
+                        "thread_state": dm_state,
+                        "composer_visible": bool(
+                            (get_last_dm_thread_classify_snapshot() or {}).get(
+                                "composer_visible", True
+                            )
+                        ),
+                        "expected_text_len": len(draft_text),
+                        "actual_text_len": actual_len,
+                        "draft_verify_attempts": draft_verify_attempts,
+                        "fastime_used": bool(fastime_used),
+                        "set_text_used": bool(set_text_used),
+                    },
+                )
+            if not verify_ok:
                 log("error", "run_aborted", reason="dm_draft_verify_failed", username=username)
                 exit_code = 17
                 _emit_performance_summary(
@@ -986,9 +1289,70 @@ def _run_one_target(
                 _emit_target_perf_compact(exit_code)
                 return exit_code
 
-        send_out = send_dm_safe(
-            d, username, draft_text, dm_state, target_row=target_row_raw
-        )
+        global _RUNTIME_REAL_DM_SENT_COUNT
+        send_blocked: str | None = None
+        cooldown_remain: float | None = None
+        previous_dm_sent = False
+        if bool(getattr(config, "ENABLE_REAL_DM_SEND", False)):
+            if _RUNTIME_REAL_DM_SENT_COUNT >= int(getattr(config, "SEND_DM_MAX_PER_RUN", 1)):
+                send_blocked = "dm_send_blocked_already_sent_runtime"
+            elif supabase_mode and target_id:
+                row_guard = _safe_supabase_call("load_target_by_id", target_id) or {}
+                previous_dm_sent = bool(row_guard.get("dm_sent"))
+                if previous_dm_sent and bool(
+                    getattr(config, "SEND_DM_SKIP_IF_PREVIOUS_DM_SENT", True)
+                ):
+                    send_blocked = "dm_send_blocked_previous_dm"
+                else:
+                    cool = float(getattr(config, "SEND_DM_COOLDOWN_SECONDS", 0) or 0)
+                    if cool > 0 and previous_dm_sent:
+                        elapsed = _seconds_since_dm_sent_row(row_guard)
+                        if elapsed is not None and elapsed < cool:
+                            send_blocked = "dm_send_blocked_cooldown"
+                            cooldown_remain = round(cool - elapsed, 2)
+
+        if send_blocked:
+            block_payload: dict = {
+                "target_username": username,
+                "run_id": run_id or None,
+                "thread_state": dm_state,
+                "send_method": None,
+                "message_len": len(draft_text),
+                "dm_sent": False,
+                "dm_sent_at": None,
+                "cooldown_seconds": float(getattr(config, "SEND_DM_COOLDOWN_SECONDS", 0) or 0),
+                "previous_dm_sent": previous_dm_sent,
+                "business_status": "send_blocked",
+                "navigation_status_post_send": None,
+            }
+            if send_blocked == "dm_send_blocked_cooldown":
+                block_payload["cooldown_remain_s"] = cooldown_remain
+            if supabase_mode and run_id and account_id:
+                _safe_supabase_call(
+                    "insert_action_log",
+                    run_id=run_id,
+                    account_id=account_id,
+                    target_username=username,
+                    action_type=send_blocked,
+                    status="blocked",
+                    message=send_blocked,
+                    payload=block_payload,
+                )
+            send_out = {
+                "target_username": username,
+                "thread_state": dm_state,
+                "enable_real_send": bool(getattr(config, "ENABLE_REAL_DM_SEND", False)),
+                "message_len": len(draft_text),
+                "precheck_ok": True,
+                "sent": False,
+                "reason": None,
+                "blocked_event": send_blocked,
+                "failure_event": None,
+            }
+        else:
+            send_out = send_dm_safe(
+                d, username, draft_text, dm_state, target_row=target_row_raw
+            )
         if supabase_mode and run_id and account_id:
             _emit_dm_send_supabase_logs(
                 run_id=run_id,
@@ -1022,6 +1386,129 @@ def _run_one_target(
             )
             _emit_target_perf_compact(send_exit)
             return send_exit
+
+        real_sent = bool(send_out.get("sent"))
+        if real_sent:
+            _RUNTIME_REAL_DM_SENT_COUNT += 1
+            send_method = "instagram_send_ui"
+            if send_out.get("coordinate_fallback_used"):
+                send_method = "coordinate_fallback"
+            elif send_out.get("send_button_position_fallback"):
+                send_method = "position_fallback_tap"
+            log(
+                "info",
+                "dm_send_sent_confirmed",
+                username=username,
+                thread_state=dm_state,
+                send_method=send_method,
+                message_len=len(draft_text),
+            )
+            if supabase_mode and run_id and account_id and target_id:
+                _safe_supabase_call(
+                    "insert_action_log",
+                    run_id=run_id,
+                    account_id=account_id,
+                    target_username=username,
+                    action_type="dm_send_business_mark_started",
+                    status="started",
+                    message="persist dm_sent business fields",
+                    payload={
+                        "target_username": username,
+                        "run_id": run_id,
+                        "thread_state": dm_state,
+                        "send_method": send_method,
+                        "message_len": len(draft_text),
+                        "business_status": "mark_started",
+                        "navigation_status_post_send": None,
+                    },
+                )
+                biz = _safe_supabase_call(
+                    "mark_target_dm_sent_business",
+                    target_id,
+                    run_id=run_id,
+                    message_preview=draft_text[:500],
+                    thread_state_at_send=dm_state,
+                    send_method=send_method,
+                    navigation_status_post_send="full",
+                )
+                _safe_supabase_call(
+                    "insert_action_log",
+                    run_id=run_id,
+                    account_id=account_id,
+                    target_username=username,
+                    action_type="dm_send_business_mark_success"
+                    if (biz or {}).get("ok")
+                    else "dm_send_business_mark_failed",
+                    status="success" if (biz or {}).get("ok") else "failed",
+                    message="business mark result",
+                    payload={
+                        "target_username": username,
+                        "run_id": run_id,
+                        "thread_state": dm_state,
+                        "send_method": send_method,
+                        "message_len": len(draft_text),
+                        "dm_sent": True,
+                        "business_status": "dm_sent_persisted",
+                        "mark_applied": (biz or {}).get("applied"),
+                        "mark_error": (biz or {}).get("error"),
+                    },
+                )
+            fin = finalize_after_real_send(
+                d,
+                username,
+                pkg,
+                use_fast_reset_between_targets=use_fast_reset_between_targets,
+                pre_send_composer_text_len=int(
+                    send_out.get("composer_text_len_before_send") or 0
+                ),
+            )
+            nav_ok = bool(fin.get("back_to_profile_ok")) and bool(fin.get("back_to_search_ok"))
+            set_perf_metric(
+                "post_finalize_back_profile_ok", 1 if fin.get("back_to_profile_ok") else 0
+            )
+            set_perf_metric(
+                "post_finalize_back_to_search_ok", 1 if fin.get("back_to_search_ok") else 0
+            )
+            if supabase_mode and target_id:
+                _safe_supabase_call(
+                    "update_target_post_send_navigation",
+                    target_id,
+                    navigation_status_post_send="full" if nav_ok else "partial",
+                )
+            if supabase_mode and run_id and account_id:
+                _safe_supabase_call(
+                    "insert_action_log",
+                    run_id=run_id,
+                    account_id=account_id,
+                    target_username=username,
+                    action_type="dm_send_post_finalize_summary",
+                    status="success" if nav_ok else "warning",
+                    message="post-send finalize",
+                    payload={
+                        "target_username": username,
+                        "run_id": run_id,
+                        "thread_state": dm_state,
+                        "send_method": send_method,
+                        "business_status": "sent_success_full"
+                        if nav_ok
+                        else "sent_success_navigation_partial",
+                        "navigation_status_post_send": "full" if nav_ok else "partial",
+                        "post_send_signal_ok": fin.get("post_send_signal_ok"),
+                        "post_send_cleanup_reason": fin.get("post_send_cleanup_reason"),
+                        "back_to_profile_ok": fin.get("back_to_profile_ok"),
+                        "back_to_search_ok": fin.get("back_to_search_ok"),
+                    },
+                )
+            exit_code = 0 if nav_ok else 21
+            _emit_performance_summary(
+                t0=t0,
+                warm_session_used=warm_session_used,
+                force_stop_used=force_stop_used,
+                exit_code=exit_code,
+                target_username=username,
+            )
+            _emit_target_perf_compact(exit_code)
+            return exit_code
 
         if bool(getattr(config, "DM_CLEAR_DRAFT_AFTER_TEST", True)):
             if not clear_dm_draft(d):
@@ -1236,6 +1723,8 @@ def main() -> int:
         run_id=run_id or None,
     )
     reset_dm_send_run_state()
+    global _RUNTIME_REAL_DM_SENT_COUNT
+    _RUNTIME_REAL_DM_SENT_COUNT = 0
     t_session = time.perf_counter()
     t = t_session
     warm_session_used = False
@@ -1384,6 +1873,7 @@ def main() -> int:
         iter_start = time.perf_counter()
         reset_perf_counters()
         reset_dm_thread_probe_state()
+        reset_dm_send_run_state()
         log(
             "info",
             "multi_target_iteration",
@@ -1442,7 +1932,7 @@ def main() -> int:
         )
         supabase_client.log_performance_event(
             action_type="target_perf_compact",
-            status="success" if code == 0 else "failed",
+            status="success" if code in (0, 21) else "failed",
             target_username=username,
             payload={k: v for k, v in compact.items() if k != "username"},
         )
@@ -1467,7 +1957,7 @@ def main() -> int:
                 warm_session_used=warm_session_used,
                 target_perf=target_perf,
             )
-        if code != 0:
+        if code != 0 and code != 21:
             failures += 1
             if supabase_mode and run_id:
                 _safe_supabase_call(
@@ -1561,22 +2051,25 @@ def main() -> int:
                 action_type="profile_open_test",
                 status="success",
                 message="Safe profile open check complete",
-                payload={"exit_code": 0, "performance": target_perf},
+                payload={
+                    "exit_code": code,
+                    "performance": target_perf,
+                    "navigation_partial": code == 21,
+                },
             )
         if supabase_mode and target_id:
             send_res = get_last_dm_send_result()
             if send_res.get("sent"):
-                _safe_supabase_call(
-                    "mark_target_dm_sent_completed",
-                    target_id=target_id,
-                )
+                # Business row already updated in _run_one_target (dm_sent + finalize).
                 log(
                     "info",
                     "target_status_updated",
                     target_id=target_id,
-                    status="completed",
-                    last_error=None,
-                    note="dm_sent",
+                    status="completed"
+                    if code != 21
+                    else "sent_navigation_partial",
+                    last_error=None if code != 21 else "sent_navigation_partial",
+                    note="dm_sent_business_persisted_in_target_run",
                 )
             elif (
                 send_res.get("precheck_ok")

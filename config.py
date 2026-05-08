@@ -70,6 +70,9 @@ DM_SEND_BUTTON_WAIT_MAX_S = 1.5
 DM_SEND_BUTTON_POLL_S = 0.1
 # Unsafe last-resort tap to the right of composer; keep False unless debugging detection only.
 ENABLE_COORDINATE_SEND_FALLBACK = False
+# After real DM send: short bounded poll for a post-send UI signal before navigation.
+DM_POST_SEND_SIGNAL_MAX_S = 2.0
+DM_POST_SEND_SIGNAL_POLL_S = 0.12
 CLOSE_APPS_AFTER_RUN = True
 HOME_AFTER_RUN = True
 FAST_PATH_MODE = True

@@ -289,22 +289,116 @@ def update_run_status(
 
 def mark_target_dm_sent_completed(target_id: str) -> None:
     """After verified real DM send: dm_sent, processed_at, status completed."""
+    mark_target_dm_sent_business(
+        target_id,
+        navigation_status_post_send="full",
+    )
+
+
+def mark_target_dm_sent_business(
+    target_id: str,
+    *,
+    run_id: str | None = None,
+    message_preview: str | None = None,
+    thread_state_at_send: str | None = None,
+    send_method: str | None = None,
+    navigation_status_post_send: str | None = None,
+) -> dict[str, Any]:
+    """
+    Persist business truth after a real DM was sent (best-effort extended fields).
+    navigation_status_post_send: 'full' | 'partial' — partial keeps dm_sent but records UI incomplete.
+    Returns {ok, applied, error} for observability; never raises.
+    """
     now = _utc_now_iso()
+    nav = (navigation_status_post_send or "full").strip().lower()
+    is_partial = nav == "partial"
+    status = "sent_navigation_partial" if is_partial else "completed"
+    last_error: str | None = "sent_navigation_partial" if is_partial else None
+
     body: dict[str, Any] = {
         "dm_sent": True,
+        "dm_sent_at": now,
         "processed_at": now,
-        "status": "completed",
         "updated_at": now,
         "last_run_at": now,
-        "last_error": None,
+        "status": status,
+        "last_error": last_error,
     }
-    _request_json(
-        "PATCH",
-        "ig_targets",
-        query={"id": f"eq.{target_id}"},
-        body=body,
-        prefer_representation=False,
-    )
+    if run_id:
+        body["last_dm_run_id"] = str(run_id)
+    if message_preview is not None:
+        body["last_dm_message_preview"] = str(message_preview)[:500]
+    if thread_state_at_send:
+        body["thread_state_at_send"] = str(thread_state_at_send)
+    if send_method:
+        body["send_method"] = str(send_method)
+
+    def _patch(b: dict[str, Any]) -> None:
+        _request_json(
+            "PATCH",
+            "ig_targets",
+            query={"id": f"eq.{target_id}"},
+            body=b,
+            prefer_representation=False,
+        )
+
+    out: dict[str, Any] = {"ok": False, "applied": "none", "error": None}
+    try:
+        _patch(body)
+        out["ok"] = True
+        out["applied"] = "full"
+        return out
+    except RuntimeError as e:
+        out["error"] = str(e)
+        minimal: dict[str, Any] = {
+            "dm_sent": True,
+            "processed_at": now,
+            "updated_at": now,
+            "last_run_at": now,
+            "status": status,
+            "last_error": last_error,
+        }
+        try:
+            _patch(minimal)
+            out["ok"] = True
+            out["applied"] = "minimal"
+            return out
+        except RuntimeError as e2:
+            out["error"] = str(e2)
+            return out
+
+
+def update_target_post_send_navigation(
+    target_id: str, *, navigation_status_post_send: str
+) -> None:
+    """After finalize: record whether return-to-search succeeded (does not clear dm_sent)."""
+    now = _utc_now_iso()
+    nav = (navigation_status_post_send or "").strip().lower()
+    is_partial = nav == "partial"
+    body: dict[str, Any] = {
+        "updated_at": now,
+        "status": "sent_navigation_partial" if is_partial else "completed",
+        "last_error": ("sent_navigation_partial" if is_partial else None),
+    }
+    try:
+        _request_json(
+            "PATCH",
+            "ig_targets",
+            query={"id": f"eq.{target_id}"},
+            body=body,
+            prefer_representation=False,
+        )
+    except RuntimeError:
+        _request_json(
+            "PATCH",
+            "ig_targets",
+            query={"id": f"eq.{target_id}"},
+            body={
+                "updated_at": now,
+                "last_error": ("sent_navigation_partial" if is_partial else None),
+            },
+            prefer_representation=False,
+        )
 
 
 def update_target_status(
