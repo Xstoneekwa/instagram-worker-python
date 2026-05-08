@@ -4,11 +4,22 @@ from __future__ import annotations
 
 import argparse
 import time
+import uuid
 from datetime import datetime, timezone
+
+import social_memory
 
 import config
 import supabase_client
-from device import app_start, connect_device, disable_android_animations, force_stop, health_check
+from device import (
+    app_start,
+    check_instagram_version_lock,
+    connect_device,
+    disable_android_animations,
+    force_stop,
+    health_check,
+    lock_instagram_update_system,
+)
 from instagram_navigation import (
     cleanup_dm_after_send_button_missing,
     clear_dm_draft,
@@ -46,11 +57,35 @@ from instagram_navigation import (
     verify_dm_draft_text,
     verify_app_foreground,
     verify_profile,
+    perform_follow_safe,
+    open_followers_list_from_profile,
+    detect_followers_list_screen,
+    iter_followers_candidates,
+    open_follower_profile_from_list,
+    return_to_followers_list,
+    scroll_followers_list_forward,
 )
 from logs import log
 
 # Real DM sends per worker process (pairs with SEND_DM_MAX_PER_RUN).
 _RUNTIME_REAL_DM_SENT_COUNT: int = 0
+# Successful follows this process (pairs with FOLLOW_MAX_PER_RUN).
+_RUNTIME_FOLLOW_COUNT: int = 0
+_RUNTIME_FOLLOWED_USERNAMES: set[str] = set()
+# Follower rows already selected in followers-list engine (same run).
+_RUNTIME_SEEN_FOLLOWER_USERNAMES: set[str] = set()
+_RUNTIME_INTERACTED_USERNAMES: set[str] = set()
+_RUNTIME_UNFOLLOWED_USERNAMES: set[str] = set()
+_RUNTIME_SKIPPED_USERNAMES: set[str] = set()
+_SESSION_SOCIAL_ID: str = ""
+_SESSION_COUNTERS: dict[str, int] = {
+    "follows": 0,
+    "unfollows": 0,
+    "likes": 0,
+    "pm": 0,
+    "interactions": 0,
+    "successful_interactions": 0,
+}
 
 
 def _seconds_since_dm_sent_row(row: dict) -> float | None:
@@ -65,6 +100,23 @@ def _seconds_since_dm_sent_row(row: dict) -> float | None:
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
             return (datetime.now(timezone.utc) - dt).total_seconds()
+        except Exception:
+            continue
+    return None
+
+
+def _seconds_since_follow_row(row: dict) -> float | None:
+    """Hours since last follow timestamp on target row, if any."""
+    for key in ("followed_at", "updated_at", "processed_at"):
+        raw = row.get(key)
+        if not raw:
+            continue
+        try:
+            ts = str(raw).replace("Z", "+00:00")
+            dt = datetime.fromisoformat(ts)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return (datetime.now(timezone.utc) - dt).total_seconds() / 3600.0
         except Exception:
             continue
     return None
@@ -219,6 +271,18 @@ def _exit_reason_from_code(code: int) -> str:
         19: "dm_send_precheck_failed",
         20: "dm_sent_failed",
         21: "sent_success_navigation_partial",
+        31: "follow_success_full",
+        32: "follow_success_navigation_partial",
+        33: "follow_button_missing",
+        34: "follow_verify_failed",
+        35: "follow_blocked_duplicate",
+        36: "follow_blocked_cooldown",
+        40: "followers_list_engine_open_failed",
+        43: "instagram_strict_update_lock_unsafe",
+        42: "followers_list_engine_return_failed",
+        37: "follow_blocked_social_memory",
+        51: "session_strict_follow_quota_incomplete",
+        52: "session_strict_interactions_quota_incomplete",
     }
     return mapping.get(code, f"exit_code_{code}")
 
@@ -230,6 +294,164 @@ def _safe_supabase_call(fn_name: str, *args, **kwargs):
     except Exception as e:
         log("warning", "supabase_call_failed", fn=fn_name, error=str(e))
         return None
+
+
+def _reset_session_counters() -> None:
+    global _SESSION_COUNTERS
+    _SESSION_COUNTERS = {
+        "follows": 0,
+        "unfollows": 0,
+        "likes": 0,
+        "pm": 0,
+        "interactions": 0,
+        "successful_interactions": 0,
+    }
+
+
+def _session_follow_quota_exceeded() -> bool:
+    caps = [
+        int(getattr(config, "SESSION_TOTAL_FOLLOWS_CAP", 0) or 0),
+        int(getattr(config, "SESSION_FOLLOW_LIMIT", 0) or 0),
+    ]
+    pos = [c for c in caps if c > 0]
+    if not pos:
+        return False
+    return _SESSION_COUNTERS["follows"] >= min(pos)
+
+
+def _session_total_interactions_cap_exceeded() -> bool:
+    lim = int(getattr(config, "SESSION_TOTAL_INTERACTIONS_LIMIT", 0) or 0)
+    if lim <= 0:
+        return False
+    return _SESSION_COUNTERS["interactions"] >= lim
+
+
+def _session_successful_interactions_cap_exceeded() -> bool:
+    lim = int(getattr(config, "SESSION_TOTAL_SUCCESSFUL_INTERACTIONS_LIMIT", 0) or 0)
+    if lim <= 0:
+        return False
+    return _SESSION_COUNTERS["successful_interactions"] >= lim
+
+
+def _session_strict_completion_exit_code() -> int | None:
+    if not getattr(config, "SESSION_STRICT_PHASE_COMPLETION", False):
+        return None
+    caps = [
+        int(getattr(config, "SESSION_TOTAL_FOLLOWS_CAP", 0) or 0),
+        int(getattr(config, "SESSION_FOLLOW_LIMIT", 0) or 0),
+    ]
+    pos = [c for c in caps if c > 0]
+    if pos and _SESSION_COUNTERS["follows"] < min(pos):
+        log(
+            "warning",
+            "session_strict_incomplete",
+            reason="follow_quota_unmet",
+            follows=_SESSION_COUNTERS["follows"],
+            required=min(pos),
+        )
+        return 51
+    til = int(getattr(config, "SESSION_TOTAL_INTERACTIONS_LIMIT", 0) or 0)
+    if til > 0 and _SESSION_COUNTERS["interactions"] < til:
+        log(
+            "warning",
+            "session_strict_incomplete",
+            reason="interactions_quota_unmet",
+            interactions=_SESSION_COUNTERS["interactions"],
+            required=til,
+        )
+        return 52
+    return None
+
+
+def _social_memory_load_and_evaluate(
+    *,
+    target_username: str,
+    source_profile: str,
+    account_id: str,
+    run_id: str,
+    supabase_mode: bool,
+) -> social_memory.FollowEligibility:
+    db_row = None
+    if supabase_mode and account_id and getattr(config, "SOCIAL_MEMORY_ENABLED", True):
+        db_row = _safe_supabase_call(
+            "load_interacted_user",
+            account_id,
+            target_username,
+            source_profile or "",
+        )
+        log(
+            "info",
+            "social_memory_loaded",
+            target_username=target_username,
+            source_profile=source_profile or "",
+            has_row=bool(db_row),
+        )
+    return social_memory.evaluate_follow_eligibility(
+        target_username=target_username,
+        source_profile=source_profile or "",
+        db_row=db_row,
+        runtime_followed=_RUNTIME_FOLLOWED_USERNAMES,
+        runtime_unfollowed=_RUNTIME_UNFOLLOWED_USERNAMES,
+        runtime_interacted=_RUNTIME_INTERACTED_USERNAMES,
+        runtime_skipped=_RUNTIME_SKIPPED_USERNAMES,
+        config=config,
+    )
+
+
+def _persist_social_memory_follow_block(
+    *,
+    elig: social_memory.FollowEligibility,
+    account_id: str,
+    run_id: str,
+    supabase_mode: bool,
+    target_username: str,
+    source_profile: str,
+) -> None:
+    if not (supabase_mode and account_id and getattr(config, "SOCIAL_MEMORY_ENABLED", True)):
+        return
+    _safe_supabase_call(
+        "record_interaction_skip_memory",
+        account_id,
+        target_username,
+        source_profile or "",
+        skip_reason=elig.reason,
+        run_id=run_id or None,
+        session_id=_SESSION_SOCIAL_ID or None,
+        lifecycle_state=elig.interaction_state,
+    )
+    log(
+        "info",
+        "social_memory_updated",
+        target_username=target_username,
+        source_profile=source_profile or "",
+        kind="skip_block",
+        reason=elig.reason,
+    )
+
+
+def _flush_follow_action_logs_to_supabase(
+    *,
+    events: list[tuple[str, dict]],
+    run_id: str,
+    account_id: str,
+    target_username: str,
+    supabase_mode: bool,
+) -> None:
+    if not (supabase_mode and run_id and account_id):
+        return
+    for ev, pl in events or []:
+        base = {"target_username": target_username, "account_id": account_id, "run_id": run_id}
+        merged = {**base, **pl}
+        _safe_supabase_call(
+            "insert_action_log",
+            run_id=run_id,
+            account_id=account_id,
+            target_username=target_username,
+            action_type=ev,
+            status="info",
+            message=ev,
+            payload=merged,
+        )
 
 
 def _cleanup_session_apps(d) -> None:
@@ -721,6 +943,7 @@ def _run_one_target(
 ) -> int:
     """Navigate search → profile for one username. Assumes IG already foreground when target_index==0."""
     pkg = config.INSTAGRAM_PACKAGE
+    target_id = str((target_row_raw or {}).get("id") or "").strip()
     t0 = time.perf_counter()
     t = t0
     phase_ms: dict[str, float] = {}
@@ -814,6 +1037,15 @@ def _run_one_target(
             status=status,
             message=message,
             payload=payload,
+        )
+
+    def _flush_follow_events(events: list[tuple[str, dict]]) -> None:
+        _flush_follow_action_logs_to_supabase(
+            events=events,
+            run_id=run_id,
+            account_id=account_id,
+            target_username=username,
+            supabase_mode=supabase_mode,
         )
 
     def _dm_composer_actual_text_len() -> int:
@@ -991,6 +1223,441 @@ def _run_one_target(
         _emit_target_perf_compact(exit_code)
         return exit_code
     t = _phase("verify_profile", t)
+
+    if bool(getattr(config, "ENABLE_REAL_FOLLOW", False)):
+        global _RUNTIME_FOLLOW_COUNT, _RUNTIME_FOLLOWED_USERNAMES, _RUNTIME_INTERACTED_USERNAMES
+        global _RUNTIME_SKIPPED_USERNAMES
+        ukey = (username or "").strip().lower()
+        # Queue targets: persist social memory without blogger source_profile (empty key).
+        social_src = ""
+
+        def _follow_fail_emit(
+            exit_c: int, action_type: str, payload_extra: dict | None = None
+        ) -> int:
+            pl = {
+                "target_username": username,
+                "account_id": account_id,
+                "run_id": run_id,
+                "follow_state_before": None,
+                "follow_state_after": None,
+                "verify_attempts": 0,
+                "navigation_state": "profile_after_verify",
+                "timings": {},
+            }
+            if payload_extra:
+                pl.update(payload_extra)
+            if supabase_mode and run_id and account_id:
+                _safe_supabase_call(
+                    "insert_action_log",
+                    run_id=run_id,
+                    account_id=account_id,
+                    target_username=username,
+                    action_type=action_type,
+                    status="blocked",
+                    message=action_type,
+                    payload=pl,
+                )
+            _emit_performance_summary(
+                t0=t0,
+                warm_session_used=warm_session_used,
+                force_stop_used=force_stop_used,
+                exit_code=exit_c,
+                target_username=username,
+            )
+            _emit_target_perf_compact(exit_c)
+            return exit_c
+
+        if _session_follow_quota_exceeded():
+            log(
+                "warning",
+                "social_memory_follow_blocked",
+                username=username,
+                reason="session_follow_quota",
+            )
+            return _follow_fail_emit(
+                37,
+                "social_memory_follow_blocked",
+                {"reason": "session_follow_quota", "follows": _SESSION_COUNTERS["follows"]},
+            )
+
+        if _session_total_interactions_cap_exceeded():
+            log(
+                "warning",
+                "social_memory_follow_blocked",
+                username=username,
+                reason="session_total_interactions_cap",
+            )
+            return _follow_fail_emit(
+                37,
+                "social_memory_follow_blocked",
+                {"reason": "session_total_interactions_cap"},
+            )
+
+        if _session_successful_interactions_cap_exceeded():
+            log(
+                "warning",
+                "social_memory_follow_blocked",
+                username=username,
+                reason="session_successful_interactions_cap",
+            )
+            return _follow_fail_emit(
+                37,
+                "social_memory_follow_blocked",
+                {"reason": "session_successful_interactions_cap"},
+            )
+
+        elig = _social_memory_load_and_evaluate(
+            target_username=username,
+            source_profile=social_src,
+            account_id=account_id,
+            run_id=run_id,
+            supabase_mode=supabase_mode,
+        )
+        if not elig.allowed:
+            log(
+                "warning",
+                elig.log_event,
+                username=username,
+                reason=elig.reason,
+                interaction_state=elig.interaction_state,
+            )
+            log(
+                "info",
+                "social_memory_interaction_state",
+                username=username,
+                state=elig.interaction_state,
+                reason=elig.reason,
+            )
+            _persist_social_memory_follow_block(
+                elig=elig,
+                account_id=account_id,
+                run_id=run_id,
+                supabase_mode=supabase_mode,
+                target_username=username,
+                source_profile=social_src,
+            )
+            if supabase_mode and run_id and account_id:
+                _safe_supabase_call(
+                    "insert_action_log",
+                    run_id=run_id,
+                    account_id=account_id,
+                    target_username=username,
+                    action_type="social_memory_follow_blocked",
+                    status="blocked",
+                    message=elig.reason,
+                    payload={
+                        "target_username": username,
+                        "source_profile": social_src,
+                        "reason": elig.reason,
+                        "interaction_state": elig.interaction_state,
+                    },
+                )
+            _RUNTIME_INTERACTED_USERNAMES.add(ukey)
+            _RUNTIME_SKIPPED_USERNAMES.add(ukey)
+            return _follow_fail_emit(
+                37,
+                "social_memory_follow_blocked",
+                {"reason": elig.reason, "interaction_state": elig.interaction_state},
+            )
+
+        if ukey in _RUNTIME_FOLLOWED_USERNAMES:
+            log(
+                "warning",
+                "follow_blocked_runtime_duplicate",
+                username=username,
+                reason="same_username_in_run",
+            )
+            return _follow_fail_emit(
+                35,
+                "follow_blocked_runtime_duplicate",
+                {"reason": "same_username_in_run"},
+            )
+
+        if _RUNTIME_FOLLOW_COUNT >= int(getattr(config, "FOLLOW_MAX_PER_RUN", 5)):
+            log(
+                "warning",
+                "follow_blocked_runtime_duplicate",
+                username=username,
+                reason="follow_max_per_run",
+            )
+            return _follow_fail_emit(
+                35,
+                "follow_blocked_runtime_duplicate",
+                {
+                    "reason": "follow_max_per_run",
+                    "follow_max_per_run": int(getattr(config, "FOLLOW_MAX_PER_RUN", 5)),
+                },
+            )
+
+        if supabase_mode and target_id:
+            row_f = _safe_supabase_call("load_target_by_id", target_id) or {}
+            if bool(row_f.get("followed")):
+                log("warning", "follow_blocked_db_duplicate", username=username, target_id=target_id)
+                return _follow_fail_emit(
+                    35,
+                    "follow_blocked_db_duplicate",
+                    {"target_id": target_id},
+                )
+            cool_h = float(getattr(config, "FOLLOW_COOLDOWN_HOURS", 0) or 0)
+            if cool_h > 0 and row_f.get("followed_at"):
+                elapsed_h = _seconds_since_follow_row(row_f)
+                if elapsed_h is not None and elapsed_h < cool_h:
+                    log(
+                        "warning",
+                        "follow_blocked_cooldown",
+                        username=username,
+                        hours_since=float(elapsed_h),
+                        cooldown_hours=cool_h,
+                    )
+                    return _follow_fail_emit(
+                        36,
+                        "follow_blocked_cooldown",
+                        {
+                            "cooldown_hours": cool_h,
+                            "hours_since_follow": float(elapsed_h),
+                            "note": "followed_at_recent_without_followed_flag",
+                        },
+                    )
+
+        follow_out = perform_follow_safe(d, username, pkg)
+        _flush_follow_events(list(follow_out.get("events") or []))
+
+        if not follow_out.get("ok"):
+            fc = int(follow_out.get("failure_code") or 33)
+            _SESSION_COUNTERS["interactions"] += 1
+            _RUNTIME_INTERACTED_USERNAMES.add(ukey)
+            if supabase_mode and account_id:
+                _safe_supabase_call(
+                    "record_follow_interaction_outcome",
+                    account_id,
+                    username,
+                    social_src,
+                    run_id=run_id or None,
+                    session_id=_SESSION_SOCIAL_ID or None,
+                    follow_ok=False,
+                    skipped_tap=False,
+                    follow_state_after=str(follow_out.get("follow_state_after") or ""),
+                    follow_status=None,
+                    failure_code=fc,
+                    failure_reason=_exit_reason_from_code(fc),
+                )
+                log(
+                    "info",
+                    "social_memory_updated",
+                    target_username=username,
+                    kind="follow_failed",
+                    failure_code=fc,
+                )
+            if supabase_mode and target_id:
+                _safe_supabase_call(
+                    "patch_target_follow_fields",
+                    target_id,
+                    follow_status="failed",
+                    last_follow_error=_exit_reason_from_code(fc),
+                    last_follow_run_id=run_id or None,
+                )
+            _emit_performance_summary(
+                t0=t0,
+                warm_session_used=warm_session_used,
+                force_stop_used=force_stop_used,
+                exit_code=fc,
+                target_username=username,
+            )
+            _emit_target_perf_compact(fc)
+            return fc
+
+        fs_after = str(follow_out.get("follow_state_after") or "")
+        if bool(follow_out.get("skipped_tap")):
+            follow_status = "already_following"
+        elif fs_after == "requested":
+            follow_status = "requested"
+        else:
+            follow_status = "following"
+
+        if not bool(follow_out.get("skipped_tap")):
+            _RUNTIME_FOLLOW_COUNT += 1
+        _RUNTIME_FOLLOWED_USERNAMES.add(ukey)
+        _RUNTIME_INTERACTED_USERNAMES.add(ukey)
+        _SESSION_COUNTERS["follows"] += 1
+        _SESSION_COUNTERS["interactions"] += 1
+        _SESSION_COUNTERS["successful_interactions"] += 1
+
+        if supabase_mode and account_id:
+            mem_ok = _safe_supabase_call(
+                "record_follow_interaction_outcome",
+                account_id,
+                username,
+                social_src,
+                run_id=run_id or None,
+                session_id=_SESSION_SOCIAL_ID or None,
+                follow_ok=True,
+                skipped_tap=bool(follow_out.get("skipped_tap")),
+                follow_state_after=str(follow_out.get("follow_state_after") or ""),
+                follow_status=follow_status,
+                failure_code=None,
+                failure_reason=None,
+            )
+            log(
+                "info",
+                "social_memory_updated",
+                target_username=username,
+                kind="follow_success",
+                memory_ok=(mem_ok or {}).get("ok"),
+            )
+
+        if supabase_mode and target_id:
+            biz = _safe_supabase_call(
+                "mark_target_follow_business",
+                target_id,
+                run_id=run_id or None,
+                follow_status=follow_status,
+                follow_method=(
+                    "ui_already_following"
+                    if bool(follow_out.get("skipped_tap"))
+                    else "ui_tap"
+                ),
+                last_follow_error=None,
+            )
+            if run_id and account_id:
+                _safe_supabase_call(
+                    "insert_action_log",
+                    run_id=run_id,
+                    account_id=account_id,
+                    target_username=username,
+                    action_type="follow_business_mark",
+                    status="success" if (biz or {}).get("ok") else "failed",
+                    message="follow business persist",
+                    payload={
+                        "target_username": username,
+                        "account_id": account_id,
+                        "run_id": run_id,
+                        "follow_status": follow_status,
+                        "mark_applied": (biz or {}).get("applied"),
+                        "mark_error": (biz or {}).get("error"),
+                        "verify_attempts": int(follow_out.get("verify_attempts") or 0),
+                        "navigation_state": "profile",
+                    },
+                )
+
+        if not bool(getattr(config, "FOLLOW_THEN_DM", True)):
+            log("info", "follow_return_profile_ok", username=username, mode="follow_only")
+            if supabase_mode and run_id and account_id:
+                _safe_supabase_call(
+                    "insert_action_log",
+                    run_id=run_id,
+                    account_id=account_id,
+                    target_username=username,
+                    action_type="follow_return_profile_ok",
+                    status="info",
+                    message="profile stable before return to search",
+                    payload={
+                        "target_username": username,
+                        "account_id": account_id,
+                        "run_id": run_id,
+                        "navigation_state": "profile",
+                        "follow_state_after": fs_after,
+                    },
+                )
+            search_ok = False
+            if use_fast_reset_between_targets:
+                search_ok = bool(reset_to_search_for_next_target(d, pkg))
+            else:
+                search_ok = bool(return_to_search_from_profile(d, pkg))
+            partial = False
+            if search_ok:
+                invalidate_search_surface_cache("follow_complete")
+                log("info", "follow_return_search_ok", username=username)
+                if supabase_mode and run_id and account_id:
+                    _safe_supabase_call(
+                        "insert_action_log",
+                        run_id=run_id,
+                        account_id=account_id,
+                        target_username=username,
+                        action_type="follow_return_search_ok",
+                        status="success",
+                        message="back to search after follow",
+                        payload={
+                            "target_username": username,
+                            "account_id": account_id,
+                            "run_id": run_id,
+                            "navigation_state": "search",
+                        },
+                    )
+                nav_code = 31
+            else:
+                if open_search(d):
+                    partial = True
+                    invalidate_search_surface_cache("follow_return_partial")
+                    log(
+                        "warning",
+                        "follow_navigation_partial",
+                        username=username,
+                        note="open_search_recovered",
+                    )
+                    if supabase_mode and run_id and account_id:
+                        _safe_supabase_call(
+                            "insert_action_log",
+                            run_id=run_id,
+                            account_id=account_id,
+                            target_username=username,
+                            action_type="follow_navigation_partial",
+                            status="warning",
+                            message="partial recovery to search",
+                            payload={
+                                "target_username": username,
+                                "account_id": account_id,
+                                "run_id": run_id,
+                                "navigation_state": "search_partial",
+                            },
+                        )
+                    nav_code = 32
+                else:
+                    log("error", "follow_navigation_failed", username=username)
+                    if supabase_mode and run_id and account_id:
+                        _safe_supabase_call(
+                            "insert_action_log",
+                            run_id=run_id,
+                            account_id=account_id,
+                            target_username=username,
+                            action_type="follow_navigation_failed",
+                            status="failed",
+                            message="could not return to search after follow",
+                            payload={
+                                "target_username": username,
+                                "account_id": account_id,
+                                "run_id": run_id,
+                                "navigation_state": "unknown",
+                            },
+                        )
+                    nav_code = 32
+            _emit_performance_summary(
+                t0=t0,
+                warm_session_used=warm_session_used,
+                force_stop_used=force_stop_used,
+                exit_code=nav_code,
+                target_username=username,
+            )
+            _emit_target_perf_compact(nav_code)
+            return nav_code
+
+        log("info", "follow_return_profile_ok", username=username, mode="follow_then_dm")
+        if supabase_mode and run_id and account_id:
+            _safe_supabase_call(
+                "insert_action_log",
+                run_id=run_id,
+                account_id=account_id,
+                target_username=username,
+                action_type="follow_return_profile_ok",
+                status="info",
+                message="remain on profile for DM",
+                payload={
+                    "target_username": username,
+                    "account_id": account_id,
+                    "run_id": run_id,
+                    "navigation_state": "profile_continue_dm",
+                    "follow_state_after": fs_after,
+                },
+            )
 
     dm_state = open_dm_thread_from_profile(d, username)
     t = _phase("open_dm_thread", t)
@@ -1641,6 +2308,526 @@ def _run_one_target(
     return 0
 
 
+def _norm_ig_handle(u: str) -> str:
+    return (u or "").strip().lstrip("@").lower()
+
+
+def _run_followers_list_engine_session(
+    d,
+    *,
+    source_profile_username: str,
+    account_id: str,
+    run_id: str,
+    supabase_mode: bool,
+    warm_session_used: bool,
+    force_stop_used: bool,
+) -> int:
+    """
+    Source profile → source followers list → follower profile → FOLLOW SAFE V1 → return to list.
+    Does not run the standard search/DM per-queue target loop.
+    """
+    global _RUNTIME_FOLLOW_COUNT, _RUNTIME_FOLLOWED_USERNAMES, _RUNTIME_INTERACTED_USERNAMES
+    global _RUNTIME_SKIPPED_USERNAMES
+    pkg = config.INSTAGRAM_PACKAGE
+    src_key = _norm_ig_handle(source_profile_username)
+
+    def _eng_log(action_type: str, status: str, message: str, payload: dict) -> None:
+        if not (supabase_mode and run_id and account_id):
+            return
+        base = {
+            "source_profile_username": source_profile_username,
+            "source_account_context": account_id,
+        }
+        _safe_supabase_call(
+            "insert_action_log",
+            run_id=run_id,
+            account_id=account_id,
+            target_username=source_profile_username,
+            action_type=action_type,
+            status=status,
+            message=message,
+            payload={**base, **payload},
+        )
+
+    t0 = time.perf_counter()
+    if not _open_search_with_recovery(
+        d, pkg=pkg, username=source_profile_username, context="followers_engine_start"
+    ):
+        _eng_log("followers_engine_aborted", "failed", "open_search_failed", {})
+        return 4
+    if not type_search(d, source_profile_username, previous_username=None):
+        reason = get_type_search_failure_reason() or "type_search_failed"
+        _eng_log("followers_engine_aborted", "failed", reason, {})
+        return 9 if reason == "search_field_not_cleared" else 5
+
+    if bool(getattr(config, "FAST_SKIP_ACCOUNTS_TAB", True)) and bool(
+        getattr(config, "FAST_PATH_MODE", False)
+    ):
+        accounts_tab_clicked = False
+    else:
+        accounts_tab_clicked = open_accounts_tab(d)
+    ui_mode = "accounts_tab" if accounts_tab_clicked else "mixed_results"
+    set_search_ui_mode(ui_mode)
+
+    if not tap_account_result(d, source_profile_username):
+        _eng_log("followers_engine_aborted", "failed", "tap_account_failed", {})
+        return 7
+    if not verify_profile(d, source_profile_username):
+        _eng_log("followers_engine_aborted", "failed", "profile_verify_failed", {})
+        return 8
+
+    _eng_log("followers_list_open_started", "started", "open_from_source_profile", {})
+    followers_list_ready = False
+    _open_ok, open_list_meta = open_followers_list_from_profile(
+        d, source_profile_username, pkg, profile_verified=True
+    )
+    if not _open_ok:
+        fb_payload = {
+            **open_list_meta,
+            "source_profile_username": source_profile_username,
+            "source_account_context": account_id,
+        }
+        if open_list_meta.get("followers_stat_text_dump"):
+            _eng_log(
+                "followers_stat_text_dump",
+                "info",
+                "profile_stats_strip",
+                {
+                    "text_view_count": len(open_list_meta.get("followers_stat_text_dump") or []),
+                    "profile_stats_visible": open_list_meta.get("profile_stats_visible"),
+                    "followers_stat_text_dump": (open_list_meta.get("followers_stat_text_dump") or [])[
+                        :80
+                    ],
+                },
+            )
+        if open_list_meta.get("followers_stat_coordinate_retry"):
+            _eng_log(
+                "followers_stat_coordinate_retry",
+                "info",
+                "coordinate_fallback_used",
+                {
+                    "tap_x": open_list_meta.get("tap_x"),
+                    "tap_y": open_list_meta.get("tap_y"),
+                    "tap_method": open_list_meta.get("tap_method"),
+                },
+            )
+        _eng_log(
+            "followers_list_open_debug",
+            "failed",
+            "followers_list_not_opened",
+            fb_payload,
+        )
+        _eng_log(
+            "followers_list_open_failed",
+            "failed",
+            "followers_list_not_opened",
+            fb_payload,
+        )
+        return 40
+    followers_list_ready = True
+    succ_payload = {
+        **open_list_meta,
+        "source_profile_username": source_profile_username,
+        "source_account_context": account_id,
+    }
+    _eng_log(
+        "followers_list_open_success",
+        "success",
+        "followers_list_open_success",
+        succ_payload,
+    )
+    if open_list_meta.get("followers_stat_text_dump"):
+        _eng_log(
+            "followers_stat_text_dump",
+            "info",
+            "profile_stats_strip",
+            {
+                "text_view_count": len(open_list_meta.get("followers_stat_text_dump") or []),
+                "profile_stats_visible": open_list_meta.get("profile_stats_visible"),
+                "followers_stat_text_dump": (open_list_meta.get("followers_stat_text_dump") or [])[
+                    :80
+                ],
+            },
+        )
+    if open_list_meta.get("followers_stat_coordinate_retry"):
+        _eng_log(
+            "followers_stat_coordinate_retry",
+            "info",
+            "coordinate_fallback_used",
+            {
+                "tap_x": open_list_meta.get("tap_x"),
+                "tap_y": open_list_meta.get("tap_y"),
+                "tap_method": open_list_meta.get("tap_method"),
+            },
+        )
+
+    max_iter = int(getattr(config, "FOLLOWERS_LIST_MAX_ITERATIONS_PER_RUN", 35))
+    max_scroll = int(getattr(config, "FOLLOWERS_LIST_SCROLL_MAX_PER_SESSION", 25))
+    scroll_used = 0
+    processed = 0
+
+    while processed < max_iter:
+        log(
+            "info",
+            "followers_loop_iteration",
+            iteration=processed,
+            source_profile_username=source_profile_username,
+            scroll_used=scroll_used,
+        )
+        _eng_log(
+            "followers_loop_iteration",
+            "info",
+            "followers_loop_iteration",
+            {"iteration": processed, "scroll_used": scroll_used},
+        )
+
+        det = detect_followers_list_screen(d, source_profile_username=source_profile_username)
+        if not det.get("is_followers_list"):
+            ok_rec, how = return_to_followers_list(d, source_profile_username, pkg)
+            if not ok_rec:
+                _eng_log(
+                    "followers_list_engine_return_failed",
+                    "failed",
+                    "lost_surface_recovery_failed",
+                    {"how": how},
+                )
+                return 42
+            if how == "reopen_from_source_profile":
+                _eng_log(
+                    "followers_list_reopen_fallback",
+                    "warning",
+                    "reopened_from_source_profile",
+                    {"source_profile_username": source_profile_username},
+                )
+            _eng_log("followers_list_recovered", "success", "surface_restored", {"method": how})
+            continue
+
+        candidates = iter_followers_candidates(
+            d,
+            source_profile_username=source_profile_username,
+            runtime_seen=_RUNTIME_SEEN_FOLLOWER_USERNAMES,
+        )
+        pick = None
+        for c in candidates:
+            ckey = _norm_ig_handle(str(c.get("username") or ""))
+            if ckey == src_key:
+                log(
+                    "info",
+                    "followers_candidate_skipped_source_profile",
+                    username=c.get("username"),
+                    source_profile_username=source_profile_username,
+                )
+                continue
+            if c.get("already_seen_runtime"):
+                log(
+                    "info",
+                    "followers_candidate_skipped_runtime_seen",
+                    username=c.get("username"),
+                    source_profile_username=source_profile_username,
+                )
+                _eng_log(
+                    "followers_candidate_skipped_runtime_seen",
+                    "info",
+                    "skipped_runtime_seen",
+                    {"follower_username": c.get("username")},
+                )
+                continue
+            pick = c
+            break
+
+        if pick is None:
+            if scroll_used >= max_scroll:
+                log(
+                    "info",
+                    "followers_engine_scroll_cap",
+                    source_profile_username=source_profile_username,
+                    scroll_used=scroll_used,
+                )
+                break
+            if not scroll_followers_list_forward(d):
+                break
+            scroll_used += 1
+            _eng_log(
+                "followers_list_scroll",
+                "info",
+                "scroll",
+                {"scroll_index": scroll_used, "direction": "forward"},
+            )
+            continue
+
+        log(
+            "info",
+            "followers_candidate_selected",
+            follower_username=pick.get("username"),
+            source_profile_username=source_profile_username,
+        )
+        _eng_log(
+            "followers_candidate_selected",
+            "info",
+            "selected",
+            {
+                "follower_username": pick.get("username"),
+                "row_center": pick.get("row_center"),
+            },
+        )
+
+        fkey = _norm_ig_handle(str(pick.get("username") or ""))
+        _RUNTIME_SEEN_FOLLOWER_USERNAMES.add(fkey)
+
+        if fkey == src_key:
+            ok_r, _ = return_to_followers_list(d, source_profile_username, pkg)
+            if not ok_r:
+                return 42
+            continue
+
+        if not open_follower_profile_from_list(d, pick, source_profile_username, pkg):
+            _eng_log(
+                "follower_profile_open_failed",
+                "failed",
+                "open_follower_failed",
+                {"follower_username": pick.get("username")},
+            )
+            ok_r, _ = return_to_followers_list(d, source_profile_username, pkg)
+            if not ok_r:
+                return 42
+            continue
+
+        _eng_log(
+            "follower_profile_open_success",
+            "success",
+            "follower_profile_open",
+            {"follower_username": pick.get("username")},
+        )
+
+        follower_un = str(pick.get("username") or "")
+
+        if bool(getattr(config, "ENABLE_REAL_FOLLOW", False)):
+            if not followers_list_ready:
+                log(
+                    "error",
+                    "follow_blocked_followers_list_not_opened",
+                    follower_username=follower_un,
+                    source_profile_username=source_profile_username,
+                )
+                _eng_log(
+                    "follow_blocked",
+                    "failed",
+                    "followers_list_not_ready",
+                    {"follower_username": follower_un},
+                )
+                ok_nf, _ = return_to_followers_list(d, source_profile_username, pkg)
+                if not ok_nf:
+                    return 42
+                continue
+            if (
+                _session_follow_quota_exceeded()
+                or _session_total_interactions_cap_exceeded()
+                or _session_successful_interactions_cap_exceeded()
+            ):
+                log(
+                    "warning",
+                    "social_memory_follow_blocked",
+                    follower_username=follower_un,
+                    source_profile_username=source_profile_username,
+                    reason="session_quota",
+                )
+                _eng_log(
+                    "social_memory_follow_blocked",
+                    "blocked",
+                    "session_quota",
+                    {"follower_username": follower_un, "reason": "session_quota"},
+                )
+                _RUNTIME_INTERACTED_USERNAMES.add(fkey)
+                _RUNTIME_SKIPPED_USERNAMES.add(fkey)
+                ok_sq, _ = return_to_followers_list(d, source_profile_username, pkg)
+                if not ok_sq:
+                    return 42
+                continue
+
+            elig = _social_memory_load_and_evaluate(
+                target_username=follower_un,
+                source_profile=source_profile_username,
+                account_id=account_id,
+                run_id=run_id,
+                supabase_mode=supabase_mode,
+            )
+            if not elig.allowed:
+                log(
+                    "warning",
+                    elig.log_event,
+                    follower_username=follower_un,
+                    source_profile_username=source_profile_username,
+                    reason=elig.reason,
+                )
+                log(
+                    "info",
+                    "social_memory_interaction_state",
+                    username=follower_un,
+                    state=elig.interaction_state,
+                    reason=elig.reason,
+                )
+                _persist_social_memory_follow_block(
+                    elig=elig,
+                    account_id=account_id,
+                    run_id=run_id,
+                    supabase_mode=supabase_mode,
+                    target_username=follower_un,
+                    source_profile=source_profile_username,
+                )
+                _eng_log(
+                    "social_memory_skip",
+                    "info",
+                    elig.reason,
+                    {
+                        "follower_username": follower_un,
+                        "interaction_state": elig.interaction_state,
+                    },
+                )
+                _RUNTIME_INTERACTED_USERNAMES.add(fkey)
+                _RUNTIME_SKIPPED_USERNAMES.add(fkey)
+                ok_el, _ = return_to_followers_list(d, source_profile_username, pkg)
+                if not ok_el:
+                    return 42
+                continue
+
+            follow_out = perform_follow_safe(d, follower_un, pkg)
+            _flush_follow_action_logs_to_supabase(
+                events=list(follow_out.get("events") or []),
+                run_id=run_id,
+                account_id=account_id,
+                target_username=follower_un,
+                supabase_mode=supabase_mode,
+            )
+
+            if not follow_out.get("ok"):
+                fc = int(follow_out.get("failure_code") or 33)
+                _SESSION_COUNTERS["interactions"] += 1
+                _RUNTIME_INTERACTED_USERNAMES.add(fkey)
+                if supabase_mode and account_id:
+                    _safe_supabase_call(
+                        "record_follow_interaction_outcome",
+                        account_id,
+                        follower_un,
+                        source_profile_username,
+                        run_id=run_id or None,
+                        session_id=_SESSION_SOCIAL_ID or None,
+                        follow_ok=False,
+                        skipped_tap=False,
+                        follow_state_after=str(follow_out.get("follow_state_after") or ""),
+                        follow_status=None,
+                        failure_code=fc,
+                        failure_reason=_exit_reason_from_code(fc),
+                    )
+                    log(
+                        "info",
+                        "social_memory_updated",
+                        target_username=follower_un,
+                        kind="follow_failed",
+                    )
+                ok_f, _ = return_to_followers_list(d, source_profile_username, pkg)
+                if not ok_f:
+                    return 42
+                continue
+
+            fs_af = str(follow_out.get("follow_state_after") or "")
+            if bool(follow_out.get("skipped_tap")):
+                f_st = "already_following"
+            elif fs_af == "requested":
+                f_st = "requested"
+            else:
+                f_st = "following"
+
+            if not bool(follow_out.get("skipped_tap")):
+                _RUNTIME_FOLLOW_COUNT += 1
+            _RUNTIME_FOLLOWED_USERNAMES.add(fkey)
+            _RUNTIME_INTERACTED_USERNAMES.add(fkey)
+            _SESSION_COUNTERS["follows"] += 1
+            _SESSION_COUNTERS["interactions"] += 1
+            _SESSION_COUNTERS["successful_interactions"] += 1
+
+            if supabase_mode and account_id:
+                mem = _safe_supabase_call(
+                    "record_follow_interaction_outcome",
+                    account_id,
+                    follower_un,
+                    source_profile_username,
+                    run_id=run_id or None,
+                    session_id=_SESSION_SOCIAL_ID or None,
+                    follow_ok=True,
+                    skipped_tap=bool(follow_out.get("skipped_tap")),
+                    follow_state_after=fs_af,
+                    follow_status=f_st,
+                    failure_code=None,
+                    failure_reason=None,
+                )
+                log(
+                    "info",
+                    "social_memory_updated",
+                    target_username=follower_un,
+                    kind="follow_success",
+                    memory_ok=(mem or {}).get("ok"),
+                )
+                _eng_log(
+                    "social_memory_updated",
+                    "success",
+                    "follow_persisted",
+                    {"follower_username": follower_un, "follow_status": f_st},
+                )
+        else:
+            log(
+                "info",
+                "followers_follow_skipped",
+                reason="ENABLE_REAL_FOLLOW_false",
+                follower_username=pick.get("username"),
+                source_profile_username=source_profile_username,
+            )
+
+        ok_back, how = return_to_followers_list(d, source_profile_username, pkg)
+        if not ok_back:
+            _eng_log(
+                "followers_list_engine_return_failed",
+                "failed",
+                "return_after_follow_failed",
+                {"how": how},
+            )
+            return 42
+        if how == "reopen_from_source_profile":
+            _eng_log(
+                "followers_list_reopen_fallback",
+                "warning",
+                "reopened_from_source_profile",
+                {"source_profile_username": source_profile_username},
+            )
+        _eng_log("followers_list_recovered", "success", "return_after_follower", {"method": how})
+
+        processed += 1
+
+    _emit_performance_summary(
+        t0=t0,
+        warm_session_used=warm_session_used,
+        force_stop_used=force_stop_used,
+        exit_code=0,
+        target_username=source_profile_username,
+    )
+    log(
+        "info",
+        "followers_engine_session_complete",
+        source_profile_username=source_profile_username,
+        iterations=processed,
+        total_ms=round((time.perf_counter() - t0) * 1000, 2),
+    )
+    _eng_log(
+        "followers_engine_session_complete",
+        "success",
+        "complete",
+        {
+            "iterations": processed,
+            "total_ms": round((time.perf_counter() - t0) * 1000, 2),
+        },
+    )
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Instagram safe navigation worker")
     parser.add_argument(
@@ -1723,8 +2910,18 @@ def main() -> int:
         run_id=run_id or None,
     )
     reset_dm_send_run_state()
-    global _RUNTIME_REAL_DM_SENT_COUNT
+    global _RUNTIME_REAL_DM_SENT_COUNT, _RUNTIME_FOLLOW_COUNT, _RUNTIME_FOLLOWED_USERNAMES
+    global _RUNTIME_SEEN_FOLLOWER_USERNAMES, _RUNTIME_INTERACTED_USERNAMES, _RUNTIME_UNFOLLOWED_USERNAMES
+    global _RUNTIME_SKIPPED_USERNAMES, _SESSION_SOCIAL_ID
     _RUNTIME_REAL_DM_SENT_COUNT = 0
+    _RUNTIME_FOLLOW_COUNT = 0
+    _RUNTIME_FOLLOWED_USERNAMES = set()
+    _RUNTIME_SEEN_FOLLOWER_USERNAMES = set()
+    _RUNTIME_INTERACTED_USERNAMES = set()
+    _RUNTIME_UNFOLLOWED_USERNAMES = set()
+    _RUNTIME_SKIPPED_USERNAMES = set()
+    _SESSION_SOCIAL_ID = str(uuid.uuid4())
+    _reset_session_counters()
     t_session = time.perf_counter()
     t = t_session
     warm_session_used = False
@@ -1755,6 +2952,53 @@ def main() -> int:
             )
         return _return_with_cleanup(d, 2)
     t = _phase("health_check", t)
+
+    _lock_check: dict = {}
+    if bool(getattr(config, "LOCK_INSTAGRAM_AUTO_UPDATE", False)):
+        try:
+            lock_instagram_update_system(d, getattr(config, "INSTAGRAM_PACKAGE", None))
+        except Exception as e:
+            log("warning", "instagram_auto_update_lock_runner_wrap_failed", error=str(e))
+        t = _phase("instagram_auto_update_lock", t)
+    if bool(getattr(config, "LOCK_INSTAGRAM_AUTO_UPDATE", False)) or bool(
+        getattr(config, "ENABLE_STRICT_UPDATE_LOCK", False)
+    ):
+        try:
+            _lock_check = check_instagram_version_lock(d)
+        except Exception as e:
+            log("warning", "instagram_version_lock_check_failed", error=str(e))
+            _lock_check = {"unsafe_for_automation": False, "error": str(e)}
+        t = _phase("instagram_version_lock_check", t)
+        if bool(getattr(config, "ENABLE_STRICT_UPDATE_LOCK", False)) and bool(
+            _lock_check.get("unsafe_for_automation")
+        ):
+            log(
+                "critical",
+                "instagram_strict_lock_run_aborted",
+                automation_unsafe_reason=_lock_check.get("automation_unsafe_reason"),
+                instagram_suspended=_lock_check.get("instagram_suspended"),
+                unsafe_for_automation=_lock_check.get("unsafe_for_automation"),
+            )
+            log("error", "run_aborted", reason="instagram_strict_update_lock_unsafe")
+            reset_perf_counters()
+            _emit_performance_summary(
+                t0=t_session,
+                warm_session_used=warm_session_used,
+                force_stop_used=force_stop_used,
+                exit_code=43,
+                target_username=targets[0] if targets else config.TARGET_USERNAME,
+            )
+            if supabase_mode and run_id:
+                _update_run_status_safe(
+                    run_id=run_id,
+                    status="failed",
+                    totals={"total": len(targets), "success": 0, "failed": len(targets)},
+                    performance_summary={
+                        "reason": "instagram_strict_update_lock_unsafe",
+                        "lock_check": _lock_check,
+                    },
+                )
+            return _return_with_cleanup(d, 43)
 
     t_warm_decision = time.perf_counter()
     warm_ok, warm_reason = instagram_warm_session_eligible(d, config.INSTAGRAM_PACKAGE)
@@ -1832,6 +3076,39 @@ def main() -> int:
             )
         return _return_with_cleanup(d, 3)
     t = _phase("verify_app_running", t)
+
+    if bool(getattr(config, "ENABLE_FOLLOWERS_LIST_ENGINE", False)):
+        source_profile_username = (getattr(config, "FOLLOWERS_SOURCE_USERNAME", "") or "").strip()
+        if not source_profile_username:
+            source_profile_username = (targets[0] if targets else "").strip()
+        if not source_profile_username:
+            log("error", "run_aborted", reason="followers_engine_missing_source_profile")
+            return _return_with_cleanup(d, 1)
+        eng_code = _run_followers_list_engine_session(
+            d,
+            source_profile_username=source_profile_username,
+            account_id=account_id,
+            run_id=run_id,
+            supabase_mode=supabase_mode,
+            warm_session_used=warm_session_used,
+            force_stop_used=force_stop_used,
+        )
+        if supabase_mode and run_id:
+            _update_run_status_safe(
+                run_id=run_id,
+                status="completed" if eng_code == 0 else "failed",
+                totals={
+                    "total": 1,
+                    "success": 1 if eng_code == 0 else 0,
+                    "failed": 0 if eng_code == 0 else 1,
+                },
+                performance_summary={
+                    "followers_list_engine": True,
+                    "exit_code": eng_code,
+                    "source_profile_username": source_profile_username,
+                },
+            )
+        return _return_with_cleanup(d, eng_code)
 
     prev_username: str | None = None
     prev_target_end_ts: float | None = None
@@ -1932,7 +3209,7 @@ def main() -> int:
         )
         supabase_client.log_performance_event(
             action_type="target_perf_compact",
-            status="success" if code in (0, 21) else "failed",
+            status="success" if code in (0, 21, 31, 32) else "failed",
             target_username=username,
             payload={k: v for k, v in compact.items() if k != "username"},
         )
@@ -1957,7 +3234,7 @@ def main() -> int:
                 warm_session_used=warm_session_used,
                 target_perf=target_perf,
             )
-        if code != 0 and code != 21:
+        if code not in (0, 21, 31, 32):
             failures += 1
             if supabase_mode and run_id:
                 _safe_supabase_call(
@@ -2054,7 +3331,7 @@ def main() -> int:
                 payload={
                     "exit_code": code,
                     "performance": target_perf,
-                    "navigation_partial": code == 21,
+                    "navigation_partial": code in (21, 32),
                 },
             )
         if supabase_mode and target_id:
@@ -2129,12 +3406,27 @@ def main() -> int:
     if supabase_mode and run_id:
         perf_summary = _build_run_perf_summary()
         perf_summary["had_failures"] = failures > 0
+        perf_summary["session_counters"] = dict(_SESSION_COUNTERS)
+        strict_code = _session_strict_completion_exit_code()
+        if strict_code is not None and failures == 0:
+            perf_summary["strict_session_exit_code"] = strict_code
+            _update_run_status_safe(
+                run_id=run_id,
+                status="failed",
+                totals={"total": len(targets), "success": successes, "failed": failures},
+                performance_summary=perf_summary,
+            )
+            return _return_with_cleanup(d, strict_code)
         _update_run_status_safe(
             run_id=run_id,
             status="completed",
             totals={"total": len(targets), "success": successes, "failed": failures},
             performance_summary=perf_summary,
         )
+    else:
+        strict_code = _session_strict_completion_exit_code()
+        if strict_code is not None and failures == 0:
+            return _return_with_cleanup(d, strict_code)
     return _return_with_cleanup(d, 1 if failures > 0 else 0)
 
 

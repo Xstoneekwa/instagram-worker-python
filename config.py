@@ -59,7 +59,7 @@ DM_CLEAR_DRAFT_AFTER_TEST = True
 DM_VERIFY_TYPED_TEXT = True
 # Real DM send — TEMP: controlled first live-send test (max 1/run, other guards unchanged).
 # When False: draft, verify, precheck, log block, clear — never taps Send.
-ENABLE_REAL_DM_SEND = True
+ENABLE_REAL_DM_SEND = False
 SEND_DM_REQUIRE_APPROVED_TARGET = False
 SEND_DM_MAX_PER_RUN = 1
 SEND_DM_COOLDOWN_SECONDS = 30
@@ -70,6 +70,45 @@ DM_SEND_BUTTON_WAIT_MAX_S = 1.5
 DM_SEND_BUTTON_POLL_S = 0.1
 # Unsafe last-resort tap to the right of composer; keep False unless debugging detection only.
 ENABLE_COORDINATE_SEND_FALLBACK = False
+# Follow SAFE V1 — real profile follow (single tap, bounded verify). Default off for existing deploys.
+ENABLE_REAL_FOLLOW = True
+# After a successful follow, open DM from the same profile (True) or return to search and exit (False).
+FOLLOW_THEN_DM = False
+FOLLOW_COOLDOWN_HOURS = 999999
+FOLLOW_MAX_PER_RUN = 2
+FOLLOW_VERIFY_TIMEOUT_MS = 4000
+# Max wait to locate a tappable Follow / Suivre control on profile header (seconds).
+FOLLOW_BUTTON_WAIT_S = 4.0
+# Followers list engine V1 — source profile → followers list → follower profiles → FOLLOW SAFE (off by default).
+# TEST minimal: 2 follows réels, pas de DM (voir aussi ENABLE_REAL_DM_SEND / FOLLOW_THEN_DM).
+ENABLE_FOLLOWERS_LIST_ENGINE = True
+# Source profile handle to open (empty = first CLI / queue target username is the source profile only for this mode).
+FOLLOWERS_SOURCE_USERNAME = "xstonekwa"
+FOLLOWERS_LIST_MAX_ITERATIONS_PER_RUN = 2
+FOLLOWERS_LIST_OPEN_WAIT_S = 4.0
+FOLLOWERS_LIST_RETURN_MAX_RETRIES = 2
+FOLLOWERS_LIST_SCROLL_MAX_PER_SESSION = 25
+# --- Social memory (ig_interacted_users) — persistent anti-refollow / cooldowns ---
+SOCIAL_MEMORY_ENABLED = True
+# Days before we may surface the same user again for a new interaction (0 = off).
+SOCIAL_MEMORY_REVISIT_COOLDOWN_DAYS = 0
+SOCIAL_MEMORY_FOLLOW_REVISIT_COOLDOWN_DAYS = 0
+SOCIAL_MEMORY_DM_COOLDOWN_DAYS = 0
+SOCIAL_MEMORY_INTERACTION_COOLDOWN_DAYS = 0
+# Max skips in one run referencing same user (followers engine); 0 = unlimited.
+SOCIAL_MEMORY_MAX_SKIP_STREAK = 0
+# DB row skip_count ceiling (requires column skip_count on ig_interacted_users); default high = inactive.
+SOCIAL_MEMORY_MAX_SKIP_COUNT_DB = 9999
+# Session quotas (0 = unlimited). Counters are in-memory per worker process.
+SESSION_FOLLOW_LIMIT = 0
+SESSION_TOTAL_FOLLOWS_CAP = 0
+SESSION_TOTAL_UNFOLLOWS_CAP = 0
+SESSION_TOTAL_LIKES_CAP = 0
+SESSION_TOTAL_PM_CAP = 0
+SESSION_TOTAL_INTERACTIONS_LIMIT = 0
+SESSION_TOTAL_SUCCESSFUL_INTERACTIONS_LIMIT = 0
+# When True, session exit code stays non-zero if configured quotas/phases are unmet (strict mode).
+SESSION_STRICT_PHASE_COMPLETION = False
 # After real DM send: short bounded poll for a post-send UI signal before navigation.
 DM_POST_SEND_SIGNAL_MAX_S = 2.0
 DM_POST_SEND_SIGNAL_POLL_S = 0.12
@@ -167,3 +206,15 @@ ACCOUNTS_TAB_DEBUG_DUMP = False
 AVATAR_TO_USERNAME_MAX_GAP_PX = 220
 # Pixels (at 1080 ref) below “Recent” header treated as recent-query block
 RECENT_BLOCK_DEPTH = 320
+
+# --- Phone farm: freeze Instagram updates (ADB hardening, best-effort) ---
+# When True, runner applies lock_instagram_update_system after device health_check.
+LOCK_INSTAGRAM_AUTO_UPDATE = True
+# When True, Play Store (com.android.vending) is disabled for user 0 as part of the lock.
+DISABLE_PLAY_STORE_FOR_PHONE_FARM = True
+# When True and lock_state.json baseline disagrees with installed IG version, runner aborts before automation.
+ENABLE_STRICT_UPDATE_LOCK = True
+# Change in production; used only by unlock_instagram_updates().
+UPDATE_UNLOCK_CODE = "TECH_ONLY_SECRET"
+# When True, lock_instagram_update_system also runs `pm suspend` on Instagram (not recommended: can block app start).
+SUSPEND_INSTAGRAM_APP_FOR_LOCK = False

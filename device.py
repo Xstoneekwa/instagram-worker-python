@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import hmac
+import json
 import random
+import re
 import subprocess
 import time
-from typing import Callable, TypeVar
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable, TypeVar
 
 import uiautomator2 as u2
 
@@ -18,6 +23,12 @@ T = TypeVar("T")
 _ime_session_original: str | None = None
 # True after global animation scales are set to 0 for this process.
 _android_animations_disabled_session: bool = False
+
+# Local baseline for strict version lock (per clone / phone farm host).
+LOCK_STATE_PATH = Path(__file__).resolve().parent / "lock_state.json"
+_PLAY_STORE_PKG = "com.android.vending"
+_VERSION_NAME_RE = re.compile(r"versionName=([^\s\]]+)")
+_VERSION_CODE_RE = re.compile(r"versionCode=(\d+)")
 
 
 def get_device_serial(d: u2.Device) -> str | None:
@@ -267,3 +278,322 @@ def retry_until_jitter(
         time.sleep(random.uniform(lo, hi))
     log("warning", "retry_until_jitter_timeout", desc=desc, last_error=last_err)
     return None
+
+
+def _lock_state_read() -> dict[str, Any]:
+    try:
+        if LOCK_STATE_PATH.is_file():
+            raw = json.loads(LOCK_STATE_PATH.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                return raw
+    except Exception as e:
+        log("warning", "instagram_lock_state_read_failed", error=str(e))
+    return {}
+
+
+def _lock_state_write(data: dict[str, Any]) -> None:
+    try:
+        LOCK_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        LOCK_STATE_PATH.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+    except Exception as e:
+        log("warning", "instagram_lock_state_write_failed", error=str(e))
+
+
+def _parse_package_versions(dumpsys_out: str) -> tuple[str | None, int | None]:
+    """First versionName / versionCode pair seen in dumpsys package output."""
+    names = _VERSION_NAME_RE.findall(dumpsys_out or "")
+    codes = _VERSION_CODE_RE.findall(dumpsys_out or "")
+    vn = names[0] if names else None
+    vc: int | None = None
+    if codes:
+        try:
+            vc = int(codes[0])
+        except ValueError:
+            vc = None
+    return vn, vc
+
+
+def _fetch_package_version(serial: str | None, pkg: str) -> tuple[str | None, int | None]:
+    code, out, _ = _adb_shell(serial, "dumpsys", "package", pkg)
+    if code != 0 or not (out or "").strip():
+        return None, None
+    return _parse_package_versions(out)
+
+
+def _package_disabled_for_user0(serial: str | None, pkg: str) -> bool | None:
+    """None if unknown; True if package appears in disabled list."""
+    try:
+        code, out, _ = _adb_shell(serial, "pm", "list", "packages", "-d")
+        if code != 0:
+            return None
+        for line in (out or "").splitlines():
+            line = line.strip()
+            if line == f"package:{pkg}":
+                return True
+        return False
+    except Exception:
+        return None
+
+
+def _package_suspended(serial: str | None, pkg: str) -> bool | None:
+    """Parse dumpsys package … for suspended=true (OEM-dependent formatting)."""
+    try:
+        code, out, _ = _adb_shell(serial, "dumpsys", "package", pkg)
+        if code != 0 or not out:
+            return None
+        lowered = out.lower()
+        if "suspended=true" in lowered:
+            return True
+        if "suspended=false" in lowered:
+            return False
+        return None
+    except Exception:
+        return None
+
+
+def _lock_run_step(
+    serial: str | None,
+    argv: list[str],
+    *,
+    step: str,
+    log_manual_block: bool = False,
+) -> bool:
+    try:
+        code, out, err = _adb_shell(serial, *argv)
+        ok = code == 0
+        tail = ((out or "") + " " + (err or "")).strip()[-240:]
+        log(
+            "info",
+            "instagram_auto_update_lock_step",
+            step=step,
+            ok=ok,
+            exit_code=code,
+            output_tail=tail,
+        )
+        if log_manual_block and ok:
+            log("info", "instagram_manual_update_blocked", step=step, mechanism="appops_or_settings")
+        return ok
+    except Exception as e:
+        log(
+            "info",
+            "instagram_auto_update_lock_step",
+            step=step,
+            ok=False,
+            error=str(e),
+        )
+        return False
+
+
+def lock_instagram_update_system(
+    d: u2.Device,
+    pkg: str | None = None,
+) -> None:
+    """
+    Device hardening (best-effort): reduce accidental IG / Play Store updates via ADB.
+    Does not suspend Instagram unless SUSPEND_INSTAGRAM_APP_FOR_LOCK is True (suspend can block app start).
+    Never raises; never fails the main runner — logs only.
+    """
+    pkg = (pkg or getattr(config, "INSTAGRAM_PACKAGE", "") or "com.instagram.android").strip()
+    serial = get_device_serial(d)
+    log(
+        "info",
+        "instagram_auto_update_lock_started",
+        package=pkg,
+        disable_play_store=bool(getattr(config, "DISABLE_PLAY_STORE_FOR_PHONE_FARM", True)),
+        suspend_instagram_app=bool(getattr(config, "SUSPEND_INSTAGRAM_APP_FOR_LOCK", False)),
+    )
+    try:
+        steps_ok = 0
+        steps_total = 0
+
+        def _one(argv: list[str], step: str, *, manual_block: bool = False) -> None:
+            nonlocal steps_ok, steps_total
+            steps_total += 1
+            if _lock_run_step(serial, argv, step=step, log_manual_block=manual_block):
+                steps_ok += 1
+
+        _one(
+            ["cmd", "package", "set-distracting-restriction", pkg, "hide-notifications"],
+            "set_distracting_restriction_hide_notifications",
+        )
+        if bool(getattr(config, "DISABLE_PLAY_STORE_FOR_PHONE_FARM", True)):
+            _one(
+                ["pm", "disable-user", "--user", "0", _PLAY_STORE_PKG],
+                "disable_play_store_user0",
+                manual_block=True,
+            )
+        if bool(getattr(config, "SUSPEND_INSTAGRAM_APP_FOR_LOCK", False)):
+            _one(["pm", "suspend", pkg], "pm_suspend_instagram")
+        _one(
+            ["appops", "set", pkg, "REQUEST_INSTALL_PACKAGES", "ignore"],
+            "appops_ignore_request_install",
+            manual_block=True,
+        )
+        _one(
+            ["settings", "put", "global", "auto_update_apps", "0"],
+            "settings_auto_update_apps_off",
+            manual_block=True,
+        )
+
+        # Record baseline version + lock metadata for strict mode.
+        try:
+            vn, vc = _fetch_package_version(serial, pkg)
+            prev = _lock_state_read()
+            merged: dict[str, Any] = {
+                **prev,
+                "authorized_version_name": vn or prev.get("authorized_version_name"),
+                "authorized_version_code": vc
+                if vc is not None
+                else prev.get("authorized_version_code"),
+                "locked_at_iso": datetime.now(timezone.utc).isoformat(),
+                "device_serial": serial or prev.get("device_serial"),
+                "lock_applied": True,
+                "package": pkg,
+            }
+            _lock_state_write(merged)
+        except Exception as e:
+            log("warning", "instagram_lock_state_update_after_lock_failed", error=str(e))
+
+        log(
+            "info",
+            "instagram_auto_update_lock_done",
+            package=pkg,
+            steps_ok=steps_ok,
+            steps_total=steps_total,
+        )
+    except Exception as e:
+        log("info", "instagram_auto_update_lock_failed", error=str(e), package=pkg)
+
+
+def unlock_instagram_updates(d: u2.Device, unlock_code: str) -> bool:
+    """
+    Re-enable Play Store and unsuspend Instagram when unlock_code matches config.
+    Best-effort ADB; logs security outcomes.
+    """
+    expected = str(getattr(config, "UPDATE_UNLOCK_CODE", "") or "")
+    log("info", "instagram_update_unlock_attempt")
+    if not expected or not hmac.compare_digest(
+        str(unlock_code or ""),
+        expected,
+    ):
+        log("warning", "instagram_update_unlock_denied", reason="invalid_or_missing_code")
+        return False
+    serial = get_device_serial(d)
+    try:
+        _lock_run_step(
+            serial,
+            ["pm", "enable", _PLAY_STORE_PKG],
+            step="enable_play_store",
+        )
+        pkg = str(getattr(config, "INSTAGRAM_PACKAGE", "") or "com.instagram.android")
+        _lock_run_step(
+            serial,
+            ["pm", "unsuspend", pkg],
+            step="pm_unsuspend_instagram",
+        )
+        log("info", "instagram_update_unlock_success", package=pkg)
+        try:
+            prev = _lock_state_read()
+            prev["lock_applied"] = False
+            prev["unlocked_at_iso"] = datetime.now(timezone.utc).isoformat()
+            prev["device_serial"] = serial or prev.get("device_serial")
+            _lock_state_write(prev)
+        except Exception:
+            pass
+        return True
+    except Exception as e:
+        log("error", "instagram_update_unlock_failed", error=str(e))
+        return False
+
+
+def check_instagram_version_lock(d: u2.Device) -> dict[str, Any]:
+    """
+    Inspect IG version + lock-related signals; update strict unsafe_for_automation
+    when installed build diverges from lock_state.json baseline.
+    """
+    pkg = str(getattr(config, "INSTAGRAM_PACKAGE", "") or "com.instagram.android")
+    serial = get_device_serial(d)
+    strict = bool(getattr(config, "ENABLE_STRICT_UPDATE_LOCK", False))
+
+    vn, vc = _fetch_package_version(serial, pkg)
+    log(
+        "info",
+        "instagram_version_detected",
+        package=pkg,
+        versionName=vn,
+        versionCode=vc,
+    )
+
+    play_off = _package_disabled_for_user0(serial, _PLAY_STORE_PKG)
+    ig_sus = _package_suspended(serial, pkg)
+
+    state = _lock_state_read()
+    auth_name = state.get("authorized_version_name")
+    auth_code = state.get("authorized_version_code")
+    baseline_missing = auth_name is None and auth_code is None
+
+    if baseline_missing and (vn is not None or vc is not None):
+        try:
+            state = {
+                **state,
+                "authorized_version_name": vn,
+                "authorized_version_code": vc,
+                "baseline_set_at_iso": datetime.now(timezone.utc).isoformat(),
+                "device_serial": serial or state.get("device_serial"),
+                "package": pkg,
+            }
+            _lock_state_write(state)
+            auth_name, auth_code = vn, vc
+        except Exception as e:
+            log("warning", "instagram_lock_baseline_init_failed", error=str(e))
+
+    automation_unsafe_reason: str | None = None
+    unsafe = False
+    if ig_sus is True:
+        unsafe = True
+        automation_unsafe_reason = "instagram_app_suspended"
+
+    version_mismatch = False
+    if strict and not baseline_missing:
+        if auth_code is not None and vc is not None:
+            if int(auth_code) != int(vc):
+                version_mismatch = True
+        elif auth_name and vn:
+            if str(auth_name).strip() != str(vn).strip():
+                version_mismatch = True
+    if version_mismatch:
+        unsafe = True
+        if automation_unsafe_reason is None:
+            automation_unsafe_reason = "instagram_version_mismatch"
+
+    payload: dict[str, Any] = {
+        "versionName": vn,
+        "versionCode": vc,
+        "play_store_disabled": play_off,
+        "instagram_suspended": ig_sus,
+        "strict_lock_enabled": strict,
+        "unsafe_for_automation": unsafe,
+        "automation_unsafe_reason": automation_unsafe_reason,
+        "authorized_version_name": state.get("authorized_version_name"),
+        "authorized_version_code": state.get("authorized_version_code"),
+        "lock_state_path": str(LOCK_STATE_PATH),
+    }
+    log("info", "instagram_lock_state_detected", **payload)
+    if unsafe and strict:
+        if automation_unsafe_reason == "instagram_app_suspended":
+            log(
+                "critical",
+                "instagram_app_suspended",
+                reason="instagram_app_suspended",
+                **payload,
+            )
+        else:
+            log(
+                "critical",
+                "instagram_strict_lock_version_mismatch",
+                **payload,
+            )
+    return payload
