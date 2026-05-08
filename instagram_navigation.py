@@ -141,8 +141,9 @@ def _session_modal_or_crash(d: u2.Device) -> bool:
     return False
 
 
-def instagram_warm_session_eligible(d: u2.Device, pkg: str) -> tuple[bool, str]:
+def instagram_warm_session_eligible(d: u2.Device, pkg: str | None = None) -> tuple[bool, str]:
     """Skip force-stop when IG is foreground and UI looks healthy."""
+    pkg = pkg or config.INSTAGRAM_PACKAGE
     try:
         if _session_modal_or_crash(d):
             return False, "modal_or_crash"
@@ -164,11 +165,12 @@ def invalidate_search_surface_cache(reason: str = "") -> None:
     log("debug", "search_surface_cache_invalidated", reason=reason)
 
 
-def is_lightweight_search_screen(d: u2.Device, pkg: str) -> bool:
+def is_lightweight_search_screen(d: u2.Device, pkg: str | None = None) -> bool:
     """
     True if IG search entry is likely active: foreground, top-band EditText, optional search tab selected.
     No XML / dump.
     """
+    pkg = pkg or config.INSTAGRAM_PACKAGE
     try:
         cur = d.app_current()
         if (cur or {}).get("package", "") != pkg:
@@ -240,12 +242,13 @@ def apply_search_surface_reuse_metrics(d: u2.Device, pkg: str, reason: str) -> b
     return True
 
 
-def return_to_search_from_profile(d: u2.Device, pkg: str) -> bool:
+def return_to_search_from_profile(d: u2.Device, pkg: str | None = None) -> bool:
     """
     One back + poll for lightweight search. Sets search_back_to_search_ms.
     On success applies search surface reuse metrics (skip open_search).
     """
     global _perf
+    pkg = pkg or config.INSTAGRAM_PACKAGE
     t0 = time.perf_counter()
     try:
         d.press("back")
@@ -2947,9 +2950,9 @@ def dismiss_android_permission_dialog(d: u2.Device) -> bool:
     return False
 
 
-def is_dm_thread_screen(d: u2.Device) -> bool:
+def is_dm_thread_screen(d, pkg=None) -> bool:
     try:
-        if not verify_app_foreground(d, config.INSTAGRAM_PACKAGE):
+        if not verify_app_foreground(d, pkg or config.INSTAGRAM_PACKAGE):
             return False
         w, h = d.window_size()
         for ed in d(className="android.widget.EditText").all():
@@ -2961,7 +2964,7 @@ def is_dm_thread_screen(d: u2.Device) -> bool:
     return False
 
 
-def reset_to_search_for_next_target(d: u2.Device, pkg: str) -> bool:
+def reset_to_search_for_next_target(d: u2.Device, pkg: str | None = None) -> bool:
     return return_to_search_from_profile(d, pkg)
 
 
@@ -3156,10 +3159,11 @@ def open_dm_thread_from_profile(d: u2.Device, username: str) -> str:
     return thread_state
 
 
-def verify_dm_composer_safe(d: u2.Device, pkg: str) -> tuple[bool, str]:
-    if not verify_app_foreground(d, pkg):
+def verify_dm_composer_safe(d: u2.Device, pkg: str | None = None) -> tuple[bool, str]:
+    p = pkg or config.INSTAGRAM_PACKAGE
+    if not verify_app_foreground(d, p):
         return False, "not_foreground"
-    if is_lightweight_search_screen(d, pkg):
+    if is_lightweight_search_screen(d, p):
         return False, "on_search_not_dm_accepts"
     acc = float(getattr(config, "FAST_DM_COMPOSER_ACCEPT_S", 1.45))
     w0 = time.perf_counter()
@@ -3173,8 +3177,8 @@ def verify_dm_composer_safe(d: u2.Device, pkg: str) -> tuple[bool, str]:
     return False, "no_dm_composer"
 
 
-def type_dm_draft_only(d: u2.Device, draft: str, pkg: str) -> tuple[bool, Any]:
-    _ = pkg
+def type_dm_draft_only(d: u2.Device, draft: str, pkg: str | None = None) -> tuple[bool, Any]:
+    _ = pkg or config.INSTAGRAM_PACKAGE
     t0 = time.perf_counter()
     ed = _dm_find_focus_composer(d)
     if ed is None:
@@ -3353,7 +3357,7 @@ def finalize_dm_draft_before_back(d: u2.Device) -> bool:
     return True
 
 
-def return_to_profile_from_dm(d: u2.Device, username: str, pkg: str) -> bool:
+def return_to_profile_from_dm(d: u2.Device, username: str, pkg: str | None = None) -> bool:
     t0 = time.perf_counter()
     try:
         _try_dismiss_keyboard_light(d)
@@ -3408,7 +3412,8 @@ def cleanup_dm_after_send_button_missing(d, pkg=None) -> bool:
     return False
 
 
-def verify_app_foreground(d: u2.Device, package: str) -> bool:
+def verify_app_foreground(d: u2.Device, package: str | None = None) -> bool:
+    package = package or config.INSTAGRAM_PACKAGE
     try:
         cur = d.app_current()
         pkg = (cur or {}).get("package", "")
