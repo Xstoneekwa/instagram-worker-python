@@ -1,0 +1,7 @@
+.env
+*.log
+logs/
+*.bak
+*.backup
+*_backup*
+instagram_navigation.before_*.py
