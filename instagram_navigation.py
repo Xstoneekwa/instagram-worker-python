@@ -5,7 +5,8 @@ from __future__ import annotations
 import random
 import time
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
+import xml.etree.ElementTree as ET
 
 import uiautomator2 as u2
 
@@ -38,6 +39,12 @@ _LAST_SEARCH_SURFACE_ACTIVITY_FAMILY: str = ""
 
 # Phase timings for performance_summary (reset each run from runner)
 _perf: dict[str, float | int | bool] = {}
+
+_WAIT_EVENT_CALLBACK: Callable[..., None] | None = None
+_LAST_DM_THREAD_CLASSIFY_SNAPSHOT: dict[str, Any] = {}
+_LAST_DM_SEND_RESULT: dict[str, Any] = {}
+_LAST_DM_THREAD_ATTEMPTED: bool = False
+_LAST_DM_THREAD_STATE: str = "unknown"
 
 _SEARCH_TAB_RID_SUFFIXES = ("search_tab", "bottom_bar_search", "tab_search")
 
@@ -2361,6 +2368,1044 @@ def verify_profile(d: u2.Device, username: str) -> bool:
         return False
     finally:
         _perf["profile_verify_ms"] = (time.perf_counter() - t0) * 1000
+
+
+def _dm_parse_bounds_attr_xml(raw: str | None) -> dict[str, int] | None:
+    """Parse Android bounds '[l,t][r,b]' from hierarchy XML."""
+    if not raw or "[" not in raw:
+        return None
+    try:
+        inner = raw.replace("][", ",").replace("[", "").replace("]", "")
+        parts = [int(x.strip()) for x in inner.split(",") if x.strip()]
+        if len(parts) != 4:
+            return None
+        l, t, r, b = parts
+        return {"left": l, "top": t, "right": r, "bottom": b}
+    except Exception:
+        return None
+
+
+def _dm_bounds_intersect_bottom_band(
+    bd: dict[str, int], screen_h: int, bottom_fraction: float
+) -> bool:
+    cut_top = int(screen_h * max(0.0, min(1.0, 1.0 - bottom_fraction)) + 0.5)
+    top = int(bd.get("top", 0))
+    bottom = int(bd.get("bottom", 0))
+    return bottom > cut_top and top < screen_h
+
+
+def _dm_nearest_clickable_xml_ancestor(
+    elem: ET.Element, parent_map: dict[ET.Element, ET.Element | None]
+) -> ET.Element | None:
+    cur = parent_map.get(elem)
+    while cur is not None:
+        if cur.get("clickable", "").lower() == "true":
+            return cur
+        cur = parent_map.get(cur)
+    return None
+
+
+def _dm_visible_from_xml(elem: ET.Element) -> bool:
+    for key in ("visible-to-user", "displayed", "visible"):
+        v = elem.get(key)
+        if v is not None:
+            return str(v).lower() != "false"
+    return True
+
+
+def _dm_bottom_ui_dump_from_hierarchy(
+    xml_text: str,
+    composer_bounds: dict | None,
+    screen_w: int,
+    screen_h: int,
+    *,
+    bottom_fraction: float = 0.45,
+    max_nodes: int = 250,
+) -> dict[str, Any]:
+    """
+    Parse saved hierarchy XML; collect nodes intersecting the bottom fraction of the screen.
+    No class or clickable filtering. Sorted bottom-first, then toward the right.
+    """
+    cb = composer_bounds or {}
+    cright = int(cb.get("right", 0)) if cb else 0
+    out: dict[str, Any] = {
+        "bottom_ui_dump_node_count": 0,
+        "bottom_ui_dump_bottom_fraction": bottom_fraction,
+        "bottom_ui_dump_max_nodes": max_nodes,
+        "nodes": [],
+    }
+    text = (xml_text or "").strip()
+    if not text:
+        return out
+    try:
+        try:
+            root = ET.fromstring(text)
+        except ET.ParseError:
+            root = ET.fromstring(f"<_root>{text}</_root>")
+        parent_map: dict[ET.Element, ET.Element | None] = {root: None}
+
+        def index_parents(el: ET.Element) -> None:
+            for ch in list(el):
+                parent_map[ch] = el
+                index_parents(ch)
+
+        index_parents(root)
+        candidates: list[tuple[int, int, dict[str, Any]]] = []
+        for el in root.iter():
+            if el is root and root.tag in ("_root",):
+                continue
+            bd = _dm_parse_bounds_attr_xml(el.get("bounds"))
+            if not bd:
+                continue
+            if not _dm_bounds_intersect_bottom_band(bd, screen_h, bottom_fraction):
+                continue
+            left, top, right, bottom = (
+                int(bd["left"]),
+                int(bd["top"]),
+                int(bd["right"]),
+                int(bd["bottom"]),
+            )
+            wi = abs(right - left)
+            hi = abs(bottom - top)
+            cx = (left + right) // 2
+            cy = (top + bottom) // 2
+            cls = el.get("class") or el.get("className") or el.tag or ""
+            rid = el.get("resource-id") or el.get("resourceId")
+            txt = el.get("text") or ""
+            cdesc = el.get("content-desc") or el.get("contentDescription") or ""
+            clk = el.get("clickable", "")
+            en = el.get("enabled", "")
+            rec: dict[str, Any] = {
+                "className": cls,
+                "resourceId": rid,
+                "text": txt,
+                "contentDescription": cdesc,
+                "bounds": dict(bd),
+                "clickable": True
+                if clk.lower() == "true"
+                else False
+                if clk.lower() == "false"
+                else None,
+                "enabled": True
+                if en.lower() == "true"
+                else False
+                if en.lower() == "false"
+                else None,
+                "visible": _dm_visible_from_xml(el),
+                "center_x": cx,
+                "center_y": cy,
+                "width": wi,
+                "height": hi,
+                "right_of_composer": bool(cb) and cx >= cright - 140,
+                "distance_to_composer_right": (cx - cright) if cb else None,
+                "lower_screen_half": cy >= (screen_h // 2),
+            }
+            anc = _dm_nearest_clickable_xml_ancestor(el, parent_map)
+            if anc is not None:
+                ap = _dm_parse_bounds_attr_xml(anc.get("bounds"))
+                rec["nearest_clickable_ancestor"] = {
+                    "className": anc.get("class") or anc.get("className"),
+                    "resourceId": anc.get("resource-id") or anc.get("resourceId"),
+                    "clickable": anc.get("clickable"),
+                    "enabled": anc.get("enabled"),
+                    "bounds": dict(ap) if ap else None,
+                }
+            else:
+                rec["nearest_clickable_ancestor"] = None
+            par_el = parent_map.get(el)
+            if par_el is not None:
+                pp = _dm_parse_bounds_attr_xml(par_el.get("bounds"))
+                rec["parent"] = {
+                    "className": par_el.get("class") or par_el.get("className"),
+                    "resourceId": par_el.get("resource-id") or par_el.get("resourceId"),
+                    "clickable": par_el.get("clickable"),
+                    "enabled": par_el.get("enabled"),
+                    "bounds": dict(pp) if pp else None,
+                }
+                try:
+                    sibs = list(par_el)
+                    ix = sibs.index(el)
+                    if ix + 1 < len(sibs):
+                        nx = sibs[ix + 1]
+                        np = _dm_parse_bounds_attr_xml(nx.get("bounds"))
+                        rec["next_sibling"] = {
+                            "className": nx.get("class") or nx.get("className"),
+                            "resourceId": nx.get("resource-id") or nx.get("resourceId"),
+                            "clickable": nx.get("clickable"),
+                            "bounds": dict(np) if np else None,
+                        }
+                    else:
+                        rec["next_sibling"] = None
+                except (ValueError, IndexError):
+                    rec["next_sibling"] = None
+            else:
+                rec["parent"] = None
+                rec["next_sibling"] = None
+            # Sort: lower on screen first (larger cy), then more to the right (larger cx).
+            candidates.append((-cy, cx, rec))
+        candidates.sort(key=lambda t: (t[0], t[1]))
+        nodes = [t[2] for t in candidates[:max_nodes]]
+        out["nodes"] = nodes
+        out["bottom_ui_dump_node_count"] = len(nodes)
+        return out
+    except Exception as e:
+        out["nodes"] = []
+        out["bottom_ui_dump_node_count"] = 0
+        out["error"] = str(e)
+        return out
+
+
+def _dm_send_button_debug_artifacts(
+    *,
+    hierarchy_xml: str,
+    composer_bounds: dict | None,
+    screen_w: int,
+    screen_h: int,
+    debug_screenshot_path: str | None = None,
+    debug_xml_path: str | None = None,
+    bottom_fraction: float = 0.45,
+    max_nodes: int = 250,
+) -> dict[str, Any]:
+    """
+    After screenshot + hierarchy XML are saved (draft still visible), build telemetry for send_out.
+
+    Correct _dm_bottom_ui_dump_from_hierarchy call order:
+    (hierarchy_xml, composer_bounds, screen_w, screen_h) — never (xml, w, h, bounds).
+    """
+    dump_payload = _dm_bottom_ui_dump_from_hierarchy(
+        hierarchy_xml,
+        composer_bounds,
+        screen_w,
+        screen_h,
+        bottom_fraction=bottom_fraction,
+        max_nodes=max_nodes,
+    )
+    out: dict[str, Any] = {
+        "dm_send_bottom_ui_dump": dump_payload,
+        "bottom_ui_dump_node_count": dump_payload["bottom_ui_dump_node_count"],
+        "bottom_ui_dump_bottom_fraction": dump_payload["bottom_ui_dump_bottom_fraction"],
+        "bottom_ui_dump_max_nodes": dump_payload["bottom_ui_dump_max_nodes"],
+    }
+    if debug_screenshot_path is not None:
+        out["debug_screenshot_path"] = debug_screenshot_path
+    if debug_xml_path is not None:
+        out["debug_xml_path"] = debug_xml_path
+    if dump_payload.get("error"):
+        out["bottom_ui_dump_error"] = dump_payload["error"]
+    return out
+
+
+_DM_SEND_POSITION_NOISE: tuple[str, ...] = (
+    "camera",
+    "mic",
+    "microphone",
+    "gallery",
+    "emoji",
+    "plus",
+    "attach",
+    "sticker",
+    "stickers",
+    "gif",
+)
+
+
+def _dm_position_fallback_obvious_noise(rid: str, desc: str, txt: str) -> bool:
+    blob = f"{rid} {desc} {txt}".lower()
+    for frag in _DM_SEND_POSITION_NOISE:
+        if frag in blob:
+            return True
+    return False
+
+
+def _dm_position_fallback_class_ok(class_name: str) -> bool:
+    if not class_name:
+        return False
+    cn = class_name
+    if "FrameLayout" in cn:
+        return True
+    if "ImageView" in cn or "ImageButton" in cn:
+        return True
+    if cn == "android.view.View" or cn.endswith("android.view.View"):
+        return True
+    return False
+
+
+def _dm_screen_size_for_dm(d: u2.Device) -> tuple[int, int]:
+    try:
+        w, h = d.window_size()
+        return int(w), int(h)
+    except Exception:
+        return 1080, 1920
+
+
+def _dm_composer_bounds_u2(composer) -> dict[str, int]:
+    try:
+        inf = composer.info or {}
+        b = inf.get("bounds") or {}
+        return {k: int(b[k]) for k in ("left", "top", "right", "bottom") if k in b}
+    except Exception:
+        return {}
+
+
+def _dm_xml_enabled_visible_ok(elem: ET.Element) -> bool:
+    en = elem.get("enabled", "")
+    if en and en.lower() == "false":
+        return False
+    return _dm_visible_from_xml(elem)
+
+
+def _dm_position_fallback_candidates_from_hierarchy_xml(
+    xml_text: str,
+    composer_bounds: dict[str, int],
+    screen_w: int,
+    screen_h: int,
+) -> list[dict[str, Any]]:
+    """Composer strip to the right: no Send keyword required; rejects obvious attachment noise."""
+    cright = int(composer_bounds.get("right", 0))
+    ctop = int(composer_bounds.get("top", 0))
+    cbot = int(composer_bounds.get("bottom", 0))
+    y_lo = ctop - 80
+    y_hi = cbot + 80
+    out: list[dict[str, Any]] = []
+    text = (xml_text or "").strip()
+    if not text:
+        return out
+    try:
+        try:
+            root = ET.fromstring(text)
+        except ET.ParseError:
+            root = ET.fromstring(f"<_root>{text}</_root>")
+    except ET.ParseError:
+        return out
+    for el in root.iter():
+        bd = _dm_parse_bounds_attr_xml(el.get("bounds"))
+        if not bd:
+            continue
+        left, top, right, bottom = (
+            int(bd["left"]),
+            int(bd["top"]),
+            int(bd["right"]),
+            int(bd["bottom"]),
+        )
+        cx = (left + right) // 2
+        cy = (top + bottom) // 2
+        if cx <= cright - 20:
+            continue
+        if bottom < y_lo or top > y_hi:
+            continue
+        wi, hi = abs(right - left), abs(bottom - top)
+        if not (30 <= wi <= 180 and 30 <= hi <= 180):
+            continue
+        cn = el.get("class") or el.get("className") or ""
+        if not _dm_position_fallback_class_ok(cn):
+            continue
+        if not _dm_xml_enabled_visible_ok(el):
+            continue
+        rid = (el.get("resource-id") or el.get("resourceId") or "").lower()
+        desc = (el.get("content-desc") or el.get("contentDescription") or "").lower()
+        txt = (el.get("text") or "").lower()
+        if _dm_position_fallback_obvious_noise(rid, desc, txt):
+            continue
+        out.append(
+            {
+                "className": cn,
+                "resourceId": el.get("resource-id") or el.get("resourceId"),
+                "text": el.get("text") or "",
+                "contentDescription": el.get("content-desc") or el.get("contentDescription") or "",
+                "bounds": dict(bd),
+                "center_x": cx,
+                "center_y": cy,
+                "width": wi,
+                "height": hi,
+            }
+        )
+    return out
+
+
+def _dm_coordinate_send_point_from_composer(
+    composer_bounds: dict[str, int], screen_w: int
+) -> tuple[int, int]:
+    cright = int(composer_bounds["right"])
+    ctop = int(composer_bounds["top"])
+    cbot = int(composer_bounds["bottom"])
+    x = int(cright + (screen_w - cright) / 2)
+    y = (ctop + cbot) // 2
+    return x, y
+
+
+class _DmSendTapOnce:
+    """Single physical tap (guards accidental double-click on same target)."""
+
+    __slots__ = ("_d", "_x", "_y", "_spent")
+
+    def __init__(self, d: u2.Device, x: int, y: int) -> None:
+        self._d = d
+        self._x = int(x)
+        self._y = int(y)
+        self._spent = False
+
+    def click(self) -> None:
+        if self._spent:
+            log("warning", "dm_send_tap_ignored_already_clicked", x=self._x, y=self._y)
+            return
+        self._d.click(self._x, self._y)
+        self._spent = True
+
+
+def _dm_try_unique_send_resource_u2(d: u2.Device) -> Any | None:
+    for pat in (
+        ".*:id/.*send.*",
+        ".*:id/.*direct_send.*",
+        ".*:id/.*row_thread_composer_button_send.*",
+        ".*:id/.*button_send.*",
+        ".*:id/.*composer.*send.*",
+    ):
+        try:
+            sel = d(resourceIdMatches=pat)
+            objs = sel.all() if hasattr(sel, "all") else []
+            if len(objs) == 1:
+                return objs[0]
+        except Exception:
+            continue
+    return None
+
+
+def wait_for_dm_send_button_after_draft(
+    d: u2.Device,
+    composer,
+    *,
+    thread_state: str,
+    draft_matches_expected: bool = True,
+) -> tuple[Any | None, str, dict[str, Any]]:
+    """
+    Poll for a unique Send control. For empty_new_thread + draft verified, adds hierarchy position
+    fallback (paper-plane zone right of composer) and optional coordinate fallback (config-gated).
+    """
+    w, h = _dm_screen_size_for_dm(d)
+    composer_bounds = _dm_composer_bounds_u2(composer)
+    max_wait = float(getattr(config, "DM_SEND_BUTTON_WAIT_MAX_S", 1.5))
+    poll_s = float(getattr(config, "DM_SEND_BUTTON_POLL_S", 0.1))
+    deadline = time.monotonic() + max_wait
+    meta: dict[str, Any] = {
+        "send_button_candidate_count": 0,
+        "send_button_position_fallback": False,
+        "send_button_coordinate_fallback": False,
+    }
+    allow_pos = (
+        (thread_state or "").strip() == "empty_new_thread"
+        and draft_matches_expected
+        and bool(composer_bounds)
+    )
+    coord_fb = bool(getattr(config, "ENABLE_COORDINATE_SEND_FALLBACK", False))
+    log(
+        "info",
+        "dm_send_button_wait_started",
+        max_wait_s=max_wait,
+        poll_s=poll_s,
+        position_fallback_allowed=allow_pos,
+    )
+    while time.monotonic() < deadline:
+        u = _dm_try_unique_send_resource_u2(d)
+        if u is not None:
+            meta["send_button_candidate_count"] = 1
+            log("info", "dm_send_button_wait_ok", path="resource_id")
+            return u, "ok", meta
+
+        if allow_pos:
+            try:
+                hier = d.dump_hierarchy(compressed=False)
+            except Exception:
+                hier = d.dump_hierarchy()
+            pos = _dm_position_fallback_candidates_from_hierarchy_xml(
+                hier, composer_bounds, w, h
+            )
+            meta["send_button_candidate_count"] = len(pos)
+            if len(pos) == 1:
+                c = pos[0]
+                log(
+                    "info",
+                    "dm_send_button_position_fallback_candidate",
+                    candidate=c,
+                    thread_state=thread_state,
+                )
+                meta["send_button_position_fallback"] = True
+                tap = _DmSendTapOnce(d, c["center_x"], c["center_y"])
+                return tap, "ok", meta
+        time.sleep(poll_s)
+
+    meta["send_button_candidate_count"] = 0
+    try:
+        hier = d.dump_hierarchy(compressed=False)
+    except Exception:
+        hier = d.dump_hierarchy()
+    if allow_pos and composer_bounds:
+        pos = _dm_position_fallback_candidates_from_hierarchy_xml(
+            hier, composer_bounds, w, h
+        )
+        meta["send_button_candidate_count"] = len(pos)
+        if len(pos) == 1:
+            c = pos[0]
+            log(
+                "info",
+                "dm_send_button_position_fallback_candidate",
+                candidate=c,
+                thread_state=thread_state,
+            )
+            meta["send_button_position_fallback"] = True
+            tap = _DmSendTapOnce(d, c["center_x"], c["center_y"])
+            return tap, "ok", meta
+        if len(pos) == 0:
+            rx, ry = _dm_coordinate_send_point_from_composer(composer_bounds, w)
+            log(
+                "info",
+                "dm_send_coordinate_candidate_from_composer",
+                x=rx,
+                y=ry,
+                thread_state=thread_state,
+                coordinate_fallback_enabled=coord_fb,
+            )
+            if coord_fb:
+                meta["send_button_coordinate_fallback"] = True
+                meta["send_button_candidate_count"] = 1
+                return _DmSendTapOnce(d, rx, ry), "ok", meta
+
+    return None, "missing", meta
+
+
+def set_perf_metric(key: str, value: float | int) -> None:
+    global _perf
+    _perf[key] = value
+
+
+def set_wait_event_callback(cb: Callable[..., None] | None) -> None:
+    global _WAIT_EVENT_CALLBACK
+    _WAIT_EVENT_CALLBACK = cb
+
+
+def _emit_wait_event(wait_reason: str, wait_duration_ms: float) -> None:
+    cb = _WAIT_EVENT_CALLBACK
+    if cb is None:
+        return
+    try:
+        cb(wait_reason, wait_duration_ms)
+    except Exception:
+        pass
+
+
+def reset_dm_send_run_state() -> None:
+    global _LAST_DM_SEND_RESULT
+    _LAST_DM_SEND_RESULT = {}
+
+
+def reset_dm_thread_probe_state() -> None:
+    global _LAST_DM_THREAD_ATTEMPTED, _LAST_DM_THREAD_STATE, _LAST_DM_THREAD_CLASSIFY_SNAPSHOT
+    _LAST_DM_THREAD_ATTEMPTED = False
+    _LAST_DM_THREAD_STATE = "unknown"
+    _LAST_DM_THREAD_CLASSIFY_SNAPSHOT = {}
+
+
+def get_last_dm_thread_classify_snapshot() -> dict[str, Any]:
+    return dict(_LAST_DM_THREAD_CLASSIFY_SNAPSHOT)
+
+
+def get_last_dm_send_result() -> dict[str, Any]:
+    return dict(_LAST_DM_SEND_RESULT)
+
+
+def get_last_dm_thread_attempted() -> bool:
+    return bool(_LAST_DM_THREAD_ATTEMPTED)
+
+
+def get_last_dm_thread_state() -> str:
+    return str(_LAST_DM_THREAD_STATE or "unknown")
+
+
+def detect_unsupported_start_surface(d: u2.Device) -> str | None:
+    try:
+        if (
+            (d(text="Allow").exists(timeout=0.05) or d(textContains="Allow").exists(timeout=0.05))
+            and (
+                d(textContains="photos and videos").exists(timeout=0.05)
+                or d(textContains="Photos").exists(timeout=0.05)
+            )
+        ):
+            return "android_permission_dialog"
+    except Exception:
+        pass
+    return None
+
+
+def dismiss_android_permission_dialog(d: u2.Device) -> bool:
+    for label in ("Don't allow", "Deny", "Refuser", "OK", "ALLOW"):
+        try:
+            o = d(text=label)
+            if o.exists(timeout=0.08):
+                o.click()
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def is_dm_thread_screen(d: u2.Device) -> bool:
+    try:
+        if not verify_app_foreground(d, config.INSTAGRAM_PACKAGE):
+            return False
+        w, h = d.window_size()
+        for ed in d(className="android.widget.EditText").all():
+            b = (ed.info or {}).get("bounds") or {}
+            if int(b.get("top", 0)) > h * 0.25:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def reset_to_search_for_next_target(d: u2.Device, pkg: str) -> bool:
+    return return_to_search_from_profile(d, pkg)
+
+
+def _dm_find_focus_composer(d: u2.Device) -> Any | None:
+    """Bottom-half Instagram DM composer EditText (best-effort)."""
+    w, h = d.window_size()
+    y_min = int(h * 0.28)
+    best = None
+    best_top = -1
+    try:
+        for ed in d(className="android.widget.EditText").all():
+            info = ed.info or {}
+            b = info.get("bounds") or {}
+            top = int(b.get("top", 0))
+            if top < y_min:
+                continue
+            if top >= best_top:
+                best_top = top
+                best = ed
+    except Exception:
+        return None
+    return best
+
+
+def _dm_restricted_surfaces(d: u2.Device) -> bool:
+    try:
+        needles = (
+            "can't message",
+            "Cannot message",
+            "can't reply",
+            "Message unavailable",
+            "restricted",
+            "Ne peut pas envoyer",
+        )
+        for frag in needles:
+            if d(textContains=frag).exists(timeout=0.05):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _dm_hierarchy_suggests_existing_thread(hier: str) -> bool:
+    if not hier:
+        return False
+    markers = (
+        "row_thread_message",
+        "direct_message_text",
+        "message_content",
+        "thread_message",
+        "inbox_message",
+        "message_bubble",
+    )
+    blob = hier.lower()
+    return any(m in blob for m in markers)
+
+
+def open_dm_thread_from_profile(d: u2.Device, username: str) -> str:
+    global _LAST_DM_THREAD_ATTEMPTED, _LAST_DM_THREAD_STATE, _LAST_DM_THREAD_CLASSIFY_SNAPSHOT
+    _LAST_DM_THREAD_ATTEMPTED = True
+    pkg = config.INSTAGRAM_PACKAGE
+    _LAST_DM_THREAD_CLASSIFY_SNAPSHOT = {"username": username, "package": pkg}
+    _LAST_DM_THREAD_STATE = "unknown"
+
+    t_open = time.perf_counter()
+    button_signal = ""
+    tapped = False
+    for label, factory in (
+        ("text:Message", lambda: d(text="Message")),
+        ("textContains:Message", lambda: d(textContains="Message")),
+        ("description:Message", lambda: d(descriptionContains="Message")),
+    ):
+        try:
+            el = factory()
+            if el.wait(timeout=0.4):
+                el.click()
+                tapped = True
+                button_signal = label
+                break
+        except Exception:
+            continue
+    dm_open_click_ms = (time.perf_counter() - t_open) * 1000
+    _perf["dm_open_click_ms"] = dm_open_click_ms
+
+    if not tapped:
+        log("error", "dm_message_button_missing", username=username)
+        _LAST_DM_THREAD_STATE = "dm_not_available"
+        return "dm_not_available"
+
+    log(
+        "info",
+        "dm_thread_opened",
+        username=username,
+        button_signal=button_signal,
+        dm_open_click_ms=round(dm_open_click_ms, 2),
+    )
+
+    time.sleep(float(getattr(config, "DM_THREAD_POST_OPEN_SETTLE_S", 0.45)))
+
+    if _dm_restricted_surfaces(d):
+        _LAST_DM_THREAD_STATE = "restricted_account"
+        _LAST_DM_THREAD_CLASSIFY_SNAPSHOT["thread_state"] = "restricted_account"
+        t_det = (time.perf_counter() - t_open) * 1000
+        _perf["dm_thread_detect_ms"] = t_det - dm_open_click_ms
+        log(
+            "info",
+            "dm_thread_state_detected",
+            username=username,
+            thread_state="restricted_account",
+            dm_thread_detect_ms=round(_perf["dm_thread_detect_ms"], 2),
+        )
+        return "restricted_account"
+
+    t_detect = time.perf_counter()
+    composer: Any | None = None
+    deadline = time.monotonic() + float(getattr(config, "DM_THREAD_DETECT_MAX_S", 2.5))
+    while time.monotonic() < deadline:
+        if _dm_restricted_surfaces(d):
+            _LAST_DM_THREAD_STATE = "restricted_account"
+            _perf["dm_thread_detect_ms"] = (time.perf_counter() - t_detect) * 1000
+            log(
+                "info",
+                "dm_thread_state_detected",
+                username=username,
+                thread_state="restricted_account",
+                dm_thread_detect_ms=round(float(_perf["dm_thread_detect_ms"]), 2),
+            )
+            return "restricted_account"
+        composer = _dm_find_focus_composer(d)
+        if composer is not None:
+            break
+        time.sleep(float(getattr(config, "DM_THREAD_POLL_S", 0.08)))
+
+    if composer is None:
+        _perf["dm_thread_detect_ms"] = (time.perf_counter() - t_detect) * 1000
+        log(
+            "warning",
+            "dm_thread_composer_missing",
+            username=username,
+            dm_thread_detect_ms=round(float(_perf["dm_thread_detect_ms"]), 2),
+        )
+        _LAST_DM_THREAD_STATE = "unknown"
+        return "unknown"
+
+    state_deadline = time.monotonic() + float(getattr(config, "DM_THREAD_STATE_MAX_WAIT_S", 2.0))
+    thread_state = "empty_new_thread"
+    last_hier = ""
+    while time.monotonic() < state_deadline:
+        try:
+            last_hier = d.dump_hierarchy(compressed=False)
+        except Exception:
+            try:
+                last_hier = d.dump_hierarchy()
+            except Exception:
+                last_hier = ""
+        if _dm_hierarchy_suggests_existing_thread(last_hier):
+            thread_state = "existing_thread"
+            break
+        time.sleep(float(getattr(config, "DM_THREAD_STATE_POLL_S", 0.25)))
+
+    if thread_state == "empty_new_thread" and not _dm_hierarchy_suggests_existing_thread(last_hier):
+        short = time.monotonic() + float(getattr(config, "DM_EXISTING_THREAD_PROBE_S", 0.8))
+        while time.monotonic() < short:
+            try:
+                last_hier = d.dump_hierarchy(compressed=False)
+            except Exception:
+                last_hier = d.dump_hierarchy()
+            if _dm_hierarchy_suggests_existing_thread(last_hier):
+                thread_state = "existing_thread"
+                break
+            time.sleep(float(getattr(config, "DM_EXISTING_THREAD_POLL_S", 0.1)))
+
+    if thread_state == "empty_new_thread" and _dm_hierarchy_suggests_existing_thread(last_hier):
+        thread_state = "existing_thread"
+
+    _perf["dm_thread_detect_ms"] = (time.perf_counter() - t_detect) * 1000
+    _LAST_DM_THREAD_STATE = thread_state
+    _LAST_DM_THREAD_CLASSIFY_SNAPSHOT.update(
+        {
+            "thread_state": thread_state,
+            "hierarchy_has_thread_markers": _dm_hierarchy_suggests_existing_thread(last_hier),
+            "hierarchy_len": len(last_hier),
+        }
+    )
+    log(
+        "info",
+        "dm_thread_state_detected",
+        username=username,
+        thread_state=thread_state,
+        dm_thread_detect_ms=round(float(_perf["dm_thread_detect_ms"]), 2),
+    )
+    return thread_state
+
+
+def verify_dm_composer_safe(d: u2.Device, pkg: str) -> tuple[bool, str]:
+    if not verify_app_foreground(d, pkg):
+        return False, "not_foreground"
+    if is_lightweight_search_screen(d, pkg):
+        return False, "on_search_not_dm_accepts"
+    acc = float(getattr(config, "FAST_DM_COMPOSER_ACCEPT_S", 1.45))
+    w0 = time.perf_counter()
+    composer: Any | None = None
+    while (time.perf_counter() - w0) < acc:
+        composer = _dm_find_focus_composer(d)
+        if composer is not None:
+            return True, "ok"
+        time.sleep(0.08)
+    _emit_wait_event("dm_composer_wait", (time.perf_counter() - w0) * 1000)
+    return False, "no_dm_composer"
+
+
+def type_dm_draft_only(d: u2.Device, draft: str, pkg: str) -> tuple[bool, Any]:
+    _ = pkg
+    t0 = time.perf_counter()
+    ed = _dm_find_focus_composer(d)
+    if ed is None:
+        return False, "no_composer"
+    try:
+        ed.click()
+        time.sleep(0.05)
+    except Exception:
+        pass
+    text = str(draft or "")
+    serial = get_device_serial(d)
+    fast_ime = (getattr(config, "FAST_IME", "") or "").strip()
+    if fast_ime and is_fast_ime_available(serial):
+        cmd_ok, _, sw_ok, br_ok = run_fast_ime_input(serial, text, fast_ime_id=fast_ime)
+        ok = bool(cmd_ok and (sw_ok or br_ok))
+    else:
+        ok = False
+        try:
+            ed.set_text(text)
+            ok = True
+        except Exception as e:
+            return False, str(e)
+    _perf["dm_draft_typing_ms"] = (time.perf_counter() - t0) * 1000
+    if not ok:
+        return False, "fast_ime_failed"
+    return True, {"method": "fast_ime" if fast_ime else "set_text"}
+
+
+def verify_dm_draft_text(d: u2.Device, expected: str) -> bool:
+    t0 = time.perf_counter()
+    ed = _dm_find_focus_composer(d)
+    if ed is None:
+        return False
+    try:
+        got = ed.get_text() or ""
+    except Exception:
+        return False
+    _perf["dm_draft_verify_ms"] = (time.perf_counter() - t0) * 1000
+    return got.strip() == str(expected).strip()
+
+
+def send_dm_safe(
+    d: u2.Device,
+    username: str,
+    draft_text: str,
+    dm_state: str,
+    *,
+    target_row: Any = None,
+) -> dict[str, Any]:
+    global _LAST_DM_SEND_RESULT
+    _ = target_row
+    msg = str(draft_text or "")
+    enable_real = bool(getattr(config, "ENABLE_REAL_DM_SEND", False))
+    out: dict[str, Any] = {
+        "target_username": username,
+        "thread_state": dm_state,
+        "enable_real_send": enable_real,
+        "message_len": len(msg),
+        "precheck_ok": True,
+        "sent": False,
+        "reason": None,
+        "blocked_event": None,
+        "failure_event": None,
+    }
+
+    if not enable_real:
+        out["blocked_event"] = "dm_send_blocked_config_disabled"
+        _LAST_DM_SEND_RESULT = dict(out)
+        return out
+
+    if dm_state == "existing_thread" and bool(
+        getattr(config, "SEND_DM_SKIP_EXISTING_THREAD", True)
+    ):
+        out["blocked_event"] = "dm_send_blocked_existing_thread"
+        _LAST_DM_SEND_RESULT = dict(out)
+        return out
+
+    composer = _dm_find_focus_composer(d)
+    if composer is None:
+        out["precheck_ok"] = False
+        out["reason"] = "no_composer"
+        _LAST_DM_SEND_RESULT = dict(out)
+        return out
+
+    try:
+        cur = composer.get_text() or ""
+    except Exception:
+        cur = ""
+    out["composer_text_len_before_send"] = len(cur)
+    draft_ok = cur.strip() == msg.strip()
+    out["draft_matches_before_send"] = draft_ok
+
+    btn, status, meta = wait_for_dm_send_button_after_draft(
+        d,
+        composer,
+        thread_state=dm_state,
+        draft_matches_expected=bool(draft_ok),
+    )
+    out["send_button_candidate_count"] = meta.get("send_button_candidate_count", 0)
+    out["coordinate_fallback_used"] = bool(meta.get("send_button_coordinate_fallback"))
+    w, h = _dm_screen_size_for_dm(d)
+    cb = _dm_composer_bounds_u2(composer)
+
+    if status != "ok" or btn is None:
+        out["precheck_ok"] = False
+        out["reason"] = "send_button_missing"
+        try:
+            _ensure_debug_dirs()
+            stem = f"dm_send_missing_{int(time.time() * 1000)}"
+            ss_path = str(_SCREENSHOTS_DIR / f"{stem}.png")
+            xml_path = str(_XML_DIR / f"{stem}.xml")
+            screenshot(d, ss_path)
+            try:
+                hier = d.dump_hierarchy(compressed=False)
+            except Exception:
+                hier = d.dump_hierarchy()
+            with open(xml_path, "w", encoding="utf-8") as fh:
+                fh.write(hier)
+            art = _dm_send_button_debug_artifacts(
+                hierarchy_xml=hier,
+                composer_bounds=cb or {},
+                screen_w=w,
+                screen_h=h,
+                debug_screenshot_path=ss_path,
+                debug_xml_path=xml_path,
+            )
+            out.update(art)
+        except Exception as e:
+            out["debug_screenshot_error"] = str(e)
+        _LAST_DM_SEND_RESULT = dict(out)
+        return out
+
+    try:
+        btn.click()
+        out["sent"] = True
+    except Exception as e:
+        out["failure_event"] = "dm_sent_failed"
+        out["reason"] = str(e)
+    _LAST_DM_SEND_RESULT = dict(out)
+    return out
+
+
+def clear_dm_draft(d: u2.Device) -> bool:
+    t0 = time.perf_counter()
+    ed = _dm_find_focus_composer(d)
+    if ed is None:
+        _perf["dm_draft_clear_ms"] = (time.perf_counter() - t0) * 1000
+        return False
+    try:
+        ed.click()
+        time.sleep(0.05)
+        try:
+            ed.clear_text()
+        except Exception:
+            ed.set_text("")
+    except Exception:
+        _perf["dm_draft_clear_ms"] = (time.perf_counter() - t0) * 1000
+        return False
+    try:
+        left = (ed.get_text() or "").strip()
+    except Exception:
+        left = "?"
+    _perf["dm_draft_clear_ms"] = (time.perf_counter() - t0) * 1000
+    return len(left) == 0
+
+
+def finalize_dm_draft_before_back(d: u2.Device) -> bool:
+    t0 = time.perf_counter()
+    kt0 = time.perf_counter()
+    try:
+        _try_dismiss_keyboard_light(d)
+    except Exception:
+        pass
+    _perf["keyboard_hide_ms"] = (time.perf_counter() - kt0) * 1000
+    _perf["finalize_before_back_ms"] = (time.perf_counter() - t0) * 1000
+    return True
+
+
+def return_to_profile_from_dm(d: u2.Device, username: str, pkg: str) -> bool:
+    t0 = time.perf_counter()
+    try:
+        _try_dismiss_keyboard_light(d)
+    except Exception:
+        pass
+    pkg = pkg or config.INSTAGRAM_PACKAGE
+    deadline = time.monotonic() + float(getattr(config, "DM_BACK_TO_PROFILE_MAX_WAIT_S", 3.0))
+    t_back = time.perf_counter()
+    presses = 0
+    max_backs = 18
+    while time.monotonic() < deadline and presses < max_backs:
+        if verify_profile(d, username):
+            _perf["back_press_ms"] = (time.perf_counter() - t_back) * 1000
+            _perf["profile_detect_wait_ms"] = (time.perf_counter() - t0) * 1000
+            _perf["dm_back_to_profile_ms"] = (time.perf_counter() - t0) * 1000
+            return True
+        try:
+            d.press("back")
+            presses += 1
+        except Exception:
+            break
+        time.sleep(float(getattr(config, "DM_BACK_TO_PROFILE_POLL_S", 0.08)))
+    _perf["back_press_ms"] = (time.perf_counter() - t_back) * 1000
+    _perf["profile_detect_wait_ms"] = (time.perf_counter() - t0) * 1000
+    _perf["dm_back_to_profile_ms"] = (time.perf_counter() - t0) * 1000
+    return False
+
+
+def cleanup_dm_after_send_button_missing(d, pkg=None) -> bool:
+    """
+    Best-effort cleanup after send button missing.
+    Must not send anything.
+    Goal:
+    - clear draft if possible
+    - hide keyboard if possible
+    - go back to profile if currently in DM
+    - return True/False but never raise
+    """
+    try:
+        clear_dm_draft(d)
+    except Exception:
+        pass
+    try:
+        finalize_dm_draft_before_back(d)
+    except Exception:
+        pass
+    try:
+        p = str(pkg or config.INSTAGRAM_PACKAGE or "")
+        return bool(return_to_profile_from_dm(d, "", p))
+    except Exception:
+        pass
+    return False
 
 
 def verify_app_foreground(d: u2.Device, package: str) -> bool:
