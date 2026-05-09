@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Any
 from urllib import error, parse, request
 from datetime import datetime, timezone
@@ -63,6 +64,58 @@ def _request_json(
         raise RuntimeError(f"Supabase {method} {table} failed: {e.code} {detail}") from e
     except error.URLError as e:
         raise RuntimeError(f"Supabase request error: {e}") from e
+
+
+def _strip_one_unknown_column(body: dict[str, Any], err: str) -> dict[str, Any] | None:
+    """Parse PostgREST/Postgres unknown-column errors and drop that key for retry."""
+    m = re.search(r'column "([^"]+)"', err, re.I)
+    if not m:
+        m = re.search(r"Could not find the '([^']+)' column", err, re.I)
+    if not m:
+        return None
+    col = m.group(1)
+    if col not in body:
+        return None
+    return {k: v for k, v in body.items() if k != col}
+
+
+def _request_json_tolerate_unknown_columns(
+    method: str,
+    table: str,
+    *,
+    query: dict[str, str] | None = None,
+    body: dict[str, Any] | None = None,
+    prefer_representation: bool = False,
+) -> Any:
+    """Same as _request_json but retries after dropping columns the server does not have."""
+    if body is None:
+        return _request_json(
+            method,
+            table,
+            query=query,
+            body=None,
+            prefer_representation=prefer_representation,
+        )
+    cur = dict(body)
+    last_err: RuntimeError | None = None
+    for _ in range(48):
+        try:
+            return _request_json(
+                method,
+                table,
+                query=query,
+                body=cur,
+                prefer_representation=prefer_representation,
+            )
+        except RuntimeError as e:
+            last_err = e
+            nxt = _strip_one_unknown_column(cur, str(e))
+            if nxt is None:
+                raise
+            cur = nxt
+    if last_err:
+        raise last_err
+    raise RuntimeError("Supabase retry strip exhausted")
 
 
 def _utc_now_iso() -> str:
@@ -295,6 +348,99 @@ def mark_target_dm_sent_completed(target_id: str) -> None:
     )
 
 
+def mark_target_follow_business(
+    target_id: str,
+    *,
+    run_id: str | None = None,
+    follow_status: str | None = None,
+    follow_method: str | None = None,
+    last_follow_error: str | None = None,
+) -> dict[str, Any]:
+    """
+    Persist follow business fields without touching DM columns or terminal DM status.
+    """
+    now = _utc_now_iso()
+    body: dict[str, Any] = {
+        "followed": True,
+        "followed_at": now,
+        "processed_at": now,
+        "updated_at": now,
+    }
+    if run_id:
+        body["last_follow_run_id"] = str(run_id)
+    if follow_status is not None:
+        body["follow_status"] = str(follow_status)[:200]
+    if follow_method is not None:
+        body["follow_method"] = str(follow_method)[:120]
+    if last_follow_error is not None:
+        body["last_follow_error"] = str(last_follow_error)[:500]
+
+    def _patch(b: dict[str, Any]) -> None:
+        _request_json(
+            "PATCH",
+            "ig_targets",
+            query={"id": f"eq.{target_id}"},
+            body=b,
+            prefer_representation=False,
+        )
+
+    out: dict[str, Any] = {"ok": False, "applied": "none", "error": None}
+    try:
+        _patch(body)
+        out["ok"] = True
+        out["applied"] = "full"
+        return out
+    except RuntimeError as e:
+        out["error"] = str(e)
+        minimal: dict[str, Any] = {
+            "followed": True,
+            "followed_at": now,
+            "processed_at": now,
+            "updated_at": now,
+        }
+        if run_id:
+            minimal["last_follow_run_id"] = str(run_id)
+        try:
+            _patch(minimal)
+            out["ok"] = True
+            out["applied"] = "minimal"
+            return out
+        except RuntimeError as e2:
+            out["error"] = str(e2)
+            return out
+
+
+def patch_target_follow_fields(
+    target_id: str,
+    *,
+    follow_status: str | None = None,
+    follow_method: str | None = None,
+    last_follow_error: str | None = None,
+    last_follow_run_id: str | None = None,
+) -> None:
+    """Non-terminal follow diagnostics (failed verify / missing button)."""
+    now = _utc_now_iso()
+    body: dict[str, Any] = {"updated_at": now}
+    if follow_status is not None:
+        body["follow_status"] = str(follow_status)[:200]
+    if follow_method is not None:
+        body["follow_method"] = str(follow_method)[:120]
+    if last_follow_error is not None:
+        body["last_follow_error"] = str(last_follow_error)[:500]
+    if last_follow_run_id is not None:
+        body["last_follow_run_id"] = str(last_follow_run_id)
+    try:
+        _request_json(
+            "PATCH",
+            "ig_targets",
+            query={"id": f"eq.{target_id}"},
+            body=body,
+            prefer_representation=False,
+        )
+    except RuntimeError:
+        pass
+
+
 def mark_target_dm_sent_business(
     target_id: str,
     *,
@@ -438,3 +584,210 @@ def increment_target_retry_count(target_id: str) -> None:
         body={"retry_count": current + 1, "updated_at": now},
         prefer_representation=False,
     )
+
+
+def _canonical_interaction_username(username: str) -> str:
+    return (username or "").strip().lstrip("@").lower()
+
+
+def _canonical_source_profile(source_profile: str) -> str:
+    return (source_profile or "").strip().lstrip("@").lower()
+
+
+def load_interacted_user(
+    account_id: str,
+    username: str,
+    source_profile: str = "",
+) -> dict[str, Any] | None:
+    """
+    Latest row for (account_id, username). Unique constraint is (account_id, username);
+    source_profile is stored on the row but not part of the lookup key.
+    """
+    u = _canonical_interaction_username(username)
+    rows = _request_json(
+        "GET",
+        "ig_interacted_users",
+        query={
+            "select": "*",
+            "account_id": f"eq.{account_id}",
+            "username": f"eq.{u}",
+            "order": "last_interaction_at.desc",
+            "limit": "1",
+        },
+    )
+    if not rows:
+        return None
+    return rows[0]
+
+
+def merge_interacted_user_row(
+    account_id: str,
+    username: str,
+    source_profile: str,
+    patch: dict[str, Any],
+) -> dict[str, Any]:
+    """Insert or patch ig_interacted_users (fail-silent friendly return)."""
+    now = _utc_now_iso()
+    u = _canonical_interaction_username(username)
+    sp_raw = _canonical_source_profile(source_profile)
+    sp_col = sp_raw if sp_raw else None
+    row = load_interacted_user(account_id, username, source_profile)
+    body = {k: v for k, v in patch.items() if v is not None}
+    if "payload" in body and isinstance(body["payload"], dict):
+        prev: dict[str, Any] = {}
+        if row and isinstance(row.get("payload"), dict):
+            prev = dict(row["payload"])
+        prev.update(body["payload"])
+        body["payload"] = prev
+    body["updated_at"] = now
+    out: dict[str, Any] = {"ok": False, "error": None}
+    try:
+        if row and row.get("id"):
+            _request_json_tolerate_unknown_columns(
+                "PATCH",
+                "ig_interacted_users",
+                query={"id": f"eq.{row.get('id')}"},
+                body=body,
+                prefer_representation=False,
+            )
+        else:
+            insert_body: dict[str, Any] = {
+                "account_id": account_id,
+                "username": u,
+                "created_at": now,
+                **body,
+            }
+            if sp_col is not None:
+                insert_body["source_profile"] = sp_col
+            try:
+                _request_json_tolerate_unknown_columns(
+                    "POST",
+                    "ig_interacted_users",
+                    body=insert_body,
+                    prefer_representation=False,
+                )
+            except RuntimeError as e:
+                msg = str(e)
+                if " 409 " in msg or "23505" in msg:
+                    row2 = load_interacted_user(account_id, username, source_profile)
+                    if row2 and row2.get("id"):
+                        _request_json_tolerate_unknown_columns(
+                            "PATCH",
+                            "ig_interacted_users",
+                            query={"id": f"eq.{row2.get('id')}"},
+                            body=body,
+                            prefer_representation=False,
+                        )
+                    else:
+                        raise
+                else:
+                    raise
+        out["ok"] = True
+        return out
+    except RuntimeError as e:
+        out["error"] = str(e)
+        return out
+
+
+def record_follow_interaction_outcome(
+    account_id: str,
+    username: str,
+    source_profile: str,
+    *,
+    run_id: str | None,
+    session_id: str | None,
+    follow_ok: bool,
+    skipped_tap: bool,
+    follow_state_after: str | None,
+    follow_status: str | None,
+    failure_code: int | None = None,
+    failure_reason: str | None = None,
+) -> dict[str, Any]:
+    now = _utc_now_iso()
+    payload_delta: dict[str, Any] = {}
+    if follow_state_after is not None:
+        payload_delta["follow_state_after"] = follow_state_after
+    if skipped_tap:
+        payload_delta["skipped_tap"] = True
+    if failure_code is not None:
+        payload_delta["failure_code"] = failure_code
+    if failure_reason:
+        payload_delta["failure_reason"] = failure_reason
+
+    if follow_ok:
+        fs = (follow_status or ("already_following" if skipped_tap else "following"))[:200]
+        payload_delta = {
+            **payload_delta,
+            "interaction_lifecycle_state": "active_following",
+            "interaction_status": "success",
+        }
+        patch: dict[str, Any] = {
+            "interaction_type": "follow",
+            "was_successful": True,
+            "follow_status": fs,
+            "last_interaction_at": now,
+            "payload": payload_delta,
+            "interaction_status": "success",
+            "interaction_lifecycle_state": "active_following",
+            "followed": True,
+            "unfollowed": False,
+        }
+        if not skipped_tap:
+            patch["followed_at"] = now
+        if run_id:
+            patch["run_id"] = str(run_id)
+        if session_id:
+            patch["session_id"] = str(session_id)
+    else:
+        payload_delta = {
+            **payload_delta,
+            "interaction_lifecycle_state": "failed",
+            "interaction_status": "failed",
+        }
+        patch = {
+            "interaction_type": "follow",
+            "was_successful": False,
+            "last_interaction_at": now,
+            "follow_status": (follow_status[:200] if follow_status else None),
+            "payload": payload_delta,
+            "interaction_status": "failed",
+            "interaction_lifecycle_state": "failed",
+            "followed": False,
+            "skip_reason": (failure_reason or f"follow_failure_{failure_code}")[:500],
+        }
+        if run_id:
+            patch["run_id"] = str(run_id)
+        if session_id:
+            patch["session_id"] = str(session_id)
+    patch = {k: v for k, v in patch.items() if v is not None}
+    return merge_interacted_user_row(account_id, username, source_profile, patch)
+
+
+def record_interaction_skip_memory(
+    account_id: str,
+    username: str,
+    source_profile: str,
+    *,
+    skip_reason: str,
+    run_id: str | None = None,
+    session_id: str | None = None,
+    lifecycle_state: str = "skipped",
+) -> dict[str, Any]:
+    now = _utc_now_iso()
+    patch: dict[str, Any] = {
+        "interaction_type": "follow",
+        "last_interaction_at": now,
+        "interaction_lifecycle_state": lifecycle_state[:120],
+        "interaction_status": "skipped",
+        "skip_reason": (skip_reason or "")[:500],
+        "was_successful": False,
+        "payload": {
+            "skip_reason_detail": skip_reason or "",
+            "interaction_lifecycle_state": lifecycle_state[:120],
+        },
+    }
+    if run_id:
+        patch["run_id"] = str(run_id)
+    if session_id:
+        patch["session_id"] = str(session_id)
+    return merge_interacted_user_row(account_id, username, source_profile, patch)

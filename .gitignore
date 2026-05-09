@@ -5,3 +5,4 @@ logs/
 *.backup
 *_backup*
 instagram_navigation.before_*.py
+lock_state.json

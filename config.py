@@ -88,6 +88,29 @@ FOLLOWERS_LIST_MAX_ITERATIONS_PER_RUN = 2
 FOLLOWERS_LIST_OPEN_WAIT_S = 4.0
 FOLLOWERS_LIST_RETURN_MAX_RETRIES = 2
 FOLLOWERS_LIST_SCROLL_MAX_PER_SESSION = 25
+# When XML/accessibility tree is stale after opening followers, use screenshot heuristics (no clicks).
+ENABLE_FOLLOWERS_VISUAL_FALLBACK = True
+FOLLOWERS_VISUAL_FALLBACK_MIN_CONFIDENCE = 0.65
+FOLLOWERS_VISUAL_MIN_FOLLOW_BUTTONS = 3
+# Read-only screenshot row layout probe when XML stays stale after visual_fallback (no taps).
+ENABLE_FOLLOWERS_VISUAL_CANDIDATE_DIAGNOSTIC = True
+# Visual row picker from screenshot when XML candidates are empty (V1: no taps / follow / scroll).
+ENABLE_VISUAL_FOLLOWERS_CANDIDATE_PICKER = True
+VISUAL_FOLLOWERS_PICKER_DRY_RUN = True
+VISUAL_FOLLOWERS_MAX_CANDIDATES_PER_SCREEN = 5
+# Tap one visual row (username zone) to open follower profile; dry-run stops after verify (no follow/DM).
+ENABLE_VISUAL_FOLLOWERS_CANDIDATE_OPEN = True
+VISUAL_FOLLOWERS_OPEN_DRY_RUN = True
+VISUAL_FOLLOWERS_OPEN_MAX_PER_RUN = 1
+# Open grid post + like zone dry-run from an already-open profile (no real like tap).
+ENABLE_VISUAL_POST_LIKE_FLOW = True
+VISUAL_POST_LIKE_DRY_RUN = True
+VISUAL_POST_MAX_LIKES_PER_PROFILE = 1
+# Follow + mute sheet dry-run on open profile (no real follow/mute taps).
+ENABLE_VISUAL_FOLLOW_MUTE_FLOW = True
+VISUAL_FOLLOW_MUTE_DRY_RUN = True
+VISUAL_MUTE_POSTS_AFTER_FOLLOW = True
+VISUAL_MUTE_STORIES_AFTER_FOLLOW = True
 # --- Social memory (ig_interacted_users) — persistent anti-refollow / cooldowns ---
 SOCIAL_MEMORY_ENABLED = True
 # Days before we may surface the same user again for a new interaction (0 = off).

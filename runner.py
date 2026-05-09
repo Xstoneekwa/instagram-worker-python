@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import time
 import uuid
+from collections.abc import Callable
 from datetime import datetime, timezone
 
 import social_memory
@@ -60,10 +61,21 @@ from instagram_navigation import (
     perform_follow_safe,
     open_followers_list_from_profile,
     detect_followers_list_screen,
+    FOLLOWERS_ENGINE_XML_STALE_EXIT_REASONS,
+    get_followers_engine_stop_reason,
     iter_followers_candidates,
     open_follower_profile_from_list,
     return_to_followers_list,
     scroll_followers_list_forward,
+    visual_extract_followers_candidates_from_screenshot,
+    open_visual_follower_candidate_from_screenshot,
+    visual_like_open_post,
+    visual_open_recent_post_from_profile,
+    visual_return_to_profile_from_post,
+    visual_detect_follow_button_on_profile,
+    visual_detect_follow_post_actions,
+    visual_follow_profile_dry_run,
+    visual_mute_after_follow_dry_run,
 )
 from logs import log
 
@@ -77,6 +89,7 @@ _RUNTIME_SEEN_FOLLOWER_USERNAMES: set[str] = set()
 _RUNTIME_INTERACTED_USERNAMES: set[str] = set()
 _RUNTIME_UNFOLLOWED_USERNAMES: set[str] = set()
 _RUNTIME_SKIPPED_USERNAMES: set[str] = set()
+_VISUAL_FOLLOWERS_OPEN_COUNT_THIS_SESSION: int = 0
 _SESSION_SOCIAL_ID: str = ""
 _SESSION_COUNTERS: dict[str, int] = {
     "follows": 0,
@@ -280,6 +293,11 @@ def _exit_reason_from_code(code: int) -> str:
         40: "followers_list_engine_open_failed",
         43: "instagram_strict_update_lock_unsafe",
         42: "followers_list_engine_return_failed",
+        44: "followers_engine_xml_stale_abort",
+        45: "visual_followers_candidates_detected_dry_run",
+        46: "visual_follower_profile_opened_dry_run",
+        47: "visual_post_like_flow_dry_run_complete",
+        48: "visual_follow_mute_flow_dry_run_complete",
         37: "follow_blocked_social_memory",
         51: "session_strict_follow_quota_incomplete",
         52: "session_strict_interactions_quota_incomplete",
@@ -2312,6 +2330,285 @@ def _norm_ig_handle(u: str) -> str:
     return (u or "").strip().lstrip("@").lower()
 
 
+def _open_meta_visual_fallback_screenshot_path(meta: dict) -> str | None:
+    """Path to the screenshot used for visual_fallback open detection, if present."""
+    for key in ("last_poll_snapshot", "after_tap_screen_snapshot"):
+        snap = meta.get(key) or {}
+        vf = snap.get("visual_fallback_detail") or {}
+        p = vf.get("screenshot_path_used") or vf.get("screenshot_path")
+        if p:
+            return str(p)
+    return None
+
+
+def _open_meta_visual_fallback_list_was_open(meta: dict) -> bool:
+    """True when open success payload shows followers list validated via visual_fallback."""
+    if str(meta.get("open_detection_method") or "") != "visual_fallback":
+        return False
+    for key in ("last_poll_snapshot", "after_tap_screen_snapshot"):
+        snap = meta.get(key) or {}
+        if bool(snap.get("is_followers_list")):
+            return True
+        vf = snap.get("visual_fallback_detail") or {}
+        if bool(vf.get("visual_match")):
+            return True
+    return False
+
+
+def _try_visual_followers_picker_dry_run(
+    d,
+    *,
+    open_list_meta: dict,
+    source_profile_username: str,
+    source_account_context: str | None,
+    t0: float,
+    warm_session_used: bool,
+    force_stop_used: bool,
+    eng_log: Callable[..., None],
+    stop_reason: str | None = None,
+    candidates: list | None = None,
+    iteration: int | None = None,
+    scroll_used: int = 0,
+    runtime_seen: set | None = None,
+) -> int | None:
+    """
+    Visual screenshot candidate extraction + dry-run exit 45 (or 46 after one profile-open tap).
+    Returns None if picker disabled, not dry-run, not visual_fallback open proof, or no screenshot.
+    """
+    global _VISUAL_FOLLOWERS_OPEN_COUNT_THIS_SESSION
+    if not bool(getattr(config, "ENABLE_VISUAL_FOLLOWERS_CANDIDATE_PICKER", False)):
+        return None
+    if not bool(getattr(config, "VISUAL_FOLLOWERS_PICKER_DRY_RUN", True)):
+        return None
+    if str(open_list_meta.get("open_detection_method") or "") != "visual_fallback":
+        return None
+    if not _open_meta_visual_fallback_list_was_open(open_list_meta):
+        return None
+
+    shot = _open_meta_visual_fallback_screenshot_path(open_list_meta)
+    if not shot:
+        log(
+            "warning",
+            "visual_followers_picker_skipped_no_screenshot",
+            source_profile_username=source_profile_username,
+            source_account_context=source_account_context,
+            stop_reason=stop_reason,
+            iteration=iteration,
+            scroll_used=scroll_used,
+            open_detection_method=open_list_meta.get("open_detection_method"),
+        )
+        return None
+
+    vpick = visual_extract_followers_candidates_from_screenshot(
+        d,
+        screenshot_path=shot,
+        source_profile_username=source_profile_username,
+        runtime_seen=runtime_seen,
+    )
+    cands = list(vpick.get("candidates") or [])
+    min_conf = float(getattr(config, "FOLLOWERS_VISUAL_FALLBACK_MIN_CONFIDENCE", 0.65))
+    open_enabled = bool(getattr(config, "ENABLE_VISUAL_FOLLOWERS_CANDIDATE_OPEN", False))
+    open_dry = bool(getattr(config, "VISUAL_FOLLOWERS_OPEN_DRY_RUN", True))
+    max_open = int(getattr(config, "VISUAL_FOLLOWERS_OPEN_MAX_PER_RUN", 1) or 1)
+
+    if (
+        open_enabled
+        and open_dry
+        and cands
+        and max_open > _VISUAL_FOLLOWERS_OPEN_COUNT_THIS_SESSION
+    ):
+        ranked = sorted(
+            (c for c in cands if float(c.get("confidence") or 0) >= min_conf),
+            key=lambda x: float(x.get("confidence") or 0),
+            reverse=True,
+        )
+        if ranked:
+            best = ranked[0]
+            _VISUAL_FOLLOWERS_OPEN_COUNT_THIS_SESSION += 1
+            log(
+                "info",
+                "visual_follower_candidate_selected_for_open",
+                source_profile_username=source_profile_username,
+                visual_candidate_id=best.get("visual_candidate_id"),
+                row_index=best.get("row_index"),
+                confidence=best.get("confidence"),
+                selection="highest_confidence",
+            )
+            open_out = open_visual_follower_candidate_from_screenshot(
+                d,
+                best,
+                source_profile_username=source_profile_username,
+            )
+            log(
+                "info",
+                "visual_follower_open_dry_run_complete",
+                source_profile_username=source_profile_username,
+                profile_detected=open_out.get("profile_detected"),
+                failure_reason=open_out.get("failure_reason"),
+                tap_x=open_out.get("tap_x"),
+                tap_y=open_out.get("tap_y"),
+                visual_candidate_id=open_out.get("visual_candidate_id"),
+                current_package=open_out.get("current_package"),
+                current_activity=open_out.get("current_activity"),
+            )
+            eng_log(
+                "visual_follower_open_dry_run_complete",
+                "success" if open_out.get("profile_detected") else "failed",
+                "visual_follower_profile_opened_dry_run",
+                {
+                    "profile_detected": open_out.get("profile_detected"),
+                    "failure_reason": open_out.get("failure_reason"),
+                    "tap_x": open_out.get("tap_x"),
+                    "tap_y": open_out.get("tap_y"),
+                    "visual_candidate_id": open_out.get("visual_candidate_id"),
+                },
+            )
+            if open_out.get("profile_detected") and bool(
+                getattr(config, "ENABLE_VISUAL_POST_LIKE_FLOW", False)
+            ):
+                post_out = visual_open_recent_post_from_profile(
+                    d, source_profile_username=source_profile_username
+                )
+                like_out: dict = {"ok": False, "skipped": True}
+                back_out: dict = {"ok": True, "skipped": True}
+                if not post_out.get("ok"):
+                    pass
+                elif post_out.get("post_detected"):
+                    like_out = visual_like_open_post(
+                        d, source_profile_username=source_profile_username
+                    )
+                    back_out = visual_return_to_profile_from_post(
+                        d, source_profile_username=source_profile_username
+                    )
+                else:
+                    like_out = {
+                        "ok": False,
+                        "skipped": True,
+                        "failure_reason": "post_viewer_not_detected",
+                    }
+                log(
+                    "info",
+                    "visual_post_like_flow_runner_complete",
+                    source_profile_username=source_profile_username,
+                    post_open_ok=post_out.get("ok"),
+                    post_detected=post_out.get("post_detected"),
+                    like_dry_run_ok=like_out.get("ok"),
+                    return_profile_ok=back_out.get("ok"),
+                )
+                eng_log(
+                    "visual_post_like_flow_dry_run",
+                    "success"
+                    if bool(
+                        post_out.get("ok")
+                        and post_out.get("post_detected")
+                        and like_out.get("ok")
+                        and back_out.get("ok")
+                    )
+                    else "info",
+                    "visual_post_like_flow_dry_run_complete",
+                    {
+                        "post_detected": post_out.get("post_detected"),
+                        "like_dry_run": True,
+                        "profile_after_back": back_out.get("profile_detected"),
+                    },
+                )
+                exit_code = 47
+                if bool(getattr(config, "ENABLE_VISUAL_FOLLOW_MUTE_FLOW", False)):
+                    det_fb = visual_detect_follow_button_on_profile(
+                        d, source_profile_username=source_profile_username
+                    )
+                    fr_out = visual_follow_profile_dry_run(
+                        d,
+                        source_profile_username=source_profile_username,
+                        follow_detection=det_fb,
+                    )
+                    act_out = visual_detect_follow_post_actions(
+                        d, source_profile_username=source_profile_username
+                    )
+                    mute_out = visual_mute_after_follow_dry_run(
+                        d,
+                        source_profile_username=source_profile_username,
+                        actions_out=act_out,
+                    )
+                    log(
+                        "info",
+                        "visual_follow_mute_flow_runner_complete",
+                        source_profile_username=source_profile_username,
+                        follow_detect_ok=det_fb.get("ok"),
+                        follow_dry_run_ok=fr_out.get("ok"),
+                        follow_actions_popup=act_out.get("popup_detected"),
+                        mute_dry_run_ok=mute_out.get("ok"),
+                    )
+                    eng_log(
+                        "visual_follow_mute_flow_dry_run",
+                        "info",
+                        "visual_follow_mute_flow_dry_run_complete",
+                        {
+                            "follow_detect_ok": det_fb.get("ok"),
+                            "follow_dry_run": True,
+                            "mute_dry_run": True,
+                            "popup_detected": act_out.get("popup_detected"),
+                        },
+                    )
+                    exit_code = 48
+                _emit_performance_summary(
+                    t0=t0,
+                    warm_session_used=warm_session_used,
+                    force_stop_used=force_stop_used,
+                    exit_code=exit_code,
+                    target_username=source_profile_username,
+                )
+                return exit_code
+            _emit_performance_summary(
+                t0=t0,
+                warm_session_used=warm_session_used,
+                force_stop_used=force_stop_used,
+                exit_code=46,
+                target_username=source_profile_username,
+            )
+            return 46
+
+    log(
+        "info",
+        "visual_followers_picker_dry_run_complete",
+        screenshot_path=vpick.get("screenshot_path"),
+        source_profile_username=source_profile_username,
+        source_account_context=source_account_context,
+        candidate_count=vpick.get("candidate_count"),
+        sample_candidates=vpick.get("sample_candidates"),
+        mean_confidence=vpick.get("mean_confidence"),
+        dry_run=True,
+        visual_only=True,
+        picker_error=vpick.get("picker_error"),
+        stop_reason=stop_reason,
+        xml_candidate_row_count=len(candidates) if candidates is not None else None,
+        iteration=iteration,
+        scroll_used=scroll_used,
+    )
+    eng_log(
+        "visual_followers_picker_dry_run_complete",
+        "success" if int(vpick.get("candidate_count") or 0) > 0 else "info",
+        "visual_followers_candidates_detected_dry_run",
+        {
+            "candidate_count": vpick.get("candidate_count"),
+            "mean_confidence": vpick.get("mean_confidence"),
+            "screenshot_path": vpick.get("screenshot_path"),
+            "picker_error": vpick.get("picker_error"),
+            "stop_reason": stop_reason,
+            "iteration": iteration,
+            "scroll_used": scroll_used,
+        },
+    )
+    _emit_performance_summary(
+        t0=t0,
+        warm_session_used=warm_session_used,
+        force_stop_used=force_stop_used,
+        exit_code=45,
+        target_username=source_profile_username,
+    )
+    return 45
+
+
 def _run_followers_list_engine_session(
     d,
     *,
@@ -2328,6 +2625,8 @@ def _run_followers_list_engine_session(
     """
     global _RUNTIME_FOLLOW_COUNT, _RUNTIME_FOLLOWED_USERNAMES, _RUNTIME_INTERACTED_USERNAMES
     global _RUNTIME_SKIPPED_USERNAMES
+    global _VISUAL_FOLLOWERS_OPEN_COUNT_THIS_SESSION
+    _VISUAL_FOLLOWERS_OPEN_COUNT_THIS_SESSION = 0
     pkg = config.INSTAGRAM_PACKAGE
     src_key = _norm_ig_handle(source_profile_username)
 
@@ -2465,24 +2764,115 @@ def _run_followers_list_engine_session(
     max_scroll = int(getattr(config, "FOLLOWERS_LIST_SCROLL_MAX_PER_SESSION", 25))
     scroll_used = 0
     processed = 0
+    open_detection_method = str(open_list_meta.get("open_detection_method") or "xml")
+    followers_engine_loop_iteration = 0
+    prev_candidate_row_count: int | None = None
+
+    def _collect_follower_candidates() -> list:
+        return iter_followers_candidates(
+            d,
+            source_profile_username=source_profile_username,
+            runtime_seen=_RUNTIME_SEEN_FOLLOWER_USERNAMES,
+        )
+
+    def _followers_xml_stale_engine_stop(
+        *,
+        stop_reason: str | None,
+        det: dict,
+        loop_iteration: int,
+        xml_candidates: list | None = None,
+    ) -> int:
+        pic = _try_visual_followers_picker_dry_run(
+            d,
+            open_list_meta=open_list_meta,
+            source_profile_username=source_profile_username,
+            source_account_context=account_id,
+            t0=t0,
+            warm_session_used=warm_session_used,
+            force_stop_used=force_stop_used,
+            eng_log=_eng_log,
+            stop_reason=stop_reason,
+            candidates=xml_candidates,
+            iteration=loop_iteration,
+            scroll_used=scroll_used,
+            runtime_seen=_RUNTIME_SEEN_FOLLOWER_USERNAMES,
+        )
+        if pic is not None:
+            return pic
+        sr = str(stop_reason or "unknown")
+        payload = {
+            "source_profile_username": source_profile_username,
+            "open_detection_method": open_detection_method,
+            "stop_reason": sr,
+            "candidate_username_count": det.get("candidate_username_count"),
+            "visible_usernames_sample": det.get("visible_usernames_sample"),
+            "scroll_used": scroll_used,
+            "iteration": loop_iteration,
+            "current_activity": det.get("current_activity"),
+            "current_package": det.get("current_package"),
+        }
+        log("error", "followers_engine_stopped_xml_stale", **payload)
+        _eng_log(
+            "followers_engine_stopped_xml_stale",
+            "failed",
+            sr,
+            payload,
+        )
+        _emit_performance_summary(
+            t0=t0,
+            warm_session_used=warm_session_used,
+            force_stop_used=force_stop_used,
+            exit_code=44,
+            target_username=source_profile_username,
+        )
+        return 44
 
     while processed < max_iter:
+        followers_engine_loop_iteration += 1
+        stop_r_loop = get_followers_engine_stop_reason()
+
         log(
             "info",
             "followers_loop_iteration",
             iteration=processed,
             source_profile_username=source_profile_username,
             scroll_used=scroll_used,
+            open_detection_method=open_detection_method,
+            stop_reason=stop_r_loop,
+            prev_candidate_row_count=prev_candidate_row_count,
         )
         _eng_log(
             "followers_loop_iteration",
             "info",
             "followers_loop_iteration",
-            {"iteration": processed, "scroll_used": scroll_used},
+            {
+                "iteration": processed,
+                "scroll_used": scroll_used,
+                "open_detection_method": open_detection_method,
+                "stop_reason": stop_r_loop,
+                "prev_candidate_row_count": prev_candidate_row_count,
+            },
         )
 
         det = detect_followers_list_screen(d, source_profile_username=source_profile_username)
+
+        if (
+            open_detection_method == "visual_fallback"
+            and stop_r_loop in FOLLOWERS_ENGINE_XML_STALE_EXIT_REASONS
+        ):
+            return _followers_xml_stale_engine_stop(
+                stop_reason=stop_r_loop,
+                det=det,
+                loop_iteration=followers_engine_loop_iteration,
+            )
+
         if not det.get("is_followers_list"):
+            if open_detection_method == "visual_fallback":
+                return _followers_xml_stale_engine_stop(
+                    stop_reason=stop_r_loop or "visual_fallback_xml_not_followers_list",
+                    det=det,
+                    loop_iteration=followers_engine_loop_iteration,
+                )
             ok_rec, how = return_to_followers_list(d, source_profile_username, pkg)
             if not ok_rec:
                 _eng_log(
@@ -2502,11 +2892,23 @@ def _run_followers_list_engine_session(
             _eng_log("followers_list_recovered", "success", "surface_restored", {"method": how})
             continue
 
-        candidates = iter_followers_candidates(
-            d,
-            source_profile_username=source_profile_username,
-            runtime_seen=_RUNTIME_SEEN_FOLLOWER_USERNAMES,
-        )
+        candidates = _collect_follower_candidates()
+        prev_candidate_row_count = len(candidates)
+        stop_r_after_candidates = get_followers_engine_stop_reason()
+        if open_detection_method == "visual_fallback" and (
+            stop_r_after_candidates in FOLLOWERS_ENGINE_XML_STALE_EXIT_REASONS
+            or len(candidates) == 0
+        ):
+            stale_reason = stop_r_after_candidates
+            if stale_reason not in FOLLOWERS_ENGINE_XML_STALE_EXIT_REASONS:
+                stale_reason = "visual_fallback_no_xml_candidates"
+            return _followers_xml_stale_engine_stop(
+                stop_reason=stale_reason,
+                det=det,
+                loop_iteration=followers_engine_loop_iteration,
+                xml_candidates=candidates,
+            )
+
         pick = None
         for c in candidates:
             ckey = _norm_ig_handle(str(c.get("username") or ""))
@@ -2544,16 +2946,17 @@ def _run_followers_list_engine_session(
                     scroll_used=scroll_used,
                 )
                 break
-            if not scroll_followers_list_forward(d):
+            elif not scroll_followers_list_forward(d):
                 break
-            scroll_used += 1
-            _eng_log(
-                "followers_list_scroll",
-                "info",
-                "scroll",
-                {"scroll_index": scroll_used, "direction": "forward"},
-            )
-            continue
+            else:
+                scroll_used += 1
+                _eng_log(
+                    "followers_list_scroll",
+                    "info",
+                    "scroll",
+                    {"scroll_index": scroll_used, "direction": "forward"},
+                )
+                continue
 
         log(
             "info",
@@ -2801,6 +3204,17 @@ def _run_followers_list_engine_session(
         _eng_log("followers_list_recovered", "success", "return_after_follower", {"method": how})
 
         processed += 1
+
+    stop_final = get_followers_engine_stop_reason()
+    if stop_final in FOLLOWERS_ENGINE_XML_STALE_EXIT_REASONS:
+        det_final = detect_followers_list_screen(
+            d, source_profile_username=source_profile_username
+        )
+        return _followers_xml_stale_engine_stop(
+            stop_reason=stop_final,
+            det=det_final,
+            loop_iteration=followers_engine_loop_iteration,
+        )
 
     _emit_performance_summary(
         t0=t0,
