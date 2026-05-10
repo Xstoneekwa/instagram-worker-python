@@ -102,15 +102,37 @@ VISUAL_FOLLOWERS_MAX_CANDIDATES_PER_SCREEN = 5
 ENABLE_VISUAL_FOLLOWERS_CANDIDATE_OPEN = True
 VISUAL_FOLLOWERS_OPEN_DRY_RUN = True
 VISUAL_FOLLOWERS_OPEN_MAX_PER_RUN = 1
+# Logged-in worker handle: excluded from visual follower-row open (self row on another profile's followers list).
+VISUAL_FOLLOWERS_ACTION_ACCOUNT_USERNAME = ""
 # Open grid post + like zone dry-run from an already-open profile (no real like tap).
 ENABLE_VISUAL_POST_LIKE_FLOW = True
-VISUAL_POST_LIKE_DRY_RUN = True
+# Real controlled like test: True tap + verify (pair with ENABLE_REAL_VISUAL_POST_LIKE).
+VISUAL_POST_LIKE_DRY_RUN = False
 VISUAL_POST_MAX_LIKES_PER_PROFILE = 1
+# Real like from visual post viewer (single tap, verify after); does not enable follow/DM/mute.
+ENABLE_REAL_VISUAL_POST_LIKE = True
+VISUAL_POST_LIKE_VERIFY_AFTER_TAP = True
+VISUAL_POST_LIKE_VERIFY_TIMEOUT_S = 2.5
 # Follow + mute sheet dry-run on open profile (no real follow/mute taps).
 ENABLE_VISUAL_FOLLOW_MUTE_FLOW = True
 VISUAL_FOLLOW_MUTE_DRY_RUN = True
+# Real visual Follow tap + verify (mute remains controlled by VISUAL_FOLLOW_MUTE_DRY_RUN).
+ENABLE_REAL_VISUAL_FOLLOW = True
+VISUAL_FOLLOW_VERIFY_AFTER_TAP = True
+VISUAL_FOLLOW_VERIFY_TIMEOUT_S = 3.0
 VISUAL_MUTE_POSTS_AFTER_FOLLOW = True
 VISUAL_MUTE_STORIES_AFTER_FOLLOW = True
+# Real mute after visual follow: Following → Mute menu → Posts/Stories toggles (V1).
+ENABLE_REAL_VISUAL_MUTE_AFTER_FOLLOW = True
+VISUAL_MUTE_VERIFY_AFTER_TAP = True
+VISUAL_MUTE_VERIFY_TIMEOUT_S = 3.0
+# Lock visual profile context before real Follow/Like (abort on drift; no recovery navigation).
+ENABLE_VISUAL_PROFILE_CONTEXT_LOCK = True
+VISUAL_PROFILE_CONTEXT_MIN_MATCH_CONFIDENCE = 0.72
+# Private profiles: skip like/follow/mute when ENABLE_PRIVATE_ACCOUNT_FILTER + not FOLLOW_PRIVATE_ACCOUNTS;
+# when FOLLOW_PRIVATE_ACCOUNTS True, allow real follow + Requested verification, skip post/mute until accepted.
+ENABLE_PRIVATE_ACCOUNT_FILTER = True
+FOLLOW_PRIVATE_ACCOUNTS = True
 # --- Social memory (ig_interacted_users) — persistent anti-refollow / cooldowns ---
 SOCIAL_MEMORY_ENABLED = True
 # Days before we may surface the same user again for a new interaction (0 = off).

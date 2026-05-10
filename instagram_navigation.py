@@ -4594,6 +4594,45 @@ def perform_follow_safe(
 # --- Followers list engine V1 (source profile → followers list → follower profile) ---
 
 _FOLLOWERS_HANDLE_RE = re.compile(r"^[a-zA-Z0-9._]{1,30}$")
+
+
+def _visual_followers_resolve_username_in_row_band(
+    d: u2.Device,
+    *,
+    row_top: int,
+    row_bottom: int,
+) -> str | None:
+    """
+    Best-effort handle on the followers list whose TextView vertical center falls in the row band.
+    Uses device-pixel bounds (matches full-screen screenshots).
+    """
+    if row_bottom <= row_top:
+        return None
+    tol = max(10, (row_bottom - row_top) // 6)
+    lo = row_top - tol
+    hi = row_bottom + tol
+    band_c = (row_top + row_bottom) // 2
+    best: tuple[int, str] | None = None
+    try:
+        for el in d(className="android.widget.TextView").all():
+            try:
+                raw_t = (el.info.get("text") or "").strip().lstrip("@")
+                if not raw_t or not _FOLLOWERS_HANDLE_RE.match(raw_t):
+                    continue
+                b = el.info.get("bounds") or {}
+                cy = (int(b.get("top", 0)) + int(b.get("bottom", 0))) // 2
+                if cy < lo or cy > hi:
+                    continue
+                dist = abs(cy - band_c)
+                if best is None or dist < best[0]:
+                    best = (dist, raw_t)
+            except Exception:
+                continue
+    except Exception:
+        return None
+    return best[1] if best else None
+
+
 _FOLLOWERS_TITLE_TEXTS = frozenset(
     {
         "Followers",
@@ -5993,7 +6032,7 @@ def _visual_count_right_column_blue_bands(im_rgb: Any) -> int:
     w, h = im_rgb.size
     x0 = int(w * 0.70)
     x1 = w - 1
-    y0 = int(h * 0.10)
+    y0 = int(h * 0.085)
     y1 = int(h * 0.90)
     if x1 <= x0 or y1 <= y0:
         return 0
@@ -6109,7 +6148,8 @@ def _visual_collect_follow_row_y_spans(im_rgb: Any) -> list[tuple[int, int, floa
     w, h = im_rgb.size
     x0 = int(w * 0.68)
     x1 = w - 1
-    y0 = int(h * 0.11)
+    # Include rows just below header/search; avoid missing the first Follow pill.
+    y0 = int(h * 0.085)
     y1 = int(h * 0.90)
     if x1 <= x0 or y1 <= y0:
         return []
@@ -6393,13 +6433,16 @@ def visual_extract_followers_candidates_from_screenshot(
     screenshot_path: str | None = None,
     source_profile_username: str | None = None,
     runtime_seen: set[str] | None = None,
+    action_account_username: str | None = None,
 ) -> dict[str, Any]:
     """
     Build structured visual follower-row candidates from an on-disk screenshot (PIL pixels only).
-    No device taps, scroll, swipe, or follow. ``d`` is unused; kept for API symmetry.
+    No taps / scroll / follow. Uses ``d`` only to map row bands to list handles via UiAutomator.
     ``runtime_seen`` is reserved for future username-based filtering (no OCR in V1).
+
+    Rows matching ``VISUAL_FOLLOWERS_ACTION_ACCOUNT_USERNAME`` / ``action_account_username`` are dropped
+    (logged-out worker account showing as first row on someone else's followers list).
     """
-    _ = d
     _ = runtime_seen
     dry_run = bool(getattr(config, "VISUAL_FOLLOWERS_PICKER_DRY_RUN", True))
     max_pick = int(getattr(config, "VISUAL_FOLLOWERS_MAX_CANDIDATES_PER_SCREEN", 5) or 5)
@@ -6471,10 +6514,15 @@ def visual_extract_followers_candidates_from_screenshot(
     built: list[dict[str, Any]] = []
     confidences: list[float] = []
     src_key = (source_profile_username or "").strip().lstrip("@").lower()[:40]
+    action_raw = (
+        (action_account_username or "").strip()
+        or str(getattr(config, "VISUAL_FOLLOWERS_ACTION_ACCOUNT_USERNAME", "") or "").strip()
+    )
+    action_norm = _normalize_handle(action_raw) if action_raw else ""
 
     for idx, (yt, yb, peak) in enumerate(spans):
         pad = max(4, (yb - yt + 1) // 3)
-        row_top = max(int(h * 0.10), yt - pad)
+        row_top = max(int(h * 0.052), yt - pad)
         row_bottom = min(int(h * 0.93), yb + pad)
         approx_row_bounds = {
             "left": int(w * 0.02),
@@ -6526,7 +6574,48 @@ def visual_extract_followers_candidates_from_screenshot(
             approx_row_bounds, aw=aw, ah=ah, orig_w=orig_w, orig_h=orig_h
         )
         cy = (int(row_o["top"]) + int(row_o["bottom"])) // 2
-        if cy < int(orig_h * 0.14) or cy > int(orig_h * 0.86):
+        top_o = int(row_o["top"])
+        bot_o = int(row_o["bottom"])
+        if cy < int(orig_h * 0.065) or cy > int(orig_h * 0.92):
+            log(
+                "info",
+                "visual_followers_candidate_skipped",
+                screenshot_path=str(path),
+                source_profile_username=source_profile_username,
+                span_index=idx,
+                skip_reason="row_center_outside_list_safe_band",
+                top=top_o,
+                bottom=bot_o,
+                row_center_y=cy,
+                confidence=round(row_conf, 4),
+                dry_run=dry_run,
+                visual_only=True,
+            )
+            continue
+
+        resolved_u = _visual_followers_resolve_username_in_row_band(
+            d, row_top=top_o, row_bottom=bot_o
+        )
+        if (
+            action_norm
+            and resolved_u
+            and _normalize_handle(resolved_u) == action_norm
+        ):
+            log(
+                "info",
+                "visual_followers_candidate_skipped",
+                screenshot_path=str(path),
+                source_profile_username=source_profile_username,
+                span_index=idx,
+                skip_reason="source_account_self",
+                skipped_username=resolved_u,
+                action_account_username=action_raw,
+                top=top_o,
+                bottom=bot_o,
+                confidence=round(row_conf, 4),
+                dry_run=dry_run,
+                visual_only=True,
+            )
             continue
 
         av_o = _scale_bounds_to_original(
@@ -6547,6 +6636,7 @@ def visual_extract_followers_candidates_from_screenshot(
         cand = {
             "visual_candidate_id": visual_candidate_id,
             "row_index": len(built),
+            "span_index": idx,
             "approx_row_bounds": row_o,
             "approx_follow_button_bounds": fb_o,
             "approx_avatar_bounds": av_o,
@@ -6554,6 +6644,7 @@ def visual_extract_followers_candidates_from_screenshot(
             "confidence": round(row_conf, 4),
             "source_profile_username": source_profile_username or "",
             "selection_method": "visual_screenshot",
+            "resolved_username_hint": resolved_u or "",
         }
         built.append(cand)
         confidences.append(row_conf)
@@ -6564,6 +6655,9 @@ def visual_extract_followers_candidates_from_screenshot(
             source_profile_username=source_profile_username,
             visual_candidate_id=visual_candidate_id,
             row_index=cand["row_index"],
+            span_index=idx,
+            top=top_o,
+            bottom=bot_o,
             confidence=cand["confidence"],
             approx_row_bounds=row_o,
             dry_run=dry_run,
@@ -6649,6 +6743,44 @@ def open_visual_follower_candidate_from_screenshot(
     Tap the username / row zone (never the Follow pill), then verify Instagram profile chrome.
     Does not follow, DM, or scroll.
     """
+    global _VISUAL_TARGET_PROFILE_LOCK_ACTIVE, _VISUAL_TARGET_PROFILE_CONTEXT
+    if _VISUAL_TARGET_PROFILE_LOCK_ACTIVE:
+        meta_blk = _followers_current_pkg_activity(d)
+        pin = _VISUAL_TARGET_PROFILE_CONTEXT or {}
+        exp_fp_blk = str(
+            pin.get("profile_visual_fingerprint")
+            or pin.get("profile_fingerprint")
+            or ""
+        )
+        log(
+            "info",
+            "visual_target_profile_lock_mismatch_abort",
+            action="open_follower_candidate_blocked_active_target_lock",
+            expected_profile_fingerprint=exp_fp_blk,
+            current_profile_fingerprint="",
+            confidence=0.0,
+            same_profile=False,
+            current_activity=meta_blk.get("current_activity"),
+            current_package=meta_blk.get("current_package"),
+            source_profile_username=source_profile_username or "",
+        )
+        return {
+            "visual_candidate_id": str(candidate.get("visual_candidate_id") or ""),
+            "row_index": candidate.get("row_index"),
+            "tap_x": None,
+            "tap_y": None,
+            "approx_row_bounds": dict(candidate.get("approx_row_bounds") or {}),
+            "approx_username_text_zone": dict(
+                candidate.get("approx_username_text_zone") or {}
+            ),
+            "source_profile_username": source_profile_username or "",
+            "current_activity": meta_blk.get("current_activity"),
+            "current_package": meta_blk.get("current_package"),
+            "profile_detected": False,
+            "failure_reason": "visual_target_profile_lock_active",
+            "ok": False,
+        }
+
     pkg = str(getattr(config, "INSTAGRAM_PACKAGE", "") or "")
     row_b = dict(candidate.get("approx_row_bounds") or {})
     tz_b = dict(candidate.get("approx_username_text_zone") or {})
@@ -6845,6 +6977,40 @@ def open_visual_follower_candidate_from_screenshot(
             profile_signal=signal,
             screen_guess=guess,
         )
+        tgt_ctx = visual_capture_profile_context(
+            d, source_profile_username=source_profile_username
+        )
+        tgt_fp = str(
+            tgt_ctx.get("profile_visual_fingerprint")
+            or tgt_ctx.get("profile_fingerprint")
+            or ""
+        )
+        if tgt_ctx.get("ok") and tgt_fp:
+            _VISUAL_TARGET_PROFILE_CONTEXT = tgt_ctx
+            _VISUAL_TARGET_PROFILE_LOCK_ACTIVE = True
+            log(
+                "info",
+                "visual_target_profile_lock_enabled",
+                expected_profile_fingerprint=tgt_fp,
+                current_activity=cur_act,
+                current_package=cur_pkg,
+                source_profile_username=source_profile_username or "",
+                action="after_follower_candidate_open_success",
+            )
+        else:
+            _VISUAL_TARGET_PROFILE_CONTEXT = None
+            _VISUAL_TARGET_PROFILE_LOCK_ACTIVE = False
+            log(
+                "warning",
+                "visual_target_profile_lock_enable_failed",
+                expected_profile_fingerprint="",
+                capture_ok=bool(tgt_ctx.get("ok")),
+                failure_reason=str(tgt_ctx.get("failure_reason") or ""),
+                current_activity=cur_act,
+                current_package=cur_pkg,
+                source_profile_username=source_profile_username or "",
+                action="after_follower_candidate_open_success",
+            )
         return {
             **_payload(
                 tap_x=cx,
@@ -6857,6 +7023,7 @@ def open_visual_follower_candidate_from_screenshot(
             "ok": True,
             "profile_signal": signal,
             "screen_guess": guess,
+            "target_profile_context": tgt_ctx,
         }
 
     log(
@@ -6891,6 +7058,209 @@ def open_visual_follower_candidate_from_screenshot(
 # --- Visual post grid + like dry-run (screenshot heuristics; like tap never sent when VISUAL_POST_LIKE_DRY_RUN) ---
 _VISUAL_POST_LIKE_TAPS_RECORDED: int = 0
 
+# Session: after a follower candidate profile opens successfully, pin that profile until flow end.
+_VISUAL_TARGET_PROFILE_LOCK_ACTIVE: bool = False
+_VISUAL_TARGET_PROFILE_CONTEXT: dict[str, Any] | None = None
+
+
+def visual_target_profile_lock_clear() -> None:
+    global _VISUAL_TARGET_PROFILE_LOCK_ACTIVE, _VISUAL_TARGET_PROFILE_CONTEXT
+    _VISUAL_TARGET_PROFILE_LOCK_ACTIVE = False
+    _VISUAL_TARGET_PROFILE_CONTEXT = None
+
+
+def visual_target_profile_lock_verify(
+    d: u2.Device,
+    *,
+    source_profile_username: str | None,
+    action: str,
+) -> dict[str, Any]:
+    """
+    If a target profile lock is active, ensure the current screen still matches the
+    captured follower profile before post open / real like / real follow / mute dry-run.
+    """
+    global _VISUAL_TARGET_PROFILE_LOCK_ACTIVE, _VISUAL_TARGET_PROFILE_CONTEXT
+    meta = _followers_current_pkg_activity(d)
+    if not _VISUAL_TARGET_PROFILE_LOCK_ACTIVE:
+        return {
+            "ok": True,
+            "skipped": True,
+            "target_profile_lock_mismatch": False,
+        }
+    ctx = _VISUAL_TARGET_PROFILE_CONTEXT
+    if not isinstance(ctx, dict):
+        log(
+            "info",
+            "visual_target_profile_lock_mismatch_abort",
+            action=action,
+            expected_profile_fingerprint="",
+            current_profile_fingerprint="",
+            current_context_failure_reason="invalid_target_context_object",
+            current_context_screenshot_path="",
+            confidence=0.0,
+            same_profile=False,
+            current_activity=meta.get("current_activity"),
+            current_package=meta.get("current_package"),
+            source_profile_username=source_profile_username or "",
+        )
+        return {
+            "ok": False,
+            "skipped": False,
+            "target_profile_lock_mismatch": True,
+        }
+    exp_fp = str(
+        ctx.get("profile_visual_fingerprint") or ctx.get("profile_fingerprint") or ""
+    )
+    if ctx.get("ok") is False or not exp_fp:
+        log(
+            "info",
+            "visual_target_profile_lock_mismatch_abort",
+            action=action,
+            expected_profile_fingerprint=exp_fp,
+            current_profile_fingerprint="",
+            current_context_failure_reason=str(ctx.get("failure_reason") or "target_baseline_invalid"),
+            current_context_screenshot_path=str(
+                ctx.get("screenshot_path") or ctx.get("profile_screenshot_path") or ""
+            ),
+            confidence=0.0,
+            same_profile=False,
+            current_activity=meta.get("current_activity"),
+            current_package=meta.get("current_package"),
+            source_profile_username=source_profile_username or "",
+        )
+        return {
+            "ok": False,
+            "skipped": False,
+            "target_profile_lock_mismatch": True,
+        }
+
+    log(
+        "info",
+        "visual_target_profile_lock_verify_started",
+        expected_profile_fingerprint=exp_fp,
+        current_profile_fingerprint="",
+        confidence=0.0,
+        same_profile=False,
+        current_activity=meta.get("current_activity"),
+        current_package=meta.get("current_package"),
+        source_profile_username=source_profile_username or "",
+        action=action,
+    )
+
+    cur_cap = visual_capture_profile_context(
+        d, source_profile_username=source_profile_username
+    )
+    cur_fp_live = str(
+        cur_cap.get("profile_visual_fingerprint")
+        or cur_cap.get("profile_fingerprint")
+        or ""
+    )
+    if cur_cap.get("ok") is False or not cur_fp_live:
+        time.sleep(0.35)
+        cur_cap = visual_capture_profile_context(
+            d, source_profile_username=source_profile_username
+        )
+        cur_fp_live = str(
+            cur_cap.get("profile_visual_fingerprint")
+            or cur_cap.get("profile_fingerprint")
+            or ""
+        )
+
+    hdr_h = int(cur_cap.get("header_hash") or cur_cap.get("ahash_64") or 0)
+    av_h = int(cur_cap.get("avatar_hash") or cur_cap.get("avatar_ahash_64") or 0)
+    shot_ctx = str(
+        cur_cap.get("screenshot_path") or cur_cap.get("profile_screenshot_path") or ""
+    )
+    cur_fp_log = str(
+        cur_cap.get("profile_visual_fingerprint")
+        or cur_cap.get("profile_fingerprint")
+        or ""
+    )
+    log(
+        "info",
+        "visual_target_profile_lock_current_context_captured",
+        ok=bool(cur_cap.get("ok")),
+        failure_reason=str(cur_cap.get("failure_reason") or ""),
+        screenshot_path=shot_ctx,
+        current_profile_fingerprint=cur_fp_log,
+        header_hash=hdr_h,
+        avatar_hash=av_h,
+        username_norm=str(cur_cap.get("username_norm") or ""),
+        current_activity=cur_cap.get("current_activity"),
+        current_package=cur_cap.get("current_package"),
+        action=action,
+        source_profile_username=source_profile_username or "",
+    )
+    if cur_cap.get("ok") is False or not cur_fp_log:
+        log(
+            "warning",
+            "visual_target_profile_lock_current_context_empty",
+            failure_reason=str(cur_cap.get("failure_reason") or "empty_profile_fingerprint"),
+            screenshot_path=shot_ctx,
+            action=action,
+            current_activity=meta.get("current_activity"),
+            current_package=meta.get("current_package"),
+        )
+
+    min_c = float(
+        getattr(config, "VISUAL_PROFILE_CONTEXT_MIN_MATCH_CONFIDENCE", 0.72) or 0.72
+    )
+    ver = visual_verify_same_profile_context(
+        d,
+        expected_context=ctx,
+        source_profile_username=source_profile_username,
+        current_capture=cur_cap,
+    )
+    cur_fp = str(
+        ver.get("current_profile_fingerprint")
+        or cur_fp_log
+        or ""
+    )
+    exp_fp_v = str(ver.get("expected_profile_fingerprint") or exp_fp)
+    conf = float(ver.get("confidence") or 0.0)
+    same_p = bool(ver.get("same_profile"))
+    bad = (not same_p) or conf < min_c
+    ctx_fail = str(
+        ver.get("current_capture_failure_reason")
+        or cur_cap.get("failure_reason")
+        or ""
+    )
+    ctx_shot = str(
+        ver.get("current_capture_screenshot_path")
+        or shot_ctx
+        or ""
+    )
+
+    payload = {
+        "expected_profile_fingerprint": exp_fp_v,
+        "current_profile_fingerprint": cur_fp,
+        "current_context_failure_reason": ctx_fail,
+        "current_context_screenshot_path": ctx_shot,
+        "confidence": round(conf, 4),
+        "same_profile": same_p,
+        "current_activity": meta.get("current_activity"),
+        "current_package": meta.get("current_package"),
+        "source_profile_username": source_profile_username or "",
+        "action": action,
+    }
+    if bad:
+        log("info", "visual_target_profile_lock_mismatch_abort", **payload)
+        return {
+            "ok": False,
+            "skipped": False,
+            "target_profile_lock_mismatch": True,
+            **payload,
+            "verify": ver,
+        }
+    log("info", "visual_target_profile_lock_verify_success", **payload)
+    return {
+        "ok": True,
+        "skipped": False,
+        "target_profile_lock_mismatch": False,
+        **payload,
+        "verify": ver,
+    }
+
 
 def _visual_image_cell_luma_variance(
     im: Any, x0: int, y0: int, cw: int, ch: int
@@ -6914,6 +7284,371 @@ def _visual_xy_image_to_device(
     if iw <= 0 or ih <= 0:
         return max(1, ix), max(1, iy)
     return max(1, int(ix * ww / iw)), max(1, int(iy * wh / ih))
+
+
+def _visual_profile_grid_cells_mostly_blank(
+    im: Any, iw: int, ih: int, *, var_thr: float = 88.0, min_blank_cells: int = 5
+) -> tuple[bool, float]:
+    """True when most 3×3-style grid slots under the profile tabs look blank (empty-state)."""
+    grid_y0 = int(ih * 0.33)
+    grid_y1 = int(ih * 0.92)
+    cols = 3
+    cell_w = max(24, iw // cols)
+    cell_h = cell_w
+    blank = 0
+    total = 0
+    for col, row in ((0, 0), (1, 0), (2, 0), (0, 1), (1, 1), (2, 1)):
+        x0 = col * cell_w
+        y0 = grid_y0 + row * cell_h
+        if y0 + cell_h > grid_y1 or x0 + cell_w > iw:
+            continue
+        total += 1
+        v = _visual_image_cell_luma_variance(im, x0, y0, cell_w, cell_h)
+        if v < var_thr:
+            blank += 1
+    if total == 0:
+        return False, 0.0
+    if blank >= min_blank_cells:
+        ratio = blank / total
+        conf = float(min(0.82, 0.48 + ratio * 0.28))
+        return True, conf
+    return False, 0.0
+
+
+def _visual_profile_lower_grid_mostly_blank(
+    im: Any,
+    iw: int,
+    ih: int,
+    *,
+    var_thr: float = 96.0,
+    min_blank_cells: int = 4,
+    grid_y0_ratio: float = 0.58,
+    grid_y1_ratio: float = 0.94,
+) -> tuple[bool, float]:
+    """
+    Sample cells only below the header / stats / 'Suggested for you' strip (≈ lower half).
+    Empty-state profiles show a flat 'No posts yet' region here; suggestion cards sit higher.
+    """
+    grid_y0 = int(ih * grid_y0_ratio)
+    grid_y1 = int(ih * grid_y1_ratio)
+    cols = 3
+    cell_w = max(24, iw // cols)
+    cell_h = cell_w
+    blank = 0
+    total = 0
+    for col, row in ((0, 0), (1, 0), (2, 0), (0, 1), (1, 1), (2, 1)):
+        x0 = col * cell_w
+        y0 = grid_y0 + row * cell_h
+        if y0 + cell_h > grid_y1 or x0 + cell_w > iw:
+            continue
+        total += 1
+        v = _visual_image_cell_luma_variance(im, x0, y0, cell_w, cell_h)
+        if v < var_thr:
+            blank += 1
+    if total == 0:
+        return False, 0.0
+    if blank >= min_blank_cells:
+        ratio = blank / total
+        conf = float(min(0.8, 0.44 + ratio * 0.28))
+        return True, conf
+    return False, 0.0
+
+
+def visual_profile_has_no_posts(
+    d: u2.Device,
+    *,
+    source_profile_username: str | None = None,
+) -> dict[str, Any]:
+    """
+    Detect Instagram profile empty grid ("No posts yet" / localized / visual blank grid).
+    """
+    meta = _followers_current_pkg_activity(d)
+    base_out = {
+        "no_posts_detected": False,
+        "detection_method": "none",
+        "confidence": 0.0,
+        "current_activity": meta.get("current_activity"),
+        "current_package": meta.get("current_package"),
+        "source_profile_username": source_profile_username or "",
+    }
+
+    ui_needles = (
+        "No Posts Yet",
+        "No posts yet",
+        "No posts",
+        "No Posts",
+        "Aucune publication",
+        "Aucune photo",
+        "Pas encore de publication",
+        "Pas encore de photo",
+        "Sin publicaciones",
+        "Sin publicaciones aún",
+        "Keine Beiträge",
+        "Keine Beiträge vorhanden",
+        "Nessun post",
+        "Nessuna pubblicazione",
+        "Sem publicações",
+        "Sem publicações ainda",
+        "投稿なし",
+        "投稿がありません",
+    )
+
+    for needle in ui_needles:
+        try:
+            if d(textContains=needle).exists(timeout=0.1):
+                out = dict(base_out)
+                out["no_posts_detected"] = True
+                out["detection_method"] = f"ui_textContains:{needle[:48]}"
+                out["confidence"] = 0.91
+                return out
+        except Exception:
+            continue
+
+    for needle in (
+        "No posts yet",
+        "No Posts Yet",
+        "Aucune publication",
+        "Pas encore de publication",
+    ):
+        try:
+            if d(descriptionContains=needle).exists(timeout=0.09):
+                out = dict(base_out)
+                out["no_posts_detected"] = True
+                out["detection_method"] = f"ui_descriptionContains:{needle[:48]}"
+                out["confidence"] = 0.89
+                return out
+        except Exception:
+            continue
+
+    hier = ""
+    try:
+        hier = str(d.dump_hierarchy(compressed=False))
+    except Exception:
+        try:
+            hier = str(d.dump_hierarchy())
+        except Exception:
+            hier = ""
+    hier_l = hier.lower()
+    hier_markers = (
+        "no posts yet",
+        "no posts",
+        "aucune publication",
+        "pas encore de publication",
+        "pas encore de photo",
+        "sin publicaciones",
+        "keine beiträge",
+        "nessun post",
+        "sem publicações",
+        "投稿がありません",
+        "投稿なし",
+    )
+    for mk in hier_markers:
+        if mk in hier_l:
+            out = dict(base_out)
+            out["no_posts_detected"] = True
+            out["detection_method"] = f"hierarchy:{mk[:40]}"
+            out["confidence"] = 0.76
+            return out
+
+    _hier_zero_posts = (
+        (r"\b0\s+posts\b", "hierarchy_regex:0_posts_en"),
+        (r"\b0\s+post\b", "hierarchy_regex:0_post_en"),
+        (r"\b0\s+publications?\b", "hierarchy_regex:0_publications_fr"),
+        (r"\b0\s+publicación(?:es)?\b", "hierarchy_regex:0_publicaciones_es"),
+        (r"\b0\s+beiträge\b", "hierarchy_regex:0_beitraege_de"),
+        (r"\b0\s+pubblicazioni\b", "hierarchy_regex:0_pubblicazioni_it"),
+    )
+    for pat, method in _hier_zero_posts:
+        try:
+            if re.search(pat, hier, re.I):
+                out = dict(base_out)
+                out["no_posts_detected"] = True
+                out["detection_method"] = method
+                out["confidence"] = 0.83
+                return out
+        except Exception:
+            continue
+
+    suggested_strip = any(
+        mk in hier_l
+        for mk in (
+            "suggested for you",
+            "suggested accounts",
+            "suggestions pour vous",
+            "comptes suggérés",
+            "sugerencias para ti",
+            "vorschläge für dich",
+        )
+    )
+
+    try:
+        _ensure_debug_dirs()
+        shot = str(
+            _SCREENSHOTS_DIR
+            / f"visual_profile_no_posts_{int(time.time() * 1000)}.png"
+        )
+        screenshot(d, shot)
+        from PIL import Image
+
+        im = Image.open(shot).convert("RGB")
+        iw, ih = im.size
+        empty_guess, conf_v = _visual_profile_grid_cells_mostly_blank(im, iw, ih)
+        if empty_guess:
+            out = dict(base_out)
+            out["no_posts_detected"] = True
+            out["detection_method"] = "visual_blank_grid"
+            out["confidence"] = conf_v
+            return out
+        empty_lower, conf_lo = _visual_profile_lower_grid_mostly_blank(im, iw, ih)
+        if empty_lower and suggested_strip:
+            out = dict(base_out)
+            out["no_posts_detected"] = True
+            out["detection_method"] = "visual_lower_grid_blank_with_suggested_strip"
+            out["confidence"] = conf_lo
+            return out
+    except Exception:
+        pass
+
+    return base_out
+
+
+def visual_detect_private_profile(
+    d: u2.Device,
+    *,
+    source_profile_username: str | None = None,
+) -> dict[str, Any]:
+    """
+    Detect Instagram private-account profile chrome (lock message / localized strings).
+    Does not tap. Distinct from empty public grid (Suggested / No posts yet).
+    """
+    meta = _followers_current_pkg_activity(d)
+    pkg_s = str(meta.get("current_package") or "")
+    act_s = str(meta.get("current_activity") or "")
+    src = source_profile_username or ""
+    base_out: dict[str, Any] = {
+        "private_profile_detected": False,
+        "detection_method": "none",
+        "confidence": 0.0,
+        "current_activity": act_s,
+        "current_package": pkg_s,
+        "source_profile_username": src,
+    }
+    log(
+        "info",
+        "visual_private_profile_detect_started",
+        source_profile_username=src,
+        current_activity=act_s,
+        current_package=pkg_s,
+    )
+
+    ui_rows: list[tuple[str, str, float]] = [
+        ("ui_textContains_this_account_private_en", "This account is private", 0.93),
+        (
+            "ui_textContains_follow_to_see_en",
+            "Follow this account to see their photos and videos",
+            0.91,
+        ),
+        ("ui_textContains_ce_compte_prive_fr", "Ce compte est privé", 0.91),
+        ("ui_textContains_compte_prive_fr", "Compte privé", 0.84),
+        ("ui_textContains_suivez_compte_fr", "Suivez ce compte pour voir", 0.87),
+        (
+            "ui_textContains_abonnez_compte_fr",
+            "Abonnez-vous à ce compte pour voir",
+            0.87,
+        ),
+        ("ui_textContains_cuenta_privada_es", "Esta cuenta es privada", 0.89),
+        ("ui_textContains_konto_privat_de", "Dieses Konto ist privat", 0.89),
+    ]
+    for method, needle, conf in ui_rows:
+        try:
+            if d(textContains=needle).exists(timeout=0.15):
+                out = dict(base_out)
+                out["private_profile_detected"] = True
+                out["detection_method"] = method
+                out["confidence"] = float(conf)
+                log(
+                    "info",
+                    "visual_private_profile_detected",
+                    detection_method=out["detection_method"],
+                    confidence=out["confidence"],
+                    current_activity=out["current_activity"],
+                    current_package=out["current_package"],
+                    source_profile_username=src,
+                )
+                return out
+        except Exception:
+            continue
+
+    for nd, method_suffix in (
+        ("This account is private", "this_account_private"),
+        ("Ce compte est privé", "ce_compte_prive"),
+        ("Compte privé", "compte_prive"),
+    ):
+        try:
+            if d(descriptionContains=nd).exists(timeout=0.12):
+                out = dict(base_out)
+                out["private_profile_detected"] = True
+                out["detection_method"] = f"ui_descriptionContains:{method_suffix}"
+                out["confidence"] = 0.85
+                log(
+                    "info",
+                    "visual_private_profile_detected",
+                    detection_method=out["detection_method"],
+                    confidence=out["confidence"],
+                    current_activity=out["current_activity"],
+                    current_package=out["current_package"],
+                    source_profile_username=src,
+                )
+                return out
+        except Exception:
+            continue
+
+    hier = ""
+    try:
+        hier = str(d.dump_hierarchy(compressed=False))
+    except Exception:
+        try:
+            hier = str(d.dump_hierarchy())
+        except Exception:
+            hier = ""
+    hl = hier.lower()
+    hier_markers: tuple[tuple[str, str], ...] = (
+        ("this account is private", "hierarchy:this_account_private"),
+        (
+            "follow this account to see their photos",
+            "hierarchy:follow_to_see_photos",
+        ),
+        ("ce compte est privé", "hierarchy:ce_compte_prive"),
+        ("compte privé", "hierarchy:compte_prive"),
+        ("suivez ce compte pour voir", "hierarchy:suivez_compte"),
+        ("esta cuenta es privada", "hierarchy:cuenta_privada"),
+        ("dieses konto ist privat", "hierarchy:konto_privat"),
+    )
+    for substr, method in hier_markers:
+        if substr in hl:
+            out = dict(base_out)
+            out["private_profile_detected"] = True
+            out["detection_method"] = method
+            out["confidence"] = 0.79
+            log(
+                "info",
+                "visual_private_profile_detected",
+                detection_method=out["detection_method"],
+                confidence=out["confidence"],
+                current_activity=out["current_activity"],
+                current_package=out["current_package"],
+                source_profile_username=src,
+            )
+            return out
+
+    log(
+        "info",
+        "visual_private_profile_not_detected",
+        source_profile_username=src,
+        current_activity=act_s,
+        current_package=pkg_s,
+    )
+    return base_out
 
 
 def visual_open_recent_post_from_profile(
@@ -6949,10 +7684,59 @@ def visual_open_recent_post_from_profile(
         source_profile_username=source_profile_username or "",
     )
 
+    tv_open = visual_target_profile_lock_verify(
+        d,
+        source_profile_username=source_profile_username,
+        action="visual_open_recent_post_from_profile",
+    )
+    if not tv_open.get("ok"):
+        meta_tv = _followers_current_pkg_activity(d)
+        return {
+            "ok": False,
+            "tap_x": None,
+            "tap_y": None,
+            "current_activity": meta_tv.get("current_activity"),
+            "current_package": meta_tv.get("current_package"),
+            "profile_detected": prof0,
+            "post_detected": False,
+            "source_profile_username": source_profile_username or "",
+            "failure_reason": "target_profile_lock_mismatch",
+            "target_profile_lock_mismatch": True,
+        }
+
     try:
         ww, wh = d.window_size()
     except Exception:
         ww, wh = 1080, 2400
+
+    np_check = visual_profile_has_no_posts(
+        d, source_profile_username=source_profile_username
+    )
+    if np_check.get("no_posts_detected"):
+        meta_np = _followers_current_pkg_activity(d)
+        log(
+            "info",
+            "visual_profile_no_posts_detected",
+            source_profile_username=source_profile_username or "",
+            current_activity=meta_np.get("current_activity"),
+            current_package=meta_np.get("current_package"),
+            detection_method=np_check.get("detection_method"),
+            confidence=round(float(np_check.get("confidence") or 0.0), 4),
+        )
+        return {
+            "ok": True,
+            "tap_x": None,
+            "tap_y": None,
+            "current_activity": meta_np.get("current_activity"),
+            "current_package": meta_np.get("current_package"),
+            "profile_detected": prof0,
+            "post_detected": False,
+            "no_posts_profile": True,
+            "no_posts_detection_method": np_check.get("detection_method"),
+            "no_posts_confidence": float(np_check.get("confidence") or 0.0),
+            "source_profile_username": source_profile_username or "",
+            "failure_reason": None,
+        }
 
     _ensure_debug_dirs()
     shot = str(
@@ -7201,18 +7985,290 @@ def visual_open_recent_post_from_profile(
     }
 
 
-def visual_like_open_post(
+def _visual_filled_heart_red_ratio(im: Any, iw: int, ih: int) -> float:
+    """Share of pixels in the viewer heart ROI that look like a filled (liked) heart."""
+    lb_left = int(iw * 0.055)
+    lb_top = int(ih * 0.555)
+    lb_right = int(iw * 0.145)
+    lb_bottom = int(ih * 0.63)
+    if lb_right <= lb_left + 4 or lb_bottom <= lb_top + 4:
+        return 0.0
+    roi = im.crop((lb_left, lb_top, lb_right + 1, lb_bottom + 1))
+    n = 0
+    nr = 0
+    for rr, gg, bb in roi.getdata():
+        r, g, b = int(rr), int(gg), int(bb)
+        n += 1
+        if r >= 130 and r >= g + 22 and r >= b + 18:
+            nr += 1
+    return nr / max(n, 1)
+
+
+def _ui_post_viewer_liked_quick(d: u2.Device) -> tuple[bool, str, float]:
+    """Fast UiAutomator hints that the post is already liked (Unlike / localized unlike)."""
+    checks: list[tuple[str, Callable[[], object], float]] = [
+        ("ui_description_unlike", lambda: d(descriptionContains="Unlike"), 0.9),
+        ("ui_description_liked", lambda: d(descriptionContains="Liked"), 0.82),
+        ("ui_text_unlike", lambda: d(textContains="Unlike"), 0.85),
+        ("ui_description_fr_unlike", lambda: d(descriptionContains="Je n'aime plus"), 0.88),
+        ("ui_description_de_unlike", lambda: d(descriptionContains="Gefällt mir nicht mehr"), 0.85),
+    ]
+    for method, pred, conf in checks:
+        try:
+            if pred().exists(timeout=0.14):
+                return True, method, conf
+        except Exception:
+            continue
+    return False, "", 0.0
+
+
+def _hierarchy_suggests_liked_state(hier: str) -> bool:
+    if not hier:
+        return False
+    needles = (
+        'content-desc="Unlike"',
+        "content-desc=\"Unlike\"",
+        "Unlike",
+        "Je n'aime plus",
+        "Gefällt mir nicht mehr",
+        'text="Unlike"',
+    )
+    return any(n in hier for n in needles)
+
+
+def visual_post_already_liked(
     d: u2.Device,
     *,
     source_profile_username: str | None = None,
 ) -> dict[str, Any]:
     """
-    Estimate like control from a screenshot of the open post; dry-run never sends the like tap.
+    Detect whether the open post viewer already shows a liked state (no tap).
+    """
+    meta = _followers_current_pkg_activity(d)
+    ok_ui, method_ui, conf_ui = _ui_post_viewer_liked_quick(d)
+    if ok_ui:
+        return {
+            "already_liked": True,
+            "detection_method": method_ui,
+            "confidence": conf_ui,
+            "current_activity": meta.get("current_activity"),
+            "current_package": meta.get("current_package"),
+            "source_profile_username": source_profile_username or "",
+        }
+    hier = ""
+    try:
+        hier = str(d.dump_hierarchy(compressed=False))
+    except Exception:
+        try:
+            hier = str(d.dump_hierarchy())
+        except Exception:
+            hier = ""
+    if _hierarchy_suggests_liked_state(hier):
+        return {
+            "already_liked": True,
+            "detection_method": "hierarchy_unlike_hint",
+            "confidence": 0.72,
+            "current_activity": meta.get("current_activity"),
+            "current_package": meta.get("current_package"),
+            "source_profile_username": source_profile_username or "",
+        }
+    # Visual fallback: strong red fill in heart ROI (outline-only hearts stay pale).
+    try:
+        _ensure_debug_dirs()
+        shot = str(
+            _SCREENSHOTS_DIR
+            / f"visual_post_already_liked_{int(time.time() * 1000)}.png"
+        )
+        screenshot(d, shot)
+        from PIL import Image
+
+        im = Image.open(shot).convert("RGB")
+        iw, ih = im.size
+        ratio = _visual_filled_heart_red_ratio(im, iw, ih)
+        if ratio >= 0.085:
+            return {
+                "already_liked": True,
+                "detection_method": "visual_heart_red_fallback",
+                "confidence": float(min(0.82, 0.35 + ratio * 4.5)),
+                "current_activity": meta.get("current_activity"),
+                "current_package": meta.get("current_package"),
+                "source_profile_username": source_profile_username or "",
+            }
+    except Exception:
+        pass
+    return {
+        "already_liked": False,
+        "detection_method": "none",
+        "confidence": 0.0,
+        "current_activity": meta.get("current_activity"),
+        "current_package": meta.get("current_package"),
+        "source_profile_username": source_profile_username or "",
+    }
+
+
+def visual_verify_post_liked(
+    d: u2.Device,
+    *,
+    source_profile_username: str | None = None,
+    tap_x: int | None = None,
+    tap_y: int | None = None,
+    detect_confidence: float | None = None,
+) -> dict[str, Any]:
+    """
+    Poll the device after a like tap to confirm liked state (Unlike / hierarchy / heart ROI).
+    """
+    timeout_s = float(getattr(config, "VISUAL_POST_LIKE_VERIFY_TIMEOUT_S", 2.5) or 2.5)
+    deadline = time.time() + max(0.4, timeout_s)
+    meta0 = _followers_current_pkg_activity(d)
+    dc = float(detect_confidence) if detect_confidence is not None else 0.0
+    log(
+        "info",
+        "visual_post_like_verify_started",
+        tap_x=tap_x,
+        tap_y=tap_y,
+        confidence=round(dc, 4),
+        verification_method="polling",
+        current_activity=meta0.get("current_activity"),
+        current_package=meta0.get("current_package"),
+        source_profile_username=source_profile_username or "",
+    )
+
+    poll = 0.32
+    attempt = 0
+    while time.time() < deadline:
+        attempt += 1
+        meta_att = _followers_current_pkg_activity(d)
+        log(
+            "info",
+            "visual_post_like_verify_attempt",
+            attempt=attempt,
+            tap_x=tap_x,
+            tap_y=tap_y,
+            confidence=round(dc, 4),
+            verification_method="ui_then_hierarchy_then_visual",
+            current_activity=meta_att.get("current_activity"),
+            current_package=meta_att.get("current_package"),
+            source_profile_username=source_profile_username or "",
+        )
+        ok_ui, method_ui, conf_ui = _ui_post_viewer_liked_quick(d)
+        if ok_ui:
+            meta = _followers_current_pkg_activity(d)
+            log(
+                "info",
+                "visual_post_like_verify_success",
+                tap_x=tap_x,
+                tap_y=tap_y,
+                verification_method=method_ui,
+                confidence=round(conf_ui, 4),
+                current_activity=meta.get("current_activity"),
+                current_package=meta.get("current_package"),
+                source_profile_username=source_profile_username or "",
+            )
+            return {
+                "liked_verified": True,
+                "verification_method": method_ui,
+                "confidence": conf_ui,
+            }
+
+        hier = ""
+        try:
+            hier = str(d.dump_hierarchy(compressed=False))
+        except Exception:
+            try:
+                hier = str(d.dump_hierarchy())
+            except Exception:
+                hier = ""
+        if _hierarchy_suggests_liked_state(hier):
+            meta = _followers_current_pkg_activity(d)
+            conf = 0.74
+            log(
+                "info",
+                "visual_post_like_verify_success",
+                tap_x=tap_x,
+                tap_y=tap_y,
+                verification_method="hierarchy_unlike_hint",
+                confidence=conf,
+                current_activity=meta.get("current_activity"),
+                current_package=meta.get("current_package"),
+                source_profile_username=source_profile_username or "",
+            )
+            return {
+                "liked_verified": True,
+                "verification_method": "hierarchy_unlike_hint",
+                "confidence": conf,
+            }
+
+        try:
+            _ensure_debug_dirs()
+            shot = str(
+                _SCREENSHOTS_DIR
+                / f"visual_post_verify_like_{int(time.time() * 1000)}.png"
+            )
+            screenshot(d, shot)
+            from PIL import Image
+
+            im = Image.open(shot).convert("RGB")
+            iw, ih = im.size
+            ratio = _visual_filled_heart_red_ratio(im, iw, ih)
+            if ratio >= 0.095:
+                conf_v = float(min(0.92, 0.42 + ratio * 4.2))
+                meta = _followers_current_pkg_activity(d)
+                log(
+                    "info",
+                    "visual_post_like_verify_success",
+                    tap_x=tap_x,
+                    tap_y=tap_y,
+                    verification_method="visual_heart_red",
+                    confidence=round(conf_v, 4),
+                    current_activity=meta.get("current_activity"),
+                    current_package=meta.get("current_package"),
+                    source_profile_username=source_profile_username or "",
+                )
+                return {
+                    "liked_verified": True,
+                    "verification_method": "visual_heart_red",
+                    "confidence": conf_v,
+                }
+        except Exception:
+            pass
+
+        time.sleep(poll)
+
+    meta_f = _followers_current_pkg_activity(d)
+    log(
+        "info",
+        "visual_post_like_verify_failed",
+        tap_x=tap_x,
+        tap_y=tap_y,
+        verification_method="none",
+        confidence=round(dc, 4),
+        current_activity=meta_f.get("current_activity"),
+        current_package=meta_f.get("current_package"),
+        source_profile_username=source_profile_username or "",
+    )
+    return {
+        "liked_verified": False,
+        "verification_method": "none",
+        "confidence": 0.0,
+    }
+
+
+def visual_like_open_post(
+    d: u2.Device,
+    *,
+    source_profile_username: str | None = None,
+    expected_profile_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """
+    Estimate like control from a screenshot of the open post.
+    When ENABLE_REAL_VISUAL_POST_LIKE is False, honors VISUAL_POST_LIKE_DRY_RUN (no tap).
+    When True, performs a single real like tap (unless already liked); verification is done in runner.
     """
     global _VISUAL_POST_LIKE_TAPS_RECORDED
     max_l = int(getattr(config, "VISUAL_POST_MAX_LIKES_PER_PROFILE", 1) or 1)
+    real_visual = bool(getattr(config, "ENABLE_REAL_VISUAL_POST_LIKE", False))
     dry = bool(getattr(config, "VISUAL_POST_LIKE_DRY_RUN", True))
-    pkg = str(getattr(config, "INSTAGRAM_PACKAGE", "") or "")
+    effective_dry = (not real_visual) and dry
     meta0 = _followers_current_pkg_activity(d)
 
     log(
@@ -7221,7 +8277,8 @@ def visual_like_open_post(
         source_profile_username=source_profile_username or "",
         current_activity=meta0.get("current_activity"),
         current_package=meta0.get("current_package"),
-        dry_run=dry,
+        dry_run=effective_dry,
+        real_visual_like=real_visual,
     )
 
     if _VISUAL_POST_LIKE_TAPS_RECORDED >= max_l:
@@ -7247,7 +8304,9 @@ def visual_like_open_post(
             "current_package": meta0.get("current_package"),
             "source_profile_username": source_profile_username or "",
             "failure_reason": "max_likes_per_profile",
-            "dry_run": dry,
+            "dry_run": effective_dry,
+            "real_tap_sent": False,
+            "already_liked": False,
         }
 
     try:
@@ -7282,7 +8341,9 @@ def visual_like_open_post(
             "current_package": meta0.get("current_package"),
             "source_profile_username": source_profile_username or "",
             "failure_reason": f"screenshot_failed:{e}",
-            "dry_run": dry,
+            "dry_run": effective_dry,
+            "real_tap_sent": False,
+            "already_liked": False,
         }
 
     try:
@@ -7312,7 +8373,9 @@ def visual_like_open_post(
             "current_package": meta0.get("current_package"),
             "source_profile_username": source_profile_username or "",
             "failure_reason": f"pil_failed:{e}",
-            "dry_run": dry,
+            "dry_run": effective_dry,
+            "real_tap_sent": False,
+            "already_liked": False,
         }
 
     iw, ih = im.size
@@ -7346,13 +8409,168 @@ def visual_like_open_post(
         current_activity=meta0.get("current_activity"),
         current_package=meta0.get("current_package"),
         source_profile_username=source_profile_username or "",
-        dry_run=dry,
+        dry_run=effective_dry,
     )
+
+    if real_visual:
+        al_pre = visual_post_already_liked(
+            d, source_profile_username=source_profile_username
+        )
+        if al_pre.get("already_liked"):
+            meta_skip = _followers_current_pkg_activity(d)
+            log(
+                "info",
+                "visual_post_like_skip_already_liked",
+                tap_x=tap_x,
+                tap_y=tap_y,
+                verification_method=al_pre.get("detection_method"),
+                confidence=round(float(al_pre.get("confidence") or 0.0), 4),
+                current_activity=meta_skip.get("current_activity"),
+                current_package=meta_skip.get("current_package"),
+                source_profile_username=source_profile_username or "",
+            )
+            return {
+                "ok": True,
+                "already_liked": True,
+                "skipped": True,
+                "real_tap_sent": False,
+                "like_button_bounds": like_button_bounds,
+                "tap_x": tap_x,
+                "tap_y": tap_y,
+                "confidence": confidence,
+                "current_activity": meta_skip.get("current_activity"),
+                "current_package": meta_skip.get("current_package"),
+                "source_profile_username": source_profile_username or "",
+                "failure_reason": None,
+                "dry_run": False,
+                "liked_verified": False,
+                "verification_method": al_pre.get("detection_method"),
+            }
+
+        tv_like = visual_target_profile_lock_verify(
+            d,
+            source_profile_username=source_profile_username,
+            action="visual_post_like_real",
+        )
+        if not tv_like.get("ok"):
+            meta_tv = _followers_current_pkg_activity(d)
+            return {
+                "ok": False,
+                "already_liked": False,
+                "skipped": False,
+                "real_tap_sent": False,
+                "target_profile_lock_mismatch": True,
+                "like_button_bounds": like_button_bounds,
+                "tap_x": tap_x,
+                "tap_y": tap_y,
+                "confidence": confidence,
+                "current_activity": meta_tv.get("current_activity"),
+                "current_package": meta_tv.get("current_package"),
+                "source_profile_username": source_profile_username or "",
+                "failure_reason": "target_profile_lock_mismatch",
+                "dry_run": False,
+                "liked_verified": False,
+                "verification_method": "visual_target_profile_lock",
+            }
+
+        lock_ctx = bool(getattr(config, "ENABLE_VISUAL_PROFILE_CONTEXT_LOCK", False))
+        exp_ctx = expected_profile_context or {}
+        min_ctx = float(
+            getattr(config, "VISUAL_PROFILE_CONTEXT_MIN_MATCH_CONFIDENCE", 0.72)
+            or 0.72
+        )
+        if lock_ctx:
+            exp_fp0 = str(
+                exp_ctx.get("profile_visual_fingerprint")
+                or exp_ctx.get("profile_fingerprint")
+                or ""
+            )
+            if exp_ctx.get("ok") is False or not exp_fp0:
+                meta_ctx = _followers_current_pkg_activity(d)
+                log(
+                    "info",
+                    "visual_profile_context_mismatch_abort",
+                    action="visual_post_like_real",
+                    abort_reason="missing_expected_profile_context_baseline",
+                    expected_profile_fingerprint="",
+                    current_profile_fingerprint="",
+                    confidence=0.0,
+                    same_profile=False,
+                    verification_method="none",
+                    current_activity=meta_ctx.get("current_activity"),
+                    current_package=meta_ctx.get("current_package"),
+                    source_profile_username=source_profile_username or "",
+                )
+                return {
+                    "ok": False,
+                    "already_liked": False,
+                    "skipped": False,
+                    "real_tap_sent": False,
+                    "profile_context_mismatch": True,
+                    "like_button_bounds": like_button_bounds,
+                    "tap_x": tap_x,
+                    "tap_y": tap_y,
+                    "confidence": confidence,
+                    "current_activity": meta_ctx.get("current_activity"),
+                    "current_package": meta_ctx.get("current_package"),
+                    "source_profile_username": source_profile_username or "",
+                    "failure_reason": "profile_context_mismatch",
+                    "dry_run": False,
+                    "liked_verified": False,
+                    "verification_method": "profile_context_lock",
+                }
+            vctx = visual_verify_same_profile_context(
+                d,
+                expected_context=exp_ctx,
+                source_profile_username=source_profile_username,
+            )
+            if (not vctx.get("same_profile")) or float(
+                vctx.get("confidence") or 0.0
+            ) < min_ctx:
+                meta_ctx = _followers_current_pkg_activity(d)
+                log(
+                    "info",
+                    "visual_profile_context_mismatch_abort",
+                    action="visual_post_like_real",
+                    abort_reason="verify_failed_or_low_confidence",
+                    expected_profile_fingerprint=vctx.get(
+                        "expected_profile_fingerprint"
+                    ),
+                    current_profile_fingerprint=vctx.get(
+                        "current_profile_fingerprint"
+                    ),
+                    confidence=float(vctx.get("confidence") or 0.0),
+                    same_profile=bool(vctx.get("same_profile")),
+                    verification_method=str(vctx.get("verification_method") or ""),
+                    current_activity=meta_ctx.get("current_activity"),
+                    current_package=meta_ctx.get("current_package"),
+                    source_profile_username=source_profile_username or "",
+                )
+                return {
+                    "ok": False,
+                    "already_liked": False,
+                    "skipped": False,
+                    "real_tap_sent": False,
+                    "profile_context_mismatch": True,
+                    "like_button_bounds": like_button_bounds,
+                    "tap_x": tap_x,
+                    "tap_y": tap_y,
+                    "confidence": confidence,
+                    "current_activity": meta_ctx.get("current_activity"),
+                    "current_package": meta_ctx.get("current_package"),
+                    "source_profile_username": source_profile_username or "",
+                    "failure_reason": "profile_context_mismatch",
+                    "dry_run": False,
+                    "liked_verified": False,
+                    "verification_method": str(
+                        vctx.get("verification_method") or "profile_context_lock"
+                    ),
+                }
 
     _VISUAL_POST_LIKE_TAPS_RECORDED += 1
     meta1 = _followers_current_pkg_activity(d)
 
-    if dry:
+    if effective_dry:
         log(
             "info",
             "visual_post_like_dry_run_complete",
@@ -7367,6 +8585,8 @@ def visual_like_open_post(
         )
         return {
             "ok": True,
+            "already_liked": False,
+            "real_tap_sent": False,
             "like_button_bounds": like_button_bounds,
             "tap_x": tap_x,
             "tap_y": tap_y,
@@ -7376,6 +8596,108 @@ def visual_like_open_post(
             "source_profile_username": source_profile_username or "",
             "failure_reason": None,
             "dry_run": True,
+        }
+
+    if real_visual:
+        log(
+            "info",
+            "visual_post_like_real_before_tap",
+            tap_x=tap_x,
+            tap_y=tap_y,
+            confidence=round(confidence, 4),
+            verification_method="pending",
+            current_activity=meta1.get("current_activity"),
+            current_package=meta1.get("current_package"),
+            source_profile_username=source_profile_username or "",
+        )
+        try:
+            d.click(tap_x, tap_y)
+        except Exception as e:
+            log(
+                "error",
+                "visual_post_like_failed",
+                like_button_bounds=like_button_bounds,
+                tap_x=tap_x,
+                tap_y=tap_y,
+                confidence=round(confidence, 4),
+                current_activity=meta1.get("current_activity"),
+                current_package=meta1.get("current_package"),
+                source_profile_username=source_profile_username or "",
+                failure_reason=f"tap_failed:{e}",
+            )
+            return {
+                "ok": False,
+                "already_liked": False,
+                "real_tap_sent": False,
+                "like_button_bounds": like_button_bounds,
+                "tap_x": tap_x,
+                "tap_y": tap_y,
+                "confidence": confidence,
+                "current_activity": meta1.get("current_activity"),
+                "current_package": meta1.get("current_package"),
+                "source_profile_username": source_profile_username or "",
+                "failure_reason": f"tap_failed:{e}",
+                "dry_run": False,
+            }
+
+        log(
+            "info",
+            "visual_post_like_real_tap_sent",
+            tap_x=tap_x,
+            tap_y=tap_y,
+            confidence=round(confidence, 4),
+            verification_method="tap_dispatched",
+            current_activity=meta1.get("current_activity"),
+            current_package=meta1.get("current_package"),
+            source_profile_username=source_profile_username or "",
+        )
+        time.sleep(1.2)
+        post_shot = str(
+            _SCREENSHOTS_DIR / f"visual_post_like_after_tap_{int(time.time() * 1000)}.png"
+        )
+        try:
+            screenshot(d, post_shot)
+        except Exception:
+            pass
+        try:
+            d.dump_hierarchy(compressed=False)
+        except Exception:
+            try:
+                d.dump_hierarchy()
+            except Exception:
+                pass
+        try:
+            d.app_current()
+        except Exception:
+            pass
+
+        meta_post = _followers_current_pkg_activity(d)
+        log(
+            "info",
+            "visual_post_like_real_after_tap",
+            tap_x=tap_x,
+            tap_y=tap_y,
+            confidence=round(confidence, 4),
+            verification_method="post_tap_capture",
+            screenshot_path=post_shot,
+            current_activity=meta_post.get("current_activity"),
+            current_package=meta_post.get("current_package"),
+            source_profile_username=source_profile_username or "",
+        )
+        return {
+            "ok": True,
+            "already_liked": False,
+            "real_tap_sent": True,
+            "like_button_bounds": like_button_bounds,
+            "tap_x": tap_x,
+            "tap_y": tap_y,
+            "confidence": confidence,
+            "post_tap_screenshot_path": post_shot,
+            "current_activity": meta_post.get("current_activity"),
+            "current_package": meta_post.get("current_package"),
+            "source_profile_username": source_profile_username or "",
+            "failure_reason": None,
+            "dry_run": False,
         }
 
     try:
@@ -7395,6 +8717,8 @@ def visual_like_open_post(
         )
         return {
             "ok": False,
+            "already_liked": False,
+            "real_tap_sent": False,
             "like_button_bounds": like_button_bounds,
             "tap_x": tap_x,
             "tap_y": tap_y,
@@ -7420,6 +8744,8 @@ def visual_like_open_post(
     )
     return {
         "ok": True,
+        "already_liked": False,
+        "real_tap_sent": True,
         "like_button_bounds": like_button_bounds,
         "tap_x": tap_x,
         "tap_y": tap_y,
@@ -7548,10 +8874,13 @@ def visual_detect_follow_button_on_profile(
     """
     Screenshot-based blue Follow pill in the profile header action row (upper-middle right).
     """
+    meta_start = _followers_current_pkg_activity(d)
     log(
         "info",
         "visual_follow_button_detect_started",
         source_profile_username=source_profile_username or "",
+        current_activity=meta_start.get("current_activity"),
+        current_package=meta_start.get("current_package"),
     )
     try:
         ww, wh = d.window_size()
@@ -7569,6 +8898,10 @@ def visual_detect_follow_button_on_profile(
             "info",
             "visual_follow_button_not_found",
             source_profile_username=source_profile_username or "",
+            follow_button_bounds=None,
+            confidence=0.0,
+            current_activity=meta_start.get("current_activity"),
+            current_package=meta_start.get("current_package"),
             reason=f"screenshot_failed:{e}",
         )
         return {
@@ -7590,6 +8923,10 @@ def visual_detect_follow_button_on_profile(
             "info",
             "visual_follow_button_not_found",
             source_profile_username=source_profile_username or "",
+            follow_button_bounds=None,
+            confidence=0.0,
+            current_activity=meta_start.get("current_activity"),
+            current_package=meta_start.get("current_package"),
             reason=f"pil_failed:{e}",
         )
         return {
@@ -7614,6 +8951,10 @@ def visual_detect_follow_button_on_profile(
             "info",
             "visual_follow_button_not_found",
             source_profile_username=source_profile_username or "",
+            follow_button_bounds=None,
+            confidence=0.0,
+            current_activity=meta_start.get("current_activity"),
+            current_package=meta_start.get("current_package"),
             reason="no_blue_pill_in_header_roi",
         )
         return {
@@ -7634,6 +8975,7 @@ def visual_detect_follow_button_on_profile(
     tap_x = max(2, min(ww - 3, tap_x))
     tap_y = max(2, min(wh - 3, tap_y))
 
+    meta_end = _followers_current_pkg_activity(d)
     log(
         "info",
         "visual_follow_button_detected",
@@ -7643,6 +8985,8 @@ def visual_detect_follow_button_on_profile(
         tap_y=tap_y,
         confidence=round(confidence, 4),
         button_type="follow",
+        current_activity=meta_end.get("current_activity"),
+        current_package=meta_end.get("current_package"),
     )
     return {
         "ok": True,
@@ -7655,37 +8999,1014 @@ def visual_detect_follow_button_on_profile(
     }
 
 
+def _exists_follow_verify_ui_message(d: u2.Device) -> bool:
+    try:
+        return bool(d(textContains="Message").exists(timeout=0.08))
+    except Exception:
+        return False
+
+
+def visual_profile_already_following_before_follow(
+    d: u2.Device,
+    *,
+    source_profile_username: str | None = None,
+) -> dict[str, Any]:
+    """
+    True when profile header already shows Following / Requested (skip Follow tap).
+    """
+    meta = _followers_current_pkg_activity(d)
+    base = {
+        "already_following": False,
+        "detection_method": "none",
+        "confidence": 0.0,
+        "current_activity": meta.get("current_activity"),
+        "current_package": meta.get("current_package"),
+        "source_profile_username": source_profile_username or "",
+    }
+
+    # Avoid textContains="Following" — it matches profile stats ("123 Following").
+    ui_triples: list[tuple[str, Callable[[], object], float]] = [
+        ("ui_text_following_exact", lambda: d(text="Following"), 0.9),
+        ("ui_text_requested", lambda: d(textContains="Requested"), 0.91),
+        ("ui_text_suivi_exact", lambda: d(text="Suivi(e)"), 0.88),
+        ("ui_text_suivi_exact2", lambda: d(text="Suivi"), 0.86),
+        ("ui_text_abonne", lambda: d(text="Abonné(e)"), 0.86),
+        ("ui_text_abonne2", lambda: d(text="Abonné"), 0.84),
+        ("ui_text_siguiendo", lambda: d(text="Siguiendo"), 0.86),
+        ("ui_text_solicitado", lambda: d(textContains="Solicitado"), 0.88),
+        ("ui_text_gefolgt", lambda: d(text="Gefolgt"), 0.84),
+        ("ui_text_angefragt", lambda: d(textContains="Angefragt"), 0.88),
+        ("ui_desc_following_btn", lambda: d(descriptionContains="Following button"), 0.87),
+        ("ui_desc_requested", lambda: d(descriptionContains="Requested"), 0.89),
+    ]
+    for method, pred, conf in ui_triples:
+        try:
+            if pred().exists(timeout=0.12):
+                out = dict(base)
+                out["already_following"] = True
+                out["detection_method"] = method
+                out["confidence"] = conf
+                return out
+        except Exception:
+            continue
+
+    hier = ""
+    try:
+        hier = str(d.dump_hierarchy(compressed=False))
+    except Exception:
+        try:
+            hier = str(d.dump_hierarchy())
+        except Exception:
+            hier = ""
+    hl = hier.lower()
+    if "requested" in hl:
+        out = dict(base)
+        out["already_following"] = True
+        out["detection_method"] = "hierarchy_requested"
+        out["confidence"] = 0.78
+        return out
+    # Narrow: stats row often contains lowercase "following"; require explicit button attrs.
+    if (
+        'content-desc="Following"' in hier
+        or 'content-desc="Suivi' in hier
+        or 'content-desc="Siguiendo"' in hier
+    ):
+        out = dict(base)
+        out["already_following"] = True
+        out["detection_method"] = "hierarchy_follow_button_content_desc"
+        out["confidence"] = 0.76
+        return out
+    if "demande envoyée" in hl or "demandé" in hl or "suivi(e)" in hl:
+        out = dict(base)
+        out["already_following"] = True
+        out["detection_method"] = "hierarchy_fr_requested_or_following"
+        out["confidence"] = 0.72
+        return out
+
+    return base
+
+
+def _visual_follow_request_pending_state(d: u2.Device) -> tuple[bool, str]:
+    """
+    True when the profile header shows a pending follow request (private account),
+    not an established Following relationship.
+    """
+    try:
+        if d(descriptionContains="Following button").exists(timeout=0.14):
+            return False, "following_button_present"
+    except Exception:
+        pass
+    try:
+        if d(text="Following").exists(timeout=0.12):
+            return False, "text_following_exact"
+    except Exception:
+        pass
+    desc_checks: list[tuple[str, Callable[[], object]]] = [
+        ("ui_descContains_requested", lambda: d(descriptionContains="Requested")),
+        ("ui_descContains_request_sent", lambda: d(descriptionContains="Request sent")),
+        (
+            "ui_descContains_demande_envoyee",
+            lambda: d(descriptionContains="Demande envoyée"),
+        ),
+        ("ui_descContains_solicitado", lambda: d(descriptionContains="Solicitado")),
+    ]
+    for name, pred in desc_checks:
+        try:
+            if pred().exists(timeout=0.12):
+                return True, name
+        except Exception:
+            continue
+    checks: list[tuple[str, Callable[[], object]]] = [
+        ("ui_text_requested_exact", lambda: d(text="Requested")),
+        ("ui_textContains_requested", lambda: d(textContains="Requested")),
+        ("ui_textContains_request_sent", lambda: d(textContains="Request sent")),
+        ("ui_textContains_request_pending", lambda: d(textContains="Request pending")),
+        ("ui_textContains_demande_envoyee", lambda: d(textContains="Demande envoyée")),
+        ("ui_textContains_demande_envoyee_plain", lambda: d(text="Demande envoyée")),
+        ("ui_textContains_demande", lambda: d(textContains="Demandé")),
+        ("ui_textContains_en_attente", lambda: d(textContains="En attente")),
+        ("ui_textContains_solicitado", lambda: d(textContains="Solicitado")),
+        (
+            "ui_textContains_solicitud_enviada",
+            lambda: d(textContains="Solicitud enviada"),
+        ),
+        ("ui_textContains_angefragt", lambda: d(textContains="Angefragt")),
+        (
+            "ui_textContains_anfrage_gesendet",
+            lambda: d(textContains="Anfrage gesendet"),
+        ),
+        (
+            "ui_textContains_richiesta_inviata",
+            lambda: d(textContains="Richiesta inviata"),
+        ),
+    ]
+    for name, pred in checks:
+        try:
+            if pred().exists(timeout=0.14):
+                return True, name
+        except Exception:
+            continue
+    try:
+        hl = str(d.dump_hierarchy(compressed=False)).lower()
+    except Exception:
+        try:
+            hl = str(d.dump_hierarchy()).lower()
+        except Exception:
+            hl = ""
+    if "request sent" in hl or "request pending" in hl:
+        return True, "hierarchy_request_sent_or_pending"
+    if "demande envoyée" in hl or "demande envoyee" in hl:
+        return True, "hierarchy_demande_envoyee"
+    if "solicitud enviada" in hl or "solicitud pendiente" in hl:
+        return True, "hierarchy_es_request"
+    if "anfrage gesendet" in hl or "angefragt" in hl:
+        return True, "hierarchy_de_request"
+    if "richiesta inviata" in hl:
+        return True, "hierarchy_it_request"
+    return False, ""
+
+
+def _visual_profile_header_blue_follow_pill_weak(
+    im: Any, iw: int, ih: int
+) -> tuple[bool, float]:
+    """True when a strong blue Follow pill is absent or very faint (post-follow transition hint)."""
+    x0, x1 = int(iw * 0.40), iw - 2
+    y0, y1 = int(ih * 0.10), int(ih * 0.36)
+    tb = _visual_tight_blue_bounds(im, left=x0, top=y0, right=x1, bottom=y1)
+    if tb is None:
+        return True, 0.74
+    ratio = _visual_blue_fill_ratio_in_bounds(im, tb)
+    if ratio < 0.072:
+        return True, 0.62
+    return False, 0.0
+
+
+def visual_verify_profile_followed(
+    d: u2.Device,
+    *,
+    source_profile_username: str | None = None,
+    tap_x: int | None = None,
+    tap_y: int | None = None,
+    follow_button_bounds: dict[str, int] | None = None,
+    detect_confidence: float | None = None,
+) -> dict[str, Any]:
+    """
+    Poll after a real Follow tap: Following / Requested / hierarchy / header screenshot heuristics.
+    """
+    timeout_s = float(getattr(config, "VISUAL_FOLLOW_VERIFY_TIMEOUT_S", 3.0) or 3.0)
+    deadline = time.time() + max(0.5, timeout_s)
+    meta0 = _followers_current_pkg_activity(d)
+    dc = float(detect_confidence) if detect_confidence is not None else 0.0
+    log(
+        "info",
+        "visual_follow_profile_verify_started",
+        tap_x=tap_x,
+        tap_y=tap_y,
+        follow_button_bounds=follow_button_bounds,
+        confidence=round(dc, 4),
+        verification_method="polling",
+        current_activity=meta0.get("current_activity"),
+        current_package=meta0.get("current_package"),
+        source_profile_username=source_profile_username or "",
+    )
+
+    def _ui_follow_state_ok() -> tuple[bool, str, float]:
+        checks: list[tuple[str, Callable[[], object], float]] = [
+            ("ui_following", lambda: d(textContains="Following"), 0.9),
+            ("ui_requested", lambda: d(textContains="Requested"), 0.92),
+            ("ui_suivi", lambda: d(textContains="Suivi"), 0.86),
+            ("ui_siguiendo", lambda: d(textContains="Siguiendo"), 0.86),
+            ("ui_message_near_row", lambda: d(textContains="Message"), 0.68),
+            ("ui_desc_following", lambda: d(descriptionContains="Following"), 0.87),
+        ]
+        for method, pred, conf in checks:
+            try:
+                if pred().exists(timeout=0.14):
+                    return True, method, conf
+            except Exception:
+                continue
+        return False, "", 0.0
+
+    def _hierarchy_follow_ok(hier_s: str) -> bool:
+        h = hier_s.lower()
+        if "requested" in h:
+            return True
+        if "following" in h and "content-desc=\"follow\"" not in h:
+            return True
+        if "suivi" in h or "siguiendo" in h or "demandé" in h:
+            return True
+        return False
+
+    poll = 0.35
+    attempt = 0
+    while time.time() < deadline:
+        attempt += 1
+        meta_a = _followers_current_pkg_activity(d)
+        log(
+            "info",
+            "visual_follow_profile_verify_attempt",
+            attempt=attempt,
+            tap_x=tap_x,
+            tap_y=tap_y,
+            follow_button_bounds=follow_button_bounds,
+            confidence=round(dc, 4),
+            verification_method="ui_hierarchy_visual",
+            current_activity=meta_a.get("current_activity"),
+            current_package=meta_a.get("current_package"),
+            source_profile_username=source_profile_username or "",
+        )
+
+        ok_u, method_u, conf_u = _ui_follow_state_ok()
+        if ok_u and method_u != "ui_message_near_row":
+            meta = _followers_current_pkg_activity(d)
+            log(
+                "info",
+                "visual_follow_profile_verify_success",
+                tap_x=tap_x,
+                tap_y=tap_y,
+                follow_button_bounds=follow_button_bounds,
+                verification_method=method_u,
+                confidence=round(conf_u, 4),
+                current_activity=meta.get("current_activity"),
+                current_package=meta.get("current_package"),
+                source_profile_username=source_profile_username or "",
+            )
+            return {
+                "follow_verified": True,
+                "verification_method": method_u,
+                "confidence": conf_u,
+            }
+        if ok_u and method_u == "ui_message_near_row":
+            hier_quick = ""
+            try:
+                hier_quick = str(d.dump_hierarchy(compressed=False))
+            except Exception:
+                try:
+                    hier_quick = str(d.dump_hierarchy())
+                except Exception:
+                    hier_quick = ""
+            if _hierarchy_follow_ok(hier_quick) or "following" in hier_quick.lower():
+                meta = _followers_current_pkg_activity(d)
+                conf_msg = 0.81
+                log(
+                    "info",
+                    "visual_follow_profile_verify_success",
+                    tap_x=tap_x,
+                    tap_y=tap_y,
+                    follow_button_bounds=follow_button_bounds,
+                    verification_method="ui_message_plus_hierarchy",
+                    confidence=conf_msg,
+                    current_activity=meta.get("current_activity"),
+                    current_package=meta.get("current_package"),
+                    source_profile_username=source_profile_username or "",
+                )
+                return {
+                    "follow_verified": True,
+                    "verification_method": "ui_message_plus_hierarchy",
+                    "confidence": conf_msg,
+                }
+
+        hier = ""
+        try:
+            hier = str(d.dump_hierarchy(compressed=False))
+        except Exception:
+            try:
+                hier = str(d.dump_hierarchy())
+            except Exception:
+                hier = ""
+        if _hierarchy_follow_ok(hier):
+            meta = _followers_current_pkg_activity(d)
+            conf_h = 0.77
+            log(
+                "info",
+                "visual_follow_profile_verify_success",
+                tap_x=tap_x,
+                tap_y=tap_y,
+                follow_button_bounds=follow_button_bounds,
+                verification_method="hierarchy_follow_state",
+                confidence=conf_h,
+                current_activity=meta.get("current_activity"),
+                current_package=meta.get("current_package"),
+                source_profile_username=source_profile_username or "",
+            )
+            return {
+                "follow_verified": True,
+                "verification_method": "hierarchy_follow_state",
+                "confidence": conf_h,
+            }
+
+        try:
+            _ensure_debug_dirs()
+            shot = str(
+                _SCREENSHOTS_DIR
+                / f"visual_follow_verify_{int(time.time() * 1000)}.png"
+            )
+            screenshot(d, shot)
+            from PIL import Image
+
+            im = Image.open(shot).convert("RGB")
+            iw, ih = im.size
+            gone, conf_v = _visual_profile_header_blue_follow_pill_weak(im, iw, ih)
+            if gone and (
+                _exists_follow_verify_ui_message(d)
+                or _hierarchy_follow_ok(hier)
+            ):
+                conf_f = float(min(0.88, conf_v + 0.12))
+                meta = _followers_current_pkg_activity(d)
+                log(
+                    "info",
+                    "visual_follow_profile_verify_success",
+                    tap_x=tap_x,
+                    tap_y=tap_y,
+                    follow_button_bounds=follow_button_bounds,
+                    verification_method="visual_blue_follow_gone",
+                    confidence=round(conf_f, 4),
+                    current_activity=meta.get("current_activity"),
+                    current_package=meta.get("current_package"),
+                    source_profile_username=source_profile_username or "",
+                )
+                return {
+                    "follow_verified": True,
+                    "verification_method": "visual_blue_follow_gone",
+                    "confidence": conf_f,
+                }
+        except Exception:
+            pass
+
+        time.sleep(poll)
+
+    meta_f = _followers_current_pkg_activity(d)
+    log(
+        "info",
+        "visual_follow_profile_verify_failed",
+        tap_x=tap_x,
+        tap_y=tap_y,
+        follow_button_bounds=follow_button_bounds,
+        verification_method="none",
+        confidence=round(dc, 4),
+        current_activity=meta_f.get("current_activity"),
+        current_package=meta_f.get("current_package"),
+        source_profile_username=source_profile_username or "",
+    )
+    return {
+        "follow_verified": False,
+        "verification_method": "none",
+        "confidence": 0.0,
+    }
+
+
+def _visual_read_action_bar_username(d: u2.Device) -> str:
+    try:
+        ab = d(resourceIdMatches=r".*:id/action_bar_title.*")
+        if ab.exists(timeout=0.18):
+            return str(ab.get_text() or "").strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _visual_profile_header_avatar_boxes(iw: int, ih: int) -> tuple[dict[str, int], dict[str, int]]:
+    hl, ht, hr = 0, int(ih * 0.06), iw
+    hb = int(ih * 0.28)
+    header_bounds = {"left": hl, "top": ht, "right": hr, "bottom": hb}
+    avatar_bounds = {
+        "left": int(iw * 0.04),
+        "top": int(ih * 0.10),
+        "right": int(iw * 0.30),
+        "bottom": int(ih * 0.24),
+    }
+    return header_bounds, avatar_bounds
+
+
+def _visual_average_hash_64(im_rgb: Any) -> int:
+    from PIL import Image
+
+    g = im_rgb.resize((8, 8), Image.Resampling.LANCZOS).convert("L")
+    pixels = list(g.getdata())
+    avg = sum(pixels) / 64.0
+    bits = 0
+    for i, p in enumerate(pixels):
+        if p >= avg:
+            bits |= 1 << i
+    return bits
+
+
+def _visual_dominant_rgb_simple(im_rgb: Any) -> tuple[int, int, int]:
+    from PIL import Image
+
+    small = im_rgb.resize((12, 12), Image.Resampling.LANCZOS)
+    r_sum = g_sum = b_sum = 0
+    n = 144
+    for px in small.getdata():
+        r_sum += px[0]
+        g_sum += px[1]
+        b_sum += px[2]
+    return (r_sum // n, g_sum // n, b_sum // n)
+
+
+def _visual_header_structure_key(im_rgb: Any) -> str:
+    from PIL import Image
+
+    g = im_rgb.resize((4, 4), Image.Resampling.LANCZOS).convert("L")
+    return "".join(f"{int(v) // 17:x}" for v in g.getdata())
+
+
+def _visual_compute_profile_fingerprint(
+    *,
+    ahash_64: int,
+    avatar_ahash_64: int,
+    dominant_rgb: tuple[int, int, int],
+    structure_key: str,
+    username_norm: str,
+) -> str:
+    raw = (
+        f"{ahash_64:016x}|{avatar_ahash_64:016x}|"
+        f"{dominant_rgb[0]},{dominant_rgb[1]},{dominant_rgb[2]}|"
+        f"{structure_key}|{username_norm}"
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def visual_capture_profile_context(
+    d: u2.Device,
+    *,
+    source_profile_username: str | None = None,
+) -> dict[str, Any]:
+    """
+    Capture a lightweight visual fingerprint of the current Instagram screen (profile or post).
+    Uses header crop average-hash, avatar ROI hash, dominant colour, coarse 4x4 structure,
+    and action-bar title text when visible (no heavy OCR).
+    """
+    meta = _followers_current_pkg_activity(d)
+    log(
+        "info",
+        "visual_profile_context_capture_started",
+        current_activity=meta.get("current_activity"),
+        current_package=meta.get("current_package"),
+        source_profile_username=source_profile_username or "",
+    )
+    header_username = _visual_read_action_bar_username(d)
+    username_norm = _normalize_handle(header_username)
+
+    def _fail_payload(reason: str, shot: str = "") -> dict[str, Any]:
+        log(
+            "warning",
+            "visual_profile_context_capture_failed",
+            ok=False,
+            failure_reason=reason,
+            screenshot_path=shot,
+            profile_fingerprint="",
+            username_norm=username_norm,
+            current_activity=meta.get("current_activity"),
+            current_package=meta.get("current_package"),
+            source_profile_username=source_profile_username or "",
+        )
+        return {
+            "ok": False,
+            "profile_context_id": "",
+            "header_username_detected": header_username,
+            "username_norm": username_norm,
+            "avatar_bounds": {},
+            "profile_header_bounds": {},
+            "profile_visual_fingerprint": "",
+            "profile_fingerprint": "",
+            "screenshot_path": shot,
+            "profile_screenshot_path": shot,
+            "confidence": 0.0,
+            "header_hash": 0,
+            "avatar_hash": 0,
+            "ahash_64": 0,
+            "avatar_ahash_64": 0,
+            "dominant_color": (0, 0, 0),
+            "dominant_rgb": (0, 0, 0),
+            "structure_key": "",
+            "current_activity": meta.get("current_activity"),
+            "current_package": meta.get("current_package"),
+            "failure_reason": reason,
+        }
+
+    shot_path = ""
+    try:
+        _ensure_debug_dirs()
+        shot_file = (
+            _SCREENSHOTS_DIR
+            / f"visual_profile_context_{int(time.time() * 1000)}.png"
+        )
+        screenshot(d, str(shot_file))
+        shot_path = str(shot_file)
+    except Exception as e:
+        return _fail_payload(f"screenshot:{e}", shot="")
+
+    from PIL import Image
+
+    try:
+        im = Image.open(shot_path).convert("RGB")
+    except Exception as e:
+        return _fail_payload(f"pil:{e}", shot=shot_path)
+
+    iw, ih = im.size
+    hb_b, av_b = _visual_profile_header_avatar_boxes(iw, ih)
+    header_im = im.crop((hb_b["left"], hb_b["top"], hb_b["right"], hb_b["bottom"]))
+    avatar_im = im.crop((av_b["left"], av_b["top"], av_b["right"], av_b["bottom"]))
+    ahash_64 = _visual_average_hash_64(header_im)
+    avatar_ahash_64 = _visual_average_hash_64(avatar_im)
+    dom = _visual_dominant_rgb_simple(header_im)
+    struct_key = _visual_header_structure_key(header_im)
+    fp = _visual_compute_profile_fingerprint(
+        ahash_64=ahash_64,
+        avatar_ahash_64=avatar_ahash_64,
+        dominant_rgb=dom,
+        structure_key=struct_key,
+        username_norm=username_norm,
+    )
+    ctx_id = fp[:16]
+    cap_conf = 0.72 + (0.12 if username_norm else 0.0) + (
+        0.06 if header_username else 0.0
+    )
+    cap_conf = float(min(0.93, cap_conf))
+
+    log(
+        "info",
+        "visual_profile_context_captured",
+        screenshot_path=shot_path,
+        profile_fingerprint=fp,
+        username_norm=username_norm,
+        current_activity=meta.get("current_activity"),
+        current_package=meta.get("current_package"),
+        source_profile_username=source_profile_username or "",
+    )
+    return {
+        "ok": True,
+        "profile_context_id": ctx_id,
+        "header_username_detected": header_username,
+        "username_norm": username_norm,
+        "avatar_bounds": dict(av_b),
+        "profile_header_bounds": dict(hb_b),
+        "profile_visual_fingerprint": fp,
+        "profile_fingerprint": fp,
+        "screenshot_path": shot_path,
+        "profile_screenshot_path": shot_path,
+        "confidence": round(cap_conf, 4),
+        "header_hash": ahash_64,
+        "avatar_hash": avatar_ahash_64,
+        "ahash_64": ahash_64,
+        "avatar_ahash_64": avatar_ahash_64,
+        "dominant_color": dom,
+        "dominant_rgb": dom,
+        "structure_key": struct_key,
+        "current_activity": meta.get("current_activity"),
+        "current_package": meta.get("current_package"),
+        "failure_reason": None,
+    }
+
+
+def _int_bit_count_compat(value: Any) -> int:
+    try:
+        return int(value).bit_count()
+    except AttributeError:
+        try:
+            return bin(int(value)).count("1")
+        except Exception:
+            return 0
+    except Exception:
+        return 0
+
+
+def _visual_hash_xor_hamming(exp_raw: Any, cur_raw: Any) -> int:
+    """Hamming distance (popcount of XOR) for two 64-bit-ish hashes; invalid → worst case."""
+    try:
+        e = int(exp_raw)
+        c = int(cur_raw)
+    except Exception:
+        return 64
+    try:
+        return min(64, max(0, _int_bit_count_compat(e ^ c)))
+    except Exception:
+        return 64
+
+
+def visual_verify_same_profile_context(
+    d: u2.Device,
+    *,
+    expected_context: dict[str, Any],
+    source_profile_username: str | None = None,
+    current_capture: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    meta = _followers_current_pkg_activity(d)
+    exp_fp = str(
+        expected_context.get("profile_visual_fingerprint")
+        or expected_context.get("profile_fingerprint")
+        or ""
+    )
+    exp_u = _normalize_handle(str(expected_context.get("header_username_detected") or ""))
+    src_n = _normalize_handle(source_profile_username or "")
+    base_log: dict[str, Any] = {
+        "expected_profile_fingerprint": exp_fp,
+        "current_profile_fingerprint": "",
+        "confidence": 0.0,
+        "same_profile": False,
+        "verification_method": "",
+        "current_activity": meta.get("current_activity"),
+        "current_package": meta.get("current_package"),
+        "source_profile_username": source_profile_username or "",
+    }
+    log("info", "visual_profile_context_verify_started", **base_log)
+
+    min_c = float(
+        getattr(config, "VISUAL_PROFILE_CONTEXT_MIN_MATCH_CONFIDENCE", 0.72) or 0.72
+    )
+
+    if current_capture is not None:
+        cur = current_capture
+    else:
+        cur = visual_capture_profile_context(
+            d, source_profile_username=source_profile_username
+        )
+    cur_fp = str(
+        cur.get("profile_visual_fingerprint") or cur.get("profile_fingerprint") or ""
+    )
+    base_log["current_profile_fingerprint"] = cur_fp
+
+    if cur.get("ok") is False or not cur_fp:
+        verification_method = "current_capture_empty_or_failed"
+        fail_reason = str(cur.get("failure_reason") or "empty_profile_fingerprint")
+        log_payload = {
+            **base_log,
+            "same_profile": False,
+            "confidence": 0.0,
+            "verification_method": verification_method,
+            "expected_profile_fingerprint": exp_fp,
+            "current_profile_fingerprint": cur_fp,
+            "current_capture_failure_reason": fail_reason,
+            "current_capture_screenshot_path": str(
+                cur.get("screenshot_path") or cur.get("profile_screenshot_path") or ""
+            ),
+        }
+        log("info", "visual_profile_context_verify_failed", **log_payload)
+        return {
+            "same_profile": False,
+            "confidence": 0.0,
+            "verification_method": verification_method,
+            "current_profile_fingerprint": cur_fp,
+            "expected_profile_fingerprint": exp_fp,
+            "username_conflict": False,
+            "visual_similarity": 0.0,
+            "current_capture_failure_reason": fail_reason,
+            "current_capture_screenshot_path": log_payload[
+                "current_capture_screenshot_path"
+            ],
+        }
+
+    exp_h = expected_context.get("ahash_64")
+    if exp_h is None:
+        exp_h = expected_context.get("header_hash")
+    cur_h = cur.get("ahash_64")
+    if cur_h is None:
+        cur_h = cur.get("header_hash")
+    ham_h = (
+        64
+        if exp_h is None or cur_h is None
+        else _visual_hash_xor_hamming(exp_h, cur_h)
+    )
+
+    exp_av = expected_context.get("avatar_ahash_64")
+    if exp_av is None:
+        exp_av = expected_context.get("avatar_hash")
+    cur_av = cur.get("avatar_ahash_64")
+    if cur_av is None:
+        cur_av = cur.get("avatar_hash")
+    ham_av = (
+        64
+        if exp_av is None or cur_av is None
+        else _visual_hash_xor_hamming(exp_av, cur_av)
+    )
+    visual_sim = 1.0 - (ham_h + ham_av) / 128.0
+    visual_sim = max(0.0, min(1.0, visual_sim))
+
+    exp_struct = str(expected_context.get("structure_key") or "")
+    cur_struct = str(cur.get("structure_key") or "")
+    if exp_struct and cur_struct and exp_struct == cur_struct:
+        visual_sim = min(1.0, visual_sim + 0.04)
+
+    cur_u = _normalize_handle(str(cur.get("header_username_detected") or ""))
+
+    username_conflict = bool(exp_u and cur_u and exp_u != cur_u)
+    username_match = bool(exp_u and cur_u and exp_u == cur_u)
+    src_cur_match = bool(src_n and cur_u and src_n == cur_u)
+    src_exp_match = bool(src_n and exp_u and src_n == exp_u)
+
+    verification_method = "visual_hamming"
+    same_profile = False
+    confidence = visual_sim
+
+    if username_conflict:
+        verification_method = "username_mismatch"
+        same_profile = False
+        confidence = min(0.22, visual_sim * 0.35)
+    elif username_match or (src_cur_match and (not exp_u or exp_u == cur_u)):
+        verification_method = "username_match+visual"
+        same_profile = True
+        confidence = max(visual_sim, 0.88 if username_match else 0.84)
+    elif src_exp_match and not cur_u:
+        verification_method = "source_expected_align+visual"
+        confidence = max(visual_sim, 0.78)
+        same_profile = bool(not username_conflict and visual_sim >= 0.42)
+    else:
+        verification_method = "visual_hamming"
+        same_profile = bool(visual_sim >= min_c)
+        confidence = visual_sim
+
+    gate_ok = bool(
+        same_profile and confidence >= min_c and not username_conflict
+    )
+    log_payload = {
+        **base_log,
+        "same_profile": same_profile,
+        "confidence": round(float(confidence), 4),
+        "verification_method": verification_method,
+        "expected_profile_fingerprint": exp_fp,
+        "current_profile_fingerprint": cur_fp,
+    }
+    if gate_ok:
+        log("info", "visual_profile_context_verify_success", **log_payload)
+    else:
+        log("info", "visual_profile_context_verify_failed", **log_payload)
+
+    return {
+        "same_profile": same_profile,
+        "confidence": round(float(confidence), 4),
+        "verification_method": verification_method,
+        "current_profile_fingerprint": cur_fp,
+        "expected_profile_fingerprint": exp_fp,
+        "username_conflict": username_conflict,
+        "visual_similarity": round(float(visual_sim), 4),
+    }
+
+
 def visual_follow_profile_dry_run(
     d: u2.Device,
     *,
     source_profile_username: str | None = None,
     follow_detection: dict[str, Any] | None = None,
+    expected_profile_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
-    Compute Follow tap from screenshot; never taps when VISUAL_FOLLOW_MUTE_DRY_RUN is True.
+    Follow button from screenshot. Dry when ENABLE_REAL_VISUAL_FOLLOW is False and
+    VISUAL_FOLLOW_MUTE_DRY_RUN is True (legacy). Real tap when ENABLE_REAL_VISUAL_FOLLOW is True;
+    mute dryness is separate (VISUAL_FOLLOW_MUTE_DRY_RUN on visual_mute_after_follow_dry_run).
     """
-    dry = bool(getattr(config, "VISUAL_FOLLOW_MUTE_DRY_RUN", True))
+    real_follow = bool(getattr(config, "ENABLE_REAL_VISUAL_FOLLOW", False))
+    mute_dry = bool(getattr(config, "VISUAL_FOLLOW_MUTE_DRY_RUN", True))
+    # Real Follow tap is gated only by ENABLE_REAL_VISUAL_FOLLOW. Mute dryness never blocks it.
+    if real_follow:
+        effective_dry = False
+    else:
+        effective_dry = mute_dry
     meta0 = _followers_current_pkg_activity(d)
+    log(
+        "info",
+        "visual_follow_runtime_config",
+        ENABLE_REAL_VISUAL_FOLLOW=real_follow,
+        VISUAL_FOLLOW_MUTE_DRY_RUN=mute_dry,
+        dry_effective=effective_dry,
+        follow_button_detected=False,
+        follow_button_bounds=None,
+        tap_x=None,
+        tap_y=None,
+        already_following=False,
+        skip_reason="",
+        will_click_follow=False,
+        current_activity=meta0.get("current_activity"),
+        current_package=meta0.get("current_package"),
+        source_profile_username=source_profile_username or "",
+    )
     log(
         "info",
         "visual_follow_profile_started",
         source_profile_username=source_profile_username or "",
         current_activity=meta0.get("current_activity"),
         current_package=meta0.get("current_package"),
-        dry_run=dry,
+        dry_run=effective_dry,
+        real_visual_follow=real_follow,
     )
+
+    pre_af = visual_profile_already_following_before_follow(
+        d, source_profile_username=source_profile_username
+    )
+    log(
+        "info",
+        "visual_follow_decision_debug",
+        ENABLE_REAL_VISUAL_FOLLOW=real_follow,
+        VISUAL_FOLLOW_MUTE_DRY_RUN=mute_dry,
+        dry_effective=effective_dry,
+        follow_button_detected=False,
+        follow_button_bounds=None,
+        tap_x=None,
+        tap_y=None,
+        already_following=bool(pre_af.get("already_following")),
+        skip_reason="pre_profile_already_following_check",
+        will_click_follow=False,
+        current_activity=meta0.get("current_activity"),
+        current_package=meta0.get("current_package"),
+        source_profile_username=source_profile_username or "",
+    )
+    if pre_af.get("already_following"):
+        meta_skip = _followers_current_pkg_activity(d)
+        log(
+            "info",
+            "visual_follow_click_blocked_reason",
+            reason="already_following_before_follow_detection",
+            ENABLE_REAL_VISUAL_FOLLOW=real_follow,
+            VISUAL_FOLLOW_MUTE_DRY_RUN=mute_dry,
+            dry_effective=effective_dry,
+            follow_button_detected=False,
+            follow_button_bounds=None,
+            tap_x=None,
+            tap_y=None,
+            already_following=True,
+            skip_reason=pre_af.get("detection_method"),
+            will_click_follow=False,
+            current_activity=meta_skip.get("current_activity"),
+            current_package=meta_skip.get("current_package"),
+            source_profile_username=source_profile_username or "",
+        )
+        log(
+            "info",
+            "visual_follow_profile_skip_already_following",
+            tap_x=None,
+            tap_y=None,
+            follow_button_bounds=None,
+            verification_method=pre_af.get("detection_method"),
+            confidence=round(float(pre_af.get("confidence") or 0.0), 4),
+            current_activity=meta_skip.get("current_activity"),
+            current_package=meta_skip.get("current_package"),
+            source_profile_username=source_profile_username or "",
+        )
+        fr_rq, fr_rq_m = _visual_follow_request_pending_state(d)
+        return {
+            "ok": True,
+            "follow_button_detected": False,
+            "skip_already_following": True,
+            "real_follow_tap_sent": False,
+            "follow_verified": False,
+            "follow_request_pending": fr_rq,
+            "follow_request_pending_method": fr_rq_m,
+            "tap_x": None,
+            "tap_y": None,
+            "follow_button_bounds": None,
+            "confidence": 0.0,
+            "current_activity": meta_skip.get("current_activity"),
+            "current_package": meta_skip.get("current_package"),
+            "source_profile_username": source_profile_username or "",
+            "failure_reason": None,
+            "dry_run": effective_dry,
+        }
 
     det = follow_detection
     if det is None:
         det = visual_detect_follow_button_on_profile(
             d, source_profile_username=source_profile_username
         )
+    det_ok = bool(det.get("ok"))
+    f_bounds_dbg = det.get("follow_button_bounds")
+    tap_x_dbg = det.get("tap_x")
+    tap_y_dbg = det.get("tap_y")
+    log(
+        "info",
+        "visual_follow_decision_debug",
+        ENABLE_REAL_VISUAL_FOLLOW=real_follow,
+        VISUAL_FOLLOW_MUTE_DRY_RUN=mute_dry,
+        dry_effective=effective_dry,
+        follow_button_detected=det_ok,
+        follow_button_bounds=f_bounds_dbg,
+        tap_x=tap_x_dbg,
+        tap_y=tap_y_dbg,
+        already_following=False,
+        skip_reason="after_follow_button_detection",
+        will_click_follow=bool(real_follow and det_ok and not effective_dry),
+        current_activity=meta0.get("current_activity"),
+        current_package=meta0.get("current_package"),
+        source_profile_username=source_profile_username or "",
+    )
     if not det.get("ok"):
+        post_af = visual_profile_already_following_before_follow(
+            d, source_profile_username=source_profile_username
+        )
+        if post_af.get("already_following"):
+            meta_skip = _followers_current_pkg_activity(d)
+            log(
+                "info",
+                "visual_follow_click_blocked_reason",
+                reason="already_following_blue_follow_button_not_found",
+                ENABLE_REAL_VISUAL_FOLLOW=real_follow,
+                VISUAL_FOLLOW_MUTE_DRY_RUN=mute_dry,
+                dry_effective=effective_dry,
+                follow_button_detected=False,
+                follow_button_bounds=det.get("follow_button_bounds"),
+                tap_x=None,
+                tap_y=None,
+                already_following=True,
+                skip_reason=post_af.get("detection_method"),
+                will_click_follow=False,
+                current_activity=meta_skip.get("current_activity"),
+                current_package=meta_skip.get("current_package"),
+                source_profile_username=source_profile_username or "",
+            )
+            log(
+                "info",
+                "visual_follow_profile_skip_already_following",
+                tap_x=None,
+                tap_y=None,
+                follow_button_bounds=None,
+                verification_method=post_af.get("detection_method"),
+                confidence=round(float(post_af.get("confidence") or 0.0), 4),
+                current_activity=meta_skip.get("current_activity"),
+                current_package=meta_skip.get("current_package"),
+                source_profile_username=source_profile_username or "",
+            )
+            fr_rq2, fr_rq_m2 = _visual_follow_request_pending_state(d)
+            return {
+                "ok": True,
+                "follow_button_detected": False,
+                "skip_already_following": True,
+                "real_follow_tap_sent": False,
+                "follow_verified": False,
+                "follow_request_pending": fr_rq2,
+                "follow_request_pending_method": fr_rq_m2,
+                "tap_x": None,
+                "tap_y": None,
+                "follow_button_bounds": None,
+                "confidence": 0.0,
+                "current_activity": meta_skip.get("current_activity"),
+                "current_package": meta_skip.get("current_package"),
+                "source_profile_username": source_profile_username or "",
+                "failure_reason": None,
+                "dry_run": effective_dry,
+            }
+        log(
+            "info",
+            "visual_follow_click_blocked_reason",
+            reason="follow_button_not_found",
+            ENABLE_REAL_VISUAL_FOLLOW=real_follow,
+            VISUAL_FOLLOW_MUTE_DRY_RUN=mute_dry,
+            dry_effective=effective_dry,
+            follow_button_detected=False,
+            follow_button_bounds=det.get("follow_button_bounds"),
+            tap_x=None,
+            tap_y=None,
+            already_following=False,
+            skip_reason=det.get("failure_reason") or "follow_button_not_found",
+            will_click_follow=False,
+            current_activity=meta0.get("current_activity"),
+            current_package=meta0.get("current_package"),
+            source_profile_username=source_profile_username or "",
+        )
         log(
             "error",
             "visual_follow_profile_failed",
             tap_x=None,
             tap_y=None,
+            follow_button_bounds=det.get("follow_button_bounds"),
             confidence=0.0,
             current_activity=meta0.get("current_activity"),
             current_package=meta0.get("current_package"),
@@ -7694,38 +10015,87 @@ def visual_follow_profile_dry_run(
         )
         return {
             "ok": False,
+            "follow_button_detected": False,
+            "skip_already_following": False,
+            "real_follow_tap_sent": False,
+            "follow_verified": False,
+            "follow_request_pending": False,
+            "follow_request_pending_method": "",
             "tap_x": None,
             "tap_y": None,
+            "follow_button_bounds": det.get("follow_button_bounds"),
             "confidence": 0.0,
             "current_activity": meta0.get("current_activity"),
             "current_package": meta0.get("current_package"),
             "source_profile_username": source_profile_username or "",
             "failure_reason": det.get("failure_reason") or "follow_button_not_found",
-            "dry_run": dry,
+            "dry_run": effective_dry,
         }
 
     tap_x = int(det["tap_x"])
     tap_y = int(det["tap_y"])
     confidence = float(det.get("confidence") or 0.0)
+    f_bounds = det.get("follow_button_bounds")
     meta1 = _followers_current_pkg_activity(d)
     log(
         "info",
         "visual_follow_profile_target_verified",
         tap_x=tap_x,
         tap_y=tap_y,
+        follow_button_bounds=f_bounds,
         confidence=round(confidence, 4),
         current_activity=meta1.get("current_activity"),
         current_package=meta1.get("current_package"),
         source_profile_username=source_profile_username or "",
-        dry_run=dry,
+        dry_run=effective_dry,
     )
 
-    if dry:
+    log(
+        "info",
+        "visual_follow_decision_debug",
+        ENABLE_REAL_VISUAL_FOLLOW=real_follow,
+        VISUAL_FOLLOW_MUTE_DRY_RUN=mute_dry,
+        dry_effective=effective_dry,
+        follow_button_detected=True,
+        follow_button_bounds=f_bounds,
+        tap_x=tap_x,
+        tap_y=tap_y,
+        already_following=False,
+        skip_reason="before_dry_vs_real_branch",
+        will_click_follow=bool(not effective_dry),
+        current_activity=meta1.get("current_activity"),
+        current_package=meta1.get("current_package"),
+        source_profile_username=source_profile_username or "",
+    )
+    if effective_dry:
+        log(
+            "info",
+            "visual_follow_click_blocked_reason",
+            reason="dry_run_follow_tap_disabled",
+            ENABLE_REAL_VISUAL_FOLLOW=real_follow,
+            VISUAL_FOLLOW_MUTE_DRY_RUN=mute_dry,
+            dry_effective=effective_dry,
+            follow_button_detected=True,
+            follow_button_bounds=f_bounds,
+            tap_x=tap_x,
+            tap_y=tap_y,
+            already_following=False,
+            skip_reason=(
+                "ENABLE_REAL_VISUAL_FOLLOW_false_legacy_mute_dry_only"
+                if not real_follow
+                else "unexpected_effective_dry"
+            ),
+            will_click_follow=False,
+            current_activity=meta1.get("current_activity"),
+            current_package=meta1.get("current_package"),
+            source_profile_username=source_profile_username or "",
+        )
         log(
             "info",
             "visual_follow_profile_dry_run_complete",
             tap_x=tap_x,
             tap_y=tap_y,
+            follow_button_bounds=f_bounds,
             confidence=round(confidence, 4),
             current_activity=meta1.get("current_activity"),
             current_package=meta1.get("current_package"),
@@ -7733,8 +10103,15 @@ def visual_follow_profile_dry_run(
         )
         return {
             "ok": True,
+            "follow_button_detected": True,
+            "skip_already_following": False,
+            "real_follow_tap_sent": False,
+            "follow_verified": False,
+            "follow_request_pending": False,
+            "follow_request_pending_method": "",
             "tap_x": tap_x,
             "tap_y": tap_y,
+            "follow_button_bounds": f_bounds,
             "confidence": confidence,
             "current_activity": meta1.get("current_activity"),
             "current_package": meta1.get("current_package"),
@@ -7743,27 +10120,200 @@ def visual_follow_profile_dry_run(
             "dry_run": True,
         }
 
+    tv_follow = visual_target_profile_lock_verify(
+        d,
+        source_profile_username=source_profile_username,
+        action="visual_follow_profile_real",
+    )
+    if not tv_follow.get("ok"):
+        meta_tv = _followers_current_pkg_activity(d)
+        return {
+            "ok": False,
+            "follow_button_detected": True,
+            "skip_already_following": False,
+            "real_follow_tap_sent": False,
+            "follow_verified": False,
+            "follow_request_pending": False,
+            "follow_request_pending_method": "",
+            "target_profile_lock_mismatch": True,
+            "tap_x": tap_x,
+            "tap_y": tap_y,
+            "follow_button_bounds": f_bounds,
+            "confidence": confidence,
+            "current_activity": meta_tv.get("current_activity"),
+            "current_package": meta_tv.get("current_package"),
+            "source_profile_username": source_profile_username or "",
+            "failure_reason": "target_profile_lock_mismatch",
+            "dry_run": effective_dry,
+        }
+
+    lock_pf = bool(getattr(config, "ENABLE_VISUAL_PROFILE_CONTEXT_LOCK", False))
+    exp_pf = expected_profile_context or {}
+    min_pf = float(
+        getattr(config, "VISUAL_PROFILE_CONTEXT_MIN_MATCH_CONFIDENCE", 0.72) or 0.72
+    )
+    if lock_pf:
+        exp_fp0 = str(
+            exp_pf.get("profile_visual_fingerprint")
+            or exp_pf.get("profile_fingerprint")
+            or ""
+        )
+        if exp_pf.get("ok") is False or not exp_fp0:
+            meta_pf = _followers_current_pkg_activity(d)
+            log(
+                "info",
+                "visual_profile_context_mismatch_abort",
+                action="visual_follow_profile_real",
+                abort_reason="missing_expected_profile_context_baseline",
+                expected_profile_fingerprint="",
+                current_profile_fingerprint="",
+                confidence=0.0,
+                same_profile=False,
+                verification_method="none",
+                current_activity=meta_pf.get("current_activity"),
+                current_package=meta_pf.get("current_package"),
+                source_profile_username=source_profile_username or "",
+            )
+            return {
+                "ok": False,
+                "follow_button_detected": True,
+                "skip_already_following": False,
+                "real_follow_tap_sent": False,
+                "follow_verified": False,
+                "follow_request_pending": False,
+                "follow_request_pending_method": "",
+                "profile_context_mismatch": True,
+                "tap_x": tap_x,
+                "tap_y": tap_y,
+                "follow_button_bounds": f_bounds,
+                "confidence": confidence,
+                "current_activity": meta_pf.get("current_activity"),
+                "current_package": meta_pf.get("current_package"),
+                "source_profile_username": source_profile_username or "",
+                "failure_reason": "profile_context_mismatch",
+                "dry_run": effective_dry,
+            }
+        vpc = visual_verify_same_profile_context(
+            d,
+            expected_context=exp_pf,
+            source_profile_username=source_profile_username,
+        )
+        if (not vpc.get("same_profile")) or float(
+            vpc.get("confidence") or 0.0
+        ) < min_pf:
+            meta_pf = _followers_current_pkg_activity(d)
+            log(
+                "info",
+                "visual_profile_context_mismatch_abort",
+                action="visual_follow_profile_real",
+                abort_reason="verify_failed_or_low_confidence",
+                expected_profile_fingerprint=vpc.get("expected_profile_fingerprint"),
+                current_profile_fingerprint=vpc.get("current_profile_fingerprint"),
+                confidence=float(vpc.get("confidence") or 0.0),
+                same_profile=bool(vpc.get("same_profile")),
+                verification_method=str(vpc.get("verification_method") or ""),
+                current_activity=meta_pf.get("current_activity"),
+                current_package=meta_pf.get("current_package"),
+                source_profile_username=source_profile_username or "",
+            )
+            return {
+                "ok": False,
+                "follow_button_detected": True,
+                "skip_already_following": False,
+                "real_follow_tap_sent": False,
+                "follow_verified": False,
+                "follow_request_pending": False,
+                "follow_request_pending_method": "",
+                "profile_context_mismatch": True,
+                "tap_x": tap_x,
+                "tap_y": tap_y,
+                "follow_button_bounds": f_bounds,
+                "confidence": confidence,
+                "current_activity": meta_pf.get("current_activity"),
+                "current_package": meta_pf.get("current_package"),
+                "source_profile_username": source_profile_username or "",
+                "failure_reason": "profile_context_mismatch",
+                "dry_run": effective_dry,
+            }
+
+    log(
+        "info",
+        "visual_follow_profile_real_before_tap",
+        tap_x=tap_x,
+        tap_y=tap_y,
+        follow_button_bounds=f_bounds,
+        confidence=round(confidence, 4),
+        verification_method="pending",
+        current_activity=meta1.get("current_activity"),
+        current_package=meta1.get("current_package"),
+        source_profile_username=source_profile_username or "",
+    )
+    log(
+        "info",
+        "visual_follow_decision_debug",
+        ENABLE_REAL_VISUAL_FOLLOW=real_follow,
+        VISUAL_FOLLOW_MUTE_DRY_RUN=mute_dry,
+        dry_effective=effective_dry,
+        follow_button_detected=True,
+        follow_button_bounds=f_bounds,
+        tap_x=tap_x,
+        tap_y=tap_y,
+        already_following=False,
+        skip_reason="about_to_send_follow_click",
+        will_click_follow=True,
+        current_activity=meta1.get("current_activity"),
+        current_package=meta1.get("current_package"),
+        source_profile_username=source_profile_username or "",
+    )
     try:
         d.click(tap_x, tap_y)
     except Exception as e:
+        meta_e = _followers_current_pkg_activity(d)
+        log(
+            "info",
+            "visual_follow_click_blocked_reason",
+            reason="d_click_exception",
+            ENABLE_REAL_VISUAL_FOLLOW=real_follow,
+            VISUAL_FOLLOW_MUTE_DRY_RUN=mute_dry,
+            dry_effective=effective_dry,
+            follow_button_detected=True,
+            follow_button_bounds=f_bounds,
+            tap_x=tap_x,
+            tap_y=tap_y,
+            already_following=False,
+            skip_reason=str(e),
+            will_click_follow=False,
+            current_activity=meta_e.get("current_activity"),
+            current_package=meta_e.get("current_package"),
+            source_profile_username=source_profile_username or "",
+        )
         log(
             "error",
             "visual_follow_profile_failed",
             tap_x=tap_x,
             tap_y=tap_y,
+            follow_button_bounds=f_bounds,
             confidence=round(confidence, 4),
-            current_activity=_followers_current_pkg_activity(d).get("current_activity"),
-            current_package=_followers_current_pkg_activity(d).get("current_package"),
+            verification_method="none",
+            current_activity=meta_e.get("current_activity"),
+            current_package=meta_e.get("current_package"),
             source_profile_username=source_profile_username or "",
             failure_reason=str(e),
         )
         return {
             "ok": False,
+            "follow_button_detected": True,
+            "skip_already_following": False,
+            "real_follow_tap_sent": False,
+            "follow_verified": False,
+            "follow_request_pending": False,
+            "follow_request_pending_method": "",
             "tap_x": tap_x,
             "tap_y": tap_y,
+            "follow_button_bounds": f_bounds,
             "confidence": confidence,
-            "current_activity": _followers_current_pkg_activity(d).get("current_activity"),
-            "current_package": _followers_current_pkg_activity(d).get("current_package"),
+            "current_activity": meta_e.get("current_activity"),
+            "current_package": meta_e.get("current_package"),
             "source_profile_username": source_profile_username or "",
             "failure_reason": str(e),
             "dry_run": False,
@@ -7771,21 +10321,102 @@ def visual_follow_profile_dry_run(
 
     log(
         "info",
-        "visual_follow_profile_dry_run_complete",
+        "visual_follow_profile_real_tap_sent",
         tap_x=tap_x,
         tap_y=tap_y,
+        follow_button_bounds=f_bounds,
         confidence=round(confidence, 4),
-        current_activity=_followers_current_pkg_activity(d).get("current_activity"),
-        current_package=_followers_current_pkg_activity(d).get("current_package"),
+        verification_method="tap_dispatched",
+        current_activity=meta1.get("current_activity"),
+        current_package=meta1.get("current_package"),
         source_profile_username=source_profile_username or "",
+    )
+    time.sleep(1.2)
+    post_shot = str(
+        _SCREENSHOTS_DIR / f"visual_follow_after_tap_{int(time.time() * 1000)}.png"
+    )
+    try:
+        screenshot(d, post_shot)
+    except Exception:
+        pass
+    try:
+        d.dump_hierarchy(compressed=False)
+    except Exception:
+        try:
+            d.dump_hierarchy()
+        except Exception:
+            pass
+    try:
+        d.app_current()
+    except Exception:
+        pass
+
+    verify_after = bool(getattr(config, "VISUAL_FOLLOW_VERIFY_AFTER_TAP", True))
+    if verify_after:
+        ver = visual_verify_profile_followed(
+            d,
+            source_profile_username=source_profile_username,
+            tap_x=tap_x,
+            tap_y=tap_y,
+            follow_button_bounds=f_bounds,
+            detect_confidence=confidence,
+        )
+        fv = bool(ver.get("follow_verified"))
+        vmeth = str(ver.get("verification_method") or "none")
+        vconf = float(ver.get("confidence") or 0.0)
+    else:
+        fv = True
+        vmeth = "verify_disabled"
+        vconf = 1.0
+
+    meta_done = _followers_current_pkg_activity(d)
+    fr_pending = False
+    fr_pm = ""
+    if fv:
+        fr_pending, fr_pm = _visual_follow_request_pending_state(d)
+        if fr_pending:
+            log(
+                "info",
+                "visual_follow_request_sent_verified",
+                follow_request_pending_method=fr_pm,
+                verification_method=vmeth,
+                tap_x=tap_x,
+                tap_y=tap_y,
+                source_profile_username=source_profile_username or "",
+                current_activity=meta_done.get("current_activity"),
+                current_package=meta_done.get("current_package"),
+            )
+
+    log(
+        "info",
+        "visual_follow_profile_real_complete",
+        tap_x=tap_x,
+        tap_y=tap_y,
+        follow_button_bounds=f_bounds,
+        verification_method=vmeth,
+        confidence=round(vconf, 4),
+        current_activity=meta_done.get("current_activity"),
+        current_package=meta_done.get("current_package"),
+        source_profile_username=source_profile_username or "",
+        follow_verified=fv,
+        follow_request_pending=fr_pending,
     )
     return {
         "ok": True,
+        "follow_button_detected": True,
+        "skip_already_following": False,
+        "real_follow_tap_sent": True,
+        "follow_verified": fv,
+        "follow_request_pending": fr_pending,
+        "follow_request_pending_method": fr_pm,
+        "verification_method": vmeth,
+        "verify_confidence": vconf,
         "tap_x": tap_x,
         "tap_y": tap_y,
+        "follow_button_bounds": f_bounds,
         "confidence": confidence,
-        "current_activity": _followers_current_pkg_activity(d).get("current_activity"),
-        "current_package": _followers_current_pkg_activity(d).get("current_package"),
+        "current_activity": meta_done.get("current_activity"),
+        "current_package": meta_done.get("current_package"),
         "source_profile_username": source_profile_username or "",
         "failure_reason": None,
         "dry_run": False,
@@ -7800,12 +10431,14 @@ def visual_detect_follow_post_actions(
     """
     Heuristic detection of follow confirmation sheet / mute rows (UiAutomator labels + bright sheet ROI).
     """
+    meta0 = _followers_current_pkg_activity(d)
     log(
         "info",
         "visual_follow_actions_detect_started",
         source_profile_username=source_profile_username or "",
+        current_activity=meta0.get("current_activity"),
+        current_package=meta0.get("current_package"),
     )
-    meta0 = _followers_current_pkg_activity(d)
     mute_posts_detected = False
     mute_stories_detected = False
     following_detected = False
@@ -7863,6 +10496,8 @@ def visual_detect_follow_post_actions(
     except Exception:
         pass
 
+    meta_after = _followers_current_pkg_activity(d)
+
     if mute_posts_detected or mute_stories_detected or following_detected:
         popup_detected = True
         pil_conf = max(pil_conf, 0.55)
@@ -7883,8 +10518,8 @@ def visual_detect_follow_post_actions(
         "following_detected": following_detected,
         "popup_detected": popup_detected,
         "confidence": round(confidence, 4),
-        "current_activity": meta0.get("current_activity"),
-        "current_package": meta0.get("current_package"),
+        "current_activity": meta_after.get("current_activity"),
+        "current_package": meta_after.get("current_package"),
         "source_profile_username": source_profile_username or "",
     }
 
@@ -7900,7 +10535,6 @@ def visual_mute_after_follow_dry_run(
     d: u2.Device,
     *,
     source_profile_username: str | None = None,
-    actions_out: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Estimate mute row tap points from typical bottom-sheet layout; never taps (dry-run only).
@@ -7915,7 +10549,34 @@ def visual_mute_after_follow_dry_run(
 
     want_posts = bool(getattr(config, "VISUAL_MUTE_POSTS_AFTER_FOLLOW", True))
     want_stories = bool(getattr(config, "VISUAL_MUTE_STORIES_AFTER_FOLLOW", True))
-    act = actions_out or {}
+
+    tv_mute = visual_target_profile_lock_verify(
+        d,
+        source_profile_username=source_profile_username,
+        action="visual_mute_after_follow_dry_run",
+    )
+    if not tv_mute.get("ok"):
+        meta_tv = _followers_current_pkg_activity(d)
+        log(
+            "error",
+            "visual_mute_after_follow_failed",
+            ok=False,
+            mute_posts_bounds=None,
+            mute_stories_bounds=None,
+            source_profile_username=source_profile_username or "",
+            current_activity=meta_tv.get("current_activity"),
+            current_package=meta_tv.get("current_package"),
+            failure_reason="target_profile_lock_mismatch",
+            dry_run=True,
+        )
+        return {
+            "ok": False,
+            "failure_reason": "target_profile_lock_mismatch",
+            "mute_posts_bounds": None,
+            "mute_stories_bounds": None,
+            "source_profile_username": source_profile_username or "",
+            "target_profile_lock_mismatch": True,
+        }
 
     try:
         ww, wh = d.window_size()
@@ -7933,20 +10594,30 @@ def visual_mute_after_follow_dry_run(
         im = Image.open(shot).convert("RGB")
         iw, ih = im.size
     except Exception as e:
+        meta_fail = _followers_current_pkg_activity(d)
         log(
-            "info",
-            "visual_mute_dry_run_complete",
+            "error",
+            "visual_mute_after_follow_failed",
             ok=False,
+            mute_posts_bounds=None,
+            mute_stories_bounds=None,
             source_profile_username=source_profile_username or "",
+            current_activity=meta_fail.get("current_activity"),
+            current_package=meta_fail.get("current_package"),
             failure_reason=f"screenshot_failed:{e}",
+            dry_run=True,
         )
         return {
             "ok": False,
             "failure_reason": f"screenshot_failed:{e}",
+            "mute_posts_bounds": None,
+            "mute_stories_bounds": None,
             "source_profile_username": source_profile_username or "",
         }
 
     # Typical sheet row centers (image ratios); map to device.
+    half_row = max(12, int(ih * 0.028))
+    margin_x = max(2, int(iw * 0.02))
     posts_y_img = int(ih * 0.58)
     stories_y_img = int(ih * 0.665)
     tap_x_img = int(iw * 0.48)
@@ -7956,6 +10627,20 @@ def visual_mute_after_follow_dry_run(
     stories_tx, stories_ty = _visual_xy_image_to_device(
         tap_x_img, stories_y_img, iw, ih, ww, wh
     )
+    posts_row_img = {
+        "left": margin_x,
+        "top": posts_y_img - half_row,
+        "right": iw - 2,
+        "bottom": posts_y_img + half_row,
+    }
+    stories_row_img = {
+        "left": margin_x,
+        "top": stories_y_img - half_row,
+        "right": iw - 2,
+        "bottom": stories_y_img + half_row,
+    }
+    mute_posts_bounds = _visual_bounds_map_to_device(posts_row_img, iw, ih, ww, wh)
+    mute_stories_bounds = _visual_bounds_map_to_device(stories_row_img, iw, ih, ww, wh)
 
     meta = _followers_current_pkg_activity(d)
     if want_posts:
@@ -7964,8 +10649,8 @@ def visual_mute_after_follow_dry_run(
             "visual_mute_posts_target_detected",
             tap_x=posts_tx,
             tap_y=posts_ty,
+            mute_posts_bounds=mute_posts_bounds,
             source_profile_username=source_profile_username or "",
-            ui_mute_posts_hint=act.get("mute_posts_detected"),
             current_activity=meta.get("current_activity"),
             current_package=meta.get("current_package"),
             dry_run=True,
@@ -7976,8 +10661,8 @@ def visual_mute_after_follow_dry_run(
             "visual_mute_stories_target_detected",
             tap_x=stories_tx,
             tap_y=stories_ty,
+            mute_stories_bounds=mute_stories_bounds,
             source_profile_username=source_profile_username or "",
-            ui_mute_stories_hint=act.get("mute_stories_detected"),
             current_activity=meta.get("current_activity"),
             current_package=meta.get("current_package"),
             dry_run=True,
@@ -7987,6 +10672,8 @@ def visual_mute_after_follow_dry_run(
         "info",
         "visual_mute_dry_run_complete",
         source_profile_username=source_profile_username or "",
+        mute_posts_bounds=mute_posts_bounds if want_posts else None,
+        mute_stories_bounds=mute_stories_bounds if want_stories else None,
         mute_posts_target=(want_posts, posts_tx, posts_ty),
         mute_stories_target=(want_stories, stories_tx, stories_ty),
         current_activity=meta.get("current_activity"),
@@ -7997,10 +10684,805 @@ def visual_mute_after_follow_dry_run(
         "ok": True,
         "mute_posts_tap": (posts_tx, posts_ty) if want_posts else None,
         "mute_stories_tap": (stories_tx, stories_ty) if want_stories else None,
+        "mute_posts_bounds": mute_posts_bounds if want_posts else None,
+        "mute_stories_bounds": mute_stories_bounds if want_stories else None,
         "current_activity": meta.get("current_activity"),
         "current_package": meta.get("current_package"),
         "source_profile_username": source_profile_username or "",
         "dry_run": True,
+    }
+
+
+# --- Visual real mute after follow: Following → options sheet → Mute → Posts/Stories toggles ---
+
+
+def _visual_header_following_button_predicates() -> tuple[tuple[str, Callable[[u2.Device], Any]], ...]:
+    return (
+        ("ui_text_following_exact", lambda dd: dd(text="Following")),
+        ("ui_text_suivi_e", lambda dd: dd(text="Suivi(e)")),
+        ("ui_text_suivi", lambda dd: dd(text="Suivi")),
+        ("ui_text_abonne_e", lambda dd: dd(text="Abonné(e)")),
+        ("ui_text_abonne", lambda dd: dd(text="Abonné")),
+        ("ui_text_siguiendo", lambda dd: dd(text="Siguiendo")),
+        ("ui_text_gefolgt", lambda dd: dd(text="Gefolgt")),
+    )
+
+
+def _visual_pick_profile_header_following_button(
+    d: u2.Device,
+) -> tuple[Any, str]:
+    try:
+        ww, wh = d.window_size()
+    except Exception:
+        ww, wh = 1080, 2400
+    for mid, pred in _visual_header_following_button_predicates():
+        try:
+            el = pred(d)
+            if not el.exists(timeout=0.16):
+                continue
+            b = el.info.get("bounds") or {}
+            cy = (int(b.get("top", 0)) + int(b.get("bottom", 0))) // 2
+            if cy > int(wh * 0.42):
+                continue
+            rx = int(b.get("right", 0))
+            if rx < int(ww * 0.22):
+                continue
+            return el, mid
+        except Exception:
+            continue
+    try:
+        el = d(descriptionContains="Following button")
+        if el.exists(timeout=0.12):
+            return el, "desc_following_btn"
+    except Exception:
+        pass
+    return None, ""
+
+
+def _visual_find_mute_row_first_sheet(d: u2.Device) -> tuple[Any, str]:
+    for lab in (
+        "Mute",
+        "Silenciar",
+        "Mettre en sourdine",
+        "Sourdine",
+    ):
+        try:
+            el = d(text=lab)
+            if el.exists(timeout=0.14):
+                return el, lab
+        except Exception:
+            continue
+    try:
+        el = d(textContains="sourdine")
+        if el.exists(timeout=0.12):
+            return el, "textContains_sourdine"
+    except Exception:
+        pass
+    try:
+        el = d(textContains="Mute")
+        if el.exists(timeout=0.1):
+            return el, "textContains_Mute"
+    except Exception:
+        pass
+    return None, ""
+
+
+def _visual_switch_checked_near_row(d: u2.Device, label_el: Any) -> bool | None:
+    try:
+        lb = label_el.info.get("bounds") or {}
+        lcy = (int(lb["top"]) + int(lb["bottom"])) // 2
+    except Exception:
+        return None
+    best: tuple[int, Any] | None = None
+    try:
+        for sw in d(className="android.widget.Switch").all():
+            sb = sw.info.get("bounds") or {}
+            scy = (int(sb["top"]) + int(sb["bottom"])) // 2
+            dy = abs(scy - lcy)
+            if dy > 72:
+                continue
+            if best is None or dy < best[0]:
+                best = (dy, sw)
+    except Exception:
+        return None
+    if best is None:
+        return None
+    try:
+        return bool(best[1].info.get("checked"))
+    except Exception:
+        return None
+
+
+def _visual_tap_toggle_row_for_label(
+    d: u2.Device,
+    labels: tuple[str, ...],
+    ww: int,
+) -> tuple[bool, bool, str, Any | None]:
+    """Returns (tapped, already_on, failure_reason, label_element)."""
+    el: Any | None = None
+    for lab in labels:
+        try:
+            cand = d(text=lab)
+            if cand.wait(timeout=1.5):
+                el = cand
+                break
+        except Exception:
+            continue
+    if el is None:
+        return False, False, "toggle_label_not_found", None
+    chk = _visual_switch_checked_near_row(d, el)
+    if chk is True:
+        return False, True, "", el
+    try:
+        b = el.info.get("bounds") or {}
+        cy = (int(b["top"]) + int(b["bottom"])) // 2
+        tap_x = min(ww - 6, max(int(ww * 0.88), int(b.get("right", 0)) + 72))
+        d.click(int(tap_x), int(cy))
+    except Exception as e:
+        return False, False, f"tap_failed:{e}", el
+    return True, False, "", el
+
+
+def _visual_verify_toggle_on_for_labels(
+    d: u2.Device,
+    labels: tuple[str, ...],
+    timeout_s: float,
+) -> bool:
+    deadline = time.perf_counter() + float(timeout_s)
+    while time.perf_counter() < deadline:
+        for lab in labels:
+            try:
+                el = d(text=lab)
+                if not el.exists(timeout=0.1):
+                    continue
+                c = _visual_switch_checked_near_row(d, el)
+                if c is True:
+                    return True
+            except Exception:
+                continue
+        time.sleep(0.14)
+    return False
+
+
+def visual_open_following_options_after_follow(
+    d: u2.Device,
+    *,
+    source_profile_username: str | None = None,
+) -> dict[str, Any]:
+    meta0 = _followers_current_pkg_activity(d)
+    log(
+        "info",
+        "visual_following_options_open_started",
+        source_profile_username=source_profile_username or "",
+        current_activity=meta0.get("current_activity"),
+        current_package=meta0.get("current_package"),
+    )
+    tv = visual_target_profile_lock_verify(
+        d,
+        source_profile_username=source_profile_username,
+        action="visual_open_following_options_after_follow",
+    )
+    if not tv.get("ok"):
+        log(
+            "info",
+            "visual_following_options_open_failed",
+            failure_reason="target_profile_lock_mismatch",
+            source_profile_username=source_profile_username or "",
+            current_activity=meta0.get("current_activity"),
+            current_package=meta0.get("current_package"),
+        )
+        return {
+            "ok": False,
+            "failure_reason": "target_profile_lock_mismatch",
+            "target_profile_lock_mismatch": True,
+            "following_detection_method": "",
+            "mute_presence": False,
+            "source_profile_username": source_profile_username or "",
+        }
+
+    try:
+        ww, wh = d.window_size()
+    except Exception:
+        ww, wh = 1080, 2400
+
+    btn, det_m = _visual_pick_profile_header_following_button(d)
+    if btn is None:
+        log(
+            "info",
+            "visual_following_options_open_failed",
+            failure_reason="following_button_not_found",
+            source_profile_username=source_profile_username or "",
+            current_activity=meta0.get("current_activity"),
+            current_package=meta0.get("current_package"),
+        )
+        return {
+            "ok": False,
+            "failure_reason": "following_button_not_found",
+            "following_detection_method": "",
+            "mute_presence": False,
+            "source_profile_username": source_profile_username or "",
+        }
+
+    try:
+        bx = btn.info.get("bounds") or {}
+        log(
+            "info",
+            "visual_following_options_following_button_detected",
+            following_detection_method=det_m,
+            bounds=dict(bx),
+            source_profile_username=source_profile_username or "",
+            current_activity=meta0.get("current_activity"),
+            current_package=meta0.get("current_package"),
+        )
+    except Exception:
+        log(
+            "info",
+            "visual_following_options_following_button_detected",
+            following_detection_method=det_m,
+            bounds={},
+            source_profile_username=source_profile_username or "",
+            current_activity=meta0.get("current_activity"),
+            current_package=meta0.get("current_package"),
+        )
+
+    try:
+        btn.click()
+    except Exception as e:
+        meta_e = _followers_current_pkg_activity(d)
+        log(
+            "info",
+            "visual_following_options_open_failed",
+            failure_reason=f"following_click_failed:{e}",
+            source_profile_username=source_profile_username or "",
+            current_activity=meta_e.get("current_activity"),
+            current_package=meta_e.get("current_package"),
+        )
+        return {
+            "ok": False,
+            "failure_reason": f"following_click_failed:{e}",
+            "following_detection_method": det_m,
+            "mute_presence": False,
+            "source_profile_username": source_profile_username or "",
+        }
+
+    log(
+        "info",
+        "visual_following_options_tap_sent",
+        following_detection_method=det_m,
+        source_profile_username=source_profile_username or "",
+        current_activity=meta0.get("current_activity"),
+        current_package=meta0.get("current_package"),
+    )
+    time.sleep(0.85)
+
+    mute_el, mute_lab = _visual_find_mute_row_first_sheet(d)
+    meta1 = _followers_current_pkg_activity(d)
+    if mute_el is None:
+        log(
+            "info",
+            "visual_following_options_open_failed",
+            failure_reason="mute_row_not_visible_in_sheet",
+            following_detection_method=det_m,
+            source_profile_username=source_profile_username or "",
+            current_activity=meta1.get("current_activity"),
+            current_package=meta1.get("current_package"),
+        )
+        return {
+            "ok": False,
+            "failure_reason": "mute_row_not_visible_in_sheet",
+            "following_detection_method": det_m,
+            "mute_presence": False,
+            "source_profile_username": source_profile_username or "",
+        }
+
+    log(
+        "info",
+        "visual_following_options_open_success",
+        following_detection_method=det_m,
+        mute_row_label=mute_lab,
+        source_profile_username=source_profile_username or "",
+        current_activity=meta1.get("current_activity"),
+        current_package=meta1.get("current_package"),
+    )
+    return {
+        "ok": True,
+        "failure_reason": None,
+        "following_detection_method": det_m,
+        "mute_presence": True,
+        "mute_row_label": mute_lab,
+        "source_profile_username": source_profile_username or "",
+        "window_w": ww,
+        "window_h": wh,
+    }
+
+
+def visual_open_mute_sheet_from_following_options(
+    d: u2.Device,
+    *,
+    source_profile_username: str | None = None,
+) -> dict[str, Any]:
+    meta0 = _followers_current_pkg_activity(d)
+    log(
+        "info",
+        "visual_mute_options_open_started",
+        source_profile_username=source_profile_username or "",
+        current_activity=meta0.get("current_activity"),
+        current_package=meta0.get("current_package"),
+    )
+    tv = visual_target_profile_lock_verify(
+        d,
+        source_profile_username=source_profile_username,
+        action="visual_open_mute_sheet_from_following_options",
+    )
+    if not tv.get("ok"):
+        log(
+            "info",
+            "visual_mute_options_open_failed",
+            failure_reason="target_profile_lock_mismatch",
+            source_profile_username=source_profile_username or "",
+            current_activity=meta0.get("current_activity"),
+            current_package=meta0.get("current_package"),
+        )
+        return {
+            "ok": False,
+            "failure_reason": "target_profile_lock_mismatch",
+            "target_profile_lock_mismatch": True,
+            "mute_row_label": "",
+            "posts_visible": False,
+            "stories_visible": False,
+            "source_profile_username": source_profile_username or "",
+        }
+
+    mute_el, mute_lab = _visual_find_mute_row_first_sheet(d)
+    if mute_el is None:
+        log(
+            "info",
+            "visual_mute_options_open_failed",
+            failure_reason="mute_row_not_found",
+            source_profile_username=source_profile_username or "",
+            current_activity=meta0.get("current_activity"),
+            current_package=meta0.get("current_package"),
+        )
+        return {
+            "ok": False,
+            "failure_reason": "mute_row_not_found",
+            "mute_row_label": "",
+            "posts_visible": False,
+            "stories_visible": False,
+            "source_profile_username": source_profile_username or "",
+        }
+
+    try:
+        mb = mute_el.info.get("bounds") or {}
+        log(
+            "info",
+            "visual_mute_row_detected",
+            mute_row_label=mute_lab,
+            bounds=dict(mb),
+            source_profile_username=source_profile_username or "",
+            current_activity=meta0.get("current_activity"),
+            current_package=meta0.get("current_package"),
+        )
+    except Exception:
+        log(
+            "info",
+            "visual_mute_row_detected",
+            mute_row_label=mute_lab,
+            bounds={},
+            source_profile_username=source_profile_username or "",
+            current_activity=meta0.get("current_activity"),
+            current_package=meta0.get("current_package"),
+        )
+
+    try:
+        mute_el.click()
+    except Exception as e:
+        meta_e = _followers_current_pkg_activity(d)
+        log(
+            "info",
+            "visual_mute_options_open_failed",
+            failure_reason=f"mute_row_click_failed:{e}",
+            mute_row_label=mute_lab,
+            source_profile_username=source_profile_username or "",
+            current_activity=meta_e.get("current_activity"),
+            current_package=meta_e.get("current_package"),
+        )
+        return {
+            "ok": False,
+            "failure_reason": f"mute_row_click_failed:{e}",
+            "mute_row_label": mute_lab,
+            "posts_visible": False,
+            "stories_visible": False,
+            "source_profile_username": source_profile_username or "",
+        }
+
+    log(
+        "info",
+        "visual_mute_row_tap_sent",
+        mute_row_label=mute_lab,
+        source_profile_username=source_profile_username or "",
+        current_activity=meta0.get("current_activity"),
+        current_package=meta0.get("current_package"),
+    )
+    time.sleep(0.9)
+
+    posts_v = bool(d(text="Posts").exists(timeout=2.0))
+    if not posts_v:
+        posts_v = bool(d(text="Publications").exists(timeout=2.0))
+    stories_v = bool(d(text="Stories").exists(timeout=2.0))
+    meta1 = _followers_current_pkg_activity(d)
+    if not posts_v or not stories_v:
+        log(
+            "info",
+            "visual_mute_options_open_failed",
+            failure_reason="posts_or_stories_labels_missing",
+            mute_row_label=mute_lab,
+            posts_visible=posts_v,
+            stories_visible=stories_v,
+            source_profile_username=source_profile_username or "",
+            current_activity=meta1.get("current_activity"),
+            current_package=meta1.get("current_package"),
+        )
+        return {
+            "ok": False,
+            "failure_reason": "posts_or_stories_labels_missing",
+            "mute_row_label": mute_lab,
+            "posts_visible": posts_v,
+            "stories_visible": stories_v,
+            "source_profile_username": source_profile_username or "",
+        }
+
+    log(
+        "info",
+        "visual_mute_options_open_success",
+        mute_row_label=mute_lab,
+        posts_visible=True,
+        stories_visible=True,
+        source_profile_username=source_profile_username or "",
+        current_activity=meta1.get("current_activity"),
+        current_package=meta1.get("current_package"),
+    )
+    return {
+        "ok": True,
+        "failure_reason": None,
+        "mute_row_label": mute_lab,
+        "posts_visible": True,
+        "stories_visible": True,
+        "source_profile_username": source_profile_username or "",
+    }
+
+
+def visual_toggle_mute_posts_and_stories(
+    d: u2.Device,
+    *,
+    source_profile_username: str | None = None,
+) -> dict[str, Any]:
+    meta0 = _followers_current_pkg_activity(d)
+    want_posts = bool(getattr(config, "VISUAL_MUTE_POSTS_AFTER_FOLLOW", True))
+    want_stories = bool(getattr(config, "VISUAL_MUTE_STORIES_AFTER_FOLLOW", True))
+    verify_after = bool(getattr(config, "VISUAL_MUTE_VERIFY_AFTER_TAP", True))
+    verify_to = float(getattr(config, "VISUAL_MUTE_VERIFY_TIMEOUT_S", 3.0) or 3.0)
+
+    log(
+        "info",
+        "visual_mute_toggle_started",
+        want_posts=want_posts,
+        want_stories=want_stories,
+        verify_after=verify_after,
+        source_profile_username=source_profile_username or "",
+        current_activity=meta0.get("current_activity"),
+        current_package=meta0.get("current_package"),
+    )
+
+    tv = visual_target_profile_lock_verify(
+        d,
+        source_profile_username=source_profile_username,
+        action="visual_toggle_mute_posts_and_stories",
+    )
+    if not tv.get("ok"):
+        log(
+            "info",
+            "visual_mute_toggle_verify_failed",
+            failure_reason="target_profile_lock_mismatch",
+            posts_verified=False,
+            stories_verified=False,
+            source_profile_username=source_profile_username or "",
+            current_activity=meta0.get("current_activity"),
+            current_package=meta0.get("current_package"),
+        )
+        return {
+            "ok": False,
+            "failure_reason": "target_profile_lock_mismatch",
+            "target_profile_lock_mismatch": True,
+            "posts_verified": False,
+            "stories_verified": False,
+            "source_profile_username": source_profile_username or "",
+        }
+
+    try:
+        ww, _wh = d.window_size()
+    except Exception:
+        ww = 1080
+
+    posts_labels = ("Posts", "Publications")
+    # Match Stories row only (avoid Notes / other rows sharing substring patterns).
+    stories_labels = (
+        "Stories",
+        "Historias",
+        "Storie",
+    )
+
+    posts_verified = not want_posts
+    stories_verified = not want_stories
+    posts_tapped = False
+    stories_tapped = False
+
+    def _meta_now() -> dict[str, Any]:
+        return _followers_current_pkg_activity(d)
+
+    if want_posts:
+        tapped, skip_on, reason, _pel = _visual_tap_toggle_row_for_label(
+            d, posts_labels, ww
+        )
+        m_p = _meta_now()
+        if skip_on:
+            posts_verified = True
+            log(
+                "info",
+                "visual_mute_posts_toggle_detected",
+                skipped_already_on=True,
+                source_profile_username=source_profile_username or "",
+                current_activity=m_p.get("current_activity"),
+                current_package=m_p.get("current_package"),
+            )
+            if verify_after:
+                posts_verified = _visual_verify_toggle_on_for_labels(
+                    d, posts_labels, verify_to
+                )
+                if posts_verified:
+                    log(
+                        "info",
+                        "visual_mute_posts_toggle_verify_success",
+                        source_profile_username=source_profile_username or "",
+                        current_activity=m_p.get("current_activity"),
+                        current_package=m_p.get("current_package"),
+                    )
+                else:
+                    log(
+                        "info",
+                        "visual_mute_posts_toggle_verify_failed",
+                        failure_reason="posts_toggle_not_verified_after_skip_on",
+                        source_profile_username=source_profile_username or "",
+                        current_activity=m_p.get("current_activity"),
+                        current_package=m_p.get("current_package"),
+                    )
+        elif tapped:
+            posts_tapped = True
+            log(
+                "info",
+                "visual_mute_posts_toggle_detected",
+                skipped_already_on=False,
+                source_profile_username=source_profile_username or "",
+                current_activity=m_p.get("current_activity"),
+                current_package=m_p.get("current_package"),
+            )
+            log(
+                "info",
+                "visual_mute_posts_toggle_tap_sent",
+                source_profile_username=source_profile_username or "",
+                current_activity=m_p.get("current_activity"),
+                current_package=m_p.get("current_package"),
+            )
+            time.sleep(0.42)
+            if verify_after:
+                posts_verified = _visual_verify_toggle_on_for_labels(
+                    d, posts_labels, verify_to
+                )
+                if posts_verified:
+                    log(
+                        "info",
+                        "visual_mute_posts_toggle_verify_success",
+                        source_profile_username=source_profile_username or "",
+                        current_activity=m_p.get("current_activity"),
+                        current_package=m_p.get("current_package"),
+                    )
+                else:
+                    log(
+                        "info",
+                        "visual_mute_posts_toggle_verify_failed",
+                        failure_reason="posts_toggle_not_verified",
+                        source_profile_username=source_profile_username or "",
+                        current_activity=m_p.get("current_activity"),
+                        current_package=m_p.get("current_package"),
+                    )
+            else:
+                posts_verified = True
+        else:
+            posts_verified = False
+            log(
+                "info",
+                "visual_mute_posts_toggle_detected",
+                skipped_already_on=False,
+                tap_failed=True,
+                failure_reason=reason,
+                source_profile_username=source_profile_username or "",
+                current_activity=m_p.get("current_activity"),
+                current_package=m_p.get("current_package"),
+            )
+            log(
+                "info",
+                "visual_mute_posts_toggle_verify_failed",
+                failure_reason=f"posts_toggle_tap_failed:{reason}",
+                source_profile_username=source_profile_username or "",
+                current_activity=m_p.get("current_activity"),
+                current_package=m_p.get("current_package"),
+            )
+
+    if want_stories:
+        tapped_s, skip_s, rs, _sel = _visual_tap_toggle_row_for_label(
+            d, stories_labels, ww
+        )
+        m_s = _meta_now()
+        if skip_s:
+            stories_verified = True
+            log(
+                "info",
+                "visual_mute_stories_toggle_detected",
+                skipped_already_on=True,
+                source_profile_username=source_profile_username or "",
+                current_activity=m_s.get("current_activity"),
+                current_package=m_s.get("current_package"),
+            )
+            if verify_after:
+                stories_verified = _visual_verify_toggle_on_for_labels(
+                    d, stories_labels, verify_to
+                )
+                if stories_verified:
+                    log(
+                        "info",
+                        "visual_mute_stories_toggle_verify_success",
+                        source_profile_username=source_profile_username or "",
+                        current_activity=m_s.get("current_activity"),
+                        current_package=m_s.get("current_package"),
+                    )
+                else:
+                    log(
+                        "info",
+                        "visual_mute_stories_toggle_verify_failed",
+                        failure_reason="stories_toggle_not_verified_after_skip_on",
+                        source_profile_username=source_profile_username or "",
+                        current_activity=m_s.get("current_activity"),
+                        current_package=m_s.get("current_package"),
+                    )
+        elif tapped_s:
+            stories_tapped = True
+            log(
+                "info",
+                "visual_mute_stories_toggle_detected",
+                skipped_already_on=False,
+                source_profile_username=source_profile_username or "",
+                current_activity=m_s.get("current_activity"),
+                current_package=m_s.get("current_package"),
+            )
+            log(
+                "info",
+                "visual_mute_stories_toggle_tap_sent",
+                source_profile_username=source_profile_username or "",
+                current_activity=m_s.get("current_activity"),
+                current_package=m_s.get("current_package"),
+            )
+            time.sleep(0.42)
+            if verify_after:
+                stories_verified = _visual_verify_toggle_on_for_labels(
+                    d, stories_labels, verify_to
+                )
+                if stories_verified:
+                    log(
+                        "info",
+                        "visual_mute_stories_toggle_verify_success",
+                        source_profile_username=source_profile_username or "",
+                        current_activity=m_s.get("current_activity"),
+                        current_package=m_s.get("current_package"),
+                    )
+                else:
+                    log(
+                        "info",
+                        "visual_mute_stories_toggle_verify_failed",
+                        failure_reason="stories_toggle_not_verified",
+                        source_profile_username=source_profile_username or "",
+                        current_activity=m_s.get("current_activity"),
+                        current_package=m_s.get("current_package"),
+                    )
+            else:
+                stories_verified = True
+        else:
+            stories_verified = False
+            log(
+                "info",
+                "visual_mute_stories_toggle_detected",
+                skipped_already_on=False,
+                tap_failed=True,
+                failure_reason=rs,
+                source_profile_username=source_profile_username or "",
+                current_activity=m_s.get("current_activity"),
+                current_package=m_s.get("current_package"),
+            )
+            log(
+                "info",
+                "visual_mute_stories_toggle_verify_failed",
+                failure_reason=f"stories_toggle_tap_failed:{rs}",
+                source_profile_username=source_profile_username or "",
+                current_activity=m_s.get("current_activity"),
+                current_package=m_s.get("current_package"),
+            )
+
+    meta_f = _followers_current_pkg_activity(d)
+    both_ok = (not want_posts or posts_verified) and (not want_stories or stories_verified)
+    if both_ok:
+        log(
+            "info",
+            "visual_mute_toggle_verify_success",
+            posts_verified=not want_posts or posts_verified,
+            stories_verified=not want_stories or stories_verified,
+            posts_tapped=posts_tapped,
+            stories_tapped=stories_tapped,
+            source_profile_username=source_profile_username or "",
+            current_activity=meta_f.get("current_activity"),
+            current_package=meta_f.get("current_package"),
+        )
+    else:
+        _fail_parts: list[str] = []
+        if want_posts and not posts_verified:
+            _fail_parts.append("posts_not_verified")
+        if want_stories and not stories_verified:
+            _fail_parts.append("stories_not_verified")
+        _combo = "|".join(_fail_parts) if _fail_parts else "incomplete_verify_state"
+        log(
+            "info",
+            "visual_mute_toggle_verify_failed",
+            failure_reason=_combo,
+            posts_verified=posts_verified,
+            stories_verified=stories_verified,
+            source_profile_username=source_profile_username or "",
+            current_activity=meta_f.get("current_activity"),
+            current_package=meta_f.get("current_package"),
+        )
+
+    try:
+        d.press("back")
+        time.sleep(0.45)
+        d.press("back")
+        time.sleep(0.35)
+    except Exception:
+        pass
+
+    log(
+        "info",
+        "visual_mute_toggle_complete",
+        ok=both_ok,
+        posts_verified=not want_posts or posts_verified,
+        stories_verified=not want_stories or stories_verified,
+        source_profile_username=source_profile_username or "",
+        current_activity=meta_f.get("current_activity"),
+        current_package=meta_f.get("current_package"),
+    )
+    _fin_reason = None
+    if not both_ok:
+        _fp: list[str] = []
+        if want_posts and not posts_verified:
+            _fp.append("posts_not_verified")
+        if want_stories and not stories_verified:
+            _fp.append("stories_not_verified")
+        _fin_reason = "|".join(_fp) if _fp else "mute_toggle_incomplete"
+
+    return {
+        "ok": both_ok,
+        "failure_reason": _fin_reason,
+        "posts_verified": not want_posts or posts_verified,
+        "stories_verified": not want_stories or stories_verified,
+        "posts_tapped": posts_tapped,
+        "stories_tapped": stories_tapped,
+        "source_profile_username": source_profile_username or "",
     }
 
 
