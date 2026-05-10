@@ -7,6 +7,7 @@ import time
 import uuid
 from collections.abc import Callable
 from datetime import datetime, timezone
+from typing import Any
 
 import social_memory
 from visual_follow_history import (
@@ -67,11 +68,14 @@ from instagram_navigation import (
     open_followers_list_from_profile,
     detect_followers_list_screen,
     FOLLOWERS_ENGINE_XML_STALE_EXIT_REASONS,
+    FOLLOWERS_ENGINE_VISUAL_OPEN_METHODS,
+    followers_bypass_xml_stale_recovery_if_visual_surface_strong,
     get_followers_engine_stop_reason,
     iter_followers_candidates,
     open_follower_profile_from_list,
     return_to_followers_list,
     scroll_followers_list_forward,
+    followers_force_hierarchy_refresh,
     visual_extract_followers_candidates_from_screenshot,
     open_visual_follower_candidate_from_screenshot,
     visual_like_open_post,
@@ -88,7 +92,17 @@ from instagram_navigation import (
     visual_target_profile_lock_clear,
     visual_target_profile_lock_verify,
     visual_detect_private_profile,
+    visual_extract_profile_metrics,
+    visual_flow_final_return_to_ct_followers_list,
+    verify_followers_list_surface_is_ct_account,
+    reset_instagram_to_canonical_state,
+    ensure_global_search_surface,
+    visual_profile_metrics_pass_filter,
+    visual_profile_stats_posts_count,
+    read_current_profile_username_for_follow_gate,
+    reacquire_target_profile_for_follow,
     _followers_current_pkg_activity,
+    _follow_ui_state_snapshot,
 )
 from logs import get_run_log_file_path, init_run_file_logging, log
 
@@ -99,6 +113,17 @@ _RUNTIME_FOLLOW_COUNT: int = 0
 _RUNTIME_FOLLOWED_USERNAMES: set[str] = set()
 # Follower rows already selected in followers-list engine (same run).
 _RUNTIME_SEEN_FOLLOWER_USERNAMES: set[str] = set()
+# Opens that resolved username on-profile but did not complete follow (anti-loop).
+_RUNTIME_FOLLOWERS_POST_RESOLVE_STREAK: dict[str, int] = {}
+# CT followers-list engine: usernames for which perform_follow_safe has returned this process.
+_RUNTIME_CT_LIST_FOLLOW_TAP_ATTEMPTED_USERNAMES: set[str] = set()
+# perform_follow_safe returned follow_started but no follow_tap_sent (per fkey, this run).
+_CT_FOLLOW_NO_TAP_AFTER_START_COUNT: dict[str, int] = {}
+# Candidates that returned failed_no_follow_tap this run — never reopen without a successful tap.
+_RUNTIME_FAILED_NO_FOLLOW_TAP_FKEY: set[str] = set()
+# Monotonic clock: deadline tracking for one CT-list candidate (survives profile reopens until tap or clear).
+_CT_CANDIDATE_ATTEMPT_STARTED_MONO: float | None = None
+_CT_CANDIDATE_ATTEMPT_FKEY: str | None = None
 _RUNTIME_INTERACTED_USERNAMES: set[str] = set()
 _RUNTIME_UNFOLLOWED_USERNAMES: set[str] = set()
 _RUNTIME_SKIPPED_USERNAMES: set[str] = set()
@@ -328,6 +353,12 @@ def _exit_reason_from_code(code: int) -> str:
         61: "visual_mute_real_failed",
         62: "visual_private_profile_skipped",
         63: "visual_private_follow_requested",
+        64: "visual_flow_canonical_reset_required",
+        65: "visual_mute_tap_sent_unverified",
+        66: "visual_followers_no_more_candidates_after_scrolls",
+        67: "visual_followers_stalled_visible_follow_buttons_no_candidate",
+        71: "follow_started_without_tap_watchdog",
+        72: "failed_no_follow_tap",
     }
     return mapping.get(code, f"exit_code_{code}")
 
@@ -472,6 +503,52 @@ def _persist_social_memory_follow_block(
         kind="skip_block",
         reason=elig.reason,
     )
+
+
+def _ct_list_raw_follow_invite_visible(d: Any) -> bool:
+    """UiAutomator probe when _follow_ui_state_snapshot misses (e.g. sparse headers)."""
+    try:
+        if d(text="Follow").exists(timeout=0.07):
+            return True
+        if d(text="Suivre").exists(timeout=0.05):
+            return True
+        if d(textContains="Follow").exists(timeout=0.05):
+            return True
+        if d(description="Follow").exists(timeout=0.04):
+            return True
+    except Exception:
+        return False
+    return False
+
+
+def _ct_list_bypass_runtime_duplicate_social_memory(
+    d: Any,
+    *,
+    elig: social_memory.FollowEligibility,
+    fkey: str,
+    followers_resolved_continue: bool,
+    resolve_streak: int,
+    follow_header_snap: str,
+    follow_invite_visible: bool,
+    enable_real_follow: bool,
+    enable_visual_follow: bool,
+) -> bool:
+    """
+    Allow one real perform_follow_safe on CT list–opened profiles when the only block is
+    runtime_interacted from an earlier navigation that never sent a follow tap.
+    """
+    if elig.allowed or not getattr(config, "SOCIAL_MEMORY_ENABLED", True):
+        return False
+    if elig.reason != "runtime_already_interacted":
+        return False
+    if fkey in _RUNTIME_CT_LIST_FOLLOW_TAP_ATTEMPTED_USERNAMES:
+        return False
+    if not (enable_real_follow or enable_visual_follow):
+        return False
+    _raw = _ct_list_raw_follow_invite_visible(d)
+    if not (follow_invite_visible or follow_header_snap == "follow" or _raw):
+        return False
+    return bool(followers_resolved_continue or resolve_streak >= 2)
 
 
 def _flush_follow_action_logs_to_supabase(
@@ -2357,6 +2434,94 @@ def _norm_ig_handle(u: str) -> str:
     return (u or "").strip().lstrip("@").lower()
 
 
+def _ct_clear_candidate_attempt_timer() -> None:
+    global _CT_CANDIDATE_ATTEMPT_STARTED_MONO, _CT_CANDIDATE_ATTEMPT_FKEY
+    _CT_CANDIDATE_ATTEMPT_STARTED_MONO = None
+    _CT_CANDIDATE_ATTEMPT_FKEY = None
+
+
+def _ct_start_candidate_attempt_timer(fkey: str) -> None:
+    """
+    Start (or preserve) the attempt window from first username resolution for this fkey.
+    Reopens of the same profile without a follow tap keep the original deadline.
+    """
+    global _CT_CANDIDATE_ATTEMPT_STARTED_MONO, _CT_CANDIDATE_ATTEMPT_FKEY
+    fk = _norm_ig_handle(fkey)
+    if not fk:
+        return
+    if (
+        _CT_CANDIDATE_ATTEMPT_FKEY == fk
+        and _CT_CANDIDATE_ATTEMPT_STARTED_MONO is not None
+        and fk not in _RUNTIME_CT_LIST_FOLLOW_TAP_ATTEMPTED_USERNAMES
+    ):
+        return
+    _CT_CANDIDATE_ATTEMPT_STARTED_MONO = time.monotonic()
+    _CT_CANDIDATE_ATTEMPT_FKEY = fk
+
+
+def _ct_candidate_follow_attempt_timed_out(fkey: str, *, timeout_s: float) -> bool:
+    global _CT_CANDIDATE_ATTEMPT_STARTED_MONO, _CT_CANDIDATE_ATTEMPT_FKEY
+    fk = _norm_ig_handle(fkey)
+    if not fk or _CT_CANDIDATE_ATTEMPT_STARTED_MONO is None or _CT_CANDIDATE_ATTEMPT_FKEY != fk:
+        return False
+    if fk in _RUNTIME_CT_LIST_FOLLOW_TAP_ATTEMPTED_USERNAMES:
+        return False
+    if fk in _RUNTIME_FOLLOWED_USERNAMES:
+        return False
+    return (time.monotonic() - _CT_CANDIDATE_ATTEMPT_STARTED_MONO) >= float(timeout_s)
+
+
+def _ct_return_followers_list_or_canonical_reset(
+    d: Any,
+    *,
+    source_profile_username: str,
+    pkg: str,
+    account_id: str | None,
+    reason: str,
+) -> None:
+    ok_r, how = return_to_followers_list(d, source_profile_username, pkg)
+    if ok_r:
+        log(
+            "info",
+            "visual_followers_timeout_returned_to_ct_list",
+            reason=reason,
+            how=how,
+            source_profile_username=source_profile_username,
+        )
+        return
+    log(
+        "warning",
+        "visual_followers_timeout_list_return_failed_canonical_reset",
+        reason=reason,
+        source_profile_username=source_profile_username,
+    )
+    reset_instagram_to_canonical_state(
+        d,
+        reason=f"ct_followers_{reason}",
+        source_profile_username=source_profile_username,
+        source_account_context=str(account_id or ""),
+    )
+
+
+def _ct_follow_out_had_tap_sent(follow_out: dict) -> bool:
+    return any(e[0] == "follow_tap_sent" for e in (follow_out.get("events") or []))
+
+
+def _ct_follow_out_follow_started_no_tap(follow_out: dict) -> bool:
+    if bool(follow_out.get("skipped_tap")):
+        return False
+    evs = list(follow_out.get("events") or [])
+    started = any(e[0] == "follow_started" for e in evs)
+    tapped = any(e[0] == "follow_tap_sent" for e in evs)
+    return started and not tapped
+
+
+def _ct_follow_out_is_failed_no_follow_tap(follow_out: dict) -> bool:
+    if str(follow_out.get("failure_reason") or "") == "failed_no_follow_tap":
+        return True
+    return int(follow_out.get("failure_code") or 0) == 72
+
+
 def _open_meta_visual_fallback_screenshot_path(meta: dict) -> str | None:
     """Path to the screenshot used for visual_fallback open detection, if present."""
     for key in ("last_poll_snapshot", "after_tap_screen_snapshot"):
@@ -2370,7 +2535,7 @@ def _open_meta_visual_fallback_screenshot_path(meta: dict) -> str | None:
 
 def _open_meta_visual_fallback_list_was_open(meta: dict) -> bool:
     """True when open success payload shows followers list validated via visual_fallback."""
-    if str(meta.get("open_detection_method") or "") != "visual_fallback":
+    if str(meta.get("open_detection_method") or "") not in FOLLOWERS_ENGINE_VISUAL_OPEN_METHODS:
         return False
     for key in ("last_poll_snapshot", "after_tap_screen_snapshot"):
         snap = meta.get(key) or {}
@@ -2405,11 +2570,13 @@ def _try_visual_followers_picker_dry_run(
     Returns None if picker disabled, not dry-run, not visual_fallback open proof, or no screenshot.
     """
     global _VISUAL_FOLLOWERS_OPEN_COUNT_THIS_SESSION
+    history_recorded_follow_target = False
+    history_recorded_target_username = ""
     if not bool(getattr(config, "ENABLE_VISUAL_FOLLOWERS_CANDIDATE_PICKER", False)):
         return None
     if not bool(getattr(config, "VISUAL_FOLLOWERS_PICKER_DRY_RUN", True)):
         return None
-    if str(open_list_meta.get("open_detection_method") or "") != "visual_fallback":
+    if str(open_list_meta.get("open_detection_method") or "") not in FOLLOWERS_ENGINE_VISUAL_OPEN_METHODS:
         return None
     if not _open_meta_visual_fallback_list_was_open(open_list_meta):
         return None
@@ -2427,6 +2594,15 @@ def _try_visual_followers_picker_dry_run(
             open_detection_method=open_list_meta.get("open_detection_method"),
         )
         return None
+
+    log(
+        "info",
+        "visual_followers_picker_restart_requested",
+        source_profile_username=source_profile_username,
+        stop_reason=stop_reason,
+        iteration=iteration,
+        scroll_used=scroll_used,
+    )
 
     _action_acct = str(
         getattr(config, "VISUAL_FOLLOWERS_ACTION_ACCOUNT_USERNAME", "") or ""
@@ -2552,6 +2728,7 @@ def _try_visual_followers_picker_dry_run(
             priv_detect_runner: dict = {}
             skip_post_private = False
             profile_expected_ctx = None
+            zero_posts_hard_skip = False
             if open_out.get("profile_detected"):
                 priv_detect_runner = visual_detect_private_profile(
                     d, source_profile_username=source_profile_username
@@ -2632,30 +2809,163 @@ def _try_visual_followers_picker_dry_run(
                         d, source_profile_username=source_profile_username
                     )
 
-            if open_out.get("profile_detected") and bool(
-                getattr(config, "ENABLE_VISUAL_POST_LIKE_FLOW", False)
-            ):
-                post_follow_context_blocked = False
-                if skip_post_private:
-                    meta_priv = _followers_current_pkg_activity(d)
+                gate_un = str(
+                    (profile_expected_ctx or {}).get("header_username_detected") or ""
+                ).strip().lstrip("@")
+                if not gate_un:
+                    gate_un = str(
+                        best.get("resolved_username_hint") or ""
+                    ).strip().lstrip("@")
+                if not gate_un:
+                    gate_un = str(
+                        read_current_profile_username_for_follow_gate(d) or ""
+                    ).strip().lstrip("@")
+                if gate_un:
+                    best = dict(best)
+                    best["resolved_username_hint"] = gate_un
+                    if profile_expected_ctx is not None:
+                        profile_expected_ctx = {
+                            **dict(profile_expected_ctx),
+                            "header_username_detected": gate_un,
+                        }
+                    else:
+                        profile_expected_ctx = {"header_username_detected": gate_un}
                     log(
                         "info",
-                        "visual_post_like_skipped_private_profile",
+                        "visual_followers_username_resolved_on_profile",
+                        follower_username=gate_un,
                         source_profile_username=source_profile_username,
-                        current_activity=meta_priv.get("current_activity"),
-                        current_package=meta_priv.get("current_package"),
-                        private_detection_method=priv_detect_runner.get(
-                            "detection_method"
+                        visual_candidate_id=best.get("visual_candidate_id"),
+                        phase="picker_dry_run",
+                    )
+
+                if bool(getattr(config, "ENABLE_VISUAL_POST_LIKE_BEFORE_FOLLOW", False)):
+                    zp_ct = visual_profile_stats_posts_count(d)
+                    if zp_ct is not None and int(zp_ct) == 0:
+                        zero_posts_hard_skip = True
+                        meta_zp = _followers_current_pkg_activity(d)
+                        log(
+                            "info",
+                            "visual_profile_zero_posts_hard_skip",
+                            posts_count=0,
+                            skip_post_open=True,
+                            skip_like=True,
+                            skip_mute=True,
+                            source_profile_username=source_profile_username,
+                            current_activity=meta_zp.get("current_activity"),
+                            current_package=meta_zp.get("current_package"),
+                        )
+
+            if open_out.get("profile_detected"):
+                if bool(getattr(config, "ENABLE_VISUAL_PROFILE_METRICS_FILTER", False)):
+                    metrics_pf = visual_extract_profile_metrics(
+                        d, source_profile_username=source_profile_username
+                    )
+                    pass_m, reason_m = visual_profile_metrics_pass_filter(metrics_pf)
+                    if not pass_m:
+                        log(
+                            "warning",
+                            "visual_profile_metrics_filter_skipped",
+                            filter_reason=reason_m,
+                            posts_count=metrics_pf.get("posts_count"),
+                            followers_count=metrics_pf.get("followers_count"),
+                            following_count=metrics_pf.get("following_count"),
+                            username_norm=metrics_pf.get("username_norm"),
+                            source_profile_username=source_profile_username,
+                            current_activity=metrics_pf.get("current_activity"),
+                            current_package=metrics_pf.get("current_package"),
+                        )
+                        tgt_m = str(
+                            (profile_expected_ctx or {}).get("header_username_detected")
+                            or ""
+                        ).strip().lstrip("@")
+                        if not tgt_m:
+                            tgt_m = str(
+                                best.get("resolved_username_hint") or ""
+                            ).strip().lstrip("@")
+                        if not tgt_m:
+                            cap_m = visual_capture_profile_context(
+                                d, source_profile_username=source_profile_username
+                            )
+                            tgt_m = str(
+                                cap_m.get("header_username_detected") or ""
+                            ).strip().lstrip("@")
+                        if tgt_m:
+                            mark_visual_follow_target_processed(
+                                source_profile_username=source_profile_username,
+                                target_username=tgt_m,
+                                visual_candidate_id=str(
+                                    best.get("visual_candidate_id") or ""
+                                ),
+                                status="skipped_metrics_filter",
+                                follow_verified=False,
+                                follow_request_pending=False,
+                                run_id=str(run_id or ""),
+                                source_account_context=str(source_account_context or ""),
+                                metadata={
+                                    "filter_reason": reason_m,
+                                    "posts_count": metrics_pf.get("posts_count"),
+                                    "followers_count": metrics_pf.get("followers_count"),
+                                    "following_count": metrics_pf.get("following_count"),
+                                },
+                            )
+                        visual_target_profile_lock_clear()
+                        pkg_m = config.INSTAGRAM_PACKAGE
+                        ok_m_back, how_m = return_to_followers_list(
+                            d, source_profile_username, pkg_m
+                        )
+                        log(
+                            "info",
+                            "visual_profile_metrics_skipped_return_followers",
+                            source_profile_username=source_profile_username,
+                            target_username=tgt_m,
+                            return_ok=ok_m_back,
+                            how=how_m,
+                            filter_reason=reason_m,
+                        )
+                        _VISUAL_FOLLOWERS_OPEN_COUNT_THIS_SESSION = max(
+                            0, _VISUAL_FOLLOWERS_OPEN_COUNT_THIS_SESSION - 1
+                        )
+                        if not ok_m_back:
+                            _emit_performance_summary(
+                                t0=t0,
+                                warm_session_used=warm_session_used,
+                                force_stop_used=force_stop_used,
+                                exit_code=42,
+                                target_username=source_profile_username,
+                            )
+                            return 42
+                        return VISUAL_FOLLOW_HISTORY_CONTINUE
+
+            if open_out.get("profile_detected"):
+                post_like_before = bool(
+                    getattr(config, "ENABLE_VISUAL_POST_LIKE_BEFORE_FOLLOW", False)
+                ) and bool(getattr(config, "ENABLE_VISUAL_POST_LIKE_FLOW", False))
+                _post_like_hard_lock_mismatch = False
+                post_follow_context_blocked = False
+                post_like_failed = False
+                exit_code = 48
+                fr_out = None
+                if not post_like_before:
+                    log(
+                        "info",
+                        "visual_post_like_flow_bypassed_for_stability",
+                        source_profile_username=source_profile_username,
+                        ENABLE_VISUAL_POST_LIKE_BEFORE_FOLLOW=bool(
+                            getattr(
+                                config,
+                                "ENABLE_VISUAL_POST_LIKE_BEFORE_FOLLOW",
+                                False,
+                            )
                         ),
-                        confidence=round(
-                            float(priv_detect_runner.get("confidence") or 0.0),
-                            4,
+                        ENABLE_VISUAL_POST_LIKE_FLOW=bool(
+                            getattr(config, "ENABLE_VISUAL_POST_LIKE_FLOW", False)
                         ),
                     )
                     post_out = {
                         "ok": True,
                         "post_detected": False,
-                        "private_profile": True,
+                        "private_profile": False,
                         "no_posts_profile": False,
                         "failure_reason": None,
                         "source_profile_username": source_profile_username,
@@ -2663,19 +2973,144 @@ def _try_visual_followers_picker_dry_run(
                     like_out = {
                         "ok": True,
                         "skipped": True,
-                        "private_profile": True,
+                        "stability_bypass": True,
                     }
                     back_out = {
                         "ok": True,
                         "skipped": True,
                         "profile_detected": True,
                     }
-                else:
-                    post_out = visual_open_recent_post_from_profile(
-                        d, source_profile_username=source_profile_username
+
+                def _expected_target_username_from_ctx() -> str:
+                    t = str(
+                        (profile_expected_ctx or {}).get("header_username_detected")
+                        or ""
+                    ).strip().lstrip("@")
+                    if t:
+                        return t
+                    return str(best.get("resolved_username_hint") or "").strip().lstrip(
+                        "@"
                     )
-                _pr_fail = str(post_out.get("failure_reason") or "")
-                post_follow_context_blocked = False
+
+                def _follower_candidate_payload() -> dict:
+                    tx = open_out.get("tap_x")
+                    ty = open_out.get("tap_y")
+                    un = _expected_target_username_from_ctx()
+                    rc: list[int]
+                    if tx is not None and ty is not None:
+                        rc = [int(tx), int(ty)]
+                    else:
+                        rb = dict(best.get("approx_row_bounds") or {})
+                        try:
+                            w, _h = d.window_size()
+                            mx = int(w) // 2
+                        except Exception:
+                            mx = 360
+                        top = int(rb.get("top") or 0)
+                        bot = int(rb.get("bottom") or 0)
+                        rc = [mx, (top + bot) // 2]
+                    return {"username": un, "row_center": rc}
+
+                def _follow_surface_ok_for_dry_run(
+                    expected: str,
+                ) -> tuple[bool, str, str]:
+                    src_n = _norm_ig_handle(source_profile_username)
+                    exp_n = _norm_ig_handle(expected)
+                    cur_n = _norm_ig_handle(
+                        read_current_profile_username_for_follow_gate(d)
+                    )
+                    if cur_n == src_n:
+                        return False, cur_n, "on_source_ct_profile_not_target"
+                    if not exp_n:
+                        if cur_n:
+                            return True, cur_n, "ok_expected_from_profile_gate_only"
+                        return False, cur_n, "missing_expected_target_username"
+                    if cur_n != exp_n:
+                        return False, cur_n, "current_username_mismatch_expected"
+                    return True, cur_n, "ok"
+
+                def _fr_out_follow_blocked_stub(
+                    reason: str,
+                ) -> dict:
+                    return {
+                        "ok": False,
+                        "follow_button_detected": False,
+                        "follow_verified": False,
+                        "real_follow_tap_sent": False,
+                        "skip_already_following": False,
+                        "profile_context_mismatch": True,
+                        "target_profile_lock_mismatch": False,
+                        "failure_reason": reason,
+                        "detected_button_text": "",
+                        "follow_button_visible_after_verify": False,
+                        "follow_request_pending": False,
+                        "follow_request_pending_method": "",
+                        "tap_x": None,
+                        "tap_y": None,
+                        "follow_button_bounds": None,
+                        "dry_run": True,
+                    }
+
+                if not post_like_before:
+                    log(
+                        "info",
+                        "visual_follow_stability_flow_started",
+                        source_profile_username=source_profile_username,
+                    )
+
+                if post_like_before:
+                    post_follow_context_blocked = False
+                    if skip_post_private:
+                        meta_priv = _followers_current_pkg_activity(d)
+                        log(
+                            "info",
+                            "visual_post_like_skipped_private_profile",
+                            source_profile_username=source_profile_username,
+                            current_activity=meta_priv.get("current_activity"),
+                            current_package=meta_priv.get("current_package"),
+                            private_detection_method=priv_detect_runner.get(
+                                "detection_method"
+                            ),
+                            confidence=round(
+                                float(priv_detect_runner.get("confidence") or 0.0),
+                                4,
+                            ),
+                        )
+                        post_out = {
+                            "ok": True,
+                            "post_detected": False,
+                            "private_profile": True,
+                            "no_posts_profile": False,
+                            "failure_reason": None,
+                            "source_profile_username": source_profile_username,
+                        }
+                        like_out = {
+                            "ok": True,
+                            "skipped": True,
+                            "private_profile": True,
+                        }
+                        back_out = {
+                            "ok": True,
+                            "skipped": True,
+                            "profile_detected": True,
+                        }
+                    elif zero_posts_hard_skip:
+                        post_out = {
+                            "ok": True,
+                            "post_detected": False,
+                            "private_profile": False,
+                            "no_posts_profile": True,
+                            "no_posts_detection_method": "stats_strip_posts_zero_hard_skip",
+                            "no_posts_confidence": 1.0,
+                            "failure_reason": None,
+                            "source_profile_username": source_profile_username,
+                        }
+                    else:
+                        post_out = visual_open_recent_post_from_profile(
+                            d, source_profile_username=source_profile_username
+                        )
+                    _pr_fail = str(post_out.get("failure_reason") or "")
+                    post_follow_context_blocked = False
                 if (
                     not bool(post_out.get("post_detected"))
                     and _pr_fail == "post_viewer_not_detected"
@@ -2857,6 +3292,9 @@ def _try_visual_followers_picker_dry_run(
                         d,
                         source_profile_username=source_profile_username,
                         expected_profile_context=profile_expected_ctx,
+                        post_opened_via_profile_grid=bool(
+                            post_out.get("post_detected")
+                        ),
                     )
                     if (
                         bool(getattr(config, "ENABLE_REAL_VISUAL_POST_LIKE", False))
@@ -2872,6 +3310,9 @@ def _try_visual_followers_picker_dry_run(
                                 tap_x=like_out.get("tap_x"),
                                 tap_y=like_out.get("tap_y"),
                                 detect_confidence=like_out.get("confidence"),
+                                like_button_state_before=like_out.get(
+                                    "like_button_state_before"
+                                ),
                             )
                             like_out["liked_verified"] = bool(
                                 ver.get("liked_verified")
@@ -2905,7 +3346,16 @@ def _try_visual_followers_picker_dry_run(
                         d, source_profile_username=source_profile_username
                     )
                 elif post_out.get("private_profile"):
-                    pass
+                    like_out = {
+                        "ok": True,
+                        "skipped": True,
+                        "private_profile": True,
+                    }
+                    back_out = {
+                        "ok": True,
+                        "skipped": True,
+                        "profile_detected": True,
+                    }
                 else:
                     like_out = {
                         "ok": False,
@@ -2987,6 +3437,7 @@ def _try_visual_followers_picker_dry_run(
                             "profile_after_back": back_out.get("profile_detected"),
                         },
                     )
+                fr_out = None
                 exit_code = 47
                 if post_out.get("no_posts_profile"):
                     exit_code = 52
@@ -2997,14 +3448,103 @@ def _try_visual_followers_picker_dry_run(
                         exit_code = (
                             49 if like_out.get("liked_verified") else 50
                         )
-                if (
-                    post_follow_context_blocked
-                    or post_out.get("target_profile_lock_mismatch")
+                _post_like_hard_lock_mismatch = bool(
+                    post_out.get("target_profile_lock_mismatch")
                     or like_out.get("target_profile_lock_mismatch")
                     or like_out.get("profile_context_mismatch")
-                ):
+                )
+                if _post_like_hard_lock_mismatch:
                     exit_code = 58
-                elif bool(getattr(config, "ENABLE_VISUAL_FOLLOW_MUTE_FLOW", False)):
+                elif post_follow_context_blocked:
+                    log(
+                        "info",
+                        "visual_post_like_failed_continue_to_follow",
+                        source_profile_username=source_profile_username,
+                        post_detected=bool(post_out.get("post_detected")),
+                        post_ok=bool(post_out.get("ok")),
+                        like_ok=bool(like_out.get("ok")),
+                        failure_reason=str(post_out.get("failure_reason") or ""),
+                    )
+                    log(
+                        "info",
+                        "visual_follow_attempt_allowed_after_post_like_failure",
+                        source_profile_username=source_profile_username,
+                    )
+
+                posts_count_gate = visual_profile_stats_posts_count(d)
+                like_ok_effective = bool(
+                    like_out.get("already_liked")
+                    or (
+                        like_out.get("ok")
+                        and (
+                            not real_visual_like
+                            or bool(like_out.get("liked_verified"))
+                        )
+                    )
+                )
+                post_like_failed = bool(
+                    not skip_post_private
+                    and not bool(post_out.get("no_posts_profile"))
+                    and not bool(post_out.get("private_profile"))
+                    and (
+                        (posts_count_gate is not None and int(posts_count_gate) > 0)
+                        or bool(post_out.get("post_detected"))
+                    )
+                    and (
+                        post_follow_context_blocked
+                        or not bool(post_out.get("ok"))
+                        or (
+                            bool(post_out.get("post_detected"))
+                            and not like_ok_effective
+                        )
+                    )
+                )
+
+                if bool(getattr(config, "ENABLE_VISUAL_FOLLOW_MUTE_FLOW", False)) and (
+                    not _post_like_hard_lock_mismatch
+                ):
+                    if (
+                        post_like_failed
+                        and posts_count_gate is not None
+                        and int(posts_count_gate) > 0
+                    ):
+                        log(
+                            "info",
+                            "visual_post_like_failed_target_reacquire_before_follow",
+                            source_profile_username=source_profile_username,
+                            posts_count=int(posts_count_gate),
+                            post_detected=bool(post_out.get("post_detected")),
+                            like_ok_effective=like_ok_effective,
+                        )
+                        _cand_pre = _follower_candidate_payload()
+                        _racq_pre = reacquire_target_profile_for_follow(
+                            d,
+                            target_username=_expected_target_username_from_ctx(),
+                            source_profile_username=source_profile_username,
+                            source_account_context=str(source_account_context or ""),
+                            follower_candidate=_cand_pre
+                            if str(_cand_pre.get("username") or "").strip()
+                            else None,
+                        )
+                        if _racq_pre.get("ok"):
+                            log(
+                                "info",
+                                "visual_follow_attempt_allowed_after_target_reacquire",
+                                source_profile_username=source_profile_username,
+                                reacquire_method=str(
+                                    _racq_pre.get("method") or ""
+                                ),
+                            )
+                            if bool(
+                                getattr(
+                                    config, "ENABLE_VISUAL_PROFILE_CONTEXT_LOCK", False
+                                )
+                            ):
+                                profile_expected_ctx = visual_capture_profile_context(
+                                    d,
+                                    source_profile_username=source_profile_username,
+                                )
+
                     log(
                         "info",
                         "visual_follow_runtime_config",
@@ -3020,11 +3560,68 @@ def _try_visual_followers_picker_dry_run(
                         ),
                         source_profile_username=source_profile_username,
                     )
-                    fr_out = visual_follow_profile_dry_run(
-                        d,
-                        source_profile_username=source_profile_username,
-                        expected_profile_context=profile_expected_ctx,
+                    _exp_tgt = _expected_target_username_from_ctx()
+                    _ok_gate, _cur_u, _reason_gate = _follow_surface_ok_for_dry_run(
+                        _exp_tgt
                     )
+                    if not _ok_gate:
+                        log(
+                            "info",
+                            "visual_follow_blocked_not_on_target_profile",
+                            expected_target_username=_exp_tgt,
+                            current_username=_cur_u,
+                            source_profile_username=source_profile_username,
+                            reason=_reason_gate,
+                        )
+                        _cand_g = _follower_candidate_payload()
+                        _racq_g = reacquire_target_profile_for_follow(
+                            d,
+                            target_username=_exp_tgt,
+                            source_profile_username=source_profile_username,
+                            source_account_context=str(source_account_context or ""),
+                            follower_candidate=_cand_g
+                            if str(_cand_g.get("username") or "").strip()
+                            else None,
+                        )
+                        if _racq_g.get("ok"):
+                            if bool(
+                                getattr(
+                                    config, "ENABLE_VISUAL_PROFILE_CONTEXT_LOCK", False
+                                )
+                            ):
+                                profile_expected_ctx = visual_capture_profile_context(
+                                    d,
+                                    source_profile_username=source_profile_username,
+                                )
+                            _exp_tgt = _expected_target_username_from_ctx()
+                            _ok_gate, _cur_u, _reason_gate = (
+                                _follow_surface_ok_for_dry_run(_exp_tgt)
+                            )
+                        if not _ok_gate:
+                            log(
+                                "info",
+                                "visual_follow_blocked_not_on_target_profile",
+                                expected_target_username=_exp_tgt,
+                                current_username=_cur_u,
+                                source_profile_username=source_profile_username,
+                                reason=_reason_gate,
+                                phase="after_reacquire",
+                            )
+                            fr_out = _fr_out_follow_blocked_stub(
+                                "visual_follow_blocked_not_on_target_profile_after_reacquire"
+                            )
+                        else:
+                            fr_out = visual_follow_profile_dry_run(
+                                d,
+                                source_profile_username=source_profile_username,
+                                expected_profile_context=profile_expected_ctx,
+                            )
+                    else:
+                        fr_out = visual_follow_profile_dry_run(
+                            d,
+                            source_profile_username=source_profile_username,
+                            expected_profile_context=profile_expected_ctx,
+                        )
                     real_mute_on = bool(
                         getattr(config, "ENABLE_REAL_VISUAL_MUTE_AFTER_FOLLOW", False)
                     )
@@ -3034,20 +3631,70 @@ def _try_visual_followers_picker_dry_run(
                         and fr_out.get("real_follow_tap_sent")
                     )
                     mute_skip_private_rq = bool(
-                        skip_post_private
-                        and bool(getattr(config, "FOLLOW_PRIVATE_ACCOUNTS", False))
+                        bool(getattr(config, "FOLLOW_PRIVATE_ACCOUNTS", False))
                         and bool(fr_out.get("follow_request_pending"))
+                        and bool(fr_out.get("follow_verified"))
                     )
                     real_mute_eligible = bool(
                         real_follow_ok and not mute_skip_private_rq
                     )
                     mute_real = None
 
+                    if (
+                        not post_like_before
+                        and fr_out is not None
+                        and fr_out.get("follow_verified")
+                    ):
+                        log(
+                            "info",
+                            "visual_follow_stability_follow_verified",
+                            source_profile_username=source_profile_username,
+                            username_norm=_expected_target_username_from_ctx(),
+                            follow_request_pending=bool(
+                                fr_out.get("follow_request_pending")
+                            ),
+                        )
+
+                    if zero_posts_hard_skip:
+                        log(
+                            "info",
+                            "visual_follow_zero_posts_continue_mute_flow",
+                            source_profile_username=source_profile_username,
+                            follow_verified=bool(fr_out.get("follow_verified")),
+                            real_follow_ok=real_follow_ok,
+                            real_mute_on=real_mute_on,
+                            mute_skip_private_rq=mute_skip_private_rq,
+                            skip_post_open=True,
+                            skip_like=True,
+                        )
+
                     if fr_out.get("profile_context_mismatch") or fr_out.get(
                         "target_profile_lock_mismatch"
                     ):
                         act_out = {"popup_detected": False, "skipped": True}
                         mute_out = {"ok": False, "skipped": True}
+                    elif bool(getattr(config, "ENABLE_REAL_VISUAL_FOLLOW", False)) and not bool(
+                        fr_out.get("follow_verified")
+                    ):
+                        log(
+                            "info",
+                            "visual_follow_mute_skipped_follow_unverified",
+                            source_profile_username=source_profile_username,
+                            follow_verified=False,
+                            real_follow_tap_sent=bool(
+                                fr_out.get("real_follow_tap_sent")
+                            ),
+                            skip_already_following=bool(
+                                fr_out.get("skip_already_following")
+                            ),
+                            failure_reason=str(fr_out.get("failure_reason") or ""),
+                        )
+                        act_out = {"popup_detected": False, "skipped": True}
+                        mute_out = {
+                            "ok": False,
+                            "skipped": True,
+                            "skipped_reason": "follow_not_verified",
+                        }
                     elif mute_skip_private_rq and real_follow_ok:
                         log(
                             "info",
@@ -3061,6 +3708,18 @@ def _try_visual_followers_picker_dry_run(
                                 fr_out.get("follow_request_pending_method") or ""
                             ),
                         )
+                        log(
+                            "info",
+                            "private_follow_request_skip_mute_expected",
+                            source_profile_username=source_profile_username,
+                            visual_private_profile_detected=bool(
+                                priv_detect_runner.get("private_profile_detected")
+                            ),
+                            follow_verified=bool(fr_out.get("follow_verified")),
+                            follow_request_pending=bool(
+                                fr_out.get("follow_request_pending")
+                            ),
+                        )
                         act_out = {"popup_detected": False, "skipped": True}
                         mute_out = {
                             "ok": False,
@@ -3068,6 +3727,12 @@ def _try_visual_followers_picker_dry_run(
                             "skipped_reason": "private_follow_request_pending",
                         }
                     elif real_mute_on and real_mute_eligible:
+                        if not post_like_before:
+                            log(
+                                "info",
+                                "visual_follow_stability_mute_started",
+                                source_profile_username=source_profile_username,
+                            )
                         act_out = visual_detect_follow_post_actions(
                             d, source_profile_username=source_profile_username
                         )
@@ -3164,15 +3829,11 @@ def _try_visual_followers_picker_dry_run(
                         elif fr_out.get("skip_already_following"):
                             exit_code = 57
                         elif fr_out.get("real_follow_tap_sent"):
-                            _pd = bool(
-                                priv_detect_runner.get("private_profile_detected")
-                            )
                             _fp = bool(
                                 getattr(config, "FOLLOW_PRIVATE_ACCOUNTS", False)
                             )
                             if (
-                                _pd
-                                and _fp
+                                _fp
                                 and fr_out.get("follow_verified")
                                 and fr_out.get("follow_request_pending")
                             ):
@@ -3181,10 +3842,79 @@ def _try_visual_followers_picker_dry_run(
                                 exit_code = (
                                     55 if fr_out.get("follow_verified") else 56
                                 )
+                    if exit_code in (55, 57, 63):
+                        tgt_rec = str(
+                            (profile_expected_ctx or {}).get(
+                                "header_username_detected"
+                            )
+                            or ""
+                        ).strip().lstrip("@")
+                        if not tgt_rec:
+                            tgt_rec = str(
+                                (best or {}).get("resolved_username_hint") or ""
+                            ).strip().lstrip("@")
+                        meta_hist = _followers_current_pkg_activity(d)
+                        if not bool(fr_out.get("follow_verified")):
+                            log(
+                                "info",
+                                "visual_follow_history_not_recorded_follow_unverified",
+                                detected_button_text=str(
+                                    fr_out.get("detected_button_text") or ""
+                                ),
+                                follow_verified=False,
+                                follow_button_visible_after_verify=bool(
+                                    fr_out.get("follow_button_visible_after_verify")
+                                ),
+                                current_activity=meta_hist.get("current_activity"),
+                                current_package=meta_hist.get("current_package"),
+                                source_profile_username=source_profile_username,
+                                exit_code=exit_code,
+                                failure_reason=str(fr_out.get("failure_reason") or ""),
+                            )
+                        else:
+                            _hist_meta: dict = {"exit_code": exit_code}
+                            if exit_code == 63:
+                                _hist_meta["visual_private_profile_detected"] = bool(
+                                    priv_detect_runner.get("private_profile_detected")
+                                )
+                            mark_visual_follow_target_processed(
+                                source_profile_username=source_profile_username,
+                                target_username=tgt_rec,
+                                visual_candidate_id=str(
+                                    (best or {}).get("visual_candidate_id") or ""
+                                ),
+                                status={
+                                    55: "followed",
+                                    57: "already_following",
+                                    63: "follow_requested",
+                                }[exit_code],
+                                follow_verified=bool(fr_out.get("follow_verified")),
+                                follow_request_pending=bool(
+                                    fr_out.get("follow_request_pending")
+                                ),
+                                run_id=str(run_id or ""),
+                                source_account_context=str(source_account_context or ""),
+                                metadata=_hist_meta,
+                            )
+                            history_recorded_follow_target = True
+                            history_recorded_target_username = tgt_rec
+                            if exit_code == 63 and bool(
+                                priv_detect_runner.get("private_profile_detected")
+                            ) and bool(fr_out.get("follow_request_pending")):
+                                log(
+                                    "info",
+                                    "private_follow_request_handled_success",
+                                    source_profile_username=source_profile_username,
+                                    target_username=tgt_rec,
+                                    visual_private_profile_detected=True,
+                                    follow_request_pending=True,
+                                    exit_code=exit_code,
+                                )
                     if (
                         real_mute_on
                         and real_mute_eligible
                         and mute_real is not None
+                        and not bool(fr_out.get("follow_request_pending"))
                     ):
                         fo_r = mute_real.get("following_options") or {}
                         ms_r = mute_real.get("mute_sheet")
@@ -3201,15 +3931,20 @@ def _try_visual_followers_picker_dry_run(
                             )
                         ):
                             exit_code = 58
-                        elif isinstance(tg_r, dict) and tg_r.get("ok"):
-                            exit_code = 59
-                        elif isinstance(tg_r, dict) and (
-                            tg_r.get("posts_verified")
-                            or tg_r.get("stories_verified")
-                        ):
-                            exit_code = 60
-                        else:
-                            exit_code = 61
+                        elif isinstance(tg_r, dict):
+                            pst = bool(tg_r.get("posts_verify_strict"))
+                            sst = bool(tg_r.get("stories_verify_strict"))
+                            vt = bool(tg_r.get("verify_trusted"))
+                            mtu = bool(tg_r.get("mute_tap_sent_unverified"))
+                            tg_ok = bool(tg_r.get("ok"))
+                            if tg_ok and vt:
+                                exit_code = 59
+                            elif tg_ok and (pst or sst) and not vt:
+                                exit_code = 60
+                            elif tg_ok and mtu:
+                                exit_code = 65
+                            else:
+                                exit_code = 61
                     if exit_code not in (
                         49,
                         50,
@@ -3224,38 +3959,211 @@ def _try_visual_followers_picker_dry_run(
                         61,
                         62,
                         63,
+                        65,
                     ):
                         exit_code = 48
-                    if exit_code in (55, 57, 63):
-                        tgt_rec = str(
-                            (profile_expected_ctx or {}).get(
-                                "header_username_detected"
-                            )
-                            or ""
-                        ).strip().lstrip("@")
-                        if not tgt_rec:
-                            tgt_rec = str(
-                                (best or {}).get("resolved_username_hint") or ""
-                            ).strip().lstrip("@")
-                        mark_visual_follow_target_processed(
+                pkg_fin = config.INSTAGRAM_PACKAGE
+                _picker_fin_cand = str(
+                    (best or {}).get("resolved_username_hint") or ""
+                ).strip().lstrip("@")
+                if not _picker_fin_cand:
+                    _picker_fin_cand = str(
+                        (profile_expected_ctx or {}).get("header_username_detected")
+                        or ""
+                    ).strip().lstrip("@")
+                if not post_like_before:
+                    log(
+                        "info",
+                        "visual_follow_stability_return_ct_followers_started",
+                        source_profile_username=source_profile_username,
+                        candidate_username=_picker_fin_cand,
+                    )
+                fin_ret = visual_flow_final_return_to_ct_followers_list(
+                    d,
+                    source_profile_username=source_profile_username,
+                    pkg=pkg_fin,
+                    candidate_username=_picker_fin_cand or None,
+                    source_account_context=str(source_account_context or "") or None,
+                )
+                ok_fin = bool(fin_ret.get("final_return_ok"))
+                how_fin = str(fin_ret.get("how") or "")
+                if (
+                    ok_fin
+                    and not fin_ret.get("restart_required")
+                    and not verify_followers_list_surface_is_ct_account(
+                        d,
+                        source_profile_username=source_profile_username,
+                        follower_candidate_username=_picker_fin_cand or None,
+                    )
+                ):
+                    log(
+                        "info",
+                        "visual_followers_picker_abort_wrong_source_list",
+                        phase="post_final_return_surface_check",
+                        source_profile_username=source_profile_username,
+                        follower_candidate_username=_picker_fin_cand,
+                    )
+                    rr_wr = reset_instagram_to_canonical_state(
+                        d,
+                        reason="picker_wrong_followers_list_header",
+                        source_profile_username=source_profile_username,
+                        source_account_context=str(source_account_context or "") or None,
+                    )
+                    if rr_wr.get("ok") and _reenter_ct_followers_list_after_canonical_reset(
+                        d,
+                        source_profile_username=source_profile_username,
+                        account_id=str(source_account_context or ""),
+                        context="picker_wrong_followers_list_recover",
+                    ):
+                        visual_target_profile_lock_clear()
+                        return VISUAL_FOLLOW_HISTORY_CONTINUE
+                    ok_fin = False
+                    how_fin = "wrong_followers_list_after_return"
+                if (
+                    not post_like_before
+                    and ok_fin
+                    and not fin_ret.get("restart_required")
+                    and verify_followers_list_surface_is_ct_account(
+                        d,
+                        source_profile_username=source_profile_username,
+                        follower_candidate_username=_picker_fin_cand or None,
+                    )
+                ):
+                    log(
+                        "info",
+                        "visual_follow_stability_return_ct_followers_success",
+                        source_profile_username=source_profile_username,
+                        final_return_how=how_fin,
+                        candidate_username=_picker_fin_cand,
+                    )
+                if fin_ret.get("restart_required"):
+                    reset_ok = bool(fin_ret.get("reset_ok"))
+                    if reset_ok and _reenter_ct_followers_list_after_canonical_reset(
+                        d,
+                        source_profile_username=source_profile_username,
+                        account_id=str(source_account_context or ""),
+                        context="visual_flow_after_final_return_reset",
+                    ):
+                        log(
+                            "info",
+                            "visual_flow_canonical_reset_recovered",
                             source_profile_username=source_profile_username,
-                            target_username=tgt_rec,
-                            visual_candidate_id=str(
-                                (best or {}).get("visual_candidate_id") or ""
+                            final_return_how=how_fin,
+                            reset_performed=bool(fin_ret.get("reset_performed")),
+                            business_status="recovered_reset",
+                            history_target_recorded=bool(
+                                history_recorded_follow_target
                             ),
-                            status={
-                                55: "followed",
-                                57: "already_following",
-                                63: "follow_requested",
-                            }[exit_code],
-                            follow_verified=bool(fr_out.get("follow_verified")),
-                            follow_request_pending=bool(
-                                fr_out.get("follow_request_pending")
-                            ),
-                            run_id=str(run_id or ""),
-                            source_account_context=str(source_account_context or ""),
-                            metadata={"exit_code": exit_code},
                         )
+                        log(
+                            "info",
+                            "visual_flow_restart_from_canonical_requested",
+                            source_profile_username=source_profile_username,
+                            resume="followers_engine_same_session",
+                        )
+                        log(
+                            "info",
+                            "visual_followers_reentry_success_continue",
+                            source_profile_username=source_profile_username,
+                        )
+                        if history_recorded_follow_target:
+                            log(
+                                "info",
+                                "visual_follow_history_preserved_after_reset",
+                                source_profile_username=source_profile_username,
+                                target_username=history_recorded_target_username,
+                            )
+                            log(
+                                "info",
+                                "visual_followers_next_run_should_skip_recorded_target",
+                                source_profile_username=source_profile_username,
+                                target_username=history_recorded_target_username,
+                                skip_reason="already_processed_follow_target",
+                            )
+                        log(
+                            "info",
+                            "visual_follow_history_state_debug",
+                            history_recorded_follow_target=history_recorded_follow_target,
+                            history_recorded_target_username=history_recorded_target_username,
+                            exit_code=exit_code,
+                            branch="canonical_reset_recovered_return_continue",
+                        )
+                        visual_target_profile_lock_clear()
+                        return VISUAL_FOLLOW_HISTORY_CONTINUE
+                    log(
+                        "info",
+                        "visual_flow_aborted_after_canonical_reset",
+                        source_profile_username=source_profile_username,
+                        final_return_how=how_fin,
+                        reset_performed=bool(fin_ret.get("reset_performed")),
+                        reset_ok=reset_ok,
+                        business_status="needs_restart"
+                        if reset_ok
+                        else "failed",
+                    )
+                    _preserve_follow_exit = bool(
+                        isinstance(fr_out, dict)
+                        and bool(fr_out.get("follow_verified"))
+                        and bool(fr_out.get("real_follow_tap_sent"))
+                    )
+                    if _preserve_follow_exit:
+                        log(
+                            "info",
+                            "visual_flow_final_return_reset_failed_preserve_follow_success",
+                            source_profile_username=source_profile_username,
+                            exit_code=exit_code,
+                            follow_verified=bool(fr_out.get("follow_verified")),
+                            verification_method=str(
+                                fr_out.get("verification_method") or ""
+                            ),
+                        )
+                    else:
+                        exit_code = 64
+                if zero_posts_hard_skip:
+                    meta_zdone = _followers_current_pkg_activity(d)
+                    _hist_ok = bool(history_recorded_follow_target) or bool(
+                        exit_code in (55, 57, 63)
+                        and isinstance(fr_out, dict)
+                        and bool(fr_out.get("follow_verified"))
+                    )
+                    log(
+                        "info",
+                        "visual_follow_zero_posts_profile_complete",
+                        posts_count=0,
+                        skip_post_open=True,
+                        skip_like=True,
+                        skip_mute=False,
+                        mute_flow_allowed=True,
+                        exit_code=exit_code,
+                        follow_verified=(
+                            bool(fr_out.get("follow_verified"))
+                            if isinstance(fr_out, dict)
+                            else False
+                        ),
+                        history_recorded=_hist_ok,
+                        final_return_ok=bool(ok_fin),
+                        final_return_how=str(how_fin or ""),
+                        source_profile_username=source_profile_username,
+                        current_activity=meta_zdone.get("current_activity"),
+                        current_package=meta_zdone.get("current_package"),
+                    )
+                log(
+                    "info",
+                    "visual_follow_history_state_debug",
+                    history_recorded_follow_target=history_recorded_follow_target,
+                    history_recorded_target_username=history_recorded_target_username,
+                    exit_code=exit_code,
+                    branch="picker_dry_run_complete_before_emit",
+                )
+                if not post_like_before:
+                    log(
+                        "info",
+                        "visual_follow_stability_next_candidate",
+                        source_profile_username=source_profile_username,
+                        exit_code=exit_code,
+                        final_return_ok=bool(ok_fin),
+                        history_recorded_follow_target=history_recorded_follow_target,
+                    )
                 visual_target_profile_lock_clear()
                 _emit_performance_summary(
                     t0=t0,
@@ -3264,6 +4172,25 @@ def _try_visual_followers_picker_dry_run(
                     exit_code=exit_code,
                     target_username=source_profile_username,
                 )
+                if (
+                    exit_code in (55, 57, 59, 60, 63)
+                    and ok_fin
+                    and not fin_ret.get("restart_required")
+                ):
+                    if exit_code == 63:
+                        log(
+                            "info",
+                            "private_follow_request_continue_next_candidate",
+                            source_profile_username=source_profile_username,
+                            exit_code=exit_code,
+                            visual_private_profile_detected=bool(
+                                priv_detect_runner.get("private_profile_detected")
+                            ),
+                            follow_request_pending=bool(
+                                fr_out.get("follow_request_pending")
+                            ),
+                        )
+                    return VISUAL_FOLLOW_HISTORY_CONTINUE
                 return exit_code
             if open_out.get("profile_detected"):
                 visual_target_profile_lock_clear()
@@ -3317,6 +4244,103 @@ def _try_visual_followers_picker_dry_run(
     return 45
 
 
+def _reenter_ct_followers_list_after_canonical_reset(
+    d,
+    *,
+    source_profile_username: str,
+    account_id: str,
+    context: str,
+) -> bool:
+    """
+    After instagram_canonical_reset_success, rebuild CT profile + followers list surface
+    so the followers engine can continue in the same process.
+    """
+    pkg = config.INSTAGRAM_PACKAGE
+    gsurf = ensure_global_search_surface(
+        d,
+        intended_username=source_profile_username,
+        source_profile_username=source_profile_username,
+        source_account_context=account_id,
+    )
+    if not gsurf.get("ok"):
+        log(
+            "warning",
+            "canonical_reset_reenter_failed",
+            phase="global_search_surface",
+            context=context,
+            source_profile_username=source_profile_username,
+        )
+        return False
+    if not _open_search_with_recovery(
+        d,
+        pkg=pkg,
+        username=source_profile_username,
+        context=context,
+    ):
+        log(
+            "warning",
+            "canonical_reset_reenter_failed",
+            phase="open_search",
+            context=context,
+            source_profile_username=source_profile_username,
+        )
+        return False
+    if not type_search(d, source_profile_username, previous_username=None):
+        log(
+            "warning",
+            "canonical_reset_reenter_failed",
+            phase="type_search",
+            context=context,
+            source_profile_username=source_profile_username,
+        )
+        return False
+    if bool(getattr(config, "FAST_SKIP_ACCOUNTS_TAB", True)) and bool(
+        getattr(config, "FAST_PATH_MODE", False)
+    ):
+        accounts_tab_clicked = False
+    else:
+        accounts_tab_clicked = open_accounts_tab(d)
+    ui_mode = "accounts_tab" if accounts_tab_clicked else "mixed_results"
+    set_search_ui_mode(ui_mode)
+    if not tap_account_result(d, source_profile_username):
+        log(
+            "warning",
+            "canonical_reset_reenter_failed",
+            phase="tap_account",
+            context=context,
+            source_profile_username=source_profile_username,
+        )
+        return False
+    if not verify_profile(d, source_profile_username):
+        log(
+            "warning",
+            "canonical_reset_reenter_failed",
+            phase="verify_profile",
+            context=context,
+            source_profile_username=source_profile_username,
+        )
+        return False
+    _open_ok, _meta = open_followers_list_from_profile(
+        d, source_profile_username, pkg, profile_verified=True
+    )
+    if not _open_ok:
+        log(
+            "warning",
+            "canonical_reset_reenter_failed",
+            phase="open_followers_list",
+            context=context,
+            source_profile_username=source_profile_username,
+        )
+        return False
+    log(
+        "info",
+        "canonical_reset_reenter_success",
+        context=context,
+        source_profile_username=source_profile_username,
+    )
+    return True
+
+
 def _run_followers_list_engine_session(
     d,
     *,
@@ -3337,6 +4361,13 @@ def _run_followers_list_engine_session(
     _VISUAL_FOLLOWERS_OPEN_COUNT_THIS_SESSION = 0
     pkg = config.INSTAGRAM_PACKAGE
     src_key = _norm_ig_handle(source_profile_username)
+    log(
+        "info",
+        "visual_followers_ct_source_loaded",
+        source_profile_username=source_profile_username,
+        target_username=str(getattr(config, "TARGET_USERNAME", "") or ""),
+        account_id=str(account_id or ""),
+    )
 
     def _eng_log(action_type: str, status: str, message: str, payload: dict) -> None:
         if not (supabase_mode and run_id and account_id):
@@ -3357,6 +4388,27 @@ def _run_followers_list_engine_session(
         )
 
     t0 = time.perf_counter()
+    gsurf = ensure_global_search_surface(
+        d,
+        intended_username=source_profile_username,
+        source_profile_username=source_profile_username,
+        source_account_context=account_id,
+    )
+    if not gsurf.get("ok"):
+        _eng_log(
+            "followers_engine_aborted",
+            "failed",
+            "global_search_surface_failed",
+            {"reason": gsurf.get("reason")},
+        )
+        _emit_performance_summary(
+            t0=t0,
+            warm_session_used=warm_session_used,
+            force_stop_used=force_stop_used,
+            exit_code=64,
+            target_username=source_profile_username,
+        )
+        return 64
     if not _open_search_with_recovery(
         d, pkg=pkg, username=source_profile_username, context="followers_engine_start"
     ):
@@ -3475,12 +4527,18 @@ def _run_followers_list_engine_session(
     open_detection_method = str(open_list_meta.get("open_detection_method") or "xml")
     followers_engine_loop_iteration = 0
     prev_candidate_row_count: int | None = None
+    sparse_follow_scrolls = 0
+    visible_follow_buttons_stall_scrolls = 0
+    max_visible_buttons_micro_scrolls = int(
+        getattr(config, "FOLLOWERS_MAX_VISIBLE_BUTTON_MICRO_SCROLLS", 2) or 2
+    )
 
     def _collect_follower_candidates() -> list:
         return iter_followers_candidates(
             d,
             source_profile_username=source_profile_username,
             runtime_seen=_RUNTIME_SEEN_FOLLOWER_USERNAMES,
+            source_account_context=account_id or None,
         )
 
     def _followers_xml_stale_engine_stop(
@@ -3489,7 +4547,16 @@ def _run_followers_list_engine_session(
         det: dict,
         loop_iteration: int,
         xml_candidates: list | None = None,
-    ) -> int:
+    ) -> int | None:
+        if followers_bypass_xml_stale_recovery_if_visual_surface_strong(
+            d,
+            source_profile_username=source_profile_username,
+            det=det,
+            phase="xml_stale_engine_stop",
+            stop_reason=stop_reason,
+            loop_iteration=loop_iteration,
+        ):
+            return None
         pic = _try_visual_followers_picker_dry_run(
             d,
             open_list_meta=open_list_meta,
@@ -3507,6 +4574,20 @@ def _run_followers_list_engine_session(
             runtime_seen=_RUNTIME_SEEN_FOLLOWER_USERNAMES,
         )
         if pic == VISUAL_FOLLOW_HISTORY_CONTINUE:
+            log(
+                "info",
+                "visual_followers_picker_restarted_after_reentry",
+                source_profile_username=source_profile_username,
+                stop_reason=stop_reason,
+                loop_iteration=loop_iteration,
+            )
+            log(
+                "info",
+                "visual_followers_picker_restarted_after_continue",
+                source_profile_username=source_profile_username,
+                stop_reason=stop_reason,
+                loop_iteration=loop_iteration,
+            )
             return VISUAL_FOLLOW_HISTORY_CONTINUE
         if pic is not None:
             return pic
@@ -3566,9 +4647,12 @@ def _run_followers_list_engine_session(
         )
 
         det = detect_followers_list_screen(d, source_profile_username=source_profile_username)
+        _det_odm = det.get("open_detection_method")
+        if _det_odm:
+            open_detection_method = str(_det_odm)
 
         if (
-            open_detection_method == "visual_fallback"
+            open_detection_method in FOLLOWERS_ENGINE_VISUAL_OPEN_METHODS
             and stop_r_loop in FOLLOWERS_ENGINE_XML_STALE_EXIT_REASONS
         ):
             _stale_pic = _followers_xml_stale_engine_stop(
@@ -3577,19 +4661,49 @@ def _run_followers_list_engine_session(
                 loop_iteration=followers_engine_loop_iteration,
             )
             if _stale_pic == VISUAL_FOLLOW_HISTORY_CONTINUE:
+                log(
+                    "info",
+                    "visual_followers_loop_continue_after_reentry",
+                    source_profile_username=source_profile_username,
+                    phase="xml_stale_before_candidates",
+                    iteration=processed,
+                )
+                log(
+                    "info",
+                    "visual_followers_loop_continued_after_reentry",
+                    source_profile_username=source_profile_username,
+                    phase="xml_stale_before_candidates",
+                    iteration=processed,
+                )
                 continue
-            return _stale_pic
+            if _stale_pic is not None:
+                return _stale_pic
 
         if not det.get("is_followers_list"):
-            if open_detection_method == "visual_fallback":
+            if open_detection_method in FOLLOWERS_ENGINE_VISUAL_OPEN_METHODS:
                 _stale_pic = _followers_xml_stale_engine_stop(
                     stop_reason=stop_r_loop or "visual_fallback_xml_not_followers_list",
                     det=det,
                     loop_iteration=followers_engine_loop_iteration,
                 )
                 if _stale_pic == VISUAL_FOLLOW_HISTORY_CONTINUE:
+                    log(
+                        "info",
+                        "visual_followers_loop_continue_after_reentry",
+                        source_profile_username=source_profile_username,
+                        phase="xml_stale_not_followers_list",
+                        iteration=processed,
+                    )
+                    log(
+                        "info",
+                        "visual_followers_loop_continued_after_reentry",
+                        source_profile_username=source_profile_username,
+                        phase="xml_stale_not_followers_list",
+                        iteration=processed,
+                    )
                     continue
-                return _stale_pic
+                if _stale_pic is not None:
+                    return _stale_pic
             ok_rec, how = return_to_followers_list(d, source_profile_username, pkg)
             if not ok_rec:
                 _eng_log(
@@ -3610,9 +4724,11 @@ def _run_followers_list_engine_session(
             continue
 
         candidates = _collect_follower_candidates()
+        if len(candidates) > 0:
+            visible_follow_buttons_stall_scrolls = 0
         prev_candidate_row_count = len(candidates)
         stop_r_after_candidates = get_followers_engine_stop_reason()
-        if open_detection_method == "visual_fallback" and (
+        if open_detection_method in FOLLOWERS_ENGINE_VISUAL_OPEN_METHODS and (
             stop_r_after_candidates in FOLLOWERS_ENGINE_XML_STALE_EXIT_REASONS
             or len(candidates) == 0
         ):
@@ -3626,38 +4742,175 @@ def _run_followers_list_engine_session(
                 xml_candidates=candidates,
             )
             if _stale_pic == VISUAL_FOLLOW_HISTORY_CONTINUE:
+                log(
+                    "info",
+                    "visual_followers_loop_continue_after_reentry",
+                    source_profile_username=source_profile_username,
+                    phase="xml_stale_after_candidates",
+                    iteration=processed,
+                )
                 continue
-            return _stale_pic
+            if _stale_pic is not None:
+                return _stale_pic
 
-        pick = None
-        for c in candidates:
-            ckey = _norm_ig_handle(str(c.get("username") or ""))
-            if ckey == src_key:
+        def _first_eligible_follower_pick(cand_list: list) -> dict | None:
+            for c in cand_list:
+                ckey = _norm_ig_handle(str(c.get("username") or ""))
+                if ckey == src_key:
+                    log(
+                        "info",
+                        "followers_candidate_skipped_source_profile",
+                        username=c.get("username"),
+                        source_profile_username=source_profile_username,
+                    )
+                    continue
+                if c.get("already_seen_runtime"):
+                    log(
+                        "info",
+                        "followers_candidate_skipped_runtime_seen",
+                        username=c.get("username"),
+                        source_profile_username=source_profile_username,
+                    )
+                    _eng_log(
+                        "followers_candidate_skipped_runtime_seen",
+                        "info",
+                        "skipped_runtime_seen",
+                        {"follower_username": c.get("username")},
+                    )
+                    continue
+                return c
+            return None
+
+        pick = _first_eligible_follower_pick(candidates)
+        det_sparse_loop: dict | None = None
+
+        if pick is None and len(candidates) == 0:
+            det_sparse_loop = detect_followers_list_screen(
+                d, source_profile_username=source_profile_username
+            )
+            fbc_pre = int(det_sparse_loop.get("follow_buttons_visual_count") or 0)
+            if fbc_pre == 0:
+                visible_follow_buttons_stall_scrolls = 0
+            elif bool(det_sparse_loop.get("is_followers_list")) and fbc_pre > 0:
                 log(
                     "info",
-                    "followers_candidate_skipped_source_profile",
-                    username=c.get("username"),
+                    "visual_followers_scroll_blocked_visible_follow_buttons",
                     source_profile_username=source_profile_username,
+                    follow_button_count=fbc_pre,
+                    note="hierarchy_refresh_then_re_resolve_before_any_scroll",
                 )
-                continue
-            if c.get("already_seen_runtime"):
                 log(
                     "info",
-                    "followers_candidate_skipped_runtime_seen",
-                    username=c.get("username"),
+                    "visual_followers_candidate_resolution_retry_before_scroll",
                     source_profile_username=source_profile_username,
+                    follow_button_count=fbc_pre,
                 )
-                _eng_log(
-                    "followers_candidate_skipped_runtime_seen",
-                    "info",
-                    "skipped_runtime_seen",
-                    {"follower_username": c.get("username")},
+                followers_force_hierarchy_refresh(
+                    d, source_profile_username=source_profile_username
                 )
-                continue
-            pick = c
-            break
+                time.sleep(0.45)
+                candidates = _collect_follower_candidates()
+                pick = _first_eligible_follower_pick(candidates)
+                if pick is not None:
+                    visible_follow_buttons_stall_scrolls = 0
 
         if pick is None:
+            if len(candidates) == 0:
+                det_sparse = (
+                    det_sparse_loop
+                    if det_sparse_loop is not None
+                    else detect_followers_list_screen(
+                        d, source_profile_username=source_profile_username
+                    )
+                )
+                fbc_sparse = int(det_sparse.get("follow_buttons_visual_count") or 0)
+                if fbc_sparse == 0:
+                    visible_follow_buttons_stall_scrolls = 0
+                if bool(det_sparse.get("is_followers_list")) and fbc_sparse > 0:
+                    if (
+                        visible_follow_buttons_stall_scrolls
+                        >= max_visible_buttons_micro_scrolls
+                    ):
+                        log(
+                            "error",
+                            "visual_followers_picker_stalled_visible_buttons_no_candidate",
+                            source_profile_username=source_profile_username,
+                            follow_button_count=fbc_sparse,
+                            stall_scrolls=visible_follow_buttons_stall_scrolls,
+                            sparse_follow_scrolls=sparse_follow_scrolls,
+                            max_micro_scrolls=max_visible_buttons_micro_scrolls,
+                        )
+                        _eng_log(
+                            "followers_engine_stalled_visible_follows",
+                            "failed",
+                            "no_resolved_candidate_after_scrolls",
+                            {
+                                "follow_button_count": fbc_sparse,
+                                "stall_scrolls": visible_follow_buttons_stall_scrolls,
+                            },
+                        )
+                        _emit_performance_summary(
+                            t0=t0,
+                            warm_session_used=warm_session_used,
+                            force_stop_used=force_stop_used,
+                            exit_code=67,
+                            target_username=source_profile_username,
+                        )
+                        return 67
+                    log(
+                        "info",
+                        "visual_followers_sparse_list_scroll",
+                        scroll_index=sparse_follow_scrolls,
+                        reason="no_candidate_after_retry_micro_scroll_only",
+                        follow_button_count=fbc_sparse,
+                        source_profile_username=source_profile_username,
+                        scroll_kind="micro_swipe",
+                    )
+                    if scroll_followers_list_forward(d):
+                        sparse_follow_scrolls += 1
+                        visible_follow_buttons_stall_scrolls += 1
+                        scroll_used += 1
+                        _eng_log(
+                            "followers_list_scroll",
+                            "info",
+                            "scroll_sparse_xml_micro",
+                            {
+                                "scroll_index": scroll_used,
+                                "sparse_index": sparse_follow_scrolls,
+                                "direction": "forward",
+                                "scroll_kind": "micro_swipe",
+                            },
+                        )
+                    continue
+                if (
+                    bool(det_sparse.get("is_followers_list"))
+                    and fbc_sparse == 0
+                    and sparse_follow_scrolls >= 3
+                ):
+                    log(
+                        "info",
+                        "visual_followers_no_more_candidates_after_scrolls",
+                        source_profile_username=source_profile_username,
+                        sparse_scrolls=sparse_follow_scrolls,
+                        follow_button_count=fbc_sparse,
+                    )
+                    _eng_log(
+                        "followers_engine_sparse_exhausted",
+                        "failed",
+                        "no_candidates_after_sparse_scrolls",
+                        {
+                            "sparse_scrolls": sparse_follow_scrolls,
+                            "follow_button_count": fbc_sparse,
+                        },
+                    )
+                    _emit_performance_summary(
+                        t0=t0,
+                        warm_session_used=warm_session_used,
+                        force_stop_used=force_stop_used,
+                        exit_code=66,
+                        target_username=source_profile_username,
+                    )
+                    return 66
             if scroll_used >= max_scroll:
                 log(
                     "info",
@@ -3694,24 +4947,250 @@ def _run_followers_list_engine_session(
             },
         )
 
-        fkey = _norm_ig_handle(str(pick.get("username") or ""))
-        _RUNTIME_SEEN_FOLLOWER_USERNAMES.add(fkey)
+        sparse_follow_scrolls = 0
 
-        if fkey == src_key:
-            ok_r, _ = return_to_followers_list(d, source_profile_username, pkg)
-            if not ok_r:
-                return 42
-            continue
+        pending_username = bool(pick.get("username_pending_profile_read"))
+        _followers_resolved_continue_to_follow = False
+        _ct_follow_resolve_streak = 0
+
+        if not pending_username:
+            fkey_pre = _norm_ig_handle(str(pick.get("username") or ""))
+            if fkey_pre:
+                _RUNTIME_SEEN_FOLLOWER_USERNAMES.add(fkey_pre)
+            if fkey_pre == src_key:
+                ok_r, _ = return_to_followers_list(d, source_profile_username, pkg)
+                if not ok_r:
+                    return 42
+                continue
 
         if not open_follower_profile_from_list(d, pick, source_profile_username, pkg):
             _eng_log(
                 "follower_profile_open_failed",
                 "failed",
                 "open_follower_failed",
-                {"follower_username": pick.get("username")},
+                {
+                    "follower_username": pick.get("username"),
+                    "username_pending_profile_read": pending_username,
+                },
             )
             ok_r, _ = return_to_followers_list(d, source_profile_username, pkg)
             if not ok_r:
+                return 42
+            continue
+
+        follower_un = str(pick.get("username") or "").strip()
+
+        if pending_username:
+            follower_un = str(
+                read_current_profile_username_for_follow_gate(d) or ""
+            ).strip().lstrip("@")
+            log(
+                "info",
+                "visual_followers_username_resolved_on_profile",
+                follower_username=follower_un,
+                source_profile_username=source_profile_username,
+                follow_button_bounds=pick.get("bounds"),
+            )
+            pick["username"] = follower_un
+            pick["username_pending_profile_read"] = False
+            if not follower_un:
+                log(
+                    "warning",
+                    "visual_followers_username_read_on_profile_empty",
+                    source_profile_username=source_profile_username,
+                )
+                log(
+                    "info",
+                    "visual_followers_resolved_username_skip_reason",
+                    reason="empty_username_after_profile_read",
+                    source_profile_username=source_profile_username,
+                )
+                ok_r, _ = return_to_followers_list(d, source_profile_username, pkg)
+                if not ok_r:
+                    return 42
+                continue
+            fkey = _norm_ig_handle(follower_un)
+            if not fkey:
+                log(
+                    "info",
+                    "visual_followers_resolved_username_skip_reason",
+                    reason="normalize_empty_after_profile_read",
+                    source_profile_username=source_profile_username,
+                )
+                ok_r, _ = return_to_followers_list(d, source_profile_username, pkg)
+                if not ok_r:
+                    return 42
+                continue
+            if fkey == src_key:
+                log(
+                    "info",
+                    "followers_candidate_skipped_source_profile",
+                    username=follower_un,
+                    source_profile_username=source_profile_username,
+                    phase="after_profile_username_read",
+                )
+                log(
+                    "info",
+                    "visual_followers_resolved_username_skip_reason",
+                    reason="source_profile_self",
+                    follower_username=follower_un,
+                    source_profile_username=source_profile_username,
+                )
+                ok_r, _ = return_to_followers_list(d, source_profile_username, pkg)
+                if not ok_r:
+                    return 42
+                continue
+            _ct_start_candidate_attempt_timer(fkey)
+            streak = _RUNTIME_FOLLOWERS_POST_RESOLVE_STREAK.get(fkey, 0) + 1
+            _RUNTIME_FOLLOWERS_POST_RESOLVE_STREAK[fkey] = streak
+            _ct_follow_resolve_streak = streak
+            _max_reopen = int(
+                getattr(config, "CT_FOLLOW_MAX_SAME_PROFILE_REOPEN_WITHOUT_TAP", 2) or 2
+            )
+            if (
+                fkey not in _RUNTIME_CT_LIST_FOLLOW_TAP_ATTEMPTED_USERNAMES
+                and streak > 1 + _max_reopen
+            ):
+                log(
+                    "info",
+                    "visual_followers_candidate_abandoned_after_reopen_limit",
+                    follower_username=follower_un,
+                    fkey=fkey,
+                    source_profile_username=source_profile_username,
+                    resolve_streak=streak,
+                    max_same_profile_reopen=_max_reopen,
+                )
+                _RUNTIME_SEEN_FOLLOWER_USERNAMES.add(fkey)
+                _ct_clear_candidate_attempt_timer()
+                _RUNTIME_FOLLOWERS_POST_RESOLVE_STREAK.pop(fkey, None)
+                _ct_return_followers_list_or_canonical_reset(
+                    d,
+                    source_profile_username=source_profile_username,
+                    pkg=pkg,
+                    account_id=account_id or None,
+                    reason="abandoned_after_reopen_limit",
+                )
+                continue
+            if fkey in _RUNTIME_SEEN_FOLLOWER_USERNAMES:
+                if streak < 2:
+                    log(
+                        "info",
+                        "followers_candidate_skipped_runtime_seen",
+                        username=follower_un,
+                        source_profile_username=source_profile_username,
+                        phase="after_profile_username_read",
+                    )
+                    log(
+                        "info",
+                        "visual_followers_resolved_username_skip_reason",
+                        reason="runtime_seen_before_follow",
+                        follower_username=follower_un,
+                        source_profile_username=source_profile_username,
+                    )
+                    _eng_log(
+                        "followers_candidate_skipped_runtime_seen",
+                        "info",
+                        "skipped_runtime_seen",
+                        {"follower_username": follower_un},
+                    )
+                    ok_r, _ = return_to_followers_list(d, source_profile_username, pkg)
+                    if not ok_r:
+                        return 42
+                    continue
+                log(
+                    "warning",
+                    "visual_followers_same_profile_reopened_without_follow",
+                    follower_username=follower_un,
+                    source_profile_username=source_profile_username,
+                    resolve_streak=streak,
+                )
+                log(
+                    "info",
+                    "visual_followers_force_follow_after_reopen_loop",
+                    follower_username=follower_un,
+                    source_profile_username=source_profile_username,
+                    resolve_streak=streak,
+                )
+            if account_id:
+                hist_skip = visual_follow_history_skip_reason_if_any(
+                    source_profile_username=source_profile_username,
+                    target_username_hint=follower_un,
+                    source_account_context=str(account_id),
+                )
+                if hist_skip:
+                    log(
+                        "info",
+                        "visual_followers_fallback_candidate_skipped",
+                        reason=str(hist_skip),
+                        username=follower_un,
+                        phase="after_profile_username_read",
+                    )
+                    log(
+                        "info",
+                        "visual_followers_resolved_username_skip_reason",
+                        reason=str(hist_skip),
+                        follower_username=follower_un,
+                        source_profile_username=source_profile_username,
+                    )
+                    _RUNTIME_SEEN_FOLLOWER_USERNAMES.add(fkey)
+                    _ct_clear_candidate_attempt_timer()
+                    ok_r, _ = return_to_followers_list(d, source_profile_username, pkg)
+                    if not ok_r:
+                        return 42
+                    continue
+            if not verify_profile(d, follower_un):
+                log(
+                    "error",
+                    "follower_profile_verify_after_username_read_failed",
+                    follower_username=follower_un,
+                    source_profile_username=source_profile_username,
+                )
+                log(
+                    "info",
+                    "visual_followers_resolved_username_skip_reason",
+                    reason="verify_profile_failed_after_username_read",
+                    follower_username=follower_un,
+                    source_profile_username=source_profile_username,
+                )
+                ok_r, _ = return_to_followers_list(d, source_profile_username, pkg)
+                if not ok_r:
+                    return 42
+                continue
+            log(
+                "info",
+                "visual_followers_resolved_username_continue_to_follow",
+                follower_username=follower_un,
+                source_profile_username=source_profile_username,
+                resolve_streak=streak,
+            )
+            _followers_resolved_continue_to_follow = True
+            log(
+                "info",
+                "visual_followers_before_follow_block_checkpoint",
+                phase="immediately_after_resolved_continue",
+                follower_username=follower_un,
+                source_profile_username=source_profile_username,
+                fkey=fkey,
+                resolve_streak=streak,
+                followers_list_ready=followers_list_ready,
+                ENABLE_REAL_FOLLOW=bool(getattr(config, "ENABLE_REAL_FOLLOW", False)),
+                ENABLE_REAL_VISUAL_FOLLOW=bool(
+                    getattr(config, "ENABLE_REAL_VISUAL_FOLLOW", False)
+                ),
+            )
+        else:
+            fkey = _norm_ig_handle(follower_un)
+
+        if fkey and fkey in _RUNTIME_FAILED_NO_FOLLOW_TAP_FKEY:
+            log(
+                "info",
+                "visual_followers_candidate_skipped_failed_no_follow_tap",
+                follower_username=follower_un,
+                fkey=fkey,
+                source_profile_username=source_profile_username,
+            )
+            ok_sk, _ = return_to_followers_list(d, source_profile_username, pkg)
+            if not ok_sk:
                 return 42
             continue
 
@@ -3719,12 +5198,45 @@ def _run_followers_list_engine_session(
             "follower_profile_open_success",
             "success",
             "follower_profile_open",
-            {"follower_username": pick.get("username")},
+            {
+                "follower_username": follower_un,
+                "username_pending_profile_read": pending_username,
+            },
         )
 
-        follower_un = str(pick.get("username") or "")
+        _enable_real_follow = bool(getattr(config, "ENABLE_REAL_FOLLOW", False))
+        _enable_visual_follow = bool(getattr(config, "ENABLE_REAL_VISUAL_FOLLOW", False))
+        _ct_follow_execution_enabled = _enable_real_follow or (
+            _followers_resolved_continue_to_follow and _enable_visual_follow
+        )
+        if not _followers_resolved_continue_to_follow:
+            log(
+                "info",
+                "visual_followers_before_follow_block_checkpoint",
+                phase="non_pending_list_candidate",
+                follower_username=follower_un,
+                source_profile_username=source_profile_username,
+                fkey=_norm_ig_handle(follower_un),
+                followers_list_ready=followers_list_ready,
+                ENABLE_REAL_FOLLOW=_enable_real_follow,
+                ENABLE_REAL_VISUAL_FOLLOW=_enable_visual_follow,
+                ct_follow_execution_enabled=_ct_follow_execution_enabled,
+            )
+        if (
+            _followers_resolved_continue_to_follow
+            and not _enable_real_follow
+            and _enable_visual_follow
+            and _ct_follow_execution_enabled
+        ):
+            log(
+                "info",
+                "visual_followers_ct_list_follow_gate_visual_fallback",
+                follower_username=follower_un,
+                source_profile_username=source_profile_username,
+                message="ENABLE_REAL_FOLLOW_false_using_ENABLE_REAL_VISUAL_FOLLOW_for_ct_list",
+            )
 
-        if bool(getattr(config, "ENABLE_REAL_FOLLOW", False)):
+        if _ct_follow_execution_enabled:
             if not followers_list_ready:
                 log(
                     "error",
@@ -3762,10 +5274,51 @@ def _run_followers_list_engine_session(
                 )
                 _RUNTIME_INTERACTED_USERNAMES.add(fkey)
                 _RUNTIME_SKIPPED_USERNAMES.add(fkey)
+                _RUNTIME_SEEN_FOLLOWER_USERNAMES.add(fkey)
                 ok_sq, _ = return_to_followers_list(d, source_profile_username, pkg)
                 if not ok_sq:
                     return 42
                 continue
+
+            try:
+                _follow_hdr_snap = _follow_ui_state_snapshot(d)
+            except Exception:
+                _follow_hdr_snap = "unknown"
+            _follow_invite_visible = _follow_hdr_snap == "follow" or _ct_list_raw_follow_invite_visible(
+                d
+            )
+            try:
+                _posts_cnt = visual_profile_stats_posts_count(d)
+            except Exception:
+                _posts_cnt = None
+            if (
+                _posts_cnt is not None
+                and int(_posts_cnt) == 0
+                and _follow_invite_visible
+            ):
+                log(
+                    "info",
+                    "visual_no_posts_yet_follow_allowed",
+                    follower_username=follower_un,
+                    source_profile_username=source_profile_username,
+                    posts_count=0,
+                    follow_header_state=_follow_hdr_snap,
+                )
+
+            log(
+                "info",
+                "visual_followers_before_social_memory_check",
+                follower_username=follower_un,
+                fkey=fkey,
+                resolve_streak=_ct_follow_resolve_streak,
+                follow_button_visible=_follow_invite_visible,
+                follow_header_state=_follow_hdr_snap,
+                posts_count=_posts_cnt,
+                ENABLE_REAL_FOLLOW=_enable_real_follow,
+                ENABLE_REAL_VISUAL_FOLLOW=_enable_visual_follow,
+                ct_follow_tap_attempted_yet=fkey
+                in _RUNTIME_CT_LIST_FOLLOW_TAP_ATTEMPTED_USERNAMES,
+            )
 
             elig = _social_memory_load_and_evaluate(
                 target_username=follower_un,
@@ -3774,7 +5327,64 @@ def _run_followers_list_engine_session(
                 run_id=run_id,
                 supabase_mode=supabase_mode,
             )
-            if not elig.allowed:
+            _sm_bypass_dup = _ct_list_bypass_runtime_duplicate_social_memory(
+                d,
+                elig=elig,
+                fkey=fkey,
+                followers_resolved_continue=_followers_resolved_continue_to_follow,
+                resolve_streak=_ct_follow_resolve_streak,
+                follow_header_snap=_follow_hdr_snap,
+                follow_invite_visible=_follow_invite_visible,
+                enable_real_follow=_enable_real_follow,
+                enable_visual_follow=_enable_visual_follow,
+            )
+            if _sm_bypass_dup:
+                log(
+                    "info",
+                    "visual_followers_social_memory_duplicate_ignored_before_follow",
+                    follower_username=follower_un,
+                    fkey=fkey,
+                    social_memory_reason=elig.reason,
+                    resolve_streak=_ct_follow_resolve_streak,
+                    follow_header_state=_follow_hdr_snap,
+                    source_profile_username=source_profile_username,
+                )
+
+            if not elig.allowed and not _sm_bypass_dup:
+                if (
+                    elig.reason == "runtime_already_interacted"
+                    and fkey in _RUNTIME_CT_LIST_FOLLOW_TAP_ATTEMPTED_USERNAMES
+                ):
+                    log(
+                        "info",
+                        "visual_followers_social_memory_duplicate_blocked_after_follow_attempt",
+                        follower_username=follower_un,
+                        fkey=fkey,
+                        source_profile_username=source_profile_username,
+                    )
+                if (
+                    elig.reason == "runtime_already_interacted"
+                    and _ct_follow_resolve_streak >= 4
+                    and _followers_resolved_continue_to_follow
+                ):
+                    log(
+                        "error",
+                        "visual_followers_exit_antiloop_social_memory",
+                        follower_username=follower_un,
+                        fkey=fkey,
+                        resolve_streak=_ct_follow_resolve_streak,
+                        follow_header_state=_follow_hdr_snap,
+                        follow_button_visible=_follow_invite_visible,
+                        source_profile_username=source_profile_username,
+                    )
+                    _emit_performance_summary(
+                        t0=t0,
+                        warm_session_used=warm_session_used,
+                        force_stop_used=force_stop_used,
+                        exit_code=74,
+                        target_username=source_profile_username,
+                    )
+                    return 74
                 log(
                     "warning",
                     elig.log_event,
@@ -3808,12 +5418,101 @@ def _run_followers_list_engine_session(
                 )
                 _RUNTIME_INTERACTED_USERNAMES.add(fkey)
                 _RUNTIME_SKIPPED_USERNAMES.add(fkey)
+                _RUNTIME_SEEN_FOLLOWER_USERNAMES.add(fkey)
                 ok_el, _ = return_to_followers_list(d, source_profile_username, pkg)
                 if not ok_el:
                     return 42
                 continue
 
+            _attempt_timeout_s = float(
+                getattr(config, "CT_FOLLOW_CANDIDATE_ATTEMPT_TIMEOUT_S", 90) or 90
+            )
+            _attempt_timeout_s = max(60.0, min(120.0, _attempt_timeout_s))
+            if _ct_candidate_follow_attempt_timed_out(
+                fkey, timeout_s=_attempt_timeout_s
+            ):
+                _t0_attempt = float(_CT_CANDIDATE_ATTEMPT_STARTED_MONO or time.monotonic())
+                _elapsed = time.monotonic() - _t0_attempt
+                log(
+                    "error",
+                    "visual_followers_candidate_attempt_timeout",
+                    follower_username=follower_un,
+                    fkey=fkey,
+                    source_profile_username=source_profile_username,
+                    elapsed_s=round(_elapsed, 2),
+                    timeout_s=_attempt_timeout_s,
+                    resolve_streak=_ct_follow_resolve_streak,
+                )
+                _RUNTIME_SEEN_FOLLOWER_USERNAMES.add(fkey)
+                _ct_clear_candidate_attempt_timer()
+                _RUNTIME_FOLLOWERS_POST_RESOLVE_STREAK.pop(fkey, None)
+                _ct_return_followers_list_or_canonical_reset(
+                    d,
+                    source_profile_username=source_profile_username,
+                    pkg=pkg,
+                    account_id=account_id or None,
+                    reason="attempt_timeout",
+                )
+                continue
+            if (
+                _ct_follow_resolve_streak >= 2
+                and fkey not in _RUNTIME_CT_LIST_FOLLOW_TAP_ATTEMPTED_USERNAMES
+                and _CT_FOLLOW_NO_TAP_AFTER_START_COUNT.get(fkey, 0) >= 1
+            ):
+                log(
+                    "warning",
+                    "visual_followers_candidate_abandoned_resolve_streak_without_tap",
+                    follower_username=follower_un,
+                    fkey=fkey,
+                    source_profile_username=source_profile_username,
+                    resolve_streak=_ct_follow_resolve_streak,
+                    no_tap_after_start_count=_CT_FOLLOW_NO_TAP_AFTER_START_COUNT.get(
+                        fkey, 0
+                    ),
+                )
+                _RUNTIME_SEEN_FOLLOWER_USERNAMES.add(fkey)
+                _CT_FOLLOW_NO_TAP_AFTER_START_COUNT.pop(fkey, None)
+                _ct_clear_candidate_attempt_timer()
+                _RUNTIME_FOLLOWERS_POST_RESOLVE_STREAK.pop(fkey, None)
+                _ct_return_followers_list_or_canonical_reset(
+                    d,
+                    source_profile_username=source_profile_username,
+                    pkg=pkg,
+                    account_id=account_id or None,
+                    reason="resolve_streak_no_follow_tap",
+                )
+                continue
+            log(
+                "info",
+                "visual_followers_perform_follow_safe_invocation",
+                follower_username=follower_un,
+                source_profile_username=source_profile_username,
+                gate_real_follow=_enable_real_follow,
+                gate_visual_follow_fallback=bool(
+                    _followers_resolved_continue_to_follow
+                    and not _enable_real_follow
+                    and _enable_visual_follow
+                ),
+                social_memory_duplicate_bypassed=_sm_bypass_dup,
+                attempt_elapsed_s=(
+                    round(time.monotonic() - _CT_CANDIDATE_ATTEMPT_STARTED_MONO, 2)
+                    if _CT_CANDIDATE_ATTEMPT_STARTED_MONO is not None
+                    else None
+                ),
+            )
+            _ff_s = float(
+                getattr(config, "CT_FOLLOW_NO_TAP_FAIL_FAST_S", 5.0) or 5.0
+            )
+            log(
+                "info",
+                "visual_followers_follow_started_no_tap_watchdog_started",
+                follower_username=follower_un,
+                fkey=fkey,
+                source_profile_username=source_profile_username,
+                fail_fast_s=round(_ff_s, 3),
+            )
             follow_out = perform_follow_safe(d, follower_un, pkg)
+            _ct_clear_candidate_attempt_timer()
             _flush_follow_action_logs_to_supabase(
                 events=list(follow_out.get("events") or []),
                 run_id=run_id,
@@ -3822,10 +5521,67 @@ def _run_followers_list_engine_session(
                 supabase_mode=supabase_mode,
             )
 
+            if _ct_follow_out_is_failed_no_follow_tap(follow_out):
+                log(
+                    "error",
+                    "visual_followers_failed_no_follow_tap_abandon_candidate",
+                    follower_username=follower_un,
+                    fkey=fkey,
+                    source_profile_username=source_profile_username,
+                    failure_code=int(follow_out.get("failure_code") or 72),
+                )
+                _RUNTIME_FAILED_NO_FOLLOW_TAP_FKEY.add(fkey)
+                _RUNTIME_SEEN_FOLLOWER_USERNAMES.add(fkey)
+                _CT_FOLLOW_NO_TAP_AFTER_START_COUNT.pop(fkey, None)
+                _RUNTIME_FOLLOWERS_POST_RESOLVE_STREAK.pop(fkey, None)
+                ok_ab, _ = return_to_followers_list(d, source_profile_username, pkg)
+                if not ok_ab:
+                    return 42
+                log(
+                    "info",
+                    "visual_followers_next_candidate_after_no_tap_failure",
+                    follower_username=follower_un,
+                    fkey=fkey,
+                    source_profile_username=source_profile_username,
+                )
+                continue
+
+            _had_tap = _ct_follow_out_had_tap_sent(follow_out)
+            _skipped = bool(follow_out.get("skipped_tap"))
+            if _had_tap or _skipped:
+                _RUNTIME_CT_LIST_FOLLOW_TAP_ATTEMPTED_USERNAMES.add(fkey)
+                _CT_FOLLOW_NO_TAP_AFTER_START_COUNT.pop(fkey, None)
+            elif _ct_follow_out_follow_started_no_tap(follow_out):
+                _CT_FOLLOW_NO_TAP_AFTER_START_COUNT[fkey] = (
+                    _CT_FOLLOW_NO_TAP_AFTER_START_COUNT.get(fkey, 0) + 1
+                )
+                if _CT_FOLLOW_NO_TAP_AFTER_START_COUNT[fkey] >= 2:
+                    log(
+                        "warning",
+                        "visual_followers_candidate_abandoned_follow_no_tap_retries",
+                        follower_username=follower_un,
+                        fkey=fkey,
+                        source_profile_username=source_profile_username,
+                        attempts_without_tap=_CT_FOLLOW_NO_TAP_AFTER_START_COUNT[fkey],
+                        failure_code=int(follow_out.get("failure_code") or 0),
+                    )
+                    _RUNTIME_SEEN_FOLLOWER_USERNAMES.add(fkey)
+                    _CT_FOLLOW_NO_TAP_AFTER_START_COUNT.pop(fkey, None)
+                    _RUNTIME_FOLLOWERS_POST_RESOLVE_STREAK.pop(fkey, None)
+                    _ct_return_followers_list_or_canonical_reset(
+                        d,
+                        source_profile_username=source_profile_username,
+                        pkg=pkg,
+                        account_id=account_id or None,
+                        reason="follow_no_tap_retries",
+                    )
+                    continue
+
             if not follow_out.get("ok"):
                 fc = int(follow_out.get("failure_code") or 33)
                 _SESSION_COUNTERS["interactions"] += 1
                 _RUNTIME_INTERACTED_USERNAMES.add(fkey)
+                _RUNTIME_SEEN_FOLLOWER_USERNAMES.add(fkey)
                 if supabase_mode and account_id:
                     _safe_supabase_call(
                         "record_follow_interaction_outcome",
@@ -3897,13 +5653,35 @@ def _run_followers_list_engine_session(
                     {"follower_username": follower_un, "follow_status": f_st},
                 )
         else:
-            log(
-                "info",
-                "followers_follow_skipped",
-                reason="ENABLE_REAL_FOLLOW_false",
-                follower_username=pick.get("username"),
-                source_profile_username=source_profile_username,
-            )
+            if _followers_resolved_continue_to_follow:
+                log(
+                    "error",
+                    "visual_followers_resolved_username_follow_not_executed",
+                    reason="ct_follow_execution_disabled_after_resolved_continue",
+                    follower_username=follower_un,
+                    source_profile_username=source_profile_username,
+                    ENABLE_REAL_FOLLOW=_enable_real_follow,
+                    ENABLE_REAL_VISUAL_FOLLOW=_enable_visual_follow,
+                    followers_list_ready=followers_list_ready,
+                )
+                _eng_log(
+                    "visual_followers_follow_blocked",
+                    "failed",
+                    "both_follow_flags_false_after_continue_to_follow",
+                    {
+                        "follower_username": follower_un,
+                        "ENABLE_REAL_FOLLOW": _enable_real_follow,
+                        "ENABLE_REAL_VISUAL_FOLLOW": _enable_visual_follow,
+                    },
+                )
+            else:
+                log(
+                    "info",
+                    "followers_follow_skipped",
+                    reason="ENABLE_REAL_FOLLOW_false",
+                    follower_username=pick.get("username"),
+                    source_profile_username=source_profile_username,
+                )
 
         ok_back, how = return_to_followers_list(d, source_profile_username, pkg)
         if not ok_back:
@@ -3922,6 +5700,11 @@ def _run_followers_list_engine_session(
                 {"source_profile_username": source_profile_username},
             )
         _eng_log("followers_list_recovered", "success", "return_after_follower", {"method": how})
+
+        fk_session = _norm_ig_handle(str(follower_un or ""))
+        if fk_session:
+            _RUNTIME_SEEN_FOLLOWER_USERNAMES.add(fk_session)
+            _RUNTIME_FOLLOWERS_POST_RESOLVE_STREAK.pop(fk_session, None)
 
         processed += 1
 
@@ -3942,7 +5725,15 @@ def _run_followers_list_engine_session(
                 source_profile_username=source_profile_username,
                 stop_reason=stop_final,
             )
-        elif pic_final is not None:
+            log(
+                "info",
+                "visual_followers_loop_continued_after_reentry",
+                source_profile_username=source_profile_username,
+                phase="followers_loop_end_stale",
+                stop_reason=stop_final,
+            )
+            return pic_final
+        if pic_final is not None:
             return pic_final
 
     _emit_performance_summary(

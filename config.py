@@ -83,7 +83,7 @@ FOLLOW_BUTTON_WAIT_S = 4.0
 # TEST minimal: 2 follows réels, pas de DM (voir aussi ENABLE_REAL_DM_SEND / FOLLOW_THEN_DM).
 ENABLE_FOLLOWERS_LIST_ENGINE = True
 # Source profile handle to open (empty = first CLI / queue target username is the source profile only for this mode).
-FOLLOWERS_SOURCE_USERNAME = "xstonekwa"
+FOLLOWERS_SOURCE_USERNAME = "xstonekwa_backup_acc"
 FOLLOWERS_LIST_MAX_ITERATIONS_PER_RUN = 2
 FOLLOWERS_LIST_OPEN_WAIT_S = 4.0
 FOLLOWERS_LIST_RETURN_MAX_RETRIES = 2
