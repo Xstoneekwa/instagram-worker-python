@@ -88,6 +88,8 @@ FOLLOWERS_LIST_MAX_ITERATIONS_PER_RUN = 2
 FOLLOWERS_LIST_OPEN_WAIT_S = 4.0
 FOLLOWERS_LIST_RETURN_MAX_RETRIES = 2
 FOLLOWERS_LIST_SCROLL_MAX_PER_SESSION = 25
+# Après visual_fallback avec forte confiance, ignorera XML stale pendant N itérations de boucle.
+FOLLOWERS_VISUAL_XML_STALE_GRACE_ITERATIONS = 3
 # When XML/accessibility tree is stale after opening followers, use screenshot heuristics (no clicks).
 ENABLE_FOLLOWERS_VISUAL_FALLBACK = True
 FOLLOWERS_VISUAL_FALLBACK_MIN_CONFIDENCE = 0.65
@@ -96,11 +98,13 @@ FOLLOWERS_VISUAL_MIN_FOLLOW_BUTTONS = 3
 ENABLE_FOLLOWERS_VISUAL_CANDIDATE_DIAGNOSTIC = True
 # Visual row picker from screenshot when XML candidates are empty (V1: no taps / follow / scroll).
 ENABLE_VISUAL_FOLLOWERS_CANDIDATE_PICKER = True
-VISUAL_FOLLOWERS_PICKER_DRY_RUN = True
+# False requis pour ne pas terminer le followers engine sur exit 45 (picker dry-run only).
+VISUAL_FOLLOWERS_PICKER_DRY_RUN = False
 VISUAL_FOLLOWERS_MAX_CANDIDATES_PER_SCREEN = 5
 # Tap one visual row (username zone) to open follower profile; dry-run stops after verify (no follow/DM).
 ENABLE_VISUAL_FOLLOWERS_CANDIDATE_OPEN = True
-VISUAL_FOLLOWERS_OPEN_DRY_RUN = True
+# False = ouverture réelle des lignes followers (validation device réel followers/mute).
+VISUAL_FOLLOWERS_OPEN_DRY_RUN = False
 VISUAL_FOLLOWERS_OPEN_MAX_PER_RUN = 1
 # Logged-in worker handle: excluded from visual follower-row open (self row on another profile's followers list).
 VISUAL_FOLLOWERS_ACTION_ACCOUNT_USERNAME = ""
@@ -115,7 +119,8 @@ VISUAL_POST_LIKE_VERIFY_AFTER_TAP = True
 VISUAL_POST_LIKE_VERIFY_TIMEOUT_S = 2.5
 # Follow + mute sheet dry-run on open profile (no real follow/mute taps).
 ENABLE_VISUAL_FOLLOW_MUTE_FLOW = True
-VISUAL_FOLLOW_MUTE_DRY_RUN = True
+# False = follow/mute réels après ouverture profil (validation pending + mute).
+VISUAL_FOLLOW_MUTE_DRY_RUN = False
 # Real visual Follow tap + verify (mute remains controlled by VISUAL_FOLLOW_MUTE_DRY_RUN).
 ENABLE_REAL_VISUAL_FOLLOW = True
 VISUAL_FOLLOW_VERIFY_AFTER_TAP = True

@@ -218,7 +218,21 @@ def apply_search_surface_reuse_metrics(d: u2.Device, pkg: str, reason: str) -> b
     """Set perf + log search_surface_reused when EditText is ready (no nav click)."""
     global _perf
     t_ed = time.perf_counter()
-    if _wait_search_edittext(d) is None:
+    ed_reuse = _wait_search_edittext(d)
+    if ed_reuse is None:
+        return False
+    strict_ok, strict_why = instagram_search_surface_strict_ok(d, ed_reuse, pkg=pkg)
+    if not strict_ok:
+        invalidate_search_surface_cache(f"surface_reuse_strict_failed:{strict_why}")
+        log(
+            "info",
+            "wrong_search_surface_detected",
+            phase="apply_search_surface_reuse_metrics",
+            detail=strict_why,
+            reuse_reason=reason,
+            foreground_package=_current_foreground_package(d),
+            edittext_package=_edittext_package_name(ed_reuse),
+        )
         return False
     _perf["search_field_ready_ms"] = (time.perf_counter() - t_ed) * 1000
     _perf["search_click_ms"] = 0.0
@@ -241,6 +255,12 @@ def apply_search_surface_reuse_metrics(d: u2.Device, pkg: str, reason: str) -> b
         search_field_ready_ms=round(float(_perf["search_field_ready_ms"]), 2),
         selector=f"surface_reuse:{reason}",
         ok=True,
+    )
+    log(
+        "info",
+        "instagram_search_surface_verified",
+        phase="apply_search_surface_reuse_metrics",
+        detail=reason,
     )
     return True
 
@@ -1403,7 +1423,7 @@ def open_accounts_tab(d: u2.Device) -> bool:
     return False
 
 
-def open_search(d: u2.Device) -> bool:
+def open_search(d: u2.Device, *, _surface_recovery_depth: int = 0) -> bool:
     """Open bottom-nav Search: resource-id first, short settle, exit as soon as EditText exists."""
     global _perf
     settle = min(float(getattr(config, "OPEN_SEARCH_SETTLE_S", 0.12)), 0.12)
@@ -1489,10 +1509,10 @@ def open_search(d: u2.Device) -> bool:
         poll_s=config.UI_FAST_POLL_S,
         desc="open_search_edittext",
     )
+    if ed is None:
+        ed = _wait_search_edittext(d)
     search_field_ready_ms = (time.perf_counter() - t_wait) * 1000
     ok = ed is not None
-    if not ok:
-        ok = _wait_search_edittext(d) is not None
 
     _perf["search_click_ms"] = search_click_ms
     _perf["search_field_ready_ms"] = search_field_ready_ms
@@ -1506,7 +1526,51 @@ def open_search(d: u2.Device) -> bool:
     )
     if not ok:
         invalidate_search_surface_cache("open_search_no_edittext")
-    return ok
+        return False
+
+    strict_ok, strict_why = instagram_search_surface_strict_ok(d, ed, pkg=pkg)
+    if strict_ok:
+        log(
+            "info",
+            "instagram_search_surface_verified",
+            phase="open_search",
+            detail="post_edittext",
+            selector=click_name,
+        )
+        return True
+
+    log(
+        "info",
+        "wrong_search_surface_detected",
+        phase="open_search",
+        detail=strict_why,
+        selector=click_name,
+        foreground_package=_current_foreground_package(d),
+        edittext_package=_edittext_package_name(ed),
+        instagram_package=pkg,
+    )
+    invalidate_search_surface_cache(f"open_search_strict_surface_failed:{strict_why}")
+    if _surface_recovery_depth >= 1:
+        log(
+            "error",
+            "search_surface_wrong_app_launcher",
+            phase="open_search",
+            after_recovery=False,
+            verify_reason=strict_why,
+            foreground_package=_current_foreground_package(d),
+        )
+        return False
+
+    if recover_instagram_search_surface_after_launcher_mixup(
+        d,
+        phase="open_search",
+        detail=strict_why,
+        source_profile_username="",
+        source_account_context=None,
+    ):
+        return open_search(d, _surface_recovery_depth=_surface_recovery_depth + 1)
+
+    return False
 
 
 def _wait_search_edittext(d: u2.Device):
@@ -1547,6 +1611,57 @@ def _search_edittext_text_strip(ed) -> str:
         return (ed.get_text() or "").strip()
     except Exception:
         return ""
+
+
+def _current_foreground_package(d: u2.Device) -> str:
+    try:
+        cur = d.app_current()
+        return str((cur or {}).get("package") or "").strip()
+    except Exception:
+        return ""
+
+
+def _edittext_package_name(ed) -> str:
+    try:
+        info = ed.info or {}
+        return str(info.get("packageName") or info.get("package") or "").strip()
+    except Exception:
+        return ""
+
+
+def _visible_text_suggests_android_launcher_search(txt: str | None) -> bool:
+    key = _normalize_search_field_visible_text(txt)
+    if not key:
+        return False
+    markers = (
+        "search apps, web and more",
+        "search apps",
+        "web and more",
+    )
+    return any(m in key for m in markers)
+
+
+def instagram_search_surface_strict_ok(
+    d: u2.Device,
+    ed,
+    *,
+    pkg: str | None = None,
+) -> tuple[bool, str]:
+    """
+    True only when Instagram is foreground, the focused search EditText is from IG,
+    and the field text is not the Android launcher / universal search placeholder.
+    """
+    pkg = str(pkg or getattr(config, "INSTAGRAM_PACKAGE", "") or "")
+    fg = _current_foreground_package(d)
+    if fg != pkg:
+        return False, f"foreground_package_mismatch:{fg}"
+    ed_pkg = _edittext_package_name(ed)
+    if ed_pkg and ed_pkg != pkg:
+        return False, f"edittext_package_mismatch:{ed_pkg}"
+    txt = _search_edittext_text_strip(ed)
+    if _visible_text_suggests_android_launcher_search(txt):
+        return False, "launcher_search_hint_in_field"
+    return True, "ok"
 
 
 def _field_still_matches_previous_query(cur: str, previous_username: str | None) -> bool:
@@ -1767,6 +1882,91 @@ def type_search(
         _perf["typing_command_ms"] = (time.perf_counter() - t_typ) * 1000
         _perf["typing_confirm_ms"] = 0.0
         return False
+
+    pkg_ig = str(getattr(config, "INSTAGRAM_PACKAGE", "") or "")
+    ok_surf, surf_why = instagram_search_surface_strict_ok(d, ed, pkg=pkg_ig)
+    if ok_surf:
+        log(
+            "info",
+            "instagram_search_surface_verified",
+            phase="type_search_precheck",
+            detail="initial",
+        )
+    else:
+        log(
+            "info",
+            "wrong_search_surface_detected",
+            phase="type_search_precheck",
+            detail=surf_why,
+            foreground_package=_current_foreground_package(d),
+            edittext_package=_edittext_package_name(ed),
+            instagram_package=pkg_ig,
+        )
+        if not recover_instagram_search_surface_after_launcher_mixup(
+            d,
+            phase="type_search_precheck",
+            detail=surf_why,
+            source_profile_username="",
+            source_account_context=None,
+        ):
+            _TYPE_SEARCH_FAILURE_REASON = "search_surface_wrong_app_launcher"
+            _perf["typing_command_ms"] = (time.perf_counter() - t_typ) * 1000
+            _perf["typing_confirm_ms"] = 0.0
+            log("error", "type_search_aborted", reason="search_surface_wrong_app_launcher")
+            return False
+        if not open_search(d):
+            _TYPE_SEARCH_FAILURE_REASON = "search_surface_wrong_app_launcher"
+            _perf["typing_command_ms"] = (time.perf_counter() - t_typ) * 1000
+            _perf["typing_confirm_ms"] = 0.0
+            log(
+                "error",
+                "search_surface_wrong_app_launcher",
+                phase="type_search_precheck",
+                stage="open_search_after_recovery_failed",
+                foreground_package=_current_foreground_package(d),
+            )
+            log("error", "type_search_aborted", reason="search_surface_wrong_app_launcher")
+            return False
+        ed = retry_until(
+            lambda: _wait_search_edittext(d),
+            timeout_s=config.SEARCH_FIELD_WAIT_S,
+            poll_s=config.UI_FAST_POLL_S,
+            desc="search_edittext_after_launcher_recovery",
+        )
+        if ed is None:
+            _TYPE_SEARCH_FAILURE_REASON = "search_surface_wrong_app_launcher"
+            _perf["typing_command_ms"] = (time.perf_counter() - t_typ) * 1000
+            _perf["typing_confirm_ms"] = 0.0
+            log(
+                "error",
+                "search_surface_wrong_app_launcher",
+                phase="type_search_precheck",
+                stage="no_edittext_after_recovery",
+                foreground_package=_current_foreground_package(d),
+            )
+            log("error", "type_search_aborted", reason="search_surface_wrong_app_launcher")
+            return False
+        ok_surf2, surf_why2 = instagram_search_surface_strict_ok(d, ed, pkg=pkg_ig)
+        if not ok_surf2:
+            _TYPE_SEARCH_FAILURE_REASON = "search_surface_wrong_app_launcher"
+            _perf["typing_command_ms"] = (time.perf_counter() - t_typ) * 1000
+            _perf["typing_confirm_ms"] = 0.0
+            log(
+                "error",
+                "search_surface_wrong_app_launcher",
+                phase="type_search_precheck",
+                after_recovery=True,
+                verify_reason=surf_why2,
+                foreground_package=_current_foreground_package(d),
+            )
+            log("error", "type_search_aborted", reason="search_surface_wrong_app_launcher")
+            return False
+        log(
+            "info",
+            "instagram_search_surface_verified",
+            phase="type_search_precheck",
+            detail="after_recovery",
+        )
 
     serial = get_device_serial(d)
     t_cmd_start = time.perf_counter()
@@ -4737,6 +4937,123 @@ FOLLOWERS_ENGINE_XML_STALE_EXIT_REASONS = frozenset(
     }
 )
 
+# open_detection_method values that imply visual / coordinate followers list open (picker + stale-XML paths).
+FOLLOWERS_ENGINE_VISUAL_OPEN_METHODS = frozenset(
+    {
+        "visual_followers_list",
+        "followers_list_visual",
+        "visual_open_followers",
+        "visual_followers",
+        "visual_fallback",
+        "coordinate_fallback",
+    }
+)
+
+
+def followers_bypass_xml_stale_recovery_if_visual_surface_strong(
+    d: u2.Device,
+    *,
+    source_profile_username: str,
+    det: dict[str, Any],
+    phase: str,
+    stop_reason: str | None,
+    loop_iteration: int,
+    session_visual_fallback_detail: dict[str, Any] | None = None,
+    visual_xml_stale_grace_remaining: int = 0,
+) -> tuple[bool, str]:
+    """
+    (True, reason) when the followers surface is visually / structurally strong enough to skip
+    immediate exit 44 from _followers_xml_stale_engine_stop (picker may still be skipped).
+    """
+    _ = d
+    min_conf = float(getattr(config, "FOLLOWERS_VISUAL_FALLBACK_MIN_CONFIDENCE", 0.65))
+
+    vf_detail = det.get("visual_fallback_detail")
+    if isinstance(vf_detail, dict) and bool(vf_detail.get("visual_match")):
+        rows = int(vf_detail.get("visual_user_rows_detected") or 0)
+        btns = int(vf_detail.get("visual_follow_button_count") or 0)
+        conf = float(vf_detail.get("visual_confidence") or 0.0)
+        if rows >= 2 or btns >= 1 or conf >= min_conf:
+            log(
+                "info",
+                "followers_bypass_xml_stale_recovery_visual_surface_strong",
+                reason="visual_fallback_detail",
+                phase=phase,
+                stop_reason=stop_reason,
+                loop_iteration=loop_iteration,
+                source_profile_username=source_profile_username,
+                visual_user_rows_detected=rows,
+                visual_follow_button_count=btns,
+                visual_confidence=round(conf, 4),
+            )
+            return True, "det_visual_fallback_detail"
+
+    if (
+        visual_xml_stale_grace_remaining > 0
+        and isinstance(session_visual_fallback_detail, dict)
+        and bool(session_visual_fallback_detail.get("visual_match"))
+    ):
+        s_rows = int(session_visual_fallback_detail.get("visual_user_rows_detected") or 0)
+        s_btns = int(session_visual_fallback_detail.get("visual_follow_button_count") or 0)
+        s_conf = float(session_visual_fallback_detail.get("visual_confidence") or 0.0)
+        if s_conf >= min_conf and (s_rows >= 2 or s_btns >= 1):
+            log(
+                "info",
+                "followers_xml_stale_ignored_after_visual_match",
+                phase=phase,
+                stop_reason=stop_reason,
+                loop_iteration=loop_iteration,
+                source_profile_username=source_profile_username,
+                grace_remaining=visual_xml_stale_grace_remaining,
+                visual_user_rows_detected=s_rows,
+                visual_follow_button_count=s_btns,
+                visual_confidence=round(s_conf, 4),
+            )
+            return True, "session_visual_fallback_grace"
+
+    odm = str(_FOLLOWERS_LAST_OPEN_DETECTION_METHOD or "")
+    if odm in FOLLOWERS_ENGINE_VISUAL_OPEN_METHODS and _FOLLOWERS_VISUAL_HAD_NONEMPTY_CANDIDATE_ROWS:
+        log(
+            "info",
+            "followers_bypass_xml_stale_recovery_visual_surface_strong",
+            reason="visual_open_had_nonempty_candidate_rows",
+            phase=phase,
+            stop_reason=stop_reason,
+            loop_iteration=loop_iteration,
+            source_profile_username=source_profile_username,
+            open_detection_method=odm,
+        )
+        return True, "visual_open_had_nonempty_candidate_rows"
+
+    if odm in FOLLOWERS_ENGINE_VISUAL_OPEN_METHODS and bool(det.get("is_followers_list")):
+        cc = int(det.get("candidate_username_count") or 0)
+        sample = det.get("visible_usernames_sample") or []
+        n_sample = len(sample) if isinstance(sample, list) else 0
+        if cc >= 1 or n_sample >= 1:
+            if bool(det.get("strict_list_open")) or bool(det.get("relaxed_list_open")) or cc >= 2:
+                log(
+                    "info",
+                    "followers_bypass_xml_stale_recovery_visual_surface_strong",
+                    reason="hierarchy_list_with_handles_after_visual_open",
+                    phase=phase,
+                    stop_reason=stop_reason,
+                    loop_iteration=loop_iteration,
+                    source_profile_username=source_profile_username,
+                    candidate_username_count=cc,
+                    visible_usernames_sample_len=n_sample,
+                    strict_list_open=bool(det.get("strict_list_open")),
+                    relaxed_list_open=bool(det.get("relaxed_list_open")),
+                )
+                return True, "hierarchy_list_with_handles_after_visual_open"
+
+    return False, ""
+
+
+def followers_engine_clear_stop_reason() -> None:
+    """Clear XML-stale stop flag so the followers loop can continue in visual mode."""
+    global _FOLLOWERS_ENGINE_STOP_REASON
+    _FOLLOWERS_ENGINE_STOP_REASON = None
+
 
 def get_followers_engine_stop_reason() -> str | None:
     return _FOLLOWERS_ENGINE_STOP_REASON
@@ -4988,6 +5305,119 @@ def _collect_profile_stats_band_texts(d: u2.Device, w: int, h: int) -> list[dict
         pass
     rows.sort(key=lambda r: (r["cyy"], r["cx"]))
     return rows
+
+
+def _parse_profile_metric_compact_number(text: str) -> int | None:
+    """Parse IG-style counts: 1,234 / 12.5K / 3M (best-effort)."""
+    t = (
+        (text or "")
+        .strip()
+        .replace(",", "")
+        .replace("\u202f", "")
+        .replace("\xa0", "")
+        .replace(" ", "")
+    )
+    if not t or t in ("-", "–", "—"):
+        return None
+    mul = 1
+    tl = t.lower().rstrip(".")
+    if tl.endswith("k"):
+        mul = 1000
+        t = t[:-1]
+    elif tl.endswith("m"):
+        mul = 1_000_000
+        t = t[:-1]
+    elif tl.endswith("b"):
+        mul = 1_000_000_000
+        t = t[:-1]
+    try:
+        if "." in t:
+            return int(float(t) * mul)
+        return int(t) * mul
+    except (TypeError, ValueError):
+        return None
+
+
+def _visual_profile_stats_numeric_row_entries(
+    band: list[dict[str, Any]], *, h: int
+) -> list[tuple[int, int, int]]:
+    """
+    From stats-band TextViews, keep numeric nodes likely on the counts row (upper part of band).
+    Returns list of (cx, cyy, value) sorted left-to-right.
+    """
+    if not band:
+        return []
+    y_cut = int(h * 0.17)
+    out: list[tuple[int, int, int]] = []
+    for r in band:
+        txt = str(r.get("text") or "").strip()
+        val = _parse_profile_metric_compact_number(txt)
+        if val is None:
+            continue
+        cyy = int(r.get("cyy") or 0)
+        if cyy > y_cut:
+            continue
+        out.append((int(r.get("cx") or 0), cyy, val))
+    out.sort(key=lambda x: (x[0], x[1]))
+    return out
+
+
+def visual_extract_profile_metrics(
+    d: u2.Device,
+    *,
+    source_profile_username: str = "",
+) -> dict[str, Any]:
+    """
+    Read posts / followers / following from the profile header stats strip (XML band).
+    Never raises; on failure returns null counts and extraction_ok=False.
+    """
+    meta = _followers_current_pkg_activity(d)
+    un_hint = _normalize_handle(source_profile_username or "")
+    username_norm = un_hint
+    try:
+        ab = d(resourceIdMatches=r".*:id/action_bar_title.*")
+        if ab.exists(timeout=0.12):
+            username_norm = _normalize_handle(str(ab.get_text() or "")) or username_norm
+    except Exception:
+        pass
+
+    out: dict[str, Any] = {
+        "posts_count": None,
+        "followers_count": None,
+        "following_count": None,
+        "username_norm": username_norm,
+        "current_activity": meta.get("current_activity"),
+        "current_package": meta.get("current_package"),
+        "extraction_ok": False,
+        "extraction_note": None,
+    }
+    try:
+        w, h = d.window_size()
+    except Exception:
+        w, h = 1080, 1920
+    try:
+        band = _collect_profile_stats_band_texts(d, w, h)
+        nums = _visual_profile_stats_numeric_row_entries(band, h=h)
+        if len(nums) >= 3:
+            out["posts_count"] = nums[0][2]
+            out["followers_count"] = nums[1][2]
+            out["following_count"] = nums[2][2]
+            out["extraction_ok"] = True
+            out["extraction_note"] = "three_column_parse"
+        elif len(nums) == 2:
+            out["posts_count"] = nums[0][2]
+            out["followers_count"] = nums[1][2]
+            out["extraction_ok"] = True
+            out["extraction_note"] = "partial_two_counts"
+        elif len(nums) == 1:
+            out["posts_count"] = nums[0][2]
+            out["extraction_ok"] = True
+            out["extraction_note"] = "single_count_assumed_posts"
+        else:
+            out["extraction_note"] = "no_numeric_stats_in_band"
+    except Exception as e:
+        out["extraction_note"] = f"exception:{type(e).__name__}"
+    return out
 
 
 def _followers_collect_profile_text_dump(d: u2.Device, w: int, h: int) -> list[dict[str, Any]]:
@@ -12823,6 +13253,398 @@ def return_to_followers_list(
             return True, "reopen_from_source_profile"
     log("error", "followers_list_return_failed", source_profile_username=source_profile_username)
     return False, "failed"
+
+
+def visual_flow_final_return_to_ct_followers_list(
+    d: u2.Device,
+    *,
+    source_profile_username: str,
+    pkg: str,
+    candidate_username: str | None = None,
+    source_account_context: str | None = None,
+) -> dict[str, Any]:
+    """
+    Leave an opened follower-candidate profile and restore the source (CT) followers list.
+    Thin wrapper over return_to_followers_list; never raises.
+    """
+    _ = source_account_context
+    try:
+        log(
+            "info",
+            "visual_flow_final_return_to_ct_followers_list_started",
+            source_profile_username=source_profile_username,
+            candidate_username=candidate_username,
+        )
+        ok, how = return_to_followers_list(d, source_profile_username, pkg or "")
+        out = {
+            "final_return_ok": bool(ok),
+            "how": str(how or ""),
+            "restart_required": False,
+            "reset_ok": False,
+            "reset_performed": False,
+        }
+        log(
+            "info",
+            "visual_flow_final_return_to_ct_followers_list_complete",
+            source_profile_username=source_profile_username,
+            candidate_username=candidate_username,
+            **out,
+        )
+        return out
+    except Exception as e:
+        log(
+            "warning",
+            "visual_flow_final_return_to_ct_followers_list_failed",
+            source_profile_username=source_profile_username,
+            candidate_username=candidate_username,
+            error=str(e),
+        )
+        return {
+            "final_return_ok": False,
+            "how": "exception",
+            "restart_required": False,
+            "reset_ok": False,
+            "reset_performed": False,
+        }
+
+
+def verify_followers_list_surface_is_ct_account(
+    d: u2.Device,
+    *,
+    source_profile_username: str,
+    follower_candidate_username: str | None = None,
+) -> bool:
+    """
+    Best-effort: True if current screen looks like the CT source account's followers list.
+    Never raises. Uses detect_followers_list_screen + action bar / header hints.
+    """
+    try:
+        det = detect_followers_list_screen(d, source_profile_username=source_profile_username)
+        if not bool(det.get("is_followers_list")):
+            return False
+
+        src = _normalize_handle(source_profile_username or "")
+        ab_raw = str(det.get("action_bar_title") or "").strip()
+        ab = _normalize_handle(ab_raw)
+        cand = _normalize_handle(follower_candidate_username or "")
+
+        if cand and ab and ab == cand:
+            return False
+
+        if not src:
+            return True
+
+        if ab and ab == src:
+            return True
+
+        if ab and ab != src:
+            return False
+
+        for t in (det.get("visible_header_texts") or [])[:30]:
+            if _normalize_handle(str(t)) == src:
+                return True
+
+        return bool(det.get("title_match")) or bool(det.get("strict_list_open"))
+    except Exception:
+        return True
+
+
+def reset_instagram_to_canonical_state(
+    d: u2.Device,
+    *,
+    reason: str,
+    source_profile_username: str = "",
+    source_account_context: str | None = None,
+) -> dict[str, Any]:
+    """
+    Best-effort cold restart of Instagram (force-stop → launch → foreground check).
+    Never raises; returns a dict with at least ``ok`` for runner compatibility.
+    """
+    _ = source_account_context
+    pkg = str(getattr(config, "INSTAGRAM_PACKAGE", "") or "com.instagram.android")
+    out: dict[str, Any] = {
+        "ok": False,
+        "reason": str(reason or ""),
+        "reset_performed": False,
+        "package": pkg,
+        "source_profile_username": source_profile_username,
+        "foreground_after_reset": False,
+    }
+    try:
+        log(
+            "info",
+            "instagram_canonical_reset_started",
+            reset_reason=out["reason"],
+            package=pkg,
+            source_profile_username=source_profile_username,
+        )
+        code, _stdout, _stderr = shell(d, f"am force-stop {pkg}")
+        out["force_stop_exit_code"] = int(code)
+        time.sleep(0.4)
+        try:
+            d.app_start(pkg, stop=False)
+        except Exception as e_app:
+            out["app_start_error"] = str(e_app)
+            shell(d, f"monkey -p {pkg} -c android.intent.category.LAUNCHER 1")
+        time.sleep(0.85)
+        fg = bool(verify_app_foreground(d, pkg))
+        out["foreground_after_reset"] = fg
+        out["reset_performed"] = True
+        out["ok"] = fg
+        if fg:
+            try:
+                invalidate_search_surface_cache(reason=f"canonical_reset:{reason}")
+            except Exception:
+                pass
+        log(
+            "info",
+            "instagram_canonical_reset_complete",
+            ok=out["ok"],
+            reset_reason=out["reason"],
+            foreground_after_reset=fg,
+        )
+        return out
+    except Exception as e:
+        out["error"] = str(e)
+        log(
+            "warning",
+            "instagram_canonical_reset_failed",
+            error=str(e),
+            reset_reason=out["reason"],
+            package=pkg,
+        )
+        return out
+
+
+def recover_instagram_search_surface_after_launcher_mixup(
+    d: u2.Device,
+    *,
+    phase: str,
+    detail: str,
+    source_profile_username: str = "",
+    source_account_context: str | None = None,
+) -> bool:
+    """
+    Cold-restart Instagram after we detected launcher/universal-search confusion.
+    Caller should call open_search afterward. Does not log wrong_search_surface_detected
+    (caller already did when applicable).
+    """
+    invalidate_search_surface_cache("wrong_search_surface_launcher_mixup")
+    rr = reset_instagram_to_canonical_state(
+        d,
+        reason=f"launcher_search_surface_mixup:{phase}:{detail}",
+        source_profile_username=source_profile_username,
+        source_account_context=source_account_context,
+    )
+    if not rr.get("ok"):
+        log(
+            "error",
+            "search_surface_wrong_app_launcher",
+            phase=phase,
+            stage="canonical_reset_failed",
+            reset_reason=rr.get("reason"),
+            foreground_package=_current_foreground_package(d),
+        )
+        return False
+    log(
+        "info",
+        "instagram_recovery_after_launcher_search",
+        phase=phase,
+        detail=detail,
+        foreground_after_reset=bool(rr.get("foreground_after_reset")),
+    )
+    return True
+
+
+def ensure_global_search_surface(
+    d: u2.Device,
+    *,
+    intended_username: str = "",
+    source_profile_username: str = "",
+    source_account_context: str = "",
+) -> dict[str, Any]:
+    """
+    Ensure Instagram is foreground and the bottom-nav Search surface is usable.
+    Compatible with runner / canonical-reset reentry (keys: ok, reason).
+    """
+    _ = source_account_context
+    pkg = str(getattr(config, "INSTAGRAM_PACKAGE", "") or "com.instagram.android")
+    meta: dict[str, Any] = {
+        "ok": False,
+        "reason": "init",
+        "package": pkg,
+        "intended_username": intended_username,
+        "source_profile_username": source_profile_username,
+    }
+    try:
+        log(
+            "info",
+            "ensure_global_search_surface_started",
+            package=pkg,
+            intended_username=intended_username,
+            source_profile_username=source_profile_username,
+        )
+        if not verify_app_foreground(d, pkg):
+            try:
+                d.app_start(pkg, stop=False)
+            except Exception:
+                shell(d, f"monkey -p {pkg} -c android.intent.category.LAUNCHER 1")
+            time.sleep(0.55)
+            if not verify_app_foreground(d, pkg):
+                meta["reason"] = "instagram_not_foreground"
+                return meta
+        if open_search(d):
+            meta["ok"] = True
+            meta["reason"] = "open_search_ok"
+            log(
+                "info",
+                "instagram_search_surface_verified",
+                phase="ensure_global_search_surface",
+                detail="open_search_ok",
+            )
+            return meta
+        if is_lightweight_search_screen(d, pkg):
+            if apply_search_surface_reuse_metrics(d, pkg, "ensure_global_fallback"):
+                meta["ok"] = True
+                meta["reason"] = "lightweight_search_screen"
+                log(
+                    "info",
+                    "instagram_search_surface_verified",
+                    phase="ensure_global_search_surface",
+                    detail="lightweight_search_screen",
+                )
+                return meta
+        meta["reason"] = "open_search_failed"
+        return meta
+    except Exception as e:
+        meta["reason"] = f"exception:{type(e).__name__}"
+        meta["error"] = str(e)
+        return meta
+
+
+def visual_profile_metrics_pass_filter(metrics: dict[str, Any]) -> tuple[bool, str]:
+    """
+    (passes, reason). When extraction is weak or thresholds are unset, default pass (do not skip target).
+    Thresholds: optional VISUAL_PROFILE_METRICS_* on config.
+    """
+    if not isinstance(metrics, dict):
+        return True, "metrics_invalid_skip_filter"
+
+    min_followers = getattr(config, "VISUAL_PROFILE_METRICS_MIN_FOLLOWERS", None)
+    max_followers = getattr(config, "VISUAL_PROFILE_METRICS_MAX_FOLLOWERS", None)
+    min_posts = getattr(config, "VISUAL_PROFILE_METRICS_MIN_POSTS", None)
+    max_posts = getattr(config, "VISUAL_PROFILE_METRICS_MAX_POSTS", None)
+    min_following = getattr(config, "VISUAL_PROFILE_METRICS_MIN_FOLLOWING", None)
+    max_following = getattr(config, "VISUAL_PROFILE_METRICS_MAX_FOLLOWING", None)
+
+    active_thresholds = [
+        x is not None
+        for x in (
+            min_followers,
+            max_followers,
+            min_posts,
+            max_posts,
+            min_following,
+            max_following,
+        )
+    ]
+    if not any(active_thresholds):
+        return True, "no_metrics_thresholds_configured"
+
+    if not metrics.get("extraction_ok", False):
+        return True, "metrics_extraction_failed_skip_filter"
+
+    fc = metrics.get("followers_count")
+    pc = metrics.get("posts_count")
+    flc = metrics.get("following_count")
+
+    def _chk(
+        val: Any,
+        lo: Any,
+        hi: Any,
+        below_reason: str,
+        above_reason: str,
+    ) -> tuple[bool, str] | None:
+        if val is None:
+            return None
+        try:
+            v = int(val)
+        except (TypeError, ValueError):
+            return None
+        if lo is not None and v < int(lo):
+            return False, below_reason
+        if hi is not None and v > int(hi):
+            return False, above_reason
+        return None
+
+    for val, lo, hi, br, ar in (
+        (fc, min_followers, max_followers, "below_min_followers", "above_max_followers"),
+        (pc, min_posts, max_posts, "below_min_posts", "above_max_posts"),
+        (flc, min_following, max_following, "below_min_following", "above_max_following"),
+    ):
+        res = _chk(val, lo, hi, br, ar)
+        if res is not None:
+            ok_r, reason_r = res
+            if not ok_r:
+                return False, reason_r
+    return True, "metrics_thresholds_pass"
+
+
+def visual_profile_stats_posts_count(d: u2.Device) -> int | None:
+    """Posts count from header stats strip; None if unknown."""
+    try:
+        m = visual_extract_profile_metrics(d, source_profile_username="")
+        pc = m.get("posts_count")
+        return int(pc) if pc is not None else None
+    except Exception:
+        return None
+
+
+def read_current_profile_username_for_follow_gate(d: u2.Device) -> str:
+    """Action-bar / header username on current profile screen (best-effort)."""
+    try:
+        return str(_visual_read_action_bar_username(d) or "").strip().lstrip("@")
+    except Exception:
+        return ""
+
+
+def reacquire_target_profile_for_follow(
+    d: u2.Device,
+    *,
+    target_username: str,
+    source_profile_username: str,
+    source_account_context: str = "",
+    follower_candidate: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """
+    Re-open the follower row profile when navigation drifted before follow/mute.
+    """
+    _ = source_account_context
+    out: dict[str, Any] = {"ok": False, "method": "none"}
+    try:
+        tgt = _normalize_handle(target_username or "")
+        cur = _normalize_handle(read_current_profile_username_for_follow_gate(d))
+        if tgt and cur and cur == tgt:
+            out["ok"] = True
+            out["method"] = "already_on_target_profile"
+            return out
+
+        fc = follower_candidate if isinstance(follower_candidate, dict) else None
+        if not fc or not str(fc.get("username") or "").strip():
+            out["method"] = "missing_follower_candidate"
+            return out
+
+        pkg = getattr(config, "INSTAGRAM_PACKAGE", "") or ""
+        if open_follower_profile_from_list(d, fc, source_profile_username, pkg):
+            out["ok"] = True
+            out["method"] = "follower_row_reopen"
+        else:
+            out["method"] = "open_follower_profile_failed"
+        return out
+    except Exception as e:
+        out["method"] = "exception"
+        out["error"] = str(e)
+        return out
 
 
 def send_dm_safe(
