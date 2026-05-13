@@ -2,7 +2,7 @@
 
 # Target account to open (exact match under Accounts tab).
 # Controlled real-send test: prefer empty / new thread only (no prior DM history with this account).
-TARGET_USERNAME = "xstonekwa_backup_acc"
+TARGET_USERNAME = "mythyllus"
 
 INSTAGRAM_PACKAGE = "com.instagram.android"
 
@@ -83,10 +83,15 @@ FOLLOW_BUTTON_WAIT_S = 4.0
 # TEST minimal: 2 follows réels, pas de DM (voir aussi ENABLE_REAL_DM_SEND / FOLLOW_THEN_DM).
 ENABLE_FOLLOWERS_LIST_ENGINE = True
 # Source profile handle to open (empty = first CLI / queue target username is the source profile only for this mode).
-FOLLOWERS_SOURCE_USERNAME = "xstonekwa_backup_acc"
+FOLLOWERS_SOURCE_USERNAME = "mythyllus"
 FOLLOWERS_LIST_MAX_ITERATIONS_PER_RUN = 2
 FOLLOWERS_LIST_OPEN_WAIT_S = 4.0
 FOLLOWERS_LIST_RETURN_MAX_RETRIES = 2
+# Followers Entry Engine V2: hybrid followers-stat candidates, no coordinate fallback drift; force-stop on hard failure.
+ENABLE_FOLLOWERS_ENTRY_ENGINE_V2 = True
+FOLLOWERS_ENTRY_V2_MIN_CONFIDENCE = 0.62
+# When True: allow geometry-only followers column tap if no text/XML candidates and profile gates match.
+FOLLOWERS_ENTRY_V2_ALLOW_GEOMETRY_TAP = False
 FOLLOWERS_LIST_SCROLL_MAX_PER_SESSION = 25
 # Après visual_fallback avec forte confiance, ignorera XML stale pendant N itérations de boucle.
 FOLLOWERS_VISUAL_XML_STALE_GRACE_ITERATIONS = 3
@@ -131,6 +136,17 @@ VISUAL_MUTE_STORIES_AFTER_FOLLOW = True
 ENABLE_REAL_VISUAL_MUTE_AFTER_FOLLOW = True
 VISUAL_MUTE_VERIFY_AFTER_TAP = True
 VISUAL_MUTE_VERIFY_TIMEOUT_S = 3.0
+# Vision Validation Layer: screenshot + context heuristics (no taps); gates followers/mute drift.
+ENABLE_VISION_VALIDATION_LAYER = True
+VISION_VALIDATION_STRICT_MODE = True
+# Post-follow return CT: stop blind back/recovery after this many consecutive bad nav observations.
+POST_FOLLOW_RETURN_CT_DRIFT_ABORT_STREAK = 4
+# Max wall time per post-follow CT return round (no deep recovery / exploratory navigation).
+POST_FOLLOW_RETURN_CT_ROUND_BUDGET_S = 10.0
+# Backs delegated to return_to_followers_list within one post-follow CT round (keep low).
+POST_FOLLOW_RETURN_CT_BACK_MAX_RETRIES = 1
+# When True: allow hierarchy dumps + reopen followers from source profile (may tap UI). Default off for drift safety.
+POST_FOLLOW_RETURN_CT_ALLOW_HIERARCHY_PROFILE_REOPEN = False
 # Lock visual profile context before real Follow/Like (abort on drift; no recovery navigation).
 ENABLE_VISUAL_PROFILE_CONTEXT_LOCK = True
 VISUAL_PROFILE_CONTEXT_MIN_MATCH_CONFIDENCE = 0.72

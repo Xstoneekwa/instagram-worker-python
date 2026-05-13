@@ -15,6 +15,7 @@ import uiautomator2 as u2
 
 import config
 from device import (
+    force_stop,
     get_device_serial,
     is_fast_ime_available,
     retry_until,
@@ -24,6 +25,7 @@ from device import (
     shell,
 )
 from logs import log
+from screen_fingerprint import build_screen_fingerprint, compare_screen_fingerprints
 
 # Set by runner after open_accounts_tab: "accounts_tab" | "mixed_results"
 _search_ui_mode = "accounts_tab"
@@ -64,6 +66,17 @@ _PENDING_FUSED_FAST_IME_USERNAME: str = ""
 _LOGS_ROOT = Path(__file__).resolve().parent / "logs"
 _SCREENSHOTS_DIR = _LOGS_ROOT / "screenshots"
 _XML_DIR = _LOGS_ROOT / "xml"
+
+# Consecutive ``visual_followers_candidate_picker_started`` without a terminal outcome (cross-call).
+_FOLLOWERS_VISUAL_PICKER_INCOMPLETE_STARTS: dict[str, int] = {}
+
+
+def _followers_visual_picker_terminal_reset(stall_key: str) -> None:
+    try:
+        _FOLLOWERS_VISUAL_PICKER_INCOMPLETE_STARTS[stall_key] = 0
+    except Exception:
+        pass
+
 
 # Horizontal search tab chips (EN/FR + variants)
 _ACCOUNTS_TAB_LABELS = (
@@ -4420,6 +4433,7 @@ def _follow_score_candidate(
     el: Any,
     *,
     username: str,
+    header_band_relaxed: bool = False,
 ) -> tuple[int, dict[str, Any]] | tuple[None, dict[str, Any]]:
     inf = _follow_safe_info(el)
     rid = str(inf.get("resourceName") or "")
@@ -4442,8 +4456,10 @@ def _follow_score_candidate(
     }
     if cy is None:
         return None, {**meta, "reject": "no_bounds"}
-    # Header band: avoid bottom-sheet / list rows
-    if cy < int(h * 0.07) or cy > int(h * 0.44):
+    # Header band: avoid bottom-sheet / list rows (relaxed when profile already open / visual row tap)
+    _y_top = int(h * 0.05) if header_band_relaxed else int(h * 0.07)
+    _y_bot = int(h * 0.52) if header_band_relaxed else int(h * 0.44)
+    if cy < _y_top or cy > _y_bot:
         return None, {**meta, "reject": "off_header_band"}
     if _follow_rid_suspicious(rid):
         return None, {**meta, "reject": "rid_blocked"}
@@ -4510,10 +4526,16 @@ def wait_for_follow_button_safe(
     d: u2.Device,
     username: str,
     pkg: str | None = None,
+    *,
+    profile_already_open: bool = False,
+    visual_candidate_id: str | None = None,
 ) -> tuple[Any | None, dict[str, Any]]:
     """
     Wait for a single safe Follow / Suivre control. Rejects Following, Requested, Message, etc.
     Returns (element, meta). meta includes 'events' list of (event_name, payload) for Supabase mirroring.
+
+    When ``profile_already_open`` is True, skip username-based assumptions and use a slightly relaxed
+    header vertical band so the Follow pill on the already-open profile can be scored.
     """
     pkg = pkg or getattr(config, "INSTAGRAM_PACKAGE", "") or ""
     events: list[tuple[str, dict[str, Any]]] = []
@@ -4541,7 +4563,12 @@ def wait_for_follow_button_safe(
         candidates = _follow_collect_elements(d)
         best: tuple[int, Any, dict[str, Any]] | None = None
         for el in candidates:
-            scored = _follow_score_candidate(d, el, username=username)
+            scored = _follow_score_candidate(
+                d,
+                el,
+                username=username,
+                header_band_relaxed=bool(profile_already_open),
+            )
             score, meta = scored
             _record(
                 "follow_button_candidate_seen",
@@ -4594,6 +4621,8 @@ def wait_for_follow_button_safe(
             "last_ui_state": last_ui,
             "wait_s": round(float(getattr(config, "FOLLOW_BUTTON_WAIT_S", 4.0)), 3),
             "navigation_state": "profile",
+            "profile_already_open": bool(profile_already_open),
+            "visual_candidate_id": str(visual_candidate_id or ""),
         },
     )
     return None, {"outcome": "not_found", "last_ui_state": last_ui, "events": events}
@@ -4603,9 +4632,16 @@ def perform_follow_safe(
     d: u2.Device,
     username: str,
     pkg: str | None = None,
+    *,
+    profile_already_open: bool = False,
+    visual_candidate_id: str | None = None,
+    source_profile_username: str | None = None,
 ) -> dict[str, Any]:
     """
     Single-tap follow with bounded verification (Following or Requested). No retries / multi-tap.
+
+    When ``profile_already_open`` is True, resolve the Follow control on the current profile surface
+    without requiring a non-empty ``username`` (visual / open-profile follow path).
     """
     pkg = pkg or getattr(config, "INSTAGRAM_PACKAGE", "") or ""
     events: list[tuple[str, dict[str, Any]]] = []
@@ -4615,11 +4651,112 @@ def perform_follow_safe(
         events.append((event, dict(payload)))
         log("info", event, **payload)
 
+    def _visual_reconcile_failure(
+        failure_code: int,
+        *,
+        attempted_tap: bool,
+        verify_attempts: int,
+        state_after_hint: str | None = None,
+    ) -> dict[str, Any] | None:
+        if not profile_already_open:
+            return None
+        partial = {
+            "ok": False,
+            "failure_code": int(failure_code),
+            "events": list(events),
+            "follow_state_before": state_before,
+            "follow_state_after": state_after_hint
+            if state_after_hint is not None
+            else meta.get("last_ui_state"),
+        }
+        reco = visual_follow_post_action_reconcile(
+            d,
+            follow_out=partial,
+            profile_already_open=True,
+            visual_candidate_id=str(visual_candidate_id or ""),
+        )
+        if not reco.get("inferred_follow_success"):
+            return None
+        st_fix = str(reco.get("current_follow_state") or "")
+        if st_fix not in ("following", "requested"):
+            st_fix = _poll_follow_state_for_reconcile(d, rounds=8, delay_s=0.12)
+        if st_fix not in ("following", "requested"):
+            st_fix = str(
+                state_after_hint
+                or meta.get("last_ui_state")
+                or state_before
+                or "following"
+            )
+        had_tap_ev = any(
+            isinstance(e, (list, tuple))
+            and len(e) >= 1
+            and e[0]
+            in ("follow_tap_sent", "follow_action_exact_follow_tap_sent")
+            for e in events
+        )
+        skipped = not (bool(attempted_tap) or had_tap_ev)
+        _record(
+            "follow_completed",
+            {
+                "target_username": username,
+                "profile_already_open": True,
+                "visual_candidate_id": str(visual_candidate_id or ""),
+                "follow_state_before": state_before,
+                "follow_state_after": st_fix,
+                "verify_attempts": verify_attempts,
+                "navigation_state": "profile",
+                "reconciled_inferred_success": True,
+                "reconciled_reason": str(reco.get("reason") or ""),
+                "timings_ms": {"total": round((time.perf_counter() - t_all) * 1000, 2)},
+            },
+        )
+        log(
+            "info",
+            "visual_follow_perform_follow_reconciled_to_success",
+            target_username=str(username or ""),
+            visual_candidate_id=str(visual_candidate_id or ""),
+            prior_failure_code=int(failure_code),
+            follow_state_after=st_fix,
+            reconciled_reason=str(reco.get("reason") or ""),
+        )
+        log(
+            "info",
+            "visual_follow_direct_profile_action_success",
+            target_username=str(username or ""),
+            visual_candidate_id=str(visual_candidate_id or ""),
+            follow_state_after=st_fix,
+            verify_attempts=verify_attempts,
+            note="reconciled_after_reported_failure",
+        )
+        return {
+            "ok": True,
+            "failure_code": None,
+            "tapped": bool(attempted_tap or had_tap_ev),
+            "skipped_tap": skipped,
+            "follow_state_before": state_before,
+            "follow_state_after": st_fix,
+            "verify_attempts": verify_attempts,
+            "events": events,
+            "reconciled_inferred_success": True,
+            "reconciled_reason": str(reco.get("reason") or ""),
+        }
+
+    if profile_already_open:
+        log(
+            "info",
+            "visual_follow_profile_already_open_mode",
+            target_username=str(username or ""),
+            visual_candidate_id=str(visual_candidate_id or ""),
+            header_band_relaxed=True,
+        )
+
     state_before = _follow_ui_state_snapshot(d)
     _record(
         "follow_started",
         {
             "target_username": username,
+            "profile_already_open": bool(profile_already_open),
+            "visual_candidate_id": str(visual_candidate_id or ""),
             "follow_state_before": state_before,
             "follow_state_after": None,
             "verify_attempts": 0,
@@ -4628,7 +4765,30 @@ def perform_follow_safe(
         },
     )
 
-    btn, meta = wait_for_follow_button_safe(d, username, pkg)
+    _use_follow_action_v2 = bool(profile_already_open) and bool(
+        str(visual_candidate_id or "").strip()
+    )
+    _src_prof = str(source_profile_username or "").strip()
+
+    btn, meta = (None, {})
+    if _use_follow_action_v2:
+        from follow_action_engine import follow_action_surface_wait_and_select_element
+
+        btn, meta = follow_action_surface_wait_and_select_element(
+            d,
+            username,
+            pkg or "",
+            visual_candidate_id=str(visual_candidate_id or ""),
+            source_profile_username=_src_prof,
+        )
+    else:
+        btn, meta = wait_for_follow_button_safe(
+            d,
+            username,
+            pkg,
+            profile_already_open=profile_already_open,
+            visual_candidate_id=visual_candidate_id,
+        )
     events.extend(meta.get("events") or [])
 
     if meta.get("already_following"):
@@ -4649,6 +4809,7 @@ def perform_follow_safe(
             "failure_code": None,
             "tapped": False,
             "skipped_tap": True,
+            "already_following": True,
             "follow_state_before": meta.get("ui_state", state_before),
             "follow_state_after": meta.get("ui_state"),
             "verify_attempts": 0,
@@ -4656,6 +4817,57 @@ def perform_follow_safe(
         }
 
     if btn is None:
+        if profile_already_open:
+            lu = str(meta.get("last_ui_state") or meta.get("ui_state") or "").strip()
+            if lu in ("following", "requested"):
+                _record(
+                    "follow_completed",
+                    {
+                        "target_username": username,
+                        "follow_state_before": lu,
+                        "follow_state_after": lu,
+                        "verify_attempts": 0,
+                        "navigation_state": "profile",
+                        "skipped_tap": True,
+                        "timings_ms": {"total": round((time.perf_counter() - t_all) * 1000, 2)},
+                        "visual_candidate_id": str(visual_candidate_id or ""),
+                        "note": "header_already_connected_before_reconcile",
+                    },
+                )
+                return {
+                    "ok": True,
+                    "failure_code": None,
+                    "tapped": False,
+                    "skipped_tap": True,
+                    "already_following": True,
+                    "follow_state_before": lu,
+                    "follow_state_after": lu,
+                    "verify_attempts": 0,
+                    "events": events,
+                }
+            _reco_none = _visual_reconcile_failure(
+                33, attempted_tap=False, verify_attempts=0
+            )
+            if _reco_none is not None:
+                return _reco_none
+            log(
+                "info",
+                "visual_follow_direct_profile_action_failed",
+                reason="visual_follow_button_not_found_on_open_profile",
+                failure_code=33,
+                target_username=str(username or ""),
+                visual_candidate_id=str(visual_candidate_id or ""),
+            )
+            return {
+                "ok": False,
+                "failure_code": 33,
+                "tapped": False,
+                "follow_state_before": state_before,
+                "follow_state_after": meta.get("last_ui_state"),
+                "verify_attempts": 0,
+                "events": events,
+                "visual_follow_failure_reason": "visual_follow_button_not_found_on_open_profile",
+            }
         return {
             "ok": False,
             "failure_code": 33,
@@ -4666,8 +4878,73 @@ def perform_follow_safe(
             "events": events,
         }
 
+    tap_exact = bool(_use_follow_action_v2 and meta.get("exact_follow_fast_path"))
+    tap_cx, tap_cy = 0, 0
+    tap_coords_ready = False
+    if tap_exact:
+        _eb = _follow_safe_info(btn).get("bounds") or {}
+        try:
+            l0, t0, r0, b0 = (
+                int(_eb["left"]),
+                int(_eb["top"]),
+                int(_eb["right"]),
+                int(_eb["bottom"]),
+            )
+            if r0 > l0 and b0 > t0:
+                tap_cx, tap_cy = (l0 + r0) // 2, (t0 + b0) // 2
+                if not (l0 <= tap_cx <= r0 and t0 <= tap_cy <= b0):
+                    tap_cx, tap_cy = (l0 + r0) // 2, (t0 + b0) // 2
+                tap_coords_ready = True
+        except (KeyError, TypeError, ValueError):
+            tap_coords_ready = False
+
+    if profile_already_open:
+        log(
+            "info",
+            "visual_follow_direct_profile_action_started",
+            target_username=str(username or ""),
+            visual_candidate_id=str(visual_candidate_id or ""),
+            follow_state_before=state_before,
+            follow_action_engine_v2=_use_follow_action_v2,
+            exact_follow_fast_path=tap_exact,
+        )
+
+    if tap_exact:
+        log(
+            "info",
+            "follow_action_exact_follow_tap_ready",
+            target_username=str(username or ""),
+            visual_candidate_id=str(visual_candidate_id or ""),
+            bounds=dict(_follow_safe_info(btn).get("bounds") or {}),
+            derived_click_target=[tap_cx, tap_cy],
+            center_x=tap_cx,
+            center_y=tap_cy,
+            tap_coords_ready=tap_coords_ready,
+        )
+    elif _use_follow_action_v2:
+        log(
+            "info",
+            "follow_action_tap_started",
+            target_username=str(username or ""),
+            visual_candidate_id=str(visual_candidate_id or ""),
+            follow_state_before=state_before,
+        )
+        events.append(
+            (
+                "follow_action_tap_started",
+                {
+                    "target_username": username,
+                    "visual_candidate_id": str(visual_candidate_id or ""),
+                    "follow_state_before": state_before,
+                },
+            )
+        )
+
     try:
-        btn.click()
+        if tap_exact and tap_coords_ready:
+            d.click(tap_cx, tap_cy)
+        else:
+            btn.click()
     except Exception as e:
         _record(
             "follow_verify_failed",
@@ -4681,6 +4958,14 @@ def perform_follow_safe(
                 "timings_ms": {"total": round((time.perf_counter() - t_all) * 1000, 2)},
             },
         )
+        _reco_exc = _visual_reconcile_failure(
+            34,
+            attempted_tap=True,
+            verify_attempts=0,
+            state_after_hint=_follow_ui_state_snapshot(d),
+        )
+        if _reco_exc is not None:
+            return _reco_exc
         _record(
             "follow_completed",
             {
@@ -4691,6 +4976,15 @@ def perform_follow_safe(
                 "timings_ms": {"total": round((time.perf_counter() - t_all) * 1000, 2)},
             },
         )
+        if profile_already_open:
+            log(
+                "info",
+                "visual_follow_direct_profile_action_failed",
+                reason="follow_tap_click_exception",
+                failure_code=34,
+                error=str(e),
+                visual_candidate_id=str(visual_candidate_id or ""),
+            )
         return {
             "ok": False,
             "failure_code": 34,
@@ -4701,31 +4995,95 @@ def perform_follow_safe(
             "events": events,
         }
 
+    if tap_exact:
+        log(
+            "info",
+            "follow_action_exact_follow_tap_sent",
+            target_username=str(username or ""),
+            visual_candidate_id=str(visual_candidate_id or ""),
+            center_x=tap_cx,
+            center_y=tap_cy,
+            tap_coords_ready=tap_coords_ready,
+        )
+        events.append(
+            (
+                "follow_action_exact_follow_tap_sent",
+                {
+                    "target_username": username,
+                    "visual_candidate_id": str(visual_candidate_id or ""),
+                    "center_x": tap_cx,
+                    "center_y": tap_cy,
+                },
+            )
+        )
+
     _record(
         "follow_tap_sent",
         {
             "target_username": username,
+            "profile_already_open": bool(profile_already_open),
+            "visual_candidate_id": str(visual_candidate_id or ""),
             "follow_state_before": state_before,
             "follow_state_after": None,
             "verify_attempts": 0,
             "navigation_state": "profile",
             "timings_ms": {"to_tap_ms": round((time.perf_counter() - t_all) * 1000, 2)},
+            "exact_follow_fast_path": tap_exact,
         },
     )
 
     verify_timeout_ms = int(getattr(config, "FOLLOW_VERIFY_TIMEOUT_MS", 4000) or 4000)
+    if tap_exact:
+        verify_timeout_ms = min(verify_timeout_ms, 2800)
     verify_deadline = time.monotonic() + verify_timeout_ms / 1000.0
-    poll_v = 0.12
+    poll_v = 0.055 if tap_exact else 0.12
     attempts = 0
     state_after = state_before
     while time.monotonic() < verify_deadline:
         attempts += 1
         state_after = _follow_ui_state_snapshot(d)
+        if _use_follow_action_v2 and (
+            attempts == 1
+            or attempts % 5 == 0
+            or state_after != state_before
+        ):
+            _pvv = {
+                "target_username": username,
+                "visual_candidate_id": str(visual_candidate_id or ""),
+                "verify_attempts": attempts,
+                "follow_state_after": state_after,
+                "follow_state_before": state_before,
+            }
+            events.append(("follow_action_post_verify", dict(_pvv)))
+            log("info", "follow_action_post_verify", **_pvv)
         if state_after in ("following", "requested"):
+            if tap_exact:
+                log(
+                    "info",
+                    "follow_action_exact_follow_verified",
+                    target_username=str(username or ""),
+                    visual_candidate_id=str(visual_candidate_id or ""),
+                    follow_state_before=state_before,
+                    follow_state_after=state_after,
+                    verify_attempts=attempts,
+                )
+                events.append(
+                    (
+                        "follow_action_exact_follow_verified",
+                        {
+                            "target_username": username,
+                            "visual_candidate_id": str(visual_candidate_id or ""),
+                            "follow_state_after": state_after,
+                            "verify_attempts": attempts,
+                        },
+                    )
+                )
             _record(
                 "follow_verify_success",
                 {
                     "target_username": username,
+                    "profile_already_open": bool(profile_already_open),
+                    "visual_candidate_id": str(visual_candidate_id or ""),
                     "follow_state_before": state_before,
                     "follow_state_after": state_after,
                     "verify_attempts": attempts,
@@ -4739,6 +5097,8 @@ def perform_follow_safe(
                 "follow_completed",
                 {
                     "target_username": username,
+                    "profile_already_open": bool(profile_already_open),
+                    "visual_candidate_id": str(visual_candidate_id or ""),
                     "follow_state_before": state_before,
                     "follow_state_after": state_after,
                     "verify_attempts": attempts,
@@ -4746,6 +5106,24 @@ def perform_follow_safe(
                     "timings_ms": {"total": round((time.perf_counter() - t_all) * 1000, 2)},
                 },
             )
+            if profile_already_open:
+                log(
+                    "info",
+                    "visual_follow_direct_profile_action_success",
+                    target_username=str(username or ""),
+                    visual_candidate_id=str(visual_candidate_id or ""),
+                    follow_state_after=state_after,
+                    verify_attempts=attempts,
+                )
+            if _use_follow_action_v2:
+                _fav = {
+                    "target_username": username,
+                    "visual_candidate_id": str(visual_candidate_id or ""),
+                    "follow_state_after": state_after,
+                    "verify_attempts": attempts,
+                }
+                events.append(("follow_action_verified", dict(_fav)))
+                log("info", "follow_action_verified", **_fav)
             return {
                 "ok": True,
                 "failure_code": None,
@@ -4757,10 +5135,55 @@ def perform_follow_safe(
             }
         time.sleep(poll_v)
 
+    if tap_exact and state_after not in ("following", "requested"):
+        log(
+            "warning",
+            "follow_action_exact_follow_verify_failed",
+            target_username=str(username or ""),
+            visual_candidate_id=str(visual_candidate_id or ""),
+            follow_state_before=state_before,
+            follow_state_after=state_after,
+            verify_attempts=attempts,
+        )
+        events.append(
+            (
+                "follow_action_exact_follow_verify_failed",
+                {
+                    "target_username": username,
+                    "visual_candidate_id": str(visual_candidate_id or ""),
+                    "follow_state_after": state_after,
+                    "verify_attempts": attempts,
+                },
+            )
+        )
+
+    if _use_follow_action_v2 and not tap_exact:
+        _unv = {
+            "target_username": username,
+            "visual_candidate_id": str(visual_candidate_id or ""),
+            "follow_state_before": state_before,
+            "follow_state_after": state_after,
+            "verify_attempts": attempts,
+            "reason": "follow_action_unverified",
+        }
+        events.append(("follow_action_unverified", dict(_unv)))
+        log("info", "follow_action_unverified", **_unv)
+
+    _reco_verify = _visual_reconcile_failure(
+        34,
+        attempted_tap=True,
+        verify_attempts=attempts,
+        state_after_hint=state_after,
+    )
+    if _reco_verify is not None:
+        return _reco_verify
+
     _record(
         "follow_verify_failed",
         {
             "target_username": username,
+            "profile_already_open": bool(profile_already_open),
+            "visual_candidate_id": str(visual_candidate_id or ""),
             "follow_state_before": state_before,
             "follow_state_after": state_after,
             "verify_attempts": attempts,
@@ -4772,6 +5195,8 @@ def perform_follow_safe(
         "follow_completed",
         {
             "target_username": username,
+            "profile_already_open": bool(profile_already_open),
+            "visual_candidate_id": str(visual_candidate_id or ""),
             "ok": False,
             "failure_code": 34,
             "follow_state_before": state_before,
@@ -4780,6 +5205,15 @@ def perform_follow_safe(
             "navigation_state": "profile",
         },
     )
+    if profile_already_open:
+        log(
+            "info",
+            "visual_follow_direct_profile_action_failed",
+            reason="follow_verify_timeout_after_tap",
+            failure_code=34,
+            visual_candidate_id=str(visual_candidate_id or ""),
+            follow_state_after=state_after,
+        )
     return {
         "ok": False,
         "failure_code": 34,
@@ -5074,6 +5508,291 @@ def _followers_reset_followers_list_session_state() -> None:
     _FOLLOWERS_ENGINE_STOP_REASON = None
 
 
+# After followers_list_open_success: XML det can still read likely_profile; avoid spurious reopen.
+_FOLLOWERS_LIST_SESSION_COMMITTED_OPEN: bool = False
+_FOLLOWERS_LIST_SESSION_COMMITTED_AT: float = 0.0
+_FOLLOWERS_LIST_SESSION_COMMITTED_SOURCE: str = ""
+_FOLLOWERS_LIST_SESSION_COMMITTED_FOR: str = ""
+
+
+def followers_session_reset_list_committed_open() -> None:
+    """Clear committed-followers-list flag (start of a new followers engine run)."""
+    global _FOLLOWERS_LIST_SESSION_COMMITTED_OPEN, _FOLLOWERS_LIST_SESSION_COMMITTED_AT
+    global _FOLLOWERS_LIST_SESSION_COMMITTED_SOURCE, _FOLLOWERS_LIST_SESSION_COMMITTED_FOR
+    _FOLLOWERS_LIST_SESSION_COMMITTED_OPEN = False
+    _FOLLOWERS_LIST_SESSION_COMMITTED_AT = 0.0
+    _FOLLOWERS_LIST_SESSION_COMMITTED_SOURCE = ""
+    _FOLLOWERS_LIST_SESSION_COMMITTED_FOR = ""
+
+
+def followers_session_mark_list_committed_open(
+    source_profile_username: str,
+    *,
+    committed_source: str,
+) -> None:
+    global _FOLLOWERS_LIST_SESSION_COMMITTED_OPEN, _FOLLOWERS_LIST_SESSION_COMMITTED_AT
+    global _FOLLOWERS_LIST_SESSION_COMMITTED_SOURCE, _FOLLOWERS_LIST_SESSION_COMMITTED_FOR
+    key = _normalize_handle(str(source_profile_username or "").strip().lstrip("@"))
+    if not key:
+        return
+    _FOLLOWERS_LIST_SESSION_COMMITTED_OPEN = True
+    _FOLLOWERS_LIST_SESSION_COMMITTED_AT = time.perf_counter()
+    _FOLLOWERS_LIST_SESSION_COMMITTED_SOURCE = str(committed_source or "")[:120]
+    _FOLLOWERS_LIST_SESSION_COMMITTED_FOR = key
+
+
+def followers_session_clear_list_committed_open(
+    source_profile_username: str | None = None,
+) -> None:
+    """Clear when leaving CT followers list (e.g. follower profile) or before explicit reopen."""
+    global _FOLLOWERS_LIST_SESSION_COMMITTED_OPEN, _FOLLOWERS_LIST_SESSION_COMMITTED_AT
+    global _FOLLOWERS_LIST_SESSION_COMMITTED_SOURCE, _FOLLOWERS_LIST_SESSION_COMMITTED_FOR
+    if source_profile_username is None:
+        followers_session_reset_list_committed_open()
+        return
+    key = _normalize_handle(str(source_profile_username or "").strip().lstrip("@"))
+    if not key or key != _FOLLOWERS_LIST_SESSION_COMMITTED_FOR:
+        return
+    followers_session_reset_list_committed_open()
+
+
+def followers_session_list_committed_open_for(source_profile_username: str) -> bool:
+    key = _normalize_handle(str(source_profile_username or "").strip().lstrip("@"))
+    if not key or not _FOLLOWERS_LIST_SESSION_COMMITTED_OPEN:
+        return False
+    return key == _FOLLOWERS_LIST_SESSION_COMMITTED_FOR
+
+
+def followers_session_committed_open_age_ms() -> float:
+    if not _FOLLOWERS_LIST_SESSION_COMMITTED_OPEN or not _FOLLOWERS_LIST_SESSION_COMMITTED_AT:
+        return 0.0
+    return (time.perf_counter() - _FOLLOWERS_LIST_SESSION_COMMITTED_AT) * 1000.0
+
+
+def followers_session_committed_meta() -> dict[str, Any]:
+    return {
+        "followers_list_committed_open": bool(_FOLLOWERS_LIST_SESSION_COMMITTED_OPEN),
+        "followers_list_committed_at": float(_FOLLOWERS_LIST_SESSION_COMMITTED_AT),
+        "followers_list_committed_source": str(_FOLLOWERS_LIST_SESSION_COMMITTED_SOURCE or ""),
+        "followers_list_committed_for": str(_FOLLOWERS_LIST_SESSION_COMMITTED_FOR or ""),
+    }
+
+
+def _followers_committed_rendered_strong_visual_ok(vf: dict[str, Any]) -> bool:
+    """
+    Structural visual proof aligned with ``_followers_entry_v2_transition_visual_rendered_strong_gates``
+    (without requiring ``visual_match``). Used only for committed-followers revalidation after
+    ``entry_v2_rendered_strong`` acceptance.
+    """
+    if not isinstance(vf, dict):
+        return False
+    if not bool(vf.get("visual_search_area_detected")):
+        return False
+    if int(vf.get("visual_user_rows_detected") or 0) < 12:
+        return False
+    if int(vf.get("visual_follow_button_count") or 0) < 1:
+        return False
+    if not bool(vf.get("visual_followers_title_hint")):
+        return False
+    sigs_raw = vf.get("visual_signals") or []
+    if not any(str(x) == "search_strip" for x in sigs_raw):
+        return False
+    return True
+
+
+def _followers_committed_vf_selectable_for_merge(cand: dict[str, Any]) -> bool:
+    if not isinstance(cand, dict):
+        return False
+    if bool(cand.get("visual_match")):
+        return True
+    if (
+        str(_FOLLOWERS_LIST_SESSION_COMMITTED_SOURCE or "") == "entry_v2_rendered_strong"
+        and _followers_committed_rendered_strong_visual_ok(cand)
+    ):
+        return True
+    return False
+
+
+def followers_session_merge_det_for_committed_visual_surface(
+    det: dict[str, Any],
+    *,
+    session_vf_detail_for_loop: dict[str, Any] | None,
+    open_list_meta: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """
+    When the followers list was visually committed open, merge session / snapshot
+    visual_fallback_detail so ``is_followers_list`` reflects the proven surface.
+    """
+    out = dict(det) if isinstance(det, dict) else {}
+    vf: dict[str, Any] = {}
+    if isinstance(session_vf_detail_for_loop, dict) and _followers_committed_vf_selectable_for_merge(
+        session_vf_detail_for_loop
+    ):
+        vf = dict(session_vf_detail_for_loop)
+    elif isinstance(open_list_meta, dict):
+        for snap_key in ("after_tap_screen_snapshot", "last_poll_snapshot"):
+            snap = open_list_meta.get(snap_key) or {}
+            cand = snap.get("visual_fallback_detail") or {}
+            if isinstance(cand, dict) and _followers_committed_vf_selectable_for_merge(cand):
+                vf = dict(cand)
+                break
+    if not vf or not _followers_committed_vf_selectable_for_merge(vf):
+        return out
+    rows = int(vf.get("visual_user_rows_detected") or 0)
+    fbc = int(vf.get("visual_follow_button_count") or 0)
+    if rows >= 2 or fbc >= 1:
+        if (not bool(vf.get("visual_match"))) and _followers_committed_rendered_strong_visual_ok(vf):
+            try:
+                log(
+                    "info",
+                    "followers_committed_rendered_strong_visual_merge_applied",
+                    source_profile_username=str(_FOLLOWERS_LIST_SESSION_COMMITTED_FOR or "")[:120],
+                    committed_source=str(_FOLLOWERS_LIST_SESSION_COMMITTED_SOURCE or ""),
+                    visual_match=bool(vf.get("visual_match")),
+                    visual_user_rows_detected=int(vf.get("visual_user_rows_detected") or 0),
+                    visual_follow_button_count=int(vf.get("visual_follow_button_count") or 0),
+                    visual_search_area_detected=bool(vf.get("visual_search_area_detected")),
+                    visual_followers_title_hint=bool(vf.get("visual_followers_title_hint")),
+                )
+            except Exception:
+                pass
+        out["is_followers_list"] = True
+        odm = str(out.get("open_detection_method") or vf.get("open_detection_method") or "").strip()
+        if not odm or odm == "xml":
+            out["open_detection_method"] = str(vf.get("open_detection_method") or "visual_fallback")
+        out["visual_fallback_detail"] = dict(vf)
+        sigs = list(out.get("signals") or [])
+        if "committed_visual_surface_merge" not in sigs:
+            sigs.append("committed_visual_surface_merge")
+        out["signals"] = sigs
+        if not str(out.get("current_screen_guess") or "").strip():
+            out["current_screen_guess"] = "likely_followers_list_committed_visual"
+    return out
+
+
+def followers_committed_surface_light_revalidate(
+    d: u2.Device,
+    *,
+    source_profile_username: str,
+    expected_package: str,
+    det_merged: dict[str, Any],
+    committed_age_ms: float,
+    open_list_meta: dict[str, Any] | None,
+    session_vf_detail_for_loop: dict[str, Any] | None,
+    max_committed_age_ms_for_light: float = 120_000.0,
+) -> tuple[str, dict[str, Any]]:
+    """
+    Fast committed-surface check without ``detect_followers_list_screen``.
+
+    Returns ``(status, meta)`` where ``status`` is:
+    - ``light_ok`` — trust committed visual for this loop iteration
+    - ``light_inconclusive`` — caller may run heavier revalidation
+    - ``wrong_surface`` — foreground/danger rules failed (treat like lost surface)
+    """
+    meta: dict[str, Any] = {"path": "committed_light_revalidate"}
+    exp = str(expected_package or getattr(config, "INSTAGRAM_PACKAGE", "") or "").strip()
+    if not verify_app_foreground(d, exp):
+        meta["reason"] = "not_foreground_or_wrong_pkg"
+        return "wrong_surface", meta
+
+    dm = det_merged if isinstance(det_merged, dict) else {}
+    vf = dm.get("visual_fallback_detail")
+    if not isinstance(vf, dict):
+        meta["reason"] = "missing_visual_fallback_detail_dict"
+        return "light_inconclusive", meta
+    vf_ok = bool(vf.get("visual_match"))
+    if (
+        not vf_ok
+        and str(_FOLLOWERS_LIST_SESSION_COMMITTED_SOURCE or "") == "entry_v2_rendered_strong"
+        and _followers_committed_rendered_strong_visual_ok(vf)
+    ):
+        vf_ok = True
+        try:
+            log(
+                "info",
+                "committed_followers_surface_rendered_strong_visual_reused",
+                source_profile_username=str(_FOLLOWERS_LIST_SESSION_COMMITTED_FOR or "")[:120],
+                committed_source=str(_FOLLOWERS_LIST_SESSION_COMMITTED_SOURCE or ""),
+                visual_match=bool(vf.get("visual_match")),
+                visual_user_rows_detected=int(vf.get("visual_user_rows_detected") or 0),
+                visual_follow_button_count=int(vf.get("visual_follow_button_count") or 0),
+                visual_search_area_detected=bool(vf.get("visual_search_area_detected")),
+                visual_followers_title_hint=bool(vf.get("visual_followers_title_hint")),
+            )
+        except Exception:
+            pass
+    if not vf_ok:
+        meta["reason"] = "missing_merged_visual_fallback"
+        return "light_inconclusive", meta
+    rows = int(vf.get("visual_user_rows_detected") or 0)
+    fbc = int(vf.get("visual_follow_button_count") or 0)
+    if rows < 2 and fbc < 1:
+        meta["reason"] = "weak_visual_row_signals"
+        meta["visual_user_rows_detected"] = rows
+        meta["visual_follow_button_count"] = fbc
+        return "light_inconclusive", meta
+    if float(committed_age_ms) > float(max_committed_age_ms_for_light):
+        meta["reason"] = "committed_age_stale"
+        meta["committed_age_ms"] = float(committed_age_ms)
+        meta["max_committed_age_ms_for_light"] = float(max_committed_age_ms_for_light)
+        return "light_inconclusive", meta
+
+    shot = ""
+    shot_src = ""
+    if isinstance(open_list_meta, dict):
+        for snap_key in ("after_tap_screen_snapshot", "last_poll_snapshot"):
+            snap = open_list_meta.get(snap_key) or {}
+            if not isinstance(snap, dict):
+                continue
+            for sp_key in (
+                "screenshot_path_used",
+                "screenshot_path",
+                "followers_after_tap_second_pass_screenshot_path",
+                "followers_after_tap_immediate_screenshot_path",
+            ):
+                sp = str(snap.get(sp_key) or "").strip()
+                if sp and Path(sp).is_file():
+                    shot, shot_src = sp, f"open_list_meta.{snap_key}.{sp_key}"
+                    break
+            if shot:
+                break
+    if not shot and isinstance(session_vf_detail_for_loop, dict):
+        for sp_key in ("screenshot_path_used", "screenshot_path"):
+            sp = str(session_vf_detail_for_loop.get(sp_key) or "").strip()
+            if sp and Path(sp).is_file():
+                shot, shot_src = sp, f"session_vf_detail.{sp_key}"
+                break
+    meta["screenshot_path"] = str(shot or "")[:400]
+    meta["screenshot_source"] = shot_src
+
+    if _vision_validation_enabled() and shot:
+        tap_diag = {"entry_v2_source_profile_username": str(source_profile_username or "")}
+        v_ok, v_dict = _vision_validation_followers_list_open_gate(
+            screenshot_path=str(shot),
+            det=dm,
+            tap_diag=tap_diag,
+            source_profile_username=str(source_profile_username or ""),
+        )
+        meta["vision_gate"] = v_dict if isinstance(v_dict, dict) else {"result": v_dict}
+        if not v_ok:
+            meta["reason"] = "vision_rejected_on_committed_shot"
+            return "light_inconclusive", meta
+
+    try:
+        from vision_validation_layer import vision_detect_danger_surface
+
+        dang = vision_detect_danger_surface({"det": dm})
+        meta["xml_danger"] = dang
+        if bool((dang or {}).get("danger")):
+            meta["reason"] = "danger_surface"
+            return "wrong_surface", meta
+    except Exception as e:
+        meta["danger_check_error"] = str(e)[:200]
+
+    meta["reason"] = "light_checks_passed"
+    return "light_ok", meta
+
+
 def _followers_set_last_open_detection_method(method: str | None) -> None:
     global _FOLLOWERS_LAST_OPEN_DETECTION_METHOD
     _FOLLOWERS_LAST_OPEN_DETECTION_METHOD = method
@@ -5210,6 +5929,825 @@ def _followers_label_match(text: str) -> bool:
     return False
 
 
+
+
+def _followers_harvest_blob_from_row(row: dict[str, Any]) -> str:
+    parts = [
+        str(row.get("raw_text") or row.get("text") or ""),
+        str(row.get("content_desc") or ""),
+        str(row.get("pane_title") or ""),
+    ]
+    return " ".join(p.strip() for p in parts if p and str(p).strip()).strip()
+
+
+def _followers_harvest_classify_stat_type(blob: str) -> str | None:
+    """posts | followers | following | None (fuzzy / partial)."""
+    s = _follow_norm(blob)
+    if not s:
+        return None
+    if ("publication" in s or s == "posts" or s.startswith("posts")) and "follower" not in s:
+        return "posts"
+    if "abonnements" in s or ("abonnement" in s and "abonné" not in s):
+        return "following"
+    if "suivi" in s and "abonné" not in s and "follower" not in s:
+        return "following"
+    if _followers_reject_following_column_label(blob):
+        return "following"
+    if _followers_label_match(blob):
+        return "followers"
+    if "follower" in s and "following" not in s:
+        return "followers"
+    return None
+
+
+
+
+def _followers_screen_class_is_profile_like(screen_class: str) -> bool:
+    s = str(screen_class or "").strip().lower()
+    if not s:
+        return False
+    return (
+        "profile" in s
+        or s in ("likely_profile", "profile_header_rid", "action_bar_title")
+        or "candidate_profile" in s
+    )
+
+
+def _followers_stats_harvest_raw_nodes_from_hierarchy_xml(
+    xml_text: str,
+    w: int,
+    h: int,
+    *,
+    y_frac_lo: float = 0.045,
+    y_frac_hi: float = 0.34,
+) -> list[dict[str, Any]]:
+    """Parse hierarchy dump; collect nodes intersecting the profile stats vertical band (incl. empty text)."""
+    out: list[dict[str, Any]] = []
+    t = (xml_text or "").strip()
+    if not t:
+        return out
+    y_lo = int(h * float(y_frac_lo))
+    y_hi = int(h * float(y_frac_hi))
+    x_lo = int(w * 0.02)
+    x_hi = int(w * 0.98)
+    try:
+        try:
+            root = ET.fromstring(t)
+        except ET.ParseError:
+            root = ET.fromstring(f"<wrap>{t}</wrap>")
+    except Exception:
+        return out
+    for el in root.iter():
+        bd = _dm_parse_bounds_attr_xml(el.get("bounds"))
+        if not bd:
+            continue
+        try:
+            cx = (int(bd["left"]) + int(bd["right"])) // 2
+            cy = (int(bd["top"]) + int(bd["bottom"])) // 2
+        except Exception:
+            continue
+        if cy < y_lo or cy > y_hi or cx < x_lo or cx > x_hi:
+            continue
+        out.append(
+            {
+                "className": str(el.get("class") or "")[:200],
+                "resourceId": str(el.get("resource-id") or "")[:220],
+                "text": str(el.get("text") or "")[:160],
+                "content_desc": str(el.get("content-desc") or "")[:320],
+                "bounds": bd,
+                "clickable": str(el.get("clickable") or "").lower() == "true",
+            }
+        )
+    return out
+
+
+def _followers_stats_band_write_snippet_xml(
+    xml_text: str,
+    out_path: Path,
+    w: int,
+    h: int,
+) -> bool:
+    """Write a small XML file with stats-band nodes only (diagnostics)."""
+    nodes = _followers_stats_harvest_raw_nodes_from_hierarchy_xml(xml_text, w, h)
+    try:
+        _ensure_debug_dirs()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        root = ET.Element("stats_band_snippet")
+        root.set("screen_w", str(int(w)))
+        root.set("screen_h", str(int(h)))
+        root.set("node_count", str(len(nodes)))
+        for n in nodes[:400]:
+            ch = ET.SubElement(root, "node")
+            ch.set("class", str(n.get("className") or ""))
+            rid = str(n.get("resourceId") or "")
+            if rid:
+                ch.set("resource-id", rid)
+            if str(n.get("text") or ""):
+                ch.set("text", str(n.get("text") or ""))
+            if str(n.get("content_desc") or ""):
+                ch.set("content-desc", str(n.get("content_desc") or ""))
+            b = n.get("bounds") or {}
+            ch.set(
+                "bounds",
+                f"[{int(b.get('left',0))},{int(b.get('top',0))}][{int(b.get('right',0))},{int(b.get('bottom',0))}]",
+            )
+            ch.set("clickable", "true" if n.get("clickable") else "false")
+        hdr = '<?xml version="1.0" encoding="utf-8"?>\n'
+        out_path.write_text(
+            hdr + ET.tostring(root, encoding="unicode"),
+            encoding="utf-8",
+        )
+        return True
+    except Exception:
+        return False
+
+
+# Stats strip (LTR): left = posts, center = followers, right = following.
+# Hard taps must stay strictly left of ~45% width — wider ceilings hit Following.
+_FOLLOWERS_METRIC_SCREEN_MAX_NX: float = 0.45
+_FOLLOWERS_METRIC_POSTS_MAX_NX: float = 0.30
+_FOLLOWERS_METRIC_WIDE_NODE_FRAC_W: float = 0.35
+_FOLLOWERS_METRIC_SUB_LEFT_FRAC: float = 0.30
+_FOLLOWERS_METRIC_SUB_RIGHT_FRAC: float = 0.60
+
+
+def _followers_metric_max_tap_x_for_stats_strip(screen_w: int) -> int:
+    """Largest integer X allowed for a stats-strip tap (strictly left of 45% screen width)."""
+    sw = max(1, int(screen_w))
+    return (sw * 450 - 1) // 1000
+
+
+def _followers_harvest_classify_metric_screen_zone(nx: float) -> str:
+    if nx < _FOLLOWERS_METRIC_POSTS_MAX_NX:
+        return "posts"
+    if nx > _FOLLOWERS_METRIC_SCREEN_MAX_NX:
+        return "following"
+    return "followers"
+
+
+def _followers_metric_semantic_identity(n: dict[str, Any]) -> str:
+    """
+    XML-first metric column identity for profile stats strip.
+    Returns followers | following | posts | unknown (geometry only for unknown).
+    """
+    rid = str(n.get("resourceId") or "").lower()
+    cd_raw = str(n.get("content_desc") or "")
+    cd = _follow_norm(cd_raw)
+    tx = str(n.get("text") or "").strip()
+    tx_l = tx.lower()
+    if "profile_header_posts" in rid or rid.endswith("posts"):
+        return "posts"
+    if "profile_header_post" in rid and "follower" not in rid:
+        return "posts"
+    if "profile_header_following" in rid:
+        return "following"
+    if "followers_label" in rid or "followers_value" in rid:
+        return "followers"
+    if "follow_count" in rid or "follower_count" in rid:
+        return "followers"
+    if "profile_header_followers" in rid:
+        return "followers"
+    if tx and _followers_label_match(tx):
+        return "followers"
+    if cd:
+        if _followers_reject_following_column_label(cd_raw) and not _followers_label_match(
+            cd_raw
+        ):
+            if "follower" not in cd:
+                return "following"
+        if "follower" in cd or "abonné" in cd or "abonne" in cd:
+            if not _followers_reject_following_column_label(cd_raw):
+                return "followers"
+    return "unknown"
+
+
+def _followers_metric_pick_semantic_followers_tap(
+    parent: dict[str, Any],
+    raw_nodes: list[dict[str, Any]],
+    *,
+    source_profile_username: str,
+) -> tuple[int, int, str, dict[str, Any], dict[str, Any]]:
+    """
+    Prefer followers count TextView, then label, then a left-biased point on the parent.
+    Returns tap_x, tap_y, tap_source, tap_bounds, parent_bounds.
+    """
+    pbd = dict(parent.get("bounds") or {})
+    try:
+        pl = int(pbd.get("left", 0))
+        pt = int(pbd.get("top", 0))
+        pr = int(pbd.get("right", 0))
+        pb = int(pbd.get("bottom", 0))
+    except Exception:
+        return 0, 0, "parent_biased", {}, pbd
+    if pr <= pl or pb <= pt:
+        return 0, 0, "parent_biased", {}, pbd
+    nw = pr - pl
+    nh = pb - pt
+    p_area = max(1, nw * nh)
+    rid_p = str(parent.get("resourceId") or "")
+    cd_p = str(parent.get("content_desc") or "")
+
+    def _center(bd: dict[str, Any]) -> tuple[int, int] | None:
+        try:
+            l, t, r, b = (
+                int(bd.get("left", 0)),
+                int(bd.get("top", 0)),
+                int(bd.get("right", 0)),
+                int(bd.get("bottom", 0)),
+            )
+        except Exception:
+            return None
+        if r <= l or b <= t:
+            return None
+        return (l + r) // 2, (t + b) // 2
+
+    def _inside_parent(bd: dict[str, Any]) -> bool:
+        cc = _center(bd)
+        if not cc:
+            return False
+        mx, my = cc
+        return pl <= mx <= pr and pt <= my <= pb
+
+    value_hits: list[tuple[int, dict[str, Any]]] = []
+    label_hits: list[tuple[int, dict[str, Any]]] = []
+    for m in raw_nodes:
+        mb = dict(m.get("bounds") or {})
+        if mb == pbd:
+            continue
+        if not _inside_parent(mb):
+            continue
+        try:
+            m_area = max(
+                1,
+                (int(mb.get("right", 0)) - int(mb.get("left", 0)))
+                * (int(mb.get("bottom", 0)) - int(mb.get("top", 0))),
+            )
+        except Exception:
+            m_area = 1
+        if m_area >= int(p_area * 0.96):
+            continue
+        mrid = str(m.get("resourceId") or "").lower()
+        mtxt = str(m.get("text") or "").strip()
+        mcd = str(m.get("content_desc") or "").strip()
+        _ = f"{mtxt} {mcd}".strip()
+        is_val_rid = (
+            "followers_value" in mrid
+            or "follow_count" in mrid
+            or ("follower" in mrid and "count" in mrid and "following" not in mrid)
+        )
+        is_lbl_rid = "followers_label" in mrid
+        if is_val_rid or (
+            mtxt and _STAT_NUMERIC_RE.match(mtxt) and not _followers_reject_posts_label(mtxt)
+        ):
+            value_hits.append((m_area, dict(mb)))
+            continue
+        if is_lbl_rid or (mtxt and _followers_label_match(mtxt)):
+            label_hits.append((m_area, dict(mb)))
+
+    def _emit(
+        bx: dict[str, Any], src: str, tcx: int, tcy: int
+    ) -> tuple[int, int, str, dict[str, Any], dict[str, Any]]:
+        try:
+            log(
+                "info",
+                "followers_entry_semantic_followers_metric_selected",
+                source_profile_username=str(source_profile_username or ""),
+                resource_id=str(rid_p or "")[:220],
+                content_desc=str(cd_p or "")[:320],
+                parent_bounds=dict(pbd),
+                tap_source=str(src or ""),
+                tap_x=int(tcx),
+                tap_y=int(tcy),
+                tap_bounds=dict(bx),
+            )
+        except Exception:
+            pass
+        return int(tcx), int(tcy), str(src), dict(bx), dict(pbd)
+
+    if value_hits:
+        value_hits.sort(key=lambda t: t[0])
+        vb = value_hits[0][1]
+        c = _center(vb)
+        if c:
+            return _emit(vb, "value_text", c[0], c[1])
+    if label_hits:
+        label_hits.sort(key=lambda t: t[0])
+        lb = label_hits[0][1]
+        c = _center(lb)
+        if c:
+            return _emit(lb, "label_text", c[0], c[1])
+    tcx = pl + int(nw * 0.36)
+    tcy = (pt + pb) // 2
+    margin = max(4, nw // 25)
+    tcx = max(pl + margin, min(pr - margin, tcx))
+    tcy = max(pt + margin, min(pb - margin, tcy))
+    fake_bd = {
+        "left": max(pl, tcx - margin),
+        "right": min(pr, tcx + margin),
+        "top": max(pt, tcy - margin),
+        "bottom": min(pb, tcy + margin),
+    }
+    return _emit(fake_bd, "parent_biased", tcx, tcy)
+
+
+def _followers_harvest_metric_followers_sub_bounds(
+    bd: dict[str, Any], *, screen_w: int
+) -> tuple[dict[str, Any], bool]:
+    """Wide clickables: middle 30–60% of node width, clamped into the followers screen band."""
+    try:
+        left = int(bd.get("left", 0))
+        top = int(bd.get("top", 0))
+        right = int(bd.get("right", 0))
+        bottom = int(bd.get("bottom", 0))
+    except Exception:
+        return dict(bd), False
+    sw = max(1, int(screen_w))
+    nw = right - left
+    if nw <= 0 or bottom <= top:
+        return dict(bd), False
+    if nw <= int(_FOLLOWERS_METRIC_WIDE_NODE_FRAC_W * sw):
+        return {"left": left, "right": right, "top": top, "bottom": bottom}, False
+    sl = left + int(_FOLLOWERS_METRIC_SUB_LEFT_FRAC * nw)
+    sr = left + int(_FOLLOWERS_METRIC_SUB_RIGHT_FRAC * nw)
+    sr = min(sr, _followers_metric_max_tap_x_for_stats_strip(sw))
+    sl = max(sl, int(sw * 0.22))
+    if sr - sl < 18:
+        return {"left": left, "right": right, "top": top, "bottom": bottom}, False
+    return {"left": sl, "right": sr, "top": top, "bottom": bottom}, True
+
+
+def _followers_raw_xml_node_looks_like_followers_column(n: dict[str, Any]) -> bool:
+    """True when hierarchy node targets the followers metric (not following/posts)."""
+    rid = str(n.get("resourceId") or "").lower()
+    cd = _follow_norm(str(n.get("content_desc") or ""))
+    tx = str(n.get("text") or "").strip()
+    if "profile_header_following" in rid and "follower" not in rid:
+        return False
+    if "profile_header_posts" in rid or "profile_header_post" in rid:
+        return False
+    if "profile_header_followers" in rid:
+        return True
+    if cd and ("follower" in cd or "abonné" in cd or "abonne" in cd):
+        if _followers_reject_following_column_label(str(n.get("content_desc") or "")):
+            return False
+        return True
+    if tx and _followers_label_match(tx):
+        return True
+    return False
+
+
+def _followers_harvest_build_raw_metric_taps(
+    raw_nodes: list[dict[str, Any]],
+    w: int,
+    h: int,
+    *,
+    source_profile_username: str,
+    profile_verified: bool,
+    profile_screen_class: str,
+    profile_action_bar_title: str,
+) -> list[dict[str, Any]]:
+    """
+    Convert raw hierarchy nodes (e.g. profile_header_followers_stacked_familiar) into tap rows.
+    Gated: verified profile, profile-like screen class, action bar matches source, stats header bounds.
+    """
+    if not bool(profile_verified):
+        return []
+    if not _followers_screen_class_is_profile_like(profile_screen_class):
+        return []
+    abn = _normalize_handle(str(profile_action_bar_title or ""))
+    srcn = _normalize_handle(str(source_profile_username or ""))
+    if not abn or not srcn or abn != srcn:
+        return []
+    y_stat_lo, y_stat_hi = int(h * 0.055), int(h * 0.36)
+    x_lo, x_hi = int(w * 0.02), int(w * 0.98)
+    sw = int(max(1, w))
+    out: list[dict[str, Any]] = []
+    seen: set[tuple[int, int, int, int]] = set()
+    for n in raw_nodes:
+        if not bool(n.get("clickable")):
+            continue
+        if not _followers_raw_xml_node_looks_like_followers_column(n):
+            continue
+        bd = dict(n.get("bounds") or {})
+        try:
+            left = int(bd.get("left", 0))
+            top = int(bd.get("top", 0))
+            right = int(bd.get("right", 0))
+            bottom = int(bd.get("bottom", 0))
+        except Exception:
+            continue
+        if right <= left or bottom <= top:
+            continue
+        cy_full = (top + bottom) // 2
+        if cy_full < y_stat_lo or cy_full > y_stat_hi:
+            continue
+        sem_id = _followers_metric_semantic_identity(n)
+        if sem_id in ("following", "posts"):
+            continue
+        sub_bd, shrunk = _followers_harvest_metric_followers_sub_bounds(bd, screen_w=sw)
+        try:
+            sl = int(sub_bd.get("left", 0))
+            sr = int(sub_bd.get("right", 0))
+        except Exception:
+            continue
+        if sr <= sl:
+            continue
+        scx_geom = (sl + sr) // 2
+        if scx_geom < x_lo or scx_geom > x_hi:
+            continue
+        nx_geom = scx_geom / float(sw)
+        classified_geom = _followers_harvest_classify_metric_screen_zone(nx_geom)
+        semantic_followers = bool(sem_id == "followers")
+        tap_src_row = "harvest_raw_clickable_followers_metric"
+        if semantic_followers:
+            st_tx, st_ty, tap_src_row, tap_rect, _pbd = (
+                _followers_metric_pick_semantic_followers_tap(
+                    n,
+                    raw_nodes,
+                    source_profile_username=source_profile_username,
+                )
+            )
+            if st_tx > 0 and st_ty > 0:
+                scx = int(st_tx)
+                cy_full = int(st_ty)
+                if tap_rect:
+                    sub_bd = dict(tap_rect)
+                shrunk = False
+            else:
+                scx = int(scx_geom)
+            classified = "followers"
+            nx = float(scx) / float(sw)
+        else:
+            scx = int(scx_geom)
+            nx = float(nx_geom)
+            classified = str(classified_geom)
+        try:
+            log(
+                "info",
+                "followers_entry_metric_zone_classified",
+                source_profile_username=str(source_profile_username or ""),
+                bounds=dict(bd),
+                screen_width=int(sw),
+                center_x=int(scx),
+                normalized_x=round(float(nx), 5),
+                classified_zone=classified,
+                semantic_metric_identity=str(sem_id or ""),
+                geometry_classified_zone=str(classified_geom),
+                candidate_method="harvest_raw_clickable_followers_metric",
+                followers_sub_bounds_applied=bool(shrunk),
+            )
+        except Exception:
+            pass
+        if classified != "followers":
+            try:
+                log(
+                    "warning",
+                    "followers_entry_following_zone_rejected",
+                    source_profile_username=str(source_profile_username or ""),
+                    reason="classified_zone_not_followers",
+                    classified_zone=classified,
+                    semantic_metric_identity=str(sem_id or ""),
+                    center_x=int(scx),
+                    normalized_x=round(float(nx), 5),
+                    bounds=dict(bd),
+                    candidate_method="harvest_raw_clickable_followers_metric",
+                )
+            except Exception:
+                pass
+            continue
+        if shrunk:
+            try:
+                log(
+                    "info",
+                    "followers_entry_sub_bounds_created",
+                    source_profile_username=str(source_profile_username or ""),
+                    original_bounds=dict(bd),
+                    followers_sub_bounds=dict(sub_bd),
+                    candidate_method="harvest_raw_clickable_followers_metric",
+                )
+            except Exception:
+                pass
+        try:
+            sl = int(sub_bd.get("left", 0))
+            sr = int(sub_bd.get("right", 0))
+        except Exception:
+            continue
+        if sr <= sl:
+            continue
+        key = (sl, int(sub_bd.get("top", 0)), sr, int(sub_bd.get("bottom", 0)))
+        if key in seen:
+            continue
+        seen.add(key)
+        rid_s = str(n.get("resourceId") or "")[:200]
+        cd_s = str(n.get("content_desc") or "")[:220]
+        det = f"{rid_s}|{cd_s}"[:220]
+        detail_signals = [
+            "raw_clickable_followers_metric",
+            "resource_id_followers",
+            "content_desc_followers" if cd_s else "content_desc_empty",
+            "profile_verified:true",
+            "action_bar_matches_source:true",
+            f"classified_zone:{classified}",
+            f"followers_sub_shrink:{int(bool(shrunk))}",
+            f"semantic_metric_identity:{sem_id}",
+            f"semantic_followers_metric:{int(bool(semantic_followers))}",
+        ]
+        row: dict[str, Any] = {
+            "score": 11_600,
+            "cx": int(scx),
+            "cy": int(cy_full),
+            "tbounds": dict(sub_bd),
+            "method": "harvest_raw_clickable_followers_metric",
+            "tap_source": str(tap_src_row or "harvest_raw_clickable_followers_metric"),
+            "detected": det,
+            "detail_signals": detail_signals,
+            "stat_type": "followers",
+        }
+        if semantic_followers:
+            row["semantic_followers_metric"] = True
+        out.append(row)
+    return out
+
+
+def _followers_entry_v2_geometry_followers_raw(w: int, h: int) -> dict[str, Any]:
+    """Three-column geometry: tap center of middle (followers) column — no live UI probe."""
+    x0, x1 = int(w * 0.18), int(w * 0.82)
+    cw = max(24, (x1 - x0) // 3)
+    tcx = x0 + cw + cw // 2
+    tcy = int(h * 0.175)
+    top, bot = int(h * 0.11), int(h * 0.27)
+    bounds = {
+        "left": max(0, tcx - cw // 2),
+        "right": min(int(w) - 1, tcx + cw // 2),
+        "top": top,
+        "bottom": min(int(h) - 1, bot),
+    }
+    return {
+        "score": 7750,
+        "cx": int(tcx),
+        "cy": int(tcy),
+        "tbounds": bounds,
+        "method": "geometry_followers_column_center",
+        "tap_source": "geometry_stats_band_three_column",
+        "detected": "geometry_followers_column_center",
+        "stat_type": "followers",
+    }
+
+
+def followers_stats_surface_harvester_v2(
+    d: u2.Device,
+    w: int,
+    h: int,
+    *,
+    source_profile_username: str = "",
+    hierarchy_xml: str | None = None,
+    profile_verified: bool = False,
+    profile_screen_class: str = "",
+    profile_action_bar_title: str = "",
+) -> dict[str, Any]:
+    """
+    Reconstruct virtual stats blocks (posts / followers / following) from XML, content-desc,
+    pane titles, and stats-band geometry — no taps, no swipes.
+    """
+    log(
+        "info",
+        "followers_stats_harvest_started",
+        source_profile_username=source_profile_username or "",
+        screen_w=w,
+        screen_h=h,
+    )
+    hier = (hierarchy_xml or "").strip()
+    if not hier:
+        try:
+            try:
+                hier = str(d.dump_hierarchy(compressed=False))
+            except TypeError:
+                hier = str(d.dump_hierarchy())
+        except Exception:
+            hier = ""
+    raw_band_nodes = _followers_stats_harvest_raw_nodes_from_hierarchy_xml(hier, w, h)
+    try:
+        log(
+            "info",
+            "followers_stats_harvest_raw_node_sample",
+            source_profile_username=source_profile_username or "",
+            sample=raw_band_nodes[:20],
+            raw_node_count=len(raw_band_nodes),
+        )
+    except Exception:
+        pass
+    raw_metric_taps = _followers_harvest_build_raw_metric_taps(
+        raw_band_nodes,
+        int(w),
+        int(h),
+        source_profile_username=str(source_profile_username or ""),
+        profile_verified=bool(profile_verified),
+        profile_screen_class=str(profile_screen_class or ""),
+        profile_action_bar_title=str(profile_action_bar_title or ""),
+    )
+    for rmi, rmt in enumerate(raw_metric_taps[:6]):
+        try:
+            b = dict(rmt.get("tbounds") or {})
+            rec = {
+                "stat_type": "followers",
+                "text": "",
+                "content_desc": str(rmt.get("detected") or "")[:240],
+                "bounds": b,
+                "center_x": int(rmt.get("cx") or 0),
+                "center_y": int(rmt.get("cy") or 0),
+                "confidence": 0.78,
+                "source": "harvest_raw_clickable_followers_metric",
+            }
+            log(
+                "info",
+                "followers_stats_harvest_candidate",
+                source_profile_username=source_profile_username or "",
+                candidate=rec,
+                raw_metric_index=rmi,
+            )
+        except Exception:
+            pass
+    band = _collect_profile_stats_band_texts(d, w, h)
+    dump = _followers_collect_profile_text_dump(d, w, h)
+    atoms: list[dict[str, Any]] = []
+
+    def _emit_atom(
+        *,
+        stat_type: str,
+        text: str,
+        content_desc: str,
+        bounds: dict[str, Any],
+        confidence: float,
+        source: str,
+    ) -> dict[str, Any]:
+        b = dict(bounds or {})
+        c = _followers_bounds_center(b)
+        cx, cy = (int(c[0]), int(c[1])) if c else (0, 0)
+        rec: dict[str, Any] = {
+            "stat_type": stat_type,
+            "text": (text or "")[:240],
+            "content_desc": (content_desc or "")[:480],
+            "bounds": b,
+            "center_x": cx,
+            "center_y": cy,
+            "confidence": round(float(confidence), 4),
+            "source": source,
+        }
+        try:
+            log(
+                "info",
+                "followers_stats_harvest_candidate",
+                source_profile_username=source_profile_username or "",
+                candidate=rec,
+            )
+        except Exception:
+            pass
+        atoms.append(rec)
+        return rec
+
+    for r in band:
+        blob = _followers_harvest_blob_from_row(r)
+        st = _followers_harvest_classify_stat_type(blob)
+        if not st:
+            continue
+        conf = 0.62
+        if str(r.get("resource_id") or "").lower().find("follower") >= 0:
+            conf = 0.78
+        if (r.get("raw_text") or "").strip():
+            conf += 0.06
+        if (r.get("content_desc") or "").strip() and not (r.get("raw_text") or "").strip():
+            conf += 0.04
+        src = "stats_band_xml" if (r.get("raw_text") or "").strip() else "stats_band_content_desc"
+        _emit_atom(
+            stat_type=st,
+            text=str(r.get("raw_text") or r.get("text") or ""),
+            content_desc=str(r.get("content_desc") or ""),
+            bounds=dict(r.get("bounds") or {}),
+            confidence=min(0.93, conf),
+            source=src,
+        )
+
+    for r in dump:
+        blob = " ".join(
+            [
+                str(r.get("text") or ""),
+                str(r.get("content_desc") or ""),
+                str(r.get("pane_title") or ""),
+            ]
+        ).strip()
+        st = _followers_harvest_classify_stat_type(blob)
+        if not st:
+            continue
+        conf = 0.58
+        rid_l = str(r.get("resourceId") or "").lower()
+        if "follower" in rid_l or "stats" in rid_l or "header" in rid_l:
+            conf += 0.12
+        if (r.get("text") or "").strip():
+            conf += 0.06
+        if (r.get("content_desc") or "").strip():
+            conf += 0.05
+        _emit_atom(
+            stat_type=st,
+            text=str(r.get("text") or ""),
+            content_desc=str(r.get("content_desc") or ""),
+            bounds=dict(r.get("bounds") or {}),
+            confidence=min(0.91, conf),
+            source=str(r.get("via") or "dump_mixed"),
+        )
+
+    fused: list[dict[str, Any]] = []
+    followers_labels = [a for a in atoms if a.get("stat_type") == "followers"]
+    numeric_band = [
+        r
+        for r in band
+        if _STAT_NUMERIC_RE.match(
+            (r.get("raw_text") or r.get("text") or "").strip()
+        )
+        and not _followers_reject_posts_label(
+            r.get("raw_text") or r.get("text") or ""
+        )
+        and not _followers_reject_following_column_label(
+            r.get("raw_text") or r.get("text") or ""
+        )
+    ]
+    numeric_band.sort(key=lambda r: r["cx"])
+    for lab in followers_labels:
+        lb = lab.get("bounds") or {}
+        lc = _followers_bounds_center(lb)
+        if lc is None:
+            continue
+        lx, ly = int(lc[0]), int(lc[1])
+        best: dict[str, Any] | None = None
+        best_d = 10**9
+        for nr in numeric_band:
+            nb = nr.get("bounds") or {}
+            nc = _followers_bounds_center(nb)
+            if nc is None:
+                continue
+            nx, ny = int(nc[0]), int(nc[1])
+            if ny >= ly - 4:
+                continue
+            if (ly - ny) > int(h * 0.16):
+                continue
+            dx = abs(nx - lx)
+            if dx > int(w * 0.11):
+                continue
+            if dx < best_d:
+                best_d = dx
+                best = nr
+        mb = _followers_merge_bounds(lb, (best or {}).get("bounds") or lb)
+        mc = _followers_bounds_center(mb)
+        if mc is None:
+            continue
+        tcx, tcy = int(mc[0]), int(mc[1])
+        base_conf = float(lab.get("confidence") or 0.6)
+        if best is not None:
+            base_conf = min(0.94, base_conf + 0.14)
+        fuse_rec = {
+            "stat_type": "followers",
+            "text": str(lab.get("text") or ""),
+            "content_desc": str(lab.get("content_desc") or ""),
+            "bounds": dict(mb),
+            "center_x": tcx,
+            "center_y": tcy,
+            "confidence": round(base_conf, 4),
+            "source": "hybrid_label_numeric_fusion",
+        }
+        try:
+            log(
+                "info",
+                "followers_stats_harvest_fused_candidate",
+                source_profile_username=source_profile_username or "",
+                candidate=fuse_rec,
+                paired_count_text=(best.get("text") if best else None),
+            )
+        except Exception:
+            pass
+        fused.append(fuse_rec)
+
+    try:
+        log(
+            "info",
+            "followers_stats_harvest_result",
+            source_profile_username=source_profile_username or "",
+            band_rows=len(band),
+            dump_rows=len(dump),
+            atoms=len(atoms),
+            fused_followers=len(fused),
+            raw_metric_taps=len(raw_metric_taps),
+        )
+    except Exception:
+        pass
+    return {
+        "atoms": atoms,
+        "fused_followers": fused,
+        "band": band,
+        "dump": dump,
+        "raw_band_nodes": raw_band_nodes,
+        "raw_metric_taps": raw_metric_taps,
+    }
+
+
 def _followers_merge_bounds(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
     try:
         return {
@@ -5271,16 +6809,15 @@ def _guess_profile_screen(d: u2.Device, pkg: str, username_hint: str = "") -> st
 
 
 def _collect_profile_stats_band_texts(d: u2.Device, w: int, h: int) -> list[dict[str, Any]]:
-    """TextViews in the profile header stats row (posts / followers / following).
+    """TextViews + content-desc nodes in the profile header stats row (posts / followers / following).
 
-    Vertical window stops below the stats strip (~22% h) so long bio TextViews
-    (e.g. containing the word \"followers\") are not mixed into the band.
+    Slightly taller window and contentDescription fallbacks help React Native / fragmented UI.
     """
-    y_lo, y_hi = int(h * 0.08), int(h * 0.22)
-    x_lo, x_hi = int(w * 0.04), int(w * 0.96)
+    y_lo, y_hi = int(h * 0.06), int(h * 0.28)
+    x_lo, x_hi = int(w * 0.03), int(w * 0.97)
     rows: list[dict[str, Any]] = []
     try:
-        for el in d(className="android.widget.TextView").all():
+        for el in _safe_ui_all(d(className="android.widget.TextView")):
             inf = _follow_safe_info(el)
             b = inf.get("bounds") or {}
             cy = _followers_bounds_center(b)
@@ -5290,11 +6827,20 @@ def _collect_profile_stats_band_texts(d: u2.Device, w: int, h: int) -> list[dict
             if cyy < y_lo or cyy > y_hi or cx < x_lo or cx > x_hi:
                 continue
             txt = (inf.get("text") or "").strip()
-            if not txt:
+            cd = (
+                str(inf.get("contentDescription") or inf.get("content_desc") or "")
+                .strip()
+            )
+            pane = str(inf.get("paneTitle") or inf.get("pane_title") or "").strip()
+            display = txt or cd
+            if not display:
                 continue
             rows.append(
                 {
-                    "text": txt,
+                    "text": display,
+                    "raw_text": txt,
+                    "content_desc": cd,
+                    "pane_title": pane,
                     "cx": cx,
                     "cyy": cyy,
                     "bounds": dict(b),
@@ -5303,8 +6849,294 @@ def _collect_profile_stats_band_texts(d: u2.Device, w: int, h: int) -> list[dict
             )
     except Exception:
         pass
+    pkg = str(getattr(config, "INSTAGRAM_PACKAGE", "") or "")
+    for cn in ("android.view.View", "android.widget.Button"):
+        try:
+            sel = d(className=cn)
+            if pkg:
+                sel = sel.packageName(pkg)
+            for el in _safe_ui_all(sel):
+                inf = _follow_safe_info(el)
+                b = inf.get("bounds") or {}
+                cy = _followers_bounds_center(b)
+                if cy is None:
+                    continue
+                cx, cyy = cy
+                if cyy < y_lo or cyy > y_hi or cx < x_lo or cx > x_hi:
+                    continue
+                txt = (inf.get("text") or "").strip()
+                cd = (
+                    str(inf.get("contentDescription") or inf.get("content_desc") or "")
+                    .strip()
+                )
+                display = txt or cd
+                if not display:
+                    continue
+                rows.append(
+                    {
+                        "text": display,
+                        "raw_text": txt,
+                        "content_desc": cd,
+                        "pane_title": str(
+                            inf.get("paneTitle") or inf.get("pane_title") or ""
+                        ).strip(),
+                        "cx": cx,
+                        "cyy": cyy,
+                        "bounds": dict(b),
+                        "resource_id": inf.get("resourceName"),
+                    }
+                )
+        except Exception:
+            continue
     rows.sort(key=lambda r: (r["cyy"], r["cx"]))
     return rows
+
+
+def _compute_followers_metric_tap_from_header_geometry(
+    *,
+    screen_w: int,
+    screen_h: int,
+    band: list[dict[str, Any]],
+    source_profile_username: str = "",
+) -> dict[str, Any]:
+    """Stable followers-column tap from stats-band TextView geometry (not wide XML clickables).
+
+    Returns a dict with ok, tap_x, tap_y, source_method, reason, stats_band_top, stats_band_bottom.
+    """
+    sw = max(1, int(screen_w))
+    sh = max(1, int(screen_h))
+    max_tx = _followers_metric_max_tap_x_for_stats_strip(sw)
+    gap = max(8, sw // 110)
+
+    def _geom_log_reject(reason: str, **extra: Any) -> dict[str, Any]:
+        try:
+            log(
+                "warning",
+                "followers_entry_header_geometry_tap_rejected",
+                source_profile_username=str(source_profile_username or ""),
+                reason=str(reason),
+                screen_width=int(sw),
+                expected_tab="followers",
+                **{k: v for k, v in extra.items() if v is not None},
+            )
+        except Exception:
+            pass
+        return {
+            "ok": False,
+            "tap_x": 0,
+            "tap_y": 0,
+            "source_method": "",
+            "reason": str(reason),
+            "stats_band_top": int(extra.get("stats_band_top") or 0),
+            "stats_band_bottom": int(extra.get("stats_band_bottom") or 0),
+        }
+
+    def _geom_log_ok(
+        tap_x: int,
+        tap_y: int,
+        source_method: str,
+        band_top: int,
+        band_bot: int,
+    ) -> dict[str, Any]:
+        try:
+            log(
+                "info",
+                "followers_entry_header_geometry_tap_computed",
+                source_profile_username=str(source_profile_username or ""),
+                screen_width=int(sw),
+                tap_x=int(tap_x),
+                tap_y=int(tap_y),
+                normalized_x=round(float(tap_x) / float(sw), 5),
+                source_method=str(source_method or ""),
+                expected_tab="followers",
+                stats_band_top=int(band_top),
+                stats_band_bottom=int(band_bot),
+            )
+        except Exception:
+            pass
+        return {
+            "ok": True,
+            "tap_x": int(tap_x),
+            "tap_y": int(tap_y),
+            "source_method": str(source_method or ""),
+            "reason": "",
+            "stats_band_top": int(band_top),
+            "stats_band_bottom": int(band_bot),
+        }
+
+    def _tap_x_passes_hard_gate(tx: int) -> bool:
+        return int(tx) * 1000 < sw * 450
+
+    nums: list[dict[str, Any]] = []
+    for r in band:
+        txt = (r.get("text") or "").strip()
+        if not _STAT_NUMERIC_RE.match(txt):
+            continue
+        if _followers_reject_posts_label(txt):
+            continue
+        if _followers_reject_following_column_label(txt):
+            continue
+        b = r.get("bounds")
+        if not isinstance(b, dict):
+            continue
+        try:
+            left = int(b.get("left", 0))
+            top = int(b.get("top", 0))
+            right = int(b.get("right", 0))
+            bottom = int(b.get("bottom", 0))
+        except Exception:
+            continue
+        if right <= left or bottom <= top:
+            continue
+        cx = int(r.get("cx") or (left + right) // 2)
+        cyy = int(r.get("cyy") or (top + bottom) // 2)
+        nums.append(
+            {
+                "_left": left,
+                "_right": right,
+                "_top": top,
+                "_bottom": bottom,
+                "_cx": cx,
+                "_cyy": cyy,
+            }
+        )
+
+    band_top = 0
+    band_bot = 0
+    if nums:
+        band_top = min(int(n["_top"]) for n in nums)
+        band_bot = max(int(n["_bottom"]) for n in nums)
+
+    y_tol = max(12, int(sh * 0.038))
+    if nums:
+        cyys = sorted(int(n["_cyy"]) for n in nums)
+        med_y = cyys[len(cyys) // 2]
+        strip = [n for n in nums if abs(int(n["_cyy"]) - med_y) <= y_tol]
+        strip.sort(key=lambda n: int(n["_cx"]))
+        if strip:
+            band_top = min(int(n["_top"]) for n in strip)
+            band_bot = max(int(n["_bottom"]) for n in strip)
+
+        if len(strip) >= 3:
+            cands = strip
+            posts_r = int(cands[0]["_right"])
+            following_l = int(cands[-1]["_left"])
+            if len(cands) == 3:
+                mid = cands[1]
+                src = "triple_numeric_middle_chip"
+            else:
+                inner = cands[1:-1]
+                target_x = int(sw * 0.37)
+                mid = (
+                    min(inner, key=lambda n: abs(int(n["_cx"]) - target_x))
+                    if inner
+                    else cands[1]
+                )
+                src = "triple_numeric_pick_nearest_expected_cx"
+            mx = (int(mid["_left"]) + int(mid["_right"])) // 2
+            my = (int(mid["_top"]) + int(mid["_bottom"])) // 2
+            mx = min(mx, max_tx, following_l - gap)
+            mx = max(mx, posts_r + gap)
+            if not _tap_x_passes_hard_gate(mx):
+                return _geom_log_reject(
+                    "hard_gate_tap_x_not_strictly_before_45pct",
+                    attempted_tap_x=int(mx),
+                    attempted_normalized_x=round(float(mx) / float(sw), 5),
+                    stats_band_top=band_top,
+                    stats_band_bottom=band_bot,
+                    source_method=str(src),
+                )
+            return _geom_log_ok(mx, my, src, band_top, band_bot)
+
+        if len(strip) == 2:
+            left_cell, right_cell = strip[0], strip[1]
+            posts_r = int(left_cell["_right"])
+            rx = (int(right_cell["_left"]) + int(right_cell["_right"])) // 2
+            ry = (int(right_cell["_top"]) + int(right_cell["_bottom"])) // 2
+            rx = min(rx, max_tx)
+            rx = max(rx, posts_r + gap)
+            if int(right_cell["_cx"]) * 1000 >= sw * 450:
+                return _geom_log_reject(
+                    "dual_numeric_right_cell_in_following_zone",
+                    stats_band_top=band_top,
+                    stats_band_bottom=band_bot,
+                )
+            if not _tap_x_passes_hard_gate(rx):
+                return _geom_log_reject(
+                    "hard_gate_tap_x_not_strictly_before_45pct",
+                    attempted_tap_x=int(rx),
+                    attempted_normalized_x=round(float(rx) / float(sw), 5),
+                    stats_band_top=band_top,
+                    stats_band_bottom=band_bot,
+                    source_method="dual_numeric_right_cell",
+                )
+            return _geom_log_ok(rx, ry, "dual_numeric_right_cell", band_top, band_bot)
+
+        if len(strip) == 1:
+            one = strip[0]
+            ox = (int(one["_left"]) + int(one["_right"])) // 2
+            oy = (int(one["_top"]) + int(one["_bottom"])) // 2
+            if _tap_x_passes_hard_gate(ox) and int(one["_cx"]) >= int(sw * 0.20):
+                return _geom_log_ok(
+                    ox, oy, "single_numeric_center", band_top, band_bot
+                )
+
+    flabs: list[dict[str, Any]] = []
+    for r in band:
+        disp = (r.get("raw_text") or r.get("text") or "").strip()
+        if not _followers_label_match(disp):
+            continue
+        b = r.get("bounds")
+        if not isinstance(b, dict):
+            continue
+        try:
+            left = int(b.get("left", 0))
+            top = int(b.get("top", 0))
+            right = int(b.get("right", 0))
+            bottom = int(b.get("bottom", 0))
+        except Exception:
+            continue
+        if right <= left or bottom <= top:
+            continue
+        cx = int(r.get("cx") or (left + right) // 2)
+        cyy = int(r.get("cyy") or (top + bottom) // 2)
+        flabs.append(
+            {
+                "_left": left,
+                "_right": right,
+                "_top": top,
+                "_bottom": bottom,
+                "_cx": cx,
+                "_cyy": cyy,
+            }
+        )
+
+    if not flabs:
+        return _geom_log_reject(
+            "no_followers_geometry_from_band",
+            stats_band_top=band_top,
+            stats_band_bottom=band_bot,
+        )
+
+    target_x = int(sw * 0.38)
+    lab = min(flabs, key=lambda z: abs(int(z["_cx"]) - target_x))
+    band_top = int(lab["_top"]) if not band_top else min(band_top, int(lab["_top"]))
+    band_bot = int(lab["_bottom"]) if not band_bot else max(band_bot, int(lab["_bottom"]))
+    wi = int(lab["_right"]) - int(lab["_left"])
+    tx = int(lab["_left"] + wi * 0.38)
+    ty = (int(lab["_top"]) + int(lab["_bottom"])) // 2
+    tx = min(tx, max_tx)
+    tx = max(tx, int(sw * 0.24))
+    if not _tap_x_passes_hard_gate(tx):
+        return _geom_log_reject(
+            "hard_gate_tap_x_not_strictly_before_45pct",
+            attempted_tap_x=int(tx),
+            attempted_normalized_x=round(float(tx) / float(sw), 5),
+            stats_band_top=band_top,
+            stats_band_bottom=band_bot,
+            source_method="followers_label_biased_tap",
+        )
+    return _geom_log_ok(tx, ty, "followers_label_biased_tap", band_top, band_bot)
 
 
 def _parse_profile_metric_compact_number(text: str) -> int | None:
@@ -5421,27 +7253,77 @@ def visual_extract_profile_metrics(
 
 
 def _followers_collect_profile_text_dump(d: u2.Device, w: int, h: int) -> list[dict[str, Any]]:
-    """TextViews in the profile header / stats strip (scaled band ~150–650px @ 2400h)."""
-    y_lo, y_hi = int(h * 150 // 2400), int(h * 650 // 2400)
+    """Header / stats strip nodes: TextView + views with content-desc (RN), pane titles, RID hints."""
+    y_lo, y_hi = int(h * 120 // 2400), int(h * 720 // 2400)
     out: list[dict[str, Any]] = []
+    seen: set[tuple[int, int, int, int, str]] = set()
+
+    def _push(inf: dict[str, Any], *, via: str) -> None:
+        b = dict(inf.get("bounds") or {})
+        cy = _followers_bounds_center(b)
+        if cy is None:
+            return
+        _, cyy = cy
+        if not (y_lo <= cyy <= y_hi):
+            return
+        txt = (inf.get("text") or "").strip()
+        cd = (
+            str(inf.get("contentDescription") or inf.get("content_desc") or "")
+            .strip()
+        )
+        pane = str(inf.get("paneTitle") or inf.get("pane_title") or "").strip()
+        if not txt and not cd and not pane:
+            return
+        try:
+            key = (
+                int(b.get("left", 0)),
+                int(b.get("top", 0)),
+                int(b.get("right", 0)),
+                int(b.get("bottom", 0)),
+                str(inf.get("className") or ""),
+            )
+        except Exception:
+            return
+        if key in seen:
+            return
+        seen.add(key)
+        rid = str(inf.get("resourceName") or "")
+        out.append(
+            {
+                "text": txt,
+                "content_desc": cd,
+                "pane_title": pane,
+                "bounds": b,
+                "className": str(inf.get("className") or ""),
+                "resourceId": rid,
+                "via": via,
+            }
+        )
+
     try:
         for el in d(className="android.widget.TextView").all():
-            inf = _follow_safe_info(el)
-            b = inf.get("bounds") or {}
-            cy = _followers_bounds_center(b)
-            if cy is None:
-                continue
-            _, cyy = cy
-            if not (y_lo <= cyy <= y_hi):
-                continue
-            out.append(
-                {
-                    "text": (inf.get("text") or "").strip(),
-                    "bounds": dict(b),
-                    "className": str(inf.get("className") or ""),
-                    "resourceId": str(inf.get("resourceName") or ""),
-                }
-            )
+            _push(_follow_safe_info(el), via="textview")
+    except Exception:
+        pass
+    pkg = str(getattr(config, "INSTAGRAM_PACKAGE", "") or "")
+    for cn in (
+        "android.view.View",
+        "android.widget.Button",
+        "android.widget.ImageView",
+    ):
+        try:
+            sel = d(className=cn)
+            if pkg:
+                sel = sel.packageName(pkg)
+            for el in sel.all():
+                _push(_follow_safe_info(el), via=f"class:{cn}")
+        except Exception:
+            continue
+    try:
+        for el in d(
+            resourceIdMatches=r".*profile.*header.*|.*stats.*|.*follower.*count.*|.*followers.*"
+        ).all():
+            _push(_follow_safe_info(el), via="resource_id_stats_scope")
     except Exception:
         pass
     out.sort(
@@ -5459,10 +7341,17 @@ def _followers_stat_strip_y_for_text_labels(h: int) -> tuple[int, int]:
 
 
 def _followers_stats_dump_effectively_empty(dump: list[dict[str, Any]]) -> bool:
-    """True when there is no stats strip text yet (empty list or only blank TextViews)."""
+    """True when there is no stats strip signal yet (no text, content-desc, or pane title)."""
     if not dump:
         return True
-    return not any((str(r.get("text") or "").strip()) for r in dump)
+    for r in dump:
+        if str(r.get("text") or "").strip():
+            return False
+        if str(r.get("content_desc") or "").strip():
+            return False
+        if str(r.get("pane_title") or "").strip():
+            return False
+    return True
 
 
 def _followers_profile_rescan_stats_if_empty(
@@ -5754,9 +7643,15 @@ def _tap_profile_followers_stat(
     numeric_row = [
         r
         for r in band
-        if _STAT_NUMERIC_RE.match((r.get("text") or "").strip())
-        and not _followers_reject_posts_label(r.get("text") or "")
-        and not _followers_reject_following_column_label(r.get("text") or "")
+        if _STAT_NUMERIC_RE.match(
+            (r.get("raw_text") or r.get("text") or "").strip()
+        )
+        and not _followers_reject_posts_label(
+            r.get("raw_text") or r.get("text") or ""
+        )
+        and not _followers_reject_following_column_label(
+            r.get("raw_text") or r.get("text") or ""
+        )
     ]
     numeric_row.sort(key=lambda r: r["cx"])
 
@@ -5798,7 +7693,9 @@ def _tap_profile_followers_stat(
         for el in d(className="android.widget.TextView").all():
             inf = _follow_safe_info(el)
             raw_txt = (inf.get("text") or "").strip()
-            if not raw_txt or not _followers_label_match(raw_txt):
+            cd_txt = str(inf.get("contentDescription") or "").strip()
+            label_txt = raw_txt or cd_txt
+            if not label_txt or not _followers_label_match(label_txt):
                 continue
             b = inf.get("bounds") or {}
             cy = _followers_bounds_center(b)
@@ -5810,7 +7707,7 @@ def _tap_profile_followers_stat(
             rw = int(b.get("right", 0)) - int(b.get("left", 0))
             if rw < 8:
                 continue
-            low = raw_txt.lower()
+            low = label_txt.lower()
             if "following" in low and "follower" not in low:
                 continue
             rid_l = str(inf.get("resourceName") or "")
@@ -5823,7 +7720,7 @@ def _tap_profile_followers_stat(
 
             pair: dict[str, Any] | None = None
             for r in band:
-                rt = (r.get("text") or "").strip()
+                rt = (r.get("raw_text") or r.get("text") or "").strip()
                 if not _STAT_NUMERIC_RE.match(rt):
                     continue
                 if _followers_reject_posts_label(rt) or _followers_reject_following_column_label(rt):
@@ -5859,7 +7756,7 @@ def _tap_profile_followers_stat(
                         "el": el,
                         "method": "text_label_with_count_block",
                         "tap_source": "parent_block",
-                        "detected": f"{(pair.get('text') or '').strip()}|{raw_txt}",
+                        "detected": f"{(pair.get('raw_text') or pair.get('text') or '').strip()}|{label_txt}",
                         "tbounds": dict(mb),
                     }
                 )
@@ -5874,7 +7771,7 @@ def _tap_profile_followers_stat(
                         "el": el,
                         "method": "text_followers_label",
                         "tap_source": "text_element",
-                        "detected": raw_txt,
+                        "detected": label_txt,
                         "tbounds": dict(b),
                     }
                 )
@@ -6056,25 +7953,45 @@ def _followers_profile_tabs_visible(d: u2.Device) -> bool:
     True when typical Instagram profile tab chrome is present (grid / reels / tagged strip).
     Used to infer followers list when tabs disappear but list rows remain.
     """
-    checks: list[Callable[[], object]] = [
-        lambda: d(resourceIdMatches=r".*:id/profile_tabs_container"),
-        lambda: d(resourceIdMatches=r".*:id/profile_tab_layout"),
-        lambda: d(resourceIdMatches=r".*:id/profile_tab_icon_view"),
-        lambda: d(resourceIdMatches=r".*:id/media_tab"),
-        lambda: d(descriptionContains="Grid"),
-        lambda: d(descriptionContains="Reels"),
-        lambda: d(descriptionContains="Tagged"),
-        lambda: d(descriptionMatches=r"(?i).*tagged.*"),
-        lambda: d(text="Posts"),
-        lambda: d(textMatches=r"(?i).*posts.*"),
-        lambda: d(resourceIdMatches=r".*:id/profile_tabs[^_].*"),
+    checks: list[tuple[str, Callable[[], object]]] = [
+        ("resourceId:profile_tabs_container", lambda: d(resourceIdMatches=r".*:id/profile_tabs_container")),
+        ("resourceId:profile_tab_layout", lambda: d(resourceIdMatches=r".*:id/profile_tab_layout")),
+        ("resourceId:profile_tab_icon_view", lambda: d(resourceIdMatches=r".*:id/profile_tab_icon_view")),
+        ("resourceId:media_tab", lambda: d(resourceIdMatches=r".*:id/media_tab")),
+        ("descriptionContains:Grid", lambda: d(descriptionContains="Grid")),
+        ("descriptionContains:Reels", lambda: d(descriptionContains="Reels")),
+        ("descriptionContains:Tagged", lambda: d(descriptionContains="Tagged")),
+        ("descriptionMatches:tagged", lambda: d(descriptionMatches=r"(?i).*tagged.*")),
+        ("text:Posts", lambda: d(text="Posts")),
+        ("textMatches:posts", lambda: d(textMatches=r"(?i).*posts.*")),
+        ("resourceId:profile_tabs", lambda: d(resourceIdMatches=r".*:id/profile_tabs[^_].*")),
     ]
-    for fact in checks:
+    for phase, fact in checks:
+        el = None
         try:
             el = fact()
+        except Exception as e:
+            log(
+                "warning",
+                "followers_profile_tabs_visible_probe_failed",
+                phase=phase,
+                probe="selector_build",
+                exception_type=type(e).__name__,
+                exception_message=str(e)[:800],
+            )
+            continue
+        try:
             if el.exists(timeout=0.06):
                 return True
-        except Exception:
+        except Exception as e:
+            log(
+                "warning",
+                "followers_profile_tabs_visible_probe_failed",
+                phase=phase,
+                probe="exists",
+                exception_type=type(e).__name__,
+                exception_message=str(e)[:800],
+            )
             continue
     return False
 
@@ -6116,6 +8033,16 @@ def _followers_stacked_central_textview_run(d: u2.Device, w: int, h: int) -> int
     return max_run
 
 
+def _safe_ui_all(sel: Any) -> list[Any]:
+    """UiAutomator2: ``Selector.all()`` can throw when the accessibility tree is mid-refresh."""
+    try:
+        if sel is not None and hasattr(sel, "all"):
+            return list(sel.all())
+    except Exception:
+        pass
+    return []
+
+
 def detect_followers_list_screen(
     d: u2.Device,
     *,
@@ -6132,8 +8059,15 @@ def detect_followers_list_screen(
         cur = d.app_current() or {}
         cur_pkg = cur.get("package")
         cur_act = cur.get("activity")
-    except Exception:
-        pass
+    except Exception as e:
+        log(
+            "warning",
+            "followers_list_detect_probe_failed",
+            phase="app_current",
+            exception_type=type(e).__name__,
+            exception_message=str(e)[:800],
+            source_profile_username=str(source_profile_username or "")[:160],
+        )
 
     out: dict[str, Any] = {
         "is_followers_list": False,
@@ -6156,284 +8090,322 @@ def detect_followers_list_screen(
         "current_activity": cur_act,
         "current_screen_guess": "unknown",
     }
-    try:
-        w, h = d.window_size()
-    except Exception:
-        w, h = 1080, 1920
+    def _probe_fail(phase: str, exc: BaseException) -> None:
+        log(
+            "warning",
+            "followers_list_detect_probe_failed",
+            phase=phase,
+            exception_type=type(exc).__name__,
+            exception_message=str(exc)[:800],
+            source_profile_username=str(source_profile_username or "")[:160],
+        )
 
     try:
-        out["current_screen_guess"] = _guess_profile_screen(d, pkg, source_profile_username)
-    except Exception:
-        pass
-
-    try:
-        ab = d(resourceIdMatches=r".*:id/action_bar_title.*")
-        if ab.exists(timeout=0.12):
-            out["action_bar_title"] = str(ab.get_text() or "").strip()
-    except Exception:
-        pass
-
-    # Toolbar / top strip texts for diagnostics
-    try:
-        y_hdr = int(h * 0.14)
-        hdr_texts: list[str] = []
-        for el in d(className="android.widget.TextView").all():
-            try:
-                inf = el.info
-                b = inf.get("bounds") or {}
-                if int(b.get("bottom", 0)) > y_hdr:
-                    continue
-                t = (inf.get("text") or "").strip()
-                if t and t not in hdr_texts:
-                    hdr_texts.append(t)
-            except Exception:
-                continue
-        out["visible_header_texts"] = hdr_texts[:20]
-    except Exception:
-        pass
-
-    title_ok = False
-    for t in _FOLLOWERS_TITLE_TEXTS:
         try:
-            if d(text=t).exists(timeout=0.06):
-                title_ok = True
-                out["signals"].append(f"title_text:{t}")
-                break
-        except Exception:
-            continue
-    if not title_ok and out["action_bar_title"]:
-        ab_l = out["action_bar_title"].strip().lower()
-        for cand in _FOLLOWERS_TITLE_TEXTS:
-            if ab_l == cand.lower():
-                title_ok = True
-                out["signals"].append("title_action_bar")
-                break
-        if not title_ok:
-            if any(sub in ab_l for sub in _FOLLOWERS_TITLE_SUBSTRINGS):
-                title_ok = True
-                out["signals"].append("title_action_bar_substring")
-    out["title_match"] = title_ok
+            w, h = d.window_size()
+        except Exception as e:
+            _probe_fail("window_size", e)
+            w, h = 1080, 1920
 
-    try:
-        rvs = d(classNameMatches=".*RecyclerView.*").all()
-        out["recycler_present"] = len(rvs) > 0
-        if out["recycler_present"]:
-            out["signals"].append(f"recyclerview_count:{len(rvs)}")
-    except Exception:
-        pass
+        try:
+            out["current_screen_guess"] = _guess_profile_screen(d, pkg, source_profile_username)
+        except Exception as e:
+            _probe_fail("guess_profile_screen", e)
 
-    try:
-        lvs = d(className="android.widget.ListView").all()
-        out["listview_present"] = len(lvs) > 0
-        if out["listview_present"]:
-            out["signals"].append(f"listview_count:{len(lvs)}")
-    except Exception:
-        pass
+        try:
+            ab = d(resourceIdMatches=r".*:id/action_bar_title.*")
+            if ab.exists(timeout=0.12):
+                try:
+                    out["action_bar_title"] = str(ab.get_text() or "").strip()
+                except Exception as e:
+                    _probe_fail("action_bar_get_text", e)
+        except Exception as e:
+            _probe_fail("action_bar_title_probe", e)
 
-    try:
-        sc = d(scrollable=True).all()
-        out["scrollable_count"] = len(sc)
-        out["scrollable_present"] = len(sc) > 0
-        if out["scrollable_present"]:
-            out["signals"].append(f"scrollable_count:{len(sc)}")
-    except Exception:
-        pass
+        # Toolbar / top strip texts for diagnostics
+        try:
+            y_hdr = int(h * 0.14)
+            hdr_texts: list[str] = []
+            for el in _safe_ui_all(d(className="android.widget.TextView")):
+                try:
+                    inf = el.info
+                    b = inf.get("bounds") or {}
+                    if int(b.get("bottom", 0)) > y_hdr:
+                        continue
+                    t = (inf.get("text") or "").strip()
+                    if t and t not in hdr_texts:
+                        hdr_texts.append(t)
+                except Exception:
+                    continue
+            out["visible_header_texts"] = hdr_texts[:20]
+        except Exception as e:
+            _probe_fail("visible_header_texts", e)
 
-    list_chrome = bool(
-        out["recycler_present"] or out["listview_present"] or out["scrollable_present"]
-    )
-
-    try:
-        out["profile_tabs_absent"] = not _followers_profile_tabs_visible(d)
-    except Exception:
-        out["profile_tabs_absent"] = False
-
-    sample: list[str] = []
-    handle_keys: set[str] = set()
-    try:
-        y_min = int(h * 0.08)
-        src_key = _normalize_handle(source_profile_username or "")
-        for el in d(className="android.widget.TextView").all():
+        title_ok = False
+        for t in _FOLLOWERS_TITLE_TEXTS:
             try:
-                inf = el.info
-                raw_t = (inf.get("text") or "").strip().lstrip("@")
-                if not _looks_like_instagram_username(raw_t):
-                    continue
-                b = inf.get("bounds") or {}
-                cy = (int(b.get("top", 0)) + int(b.get("bottom", 0))) // 2
-                if cy < y_min or cy > int(h * 0.96):
-                    continue
-                hk = _normalize_handle(raw_t)
-                if hk == src_key:
-                    continue
-                handle_keys.add(hk)
-                if len(sample) < 12:
-                    sample.append(raw_t)
-            except Exception:
+                if d(text=t).exists(timeout=0.06):
+                    title_ok = True
+                    out["signals"].append(f"title_text:{t}")
+                    break
+            except Exception as e:
+                _probe_fail(f"followers_title_exists:{t}", e)
                 continue
-    except Exception:
-        pass
-    out["visible_usernames_sample"] = sample
-    out["candidate_username_count"] = len(handle_keys)
+        if not title_ok and out["action_bar_title"]:
+            ab_l = out["action_bar_title"].strip().lower()
+            for cand in _FOLLOWERS_TITLE_TEXTS:
+                if ab_l == cand.lower():
+                    title_ok = True
+                    out["signals"].append("title_action_bar")
+                    break
+            if not title_ok:
+                if any(sub in ab_l for sub in _FOLLOWERS_TITLE_SUBSTRINGS):
+                    title_ok = True
+                    out["signals"].append("title_action_bar_substring")
+        out["title_match"] = title_ok
 
-    stacked_run = _followers_stacked_central_textview_run(d, w, h)
-    out["stacked_central_textview_run"] = stacked_run
+        try:
+            rvs = _safe_ui_all(d(classNameMatches=".*RecyclerView.*"))
+            out["recycler_present"] = len(rvs) > 0
+            if out["recycler_present"]:
+                out["signals"].append(f"recyclerview_count:{len(rvs)}")
+        except Exception as e:
+            _probe_fail("recyclerview_probe", e)
 
-    # --- Relaxed OR conditions (no Followers title required) ---
-    cond_a = list_chrome and out["candidate_username_count"] >= 3
-    cond_b = len(sample) >= 2
-    cond_c = bool(out["scrollable_present"] and stacked_run >= 5)
-    ab_norm = _normalize_handle(out["action_bar_title"] or "")
-    src_norm = _normalize_handle(source_profile_username or "")
-    cond_d = bool(
-        src_norm
-        and ab_norm == src_norm
-        and out["scrollable_present"]
-        and (out["candidate_username_count"] >= 1 or len(sample) >= 1)
-    )
-    handles_visible_ok = bool(
-        out["candidate_username_count"] >= 1 or len(sample) >= 1
-    )
-    cond_e = bool(
-        out["profile_tabs_absent"]
-        and list_chrome
-        and handles_visible_ok
-    )
+        try:
+            lvs = _safe_ui_all(d(className="android.widget.ListView"))
+            out["listview_present"] = len(lvs) > 0
+            if out["listview_present"]:
+                out["signals"].append(f"listview_count:{len(lvs)}")
+        except Exception as e:
+            _probe_fail("listview_probe", e)
 
-    relaxed_reasons: list[str] = []
-    if cond_a:
-        relaxed_reasons.append("A_recycler_or_scrollable_and_3plus_handles")
-        log(
-            "info",
-            "followers_list_detect_recycler_match",
-            action_bar_title=out["action_bar_title"],
-            recycler_present=out["recycler_present"],
-            listview_present=out.get("listview_present"),
-            scrollable_present=out["scrollable_present"],
-            scrollable_count=out["scrollable_count"],
-            candidate_username_count=out["candidate_username_count"],
-            visible_usernames_sample=out["visible_usernames_sample"],
-            visible_header_texts=out["visible_header_texts"],
-            current_activity=out["current_activity"],
-            current_package=out["current_package"],
-            current_screen_guess=out["current_screen_guess"],
-        )
-    if cond_b:
-        relaxed_reasons.append("B_multi_plausible_username_sample")
-        log(
-            "info",
-            "followers_list_detect_username_match",
-            action_bar_title=out["action_bar_title"],
-            recycler_present=out["recycler_present"],
-            listview_present=out.get("listview_present"),
-            scrollable_present=out["scrollable_present"],
-            scrollable_count=out["scrollable_count"],
-            candidate_username_count=out["candidate_username_count"],
-            visible_usernames_sample=out["visible_usernames_sample"],
-            visible_header_texts=out["visible_header_texts"],
-            current_activity=out["current_activity"],
-            current_package=out["current_package"],
-            current_screen_guess=out["current_screen_guess"],
-        )
-    if cond_c:
-        relaxed_reasons.append("C_scrollable_and_stacked_central_textviews")
-        log(
-            "info",
-            "followers_list_detect_scrollable_match",
-            action_bar_title=out["action_bar_title"],
-            recycler_present=out["recycler_present"],
-            listview_present=out.get("listview_present"),
-            scrollable_present=out["scrollable_present"],
-            scrollable_count=out["scrollable_count"],
-            stacked_central_textview_run=stacked_run,
-            candidate_username_count=out["candidate_username_count"],
-            visible_usernames_sample=out["visible_usernames_sample"],
-            visible_header_texts=out["visible_header_texts"],
-            current_activity=out["current_activity"],
-            current_package=out["current_package"],
-            current_screen_guess=out["current_screen_guess"],
-        )
-    if cond_d:
-        relaxed_reasons.append("D_action_bar_is_source_profile_with_list")
-        log(
-            "info",
-            "followers_list_detect_relaxed_match",
-            reason="D_title_equals_source_profile",
-            action_bar_title=out["action_bar_title"],
-            source_profile_username=source_profile_username,
-            recycler_present=out["recycler_present"],
-            listview_present=out.get("listview_present"),
-            scrollable_present=out["scrollable_present"],
-            scrollable_count=out["scrollable_count"],
-            candidate_username_count=out["candidate_username_count"],
-            visible_usernames_sample=out["visible_usernames_sample"],
-            visible_header_texts=out["visible_header_texts"],
-            current_activity=out["current_activity"],
-            current_package=out["current_package"],
-            current_screen_guess=out["current_screen_guess"],
-        )
-    if cond_e:
-        relaxed_reasons.append(
-            "E_profile_tabs_absent_with_list_chrome_and_plausible_handles"
-        )
-        log(
-            "info",
-            "followers_list_detect_profile_tabs_absent_match",
-            profile_tabs_absent=out["profile_tabs_absent"],
-            action_bar_title=out["action_bar_title"],
-            source_profile_username=source_profile_username,
-            recycler_present=out["recycler_present"],
-            listview_present=out.get("listview_present"),
-            scrollable_present=out["scrollable_present"],
-            scrollable_count=out["scrollable_count"],
-            candidate_username_count=out["candidate_username_count"],
-            visible_usernames_sample=out["visible_usernames_sample"],
-            visible_header_texts=out["visible_header_texts"],
-            current_activity=out["current_activity"],
-            current_package=out["current_package"],
-            current_screen_guess=out["current_screen_guess"],
+        try:
+            sc = _safe_ui_all(d(scrollable=True))
+            out["scrollable_count"] = len(sc)
+            out["scrollable_present"] = len(sc) > 0
+            if out["scrollable_present"]:
+                out["signals"].append(f"scrollable_count:{len(sc)}")
+        except Exception as e:
+            _probe_fail("scrollable_probe", e)
+
+        list_chrome = bool(
+            out["recycler_present"] or out["listview_present"] or out["scrollable_present"]
         )
 
-    relaxed_hit = cond_a or cond_b or cond_c or cond_d or cond_e
-    out["relaxed_rules_matched"] = relaxed_reasons
-    out["relaxed_list_open"] = relaxed_hit
+        try:
+            out["profile_tabs_absent"] = not _followers_profile_tabs_visible(d)
+        except Exception as e:
+            _probe_fail("profile_tabs_visible", e)
+            out["profile_tabs_absent"] = False
 
-    strict_hit = bool(title_ok and list_chrome)
-    out["strict_list_open"] = strict_hit
+        sample: list[str] = []
+        handle_keys: set[str] = set()
+        try:
+            y_min = int(h * 0.08)
+            src_key = _normalize_handle(source_profile_username or "")
+            for el in _safe_ui_all(d(className="android.widget.TextView")):
+                try:
+                    inf = el.info
+                    raw_t = (inf.get("text") or "").strip().lstrip("@")
+                    if not _looks_like_instagram_username(raw_t):
+                        continue
+                    b = inf.get("bounds") or {}
+                    cy = (int(b.get("top", 0)) + int(b.get("bottom", 0))) // 2
+                    if cy < y_min or cy > int(h * 0.96):
+                        continue
+                    hk = _normalize_handle(raw_t)
+                    if hk == src_key:
+                        continue
+                    handle_keys.add(hk)
+                    if len(sample) < 12:
+                        sample.append(raw_t)
+                except Exception:
+                    continue
+        except Exception as e:
+            _probe_fail("visible_username_handles_sample", e)
+        out["visible_usernames_sample"] = sample
+        out["candidate_username_count"] = len(handle_keys)
 
-    out["is_followers_list"] = bool(relaxed_hit or strict_hit)
-    if out["is_followers_list"]:
-        out["open_detection_method"] = "xml"
-        if relaxed_hit:
-            out["signals"].append(f"relaxed:{','.join(relaxed_reasons)}")
-        if strict_hit:
-            out["signals"].append("strict:title_and_list_chrome")
-    else:
+        stacked_run = 0
+        try:
+            stacked_run = _followers_stacked_central_textview_run(d, w, h)
+        except Exception as e:
+            _probe_fail("stacked_central_textview_run", e)
+            stacked_run = 0
+        out["stacked_central_textview_run"] = stacked_run
+
+        # --- Relaxed OR conditions (no Followers title required) ---
+        cond_a = list_chrome and out["candidate_username_count"] >= 3
+        cond_b = len(sample) >= 2
+        cond_c = bool(out["scrollable_present"] and stacked_run >= 5)
+        ab_norm = _normalize_handle(out["action_bar_title"] or "")
+        src_norm = _normalize_handle(source_profile_username or "")
+        cond_d = bool(
+            src_norm
+            and ab_norm == src_norm
+            and out["scrollable_present"]
+            and (out["candidate_username_count"] >= 1 or len(sample) >= 1)
+        )
+        handles_visible_ok = bool(
+            out["candidate_username_count"] >= 1 or len(sample) >= 1
+        )
+        cond_e = bool(
+            out["profile_tabs_absent"]
+            and list_chrome
+            and handles_visible_ok
+        )
+
+        relaxed_reasons: list[str] = []
+        if cond_a:
+            relaxed_reasons.append("A_recycler_or_scrollable_and_3plus_handles")
+            log(
+                "info",
+                "followers_list_detect_recycler_match",
+                action_bar_title=out["action_bar_title"],
+                recycler_present=out["recycler_present"],
+                listview_present=out.get("listview_present"),
+                scrollable_present=out["scrollable_present"],
+                scrollable_count=out["scrollable_count"],
+                candidate_username_count=out["candidate_username_count"],
+                visible_usernames_sample=out["visible_usernames_sample"],
+                visible_header_texts=out["visible_header_texts"],
+                current_activity=out["current_activity"],
+                current_package=out["current_package"],
+                current_screen_guess=out["current_screen_guess"],
+            )
+        if cond_b:
+            relaxed_reasons.append("B_multi_plausible_username_sample")
+            log(
+                "info",
+                "followers_list_detect_username_match",
+                action_bar_title=out["action_bar_title"],
+                recycler_present=out["recycler_present"],
+                listview_present=out.get("listview_present"),
+                scrollable_present=out["scrollable_present"],
+                scrollable_count=out["scrollable_count"],
+                candidate_username_count=out["candidate_username_count"],
+                visible_usernames_sample=out["visible_usernames_sample"],
+                visible_header_texts=out["visible_header_texts"],
+                current_activity=out["current_activity"],
+                current_package=out["current_package"],
+                current_screen_guess=out["current_screen_guess"],
+            )
+        if cond_c:
+            relaxed_reasons.append("C_scrollable_and_stacked_central_textviews")
+            log(
+                "info",
+                "followers_list_detect_scrollable_match",
+                action_bar_title=out["action_bar_title"],
+                recycler_present=out["recycler_present"],
+                listview_present=out.get("listview_present"),
+                scrollable_present=out["scrollable_present"],
+                scrollable_count=out["scrollable_count"],
+                stacked_central_textview_run=stacked_run,
+                candidate_username_count=out["candidate_username_count"],
+                visible_usernames_sample=out["visible_usernames_sample"],
+                visible_header_texts=out["visible_header_texts"],
+                current_activity=out["current_activity"],
+                current_package=out["current_package"],
+                current_screen_guess=out["current_screen_guess"],
+            )
+        if cond_d:
+            relaxed_reasons.append("D_action_bar_is_source_profile_with_list")
+            log(
+                "info",
+                "followers_list_detect_relaxed_match",
+                reason="D_title_equals_source_profile",
+                action_bar_title=out["action_bar_title"],
+                source_profile_username=source_profile_username,
+                recycler_present=out["recycler_present"],
+                listview_present=out.get("listview_present"),
+                scrollable_present=out["scrollable_present"],
+                scrollable_count=out["scrollable_count"],
+                candidate_username_count=out["candidate_username_count"],
+                visible_usernames_sample=out["visible_usernames_sample"],
+                visible_header_texts=out["visible_header_texts"],
+                current_activity=out["current_activity"],
+                current_package=out["current_package"],
+                current_screen_guess=out["current_screen_guess"],
+            )
+        if cond_e:
+            relaxed_reasons.append(
+                "E_profile_tabs_absent_with_list_chrome_and_plausible_handles"
+            )
+            log(
+                "info",
+                "followers_list_detect_profile_tabs_absent_match",
+                profile_tabs_absent=out["profile_tabs_absent"],
+                action_bar_title=out["action_bar_title"],
+                source_profile_username=source_profile_username,
+                recycler_present=out["recycler_present"],
+                listview_present=out.get("listview_present"),
+                scrollable_present=out["scrollable_present"],
+                scrollable_count=out["scrollable_count"],
+                candidate_username_count=out["candidate_username_count"],
+                visible_usernames_sample=out["visible_usernames_sample"],
+                visible_header_texts=out["visible_header_texts"],
+                current_activity=out["current_activity"],
+                current_package=out["current_package"],
+                current_screen_guess=out["current_screen_guess"],
+            )
+
+        relaxed_hit = cond_a or cond_b or cond_c or cond_d or cond_e
+        out["relaxed_rules_matched"] = relaxed_reasons
+        out["relaxed_list_open"] = relaxed_hit
+
+        strict_hit = bool(title_ok and list_chrome)
+        out["strict_list_open"] = strict_hit
+
+        out["is_followers_list"] = bool(relaxed_hit or strict_hit)
+        if out["is_followers_list"]:
+            out["open_detection_method"] = "xml"
+            if relaxed_hit:
+                out["signals"].append(f"relaxed:{','.join(relaxed_reasons)}")
+            if strict_hit:
+                out["signals"].append("strict:title_and_list_chrome")
+        else:
+            out["open_detection_method"] = None
+
+        try:
+            log(
+                "info",
+                "followers_list_detect_debug",
+                is_followers_list=out["is_followers_list"],
+                title_match=out["title_match"],
+                strict_list_open=out["strict_list_open"],
+                relaxed_list_open=out["relaxed_list_open"],
+                relaxed_rules_matched=out["relaxed_rules_matched"],
+                action_bar_title=out["action_bar_title"],
+                recycler_present=out["recycler_present"],
+                listview_present=out["listview_present"],
+                scrollable_present=out["scrollable_present"],
+                scrollable_count=out["scrollable_count"],
+                candidate_username_count=out["candidate_username_count"],
+                visible_usernames_sample=out["visible_usernames_sample"],
+                visible_header_texts=out["visible_header_texts"],
+                stacked_central_textview_run=out["stacked_central_textview_run"],
+                profile_tabs_absent=out.get("profile_tabs_absent"),
+                current_activity=out["current_activity"],
+                current_package=out["current_package"],
+                current_screen_guess=out["current_screen_guess"],
+            )
+        except Exception as e:
+            _probe_fail("followers_list_detect_debug_log", e)
+        return out
+    except Exception as _fatal_det:
+        _probe_fail("detect_followers_list_screen_fatal", _fatal_det)
+        sig = out.get("signals")
+        if not isinstance(sig, list):
+            out["signals"] = ["detect_followers_list_aborted_safe"]
+        else:
+            sig.append("detect_followers_list_aborted_safe")
+        out["is_followers_list"] = False
+        out["strict_list_open"] = False
+        out["relaxed_list_open"] = False
+        out["relaxed_rules_matched"] = []
         out["open_detection_method"] = None
-
-    log(
-        "info",
-        "followers_list_detect_debug",
-        is_followers_list=out["is_followers_list"],
-        title_match=out["title_match"],
-        strict_list_open=out["strict_list_open"],
-        relaxed_list_open=out["relaxed_list_open"],
-        relaxed_rules_matched=out["relaxed_rules_matched"],
-        action_bar_title=out["action_bar_title"],
-        recycler_present=out["recycler_present"],
-        listview_present=out["listview_present"],
-        scrollable_present=out["scrollable_present"],
-        scrollable_count=out["scrollable_count"],
-        candidate_username_count=out["candidate_username_count"],
-        visible_usernames_sample=out["visible_usernames_sample"],
-        visible_header_texts=out["visible_header_texts"],
-        stacked_central_textview_run=out["stacked_central_textview_run"],
-        profile_tabs_absent=out.get("profile_tabs_absent"),
-        current_activity=out["current_activity"],
-        current_package=out["current_package"],
-        current_screen_guess=out["current_screen_guess"],
-    )
-    return out
+        return out
 
 
 def _ig_follow_button_blue_pixel(r: int, g: int, b: int) -> bool:
@@ -6857,6 +8829,17 @@ def followers_visual_candidate_diagnostic(
     return out
 
 
+def _followers_visual_picker_scroll_down_once_for_candidates(d: u2.Device) -> None:
+    """Small vertical swipe to reveal more follower rows (no RecyclerView-specific API)."""
+    try:
+        w, h = d.window_size()
+        x = int(w // 2)
+        d.swipe(x, int(h * 0.62), x, int(h * 0.42), 0.1)
+    except Exception:
+        pass
+    time.sleep(0.38)
+
+
 def visual_extract_followers_candidates_from_screenshot(
     d: u2.Device,
     *,
@@ -6864,6 +8847,7 @@ def visual_extract_followers_candidates_from_screenshot(
     source_profile_username: str | None = None,
     runtime_seen: set[str] | None = None,
     action_account_username: str | None = None,
+    phase: str | None = None,
 ) -> dict[str, Any]:
     """
     Build structured visual follower-row candidates from an on-disk screenshot (PIL pixels only).
@@ -6904,10 +8888,17 @@ def visual_extract_followers_candidates_from_screenshot(
         )
         return out
 
+    work_path = str(path)
+    scroll_executed = 0
+    max_scrolls = 2
+    vision_required = bool(_vision_validation_enabled())
+    out["picker_scroll_rounds"] = 0
+    _stall_key = f"{work_path}|{str(source_profile_username or '')}"
+
     try:
         from PIL import Image
 
-        im_orig = Image.open(path)
+        im_orig = Image.open(work_path)
         orig_w, orig_h = im_orig.size
         im_rgb = _visual_downscale_rgb(im_orig, max_w=480)
     except Exception as e:
@@ -6915,7 +8906,7 @@ def visual_extract_followers_candidates_from_screenshot(
         log(
             "info",
             "visual_followers_candidate_picker_empty",
-            screenshot_path=str(path),
+            screenshot_path=str(work_path),
             source_profile_username=source_profile_username,
             candidate_count=0,
             sample_candidates=[],
@@ -6923,32 +8914,148 @@ def visual_extract_followers_candidates_from_screenshot(
             dry_run=dry_run,
             visual_only=True,
             reason=out["picker_error"],
+            empty_reason=out["picker_error"],
+            spans_count=0,
+            candidates_before_cta_filter=0,
+            candidates_after_cta_filter=0,
         )
+        _followers_visual_picker_terminal_reset(_stall_key)
         return out
 
     aw, ah = im_rgb.size
-    log(
-        "info",
-        "visual_followers_candidate_picker_started",
-        screenshot_path=str(path),
-        source_profile_username=source_profile_username,
-        dry_run=dry_run,
-        visual_only=True,
-        max_candidates=max_pick,
-        analysis_size=(aw, ah),
-        original_size=(orig_w, orig_h),
-    )
+    if vision_required:
+        if not _vision_validation_visual_followers_candidate_gate(
+            screenshot_path=str(work_path),
+            d=d,
+            source_profile_username=source_profile_username,
+        ):
+            out["picker_error"] = (
+                "vision_validation_rejected"
+                if scroll_executed == 0
+                else "vision_validation_rejected_after_scroll_retry"
+            )
+            log(
+                "info",
+                "visual_followers_candidate_picker_empty",
+                screenshot_path=str(work_path),
+                source_profile_username=source_profile_username,
+                candidate_count=0,
+                sample_candidates=[],
+                confidence=0.0,
+                dry_run=dry_run,
+                visual_only=True,
+                reason=out["picker_error"],
+                empty_reason=out["picker_error"],
+                spans_count=0,
+                candidates_before_cta_filter=0,
+                candidates_after_cta_filter=0,
+            )
+            _followers_visual_picker_terminal_reset(_stall_key)
+            return out
+    try:
+        log(
+            "info",
+            "visual_followers_candidate_picker_after_vision_gate",
+            screenshot_path=str(work_path),
+            source_profile_username=source_profile_username,
+            vision_required=vision_required,
+            vision_candidate_surface_allowed=True,
+            dry_run=dry_run,
+            visual_only=True,
+        )
+    except Exception:
+        pass
+
+    if scroll_executed == 0:
+        _prev_inc = int(_FOLLOWERS_VISUAL_PICKER_INCOMPLETE_STARTS.get(_stall_key, 0))
+        _next_inc = _prev_inc + 1
+        if _next_inc > 3:
+            try:
+                log(
+                    "warning",
+                    "followers_candidate_picker_stalled",
+                    repeat_count=_prev_inc,
+                    screenshot_path=str(work_path),
+                    source_profile_username=source_profile_username,
+                )
+            except Exception:
+                pass
+            _followers_visual_picker_terminal_reset(_stall_key)
+            out["picker_error"] = "picker_stalled_repeated_picker_started"
+            out["candidate_count"] = 0
+            try:
+                log(
+                    "info",
+                    "visual_followers_candidate_picker_empty",
+                    screenshot_path=str(work_path),
+                    source_profile_username=source_profile_username,
+                    candidate_count=0,
+                    sample_candidates=[],
+                    confidence=0.0,
+                    dry_run=dry_run,
+                    visual_only=True,
+                    reason=out["picker_error"],
+                    empty_reason=out["picker_error"],
+                    spans_count=0,
+                    candidates_before_cta_filter=0,
+                    candidates_after_cta_filter=0,
+                )
+            except Exception:
+                pass
+            return out
+        _FOLLOWERS_VISUAL_PICKER_INCOMPLETE_STARTS[_stall_key] = _next_inc
+
+        log(
+            "info",
+            "visual_followers_candidate_picker_started",
+            screenshot_path=str(work_path),
+            source_profile_username=source_profile_username,
+            dry_run=dry_run,
+            visual_only=True,
+            max_candidates=max_pick,
+            analysis_size=(aw, ah),
+            original_size=(orig_w, orig_h),
+        )
 
     spans = _visual_collect_follow_row_y_spans(im_rgb)
+    try:
+        log(
+            "info",
+            "visual_followers_candidate_picker_spans_detected",
+            screenshot_path=str(work_path),
+            source_profile_username=source_profile_username,
+            spans_count=len(spans),
+            dry_run=dry_run,
+            visual_only=True,
+        )
+    except Exception:
+        pass
+    try:
+        log(
+            "info",
+            "visual_followers_candidate_picker_before_cta_classification",
+            screenshot_path=str(work_path),
+            source_profile_username=source_profile_username,
+            spans_count=len(spans),
+            dry_run=dry_run,
+            visual_only=True,
+        )
+    except Exception:
+        pass
+
     w, h = aw, ah
     built: list[dict[str, Any]] = []
     confidences: list[float] = []
+    cta_followable_row_count = 0
     src_key = (source_profile_username or "").strip().lstrip("@").lower()[:40]
     action_raw = (
         (action_account_username or "").strip()
         or str(getattr(config, "VISUAL_FOLLOWERS_ACTION_ACCOUNT_USERNAME", "") or "").strip()
     )
     action_norm = _normalize_handle(action_raw) if action_raw else ""
+
+    from visual_row_mapping import _vr_log_row_cta as _vr_log_row_cta_fn
+    from visual_row_mapping import visual_followers_row_cta_classify as _vr_row_cta_classify
 
     for idx, (yt, yb, peak) in enumerate(spans):
         pad = max(4, (yb - yt + 1) // 3)
@@ -7006,6 +9113,80 @@ def visual_extract_followers_candidates_from_screenshot(
         cy = (int(row_o["top"]) + int(row_o["bottom"])) // 2
         top_o = int(row_o["top"])
         bot_o = int(row_o["bottom"])
+
+        cta_row = _vr_row_cta_classify(
+            im_rgb,
+            fb_left=fb_left,
+            fb_top=yt,
+            fb_right=fb_right,
+            fb_bottom=yb,
+            tight_bounds=tight,
+        )
+        if bool(cta_row.get("cta_followable")):
+            cta_followable_row_count += 1
+        digest_pre = hashlib.sha1(
+            f"{src_key}|{idx}|{row_o['left']}|{row_o['top']}|{row_o['right']}|{row_o['bottom']}".encode()
+        ).hexdigest()[:12]
+        visual_candidate_id_pre = f"vfp_{idx}_{digest_pre}"
+        _vr_log_row_cta_fn(
+            event="followers_row_cta_classified",
+            row_index=idx,
+            visual_candidate_id=visual_candidate_id_pre,
+            span_index=idx,
+            cta=cta_row,
+            screenshot_path=str(path),
+            source_profile_username=str(source_profile_username or ""),
+            extra={"selection_method": "visual_screenshot"},
+        )
+        if not bool(cta_row.get("cta_followable")):
+            _vr_log_row_cta_fn(
+                event="followers_row_cta_rejected",
+                row_index=idx,
+                visual_candidate_id=visual_candidate_id_pre,
+                span_index=idx,
+                cta=cta_row,
+                screenshot_path=str(path),
+                source_profile_username=str(source_profile_username or ""),
+                extra={
+                    "cta_reject_reason": str(cta_row.get("cta_class") or "unknown"),
+                    "selection_method": "visual_screenshot",
+                },
+            )
+            if str(cta_row.get("cta_class") or "") in (
+                "message",
+                "contact",
+                "following",
+                "requested",
+                "connected_gray",
+                "inactive",
+            ) or (
+                str(cta_row.get("cta_class") or "") == "unknown"
+                and float(cta_row.get("frac_blue_full") or 0.0) < 0.045
+            ):
+                log(
+                    "info",
+                    "followers_visual_candidate_rejected_already_connected",
+                    row_index=idx,
+                    visual_candidate_id=visual_candidate_id_pre,
+                    cta_class=str(cta_row.get("cta_class") or ""),
+                    cta_text=str(cta_row.get("cta_text") or ""),
+                    reason="row_cta_non_follow_or_connected",
+                    span_index=idx,
+                    screenshot_path=str(work_path),
+                    source_profile_username=str(source_profile_username or ""),
+                )
+            continue
+        _vr_log_row_cta_fn(
+            event="followers_row_cta_allowed",
+            row_index=idx,
+            visual_candidate_id=visual_candidate_id_pre,
+            span_index=idx,
+            cta=cta_row,
+            screenshot_path=str(path),
+            source_profile_username=str(source_profile_username or ""),
+            extra={"selection_method": "visual_screenshot"},
+        )
+
         if cy < int(orig_h * 0.065) or cy > int(orig_h * 0.92):
             log(
                 "info",
@@ -7058,10 +9239,7 @@ def visual_extract_followers_candidates_from_screenshot(
             approx_follow_button_bounds, aw=aw, ah=ah, orig_w=orig_w, orig_h=orig_h
         )
 
-        digest = hashlib.sha1(
-            f"{src_key}|{idx}|{row_o['left']}|{row_o['top']}|{row_o['right']}|{row_o['bottom']}".encode()
-        ).hexdigest()[:12]
-        visual_candidate_id = f"vfp_{idx}_{digest}"
+        visual_candidate_id = visual_candidate_id_pre
 
         cand = {
             "visual_candidate_id": visual_candidate_id,
@@ -7075,9 +9253,29 @@ def visual_extract_followers_candidates_from_screenshot(
             "source_profile_username": source_profile_username or "",
             "selection_method": "visual_screenshot",
             "resolved_username_hint": resolved_u or "",
+            "row_cta_class": str(cta_row.get("cta_class") or ""),
+            "row_cta_text": str(cta_row.get("cta_text") or ""),
+            "row_cta_blue_frac": max(
+                float(cta_row.get("frac_blue_tight") or 0.0),
+                float(cta_row.get("frac_blue_full") or 0.0),
+            ),
         }
+        cand.update(_compute_visual_candidate_tap_points_from_bounds(row_o, av_o, tz_o, fb_o))
         built.append(cand)
         confidences.append(row_conf)
+        log(
+            "info",
+            "followers_visual_candidate_selected",
+            screenshot_path=str(path),
+            source_profile_username=source_profile_username,
+            visual_candidate_id=visual_candidate_id,
+            row_index=cand["row_index"],
+            span_index=idx,
+            row_cta_class=cand.get("row_cta_class"),
+            row_cta_text=cand.get("row_cta_text"),
+            row_cta_blue_frac=cand.get("row_cta_blue_frac"),
+            confidence=cand["confidence"],
+        )
         log(
             "info",
             "visual_followers_candidate_detected",
@@ -7096,40 +9294,288 @@ def visual_extract_followers_candidates_from_screenshot(
         if len(built) >= max_pick:
             break
 
-    out["candidates"] = built
-    out["candidate_count"] = len(built)
-    out["mean_confidence"] = float(
-        sum(confidences) / len(confidences) if confidences else 0.0
-    )
-    out["sample_candidates"] = built[:5]
+    try:
+        log(
+            "info",
+            "visual_followers_candidate_picker_after_cta_classification",
+            screenshot_path=str(work_path),
+            source_profile_username=source_profile_username,
+            spans_count=len(spans),
+            cta_followable_rows=cta_followable_row_count,
+            visual_candidates_after_row_filters=len(built),
+            dry_run=dry_run,
+            visual_only=True,
+        )
+    except Exception:
+        pass
 
-    if out["candidate_count"] == 0:
-        log(
-            "info",
-            "visual_followers_candidate_picker_empty",
-            screenshot_path=str(path),
-            source_profile_username=source_profile_username,
-            candidate_count=0,
-            sample_candidates=[],
-            confidence=0.0,
-            dry_run=dry_run,
-            visual_only=True,
-            reason="no_rows_after_filter" if spans else "no_blue_follow_spans",
+    try:
+        built.sort(
+            key=lambda c: (
+                -float(c.get("row_cta_blue_frac") or 0.0),
+                -float(c.get("confidence") or 0.0),
+                int((c.get("approx_row_bounds") or {}).get("top") or 10**9),
+            )
         )
+        for _ri, _c in enumerate(built):
+            _c["row_index"] = int(_ri)
+
+        out["candidates"] = built
+        out["candidate_count"] = len(built)
+        out["mean_confidence"] = float(
+            sum(confidences) / len(confidences) if confidences else 0.0
+        )
+        out["sample_candidates"] = built[:5]
+
+        if out["candidate_count"] == 0:
+            if spans:
+                log(
+                    "warning",
+                    "followers_visual_no_followable_candidate_found",
+                    screenshot_path=str(path),
+                    source_profile_username=source_profile_username,
+                    span_count=len(spans),
+                    dry_run=dry_run,
+                    visual_only=True,
+                    reason="no_row_passed_follow_cta_gate",
+                )
+            empty_reason = "no_rows_after_filter" if spans else "no_blue_follow_spans"
+            log(
+                "info",
+                "visual_followers_candidate_picker_empty",
+                screenshot_path=str(path),
+                source_profile_username=source_profile_username,
+                candidate_count=0,
+                sample_candidates=[],
+                confidence=0.0,
+                dry_run=dry_run,
+                visual_only=True,
+                reason=empty_reason,
+                empty_reason=empty_reason,
+                spans_count=len(spans),
+                candidates_before_cta_filter=len(spans),
+                candidates_after_cta_filter=cta_followable_row_count,
+            )
+        else:
+            log(
+                "info",
+                "visual_followers_candidate_picker_done",
+                screenshot_path=str(path),
+                source_profile_username=source_profile_username,
+                candidate_count=out["candidate_count"],
+                sample_candidates=out["sample_candidates"],
+                confidence=round(out["mean_confidence"], 4),
+                dry_run=dry_run,
+                visual_only=True,
+            )
+        _followers_visual_picker_terminal_reset(_stall_key)
+        return out
+    except Exception as e:
+        try:
+            log(
+                "error",
+                "visual_followers_candidate_picker_failed",
+                exception_type=type(e).__name__,
+                exception_message=str(e)[:800],
+                screenshot_path=str(work_path),
+                source_profile_username=source_profile_username,
+                phase=str(phase or ""),
+                candidate_count_so_far=len(built),
+                spans_count=len(spans),
+                dry_run=dry_run,
+                visual_only=True,
+            )
+        except Exception:
+            pass
+        out["picker_error"] = f"unexpected:{type(e).__name__}"
+        out["candidates"] = list(built)
+        out["candidate_count"] = len(built)
+        out["mean_confidence"] = float(
+            sum(confidences) / len(confidences) if confidences else 0.0
+        )
+        out["sample_candidates"] = built[:5]
+        _followers_visual_picker_terminal_reset(_stall_key)
+        return out
+
+
+def _compute_visual_candidate_tap_points_from_bounds(
+    row_o: dict[str, Any],
+    av_o: dict[str, Any],
+    tz_o: dict[str, Any],
+    fb_o: dict[str, Any],
+) -> dict[str, int]:
+    """
+    Multiple tap targets on a followers-list row (original pixel space).
+    All points stay left of the Follow pill column.
+    """
+    def _ig(d: dict[str, Any], k: str) -> int:
+        try:
+            return int(d.get(k) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    rl, rt, rr, rb = (
+        _ig(row_o, "left"),
+        _ig(row_o, "top"),
+        _ig(row_o, "right"),
+        _ig(row_o, "bottom"),
+    )
+    al, at, ar, ab = (
+        _ig(av_o, "left"),
+        _ig(av_o, "top"),
+        _ig(av_o, "right"),
+        _ig(av_o, "bottom"),
+    )
+    tl, tt, tr, tb = (
+        _ig(tz_o, "left"),
+        _ig(tz_o, "top"),
+        _ig(tz_o, "right"),
+        _ig(tz_o, "bottom"),
+    )
+    fl = _ig(fb_o, "left")
+    fw = max(_ig(fb_o, "right") - fl, 1)
+
+    row_w = max(rr - rl, 1)
+    margin = max(12, int(row_w * 0.02))
+    # Horizontal guard: stay clearly left of Follow column
+    x_max = fl - margin - max(4, fw // 16) if fl > rl + margin else rr - margin
+
+    avatar_tap_x = max(al + 4, min((al + ar) // 2, x_max))
+    avatar_tap_y = (at + ab) // 2
+
+    safe_left_tap_x = max(
+        al + max(6, (ar - al) // 12),
+        min(al + (ar - al) // 5, x_max),
+    )
+    safe_left_tap_y = avatar_tap_y
+
+    r_eff = min(tr, x_max) if tr > tl else x_max
+    if fl > 0:
+        r_eff = min(r_eff, fl - margin)
+    if r_eff <= tl + 6:
+        username_area_tap_x = max(tl + 8, min((tl + max(tl, fl - margin)) // 2, x_max))
     else:
-        log(
-            "info",
-            "visual_followers_candidate_picker_done",
-            screenshot_path=str(path),
-            source_profile_username=source_profile_username,
-            candidate_count=out["candidate_count"],
-            sample_candidates=out["sample_candidates"],
-            confidence=round(out["mean_confidence"], 4),
-            dry_run=dry_run,
-            visual_only=True,
-        )
+        username_area_tap_x = max(tl + 6, min((tl + r_eff) // 2, x_max))
+    username_area_tap_y = (tt + tb) // 2
+
+    left_band_right = max(rl + margin * 2, fl - margin)
+    row_center_left_tap_x = max(
+        rl + margin,
+        min((rl + left_band_right) // 2, x_max),
+    )
+    row_center_left_tap_y = (rt + rb) // 2
+
+    return {
+        "avatar_tap_x": int(avatar_tap_x),
+        "avatar_tap_y": int(avatar_tap_y),
+        "username_area_tap_x": int(username_area_tap_x),
+        "username_area_tap_y": int(username_area_tap_y),
+        "row_center_left_tap_x": int(row_center_left_tap_x),
+        "row_center_left_tap_y": int(row_center_left_tap_y),
+        "safe_left_tap_x": int(safe_left_tap_x),
+        "safe_left_tap_y": int(safe_left_tap_y),
+    }
+
+
+def _visual_open_strategy_taps_from_candidate(
+    candidate: dict[str, Any],
+) -> list[tuple[str, int, int]]:
+    """Ordered tap strategies for visual follower rows; dedupes identical coordinates."""
+    out: list[tuple[str, int, int]] = []
+    seen: set[tuple[int, int]] = set()
+
+    def _add(name: str, x: Any, y: Any) -> None:
+        try:
+            xi, yi = int(x), int(y)
+        except (TypeError, ValueError):
+            return
+        if xi <= 0 or yi <= 0:
+            return
+        sig = (xi, yi)
+        if sig in seen:
+            return
+        seen.add(sig)
+        out.append((name, xi, yi))
+
+    rc = candidate.get("row_center") or [0, 0]
+    if isinstance(rc, (list, tuple)) and len(rc) >= 2:
+        _add("row_center", rc[0], rc[1])
+
+    _add("username_area", candidate.get("username_area_tap_x"), candidate.get("username_area_tap_y"))
+    _add("avatar_area", candidate.get("avatar_tap_x"), candidate.get("avatar_tap_y"))
+    _add("row_center_left", candidate.get("row_center_left_tap_x"), candidate.get("row_center_left_tap_y"))
+    _add("safe_left", candidate.get("safe_left_tap_x"), candidate.get("safe_left_tap_y"))
 
     return out
+
+
+def _wait_visual_follower_open_transition(
+    d: u2.Device,
+    *,
+    pkg: str,
+    source_profile_username: str,
+    timeout_s: float = 2.65,
+) -> bool:
+    """
+    After tapping a followers row, wait until navigation suggests we left the CT title
+    or landed on a profile-like surface (never blocks indefinitely).
+    """
+    from navigation_engine import NavigationEngineState, observe_instagram_state
+
+    deadline = time.monotonic() + float(timeout_s)
+    src_n = _normalize_handle(source_profile_username or "")
+    poll = float(getattr(config, "PROFILE_VERIFY_POLL_S", 0.12) or 0.12)
+
+    while time.monotonic() < deadline:
+        try:
+            ab = read_current_profile_username_for_follow_gate(d)
+            ab_n = _normalize_handle(ab or "")
+            if src_n and ab_n and ab_n != src_n:
+                return True
+        except Exception:
+            pass
+
+        try:
+            nav = observe_instagram_state(
+                d,
+                expected_package=pkg,
+                last_known_state=NavigationEngineState.FOLLOWERS_LIST.value,
+                context={
+                    "phase": "visual_follower_open_transition",
+                    "source_profile_username": source_profile_username,
+                    "disable_followers_visual_fallback": True,
+                    "expected_state": "PROFILE",
+                },
+            )
+            st = str(nav.get("state") or "")
+            cf = float(nav.get("confidence") or 0.0)
+            if st in (
+                NavigationEngineState.PROFILE.value,
+                NavigationEngineState.CANDIDATE_PROFILE.value,
+                NavigationEngineState.PRIVATE_PROFILE.value,
+            ) and cf >= 0.42:
+                if (
+                    _visual_raw_follow_invite_visible_quick(d)
+                    or _follow_ui_state_snapshot(d) == "follow"
+                ):
+                    return True
+        except Exception:
+            pass
+
+        try:
+            det = detect_followers_list_screen(
+                d, source_profile_username=source_profile_username
+            )
+            if not bool(det.get("is_followers_list")):
+                guess = str(det.get("current_screen_guess") or "").lower()
+                if "profile" in guess or guess == "likely_profile":
+                    return True
+        except Exception:
+            pass
+
+        time.sleep(poll)
+
+    return False
 
 
 def _visual_follower_username_zone_tap_xy(
@@ -7497,6 +9943,46 @@ def visual_target_profile_lock_clear() -> None:
     global _VISUAL_TARGET_PROFILE_LOCK_ACTIVE, _VISUAL_TARGET_PROFILE_CONTEXT
     _VISUAL_TARGET_PROFILE_LOCK_ACTIVE = False
     _VISUAL_TARGET_PROFILE_CONTEXT = None
+
+
+def runner_invalidate_visual_followers_session_after_safe_stop(
+    d: u2.Device | None,
+    *,
+    source_profile_username: str = "",
+) -> None:
+    """
+    After a terminal post-follow safe stop (force_stop / home): clear in-memory followers
+    visual state so the runner cannot reuse a stale screenshot or row CTA selection.
+    """
+    un = str(source_profile_username or "").strip()
+    try:
+        _followers_release_post_tap_detection_lock(un)
+    except Exception:
+        try:
+            _followers_set_post_tap_detection_lock(False)
+        except Exception:
+            pass
+    try:
+        _followers_reset_post_tap_capture_gate()
+    except Exception:
+        pass
+    try:
+        visual_target_profile_lock_clear()
+    except Exception:
+        pass
+    try:
+        _followers_reset_followers_list_session_state()
+    except Exception:
+        pass
+    try:
+        _followers_set_post_tap_detection_lock(False)
+    except Exception:
+        pass
+    if d is not None:
+        try:
+            d.app_current()
+        except Exception:
+            pass
 
 
 def visual_target_profile_lock_verify(
@@ -11197,30 +13683,165 @@ def _visual_find_mute_row_first_sheet(d: u2.Device) -> tuple[Any, str]:
     return None, ""
 
 
-def _visual_switch_checked_near_row(d: u2.Device, label_el: Any) -> bool | None:
+def _mute_row_preferred_toggle_rid_fragment(label_el: Any) -> str | None:
+    """Instagram mute sheet row: map label text to ``…_mute_setting_row_switch`` id fragment."""
+    try:
+        t = str(label_el.info.get("text") or "").strip().lower()
+    except Exception:
+        return None
+    if t in ("posts", "publications") or t.startswith("publication"):
+        return "posts_mute_setting_row_switch"
+    if t in ("stories", "historias", "storie"):
+        return "stories_mute_setting_row_switch"
+    if "note" in t:
+        return "notes_mute_setting_row_switch"
+    return None
+
+
+def _mute_row_toggle_resource_id(el: Any) -> str:
+    try:
+        inf = el.info
+        return str(inf.get("resourceName") or inf.get("resourceId") or "")
+    except Exception:
+        return ""
+
+
+def _mute_row_toggle_tier(el: Any, *, class_name: str, pref: str | None) -> int:
+    """
+    Lower tier = higher priority. 0 = Instagram mute row id match; 1 = Switch; 2 = other CompoundButton.
+    """
+    rid = _mute_row_toggle_resource_id(el)
+    if pref and pref in rid:
+        return 0
+    if class_name == "android.widget.Switch":
+        return 1
+    return 2
+
+
+def _mute_row_toggle_candidates_near_label(
+    d: u2.Device, label_el: Any
+) -> list[tuple[int, int, Any, str]]:
+    """Switch + checkable CompoundButton within vertical band of label row center (dy <= 72)."""
     try:
         lb = label_el.info.get("bounds") or {}
         lcy = (int(lb["top"]) + int(lb["bottom"])) // 2
     except Exception:
-        return None
-    best: tuple[int, Any] | None = None
+        return []
+    pref = _mute_row_preferred_toggle_rid_fragment(label_el)
+    out: list[tuple[int, int, Any, str]] = []
     try:
-        for sw in d(className="android.widget.Switch").all():
-            sb = sw.info.get("bounds") or {}
-            scy = (int(sb["top"]) + int(sb["bottom"])) // 2
-            dy = abs(scy - lcy)
-            if dy > 72:
+        for el in d(className="android.widget.Switch").all():
+            try:
+                sb = el.info.get("bounds") or {}
+                scy = (int(sb["top"]) + int(sb["bottom"])) // 2
+                dy = abs(scy - lcy)
+                if dy > 72:
+                    continue
+                tier = _mute_row_toggle_tier(el, class_name="android.widget.Switch", pref=pref)
+                out.append((tier, dy, el, "android.widget.Switch"))
+            except Exception:
                 continue
-            if best is None or dy < best[0]:
-                best = (dy, sw)
+        for el in d(className="android.widget.CompoundButton").all():
+            try:
+                inf = el.info
+                if not bool(inf.get("checkable")):
+                    continue
+                sb = inf.get("bounds") or {}
+                scy = (int(sb["top"]) + int(sb["bottom"])) // 2
+                dy = abs(scy - lcy)
+                if dy > 72:
+                    continue
+                tier = _mute_row_toggle_tier(
+                    el, class_name="android.widget.CompoundButton", pref=pref
+                )
+                out.append((tier, dy, el, "android.widget.CompoundButton"))
+            except Exception:
+                continue
     except Exception:
-        return None
-    if best is None:
+        return out
+    return out
+
+
+def _mute_row_toggle_pick_best(
+    cands: list[tuple[int, int, Any, str]],
+) -> tuple[Any | None, dict[str, Any]]:
+    diag: dict[str, Any] = {
+        "matched_toggle_class": "",
+        "matched_toggle_resource_id": "",
+        "matched_toggle_checked": None,
+    }
+    if not cands:
+        return None, diag
+    best = min(cands, key=lambda x: (x[0], x[1]))
+    el = best[2]
+    cls = best[3]
+    try:
+        inf = el.info
+        diag["matched_toggle_class"] = str(inf.get("className") or cls)[:160]
+        diag["matched_toggle_resource_id"] = str(
+            inf.get("resourceName") or inf.get("resourceId") or ""
+        )[:200]
+        raw = inf.get("checked")
+        if isinstance(raw, bool):
+            diag["matched_toggle_checked"] = raw
+        else:
+            diag["matched_toggle_checked"] = None
+    except Exception:
+        pass
+    return el, diag
+
+
+def _visual_switch_checked_near_row(
+    d: u2.Device, label_el: Any, *, diag_meta: dict[str, Any] | None = None
+) -> bool | None:
+    cands = _mute_row_toggle_candidates_near_label(d, label_el)
+    el, diag = _mute_row_toggle_pick_best(cands)
+    if diag_meta is not None:
+        diag_meta.update(diag)
+    if el is None:
         return None
     try:
-        return bool(best[1].info.get("checked"))
+        return bool(el.info.get("checked"))
     except Exception:
         return None
+
+
+def _visual_switch_probe_near_row(d: u2.Device, label_el: Any) -> dict[str, Any]:
+    """
+    Same row / band heuristics as ``_visual_switch_checked_near_row``; returns counts
+    for mute toggle verify diagnostics (extra UiAutomator pass; verify path only).
+    """
+    out: dict[str, Any] = {
+        "switches_in_band": 0,
+        "nearest_dy": None,
+        "checked_raw_on_nearest": None,
+    }
+    try:
+        lb = label_el.info.get("bounds") or {}
+        lcy = (int(lb["top"]) + int(lb["bottom"])) // 2
+    except Exception:
+        return out
+    cands = _mute_row_toggle_candidates_near_label(d, label_el)
+    out["switches_in_band"] = int(len(cands))
+    el, _diag = _mute_row_toggle_pick_best(cands)
+    if el is None:
+        return out
+    best_dy = None
+    for tier, dy, cand_el, _cls in cands:
+        if cand_el is el:
+            best_dy = dy
+            break
+    if best_dy is not None:
+        out["nearest_dy"] = int(best_dy)
+    try:
+        raw = el.info.get("checked")
+        if isinstance(raw, bool):
+            out["checked_raw_on_nearest"] = raw
+        else:
+            out["checked_raw_on_nearest"] = None
+    except Exception:
+        out["checked_raw_on_nearest"] = None
+    return out
 
 
 def _visual_tap_toggle_row_for_label(
@@ -11251,6 +13872,587 @@ def _visual_tap_toggle_row_for_label(
     except Exception as e:
         return False, False, f"tap_failed:{e}", el
     return True, False, "", el
+
+
+def _visual_verify_toggle_on_for_labels_detailed(
+    d: u2.Device,
+    labels: tuple[str, ...],
+    timeout_s: float,
+) -> tuple[bool, dict[str, Any]]:
+    """
+    Poll until ``android.widget.Switch`` near the row reads ``checked`` or timeout.
+    Returns (ok, meta) with probe stats for diagnostics (mute v2 logging on failure).
+    """
+    to = float(timeout_s)
+    deadline = time.perf_counter() + to
+    probe_cycles = 0
+    inner_probes = 0
+    meta: dict[str, Any] = {
+        "verify_timeout_s": round(to, 4),
+        "probe_cycles": 0,
+        "inner_probes": 0,
+        "last_label": "",
+        "last_checked_signal": "none",
+        "last_switches_in_band": 0,
+        "last_nearest_dy": None,
+        "checked_raw_on_nearest": None,
+        "verify_ok": False,
+        "matched_toggle_class": "",
+        "matched_toggle_resource_id": "",
+        "matched_toggle_checked": None,
+    }
+    while time.perf_counter() < deadline:
+        probe_cycles += 1
+        for lab in labels:
+            try:
+                el = d(text=lab)
+                if not el.exists(timeout=0.1):
+                    continue
+                inner_probes += 1
+                meta["last_label"] = str(lab)
+                pr = _visual_switch_probe_near_row(d, el)
+                meta["last_switches_in_band"] = int(pr.get("switches_in_band") or 0)
+                meta["last_nearest_dy"] = pr.get("nearest_dy")
+                meta["checked_raw_on_nearest"] = pr.get("checked_raw_on_nearest")
+                _row_d: dict[str, Any] = {}
+                c = _visual_switch_checked_near_row(d, el, diag_meta=_row_d)
+                meta["matched_toggle_class"] = str(_row_d.get("matched_toggle_class") or "")[:160]
+                meta["matched_toggle_resource_id"] = str(
+                    _row_d.get("matched_toggle_resource_id") or ""
+                )[:200]
+                meta["matched_toggle_checked"] = _row_d.get("matched_toggle_checked")
+                if c is True:
+                    meta["last_checked_signal"] = "true"
+                elif c is False:
+                    meta["last_checked_signal"] = "false"
+                else:
+                    meta["last_checked_signal"] = "missing_switch"
+                if c is True:
+                    meta["probe_cycles"] = probe_cycles
+                    meta["inner_probes"] = inner_probes
+                    meta["verify_ok"] = True
+                    return True, meta
+            except Exception:
+                continue
+        time.sleep(0.14)
+    meta["probe_cycles"] = probe_cycles
+    meta["inner_probes"] = inner_probes
+    meta["verify_ok"] = False
+    return False, meta
+
+
+_LIVE_TOGGLE_CANDIDATES_DIAG_MAX_COMPOUND_SAMPLES = 16
+_LIVE_TOGGLE_CANDIDATES_DIAG_MAX_SWITCH_SAMPLES = 8
+_LIVE_TOGGLE_CANDIDATES_DIAG_VERTICAL_BAND_DY = 72
+
+
+def _mute_engine_v2_toggle_live_sample_node(
+    el: Any, *, lcy: int | None, band_dy: int
+) -> dict[str, Any]:
+    row: dict[str, Any] = {}
+    try:
+        inf = el.info
+    except Exception as e:
+        row["sample_error"] = str(e)[:200]
+        return row
+    try:
+        row["className"] = str(inf.get("className") or "")[:200]
+    except Exception:
+        row["className"] = ""
+    sb = {}
+    try:
+        sb = inf.get("bounds") or {}
+        row["bounds"] = {
+            "left": int(sb["left"]),
+            "top": int(sb["top"]),
+            "right": int(sb["right"]),
+            "bottom": int(sb["bottom"]),
+        }
+    except Exception:
+        row["bounds"] = None
+    try:
+        row["resourceName"] = inf.get("resourceName")
+        row["resourceId"] = inf.get("resourceId")
+        row["resource_id"] = str(inf.get("resourceName") or inf.get("resourceId") or "")[:220]
+    except Exception:
+        row["resourceName"] = None
+        row["resourceId"] = None
+        row["resource_id"] = ""
+    row["checkable_raw"] = inf.get("checkable")
+    row["checked_raw"] = inf.get("checked")
+    row["clickable_raw"] = inf.get("clickable")
+    if lcy is not None and isinstance(sb, dict) and all(k in sb for k in ("top", "bottom")):
+        try:
+            scy = (int(sb["top"]) + int(sb["bottom"])) // 2
+            dy = abs(scy - int(lcy))
+            row["dy"] = int(dy)
+            row["in_vertical_band"] = bool(dy <= int(band_dy))
+        except Exception:
+            row["dy"] = None
+            row["in_vertical_band"] = None
+    else:
+        row["dy"] = None
+        row["in_vertical_band"] = None
+    return row
+
+
+def _mute_engine_v2_toggle_live_candidates_diag(
+    d: u2.Device,
+    *,
+    axis: str,
+    vmeta: dict[str, Any],
+    labels_tuple: tuple[str, ...],
+    visual_candidate_id: str,
+    source_profile_username: str,
+) -> None:
+    """
+    Diagnostic-only: when verify failed with ``missing_switch`` and zero in-band
+    candidates from the helper, log raw ``.all()`` counts and per-node ``info`` samples
+    (does not change verify outcome or taps).
+    """
+    if bool(vmeta.get("verify_ok")):
+        return
+    if str(vmeta.get("last_checked_signal") or "") != "missing_switch":
+        return
+    if int(vmeta.get("last_switches_in_band") or 0) != 0:
+        return
+
+    band = int(_LIVE_TOGGLE_CANDIDATES_DIAG_VERTICAL_BAND_DY)
+    label_text = str(vmeta.get("last_label") or "").strip()
+    if not label_text:
+        for lab in labels_tuple:
+            if str(lab or "").strip():
+                label_text = str(lab).strip()
+                break
+
+    label_bounds: dict[str, int] | None = None
+    label_center_y: int | None = None
+    label_found = False
+    label_el: Any | None = None
+    if label_text:
+        try:
+            cand = d(text=label_text)
+            if bool(cand.exists(timeout=0.12)):
+                label_el = cand
+                label_found = True
+        except Exception:
+            label_el = None
+    if label_el is not None:
+        try:
+            lb = label_el.info.get("bounds") or {}
+            label_bounds = {
+                "left": int(lb["left"]),
+                "top": int(lb["top"]),
+                "right": int(lb["right"]),
+                "bottom": int(lb["bottom"]),
+            }
+            label_center_y = (label_bounds["top"] + label_bounds["bottom"]) // 2
+        except Exception:
+            label_bounds = None
+            label_center_y = None
+
+    lcy = label_center_y
+    compound_button_live_count = 0
+    switch_live_count = 0
+    candidate_in_vertical_band_count = 0
+    candidate_filtered_by_checkable_count = 0
+    compound_samples: list[dict[str, Any]] = []
+    switch_samples: list[dict[str, Any]] = []
+
+    try:
+        cb_all = d(className="android.widget.CompoundButton").all()
+    except Exception:
+        cb_all = []
+    try:
+        sw_all = d(className="android.widget.Switch").all()
+    except Exception:
+        sw_all = []
+
+    compound_button_live_count = int(len(cb_all))
+    switch_live_count = int(len(sw_all))
+
+    for i, el in enumerate(cb_all):
+        if lcy is not None:
+            try:
+                inf = el.info
+                sb = inf.get("bounds") or {}
+                scy = (int(sb["top"]) + int(sb["bottom"])) // 2
+                dy = abs(scy - int(lcy))
+                if dy <= band:
+                    candidate_in_vertical_band_count += 1
+                    if not bool(inf.get("checkable")):
+                        candidate_filtered_by_checkable_count += 1
+            except Exception:
+                pass
+        if i < _LIVE_TOGGLE_CANDIDATES_DIAG_MAX_COMPOUND_SAMPLES:
+            compound_samples.append(_mute_engine_v2_toggle_live_sample_node(el, lcy=lcy, band_dy=band))
+
+    for i, el in enumerate(sw_all):
+        if i < _LIVE_TOGGLE_CANDIDATES_DIAG_MAX_SWITCH_SAMPLES:
+            switch_samples.append(_mute_engine_v2_toggle_live_sample_node(el, lcy=lcy, band_dy=band))
+
+    try:
+        log(
+            "warning",
+            "mute_engine_v2_toggle_live_candidates_diag",
+            axis=str(axis or "")[:32],
+            visual_candidate_id=visual_candidate_id,
+            source_profile_username=source_profile_username,
+            last_label=label_text or None,
+            label_found=label_found,
+            label_bounds=label_bounds,
+            label_center_y=label_center_y,
+            compound_button_live_count=compound_button_live_count,
+            switch_live_count=switch_live_count,
+            candidate_in_vertical_band_count=candidate_in_vertical_band_count,
+            candidate_filtered_by_checkable_count=candidate_filtered_by_checkable_count,
+            vertical_band_dy=band,
+            compound_button_samples=compound_samples,
+            switch_samples=switch_samples,
+        )
+    except Exception:
+        pass
+
+
+_MUTE_V2_XML_VERIFY_RID_FRAGMENTS: dict[str, str] = {
+    "posts": "posts_mute_setting_row_switch",
+    "stories": "stories_mute_setting_row_switch",
+}
+
+
+def _mute_engine_v2_verify_toggle_on_from_xml_dump(
+    d: u2.Device,
+    *,
+    axis: str,
+) -> tuple[bool | None, dict[str, Any]]:
+    """
+    Read-only: after live UiAutomator verify failed (no CompoundButton in ``.all()``),
+    confirm mute toggle ``checked`` from ``dump_hierarchy`` XML by Instagram resource-id.
+
+    Returns ``(True, diag)`` only when a matching node has ``checked`` attribute equal to
+    ``true`` (case-insensitive). ``False`` when node found but clearly not on. ``None``
+    when dump/parse failed or target node missing / ambiguous ``checked``.
+    """
+    ax = str(axis or "").strip().lower()
+    frag = _MUTE_V2_XML_VERIFY_RID_FRAGMENTS.get(ax, "")
+    diag: dict[str, Any] = {
+        "target_resource_id_fragment": frag,
+        "xml_node_found": False,
+        "checked_value": "",
+        "xml_verify_ok": False,
+        "matched_toggle_resource_id": "",
+        "matched_toggle_class": "",
+    }
+    if not frag:
+        diag["xml_fallback_skip_reason"] = "unknown_axis"
+        return None, diag
+
+    hier = ""
+    try:
+        try:
+            hier = str(d.dump_hierarchy(compressed=False))
+        except TypeError:
+            hier = str(d.dump_hierarchy())
+    except Exception as e:
+        diag["xml_fallback_skip_reason"] = f"dump_failed:{type(e).__name__}"
+        return None, diag
+
+    if not hier.strip():
+        diag["xml_fallback_skip_reason"] = "empty_hierarchy"
+        return None, diag
+
+    try:
+        root = ET.fromstring(hier)
+    except Exception as e:
+        diag["xml_fallback_skip_reason"] = f"parse_failed:{type(e).__name__}"
+        return None, diag
+
+    for node in root.iter():
+        tg = str(node.tag)
+        if tg != "node" and not tg.endswith("}node"):
+            continue
+        a = node.attrib
+        rid = str(a.get("resource-id") or "")
+        if frag not in rid:
+            continue
+        chk_raw = str(a.get("checked") or "").strip()
+        diag["xml_node_found"] = True
+        diag["checked_value"] = chk_raw
+        diag["matched_toggle_resource_id"] = rid[:220]
+        diag["matched_toggle_class"] = str(a.get("class") or "")[:160]
+        cl = chk_raw.lower()
+        if cl == "true":
+            diag["xml_verify_ok"] = True
+            return True, diag
+        if cl == "false":
+            diag["xml_verify_ok"] = False
+            return False, diag
+        diag["xml_verify_ok"] = False
+        diag["xml_fallback_skip_reason"] = "checked_attr_not_boolean"
+        return None, diag
+
+    diag["xml_fallback_skip_reason"] = "resource_id_not_found"
+    return None, diag
+
+
+def _mute_engine_v2_toggle_verify_xml_fallback_maybe(
+    d: u2.Device,
+    *,
+    axis: str,
+    vmeta: dict[str, Any],
+    visual_candidate_id: str,
+    source_profile_username: str,
+) -> bool:
+    """
+    If live mute toggle verify ended with ``missing_switch`` and zero in-band switches,
+    try strict XML resource-id read. On success, mutates ``vmeta`` like a passing live verify.
+    """
+    if bool(vmeta.get("verify_ok")):
+        return False
+    if str(vmeta.get("last_checked_signal") or "") != "missing_switch":
+        return False
+    if int(vmeta.get("last_switches_in_band") or 0) != 0:
+        return False
+
+    res, fields = _mute_engine_v2_verify_toggle_on_from_xml_dump(
+        d,
+        axis=axis,
+    )
+    try:
+        log(
+            "warning",
+            "mute_engine_v2_toggle_verify_xml_fallback_used",
+            axis=str(axis or "")[:32],
+            visual_candidate_id=visual_candidate_id,
+            source_profile_username=source_profile_username,
+            **fields,
+        )
+    except Exception:
+        pass
+
+    if res is not True:
+        return False
+
+    vmeta["verify_ok"] = True
+    vmeta["last_checked_signal"] = "true"
+    vmeta["matched_toggle_class"] = str(fields.get("matched_toggle_class") or "")[:160]
+    vmeta["matched_toggle_resource_id"] = str(fields.get("matched_toggle_resource_id") or "")[
+        :220
+    ]
+    vmeta["matched_toggle_checked"] = True
+    return True
+
+
+def _mute_engine_v2_parse_bounds_attr(bounds_s: str) -> tuple[int, int, int, int] | None:
+    s = (bounds_s or "").strip()
+    m = re.match(r"^\[(\d+),(\d+)\]\[(\d+),(\d+)\]$", s)
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
+
+
+def _mute_engine_v2_toggle_verify_structure_diag(
+    d: u2.Device,
+    *,
+    axis: str,
+    labels_tuple: tuple[str, ...],
+    vmeta: dict[str, Any],
+    visual_candidate_id: str,
+    source_profile_username: str,
+) -> None:
+    """
+    Diagnostic-only: when Switch-based verify saw no ``android.widget.Switch`` near the row,
+    dump hierarchy + screenshot and log nearby / right-side XML nodes (does not change verify outcome).
+    """
+    if bool(vmeta.get("verify_ok")):
+        return
+    if str(vmeta.get("last_checked_signal") or "") != "missing_switch":
+        return
+    if int(vmeta.get("last_switches_in_band") or 0) != 0:
+        return
+
+    _ensure_debug_dirs()
+    sub_xml = _XML_DIR / "mute_toggle_verify_diag"
+    try:
+        sub_xml.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+
+    stamp = int(time.time() * 1000)
+    vshort = re.sub(r"[^A-Za-z0-9._-]+", "_", (visual_candidate_id or "na")[:20])
+    base = f"mute_toggle_structure_{axis}_{stamp}_{vshort}"
+    xml_path = sub_xml / f"{base}.xml"
+    shot_path = _SCREENSHOTS_DIR / f"{base}.png"
+
+    label = str(vmeta.get("last_label") or "").strip()
+    if not label:
+        for lab in labels_tuple:
+            if str(lab or "").strip():
+                label = str(lab).strip()
+                break
+
+    xml_dump_path = ""
+    screenshot_path = ""
+    nearby_node_count = 0
+    right_side_node_count = 0
+    sampled_classnames: list[str] = []
+    sampled_checkable_nodes: list[str] = []
+    label_bounds: dict[str, int] | None = None
+
+    try:
+        try:
+            screenshot(d, str(shot_path))
+            screenshot_path = str(shot_path)
+        except Exception:
+            pass
+
+        try:
+            try:
+                hier = str(d.dump_hierarchy(compressed=False))
+            except TypeError:
+                hier = str(d.dump_hierarchy())
+            xml_path.write_text(hier, encoding="utf-8")
+            xml_dump_path = str(xml_path)
+            _bump_xml_fetch()
+        except Exception:
+            hier = ""
+
+        lcy = lcx = ltop = lbot = lleft = lright = 0
+        if label:
+            try:
+                el = d(text=label)
+                if el.exists(timeout=0.12):
+                    lb = el.info.get("bounds") or {}
+                    lleft = int(lb.get("left", 0))
+                    ltop = int(lb.get("top", 0))
+                    lright = int(lb.get("right", 0))
+                    lbot = int(lb.get("bottom", 0))
+                    lcx = (lleft + lright) // 2
+                    lcy = (ltop + lbot) // 2
+                    label_bounds = {
+                        "left": lleft,
+                        "top": ltop,
+                        "right": lright,
+                        "bottom": lbot,
+                    }
+            except Exception:
+                pass
+
+        if hier and label_bounds is None and label:
+            try:
+                _r = ET.fromstring(hier)
+                for _node in _r.iter():
+                    _tg = str(_node.tag)
+                    if _tg != "node" and not _tg.endswith("}node"):
+                        continue
+                    _a = _node.attrib
+                    if str(_a.get("text") or "").strip() != label:
+                        continue
+                    _pb = _mute_engine_v2_parse_bounds_attr(str(_a.get("bounds") or ""))
+                    if _pb is None:
+                        continue
+                    gl, gt, gr, gb = _pb
+                    lleft, ltop, lright, lbot = gl, gt, gr, gb
+                    lcx = (lleft + lright) // 2
+                    lcy = (ltop + lbot) // 2
+                    label_bounds = {
+                        "left": lleft,
+                        "top": ltop,
+                        "right": lright,
+                        "bottom": lbot,
+                    }
+                    break
+            except Exception:
+                pass
+
+        band_y = 140
+        nearby_rows: list[dict[str, Any]] = []
+        checkable_samples: list[str] = []
+        class_set: list[str] = []
+
+        if hier and label_bounds is not None:
+            try:
+                root = ET.fromstring(hier)
+            except Exception:
+                root = None
+            if root is not None:
+                for node in root.iter():
+                    tg = str(node.tag)
+                    if tg != "node" and not tg.endswith("}node"):
+                        continue
+                    a = node.attrib
+                    pb = _mute_engine_v2_parse_bounds_attr(str(a.get("bounds") or ""))
+                    if pb is None:
+                        continue
+                    gl, gt, gr, gb = pb
+                    cx = (gl + gr) // 2
+                    cy = (gt + gb) // 2
+                    if abs(cy - lcy) > band_y:
+                        continue
+                    nearby_node_count += 1
+                    cls = str(a.get("class") or "")
+                    if cls and cls not in class_set:
+                        class_set.append(cls)
+                    txt = str(a.get("text") or "")[:48]
+                    cd = str(a.get("content-desc") or "")[:80]
+                    rid = str(a.get("resource-id") or "")[:80]
+                    clk = str(a.get("clickable") or "")
+                    chk = str(a.get("checkable") or "")
+                    chd = str(a.get("checked") or "")
+                    sel = str(a.get("selected") or "")
+                    row = {
+                        "className": cls[:120],
+                        "text": txt,
+                        "content_desc": cd,
+                        "resource_id": rid,
+                        "clickable": clk,
+                        "checkable": chk,
+                        "checked": chd,
+                        "selected": sel,
+                        "bounds": f"[{gl},{gt}][{gr},{gb}]",
+                    }
+                    if len(nearby_rows) < 24:
+                        nearby_rows.append(row)
+                    if chk.lower() == "true":
+                        checkable_samples.append(
+                            f"{cls[:48]}|c={chd}|s={sel}|clk={clk}|{gl},{gt},{gr},{gb}"
+                        )
+                    if cx > lright - 4:
+                        right_side_node_count += 1
+
+        sampled_classnames = class_set[:20]
+        sampled_checkable_nodes = checkable_samples[:10]
+
+        try:
+            log(
+                "warning",
+                "mute_engine_v2_toggle_verify_structure_diag",
+                axis=str(axis or "")[:16],
+                label=label[:80],
+                visual_candidate_id=str(visual_candidate_id or "")[:120],
+                source_profile_username=str(source_profile_username or "")[:120],
+                nearby_node_count=int(nearby_node_count),
+                right_side_node_count=int(right_side_node_count),
+                sampled_classnames=sampled_classnames,
+                sampled_checkable_nodes=sampled_checkable_nodes,
+                xml_dump_path=xml_dump_path[:400],
+                screenshot_path=(screenshot_path or "")[:400],
+                label_bounds=label_bounds,
+                nearby_nodes_sample=nearby_rows[:8],
+            )
+        except Exception:
+            pass
+    except Exception as exc:
+        try:
+            log(
+                "info",
+                "mute_engine_v2_toggle_verify_structure_diag_failed",
+                axis=str(axis or "")[:16],
+                label=label[:80],
+                error=str(exc)[:240],
+            )
+        except Exception:
+            pass
 
 
 def _visual_verify_toggle_on_for_labels(
@@ -12160,18 +15362,21 @@ def _followers_after_tap_detect_log_payload(
 def _followers_after_tap_immediate_capture_and_detect(
     d: u2.Device,
     source_profile_username: str,
+    *,
+    settle_seconds: float = 2.0,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """
     After followers stat tap: settle (no swipe), single dump_hierarchy to XML, screenshot,
     app_current, then detect_followers_list_screen (no extra hierarchy dumps on hot path).
     """
+    _ss = float(settle_seconds)
     log(
         "info",
         "followers_after_tap_delayed_capture",
-        settle_seconds=2.0,
+        settle_seconds=_ss,
         phase="before_single_dump_and_screenshot",
     )
-    time.sleep(2.0)
+    time.sleep(_ss)
     _ensure_debug_dirs()
     shot = _SCREENSHOTS_DIR / "followers_after_tap_immediate.png"
     xml_path = _XML_DIR / "followers_after_tap_immediate.xml"
@@ -12260,6 +15465,205 @@ def _followers_after_tap_immediate_capture_and_detect(
     return paths, det
 
 
+def _followers_surface_is_stable(
+    d: u2.Device,
+    *,
+    first_xml: str | None,
+    first_candidate_count: int | None,
+    open_detection_method: str | None,
+    candidate_username_count: int,
+    current_screen_guess: str,
+    source_profile_username: str,
+) -> tuple[bool, dict[str, Any]]:
+    """
+    Light-weight followers/following surface stability check: short settle, re-detect,
+    reject obvious UI transitions (counts collapsing, list flag flipping, screen guess
+    regressing toward profile/unknown).
+    """
+    odm = str(open_detection_method or "") or None
+    strict_mode = odm == "visual_fallback" and int(candidate_username_count or 0) == 0
+    stability_mode: str = (
+        "visual_fallback_zero_handles_strict" if strict_mode else "normal"
+    )
+    guess_before = str(current_screen_guess or "")
+    cand_before = int(candidate_username_count or 0)
+    ambiguous_guess = frozenset({"likely_profile", "unknown", ""})
+
+    def _fresh_shot() -> str | None:
+        try:
+            _ensure_debug_dirs()
+            p = _SCREENSHOTS_DIR / (
+                f"followers_surface_stability_{int(time.perf_counter() * 1000)}.png"
+            )
+            screenshot(d, str(p))
+            return str(p)
+        except Exception:
+            return None
+
+    def _redetect(shot_fb: str | None) -> dict[str, Any]:
+        det_r = detect_followers_list_screen(
+            d, source_profile_username=str(source_profile_username or "")
+        )
+        if shot_fb:
+            det_r = _followers_apply_visual_fallback_if_needed(
+                d,
+                det_r,
+                shot_fb,
+                str(source_profile_username or ""),
+                phase="followers_surface_stability",
+            )
+        return det_r if isinstance(det_r, dict) else {}
+
+    def _xml_snapshot() -> str | None:
+        try:
+            try:
+                return str(d.dump_hierarchy(compressed=False))
+            except TypeError:
+                return str(d.dump_hierarchy())
+        except Exception:
+            return None
+
+    def _pass_ok(
+        det_a: dict[str, Any],
+        *,
+        cand_ref: int,
+        guess_ref: str,
+        xml_ref: str | None,
+        second_xml_equal: bool | None,
+    ) -> bool:
+        if not bool(det_a.get("is_followers_list")):
+            return False
+        guess_a = str(det_a.get("current_screen_guess") or "")
+        cand_a = int(det_a.get("candidate_username_count") or 0)
+        if guess_ref not in ambiguous_guess and guess_a in ambiguous_guess:
+            return False
+        if first_candidate_count is not None and int(first_candidate_count) > 0:
+            if cand_a < 1:
+                return False
+            if abs(cand_a - int(first_candidate_count)) > max(
+                2, int(first_candidate_count) // 4
+            ):
+                return False
+        elif strict_mode:
+            if cand_a == 0 and guess_a in ambiguous_guess:
+                return False
+        if xml_ref is not None and second_xml_equal is not None:
+            if not second_xml_equal:
+                return False
+        if cand_ref > 0:
+            if abs(cand_a - cand_ref) > max(1, cand_ref // 5):
+                return False
+        return True
+
+    meta: dict[str, Any] = {
+        "candidate_count_before": cand_before,
+        "current_screen_guess_before": guess_before,
+        "open_detection_method": str(odm or ""),
+        "stability_mode": stability_mode,
+        "source_profile_username": str(source_profile_username or ""),
+    }
+    shot0 = _fresh_shot()
+
+    if strict_mode:
+        time.sleep(0.25)
+        xml_between = _xml_snapshot()
+        det1 = _redetect(shot0)
+        xml1 = _xml_snapshot()
+        xml_ok1 = True
+        if first_xml is not None and xml1 is not None:
+            xml_ok1 = xml1 == first_xml
+        if not _pass_ok(
+            det1,
+            cand_ref=cand_before,
+            guess_ref=guess_before,
+            xml_ref=first_xml,
+            second_xml_equal=xml_ok1,
+        ):
+            c1 = int(det1.get("candidate_username_count") or 0)
+            meta.update(
+                {
+                    "candidate_count_after": c1,
+                    "current_screen_guess_after": str(
+                        det1.get("current_screen_guess") or ""
+                    ),
+                    "xml_stable_vs_first": xml_ok1,
+                }
+            )
+            return False, meta
+        time.sleep(0.25)
+        shot1 = _fresh_shot()
+        det2 = _redetect(shot1 or shot0)
+        c1 = int(det1.get("candidate_username_count") or 0)
+        c2 = int(det2.get("candidate_username_count") or 0)
+        xml2 = _xml_snapshot()
+        xml_ok2 = True
+        if xml_between is not None and xml2 is not None:
+            xml_ok2 = xml2 == xml_between
+        if abs(c2 - c1) > max(1, max(c1, 1) // 5):
+            meta.update(
+                {
+                    "candidate_count_after": c2,
+                    "current_screen_guess_after": str(
+                        det2.get("current_screen_guess") or ""
+                    ),
+                    "candidate_count_cycle1": c1,
+                    "xml_stable_between_cycles": xml_ok2,
+                }
+            )
+            return False, meta
+        if not _pass_ok(
+            det2,
+            cand_ref=c1,
+            guess_ref=guess_before,
+            xml_ref=xml_between,
+            second_xml_equal=xml_ok2,
+        ):
+            meta.update(
+                {
+                    "candidate_count_after": c2,
+                    "current_screen_guess_after": str(
+                        det2.get("current_screen_guess") or ""
+                    ),
+                    "candidate_count_cycle1": c1,
+                    "xml_stable_between_cycles": xml_ok2,
+                }
+            )
+            return False, meta
+        meta.update(
+            {
+                "candidate_count_after": c2,
+                "current_screen_guess_after": str(det2.get("current_screen_guess") or ""),
+                "candidate_count_cycle1": c1,
+                "xml_stable_between_cycles": xml_ok2,
+            }
+        )
+        return True, meta
+
+    time.sleep(0.15)
+    det_n = _redetect(shot0)
+    c_after = int(det_n.get("candidate_username_count") or 0)
+    guess_after = str(det_n.get("current_screen_guess") or "")
+    xml_after = _xml_snapshot()
+    xml_ok = True
+    if first_xml is not None and xml_after is not None:
+        xml_ok = xml_after == first_xml
+    ok_n = _pass_ok(
+        det_n,
+        cand_ref=cand_before,
+        guess_ref=guess_before,
+        xml_ref=first_xml,
+        second_xml_equal=xml_ok,
+    )
+    meta.update(
+        {
+            "candidate_count_after": c_after,
+            "current_screen_guess_after": guess_after,
+            "xml_stable_vs_first": xml_ok,
+        }
+    )
+    return bool(ok_n), meta
+
+
 def _followers_poll_followers_list_opened_after_immediate(
     d: u2.Device,
     source_profile_username: str,
@@ -12328,6 +15732,88 @@ def _followers_poll_followers_list_opened_after_immediate(
             screenshot_path=shot_path,
         )
         if det.get("is_followers_list"):
+            tap_diag_rd: dict[str, Any] = {
+                "entry_v2_source_profile_username": str(source_profile_username or ""),
+            }
+            gate_shot = shot_path
+            if _vision_validation_enabled() and not gate_shot:
+                try:
+                    _ensure_debug_dirs()
+                    gate_shot = str(
+                        _SCREENSHOTS_DIR
+                        / f"followers_poll_recovery_vision_gate_{recovery_i}.png"
+                    )
+                    screenshot(d, gate_shot)
+                except Exception:
+                    gate_shot = None
+            if _vision_validation_enabled() and not gate_shot:
+                try:
+                    log(
+                        "warning",
+                        "followers_poll_recovery_vision_gate_rejected",
+                        source_profile_username=source_profile_username,
+                        recovery_cycle=int(recovery_i),
+                        reason="no_screenshot_for_vision_gate",
+                    )
+                except Exception:
+                    pass
+                continue
+            v_ok, v_dict_r = _vision_validation_followers_list_open_gate(
+                screenshot_path=str(gate_shot or ""),
+                det=det,
+                tap_diag=tap_diag_rd,
+                source_profile_username=source_profile_username,
+            )
+            if not v_ok:
+                try:
+                    log(
+                        "warning",
+                        "followers_poll_recovery_vision_gate_rejected",
+                        source_profile_username=source_profile_username,
+                        recovery_cycle=int(recovery_i),
+                        vision_validation_result=v_dict_r,
+                    )
+                except Exception:
+                    pass
+                continue
+            f_xml: str | None = None
+            try:
+                try:
+                    f_xml = str(d.dump_hierarchy(compressed=False))
+                except TypeError:
+                    f_xml = str(d.dump_hierarchy())
+            except Exception:
+                f_xml = None
+            odm_fb = str(det.get("open_detection_method") or "") or None
+            st_ok, st_meta = _followers_surface_is_stable(
+                d,
+                first_xml=f_xml,
+                first_candidate_count=int(det.get("candidate_username_count") or 0),
+                open_detection_method=odm_fb,
+                candidate_username_count=int(det.get("candidate_username_count") or 0),
+                current_screen_guess=str(det.get("current_screen_guess") or ""),
+                source_profile_username=source_profile_username,
+            )
+            if not st_ok:
+                try:
+                    log(
+                        "warning",
+                        "followers_poll_recovery_surface_unstable",
+                        recovery_cycle=int(recovery_i),
+                        **st_meta,
+                    )
+                except Exception:
+                    pass
+                continue
+            try:
+                log(
+                    "info",
+                    "followers_poll_recovery_surface_stable",
+                    recovery_cycle=int(recovery_i),
+                    **st_meta,
+                )
+            except Exception:
+                pass
             log(
                 "info",
                 "followers_after_tap_detect_success",
@@ -12790,6 +16276,7 @@ def iter_followers_candidates(
     *,
     source_profile_username: str,
     runtime_seen: set[str],
+    source_account_context: str | None = None,
 ) -> list[dict[str, Any]]:
     """
     Visible follower handles on the current followers list surface.
@@ -12800,6 +16287,21 @@ def iter_followers_candidates(
     global _FOLLOWERS_LAST_ITER_CANDIDATE_COUNT
     global _FOLLOWERS_VISUAL_HAD_NONEMPTY_CANDIDATE_ROWS
     global _FOLLOWERS_ENGINE_STOP_REASON
+
+    try:
+        _iter_pkg_meta = _followers_current_pkg_activity(d)
+        _iter_current_pkg = _iter_pkg_meta.get("current_package")
+    except Exception:
+        _iter_current_pkg = None
+    _iter_odm = str(_FOLLOWERS_LAST_OPEN_DETECTION_METHOD or "").strip() or None
+    log(
+        "info",
+        "followers_iter_candidates_started",
+        source_profile_username=source_profile_username,
+        source_account_context=str(source_account_context or ""),
+        current_package=str(_iter_current_pkg or getattr(config, "INSTAGRAM_PACKAGE", "") or ""),
+        open_detection_method=_iter_odm,
+    )
 
     rows = _iter_followers_candidates_collect(
         d, source_profile_username=source_profile_username, runtime_seen=runtime_seen
@@ -12875,6 +16377,14 @@ def _followers_open_success_payload(
     source_profile_username: str,
     profile_verified: bool,
 ) -> dict[str, Any]:
+    _odm = str(last_det.get("open_detection_method") or "xml")
+    _lvf = last_det.get("visual_fallback_detail") or {}
+    if isinstance(_lvf, dict) and bool(_lvf.get("visual_match")):
+        _odm = "visual_fallback"
+    elif _odm == "xml":
+        _atvf = (after_tap_det or {}).get("visual_fallback_detail") or {}
+        if isinstance(_atvf, dict) and bool(_atvf.get("visual_match")):
+            _odm = "visual_fallback"
     return {
         "source_profile_username": source_profile_username,
         "profile_verified": bool(profile_verified),
@@ -12890,8 +16400,3165 @@ def _followers_open_success_payload(
         "current_package": pkg_meta.get("current_package"),
         "signals": last_det.get("signals"),
         "sample": last_det.get("visible_usernames_sample"),
-        "open_detection_method": last_det.get("open_detection_method") or "xml",
+        "open_detection_method": _odm,
     }
+
+
+_FOLLOWERS_ENTRY_V2_SOURCE_BY_METHOD: dict[str, str] = {
+    "resource_id_profile_header_followers_stacked_familiar_exact": "xml_text",
+    "resource_id_followers_stacked_familiar": "stats_band_structure",
+    "text_label_with_count_block": "hybrid",
+    "text_followers_label": "xml_text",
+    "harvest_fused_followers_tap": "hybrid",
+    "harvest_followers_label_only": "hybrid",
+    "harvest_content_desc_followers_label": "vision_text",
+    "geometry_followers_column_center": "stats_band_structure",
+    "harvest_raw_clickable_followers_metric": "hybrid",
+}
+
+
+def _followers_entry_v2_confidence(score: int, method: str) -> float:
+    if method == "resource_id_profile_header_followers_stacked_familiar_exact":
+        return 0.97
+    if method == "resource_id_followers_stacked_familiar":
+        return 0.93
+    if method == "text_label_with_count_block":
+        return 0.86
+    if method == "text_followers_label":
+        return 0.79
+    if method == "harvest_fused_followers_tap":
+        return 0.84
+    if method == "harvest_followers_label_only":
+        return 0.72
+    if method == "harvest_content_desc_followers_label":
+        return 0.74
+    if method == "geometry_followers_column_center":
+        return 0.62
+    if method == "harvest_raw_clickable_followers_metric":
+        return 0.78
+    if str(method).startswith("resource_id:"):
+        return 0.71
+    return min(0.91, max(0.38, float(score) / 12500.0))
+
+
+def _followers_entry_v2_public_candidate(raw: dict[str, Any]) -> dict[str, Any]:
+    method = str(raw.get("method") or "")
+    src = _FOLLOWERS_ENTRY_V2_SOURCE_BY_METHOD.get(method, "hybrid")
+    det_txt = str(raw.get("detected") or "").lower()
+    if method == "text_followers_label" and (
+        "abonn" in det_txt or "abonnés" in det_txt or "abonnes" in det_txt
+    ):
+        src = "vision_text"
+    if method == "harvest_content_desc_followers_label":
+        src = "vision_text"
+    if method == "harvest_raw_clickable_followers_metric":
+        src = "hybrid"
+    tb = dict(raw.get("tbounds") or {})
+    sigs: list[str] = [
+        method,
+        str(raw.get("detected") or ""),
+        f"score:{int(raw.get('score') or 0)}",
+        str(raw.get("tap_source") or ""),
+    ]
+    for xs in raw.get("detail_signals") or []:
+        xs = str(xs).strip()
+        if xs and xs not in sigs:
+            sigs.append(xs)
+    return {
+        "source": src,
+        "bounds": tb,
+        "confidence": round(_followers_entry_v2_confidence(int(raw.get("score") or 0), method), 4),
+        "tap_x": int(raw.get("cx") or 0),
+        "tap_y": int(raw.get("cy") or 0),
+        "signals": sigs,
+        "method": method,
+        **(
+            {"stat_type": str(raw.get("stat_type")).strip()}
+            if str(raw.get("stat_type") or "").strip()
+            else {}
+        ),
+        **(
+            {"semantic_followers_metric": True}
+            if bool(raw.get("semantic_followers_metric"))
+            else {}
+        ),
+        **(
+            {"tap_source": str(raw.get("tap_source") or "").strip()[:80]}
+            if str(raw.get("tap_source") or "").strip()
+            else {}
+        ),
+    }
+
+
+def _followers_collect_stat_entry_candidates_for_v2(
+    d: u2.Device,
+    *,
+    w: int,
+    h: int,
+    source_profile_username: str = "",
+    hierarchy_xml: str | None = None,
+    profile_verified: bool = False,
+    profile_screen_class: str = "",
+    profile_action_bar_title: str = "",
+) -> list[dict[str, Any]]:
+    """Collect followers-stat tap candidates without middle-column or coordinate fallback."""
+    y_lo, y_hi = int(h * 0.10), int(h * 0.46)
+    x_max = int(w * 0.96)
+    ideal_cx = int(w * 0.60)
+    ly_lo, ly_hi = _followers_stat_strip_y_for_text_labels(h)
+    raw: list[dict[str, Any]] = []
+
+    try:
+        hv = followers_stats_surface_harvester_v2(
+            d,
+            w,
+            h,
+            source_profile_username=str(source_profile_username or ""),
+            hierarchy_xml=hierarchy_xml,
+            profile_verified=bool(profile_verified),
+            profile_screen_class=str(profile_screen_class or ""),
+            profile_action_bar_title=str(profile_action_bar_title or ""),
+        )
+        for rmt in list(hv.get("raw_metric_taps") or [])[:6]:
+            try:
+                rmd = dict(rmt) if isinstance(rmt, dict) else {}
+                bchk = dict(rmd.get("tbounds") or {})
+                tcx_chk = int(rmd.get("cx") or 0)
+                if not bool(rmd.get("semantic_followers_metric")) and not _followers_entry_v2_tap_center_in_followers_column(
+                    int(w), tcx_chk, bchk
+                ):
+                    continue
+                rmd["stat_type"] = "followers"
+                raw.append(rmd)
+            except Exception:
+                continue
+        for fus in list(hv.get("fused_followers") or [])[:6]:
+            try:
+                b = dict(fus.get("bounds") or {})
+                tcx = int(fus.get("center_x") or 0)
+                tcy = int(fus.get("center_y") or 0)
+                if not b or tcx <= 0 or tcy <= 0:
+                    continue
+                if tcy < y_lo or tcy > y_hi or int(b.get("left", 0)) > x_max:
+                    continue
+                raw.append(
+                    {
+                        "score": 9000 - abs(tcx - ideal_cx) // 2,
+                        "cx": tcx,
+                        "cy": tcy,
+                        "tbounds": b,
+                        "method": "harvest_fused_followers_tap",
+                        "tap_source": "harvester_v2_fusion",
+                        "detected": (
+                            f"{fus.get('text') or ''}|{fus.get('content_desc') or ''}"
+                        )[:220],
+                        "stat_type": "followers",
+                    }
+                )
+            except Exception:
+                continue
+        fused_centers: list[tuple[int, int]] = []
+        try:
+            fused_centers = [
+                (int(f.get("center_x") or 0), int(f.get("center_y") or 0))
+                for f in (hv.get("fused_followers") or [])
+            ]
+        except Exception:
+            fused_centers = []
+
+        def _near_fused_centroid(tx: int, ty: int) -> bool:
+            for fx, fy in fused_centers:
+                if fx <= 0 or fy <= 0:
+                    continue
+                if abs(fx - tx) < int(w * 0.06) and abs(fy - ty) < int(h * 0.04):
+                    return True
+            return False
+
+        for lab in list(hv.get("atoms") or [])[:24]:
+            if str(lab.get("stat_type") or "") != "followers":
+                continue
+            b = dict(lab.get("bounds") or {})
+            tcx = int(lab.get("center_x") or 0)
+            tcy = int(lab.get("center_y") or 0)
+            if not b or tcx <= 0 or tcy <= 0:
+                continue
+            if tcy < y_lo or tcy > y_hi or int(b.get("left", 0)) > x_max:
+                continue
+            has_txt = bool(str(lab.get("text") or "").strip())
+            has_cd = bool(str(lab.get("content_desc") or "").strip())
+            if not has_txt and has_cd:
+                raw.append(
+                    {
+                        "score": 6400 - abs(tcx - ideal_cx) // 2,
+                        "cx": tcx,
+                        "cy": tcy,
+                        "tbounds": b,
+                        "method": "harvest_content_desc_followers_label",
+                        "tap_source": "harvester_v2_content_desc",
+                        "detected": str(lab.get("content_desc") or "")[:180],
+                        "stat_type": "followers",
+                    }
+                )
+            elif has_txt and not _near_fused_centroid(tcx, tcy):
+                raw.append(
+                    {
+                        "score": 6300 - abs(tcx - ideal_cx) // 2,
+                        "cx": tcx,
+                        "cy": tcy,
+                        "tbounds": b,
+                        "method": "harvest_followers_label_only",
+                        "tap_source": "harvester_v2_label_only",
+                        "detected": str(lab.get("text") or "")[:180],
+                        "stat_type": "followers",
+                    }
+                )
+    except Exception:
+        pass
+
+    try:
+        sel_exact = d(resourceId=PROFILE_HEADER_FOLLOWERS_STACKED_FAMILIAR_RID)
+        if sel_exact.exists(timeout=0.35):
+            for el in sel_exact.all():
+                inf = _follow_safe_info(el)
+                b = dict(inf.get("bounds") or {})
+                try:
+                    left = int(b.get("left", 0))
+                    right = int(b.get("right", 0))
+                    top = int(b.get("top", 0))
+                    bottom = int(b.get("bottom", 0))
+                except Exception:
+                    continue
+                if right <= left or bottom <= top:
+                    continue
+                cy_chk = _followers_bounds_center(b)
+                if cy_chk is None:
+                    continue
+                _, cyy = cy_chk
+                if cyy < y_lo or cyy > y_hi or left > x_max:
+                    continue
+                cx = (left + right) // 2
+                cy = (top + bottom) // 2
+                rw = right - left
+                raw.append(
+                    {
+                        "score": 12500 + min(rw, 500),
+                        "cx": cx,
+                        "cy": cy,
+                        "tbounds": b,
+                        "method": "resource_id_profile_header_followers_stacked_familiar_exact",
+                        "tap_source": "exact_rid_coordinate_tap",
+                        "detected": "profile_header_followers_stacked_familiar",
+                        "stat_type": "followers",
+                    }
+                )
+                break
+    except Exception:
+        pass
+
+    band = _collect_profile_stats_band_texts(d, w, h)
+    numeric_row = [
+        r
+        for r in band
+        if _STAT_NUMERIC_RE.match((r.get("text") or "").strip())
+        and not _followers_reject_posts_label(r.get("text") or "")
+        and not _followers_reject_following_column_label(r.get("text") or "")
+    ]
+    numeric_row.sort(key=lambda r: r["cx"])
+
+    try:
+        stacked = d(resourceIdMatches=r".*:id/profile_header_followers_stacked_familiar$")
+        if stacked.exists(timeout=0.26):
+            for el in stacked.all():
+                inf = _follow_safe_info(el)
+                b = inf.get("bounds") or {}
+                c = _followers_bounds_center(b)
+                if c is None:
+                    continue
+                _cx, cyy = c
+                if cyy < y_lo or cyy > y_hi or int(b.get("left", 0)) > x_max:
+                    continue
+                rw = int(b.get("right", 0)) - int(b.get("left", 0))
+                raw.append(
+                    {
+                        "score": 12000 + min(max(rw, 1), 500),
+                        "cx": _cx,
+                        "cy": cyy,
+                        "tbounds": dict(b),
+                        "method": "resource_id_followers_stacked_familiar",
+                        "tap_source": "parent_block",
+                        "detected": "profile_header_followers_stacked_familiar",
+                        "stat_type": "followers",
+                    }
+                )
+                break
+    except Exception:
+        pass
+
+    try:
+        for el in d(className="android.widget.TextView").all():
+            inf = _follow_safe_info(el)
+            raw_txt = (inf.get("text") or "").strip()
+            cd_txt = str(inf.get("contentDescription") or "").strip()
+            label_txt = raw_txt or cd_txt
+            if not label_txt or not _followers_label_match(label_txt):
+                continue
+            b = inf.get("bounds") or {}
+            cy = _followers_bounds_center(b)
+            if cy is None:
+                continue
+            _cx, cyy = cy
+            if cyy < y_lo or cyy > y_hi or int(b.get("left", 0)) > x_max:
+                continue
+            rw = int(b.get("right", 0)) - int(b.get("left", 0))
+            if rw < 8:
+                continue
+            low = label_txt.lower()
+            if "following" in low and "follower" not in low:
+                continue
+            rid_l = str(inf.get("resourceName") or "")
+            if (
+                "profile_header_familiar_followers" not in rid_l
+                and "followers_stacked" not in rid_l
+            ):
+                if not (ly_lo <= cyy <= ly_hi):
+                    continue
+
+            pair: dict[str, Any] | None = None
+            for r in band:
+                rt = (r.get("raw_text") or r.get("text") or "").strip()
+                if not _STAT_NUMERIC_RE.match(rt):
+                    continue
+                if _followers_reject_posts_label(rt) or _followers_reject_following_column_label(rt):
+                    continue
+                rcx, rcyy = int(r["cx"]), int(r["cyy"])
+                if abs(rcx - _cx) > int(w * 0.09):
+                    continue
+                if rcyy >= cyy - 4:
+                    continue
+                if (cyy - rcyy) > int(h * 0.14):
+                    continue
+                pair = r
+                break
+
+            if pair is not None:
+                mb = _followers_merge_bounds(b, pair.get("bounds") or {})
+                mc = _followers_bounds_center(mb)
+                if mc is None:
+                    continue
+                tcx, tcy = mc
+                bw = int(mb.get("right", 0)) - int(mb.get("left", 0))
+                score = 8500 - abs(tcx - ideal_cx) + min(bw, 400)
+                raw.append(
+                    {
+                        "score": score,
+                        "cx": tcx,
+                        "cy": tcy,
+                        "tbounds": dict(mb),
+                        "method": "text_label_with_count_block",
+                        "tap_source": "parent_block",
+                        "detected": f"{(pair.get('raw_text') or pair.get('text') or '').strip()}|{label_txt}",
+                        "stat_type": "followers",
+                    }
+                )
+            else:
+                score = 6200 - abs(_cx - ideal_cx) + min(rw, 320)
+                raw.append(
+                    {
+                        "score": score,
+                        "cx": _cx,
+                        "cy": cyy,
+                        "tbounds": dict(b),
+                        "method": "text_followers_label",
+                        "tap_source": "text_element",
+                        "detected": label_txt,
+                        "stat_type": "followers",
+                    }
+                )
+    except Exception:
+        pass
+
+    rid_patterns = (
+        r".*:id/.*follower.*count.*",
+        r".*:id/.*followers.*count.*",
+        r".*:id/.*stacked.*follower.*",
+    )
+    for pat in rid_patterns:
+        try:
+            for el in d(resourceIdMatches=pat).all():
+                inf = _follow_safe_info(el)
+                b = inf.get("bounds") or {}
+                cy = _followers_bounds_center(b)
+                if cy is None:
+                    continue
+                _cx, cyy = cy
+                if cyy < y_lo or cyy > y_hi or int(b.get("left", 0)) > x_max:
+                    continue
+                rw = int(b.get("right", 0)) - int(b.get("left", 0))
+                score = 5000 + rw * 100 - abs(_cx - ideal_cx) // 2
+                try:
+                    det_txt = (el.get_text() or "").strip()
+                except Exception:
+                    det_txt = ""
+                raw.append(
+                    {
+                        "score": score,
+                        "cx": _cx,
+                        "cy": cyy,
+                        "tbounds": dict(b),
+                        "method": f"resource_id:{pat}",
+                        "tap_source": "text_element",
+                        "detected": det_txt or pat,
+                        "stat_type": "followers",
+                    }
+                )
+        except Exception:
+            continue
+
+    try:
+        g_raw = _followers_entry_v2_geometry_followers_raw(int(w), int(h))
+        g_pub = _followers_entry_v2_public_candidate(g_raw)
+        g_cal = dict(g_pub)
+        g_cal["confidence"] = round(0.54, 4)
+        g_cal["calibration_confidence"] = round(0.54, 4)
+        log(
+            "info",
+            "followers_entry_geometry_candidate_created",
+            source_profile_username=str(source_profile_username or ""),
+            candidate=g_cal,
+            profile_verified=bool(profile_verified),
+            profile_screen_class=str(profile_screen_class or "")[:120],
+            allow_geometry_tap=bool(
+                getattr(config, "FOLLOWERS_ENTRY_V2_ALLOW_GEOMETRY_TAP", False)
+            ),
+        )
+        allow_geom = bool(getattr(config, "FOLLOWERS_ENTRY_V2_ALLOW_GEOMETRY_TAP", False))
+        text_like = [
+            r
+            for r in raw
+            if not str(r.get("method") or "").startswith("geometry_followers")
+        ]
+        if (
+            allow_geom
+            and bool(profile_verified)
+            and not text_like
+            and _followers_screen_class_is_profile_like(profile_screen_class)
+        ):
+            abn = _normalize_handle(str(profile_action_bar_title or ""))
+            srcn = _normalize_handle(str(source_profile_username or ""))
+            if abn and srcn and abn == srcn:
+                raw.append(g_raw)
+    except Exception:
+        pass
+
+    return raw
+
+
+def detect_followers_entry_candidates(
+    d: u2.Device,
+    source_profile_username: str,
+    pkg: str,
+    *,
+    width: int | None = None,
+    height: int | None = None,
+    hierarchy_xml: str | None = None,
+    profile_verified: bool = False,
+    profile_screen_class: str = "",
+    profile_action_bar_title: str = "",
+) -> list[dict[str, Any]]:
+    """
+    Hybrid followers-stat entry candidates (XML + stats band). No middle-column guess,
+    no coordinate_fallback_middle_stats_column.
+    """
+    _ = pkg
+    w = width or 1080
+    h = height or 1920
+    try:
+        w, h = d.window_size()
+    except Exception:
+        pass
+    raw = _followers_collect_stat_entry_candidates_for_v2(
+        d,
+        w=int(w),
+        h=int(h),
+        source_profile_username=source_profile_username,
+        hierarchy_xml=hierarchy_xml,
+        profile_verified=profile_verified,
+        profile_screen_class=profile_screen_class,
+        profile_action_bar_title=profile_action_bar_title,
+    )
+    out = [_followers_entry_v2_public_candidate(r) for r in raw]
+    out.sort(key=lambda c: float(c.get("confidence") or 0.0), reverse=True)
+    return out
+
+
+
+def _followers_entry_v2_visual_signal_int(signals: Any, key: str) -> int | None:
+    """Parse ``left_row_bands:21`` / ``right_blue_bands:3`` style entries from visual_signals."""
+    if not isinstance(signals, (list, tuple)):
+        return None
+    prefix = f"{key}:"
+    for raw in signals:
+        s = str(raw)
+        if s.startswith(prefix):
+            try:
+                return int(s.split(":", 1)[1].strip())
+            except Exception:
+                return None
+    return None
+
+
+def _followers_entry_v2_legacy_quality_reject_preview(
+    det: dict[str, Any], tap_diag: dict[str, Any]
+) -> str:
+    """First legacy rejection label (for logs) if vision override were disabled."""
+    if not bool(det.get("is_followers_list")):
+        return "not_followers_list"
+    if bool(det.get("strict_list_open")) or bool(det.get("title_match")):
+        return "strict_or_title_ok"
+    abn = _normalize_handle(str(det.get("action_bar_title") or ""))
+    srcn = _normalize_handle(str(tap_diag.get("entry_v2_source_profile_username") or ""))
+    handles = int(det.get("candidate_username_count") or 0)
+    if (
+        srcn
+        and abn == srcn
+        and handles < 2
+        and not bool(det.get("title_match"))
+        and not bool(det.get("strict_list_open"))
+    ):
+        return "same_action_bar_few_handles"
+    reasons = det.get("relaxed_rules_matched") or []
+    rs = ",".join(str(x) for x in reasons)
+    if "D_" in rs and handles < 2 and not bool(det.get("profile_tabs_absent")):
+        return "relaxed_d_weak_handles"
+    return "legacy_fingerprint_or_relaxed"
+
+
+def _followers_entry_v2_wrong_following_tab_evidence(
+    d: u2.Device,
+    det: dict[str, Any],
+) -> tuple[bool, str, dict[str, Any]]:
+    """
+    True when the opened list surface is the **Following** (subscriptions) tab/chip,
+    not **Followers**. Uses action bar, header text chips, and selected-tab probes.
+    """
+    vs: dict[str, Any] = {
+        "title_match": bool(det.get("title_match")),
+        "strict_list_open": bool(det.get("strict_list_open")),
+        "open_detection_method": str(det.get("open_detection_method") or ""),
+    }
+    vf = det.get("visual_fallback_detail")
+    if isinstance(vf, dict):
+        vs["visual_match"] = bool(vf.get("visual_match"))
+        vs["visual_signals"] = list((vf.get("visual_signals") or [])[:24])
+
+    ab = str(det.get("action_bar_title") or "").strip()
+    ab_l = ab.lower()
+    if ab_l in ("following", "suivis", "abonnements", "siguiendo"):
+        return True, ab[:160], {**vs, "reason": "action_bar_tab_title", "active_tab_text": ab[:160]}
+    if "following" in ab_l and "follower" not in ab_l:
+        if ab_l.startswith("following") or re.search(
+            r"\b\d[\d,\.\s]*\s+following\b", ab_l, flags=re.I
+        ):
+            return True, ab[:160], {**vs, "reason": "action_bar_following_phrase", "active_tab_text": ab[:160]}
+
+    for raw in list(det.get("visible_header_texts") or [])[:36]:
+        t = str(raw).strip()
+        if not t:
+            continue
+        tl = t.lower()
+        if _followers_label_match(t):
+            continue
+        if re.search(r"\b\d[\d,\.\s]*\s+following\b", tl, flags=re.I) and "follower" not in tl:
+            return True, t[:160], {**vs, "reason": "header_numeric_following_chip", "active_tab_text": t[:160]}
+        if re.search(r"\b\d[\d,\.\s]*\s+suivis\b", tl, flags=re.I) and "abonné" not in tl:
+            return True, t[:160], {**vs, "reason": "header_numeric_suivis_chip", "active_tab_text": t[:160]}
+        if _followers_reject_following_column_label(t) and not re.search(
+            r"follower", tl, flags=re.I
+        ):
+            return True, t[:160], {**vs, "reason": "header_following_label", "active_tab_text": t[:160]}
+
+    tab_labels_selected = (
+        ("Following", "Following"),
+        ("Suivis", "Suivis"),
+        ("Abonnements", "Abonnements"),
+        ("Siguiendo", "Siguiendo"),
+    )
+    for probe, label in tab_labels_selected:
+        try:
+            el = d(text=probe, selected=True)
+            if el.exists(timeout=0.055):
+                return True, label, {**vs, "reason": "selected_tab_text", "active_tab_text": label}
+        except Exception:
+            continue
+    try:
+        el2 = d(textMatches=r"(?i).*\bfollowing\b.*", selected=True)
+        if el2.exists(timeout=0.05):
+            try:
+                tx = str(el2.info.get("text") or el2.info.get("contentDescription") or "")[:120]
+            except Exception:
+                tx = "following_selected"
+            if "follower" not in tx.lower():
+                return True, tx, {**vs, "reason": "selected_following_pattern", "active_tab_text": tx}
+    except Exception:
+        pass
+    return False, "", vs
+
+
+def _followers_entry_v2_tap_center_in_followers_column(
+    w: int, tcx: int, bounds: dict[str, Any] | None
+) -> bool:
+    """LTR profile stats strip: followers is the center column; reject far-left (posts) / far-right (following)."""
+    try:
+        bd = bounds if isinstance(bounds, dict) else {}
+        cx = (int(bd.get("left", 0)) + int(bd.get("right", 0))) // 2 if bd else int(tcx)
+    except Exception:
+        cx = int(tcx)
+    if w <= 0:
+        return True
+    sw = max(1, int(w))
+    xf = cx / float(sw)
+    if xf < 0.22:
+        return False
+    return int(cx) * 1000 < sw * 450
+
+
+def _followers_entry_v2_entry_candidate_followers_metric_ok(
+    c: dict[str, Any], *, w: int
+) -> tuple[bool, str]:
+    """Reject entry candidates that target the Following column or non-followers stat."""
+    st = str(c.get("stat_type") or "").strip().lower()
+    if st == "following":
+        return False, "stat_type_following"
+    if st in ("posts", "post"):
+        return False, "stat_type_posts"
+    if st and st != "followers":
+        return False, f"stat_type_{st}"
+    if bool(c.get("semantic_followers_metric")):
+        return True, ""
+    mlow = str(c.get("method") or "").lower()
+    if "profile_header_following" not in mlow and (
+        "profile_header_followers" in mlow or "followers_stacked_familiar" in mlow
+    ):
+        return True, ""
+    tcx = int(c.get("tap_x") or 0)
+    bd = dict(c.get("bounds") or {})
+    if tcx > 0 and bd:
+        if not _followers_entry_v2_tap_center_in_followers_column(int(w), tcx, bd):
+            return False, "tap_outside_followers_column"
+    m = str(c.get("method") or "").lower()
+    if "profile_header_following" in mlow and "follower" not in mlow:
+        return False, "resource_id_following_header"
+    sigs = c.get("signals") or []
+    if isinstance(sigs, list):
+        for s in sigs:
+            if not isinstance(s, str):
+                continue
+            if _followers_reject_following_column_label(s) and not _followers_label_match(s):
+                return False, "signal_following_like"
+    det_txt = ""
+    for s in sigs:
+        if isinstance(s, str) and not s.startswith("score:") and "resource_id" not in s.lower():
+            det_txt = s
+            break
+    if det_txt and _followers_reject_following_column_label(det_txt) and not _followers_label_match(
+        det_txt
+    ):
+        return False, "detected_following_like"
+    return True, ""
+
+
+def _followers_entry_v2_log_tab_validation_accepted(
+    det: dict[str, Any],
+    tap_diag: dict[str, Any],
+    *,
+    validation_tag: str,
+) -> None:
+    src_log = str(tap_diag.get("entry_v2_source_profile_username") or "")
+    vf = (
+        det.get("visual_fallback_detail")
+        if isinstance(det.get("visual_fallback_detail"), dict)
+        else {}
+    )
+    vs = list((vf.get("visual_signals") or [])[:20]) if vf else []
+    log(
+        "info",
+        "followers_entry_tab_validation_accepted",
+        source_profile_username=src_log,
+        expected_tab="followers",
+        active_tab_text=str(det.get("action_bar_title") or "")[:160],
+        action_bar_title=str(det.get("action_bar_title") or "")[:120],
+        visual_signals=vs,
+        validation_tag=str(validation_tag or ""),
+    )
+
+
+def _followers_entry_v2_vision_followers_surface_confirmed(det: dict[str, Any]) -> bool:
+    """
+    RN / Compose followers list: strong screenshot signals even when XML lacks
+    usernames / RecyclerView and the action bar still shows the source handle.
+    Never true on ``visual_match`` alone — requires rows, search strip, blue bands, confidence.
+    """
+    if str(det.get("open_detection_method") or "") != "visual_fallback":
+        return False
+    vf = det.get("visual_fallback_detail")
+    if not isinstance(vf, dict):
+        return False
+    if not bool(vf.get("visual_match")):
+        return False
+    conf = float(vf.get("visual_confidence") or 0.0)
+    if conf < 0.82:
+        return False
+    rows = int(vf.get("visual_user_rows_detected") or 0)
+    if rows < 12:
+        return False
+    if not bool(vf.get("visual_search_area_detected")):
+        return False
+    guess = str(det.get("current_screen_guess") or "").strip().lower()
+    if guess and guess not in ("likely_profile", "followers_like", "unknown"):
+        return False
+    sigs = vf.get("visual_signals") or []
+    if not any(str(x) == "search_strip" for x in sigs):
+        return False
+    rb = int(vf.get("visual_follow_button_count") or 0)
+    rb_sig = _followers_entry_v2_visual_signal_int(sigs, "right_blue_bands")
+    if rb_sig is not None:
+        rb = max(rb, rb_sig)
+    if rb < 2:
+        return False
+    lb_sig = _followers_entry_v2_visual_signal_int(sigs, "left_row_bands")
+    if lb_sig is not None and lb_sig < 12:
+        return False
+    if lb_sig is not None and abs(int(lb_sig) - rows) > 5:
+        return False
+    return True
+
+
+def _followers_entry_v2_post_tap_semantic_followers_context(
+    tap_diag: dict[str, Any],
+) -> bool:
+    if not bool(tap_diag.get("entry_engine_v2")):
+        return False
+    if bool(tap_diag.get("semantic_followers_metric")):
+        return True
+    utm = str(
+        tap_diag.get("entry_v2_underlying_candidate_method")
+        or tap_diag.get("tap_method")
+        or ""
+    ).lower()
+    return "harvest_raw_clickable_followers_metric" in utm
+
+
+def _followers_entry_v2_transition_visual_rendered_strong_gates(
+    d: u2.Device,
+    det: dict[str, Any],
+    tap_diag: dict[str, Any],
+) -> tuple[bool, str]:
+    if not _followers_entry_v2_post_tap_semantic_followers_context(tap_diag):
+        return False, "not_semantic_post_tap_context"
+    vf = det.get("visual_fallback_detail")
+    if not isinstance(vf, dict):
+        return False, "no_visual_fallback_detail"
+    bad_tab, _, _ = _followers_entry_v2_wrong_following_tab_evidence(d, det)
+    if bad_tab:
+        return False, "following_tab_active"
+    try:
+        from vision_validation_layer import vision_detect_danger_surface
+
+        dang = vision_detect_danger_surface({"det": det if isinstance(det, dict) else {}})
+    except Exception:
+        dang = {"danger": False}
+    if bool((dang or {}).get("danger")):
+        return False, "danger_surface"
+    if not bool(vf.get("visual_search_area_detected")):
+        return False, "rendered_strong_gates_failed"
+    rows = int(vf.get("visual_user_rows_detected") or 0)
+    if rows < 12:
+        return False, "rendered_strong_gates_failed"
+    if int(vf.get("visual_follow_button_count") or 0) < 1:
+        return False, "rendered_strong_gates_failed"
+    if not bool(vf.get("visual_followers_title_hint")):
+        return False, "rendered_strong_gates_failed"
+    sigs_raw = vf.get("visual_signals") or []
+    if not any(str(x) == "search_strip" for x in sigs_raw):
+        return False, "rendered_strong_gates_failed"
+    return True, "ok"
+
+
+def _followers_entry_v2_log_rendered_strong_accepted(
+    det: dict[str, Any],
+    tap_diag: dict[str, Any],
+) -> None:
+    vf = (
+        det.get("visual_fallback_detail")
+        if isinstance(det.get("visual_fallback_detail"), dict)
+        else {}
+    )
+    shot = str(
+        tap_diag.get("followers_entry_second_pass_screenshot_path")
+        or tap_diag.get("followers_after_tap_immediate_screenshot_path")
+        or ""
+    )[:400]
+    try:
+        log(
+            "info",
+            "followers_entry_transition_visual_rendered_strong_accepted",
+            source_profile_username=str(tap_diag.get("entry_v2_source_profile_username") or ""),
+            visual_user_rows_detected=vf.get("visual_user_rows_detected"),
+            visual_search_area_detected=vf.get("visual_search_area_detected"),
+            visual_follow_button_count=vf.get("visual_follow_button_count"),
+            visual_followers_title_hint=vf.get("visual_followers_title_hint"),
+            visual_match=vf.get("visual_match"),
+            visual_confidence=vf.get("visual_confidence"),
+            visual_signals=list((vf.get("visual_signals") or [])[:40]),
+            screenshot_path=shot,
+        )
+    except Exception:
+        pass
+
+
+def _followers_entry_v2_log_rendered_strong_rejected_post_tap(
+    det: dict[str, Any],
+    tap_diag: dict[str, Any],
+    *,
+    rejection_reason: str,
+    phase: str,
+) -> None:
+    vf = (
+        det.get("visual_fallback_detail")
+        if isinstance(det.get("visual_fallback_detail"), dict)
+        else {}
+    )
+    try:
+        log(
+            "warning",
+            "followers_entry_transition_visual_rendered_strong_rejected",
+            source_profile_username=str(tap_diag.get("entry_v2_source_profile_username") or ""),
+            rejection_reason=str(rejection_reason or ""),
+            phase=str(phase or ""),
+            visual_search_area_detected=vf.get("visual_search_area_detected"),
+            visual_user_rows_detected=vf.get("visual_user_rows_detected"),
+            visual_follow_button_count=vf.get("visual_follow_button_count"),
+            visual_followers_title_hint=vf.get("visual_followers_title_hint"),
+            visual_signals=list((vf.get("visual_signals") or [])[:40]),
+            visual_match=vf.get("visual_match"),
+            visual_confidence=vf.get("visual_confidence"),
+            current_screen_guess=str(det.get("current_screen_guess") or ""),
+            screenshot_path=str(
+                tap_diag.get("followers_entry_second_pass_screenshot_path")
+                or tap_diag.get("followers_after_tap_immediate_screenshot_path")
+                or ""
+            )[:400],
+        )
+    except Exception:
+        pass
+
+
+def _followers_entry_v2_post_tap_rendered_strong_confirm_if_applicable(
+    d: u2.Device,
+    det: dict[str, Any],
+    tap_diag: dict[str, Any],
+    *,
+    screenshot_path: str | None,
+    source_profile_username: str,
+    phase: str,
+) -> str:
+    """
+    Post-tap V2 only: accept followers list transition on strong rendered visual evidence
+    even when ``is_followers_list`` is false. Returns:
+    ``success`` | ``vision_rejected`` | ``continue``.
+    """
+    if not _followers_entry_v2_post_tap_semantic_followers_context(tap_diag):
+        return "continue"
+    sr_ok, sr_why = _followers_entry_v2_transition_visual_rendered_strong_gates(d, det, tap_diag)
+    if not sr_ok:
+        if str(sr_why or "") != "not_semantic_post_tap_context":
+            _followers_entry_v2_log_rendered_strong_rejected_post_tap(
+                det,
+                tap_diag,
+                rejection_reason=str(sr_why or "rendered_strong_gates_failed"),
+                phase=str(phase or ""),
+            )
+        return "continue"
+    _followers_entry_v2_log_rendered_strong_accepted(det, tap_diag)
+    try:
+        _followers_entry_v2_log_tab_validation_accepted(
+            det,
+            tap_diag,
+            validation_tag="followers_transition_visual_rendered_strong",
+        )
+    except Exception:
+        pass
+    ok_vis, vis_r = _vision_validation_followers_list_open_gate(
+        screenshot_path=str(screenshot_path or ""),
+        det=det,
+        tap_diag=tap_diag,
+        source_profile_username=source_profile_username,
+    )
+    if not ok_vis:
+        tap_diag["entry_v2_rendered_strong_vision_reject_phase"] = str(phase or "")
+        tap_diag["entry_v2_rendered_strong_vision_result"] = vis_r
+        _followers_entry_v2_log_transition_visual_list_rejected(
+            d,
+            det,
+            tap_diag,
+            rejection_reason="vision_validation_rejected",
+            quality_reason="followers_transition_visual_rendered_strong",
+            vision_validation_result=vis_r,
+            phase=f"{str(phase or '')}_vision_gate",
+        )
+        return "vision_rejected"
+    return "success"
+
+
+def _followers_entry_v2_transition_visual_list_evidence_ok(
+    d: u2.Device,
+    det: dict[str, Any],
+    tap_diag: dict[str, Any],
+) -> tuple[bool, list[str], str]:
+    """
+    Softer than ``_followers_entry_v2_vision_followers_surface_confirmed``:
+    accept RN/Compose followers list when screenshot cues are strong enough, without requiring
+    XML handle count, recycler heuristics, or ``current_screen_guess`` away from profile.
+    """
+    sr_ok, sr_why = _followers_entry_v2_transition_visual_rendered_strong_gates(d, det, tap_diag)
+    vf = det.get("visual_fallback_detail")
+    sigs: list[str] = []
+    if isinstance(vf, dict):
+        sigs = [str(x) for x in (vf.get("visual_signals") or [])][:40]
+    if sr_ok:
+        return True, sigs, "visual_rendered_strong"
+    if (
+        sr_why == "rendered_strong_gates_failed"
+        and _followers_entry_v2_post_tap_semantic_followers_context(tap_diag)
+        and isinstance(vf, dict)
+        and not bool(vf.get("visual_match"))
+    ):
+        rows = int(vf.get("visual_user_rows_detected") or 0)
+        if rows >= 8 or bool(vf.get("visual_search_area_detected")):
+            try:
+                log(
+                    "warning",
+                    "followers_entry_transition_visual_rendered_strong_rejected",
+                    source_profile_username=str(
+                        tap_diag.get("entry_v2_source_profile_username") or ""
+                    ),
+                    visual_user_rows_detected=vf.get("visual_user_rows_detected"),
+                    visual_search_area_detected=vf.get("visual_search_area_detected"),
+                    visual_follow_button_count=vf.get("visual_follow_button_count"),
+                    visual_followers_title_hint=vf.get("visual_followers_title_hint"),
+                    visual_match=vf.get("visual_match"),
+                    visual_confidence=vf.get("visual_confidence"),
+                    visual_signals=sigs[:40],
+                    screenshot_path=str(
+                        tap_diag.get("followers_entry_second_pass_screenshot_path")
+                        or tap_diag.get("followers_after_tap_immediate_screenshot_path")
+                        or ""
+                    )[:400],
+                    gate_reason=str(sr_why),
+                )
+            except Exception:
+                pass
+    if not isinstance(vf, dict) or not bool(vf.get("visual_match")):
+        return False, sigs, "no_visual_match_detail"
+    min_conf = float(
+        getattr(config, "FOLLOWERS_VISUAL_FALLBACK_MIN_CONFIDENCE", 0.65) or 0.65
+    )
+    rows = int(vf.get("visual_user_rows_detected") or 0)
+    btns = int(vf.get("visual_follow_button_count") or 0)
+    conf = float(vf.get("visual_confidence") or 0.0)
+    sigs_raw = vf.get("visual_signals") or []
+    sigs = [str(x) for x in sigs_raw][:40]
+    tier_a = rows >= 2 or btns >= 1 or conf >= min_conf
+    if not tier_a:
+        return False, sigs, "visual_tier_a_weak"
+    tier_b = (
+        bool(vf.get("visual_search_area_detected"))
+        or rows >= 3
+        or btns >= 2
+        or conf >= 0.70
+    )
+    if not tier_b:
+        return False, sigs, "visual_tier_b_weak"
+    return True, sigs, "visual_evidence_strong"
+
+
+def _followers_entry_v2_enrich_transition_visual_detail(
+    d: u2.Device,
+    det: dict[str, Any],
+    screenshot_path: str | None,
+    source_profile_username: str,
+) -> dict[str, Any]:
+    """
+    When XML already sets ``is_followers_list`` but skips ``_followers_apply_visual_fallback_if_needed``,
+    still attach ``visual_fallback_detail`` from the post-tap screenshot for transition validation.
+    """
+    out = dict(det)
+    if not bool(getattr(config, "ENABLE_FOLLOWERS_VISUAL_FALLBACK", False)):
+        return out
+    p = str(screenshot_path or "").strip()
+    if not p:
+        return out
+    vf0 = out.get("visual_fallback_detail")
+    if isinstance(vf0, dict) and bool(vf0.get("visual_match")):
+        return out
+    try:
+        vf = detect_followers_list_screen_visual_fallback(
+            d,
+            source_profile_username=source_profile_username,
+            screenshot_path=p,
+        )
+        out["visual_fallback_detail"] = vf
+    except Exception:
+        pass
+    return out
+
+
+def _followers_entry_v2_log_transition_visual_list_accepted(
+    det: dict[str, Any],
+    tap_diag: dict[str, Any],
+    *,
+    visual_signals: list[str],
+    quality_tag: str,
+) -> None:
+    src = str(tap_diag.get("entry_v2_source_profile_username") or "")
+    ab = str(det.get("action_bar_title") or "")[:160]
+    try:
+        log(
+            "info",
+            "followers_entry_transition_visual_list_accepted",
+            source_profile_username=src,
+            is_followers_list=bool(det.get("is_followers_list")),
+            current_screen_guess=str(det.get("current_screen_guess") or ""),
+            action_bar_title_after=ab,
+            active_tab_text=ab,
+            visual_signals=list(visual_signals)[:30],
+            candidate_method=str(
+                tap_diag.get("tap_method")
+                or tap_diag.get("followers_stat_tap_source")
+                or ""
+            )[:120],
+            quality_tag=str(quality_tag or ""),
+        )
+    except Exception:
+        pass
+
+
+def _followers_entry_v2_log_transition_visual_list_rejected(
+    d: u2.Device,
+    det: dict[str, Any],
+    tap_diag: dict[str, Any],
+    *,
+    rejection_reason: str,
+    quality_reason: str,
+    vision_validation_result: Any,
+    phase: str,
+) -> None:
+    bad_tab, active_txt, tab_vs = _followers_entry_v2_wrong_following_tab_evidence(d, det)
+    wrong_ev: dict[str, Any] = {
+        "following_tab_active": bool(bad_tab),
+        "active_tab_text": str(active_txt or "")[:160],
+    }
+    if isinstance(tab_vs, dict):
+        wrong_ev = {**wrong_ev, **tab_vs}
+    src = str(tap_diag.get("entry_v2_source_profile_username") or "")
+    try:
+        log(
+            "warning",
+            "followers_entry_transition_visual_list_rejected",
+            source_profile_username=src,
+            phase=str(phase or ""),
+            rejection_reason=str(rejection_reason or ""),
+            wrong_tab_evidence=wrong_ev,
+            vision_validation_result=vision_validation_result,
+            quality_reason=str(quality_reason or ""),
+            is_followers_list=bool(det.get("is_followers_list")),
+            current_screen_guess=str(det.get("current_screen_guess") or ""),
+            action_bar_title_after=str(det.get("action_bar_title") or "")[:160],
+            candidate_method=str(
+                tap_diag.get("tap_method")
+                or tap_diag.get("followers_stat_tap_source")
+                or ""
+            )[:120],
+        )
+    except Exception:
+        pass
+
+
+def _followers_entry_v2_list_open_quality_ok(
+    d: u2.Device,
+    det: dict[str, Any],
+    tap_diag: dict[str, Any],
+) -> tuple[bool, str]:
+    """
+    Stricter than raw ``is_followers_list``: reject weak relaxed opens that still look
+    like the CT profile surface (same action bar, no list handles, unchanged fingerprint).
+    """
+    if not bool(det.get("is_followers_list")):
+        sr_ok, _sr_why = _followers_entry_v2_transition_visual_rendered_strong_gates(
+            d, det, tap_diag
+        )
+        if sr_ok:
+            _followers_entry_v2_log_rendered_strong_accepted(det, tap_diag)
+            try:
+                _followers_entry_v2_log_tab_validation_accepted(
+                    det,
+                    tap_diag,
+                    validation_tag="followers_transition_visual_rendered_strong",
+                )
+            except Exception:
+                pass
+            return True, "followers_transition_visual_rendered_strong"
+        return False, "not_followers_list"
+    bad_tab, active_txt, tab_vs = _followers_entry_v2_wrong_following_tab_evidence(d, det)
+    src_log = str(tap_diag.get("entry_v2_source_profile_username") or "")
+    if bad_tab:
+        try:
+            log(
+                "warning",
+                "followers_entry_wrong_tab_detected",
+                source_profile_username=src_log,
+                active_tab_text=str(active_txt or "")[:160],
+                expected_tab="followers",
+                action_bar_title=str(det.get("action_bar_title") or "")[:120],
+                visual_signals=tab_vs,
+            )
+            log(
+                "warning",
+                "followers_entry_tab_validation_failed",
+                source_profile_username=src_log,
+                active_tab_text=str(active_txt or "")[:160],
+                expected_tab="followers",
+                action_bar_title=str(det.get("action_bar_title") or "")[:120],
+                visual_signals=tab_vs,
+                failure_reason="following_tab_active",
+            )
+        except Exception:
+            pass
+        return False, "following_tab_wrong_surface"
+
+    if bool(det.get("strict_list_open")) or bool(det.get("title_match")):
+        try:
+            _followers_entry_v2_log_tab_validation_accepted(
+                det, tap_diag, validation_tag="strict_or_title"
+            )
+        except Exception:
+            pass
+        return True, "strict_or_title"
+    sr_ok2, _sr_why2 = _followers_entry_v2_transition_visual_rendered_strong_gates(
+        d, det, tap_diag
+    )
+    if sr_ok2:
+        _followers_entry_v2_log_rendered_strong_accepted(det, tap_diag)
+        try:
+            _followers_entry_v2_log_tab_validation_accepted(
+                det,
+                tap_diag,
+                validation_tag="followers_transition_visual_rendered_strong",
+            )
+        except Exception:
+            pass
+        return True, "followers_transition_visual_rendered_strong"
+    cand0 = int(det.get("candidate_username_count") or 0)
+    guess0 = str(det.get("current_screen_guess") or "")
+    if cand0 == 0 and guess0 in ("likely_profile", "unknown", ""):
+        try:
+            log(
+                "info",
+                "followers_entry_quality_zero_handles_ambiguous_rejected",
+                candidate_username_count=cand0,
+                current_screen_guess=guess0,
+                open_detection_method=str(det.get("open_detection_method") or ""),
+                action_bar_title=str(det.get("action_bar_title") or "")[:160],
+                source_profile_username=str(
+                    tap_diag.get("entry_v2_source_profile_username") or ""
+                ),
+                visual_fallback_detail=det.get("visual_fallback_detail"),
+            )
+        except Exception:
+            pass
+        return False, "zero_handles_ambiguous_screen_guess"
+    prev_preview = _followers_entry_v2_legacy_quality_reject_preview(det, tap_diag)
+    if _followers_entry_v2_vision_followers_surface_confirmed(det):
+        try:
+            _vf = det.get("visual_fallback_detail") or {}
+            log(
+                "info",
+                "followers_entry_quality_visual_override_accepted",
+                source_profile_username=str(
+                    tap_diag.get("entry_v2_source_profile_username") or ""
+                ),
+                visual_confidence=_vf.get("visual_confidence"),
+                visual_user_rows_detected=_vf.get("visual_user_rows_detected"),
+                visual_signals=_vf.get("visual_signals"),
+                previous_quality_reason=prev_preview,
+                action_bar_title=str(det.get("action_bar_title") or "")[:120],
+                candidate_username_count=int(det.get("candidate_username_count") or 0),
+                current_screen_guess=str(det.get("current_screen_guess") or ""),
+                open_detection_method=str(det.get("open_detection_method") or ""),
+            )
+        except Exception:
+            pass
+        try:
+            _followers_entry_v2_log_tab_validation_accepted(
+                det, tap_diag, validation_tag="vision_followers_surface_confirmed"
+            )
+        except Exception:
+            pass
+        return True, "vision_followers_surface_confirmed"
+    ev_ok, ev_sigs, _ev_code = _followers_entry_v2_transition_visual_list_evidence_ok(
+        d, det, tap_diag
+    )
+    if ev_ok:
+        if str(_ev_code or "") == "visual_rendered_strong":
+            _followers_entry_v2_log_rendered_strong_accepted(det, tap_diag)
+            try:
+                _followers_entry_v2_log_tab_validation_accepted(
+                    det,
+                    tap_diag,
+                    validation_tag="followers_transition_visual_rendered_strong",
+                )
+            except Exception:
+                pass
+            return True, "followers_transition_visual_rendered_strong"
+        try:
+            _followers_entry_v2_log_transition_visual_list_accepted(
+                det,
+                tap_diag,
+                visual_signals=ev_sigs,
+                quality_tag="visual_list_surface_accepted",
+            )
+            _followers_entry_v2_log_tab_validation_accepted(
+                det, tap_diag, validation_tag="visual_list_surface"
+            )
+        except Exception:
+            pass
+        return True, "visual_list_surface_accepted"
+    abn = _normalize_handle(str(det.get("action_bar_title") or ""))
+    srcn = _normalize_handle(str(tap_diag.get("entry_v2_source_profile_username") or ""))
+    handles = int(det.get("candidate_username_count") or 0)
+    if (
+        srcn
+        and abn == srcn
+        and handles < 2
+        and not bool(det.get("title_match"))
+        and not bool(det.get("strict_list_open"))
+    ):
+        return False, "same_action_bar_few_handles"
+    reasons = det.get("relaxed_rules_matched") or []
+    rs = ",".join(str(x) for x in reasons)
+    if "D_" in rs and handles < 2 and not bool(det.get("profile_tabs_absent")):
+        return False, "relaxed_d_weak_handles"
+    before_fp = str(tap_diag.get("entry_v2_profile_fingerprint_id_before") or "")
+    if before_fp:
+        try:
+            from navigation_engine import NavigationEngineState
+
+            fp_now = _post_follow_screen_fingerprint(
+                d,
+                nav_state=NavigationEngineState.FOLLOWERS_LIST.value,
+                det=det,
+            )
+            now_fp = str(fp_now.get("fingerprint_id") or "")
+            tap_diag["entry_v2_profile_fingerprint_after"] = now_fp
+            if (
+                now_fp
+                and now_fp == before_fp
+                and not bool(det.get("strict_list_open"))
+                and not bool(det.get("title_match"))
+            ):
+                return False, "fingerprint_unchanged_weak_signals"
+        except Exception:
+            pass
+    if bool(det.get("relaxed_list_open")):
+        try:
+            _followers_entry_v2_log_tab_validation_accepted(
+                det, tap_diag, validation_tag="relaxed_ok"
+            )
+        except Exception:
+            pass
+        return True, "relaxed_ok"
+    return False, "unexpected"
+
+
+def _vision_validation_enabled() -> bool:
+    return bool(getattr(config, "ENABLE_VISION_VALIDATION_LAYER", False))
+
+
+def _vision_validation_followers_list_open_gate(
+    *,
+    screenshot_path: str,
+    det: dict[str, Any],
+    tap_diag: dict[str, Any],
+    source_profile_username: str,
+) -> tuple[bool, dict[str, Any]]:
+    if not _vision_validation_enabled():
+        return True, {}
+    try:
+        from vision_validation_layer import vision_validate_followers_list
+    except Exception:
+        return True, {}
+    ctx: dict[str, Any] = {"det": det if isinstance(det, dict) else {}}
+    r = vision_validate_followers_list(
+        str(screenshot_path or ""),
+        source_profile_username=source_profile_username,
+        context=ctx,
+    )
+    r_dict = r if isinstance(r, dict) else {"result": r}
+    if not r_dict.get("safe_to_continue"):
+        if r_dict.get("surface") == "following_list" or r_dict.get("active_tab") == "following":
+            log(
+                "warning",
+                "vision_validation_rejected_wrong_tab",
+                source_profile_username=source_profile_username,
+                vision=r_dict,
+            )
+        elif r_dict.get("danger"):
+            log(
+                "warning",
+                "vision_validation_rejected_danger_surface",
+                source_profile_username=source_profile_username,
+                vision=r_dict,
+            )
+        return False, r_dict
+    return True, r_dict
+
+
+def followers_surface_quick_revalidate(
+    d: u2.Device,
+    *,
+    source_profile_username: str,
+    max_seconds: float = 0.38,
+) -> tuple[bool, dict[str, Any]]:
+    """
+    Fast followers-list surface check for tight loops (e.g. already-connected path).
+
+    Enforces a hard wall-clock budget (default <400 ms): XML/heuristics first, optional
+    vision followers-list gate only when the layer is enabled and time remains.
+    """
+    t0 = time.perf_counter()
+
+    def _elapsed_ms() -> float:
+        return (time.perf_counter() - t0) * 1000.0
+
+    def _over_budget() -> bool:
+        return (time.perf_counter() - t0) > float(max_seconds)
+
+    meta: dict[str, Any] = {"elapsed_ms_stage": {}}
+    if _over_budget():
+        return False, {**meta, "reason": "time_budget_exceeded", "stage": "pre_detect"}
+
+    t_det = time.perf_counter()
+    try:
+        det = detect_followers_list_screen(
+            d, source_profile_username=str(source_profile_username or "")
+        )
+    except Exception as e:
+        return False, {
+            "reason": "detect_exception",
+            "error": str(e),
+            "elapsed_ms_total": _elapsed_ms(),
+        }
+    meta["elapsed_ms_stage"]["detect_ms"] = (time.perf_counter() - t_det) * 1000.0
+
+    if _over_budget():
+        return False, {**meta, "reason": "time_budget_exceeded", "stage": "post_detect"}
+
+    tap_diag: dict[str, Any] = {
+        "entry_v2_source_profile_username": str(source_profile_username or "")
+    }
+    q_ok, q_reason = _followers_entry_v2_list_open_quality_ok(d, det, tap_diag)
+    meta["quality_ok"] = bool(q_ok)
+    meta["quality_reason"] = str(q_reason or "")
+    if not q_ok:
+        return False, {
+            **meta,
+            "reason": "followers_surface_not_validated",
+            "detail": str(q_reason or ""),
+        }
+
+    if _over_budget():
+        return False, {**meta, "reason": "time_budget_exceeded", "stage": "post_quality"}
+
+    rem_stab = float(max_seconds) - (time.perf_counter() - t0)
+    odm = str(det.get("open_detection_method") or "")
+    cand_ct = int(det.get("candidate_username_count") or 0)
+    guess_g = str(det.get("current_screen_guess") or "")
+    strict_stab = odm == "visual_fallback" and cand_ct == 0
+    want_stab = odm == "visual_fallback" or (
+        cand_ct == 0 and guess_g in ("likely_profile", "unknown", "")
+    )
+    if want_stab:
+        if strict_stab and rem_stab < 0.52:
+            return False, {
+                **meta,
+                "reason": "surface_stability_insufficient_budget",
+                "remaining_s": rem_stab,
+                "stability_mode": "visual_fallback_zero_handles_strict",
+                "elapsed_ms_total": _elapsed_ms(),
+            }
+        if (not strict_stab) and rem_stab < 0.18:
+            meta["surface_stability_skipped"] = True
+            meta["surface_stability_skip_reason"] = "time_budget"
+        else:
+            f_xml_q: str | None = None
+            try:
+                try:
+                    f_xml_q = str(d.dump_hierarchy(compressed=False))
+                except TypeError:
+                    f_xml_q = str(d.dump_hierarchy())
+            except Exception:
+                f_xml_q = None
+            st_ok, st_meta = _followers_surface_is_stable(
+                d,
+                first_xml=f_xml_q,
+                first_candidate_count=cand_ct,
+                open_detection_method=odm or None,
+                candidate_username_count=cand_ct,
+                current_screen_guess=guess_g,
+                source_profile_username=str(source_profile_username or ""),
+            )
+            meta["surface_stability"] = st_meta
+            if not st_ok:
+                return False, {
+                    **meta,
+                    "reason": "followers_surface_unstable",
+                    "elapsed_ms_total": _elapsed_ms(),
+                }
+
+    try:
+        from vision_validation_layer import vision_detect_danger_surface
+
+        dang = vision_detect_danger_surface({"det": det if isinstance(det, dict) else {}})
+    except Exception:
+        dang = {"danger": False, "reasons": []}
+    meta["xml_danger"] = dang
+    if bool((dang or {}).get("danger")):
+        return False, {**meta, "reason": "danger_surface"}
+
+    if _vision_validation_enabled():
+        remaining = float(max_seconds) - (time.perf_counter() - t0)
+        if remaining < 0.05:
+            return False, {
+                **meta,
+                "reason": "vision_skipped_insufficient_time",
+                "remaining_s": remaining,
+                "elapsed_ms_total": _elapsed_ms(),
+            }
+        try:
+            _ensure_debug_dirs()
+            shot = _SCREENSHOTS_DIR / f"followers_quick_reval_{int(time.perf_counter() * 1000)}.png"
+            t_ss = time.perf_counter()
+            d.screenshot(str(shot))
+            meta["elapsed_ms_stage"]["screenshot_ms"] = (time.perf_counter() - t_ss) * 1000.0
+        except Exception as e:
+            return False, {
+                **meta,
+                "reason": "screenshot_failed",
+                "error": str(e),
+                "elapsed_ms_total": _elapsed_ms(),
+            }
+        if _over_budget():
+            return False, {
+                **meta,
+                "reason": "time_budget_exceeded",
+                "stage": "post_screenshot",
+            }
+        v_ok, v_dict = _vision_validation_followers_list_open_gate(
+            screenshot_path=str(shot),
+            det=det if isinstance(det, dict) else {},
+            tap_diag=tap_diag,
+            source_profile_username=str(source_profile_username or ""),
+        )
+        meta["vision_gate"] = v_dict if isinstance(v_dict, dict) else {"result": v_dict}
+        if not v_ok:
+            return False, {**meta, "reason": "vision_followers_list_rejected"}
+
+    meta["elapsed_ms_total"] = _elapsed_ms()
+    if meta["elapsed_ms_total"] > float(max_seconds) * 1000.0:
+        meta["reason"] = "time_budget_exceeded_post_checks"
+        return False, meta
+    return True, meta
+
+
+_followers_surface_quick_revalidate = followers_surface_quick_revalidate
+
+
+def _vision_validation_visual_followers_candidate_gate(
+    *,
+    screenshot_path: str,
+    d: u2.Device,
+    source_profile_username: str | None,
+) -> bool:
+    if not _vision_validation_enabled():
+        return True
+    try:
+        from vision_validation_layer import vision_validate_candidate_row_followable
+    except Exception:
+        return True
+    try:
+        det_ctx: dict[str, Any] = {}
+        try:
+            det_ctx = detect_followers_list_screen(
+                d, source_profile_username=str(source_profile_username or "")
+            )
+            if not isinstance(det_ctx, dict):
+                det_ctx = {}
+        except Exception as e:
+            log(
+                "warning",
+                "vision_validation_candidate_gate_detect_failed",
+                phase="detect_followers_list_screen",
+                exception_type=type(e).__name__,
+                exception_message=str(e)[:800],
+                screenshot_path=str(screenshot_path or "")[:240],
+                source_profile_username=str(source_profile_username or "")[:120],
+            )
+            det_ctx = {
+                "is_followers_list": False,
+                "signals": ["vision_gate_detect_context_minimal"],
+            }
+        try:
+            det_ctx = _followers_apply_visual_fallback_if_needed(
+                d,
+                det_ctx,
+                str(screenshot_path or ""),
+                str(source_profile_username or ""),
+                phase="vision_validation_visual_pick",
+            )
+            if not isinstance(det_ctx, dict):
+                det_ctx = {}
+        except Exception as e:
+            log(
+                "warning",
+                "vision_validation_candidate_gate_detect_failed",
+                phase="followers_apply_visual_fallback_if_needed",
+                exception_type=type(e).__name__,
+                exception_message=str(e)[:800],
+                screenshot_path=str(screenshot_path or "")[:240],
+                source_profile_username=str(source_profile_username or "")[:120],
+            )
+        try:
+            raw = vision_validate_candidate_row_followable(
+                str(screenshot_path or ""),
+                source_profile_username=source_profile_username,
+                context={"det": det_ctx, "strict_followers_surface": True},
+            )
+            r = raw if isinstance(raw, dict) else {"safe_to_continue": False, "raw": raw}
+        except Exception as e:
+            log(
+                "warning",
+                "vision_validation_candidate_gate_detect_failed",
+                phase="vision_validate_candidate_row_followable",
+                exception_type=type(e).__name__,
+                exception_message=str(e)[:800],
+                screenshot_path=str(screenshot_path or "")[:240],
+                source_profile_username=str(source_profile_username or "")[:120],
+            )
+            return False
+        if not bool(r.get("safe_to_continue")):
+            log(
+                "warning",
+                "vision_validation_candidate_rejected",
+                screenshot_path=str(screenshot_path or "")[:240],
+                source_profile_username=str(source_profile_username or ""),
+                vision=r,
+            )
+            return False
+        log(
+            "info",
+            "vision_validation_candidate_allowed",
+            screenshot_path=str(screenshot_path or "")[:240],
+            source_profile_username=str(source_profile_username or ""),
+            vision=r,
+        )
+        return True
+    except Exception as e:
+        log(
+            "warning",
+            "vision_validation_candidate_gate_detect_failed",
+            phase="vision_candidate_gate_unexpected",
+            exception_type=type(e).__name__,
+            exception_message=str(e)[:800],
+            screenshot_path=str(screenshot_path or "")[:240],
+            source_profile_username=str(source_profile_username or "")[:120],
+        )
+        return False
+
+def _vision_validation_post_follow_before_mute(
+    *,
+    screenshot_path: str,
+    det: dict[str, Any],
+    nav_obs: dict[str, Any],
+    overlay: dict[str, Any],
+    fp: dict[str, Any],
+    visual_candidate_id: str,
+    source_profile_username: str,
+) -> bool:
+    if not _vision_validation_enabled():
+        return True
+    try:
+        from vision_validation_layer import vision_validate_post_follow_surface
+    except Exception:
+        return True
+    ctx = {
+        "det": det if isinstance(det, dict) else {},
+        "nav_state": str(nav_obs.get("state") or ""),
+        "overlay": overlay if isinstance(overlay, dict) else {},
+        "fingerprint": fp if isinstance(fp, dict) else {},
+    }
+    r = vision_validate_post_follow_surface(
+        str(screenshot_path or ""),
+        source_profile_username=source_profile_username,
+        context=ctx,
+    )
+    if not r.get("safe_to_continue") or r.get("danger"):
+        log(
+            "warning",
+            "vision_validation_post_follow_danger_surface",
+            visual_candidate_id=str(visual_candidate_id or ""),
+            source_profile_username=str(source_profile_username or ""),
+            vision=r,
+        )
+        log(
+            "warning",
+            "vision_validation_safe_stop_required",
+            phase="post_follow_pre_mute",
+            visual_candidate_id=str(visual_candidate_id or ""),
+            source_profile_username=str(source_profile_username or ""),
+            vision=r,
+        )
+        return False
+    return True
+
+
+def _vision_validation_mute_engine_surface(
+    *,
+    screenshot_path: str,
+    det: dict[str, Any],
+    nav: dict[str, Any],
+    overlay: dict[str, Any],
+    fp: dict[str, Any],
+    follow_header_snapshot: str,
+    follow_state_after: str,
+    visual_candidate_id: str,
+    source_profile_username: str,
+) -> bool:
+    if not _vision_validation_enabled():
+        return True
+    try:
+        from vision_validation_layer import vision_validate_mute_surface
+    except Exception:
+        return True
+    fs = str(follow_state_after or "").strip().lower()
+    following_vis = fs in ("following", "requested")
+    ctx = {
+        "det": det if isinstance(det, dict) else {},
+        "nav_state": str(nav.get("state") or ""),
+        "overlay": overlay if isinstance(overlay, dict) else {},
+        "fingerprint": fp if isinstance(fp, dict) else {},
+        "follow_header_snapshot": follow_header_snapshot,
+        "following_visible": following_vis,
+    }
+    r = vision_validate_mute_surface(
+        str(screenshot_path or ""),
+        source_profile_username=source_profile_username,
+        context=ctx,
+    )
+    if not r.get("safe_to_continue"):
+        log(
+            "warning",
+            "vision_validation_rejected_danger_surface",
+            phase="mute_engine_v2_pre_surface",
+            visual_candidate_id=str(visual_candidate_id or ""),
+            source_profile_username=str(source_profile_username or ""),
+            vision=r,
+        )
+        return False
+    return True
+
+
+def _followers_entry_keyboard_visible_heuristic(d: u2.Device) -> bool:
+    """Best-effort IME visibility via dumpsys (varies by OEM)."""
+    try:
+        _code, out, _err = shell(d, "dumpsys input_method 2>/dev/null | head -n 96")
+        t = (out or "").lower().replace(" ", "")
+        if "minputshown=true" in t:
+            return True
+        if "mshowinputrequested=true" in t:
+            return True
+        if "mimewindowvis=true" in t or "mimewindowvisible=true" in t:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _followers_entry_count_username_rows_in_list_band(
+    d: u2.Device, w: int, h: int, source_profile_username: str
+) -> int:
+    y_min = int(h * 0.10)
+    src_key = _normalize_handle(source_profile_username or "")
+    keys: set[str] = set()
+    for el in _safe_ui_all(d(className="android.widget.TextView")):
+        try:
+            inf = el.info
+            raw_t = (inf.get("text") or "").strip().lstrip("@")
+            if not _looks_like_instagram_username(raw_t):
+                continue
+            b = inf.get("bounds") or {}
+            cy = (int(b.get("top", 0)) + int(b.get("bottom", 0))) // 2
+            if cy < y_min or cy > int(h * 0.96):
+                continue
+            hk = _normalize_handle(raw_t)
+            if hk == src_key:
+                continue
+            keys.add(hk)
+        except Exception:
+            continue
+    return len(keys)
+
+
+def _followers_entry_label_is_row_cta(txt: str) -> bool:
+    s = (txt or "").strip().lower()
+    if not s or len(s) > 32:
+        return False
+    if s in (
+        "follow",
+        "following",
+        "requested",
+        "message",
+        "contact",
+        "suivre",
+        "suivi",
+        "invited",
+        "invité",
+        "contacter",
+        "demande envoyée",
+        "demande envoye",
+        "abonné",
+        "abonnée",
+    ):
+        return True
+    if s.startswith("follow") and len(s) <= 14:
+        return True
+    if "message" in s and len(s) <= 16:
+        return True
+    return False
+
+
+def _followers_entry_count_list_row_ctas(
+    d: u2.Device, w: int, h: int, ig_pkg: str
+) -> int:
+    y0, y1 = int(h * 0.13), int(h * 0.94)
+    x_cut = int(w * 0.48)
+    seen: set[str] = set()
+    for cn in ("android.widget.TextView", "android.widget.Button"):
+        for el in _safe_ui_all(d(className=cn, packageName=ig_pkg)):
+            try:
+                inf = el.info
+                tx = (
+                    str(inf.get("text") or inf.get("contentDescription") or "")
+                    .strip()
+                )
+                if not _followers_entry_label_is_row_cta(tx):
+                    continue
+                b = inf.get("bounds") or {}
+                cx = (int(b.get("left", 0)) + int(b.get("right", 0))) // 2
+                cy = (int(b.get("top", 0)) + int(b.get("bottom", 0))) // 2
+                if cy < y0 or cy > y1 or cx < x_cut:
+                    continue
+                seen.add(f"{cy // 30}:{tx.lower()}")
+            except Exception:
+                continue
+    return len(seen)
+
+
+def _followers_entry_count_list_avatars(
+    d: u2.Device, w: int, h: int, ig_pkg: str
+) -> int:
+    y0, y1 = int(h * 0.12), int(h * 0.92)
+    n = 0
+    for el in _safe_ui_all(d(className="android.widget.ImageView", packageName=ig_pkg)):
+        try:
+            inf = el.info
+            b = inf.get("bounds") or {}
+            left = int(b.get("left", 0))
+            top = int(b.get("top", 0))
+            right = int(b.get("right", 0))
+            bottom = int(b.get("bottom", 0))
+            wi, hi = right - left, bottom - top
+            cy = (top + bottom) // 2
+            if cy < y0 or cy > y1:
+                continue
+            if 22 <= wi <= min(300, int(w * 0.32)) and 22 <= hi <= 340:
+                n += 1
+        except Exception:
+            continue
+    return min(n, 48)
+
+
+def _followers_entry_count_row_profile_nodes(d: u2.Device, ig_pkg: str) -> int:
+    n = 0
+    for pat in (
+        r".*:id/row_user_",
+        r".*:id/row_recommended_user",
+        r".*:id/row_hashtag",
+        r".*:id/row_profile",
+    ):
+        try:
+            for el in _safe_ui_all(
+                d(resourceIdMatches=pat, packageName=ig_pkg)
+            ):
+                n += 1
+                if n >= 14:
+                    return n
+        except Exception:
+            continue
+    return n
+
+
+def _followers_entry_count_clickables_list_zone(
+    d: u2.Device, w: int, h: int, ig_pkg: str
+) -> int:
+    y0, y1 = int(h * 0.12), int(h * 0.94)
+    n = 0
+    for el in _safe_ui_all(d(clickable=True, packageName=ig_pkg)):
+        try:
+            inf = el.info
+            b = inf.get("bounds") or {}
+            cy = (int(b.get("top", 0)) + int(b.get("bottom", 0))) // 2
+            if y0 <= cy <= y1:
+                n += 1
+        except Exception:
+            continue
+    return min(n, 200)
+
+
+def _followers_entry_collect_visual_signals_for_log(det: dict[str, Any]) -> list[str]:
+    out: list[str] = []
+    for x in list(det.get("signals") or [])[:20]:
+        out.append(str(x))
+    vf = det.get("visual_fallback_detail")
+    if isinstance(vf, dict):
+        for x in list(vf.get("visual_signals") or [])[:20]:
+            out.append(str(x))
+    return out[:40]
+
+
+def _followers_entry_probe_exploitable_followers_surface(
+    d: u2.Device,
+    det: dict[str, Any],
+    *,
+    w: int,
+    h: int,
+    ig_pkg: str,
+    pkg_meta: dict[str, Any],
+    source_profile_username: str,
+) -> dict[str, Any]:
+    """Strict exploitable-surface checks (not ``is_followers_list`` / title heuristics alone)."""
+    failures: list[str] = []
+    ww, hh = max(1, int(w)), max(1, int(h))
+    ig = (ig_pkg or "com.instagram.android").strip()
+    cur_pkg = str(pkg_meta.get("current_package") or "")
+    cur_act = str(pkg_meta.get("current_activity") or "")
+    cp_l = cur_pkg.lower()
+    ig_l = ig.lower()
+    if cur_pkg and ig_l not in cp_l:
+        failures.append("not_instagram_foreground")
+    for banned in (
+        "launcher",
+        "googlequicksearchbox",
+        "nexuslauncher",
+        "intentresolver",
+    ):
+        if banned in cp_l and ig_l not in cp_l:
+            failures.append("system_launcher_or_search_pkg")
+            break
+
+    act_l = cur_act.lower()
+    if any(k in act_l for k in ("resolver", "chooser")) and "instagram" not in act_l:
+        failures.append("resolver_or_chooser_activity")
+
+    keyboard_visible = _followers_entry_keyboard_visible_heuristic(d)
+    if keyboard_visible:
+        failures.append("keyboard_visible")
+
+    wrong_tab, active_txt, _vs = _followers_entry_v2_wrong_following_tab_evidence(d, det)
+    if wrong_tab:
+        failures.append("wrong_following_tab")
+
+    y_search_lo, y_search_hi = int(hh * 0.08), int(hh * 0.34)
+    search_ok = False
+    try:
+        if d(
+            resourceIdMatches=r".*:id/(static_navigation_search|action_bar_search|action_bar_search_edit_text|row_search_edit_text|clips_tab_bar_search|tab_bar_search)"
+        ).exists(timeout=0.08):
+            search_ok = True
+    except Exception:
+        pass
+    if not search_ok:
+        for probe in ("Search", "Rechercher", "Chercher", "Buscar"):
+            try:
+                for el in _safe_ui_all(d(textContains=probe, packageName=ig)):
+                    try:
+                        inf = el.info
+                        b = inf.get("bounds") or {}
+                        top = int(b.get("top", 0))
+                        if y_search_lo <= top <= y_search_hi:
+                            search_ok = True
+                            break
+                    except Exception:
+                        continue
+                if search_ok:
+                    break
+            except Exception:
+                continue
+    if not search_ok:
+        for el in _safe_ui_all(d(className="android.widget.EditText", packageName=ig)):
+            try:
+                inf = el.info
+                b = inf.get("bounds") or {}
+                top = int(b.get("top", 0))
+                bot = int(b.get("bottom", 0))
+                if y_search_lo <= top <= y_search_hi or (
+                    top < int(hh * 0.12) and bot <= int(hh * 0.36)
+                ):
+                    search_ok = True
+                    break
+            except Exception:
+                continue
+    if not search_ok:
+        failures.append("search_bar_not_detected")
+
+    row_det = int(det.get("candidate_username_count") or 0)
+    row_manual = _followers_entry_count_username_rows_in_list_band(
+        d, ww, hh, source_profile_username
+    )
+    row_count = max(row_det, row_manual)
+    if row_count < 2:
+        failures.append("row_count_lt_2")
+
+    cta_count = _followers_entry_count_list_row_ctas(d, ww, hh, ig)
+    if cta_count < 1:
+        failures.append("cta_missing")
+
+    stacked = int(det.get("stacked_central_textview_run") or 0)
+    avatars = _followers_entry_count_list_avatars(d, ww, hh, ig)
+    row_rids = _followers_entry_count_row_profile_nodes(d, ig)
+    has_band = stacked >= 2 or row_rids >= 1
+    has_avatar = avatars >= 1
+    if not (has_band or has_avatar):
+        failures.append("no_avatar_or_row_band")
+
+    list_chrome = bool(
+        det.get("recycler_present")
+        or det.get("listview_present")
+        or int(det.get("scrollable_count") or 0) > 0
+    )
+    if not list_chrome:
+        failures.append("no_list_chrome")
+
+    clickables = _followers_entry_count_clickables_list_zone(d, ww, hh, ig)
+    if list_chrome and row_count == 0 and cta_count == 0:
+        failures.append("empty_list_under_chrome")
+    if row_count < 2 and clickables < 8 and cta_count < 1:
+        failures.append("surface_sparse_or_frozen")
+
+    all_ok = len(failures) == 0
+    return {
+        "all_checks_ok": all_ok,
+        "failure_codes": failures,
+        "row_count": row_count,
+        "row_count_xml": row_det,
+        "row_count_manual": row_manual,
+        "cta_count": cta_count,
+        "search_bar_detected": bool(search_ok),
+        "keyboard_visible": bool(keyboard_visible),
+        "avatar_count": avatars,
+        "row_profile_nodes": row_rids,
+        "stacked_central_textview_run": stacked,
+        "clickables_list_zone": clickables,
+        "active_tab": str(det.get("action_bar_title") or "")[:160],
+        "action_bar_title": str(det.get("action_bar_title") or "")[:160],
+        "wrong_tab_active": bool(wrong_tab),
+        "wrong_tab_text": str(active_txt or "")[:160],
+        "current_package": cur_pkg,
+        "current_activity": cur_act,
+        "list_chrome": list_chrome,
+    }
+
+
+def _followers_entry_log_visual_surface_not_rendered(
+    meta: dict[str, Any],
+    *,
+    source_profile_username: str,
+) -> None:
+    try:
+        log(
+            "warning",
+            "followers_entry_visual_surface_not_rendered",
+            source_profile_username=str(source_profile_username or ""),
+            screenshot_path=str(meta.get("screenshot_path") or ""),
+            visual_signals=list(meta.get("visual_signals") or [])[:40],
+            row_count=int(meta.get("row_count") or 0),
+            cta_count=int(meta.get("cta_count") or 0),
+            search_bar_detected=bool(meta.get("search_bar_detected")),
+            keyboard_visible=bool(meta.get("keyboard_visible")),
+            current_package=str(meta.get("current_package") or ""),
+            current_activity=str(meta.get("current_activity") or ""),
+            active_tab=str(meta.get("active_tab") or "")[:160],
+            action_bar_title=str(meta.get("action_bar_title") or "")[:160],
+            failure_codes=list(meta.get("failure_codes") or [])[:24],
+            attempt=int(meta.get("attempt") or 0),
+        )
+    except Exception:
+        pass
+
+
+def _followers_entry_evaluate_rendered_followers_surface_once(
+    d: u2.Device,
+    *,
+    source_profile_username: str,
+    ig_pkg: str,
+    capture_stem: str,
+    attempt: int,
+) -> tuple[bool, dict[str, Any]]:
+    cap = _followers_debug_capture(d, capture_stem)
+    pkg_meta = _followers_current_pkg_activity(d)
+    det = detect_followers_list_screen(
+        d, source_profile_username=source_profile_username
+    )
+    shot_path = cap.get("screenshot_path")
+    det = _followers_apply_visual_fallback_if_needed(
+        d,
+        det,
+        shot_path,
+        source_profile_username,
+        phase="followers_entry_final_surface",
+    )
+    det = _followers_entry_v2_enrich_transition_visual_detail(
+        d, dict(det), shot_path, source_profile_username
+    )
+    try:
+        w, h = d.window_size()
+    except Exception:
+        w, h = 1080, 1920
+    metrics = _followers_entry_probe_exploitable_followers_surface(
+        d,
+        det,
+        w=int(w),
+        h=int(h),
+        ig_pkg=ig_pkg,
+        pkg_meta=pkg_meta,
+        source_profile_username=source_profile_username,
+    )
+    metrics["screenshot_path"] = str(shot_path or "")
+    metrics["visual_signals"] = _followers_entry_collect_visual_signals_for_log(det)
+    metrics["last_det"] = det
+    metrics["capture"] = cap
+    metrics["attempt"] = int(attempt)
+    return bool(metrics.get("all_checks_ok")), metrics
+
+
+def _followers_entry_run_final_rendered_surface_gate_with_retry(
+    d: u2.Device,
+    *,
+    source_profile_username: str,
+    pkg: str,
+) -> tuple[bool, dict[str, Any]]:
+    ig_pkg = str(pkg or getattr(config, "INSTAGRAM_PACKAGE", "") or "")
+    ok1, m1 = _followers_entry_evaluate_rendered_followers_surface_once(
+        d,
+        source_profile_username=source_profile_username,
+        ig_pkg=ig_pkg,
+        capture_stem="followers_entry_final_surface_check",
+        attempt=1,
+    )
+    if ok1:
+        return True, m1
+    _followers_entry_log_visual_surface_not_rendered(
+        m1, source_profile_username=source_profile_username
+    )
+    time.sleep(0.7)
+    ok2, m2 = _followers_entry_evaluate_rendered_followers_surface_once(
+        d,
+        source_profile_username=source_profile_username,
+        ig_pkg=ig_pkg,
+        capture_stem="followers_entry_final_surface_check_retry",
+        attempt=2,
+    )
+    if ok2:
+        return True, m2
+    _followers_entry_log_visual_surface_not_rendered(
+        m2, source_profile_username=source_profile_username
+    )
+    last_det = m2.get("last_det")
+    if not isinstance(last_det, dict):
+        last_det = m1.get("last_det")
+    if not isinstance(last_det, dict):
+        last_det = {}
+    return False, {"first": m1, "retry": m2, "last_det": last_det}
+
+
+def _followers_entry_v2_second_pass_shell_partial_render(det: dict[str, Any]) -> bool:
+    """
+    Heuristic: followers list UI is still settling (search/title present, bottom profile tabs gone).
+    """
+    vf = det.get("visual_fallback_detail")
+    if not isinstance(vf, dict):
+        return False
+    if not bool(vf.get("visual_search_area_detected")):
+        return False
+    if not bool(vf.get("visual_followers_title_hint")):
+        return False
+    tabs_absent = bool(vf.get("visual_profile_tabs_absent"))
+    sigs = [str(x) for x in (vf.get("visual_signals") or [])]
+    bottom_h = any("bottom_tabs_absent_heuristic" in s for s in sigs)
+    if not (tabs_absent or bottom_h):
+        return False
+    return True
+
+
+def _followers_entry_v2_second_pass_fresh_capture_and_detect(
+    d: u2.Device,
+    source_profile_username: str,
+    *,
+    delay_seconds: float = 0.9,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """
+    New screenshot + XML + detect + visual fallback for second pass (not the immediate frame).
+    """
+    time.sleep(float(delay_seconds))
+    _ensure_debug_dirs()
+    shot = _SCREENSHOTS_DIR / "followers_after_tap_second_pass.png"
+    xml_path = _XML_DIR / "followers_after_tap_second_pass.xml"
+    paths: dict[str, Any] = {"screenshot_path": str(shot), "xml_path": str(xml_path)}
+    try:
+        screenshot(d, str(shot))
+    except Exception as e:
+        paths["screenshot_error"] = str(e)
+    try:
+        try:
+            hier = d.dump_hierarchy(compressed=False)
+        except TypeError:
+            hier = d.dump_hierarchy()
+        xml_path.write_text(hier, encoding="utf-8")
+        _bump_xml_fetch()
+    except Exception as e:
+        paths["xml_error"] = str(e)
+    try:
+        d.app_current()
+    except Exception:
+        pass
+    det = detect_followers_list_screen(
+        d, source_profile_username=source_profile_username
+    )
+    det = _followers_apply_visual_fallback_if_needed(
+        d,
+        det,
+        paths.get("screenshot_path"),
+        source_profile_username,
+        phase="followers_entry_v2_second_pass",
+    )
+    global _FOLLOWERS_POST_TAP_DETECT_ATTEMPT_COUNT
+    _FOLLOWERS_POST_TAP_DETECT_ATTEMPT_COUNT += 1
+    return paths, det
+
+
+def _followers_entry_v2_post_tap_confirm(
+    d: u2.Device,
+    tap_diag: dict[str, Any],
+    source_profile_username: str,
+    *,
+    post_tap_settle_s: float = 2.0,
+) -> tuple[bool, dict[str, Any], dict[str, Any], int]:
+    """Single immediate capture + one optional short re-detect; no hierarchy refresh recovery."""
+    _followers_reset_post_tap_capture_gate()
+    paths, det_imm = _followers_after_tap_immediate_capture_and_detect(
+        d,
+        source_profile_username=source_profile_username,
+        settle_seconds=float(post_tap_settle_s),
+    )
+    det_imm = _followers_entry_v2_enrich_transition_visual_detail(
+        d,
+        dict(det_imm),
+        paths.get("screenshot_path"),
+        source_profile_username,
+    )
+    tap_diag["followers_after_tap_immediate_screenshot_path"] = paths.get("screenshot_path")
+    tap_diag["followers_after_tap_immediate_xml_path"] = paths.get("xml_path")
+    tap_diag["followers_list_post_tap_capture_done"] = True
+    tap_diag["entry_engine_v2"] = True
+    if not det_imm.get("is_followers_list"):
+        _rs_imm = _followers_entry_v2_post_tap_rendered_strong_confirm_if_applicable(
+            d,
+            det_imm,
+            tap_diag,
+            screenshot_path=paths.get("screenshot_path"),
+            source_profile_username=source_profile_username,
+            phase="immediate_post_tap",
+        )
+        if _rs_imm == "success":
+            return True, det_imm, det_imm, _FOLLOWERS_POST_TAP_DETECT_ATTEMPT_COUNT
+        if _rs_imm == "vision_rejected":
+            return False, det_imm, det_imm, _FOLLOWERS_POST_TAP_DETECT_ATTEMPT_COUNT
+    if det_imm.get("is_followers_list"):
+        qok, qwhy = _followers_entry_v2_list_open_quality_ok(d, det_imm, tap_diag)
+        if qok:
+            ok_vis, vis_r = _vision_validation_followers_list_open_gate(
+                screenshot_path=str(paths.get("screenshot_path") or ""),
+                det=det_imm,
+                tap_diag=tap_diag,
+                source_profile_username=source_profile_username,
+            )
+            if not ok_vis:
+                tap_diag["entry_v2_vision_validation_reject"] = "followers_list_surface"
+                tap_diag["entry_v2_vision_validation_result"] = vis_r
+                _followers_entry_v2_log_transition_visual_list_rejected(
+                    d,
+                    det_imm,
+                    tap_diag,
+                    rejection_reason="vision_validation_rejected",
+                    quality_reason=str(qwhy or ""),
+                    vision_validation_result=vis_r,
+                    phase="immediate_vision_gate",
+                )
+                return False, det_imm, det_imm, _FOLLOWERS_POST_TAP_DETECT_ATTEMPT_COUNT
+            return True, det_imm, det_imm, _FOLLOWERS_POST_TAP_DETECT_ATTEMPT_COUNT
+        tap_diag["entry_v2_quality_reject_immediate"] = qwhy
+        try:
+            log(
+                "warning",
+                "followers_entry_transition_failed",
+                source_profile_username=source_profile_username,
+                phase="immediate_quality_gate",
+                quality_reason=qwhy,
+                strict_list_open=bool(det_imm.get("strict_list_open")),
+                title_match=bool(det_imm.get("title_match")),
+                relaxed_list_open=bool(det_imm.get("relaxed_list_open")),
+            )
+        except Exception:
+            pass
+        _followers_entry_v2_log_transition_visual_list_rejected(
+            d,
+            det_imm,
+            tap_diag,
+            rejection_reason="quality_gate_rejected",
+            quality_reason=str(qwhy or ""),
+            vision_validation_result="not_evaluated",
+            phase="immediate_quality_gate",
+        )
+    need_fresh_second = (
+        _followers_entry_v2_post_tap_semantic_followers_context(tap_diag)
+        and _followers_entry_v2_second_pass_shell_partial_render(det_imm)
+    )
+    delay_sec = 0.9
+    _prev_shot = str(paths.get("screenshot_path") or "")[:400]
+    paths_sp: dict[str, Any] = dict(paths)
+    det2: dict[str, Any]
+    if need_fresh_second:
+        try:
+            log(
+                "info",
+                "followers_entry_second_pass_fresh_capture_started",
+                source_profile_username=source_profile_username,
+                previous_screenshot_path=_prev_shot,
+                delay_ms=int(delay_sec * 1000),
+            )
+        except Exception:
+            pass
+        _t_cap = time.perf_counter()
+        paths_sp, det2 = _followers_entry_v2_second_pass_fresh_capture_and_detect(
+            d,
+            source_profile_username,
+            delay_seconds=delay_sec,
+        )
+        _elapsed_ms = int((time.perf_counter() - _t_cap) * 1000)
+        tap_diag["followers_entry_second_pass_screenshot_path"] = str(
+            paths_sp.get("screenshot_path") or ""
+        )[:400]
+        tap_diag["followers_after_tap_second_pass_xml_path"] = str(paths_sp.get("xml_path") or "")[
+            :400
+        ]
+        try:
+            log(
+                "info",
+                "followers_entry_second_pass_fresh_capture_done",
+                source_profile_username=source_profile_username,
+                screenshot_path=str(paths_sp.get("screenshot_path") or ""),
+                xml_path=str(paths_sp.get("xml_path") or ""),
+                previous_screenshot_path=_prev_shot,
+                delay_ms=int(delay_sec * 1000),
+                elapsed_wall_ms=_elapsed_ms,
+            )
+        except Exception:
+            pass
+    else:
+        time.sleep(0.42)
+        det2 = detect_followers_list_screen(
+            d, source_profile_username=source_profile_username
+        )
+        det2 = _followers_apply_visual_fallback_if_needed(
+            d,
+            det2,
+            paths_sp.get("screenshot_path"),
+            source_profile_username,
+            phase="followers_entry_v2_second_pass",
+        )
+    det2 = _followers_entry_v2_enrich_transition_visual_detail(
+        d,
+        dict(det2),
+        paths_sp.get("screenshot_path"),
+        source_profile_username,
+    )
+    tap_diag["entry_v2_second_pass_det"] = det2
+    if not det2.get("is_followers_list"):
+        _rs2 = _followers_entry_v2_post_tap_rendered_strong_confirm_if_applicable(
+            d,
+            det2,
+            tap_diag,
+            screenshot_path=paths_sp.get("screenshot_path"),
+            source_profile_username=source_profile_username,
+            phase="second_pass_post_tap",
+        )
+        if _rs2 == "success":
+            return True, det2, det2, _FOLLOWERS_POST_TAP_DETECT_ATTEMPT_COUNT
+        if _rs2 == "vision_rejected":
+            return False, det2, det2, _FOLLOWERS_POST_TAP_DETECT_ATTEMPT_COUNT
+        return False, det2, det2, _FOLLOWERS_POST_TAP_DETECT_ATTEMPT_COUNT
+    q2, qwhy2 = _followers_entry_v2_list_open_quality_ok(d, det2, tap_diag)
+    if not q2:
+        tap_diag["entry_v2_quality_reject_second_pass"] = qwhy2
+        try:
+            log(
+                "warning",
+                "followers_entry_transition_failed",
+                source_profile_username=source_profile_username,
+                phase="second_pass_quality_gate",
+                quality_reason=qwhy2,
+                strict_list_open=bool(det2.get("strict_list_open")),
+                title_match=bool(det2.get("title_match")),
+                relaxed_list_open=bool(det2.get("relaxed_list_open")),
+            )
+        except Exception:
+            pass
+        _followers_entry_v2_log_transition_visual_list_rejected(
+            d,
+            det2,
+            tap_diag,
+            rejection_reason="quality_gate_rejected",
+            quality_reason=str(qwhy2 or ""),
+            vision_validation_result="not_evaluated",
+            phase="second_pass_quality_gate",
+        )
+        return False, det2, det2, _FOLLOWERS_POST_TAP_DETECT_ATTEMPT_COUNT
+    ok_vis2, vis_r2 = _vision_validation_followers_list_open_gate(
+        screenshot_path=str(paths_sp.get("screenshot_path") or ""),
+        det=det2,
+        tap_diag=tap_diag,
+        source_profile_username=source_profile_username,
+    )
+    if not ok_vis2:
+        tap_diag["entry_v2_vision_validation_reject_second"] = "followers_list_surface"
+        tap_diag["entry_v2_vision_validation_result_second"] = vis_r2
+        _followers_entry_v2_log_transition_visual_list_rejected(
+            d,
+            det2,
+            tap_diag,
+            rejection_reason="vision_validation_rejected",
+            quality_reason=str(qwhy2 or ""),
+            vision_validation_result=vis_r2,
+            phase="second_pass_vision_gate",
+        )
+        return False, det2, det2, _FOLLOWERS_POST_TAP_DETECT_ATTEMPT_COUNT
+    return True, det2, det2, _FOLLOWERS_POST_TAP_DETECT_ATTEMPT_COUNT
+
+
+def _followers_entry_v2_raw_metric_tap_strategies(
+    bounds: dict[str, Any],
+    *,
+    screen_w: int,
+) -> list[tuple[str, int, int]]:
+    """In-bounds tap points for harvested followers metric — LTR strip: never right-biased (Following)."""
+    try:
+        l = int(bounds.get("left", 0))
+        t = int(bounds.get("top", 0))
+        r = int(bounds.get("right", 0))
+        b = int(bounds.get("bottom", 0))
+    except Exception:
+        return []
+    if r <= l or b <= t:
+        return []
+    sw = max(1, int(screen_w))
+    max_tx = _followers_metric_max_tap_x_for_stats_strip(sw)
+    wi = r - l
+    hi = b - t
+    margin = max(2, min(wi, hi) // 20)
+    inner_r = min(r - margin, max_tx)
+    if inner_r <= l + margin:
+        return []
+
+    def _clamp(px: float, py: float) -> tuple[int, int]:
+        xi = int(round(px))
+        yi = int(round(py))
+        xi = max(l + margin, min(inner_r, xi))
+        yi = max(t + margin, min(b - margin, yi))
+        return xi, yi
+
+    # Only center column probes — no right_center / no right-side label_area.
+    raw_pts: list[tuple[str, float, float]] = [
+        ("center", (l + r) / 2, (t + b) / 2),
+        ("upper_center", (l + r) / 2, t + hi / 4),
+        ("lower_center", (l + r) / 2, t + 3 * hi / 4),
+        ("value_area", l + 0.32 * wi, t + 0.30 * hi),
+        ("label_area", l + 0.36 * wi, t + 0.72 * hi),
+    ]
+    out: list[tuple[str, int, int]] = []
+    seen_xy: set[tuple[int, int]] = set()
+    for name, px, py in raw_pts:
+        tx, ty = _clamp(px, py)
+        key = (tx, ty)
+        if key in seen_xy:
+            continue
+        seen_xy.add(key)
+        out.append((name, tx, ty))
+    return out
+
+
+def _followers_entry_v2_still_on_source_profile_surface(
+    det: dict[str, Any],
+    *,
+    source_profile_username: str,
+) -> bool:
+    """True when a failed tap likely left us on the source profile (safe to try another in-bounds tap)."""
+    if bool(det.get("is_followers_list")):
+        return False
+    ab = str(det.get("action_bar_title") or "").strip()
+    abn = _normalize_handle(ab) if ab else ""
+    srcn = _normalize_handle(str(source_profile_username or ""))
+    if abn and srcn and abn == srcn:
+        return True
+    guess = str(det.get("current_screen_guess") or "").lower()
+    if not abn and srcn and "profile" in guess:
+        return True
+    return False
+
+
+def _open_followers_list_from_profile_v2(
+    d: u2.Device,
+    source_profile_username: str,
+    pkg: str,
+    *,
+    profile_verified: bool,
+    pkg_meta: dict[str, Any],
+    screen_guess: str,
+    before_scan_cap: dict[str, Any],
+) -> tuple[bool, dict[str, Any]]:
+    from navigation_engine import NavigationEngineState, observe_instagram_state
+
+    min_conf = float(getattr(config, "FOLLOWERS_ENTRY_V2_MIN_CONFIDENCE", 0.62) or 0.62)
+    try:
+        w, h = d.window_size()
+    except Exception:
+        w, h = 1080, 1920
+
+    entry_debug_cap = _followers_debug_capture(d, "followers_entry_surface")
+    hier_followers_entry = ""
+    if entry_debug_cap.get("xml_path"):
+        try:
+            hier_followers_entry = Path(entry_debug_cap["xml_path"]).read_text(
+                encoding="utf-8"
+            )
+        except Exception:
+            hier_followers_entry = ""
+    stats_band_xml_path_val: str | None = None
+    if hier_followers_entry:
+        try:
+            _ensure_debug_dirs()
+            _snippet_path = _XML_DIR / "followers_entry_stats_band_snippet.xml"
+            if _followers_stats_band_write_snippet_xml(
+                hier_followers_entry, _snippet_path, int(w), int(h)
+            ):
+                stats_band_xml_path_val = str(_snippet_path)
+        except Exception:
+            stats_band_xml_path_val = None
+    try:
+        log(
+            "info",
+            "followers_entry_debug_artifacts_saved",
+            source_profile_username=source_profile_username,
+            screenshot_path=entry_debug_cap.get("screenshot_path"),
+            xml_dump_path=entry_debug_cap.get("xml_path"),
+            stats_band_xml_path=stats_band_xml_path_val,
+            before_scan_screenshot_path=before_scan_cap.get("screenshot_path"),
+            before_scan_xml_path=before_scan_cap.get("xml_path"),
+        )
+    except Exception:
+        pass
+
+    det_surface = detect_followers_list_screen(
+        d, source_profile_username=source_profile_username
+    )
+    nav_ctx = {
+        "phase": "followers_entry_surface",
+        "source_profile_username": source_profile_username,
+        "det": det_surface,
+        "disable_followers_visual_fallback": True,
+    }
+    try:
+        nav_s = observe_instagram_state(
+            d,
+            expected_package=pkg,
+            last_known_state=NavigationEngineState.PROFILE.value,
+            context=nav_ctx,
+        )
+    except Exception as e:
+        nav_s = {"state": "UNKNOWN", "confidence": 0.0, "reason": str(e)}
+    fp_s = _post_follow_screen_fingerprint(
+        d, nav_state=str(nav_s.get("state") or ""), det=det_surface
+    )
+    stats_harvest_raw_node_count = len(
+        _followers_stats_harvest_raw_nodes_from_hierarchy_xml(
+            hier_followers_entry, int(w), int(h)
+        )
+    )
+    band = _collect_profile_stats_band_texts(d, w, h)
+    stats_band_candidates = [
+        {
+            "text": (r.get("text") or "").strip()[:48],
+            "cx": r.get("cx"),
+            "cyy": r.get("cyy"),
+        }
+        for r in band[:36]
+    ]
+    xml_stats_candidates = [
+        {
+            "text": (r.get("text") or "").strip()[:48],
+            "content_desc": (str(r.get("content_desc") or ""))[:120],
+            "bounds": r.get("bounds"),
+            "resourceId": r.get("resourceId"),
+        }
+        for r in (_followers_collect_profile_text_dump(d, w, h)[:40])
+    ]
+    vis_sample = list((det_surface.get("visible_header_texts") or [])[:24])
+    visual_stats_candidates = [
+        {
+            "text": (r.get("text") or "").strip()[:48],
+            "cx": r.get("cx"),
+            "cyy": r.get("cyy"),
+        }
+        for r in band
+        if _followers_label_match(
+            (r.get("raw_text") or r.get("text") or "").strip()
+        )
+    ][:24]
+    log(
+        "info",
+        "followers_entry_surface_analysis_started",
+        source_profile_username=source_profile_username,
+        package=pkg,
+        profile_verified=bool(profile_verified),
+        visible_texts_sample=vis_sample,
+        stats_band_candidates=stats_band_candidates,
+        action_bar_title=str(det_surface.get("action_bar_title") or "")[:120],
+        profile_fingerprint_id=fp_s.get("fingerprint_id"),
+        profile_screen_class=fp_s.get("screen_class"),
+        current_screen_guess=str(det_surface.get("current_screen_guess") or ""),
+        navigation_state=str(nav_s.get("state") or ""),
+        navigation_confidence=float(nav_s.get("confidence") or 0.0),
+        xml_stats_candidates=xml_stats_candidates,
+        visual_stats_candidates=visual_stats_candidates,
+        screenshot_path=entry_debug_cap.get("screenshot_path"),
+        xml_dump_path=entry_debug_cap.get("xml_path"),
+        stats_band_xml_path=stats_band_xml_path_val,
+        stats_harvest_raw_node_count=stats_harvest_raw_node_count,
+    )
+
+    candidates = detect_followers_entry_candidates(
+        d,
+        source_profile_username,
+        pkg,
+        width=w,
+        height=h,
+        hierarchy_xml=hier_followers_entry or None,
+        profile_verified=profile_verified,
+        profile_screen_class=str(fp_s.get("screen_class") or ""),
+        profile_action_bar_title=str(det_surface.get("action_bar_title") or ""),
+    )
+    for c in candidates[:14]:
+        log(
+            "info",
+            "followers_entry_candidate_detected",
+            source_profile_username=source_profile_username,
+            candidate=c,
+        )
+    eligible = [c for c in candidates if float(c.get("confidence") or 0.0) >= min_conf]
+    if not eligible:
+        log(
+            "warning",
+            "followers_entry_safe_abort",
+            source_profile_username=source_profile_username,
+            reason="no_candidate_meets_confidence",
+            min_confidence=min_conf,
+            candidate_count=len(candidates),
+        )
+        try:
+            force_stop(d, pkg)
+        except Exception as e:
+            log("warning", "followers_entry_v2_force_stop_failed", error=str(e), package=pkg)
+        tap_diag_empty: dict[str, Any] = {
+            "followers_stat_found": False,
+            "tap_method": "entry_v2_no_tap",
+            "followers_stat_coordinate_retry": False,
+            "followers_coord_fallback": False,
+            "stats_band_texts": [(r.get("text") or "").strip() for r in band[:40]],
+            "followers_stat_text_dump": _followers_collect_profile_text_dump(d, w, h),
+            "profile_stats_visible": [],
+            "entry_engine_v2": True,
+            "entry_v2_abort": "no_candidate_meets_confidence",
+        }
+        cap = _followers_debug_capture(d, "followers_entry_v2_no_candidate")
+        fmeta = _followers_open_build_failure_meta(
+            source_profile_username=source_profile_username,
+            failure_reason="entry_v2_no_stat_candidate",
+            profile_verified=profile_verified,
+            pkg_meta=pkg_meta,
+            screen_guess=screen_guess,
+            tap_diag=tap_diag_empty,
+            after_tap_screen_snapshot={},
+            last_poll_snapshot=dict(det_surface),
+            cap=cap,
+            open_method="followers_entry_engine_v2",
+            used_coord_fallback=False,
+        )
+        _followers_open_emit_failure(fmeta)
+        return False, fmeta
+
+    col_ok: list[dict[str, Any]] = []
+    for c in eligible:
+        okm, whym = _followers_entry_v2_entry_candidate_followers_metric_ok(c, w=int(w))
+        if okm:
+            col_ok.append(c)
+        else:
+            try:
+                log(
+                    "warning",
+                    "followers_entry_following_metric_rejected",
+                    source_profile_username=source_profile_username,
+                    candidate=c,
+                    rejection_reason=whym,
+                    expected_column="followers",
+                )
+            except Exception:
+                pass
+    if not col_ok:
+        log(
+            "warning",
+            "followers_entry_safe_abort",
+            source_profile_username=source_profile_username,
+            reason="no_followers_column_candidate_after_filter",
+            min_confidence=min_conf,
+            candidate_count=len(candidates),
+            eligible_after_confidence=len(eligible),
+        )
+        try:
+            force_stop(d, pkg)
+        except Exception as e:
+            log("warning", "followers_entry_v2_force_stop_failed", error=str(e), package=pkg)
+        tap_diag_empty: dict[str, Any] = {
+            "followers_stat_found": False,
+            "tap_method": "entry_v2_no_followers_column_tap",
+            "followers_stat_coordinate_retry": False,
+            "followers_coord_fallback": False,
+            "stats_band_texts": [(r.get("text") or "").strip() for r in band[:40]],
+            "followers_stat_text_dump": _followers_collect_profile_text_dump(d, w, h),
+            "profile_stats_visible": [],
+            "entry_engine_v2": True,
+            "entry_v2_abort": "followers_metric_column_filter_empty",
+        }
+        cap = _followers_debug_capture(d, "followers_entry_v2_column_filter_empty")
+        fmeta = _followers_open_build_failure_meta(
+            source_profile_username=source_profile_username,
+            failure_reason="entry_v2_followers_metric_column_reject_all",
+            profile_verified=profile_verified,
+            pkg_meta=pkg_meta,
+            screen_guess=screen_guess,
+            tap_diag=tap_diag_empty,
+            after_tap_screen_snapshot={},
+            last_poll_snapshot=dict(det_surface),
+            cap=cap,
+            open_method="followers_entry_engine_v2",
+            used_coord_fallback=False,
+        )
+        _followers_open_emit_failure(fmeta)
+        return False, fmeta
+
+    best = max(col_ok, key=lambda x: float(x.get("confidence") or 0.0))
+    entry_v2_underlying_method = str(best.get("method") or "")
+    if bool(best.get("semantic_followers_metric")):
+        _sigs_b = best.get("signals") or []
+        _det0 = str(_sigs_b[1]) if isinstance(_sigs_b, list) and len(_sigs_b) > 1 else ""
+        _rid_log = _det0.split("|", 1)[0][:220] if _det0 else ""
+        try:
+            log(
+                "info",
+                "followers_entry_semantic_metric_bypassed_header_geometry",
+                source_profile_username=source_profile_username,
+                tap_x=int(best.get("tap_x") or 0),
+                tap_y=int(best.get("tap_y") or 0),
+                tap_source=str(best.get("tap_source") or "")[:80],
+                method=str(best.get("method") or "")[:160],
+                resource_id=_rid_log,
+                semantic_followers_metric=True,
+            )
+        except Exception:
+            pass
+    else:
+        geo = _compute_followers_metric_tap_from_header_geometry(
+            screen_w=int(w),
+            screen_h=int(h),
+            band=band,
+            source_profile_username=source_profile_username,
+        )
+        if not bool(geo.get("ok")):
+            log(
+                "warning",
+                "followers_entry_safe_abort",
+                source_profile_username=source_profile_username,
+                reason="header_geometry_tap_unsolved",
+                geometry_reason=str(geo.get("reason") or ""),
+                min_confidence=min_conf,
+                candidate_count=len(candidates),
+                eligible_after_confidence=len(eligible),
+            )
+            try:
+                force_stop(d, pkg)
+            except Exception as e:
+                log("warning", "followers_entry_v2_force_stop_failed", error=str(e), package=pkg)
+            tap_diag_empty = {
+                "followers_stat_found": True,
+                "tap_method": "entry_v2_header_geometry_abort",
+                "followers_stat_coordinate_retry": False,
+                "followers_coord_fallback": False,
+                "stats_band_texts": [(r.get("text") or "").strip() for r in band[:40]],
+                "followers_stat_text_dump": _followers_collect_profile_text_dump(d, w, h),
+                "profile_stats_visible": [],
+                "entry_engine_v2": True,
+                "entry_v2_abort": "header_geometry_tap_unsolved",
+                "entry_v2_header_geometry_reason": str(geo.get("reason") or ""),
+                "entry_v2_underlying_candidate_method": entry_v2_underlying_method,
+            }
+            cap = _followers_debug_capture(d, "followers_entry_v2_header_geometry_abort")
+            fmeta = _followers_open_build_failure_meta(
+                source_profile_username=source_profile_username,
+                failure_reason="entry_v2_header_geometry_tap_unsolved",
+                profile_verified=profile_verified,
+                pkg_meta=pkg_meta,
+                screen_guess=screen_guess,
+                tap_diag=tap_diag_empty,
+                after_tap_screen_snapshot={},
+                last_poll_snapshot=dict(det_surface),
+                cap=cap,
+                open_method="followers_entry_engine_v2",
+                used_coord_fallback=False,
+            )
+            _followers_open_emit_failure(fmeta)
+            return False, fmeta
+
+        gtx = int(geo["tap_x"])
+        gty = int(geo["tap_y"])
+        gsm = str(geo.get("source_method") or "")
+        pad_x = max(20, int(w) // 45)
+        pad_y = max(16, int(h) // 100)
+        ww = max(1, int(w))
+        hh = max(1, int(h))
+        best["tap_x"] = gtx
+        best["tap_y"] = gty
+        best["bounds"] = {
+            "left": max(0, gtx - pad_x),
+            "right": min(ww - 1, gtx + pad_x),
+            "top": max(0, gty - pad_y),
+            "bottom": min(hh - 1, gty + pad_y),
+        }
+        best["method"] = f"header_geometry:{gsm}"
+
+    log(
+        "info",
+        "followers_entry_followers_metric_selected",
+        source_profile_username=source_profile_username,
+        confidence=best.get("confidence"),
+        tap_x=best.get("tap_x"),
+        tap_y=best.get("tap_y"),
+        source=best.get("source"),
+        method=best.get("method"),
+        stat_type=str(best.get("stat_type") or ""),
+        bounds=best.get("bounds"),
+        underlying_candidate_method=entry_v2_underlying_method,
+    )
+    log(
+        "info",
+        "followers_entry_candidate_selected",
+        source_profile_username=source_profile_username,
+        confidence=best.get("confidence"),
+        tap_x=best.get("tap_x"),
+        tap_y=best.get("tap_y"),
+        source=best.get("source"),
+        method=best.get("method"),
+        underlying_candidate_method=entry_v2_underlying_method,
+    )
+
+    cx = int(best["tap_x"])
+    cy = int(best["tap_y"])
+    _fs_dump = _followers_collect_profile_text_dump(d, w, h)
+    _sigs = best.get("signals") or []
+    _label = ""
+    if isinstance(_sigs, list):
+        for _p in _sigs:
+            if (
+                isinstance(_p, str)
+                and _p
+                and not _p.startswith("score:")
+                and "resource_id" not in _p
+            ):
+                _label = _p
+                break
+    if not _label:
+        _label = str(best.get("method") or "")
+    tap_diag: dict[str, Any] = {
+        "followers_stat_found": True,
+        "followers_stat_text": _label,
+        "followers_stat_bounds": best.get("bounds"),
+        "tap_x": cx,
+        "tap_y": cy,
+        "tap_method": str(best.get("method") or "entry_v2_hybrid"),
+        "followers_stat_text_detected": str(best.get("method")),
+        "followers_stat_text_bounds": best.get("bounds"),
+        "followers_stat_tap_x": cx,
+        "followers_stat_tap_y": cy,
+        "followers_stat_tap_source": "followers_entry_engine_v2",
+        "followers_stat_text_dump": _fs_dump,
+        "stats_band_texts": [(r.get("text") or "").strip() for r in band[:40]],
+        "profile_stats_visible": list(_fs_dump),
+        "followers_stat_coordinate_retry": False,
+        "followers_coord_fallback": False,
+        "followers_exact_rid_used": str(entry_v2_underlying_method).startswith(
+            "resource_id_profile_header"
+        ),
+        "debug_before_scan_screenshot_path": before_scan_cap.get("screenshot_path"),
+        "debug_before_scan_xml_path": before_scan_cap.get("xml_path"),
+        "profile_rescan_swiped": False,
+        "entry_engine_v2": True,
+        "entry_v2_source_profile_username": source_profile_username,
+        "entry_v2_profile_fingerprint_id_before": str(fp_s.get("fingerprint_id") or ""),
+        "entry_v2_underlying_candidate_method": entry_v2_underlying_method,
+        **(
+            {"semantic_followers_metric": True}
+            if bool(best.get("semantic_followers_metric"))
+            else {}
+        ),
+    }
+
+    cand_method = str(best.get("method") or "")
+    bd_grid = dict(best.get("bounds") or tap_diag.get("followers_stat_bounds") or {})
+    strat_rows = _followers_entry_v2_raw_metric_tap_strategies(
+        bd_grid, screen_w=int(w)
+    )
+    use_raw_grid = False
+
+    log(
+        "info",
+        "followers_entry_transition_started",
+        source_profile_username=source_profile_username,
+        tap_x=cx,
+        tap_y=cy,
+        confidence=best.get("confidence"),
+        candidate_method=cand_method,
+        multi_tap_strategies=bool(use_raw_grid),
+        bounds=bd_grid if use_raw_grid else best.get("bounds"),
+    )
+
+    def _v2_post_tap_confirm_wrapped(settle_s: float) -> tuple[bool, dict, dict, int]:
+        _followers_enable_post_tap_detection_lock(source_profile_username)
+        try:
+            return _followers_entry_v2_post_tap_confirm(
+                d,
+                tap_diag,
+                source_profile_username,
+                post_tap_settle_s=float(settle_s),
+            )
+        finally:
+            _followers_release_post_tap_detection_lock(source_profile_username)
+
+    opened = False
+    after_det: dict[str, Any] = {}
+    last_det: dict[str, Any] = {}
+    poll_n = 0
+
+    if use_raw_grid:
+        log(
+            "info",
+            "followers_entry_tap_strategy_started",
+            source_profile_username=source_profile_username,
+            candidate_method=cand_method,
+            bounds=bd_grid,
+            strategies=[s[0] for s in strat_rows],
+        )
+        max_tx_gate = _followers_metric_max_tap_x_for_stats_strip(int(w))
+        for si, (st_name, tx, ty) in enumerate(strat_rows):
+            log(
+                "info",
+                "followers_entry_tap_strategy_attempt",
+                source_profile_username=source_profile_username,
+                strategy=st_name,
+                strategy_index=int(si),
+                tap_x=int(tx),
+                tap_y=int(ty),
+                bounds=bd_grid,
+                candidate_method=cand_method,
+            )
+            if int(tx) > max_tx_gate:
+                try:
+                    log(
+                        "warning",
+                        "followers_entry_following_zone_rejected",
+                        source_profile_username=source_profile_username,
+                        reason="tap_x_over_screen_gate",
+                        tap_x=int(tx),
+                        tap_y=int(ty),
+                        screen_width=int(w),
+                        max_tap_x=int(max_tx_gate),
+                        normalized_x=round(int(tx) / float(max(1, int(w))), 5),
+                        strategy=st_name,
+                        candidate_method=cand_method,
+                    )
+                except Exception:
+                    pass
+                continue
+            try:
+                d.click(int(tx), int(ty))
+            except Exception as e:
+                log(
+                    "warning",
+                    "followers_entry_tap_strategy_failed",
+                    source_profile_username=source_profile_username,
+                    strategy=st_name,
+                    tap_x=int(tx),
+                    tap_y=int(ty),
+                    bounds=bd_grid,
+                    action_bar_title_after=None,
+                    is_followers_list=False,
+                    current_screen_guess=None,
+                    candidate_method=cand_method,
+                    phase="tap_exception",
+                    error=str(e),
+                )
+                continue
+            tap_diag["tap_x"] = int(tx)
+            tap_diag["tap_y"] = int(ty)
+            tap_diag["followers_stat_tap_x"] = int(tx)
+            tap_diag["followers_stat_tap_y"] = int(ty)
+            settle_use = 0.88 if si == 0 else 0.48
+            opened, after_det, last_det, poll_n = _v2_post_tap_confirm_wrapped(
+                settle_use
+            )
+            ab_after = str(last_det.get("action_bar_title") or "")[:120]
+            is_list = bool(last_det.get("is_followers_list"))
+            guess = str(last_det.get("current_screen_guess") or "")
+            still_src = _followers_entry_v2_still_on_source_profile_surface(
+                last_det, source_profile_username=source_profile_username
+            )
+            log(
+                "info",
+                "followers_entry_tap_strategy_result",
+                source_profile_username=source_profile_username,
+                strategy=st_name,
+                tap_x=int(tx),
+                tap_y=int(ty),
+                bounds=bd_grid,
+                action_bar_title_after=ab_after,
+                is_followers_list=is_list,
+                current_screen_guess=guess,
+                candidate_method=cand_method,
+                transition_opened=bool(opened),
+                still_on_source_profile=bool(still_src),
+            )
+            if opened:
+                tap_diag["entry_v2_raw_metric_tap_strategy"] = st_name
+                log(
+                    "info",
+                    "followers_entry_tap_strategy_success",
+                    source_profile_username=source_profile_username,
+                    strategy=st_name,
+                    tap_x=int(tx),
+                    tap_y=int(ty),
+                    bounds=bd_grid,
+                    action_bar_title_after=ab_after,
+                    is_followers_list=is_list,
+                    current_screen_guess=guess,
+                    candidate_method=cand_method,
+                )
+                try:
+                    log(
+                        "info",
+                        "followers_entry_followers_zone_tap",
+                        source_profile_username=source_profile_username,
+                        strategy=st_name,
+                        tap_x=int(tx),
+                        tap_y=int(ty),
+                        screen_width=int(w),
+                        normalized_x=round(int(tx) / float(max(1, int(w))), 5),
+                        candidate_method=cand_method,
+                    )
+                except Exception:
+                    pass
+                break
+            log(
+                "warning",
+                "followers_entry_tap_strategy_failed",
+                source_profile_username=source_profile_username,
+                strategy=st_name,
+                tap_x=int(tx),
+                tap_y=int(ty),
+                bounds=bd_grid,
+                action_bar_title_after=ab_after,
+                is_followers_list=is_list,
+                current_screen_guess=guess,
+                candidate_method=cand_method,
+                still_on_source_profile=bool(still_src),
+            )
+            if not still_src:
+                log(
+                    "warning",
+                    "followers_entry_tap_strategy_abort_not_source_profile",
+                    source_profile_username=source_profile_username,
+                    strategy=st_name,
+                    action_bar_title_after=ab_after,
+                    current_screen_guess=guess,
+                )
+                break
+    else:
+        try:
+            d.click(cx, cy)
+        except Exception as e:
+            log(
+                "warning",
+                "followers_entry_transition_failed",
+                source_profile_username=source_profile_username,
+                phase="tap",
+                error=str(e),
+            )
+            try:
+                force_stop(d, pkg)
+            except Exception:
+                pass
+            cap = _followers_debug_capture(d, "followers_entry_v2_tap_failed")
+            fmeta = _followers_open_build_failure_meta(
+                source_profile_username=source_profile_username,
+                failure_reason="entry_v2_tap_failed",
+                profile_verified=profile_verified,
+                pkg_meta=pkg_meta,
+                screen_guess=screen_guess,
+                tap_diag=tap_diag,
+                after_tap_screen_snapshot={},
+                last_poll_snapshot={},
+                cap=cap,
+                open_method="followers_entry_engine_v2",
+                used_coord_fallback=False,
+            )
+            _followers_open_emit_failure(fmeta)
+            return False, fmeta
+        opened, after_det, last_det, poll_n = _v2_post_tap_confirm_wrapped(2.0)
+    if opened:
+        log(
+            "info",
+            "followers_entry_transition_confirmed",
+            source_profile_username=source_profile_username,
+            poll_attempts=poll_n,
+            open_detection_method=last_det.get("open_detection_method"),
+        )
+        log(
+            "info",
+            "followers_list_open_success",
+            source_profile_username=source_profile_username,
+            profile_verified=bool(profile_verified),
+            signals=last_det.get("signals"),
+            sample=last_det.get("visible_usernames_sample"),
+            tap_method=tap_diag.get("tap_method"),
+            tap_x=tap_diag.get("tap_x"),
+            tap_y=tap_diag.get("tap_y"),
+            stats_band_texts=tap_diag.get("stats_band_texts"),
+            followers_stat_text=tap_diag.get("followers_stat_text"),
+            entry_engine_v2=True,
+            current_package=pkg_meta.get("current_package"),
+            after_tap_screen_snapshot=after_det,
+            last_poll_snapshot=last_det,
+            open_method="followers_entry_engine_v2",
+            open_detection_method=last_det.get("open_detection_method") or "xml",
+        )
+        followers_session_mark_list_committed_open(
+            source_profile_username,
+            committed_source=(
+                "entry_v2_rendered_strong"
+                if bool(tap_diag.get("entry_engine_v2"))
+                else "followers_entry_engine_v2"
+            ),
+        )
+        _followers_release_post_tap_detection_lock(source_profile_username)
+        _followers_set_last_open_detection_method(
+            str(last_det.get("open_detection_method") or "xml")
+        )
+        return True, _followers_open_success_payload(
+            tap_diag,
+            after_tap_det=after_det,
+            last_det=last_det,
+            open_method="followers_entry_engine_v2",
+            pkg_meta=pkg_meta,
+            source_profile_username=source_profile_username,
+            profile_verified=profile_verified,
+        )
+
+    log(
+        "warning",
+        "followers_entry_transition_failed",
+        source_profile_username=source_profile_username,
+        is_followers_list=bool(last_det.get("is_followers_list")),
+        open_detection_method=last_det.get("open_detection_method"),
+    )
+    log(
+        "warning",
+        "followers_entry_safe_abort",
+        source_profile_username=source_profile_username,
+        reason="transition_not_confirmed",
+    )
+    try:
+        force_stop(d, pkg)
+    except Exception as e:
+        log("warning", "followers_entry_v2_force_stop_failed", error=str(e), package=pkg)
+    cap = _followers_debug_capture(d, "followers_entry_v2_transition_failed")
+    _log_followers_list_detect_failed(
+        d,
+        last_det,
+        source_profile_username=source_profile_username,
+        stem="followers_entry_v2_detect_failed",
+        cap=cap,
+    )
+    fmeta = _followers_open_build_failure_meta(
+        source_profile_username=source_profile_username,
+        failure_reason="screen_not_detected",
+        profile_verified=profile_verified,
+        pkg_meta=pkg_meta,
+        screen_guess=screen_guess,
+        tap_diag=tap_diag,
+        after_tap_screen_snapshot=after_det,
+        last_poll_snapshot=last_det,
+        cap=cap,
+        open_method="followers_entry_engine_v2",
+        used_coord_fallback=False,
+    )
+    _followers_open_emit_failure(fmeta)
+    _followers_release_post_tap_detection_lock(source_profile_username)
+    return False, fmeta
+
 
 
 def open_followers_list_from_profile(
@@ -12961,6 +19628,45 @@ def open_followers_list_from_profile(
     pkg_meta.update(_followers_current_pkg_activity(d))
     before_scan_cap = _followers_debug_capture(d, "followers_profile_before_scan")
     log("info", "followers_profile_pre_tap_swipe_skipped", followers_profile_pre_tap_swipe_skipped=True)
+
+    if profile_verified and followers_session_list_committed_open_for(source_profile_username):
+        try:
+            log(
+                "warning",
+                "followers_entry_reopen_blocked_after_committed_open",
+                source_profile_username=source_profile_username,
+                **followers_session_committed_meta(),
+            )
+        except Exception:
+            pass
+        cap_blk = _followers_debug_capture(d, "followers_entry_reopen_blocked_after_committed_open")
+        tap_blk: dict[str, Any] = {"stats_band_texts": [], "profile_stats_visible": []}
+        fmeta_blk = _followers_open_build_failure_meta(
+            source_profile_username=source_profile_username,
+            failure_reason="followers_entry_reopen_blocked_after_committed_open",
+            profile_verified=profile_verified,
+            pkg_meta=pkg_meta,
+            screen_guess=screen_guess,
+            tap_diag=tap_blk,
+            after_tap_screen_snapshot={},
+            last_poll_snapshot={},
+            cap=cap_blk,
+            open_method="blocked_committed_followers_surface",
+            used_coord_fallback=False,
+        )
+        _followers_open_emit_failure(fmeta_blk)
+        return False, fmeta_blk
+
+    if bool(getattr(config, "ENABLE_FOLLOWERS_ENTRY_ENGINE_V2", False)):
+        return _open_followers_list_from_profile_v2(
+            d,
+            source_profile_username,
+            pkg,
+            profile_verified=profile_verified,
+            pkg_meta=pkg_meta,
+            screen_guess=screen_guess,
+            before_scan_cap=before_scan_cap,
+        )
 
     element_ok, tap_diag = _tap_profile_followers_stat(d, pre_scan=None)
     tap_diag["debug_before_scan_screenshot_path"] = before_scan_cap.get("screenshot_path")
@@ -13047,6 +19753,10 @@ def open_followers_list_from_profile(
             open_method=open_method,
             open_detection_method=last_det.get("open_detection_method") or "xml",
         )
+        followers_session_mark_list_committed_open(
+            source_profile_username,
+            committed_source=str(open_method or "element_tap")[:120],
+        )
         _followers_release_post_tap_detection_lock(source_profile_username)
         _followers_set_last_open_detection_method(
             str(last_det.get("open_detection_method") or "xml")
@@ -13110,6 +19820,10 @@ def open_followers_list_from_profile(
                     open_method=open_method,
                     open_detection_method=last_det2.get("open_detection_method") or "xml",
                 )
+                followers_session_mark_list_committed_open(
+                    source_profile_username,
+                    committed_source=str(open_method or "coord_retry")[:120],
+                )
                 _followers_release_post_tap_detection_lock(source_profile_username)
                 _followers_set_last_open_detection_method(
                     str(last_det2.get("open_detection_method") or "xml")
@@ -13167,43 +19881,3561 @@ def open_follower_profile_from_list(
 ) -> bool:
     pkg = pkg or getattr(config, "INSTAGRAM_PACKAGE", "") or ""
     un = str(candidate.get("username") or "").strip()
+    vcid = str(candidate.get("visual_candidate_id") or "").strip()
+    is_visual = bool(vcid)
+
     log(
         "info",
         "follower_profile_open_started",
         follower_username=un,
         source_profile_username=source_profile_username,
         row_center=candidate.get("row_center"),
+        visual_candidate_id=vcid or None,
     )
-    rc = candidate.get("row_center") or [0, 0]
-    try:
-        d.click(int(rc[0]), int(rc[1]))
-    except Exception as e:
-        log(
-            "error",
-            "follower_profile_open_failed",
-            follower_username=un,
-            error=str(e),
-            reason="click_failed",
-        )
-        return False
-    time.sleep(float(getattr(config, "PROFILE_POST_TAP_STABILIZE_S", 0.12)))
-    ok = verify_profile(d, un)
-    if ok:
+
+    def _pkg_and_screen_guess() -> tuple[dict[str, Any], str]:
+        meta: dict[str, Any] = {}
+        try:
+            meta = _followers_current_pkg_activity(d) or {}
+        except Exception:
+            meta = {}
+        csg = ""
+        try:
+            det = detect_followers_list_screen(
+                d, source_profile_username=source_profile_username
+            )
+            csg = str(det.get("current_screen_guess") or "")
+        except Exception:
+            csg = ""
+        return meta, csg
+
+    def _action_bar_title() -> str:
+        try:
+            return str(read_current_profile_username_for_follow_gate(d) or "").strip()
+        except Exception:
+            return ""
+
+    def _is_source_action_bar(ab: str) -> bool:
+        sn = _normalize_handle(source_profile_username or "")
+        an = _normalize_handle(ab or "")
+        return bool(sn and an and sn == an)
+
+    def _tap_inside_follow_bounds(tx: int, ty: int, fb: dict[str, Any]) -> bool:
+        if not fb:
+            return False
+        try:
+            fl, ft, frb, fbot = (
+                int(fb["left"]),
+                int(fb["top"]),
+                int(fb["right"]),
+                int(fb["bottom"]),
+            )
+            return fl <= tx < frb and ft <= ty < fbot
+        except (KeyError, TypeError, ValueError):
+            return False
+
+    def _finalize_success(ab_open: str) -> bool:
+        if _is_source_action_bar(ab_open):
+            log(
+                "error",
+                "follower_profile_open_false_positive_source_profile",
+                follower_username=un,
+                source_profile_username=source_profile_username,
+                action_bar_title=ab_open,
+                visual_candidate_id=vcid or None,
+            )
+            return False
         log(
             "info",
             "follower_profile_open_success",
             follower_username=un,
             source_profile_username=source_profile_username,
+            action_bar_title=ab_open or None,
+            visual_candidate_id=vcid or None,
+        )
+        return True
+
+    if not is_visual:
+        rc = candidate.get("row_center") or [0, 0]
+        try:
+            d.click(int(rc[0]), int(rc[1]))
+        except Exception as e:
+            log(
+                "error",
+                "follower_profile_open_failed",
+                follower_username=un,
+                error=str(e),
+                reason="click_failed",
+            )
+            return False
+        time.sleep(float(getattr(config, "PROFILE_POST_TAP_STABILIZE_S", 0.12)))
+        ok = verify_profile(d, un)
+        if ok:
+            _ab_open = _action_bar_title()
+            if not _finalize_success(_ab_open):
+                return False
+        else:
+            log(
+                "error",
+                "follower_profile_open_failed",
+                follower_username=un,
+                source_profile_username=source_profile_username,
+                reason="verify_profile_failed",
+            )
+        return ok
+
+    # Visual candidate: multi-tap strategies, transition wait, strict anti–source-profile guard.
+    work = dict(candidate)
+    row_o = dict(work.get("approx_row_bounds") or {})
+    av_o = dict(work.get("approx_avatar_bounds") or {})
+    tz_o = dict(work.get("approx_username_text_zone") or {})
+    fb_o = dict(work.get("approx_follow_button_bounds") or {})
+    if row_o and av_o and tz_o and fb_o:
+        work.update(_compute_visual_candidate_tap_points_from_bounds(row_o, av_o, tz_o, fb_o))
+
+    strategies = _visual_open_strategy_taps_from_candidate(work)
+    if not strategies:
+        log(
+            "error",
+            "visual_candidate_open_tap_strategy_failed",
+            follower_username=un,
+            source_profile_username=source_profile_username,
+            visual_candidate_id=vcid,
+            reason="visual_candidate_open_all_tap_points_failed",
+            detail="no_tap_strategies_from_candidate",
+        )
+        return False
+
+    try:
+        wwin, hwin = d.window_size()
+    except Exception:
+        wwin, hwin = 1080, 1920
+
+    settle_s = float(getattr(config, "PROFILE_POST_TAP_STABILIZE_S", 0.12) or 0.12)
+    last_fail_reason = ""
+
+    def _sample_screen_fingerprint_bundle() -> dict[str, Any]:
+        from navigation_engine import NavigationEngineState, observe_instagram_state
+
+        meta = _followers_current_pkg_activity(d) or {}
+        det: dict[str, Any] = {}
+        try:
+            det = detect_followers_list_screen(
+                d, source_profile_username=source_profile_username
+            ) or {}
+        except Exception:
+            det = {}
+        lk = NavigationEngineState.FOLLOWERS_LIST.value
+        try:
+            if not bool(det.get("is_followers_list")):
+                lk = NavigationEngineState.UNKNOWN.value
+        except Exception:
+            lk = NavigationEngineState.UNKNOWN.value
+        nav: dict[str, Any] = {}
+        try:
+            nav = observe_instagram_state(
+                d,
+                expected_package=pkg,
+                last_known_state=lk,
+                context={
+                    "source_profile_username": source_profile_username,
+                    "det": det,
+                    "phase": "screen_fingerprint_sample",
+                },
+            )
+        except Exception:
+            nav = {}
+        fh = ""
+        try:
+            fh = _follow_ui_state_snapshot(d)
+        except Exception:
+            fh = ""
+        raw_inv = False
+        try:
+            raw_inv = _visual_raw_follow_invite_visible_quick(d)
+        except Exception:
+            raw_inv = False
+        return build_screen_fingerprint(
+            action_bar_title=_action_bar_title(),
+            current_package=str(meta.get("current_package") or ""),
+            current_activity=str(meta.get("current_activity") or ""),
+            visible_texts=None,
+            nav_state=str(nav.get("state") or ""),
+            visual_signals={
+                "is_followers_list": bool(det.get("is_followers_list")),
+                "strict_list_open": bool(det.get("strict_list_open")),
+                "relaxed_list_open": bool(det.get("relaxed_list_open")),
+                "follow_header_state": fh,
+                "raw_follow_invite_visible": raw_inv,
+                "nav_confidence": float(nav.get("confidence") or 0.0),
+            },
+            xml_guess=str(det.get("current_screen_guess") or ""),
+            visual_guess=str(nav.get("visual_guess") or ""),
+        )
+
+    for si, (tap_strategy, raw_x, raw_y) in enumerate(strategies):
+        tx = max(2, min(int(wwin) - 3, int(raw_x)))
+        ty = max(2, min(int(hwin) - 3, int(raw_y)))
+        if _tap_inside_follow_bounds(tx, ty, fb_o):
+            last_fail_reason = "tap_coordinates_inside_follow_button_bounds"
+            log(
+                "warning",
+                "visual_candidate_open_tap_attempt",
+                tap_strategy=tap_strategy,
+                tap_x=tx,
+                tap_y=ty,
+                source_profile_username=source_profile_username,
+                visual_candidate_id=vcid,
+                skipped=True,
+                skip_reason="tap_inside_follow_button_bounds",
+            )
+            continue
+
+        fp_before = _sample_screen_fingerprint_bundle()
+        log(
+            "info",
+            "screen_fingerprint_before_candidate_open",
+            fingerprint_id=fp_before.get("fingerprint_id"),
+            screen_class=fp_before.get("screen_class"),
+            confidence=fp_before.get("confidence"),
+            hash_prefix=str(fp_before.get("hash") or "")[:16],
+            source_profile_username=source_profile_username,
+            visual_candidate_id=vcid,
+            tap_strategy=tap_strategy,
+            strategy_index=si,
+            signals_summary={
+                "nav_state": (fp_before.get("signals") or {}).get("nav_state"),
+                "is_followers_list": (fp_before.get("signals") or {}).get(
+                    "is_followers_list"
+                ),
+                "xml_guess": (fp_before.get("signals") or {}).get("xml_guess"),
+                "action_bar_norm": (fp_before.get("signals") or {}).get(
+                    "action_bar_norm"
+                ),
+            },
+        )
+
+        try:
+            d.click(tx, ty)
+        except Exception as e:
+            last_fail_reason = f"click_failed:{e}"
+            log(
+                "error",
+                "follower_profile_open_failed",
+                follower_username=un,
+                visual_candidate_id=vcid,
+                tap_strategy=tap_strategy,
+                error=str(e),
+                reason="click_failed",
+            )
+            continue
+
+        time.sleep(settle_s)
+        _wait_visual_follower_open_transition(
+            d, pkg=pkg, source_profile_username=source_profile_username
+        )
+
+        fp_after = _sample_screen_fingerprint_bundle()
+        log(
+            "info",
+            "screen_fingerprint_after_candidate_open",
+            fingerprint_id=fp_after.get("fingerprint_id"),
+            screen_class=fp_after.get("screen_class"),
+            confidence=fp_after.get("confidence"),
+            hash_prefix=str(fp_after.get("hash") or "")[:16],
+            source_profile_username=source_profile_username,
+            visual_candidate_id=vcid,
+            tap_strategy=tap_strategy,
+            strategy_index=si,
+            signals_summary={
+                "nav_state": (fp_after.get("signals") or {}).get("nav_state"),
+                "is_followers_list": (fp_after.get("signals") or {}).get(
+                    "is_followers_list"
+                ),
+                "xml_guess": (fp_after.get("signals") or {}).get("xml_guess"),
+                "action_bar_norm": (fp_after.get("signals") or {}).get(
+                    "action_bar_norm"
+                ),
+            },
+        )
+
+        _cmp = compare_screen_fingerprints(fp_before, fp_after)
+        log(
+            "info",
+            "screen_fingerprint_transition_compare",
+            source_profile_username=source_profile_username,
+            visual_candidate_id=vcid,
+            tap_strategy=tap_strategy,
+            strategy_index=si,
+            same_screen=bool(_cmp.get("same_screen")),
+            similarity=float(_cmp.get("similarity") or 0.0),
+            changed_signals_count=len(_cmp.get("changed_signals") or []),
+            changed_signal_keys=[
+                x.get("key")
+                for x in (_cmp.get("changed_signals") or [])[:12]
+                if isinstance(x, dict)
+            ],
+        )
+
+        if bool(_cmp.get("same_screen")):
+            last_fail_reason = "screen_fingerprint_no_transition"
+            log(
+                "warning",
+                "screen_fingerprint_transition_rejected",
+                source_profile_username=source_profile_username,
+                visual_candidate_id=vcid,
+                tap_strategy=tap_strategy,
+                strategy_index=si,
+                similarity=float(_cmp.get("similarity") or 0.0),
+                fingerprint_before=fp_before.get("fingerprint_id"),
+                fingerprint_after=fp_after.get("fingerprint_id"),
+            )
+            if si + 1 < len(strategies):
+                log(
+                    "info",
+                    "visual_candidate_open_tap_retry",
+                    tap_strategy=tap_strategy,
+                    next_strategy=strategies[si + 1][0],
+                    source_profile_username=source_profile_username,
+                    visual_candidate_id=vcid,
+                    retry_reason="screen_fingerprint_no_transition",
+                )
+            continue
+
+        log(
+            "info",
+            "screen_fingerprint_transition_confirmed",
+            source_profile_username=source_profile_username,
+            visual_candidate_id=vcid,
+            tap_strategy=tap_strategy,
+            strategy_index=si,
+            similarity=float(_cmp.get("similarity") or 0.0),
+            fingerprint_before=fp_before.get("fingerprint_id"),
+            fingerprint_after=fp_after.get("fingerprint_id"),
+        )
+
+        meta1, csg1 = _pkg_and_screen_guess()
+        ab_after = _action_bar_title()
+        fp_after = ""
+        try:
+            cap = visual_capture_profile_context(
+                d, source_profile_username=source_profile_username
+            )
+            fp_after = str(
+                cap.get("profile_visual_fingerprint")
+                or cap.get("profile_fingerprint")
+                or ""
+            )
+        except Exception:
+            fp_after = ""
+
+        log(
+            "info",
+            "visual_candidate_open_tap_attempt",
+            tap_strategy=tap_strategy,
+            tap_x=tx,
+            tap_y=ty,
+            source_profile_username=source_profile_username,
+            visual_candidate_id=vcid,
+            follower_username=un,
+            action_bar_title_after_tap=ab_after,
+            current_package=str(meta1.get("current_package") or ""),
+            current_screen_guess=csg1,
+            profile_visual_fingerprint_after_tap=fp_after or None,
+            strategy_index=si,
+            strategy_total=len(strategies),
+        )
+
+        if _is_source_action_bar(ab_after):
+            last_fail_reason = "still_on_source_profile_action_bar"
+            if si + 1 < len(strategies):
+                log(
+                    "info",
+                    "visual_candidate_open_tap_retry",
+                    tap_strategy=tap_strategy,
+                    next_strategy=strategies[si + 1][0],
+                    source_profile_username=source_profile_username,
+                    visual_candidate_id=vcid,
+                    action_bar_title_after_tap=ab_after,
+                    retry_reason="still_on_source_profile",
+                )
+            continue
+
+        ok = verify_profile(d, un)
+        if not ok:
+            last_fail_reason = "verify_profile_failed"
+            if si + 1 < len(strategies):
+                log(
+                    "info",
+                    "visual_candidate_open_tap_retry",
+                    tap_strategy=tap_strategy,
+                    next_strategy=strategies[si + 1][0],
+                    source_profile_username=source_profile_username,
+                    visual_candidate_id=vcid,
+                    retry_reason="verify_profile_failed",
+                )
+            continue
+
+        ab_verify = _action_bar_title()
+        if not _finalize_success(ab_verify):
+            last_fail_reason = "verify_then_source_action_bar"
+            if si + 1 < len(strategies):
+                log(
+                    "info",
+                    "visual_candidate_open_tap_retry",
+                    tap_strategy=tap_strategy,
+                    next_strategy=strategies[si + 1][0],
+                    source_profile_username=source_profile_username,
+                    visual_candidate_id=vcid,
+                    retry_reason="post_verify_source_profile_title",
+                )
+            continue
+
+        log(
+            "info",
+            "visual_candidate_open_tap_strategy_success",
+            tap_strategy=tap_strategy,
+            tap_x=tx,
+            tap_y=ty,
+            source_profile_username=source_profile_username,
+            visual_candidate_id=vcid,
+            action_bar_title_after_tap=ab_verify,
+        )
+        return True
+
+    log(
+        "error",
+        "visual_candidate_open_tap_strategy_failed",
+        follower_username=un,
+        source_profile_username=source_profile_username,
+        visual_candidate_id=vcid,
+        reason="visual_candidate_open_all_tap_points_failed",
+        last_fail_reason=last_fail_reason,
+        strategies_tried=[s[0] for s in strategies],
+    )
+    log(
+        "error",
+        "follower_profile_open_failed",
+        follower_username=un,
+        source_profile_username=source_profile_username,
+        reason="visual_candidate_open_all_tap_points_failed",
+        visual_candidate_id=vcid,
+    )
+    return False
+
+
+def _post_follow_overlay_ui_hints(d: u2.Device) -> dict[str, Any]:
+    """Lightweight sheet/popup hints for post-follow observation (no OCR)."""
+    hints: dict[str, Any] = {}
+    try:
+        if d(textContains="Posts").exists(timeout=0.06) and d(
+            textContains="Stories"
+        ).exists(timeout=0.05):
+            hints["likely_mute_toggle_sheet"] = True
+    except Exception:
+        pass
+    for needle, key in (
+        ("Suggested for you", "suggested_for_you"),
+        ("Discover people", "discover_people"),
+        ("Turn On Notifications", "turn_on_notifications"),
+        ("notifications from", "notification_prompt"),
+    ):
+        try:
+            if d(textContains=needle).exists(timeout=0.04):
+                hints[key] = True
+        except Exception:
+            continue
+    return hints
+
+
+def _post_follow_screen_fingerprint(
+    d: u2.Device,
+    *,
+    nav_state: str,
+    det: dict[str, Any] | None,
+) -> dict[str, Any]:
+    try:
+        meta = _followers_current_pkg_activity(d) or {}
+        try:
+            ab = read_current_profile_username_for_follow_gate(d)
+        except Exception:
+            ab = ""
+        try:
+            fh = _follow_ui_state_snapshot(d)
+        except Exception:
+            fh = ""
+        det2 = det if isinstance(det, dict) else {}
+        return build_screen_fingerprint(
+            action_bar_title=ab,
+            current_package=str(meta.get("current_package") or ""),
+            current_activity=str(meta.get("current_activity") or ""),
+            visible_texts=None,
+            nav_state=nav_state,
+            visual_signals={
+                "is_followers_list": bool(det2.get("is_followers_list")),
+                "strict_list_open": bool(det2.get("strict_list_open")),
+                "relaxed_list_open": bool(det2.get("relaxed_list_open")),
+                "follow_header_state": fh,
+                "raw_follow_invite_visible": False,
+                "nav_confidence": 0.0,
+            },
+            xml_guess=str(det2.get("current_screen_guess") or ""),
+            visual_guess="",
+        )
+    except Exception:
+        return {}
+
+
+def _post_follow_screen_fingerprint_mute_v2_fast(
+    d: u2.Device,
+    *,
+    nav_state: str,
+    det: dict[str, Any] | None,
+    action_bar_title: str,
+    follow_header_state: str,
+) -> dict[str, Any]:
+    """
+    Mute v2 only: same structural fingerprint as ``_post_follow_screen_fingerprint`` without
+    ``read_current_profile_username_for_follow_gate`` (caller must enforce a verified
+    post-follow safe context).
+    """
+    try:
+        meta = _followers_current_pkg_activity(d) or {}
+        det2 = det if isinstance(det, dict) else {}
+        ab = str(action_bar_title or "").strip()
+        fh = str(follow_header_state or "").strip()
+        return build_screen_fingerprint(
+            action_bar_title=ab,
+            current_package=str(meta.get("current_package") or ""),
+            current_activity=str(meta.get("current_activity") or ""),
+            visible_texts=None,
+            nav_state=nav_state,
+            visual_signals={
+                "is_followers_list": bool(det2.get("is_followers_list")),
+                "strict_list_open": bool(det2.get("strict_list_open")),
+                "relaxed_list_open": bool(det2.get("relaxed_list_open")),
+                "follow_header_state": fh,
+                "raw_follow_invite_visible": False,
+                "nav_confidence": 0.0,
+            },
+            xml_guess=str(det2.get("current_screen_guess") or ""),
+            visual_guess="",
+        )
+    except Exception:
+        return {}
+
+
+def _poll_follow_state_for_reconcile(
+    d: u2.Device, *, rounds: int = 5, delay_s: float = 0.1
+) -> str:
+    """Short multi-poll header follow-state (handles slow UI after tap)."""
+    last = "unknown"
+    for i in range(max(1, int(rounds))):
+        try:
+            last = _follow_ui_state_snapshot(d)
+        except Exception:
+            last = "unknown"
+        if last in ("following", "requested"):
+            return last
+        if i + 1 < rounds:
+            time.sleep(float(delay_s))
+    return last
+
+
+def visual_follow_post_action_reconcile(
+    d: u2.Device,
+    *,
+    follow_out: dict[str, Any],
+    profile_already_open: bool,
+    visual_candidate_id: str = "",
+    mute_phase_result: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """
+    Reconcile ``perform_follow_safe`` / runner outcome with on-screen follow + mute signals.
+
+    If the UI shows Following/Requested, mute completed, or success events were emitted,
+    ``inferred_follow_success`` is True even when ``follow_out.ok`` was False (e.g. code 33/34).
+    """
+    vcid = str(visual_candidate_id or "").strip()
+    log(
+        "info",
+        "visual_follow_post_action_reconcile_started",
+        visual_candidate_id=vcid,
+        profile_already_open=bool(profile_already_open),
+        failure_code=int(follow_out.get("failure_code") or 0),
+        follow_out_ok=bool(follow_out.get("ok")),
+    )
+
+    events = list(follow_out.get("events") or [])
+    fc = int(follow_out.get("failure_code") or 0)
+    ok = bool(follow_out.get("ok"))
+    _tap_ev_names = frozenset(
+        {"follow_tap_sent", "follow_action_exact_follow_tap_sent"}
+    )
+    had_tap = any(
+        isinstance(e, (list, tuple)) and len(e) >= 1 and e[0] in _tap_ev_names
+        for e in events
+    )
+    verify_ev = any(
+        isinstance(e, (list, tuple))
+        and len(e) >= 1
+        and e[0]
+        in (
+            "follow_verify_success",
+            "follow_action_verified",
+            "follow_action_exact_follow_verified",
+        )
+        for e in events
+    )
+    hints = _post_follow_overlay_ui_hints(d)
+    mute_sheet_visible = bool(hints.get("likely_mute_toggle_sheet"))
+    mute_started = (
+        mute_sheet_visible
+        or bool((mute_phase_result or {}).get("mute_started"))
+        or bool(follow_out.get("mute_started"))
+    )
+    mute_success = bool((mute_phase_result or {}).get("ok")) if isinstance(
+        mute_phase_result, dict
+    ) else False
+    if (
+        not mute_success
+        and isinstance(mute_phase_result, dict)
+        and str(mute_phase_result.get("phase") or "") == "mute_toggles"
+    ):
+        mute_success = bool(mute_phase_result.get("ok"))
+
+    current_follow_state = _poll_follow_state_for_reconcile(d)
+    inferred = False
+    reason = "no_reconcile_match"
+
+    if ok:
+        inferred = True
+        reason = "follow_out_already_ok"
+    elif verify_ev:
+        inferred = True
+        reason = "follow_success_events_present"
+    elif current_follow_state in ("following", "requested"):
+        inferred = True
+        reason = "header_state_following_or_requested"
+    elif mute_success:
+        inferred = True
+        reason = "mute_phase_reported_success_implies_follow"
+    elif mute_started and had_tap and current_follow_state != "follow":
+        inferred = True
+        reason = "mute_started_after_follow_tap_non_invite_state"
+    elif had_tap and current_follow_state == "following":
+        inferred = True
+        reason = "tap_sent_and_following_header"
+
+    out = {
+        "follow_out_ok": ok,
+        "failure_code": fc,
+        "current_follow_state": current_follow_state,
+        "mute_started": mute_started,
+        "mute_success": mute_success,
+        "inferred_follow_success": bool(inferred),
+        "reason": reason,
+        "had_tap_sent": had_tap,
+        "verify_success_events": verify_ev,
+    }
+    log(
+        "info",
+        "visual_follow_post_action_reconcile_result",
+        visual_candidate_id=vcid,
+        **out,
+    )
+    return out
+
+
+def _post_mute_state_checkpoint(
+    d: u2.Device,
+    *,
+    pkg: str,
+    source_profile_username: str,
+    visual_candidate_id: str,
+) -> dict[str, Any]:
+    """
+    After mute toggles: dismiss residual sheets and observe state before return CT.
+    """
+    from navigation_engine import NavigationEngineState, observe_instagram_state
+
+    vcid = str(visual_candidate_id or "").strip()
+    src = str(source_profile_username or "").strip()
+    pkg = pkg or str(getattr(config, "INSTAGRAM_PACKAGE", "") or "")
+    log(
+        "info",
+        "post_mute_state_checkpoint_started",
+        visual_candidate_id=vcid,
+        source_profile_username=src,
+    )
+    closed = 0
+    last_err = ""
+    for attempt in range(1, 5):
+        hints = _post_follow_overlay_ui_hints(d)
+        if not hints.get("likely_mute_toggle_sheet"):
+            break
+        try:
+            d.press("back")
+            time.sleep(0.38)
+            closed += 1
+            log(
+                "info",
+                "post_mute_overlay_closed",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                attempt=attempt,
+            )
+        except Exception as e:
+            last_err = str(e)
+            log(
+                "warning",
+                "post_mute_overlay_close_failed",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                attempt=attempt,
+                error=last_err,
+            )
+            break
+    nav_obs: dict[str, Any] = {}
+    try:
+        det_ck = detect_followers_list_screen(d, source_profile_username=src)
+    except Exception:
+        det_ck = {}
+    try:
+        nav_obs = observe_instagram_state(
+            d,
+            expected_package=pkg,
+            last_known_state=NavigationEngineState.CANDIDATE_PROFILE.value,
+            context={
+                "phase": "post_mute_checkpoint",
+                "visual_candidate_id": vcid,
+                "source_profile_username": src,
+                "det": det_ck,
+                "disable_followers_visual_fallback": True,
+                "expected_state": "CANDIDATE_PROFILE",
+            },
+        )
+    except Exception as e:
+        nav_obs = {"state": "UNKNOWN", "confidence": 0.0, "reason": str(e)}
+    still_sheet = bool(_post_follow_overlay_ui_hints(d).get("likely_mute_toggle_sheet"))
+    log(
+        "info",
+        "post_mute_state_checkpoint_result",
+        visual_candidate_id=vcid,
+        source_profile_username=src,
+        overlay_back_presses=closed,
+        navigation_state=str(nav_obs.get("state") or ""),
+        navigation_confidence=float(nav_obs.get("confidence") or 0.0),
+        mute_sheet_still_visible=still_sheet,
+    )
+    return {
+        "ok": not still_sheet,
+        "overlay_presses": closed,
+        "navigation_observed": nav_obs,
+        "mute_sheet_still_visible": still_sheet,
+    }
+
+
+# --- Post-follow CT return: drift-safe recovery (no media taps, no exploratory swipes) ---
+
+_POST_FOLLOW_DRIFT_GUESS_SUBSTR: tuple[str, ...] = (
+    "story",
+    "stories",
+    "reel",
+    "comment",
+    "composer",
+    "message",
+    "direct",
+    "inbox",
+    "post_view",
+    "media",
+    "viewer",
+    "permalink",
+    "share",
+    "dm",
+    "thread",
+    "reply",
+    "feed",
+    "explore",
+)
+_POST_FOLLOW_DRIFT_TEXT_SUBSTR: tuple[str, ...] = (
+    "send message",
+    "send a message",
+    "message…",
+    "write a message",
+    "add a comment",
+    "post a comment",
+    "view comments",
+    "comment as",
+    "your story",
+    "liked a story",
+    "reacted to",
+    "new direct message",
+    "direct message",
+    "write a comment",
+    "reply to",
+    "story reactions",
+)
+
+
+def _post_follow_return_ct_sample_visible_texts(
+    d: u2.Device, *, max_items: int = 28, max_len: int = 72
+) -> list[str]:
+    out: list[str] = []
+    try:
+        for el in d(className="android.widget.TextView").all():
+            try:
+                t = (el.info.get("text") or "").strip()
+                if len(t) > 1:
+                    out.append(t[:max_len])
+                if len(out) >= max_items:
+                    break
+            except Exception:
+                continue
+    except Exception:
+        return out
+    return out
+
+
+def _post_follow_return_ct_drift_surface_reasons(
+    *,
+    nav: dict[str, Any],
+    last_det: dict[str, Any],
+    ok_list_confirmed: bool,
+    texts_sample: list[str],
+) -> list[str]:
+    """Return human-readable drift reasons; empty means no dangerous surface for this guard."""
+    from navigation_engine import NavigationEngineState
+
+    if ok_list_confirmed:
+        return []
+
+    reasons: list[str] = []
+    st = str(nav.get("state") or "")
+    cf = float(nav.get("confidence") or 0.0)
+    guess_blob = " ".join(
+        [
+            str(last_det.get("current_screen_guess") or ""),
+            str(nav.get("xml_guess") or ""),
+        ]
+    ).lower()
+    texts_blob = " ".join(texts_sample).lower()
+
+    if st == NavigationEngineState.SEARCH.value:
+        reasons.append("navigation_search")
+    if st == NavigationEngineState.SEARCH_RESULTS.value:
+        reasons.append("navigation_search_results")
+    if st == NavigationEngineState.UNKNOWN.value and cf < 0.35:
+        reasons.append("navigation_unknown_low_confidence")
+
+    for frag in _POST_FOLLOW_DRIFT_GUESS_SUBSTR:
+        if frag in guess_blob:
+            reasons.append(f"current_screen_guess_or_xml:{frag}")
+            break
+    for frag in _POST_FOLLOW_DRIFT_TEXT_SUBSTR:
+        if frag in texts_blob:
+            reasons.append(f"visible_text:{frag}")
+            break
+
+    return reasons
+
+
+def post_follow_controlled_return_to_followers_list(
+    d: u2.Device,
+    *,
+    pkg: str,
+    source_profile_username: str,
+    follower_username: str,
+    visual_candidate_id: str,
+    det: dict[str, Any] | None,
+    max_rounds: int = 4,
+    compact_after_follow_verified_mute: bool = False,
+    compact_reason: str | None = None,
+) -> tuple[bool, str, str | None]:
+    """
+    Return to the CT followers list after follow / mute.
+
+    Safety: no taps on feed/media/stories, comment threads, or message composers; no swipes
+    or exploratory navigation while recovery is uncertain. Drift surfaces get at most one
+    controlled ``back`` plus re-observe before abort.
+
+    When ``compact_after_follow_verified_mute`` is True (follow vérifié + candidat visuel),
+    the return uses a **strict** path: observe → liste CT confirmée, sinon **un** ``back``
+    sûr → ré-observation → liste ou abort compact (pas de ``return_to_followers_list`` multi
+    backs, pas de hierarchy refresh / reopen profile). Un profil PROFILE « étranger »
+    (handle barre ≠ source) déclenche toujours au plus un ``back`` puis
+    ``fast_abort_foreign_profile`` si la liste CT n’est pas confirmée.
+    """
+    from navigation_engine import NavigationEngineState, observe_instagram_state
+
+    pkg = pkg or str(getattr(config, "INSTAGRAM_PACKAGE", "") or "")
+    vcid = str(visual_candidate_id or "").strip()
+    src = str(source_profile_username or "").strip()
+    cand = str(follower_username or "").strip()
+    compact = bool(compact_after_follow_verified_mute)
+    eff_max_rounds = 1 if compact else max(1, int(max_rounds))
+    drift_max = int(
+        getattr(config, "POST_FOLLOW_RETURN_CT_DRIFT_ABORT_STREAK", 4) or 4
+    )
+    if compact:
+        drift_max = 1
+    drift_streak = 0
+    budget_s = float(
+        getattr(config, "POST_FOLLOW_RETURN_CT_ROUND_BUDGET_S", 10.0) or 10.0
+    )
+    budget_s = max(8.0, min(12.0, budget_s))
+    if compact:
+        budget_s = min(budget_s, 5.0)
+    allow_reopen = bool(
+        getattr(config, "POST_FOLLOW_RETURN_CT_ALLOW_HIERARCHY_PROFILE_REOPEN", False)
+    )
+    if compact:
+        allow_reopen = False
+    back_max = max(
+        0,
+        int(getattr(config, "POST_FOLLOW_RETURN_CT_BACK_MAX_RETRIES", 1) or 1),
+    )
+
+    def _list_confirmed() -> tuple[bool, dict[str, Any]]:
+        try:
+            det_l = detect_followers_list_screen(
+                d, source_profile_username=src
+            )
+        except Exception:
+            det_l = {}
+        is_list = bool(det_l.get("is_followers_list"))
+        try:
+            ct_ok = verify_followers_list_surface_is_ct_account(
+                d,
+                source_profile_username=src,
+                follower_candidate_username=cand or None,
+            )
+        except Exception:
+            ct_ok = is_list
+        return bool(is_list and ct_ok), det_l
+
+    def _over_budget(round_t0: float) -> bool:
+        return (time.monotonic() - round_t0) >= budget_s
+
+    def _landing_ok(nav2: dict[str, Any]) -> bool:
+        ok_l, _d = _list_confirmed()
+        if ok_l:
+            return True
+        st2 = str(nav2.get("state") or "")
+        if st2 in (
+            NavigationEngineState.CANDIDATE_PROFILE.value,
+            NavigationEngineState.PRIVATE_PROFILE.value,
+            NavigationEngineState.MUTE_SHEET.value,
+            NavigationEngineState.FOLLOWERS_LIST.value,
+        ):
+            return True
+        if st2 == NavigationEngineState.PROFILE.value:
+            try:
+                return bool(verify_profile(d, src))
+            except Exception:
+                return False
+        return False
+
+    ok0, det0 = _list_confirmed()
+    if ok0:
+        log(
+            "info",
+            "post_follow_return_ct_visual_confirmed",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            attempt=0,
+            note="already_on_confirmed_followers_list",
+            action_bar_title=str(det0.get("action_bar_title") or "")[:120],
+        )
+        return True, "already_on_followers_list", None
+
+    last_det: dict[str, Any] = dict(det) if isinstance(det, dict) else {}
+    how_last = ""
+
+    if compact:
+        req_mr = max(1, int(max_rounds))
+        if req_mr > 1 or eff_max_rounds != 1:
+            log(
+                "warning",
+                "post_follow_return_ct_compact_contract_violation",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                requested_max_rounds=req_mr,
+                effective_max_rounds=int(eff_max_rounds),
+                compact_reason=str(compact_reason or ""),
+            )
+            return (
+                False,
+                "compact_abort_contract_violation",
+                "post_follow_return_ct_compact_contract_violation",
+            )
+
+        round_t0 = time.monotonic()
+        log(
+            "info",
+            "post_follow_return_ct_compact_mode_enabled",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            compact_reason=str(compact_reason or ""),
+            round_budget_s=round(budget_s, 2),
+            effective_max_rounds=1,
+        )
+        round_idx = 1
+        log(
+            "info",
+            "post_follow_return_ct_attempt",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            attempt=round_idx,
+            max_rounds=1,
+            round_budget_s=round(budget_s, 2),
+            compact_after_follow_verified_mute=True,
+        )
+        try:
+            last_det = detect_followers_list_screen(d, source_profile_username=src)
+        except Exception:
+            last_det = {}
+        nav_ctx: dict[str, Any] = {
+            "phase": "post_follow_return_compact",
+            "visual_candidate_id": vcid,
+            "source_profile_username": src,
+            "det": last_det,
+            "disable_followers_visual_fallback": False,
+        }
+        try:
+            nav = observe_instagram_state(
+                d,
+                expected_package=pkg,
+                last_known_state=NavigationEngineState.CANDIDATE_PROFILE.value,
+                context=nav_ctx,
+            )
+        except Exception as e:
+            nav = {"state": "UNKNOWN", "confidence": 0.0, "reason": str(e)}
+        log(
+            "info",
+            "post_follow_return_ct_state_observed",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            attempt=round_idx,
+            observe_sequence="initial",
+            navigation_state=str(nav.get("state") or ""),
+            navigation_confidence=float(nav.get("confidence") or 0.0),
+            navigation_reason=str(nav.get("reason") or ""),
+            xml_guess=str(nav.get("xml_guess") or ""),
+        )
+
+        ok_list_now, det_now = _list_confirmed()
+        if ok_list_now:
+            log(
+                "info",
+                "post_follow_return_ct_visual_confirmed",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                attempt=round_idx,
+                how="compact_initial_list_confirmed",
+                action_bar_title=str(det_now.get("action_bar_title") or "")[:120],
+            )
+            return True, "compact_initial_list_confirmed", None
+
+        st_nav = str(nav.get("state") or "")
+        cf_nav = float(nav.get("confidence") or 0.0)
+        ab_raw = str(last_det.get("action_bar_title") or "").strip()
+        ab_n = _normalize_handle(ab_raw) if ab_raw else ""
+        src_n = _normalize_handle(src)
+        foreign_profile = (
+            st_nav == NavigationEngineState.PROFILE.value
+            and bool(ab_n)
+            and ab_n != src_n
+            and not ok_list_now
+        )
+        if foreign_profile:
+            log(
+                "warning",
+                "post_follow_return_ct_profile_not_source_detected",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                action_bar_title=ab_raw[:120],
+                navigation_state=st_nav,
+                navigation_confidence=cf_nav,
+                xml_guess=str(nav.get("xml_guess") or ""),
+            )
+            if verify_app_foreground(d, pkg):
+                try:
+                    d.press("back")
+                    time.sleep(0.42)
+                except Exception:
+                    pass
+                try:
+                    last_det = detect_followers_list_screen(
+                        d, source_profile_username=src
+                    )
+                except Exception:
+                    last_det = {}
+                ok_fb, det_fb = _list_confirmed()
+                if ok_fb:
+                    log(
+                        "info",
+                        "post_follow_return_ct_visual_confirmed",
+                        visual_candidate_id=vcid,
+                        source_profile_username=src,
+                        attempt=round_idx,
+                        how="foreign_profile_one_safe_back_then_list",
+                        action_bar_title=str(
+                            det_fb.get("action_bar_title") or ""
+                        )[:120],
+                    )
+                    return True, "foreign_profile_one_safe_back_then_list", None
+            log(
+                "warning",
+                "post_follow_return_ct_fast_abort_after_foreign_profile",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                attempt=round_idx,
+                action_bar_title=ab_raw[:120],
+                navigation_state=st_nav,
+                xml_guess=str(nav.get("xml_guess") or ""),
+            )
+            return (
+                False,
+                "fast_abort_foreign_profile_after_post_follow",
+                "post_follow_return_ct_fast_abort_after_foreign_profile",
+            )
+
+        if _over_budget(round_t0):
+            log(
+                "warning",
+                "post_follow_return_ct_compact_abort_no_list_confirmed",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                phase="before_compact_safe_back",
+                budget_s=budget_s,
+            )
+            return (
+                False,
+                "compact_abort_no_list_confirmed",
+                "post_follow_return_ct_compact_abort_no_list_confirmed",
+            )
+
+        log(
+            "info",
+            "post_follow_return_ct_compact_safe_back_only",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            attempt=round_idx,
+        )
+        if not verify_app_foreground(d, pkg):
+            log(
+                "warning",
+                "post_follow_return_ct_compact_abort_no_list_confirmed",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                attempt=round_idx,
+                skip_reason="not_instagram_foreground_safe",
+            )
+            return (
+                False,
+                "compact_abort_no_list_confirmed",
+                "post_follow_return_ct_compact_abort_no_list_confirmed",
+            )
+        try:
+            d.press("back")
+            time.sleep(0.38)
+        except Exception as e:
+            log(
+                "warning",
+                "post_follow_return_ct_compact_abort_no_list_confirmed",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                attempt=round_idx,
+                back_error=str(e),
+            )
+            return (
+                False,
+                "compact_abort_no_list_confirmed",
+                "post_follow_return_ct_compact_abort_no_list_confirmed",
+            )
+
+        try:
+            last_det = detect_followers_list_screen(d, source_profile_username=src)
+        except Exception:
+            last_det = {}
+        nav_ctx2 = dict(nav_ctx)
+        nav_ctx2["det"] = last_det
+        try:
+            nav2 = observe_instagram_state(
+                d,
+                expected_package=pkg,
+                last_known_state=NavigationEngineState.CANDIDATE_PROFILE.value,
+                context=nav_ctx2,
+            )
+        except Exception as e2:
+            nav2 = {"state": "UNKNOWN", "confidence": 0.0, "reason": str(e2)}
+        log(
+            "info",
+            "post_follow_return_ct_state_observed",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            attempt=round_idx,
+            observe_sequence="after_safe_back",
+            navigation_state=str(nav2.get("state") or ""),
+            navigation_confidence=float(nav2.get("confidence") or 0.0),
+            navigation_reason=str(nav2.get("reason") or ""),
+            xml_guess=str(nav2.get("xml_guess") or ""),
+        )
+
+        ok_after, det_after = _list_confirmed()
+        if ok_after:
+            log(
+                "info",
+                "post_follow_return_ct_visual_confirmed",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                attempt=round_idx,
+                how="compact_safe_back_then_list",
+                action_bar_title=str(det_after.get("action_bar_title") or "")[:120],
+            )
+            return True, "compact_safe_back_then_list", None
+
+        log(
+            "warning",
+            "post_follow_return_ct_compact_abort_no_list_confirmed",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            attempt=round_idx,
+            navigation_state_after=str(nav2.get("state") or ""),
+        )
+        return (
+            False,
+            "compact_abort_no_list_confirmed",
+            "post_follow_return_ct_compact_abort_no_list_confirmed",
+        )
+
+    for round_idx in range(1, eff_max_rounds + 1):
+        round_t0 = time.monotonic()
+        log(
+            "info",
+            "post_follow_return_ct_attempt",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            attempt=round_idx,
+            max_rounds=int(eff_max_rounds),
+            round_budget_s=round(budget_s, 2),
+            compact_after_follow_verified_mute=compact,
+        )
+        try:
+            last_det = detect_followers_list_screen(d, source_profile_username=src)
+        except Exception:
+            last_det = {}
+
+        nav_ctx: dict[str, Any] = {
+            "phase": "post_follow_return",
+            "visual_candidate_id": vcid,
+            "source_profile_username": src,
+            "det": last_det,
+            "disable_followers_visual_fallback": False,
+        }
+        try:
+            nav = observe_instagram_state(
+                d,
+                expected_package=pkg,
+                last_known_state=NavigationEngineState.CANDIDATE_PROFILE.value,
+                context=nav_ctx,
+            )
+        except Exception as e:
+            nav = {"state": "UNKNOWN", "confidence": 0.0, "reason": str(e)}
+        log(
+            "info",
+            "post_follow_return_ct_state_observed",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            attempt=round_idx,
+            navigation_state=str(nav.get("state") or ""),
+            navigation_confidence=float(nav.get("confidence") or 0.0),
+            navigation_reason=str(nav.get("reason") or ""),
+            xml_guess=str(nav.get("xml_guess") or ""),
+        )
+
+        ok_list_now, det_now = _list_confirmed()
+        if ok_list_now:
+            drift_streak = 0
+            log(
+                "info",
+                "post_follow_return_ct_visual_confirmed",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                attempt=round_idx,
+                how="confirmed_list_after_observe",
+                action_bar_title=str(det_now.get("action_bar_title") or "")[:120],
+            )
+            return True, "confirmed_list_after_observe", None
+
+        st_nav = str(nav.get("state") or "")
+        cf_nav = float(nav.get("confidence") or 0.0)
+
+        vis_sample = _post_follow_return_ct_sample_visible_texts(d)
+        drift_reasons = _post_follow_return_ct_drift_surface_reasons(
+            nav=nav,
+            last_det=last_det,
+            ok_list_confirmed=False,
+            texts_sample=vis_sample,
+        )
+
+        if drift_reasons:
+            log(
+                "warning",
+                "post_follow_return_ct_drift_surface_detected",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                attempt=round_idx,
+                navigation_state=st_nav,
+                navigation_confidence=cf_nav,
+                xml_guess=str(nav.get("xml_guess") or ""),
+                current_screen_guess=str(last_det.get("current_screen_guess") or ""),
+                action_bar_title=str(last_det.get("action_bar_title") or "")[:120],
+                visible_texts_sample=vis_sample[:16],
+                drift_reasons=drift_reasons,
+            )
+            allow_back = verify_app_foreground(d, pkg)
+            if allow_back:
+                log(
+                    "info",
+                    "post_follow_return_ct_safe_back_started",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    attempt=round_idx,
+                    max_presses=1,
+                )
+                back_ok = False
+                back_err = ""
+                try:
+                    d.press("back")
+                    time.sleep(0.42)
+                    back_ok = True
+                except Exception as e:
+                    back_err = str(e)
+                try:
+                    last_det = detect_followers_list_screen(
+                        d, source_profile_username=src
+                    )
+                except Exception:
+                    last_det = {}
+                nav_ctx2 = dict(nav_ctx)
+                nav_ctx2["det"] = last_det
+                try:
+                    nav2 = observe_instagram_state(
+                        d,
+                        expected_package=pkg,
+                        last_known_state=NavigationEngineState.CANDIDATE_PROFILE.value,
+                        context=nav_ctx2,
+                    )
+                except Exception as e2:
+                    nav2 = {"state": "UNKNOWN", "confidence": 0.0, "reason": str(e2)}
+                ok_after, det_after = _list_confirmed()
+                landed = ok_after or _landing_ok(nav2)
+                log(
+                    "info",
+                    "post_follow_return_ct_safe_back_result",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    attempt=round_idx,
+                    back_sent=bool(back_ok),
+                    back_error=back_err or None,
+                    list_confirmed_after=bool(ok_after),
+                    navigation_state_after=str(nav2.get("state") or ""),
+                    landed_acceptable=bool(landed),
+                )
+                if ok_after:
+                    log(
+                        "info",
+                        "post_follow_return_ct_visual_confirmed",
+                        visual_candidate_id=vcid,
+                        source_profile_username=src,
+                        attempt=round_idx,
+                        how="safe_back_then_list",
+                        action_bar_title=str(det_after.get("action_bar_title") or "")[:120],
+                    )
+                    return True, "safe_back_then_list", None
+                if landed:
+                    drift_streak = 0
+                    continue
+            else:
+                log(
+                    "info",
+                    "post_follow_return_ct_safe_back_result",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    attempt=round_idx,
+                    back_sent=False,
+                    skipped_reason="not_instagram_foreground_safe",
+                )
+            log(
+                "warning",
+                "post_follow_return_ct_aborted_to_prevent_drift",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                attempt=round_idx,
+                mode="drift_surface",
+                navigation_state=st_nav,
+                drift_reasons=drift_reasons,
+            )
+            return (
+                False,
+                "aborted_drift_prevention",
+                "post_follow_return_ct_aborted_to_prevent_drift",
+            )
+
+        bad_drift = (
+            (st_nav == NavigationEngineState.UNKNOWN.value and cf_nav < 0.42)
+            or st_nav
+            in (
+                NavigationEngineState.LAUNCHER_WRONG_SURFACE.value,
+                NavigationEngineState.INSTAGRAM_CLOSED.value,
+                NavigationEngineState.SEARCH.value,
+                NavigationEngineState.SEARCH_RESULTS.value,
+            )
+        )
+        if bad_drift:
+            drift_streak += 1
+        else:
+            drift_streak = 0
+        if drift_streak >= max(1, drift_max):
+            log(
+                "warning",
+                "post_follow_return_ct_aborted_to_prevent_drift",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                attempt=round_idx,
+                drift_streak=drift_streak,
+                drift_max=drift_max,
+                navigation_state=st_nav,
+                navigation_confidence=cf_nav,
+                mode="streak_guard",
+            )
+            return (
+                False,
+                "aborted_drift_prevention",
+                "post_follow_return_ct_aborted_to_prevent_drift",
+            )
+
+        if _over_budget(round_t0):
+            log(
+                "warning",
+                "post_follow_return_ct_round_budget_exceeded",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                attempt=round_idx,
+                budget_s=budget_s,
+            )
+            return (
+                False,
+                "round_budget_exceeded",
+                "post_follow_return_ct_round_budget_exceeded",
+            )
+
+        if bool(last_det.get("is_followers_list")):
+            try:
+                ct_only = verify_followers_list_surface_is_ct_account(
+                    d,
+                    source_profile_username=src,
+                    follower_candidate_username=cand or None,
+                )
+            except Exception:
+                ct_only = False
+            if not ct_only:
+                log(
+                    "info",
+                    "post_follow_return_ct_recovery_attempt",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    attempt=round_idx,
+                    kind="wrong_profile_followers_surface",
+                )
+            else:
+                log(
+                    "info",
+                    "post_follow_return_ct_visual_confirmed",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    attempt=round_idx,
+                    how="detect_without_back",
+                    action_bar_title=str(last_det.get("action_bar_title") or "")[:120],
+                )
+                return True, "detect_without_back", None
+
+        if _post_follow_overlay_ui_hints(d).get("likely_mute_toggle_sheet"):
+            if _over_budget(round_t0):
+                log(
+                    "warning",
+                    "post_follow_return_ct_round_budget_exceeded",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    attempt=round_idx,
+                    budget_s=budget_s,
+                    phase="before_mute_sheet_dismiss",
+                )
+                return (
+                    False,
+                    "round_budget_exceeded",
+                    "post_follow_return_ct_round_budget_exceeded",
+                )
+            try:
+                if d(text="Posts").exists(timeout=0.07) and d(text="Stories").exists(
+                    timeout=0.05
+                ):
+                    d.press("back")
+                    time.sleep(0.42)
+                    log(
+                        "info",
+                        "post_follow_return_ct_recovery_attempt",
+                        visual_candidate_id=vcid,
+                        source_profile_username=src,
+                        attempt=round_idx,
+                        kind="dismiss_mute_sheet_back",
+                    )
+            except Exception:
+                pass
+
+        if _over_budget(round_t0):
+            log(
+                "warning",
+                "post_follow_return_ct_round_budget_exceeded",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                attempt=round_idx,
+                budget_s=budget_s,
+                phase="before_return_to_followers_list",
+            )
+            return (
+                False,
+                "round_budget_exceeded",
+                "post_follow_return_ct_round_budget_exceeded",
+            )
+
+        try:
+            ok_r, how_last = return_to_followers_list(
+                d,
+                src,
+                pkg,
+                max_retries=back_max,
+            )
+        except Exception as e:
+            ok_r, how_last = False, f"exception:{e}"
+
+        ok1, det1 = _list_confirmed()
+        if ok_r and ok1:
+            log(
+                "info",
+                "post_follow_return_ct_visual_confirmed",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                attempt=round_idx,
+                how=str(how_last or ""),
+                action_bar_title=str(det1.get("action_bar_title") or "")[:120],
+            )
+            return True, str(how_last or "back"), None
+        if ok1:
+            log(
+                "info",
+                "post_follow_return_ct_visual_confirmed",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                attempt=round_idx,
+                how=str(how_last or "ambiguous_nav"),
+            )
+            return True, str(how_last or "back"), None
+
+        if allow_reopen and not _over_budget(round_t0):
+            log(
+                "info",
+                "post_follow_return_ct_recovery_attempt",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                attempt=round_idx,
+                kind="hierarchy_refresh_and_reopen_list",
+                return_ok=bool(ok_r),
+                how=str(how_last or ""),
+            )
+            try:
+                followers_force_hierarchy_refresh(d, src or None)
+            except Exception:
+                pass
+            time.sleep(0.2)
+            try:
+                if verify_profile(d, src):
+                    ok_re, _meta = open_followers_list_from_profile(
+                        d, src, pkg, profile_verified=True
+                    )
+                    if ok_re:
+                        ok2, det2 = _list_confirmed()
+                        if ok2:
+                            log(
+                                "info",
+                                "post_follow_return_ct_visual_confirmed",
+                                visual_candidate_id=vcid,
+                                source_profile_username=src,
+                                attempt=round_idx,
+                                how="reopen_from_source_profile",
+                            )
+                            return True, "reopen_from_source_profile", None
+            except Exception:
+                pass
+
+    fail_reason = "post_follow_return_recovery_exhausted"
+    try:
+        nav_final = observe_instagram_state(
+            d,
+            expected_package=pkg,
+            last_known_state=NavigationEngineState.CANDIDATE_PROFILE.value,
+            context={
+                "phase": "post_follow_return_classify",
+                "visual_candidate_id": vcid,
+                "source_profile_username": src,
+                "det": last_det,
+                "disable_followers_visual_fallback": False,
+            },
+        )
+        st = str(nav_final.get("state") or "")
+        cf = float(nav_final.get("confidence") or 0.0)
+        if st == NavigationEngineState.UNKNOWN.value and cf < 0.42:
+            fail_reason = "post_follow_return_lost_state"
+        is_list = bool(last_det.get("is_followers_list"))
+        if is_list:
+            try:
+                ct_bad = not verify_followers_list_surface_is_ct_account(
+                    d,
+                    source_profile_username=src,
+                    follower_candidate_username=cand or None,
+                )
+            except Exception:
+                ct_bad = True
+            if ct_bad:
+                fail_reason = "post_follow_return_wrong_profile"
+        elif st != NavigationEngineState.FOLLOWERS_LIST.value:
+            fail_reason = "post_follow_return_followers_not_confirmed"
+        if not str(how_last or "").strip() and not is_list:
+            fail_reason = "post_follow_return_back_stack_failed"
+    except Exception:
+        pass
+
+    return False, str(how_last or "failed"), fail_reason
+
+
+# --- Mute Engine V2: bounded, non-recovery mute after verified follow (best-effort) ---
+
+# Nominal post-follow window (observe + overlay + fingerprint); Following CTA search needs extra time.
+_MUTE_ENGINE_V2_BUDGET_S = 4.0
+MIN_FOLLOWING_CTA_SEARCH_BUDGET_S = 1.5
+# Reserved tail for mute toggle sheet: label wait + tap + short verify per axis (Posts + Stories).
+MIN_MUTE_TOGGLE_STAGE_BUDGET_S = 2.0
+_MUTE_ENGINE_V2_EFFECTIVE_TOTAL_S = (
+    _MUTE_ENGINE_V2_BUDGET_S
+    + MIN_FOLLOWING_CTA_SEARCH_BUDGET_S
+    + MIN_MUTE_TOGGLE_STAGE_BUDGET_S
+)
+
+# Mute v2: post-tap settle before Switch.checked polling; verify window (replaces old 0.55s hard cap).
+_MUTE_V2_TOGGLE_POST_TAP_SETTLE_S = 0.12
+_MUTE_V2_TOGGLE_VERIFY_MIN_S = 0.35
+_MUTE_V2_TOGGLE_VERIFY_MAX_S = 1.4
+
+_MUTE_V2_REJECT_SUBSTR: tuple[str, ...] = (
+    "contact",
+    "message",
+    "suggested",
+    "invite",
+    "follow back",
+    "add friend",
+    "composer",
+    "direct",
+    "thread",
+)
+
+_MUTE_V2_FOLLOWING_STATE_LABELS: tuple[str, ...] = (
+    "Following",
+    "Requested",
+    "Suivi(e)",
+    "Suivi",
+    "Abonné(e)",
+    "Abonné",
+    "Siguiendo",
+    "Gefolgt",
+    "Demandé",
+    "Demande envoyée",
+)
+
+
+def _mute_engine_v2_remaining_s(t0: float) -> float:
+    return max(0.0, _MUTE_ENGINE_V2_EFFECTIVE_TOTAL_S - (time.perf_counter() - t0))
+
+
+def _mute_engine_v2_map_toggle_rsn(rsn: str) -> str:
+    r = str(rsn or "").strip()
+    if r == "budget":
+        return "budget"
+    if r == "toggle_label_not_found":
+        return "label_missing"
+    if r.startswith("tap_failed"):
+        return "tap_failed"
+    if r in ("", "skipped"):
+        return "skipped"
+    return r or "unknown"
+
+
+def _mute_engine_v2_classify_both_toggles_failure(
+    *,
+    want_posts: bool,
+    want_stories: bool,
+    posts_ok: bool,
+    stories_ok: bool,
+    tapped_p: bool,
+    tapped_s: bool,
+    already_p: bool,
+    already_s: bool,
+    rsn_p: str,
+    rsn_s: str,
+) -> tuple[str, str]:
+    """
+    Returns (abort_reason, failure_reason) for mute_engine_v2 when both axes were required
+    and the combined outcome is failure (no partial success path).
+    """
+    mp = _mute_engine_v2_map_toggle_rsn(rsn_p)
+    ms = _mute_engine_v2_map_toggle_rsn(rsn_s)
+    if mp == "budget" or ms == "budget":
+        return "mute_toggle_budget_starved", "mute_toggle_budget_starved"
+    if mp == "label_missing" or ms == "label_missing":
+        return "mute_toggle_label_missing", "mute_toggle_label_missing"
+    vfail_p = bool(want_posts and tapped_p and not already_p and not posts_ok)
+    vfail_s = bool(want_stories and tapped_s and not already_s and not stories_ok)
+    if vfail_p or vfail_s:
+        return "mute_toggle_verify_failed", "mute_toggle_verify_failed"
+    if mp == "tap_failed" or ms == "tap_failed":
+        return "mute_toggle_tap_failed", "mute_toggle_tap_failed"
+    return "mute_toggle_failed", "mute_toggle_failed"
+
+
+def _mute_engine_v2_classify_single_toggle_failure(
+    *,
+    want_posts: bool,
+    want_stories: bool,
+    posts_ok: bool,
+    stories_ok: bool,
+    tapped_p: bool,
+    tapped_s: bool,
+    already_p: bool,
+    already_s: bool,
+    rsn_p: str,
+    rsn_s: str,
+) -> tuple[str, str]:
+    if want_posts and not want_stories:
+        m = _mute_engine_v2_map_toggle_rsn(rsn_p)
+        vfail = bool(tapped_p and not already_p and not posts_ok)
+    elif want_stories and not want_posts:
+        m = _mute_engine_v2_map_toggle_rsn(rsn_s)
+        vfail = bool(tapped_s and not already_s and not stories_ok)
+    else:
+        return "mute_toggle_failed", "mute_toggle_failed"
+    if m == "budget":
+        return "mute_toggle_budget_starved", "mute_toggle_budget_starved"
+    if m == "label_missing":
+        return "mute_toggle_label_missing", "mute_toggle_label_missing"
+    if vfail:
+        return "mute_toggle_verify_failed", "mute_toggle_verify_failed"
+    if m == "tap_failed":
+        return "mute_toggle_tap_failed", "mute_toggle_tap_failed"
+    return "mute_toggle_failed", "mute_toggle_failed"
+
+
+def _mute_engine_v2_text_rejected(txt: str) -> bool:
+    t = (txt or "").strip().lower()
+    if not t:
+        return True
+    for sub in _MUTE_V2_REJECT_SUBSTR:
+        if sub in t:
+            return True
+    if t in ("follow", "suivre", "seguir", "folgen", "abonar", "folgen"):
+        return True
+    return False
+
+
+def _mute_engine_v2_following_header_text_ok(txt: str) -> bool:
+    """True for profile header states: Following / Requested / localized, not Follow / Contact."""
+    t = (txt or "").strip()
+    if not t:
+        return False
+    low = t.lower()
+    if "contact" in low or ("message" in low and "requested" not in low):
+        return False
+    if "follow back" in low or low in ("follow", "follow "):
+        return False
+    if low.startswith("follow ") and not low.startswith("following"):
+        return False
+    if _mute_engine_v2_text_rejected(t):
+        return False
+    for lab in _MUTE_V2_FOLLOWING_STATE_LABELS:
+        ll = lab.lower()
+        if low == ll or low.startswith(ll) or low.startswith(ll + " "):
+            return True
+    return False
+
+
+def _mute_engine_v2_pick_following_cta(
+    d: u2.Device,
+    *,
+    ww: int,
+    wh: int,
+    t0: float,
+    visual_candidate_id: str = "",
+    source_profile_username: str = "",
+) -> tuple[Any | None, str]:
+    rem = _mute_engine_v2_remaining_s(t0)
+    vcid = str(visual_candidate_id or "").strip()
+    src = str(source_profile_username or "").strip()
+    base_log: dict[str, Any] = {
+        "visual_candidate_id": vcid,
+        "source_profile_username": src,
+        "window_w": int(ww),
+        "window_h": int(wh),
+        "budget_remaining_s": round(float(rem), 4),
+    }
+    if rem <= 0.1:
+        try:
+            log(
+                "warning",
+                "mute_engine_v2_following_button_search_budget_starved",
+                **base_log,
+            )
+        except Exception:
+            pass
+    log("info", "mute_engine_v2_following_button_search_started", **base_log)
+    ex_to = max(0.05, min(0.14, rem * 0.32))
+    y_header_max = int(wh * 0.52)
+    y_header_min = int(wh * 0.07)
+
+    def _element_passes(el: Any, *, pick_reason: str) -> tuple[Any | None, str]:
+        try:
+            raw_txt = str(el.info.get("text") or "").strip()
+            cd = str(el.info.get("contentDescription") or "").strip()
+            rid = str(el.info.get("resourceName") or el.info.get("resourceId") or "")
+            b = el.info.get("bounds") or {}
+        except Exception:
+            return None, ""
+        merged = raw_txt or cd
+        rl = rid.lower()
+        if "contact" in rl or "message" in rl or "invite" in rl:
+            log(
+                "info",
+                "mute_engine_v2_following_button_rejected",
+                **base_log,
+                reason="resource_id_blocked",
+                candidate_text=merged[:120],
+                resource_id=rid[:160],
+                pick_reason=pick_reason,
+            )
+            return None, ""
+        if not _mute_engine_v2_following_header_text_ok(merged):
+            log(
+                "info",
+                "mute_engine_v2_following_button_rejected",
+                **base_log,
+                reason="not_following_state_label",
+                candidate_text=merged[:120],
+                content_desc=cd[:120],
+                pick_reason=pick_reason,
+            )
+            return None, ""
+        try:
+            cy = (int(b.get("top", 0)) + int(b.get("bottom", 0))) // 2
+            rx = int(b.get("right", 0))
+        except Exception:
+            return None, ""
+        if cy < y_header_min or cy > y_header_max:
+            log(
+                "info",
+                "mute_engine_v2_following_button_rejected",
+                **base_log,
+                reason="y_outside_header_cta_band",
+                cy=int(cy),
+                pick_reason=pick_reason,
+            )
+            return None, ""
+        if rx < int(ww * 0.16):
+            log(
+                "info",
+                "mute_engine_v2_following_button_rejected",
+                **base_log,
+                reason="too_far_left",
+                pick_reason=pick_reason,
+            )
+            return None, ""
+        log(
+            "info",
+            "mute_engine_v2_following_button_candidate",
+            **base_log,
+            pick_reason=pick_reason,
+            candidate_text=merged[:120],
+            bounds={
+                "left": b.get("left"),
+                "top": b.get("top"),
+                "right": b.get("right"),
+                "bottom": b.get("bottom"),
+            },
+        )
+        return el, pick_reason
+
+    for lab in _MUTE_V2_FOLLOWING_STATE_LABELS:
+        if _mute_engine_v2_remaining_s(t0) < 0.05:
+            break
+        try:
+            el = d(text=lab)
+            if not el.exists(timeout=ex_to):
+                continue
+            try:
+                raw_txt = str(el.info.get("text") or "").strip()
+            except Exception:
+                raw_txt = lab
+            if raw_txt != lab and _normalize_handle(raw_txt) != _normalize_handle(lab):
+                if not _mute_engine_v2_following_header_text_ok(raw_txt):
+                    log(
+                        "info",
+                        "mute_engine_v2_following_button_rejected",
+                        **base_log,
+                        reason="exact_label_text_mismatch",
+                        candidate_text=raw_txt[:120],
+                        expected_label=lab,
+                        pick_reason=f"text_exact:{lab}",
+                    )
+                    continue
+            if _mute_engine_v2_text_rejected(raw_txt):
+                continue
+            picked, pr = _element_passes(el, pick_reason=f"text_exact:{lab}")
+            if picked is not None:
+                return picked, pr
+        except Exception:
+            continue
+
+    for probe_name, factory in (
+        ("textStartsWith_Following", lambda: d(textStartsWith="Following")),
+        ("textContains_Following", lambda: d(textContains="Following")),
+    ):
+        if _mute_engine_v2_remaining_s(t0) < 0.06:
+            break
+        try:
+            sel = factory()
+            if not sel.exists(timeout=ex_to):
+                continue
+            for el in sel.all()[:12]:
+                picked, pr = _element_passes(el, pick_reason=probe_name)
+                if picked is not None:
+                    return picked, pr
+        except Exception:
+            continue
+
+    try:
+        sel = d(descriptionContains="Following")
+        if sel.exists(timeout=max(0.05, ex_to * 0.9)):
+            for el in sel.all()[:8]:
+                picked, pr = _element_passes(el, pick_reason="descriptionContains:Following")
+                if picked is not None:
+                    return picked, pr
+    except Exception:
+        pass
+
+    try:
+        for el in d(classNameMatches=r".*(Button|TextView)", clickable=True).all()[:55]:
+            try:
+                raw_txt = str(el.info.get("text") or "").strip()
+                cd = str(el.info.get("contentDescription") or "").strip()
+                merged = raw_txt or cd
+            except Exception:
+                continue
+            if not merged or not _mute_engine_v2_following_header_text_ok(merged):
+                continue
+            picked, pr = _element_passes(el, pick_reason="clickable_header_band_scan")
+            if picked is not None:
+                return picked, pr
+    except Exception:
+        pass
+
+    log(
+        "warning",
+        "mute_engine_v2_following_button_rejected",
+        **base_log,
+        reason="exhausted_search_no_cta",
+    )
+    return None, ""
+
+
+_MUTE_V2_DANGEROUS_SCREEN_GUESS_FRAGMENTS: tuple[str, ...] = (
+    "story",
+    "reel",
+    "comment",
+    "composer",
+    "direct",
+    "feed",
+    "explore",
+    "inbox",
+)
+
+
+def _mute_engine_v2_build_lightweight_profile_det(
+    d: u2.Device,
+    *,
+    det_hint: dict[str, Any] | None,
+    pkg: str,
+) -> dict[str, Any]:
+    """Minimal ``det`` for mute V2 when follow state + title already prove target profile (skips heavy XML)."""
+    out: dict[str, Any] = {
+        "is_followers_list": False,
+        "strict_list_open": False,
+        "relaxed_list_open": False,
+        "action_bar_title": "",
+        "current_screen_guess": "likely_profile",
+        "profile_tabs_absent": False,
+        "candidate_username_count": 0,
+        "visible_header_texts": [],
+        "current_package": None,
+        "current_activity": None,
+        "current_package_expected": str(pkg or "").strip(),
+    }
+    hint = det_hint if isinstance(det_hint, dict) else {}
+    ab = str(hint.get("action_bar_title") or "").strip()
+    try:
+        cur = d.app_current() or {}
+        out["current_package"] = cur.get("package")
+        out["current_activity"] = cur.get("activity")
+    except Exception:
+        pass
+    try:
+        ab_el = d(resourceIdMatches=r".*:id/action_bar_title.*")
+        if ab_el.exists(timeout=0.11):
+            live = str(ab_el.get_text() or "").strip()
+            if live:
+                ab = live
+    except Exception:
+        pass
+    out["action_bar_title"] = ab
+    cg = str(hint.get("current_screen_guess") or "").strip()
+    if cg:
+        out["current_screen_guess"] = cg
+    return out
+
+
+def _mute_engine_v2_following_label_visible_quick(
+    d: u2.Device, *, timeout_s: float
+) -> bool:
+    wt = max(0.04, min(0.09, float(timeout_s)))
+    for lab in _MUTE_V2_FOLLOWING_STATE_LABELS:
+        try:
+            if d(text=lab).exists(timeout=wt):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _mute_engine_v2_keyboard_focus_edit_text(d: u2.Device, *, timeout_s: float) -> bool:
+    try:
+        wt = max(0.03, min(0.07, float(timeout_s)))
+        ed = d(className="android.widget.EditText", focused=True)
+        return bool(ed.exists(timeout=wt))
+    except Exception:
+        return False
+
+
+def _mute_engine_v2_truly_dangerous_surface(
+    d: u2.Device,
+    *,
+    pkg: str,
+    nav: dict[str, Any],
+    det: dict[str, Any],
+    fp: dict[str, Any] | None,
+    overlay: dict[str, Any],
+    remaining_s: float,
+) -> tuple[bool, str]:
+    """
+    Surfaces that must block mute regardless of inline "Suggested for you" on profile.
+    """
+    from navigation_engine import NavigationEngineState
+
+    if bool(overlay.get("likely_mute_toggle_sheet")):
+        return False, ""
+
+    rem = max(0.06, float(remaining_s))
+    st = str(nav.get("state") or "")
+
+    exp = str(pkg or "").strip()
+    try:
+        cur = d.app_current() or {}
+        fg = str(cur.get("package") or "")
+    except Exception:
+        fg = ""
+    if exp and fg and fg != exp:
+        return True, "wrong_foreground_package"
+
+    if st in (
+        NavigationEngineState.LAUNCHER_WRONG_SURFACE.value,
+        NavigationEngineState.INSTAGRAM_CLOSED.value,
+    ):
+        return True, f"bad_nav_state:{st}"
+
+    guess = str(det.get("current_screen_guess") or "").lower()
+    if guess:
+        for frag in _MUTE_V2_DANGEROUS_SCREEN_GUESS_FRAGMENTS:
+            if frag in guess:
+                return True, f"screen_guess_drift:{frag}"
+
+    if _mute_engine_v2_keyboard_focus_edit_text(d, timeout_s=min(0.07, rem * 0.12)):
+        return True, "keyboard_focus_edittext"
+
+    sc = str((fp or {}).get("screen_class") or "").strip().lower()
+    if sc in ("search_like", "followers_list", "followers_list_strong"):
+        return True, f"fingerprint_screen_class:{sc}"
+
+    return False, ""
+
+
+def _mute_engine_v2_resolve_effective_candidate_username(
+    *,
+    follower_username: str,
+    action_bar_title: str,
+    source_profile_username: str,
+    det_hint: dict[str, Any] | None,
+    visual_candidate_id: str,
+) -> tuple[str, str]:
+    """
+    Handle for the opened profile row. ``follower_username`` may be empty in visual mode;
+    fall back to action bar / hint / id-shaped handles.
+    """
+    fu = str(follower_username or "").strip()
+    if fu:
+        return fu, "follower_username"
+    ab = str(action_bar_title or "").strip()
+    src = str(source_profile_username or "").strip()
+    if ab and src and _normalize_handle(ab) != _normalize_handle(src):
+        return ab, "action_bar_title_fallback"
+    if ab and not src:
+        return ab, "action_bar_title_fallback"
+    hint = det_hint if isinstance(det_hint, dict) else {}
+    for key in (
+        "follower_username",
+        "candidate_username",
+        "visual_candidate_username",
+        "target_username",
+        "opened_profile_username",
+        "profile_username",
+    ):
+        v = str(hint.get(key) or "").strip()
+        if v and (not src or _normalize_handle(v) != _normalize_handle(src)):
+            return v, f"det_hint:{key}"
+    vcid = str(visual_candidate_id or "").strip()
+    if vcid and re.match(r"^[A-Za-z0-9._]{1,30}$", vcid):
+        if not src or _normalize_handle(vcid) != _normalize_handle(src):
+            return vcid, "visual_candidate_id"
+    return "", "unresolved"
+
+
+def _mute_engine_v2_surface_unstable(
+    d: u2.Device,
+    *,
+    nav: dict[str, Any],
+    overlay: dict[str, Any],
+    det: dict[str, Any],
+    fp: dict[str, Any] | None,
+    follower_username: str,
+    follow_state_after: str,
+    pkg: str,
+    budget_remaining_s: float,
+    visual_candidate_id: str = "",
+    source_profile_username: str = "",
+    det_hint: dict[str, Any] | None = None,
+    follow_header_snapshot: str = "",
+) -> tuple[bool, str]:
+    from navigation_engine import NavigationEngineState
+
+    st = str(nav.get("state") or "")
+    allowed = frozenset(
+        {
+            NavigationEngineState.PROFILE.value,
+            NavigationEngineState.CANDIDATE_PROFILE.value,
+            NavigationEngineState.PRIVATE_PROFILE.value,
+        }
+    )
+    if st not in allowed:
+        return True, f"navigation_not_profile:{st}"
+    ab = str(det.get("action_bar_title") or "").strip()
+    if not ab:
+        return True, "empty_action_bar_title"
+
+    rem_b = max(0.08, float(budget_remaining_s))
+    dangerous, dwhy = _mute_engine_v2_truly_dangerous_surface(
+        d,
+        pkg=pkg,
+        nav=nav,
+        det=det,
+        fp=fp,
+        overlay=overlay,
+        remaining_s=rem_b,
+    )
+
+    ov_sug = bool(overlay.get("suggested_for_you"))
+    ov_dis = bool(overlay.get("discover_people"))
+    if ov_sug or ov_dis:
+        ovt = (
+            "both"
+            if (ov_sug and ov_dis)
+            else ("suggested_for_you" if ov_sug else "discover_people")
+        )
+        fu_raw = str(follower_username or "").strip()
+        src_stripped = str(source_profile_username or "").strip()
+        eff, res_src = _mute_engine_v2_resolve_effective_candidate_username(
+            follower_username=fu_raw,
+            action_bar_title=ab,
+            source_profile_username=src_stripped,
+            det_hint=det_hint,
+            visual_candidate_id=str(visual_candidate_id or ""),
+        )
+        log(
+            "info",
+            "mute_engine_v2_effective_candidate_handle_resolved",
+            follower_username=fu_raw,
+            action_bar_title=ab[:120],
+            source_profile_username=src_stripped[:120],
+            effective_candidate_username=str(eff or "")[:120],
+            resolution_source=res_src,
+            visual_candidate_id=str(visual_candidate_id or ""),
+        )
+
+        fs_low = str(follow_state_after or "").strip().lower()
+        fhs = str(follow_header_snapshot or "").strip().lower()
+        fs_from_state = fs_low in ("following", "requested")
+        fs_from_header = fhs in ("following", "requested")
+        fs_vis = (
+            fs_from_state
+            or fs_from_header
+            or _mute_engine_v2_following_label_visible_quick(
+                d, timeout_s=min(0.11, rem_b * 0.28)
+            )
+        )
+
+        src_norm = _normalize_handle(src_stripped) if src_stripped else ""
+        ab_norm = _normalize_handle(ab)
+        on_candidate_not_owner = bool(ab) and (not src_norm or ab_norm != src_norm)
+
+        title_ok_explicit = bool(fu_raw) and bool(ab) and (
+            _normalize_handle(fu_raw) == ab_norm
+        )
+        profile_overlay_safe = (
+            st in allowed
+            and not dangerous
+            and fs_vis
+            and on_candidate_not_owner
+            and (not bool(fu_raw) or title_ok_explicit)
+        )
+
+        gate_title_source = ""
+        if profile_overlay_safe:
+            if bool(fu_raw) and title_ok_explicit:
+                gate_title_source = "follower_username_match"
+            else:
+                gate_title_source = "action_bar_title_fallback"
+
+        base_common: dict[str, Any] = {
+            "overlay_type": ovt,
+            "action_bar_title": ab[:120],
+            "navigation_state": st,
+            "following_visible": bool(fs_vis),
+            "dangerous_surface": bool(dangerous),
+            "dangerous_reason": dwhy or "",
+            "visual_candidate_id": str(visual_candidate_id or ""),
+            "source_profile_username": src_stripped[:120],
+            "follower_username": fu_raw,
+            "effective_candidate_username": str(eff or "")[:120],
+            "effective_resolution_source": res_src,
+        }
+        log("info", "mute_engine_v2_overlay_surface_detected", **base_common)
+
+        if dangerous:
+            log(
+                "warning",
+                "mute_engine_v2_overlay_surface_rejected",
+                **base_common,
+                allow_mute=False,
+                safe_profile_overlay_surface=False,
+                rejection_reason="dangerous_context",
+            )
+            return True, dwhy if dwhy else "dangerous_context"
+
+        if profile_overlay_safe:
+            log(
+                "info",
+                "mute_engine_v2_overlay_surface_allowed",
+                **base_common,
+                allow_mute=True,
+                safe_profile_overlay_surface=True,
+                profile_gate_title_ok=True,
+                profile_gate_title_source=gate_title_source,
+            )
+        else:
+            log(
+                "warning",
+                "mute_engine_v2_overlay_surface_rejected",
+                **base_common,
+                allow_mute=False,
+                safe_profile_overlay_surface=False,
+                rejection_reason="overlay_suggestion_profile_gate_failed",
+                profile_gate_title_ok=bool(title_ok_explicit),
+                profile_gate_following_visible=bool(fs_vis),
+                profile_gate_on_candidate_not_owner=bool(on_candidate_not_owner),
+                profile_gate_follow_header_snapshot=fhs[:32],
+            )
+            return True, "overlay_suggestion_surface"
+    elif dangerous:
+        return True, dwhy if dwhy else "dangerous_context"
+
+    if overlay.get("notification_prompt") or overlay.get("turn_on_notifications"):
+        return True, "overlay_system_prompt"
+    if overlay.get("likely_mute_toggle_sheet"):
+        try:
+            p0 = bool(d(text="Posts").exists(timeout=0.04)) or bool(
+                d(text="Publications").exists(timeout=0.04)
+            )
+            s0 = bool(d(text="Stories").exists(timeout=0.04))
+        except Exception:
+            p0 = s0 = False
+        if not (p0 and s0):
+            return True, "mute_sheet_partial_or_unknown"
+
+    return False, ""
+
+
+def _mute_engine_v2_tap_toggle_short(
+    d: u2.Device, labels: tuple[str, ...], ww: int, t0: float
+) -> tuple[bool, bool, str]:
+    """Returns (tapped_or_already_on, is_already_on, reason)."""
+    rem = _mute_engine_v2_remaining_s(t0)
+    if rem < 0.08:
+        return False, False, "budget"
+    wt = max(0.05, min(0.22, rem * 0.35))
+    el: Any | None = None
+    for lab in labels:
+        try:
+            cand = d(text=lab)
+            if cand.wait(timeout=wt):
+                el = cand
+                break
+        except Exception:
+            continue
+    if el is None:
+        return False, False, "toggle_label_not_found"
+    chk = _visual_switch_checked_near_row(d, el)
+    if chk is True:
+        return True, True, ""
+    try:
+        b = el.info.get("bounds") or {}
+        cy = (int(b["top"]) + int(b["bottom"])) // 2
+        tap_x = min(ww - 6, max(int(ww * 0.88), int(b.get("right", 0)) + 72))
+        d.click(int(tap_x), int(cy))
+    except Exception as e:
+        return False, False, f"tap_failed:{e}"
+    return True, False, ""
+
+
+def run_mute_engine_v2(
+    d: u2.Device,
+    *,
+    pkg: str,
+    source_profile_username: str,
+    visual_candidate_id: str,
+    follower_username: str,
+    follow_state_after: str,
+    det_hint: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """
+    Short, non-exploratory mute after verified follow. No return_to_followers_list,
+    no hierarchy refresh, no profile reopen, no scroll/swipe recovery.
+    """
+    from navigation_engine import NavigationEngineState, observe_instagram_state
+
+    t_all = time.perf_counter()
+    timings: dict[str, float] = {}
+    vcid = str(visual_candidate_id or "").strip()
+    src = str(source_profile_username or "").strip()
+    pkg = str(pkg or getattr(config, "INSTAGRAM_PACKAGE", "") or "")
+    fs_after = str(follow_state_after or "").strip()
+    raw_inv = False
+    try:
+        raw_inv = bool(_visual_raw_follow_invite_visible_quick(d))
+    except Exception:
+        raw_inv = False
+
+    log(
+        "info",
+        "mute_engine_v2_started",
+        visual_candidate_id=vcid,
+        source_profile_username=src,
+        follower_username=str(follower_username or "").strip(),
+        follow_state_after=fs_after,
+        budget_s=_MUTE_ENGINE_V2_BUDGET_S,
+        effective_total_budget_s=_MUTE_ENGINE_V2_EFFECTIVE_TOTAL_S,
+        following_cta_reserved_budget_s=MIN_FOLLOWING_CTA_SEARCH_BUDGET_S,
+    )
+
+    def _abort(reason: str, *, fr: str | None = None, **log_extra: Any) -> dict[str, Any]:
+        timings["mute_total_ms"] = round((time.perf_counter() - t_all) * 1000, 2)
+        _log_payload: dict[str, Any] = {
+            "visual_candidate_id": vcid,
+            "source_profile_username": src,
+            "reason": reason,
+            "failure_reason": fr or reason,
+            "timings_ms": dict(timings),
+        }
+        if log_extra:
+            _log_payload.update({k: v for k, v in log_extra.items() if v is not None})
+        log(
+            "warning",
+            "mute_engine_v2_safe_abort",
+            **_log_payload,
+        )
+        _out: dict[str, Any] = {
+            "ok": False,
+            "partial": False,
+            "skipped": False,
+            "failure_reason": fr or reason,
+            "outcome": "safe_abort",
+            "abort_reason": reason,
+            "mute_engine_v2": True,
+            "timings_ms": dict(timings),
+        }
+        if log_extra:
+            _out["mute_v2_abort_detail"] = {
+                k: v for k, v in log_extra.items() if v is not None and not str(k).startswith("_")
+            }
+        return _out
+
+    if _mute_engine_v2_remaining_s(t_all) < 0.25:
+        return _abort("mute_budget_exceeded", fr="mute_budget_exceeded")
+
+    t_obs = time.perf_counter()
+    light_profile_det = False
+    det: dict[str, Any] = {}
+    fu2 = str(follower_username or "").strip()
+    fs_low = str(follow_state_after or "").strip().lower()
+    if fs_low in ("following", "requested") and fu2:
+        try:
+            det_try = _mute_engine_v2_build_lightweight_profile_det(
+                d, det_hint=det_hint, pkg=pkg
+            )
+            ab_try = str(det_try.get("action_bar_title") or "").strip()
+            if ab_try and _normalize_handle(ab_try) == _normalize_handle(fu2):
+                det = det_try
+                light_profile_det = True
+        except Exception:
+            pass
+    if not light_profile_det:
+        try:
+            det = detect_followers_list_screen(d, source_profile_username=src)
+        except Exception:
+            det = {}
+    timings["mute_engine_v2_screen_det_ms"] = round(
+        (time.perf_counter() - t_obs) * 1000, 2
+    )
+    if isinstance(det_hint, dict) and det_hint:
+        if not str(det.get("action_bar_title") or "").strip():
+            abh = str(det_hint.get("action_bar_title") or "").strip()
+            if abh:
+                det = {**det, "action_bar_title": abh}
+        if not str(det.get("current_screen_guess") or "").strip():
+            cg = str(det_hint.get("current_screen_guess") or "").strip()
+            if cg:
+                det = {**det, "current_screen_guess": cg}
+
+    ab_live = str(det.get("action_bar_title") or "").strip()
+    eff_early, res_early = _mute_engine_v2_resolve_effective_candidate_username(
+        follower_username=fu2,
+        action_bar_title=ab_live,
+        source_profile_username=src,
+        det_hint=det_hint if isinstance(det_hint, dict) else None,
+        visual_candidate_id=vcid,
+    )
+    trusted_eff_fp = False
+    if str(res_early or "") == "follower_username" and str(eff_early or "").strip():
+        trusted_eff_fp = True
+    elif (
+        str(res_early or "") == "action_bar_title_fallback"
+        and str(eff_early or "").strip()
+        and ab_live
+        and src
+        and _normalize_handle(ab_live) != _normalize_handle(src)
+    ):
+        trusted_eff_fp = True
+
+    try:
+        log(
+            "info",
+            "mute_engine_v2_early_effective_candidate_handle_resolved",
+            visual_candidate_id=vcid,
+            follower_username=fu2[:120] if fu2 else "",
+            action_bar_title=ab_live[:120],
+            effective_candidate_username=str(eff_early or "")[:120],
+            resolution_source=str(res_early or ""),
+            trusted_for_fast_path=bool(trusted_eff_fp),
+            source_profile_username=src[:120] if src else "",
+        )
+    except Exception:
+        pass
+
+    handle_fp_match = (
+        fu2 if fu2 else (str(eff_early or "").strip() if trusted_eff_fp else "")
+    ).strip()
+    if (
+        not light_profile_det
+        and fs_low in ("following", "requested")
+        and handle_fp_match
+        and trusted_eff_fp
+    ):
+        try:
+            det_try2 = _mute_engine_v2_build_lightweight_profile_det(
+                d, det_hint=det_hint, pkg=pkg
+            )
+            ab_try2 = str(det_try2.get("action_bar_title") or "").strip()
+            if ab_try2 and _normalize_handle(ab_try2) == _normalize_handle(handle_fp_match):
+                det = det_try2
+                light_profile_det = True
+                if isinstance(det_hint, dict) and det_hint:
+                    if not str(det.get("action_bar_title") or "").strip():
+                        abh2 = str(det_hint.get("action_bar_title") or "").strip()
+                        if abh2:
+                            det = {**det, "action_bar_title": abh2}
+                    if not str(det.get("current_screen_guess") or "").strip():
+                        cg2 = str(det_hint.get("current_screen_guess") or "").strip()
+                        if cg2:
+                            det = {**det, "current_screen_guess": cg2}
+        except Exception:
+            pass
+
+    ab_live = str(det.get("action_bar_title") or "").strip()
+
+    nav_ctx: dict[str, Any] = {
+        "phase": "mute_engine_v2",
+        "visual_candidate_id": vcid,
+        "source_profile_username": src,
+        "det": det,
+        "disable_followers_visual_fallback": True,
+    }
+    mute_preflight_fast = False
+    src_norm = _normalize_handle(src) if src else ""
+    ab_norm = _normalize_handle(ab_live) if ab_live else ""
+    on_candidate_not_owner = bool(ab_live) and (not src_norm or ab_norm != src_norm)
+    try:
+        following_chip = _mute_engine_v2_following_label_visible_quick(d, timeout_s=0.16)
+    except Exception:
+        following_chip = False
+    if (
+        fs_low in ("following", "requested")
+        and following_chip
+        and ab_live
+        and on_candidate_not_owner
+    ):
+        mute_preflight_fast = True
+
+    t_nav = time.perf_counter()
+    if mute_preflight_fast:
+        nav = {
+            "state": NavigationEngineState.PROFILE.value,
+            "confidence": 0.86,
+            "reason": "mute_v2_preflight_profile_following_visible_short_circuit",
+            "signals": {"mute_v2_fast_observe": True},
+            "xml_guess": str(det.get("current_screen_guess") or ""),
+            "visual_guess": "",
+            "foreground_package": pkg,
+        }
+        try:
+            log(
+                "info",
+                "mute_engine_v2_observe_short_circuited",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                navigation_state=str(nav.get("state") or ""),
+                light_profile_det=bool(light_profile_det),
+                action_bar_title=ab_live[:120],
+                follow_state_after=fs_low,
+                note="skip_observe_instagram_state_following_label_visible",
+            )
+        except Exception:
+            pass
+    else:
+        try:
+            nav = observe_instagram_state(
+                d,
+                expected_package=pkg,
+                last_known_state=NavigationEngineState.CANDIDATE_PROFILE.value,
+                context=nav_ctx,
+            )
+        except Exception as e:
+            nav = {"state": "UNKNOWN", "confidence": 0.0, "reason": str(e)}
+    timings["observe_nav_ms"] = round((time.perf_counter() - t_nav) * 1000, 2)
+
+    nav_st = str(nav.get("state") or "")
+    safe_fp_fast = (
+        bool(mute_preflight_fast)
+        and bool(light_profile_det)
+        and nav_st == NavigationEngineState.PROFILE.value
+        and fs_low in ("following", "requested")
+        and bool(handle_fp_match)
+        and bool(ab_live)
+        and _normalize_handle(handle_fp_match) == _normalize_handle(ab_live)
+    )
+
+    t_ov = time.perf_counter()
+    overlay = _post_follow_overlay_ui_hints(d)
+    if safe_fp_fast:
+        fp = _post_follow_screen_fingerprint_mute_v2_fast(
+            d,
+            nav_state=nav_st,
+            det=det,
+            action_bar_title=ab_live,
+            follow_header_state=fs_low,
+        )
+        try:
+            log(
+                "info",
+                "mute_engine_v2_fast_fingerprint_used",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                action_bar_title=ab_live[:120],
+                follower_username=fu2[:120] if fu2 else "",
+                effective_candidate_username=handle_fp_match[:120] if handle_fp_match else "",
+                follow_state_after=fs_low,
+                reason="post_follow_verified_safe_context",
+            )
+        except Exception:
+            pass
+    else:
+        fp = _post_follow_screen_fingerprint(
+            d, nav_state=nav_st, det=det
+        )
+        try:
+            log(
+                "info",
+                "mute_engine_v2_full_fingerprint_used",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                navigation_state=nav_st,
+                mute_preflight_fast=bool(mute_preflight_fast),
+                light_profile_det=bool(light_profile_det),
+                follow_state_after=fs_low,
+            )
+        except Exception:
+            pass
+    timings["mute_engine_v2_overlay_fp_ms"] = round(
+        (time.perf_counter() - t_ov) * 1000, 2
+    )
+    fhs = ""
+    if safe_fp_fast:
+        fhs = fs_low
+    else:
+        try:
+            fhs = str(_follow_ui_state_snapshot(d) or "").strip()
+        except Exception:
+            fhs = ""
+    ui_snapshot = {
+        "action_bar_title": str(det.get("action_bar_title") or "")[:120],
+        "visible_header_texts": list((det.get("visible_header_texts") or [])[:14]),
+        "raw_follow_invite_visible": raw_inv,
+        "follow_header_snapshot": fhs,
+        "fingerprint_id": fp.get("fingerprint_id"),
+        "screen_class": fp.get("screen_class"),
+        "light_profile_det": light_profile_det,
+    }
+    log(
+        "info",
+        "mute_engine_v2_state_observed",
+        visual_candidate_id=vcid,
+        source_profile_username=src,
+        navigation_state=str(nav.get("state") or ""),
+        navigation_confidence=float(nav.get("confidence") or 0.0),
+        xml_guess=str(nav.get("xml_guess") or det.get("current_screen_guess") or ""),
+        **ui_snapshot,
+    )
+    timings["observe_state_ms"] = round((time.perf_counter() - t_obs) * 1000, 2)
+
+    if not _vision_validation_mute_engine_surface(
+        screenshot_path="",
+        det=det,
+        nav=nav,
+        overlay=overlay,
+        fp=fp if isinstance(fp, dict) else {},
+        follow_header_snapshot=fhs,
+        follow_state_after=fs_after,
+        visual_candidate_id=vcid,
+        source_profile_username=src,
+    ):
+        return _abort(
+            "vision_validation_mute_surface_rejected",
+            fr="vision_validation_mute_surface_rejected",
+        )
+
+    bad, why = _mute_engine_v2_surface_unstable(
+        d,
+        nav=nav,
+        overlay=overlay,
+        det=det,
+        fp=fp if isinstance(fp, dict) else None,
+        follower_username=follower_username,
+        follow_state_after=follow_state_after,
+        pkg=pkg,
+        budget_remaining_s=_mute_engine_v2_remaining_s(t_all),
+        visual_candidate_id=vcid,
+        source_profile_username=src,
+        det_hint=det_hint if isinstance(det_hint, dict) else None,
+        follow_header_snapshot=fhs,
+    )
+    if bad:
+        return _abort("unstable_post_follow_surface", fr=why)
+
+    try:
+        ww, wh = d.window_size()
+    except Exception:
+        ww, wh = 1080, 2400
+
+    skip_following = False
+    try:
+        if overlay.get("likely_mute_toggle_sheet"):
+            p0 = bool(d(text="Posts").exists(timeout=0.06)) or bool(
+                d(text="Publications").exists(timeout=0.05)
+            )
+            s0 = bool(d(text="Stories").exists(timeout=0.06))
+            if p0 and s0:
+                skip_following = True
+                log(
+                    "info",
+                    "mute_engine_v2_sheet_detected",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    phase="precheck",
+                    posts_visible=True,
+                    stories_visible=True,
+                    note="sheet_already_visible_skip_following_tap",
+                )
+    except Exception:
+        pass
+
+    t_follow = time.perf_counter()
+    following_method = ""
+    if not skip_following:
+        _eff_total = float(_MUTE_ENGINE_V2_EFFECTIVE_TOTAL_S)
+        _obs_cap = max(0.0, _eff_total - float(MIN_FOLLOWING_CTA_SEARCH_BUDGET_S))
+        _rem_cta = _mute_engine_v2_remaining_s(t_all)
+        try:
+            log(
+                "info",
+                "mute_engine_v2_budget_allocated",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                total_budget_s=round(_eff_total, 4),
+                observe_budget_s=round(_obs_cap, 4),
+                following_cta_reserved_budget_s=float(MIN_FOLLOWING_CTA_SEARCH_BUDGET_S),
+                toggle_stage_reserved_budget_s=float(MIN_MUTE_TOGGLE_STAGE_BUDGET_S),
+                budget_remaining_before_cta_s=round(float(_rem_cta), 4),
+                mute_preflight_fast_observe=bool(mute_preflight_fast),
+            )
+        except Exception:
+            pass
+        btn, following_method = _mute_engine_v2_pick_following_cta(
+            d,
+            ww=ww,
+            wh=wh,
+            t0=t_all,
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+        )
+        if btn is None:
+            log(
+                "warning",
+                "mute_engine_v2_following_button_missing",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                navigation_state=str(nav.get("state") or ""),
+                action_bar_title=str(det.get("action_bar_title") or "")[:120],
+                budget_remaining_s=round(float(_mute_engine_v2_remaining_s(t_all)), 4),
+            )
+            _rem_post = _mute_engine_v2_remaining_s(t_all)
+            if _rem_post <= 0.1:
+                return _abort(
+                    "following_button_search_budget_exhausted",
+                    fr="following_button_search_budget_exhausted",
+                )
+            return _abort("following_button_not_found", fr="following_button_not_found")
+        log(
+            "info",
+            "mute_engine_v2_following_button_detected",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            method=following_method,
+        )
+        try:
+            btn.click()
+        except Exception as e:
+            return _abort("following_click_failed", fr=str(e))
+        time.sleep(min(0.38, max(0.12, _mute_engine_v2_remaining_s(t_all) * 0.25)))
+
+    timings["following_detect_ms"] = round((time.perf_counter() - t_follow) * 1000, 2)
+
+    if _mute_engine_v2_remaining_s(t_all) < 0.2:
+        return _abort("mute_budget_exceeded", fr="mute_budget_exceeded")
+
+    t_sheet = time.perf_counter()
+    if not skip_following:
+        mute_el, mute_lab = _visual_find_mute_row_first_sheet(d)
+        if mute_el is None:
+            return _abort("mute_row_not_found", fr="mute_row_not_found")
+        try:
+            mute_el.click()
+        except Exception as e:
+            return _abort("mute_row_click_failed", fr=str(e))
+        time.sleep(min(0.42, max(0.12, _mute_engine_v2_remaining_s(t_all) * 0.28)))
+
+    posts_v = bool(d(text="Posts").exists(timeout=min(0.35, _mute_engine_v2_remaining_s(t_all) * 0.45)))
+    if not posts_v:
+        posts_v = bool(
+            d(text="Publications").exists(
+                timeout=min(0.22, max(0.05, _mute_engine_v2_remaining_s(t_all) * 0.35))
+            )
+        )
+    stories_v = bool(
+        d(text="Stories").exists(
+            timeout=min(0.35, max(0.05, _mute_engine_v2_remaining_s(t_all) * 0.45))
+        )
+    )
+    timings["mute_sheet_open_ms"] = round((time.perf_counter() - t_sheet) * 1000, 2)
+
+    if not posts_v or not stories_v:
+        return _abort("posts_or_stories_labels_missing", fr="posts_or_stories_labels_missing")
+
+    log(
+        "info",
+        "mute_engine_v2_sheet_detected",
+        visual_candidate_id=vcid,
+        source_profile_username=src,
+        posts_visible=posts_v,
+        stories_visible=stories_v,
+    )
+
+    _rem_toggle_stage = _mute_engine_v2_remaining_s(t_all)
+    timings["toggle_stage_remaining_budget_s"] = round(_rem_toggle_stage, 4)
+    timings["toggle_stage_required_budget_s"] = float(MIN_MUTE_TOGGLE_STAGE_BUDGET_S)
+    _req_toggle_floor = float(MIN_MUTE_TOGGLE_STAGE_BUDGET_S) * 0.92
+    if _rem_toggle_stage < _req_toggle_floor:
+        return _abort(
+            "mute_toggle_budget_starved",
+            fr="mute_toggle_budget_starved",
+            remaining_budget_s=round(_rem_toggle_stage, 4),
+            required_toggle_budget_s=round(_req_toggle_floor, 4),
+            phase="post_sheet_pre_toggle",
+        )
+    try:
+        log(
+            "info",
+            "mute_engine_v2_toggle_stage_entered",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            remaining_budget_s=round(_rem_toggle_stage, 4),
+            required_toggle_budget_s=float(MIN_MUTE_TOGGLE_STAGE_BUDGET_S),
+        )
+    except Exception:
+        pass
+
+    want_posts = bool(getattr(config, "VISUAL_MUTE_POSTS_AFTER_FOLLOW", True))
+    want_stories = bool(getattr(config, "VISUAL_MUTE_STORIES_AFTER_FOLLOW", True))
+    posts_labels = ("Posts", "Publications")
+    stories_labels = ("Stories", "Historias", "Storie")
+
+    posts_ok = not want_posts
+    stories_ok = not want_stories
+    posts_tapped = False
+    stories_tapped = False
+    tapped_p = False
+    already_p = False
+    rsn_p = "skipped"
+    tapped_s = False
+    already_s = False
+    rsn_s = "skipped"
+
+    if want_posts:
+        try:
+            log(
+                "info",
+                "mute_engine_v2_posts_toggle_started",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                remaining_budget_s=round(_mute_engine_v2_remaining_s(t_all), 4),
+            )
+        except Exception:
+            pass
+        t_tp = time.perf_counter()
+        tapped_p, already_p, rsn_p = _mute_engine_v2_tap_toggle_short(
+            d, posts_labels, ww, t_all
+        )
+        posts_tapped = bool(tapped_p and not already_p)
+        if already_p:
+            posts_ok = True
+        elif tapped_p:
+            _settle = min(
+                float(_MUTE_V2_TOGGLE_POST_TAP_SETTLE_S),
+                max(0.0, _mute_engine_v2_remaining_s(t_all) - 0.06),
+            )
+            if _settle >= 0.02:
+                time.sleep(_settle)
+            _rem_v = _mute_engine_v2_remaining_s(t_all)
+            vto = min(
+                float(_MUTE_V2_TOGGLE_VERIFY_MAX_S),
+                max(
+                    float(_MUTE_V2_TOGGLE_VERIFY_MIN_S),
+                    min(_rem_v * 0.48, float(_MUTE_V2_TOGGLE_VERIFY_MAX_S)),
+                ),
+            )
+            posts_ok, _posts_vmeta = _visual_verify_toggle_on_for_labels_detailed(
+                d, posts_labels, timeout_s=vto
+            )
+            if not posts_ok:
+                try:
+                    log(
+                        "warning",
+                        "mute_engine_v2_toggle_verify_diag",
+                        axis="posts",
+                        visual_candidate_id=vcid,
+                        source_profile_username=src,
+                        verify_timeout_s=_posts_vmeta.get("verify_timeout_s"),
+                        verify_ok=bool(_posts_vmeta.get("verify_ok")),
+                        probe_cycles=_posts_vmeta.get("probe_cycles"),
+                        inner_probes=_posts_vmeta.get("inner_probes"),
+                        last_label=_posts_vmeta.get("last_label"),
+                        last_checked_signal=_posts_vmeta.get("last_checked_signal"),
+                        last_switches_in_band=_posts_vmeta.get("last_switches_in_band"),
+                        last_nearest_dy=_posts_vmeta.get("last_nearest_dy"),
+                        checked_raw_on_nearest=_posts_vmeta.get("checked_raw_on_nearest"),
+                        post_tap_settle_s=round(_settle, 4),
+                        matched_toggle_class=_posts_vmeta.get("matched_toggle_class"),
+                        matched_toggle_resource_id=_posts_vmeta.get("matched_toggle_resource_id"),
+                        matched_toggle_checked=_posts_vmeta.get("matched_toggle_checked"),
+                    )
+                except Exception:
+                    pass
+                try:
+                    _mute_engine_v2_toggle_live_candidates_diag(
+                        d,
+                        axis="posts",
+                        vmeta=_posts_vmeta,
+                        labels_tuple=posts_labels,
+                        visual_candidate_id=vcid,
+                        source_profile_username=src,
+                    )
+                except Exception:
+                    pass
+                try:
+                    if _mute_engine_v2_toggle_verify_xml_fallback_maybe(
+                        d,
+                        axis="posts",
+                        vmeta=_posts_vmeta,
+                        visual_candidate_id=vcid,
+                        source_profile_username=src,
+                    ):
+                        posts_ok = True
+                except Exception:
+                    pass
+                _mute_engine_v2_toggle_verify_structure_diag(
+                    d,
+                    axis="posts",
+                    labels_tuple=posts_labels,
+                    vmeta=_posts_vmeta,
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                )
+        timings["toggle_posts_ms"] = round((time.perf_counter() - t_tp) * 1000, 2)
+        try:
+            log(
+                "info",
+                "mute_engine_v2_posts_toggle_completed",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                posts_ok=bool(posts_ok),
+                posts_toggle_raw_reason=rsn_p,
+                posts_toggle_reason=_mute_engine_v2_map_toggle_rsn(rsn_p),
+                posts_tap_attempted=bool(posts_tapped),
+                remaining_budget_s=round(_mute_engine_v2_remaining_s(t_all), 4),
+            )
+        except Exception:
+            pass
+        if posts_ok:
+            log(
+                "info",
+                "mute_engine_v2_posts_toggle_detected",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                posts_verified=True,
+            )
+
+    if want_stories:
+        try:
+            log(
+                "info",
+                "mute_engine_v2_stories_toggle_started",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                remaining_budget_s=round(_mute_engine_v2_remaining_s(t_all), 4),
+            )
+        except Exception:
+            pass
+        t_ts = time.perf_counter()
+        tapped_s, already_s, rsn_s = _mute_engine_v2_tap_toggle_short(
+            d, stories_labels, ww, t_all
+        )
+        stories_tapped = bool(tapped_s and not already_s)
+        if already_s:
+            stories_ok = True
+        elif tapped_s:
+            _settle_s = min(
+                float(_MUTE_V2_TOGGLE_POST_TAP_SETTLE_S),
+                max(0.0, _mute_engine_v2_remaining_s(t_all) - 0.06),
+            )
+            if _settle_s >= 0.02:
+                time.sleep(_settle_s)
+            _rem_vs = _mute_engine_v2_remaining_s(t_all)
+            vto_s = min(
+                float(_MUTE_V2_TOGGLE_VERIFY_MAX_S),
+                max(
+                    float(_MUTE_V2_TOGGLE_VERIFY_MIN_S),
+                    min(_rem_vs * 0.48, float(_MUTE_V2_TOGGLE_VERIFY_MAX_S)),
+                ),
+            )
+            stories_ok, _stories_vmeta = _visual_verify_toggle_on_for_labels_detailed(
+                d, stories_labels, timeout_s=vto_s
+            )
+            if not stories_ok:
+                try:
+                    log(
+                        "warning",
+                        "mute_engine_v2_toggle_verify_diag",
+                        axis="stories",
+                        visual_candidate_id=vcid,
+                        source_profile_username=src,
+                        verify_timeout_s=_stories_vmeta.get("verify_timeout_s"),
+                        verify_ok=bool(_stories_vmeta.get("verify_ok")),
+                        probe_cycles=_stories_vmeta.get("probe_cycles"),
+                        inner_probes=_stories_vmeta.get("inner_probes"),
+                        last_label=_stories_vmeta.get("last_label"),
+                        last_checked_signal=_stories_vmeta.get("last_checked_signal"),
+                        last_switches_in_band=_stories_vmeta.get("last_switches_in_band"),
+                        last_nearest_dy=_stories_vmeta.get("last_nearest_dy"),
+                        checked_raw_on_nearest=_stories_vmeta.get("checked_raw_on_nearest"),
+                        post_tap_settle_s=round(_settle_s, 4),
+                        matched_toggle_class=_stories_vmeta.get("matched_toggle_class"),
+                        matched_toggle_resource_id=_stories_vmeta.get("matched_toggle_resource_id"),
+                        matched_toggle_checked=_stories_vmeta.get("matched_toggle_checked"),
+                    )
+                except Exception:
+                    pass
+                try:
+                    _mute_engine_v2_toggle_live_candidates_diag(
+                        d,
+                        axis="stories",
+                        vmeta=_stories_vmeta,
+                        labels_tuple=stories_labels,
+                        visual_candidate_id=vcid,
+                        source_profile_username=src,
+                    )
+                except Exception:
+                    pass
+                try:
+                    if _mute_engine_v2_toggle_verify_xml_fallback_maybe(
+                        d,
+                        axis="stories",
+                        vmeta=_stories_vmeta,
+                        visual_candidate_id=vcid,
+                        source_profile_username=src,
+                    ):
+                        stories_ok = True
+                except Exception:
+                    pass
+                _mute_engine_v2_toggle_verify_structure_diag(
+                    d,
+                    axis="stories",
+                    labels_tuple=stories_labels,
+                    vmeta=_stories_vmeta,
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                )
+        timings["toggle_stories_ms"] = round((time.perf_counter() - t_ts) * 1000, 2)
+        try:
+            log(
+                "info",
+                "mute_engine_v2_stories_toggle_completed",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                stories_ok=bool(stories_ok),
+                stories_toggle_raw_reason=rsn_s,
+                stories_toggle_reason=_mute_engine_v2_map_toggle_rsn(rsn_s),
+                stories_tap_attempted=bool(stories_tapped),
+                remaining_budget_s=round(_mute_engine_v2_remaining_s(t_all), 4),
+            )
+        except Exception:
+            pass
+        if stories_ok:
+            log(
+                "info",
+                "mute_engine_v2_stories_toggle_detected",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                stories_verified=True,
+            )
+
+    timings["mute_total_ms"] = round((time.perf_counter() - t_all) * 1000, 2)
+
+    if want_posts and want_stories:
+        if posts_ok and stories_ok:
+            log(
+                "info",
+                "mute_engine_v2_success",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                timings_ms=dict(timings),
+            )
+            return {
+                "ok": True,
+                "partial": False,
+                "skipped": False,
+                "failure_reason": None,
+                "outcome": "success",
+                "abort_reason": None,
+                "mute_engine_v2": True,
+                "posts_verified": True,
+                "stories_verified": True,
+                "posts_tapped": posts_tapped,
+                "stories_tapped": stories_tapped,
+                "mute_row_label": "",
+                "timings_ms": dict(timings),
+            }
+        if posts_ok or stories_ok:
+            log(
+                "warning",
+                "mute_engine_v2_partial_success",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                posts_verified=bool(posts_ok),
+                stories_verified=bool(stories_ok),
+                timings_ms=dict(timings),
+            )
+            return {
+                "ok": True,
+                "partial": True,
+                "skipped": False,
+                "failure_reason": "mute_partial_one_toggle",
+                "outcome": "partial_success",
+                "abort_reason": None,
+                "mute_engine_v2": True,
+                "posts_verified": bool(posts_ok),
+                "stories_verified": bool(stories_ok),
+                "posts_tapped": posts_tapped,
+                "stories_tapped": stories_tapped,
+                "timings_ms": dict(timings),
+            }
+        _ab_reason, _fail_reason = _mute_engine_v2_classify_both_toggles_failure(
+            want_posts=want_posts,
+            want_stories=want_stories,
+            posts_ok=posts_ok,
+            stories_ok=stories_ok,
+            tapped_p=tapped_p,
+            tapped_s=tapped_s,
+            already_p=already_p,
+            already_s=already_s,
+            rsn_p=rsn_p,
+            rsn_s=rsn_s,
+        )
+        return _abort(
+            _ab_reason,
+            fr=_fail_reason,
+            posts_verified=False,
+            stories_verified=False,
+            posts_toggle_reason=_mute_engine_v2_map_toggle_rsn(rsn_p),
+            stories_toggle_reason=_mute_engine_v2_map_toggle_rsn(rsn_s),
+            posts_toggle_raw_reason=rsn_p,
+            stories_toggle_raw_reason=rsn_s,
+            posts_tap_attempted=bool(posts_tapped),
+            stories_tap_attempted=bool(stories_tapped),
+        )
+
+    # only one of want_posts / want_stories
+    if (want_posts and posts_ok) or (want_stories and stories_ok):
+        log(
+            "info",
+            "mute_engine_v2_success",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            timings_ms=dict(timings),
+        )
+        return {
+            "ok": True,
+            "partial": False,
+            "skipped": False,
+            "failure_reason": None,
+            "outcome": "success",
+            "abort_reason": None,
+            "mute_engine_v2": True,
+            "posts_verified": bool(posts_ok),
+            "stories_verified": bool(stories_ok),
+            "posts_tapped": posts_tapped,
+            "stories_tapped": stories_tapped,
+            "timings_ms": dict(timings),
+        }
+    _ab2, _fr2 = _mute_engine_v2_classify_single_toggle_failure(
+        want_posts=want_posts,
+        want_stories=want_stories,
+        posts_ok=posts_ok,
+        stories_ok=stories_ok,
+        tapped_p=tapped_p,
+        tapped_s=tapped_s,
+        already_p=already_p,
+        already_s=already_s,
+        rsn_p=rsn_p,
+        rsn_s=rsn_s,
+    )
+    return _abort(
+        _ab2,
+        fr=_fr2,
+        posts_verified=bool(posts_ok),
+        stories_verified=bool(stories_ok),
+        posts_toggle_reason=_mute_engine_v2_map_toggle_rsn(rsn_p),
+        stories_toggle_reason=_mute_engine_v2_map_toggle_rsn(rsn_s),
+        posts_toggle_raw_reason=rsn_p,
+        stories_toggle_raw_reason=rsn_s,
+        posts_tap_attempted=bool(posts_tapped),
+        stories_tap_attempted=bool(stories_tapped),
+    )
+
+
+def run_visual_candidate_post_follow_phase(
+    d: u2.Device,
+    *,
+    pkg: str,
+    source_profile_username: str,
+    visual_candidate_id: str,
+    follower_username: str,
+    follow_success_verified: bool,
+    follow_state_after: str,
+    skipped_tap: bool,
+    det: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """
+    Post-follow: observe UI, optional real mute, controlled return to CT followers list.
+    Does not modify follow / harvester / row mapping.
+    """
+    from navigation_engine import NavigationEngineState, observe_instagram_state
+
+    pkg = pkg or str(getattr(config, "INSTAGRAM_PACKAGE", "") or "")
+    vcid = str(visual_candidate_id or "").strip()
+    src = str(source_profile_username or "").strip()
+    cand = str(follower_username or "").strip()
+    fs_after = str(follow_state_after or "").strip()
+
+    mute_out: dict[str, Any] = {
+        "ok": False,
+        "skipped": True,
+        "skipped_reason": None,
+        "failure_reason": None,
+        "mute_started": False,
+    }
+
+    log(
+        "info",
+        "post_follow_flow_started",
+        visual_candidate_id=vcid,
+        source_profile_username=src,
+        follower_username=cand,
+        follow_success_verified=bool(follow_success_verified),
+        follow_state_after=fs_after,
+        skipped_tap=bool(skipped_tap),
+    )
+
+    det_use: dict[str, Any] = dict(det) if isinstance(det, dict) else {}
+    try:
+        det_fresh = detect_followers_list_screen(d, source_profile_username=src)
+        if isinstance(det_fresh, dict) and det_fresh:
+            det_use = det_fresh
+    except Exception:
+        pass
+
+    nav_obs: dict[str, Any] = {}
+    try:
+        nav_obs = observe_instagram_state(
+            d,
+            expected_package=pkg,
+            last_known_state=NavigationEngineState.CANDIDATE_PROFILE.value,
+            context={
+                "phase": "post_follow_observe",
+                "visual_candidate_id": vcid,
+                "source_profile_username": src,
+                "det": det_use,
+                "disable_followers_visual_fallback": True,
+                "expected_state": "CANDIDATE_PROFILE",
+            },
+        )
+    except Exception as e:
+        nav_obs = {"state": "UNKNOWN", "confidence": 0.0, "reason": str(e)}
+
+    overlay = _post_follow_overlay_ui_hints(d)
+    fp = _post_follow_screen_fingerprint(
+        d, nav_state=str(nav_obs.get("state") or ""), det=det_use
+    )
+    obs_reason = "ok"
+    if overlay.get("likely_mute_toggle_sheet"):
+        obs_reason = "overlay_mute_sheet_like"
+    elif any(
+        overlay.get(k)
+        for k in (
+            "suggested_for_you",
+            "discover_people",
+            "notification_prompt",
+            "turn_on_notifications",
+        )
+    ):
+        obs_reason = "overlay_suggestion_or_system_prompt"
+    elif str(nav_obs.get("state") or "") == NavigationEngineState.MUTE_SHEET.value:
+        obs_reason = "navigation_mute_sheet"
+
+    log(
+        "info",
+        "post_follow_state_observed",
+        visual_candidate_id=vcid,
+        source_profile_username=src,
+        navigation_state=str(nav_obs.get("state") or ""),
+        navigation_confidence=float(nav_obs.get("confidence") or 0.0),
+        navigation_reason=str(nav_obs.get("reason") or ""),
+        observation_note=obs_reason,
+        overlay_hints=overlay,
+        fingerprint_id=fp.get("fingerprint_id"),
+        screen_class=fp.get("screen_class"),
+        action_bar_title=str(det_use.get("action_bar_title") or "")[:120],
+    )
+
+    flow_on = bool(getattr(config, "ENABLE_VISUAL_FOLLOW_MUTE_FLOW", False))
+    real_mute = bool(getattr(config, "ENABLE_REAL_VISUAL_MUTE_AFTER_FOLLOW", False))
+    follow_priv = bool(getattr(config, "FOLLOW_PRIVATE_ACCOUNTS", False))
+    pending_rq = fs_after == "requested"
+
+    should_mute = bool(
+        follow_success_verified
+        and flow_on
+        and real_mute
+        and not skipped_tap
+        and not (pending_rq and follow_priv)
+    )
+    mute_decision_reason = "mute_eligible"
+    if not follow_success_verified:
+        mute_decision_reason = "follow_not_verified_in_runner_context"
+        should_mute = False
+    elif not flow_on or not real_mute:
+        mute_decision_reason = "mute_disabled_by_config"
+        should_mute = False
+    elif skipped_tap:
+        mute_decision_reason = "skipped_tap_already_connected"
+        should_mute = False
+    elif pending_rq and follow_priv:
+        mute_decision_reason = "private_follow_request_pending_skip_mute"
+        should_mute = False
+
+    log(
+        "info",
+        "post_follow_mute_decision",
+        visual_candidate_id=vcid,
+        source_profile_username=src,
+        should_mute=should_mute,
+        reason=mute_decision_reason,
+        ENABLE_VISUAL_FOLLOW_MUTE_FLOW=flow_on,
+        ENABLE_REAL_VISUAL_MUTE_AFTER_FOLLOW=real_mute,
+    )
+
+    if should_mute:
+        if not _vision_validation_post_follow_before_mute(
+            screenshot_path="",
+            det=det_use,
+            nav_obs=nav_obs,
+            overlay=overlay,
+            fp=fp if isinstance(fp, dict) else {},
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+        ):
+            should_mute = False
+            mute_decision_reason = "vision_validation_post_follow_blocked"
+
+    if not follow_success_verified:
+        log(
+            "info",
+            "post_follow_mute_skipped",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            reason="follow_not_verified",
+        )
+    elif not flow_on or not real_mute:
+        log(
+            "info",
+            "post_follow_mute_skipped",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            reason="mute_disabled_by_config",
+        )
+    elif skipped_tap:
+        log(
+            "info",
+            "post_follow_mute_skipped",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            reason="already_following_skipped_tap",
+        )
+    elif pending_rq and follow_priv:
+        log(
+            "info",
+            "post_follow_mute_skipped",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            reason="private_follow_request_pending",
+        )
+    elif should_mute:
+        mute_out["mute_started"] = True
+        log(
+            "info",
+            "post_follow_mute_started",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            engine="mute_engine_v2",
+        )
+        v2 = run_mute_engine_v2(
+            d,
+            pkg=pkg,
+            source_profile_username=src,
+            visual_candidate_id=vcid,
+            follower_username=cand,
+            follow_state_after=fs_after,
+            det_hint=det_use if isinstance(det_use, dict) else None,
+        )
+        outcome = str(v2.get("outcome") or "")
+        mute_out = {
+            "ok": bool(v2.get("ok")),
+            "skipped": False,
+            "skipped_reason": None,
+            "failure_reason": v2.get("failure_reason"),
+            "mute_started": True,
+            "mute_engine_v2": True,
+            "mute_v2_outcome": outcome,
+            "mute_v2_abort_reason": v2.get("abort_reason"),
+            "mute_v2_partial": bool(v2.get("partial")),
+            "timings_ms": v2.get("timings_ms") or {},
+        }
+        if outcome == "success":
+            log(
+                "info",
+                "post_follow_mute_success",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                mute_engine_v2=True,
+                timings_ms=v2.get("timings_ms") or {},
+            )
+            _post_mute_state_checkpoint(
+                d,
+                pkg=pkg,
+                source_profile_username=src,
+                visual_candidate_id=vcid,
+            )
+        elif outcome == "partial_success":
+            log(
+                "info",
+                "post_follow_mute_success",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                mute_engine_v2=True,
+                mute_partial=True,
+                timings_ms=v2.get("timings_ms") or {},
+            )
+        else:
+            log(
+                "warning",
+                "post_follow_mute_failed",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                phase="mute_engine_v2",
+                failure_reason=str(v2.get("failure_reason") or outcome or ""),
+                mute_v2_outcome=outcome,
+                mute_v2_abort_reason=v2.get("abort_reason"),
+                timings_ms=v2.get("timings_ms") or {},
+            )
+
+    mute_ok = bool(mute_out.get("ok"))
+    mute_attempted = bool(mute_out.get("mute_started"))
+    compact_post_follow_return = bool(follow_success_verified and bool(vcid))
+    if compact_post_follow_return:
+        if should_mute and mute_ok and bool(mute_out.get("mute_v2_partial")):
+            compact_reason_str = "follow_verified_mute_partial"
+        elif should_mute and mute_ok:
+            compact_reason_str = "follow_verified_mute_success"
+        elif should_mute and mute_attempted:
+            compact_reason_str = "follow_verified_mute_attempted"
+        elif should_mute:
+            compact_reason_str = "follow_verified_mute_attempted"
+        else:
+            compact_reason_str = "follow_verified_visual_candidate"
+    else:
+        compact_reason_str = ""
+
+    log(
+        "info",
+        "post_follow_return_ct_started",
+        visual_candidate_id=vcid,
+        source_profile_username=src,
+        follower_username=cand,
+        compact_after_follow_verified_mute=compact_post_follow_return,
+        compact_reason=compact_reason_str or None,
+        mute_attempted=mute_attempted,
+        mute_ok=mute_ok,
+        should_mute=bool(should_mute),
+        follow_success_verified=bool(follow_success_verified),
+    )
+    ok_ret, how_ret, fail_re = post_follow_controlled_return_to_followers_list(
+        d,
+        pkg=pkg,
+        source_profile_username=src,
+        follower_username=cand,
+        visual_candidate_id=vcid,
+        det=det_use,
+        max_rounds=1 if compact_post_follow_return else 4,
+        compact_after_follow_verified_mute=compact_post_follow_return,
+        compact_reason=compact_reason_str if compact_post_follow_return else None,
+    )
+    if ok_ret:
+        log(
+            "info",
+            "post_follow_return_ct_success",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            how=str(how_ret or ""),
         )
     else:
         log(
-            "error",
-            "follower_profile_open_failed",
-            follower_username=un,
-            source_profile_username=source_profile_username,
-            reason="verify_profile_failed",
+            "warning",
+            "post_follow_return_ct_failed",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            failure_reason=str(fail_re or ""),
+            how=str(how_ret or ""),
         )
-    return ok
+
+    return {
+        "mute": mute_out,
+        "return_ok": bool(ok_ret),
+        "return_how": str(how_ret or ""),
+        "return_failure_reason": fail_re,
+        "follow_success_verified": bool(follow_success_verified),
+        "navigation_observed": nav_obs,
+        "overlay_hints": overlay,
+    }
 
 
 def return_to_followers_list(
@@ -13240,6 +23472,7 @@ def return_to_followers_list(
         source_profile_username=source_profile_username,
     )
     if verify_profile(d, source_profile_username):
+        followers_session_clear_list_committed_open(source_profile_username)
         ok_reopen, _reopen_meta = open_followers_list_from_profile(
             d, source_profile_username, pkg, profile_verified=True
         )
@@ -13608,6 +23841,128 @@ def read_current_profile_username_for_follow_gate(d: u2.Device) -> str:
         return ""
 
 
+def _visual_raw_follow_invite_visible_quick(d: u2.Device) -> bool:
+    """Lightweight Follow / Suivre probe (mirrors runner CT-list raw invite helper)."""
+    try:
+        if d(text="Follow").exists(timeout=0.07):
+            return True
+        if d(text="Suivre").exists(timeout=0.05):
+            return True
+        if d(textContains="Follow").exists(timeout=0.05):
+            return True
+        if d(description="Follow").exists(timeout=0.04):
+            return True
+    except Exception:
+        return False
+    return False
+
+
+def visual_candidate_follow_pre_follow_screen_guard(
+    d: u2.Device,
+    *,
+    source_profile_username: str,
+    pkg: str,
+    pick: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """
+    Before ``perform_follow_safe(profile_already_open=True)``, confirm we are not back on the
+    source (CT) profile or followers list, and that a follow invite is visible on the current surface.
+    """
+    from navigation_engine import NavigationEngineState, observe_instagram_state
+
+    src_raw = str(source_profile_username or "").strip()
+    p = dict(pick) if isinstance(pick, dict) else {}
+    vcid = str(p.get("visual_candidate_id") or "").strip()
+    exp_pkg = str(pkg or getattr(config, "INSTAGRAM_PACKAGE", "") or "").strip()
+
+    ab_title = ""
+    try:
+        ab_title = read_current_profile_username_for_follow_gate(d)
+    except Exception:
+        ab_title = ""
+
+    sn = _normalize_handle(src_raw)
+    an = _normalize_handle(ab_title)
+
+    out: dict[str, Any] = {
+        "ok": False,
+        "reason": "init",
+        "action_bar_title": ab_title,
+        "navigation_state": "",
+        "navigation_confidence": 0.0,
+        "navigation_reason": "",
+        "follow_header_state": "",
+        "followers_list_xml_hint": False,
+        "raw_follow_invite_visible": False,
+        "visual_candidate_id": vcid,
+        "source_profile_username": src_raw,
+    }
+
+    nav = observe_instagram_state(
+        d,
+        expected_package=exp_pkg,
+        last_known_state=NavigationEngineState.CANDIDATE_PROFILE.value,
+        context={
+            "phase": "visual_follow_pre_follow_guard",
+            "visual_candidate_id": vcid,
+            "source_profile_username": src_raw,
+            "disable_followers_visual_fallback": True,
+            "expected_state": "CANDIDATE_PROFILE",
+        },
+    )
+    out["navigation_state"] = str(nav.get("state") or "")
+    out["navigation_confidence"] = float(nav.get("confidence") or 0.0)
+    out["navigation_reason"] = str(nav.get("reason") or "")
+
+    try:
+        det_fresh = detect_followers_list_screen(
+            d, source_profile_username=src_raw
+        )
+        out["followers_list_xml_hint"] = bool(
+            det_fresh.get("is_followers_list")
+            and (
+                bool(det_fresh.get("strict_list_open"))
+                or bool(det_fresh.get("relaxed_list_open"))
+            )
+        )
+    except Exception:
+        out["followers_list_xml_hint"] = False
+
+    try:
+        out["follow_header_state"] = _follow_ui_state_snapshot(d)
+    except Exception:
+        out["follow_header_state"] = "unknown"
+
+    out["raw_follow_invite_visible"] = _visual_raw_follow_invite_visible_quick(d)
+
+    if sn and an and sn == an:
+        out["ok"] = False
+        out["reason"] = "current_screen_is_source_profile"
+        return out
+
+    if out["followers_list_xml_hint"]:
+        out["ok"] = False
+        out["reason"] = "current_screen_is_followers_list"
+        return out
+
+    if (
+        out["navigation_state"] == NavigationEngineState.FOLLOWERS_LIST.value
+        and out["navigation_confidence"] >= 0.45
+    ):
+        out["ok"] = False
+        out["reason"] = "navigation_says_followers_list"
+        return out
+
+    if not out["raw_follow_invite_visible"] and out["follow_header_state"] != "follow":
+        out["ok"] = False
+        out["reason"] = "follow_invite_not_visible"
+        return out
+
+    out["ok"] = True
+    out["reason"] = "candidate_profile_surface_ok"
+    return out
+
+
 def reacquire_target_profile_for_follow(
     d: u2.Device,
     *,
@@ -13850,3 +24205,4 @@ def verify_app_foreground(d: u2.Device, package: str | None = None) -> bool:
     except Exception as e:
         log("error", "app_foreground_check_failed", error=str(e))
         return False
+
