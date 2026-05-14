@@ -236,9 +236,27 @@ def _emit_performance_summary(
     force_stop_used: bool,
     exit_code: int,
     target_username: str,
+    follows_completed_count: int | None = None,
+    list_progressive_exploration_exhausted: bool | None = None,
+    exploration_passes_used: int | None = None,
+    exploration_max_passes: int | None = None,
+    followers_session_outcome: str | None = None,
 ) -> None:
     total_ms = (time.perf_counter() - t0) * 1000
     snap = get_perf_snapshot()
+    _perf_followers_extra: dict[str, Any] = {}
+    if follows_completed_count is not None:
+        _perf_followers_extra["follows_completed_count"] = int(follows_completed_count)
+    if list_progressive_exploration_exhausted is not None:
+        _perf_followers_extra["list_progressive_exploration_exhausted"] = bool(
+            list_progressive_exploration_exhausted
+        )
+    if exploration_passes_used is not None:
+        _perf_followers_extra["exploration_passes_used"] = int(exploration_passes_used)
+    if exploration_max_passes is not None:
+        _perf_followers_extra["exploration_max_passes"] = int(exploration_max_passes)
+    if followers_session_outcome is not None and str(followers_session_outcome).strip():
+        _perf_followers_extra["followers_session_outcome"] = str(followers_session_outcome).strip()
     log(
         "info",
         "performance_summary",
@@ -312,6 +330,7 @@ def _emit_performance_summary(
         recovery_used=bool(snap.get("recovery_used", False)),
         exit_code=exit_code,
         log_file_path=get_run_log_file_path(),
+        **_perf_followers_extra,
     )
 
 
@@ -4815,6 +4834,7 @@ def _run_followers_list_engine_session(
     max_scroll = int(getattr(config, "FOLLOWERS_LIST_SCROLL_MAX_PER_SESSION", 25))
     scroll_used = 0
     processed = 0
+    follows_completed_count = 0
     followers_engine_loop_iteration = 0
     prev_candidate_row_count: int | None = None
     sparse_follow_scrolls = 0
@@ -4844,6 +4864,11 @@ def _run_followers_list_engine_session(
             int(getattr(config, "FOLLOWERS_VISUAL_XML_STALE_GRACE_ITERATIONS", 3) or 3),
         ),
         "post_return_picker_refresh_pending": False,
+        "list_progressive_exploration_passes_used": 0,
+        "list_progressive_exploration_active": False,
+        "list_progressive_exploration_last_empty_reason": "",
+        "list_progressive_exploration_last_scroll_profile": "",
+        "list_progressive_exploration_exhausted": False,
     }
 
     def _trace_visual_candidate_post_follower_open(
@@ -6067,6 +6092,11 @@ def _run_followers_list_engine_session(
                     )
         if len(candidates) > 0:
             visible_follow_buttons_stall_scrolls = 0
+            visual_loop_state["list_progressive_exploration_passes_used"] = 0
+            visual_loop_state["list_progressive_exploration_active"] = False
+            visual_loop_state["list_progressive_exploration_exhausted"] = False
+            visual_loop_state["list_progressive_exploration_last_empty_reason"] = ""
+            visual_loop_state["list_progressive_exploration_last_scroll_profile"] = ""
         prev_candidate_row_count = len(candidates)
         stop_r_after_candidates = get_followers_engine_stop_reason()
         _empty_reason_pick = ""
@@ -6103,6 +6133,25 @@ def _run_followers_list_engine_session(
         # has no visual_match (zero-CTA path). Do not widen global _visual_followers_surface.
         _defer_visual_followers_surface_ok = bool(_visual_followers_surface) or bool(
             _vf_rendered_strong_committed_ok
+        )
+        _prog_max_passes_cfg = int(
+            getattr(config, "FOLLOWERS_LIST_PROGRESSIVE_EXPLORATION_MAX_PASSES", 3) or 3
+        )
+        _prog_max_passes_cfg = max(1, min(_prog_max_passes_cfg, 10))
+        _prog_passes_used_snap = int(
+            visual_loop_state.get("list_progressive_exploration_passes_used") or 0
+        )
+        _defer_pick_soft_progressive = (
+            bool(visual_loop_state.get("list_progressive_exploration_active"))
+            and _prog_passes_used_snap >= 1
+            and _prog_passes_used_snap < _prog_max_passes_cfg
+            and len(candidates) == 0
+            and _picker_err_pick == ""
+            and _empty_reason_pick in ("no_blue_follow_spans", "no_rows_after_filter")
+            and gate_passed
+            and bool(_vf_rendered_strong_committed_ok)
+            and bool(_defer_visual_followers_surface_ok)
+            and bool(getattr(config, "ENABLE_VISUAL_FOLLOWERS_CANDIDATE_PICKER", False))
         )
         _defer_xml_stale_for_visual_scroll = (
             bool(_defer_visual_followers_surface_ok)
@@ -6147,7 +6196,7 @@ def _run_followers_list_engine_session(
                     source_profile_username=source_profile_username,
                 ):
                     exploratory_scroll_permit_armed_this_iter = True
-                    exploratory_scroll_profile_this_iter = "default"
+                    exploratory_scroll_profile_this_iter = "zero_follow_spans_soft"
                     exploratory_scroll_reposition_meta = None
             elif _defer_xml_stale_pick_legit_unsafe_low_follow_only:
                 try:
@@ -6188,6 +6237,63 @@ def _run_followers_list_engine_session(
                             }
                     except (TypeError, ValueError):
                         exploratory_scroll_reposition_meta = None
+        elif _defer_xml_stale_for_visual_scroll and _defer_pick_soft_progressive:
+            try:
+                log(
+                    "info",
+                    "followers_visual_progressive_soft_exploration_pass_armed",
+                    loop_iteration=followers_engine_loop_iteration,
+                    source_profile_username=source_profile_username,
+                    exploration_passes_used=int(_prog_passes_used_snap),
+                    exploration_max_passes=int(_prog_max_passes_cfg),
+                    empty_reason=_empty_reason_pick,
+                    gate_passed=bool(gate_passed),
+                    vf_rendered_strong_committed_ok=bool(_vf_rendered_strong_committed_ok),
+                    defer_visual_followers_surface_ok=bool(_defer_visual_followers_surface_ok),
+                )
+            except Exception:
+                pass
+            if followers_allow_visual_exploratory_scroll_once(
+                reason="zero_follow_spans_defer",
+                source_profile_username=source_profile_username,
+            ):
+                exploratory_scroll_permit_armed_this_iter = True
+                exploratory_scroll_profile_this_iter = "zero_follow_spans_soft"
+                exploratory_scroll_reposition_meta = None
+        if (
+            bool(visual_loop_state.get("list_progressive_exploration_active"))
+            and int(visual_loop_state.get("list_progressive_exploration_passes_used") or 0)
+            >= _prog_max_passes_cfg
+            and len(candidates) == 0
+            and _picker_err_pick == ""
+            and _empty_reason_pick in ("no_blue_follow_spans", "no_rows_after_filter")
+            and gate_passed
+            and bool(_vf_rendered_strong_committed_ok)
+            and bool(_defer_visual_followers_surface_ok)
+            and bool(getattr(config, "ENABLE_VISUAL_FOLLOWERS_CANDIDATE_PICKER", False))
+            and not bool(visual_loop_state.get("list_progressive_exploration_exhausted"))
+        ):
+            visual_loop_state["list_progressive_exploration_exhausted"] = True
+            try:
+                log(
+                    "info",
+                    "followers_list_soft_exploration_exhausted",
+                    source_profile_username=source_profile_username,
+                    exploration_passes_used=int(
+                        visual_loop_state.get("list_progressive_exploration_passes_used") or 0
+                    ),
+                    max_passes=int(_prog_max_passes_cfg),
+                    last_empty_reason=str(
+                        visual_loop_state.get("list_progressive_exploration_last_empty_reason")
+                        or _empty_reason_pick
+                        or ""
+                    )[:200],
+                    scroll_used=int(scroll_used),
+                    session_outcome="no_followable_candidates_after_bounded_exploration",
+                    stop_reason=str(get_followers_engine_stop_reason() or ""),
+                )
+            except Exception:
+                pass
         if _defer_xml_stale_for_visual_scroll:
             try:
                 log(
@@ -6433,6 +6539,11 @@ def _run_followers_list_engine_session(
             ):
                 break
             else:
+                _expl_profile_completed = ""
+                if exploratory_scroll_permit_armed_this_iter:
+                    _expl_profile_completed = str(
+                        exploratory_scroll_profile_this_iter or ""
+                    ).strip()
                 scroll_used += 1
                 _eng_log(
                     "followers_list_scroll",
@@ -6456,6 +6567,17 @@ def _run_followers_list_engine_session(
                     exploratory_scroll_permit_armed_this_iter = False
                     exploratory_scroll_profile_this_iter = "default"
                     exploratory_scroll_reposition_meta = None
+                if _expl_profile_completed == "zero_follow_spans_soft":
+                    visual_loop_state["list_progressive_exploration_passes_used"] = int(
+                        visual_loop_state.get("list_progressive_exploration_passes_used") or 0
+                    ) + 1
+                    visual_loop_state["list_progressive_exploration_active"] = True
+                    visual_loop_state["list_progressive_exploration_last_empty_reason"] = str(
+                        _empty_reason_pick or ""
+                    )[:160]
+                    visual_loop_state["list_progressive_exploration_last_scroll_profile"] = (
+                        "zero_follow_spans_soft"
+                    )
                 _followers_try_refresh_injection_screenshot_after_scroll(
                     d,
                     open_list_meta,
@@ -7690,6 +7812,7 @@ def _run_followers_list_engine_session(
             _RUNTIME_FOLLOWED_USERNAMES.add(fkey)
             _RUNTIME_INTERACTED_USERNAMES.add(fkey)
             _SESSION_COUNTERS["follows"] += 1
+            follows_completed_count += 1
             _SESSION_COUNTERS["interactions"] += 1
             _SESSION_COUNTERS["successful_interactions"] += 1
 
@@ -8087,12 +8210,30 @@ def _run_followers_list_engine_session(
         if pic_final is not None:
             return pic_final
 
+    _prog_max_end = int(
+        getattr(config, "FOLLOWERS_LIST_PROGRESSIVE_EXPLORATION_MAX_PASSES", 3) or 3
+    )
+    _prog_max_end = max(1, min(_prog_max_end, 10))
+    _expl_used_end = int(visual_loop_state.get("list_progressive_exploration_passes_used") or 0)
+    _expl_exhausted_end = bool(visual_loop_state.get("list_progressive_exploration_exhausted"))
+    if follows_completed_count > 0:
+        _followers_sess_outcome = "follows_completed"
+    elif _expl_exhausted_end:
+        _followers_sess_outcome = "no_followable_candidates_bounded_exploration"
+    else:
+        _followers_sess_outcome = "no_follows_attempted"
+
     _emit_performance_summary(
         t0=t0,
         warm_session_used=warm_session_used,
         force_stop_used=force_stop_used,
         exit_code=0,
         target_username=source_profile_username,
+        follows_completed_count=follows_completed_count,
+        list_progressive_exploration_exhausted=_expl_exhausted_end,
+        exploration_passes_used=_expl_used_end,
+        exploration_max_passes=_prog_max_end,
+        followers_session_outcome=_followers_sess_outcome,
     )
     log(
         "info",
@@ -8100,6 +8241,11 @@ def _run_followers_list_engine_session(
         source_profile_username=source_profile_username,
         iterations=processed,
         total_ms=round((time.perf_counter() - t0) * 1000, 2),
+        follows_completed_count=follows_completed_count,
+        list_progressive_exploration_exhausted=_expl_exhausted_end,
+        exploration_passes_used=_expl_used_end,
+        exploration_max_passes=_prog_max_end,
+        session_outcome=_followers_sess_outcome,
     )
     _eng_log(
         "followers_engine_session_complete",
@@ -8108,6 +8254,11 @@ def _run_followers_list_engine_session(
         {
             "iterations": processed,
             "total_ms": round((time.perf_counter() - t0) * 1000, 2),
+            "follows_completed_count": follows_completed_count,
+            "list_progressive_exploration_exhausted": _expl_exhausted_end,
+            "exploration_passes_used": _expl_used_end,
+            "exploration_max_passes": _prog_max_end,
+            "session_outcome": _followers_sess_outcome,
         },
     )
     return 0

@@ -95,6 +95,9 @@ FOLLOWERS_ENTRY_V2_ALLOW_GEOMETRY_TAP = False
 FOLLOWERS_LIST_SCROLL_MAX_PER_SESSION = 25
 # Après visual_fallback avec forte confiance, ignorera XML stale pendant N itérations de boucle.
 FOLLOWERS_VISUAL_XML_STALE_GRACE_ITERATIONS = 3
+# Followers list: bounded progressive soft exploration (zero_follow_spans_soft; no fling).
+FOLLOWERS_LIST_PROGRESSIVE_EXPLORATION_MAX_PASSES = 3
+FOLLOWERS_LIST_PROGRESSIVE_SOFT_SCROLL_STEPS = 4
 # When XML/accessibility tree is stale after opening followers, use screenshot heuristics (no clicks).
 ENABLE_FOLLOWERS_VISUAL_FALLBACK = True
 FOLLOWERS_VISUAL_FALLBACK_MIN_CONFIDENCE = 0.65

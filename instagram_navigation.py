@@ -16099,9 +16099,10 @@ def _followers_scroll_list_forward(
         _FOLLOWERS_VISUAL_EXPLORATORY_SCROLL_ONCE
     )
     profile_req = str(scroll_profile or "default").strip() or "default"
-    if profile_req not in ("default", "micro_reposition"):
+    if profile_req not in ("default", "micro_reposition", "zero_follow_spans_soft"):
         profile_req = "default"
     micro_reposition = bool(use_exploratory) and profile_req == "micro_reposition"
+    zero_follow_spans_soft = bool(use_exploratory) and profile_req == "zero_follow_spans_soft"
     exhausted_was = False
     fallback_guard_would_block = False
     permit_reason_snapshot = ""
@@ -16247,6 +16248,83 @@ def _followers_scroll_list_forward(
             )
         except Exception:
             pass
+    elif zero_follow_spans_soft:
+        _mode = ""
+        _zf_soft_steps = int(getattr(config, "FOLLOWERS_LIST_PROGRESSIVE_SOFT_SCROLL_STEPS", 4) or 4)
+        _zf_soft_steps = max(1, min(_zf_soft_steps, 6))
+        try:
+            rv = d(classNameMatches=".*RecyclerView.*")
+            if rv.exists(timeout=0.25):
+                _mode = "recyclerview"
+                try:
+                    log(
+                        "info",
+                        "followers_visual_zero_follow_spans_soft_scroll_started",
+                        source_profile_username=str(source_profile_username or ""),
+                        permit_reason=permit_reason_snapshot,
+                        profile="zero_follow_spans_soft",
+                        mode=_mode,
+                        steps=int(_zf_soft_steps),
+                    )
+                except Exception:
+                    pass
+                _followers_log_scroll_or_swipe_about_to_run(
+                    d,
+                    source_function="_followers_scroll_list_forward",
+                    reason="recyclerview_scroll_vert_forward_zero_follow_spans_soft",
+                )
+                rv.scroll.vert.forward(steps=int(_zf_soft_steps))
+                time.sleep(0.22)
+                scroll_ok = True
+        except Exception:
+            pass
+        if not scroll_ok:
+            try:
+                w, h = d.window_size()
+                y_start = int(h * 0.68)
+                y_end = int(h * 0.48)
+                duration_s = 0.28
+                _mode = "fallback_swipe"
+                try:
+                    log(
+                        "info",
+                        "followers_visual_zero_follow_spans_soft_scroll_started",
+                        source_profile_username=str(source_profile_username or ""),
+                        permit_reason=permit_reason_snapshot,
+                        profile="zero_follow_spans_soft",
+                        mode=_mode,
+                        steps=None,
+                        y_start=int(y_start),
+                        y_end=int(y_end),
+                        duration_s=float(duration_s),
+                        screen_w=int(w),
+                        screen_h=int(h),
+                    )
+                except Exception:
+                    pass
+                _followers_log_scroll_or_swipe_about_to_run(
+                    d,
+                    source_function="_followers_scroll_list_forward",
+                    reason="fallback_vertical_swipe_followers_list_zero_follow_spans_soft",
+                )
+                d.swipe(w // 2, y_start, w // 2, y_end, duration_s)
+                time.sleep(0.22)
+                scroll_ok = True
+            except Exception:
+                scroll_ok = False
+        try:
+            log(
+                "info",
+                "followers_visual_zero_follow_spans_soft_scroll_used",
+                source_profile_username=str(source_profile_username or ""),
+                scroll_succeeded=bool(scroll_ok),
+                one_shot_consumed=True,
+                permit_reason=permit_reason_snapshot,
+                profile="zero_follow_spans_soft",
+                mode=_mode or ("recyclerview" if scroll_ok else "unknown"),
+            )
+        except Exception:
+            pass
     else:
         try:
             rv = d(classNameMatches=".*RecyclerView.*")
@@ -16301,7 +16379,11 @@ def scroll_followers_list_forward(
     source_profile_username: str | None = None,
     scroll_reposition_meta: dict[str, Any] | None = None,
 ) -> bool:
-    """Bounded scroll on the followers RecyclerView (or fallback swipe)."""
+    """Bounded scroll on the followers RecyclerView (or fallback swipe).
+
+    ``scroll_profile``: ``default`` | ``micro_reposition`` (unsafe-low-CTA defer) |
+    ``zero_follow_spans_soft`` (exploratory defer after zero blue spans).
+    """
     return _followers_scroll_list_forward(
         d,
         apply_exploratory_xml_override=apply_exploratory_xml_override,
