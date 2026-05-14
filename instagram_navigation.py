@@ -9419,15 +9419,44 @@ def visual_extract_followers_candidates_from_screenshot(
         pass
 
     try:
+        # Priority among already-safe followable rows: visual top-to-bottom only.
+        # row_cta_blue_frac / confidence remain validation signals upstream, not pick order.
         built.sort(
             key=lambda c: (
-                -float(c.get("row_cta_blue_frac") or 0.0),
-                -float(c.get("confidence") or 0.0),
                 int((c.get("approx_row_bounds") or {}).get("top") or 10**9),
+                int(c["span_index"])
+                if c.get("span_index") is not None
+                else 10**9,
             )
         )
         for _ri, _c in enumerate(built):
             _c["row_index"] = int(_ri)
+
+        try:
+            log(
+                "info",
+                "followers_visual_candidate_ordering_applied",
+                ordering_policy="top_to_bottom_safe_followable",
+                candidate_count=len(built),
+                ordered_candidate_ids=[
+                    str(c.get("visual_candidate_id") or "") for c in built
+                ],
+                ordered_span_indices=[
+                    int(c["span_index"])
+                    if c.get("span_index") is not None
+                    else -1
+                    for c in built
+                ],
+                ordered_top_values=[
+                    int((c.get("approx_row_bounds") or {}).get("top") or -1) for c in built
+                ],
+                screenshot_path=str(work_path),
+                source_profile_username=str(source_profile_username or ""),
+                dry_run=bool(dry_run),
+                visual_only=True,
+            )
+        except Exception:
+            pass
 
         out["candidates"] = built
         out["candidate_count"] = len(built)
