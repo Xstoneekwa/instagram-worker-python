@@ -7658,26 +7658,38 @@ def _run_followers_list_engine_session(
                     _RUNTIME_INTERACTED_USERNAMES.add(fkey)
                     _RUNTIME_SEEN_FOLLOWER_USERNAMES.add(fkey)
                     if supabase_mode and account_id:
-                        _safe_supabase_call(
-                            "record_follow_interaction_outcome",
-                            account_id,
-                            follower_un,
-                            source_profile_username,
-                            run_id=run_id or None,
-                            session_id=_SESSION_SOCIAL_ID or None,
-                            follow_ok=False,
-                            skipped_tap=False,
-                            follow_state_after=str(follow_out.get("follow_state_after") or ""),
-                            follow_status=None,
-                            failure_code=fc,
-                            failure_reason=_exit_reason_from_code(fc),
-                        )
-                        log(
-                            "info",
-                            "social_memory_updated",
-                            target_username=follower_un,
-                            kind="follow_failed",
-                        )
+                        _vfp_un = str(follower_un or "").strip()
+                        if _vfp_un:
+                            _safe_supabase_call(
+                                "record_follow_interaction_outcome",
+                                account_id,
+                                follower_un,
+                                source_profile_username,
+                                run_id=run_id or None,
+                                session_id=_SESSION_SOCIAL_ID or None,
+                                follow_ok=False,
+                                skipped_tap=False,
+                                follow_state_after=str(follow_out.get("follow_state_after") or ""),
+                                follow_status=None,
+                                failure_code=fc,
+                                failure_reason=_exit_reason_from_code(fc),
+                            )
+                            log(
+                                "info",
+                                "social_memory_updated",
+                                target_username=follower_un,
+                                kind="follow_failed",
+                            )
+                        else:
+                            log(
+                                "info",
+                                "followers_follow_persistence_skipped_unresolved_username",
+                                source_profile_username=source_profile_username,
+                                visual_candidate_id=str(pick.get("visual_candidate_id") or ""),
+                                follow_state_after=str(follow_out.get("follow_state_after") or ""),
+                                follow_ok=False,
+                                reason="follow_failed_without_resolved_username",
+                            )
                     ok_f, _ = return_to_followers_list(d, source_profile_username, pkg)
                     if not ok_f:
                         if _vcid_sm:
@@ -7785,27 +7797,39 @@ def _run_followers_list_engine_session(
                     skip_reason=_vc_skip_reason,
                 )
                 if supabase_mode and account_id:
-                    mem = _safe_supabase_call(
-                        "record_follow_interaction_outcome",
-                        account_id,
-                        follower_un,
-                        source_profile_username,
-                        run_id=run_id or None,
-                        session_id=_SESSION_SOCIAL_ID or None,
-                        follow_ok=False,
-                        skipped_tap=True,
-                        follow_state_after=fs_af,
-                        follow_status="already_following",
-                        failure_code=None,
-                        failure_reason=f"already_connected:{_vc_skip_reason}",
-                    )
-                    log(
-                        "info",
-                        "social_memory_updated",
-                        target_username=follower_un,
-                        kind="follow_skipped_already_connected",
-                        memory_ok=(mem or {}).get("ok"),
-                    )
+                    _vfp_un_ac = str(follower_un or "").strip()
+                    if _vfp_un_ac:
+                        mem = _safe_supabase_call(
+                            "record_follow_interaction_outcome",
+                            account_id,
+                            follower_un,
+                            source_profile_username,
+                            run_id=run_id or None,
+                            session_id=_SESSION_SOCIAL_ID or None,
+                            follow_ok=False,
+                            skipped_tap=True,
+                            follow_state_after=fs_af,
+                            follow_status="already_following",
+                            failure_code=None,
+                            failure_reason=f"already_connected:{_vc_skip_reason}",
+                        )
+                        log(
+                            "info",
+                            "social_memory_updated",
+                            target_username=follower_un,
+                            kind="follow_skipped_already_connected",
+                            memory_ok=(mem or {}).get("ok"),
+                        )
+                    else:
+                        log(
+                            "info",
+                            "followers_follow_persistence_skipped_unresolved_username",
+                            source_profile_username=source_profile_username,
+                            visual_candidate_id=str(pick.get("visual_candidate_id") or ""),
+                            follow_state_after=fs_af,
+                            follow_ok=False,
+                            reason="already_connected_without_resolved_username",
+                        )
                 if fkey:
                     _RUNTIME_SEEN_FOLLOWER_USERNAMES.add(fkey)
                     _RUNTIME_FOLLOWED_USERNAMES.add(fkey)
@@ -7994,33 +8018,45 @@ def _run_followers_list_engine_session(
             _SESSION_COUNTERS["successful_interactions"] += 1
 
             if supabase_mode and account_id:
-                mem = _safe_supabase_call(
-                    "record_follow_interaction_outcome",
-                    account_id,
-                    follower_un,
-                    source_profile_username,
-                    run_id=run_id or None,
-                    session_id=_SESSION_SOCIAL_ID or None,
-                    follow_ok=True,
-                    skipped_tap=bool(follow_out.get("skipped_tap")),
-                    follow_state_after=fs_af,
-                    follow_status=f_st,
-                    failure_code=None,
-                    failure_reason=None,
-                )
-                log(
-                    "info",
-                    "social_memory_updated",
-                    target_username=follower_un,
-                    kind="follow_success",
-                    memory_ok=(mem or {}).get("ok"),
-                )
-                _eng_log(
-                    "social_memory_updated",
-                    "success",
-                    "follow_persisted",
-                    {"follower_username": follower_un, "follow_status": f_st},
-                )
+                _vfp_un_ok = str(follower_un or "").strip()
+                if _vfp_un_ok:
+                    mem = _safe_supabase_call(
+                        "record_follow_interaction_outcome",
+                        account_id,
+                        follower_un,
+                        source_profile_username,
+                        run_id=run_id or None,
+                        session_id=_SESSION_SOCIAL_ID or None,
+                        follow_ok=True,
+                        skipped_tap=bool(follow_out.get("skipped_tap")),
+                        follow_state_after=fs_af,
+                        follow_status=f_st,
+                        failure_code=None,
+                        failure_reason=None,
+                    )
+                    log(
+                        "info",
+                        "social_memory_updated",
+                        target_username=follower_un,
+                        kind="follow_success",
+                        memory_ok=(mem or {}).get("ok"),
+                    )
+                    _eng_log(
+                        "social_memory_updated",
+                        "success",
+                        "follow_persisted",
+                        {"follower_username": follower_un, "follow_status": f_st},
+                    )
+                else:
+                    log(
+                        "info",
+                        "followers_follow_persistence_skipped_unresolved_username",
+                        source_profile_username=source_profile_username,
+                        visual_candidate_id=str(pick.get("visual_candidate_id") or ""),
+                        follow_state_after=fs_af,
+                        follow_ok=True,
+                        reason="verified_follow_without_resolved_username",
+                    )
         else:
             if _vcid_sm and _followers_resolved_continue_to_follow:
                 log(
@@ -8294,7 +8330,10 @@ def _run_followers_list_engine_session(
                 follower_username=follower_un,
                 return_method=str(how or ""),
             )
-            if str(how or "") == "compact_foreign_profile_back_visual_followers_list_confirmed":
+            if str(how or "") in (
+                "compact_foreign_profile_back_visual_followers_list_confirmed",
+                "compact_foreign_profile_fallback_then_list",
+            ):
                 followers_session_mark_list_committed_open(
                     source_profile_username,
                     committed_source="post_follow_compact_visual_return",

@@ -590,6 +590,47 @@ def _canonical_interaction_username(username: str) -> str:
     return (username or "").strip().lstrip("@").lower()
 
 
+_VISUAL_CANDIDATE_SENTINEL_PREFIX = "__visual_candidate:"
+
+
+def _invalid_interacted_username_reason(canonical_username: str) -> str | None:
+    """
+    ig_interacted_users must only store real Instagram handles (normalized).
+    Returns a machine reason if persist must be skipped, else None.
+    """
+    u = canonical_username
+    if not u:
+        return "empty_username"
+    if u.startswith(_VISUAL_CANDIDATE_SENTINEL_PREFIX):
+        return "visual_candidate_sentinel"
+    return None
+
+
+def _emit_interacted_user_skip_log(
+    event: str,
+    *,
+    account_id: str,
+    raw_username: str,
+    normalized_username: str,
+    source_profile: str,
+    reason: str,
+) -> None:
+    print(
+        json.dumps(
+            {
+                "level": "info",
+                "event": event,
+                "account_id": account_id,
+                "username": raw_username,
+                "normalized_username": normalized_username,
+                "source_profile": source_profile,
+                "reason": reason,
+            },
+            ensure_ascii=False,
+        )
+    )
+
+
 def _canonical_source_profile(source_profile: str) -> str:
     return (source_profile or "").strip().lstrip("@").lower()
 
@@ -629,6 +670,22 @@ def merge_interacted_user_row(
     """Insert or patch ig_interacted_users (fail-silent friendly return)."""
     now = _utc_now_iso()
     u = _canonical_interaction_username(username)
+    inv = _invalid_interacted_username_reason(u)
+    if inv is not None:
+        _emit_interacted_user_skip_log(
+            "interacted_user_persist_skipped_invalid_username",
+            account_id=str(account_id or ""),
+            raw_username=str(username or ""),
+            normalized_username=u,
+            source_profile=str(source_profile or ""),
+            reason=inv,
+        )
+        return {
+            "ok": False,
+            "error": "skipped_invalid_interacted_username",
+            "username": u,
+            "source_profile": source_profile,
+        }
     sp_raw = _canonical_source_profile(source_profile)
     sp_col = sp_raw if sp_raw else None
     row = load_interacted_user(account_id, username, source_profile)
@@ -703,6 +760,26 @@ def record_follow_interaction_outcome(
     failure_code: int | None = None,
     failure_reason: str | None = None,
 ) -> dict[str, Any]:
+    u_gate = _canonical_interaction_username(username)
+    inv_gate = _invalid_interacted_username_reason(u_gate)
+    if inv_gate is not None:
+        print(
+            json.dumps(
+                {
+                    "level": "info",
+                    "event": "follow_interaction_persist_skipped_invalid_username",
+                    "account_id": str(account_id or ""),
+                    "username": str(username or ""),
+                    "normalized_username": u_gate,
+                    "source_profile": str(source_profile or ""),
+                    "reason": inv_gate,
+                    "follow_ok": follow_ok,
+                },
+                ensure_ascii=False,
+            )
+        )
+        return {"ok": False, "error": "skipped_invalid_interacted_username"}
+
     now = _utc_now_iso()
     payload_delta: dict[str, Any] = {}
     if follow_state_after is not None:
@@ -773,6 +850,26 @@ def record_interaction_skip_memory(
     session_id: str | None = None,
     lifecycle_state: str = "skipped",
 ) -> dict[str, Any]:
+    u_gate = _canonical_interaction_username(username)
+    inv_gate = _invalid_interacted_username_reason(u_gate)
+    if inv_gate is not None:
+        print(
+            json.dumps(
+                {
+                    "level": "info",
+                    "event": "interaction_skip_memory_persist_skipped_invalid_username",
+                    "account_id": str(account_id or ""),
+                    "username": str(username or ""),
+                    "normalized_username": u_gate,
+                    "source_profile": str(source_profile or ""),
+                    "reason": inv_gate,
+                    "skip_reason": skip_reason,
+                },
+                ensure_ascii=False,
+            )
+        )
+        return {"ok": False, "error": "skipped_invalid_interacted_username"}
+
     now = _utc_now_iso()
     patch: dict[str, Any] = {
         "interaction_type": "follow",

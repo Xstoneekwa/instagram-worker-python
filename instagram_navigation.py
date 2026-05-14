@@ -21664,6 +21664,81 @@ def post_follow_controlled_return_to_followers_list(
             except Exception as e:
                 fb_how = f"exception:{type(e).__name__}"
             ok_fin, det_fin = _list_confirmed()
+            _fb_repoll_max = 3
+            _fb_repoll_sleep_s = min(0.35, max(0.2, 0.28))
+            if (
+                fb_ok
+                and not ok_fin
+                and str(fb_how or "") == "reopen_from_source_profile"
+            ):
+                try:
+                    log(
+                        "info",
+                        "post_follow_return_ct_fallback_list_confirm_repoll_started",
+                        visual_candidate_id=vcid,
+                        source_profile_username=src,
+                        follower_username=cand or None,
+                        fallback_method=str(fb_how or ""),
+                        max_attempts=int(_fb_repoll_max),
+                        sleep_s=round(float(_fb_repoll_sleep_s), 3),
+                    )
+                except Exception:
+                    pass
+                for _rep_i in range(1, _fb_repoll_max + 1):
+                    try:
+                        time.sleep(_fb_repoll_sleep_s)
+                    except Exception:
+                        pass
+                    ok_fin, det_fin = _list_confirmed()
+                    try:
+                        log(
+                            "info",
+                            "post_follow_return_ct_fallback_list_confirm_repoll_attempt",
+                            visual_candidate_id=vcid,
+                            source_profile_username=src,
+                            follower_username=cand or None,
+                            fallback_method=str(fb_how or ""),
+                            attempt=int(_rep_i),
+                            max_attempts=int(_fb_repoll_max),
+                            confirmed=bool(ok_fin),
+                            is_followers_list=bool(det_fin.get("is_followers_list")),
+                            action_bar_title=str(det_fin.get("action_bar_title") or "")[:120],
+                        )
+                    except Exception:
+                        pass
+                    if ok_fin:
+                        try:
+                            log(
+                                "info",
+                                "post_follow_return_ct_fallback_list_confirm_repoll_success",
+                                visual_candidate_id=vcid,
+                                source_profile_username=src,
+                                follower_username=cand or None,
+                                fallback_method=str(fb_how or ""),
+                                attempt=int(_rep_i),
+                                max_attempts=int(_fb_repoll_max),
+                                is_followers_list=bool(det_fin.get("is_followers_list")),
+                                action_bar_title=str(det_fin.get("action_bar_title") or "")[:120],
+                            )
+                        except Exception:
+                            pass
+                        break
+                if not ok_fin:
+                    try:
+                        log(
+                            "warning",
+                            "post_follow_return_ct_fallback_list_confirm_repoll_exhausted",
+                            visual_candidate_id=vcid,
+                            source_profile_username=src,
+                            follower_username=cand or None,
+                            fallback_method=str(fb_how or ""),
+                            max_attempts=int(_fb_repoll_max),
+                            confirmed=False,
+                            is_followers_list=bool(det_fin.get("is_followers_list")),
+                            action_bar_title=str(det_fin.get("action_bar_title") or "")[:120],
+                        )
+                    except Exception:
+                        pass
             if fb_ok and ok_fin:
                 log(
                     "info",
