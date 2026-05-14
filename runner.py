@@ -30,6 +30,7 @@ from device import (
     health_check,
     lock_instagram_update_system,
     press_home,
+    screenshot,
 )
 from navigation_engine import NavigationEngineState, observe_instagram_state
 from visual_row_mapping import (
@@ -83,12 +84,16 @@ from instagram_navigation import (
     followers_session_committed_meta,
     followers_session_merge_det_for_committed_visual_surface,
     followers_session_clear_list_committed_open,
+    followers_session_mark_list_committed_open,
     followers_committed_surface_light_revalidate,
     _followers_committed_rendered_strong_visual_ok,
     _followers_set_last_open_detection_method,
     FOLLOWERS_ENGINE_XML_STALE_EXIT_REASONS,
     FOLLOWERS_ENGINE_VISUAL_OPEN_METHODS,
+    FOLLOWERS_RENDERED_STRONG_COMMITTED_SOURCES,
     followers_bypass_xml_stale_recovery_if_visual_surface_strong,
+    followers_allow_visual_exploratory_scroll_once,
+    followers_clear_exploratory_scroll_permit_unused,
     followers_engine_clear_stop_reason,
     get_followers_engine_stop_reason,
     iter_followers_candidates,
@@ -2600,14 +2605,153 @@ def _open_meta_visual_fallback_screenshot_path(meta: dict) -> str | None:
     return None
 
 
+def _followers_try_refresh_injection_screenshot_after_scroll(
+    d,
+    open_list_meta: dict,
+    *,
+    source_profile_username: str,
+    scroll_used: int,
+    reason: str,
+) -> None:
+    """
+    Capture the current followers list after a successful forward scroll so the next loop
+    iteration's visual injection path does not reuse a pre-scroll bitmap.
+    """
+    out = (
+        Path(__file__).resolve().parent
+        / "logs"
+        / "screenshots"
+        / "followers_after_scroll_latest.png"
+    )
+    capture_ok = False
+    try:
+        out.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    try:
+        screenshot(d, str(out))
+        capture_ok = bool(out.is_file())
+    except Exception as _cap_exc:
+        try:
+            log(
+                "warning",
+                "followers_visual_injection_screenshot_refresh_failed",
+                source_profile_username=source_profile_username,
+                screenshot_path=str(out),
+                scroll_used=int(scroll_used),
+                reason=str(reason or ""),
+                error=str(_cap_exc),
+            )
+        except Exception:
+            pass
+    if capture_ok:
+        open_list_meta["latest_followers_injection_screenshot_path"] = str(out)
+    try:
+        log(
+            "info",
+            "followers_visual_injection_screenshot_refreshed_after_scroll",
+            source_profile_username=source_profile_username,
+            screenshot_path=str(out),
+            scroll_used=int(scroll_used),
+            reason=str(reason or ""),
+            capture_ok=bool(capture_ok),
+        )
+    except Exception:
+        pass
+
+
+def _followers_try_post_return_picker_injection_refresh(
+    d,
+    open_list_meta: dict,
+    *,
+    visual_loop_state: dict[str, Any],
+    source_profile_username: str,
+) -> None:
+    """
+    One-shot: after compact post-follow return, replace ``latest_followers_injection_screenshot_path``
+    with a fresh capture taken shortly before the next candidate picker (distinct from the
+    return-confirmation ``followers_visual_fallback_*.png`` frame).
+    """
+    if not bool(visual_loop_state.get("post_return_picker_refresh_pending")):
+        return
+    meta_arm = visual_loop_state.get("post_return_picker_refresh_meta")
+    if not isinstance(meta_arm, dict):
+        meta_arm = {}
+    prior = ""
+    if isinstance(open_list_meta, dict):
+        prior = str(open_list_meta.get("latest_followers_injection_screenshot_path") or "").strip()
+    settle_raw = float(
+        getattr(config, "FOLLOWERS_POST_RETURN_PICKER_INJECTION_SETTLE_S", 0.75) or 0.75
+    )
+    settle_s = max(0.6, min(1.0, settle_raw))
+    try:
+        time.sleep(settle_s)
+    except Exception:
+        pass
+    out = (
+        Path(__file__).resolve().parent
+        / "logs"
+        / "screenshots"
+        / "followers_after_post_return_latest.png"
+    )
+    capture_ok = False
+    try:
+        out.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    try:
+        screenshot(d, str(out))
+        capture_ok = bool(out.is_file())
+    except Exception as _cap_exc:
+        try:
+            log(
+                "warning",
+                "followers_post_return_picker_injection_screenshot_refresh_failed",
+                source_profile_username=source_profile_username,
+                screenshot_path=str(out),
+                prior_promoted_return_screenshot_path=prior[:400] if prior else "",
+                refresh_reason="post_follow_return_before_next_picker",
+                settle_s=round(settle_s, 3),
+                error=str(_cap_exc),
+            )
+        except Exception:
+            pass
+    if capture_ok and isinstance(open_list_meta, dict):
+        open_list_meta["latest_followers_injection_screenshot_path"] = str(out)
+    try:
+        log(
+            "info",
+            "followers_post_return_picker_injection_screenshot_refreshed",
+            source_profile_username=source_profile_username,
+            screenshot_path=str(out),
+            prior_promoted_return_screenshot_path=prior[:400] if prior else "",
+            refresh_reason="post_follow_return_before_next_picker",
+            settle_s=round(settle_s, 3),
+            capture_ok=bool(capture_ok),
+            visual_candidate_id=str(meta_arm.get("visual_candidate_id") or "")[:120],
+            follower_username=str(meta_arm.get("follower_username") or "")[:120],
+            return_method=str(meta_arm.get("return_method") or "")[:120],
+        )
+    except Exception:
+        pass
+    visual_loop_state["post_return_picker_refresh_pending"] = False
+    visual_loop_state.pop("post_return_picker_refresh_meta", None)
+
+
 def _followers_injection_screenshot_path(
     open_list_meta: dict,
     session_vf: dict | None,
 ) -> str | None:
     """
     Resolve a followers-list screenshot for visual row mapping without fresh XML.
-    Order: session visual_fallback_detail → open meta snapshots → tap_diag capture → canonical file.
+    Order: latest post-scroll capture (open_list_meta) → session visual_fallback_detail
+    → open meta snapshots → tap_diag capture → canonical after-tap file.
     """
+    latest = open_list_meta.get("latest_followers_injection_screenshot_path")
+    if isinstance(latest, str):
+        latest_s = latest.strip()
+        if latest_s and os.path.isfile(latest_s):
+            return latest_s
     if isinstance(session_vf, dict):
         for k in ("screenshot_path_used", "screenshot_path"):
             p = session_vf.get(k)
@@ -2625,6 +2769,18 @@ def _followers_injection_screenshot_path(
     if p4.is_file():
         return str(p4)
     return None
+
+
+def _followers_row_mapping_skip_reasons_only_tap_y_outside_safe_vertical_band(sk: object) -> bool:
+    """
+    True when row-mapping skips are exclusively ``tap_y_outside_safe_vertical_band`` counts
+    (no mixed skip reasons). Used for a narrow XML-stale defer toward exploratory scroll.
+    """
+    if not isinstance(sk, dict) or not sk:
+        return False
+    if set(sk.keys()) != {"tap_y_outside_safe_vertical_band"}:
+        return False
+    return int(sk.get("tap_y_outside_safe_vertical_band") or 0) >= 1
 
 
 def _followers_det_skip_redetect_after_visual_bypass(
@@ -4687,6 +4843,7 @@ def _run_followers_list_engine_session(
             0,
             int(getattr(config, "FOLLOWERS_VISUAL_XML_STALE_GRACE_ITERATIONS", 3) or 3),
         ),
+        "post_return_picker_refresh_pending": False,
     }
 
     def _trace_visual_candidate_post_follower_open(
@@ -5099,6 +5256,10 @@ def _run_followers_list_engine_session(
 
     while processed < max_iter:
         followers_engine_loop_iteration += 1
+        followers_clear_exploratory_scroll_permit_unused()
+        exploratory_scroll_permit_armed_this_iter = False
+        exploratory_scroll_profile_this_iter = "default"
+        exploratory_scroll_reposition_meta: dict[str, Any] | None = None
         stop_r_loop = get_followers_engine_stop_reason()
 
         log(
@@ -5364,6 +5525,12 @@ def _run_followers_list_engine_session(
                     open_list_meta=open_list_meta,
                     session_vf_detail_for_loop=session_vf_detail_for_loop,
                 )
+                _light_meta_dict = _light_meta if isinstance(_light_meta, dict) else {}
+                _ps_latest_inj = ""
+                if isinstance(open_list_meta, dict):
+                    _ps_latest_inj = str(
+                        open_list_meta.get("latest_followers_injection_screenshot_path") or ""
+                    ).strip()
                 if _light_st == "light_ok":
                     try:
                         log(
@@ -5417,6 +5584,61 @@ def _run_followers_list_engine_session(
                     )
                     followers_session_clear_list_committed_open(source_profile_username)
                     return 42
+                elif (
+                    _light_st == "light_inconclusive"
+                    and str(_light_meta_dict.get("reason") or "")
+                    == "vision_rejected_on_committed_shot"
+                    and str(_cm.get("followers_list_committed_source") or "")
+                    in FOLLOWERS_RENDERED_STRONG_COMMITTED_SOURCES
+                    and str(_cm.get("followers_list_committed_for") or "").strip()
+                    == str(source_profile_username or "").strip()
+                    and followers_session_list_committed_open_for(source_profile_username)
+                    and bool(_ps_latest_inj and os.path.isfile(_ps_latest_inj))
+                ):
+                    try:
+                        log(
+                            "info",
+                            "followers_committed_surface_post_scroll_vision_rejection_tolerated",
+                            source_profile_username=source_profile_username,
+                            light_status=str(_light_st or ""),
+                            light_reason=str(_light_meta_dict.get("reason") or ""),
+                            screenshot_path=str(_light_meta_dict.get("screenshot_path") or "")[:400],
+                            followers_list_committed_source=str(
+                                _cm.get("followers_list_committed_source") or ""
+                            ),
+                            latest_followers_injection_screenshot_path=_ps_latest_inj,
+                            quick_revalidate_skipped=True,
+                            continue_basis="committed_rendered_strong_post_scroll",
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        log(
+                            "info",
+                            "committed_followers_surface_revalidated_light",
+                            source_profile_username=source_profile_username,
+                            committed_source=str(_cm.get("followers_list_committed_source") or ""),
+                            committed_age_ms=_committed_age_ms,
+                            light_meta=dict(_light_meta_dict),
+                        )
+                    except Exception:
+                        pass
+                    det = dict(det_merged)
+                    if not bool(det.get("is_followers_list")):
+                        det["is_followers_list"] = True
+                    _sigs = list(det.get("signals") or [])
+                    if "committed_followers_surface_revalidated_light" not in _sigs:
+                        _sigs.append("committed_followers_surface_revalidated_light")
+                    det["signals"] = _sigs
+                    open_detection_method = str(
+                        det.get("open_detection_method") or open_detection_method or ""
+                    )
+                    if open_detection_method.strip():
+                        _followers_set_last_open_detection_method(open_detection_method)
+                    _vfd_sync = det.get("visual_fallback_detail")
+                    if isinstance(_vfd_sync, dict) and _vfd_sync:
+                        session_vf_detail_for_loop = dict(_vfd_sync)
+                        visual_loop_state["session_vf_detail"] = session_vf_detail_for_loop
                 else:
                     rv_ok, rv_meta = followers_surface_quick_revalidate(
                         d,
@@ -5578,6 +5800,13 @@ def _run_followers_list_engine_session(
                 _eng_log("followers_list_recovered", "success", "surface_restored", {"method": how})
                 continue
 
+        _followers_try_post_return_picker_injection_refresh(
+            d,
+            open_list_meta,
+            visual_loop_state=visual_loop_state,
+            source_profile_username=source_profile_username,
+        )
+
         log(
             "info",
             "followers_candidate_collection_started",
@@ -5658,7 +5887,7 @@ def _run_followers_list_engine_session(
                 if bool(_vfd_loop.get("visual_match")):
                     vf_evidence = _vfd_loop
                 elif (
-                    _committed_src_gate_meta == "entry_v2_rendered_strong"
+                    _committed_src_gate_meta in FOLLOWERS_RENDERED_STRONG_COMMITTED_SOURCES
                     and _followers_committed_rendered_strong_visual_ok(_vfd_loop)
                 ):
                     vf_evidence = _vfd_loop
@@ -5676,7 +5905,7 @@ def _run_followers_list_engine_session(
             )
         )
         _vf_rendered_strong_committed_ok = (
-            _committed_src_gate_meta == "entry_v2_rendered_strong"
+            _committed_src_gate_meta in FOLLOWERS_RENDERED_STRONG_COMMITTED_SOURCES
             and isinstance(vf_evidence, dict)
             and _followers_committed_rendered_strong_visual_ok(vf_evidence)
         )
@@ -5770,6 +5999,8 @@ def _run_followers_list_engine_session(
                     source_profile_username=source_profile_username,
                 )
 
+        _vp_inj_for_defer: dict | None = None
+        _row_mapping_diag: dict[str, Any] = {}
         if gate_passed:
             _shot_inj = _gate_shot_str
             if _shot_inj:
@@ -5799,11 +6030,13 @@ def _run_followers_list_engine_session(
                     except Exception:
                         pass
                     _inj = list(_vp_inj.get("candidates") or [])
+                    if isinstance(_vp_inj, dict):
+                        _vp_inj_for_defer = dict(_vp_inj)
                 if not _inj:
                     _max_map = int(
                         getattr(config, "VISUAL_FOLLOWERS_MAX_CANDIDATES_PER_SCREEN", 5) or 5
                     )
-                    _mapped = visual_map_followers_rows_from_screenshot(
+                    _mapped, _row_mapping_diag = visual_map_followers_rows_from_screenshot(
                         _shot_inj,
                         max_candidates=_max_map,
                         min_confidence=_min_vf_conf,
@@ -5836,12 +6069,125 @@ def _run_followers_list_engine_session(
             visible_follow_buttons_stall_scrolls = 0
         prev_candidate_row_count = len(candidates)
         stop_r_after_candidates = get_followers_engine_stop_reason()
+        _empty_reason_pick = ""
+        _picker_err_pick = ""
+        if isinstance(_vp_inj_for_defer, dict):
+            _empty_reason_pick = str(
+                _vp_inj_for_defer.get("empty_reason")
+                or _vp_inj_for_defer.get("reason")
+                or ""
+            )
+            _picker_err_pick = str(_vp_inj_for_defer.get("picker_error") or "")
+        _defer_xml_stale_pick_legit_empty_xml_open = (
+            str(stop_r_after_candidates or "") == "visual_open_xml_empty"
+            and bool(_vf_rendered_strong_committed_ok)
+            and bool(getattr(config, "ENABLE_VISUAL_FOLLOWERS_CANDIDATE_PICKER", False))
+            and _picker_err_pick == ""
+            and _empty_reason_pick in ("no_blue_follow_spans", "no_rows_after_filter")
+        )
+        _defer_xml_stale_pick_legit_unsafe_low_follow_only = (
+            str(stop_r_after_candidates or "") == "visual_open_xml_empty"
+            and bool(_vf_rendered_strong_committed_ok)
+            and bool(getattr(config, "ENABLE_VISUAL_FOLLOWERS_CANDIDATE_PICKER", False))
+            and _picker_err_pick in ("", "vision_validation_rejected")
+            and int(_row_mapping_diag.get("cta_allowed_count") or 0) > 0
+            and int(_row_mapping_diag.get("mapped_count") or 0) == 0
+            and str(_row_mapping_diag.get("row_mapping_empty_reason") or "")
+            == "no_tap_safe_visual_candidate_after_cta_allowed"
+            and _followers_row_mapping_skip_reasons_only_tap_y_outside_safe_vertical_band(
+                _row_mapping_diag.get("row_mapping_skip_reasons")
+            )
+        )
+        # Defer XML-stale abort toward scroll when the list is structurally committed
+        # (rendered-strong) even if open_detection_method stayed "xml" and session_vf
+        # has no visual_match (zero-CTA path). Do not widen global _visual_followers_surface.
+        _defer_visual_followers_surface_ok = bool(_visual_followers_surface) or bool(
+            _vf_rendered_strong_committed_ok
+        )
         _defer_xml_stale_for_visual_scroll = (
-            bool(_visual_followers_surface)
+            bool(_defer_visual_followers_surface_ok)
             and bool(gate_passed)
             and len(candidates) == 0
-            and stop_r_after_candidates not in FOLLOWERS_ENGINE_XML_STALE_EXIT_REASONS
+            and (
+                str(stop_r_after_candidates or "")
+                not in FOLLOWERS_ENGINE_XML_STALE_EXIT_REASONS
+                or _defer_xml_stale_pick_legit_empty_xml_open
+                or _defer_xml_stale_pick_legit_unsafe_low_follow_only
+            )
         )
+        if _defer_xml_stale_for_visual_scroll and (
+            _defer_xml_stale_pick_legit_empty_xml_open
+            or _defer_xml_stale_pick_legit_unsafe_low_follow_only
+        ):
+            if _defer_xml_stale_pick_legit_empty_xml_open:
+                try:
+                    log(
+                        "info",
+                        "followers_visual_zero_follow_spans_deferred_to_scroll",
+                        loop_iteration=followers_engine_loop_iteration,
+                        source_profile_username=source_profile_username,
+                        stop_r_after_candidates=str(stop_r_after_candidates or ""),
+                        candidate_count=int(
+                            (_vp_inj_for_defer or {}).get("candidate_count") or 0
+                        ),
+                        picker_error=_picker_err_pick,
+                        empty_reason=_empty_reason_pick,
+                        gate_passed=bool(gate_passed),
+                        visual_followers_surface=bool(_visual_followers_surface),
+                        vf_rendered_strong_committed_ok=bool(_vf_rendered_strong_committed_ok),
+                        defer_visual_followers_surface_ok=bool(
+                            _defer_visual_followers_surface_ok
+                        ),
+                        open_detection_method=str(open_detection_method or ""),
+                    )
+                except Exception:
+                    pass
+                if followers_allow_visual_exploratory_scroll_once(
+                    reason="zero_follow_spans_defer",
+                    source_profile_username=source_profile_username,
+                ):
+                    exploratory_scroll_permit_armed_this_iter = True
+                    exploratory_scroll_profile_this_iter = "default"
+                    exploratory_scroll_reposition_meta = None
+            elif _defer_xml_stale_pick_legit_unsafe_low_follow_only:
+                try:
+                    log(
+                        "info",
+                        "followers_visual_unsafe_low_follow_cta_deferred_to_scroll",
+                        loop_iteration=followers_engine_loop_iteration,
+                        source_profile_username=source_profile_username,
+                        stop_r_after_candidates=str(stop_r_after_candidates or ""),
+                        picker_error=_picker_err_pick,
+                        cta_allowed_count=int(_row_mapping_diag.get("cta_allowed_count") or 0),
+                        mapped_count=int(_row_mapping_diag.get("mapped_count") or 0),
+                        row_mapping_skip_reasons=dict(
+                            _row_mapping_diag.get("row_mapping_skip_reasons") or {}
+                        ),
+                        reason="follow_cta_allowed_but_tap_y_outside_safe_band",
+                    )
+                except Exception:
+                    pass
+                if followers_allow_visual_exploratory_scroll_once(
+                    reason="unsafe_low_follow_cta_defer",
+                    source_profile_username=source_profile_username,
+                ):
+                    exploratory_scroll_permit_armed_this_iter = True
+                    exploratory_scroll_profile_this_iter = "micro_reposition"
+                    exploratory_scroll_reposition_meta = None
+                    try:
+                        _ty_o = _row_mapping_diag.get("reposition_low_cta_tap_y_o")
+                        _oh_o = _row_mapping_diag.get("reposition_orig_h_o")
+                        _ysb_o = _row_mapping_diag.get("reposition_y_safe_bottom_o")
+                        if _ty_o is not None and _oh_o is not None:
+                            exploratory_scroll_reposition_meta = {
+                                "tap_y_ref_o": int(_ty_o),
+                                "orig_h_o": int(_oh_o),
+                                "y_safe_bottom_o": int(_ysb_o)
+                                if _ysb_o is not None
+                                else int(int(_oh_o) * 0.86),
+                            }
+                    except (TypeError, ValueError):
+                        exploratory_scroll_reposition_meta = None
         if _defer_xml_stale_for_visual_scroll:
             try:
                 log(
@@ -5858,7 +6204,10 @@ def _run_followers_list_engine_session(
             except Exception:
                 pass
         if _visual_followers_surface and (
-            stop_r_after_candidates in FOLLOWERS_ENGINE_XML_STALE_EXIT_REASONS
+            (
+                stop_r_after_candidates in FOLLOWERS_ENGINE_XML_STALE_EXIT_REASONS
+                and not _defer_xml_stale_for_visual_scroll
+            )
             or (len(candidates) == 0 and not _defer_xml_stale_for_visual_scroll)
         ):
             stale_reason = stop_r_after_candidates
@@ -6021,6 +6370,13 @@ def _run_followers_list_engine_session(
                                 "scroll_kind": "micro_swipe",
                             },
                         )
+                        _followers_try_refresh_injection_screenshot_after_scroll(
+                            d,
+                            open_list_meta,
+                            source_profile_username=source_profile_username,
+                            scroll_used=scroll_used,
+                            reason="followers_scroll_success_sparse_micro",
+                        )
                     continue
                 if (
                     bool(det_sparse.get("is_followers_list"))
@@ -6059,7 +6415,22 @@ def _run_followers_list_engine_session(
                     scroll_used=scroll_used,
                 )
                 break
-            elif not scroll_followers_list_forward(d):
+            elif not scroll_followers_list_forward(
+                d,
+                apply_exploratory_xml_override=exploratory_scroll_permit_armed_this_iter,
+                scroll_profile=(
+                    exploratory_scroll_profile_this_iter
+                    if exploratory_scroll_permit_armed_this_iter
+                    else "default"
+                ),
+                source_profile_username=source_profile_username,
+                scroll_reposition_meta=(
+                    exploratory_scroll_reposition_meta
+                    if exploratory_scroll_permit_armed_this_iter
+                    and exploratory_scroll_profile_this_iter == "micro_reposition"
+                    else None
+                ),
+            ):
                 break
             else:
                 scroll_used += 1
@@ -6068,6 +6439,29 @@ def _run_followers_list_engine_session(
                     "info",
                     "scroll",
                     {"scroll_index": scroll_used, "direction": "forward"},
+                )
+                if exploratory_scroll_permit_armed_this_iter:
+                    _prev_stop_exploratory = get_followers_engine_stop_reason()
+                    followers_engine_clear_stop_reason()
+                    try:
+                        log(
+                            "info",
+                            "followers_visual_exploratory_scroll_success_stale_stop_cleared",
+                            source_profile_username=source_profile_username,
+                            previous_stop_reason=str(_prev_stop_exploratory or ""),
+                            scroll_used=int(scroll_used),
+                        )
+                    except Exception:
+                        pass
+                    exploratory_scroll_permit_armed_this_iter = False
+                    exploratory_scroll_profile_this_iter = "default"
+                    exploratory_scroll_reposition_meta = None
+                _followers_try_refresh_injection_screenshot_after_scroll(
+                    d,
+                    open_list_meta,
+                    source_profile_username=source_profile_username,
+                    scroll_used=scroll_used,
+                    reason="followers_scroll_success",
                 )
                 continue
 
@@ -7599,6 +7993,64 @@ def _run_followers_list_engine_session(
                 follower_username=follower_un,
                 return_method=str(how or ""),
             )
+            if str(how or "") == "compact_foreign_profile_back_visual_followers_list_confirmed":
+                followers_session_mark_list_committed_open(
+                    source_profile_username,
+                    committed_source="post_follow_compact_visual_return",
+                )
+                log(
+                    "info",
+                    "followers_session_rearmed_after_post_follow_visual_return",
+                    source_profile_username=source_profile_username,
+                    visual_candidate_id=pick.get("visual_candidate_id"),
+                    follower_username=follower_un,
+                    return_method=str(how or ""),
+                    committed_source="post_follow_compact_visual_return",
+                )
+                _promo_shot = str(_pf.get("return_list_screenshot_path") or "").strip()
+                _promo_vf = (
+                    _pf.get("return_visual_fallback_detail")
+                    if isinstance(_pf.get("return_visual_fallback_detail"), dict)
+                    else None
+                )
+                _vf_promoted = False
+                if _promo_shot and os.path.isfile(_promo_shot):
+                    open_list_meta["latest_followers_injection_screenshot_path"] = _promo_shot
+                    if _promo_vf:
+                        session_vf_detail_for_loop = dict(_promo_vf)
+                        visual_loop_state["session_vf_detail"] = session_vf_detail_for_loop
+                        _vf_promoted = True
+                    try:
+                        log(
+                            "info",
+                            "followers_post_return_visual_evidence_promoted_for_next_loop",
+                            source_profile_username=source_profile_username,
+                            visual_candidate_id=pick.get("visual_candidate_id"),
+                            follower_username=follower_un,
+                            return_method=str(how or ""),
+                            screenshot_path=_promo_shot,
+                            promoted_to="latest_followers_injection_screenshot_path",
+                            session_vf_detail_promoted=bool(_vf_promoted),
+                        )
+                    except Exception:
+                        pass
+                visual_loop_state["post_return_picker_refresh_pending"] = True
+                visual_loop_state["post_return_picker_refresh_meta"] = {
+                    "visual_candidate_id": str(pick.get("visual_candidate_id") or ""),
+                    "follower_username": str(follower_un or ""),
+                    "return_method": str(how or ""),
+                }
+                try:
+                    log(
+                        "info",
+                        "followers_post_return_picker_refresh_armed",
+                        source_profile_username=source_profile_username,
+                        visual_candidate_id=str(pick.get("visual_candidate_id") or ""),
+                        follower_username=str(follower_un or ""),
+                        return_method=str(how or ""),
+                    )
+                except Exception:
+                    pass
 
         fk_session = _norm_ig_handle(str(follower_un or ""))
         if fk_session:

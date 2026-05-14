@@ -197,17 +197,30 @@ def _vr_log_row_cta(
     log("info", event, **payload)
 
 
+EMPTY_ROW_MAPPING_DIAG: dict[str, Any] = {
+    "mapped_count": 0,
+    "span_count": 0,
+    "cta_allowed_count": 0,
+    "row_mapping_skip_reasons": {},
+    "row_mapping_empty_reason": None,
+}
+
+
 def visual_map_followers_rows_from_screenshot(
     screenshot_path: str,
     *,
     max_candidates: int = 5,
     min_confidence: float = 0.65,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """
     Map blue-follow-button row bands to tap-safe coordinates on disk screenshot.
 
-    Returns rows with ``tap_x`` / ``tap_y`` in **original** screenshot pixel space.
+    Returns ``(rows, diag)``. Rows carry ``tap_x`` / ``tap_y`` in **original** screenshot pixel space.
     ``follow_button_x`` / ``follow_button_y`` are informational (center of pill); never tap them here.
+
+    ``diag`` always includes ``mapped_count``, ``span_count``, ``cta_allowed_count``,
+    ``row_mapping_skip_reasons``, and ``row_mapping_empty_reason`` (set only when spans exist but no
+    mapped tap-safe row was produced).
     """
     path = str(screenshot_path or "").strip()
     out: list[dict[str, Any]] = []
@@ -229,7 +242,7 @@ def visual_map_followers_rows_from_screenshot(
             mapped_count=0,
             reason="no_screenshot_path",
         )
-        return out
+        return out, dict(EMPTY_ROW_MAPPING_DIAG)
 
     try:
         from PIL import Image
@@ -241,7 +254,7 @@ def visual_map_followers_rows_from_screenshot(
             mapped_count=0,
             reason=f"pil_import_failed:{e}",
         )
-        return out
+        return out, dict(EMPTY_ROW_MAPPING_DIAG)
 
     try:
         im_orig = Image.open(path)
@@ -255,13 +268,14 @@ def visual_map_followers_rows_from_screenshot(
             mapped_count=0,
             reason=f"pil_open_failed:{e}",
         )
-        return out
+        return out, dict(EMPTY_ROW_MAPPING_DIAG)
 
     aw, ah = im_rgb.size
     spans = _visual_collect_follow_row_y_spans(im_rgb)
     w, h = aw, ah
     cta_allowed_count = 0
     row_mapping_skip_reasons: dict[str, int] = {}
+    low_oob_cta_tap_y_values_o: list[int] = []
 
     def _bump_row_mapping_skip(reason: str) -> None:
         row_mapping_skip_reasons[reason] = row_mapping_skip_reasons.get(reason, 0) + 1
@@ -409,6 +423,8 @@ def visual_map_followers_rows_from_screenshot(
 
         if tap_y < y_safe_top_o or tap_y > y_safe_bottom_o:
             _bump_row_mapping_skip("tap_y_outside_safe_vertical_band")
+            if tap_y > y_safe_bottom_o:
+                low_oob_cta_tap_y_values_o.append(int(tap_y))
             log(
                 "info",
                 "followers_visual_row_mapping_skip",
@@ -477,6 +493,32 @@ def visual_map_followers_rows_from_screenshot(
             screenshot_path=path,
         )
 
+    row_mapping_empty_reason: str | None = None
+    if spans and not out:
+        row_mapping_empty_reason = (
+            "no_tap_safe_visual_candidate_after_cta_allowed"
+            if cta_allowed_count > 0
+            else "no_row_passed_follow_cta_gate"
+        )
+    mapping_diag: dict[str, Any] = {
+        "mapped_count": len(out),
+        "span_count": len(spans),
+        "cta_allowed_count": int(cta_allowed_count),
+        "row_mapping_skip_reasons": dict(row_mapping_skip_reasons),
+        "row_mapping_empty_reason": row_mapping_empty_reason,
+    }
+    if (
+        spans
+        and not out
+        and int(cta_allowed_count) > 0
+        and str(row_mapping_empty_reason or "")
+        == "no_tap_safe_visual_candidate_after_cta_allowed"
+        and low_oob_cta_tap_y_values_o
+    ):
+        mapping_diag["reposition_low_cta_tap_y_o"] = int(max(low_oob_cta_tap_y_values_o))
+        mapping_diag["reposition_orig_h_o"] = int(orig_h)
+        mapping_diag["reposition_y_safe_bottom_o"] = int(y_safe_bottom_o)
+
     log(
         "info",
         "followers_visual_row_mapping_result",
@@ -488,10 +530,6 @@ def visual_map_followers_rows_from_screenshot(
         min_confidence=round(float(min_confidence), 4),
     )
     if spans and not out:
-        if cta_allowed_count > 0:
-            nf_reason = "no_tap_safe_visual_candidate_after_cta_allowed"
-        else:
-            nf_reason = "no_row_passed_follow_cta_gate"
         log(
             "warning",
             "followers_visual_no_followable_candidate_found",
@@ -500,9 +538,9 @@ def visual_map_followers_rows_from_screenshot(
             mapped_count=len(out),
             cta_allowed_count=int(cta_allowed_count),
             row_mapping_skip_reasons=dict(row_mapping_skip_reasons),
-            reason=nf_reason,
+            reason=str(row_mapping_empty_reason or ""),
         )
-    return out
+    return out, mapping_diag
 
 
 def visual_row_mapping_to_follower_engine_candidates(

@@ -260,6 +260,67 @@ def _ambiguous_tab_visual_strong_followers_accept(
     return True, "followers_list_visual_strong_ambiguous_tab_accepted", {**sig, **extra}
 
 
+def _followers_list_open_zero_follow_cta_structure_strong(
+    det: dict[str, Any],
+    context: dict[str, Any],
+    *,
+    ft_ok: bool,
+    emit_structure_accept_log: bool = True,
+) -> tuple[bool, str, dict[str, Any]]:
+    """
+    When no Follow pill is visible yet, still classify as followers_list if list chrome
+    is very strong (aligned with rendered-strong gates in instagram_navigation).
+    """
+    if ft_ok:
+        return False, "", {}
+    bad_nav, nav_why = _forbidden_nav_or_guess_followers_override(det, context)
+    if bad_nav:
+        return False, "", {"forbidden_nav_or_guess": nav_why}
+    ab_title = str(det.get("action_bar_title") or "").strip()
+    if _action_bar_following_subscription_tokens(ab_title):
+        return False, "", {"action_bar_following_like": True}
+    vf = _vf(det)
+    if not isinstance(vf, dict) or not vf:
+        return False, "", {}
+    if not bool(vf.get("visual_search_area_detected")):
+        return False, "", {}
+    if not bool(vf.get("visual_followers_title_hint")):
+        return False, "", {}
+    vs = vf.get("visual_signals") or []
+    if not any(str(x) == "search_strip" for x in vs):
+        return False, "", {}
+    try:
+        fcb = int(vf.get("visual_follow_button_count") or 0)
+    except Exception:
+        fcb = -1
+    if fcb != 0:
+        return False, "", {}
+    rows = int(vf.get("visual_user_rows_detected") or 0)
+    if rows < 19:
+        return False, "", {}
+    extra: dict[str, Any] = {
+        "zero_follow_cta_list_structure_strong": True,
+        "visual_user_rows_detected": rows,
+        "visual_search_area_detected": True,
+        "active_tab_text_action_bar": ab_title[:160],
+    }
+    if emit_structure_accept_log:
+        try:
+            log(
+                "info",
+                "vision_validation_zero_follow_cta_followers_list_structure_accept",
+                visual_user_rows_detected=int(rows),
+                visual_search_area_detected=True,
+                visual_followers_title_hint=bool(vf.get("visual_followers_title_hint")),
+                following_tab_active=bool(ft_ok),
+                active_tab_text=ab_title[:160],
+                visual_signals_sample=[str(x) for x in vs[:20]] if isinstance(vs, list) else [],
+            )
+        except Exception:
+            pass
+    return True, "followers_list_zero_follow_cta_structure_strong", extra
+
+
 def _classify_surface(
     *,
     source_profile_username: str | None,
@@ -346,9 +407,48 @@ def _classify_surface(
                 acc_reason,
                 sig_out,
             )
+        zf_ok, zf_reason, zf_extra = _followers_list_open_zero_follow_cta_structure_strong(
+            det, context, ft_ok=ft_ok
+        )
+        if zf_ok and exp_hint in (
+            "followers_list",
+            "followers",
+            "followers_list_open",
+        ):
+            sig_out = {**sig, **zf_extra}
+            return (
+                "followers_list",
+                "followers",
+                False,
+                None,
+                0.87,
+                zf_reason,
+                sig_out,
+            )
         if bool(getattr(config, "VISION_VALIDATION_STRICT_MODE", True)):
             return "unknown", None, True, None, 0.45, "list_like_but_tab_ambiguous_strict", sig
         return "followers_list", None, False, None, 0.5, "list_like_tab_unknown_non_strict", sig
+
+    exp_follow = str(expected_surface or "").strip().lower() in (
+        "followers_list",
+        "followers",
+        "followers_list_open",
+    )
+    if (not list_like) and exp_follow and not ft_ok:
+        zf2_ok, zf2_reason, zf2_extra = _followers_list_open_zero_follow_cta_structure_strong(
+            det, context, ft_ok=ft_ok
+        )
+        if zf2_ok:
+            sig_out = {**sig, **zf2_extra}
+            return (
+                "followers_list",
+                "followers",
+                False,
+                None,
+                0.86,
+                zf2_reason,
+                sig_out,
+            )
 
     guess = str(det.get("current_screen_guess") or "").lower()
     abn = str(det.get("action_bar_title") or "").strip()
@@ -411,17 +511,67 @@ def validate_instagram_surface_from_screenshot(
             safe_to_continue = False
 
     elif exp in ("visual_candidate_row", "followers_visual_pick"):
+        det_vp = _det(ctx)
+        blob_vp = _blob_headers(det_vp)
+        ft_vp, _ft_vp_why = _following_tab_signal(blob_vp)
+        zf_vp_ok, zf_vp_reason, zf_vp_extra = (
+            _followers_list_open_zero_follow_cta_structure_strong(
+                det_vp,
+                ctx,
+                ft_ok=ft_vp,
+                emit_structure_accept_log=False,
+            )
+        )
         if surface == "following_list" or active_tab == "following":
             ok = False
             safe_to_continue = False
-        elif surface != "followers_list":
+            reason = f"expected_followers_got_{surface}:{reason}"
+        elif surface != "followers_list" and not zf_vp_ok:
             ok = False
             safe_to_continue = False
-        if ok and not _follow_cta_signal(ctx, _det(ctx)):
+        if ok and not _follow_cta_signal(ctx, det_vp):
             if getattr(config, "VISION_VALIDATION_STRICT_MODE", True):
-                ok = False
-                safe_to_continue = False
-                reason = "follow_cta_not_visible_for_candidate_row"
+                if zf_vp_ok:
+                    reason = str(zf_vp_reason or "zero_follow_cta_visual_pick_structure_strong")
+                    vf_vp = _vf(det_vp)
+                    try:
+                        log(
+                            "info",
+                            "vision_validation_zero_follow_cta_followers_visual_pick_structure_accept",
+                            expected_surface=exp,
+                            surface_classified=str(surface),
+                            visual_user_rows_detected=zf_vp_extra.get(
+                                "visual_user_rows_detected"
+                            ),
+                            visual_follow_button_count=vf_vp.get(
+                                "visual_follow_button_count"
+                            ),
+                            visual_search_area_detected=bool(
+                                vf_vp.get("visual_search_area_detected")
+                            ),
+                            visual_followers_title_hint=bool(
+                                vf_vp.get("visual_followers_title_hint")
+                            ),
+                            active_tab=active_tab,
+                            accept_basis=(
+                                "zero_follow_cta_structure_strong_surface_override"
+                                if str(surface) != "followers_list"
+                                else "zero_follow_cta_structure_strong_follow_cta_bypass"
+                            ),
+                        )
+                    except Exception:
+                        pass
+                    danger = False
+                    surface = "followers_list"
+                    if active_tab != "following":
+                        active_tab = "followers"
+                    if isinstance(signals, dict):
+                        signals["danger_override_applied"] = True
+                        signals["surface_override"] = "followers_list"
+                else:
+                    ok = False
+                    safe_to_continue = False
+                    reason = "follow_cta_not_visible_for_candidate_row"
 
     elif exp in ("post_follow", "post_follow_safe", "candidate_profile_post_follow"):
         if danger or surface in ("story_or_reel", "comment_composer", "launcher_or_wrong_surface"):

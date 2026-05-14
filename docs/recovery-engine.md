@@ -1,0 +1,52 @@
+# Recovery Engine
+
+## Recovery-first architecture
+
+Les flows sensibles (followers, ouverture profil, follow, **post-follow / return CT**) sont conçus pour :
+
+- **échouer explicitement** avec une raison stable ;
+- **réessayer** dans des bornes (compteurs, streaks, budgets temps) ;
+- **abandonner proprement** plutôt que d’empiler des actions aveugles.
+
+La recovery n’est pas un “catch-all” opaque : chaque tentative doit être **observable** et **justifiée** dans les logs.
+
+## Retries intelligents
+
+- Retries **conditionnés** par l’état observé (pas de retry identique sans nouveau signal).
+- Limites **max rounds**, **max backs**, **budgets** par phase pour éviter les sessions de plusieurs minutes sur un seul candidat.
+- Distinction entre **retry légitime** (XML stale, overlay temporaire) et **signal de dérive** (écran DM, reel, composer).
+
+## Anti-dérive
+
+Règles transverses (alignées post-follow et autres recoveries) :
+
+- Détection de **surfaces dangereuses** (story, post viewer, commentaire, message, search hors contexte, etc.).
+- En dérive : **pas** d’exploration (pas de swipe profond, pas d’ouverture de post pour “voir où on est”).
+- **Un** geste de sortie minimal (ex. un `back`) seulement si le contexte est jugé **safe** (ex. Instagram au premier plan, overlay connu).
+- Si l’état ne revient pas à une **base sûf** (profil CT, liste CT, profil candidat attendu) : **abort** avec reason dédiée.
+
+## Abort rules
+
+- **Streak** de nav défavorable (`UNKNOWN` répété, search, launcher, etc.) au-delà d’un seuil configuré.
+- **Budget temps** de round dépassé sans confirmation de la cible.
+- **Surface drift** détectée et non résolue après le back contrôlé unique.
+
+Chaque abort doit produire un **code / chaîne de failure** stable pour dashboards et post-mortem.
+
+## No exploratory navigation during recovery
+
+Pendant recovery **critique** (surtout post-follow) :
+
+- interdits : tap sur **média**, **story**, **commentaire**, **composer** ;
+- interdits : **swipe** exploratoire, **reopen** profil/liste par taps complexes si la config désactive ce chemin ;
+- autorisé avec prudence : **back** contrôlé, **observe_instagram_state**, **détection** followers / profil.
+
+## Logs obligatoires
+
+- Nom d’événement **stable** (`post_follow_return_ct_*`, `visual_follow_*`, etc.).
+- Champs : `phase`, `attempt`, `visual_candidate_id`, `source_profile_username`, `navigation_state`, `failure_reason` / `how` selon le module.
+- Les branches **recovery** et **abort** ne doivent pas être silencieuses.
+
+## Reasons explicites
+
+Toute sortie d’échec ou d’abandon doit porter une **reason** lisible et stable (pas seulement `False` / code numérique opaque côté métier). Les PR doivent documenter les **nouvelles** reasons ajoutées.
