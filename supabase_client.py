@@ -635,6 +635,35 @@ def _canonical_source_profile(source_profile: str) -> str:
     return (source_profile or "").strip().lstrip("@").lower()
 
 
+def _nonblank_str(v: Any) -> bool:
+    return bool(str(v or "").strip())
+
+
+def _apply_interacted_user_row_attribution(
+    row: dict[str, Any] | None,
+    body: dict[str, Any],
+    source_profile_canonical: str | None,
+) -> None:
+    """
+    first_* only when missing on existing row; last_* always from current write.
+    Also refreshes legacy source_profile when we have a canonical CT handle.
+    """
+    if source_profile_canonical:
+        body["last_source_profile"] = source_profile_canonical
+        if not _nonblank_str((row or {}).get("first_source_profile")):
+            body["first_source_profile"] = source_profile_canonical
+        body["source_profile"] = source_profile_canonical
+    rid = body.get("run_id")
+    if rid is not None and str(rid).strip():
+        rs = str(rid).strip()
+        body["last_run_id"] = rs
+        if not _nonblank_str((row or {}).get("first_run_id")):
+            body["first_run_id"] = rs
+    ls = body.get("last_session_id")
+    if ls is not None and str(ls).strip():
+        body["last_session_id"] = str(ls).strip()
+
+
 def load_interacted_user(
     account_id: str,
     username: str,
@@ -690,6 +719,7 @@ def merge_interacted_user_row(
     sp_col = sp_raw if sp_raw else None
     row = load_interacted_user(account_id, username, source_profile)
     body = {k: v for k, v in patch.items() if v is not None}
+    _apply_interacted_user_row_attribution(row, body, sp_col)
     if "payload" in body and isinstance(body["payload"], dict):
         prev: dict[str, Any] = {}
         if row and isinstance(row.get("payload"), dict):
@@ -811,10 +841,12 @@ def record_follow_interaction_outcome(
         }
         if not skipped_tap:
             patch["followed_at"] = now
+        if str(fs).lower() == "requested":
+            patch["follow_requested_at"] = now
         if run_id:
             patch["run_id"] = str(run_id)
         if session_id:
-            patch["session_id"] = str(session_id)
+            patch["last_session_id"] = str(session_id)
     else:
         payload_delta = {
             **payload_delta,
@@ -835,9 +867,31 @@ def record_follow_interaction_outcome(
         if run_id:
             patch["run_id"] = str(run_id)
         if session_id:
-            patch["session_id"] = str(session_id)
+            patch["last_session_id"] = str(session_id)
     patch = {k: v for k, v in patch.items() if v is not None}
-    return merge_interacted_user_row(account_id, username, source_profile, patch)
+    mout = merge_interacted_user_row(account_id, username, source_profile, patch)
+    if mout.get("ok") and follow_ok:
+        _ev = (
+            "follow_requested"
+            if str(fs or "").strip().lower() == "requested"
+            else "follow_verified"
+        )
+        record_interaction_event(
+            account_id,
+            username,
+            source_profile,
+            run_id=run_id,
+            session_id=session_id,
+            event_type=_ev,
+            event_status="success",
+            event_reason=None,
+            payload={
+                "follow_status": str(fs or ""),
+                "skipped_tap": bool(skipped_tap),
+                "follow_state_after": str(follow_state_after or ""),
+            },
+        )
+    return mout
 
 
 def record_interaction_skip_memory(
@@ -886,5 +940,149 @@ def record_interaction_skip_memory(
     if run_id:
         patch["run_id"] = str(run_id)
     if session_id:
-        patch["session_id"] = str(session_id)
+        patch["last_session_id"] = str(session_id)
     return merge_interacted_user_row(account_id, username, source_profile, patch)
+
+
+def record_interaction_event(
+    account_id: str,
+    username: str,
+    source_profile: str,
+    *,
+    run_id: str | None = None,
+    session_id: str | None = None,
+    event_type: str,
+    event_status: str = "success",
+    event_reason: str | None = None,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """
+    Append-only ig_interaction_events row. Skips invalid usernames (same rules as ig_interacted_users).
+    """
+    u = _canonical_interaction_username(username)
+    inv = _invalid_interacted_username_reason(u)
+    if inv is not None:
+        print(
+            json.dumps(
+                {
+                    "level": "info",
+                    "event": "interaction_event_persist_skipped_invalid_username",
+                    "account_id": str(account_id or ""),
+                    "username": str(username or ""),
+                    "normalized_username": u,
+                    "source_profile": str(source_profile or ""),
+                    "reason": inv,
+                    "event_type": str(event_type or ""),
+                },
+                ensure_ascii=False,
+            )
+        )
+        return {"ok": False, "error": "skipped_invalid_interacted_username"}
+    now = _utc_now_iso()
+    sp = _canonical_source_profile(source_profile)
+    body: dict[str, Any] = {
+        "username": u,
+        "event_type": str(event_type or "")[:200],
+        "event_status": str(event_status or "success")[:80],
+        "event_at": now,
+        "created_at": now,
+        "payload": dict(payload) if isinstance(payload, dict) else {},
+    }
+    if str(account_id or "").strip():
+        body["account_id"] = str(account_id).strip()
+    if run_id and str(run_id).strip():
+        body["run_id"] = str(run_id).strip()
+    if session_id and str(session_id).strip():
+        body["session_id"] = str(session_id).strip()
+    if sp:
+        body["source_profile"] = sp
+    if event_reason:
+        body["event_reason"] = str(event_reason)[:500]
+    out: dict[str, Any] = {"ok": False, "error": None}
+    try:
+        _request_json_tolerate_unknown_columns(
+            "POST",
+            "ig_interaction_events",
+            body=body,
+            prefer_representation=False,
+        )
+        out["ok"] = True
+        return out
+    except RuntimeError as e:
+        out["error"] = str(e)
+        return out
+
+
+def record_mute_interaction_success(
+    account_id: str,
+    username: str,
+    source_profile: str,
+    *,
+    run_id: str | None,
+    session_id: str | None,
+    muted_posts: bool,
+    muted_stories: bool,
+    mute_partial: bool,
+    visual_candidate_id: str,
+    timings_ms: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Persist mute outcome on ig_interacted_users + mute_success event (real username only)."""
+    u_gate = _canonical_interaction_username(username)
+    inv_gate = _invalid_interacted_username_reason(u_gate)
+    if inv_gate is not None:
+        print(
+            json.dumps(
+                {
+                    "level": "info",
+                    "event": "mute_interaction_persist_skipped_invalid_username",
+                    "account_id": str(account_id or ""),
+                    "username": str(username or ""),
+                    "normalized_username": u_gate,
+                    "source_profile": str(source_profile or ""),
+                    "reason": inv_gate,
+                },
+                ensure_ascii=False,
+            )
+        )
+        return {"ok": False, "error": "skipped_invalid_interacted_username"}
+    now = _utc_now_iso()
+    mute_delta: dict[str, Any] = {
+        "last_mute": {
+            "mute_partial": bool(mute_partial),
+            "muted_posts": bool(muted_posts),
+            "muted_stories": bool(muted_stories),
+            "visual_candidate_id": str(visual_candidate_id or ""),
+            "timings_ms": timings_ms or {},
+        }
+    }
+    patch: dict[str, Any] = {
+        "last_interaction_at": now,
+        "last_muted_at": now,
+        "muted_posts": bool(muted_posts),
+        "muted_stories": bool(muted_stories),
+        "payload": mute_delta,
+    }
+    if run_id:
+        patch["run_id"] = str(run_id)
+    if session_id:
+        patch["last_session_id"] = str(session_id)
+    mout = merge_interacted_user_row(account_id, username, source_profile, patch)
+    if mout.get("ok"):
+        record_interaction_event(
+            account_id,
+            username,
+            source_profile,
+            run_id=run_id,
+            session_id=session_id,
+            event_type="mute_success",
+            event_status="success",
+            event_reason="mute_partial" if mute_partial else None,
+            payload={
+                "mute_partial": bool(mute_partial),
+                "muted_posts": bool(muted_posts),
+                "muted_stories": bool(muted_stories),
+                "visual_candidate_id": str(visual_candidate_id or ""),
+                "timings_ms": timings_ms or {},
+            },
+        )
+    return mout

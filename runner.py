@@ -8135,6 +8135,30 @@ def _run_followers_list_engine_session(
                 skipped_tap=bool((follow_out or {}).get("skipped_tap")),
                 det=det if isinstance(det, dict) else None,
             )
+            if supabase_mode and account_id and str(follower_un or "").strip():
+                _mute_pf = _pf.get("mute") if isinstance(_pf.get("mute"), dict) else {}
+                if (
+                    bool(_mute_pf.get("mute_started"))
+                    and bool(_mute_pf.get("ok"))
+                    and bool(_mute_pf.get("mute_engine_v2"))
+                    and str(_mute_pf.get("mute_v2_outcome") or "")
+                    in ("success", "partial_success")
+                ):
+                    _safe_supabase_call(
+                        "record_mute_interaction_success",
+                        account_id,
+                        follower_un,
+                        source_profile_username,
+                        run_id=run_id or None,
+                        session_id=_SESSION_SOCIAL_ID or None,
+                        muted_posts=bool(_mute_pf.get("posts_verified")),
+                        muted_stories=bool(_mute_pf.get("stories_verified")),
+                        mute_partial=bool(_mute_pf.get("mute_v2_partial")),
+                        visual_candidate_id=str(pick.get("visual_candidate_id") or ""),
+                        timings_ms=_mute_pf.get("timings_ms")
+                        if isinstance(_mute_pf.get("timings_ms"), dict)
+                        else {},
+                    )
             ok_back = bool(_pf.get("return_ok"))
             how = str(_pf.get("return_how") or "")
             _pf_fail = str(_pf.get("return_failure_reason") or "")

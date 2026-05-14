@@ -24096,6 +24096,8 @@ def run_visual_candidate_post_follow_phase(
             "mute_v2_abort_reason": v2.get("abort_reason"),
             "mute_v2_partial": bool(v2.get("partial")),
             "timings_ms": v2.get("timings_ms") or {},
+            "posts_verified": bool(v2.get("posts_verified")),
+            "stories_verified": bool(v2.get("stories_verified")),
         }
         if outcome == "success":
             log(
