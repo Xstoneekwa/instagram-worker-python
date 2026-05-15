@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 import random
+import re
 import time
 import uuid
 from pathlib import Path
@@ -2486,6 +2487,26 @@ def _run_one_target(
 
 def _norm_ig_handle(u: str) -> str:
     return (u or "").strip().lstrip("@").lower()
+
+
+_IG_PUBLIC_HANDLE_RE = re.compile(r"^[A-Za-z0-9._]{1,30}$")
+
+
+def _is_plausible_public_ig_username(raw: str) -> bool:
+    """
+    True for a likely public Instagram handle from list/hint/profile read.
+    Rejects internal visual row placeholders (vfp_*, vf_row_*) and social-memory sentinels.
+    """
+    s = str(raw or "").strip().lstrip("@")
+    if not s:
+        return False
+    if s.startswith("__visual"):
+        return False
+    if s.startswith("vfp_"):
+        return False
+    if s.startswith("vf_row_"):
+        return False
+    return bool(_IG_PUBLIC_HANDLE_RE.fullmatch(s))
 
 
 def _ct_clear_candidate_attempt_timer() -> None:
@@ -6693,12 +6714,27 @@ def _run_followers_list_engine_session(
 
         sparse_follow_scrolls = 0
 
-        pending_username = bool(pick.get("username_pending_profile_read"))
+        _vcid_for_pick = str(pick.get("visual_candidate_id") or "").strip()
+        _prev_pick_username = str(pick.get("username") or "").strip()
+        _hint_pick = str(pick.get("resolved_username_hint") or "").strip().lstrip("@")
+        _from_pick = (
+            _prev_pick_username
+            if _is_plausible_public_ig_username(_prev_pick_username)
+            else ""
+        )
+        _from_hint = _hint_pick if _is_plausible_public_ig_username(_hint_pick) else ""
+        _resolved_prefollow = _from_pick or _from_hint
+
+        pending_username = bool(pick.get("username_pending_profile_read")) or (
+            bool(_vcid_for_pick) and not _resolved_prefollow
+        )
         _followers_resolved_continue_to_follow = False
         _ct_follow_resolve_streak = 0
 
         if not pending_username:
-            fkey_pre = _norm_ig_handle(str(pick.get("username") or ""))
+            fkey_pre = _norm_ig_handle(
+                str(_resolved_prefollow or pick.get("username") or "")
+            )
             if fkey_pre:
                 _RUNTIME_SEEN_FOLLOWER_USERNAMES.add(fkey_pre)
             if fkey_pre == src_key:
@@ -6724,21 +6760,60 @@ def _run_followers_list_engine_session(
 
         followers_session_clear_list_committed_open(source_profile_username)
 
-        follower_un = str(pick.get("username") or "").strip()
+        follower_un = (
+            _resolved_prefollow
+            if _resolved_prefollow
+            else str(pick.get("username") or "").strip().lstrip("@")
+        )
+        if not pending_username and _resolved_prefollow:
+            pick["username"] = _resolved_prefollow
 
         if pending_username:
+            try:
+                log(
+                    "info",
+                    "visual_followers_profile_username_resolution_attempted",
+                    source_profile_username=source_profile_username,
+                    visual_candidate_id=str(pick.get("visual_candidate_id") or ""),
+                    previous_pick_username=_prev_pick_username,
+                    resolved_username_hint=_hint_pick,
+                    pending_flag=bool(pick.get("username_pending_profile_read")),
+                    resolution_reason="visual_candidate_needs_action_bar_read",
+                )
+            except Exception:
+                pass
             follower_un = str(
                 read_current_profile_username_for_follow_gate(d) or ""
             ).strip().lstrip("@")
-            log(
-                "info",
-                "visual_followers_username_resolved_on_profile",
-                follower_username=follower_un,
-                source_profile_username=source_profile_username,
-                follow_button_bounds=pick.get("bounds"),
-            )
-            pick["username"] = follower_un
-            pick["username_pending_profile_read"] = False
+            if follower_un:
+                pick["username"] = follower_un
+                pick["username_pending_profile_read"] = False
+                pick["username_resolution_source"] = "profile_action_bar_post_open"
+                try:
+                    log(
+                        "info",
+                        "visual_followers_profile_username_resolved",
+                        source_profile_username=source_profile_username,
+                        visual_candidate_id=str(pick.get("visual_candidate_id") or ""),
+                        previous_pick_username=_prev_pick_username,
+                        resolved_username=follower_un,
+                        resolution_source="profile_action_bar_post_open",
+                    )
+                except Exception:
+                    pass
+            else:
+                try:
+                    log(
+                        "info",
+                        "visual_followers_profile_username_unresolved",
+                        source_profile_username=source_profile_username,
+                        visual_candidate_id=str(pick.get("visual_candidate_id") or ""),
+                        previous_pick_username=_prev_pick_username,
+                        resolved_username_hint=_hint_pick,
+                        resolution_reason="empty_after_action_bar_read",
+                    )
+                except Exception:
+                    pass
             if not follower_un:
                 log(
                     "warning",
@@ -7711,6 +7786,37 @@ def _run_followers_list_engine_session(
                 f_st = "requested"
             else:
                 f_st = "following"
+
+            if (
+                bool(follow_out.get("ok"))
+                and fs_af in ("following", "requested")
+                and not str(follower_un or "").strip()
+            ):
+                try:
+                    _urg_pf = str(
+                        read_current_profile_username_for_follow_gate(d) or ""
+                    ).strip().lstrip("@")
+                except Exception:
+                    _urg_pf = ""
+                if _urg_pf and _is_plausible_public_ig_username(_urg_pf):
+                    follower_un = _urg_pf
+                    pick["username"] = _urg_pf
+                    pick["username_pending_profile_read"] = False
+                    pick["username_resolution_source"] = (
+                        "profile_action_bar_post_follow_recovery"
+                    )
+                    fkey = _norm_ig_handle(follower_un)
+                    try:
+                        log(
+                            "info",
+                            "followers_follow_persistence_username_recovered_post_follow",
+                            source_profile_username=source_profile_username,
+                            visual_candidate_id=str(pick.get("visual_candidate_id") or ""),
+                            resolved_username=_urg_pf,
+                            follow_state_after=fs_af,
+                        )
+                    except Exception:
+                        pass
 
             if (
                 bool(follow_out.get("ok"))

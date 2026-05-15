@@ -24608,11 +24608,36 @@ def visual_profile_stats_posts_count(d: u2.Device) -> int | None:
 
 
 def read_current_profile_username_for_follow_gate(d: u2.Device) -> str:
-    """Action-bar / header username on current profile screen (best-effort)."""
-    try:
-        return str(_visual_read_action_bar_username(d) or "").strip().lstrip("@")
-    except Exception:
-        return ""
+    """Action-bar / header username on current profile screen (best-effort, short retry)."""
+    max_tries = int(
+        getattr(config, "PROFILE_ACTION_BAR_USERNAME_READ_MAX_TRIES", 3) or 3
+    )
+    max_tries = max(1, min(max_tries, 5))
+    delay_s = float(
+        getattr(config, "PROFILE_ACTION_BAR_USERNAME_READ_RETRY_DELAY_S", 0.25) or 0.25
+    )
+    delay_s = max(0.12, min(delay_s, 0.45))
+    last = ""
+    for attempt in range(max_tries):
+        try:
+            last = str(_visual_read_action_bar_username(d) or "").strip().lstrip("@")
+        except Exception:
+            last = ""
+        if last:
+            if attempt > 0:
+                try:
+                    log(
+                        "info",
+                        "profile_action_bar_username_read_retry_success",
+                        attempt_index=attempt + 1,
+                        max_tries=max_tries,
+                    )
+                except Exception:
+                    pass
+            return last
+        if attempt + 1 < max_tries:
+            time.sleep(delay_s)
+    return ""
 
 
 def _visual_raw_follow_invite_visible_quick(d: u2.Device) -> bool:
