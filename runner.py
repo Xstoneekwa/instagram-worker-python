@@ -14,6 +14,12 @@ from datetime import datetime, timezone
 from typing import Any
 
 import social_memory
+from followers_exploration import (
+    FollowersExplorationV1,
+    exploration_v1_enabled,
+    followers_progressive_max_passes,
+    followers_scroll_soft_max_per_session,
+)
 from visual_follow_history import (
     VISUAL_FOLLOW_HISTORY_CONTINUE,
     mark_visual_follow_target_processed,
@@ -5497,7 +5503,7 @@ def _run_followers_list_engine_session(
         )
 
     max_iter = int(getattr(config, "FOLLOWERS_LIST_MAX_ITERATIONS_PER_RUN", 35))
-    max_scroll = int(getattr(config, "FOLLOWERS_LIST_SCROLL_MAX_PER_SESSION", 25))
+    max_scroll = int(followers_scroll_soft_max_per_session())
     scroll_used = 0
     processed = 0
     follows_completed_count = 0
@@ -5539,6 +5545,10 @@ def _run_followers_list_engine_session(
         "pending_recent_already_connected_visual_candidate_skip": None,
         "blocked_already_connected_visual_candidate_ids": {},
     }
+    _expl_v1 = FollowersExplorationV1(
+        visual_loop_state,
+        source_profile_username=source_profile_username,
+    )
 
     def _followers_clear_pending_visual_candidate_skip() -> None:
         visual_loop_state["pending_recent_verified_follow_visual_candidate_skip"] = None
@@ -6922,10 +6932,7 @@ def _run_followers_list_engine_session(
             and _fbc_defer >= 1
             and bool(getattr(config, "ENABLE_VISUAL_FOLLOWERS_CANDIDATE_PICKER", False))
         )
-        _prog_max_passes_cfg = int(
-            getattr(config, "FOLLOWERS_LIST_PROGRESSIVE_EXPLORATION_MAX_PASSES", 3) or 3
-        )
-        _prog_max_passes_cfg = max(1, min(_prog_max_passes_cfg, 10))
+        _prog_max_passes_cfg = int(followers_progressive_max_passes())
         _prog_passes_used_snap = int(
             visual_loop_state.get("list_progressive_exploration_passes_used") or 0
         )
@@ -7223,6 +7230,7 @@ def _run_followers_list_engine_session(
 
         def _first_eligible_follower_pick(cand_list: list) -> dict | None:
             visual_loop_state["_ac_pending_had_skip_hit"] = False
+            _expl_v1.begin_visible_window(cand_list)
             for c in cand_list:
                 ckey = _norm_ig_handle(str(c.get("username") or ""))
                 if ckey == src_key:
@@ -7232,6 +7240,7 @@ def _run_followers_list_engine_session(
                         username=c.get("username"),
                         source_profile_username=source_profile_username,
                     )
+                    _expl_v1.note_visible_skip("source_profile")
                     continue
                 if c.get("already_seen_runtime"):
                     log(
@@ -7246,6 +7255,7 @@ def _run_followers_list_engine_session(
                         "skipped_runtime_seen",
                         {"follower_username": c.get("username")},
                     )
+                    _expl_v1.note_visible_skip("runtime_seen")
                     continue
                 _runtime_hit = ""
                 _runtime_kh = ""
@@ -7277,6 +7287,7 @@ def _run_followers_list_engine_session(
                         )
                     except Exception:
                         pass
+                    _expl_v1.note_visible_skip("recently_followed_runtime")
                     continue
                 _cv_ac_blk = str(c.get("visual_candidate_id") or "").strip()
                 if _cv_ac_blk and _cv_ac_blk in _ac_blocked_visual_ids():
@@ -7293,6 +7304,7 @@ def _run_followers_list_engine_session(
                         )
                     except Exception:
                         pass
+                    _expl_v1.note_visible_skip("blocked_visual")
                     continue
                 _pend_ac = visual_loop_state.get(
                     "pending_recent_already_connected_visual_candidate_skip"
@@ -7318,6 +7330,7 @@ def _run_followers_list_engine_session(
                             )
                         except Exception:
                             pass
+                        _expl_v1.note_visible_skip("recent_already_connected")
                         continue
                 _pend_vc = visual_loop_state.get(
                     "pending_recent_verified_follow_visual_candidate_skip"
@@ -7340,7 +7353,9 @@ def _run_followers_list_engine_session(
                         except Exception:
                             pass
                         _followers_clear_pending_visual_candidate_skip()
+                        _expl_v1.note_visible_skip("verified_follow_one_shot")
                         continue
+                _expl_v1.note_actionable_pick()
                 return c
             vids_blk = [
                 str(c.get("visual_candidate_id") or "").strip()
@@ -7388,6 +7403,10 @@ def _run_followers_list_engine_session(
             return True
 
         _ac_scroll_forced = False
+        _expl_v1.apply_post_scroll_candidate_window(
+            candidates if isinstance(candidates, list) else [],
+            scroll_used=int(scroll_used),
+        )
         pick = _first_eligible_follower_pick(candidates)
         _followers_clear_pending_if_pick_other_visual_id(pick)
         _ac_scroll_forced = (
@@ -7445,23 +7464,44 @@ def _run_followers_list_engine_session(
                 )
             except Exception:
                 pass
-            if scroll_used >= max_scroll:
+            _forced_scroll_stop, _forced_scroll_stop_reason = _expl_v1.should_stop_scrolling(
+                scroll_used=int(scroll_used),
+                max_scroll_soft=int(max_scroll),
+                follows_completed=int(follows_completed_count),
+                max_iter=int(max_iter),
+                list_progressive_exhausted=bool(
+                    visual_loop_state.get("list_progressive_exploration_exhausted")
+                ),
+                session_elapsed_s=float(time.perf_counter() - t0),
+            )
+            if _forced_scroll_stop:
                 try:
                     log(
                         "warning",
-                        "followers_recent_already_connected_visual_candidate_forced_scroll_blocked_scroll_cap",
+                        "followers_recent_already_connected_visual_candidate_forced_scroll_blocked",
                         source_profile_username=source_profile_username,
                         scroll_used=int(scroll_used),
                         max_scroll=int(max_scroll),
+                        stop_reason=str(_forced_scroll_stop_reason or "")[:160],
                     )
                 except Exception:
                     pass
+                _expl_v1.log_stop_reason(
+                    str(_forced_scroll_stop_reason or "forced_scroll_blocked"),
+                    scroll_used=int(scroll_used),
+                    phase="forced_already_connected",
+                )
             else:
+                _forced_scroll_profile = _expl_v1.choose_scroll_profile(
+                    base_profile="default",
+                    exploratory_armed=False,
+                    forced_already_connected=True,
+                )
                 _scroll_diag: dict[str, Any] = {}
                 _sc_ac = scroll_followers_list_forward(
                     d,
                     apply_exploratory_xml_override=False,
-                    scroll_profile="default",
+                    scroll_profile=_forced_scroll_profile,
                     source_profile_username=source_profile_username,
                     scroll_reposition_meta=None,
                     bypass_post_tap_capture_gate=True,
@@ -7470,12 +7510,14 @@ def _run_followers_list_engine_session(
                 )
                 if _sc_ac:
                     scroll_used += 1
+                    _expl_v1.mark_scroll_completed_pending_check()
                     try:
                         log(
                             "info",
                             "followers_recent_already_connected_visual_candidate_forced_scroll_execution_success",
                             source_profile_username=source_profile_username,
                             scroll_used_after=int(scroll_used),
+                            scroll_profile=str(_forced_scroll_profile or ""),
                         )
                     except Exception:
                         pass
@@ -7483,7 +7525,11 @@ def _run_followers_list_engine_session(
                         "followers_list_scroll",
                         "info",
                         "scroll_already_connected_forced",
-                        {"scroll_index": scroll_used, "direction": "forward"},
+                        {
+                            "scroll_index": scroll_used,
+                            "direction": "forward",
+                            "scroll_profile": _forced_scroll_profile,
+                        },
                     )
                     _followers_try_refresh_injection_screenshot_after_scroll(
                         d,
@@ -7596,10 +7642,19 @@ def _run_followers_list_engine_session(
                         source_profile_username=source_profile_username,
                         scroll_kind="micro_swipe",
                     )
-                    if scroll_followers_list_forward(d):
+                    _sparse_micro_profile = _expl_v1.choose_scroll_profile(
+                        base_profile="default",
+                        exploratory_armed=False,
+                    )
+                    if scroll_followers_list_forward(
+                        d,
+                        scroll_profile=_sparse_micro_profile,
+                        source_profile_username=source_profile_username,
+                    ):
                         sparse_follow_scrolls += 1
                         visible_follow_buttons_stall_scrolls += 1
                         scroll_used += 1
+                        _expl_v1.mark_scroll_completed_pending_check()
                         _eng_log(
                             "followers_list_scroll",
                             "info",
@@ -7626,41 +7681,104 @@ def _run_followers_list_engine_session(
                             clear_reason="followers_scroll_success_sparse_micro",
                         )
                     continue
-                if (
-                    bool(det_sparse.get("is_followers_list"))
-                    and fbc_sparse == 0
-                    and sparse_follow_scrolls >= 3
-                ):
-                    log(
-                        "info",
-                        "visual_followers_no_more_candidates_after_scrolls",
-                        source_profile_username=source_profile_username,
-                        sparse_scrolls=sparse_follow_scrolls,
-                        follow_button_count=fbc_sparse,
+                if bool(det_sparse.get("is_followers_list")) and fbc_sparse == 0:
+                    _sparse_legacy_cap = 3
+                    _sparse_cap = (
+                        int(
+                            getattr(
+                                config,
+                                "FOLLOWERS_EXPLORATION_V1_SPARSE_ZERO_BUTTON_SCROLL_MAX",
+                                8,
+                            )
+                            or 8
+                        )
+                        if exploration_v1_enabled()
+                        else _sparse_legacy_cap
                     )
-                    _eng_log(
-                        "followers_engine_sparse_exhausted",
-                        "failed",
-                        "no_candidates_after_sparse_scrolls",
-                        {
-                            "sparse_scrolls": sparse_follow_scrolls,
-                            "follow_button_count": fbc_sparse,
-                        },
-                    )
-                    _emit_performance_summary(
-                        t0=t0,
-                        warm_session_used=warm_session_used,
-                        force_stop_used=force_stop_used,
-                        exit_code=66,
-                        target_username=source_profile_username,
-                    )
-                    return 66
-            if scroll_used >= max_scroll:
+                    _sparse_should_exit = False
+                    _sparse_exit_reason = ""
+                    if exploration_v1_enabled():
+                        _sparse_should_exit, _sparse_exit_reason = _expl_v1.should_stop_scrolling(
+                            scroll_used=int(scroll_used),
+                            max_scroll_soft=int(max_scroll),
+                            follows_completed=int(follows_completed_count),
+                            max_iter=int(max_iter),
+                            list_progressive_exhausted=bool(
+                                visual_loop_state.get("list_progressive_exploration_exhausted")
+                            ),
+                            session_elapsed_s=float(time.perf_counter() - t0),
+                        )
+                        if (
+                            not _sparse_should_exit
+                            and sparse_follow_scrolls >= _sparse_cap
+                            and int(_expl_v1.state.get("no_new_visual_progress_count") or 0)
+                            >= 2
+                        ):
+                            _sparse_should_exit = True
+                            _sparse_exit_reason = "sparse_zero_buttons_stagnation"
+                    elif sparse_follow_scrolls >= _sparse_legacy_cap:
+                        _sparse_should_exit = True
+                        _sparse_exit_reason = "sparse_scroll_cap_legacy"
+                    if _sparse_should_exit:
+                        _expl_v1.log_end_reached_confirmed(
+                            sparse_scrolls=int(sparse_follow_scrolls),
+                            follow_button_count=int(fbc_sparse),
+                            stop_reason=str(_sparse_exit_reason or "")[:160],
+                        )
+                        log(
+                            "info",
+                            "visual_followers_no_more_candidates_after_scrolls",
+                            source_profile_username=source_profile_username,
+                            sparse_scrolls=sparse_follow_scrolls,
+                            follow_button_count=fbc_sparse,
+                            exploration_stop_reason=str(_sparse_exit_reason or "")[:160],
+                        )
+                        _eng_log(
+                            "followers_engine_sparse_exhausted",
+                            "failed",
+                            "no_candidates_after_sparse_scrolls",
+                            {
+                                "sparse_scrolls": sparse_follow_scrolls,
+                                "follow_button_count": fbc_sparse,
+                                "exploration_stop_reason": _sparse_exit_reason,
+                            },
+                        )
+                        _expl_v1.log_stop_reason(
+                            str(_sparse_exit_reason or "sparse_exhausted"),
+                            scroll_used=int(scroll_used),
+                            sparse_scrolls=int(sparse_follow_scrolls),
+                        )
+                        _emit_performance_summary(
+                            t0=t0,
+                            warm_session_used=warm_session_used,
+                            force_stop_used=force_stop_used,
+                            exit_code=66,
+                            target_username=source_profile_username,
+                        )
+                        return 66
+            _main_scroll_stop, _main_scroll_stop_reason = _expl_v1.should_stop_scrolling(
+                scroll_used=int(scroll_used),
+                max_scroll_soft=int(max_scroll),
+                follows_completed=int(follows_completed_count),
+                max_iter=int(max_iter),
+                list_progressive_exhausted=bool(
+                    visual_loop_state.get("list_progressive_exploration_exhausted")
+                ),
+                session_elapsed_s=float(time.perf_counter() - t0),
+            )
+            if _main_scroll_stop:
+                _expl_v1.log_stop_reason(
+                    str(_main_scroll_stop_reason or "exploration_stop"),
+                    scroll_used=int(scroll_used),
+                    phase="main_scroll_loop",
+                )
                 log(
                     "info",
-                    "followers_engine_scroll_cap",
+                    "followers_engine_scroll_stop",
                     source_profile_username=source_profile_username,
                     scroll_used=scroll_used,
+                    stop_reason=str(_main_scroll_stop_reason or "")[:160],
+                    exploration_v1=bool(exploration_v1_enabled()),
                 )
                 break
             if exploratory_scroll_permit_armed_this_iter:
@@ -7675,14 +7793,18 @@ def _run_followers_list_engine_session(
                     )
                 except Exception:
                     pass
-            if not scroll_followers_list_forward(
-                d,
-                apply_exploratory_xml_override=exploratory_scroll_permit_armed_this_iter,
-                scroll_profile=(
+            _main_scroll_profile = _expl_v1.choose_scroll_profile(
+                base_profile=(
                     exploratory_scroll_profile_this_iter
                     if exploratory_scroll_permit_armed_this_iter
                     else "default"
                 ),
+                exploratory_armed=bool(exploratory_scroll_permit_armed_this_iter),
+            )
+            if not scroll_followers_list_forward(
+                d,
+                apply_exploratory_xml_override=exploratory_scroll_permit_armed_this_iter,
+                scroll_profile=_main_scroll_profile,
                 source_profile_username=source_profile_username,
                 scroll_reposition_meta=(
                     exploratory_scroll_reposition_meta
@@ -7691,6 +7813,11 @@ def _run_followers_list_engine_session(
                     else None
                 ),
             ):
+                _expl_v1.log_stop_reason(
+                    "scroll_failed",
+                    scroll_used=int(scroll_used),
+                    phase="main_scroll_loop",
+                )
                 break
             else:
                 _expl_profile_completed = ""
@@ -7699,6 +7826,7 @@ def _run_followers_list_engine_session(
                         exploratory_scroll_profile_this_iter or ""
                     ).strip()
                 scroll_used += 1
+                _expl_v1.mark_scroll_completed_pending_check()
                 if exploratory_scroll_permit_armed_this_iter:
                     try:
                         log(
@@ -7708,6 +7836,7 @@ def _run_followers_list_engine_session(
                             loop_iteration=followers_engine_loop_iteration,
                             scroll_profile=exploratory_scroll_profile_this_iter,
                             scroll_index=int(scroll_used),
+                            main_scroll_profile=str(_main_scroll_profile or ""),
                         )
                     except Exception:
                         pass
@@ -9848,10 +9977,7 @@ def _run_followers_list_engine_session(
     _followers_clear_ac_visual_blocks_after_scroll(
         clear_reason="followers_engine_loop_end",
     )
-    _prog_max_end = int(
-        getattr(config, "FOLLOWERS_LIST_PROGRESSIVE_EXPLORATION_MAX_PASSES", 3) or 3
-    )
-    _prog_max_end = max(1, min(_prog_max_end, 10))
+    _prog_max_end = int(followers_progressive_max_passes())
     _expl_used_end = int(visual_loop_state.get("list_progressive_exploration_passes_used") or 0)
     _expl_exhausted_end = bool(visual_loop_state.get("list_progressive_exploration_exhausted"))
     if follows_completed_count > 0:

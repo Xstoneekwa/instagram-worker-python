@@ -84,7 +84,7 @@ FOLLOW_BUTTON_WAIT_S = 4.0
 ENABLE_FOLLOWERS_LIST_ENGINE = True
 # Source profile handle to open (empty = first CLI / queue target username is the source profile only for this mode).
 FOLLOWERS_SOURCE_USERNAME = "mythyllus"
-FOLLOWERS_LIST_MAX_ITERATIONS_PER_RUN = 2
+FOLLOWERS_LIST_MAX_ITERATIONS_PER_RUN = 5
 FOLLOWERS_LIST_OPEN_WAIT_S = 4.0
 FOLLOWERS_LIST_RETURN_MAX_RETRIES = 2
 # Followers Entry Engine V2: hybrid followers-stat candidates, no coordinate fallback drift; force-stop on hard failure.
@@ -93,6 +93,17 @@ FOLLOWERS_ENTRY_V2_MIN_CONFIDENCE = 0.62
 # When True: allow geometry-only followers column tap if no text/XML candidates and profile gates match.
 FOLLOWERS_ENTRY_V2_ALLOW_GEOMETRY_TAP = False
 FOLLOWERS_LIST_SCROLL_MAX_PER_SESSION = 25
+# Adaptive followers exploration V1 (skip-streak acceleration, stagnation guards, telemetry).
+FOLLOWERS_EXPLORATION_V1_ENABLED = True
+FOLLOWERS_EXPLORATION_V1_SKIP_STREAK_ACCEL_THRESHOLD = 3
+FOLLOWERS_EXPLORATION_V1_SCROLL_SOFT_MAX_PER_SESSION = 120
+FOLLOWERS_EXPLORATION_V1_SCROLL_ABSOLUTE_MAX = 200
+FOLLOWERS_EXPLORATION_V1_NO_NEW_VISUAL_PROGRESS_MAX = 5
+FOLLOWERS_EXPLORATION_V1_NO_ACTIONABLE_SCROLL_MAX = 15
+FOLLOWERS_EXPLORATION_V1_PROGRESSIVE_MAX_PASSES = 12
+FOLLOWERS_EXPLORATION_V1_SESSION_BUDGET_S = 0
+FOLLOWERS_EXPLORATION_V1_SPARSE_ZERO_BUTTON_SCROLL_MAX = 8
+FOLLOWERS_EXPLORATION_V1_ACCEL_RECYCLER_STEPS = 10
 # Après visual_fallback avec forte confiance, ignorera XML stale pendant N itérations de boucle.
 FOLLOWERS_VISUAL_XML_STALE_GRACE_ITERATIONS = 3
 # Followers list: bounded progressive soft exploration (zero_follow_spans_soft; no fling).
