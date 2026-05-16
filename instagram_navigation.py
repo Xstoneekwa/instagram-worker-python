@@ -2566,6 +2566,14 @@ def verify_profile(d: u2.Device, username: str) -> bool:
                     signal=signal,
                     attempts=attempt,
                 )
+                try:
+                    from followers_inter_candidate_perf import (
+                        inter_candidate_on_profile_verify_success,
+                    )
+
+                    inter_candidate_on_profile_verify_success(username=username)
+                except Exception:
+                    pass
                 return True
 
             log(
@@ -4637,6 +4645,266 @@ _REVIEW_BEFORE_FOLLOW_BODY_NEEDLES = (
     "To be safe",
     "check any public info",
 )
+_REVIEW_SHEET_FOLLOW_LABELS: tuple[str, ...] = (
+    "Follow",
+    "Suivre",
+    "Seguir",
+)
+_REVIEW_SHEET_CANCEL_LABELS: tuple[str, ...] = (
+    "Cancel",
+    "Annuler",
+    "Cancelar",
+)
+FOLLOW_REVIEW_POPUP_UNHANDLED_FAILURE_CODE = 74
+
+
+def _review_sheet_geometry(wh: int) -> dict[str, int]:
+    return {
+        "y_sheet_min": int(wh * 0.42),
+        "y_profile_exclude_max": int(wh * 0.38),
+        "y_cta_min": int(wh * 0.64),
+        "y_cta_max": int(wh * 0.94),
+    }
+
+
+def _review_follow_label_matches(text: str, desc: str) -> tuple[bool, str]:
+    t = (text or "").strip()
+    d = (desc or "").strip()
+    tl = t.lower()
+    dl = d.lower()
+    if tl in ("follow", "suivre", "seguir"):
+        return True, "text_exact"
+    if dl in ("follow", "suivre", "seguir"):
+        return True, "content_desc_exact"
+    if tl == "follow" or dl.startswith("follow"):
+        return True, "text_or_desc_follow"
+    return False, ""
+
+
+def _review_bounds_center(bd: dict[str, Any]) -> tuple[int, int] | None:
+    try:
+        l = int(bd["left"])
+        t = int(bd["top"])
+        r = int(bd["right"])
+        b = int(bd["bottom"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if r <= l or b <= t:
+        return None
+    return (l + r) // 2, (t + b) // 2
+
+
+def _review_sheet_follow_candidate_score(
+    *,
+    cy: int,
+    geo: dict[str, int],
+    match_kind: str,
+    clickable: bool,
+    cancel_top: int | None,
+) -> float:
+    score = 0.0
+    if geo["y_cta_min"] <= cy <= geo["y_cta_max"]:
+        score += 40.0
+    if cy >= geo["y_sheet_min"]:
+        score += 20.0
+    if cy <= geo["y_profile_exclude_max"]:
+        score -= 200.0
+    if match_kind == "text_exact":
+        score += 35.0
+    elif match_kind == "content_desc_exact":
+        score += 28.0
+    elif match_kind == "hierarchy_xml":
+        score += 22.0
+    elif match_kind == "geometry_cancel_anchor":
+        score += 18.0
+    elif match_kind == "geometry_primary_cta":
+        score += 12.0
+    if clickable:
+        score += 8.0
+    score += min(30.0, max(0.0, (cy - geo["y_cta_min"]) / 12.0))
+    if cancel_top is not None and cy < cancel_top:
+        score += 15.0
+    return score
+
+
+def _find_review_sheet_follow_candidates(
+    d: u2.Device,
+    *,
+    ww: int,
+    wh: int,
+) -> list[dict[str, Any]]:
+    geo = _review_sheet_geometry(wh)
+    cancel_tops: list[int] = []
+    for lab in _REVIEW_SHEET_CANCEL_LABELS:
+        try:
+            for el in d(text=lab).all() or []:
+                inf = _follow_safe_info(el)
+                cy = _follow_bounds_center_y(inf, wh)
+                if cy is None or cy < geo["y_sheet_min"]:
+                    continue
+                cancel_tops.append(int(cy))
+        except Exception:
+            continue
+    cancel_top = min(cancel_tops) if cancel_tops else None
+
+    raw: list[dict[str, Any]] = []
+
+    def _add(
+        *,
+        cx: int,
+        cy: int,
+        detection_method: str,
+        text: str = "",
+        content_desc: str = "",
+        resource_id: str = "",
+        bounds: dict[str, Any] | None = None,
+        clickable: bool = False,
+    ) -> None:
+        if cy <= geo["y_profile_exclude_max"]:
+            return
+        if cy < geo["y_sheet_min"] and detection_method not in (
+            "geometry_cancel_anchor",
+            "geometry_primary_cta",
+        ):
+            return
+        sc = _review_sheet_follow_candidate_score(
+            cy=cy,
+            geo=geo,
+            match_kind=detection_method,
+            clickable=clickable,
+            cancel_top=cancel_top,
+        )
+        raw.append(
+            {
+                "center_x": cx,
+                "center_y": cy,
+                "score": sc,
+                "detection_method": detection_method,
+                "text": text[:80],
+                "content_desc": content_desc[:120],
+                "resource_id": resource_id[:160],
+                "bounds": bounds or {},
+                "clickable": bool(clickable),
+            }
+        )
+
+    for lab in _REVIEW_SHEET_FOLLOW_LABELS:
+        probes: list[tuple[str, Any]] = [
+            ("u2_text", lambda l=lab: d(text=l)),
+            ("u2_text_contains", lambda l=lab: d(textContains=l)),
+            ("u2_desc_contains", lambda l=lab: d(descriptionContains=l)),
+        ]
+        for probe_name, sel_factory in probes:
+            try:
+                els = sel_factory().all()
+            except Exception:
+                els = []
+            for el in els or []:
+                inf = _follow_safe_info(el)
+                cy = _follow_bounds_center_y(inf, wh)
+                bd = inf.get("bounds") or {}
+                center = _review_bounds_center(bd) if bd else None
+                if cy is None and center:
+                    cy = center[1]
+                if cy is None or center is None:
+                    continue
+                cx = center[0]
+                ok, mk = _review_follow_label_matches(
+                    str(inf.get("text") or lab),
+                    str(inf.get("contentDescription") or ""),
+                )
+                if not ok:
+                    continue
+                _add(
+                    cx=cx,
+                    cy=cy,
+                    detection_method=f"{probe_name}:{mk}",
+                    text=str(inf.get("text") or ""),
+                    content_desc=str(inf.get("contentDescription") or ""),
+                    resource_id=str(inf.get("resourceName") or ""),
+                    bounds=bd if isinstance(bd, dict) else {},
+                    clickable=bool(inf.get("clickable")) or bool(inf.get("enabled")),
+                )
+
+    try:
+        xml_raw = d.dump_hierarchy(compressed=False)
+    except Exception:
+        xml_raw = ""
+    if xml_raw:
+        try:
+            root = ET.fromstring(xml_raw)
+            for node in root.iter():
+                text = str(node.attrib.get("text") or "")
+                desc = str(node.attrib.get("content-desc") or "")
+                ok, mk = _review_follow_label_matches(text, desc)
+                if not ok:
+                    continue
+                bd = _dm_parse_bounds_attr_xml(node.attrib.get("bounds"))
+                if not bd:
+                    continue
+                center = _review_bounds_center(bd)
+                if not center:
+                    continue
+                cx, cy = center
+                clickable = node.attrib.get("clickable") == "true"
+                _add(
+                    cx=cx,
+                    cy=cy,
+                    detection_method=f"hierarchy_xml:{mk}",
+                    text=text,
+                    content_desc=desc,
+                    resource_id=str(node.attrib.get("resource-id") or ""),
+                    bounds=bd,
+                    clickable=clickable,
+                )
+        except Exception:
+            pass
+
+    if cancel_top is not None:
+        anchor_cy = max(geo["y_cta_min"], cancel_top - int(wh * 0.12))
+        _add(
+            cx=ww // 2,
+            cy=anchor_cy,
+            detection_method="geometry_cancel_anchor",
+            text="Follow",
+            bounds={
+                "left": ww // 10,
+                "top": anchor_cy - 40,
+                "right": ww - ww // 10,
+                "bottom": anchor_cy + 40,
+            },
+            clickable=True,
+        )
+
+    if not raw:
+        fallback_cy = int(wh * 0.82)
+        _add(
+            cx=ww // 2,
+            cy=fallback_cy,
+            detection_method="geometry_primary_cta",
+            text="Follow",
+            bounds={
+                "left": ww // 10,
+                "top": fallback_cy - 44,
+                "right": ww - ww // 10,
+                "bottom": fallback_cy + 44,
+            },
+            clickable=True,
+        )
+
+    deduped: list[dict[str, Any]] = []
+    for cand in sorted(raw, key=lambda c: -float(c.get("score") or 0.0)):
+        dup = False
+        for kept in deduped:
+            if (
+                abs(int(cand["center_x"]) - int(kept["center_x"])) < 48
+                and abs(int(cand["center_y"]) - int(kept["center_y"])) < 48
+            ):
+                dup = True
+                break
+        if not dup:
+            deduped.append(cand)
+    return deduped
 
 
 def _review_before_follow_popup_visible(d: u2.Device) -> bool:
@@ -4665,6 +4933,131 @@ def _review_before_follow_popup_visible(d: u2.Device) -> bool:
     return title_hit
 
 
+# Micro-fenêtre post-tap sheet : couvre ~2 s de convergence observée en run réel,
+# sans dupliquer le follow verify global (perform_follow_safe).
+_REVIEW_POPUP_DISMISS_POLL_INTERVAL_S = 0.12
+_REVIEW_POPUP_DISMISS_POLL_MAX_S = 2.2
+
+
+def _poll_review_sheet_dismissed_after_follow_tap(
+    d: u2.Device,
+    *,
+    target_username: str = "",
+    visual_candidate_id: str = "",
+    attempt: int = 1,
+    tap_x: int = 0,
+    tap_y: int = 0,
+    detection_method: str = "",
+) -> bool:
+    """
+    After a sheet Follow tap, micro-poll until the sheet disappears or follow UI converges.
+
+    Does not run a full follow verify — hands off to ``perform_follow_safe`` verify loop.
+    """
+    t0 = time.monotonic()
+    polls = 0
+
+    def _poll_success(*, exit_via: str, follow_state_after: str) -> bool:
+        elapsed_ms = round((time.monotonic() - t0) * 1000.0, 2)
+        try:
+            log(
+                "info",
+                "follow_review_popup_follow_dismiss_poll_completed",
+                target_username=str(target_username or ""),
+                visual_candidate_id=str(visual_candidate_id or ""),
+                attempt=int(attempt),
+                dismissed=exit_via == "sheet_dismissed",
+                exit_via=str(exit_via),
+                follow_state_after=str(follow_state_after or ""),
+                poll_count=polls,
+                elapsed_ms=elapsed_ms,
+            )
+            if exit_via == "sheet_dismissed":
+                log(
+                    "info",
+                    "follow_review_popup_dismissed_after_follow",
+                    target_username=str(target_username or ""),
+                    visual_candidate_id=str(visual_candidate_id or ""),
+                    attempt=int(attempt),
+                )
+            log(
+                "info",
+                "follow_review_popup_follow_tap_success",
+                target_username=str(target_username or ""),
+                visual_candidate_id=str(visual_candidate_id or ""),
+                tap_x=int(tap_x),
+                tap_y=int(tap_y),
+                detection_method=str(detection_method or ""),
+                attempt=int(attempt),
+                exit_via=str(exit_via),
+            )
+            log(
+                "info",
+                "follow_review_popup_verify_resumed",
+                target_username=str(target_username or ""),
+                visual_candidate_id=str(visual_candidate_id or ""),
+            )
+        except Exception:
+            pass
+        return True
+
+    try:
+        log(
+            "info",
+            "follow_review_popup_follow_dismiss_poll_started",
+            target_username=str(target_username or ""),
+            visual_candidate_id=str(visual_candidate_id or ""),
+            attempt=int(attempt),
+            poll_interval_s=_REVIEW_POPUP_DISMISS_POLL_INTERVAL_S,
+            poll_max_s=_REVIEW_POPUP_DISMISS_POLL_MAX_S,
+        )
+    except Exception:
+        pass
+    while (time.monotonic() - t0) < _REVIEW_POPUP_DISMISS_POLL_MAX_S:
+        polls += 1
+        try:
+            follow_st = _follow_ui_state_snapshot(d)
+        except Exception:
+            follow_st = ""
+        if follow_st in ("following", "requested"):
+            return _poll_success(
+                exit_via="follow_converged", follow_state_after=follow_st
+            )
+        if not _review_before_follow_popup_visible(d):
+            return _poll_success(
+                exit_via="sheet_dismissed", follow_state_after=follow_st
+            )
+        remaining = _REVIEW_POPUP_DISMISS_POLL_MAX_S - (time.monotonic() - t0)
+        if remaining <= 0:
+            break
+        time.sleep(min(_REVIEW_POPUP_DISMISS_POLL_INTERVAL_S, remaining))
+    elapsed_ms = round((time.monotonic() - t0) * 1000.0, 2)
+    try:
+        log(
+            "info",
+            "follow_review_popup_follow_dismiss_poll_completed",
+            target_username=str(target_username or ""),
+            visual_candidate_id=str(visual_candidate_id or ""),
+            attempt=int(attempt),
+            dismissed=False,
+            poll_count=polls,
+            elapsed_ms=elapsed_ms,
+        )
+        log(
+            "warning",
+            "follow_review_popup_follow_tap_failed",
+            target_username=str(target_username or ""),
+            visual_candidate_id=str(visual_candidate_id or ""),
+            reason="sheet_still_visible_after_tap",
+            attempt=int(attempt),
+            tap_x=int(tap_x),
+            tap_y=int(tap_y),
+        )
+    except Exception:
+        pass
+    return False
+
+
 def _try_review_before_follow_popup_confirm(
     d: u2.Device,
     *,
@@ -4672,8 +5065,8 @@ def _try_review_before_follow_popup_confirm(
     visual_candidate_id: str = "",
 ) -> bool:
     """
-  If the review sheet is open, tap its primary Follow CTA (lower sheet band only).
-  Returns True when a modal Follow tap was dispatched.
+    If the review sheet is open, tap its primary Follow CTA (sheet band only, not profile header).
+    Returns True only when the sheet is dismissed after a sheet Follow tap.
     """
     if not _review_before_follow_popup_visible(d):
         return False
@@ -4690,27 +5083,8 @@ def _try_review_before_follow_popup_confirm(
         ww, wh = d.window_size()
     except Exception:
         ww, wh = 1080, 2400
-    y_sheet_min = int(wh * 0.42)
-    labels = ("Follow", "Suivre", "Seguir")
-    candidates: list[tuple[int, int, str]] = []
-    for lab in labels:
-        try:
-            els = d(text=lab).all()
-        except Exception:
-            els = []
-        for el in els or []:
-            inf = _follow_safe_info(el)
-            if not bool(inf.get("clickable")) and not bool(inf.get("enabled")):
-                continue
-            cy = _follow_bounds_center_y(inf, wh)
-            if cy is None or cy < y_sheet_min:
-                continue
-            bd = inf.get("bounds") or {}
-            try:
-                cx = (int(bd["left"]) + int(bd["right"])) // 2
-            except (KeyError, TypeError, ValueError):
-                continue
-            candidates.append((cy, cx, lab))
+
+    candidates = _find_review_sheet_follow_candidates(d, ww=ww, wh=wh)
     if not candidates:
         try:
             log(
@@ -4719,49 +5093,181 @@ def _try_review_before_follow_popup_confirm(
                 target_username=str(target_username or ""),
                 visual_candidate_id=str(visual_candidate_id or ""),
                 reason="no_sheet_follow_button",
+                candidate_count=0,
             )
         except Exception:
             pass
         return False
-    candidates.sort(key=lambda t: -t[0])
-    cy, cx, lab = candidates[0]
-    try:
-        d.click(cx, cy)
-    except Exception as e:
+
+    for attempt_idx, cand in enumerate(candidates[:3]):
+        cx = int(cand["center_x"])
+        cy = int(cand["center_y"])
         try:
             log(
-                "warning",
-                "follow_review_popup_follow_tap_failed",
+                "info",
+                "follow_review_popup_follow_button_candidate_found",
                 target_username=str(target_username or ""),
                 visual_candidate_id=str(visual_candidate_id or ""),
-                reason=f"click_failed:{e}",
+                attempt=attempt_idx + 1,
+                detection_method=str(cand.get("detection_method") or ""),
+                text=str(cand.get("text") or ""),
+                content_desc=str(cand.get("content_desc") or ""),
+                resource_id=str(cand.get("resource_id") or ""),
+                bounds=cand.get("bounds") or {},
+                tap_x=cx,
+                tap_y=cy,
+                score=round(float(cand.get("score") or 0.0), 2),
+                clickable=bool(cand.get("clickable")),
             )
         except Exception:
             pass
-        return False
-    try:
-        log(
-            "info",
-            "follow_review_popup_follow_tap_sent",
+        try:
+            d.click(cx, cy)
+        except Exception as e:
+            try:
+                log(
+                    "warning",
+                    "follow_review_popup_follow_tap_failed",
+                    target_username=str(target_username or ""),
+                    visual_candidate_id=str(visual_candidate_id or ""),
+                    reason=f"click_failed:{e}",
+                    attempt=attempt_idx + 1,
+                    tap_x=cx,
+                    tap_y=cy,
+                )
+            except Exception:
+                pass
+            continue
+        try:
+            log(
+                "info",
+                "follow_review_popup_follow_tap_sent",
+                target_username=str(target_username or ""),
+                visual_candidate_id=str(visual_candidate_id or ""),
+                tap_x=cx,
+                tap_y=cy,
+                detection_method=str(cand.get("detection_method") or ""),
+                attempt=attempt_idx + 1,
+            )
+        except Exception:
+            pass
+        if _poll_review_sheet_dismissed_after_follow_tap(
+            d,
             target_username=str(target_username or ""),
             visual_candidate_id=str(visual_candidate_id or ""),
+            attempt=attempt_idx + 1,
             tap_x=cx,
             tap_y=cy,
-            button_label=lab,
-        )
-    except Exception:
-        pass
-    time.sleep(0.18)
+            detection_method=str(cand.get("detection_method") or ""),
+        ):
+            return True
+
     try:
         log(
-            "info",
-            "follow_review_popup_verify_resumed",
+            "warning",
+            "follow_review_popup_follow_tap_failed",
             target_username=str(target_username or ""),
             visual_candidate_id=str(visual_candidate_id or ""),
+            reason="sheet_still_visible_after_all_candidates",
+            candidates_tried=min(3, len(candidates)),
         )
     except Exception:
         pass
-    return True
+    return False
+
+
+def _follow_review_popup_unhandled_abort(
+    d: u2.Device,
+    *,
+    target_username: str,
+    visual_candidate_id: str,
+    events: list[tuple[str, dict[str, Any]]],
+    record: Callable[..., Any],
+    state_before: str,
+    state_after: str,
+    reason: str,
+) -> dict[str, Any] | None:
+    """Safe-stop payload when the review sheet cannot be confirmed reliably.
+
+    Returns ``None`` when a late reconcile shows the sheet is gone and follow converged.
+    """
+    popup_still_visible = bool(_review_before_follow_popup_visible(d))
+    if not popup_still_visible and state_after in ("following", "requested"):
+        try:
+            log(
+                "info",
+                "follow_review_popup_late_success_reconciled",
+                target_username=str(target_username or ""),
+                visual_candidate_id=str(visual_candidate_id or ""),
+                follow_state_before=state_before,
+                follow_state_after=state_after,
+                popup_still_visible=False,
+                reason="popup_dismissed_after_initial_sheet_visible_check",
+                original_abort_reason=str(reason or ""),
+            )
+        except Exception:
+            pass
+        try:
+            record(
+                "follow_review_popup_late_success_reconciled",
+                {
+                    "target_username": target_username,
+                    "visual_candidate_id": str(visual_candidate_id or ""),
+                    "follow_state_before": state_before,
+                    "follow_state_after": state_after,
+                    "popup_still_visible": False,
+                    "reason": "popup_dismissed_after_initial_sheet_visible_check",
+                    "original_abort_reason": str(reason or ""),
+                },
+            )
+        except Exception:
+            pass
+        return None
+    try:
+        log(
+            "error",
+            "follow_review_popup_unhandled_safe_stop",
+            target_username=str(target_username or ""),
+            visual_candidate_id=str(visual_candidate_id or ""),
+            reason=str(reason or ""),
+            follow_state_before=state_before,
+            follow_state_after=state_after,
+            popup_still_visible=popup_still_visible,
+        )
+    except Exception:
+        pass
+    record(
+        "follow_review_popup_unhandled_safe_stop",
+        {
+            "target_username": target_username,
+            "visual_candidate_id": str(visual_candidate_id or ""),
+            "reason": str(reason or ""),
+            "follow_state_before": state_before,
+            "follow_state_after": state_after,
+            "failure_code": FOLLOW_REVIEW_POPUP_UNHANDLED_FAILURE_CODE,
+        },
+    )
+    record(
+        "follow_completed",
+        {
+            "target_username": target_username,
+            "ok": False,
+            "failure_code": FOLLOW_REVIEW_POPUP_UNHANDLED_FAILURE_CODE,
+            "follow_state_before": state_before,
+            "follow_state_after": state_after,
+            "navigation_state": "profile",
+        },
+    )
+    return {
+        "ok": False,
+        "failure_code": FOLLOW_REVIEW_POPUP_UNHANDLED_FAILURE_CODE,
+        "failure_reason": "review_popup_unhandled",
+        "tapped": True,
+        "follow_state_before": state_before,
+        "follow_state_after": state_after,
+        "verify_attempts": 0,
+        "events": events,
+    }
 
 
 def perform_follow_safe(
@@ -5174,7 +5680,20 @@ def perform_follow_safe(
         target_username=str(username or ""),
         visual_candidate_id=str(visual_candidate_id or ""),
     ):
-        time.sleep(0.12)
+        time.sleep(0.05)
+    elif _review_before_follow_popup_visible(d):
+        _review_abort = _follow_review_popup_unhandled_abort(
+            d,
+            target_username=str(username or ""),
+            visual_candidate_id=str(visual_candidate_id or ""),
+            events=events,
+            record=_record,
+            state_before=state_before,
+            state_after=_follow_ui_state_snapshot(d),
+            reason="review_sheet_visible_after_initial_follow_tap",
+        )
+        if _review_abort is not None:
+            return _review_abort
 
     verify_timeout_ms = int(getattr(config, "FOLLOW_VERIFY_TIMEOUT_MS", 4000) or 4000)
     if tap_exact:
@@ -5200,6 +5719,19 @@ def perform_follow_safe(
                 review_popup_handled_once = True
                 verify_deadline = verify_deadline + 1.2
                 state_after = _follow_ui_state_snapshot(d)
+            elif _review_before_follow_popup_visible(d):
+                _review_abort = _follow_review_popup_unhandled_abort(
+                    d,
+                    target_username=str(username or ""),
+                    visual_candidate_id=str(visual_candidate_id or ""),
+                    events=events,
+                    record=_record,
+                    state_before=state_before,
+                    state_after=state_after,
+                    reason="review_sheet_visible_during_follow_verify_poll",
+                )
+                if _review_abort is not None:
+                    return _review_abort
         if _use_follow_action_v2 and (
             attempts == 1
             or attempts % 5 == 0
@@ -5236,6 +5768,7 @@ def perform_follow_safe(
                         },
                     )
                 )
+            _verify_phase_ms = round((time.perf_counter() - t_all) * 1000, 2)
             _record(
                 "follow_verify_success",
                 {
@@ -5246,11 +5779,20 @@ def perform_follow_safe(
                     "follow_state_after": state_after,
                     "verify_attempts": attempts,
                     "navigation_state": "profile",
-                    "timings_ms": {
-                        "verify_phase_ms": round((time.perf_counter() - t_all) * 1000, 2)
-                    },
+                    "timings_ms": {"verify_phase_ms": _verify_phase_ms},
                 },
             )
+            try:
+                from followers_inter_candidate_perf import (
+                    inter_candidate_on_follow_verify_success,
+                )
+
+                inter_candidate_on_follow_verify_success(
+                    target_username=str(username or ""),
+                    verify_phase_ms=_verify_phase_ms,
+                )
+            except Exception:
+                pass
             _record(
                 "follow_completed",
                 {
@@ -8466,6 +9008,12 @@ def detect_followers_list_screen(
     Heuristic followers list: strict title + list chrome, OR relaxed list/content signals
     (RecyclerView / scrollable / usernames / stacked rows) without requiring Followers title.
     """
+    try:
+        from followers_inter_candidate_perf import inter_candidate_count_detect_followers_list
+
+        inter_candidate_count_detect_followers_list()
+    except Exception:
+        pass
     pkg = str(getattr(config, "INSTAGRAM_PACKAGE", "") or "com.instagram.android")
     cur_pkg: str | None = None
     cur_act: str | None = None
@@ -12350,6 +12898,24 @@ def visual_detect_private_profile(
         current_activity=act_s,
         current_package=pkg_s,
     )
+    try:
+        from followers_inter_candidate_perf import (
+            inter_candidate_on_private_profile_detect_started,
+        )
+
+        inter_candidate_on_private_profile_detect_started()
+    except Exception:
+        pass
+
+    def _private_detect_done() -> None:
+        try:
+            from followers_inter_candidate_perf import (
+                inter_candidate_on_private_profile_detect_finished,
+            )
+
+            inter_candidate_on_private_profile_detect_finished()
+        except Exception:
+            pass
 
     ui_rows: list[tuple[str, str, float]] = [
         ("ui_textContains_this_account_private_en", "This account is private", 0.93),
@@ -12385,6 +12951,7 @@ def visual_detect_private_profile(
                     current_package=out["current_package"],
                     source_profile_username=src,
                 )
+                _private_detect_done()
                 return out
         except Exception:
             continue
@@ -12409,6 +12976,7 @@ def visual_detect_private_profile(
                     current_package=out["current_package"],
                     source_profile_username=src,
                 )
+                _private_detect_done()
                 return out
         except Exception:
             continue
@@ -12449,6 +13017,7 @@ def visual_detect_private_profile(
                 current_package=out["current_package"],
                 source_profile_username=src,
             )
+            _private_detect_done()
             return out
 
     log(
@@ -12458,6 +13027,7 @@ def visual_detect_private_profile(
         current_activity=act_s,
         current_package=pkg_s,
     )
+    _private_detect_done()
     return base_out
 
 
@@ -25676,6 +26246,23 @@ def open_follower_profile_from_list(
         row_center=candidate.get("row_center"),
         visual_candidate_id=vcid or None,
     )
+    try:
+        from followers_inter_candidate_perf import inter_candidate_on_open_profile_started
+
+        inter_candidate_on_open_profile_started()
+    except Exception:
+        pass
+
+    def _finish_open_profile(ret: bool) -> bool:
+        try:
+            from followers_inter_candidate_perf import (
+                inter_candidate_on_open_profile_finished,
+            )
+
+            inter_candidate_on_open_profile_finished()
+        except Exception:
+            pass
+        return ret
 
     def _pkg_and_screen_guess() -> tuple[dict[str, Any], str]:
         meta: dict[str, Any] = {}
@@ -25751,13 +26338,13 @@ def open_follower_profile_from_list(
                 error=str(e),
                 reason="click_failed",
             )
-            return False
+            return _finish_open_profile(False)
         time.sleep(float(getattr(config, "PROFILE_POST_TAP_STABILIZE_S", 0.12)))
         ok = verify_profile(d, un)
         if ok:
             _ab_open = _action_bar_title()
             if not _finalize_success(_ab_open):
-                return False
+                return _finish_open_profile(False)
         else:
             log(
                 "error",
@@ -25766,7 +26353,7 @@ def open_follower_profile_from_list(
                 source_profile_username=source_profile_username,
                 reason="verify_profile_failed",
             )
-        return ok
+        return _finish_open_profile(ok)
 
     # Visual candidate: multi-tap strategies, transition wait, strict anti–source-profile guard.
     work = dict(candidate)
@@ -25788,7 +26375,7 @@ def open_follower_profile_from_list(
             reason="visual_candidate_open_all_tap_points_failed",
             detail="no_tap_strategies_from_candidate",
         )
-        return False
+        return _finish_open_profile(False)
 
     try:
         wwin, hwin = d.window_size()
@@ -26085,7 +26672,7 @@ def open_follower_profile_from_list(
             visual_candidate_id=vcid,
             action_bar_title_after_tap=ab_verify,
         )
-        return True
+        return _finish_open_profile(True)
 
     log(
         "error",
@@ -26105,7 +26692,7 @@ def open_follower_profile_from_list(
         reason="visual_candidate_open_all_tap_points_failed",
         visual_candidate_id=vcid,
     )
-    return False
+    return _finish_open_profile(False)
 
 
 def _post_follow_overlay_ui_hints(d: u2.Device) -> dict[str, Any]:
@@ -26659,6 +27246,7 @@ def post_follow_controlled_return_to_followers_list(
                 d,
                 source_profile_username=src,
                 follower_candidate_username=cand or None,
+                det=det_l,
             )
         except Exception:
             ct_ok = is_list
@@ -30155,6 +30743,15 @@ def run_post_follow_post_likes_phase(
             liked_count=out_liked,
             target_count=target_count,
         )
+        try:
+            from followers_inter_candidate_perf import inter_candidate_on_likes_phase_success
+
+            inter_candidate_on_likes_phase_success(
+                follower_username=cand,
+                source_profile_username=src,
+            )
+        except Exception:
+            pass
         return _finish(
             phase_outcome="success",
             skipped=False,
@@ -30510,6 +31107,12 @@ def run_visual_candidate_post_follow_phase(
         should_mute=bool(should_mute),
         follow_success_verified=bool(follow_success_verified),
     )
+    try:
+        from followers_inter_candidate_perf import inter_candidate_on_post_return_ct_started
+
+        inter_candidate_on_post_return_ct_started()
+    except Exception:
+        pass
     ok_ret, how_ret, fail_re = post_follow_controlled_return_to_followers_list(
         d,
         pkg=pkg,
@@ -30521,6 +31124,12 @@ def run_visual_candidate_post_follow_phase(
         compact_after_follow_verified_mute=compact_post_follow_return,
         compact_reason=compact_reason_str if compact_post_follow_return else None,
     )
+    try:
+        from followers_inter_candidate_perf import inter_candidate_on_post_return_ct_finished
+
+        inter_candidate_on_post_return_ct_finished()
+    except Exception:
+        pass
     if ok_ret:
         log(
             "info",
@@ -30529,6 +31138,12 @@ def run_visual_candidate_post_follow_phase(
             source_profile_username=src,
             how=str(how_ret or ""),
         )
+        try:
+            from followers_inter_candidate_perf import inter_candidate_on_post_return_ct_success
+
+            inter_candidate_on_post_return_ct_success()
+        except Exception:
+            pass
     else:
         log(
             "warning",
@@ -30664,18 +31279,39 @@ def verify_followers_list_surface_is_ct_account(
     *,
     source_profile_username: str,
     follower_candidate_username: str | None = None,
+    det: dict[str, Any] | None = None,
 ) -> bool:
     """
     Best-effort: True if current screen looks like the CT source account's followers list.
     Never raises. Uses detect_followers_list_screen + action bar / header hints.
+
+    When ``det`` is a dict from a fresh ``detect_followers_list_screen`` call, it is reused
+    instead of re-scanning the hierarchy (same decision logic).
     """
     try:
-        det = detect_followers_list_screen(d, source_profile_username=source_profile_username)
-        if not bool(det.get("is_followers_list")):
+        reused_provided_det = isinstance(det, dict)
+        if reused_provided_det:
+            det_use: dict[str, Any] = det  # type: ignore[assignment]
+        else:
+            det_use = detect_followers_list_screen(
+                d, source_profile_username=source_profile_username
+            )
+        if reused_provided_det:
+            try:
+                log(
+                    "debug",
+                    "verify_followers_list_surface_is_ct_account",
+                    reused_provided_det=True,
+                    source_profile_username=str(source_profile_username or "")[:160],
+                    is_followers_list=bool(det_use.get("is_followers_list")),
+                )
+            except Exception:
+                pass
+        if not bool(det_use.get("is_followers_list")):
             return False
 
         src = _normalize_handle(source_profile_username or "")
-        ab_raw = str(det.get("action_bar_title") or "").strip()
+        ab_raw = str(det_use.get("action_bar_title") or "").strip()
         ab = _normalize_handle(ab_raw)
         cand = _normalize_handle(follower_candidate_username or "")
 
@@ -30691,11 +31327,11 @@ def verify_followers_list_surface_is_ct_account(
         if ab and ab != src:
             return False
 
-        for t in (det.get("visible_header_texts") or [])[:30]:
+        for t in (det_use.get("visible_header_texts") or [])[:30]:
             if _normalize_handle(str(t)) == src:
                 return True
 
-        return bool(det.get("title_match")) or bool(det.get("strict_list_open"))
+        return bool(det_use.get("title_match")) or bool(det_use.get("strict_list_open"))
     except Exception:
         return True
 

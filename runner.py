@@ -417,6 +417,8 @@ def _exit_reason_from_code(code: int) -> str:
         67: "visual_followers_stalled_visible_follow_buttons_no_candidate",
         71: "follow_started_without_tap_watchdog",
         72: "failed_no_follow_tap",
+        74: "follow_review_popup_unhandled",
+        99: "follow_review_popup_unhandled_safe_stop",
     }
     return mapping.get(code, f"exit_code_{code}")
 
@@ -3370,6 +3372,12 @@ def _followers_try_post_return_picker_injection_refresh(
     )
     settle_s = max(0.6, min(1.0, settle_raw))
     try:
+        from followers_inter_candidate_perf import inter_candidate_on_picker_refresh_settle
+
+        inter_candidate_on_picker_refresh_settle(settle_s=settle_s)
+    except Exception:
+        pass
+    try:
         time.sleep(settle_s)
     except Exception:
         pass
@@ -3581,6 +3589,13 @@ def _try_visual_followers_picker_dry_run(
             screenshot_path=str(shot),
             picker_error=str(vpick.get("picker_error") or ""),
         )
+        if int(vpick.get("candidate_count") or 0) == 0:
+            try:
+                from followers_inter_candidate_perf import inter_candidate_on_picker_empty
+
+                inter_candidate_on_picker_empty()
+            except Exception:
+                pass
     except Exception:
         pass
     cands = list(vpick.get("candidates") or [])
@@ -5688,7 +5703,23 @@ def _run_followers_list_engine_session(
             visual_candidate_id=pick_ctx.get("visual_candidate_id"),
             settle_s=round(0.8 + random.random() * 0.4, 3),
         )
+        try:
+            from followers_inter_candidate_perf import (
+                inter_candidate_on_profile_settle_before_observe,
+            )
+
+            inter_candidate_on_profile_settle_before_observe()
+        except Exception:
+            pass
         time.sleep(0.8 + random.random() * 0.4)
+        try:
+            from followers_inter_candidate_perf import (
+                inter_candidate_on_profile_observe_after_settle,
+            )
+
+            inter_candidate_on_profile_observe_after_settle()
+        except Exception:
+            pass
         log(
             "info",
             "visual_candidate_profile_observe_context_isolated",
@@ -6066,6 +6097,12 @@ def _run_followers_list_engine_session(
         exploratory_scroll_reposition_meta: dict[str, Any] | None = None
         stop_r_loop = get_followers_engine_stop_reason()
 
+        try:
+            from followers_inter_candidate_perf import inter_candidate_on_loop_iteration
+
+            inter_candidate_on_loop_iteration()
+        except Exception:
+            pass
         log(
             "info",
             "followers_loop_iteration",
@@ -6834,6 +6871,15 @@ def _run_followers_list_engine_session(
                             screenshot_path=str(_shot_inj),
                             picker_error=str(_vp_inj.get("picker_error") or ""),
                         )
+                        if int(_vp_inj.get("candidate_count") or 0) == 0:
+                            try:
+                                from followers_inter_candidate_perf import (
+                                    inter_candidate_on_picker_empty,
+                                )
+
+                                inter_candidate_on_picker_empty()
+                            except Exception:
+                                pass
                     except Exception:
                         pass
                     _inj = list(_vp_inj.get("candidates") or [])
@@ -7838,6 +7884,14 @@ def _run_followers_list_engine_session(
                             scroll_index=int(scroll_used),
                             main_scroll_profile=str(_main_scroll_profile or ""),
                         )
+                        try:
+                            from followers_inter_candidate_perf import (
+                                inter_candidate_on_exploratory_scroll_used,
+                            )
+
+                            inter_candidate_on_exploratory_scroll_used()
+                        except Exception:
+                            pass
                     except Exception:
                         pass
                 _eng_log(
@@ -7889,6 +7943,15 @@ def _run_followers_list_engine_session(
                 )
                 continue
 
+        try:
+            from followers_inter_candidate_perf import inter_candidate_on_candidate_selected
+
+            inter_candidate_on_candidate_selected(
+                follower_username=str(pick.get("username") or ""),
+                resolved_username_hint=str(pick.get("resolved_username_hint") or ""),
+            )
+        except Exception:
+            pass
         log(
             "info",
             "followers_candidate_selected",
@@ -8604,6 +8667,14 @@ def _run_followers_list_engine_session(
                 ct_follow_tap_attempted_yet=fkey
                 in _RUNTIME_CT_LIST_FOLLOW_TAP_ATTEMPTED_USERNAMES,
             )
+            try:
+                from followers_inter_candidate_perf import (
+                    inter_candidate_on_social_memory_check_started,
+                )
+
+                inter_candidate_on_social_memory_check_started()
+            except Exception:
+                pass
 
             elig = _social_memory_load_and_evaluate(
                 target_username=_sm_target_username if _vcid_sm else follower_un,
@@ -8612,6 +8683,12 @@ def _run_followers_list_engine_session(
                 run_id=run_id,
                 supabase_mode=supabase_mode,
             )
+            try:
+                from followers_inter_candidate_perf import inter_candidate_on_social_memory_loaded
+
+                inter_candidate_on_social_memory_loaded()
+            except Exception:
+                pass
             _sm_bypass_dup = _ct_list_bypass_runtime_duplicate_social_memory(
                 d,
                 elig=elig,
@@ -8813,6 +8890,14 @@ def _run_followers_list_engine_session(
                     visual_candidate_id=pick.get("visual_candidate_id"),
                     follower_username=follower_un,
                 )
+                try:
+                    from followers_inter_candidate_perf import (
+                        inter_candidate_on_screen_guard_started,
+                    )
+
+                    inter_candidate_on_screen_guard_started()
+                except Exception:
+                    pass
                 _g_pre = visual_candidate_follow_pre_follow_screen_guard(
                     d,
                     source_profile_username=source_profile_username,
@@ -8931,6 +9016,14 @@ def _run_followers_list_engine_session(
                     navigation_state=_g_final.get("navigation_state"),
                     recovered_after_reopen=_recovered_after_reopen,
                 )
+                try:
+                    from followers_inter_candidate_perf import (
+                        inter_candidate_on_screen_guard_passed,
+                    )
+
+                    inter_candidate_on_screen_guard_passed()
+                except Exception:
+                    pass
             log(
                 "info",
                 "visual_followers_perform_follow_safe_invocation",
@@ -8986,6 +9079,75 @@ def _run_followers_list_engine_session(
                 target_username=_sm_target_username if _vcid_sm else follower_un,
                 supabase_mode=supabase_mode,
             )
+
+            if (
+                int(follow_out.get("failure_code") or 0) == 74
+                or str(follow_out.get("failure_reason") or "") == "review_popup_unhandled"
+            ):
+                log(
+                    "error",
+                    "follow_review_popup_unhandled_safe_stop_started",
+                    follower_username=follower_un,
+                    fkey=fkey,
+                    source_profile_username=source_profile_username,
+                    visual_candidate_id=str(pick.get("visual_candidate_id") or ""),
+                    failure_code=int(follow_out.get("failure_code") or 74),
+                )
+                try:
+                    if hasattr(d, "app_stop"):
+                        d.app_stop(pkg)
+                except Exception:
+                    pass
+                try:
+                    force_stop(d, pkg)
+                except Exception as e_fs:
+                    log(
+                        "warning",
+                        "follow_review_popup_unhandled_safe_stop_force_stop_failed",
+                        error=str(e_fs),
+                        package=pkg,
+                    )
+                if bool(getattr(config, "HOME_AFTER_RUN", True)):
+                    try:
+                        press_home(d)
+                        time.sleep(0.2)
+                    except Exception as e_h:
+                        log(
+                            "warning",
+                            "follow_review_popup_unhandled_safe_stop_home_failed",
+                            error=str(e_h),
+                        )
+                log(
+                    "info",
+                    "follow_review_popup_unhandled_safe_stop_done",
+                    follower_username=follower_un,
+                    source_profile_username=source_profile_username,
+                    visual_candidate_id=str(pick.get("visual_candidate_id") or ""),
+                )
+                force_stop_used = True
+                runner_invalidate_visual_followers_session_after_safe_stop(
+                    d,
+                    source_profile_username=source_profile_username,
+                )
+                _VISUAL_FOLLOWERS_OPEN_COUNT_THIS_SESSION = 0
+                _eng_log(
+                    "followers_engine_session_terminated_safe_stop",
+                    "warning",
+                    "follow_review_popup_unhandled",
+                    {
+                        "iterations": processed,
+                        "visual_candidate_id": pick.get("visual_candidate_id"),
+                        "follower_username": follower_un,
+                    },
+                )
+                _emit_performance_summary(
+                    t0=t0,
+                    warm_session_used=warm_session_used,
+                    force_stop_used=True,
+                    exit_code=99,
+                    target_username=source_profile_username,
+                )
+                return 99
 
             if _ct_follow_out_is_failed_no_follow_tap(follow_out):
                 log(
