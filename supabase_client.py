@@ -1086,3 +1086,99 @@ def record_mute_interaction_success(
             },
         )
     return mout
+
+
+def record_post_like_interaction_success(
+    account_id: str,
+    username: str,
+    source_profile: str,
+    *,
+    run_id: str | None,
+    session_id: str | None,
+    liked_count: int,
+    target_count: int,
+    attempted_count: int,
+    skipped_already_liked_count: int,
+    phase_outcome: str,
+    post_like_mode: str,
+    visual_candidate_id: str,
+    timings_ms: dict[str, Any] | None = None,
+    per_post: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Persist post-like outcome on ig_interacted_users + aggregated post_like_success event."""
+    u_gate = _canonical_interaction_username(username)
+    inv_gate = _invalid_interacted_username_reason(u_gate)
+    if inv_gate is not None:
+        print(
+            json.dumps(
+                {
+                    "level": "info",
+                    "event": "post_like_interaction_persist_skipped_invalid_username",
+                    "account_id": str(account_id or ""),
+                    "username": str(username or ""),
+                    "normalized_username": u_gate,
+                    "source_profile": str(source_profile or ""),
+                    "reason": inv_gate,
+                },
+                ensure_ascii=False,
+            )
+        )
+        return {"ok": False, "error": "skipped_invalid_interacted_username"}
+    liked_n = max(0, int(liked_count or 0))
+    if liked_n <= 0:
+        return {"ok": False, "error": "skipped_zero_liked_count"}
+    now = _utc_now_iso()
+    row = load_interacted_user(account_id, username, source_profile)
+    posts_prev = 0
+    if row:
+        try:
+            posts_prev = int(row.get("posts_liked_count") or 0)
+        except (TypeError, ValueError):
+            posts_prev = 0
+    last_post_likes: dict[str, Any] = {
+        "status": "complete" if str(phase_outcome or "") == "success" else str(phase_outcome or ""),
+        "target_count": int(target_count or 0),
+        "attempted_count": int(attempted_count or 0),
+        "liked_count": liked_n,
+        "skipped_already_liked_count": int(skipped_already_liked_count or 0),
+        "post_like_mode": str(post_like_mode or ""),
+        "visual_candidate_id": str(visual_candidate_id or ""),
+        "timings_ms": timings_ms or {},
+    }
+    if per_post:
+        last_post_likes["per_post"] = list(per_post)
+    patch: dict[str, Any] = {
+        "last_interaction_at": now,
+        "posts_liked_count": posts_prev + liked_n,
+        "payload": {"last_post_likes": last_post_likes},
+    }
+    if run_id:
+        patch["run_id"] = str(run_id)
+    if session_id:
+        patch["last_session_id"] = str(session_id)
+    mout = merge_interacted_user_row(account_id, username, source_profile, patch)
+    if mout.get("ok"):
+        ev_status = "success"
+        if str(phase_outcome or "") == "partial_success":
+            ev_status = "partial"
+        record_interaction_event(
+            account_id,
+            username,
+            source_profile,
+            run_id=run_id,
+            session_id=session_id,
+            event_type="post_like_success",
+            event_status=ev_status,
+            event_reason=None if ev_status == "success" else str(phase_outcome or "")[:200],
+            payload={
+                "target_count": int(target_count or 0),
+                "attempted_count": int(attempted_count or 0),
+                "liked_count": liked_n,
+                "skipped_already_liked_count": int(skipped_already_liked_count or 0),
+                "post_like_mode": str(post_like_mode or ""),
+                "visual_candidate_id": str(visual_candidate_id or ""),
+                "timings_ms": timings_ms or {},
+                "per_post": list(per_post) if per_post else [],
+            },
+        )
+    return mout

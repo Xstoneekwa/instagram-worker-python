@@ -49,6 +49,58 @@ def _db_row_effective_unfollowed(db_row: Mapping[str, Any]) -> bool:
     return bool(db_row.get("unfollowed_at"))
 
 
+# Follow statuses that indicate an ongoing follow relationship (localized column + payload variants).
+_DB_PERSISTENT_ACTIVE_FOLLOW_STATUSES = frozenset(
+    {"following", "requested", "already_following"}
+)
+
+
+def db_row_persistent_active_follow_connection(
+    db_row: Mapping[str, Any] | None,
+) -> tuple[bool, str, dict[str, Any]]:
+    """
+    Narrow gate for the visual followers pipeline only: skip re-processing when Supabase row
+    already reflects an active follow link. Does not replace evaluate_follow_eligibility().
+    """
+    detail: dict[str, Any] = {}
+    if not db_row:
+        detail["memory_status"] = "no_row"
+        return False, "no_db_row", detail
+
+    fs_col = str(db_row.get("follow_status") or "").strip().lower()
+    fs_payload = str(_row_pick(db_row, "follow_status") or "").strip().lower()
+    fs_follow_payload = str(_row_pick(db_row, "following_status") or "").strip().lower()
+    fs_eff = fs_col or fs_payload or fs_follow_payload
+
+    followed = _db_row_effective_followed(db_row)
+    unfollowed = _db_row_effective_unfollowed(db_row)
+    life_raw = str(_row_pick(db_row, "interaction_lifecycle_state") or "").strip().lower()
+
+    detail["memory_status"] = "has_row"
+    detail["following_status"] = fs_eff
+    detail["interaction_lifecycle_state"] = life_raw
+    detail["db_followed"] = followed
+    detail["db_unfollowed"] = unfollowed
+
+    if followed and unfollowed:
+        detail["memory_status"] = "ambiguous_follow_and_unfollow"
+        return False, "ambiguous_db_state", detail
+
+    if fs_eff and fs_eff in _DB_PERSISTENT_ACTIVE_FOLLOW_STATUSES:
+        return True, "follow_status_active_connection", detail
+
+    if life_raw == str(ACTIVE_FOLLOWING).strip().lower():
+        if not unfollowed:
+            return True, "lifecycle_active_following", detail
+        return False, "lifecycle_active_but_unfollowed", detail
+
+    if followed and not unfollowed:
+        return True, "db_followed_not_unfollowed", detail
+
+    detail["memory_status"] = "row_not_actively_connected"
+    return False, "not_persistent_connection", detail
+
+
 def _parse_iso_dt(raw: Any) -> datetime | None:
     if not raw:
         return None
