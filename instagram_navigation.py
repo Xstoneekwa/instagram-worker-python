@@ -12759,6 +12759,26 @@ def _visual_detect_post_viewer_timing_log(out: dict[str, Any], **extra: Any) -> 
             viewer_detect_exact_desc_guard_result=str(
                 out.get("viewer_detect_exact_desc_guard_result") or ""
             ),
+            viewer_detect_a1_total_ms=out.get("viewer_detect_a1_total_ms"),
+            viewer_detect_a1_rid_attempts=out.get("viewer_detect_a1_rid_attempts"),
+            viewer_detect_a1_positive_rid=str(out.get("viewer_detect_a1_positive_rid") or ""),
+            viewer_detect_a1_short_circuit_a2b=out.get("viewer_detect_a1_short_circuit_a2b"),
+            viewer_detect_a2_total_ms=out.get("viewer_detect_a2_total_ms"),
+            viewer_detect_a2b_guarded_ms=out.get("viewer_detect_a2b_guarded_ms"),
+            viewer_detect_a2b_positive_probe_index=out.get(
+                "viewer_detect_a2b_positive_probe_index"
+            ),
+            viewer_detect_a2b_signal=str(out.get("viewer_detect_a2b_signal") or ""),
+            viewer_detect_a2_posts_bar_ms=out.get("viewer_detect_a2_posts_bar_ms"),
+            viewer_detect_a2_profile_grid_guard_ms=out.get(
+                "viewer_detect_a2_profile_grid_guard_ms"
+            ),
+            viewer_detect_a2a_trusted_band_ms=out.get("viewer_detect_a2a_trusted_band_ms"),
+            viewer_detect_a2a_probe_count=out.get("viewer_detect_a2a_probe_count"),
+            viewer_detect_a2_exact_desc_signal=str(
+                out.get("viewer_detect_a2_exact_desc_signal") or ""
+            ),
+            viewer_detect_a2_guard_result=str(out.get("viewer_detect_a2_guard_result") or ""),
             viewer_detect_total_ms=out.get("viewer_detect_total_ms"),
             viewer_detect_checked_signals=list(
                 out.get("viewer_detect_checked_signals") or []
@@ -12780,7 +12800,7 @@ def _visual_detect_post_viewer_opened_after_tap(
     Post-open detection aligned with post-follow like viewer guard (not legacy profile guess alone).
 
     Phase A1: row_feed like resource-id + trusted band proof.
-    Phase A2: exact Like/Unlike descriptor + Posts action-bar guard.
+    Phase A2: A2b guarded exact descriptor first, A2a trusted band fallback.
     Phase B: full fallback (broad chrome, header, profile-grid guard) only when A1/A2 miss.
     """
     t_total0 = time.perf_counter()
@@ -12796,6 +12816,20 @@ def _visual_detect_post_viewer_opened_after_tap(
         "viewer_detect_exact_desc_ms": 0.0,
         "viewer_detect_exact_desc_signal": "",
         "viewer_detect_exact_desc_guard_result": "",
+        "viewer_detect_a1_total_ms": 0.0,
+        "viewer_detect_a1_rid_attempts": 0,
+        "viewer_detect_a1_positive_rid": "",
+        "viewer_detect_a1_short_circuit_a2b": False,
+        "viewer_detect_a2_total_ms": 0.0,
+        "viewer_detect_a2b_guarded_ms": 0.0,
+        "viewer_detect_a2b_positive_probe_index": 0,
+        "viewer_detect_a2b_signal": "",
+        "viewer_detect_a2_posts_bar_ms": 0.0,
+        "viewer_detect_a2_profile_grid_guard_ms": 0.0,
+        "viewer_detect_a2a_trusted_band_ms": 0.0,
+        "viewer_detect_a2a_probe_count": 0,
+        "viewer_detect_a2_exact_desc_signal": "",
+        "viewer_detect_a2_guard_result": "",
     }
 
     def _detect_success_out(
@@ -12829,8 +12863,14 @@ def _visual_detect_post_viewer_opened_after_tap(
         return out
 
     t_a10 = time.perf_counter()
-    like_a1, reason_a1, a1_sigs = _ui_post_viewer_open_like_unlike_fast(d)
+    like_a1, reason_a1, a1_sigs, a1_stats = _ui_post_viewer_open_like_unlike_fast(d)
     stage["viewer_detect_like_unlike_ms"] = _visual_detect_post_viewer_stage_ms(t_a10)
+    stage["viewer_detect_a1_total_ms"] = stage["viewer_detect_like_unlike_ms"]
+    stage["viewer_detect_a1_rid_attempts"] = int(a1_stats.get("rid_attempts") or 0)
+    stage["viewer_detect_a1_positive_rid"] = str(a1_stats.get("positive_rid") or "")
+    stage["viewer_detect_a1_short_circuit_a2b"] = bool(
+        a1_stats.get("short_circuit_a2b")
+    )
     signals.extend(a1_sigs)
     if like_a1:
         return _detect_success_out(
@@ -12839,12 +12879,16 @@ def _visual_detect_post_viewer_opened_after_tap(
         )
 
     t_a20 = time.perf_counter()
-    like_a2, reason_a2, a2_sigs, exact_sig, guard_res = (
+    like_a2, reason_a2, a2_sigs, exact_sig, guard_res, a2_stage = (
         _ui_post_viewer_open_exact_like_desc_fast(d, pkg=pkg)
     )
     stage["viewer_detect_exact_desc_ms"] = _visual_detect_post_viewer_stage_ms(t_a20)
+    stage["viewer_detect_a2_total_ms"] = stage["viewer_detect_exact_desc_ms"]
     stage["viewer_detect_exact_desc_signal"] = str(exact_sig or "")
     stage["viewer_detect_exact_desc_guard_result"] = str(guard_res or "")
+    for _k, _v in a2_stage.items():
+        if _k in stage:
+            stage[_k] = _v
     signals.extend(a2_sigs)
     if like_a2:
         posts_bar = "posts_bar" in str(guard_res or "")
@@ -13649,6 +13693,28 @@ def visual_open_recent_post_from_profile(
             viewer_detect_exact_desc_guard_result=det_open.get(
                 "viewer_detect_exact_desc_guard_result"
             ),
+            viewer_detect_a1_total_ms=det_open.get("viewer_detect_a1_total_ms"),
+            viewer_detect_a1_rid_attempts=det_open.get("viewer_detect_a1_rid_attempts"),
+            viewer_detect_a1_positive_rid=det_open.get("viewer_detect_a1_positive_rid"),
+            viewer_detect_a1_short_circuit_a2b=det_open.get(
+                "viewer_detect_a1_short_circuit_a2b"
+            ),
+            viewer_detect_a2_total_ms=det_open.get("viewer_detect_a2_total_ms"),
+            viewer_detect_a2b_guarded_ms=det_open.get("viewer_detect_a2b_guarded_ms"),
+            viewer_detect_a2b_positive_probe_index=det_open.get(
+                "viewer_detect_a2b_positive_probe_index"
+            ),
+            viewer_detect_a2b_signal=det_open.get("viewer_detect_a2b_signal"),
+            viewer_detect_a2_posts_bar_ms=det_open.get("viewer_detect_a2_posts_bar_ms"),
+            viewer_detect_a2_profile_grid_guard_ms=det_open.get(
+                "viewer_detect_a2_profile_grid_guard_ms"
+            ),
+            viewer_detect_a2a_trusted_band_ms=det_open.get("viewer_detect_a2a_trusted_band_ms"),
+            viewer_detect_a2a_probe_count=det_open.get("viewer_detect_a2a_probe_count"),
+            viewer_detect_a2_exact_desc_signal=det_open.get(
+                "viewer_detect_a2_exact_desc_signal"
+            ),
+            viewer_detect_a2_guard_result=det_open.get("viewer_detect_a2_guard_result"),
         )
     except Exception:
         pass
@@ -14766,10 +14832,14 @@ def _ui_post_viewer_action_button_not_liked_strict_only(
 def _post_viewer_still_profile_grid_strong(
     d: u2.Device,
     pkg: str,
+    *,
+    action_bar_title: str | None = None,
 ) -> tuple[bool, str]:
     """Anti-FP: profile tab chrome visible and action bar is not post-viewer Posts mode."""
     try:
-        ab_raw = str(_visual_read_action_bar_username(d) or "").strip()
+        ab_raw = str(action_bar_title or "").strip()
+        if not ab_raw:
+            ab_raw = str(_visual_read_action_bar_username(d) or "").strip()
         if _visual_post_viewer_action_bar_is_post_viewer_mode(ab_raw):
             return False, ""
         if _try_profile_signals_once(d, "", pkg) and _followers_profile_tabs_visible(d):
@@ -14779,13 +14849,37 @@ def _post_viewer_still_profile_grid_strong(
     return False, ""
 
 
+def _ui_post_viewer_rid_like_chrome_without_trusted_band(
+    proof: dict[str, Any],
+    d: u2.Device,
+) -> bool:
+    """Like/Unlike chrome present on a heart control but outside trusted action band."""
+    if _ui_proof_trusted_action_button_liked(proof, d):
+        return False
+    if _ui_proof_trusted_action_button_not_liked(proof, d):
+        return False
+    sem = _classify_like_semantic_desc(
+        str(proof.get("matched_node_content_desc") or ""),
+        str(proof.get("matched_node_text") or ""),
+    )
+    return sem in ("action_button_liked", "action_button_not_liked")
+
+
 def _ui_post_viewer_open_like_unlike_fast(
     d: u2.Device,
-) -> tuple[bool, str, list[str]]:
+) -> tuple[bool, str, list[str], dict[str, Any]]:
     """
     Phase A1: row_feed / clip like resource-id with trusted heart-band proof (cheapest).
+
+    When heart chrome is visible but band proof fails, short-circuit remaining RIDs so
+    the caller can try A2b immediately (no viewer acceptance here).
     """
     signals: list[str] = []
+    stats: dict[str, Any] = {
+        "rid_attempts": 0,
+        "positive_rid": "",
+        "short_circuit_a2b": False,
+    }
     for rid, tag in (
         ("com.instagram.android:id/row_feed_button_like", "row_feed_button_like"),
         ("com.instagram.android:id/clip_button_like", "clip_button_like"),
@@ -14794,6 +14888,7 @@ def _ui_post_viewer_open_like_unlike_fast(
             "media_action_bar_like_button",
         ),
     ):
+        stats["rid_attempts"] = int(stats["rid_attempts"]) + 1
         try:
             el = d(resourceId=rid)
             if not el.exists(timeout=0.08):
@@ -14801,27 +14896,104 @@ def _ui_post_viewer_open_like_unlike_fast(
             proof = _ui_element_semantic_proof(el, f"ui_{tag}_open_fast")
             if _ui_proof_trusted_action_button_liked(proof, d):
                 signals.append(f"{tag}:liked")
-                return True, "like_unlike_ui", signals
+                stats["positive_rid"] = f"{tag}:liked"
+                return True, "like_unlike_ui", signals, stats
             if _ui_proof_trusted_action_button_not_liked(proof, d):
                 signals.append(f"{tag}:not_liked")
-                return True, "like_unlike_ui", signals
+                stats["positive_rid"] = f"{tag}:not_liked"
+                return True, "like_unlike_ui", signals, stats
+            if _ui_post_viewer_rid_like_chrome_without_trusted_band(proof, d):
+                stats["positive_rid"] = f"{tag}:band_mismatch"
+                stats["short_circuit_a2b"] = True
+                signals.append(f"{tag}:band_mismatch_short_circuit_a2b")
+                break
         except Exception:
             continue
-    return False, "", signals
+    return False, "", signals, stats
 
 
 def _ui_post_viewer_open_exact_like_desc_fast(
     d: u2.Device,
     *,
     pkg: str,
-) -> tuple[bool, str, list[str], str, str]:
+) -> tuple[bool, str, list[str], str, str, dict[str, Any]]:
     """
-    Phase A2: exact Like/Unlike descriptors with light viewer guards.
+    Phase A2: A2b guarded exact descriptors first, then A2a trusted band fallback.
 
-    Returns (ok, reason, signals, exact_signal, guard_result).
+    Returns (ok, reason, signals, exact_signal, guard_result, telemetry_stage).
     """
     signals: list[str] = []
     exact_timeout_s = 0.1
+    tel: dict[str, Any] = {
+        "viewer_detect_a2b_guarded_ms": 0.0,
+        "viewer_detect_a2b_positive_probe_index": 0,
+        "viewer_detect_a2b_signal": "",
+        "viewer_detect_a2_posts_bar_ms": 0.0,
+        "viewer_detect_a2_profile_grid_guard_ms": 0.0,
+        "viewer_detect_a2a_trusted_band_ms": 0.0,
+        "viewer_detect_a2a_probe_count": 0,
+        "viewer_detect_a2_exact_desc_signal": "",
+        "viewer_detect_a2_guard_result": "",
+    }
+
+    guarded_checks: list[tuple[str, Callable[[], object]]] = [
+        ("ui_description_exact_like", lambda: d(descriptionMatches="(?i)^Like$")),
+        ("ui_description_unlike_exact", lambda: d(descriptionMatches="(?i)^Unlike$")),
+        ("ui_text_exact_like", lambda: d(textMatches="(?i)^Like$")),
+        ("ui_text_unlike_exact", lambda: d(textMatches="(?i)^Unlike$")),
+        ("ui_description_fr_jaime", lambda: d(descriptionMatches="(?i)^J'aime$|^Jaime$")),
+        (
+            "ui_description_fr_unlike",
+            lambda: d(descriptionMatches="(?i)^Je n'aime plus$"),
+        ),
+    ]
+
+    t_posts0 = time.perf_counter()
+    try:
+        ab_raw = str(_visual_read_action_bar_username(d) or "").strip()
+    except Exception:
+        ab_raw = ""
+    posts_bar = _visual_post_viewer_action_bar_is_post_viewer_mode(ab_raw)
+    tel["viewer_detect_a2_posts_bar_ms"] = _visual_detect_post_viewer_stage_ms(t_posts0)
+    if not posts_bar:
+        tel["viewer_detect_a2_guard_result"] = "no_posts_action_bar"
+        return False, "", signals, "", "no_posts_action_bar", tel
+
+    t_grid0 = time.perf_counter()
+    still_grid, grid_reason = _post_viewer_still_profile_grid_strong(
+        d, pkg, action_bar_title=ab_raw
+    )
+    tel["viewer_detect_a2_profile_grid_guard_ms"] = _visual_detect_post_viewer_stage_ms(
+        t_grid0
+    )
+    if still_grid:
+        tel["viewer_detect_a2_guard_result"] = f"blocked_{grid_reason}"
+        return False, "", signals, "", f"blocked_{grid_reason}", tel
+
+    t_a2b0 = time.perf_counter()
+    for probe_idx, (method, pred) in enumerate(guarded_checks, start=1):
+        try:
+            if pred().exists(timeout=exact_timeout_s):
+                signals.append(f"{method}:posts_bar_guard")
+                signals.append(f"action_bar_posts_mode:{ab_raw[:48]}")
+                tel["viewer_detect_a2b_guarded_ms"] = _visual_detect_post_viewer_stage_ms(
+                    t_a2b0
+                )
+                tel["viewer_detect_a2b_positive_probe_index"] = int(probe_idx)
+                tel["viewer_detect_a2b_signal"] = str(method)
+                tel["viewer_detect_a2_exact_desc_signal"] = str(method)
+                tel["viewer_detect_a2_guard_result"] = "posts_bar_and_not_profile_grid"
+                return (
+                    True,
+                    "like_unlike_ui",
+                    signals,
+                    method,
+                    "posts_bar_and_not_profile_grid",
+                    tel,
+                )
+        except Exception:
+            continue
+    tel["viewer_detect_a2b_guarded_ms"] = _visual_detect_post_viewer_stage_ms(t_a2b0)
 
     trusted_checks: list[
         tuple[str, Callable[[], object], Callable[[dict[str, Any], u2.Device], bool]]
@@ -14847,7 +15019,10 @@ def _ui_post_viewer_open_exact_like_desc_fast(
             _ui_proof_trusted_action_button_liked,
         ),
     ]
+    t_a2a0 = time.perf_counter()
+    a2a_probes = 0
     for method, pred, proof_fn in trusted_checks:
+        a2a_probes += 1
         try:
             el = pred()
             if not el.exists(timeout=exact_timeout_s):
@@ -14855,50 +15030,19 @@ def _ui_post_viewer_open_exact_like_desc_fast(
             proof = _ui_element_semantic_proof(el, method)
             if proof_fn(proof, d):
                 signals.append(f"{method}:trusted_band")
-                return True, "like_unlike_ui", signals, method, "trusted_action_band"
-        except Exception:
-            continue
-
-    try:
-        ab_raw = str(_visual_read_action_bar_username(d) or "").strip()
-    except Exception:
-        ab_raw = ""
-    posts_bar = _visual_post_viewer_action_bar_is_post_viewer_mode(ab_raw)
-    if not posts_bar:
-        return False, "", signals, "", "no_posts_action_bar"
-
-    still_grid, grid_reason = _post_viewer_still_profile_grid_strong(d, pkg)
-    if still_grid:
-        return False, "", signals, "", f"blocked_{grid_reason}"
-
-    guarded_checks: list[tuple[str, Callable[[], object]]] = [
-        ("ui_description_exact_like", lambda: d(descriptionMatches="(?i)^Like$")),
-        ("ui_description_unlike_exact", lambda: d(descriptionMatches="(?i)^Unlike$")),
-        ("ui_text_exact_like", lambda: d(textMatches="(?i)^Like$")),
-        ("ui_text_unlike_exact", lambda: d(textMatches="(?i)^Unlike$")),
-        ("ui_description_fr_jaime", lambda: d(descriptionMatches="(?i)^J'aime$|^Jaime$")),
-        (
-            "ui_description_fr_unlike",
-            lambda: d(descriptionMatches="(?i)^Je n'aime plus$"),
-        ),
-    ]
-    for method, pred in guarded_checks:
-        try:
-            if pred().exists(timeout=exact_timeout_s):
-                signals.append(f"{method}:posts_bar_guard")
-                if posts_bar:
-                    signals.append(f"action_bar_posts_mode:{ab_raw[:48]}")
-                return (
-                    True,
-                    "like_unlike_ui",
-                    signals,
-                    method,
-                    "posts_bar_and_not_profile_grid",
+                tel["viewer_detect_a2a_trusted_band_ms"] = _visual_detect_post_viewer_stage_ms(
+                    t_a2a0
                 )
+                tel["viewer_detect_a2a_probe_count"] = int(a2a_probes)
+                tel["viewer_detect_a2_exact_desc_signal"] = str(method)
+                tel["viewer_detect_a2_guard_result"] = "trusted_action_band"
+                return True, "like_unlike_ui", signals, method, "trusted_action_band", tel
         except Exception:
             continue
-
-    return False, "", signals, "", "no_exact_chrome"
+    tel["viewer_detect_a2a_trusted_band_ms"] = _visual_detect_post_viewer_stage_ms(t_a2a0)
+    tel["viewer_detect_a2a_probe_count"] = int(a2a_probes)
+    tel["viewer_detect_a2_guard_result"] = "no_exact_chrome"
+    return False, "", signals, "", "no_exact_chrome", tel
 
 
 def _ui_post_viewer_not_liked_quick(d: u2.Device) -> tuple[bool, str, float]:
