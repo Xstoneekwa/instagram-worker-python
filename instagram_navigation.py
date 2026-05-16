@@ -12470,6 +12470,163 @@ _VISUAL_GRID_CELL_TAP_FRAC_Y = 0.52
 _VISUAL_RECENT_POST_OPEN_PRE_TAP_SETTLE_S = 0.25
 _VISUAL_GRID_CELL_RETRY_TAP_FRAC_X = 0.50
 _VISUAL_GRID_CELL_RETRY_TAP_FRAC_Y = 0.55
+_VISUAL_POST_VIEWER_OPEN_POLL_INITIAL_S = 0.38
+_VISUAL_POST_VIEWER_OPEN_POLL_INTERVAL_S = 0.18
+_VISUAL_POST_VIEWER_OPEN_POLL_MAX_S = 1.35
+_VISUAL_POST_VIEWER_OPEN_POLL_RETRY_MAX_S = 1.45
+_VISUAL_RETURN_PROFILE_POLL_INITIAL_S = 0.15
+_VISUAL_RETURN_PROFILE_POLL_INTERVAL_S = 0.18
+_VISUAL_RETURN_PROFILE_POLL_MAX_S = 1.0
+
+
+def _visual_profile_detected_after_back(
+    d: u2.Device,
+    *,
+    pkg: str,
+) -> bool:
+    return bool(
+        _try_profile_signals_once(d, "", pkg)
+        or _guess_profile_screen(d, pkg, "")
+        in ("likely_profile", "profile_header_rid", "action_bar_title")
+    )
+
+
+def _visual_wait_profile_after_back(
+    d: u2.Device,
+    *,
+    pkg: str,
+    initial_delay_s: float = _VISUAL_RETURN_PROFILE_POLL_INITIAL_S,
+    poll_interval_s: float = _VISUAL_RETURN_PROFILE_POLL_INTERVAL_S,
+    max_wait_s: float = _VISUAL_RETURN_PROFILE_POLL_MAX_S,
+) -> dict[str, Any]:
+    """Poll profile chrome after Back instead of a fixed post-back sleep."""
+    t0 = time.perf_counter()
+    poll_count = 0
+    if initial_delay_s > 0:
+        time.sleep(float(initial_delay_s))
+    profile_detected = False
+    while True:
+        poll_count += 1
+        profile_detected = _visual_profile_detected_after_back(d, pkg=pkg)
+        elapsed_s = time.perf_counter() - t0
+        if profile_detected:
+            return {
+                "profile_detected": True,
+                "return_profile_poll_count": int(poll_count),
+                "return_profile_fast_confirmed": bool(
+                    poll_count <= 2 and elapsed_s < 0.55
+                ),
+                "return_profile_poll_wait_ms": round(elapsed_s * 1000.0, 2),
+            }
+        if elapsed_s >= float(max_wait_s):
+            break
+        time.sleep(min(float(poll_interval_s), float(max_wait_s) - elapsed_s))
+    elapsed_s = time.perf_counter() - t0
+    return {
+        "profile_detected": False,
+        "return_profile_poll_count": int(poll_count),
+        "return_profile_fast_confirmed": False,
+        "return_profile_poll_wait_ms": round(elapsed_s * 1000.0, 2),
+    }
+
+
+def _visual_wait_post_viewer_opened_after_tap(
+    d: u2.Device,
+    *,
+    pkg: str,
+    expected_follower_username: str,
+    act_before: Any,
+    poll_label: str = "first_tap",
+) -> dict[str, Any]:
+    """Adaptive poll for post viewer after grid tap (replaces fixed 1.6s sleep)."""
+    t0 = time.perf_counter()
+    initial_s = float(_VISUAL_POST_VIEWER_OPEN_POLL_INITIAL_S)
+    interval_s = float(_VISUAL_POST_VIEWER_OPEN_POLL_INTERVAL_S)
+    max_s = float(_VISUAL_POST_VIEWER_OPEN_POLL_MAX_S)
+    if str(poll_label or "").strip() == "retry_tap":
+        max_s = float(_VISUAL_POST_VIEWER_OPEN_POLL_RETRY_MAX_S)
+
+    poll_sleep_s = 0.0
+    if initial_s > 0:
+        time.sleep(initial_s)
+        poll_sleep_s += initial_s
+
+    poll_count = 0
+    last_detect_ms = 0.0
+    det: dict[str, Any] = {}
+    while True:
+        poll_count += 1
+        t_detect0 = time.perf_counter()
+        det = _visual_detect_post_viewer_opened_after_tap(
+            d,
+            pkg=pkg,
+            expected_follower_username=expected_follower_username,
+            act_before=act_before,
+        )
+        last_detect_ms = (time.perf_counter() - t_detect0) * 1000.0
+        if bool(det.get("post_detected")):
+            elapsed_s = time.perf_counter() - t0
+            return {
+                **det,
+                "poll_count": int(poll_count),
+                "viewer_open_poll_wait_ms": round(elapsed_s * 1000.0, 2),
+                "viewer_open_poll_sleep_ms": round(poll_sleep_s * 1000.0, 2),
+                "viewer_open_detect_call_ms": round(last_detect_ms, 2),
+                "viewer_open_fast_path": bool(
+                    poll_count == 1 and elapsed_s < initial_s + interval_s + 0.08
+                ),
+                "viewer_open_poll_label": str(poll_label or ""),
+            }
+        elapsed_s = time.perf_counter() - t0
+        if elapsed_s >= max_s:
+            break
+        sleep_s = min(interval_s, max(0.0, max_s - elapsed_s))
+        if sleep_s > 0:
+            time.sleep(sleep_s)
+            poll_sleep_s += sleep_s
+
+    elapsed_s = time.perf_counter() - t0
+    return {
+        **det,
+        "poll_count": int(poll_count),
+        "viewer_open_poll_wait_ms": round(elapsed_s * 1000.0, 2),
+        "viewer_open_poll_sleep_ms": round(poll_sleep_s * 1000.0, 2),
+        "viewer_open_detect_call_ms": round(last_detect_ms, 2),
+        "viewer_open_fast_path": False,
+        "viewer_open_poll_label": str(poll_label or ""),
+    }
+
+
+def _already_liked_precheck_trusted_not_liked(
+    precheck: dict[str, Any] | None,
+) -> bool:
+    if not isinstance(precheck, dict):
+        return False
+    if bool(precheck.get("already_liked")):
+        return False
+    state = str(precheck.get("semantic_like_state") or "")
+    reason = str(precheck.get("already_liked_decision_reason") or "")
+    if state == "like":
+        return True
+    return reason in (
+        "semantic_like_confirmed_not_liked",
+        "hierarchy_like_confirmed_not_liked",
+    )
+
+
+def _already_liked_precheck_requires_recheck(
+    precheck: dict[str, Any] | None,
+) -> tuple[bool, str]:
+    if not isinstance(precheck, dict):
+        return True, "no_precheck_supplied"
+    if bool(precheck.get("already_liked")):
+        return False, "precheck_already_liked_confirmed"
+    if _already_liked_precheck_trusted_not_liked(precheck):
+        return False, "precheck_trusted_not_liked"
+    state = str(precheck.get("semantic_like_state") or "")
+    if state == "unknown":
+        return True, "precheck_unknown_requires_heart_bounds_recheck"
+    return True, str(precheck.get("already_liked_decision_reason") or "precheck_inconclusive")
 
 
 def _visual_grid_cell_tap_xy_device(
@@ -13285,20 +13442,37 @@ def visual_open_recent_post_from_profile(
         source_profile_username=source_profile_username or "",
     )
 
-    time.sleep(1.6)
     exp_fu = str(expected_follower_username or "").strip().lstrip("@")
-    det_open = _visual_detect_post_viewer_opened_after_tap(
+    det_open = _visual_wait_post_viewer_opened_after_tap(
         d,
         pkg=pkg,
         expected_follower_username=exp_fu,
         act_before=act0,
+        poll_label="first_tap",
     )
     post_detected = bool(det_open.get("post_detected"))
     prof_still = bool(det_open.get("prof_still_on_candidate_profile"))
     viewer_signals = list(det_open.get("viewer_detection_signals_seen") or [])
+    try:
+        log(
+            "info",
+            "visual_recent_post_open_viewer_poll_completed",
+            source_profile_username=source_profile_username or "",
+            poll_label="first_tap",
+            post_detected=bool(post_detected),
+            viewer_open_poll_count=det_open.get("poll_count"),
+            viewer_open_poll_wait_ms=det_open.get("viewer_open_poll_wait_ms"),
+            viewer_open_poll_sleep_ms=det_open.get("viewer_open_poll_sleep_ms"),
+            viewer_open_detect_call_ms=det_open.get("viewer_open_detect_call_ms"),
+            viewer_open_fast_path=det_open.get("viewer_open_fast_path"),
+            detect_reason=det_open.get("detect_reason"),
+        )
+    except Exception:
+        pass
 
     _t_retry0: float | None = None
     opened_on_first_tap_flag = bool(post_detected)
+    det_retry: dict[str, Any] = {}
     if not post_detected and prof_still:
         retry_used = True
         retry_strategy = "same_cell_more_central_point"
@@ -13348,12 +13522,12 @@ def visual_open_recent_post_from_profile(
                 )
             except Exception:
                 pass
-            time.sleep(1.6)
-            det_retry = _visual_detect_post_viewer_opened_after_tap(
+            det_retry = _visual_wait_post_viewer_opened_after_tap(
                 d,
                 pkg=pkg,
                 expected_follower_username=exp_fu,
                 act_before=act0,
+                poll_label="retry_tap",
             )
             post_detected = bool(det_retry.get("post_detected"))
             prof_still = bool(det_retry.get("prof_still_on_candidate_profile"))
@@ -13410,6 +13584,16 @@ def visual_open_recent_post_from_profile(
         )
         lperf["opened_on_first_tap"] = bool(opened_on_first_tap_flag)
         lperf["retry_used"] = bool(retry_used)
+        lperf["viewer_open_poll_count"] = int(det_open.get("poll_count") or 0)
+        lperf["viewer_open_poll_wait_ms"] = det_open.get("viewer_open_poll_wait_ms")
+        lperf["viewer_open_fast_path"] = bool(det_open.get("viewer_open_fast_path"))
+        if retry_used:
+            lperf["viewer_open_poll_count_retry"] = int(
+                det_retry.get("poll_count") or 0
+            )
+            lperf["viewer_open_poll_wait_ms_retry"] = det_retry.get(
+                "viewer_open_poll_wait_ms"
+            )
         if retry_used and _t_retry0 is not None:
             lperf["retry_total_ms"] = round(
                 (time.perf_counter() - _t_retry0) * 1000.0, 2
@@ -14605,6 +14789,88 @@ def _visual_filled_heart_red_ratio_for_verify(
     return ratio, crop_b, str(src or "")
 
 
+def _visual_post_like_verify_from_post_tap_screenshot(
+    d: u2.Device,
+    *,
+    post_tap_screenshot_path: str,
+    pre_tap_like_button_bounds: dict[str, Any] | None,
+    tap_x: int | None,
+    tap_y: int | None,
+    source_profile_username: str | None,
+    red_strong: float,
+    red_soft: float,
+    verify_attempt: int,
+    fail_snap: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Analyze post-tap PNG for filled-heart red ratio; returns verify result dict on success."""
+    ratio_f, hb_f, src_f = _try_verify_red_ratio_from_image_file(
+        post_tap_screenshot_path,
+        d,
+        preferred_heart_bounds=pre_tap_like_button_bounds,
+    )
+    if ratio_f is None:
+        return None
+    fail_snap["last_red_ratio"] = round(float(ratio_f), 4)
+    fail_snap["last_heart_bounds"] = hb_f
+    fail_snap["last_heart_bounds_source"] = str(src_f or "")
+    pref_bounds = pre_tap_like_button_bounds
+    try:
+        log(
+            "info",
+            "visual_post_like_verify_post_tap_image_analyzed",
+            tap_x=tap_x,
+            tap_y=tap_y,
+            screenshot_path=str(post_tap_screenshot_path),
+            red_ratio=round(float(ratio_f), 4),
+            heart_bounds_source=str(src_f or ""),
+            source_profile_username=source_profile_username or "",
+            verify_attempt=verify_attempt,
+            verify_pre_tap_bounds_supplied=bool(pref_bounds),
+        )
+    except Exception:
+        pass
+    if ratio_f >= red_strong:
+        conf_v = float(min(0.92, 0.4 + float(ratio_f) * 4.0))
+        meta = _followers_current_pkg_activity(d)
+        log(
+            "info",
+            "visual_post_like_verify_success",
+            tap_x=tap_x,
+            tap_y=tap_y,
+            verification_method="visual_filled_heart_red_ratio_verify_post_tap_reuse",
+            confidence=round(conf_v, 4),
+            current_activity=meta.get("current_activity"),
+            current_package=meta.get("current_package"),
+            source_profile_username=source_profile_username or "",
+            red_ratio=round(float(ratio_f), 4),
+            heart_bounds_source=str(src_f or ""),
+            verify_attempt=verify_attempt,
+        )
+        return {
+            "liked_verified": True,
+            "verification_method": "visual_filled_heart_red_ratio_verify_post_tap_reuse",
+            "confidence": conf_v,
+            "verify_attempts_count": max(1, int(verify_attempt)),
+        }
+    if red_soft <= float(ratio_f) < red_strong:
+        try:
+            log(
+                "info",
+                "visual_post_like_verify_red_ratio_below_threshold",
+                tap_x=tap_x,
+                tap_y=tap_y,
+                red_ratio=round(float(ratio_f), 4),
+                red_ratio_strong_threshold=round(red_strong, 4),
+                red_ratio_soft_band=round(red_soft, 4),
+                heart_bounds_source=str(src_f or ""),
+                source_profile_username=source_profile_username or "",
+                sample_source="post_tap_screenshot_reuse",
+            )
+        except Exception:
+            pass
+    return None
+
+
 def _try_verify_red_ratio_from_image_file(
     image_path: str | None,
     d: u2.Device,
@@ -14893,7 +15159,6 @@ def visual_verify_post_liked(
         getattr(config, "VISUAL_POST_LIKE_VERIFY_MAX_ATTEMPTS", 4) or 4
     )
     max_attempts = max(1, min(max_attempts, 8))
-    deadline = time.time() + max(0.35, timeout_s)
     red_strong, red_soft = _visual_post_like_verify_red_thresholds()
     meta0 = _followers_current_pkg_activity(d)
     dc = float(detect_confidence) if detect_confidence is not None else 0.0
@@ -14933,6 +15198,68 @@ def visual_verify_post_liked(
         verify_pre_tap_bounds_supplied=fail_snap["verify_pre_tap_bounds_supplied"],
     )
 
+    t_verify_wall0 = time.perf_counter()
+    ok_strict, method_strict, conf_strict, proof_strict = (
+        _ui_post_viewer_action_button_liked_strict(d)
+    )
+    if ok_strict:
+        meta_fast = _followers_current_pkg_activity(d)
+        log(
+            "info",
+            "visual_post_like_verify_success",
+            tap_x=tap_x,
+            tap_y=tap_y,
+            verification_method=method_strict,
+            confidence=round(conf_strict, 4),
+            current_activity=meta_fast.get("current_activity"),
+            current_package=meta_fast.get("current_package"),
+            source_profile_username=source_profile_username or "",
+            matched_node_resource_id=proof_strict.get("matched_node_resource_id"),
+            matched_node_content_desc=proof_strict.get("matched_node_content_desc"),
+            matched_node_bounds=proof_strict.get("matched_node_bounds"),
+            semantic_match_scope=proof_strict.get("semantic_match_scope"),
+            semantic_match_trusted_for_already_liked=proof_strict.get(
+                "semantic_match_trusted_for_already_liked"
+            ),
+            verify_attempt=0,
+            verify_early_exit_strict_ui=True,
+            like_verify_total_ms=round(
+                (time.perf_counter() - t_verify_wall0) * 1000.0, 2
+            ),
+        )
+        return {
+            "liked_verified": True,
+            "verification_method": method_strict,
+            "confidence": conf_strict,
+            "verify_attempts_count": 0,
+            "verify_early_exit_strict_ui": True,
+            "like_verify_total_ms": round(
+                (time.perf_counter() - t_verify_wall0) * 1000.0, 2
+            ),
+        }
+
+    if fail_snap["post_tap_reuse_eligible"]:
+        post_tap_file_analyzed = True
+        pt_verify = _visual_post_like_verify_from_post_tap_screenshot(
+            d,
+            post_tap_screenshot_path=str(post_tap_screenshot_path),
+            pre_tap_like_button_bounds=pref_bounds,
+            tap_x=tap_x,
+            tap_y=tap_y,
+            source_profile_username=source_profile_username,
+            red_strong=red_strong,
+            red_soft=red_soft,
+            verify_attempt=0,
+            fail_snap=fail_snap,
+        )
+        if pt_verify:
+            pt_verify["verify_early_exit_strict_ui"] = False
+            pt_verify["like_verify_total_ms"] = round(
+                (time.perf_counter() - t_verify_wall0) * 1000.0, 2
+            )
+            return pt_verify
+
+    deadline = time.time() + max(0.35, timeout_s)
     poll = 0.14
     attempt = 0
     while attempt < max_attempts:
@@ -15000,6 +15327,10 @@ def visual_verify_post_liked(
                 "verification_method": method_ui,
                 "confidence": conf_ui,
                 "verify_attempts_count": int(attempt),
+                "verify_early_exit_strict_ui": True,
+                "like_verify_total_ms": round(
+                    (time.perf_counter() - t_verify_wall0) * 1000.0, 2
+                ),
             }
 
         if time.time() >= deadline:
@@ -15007,69 +15338,24 @@ def visual_verify_post_liked(
 
         if not post_tap_file_analyzed and post_tap_screenshot_path:
             post_tap_file_analyzed = True
-            ratio_f, hb_f, src_f = _try_verify_red_ratio_from_image_file(
-                post_tap_screenshot_path,
+            pt_verify = _visual_post_like_verify_from_post_tap_screenshot(
                 d,
-                preferred_heart_bounds=pref_bounds,
+                post_tap_screenshot_path=str(post_tap_screenshot_path),
+                pre_tap_like_button_bounds=pref_bounds,
+                tap_x=tap_x,
+                tap_y=tap_y,
+                source_profile_username=source_profile_username,
+                red_strong=red_strong,
+                red_soft=red_soft,
+                verify_attempt=attempt,
+                fail_snap=fail_snap,
             )
-            if ratio_f is not None:
-                fail_snap["last_red_ratio"] = round(float(ratio_f), 4)
-                fail_snap["last_heart_bounds"] = hb_f
-                fail_snap["last_heart_bounds_source"] = str(src_f or "")
-                try:
-                    log(
-                        "info",
-                        "visual_post_like_verify_post_tap_image_analyzed",
-                        tap_x=tap_x,
-                        tap_y=tap_y,
-                        screenshot_path=str(post_tap_screenshot_path),
-                        red_ratio=round(float(ratio_f), 4),
-                        heart_bounds_source=str(src_f or ""),
-                        source_profile_username=source_profile_username or "",
-                        verify_attempt=attempt,
-                        verify_pre_tap_bounds_supplied=bool(pref_bounds),
-                    )
-                except Exception:
-                    pass
-                if ratio_f >= red_strong:
-                    conf_v = float(min(0.92, 0.4 + float(ratio_f) * 4.0))
-                    meta = _followers_current_pkg_activity(d)
-                    log(
-                        "info",
-                        "visual_post_like_verify_success",
-                        tap_x=tap_x,
-                        tap_y=tap_y,
-                        verification_method="visual_filled_heart_red_ratio_verify_post_tap_reuse",
-                        confidence=round(conf_v, 4),
-                        current_activity=meta.get("current_activity"),
-                        current_package=meta.get("current_package"),
-                        source_profile_username=source_profile_username or "",
-                        red_ratio=round(float(ratio_f), 4),
-                        heart_bounds_source=str(src_f or ""),
-                        verify_attempt=attempt,
-                    )
-                    return {
-                        "liked_verified": True,
-                        "verification_method": "visual_filled_heart_red_ratio_verify_post_tap_reuse",
-                        "confidence": conf_v,
-                        "verify_attempts_count": int(attempt),
-                    }
-                if red_soft <= float(ratio_f) < red_strong:
-                    try:
-                        log(
-                            "info",
-                            "visual_post_like_verify_red_ratio_below_threshold",
-                            tap_x=tap_x,
-                            tap_y=tap_y,
-                            red_ratio=round(float(ratio_f), 4),
-                            red_ratio_strong_threshold=round(red_strong, 4),
-                            red_ratio_soft_band=round(red_soft, 4),
-                            heart_bounds_source=str(src_f or ""),
-                            source_profile_username=source_profile_username or "",
-                            sample_source="post_tap_screenshot_reuse",
-                        )
-                    except Exception:
-                        pass
+            if pt_verify:
+                pt_verify["verify_early_exit_strict_ui"] = False
+                pt_verify["like_verify_total_ms"] = round(
+                    (time.perf_counter() - t_verify_wall0) * 1000.0, 2
+                )
+                return pt_verify
 
         if time.time() >= deadline:
             break
@@ -15433,6 +15719,7 @@ def visual_like_open_post(
     expected_follower_username: str | None = None,
     likes_perf_like_accum: dict[str, Any] | None = None,
     likes_perf_phase_t0: float | None = None,
+    already_liked_precheck: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Estimate like control from a screenshot of the open post.
@@ -15637,16 +15924,47 @@ def visual_like_open_post(
         )
 
     if real_visual:
-        t_il0 = time.perf_counter()
-        al_pre = visual_post_already_liked(
-            d,
-            source_profile_username=source_profile_username,
-            heart_bounds=like_button_bounds,
+        needs_recheck, recheck_reason = _already_liked_precheck_requires_recheck(
+            already_liked_precheck
         )
-        if _lkperf is not None:
-            _lkperf["already_liked_decision_inner_ms"] = round(
-                (time.perf_counter() - t_il0) * 1000.0, 2
+        if not needs_recheck and isinstance(already_liked_precheck, dict):
+            al_pre = dict(already_liked_precheck)
+            if _lkperf is not None:
+                _lkperf["already_liked_decision_reused"] = True
+                _lkperf["already_liked_recheck_reason"] = str(recheck_reason or "")[
+                    :160
+                ]
+                _lkperf["already_liked_decision_inner_ms"] = 0.0
+            try:
+                log(
+                    "info",
+                    "visual_post_like_already_liked_precheck_reused",
+                    source_profile_username=source_profile_username or "",
+                    already_liked=bool(al_pre.get("already_liked")),
+                    already_liked_decision_reused=True,
+                    already_liked_recheck_reason=str(recheck_reason or "")[:160],
+                    semantic_like_state=al_pre.get("semantic_like_state"),
+                    already_liked_decision_reason=al_pre.get(
+                        "already_liked_decision_reason"
+                    ),
+                )
+            except Exception:
+                pass
+        else:
+            t_il0 = time.perf_counter()
+            al_pre = visual_post_already_liked(
+                d,
+                source_profile_username=source_profile_username,
+                heart_bounds=like_button_bounds,
             )
+            if _lkperf is not None:
+                _lkperf["already_liked_decision_reused"] = False
+                _lkperf["already_liked_recheck_reason"] = str(recheck_reason or "")[
+                    :160
+                ]
+                _lkperf["already_liked_decision_inner_ms"] = round(
+                    (time.perf_counter() - t_il0) * 1000.0, 2
+                )
         if al_pre.get("already_liked"):
             meta_skip = _followers_current_pkg_activity(d)
             log(
@@ -16149,13 +16467,9 @@ def visual_return_to_profile_from_post(
             "failure_reason": str(e),
         }
 
-    time.sleep(1.25)
+    poll_out = _visual_wait_profile_after_back(d, pkg=pkg)
+    profile_detected = bool(poll_out.get("profile_detected"))
     meta = _followers_current_pkg_activity(d)
-    profile_detected = bool(
-        _try_profile_signals_once(d, "", pkg)
-        or _guess_profile_screen(d, pkg, "")
-        in ("likely_profile", "profile_header_rid", "action_bar_title")
-    )
     if profile_detected:
         log(
             "info",
@@ -16164,6 +16478,9 @@ def visual_return_to_profile_from_post(
             current_activity=meta.get("current_activity"),
             current_package=meta.get("current_package"),
             profile_detected=True,
+            return_profile_poll_count=poll_out.get("return_profile_poll_count"),
+            return_profile_fast_confirmed=poll_out.get("return_profile_fast_confirmed"),
+            return_profile_poll_wait_ms=poll_out.get("return_profile_poll_wait_ms"),
         )
         return {
             "ok": True,
@@ -16172,6 +16489,11 @@ def visual_return_to_profile_from_post(
             "current_package": meta.get("current_package"),
             "source_profile_username": source_profile_username or "",
             "failure_reason": None,
+            "return_profile_poll_count": poll_out.get("return_profile_poll_count"),
+            "return_profile_fast_confirmed": poll_out.get(
+                "return_profile_fast_confirmed"
+            ),
+            "return_profile_poll_wait_ms": poll_out.get("return_profile_poll_wait_ms"),
         }
 
     log(
@@ -16182,6 +16504,9 @@ def visual_return_to_profile_from_post(
         current_package=meta.get("current_package"),
         profile_detected=False,
         failure_reason="profile_not_verified_after_back",
+        return_profile_poll_count=poll_out.get("return_profile_poll_count"),
+        return_profile_fast_confirmed=poll_out.get("return_profile_fast_confirmed"),
+        return_profile_poll_wait_ms=poll_out.get("return_profile_poll_wait_ms"),
     )
     return {
         "ok": False,
@@ -16190,6 +16515,9 @@ def visual_return_to_profile_from_post(
         "current_package": meta.get("current_package"),
         "source_profile_username": source_profile_username or "",
         "failure_reason": "profile_not_verified_after_back",
+        "return_profile_poll_count": poll_out.get("return_profile_poll_count"),
+        "return_profile_fast_confirmed": poll_out.get("return_profile_fast_confirmed"),
+        "return_profile_poll_wait_ms": poll_out.get("return_profile_poll_wait_ms"),
     }
 
 
@@ -28997,6 +29325,8 @@ def run_post_follow_post_likes_phase(
         _likes_perf_ctx["already_liked_decision_ms"] = round(
             (time.perf_counter() - t_al_run0) * 1000.0, 2
         )
+        _likes_perf_ctx["already_liked_decision_reused"] = False
+        _likes_perf_ctx["already_liked_recheck_reason"] = "runner_primary_precheck"
         if al_pre.get("already_liked"):
             skipped_already += 1
             post_rec["outcome"] = "already_liked"
@@ -29049,6 +29379,10 @@ def run_post_follow_post_likes_phase(
                         "return_to_profile_ms"
                     ),
                     return_success=_likes_perf_ctx.get("return_success"),
+                    return_profile_poll_count=ret_p.get("return_profile_poll_count"),
+                    return_profile_fast_confirmed=ret_p.get(
+                        "return_profile_fast_confirmed"
+                    ),
                     elapsed_from_phase_start_ms=_likes_perf_elapsed_ms(
                         _likes_perf_ctx.get("phase_t0")
                     ),
@@ -29077,6 +29411,7 @@ def run_post_follow_post_likes_phase(
             expected_follower_username=cand,
             likes_perf_like_accum=_like_accum,
             likes_perf_phase_t0=_likes_perf_ctx.get("phase_t0"),
+            already_liked_precheck=al_pre,
         )
         _likes_perf_ctx["like"] = dict(like_out.get("likes_perf_like") or {})
         _likes_perf_ctx["like"]["runner_visual_like_open_wall_ms"] = round(
@@ -29098,6 +29433,12 @@ def run_post_follow_post_likes_phase(
                 ),
                 already_liked_decision_inner_ms=_likes_perf_ctx["like"].get(
                     "already_liked_decision_inner_ms"
+                ),
+                already_liked_decision_reused=_likes_perf_ctx["like"].get(
+                    "already_liked_decision_reused"
+                ),
+                already_liked_recheck_reason=_likes_perf_ctx["like"].get(
+                    "already_liked_recheck_reason"
                 ),
                 like_tap_dispatch_ms=_likes_perf_ctx["like"].get("like_tap_dispatch_ms"),
                 like_tap_sent=bool(like_out.get("real_tap_sent")),
@@ -29159,6 +29500,9 @@ def run_post_follow_post_likes_phase(
                     verify_attempts_count=_likes_perf_ctx.get("verify_attempts_count"),
                     verification_method=_likes_perf_ctx.get("verification_method"),
                     verify_success=bool(liked_verified),
+                    verify_early_exit_strict_ui=bool(
+                        ver.get("verify_early_exit_strict_ui")
+                    ),
                     failure_reason=_likes_perf_ctx.get("like_verify_failure_reason"),
                     elapsed_from_phase_start_ms=_likes_perf_elapsed_ms(
                         _likes_perf_ctx.get("phase_t0")
@@ -29214,6 +29558,10 @@ def run_post_follow_post_likes_phase(
                         "return_to_profile_ms"
                     ),
                     return_success=_likes_perf_ctx.get("return_success"),
+                    return_profile_poll_count=ret_pf.get("return_profile_poll_count"),
+                    return_profile_fast_confirmed=ret_pf.get(
+                        "return_profile_fast_confirmed"
+                    ),
                     elapsed_from_phase_start_ms=_likes_perf_elapsed_ms(
                         _likes_perf_ctx.get("phase_t0")
                     ),
@@ -29262,6 +29610,10 @@ def run_post_follow_post_likes_phase(
                 follower_username=cand,
                 return_to_profile_total_ms=_likes_perf_ctx.get("return_to_profile_ms"),
                 return_success=_likes_perf_ctx.get("return_success"),
+                return_profile_poll_count=ret_ok.get("return_profile_poll_count"),
+                return_profile_fast_confirmed=ret_ok.get(
+                    "return_profile_fast_confirmed"
+                ),
                 elapsed_from_phase_start_ms=_likes_perf_elapsed_ms(
                     _likes_perf_ctx.get("phase_t0")
                 ),
