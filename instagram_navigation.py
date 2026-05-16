@@ -27409,7 +27409,34 @@ def post_follow_controlled_return_to_followers_list(
                     )
                 except Exception:
                     last_det = {}
-                ok_fb, det_fb = _list_confirmed()
+                ab_post_raw = str(last_det.get("action_bar_title") or "").strip()
+                ab_post_n = _normalize_handle(ab_post_raw) if ab_post_raw else ""
+                cand_n_post = _normalize_handle(cand or "")
+                ct_action_bar_fast_path = (
+                    bool(src_n)
+                    and bool(ab_post_n)
+                    and ab_post_n == src_n
+                    and (not cand_n_post or ab_post_n != cand_n_post)
+                )
+                det_fb: dict[str, Any] = (
+                    last_det if isinstance(last_det, dict) else {}
+                )
+                ok_fb = False
+                if ct_action_bar_fast_path:
+                    try:
+                        log(
+                            "info",
+                            "post_follow_return_ct_compact_foreign_profile_ct_action_bar_fast_path",
+                            visual_candidate_id=vcid,
+                            source_profile_username=src,
+                            follower_username=cand or None,
+                            action_bar_title=ab_post_raw[:120],
+                            skipped_xml_reconfirm=True,
+                        )
+                    except Exception:
+                        pass
+                else:
+                    ok_fb, det_fb = _list_confirmed()
                 if ok_fb:
                     log(
                         "info",
