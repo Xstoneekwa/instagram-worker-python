@@ -124,7 +124,15 @@ VISUAL_POST_MAX_LIKES_PER_PROFILE = 1
 # Real like from visual post viewer (single tap, verify after); does not enable follow/DM/mute.
 ENABLE_REAL_VISUAL_POST_LIKE = True
 VISUAL_POST_LIKE_VERIFY_AFTER_TAP = True
-VISUAL_POST_LIKE_VERIFY_TIMEOUT_S = 2.5
+# Wall budget for post-tap verify (UI + optional hierarchy/screenshot). Default 3.2s:
+#  ~2.5s historically could expire mid-first-pass; +0.7s allows one fast post-tap image reuse
+#  and one short repoll without turning verify into a long poll loop (see MAX_ATTEMPTS).
+VISUAL_POST_LIKE_VERIFY_TIMEOUT_S = 3.2
+# Max polling rounds within the timeout (hard cap). Typical successful path exits on 1st round
+# (UI or post_tap PNG reuse); worst-case ~4 rounds only if time remains.
+VISUAL_POST_LIKE_VERIFY_MAX_ATTEMPTS = 4
+# Separate from pre-tap already_liked red heuristic; post-tap filled heart often reads slightly lower.
+VISUAL_POST_LIKE_VERIFY_RED_RATIO_STRONG = 0.14
 # Follow + mute sheet dry-run on open profile (no real follow/mute taps).
 ENABLE_VISUAL_FOLLOW_MUTE_FLOW = True
 # False = follow/mute réels après ouverture profil (validation pending + mute).
@@ -139,6 +147,16 @@ VISUAL_MUTE_STORIES_AFTER_FOLLOW = True
 ENABLE_REAL_VISUAL_MUTE_AFTER_FOLLOW = True
 VISUAL_MUTE_VERIFY_AFTER_TAP = True
 VISUAL_MUTE_VERIFY_TIMEOUT_S = 3.0
+# Post-follow likes on candidate profile (after mute, before return CT). Master switch off until validated.
+POST_FOLLOW_POST_LIKES_ENABLED = True
+POST_FOLLOW_POST_LIKES_COUNT_RANGE = "1-1"
+POST_FOLLOW_POST_LIKES_PERCENTAGE = 100
+POST_FOLLOW_TOTAL_LIKES_LIMIT = 150
+POST_FOLLOW_POST_LIKES_BUDGET_S = 10.0
+# Min remaining seconds inside grid-prep (after initial probe) to realistically run micro→reprobe→long→reprobe.
+# Below this, first swipe is promoted to long when grid is partial + Suggested overlay (see ensure_post_grid_visible_for_post_follow_likes).
+POST_FOLLOW_LIKES_GRID_SECOND_PASS_RESERVE_S = 5.5
+POST_FOLLOW_POST_LIKES_VERIFY_AFTER_TAP = True
 # Vision Validation Layer: screenshot + context heuristics (no taps); gates followers/mute drift.
 ENABLE_VISION_VALIDATION_LAYER = True
 VISION_VALIDATION_STRICT_MODE = True

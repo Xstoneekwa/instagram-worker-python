@@ -79,6 +79,7 @@ from instagram_navigation import (
     visual_follow_post_action_reconcile,
     open_followers_list_from_profile,
     detect_followers_list_screen,
+    detect_followers_list_screen_visual_fallback,
     followers_surface_quick_revalidate,
     followers_session_reset_list_committed_open,
     followers_session_list_committed_open_for,
@@ -102,6 +103,7 @@ from instagram_navigation import (
     return_to_followers_list,
     run_visual_candidate_post_follow_phase,
     scroll_followers_list_forward,
+    followers_refresh_hierarchy_for_candidates,
     followers_force_hierarchy_refresh,
     visual_extract_followers_candidates_from_screenshot,
     open_visual_follower_candidate_from_screenshot,
@@ -553,6 +555,643 @@ def _persist_social_memory_follow_block(
         kind="skip_block",
         reason=elig.reason,
     )
+
+
+def _coerce_optional_run_id(run_id: Any) -> str | None:
+    if run_id is None:
+        return None
+    s = str(run_id).strip()
+    return s or None
+
+
+def _followers_visual_load_interacted_db_row(
+    *,
+    account_id: str,
+    target_username: str,
+    source_profile: str,
+    supabase_mode: bool,
+) -> dict[str, Any] | None:
+    if not (
+        supabase_mode
+        and str(account_id or "").strip()
+        and getattr(config, "SOCIAL_MEMORY_ENABLED", True)
+    ):
+        return None
+    out = _safe_supabase_call(
+        "load_interacted_user",
+        str(account_id).strip(),
+        target_username,
+        source_profile or "",
+    )
+    return out if isinstance(out, dict) else None
+
+
+def _visual_candidate_already_connected_soft_followers_after_back(
+    det: dict[str, Any],
+    *,
+    source_profile_username: str,
+) -> bool:
+    """
+    Narrow post-skip accept when strict ``is_followers_list`` stays false briefly after Back
+    (stale hierarchy / sparse first paint) while the surface already looks non-profile list.
+    """
+    if bool(det.get("is_followers_list")):
+        return True
+    chrome = bool(
+        det.get("recycler_present")
+        or det.get("scrollable_present")
+        or det.get("listview_present")
+    )
+    tabs_gone = bool(det.get("profile_tabs_absent"))
+    guess = str(det.get("current_screen_guess") or "").strip().lower()
+    stacked = int(det.get("stacked_central_textview_run") or 0)
+    cnt = int(det.get("candidate_username_count") or 0)
+    sample = det.get("visible_usernames_sample")
+    samp_n = len(sample) if isinstance(sample, list) else 0
+    title_match = bool(det.get("title_match"))
+    ab = _norm_ig_handle(str(det.get("action_bar_title") or ""))
+    src = _norm_ig_handle(source_profile_username or "")
+    hdrs = det.get("visible_header_texts")
+    hdr_followers_kw = False
+    if isinstance(hdrs, list):
+        hl = " ".join(str(h).strip().lower() for h in hdrs[:12] if h)
+        if any(k in hl for k in ("follower", "abonnés", "abonne", "followers")):
+            hdr_followers_kw = True
+    if chrome and tabs_gone and title_match:
+        return True
+    if (
+        chrome
+        and tabs_gone
+        and hdr_followers_kw
+        and (cnt >= 1 or samp_n >= 1 or stacked >= 4)
+        and guess not in ("likely_profile",)
+    ):
+        return True
+    if (
+        chrome
+        and tabs_gone
+        and src
+        and ab == src
+        and (cnt >= 1 or samp_n >= 1 or stacked >= 4 or title_match)
+    ):
+        return True
+    return False
+
+
+def _already_connected_xml_still_follower_profile_band(
+    det: dict[str, Any],
+    *,
+    source_profile_username: str,
+    follower_username_hint: str,
+) -> bool:
+    """
+    Rough guard: follower profile chrome often retains the follower handle as the toolbar title.
+
+    Avoid accepting a follower-list screenshot heuristic while XML still anchors on the follower
+    profile chrome (distinct from ``source_profile_username``).
+    """
+    src = _norm_ig_handle(source_profile_username or "")
+    fld = _norm_ig_handle(str(follower_username_hint or "").strip())
+    if not fld:
+        return False
+    ab = _norm_ig_handle(str(det.get("action_bar_title") or ""))
+    return bool(ab == fld and (not src or fld != src))
+
+
+def _already_connected_visual_followers_list_accept_relaxed(
+    vf: dict[str, Any],
+    *,
+    xml_follower_profile_band_hint: bool,
+) -> tuple[bool, str]:
+    """Narrow gated relax for stale-XML follower list paints (post single Back path only).
+
+    Used exclusively from ``_visual_candidate_already_connected_try_direct_back_to_followers_list``.
+    """
+    if not isinstance(vf, dict):
+        return False, "visual_payload_invalid"
+    err = str(vf.get("visual_error") or "").strip()
+    if err:
+        return False, f"visual_error:{err}"
+    tabs_abs = bool(vf.get("visual_profile_tabs_absent"))
+
+    fcb = int(vf.get("visual_follow_button_count") or 0)
+    rows = int(vf.get("visual_user_rows_detected") or 0)
+    search_ok = bool(vf.get("visual_search_area_detected"))
+    title_h = bool(vf.get("visual_followers_title_hint"))
+    conf = float(vf.get("visual_confidence") or 0.0)
+
+    min_conf_soft = float(
+        getattr(config, "ALREADY_CONNECTED_BACK_VISUAL_MIN_CONFIDENCE", 0.28)
+        or 0.28
+    )
+    if conf < min_conf_soft:
+        return False, f"visual_conf_below_soft_threshold:{conf:.3f}"
+
+    if not tabs_abs:
+        min_rows_tabs_present = max(
+            1,
+            int(
+                getattr(
+                    config,
+                    "ALREADY_CONNECTED_BACK_VISUAL_TABS_PRESENT_MIN_ROWS",
+                    15,
+                )
+                or 15
+            ),
+        )
+        # Bottom-tab heuristic noisy on real follower lists; gated by strong sheet signals +
+        # no XML follower-profile toolbar hint (caller).
+        if (
+            not xml_follower_profile_band_hint
+            and search_ok
+            and title_h
+            and rows >= min_rows_tabs_present
+            and fcb >= 1
+        ):
+            return True, (
+                "visual_tabs_present_rows_title_search_single_follow_cta_accepted"
+            )
+
+        if fcb >= 3 and search_ok:
+            return True, "dense_follow_strip_search_tab_heuristic_noisy"
+        if fcb >= 2 and search_ok and rows >= 1:
+            return True, "multi_follow_cta_rows_search_tab_heuristic_noisy"
+        return False, "visual_tabs_present_relaxed_blocked"
+
+    if fcb >= 1 and search_ok:
+        return True, "sparse_list_follow_cta_with_search_strip"
+
+    if fcb >= 2 and (search_ok or rows >= 1):
+        return True, "multi_follow_cta_with_row_or_search"
+
+    if rows >= 2 and (search_ok or fcb >= 1):
+        return True, "multi_user_rows_with_search_or_cta"
+
+    if title_h and fcb >= 1 and (search_ok or rows >= 1):
+        return True, "title_hint_follow_cta_and_rows_or_search"
+
+    return False, "visual_signals_insufficient"
+
+
+def _visual_candidate_already_connected_try_direct_back_to_followers_list(
+    d: Any,
+    *,
+    source_profile_username: str,
+    follower_username_hint: str = "",
+) -> tuple[bool, str, int, dict[str, Any] | None]:
+    """
+    Prefer one or more plain Back hops from an opened follower profile back onto the CT
+    followers list, without invoking ``open_followers_list_from_profile`` (entry_v2 reopen).
+    Caps physical Back presses (default config → 3) to **two** — extra probes use wait/refresh only,
+    because premature 2ᵉ/3ᵉ Back often leaves CT followers for an intermediate surface.
+    """
+    retries_raw = getattr(config, "FOLLOWERS_LIST_RETURN_MAX_RETRIES", 2)
+    retries_cfg = max(0, int(retries_raw or 0))
+    max_physical_backs = max(1, min(retries_cfg + 1, 2))
+    last_attempt_idx = -1
+    try:
+        log(
+            "info",
+            "visual_candidate_already_connected_direct_back_started",
+            source_profile_username=source_profile_username,
+            max_physical_back_attempts=max_physical_backs,
+            retries_config_followers_return=retries_cfg,
+            note_capped=max_physical_backs < (retries_cfg + 1),
+        )
+    except Exception:
+        pass
+
+    probe_labels = ("primary_sleep", "hierarchy_refresh_reprobe")
+
+    def _emit_direct_back_attempt_from_det(
+        det: dict[str, Any],
+        *,
+        followers_ok: bool,
+        sub_label: str,
+        vc_used: bool,
+        vc_confirmed: bool,
+    ) -> None:
+        try:
+            log(
+                "info",
+                "visual_candidate_already_connected_direct_back_attempt_result",
+                source_profile_username=source_profile_username,
+                back_attempt_index=attempt,
+                sub_probe=sub_label,
+                followers_list_detected=followers_ok,
+                detector_is_followers_list=bool(
+                    isinstance(det, dict) and bool(det.get("is_followers_list"))
+                ),
+                detector_soft_followers_accept=bool(
+                    isinstance(det, dict)
+                    and not bool(det.get("is_followers_list"))
+                    and _visual_candidate_already_connected_soft_followers_after_back(
+                        det,
+                        source_profile_username=source_profile_username,
+                    )
+                ),
+                after_back_action_bar_title=str((det.get("action_bar_title") if isinstance(det, dict) else "") or "")[
+                    :240
+                ],
+                after_back_screen_guess=str(
+                    (det.get("current_screen_guess") if isinstance(det, dict) else "") or ""
+                ),
+                strict_list_open=bool(isinstance(det, dict) and det.get("strict_list_open")),
+                relaxed_list_open=bool(isinstance(det, dict) and det.get("relaxed_list_open")),
+                title_match=bool(isinstance(det, dict) and det.get("title_match")),
+                recycler_present=bool(isinstance(det, dict) and det.get("recycler_present")),
+                scrollable_present=bool(isinstance(det, dict) and det.get("scrollable_present")),
+                candidate_username_count=int(
+                    (det.get("candidate_username_count") or 0)
+                    if isinstance(det, dict)
+                    else 0
+                ),
+                stacked_central_textview_run=int(
+                    (det.get("stacked_central_textview_run") or 0)
+                    if isinstance(det, dict)
+                    else 0
+                ),
+                profile_tabs_absent=bool(isinstance(det, dict) and bool(det.get("profile_tabs_absent"))),
+                visual_check_used=vc_used,
+                visual_check_confirmed=vc_confirmed,
+            )
+        except Exception:
+            pass
+
+    for attempt in range(max_physical_backs):
+        last_attempt_idx = attempt
+        try:
+            d.press("back")
+        except Exception:
+            pass
+
+        last_xml_det: dict[str, Any] = {}
+        for sub in range(2):
+            if sub == 0:
+                time.sleep(0.78 if attempt == 0 else 0.48)
+            else:
+                try:
+                    followers_refresh_hierarchy_for_candidates(d)
+                except Exception:
+                    pass
+                time.sleep(0.38)
+
+            det = {}
+            try:
+                det = detect_followers_list_screen(
+                    d, source_profile_username=source_profile_username
+                )
+            except Exception:
+                det = {}
+
+            last_xml_det = dict(det) if isinstance(det, dict) else {}
+
+            followers_ok = isinstance(det, dict) and (
+                bool(det.get("is_followers_list"))
+                or _visual_candidate_already_connected_soft_followers_after_back(
+                    det,
+                    source_profile_username=source_profile_username,
+                )
+            )
+            _emit_direct_back_attempt_from_det(
+                det,
+                followers_ok=followers_ok,
+                sub_label=probe_labels[sub],
+                vc_used=False,
+                vc_confirmed=False,
+            )
+
+            if followers_ok:
+                try:
+                    log(
+                        "info",
+                        "visual_candidate_already_connected_direct_back_list_confirmed",
+                        source_profile_username=source_profile_username,
+                        physical_back_attempt=attempt,
+                        sub_probe=probe_labels[sub],
+                        used_soft_accept=bool(
+                            isinstance(det, dict)
+                            and (not bool(det.get("is_followers_list")))
+                            and _visual_candidate_already_connected_soft_followers_after_back(
+                                det,
+                                source_profile_username=source_profile_username,
+                            )
+                        ),
+                    )
+                except Exception:
+                    pass
+                return True, "direct_back_to_followers_list", attempt, None
+
+        if attempt == 0:
+            try:
+                log(
+                    "info",
+                    "visual_candidate_already_connected_direct_back_visual_check_started",
+                    source_profile_username=source_profile_username,
+                    follower_username_hint=str(follower_username_hint or "")[:128],
+                    back_attempt_index=attempt,
+                    screenshot_path="",
+                )
+            except Exception:
+                pass
+
+            time.sleep(0.22)
+            vf: dict[str, Any] = {}
+            try:
+                vf = detect_followers_list_screen_visual_fallback(
+                    d,
+                    source_profile_username=source_profile_username,
+                    screenshot_path=None,
+                )
+            except Exception as e:
+                vf = {
+                    "visual_match": False,
+                    "visual_confidence": 0.0,
+                    "visual_follow_button_count": 0,
+                    "visual_search_area_detected": False,
+                    "visual_user_rows_detected": 0,
+                    "visual_profile_tabs_absent": False,
+                    "visual_followers_title_hint": False,
+                    "visual_error": f"exception:{type(e).__name__}",
+                    "screenshot_path_used": "",
+                }
+
+            vpath = str(vf.get("screenshot_path_used") or "")
+            last_xml = dict(last_xml_det) if isinstance(last_xml_det, dict) else {}
+
+            xml_band = _already_connected_xml_still_follower_profile_band(
+                last_xml,
+                source_profile_username=source_profile_username,
+                follower_username_hint=follower_username_hint,
+            )
+            strict_match = bool(vf.get("visual_match"))
+            relaxed_ok, rel_reason = _already_connected_visual_followers_list_accept_relaxed(
+                vf,
+                xml_follower_profile_band_hint=xml_band,
+            )
+            vf_err = str(vf.get("visual_error") or "").strip()
+
+            if xml_band:
+                ok_vis = False
+                acc_reason = "xml_action_bar_still_follower_profile_band"
+            elif vf_err:
+                ok_vis = False
+                acc_reason = f"visual_fallback_failed:{vf_err}"
+            elif strict_match:
+                ok_vis = True
+                acc_reason = "engine_visual_match"
+            elif relaxed_ok:
+                ok_vis = True
+                acc_reason = rel_reason
+            else:
+                ok_vis = False
+                acc_reason = rel_reason
+
+            vconf = float(vf.get("visual_confidence") or 0.0)
+            v_uc = int(vf.get("visual_user_rows_detected") or 0)
+            v_fc = int(vf.get("visual_follow_button_count") or 0)
+
+            evt = (
+                "visual_candidate_already_connected_direct_back_visual_list_confirmed"
+                if ok_vis
+                else "visual_candidate_already_connected_direct_back_visual_list_rejected"
+            )
+            try:
+                log(
+                    "info",
+                    evt,
+                    source_profile_username=source_profile_username,
+                    follower_username_hint=str(follower_username_hint or "")[:128],
+                    back_attempt_index=attempt,
+                    screenshot_path=vpath[:1024],
+                    visual_user_rows_detected=v_uc,
+                    visual_follow_button_count=v_fc,
+                    visual_search_area_detected=bool(vf.get("visual_search_area_detected")),
+                    visual_followers_title_hint=bool(vf.get("visual_followers_title_hint")),
+                    visual_profile_tabs_absent=bool(vf.get("visual_profile_tabs_absent")),
+                    visual_match=strict_match,
+                    visual_relaxed_candidate=relaxed_ok,
+                    visual_confidence=vconf,
+                    acceptance_reason=acc_reason,
+                    xml_follower_profile_band_hint=xml_band,
+                )
+            except Exception:
+                pass
+
+            _emit_direct_back_attempt_from_det(
+                last_xml,
+                followers_ok=ok_vis,
+                sub_label="visual_screenshot_fallback",
+                vc_used=True,
+                vc_confirmed=ok_vis,
+            )
+
+            if ok_vis:
+                try:
+                    log(
+                        "info",
+                        "visual_candidate_already_connected_direct_back_list_confirmed",
+                        source_profile_username=source_profile_username,
+                        physical_back_attempt=attempt,
+                        sub_probe="visual_screenshot_fallback",
+                        used_soft_accept=False,
+                    )
+                except Exception:
+                    pass
+                _vf_out = dict(vf)
+                _vf_out["open_detection_method"] = str(
+                    _vf_out.get("open_detection_method") or "visual_fallback"
+                )
+                return (
+                    True,
+                    "direct_back_visual_followers_list_confirmed",
+                    attempt,
+                    _vf_out,
+                )
+
+    try:
+        log(
+            "info",
+            "visual_candidate_already_connected_direct_back_not_confirmed",
+            source_profile_username=source_profile_username,
+            physical_backs_used=max_physical_backs,
+            last_physical_back_attempt=last_attempt_idx,
+        )
+    except Exception:
+        pass
+    return False, "direct_back_not_confirmed", last_attempt_idx, None
+
+
+def _followers_visual_emit_already_connected_skip_event(
+    *,
+    account_id: str,
+    run_id: Any,
+    supabase_mode: bool,
+    follower_username: str,
+    source_profile_username: str,
+    skip_reason: str,
+    visual_candidate_id: str | None,
+    memory_detail: dict[str, Any] | None,
+) -> None:
+    if not (supabase_mode and str(account_id or "").strip() and follower_username):
+        return
+    _safe_supabase_call(
+        "record_interaction_event",
+        str(account_id).strip(),
+        follower_username,
+        source_profile_username or "",
+        run_id=_coerce_optional_run_id(run_id),
+        session_id=_SESSION_SOCIAL_ID or None,
+        event_type="followers_visual_already_connected_skip",
+        event_status="info",
+        event_reason=skip_reason[:500],
+        payload={
+            "visual_candidate_id": str(visual_candidate_id or ""),
+            "memory_detail": dict(memory_detail) if memory_detail else {},
+        },
+    )
+
+
+def _visual_candidate_already_connected_fast_return(
+    d: Any,
+    *,
+    source_profile_username: str,
+    pkg: str,
+    follower_username: str,
+    visual_candidate_id: str | None,
+    skip_reason: str,
+    memory_detail: dict[str, Any] | None,
+    follow_header_state: str | None,
+    account_id: str,
+    run_id: Any,
+    supabase_mode: bool,
+    visual_loop_state: dict[str, Any] | None = None,
+) -> tuple[bool, str]:
+    log(
+        "info",
+        "visual_candidate_already_connected_fast_return_started",
+        source_profile_username=source_profile_username,
+        follower_username=follower_username,
+        visual_candidate_id=str(visual_candidate_id or ""),
+        skip_reason=skip_reason,
+        memory_status=str((memory_detail or {}).get("memory_status") or ""),
+        following_status=str((memory_detail or {}).get("following_status") or ""),
+        follow_header_state=str(follow_header_state or ""),
+    )
+
+    dir_vf_snap: dict[str, Any] | None = None
+    dir_ok, dir_how, _dir_attempt, dir_vf_snap = (
+        _visual_candidate_already_connected_try_direct_back_to_followers_list(
+            d,
+            source_profile_username=source_profile_username,
+            follower_username_hint=str(follower_username or ""),
+        )
+    )
+    vf_snap_eff: dict[str, Any] | None = dir_vf_snap
+    if dir_ok:
+        ok, how = True, dir_how
+    else:
+        try:
+            log(
+                "info",
+                "visual_candidate_already_connected_fast_return_fallback_started",
+                source_profile_username=source_profile_username,
+                direct_back_outcome=str(dir_how or ""),
+                fallback="return_to_followers_list_full",
+            )
+        except Exception:
+            pass
+        vf_snap_eff = None
+        ok, how = return_to_followers_list(d, source_profile_username, pkg)
+    if ok:
+        _how_s = str(how or "").strip()
+        if _how_s == "direct_back_visual_followers_list_confirmed":
+            _committed_src = "already_connected_direct_back_visual_confirmed"
+        elif _how_s.startswith("direct_back"):
+            _committed_src = "already_connected_direct_back_other"
+        else:
+            _committed_src = "already_connected_fallback_return_success"
+        try:
+            followers_session_mark_list_committed_open(
+                source_profile_username,
+                committed_source=_committed_src[:120],
+            )
+        except Exception:
+            pass
+        if (
+            vf_snap_eff
+            and isinstance(visual_loop_state, dict)
+            and _how_s == "direct_back_visual_followers_list_confirmed"
+        ):
+            try:
+                visual_loop_state["session_vf_detail"] = dict(vf_snap_eff)
+            except Exception:
+                pass
+        if isinstance(visual_loop_state, dict):
+            try:
+                visual_loop_state["post_return_picker_refresh_pending"] = True
+                visual_loop_state["post_return_picker_refresh_meta"] = {
+                    "visual_candidate_id": str(visual_candidate_id or ""),
+                    "follower_username": str(follower_username or ""),
+                    "return_method": str(how or ""),
+                    "phase": "already_connected_fast_return",
+                }
+                log(
+                    "info",
+                    "followers_post_return_picker_refresh_armed",
+                    source_profile_username=source_profile_username,
+                    visual_candidate_id=str(visual_candidate_id or ""),
+                    follower_username=str(follower_username or ""),
+                    return_method=str(how or ""),
+                    phase="already_connected_fast_return",
+                )
+            except Exception:
+                pass
+        try:
+            log(
+                "info",
+                "followers_session_rearmed_after_already_connected_fast_return",
+                source_profile_username=source_profile_username,
+                follower_username=str(follower_username or ""),
+                return_method=str(how or ""),
+                committed_source=_committed_src[:120],
+                session_vf_promoted=bool(vf_snap_eff)
+                and _how_s == "direct_back_visual_followers_list_confirmed",
+            )
+        except Exception:
+            pass
+
+        log(
+            "info",
+            "visual_candidate_already_connected_fast_return_success",
+            source_profile_username=source_profile_username,
+            follower_username=follower_username,
+            visual_candidate_id=str(visual_candidate_id or ""),
+            return_how=str(how or ""),
+            skip_reason=skip_reason,
+        )
+    else:
+        log(
+            "warning",
+            "visual_candidate_already_connected_fast_return_failed",
+            source_profile_username=source_profile_username,
+            follower_username=follower_username,
+            visual_candidate_id=str(visual_candidate_id or ""),
+            return_how=str(how or ""),
+            skip_reason=skip_reason,
+        )
+    if ok:
+        _followers_visual_emit_already_connected_skip_event(
+            account_id=account_id,
+            run_id=run_id,
+            supabase_mode=supabase_mode,
+            follower_username=follower_username,
+            source_profile_username=source_profile_username,
+            skip_reason=skip_reason,
+            visual_candidate_id=visual_candidate_id,
+            memory_detail=memory_detail,
+        )
+    return ok, str(how or "")
 
 
 def _ct_list_raw_follow_invite_visible(d: Any) -> bool:
@@ -3634,8 +4273,14 @@ def _try_visual_followers_picker_dry_run(
                                 tap_x=like_out.get("tap_x"),
                                 tap_y=like_out.get("tap_y"),
                                 detect_confidence=like_out.get("confidence"),
+                                post_tap_screenshot_path=like_out.get(
+                                    "post_tap_screenshot_path"
+                                ),
                                 like_button_state_before=like_out.get(
                                     "like_button_state_before"
+                                ),
+                                pre_tap_like_button_bounds=like_out.get(
+                                    "like_button_bounds"
                                 ),
                             )
                             like_out["liked_verified"] = bool(
@@ -4891,25 +5536,109 @@ def _run_followers_list_engine_session(
         "list_progressive_exploration_last_scroll_profile": "",
         "list_progressive_exploration_exhausted": False,
         "pending_recent_verified_follow_visual_candidate_skip": None,
+        "pending_recent_already_connected_visual_candidate_skip": None,
+        "blocked_already_connected_visual_candidate_ids": {},
     }
 
     def _followers_clear_pending_visual_candidate_skip() -> None:
         visual_loop_state["pending_recent_verified_follow_visual_candidate_skip"] = None
 
+    def _followers_clear_pending_already_connected_visual_skip(
+        *,
+        clear_reason: str = "",
+    ) -> None:
+        _prev = visual_loop_state.get("pending_recent_already_connected_visual_candidate_skip")
+        if not isinstance(_prev, dict):
+            return
+        visual_loop_state["pending_recent_already_connected_visual_candidate_skip"] = None
+        try:
+            log(
+                "info",
+                "followers_recent_already_connected_visual_candidate_skip_cleared",
+                source_profile_username=str(_prev.get("source_profile_username") or "")[:120],
+                visual_candidate_id=str(_prev.get("visual_candidate_id") or "")[:120],
+                follower_username=str(_prev.get("follower_username") or "")[:120],
+                skip_reason=str(_prev.get("skip_reason") or "")[:200],
+                clear_reason=str(clear_reason or "")[:160],
+            )
+        except Exception:
+            pass
+
     def _followers_clear_pending_if_pick_other_visual_id(p: dict | None) -> None:
         if not isinstance(p, dict):
             return
+        _pv = str(p.get("visual_candidate_id") or "").strip()
         _pend = visual_loop_state.get("pending_recent_verified_follow_visual_candidate_skip")
-        if not isinstance(_pend, dict):
-            return
-        if str(_pend.get("source_profile_username") or "") != str(
+        if isinstance(_pend, dict) and str(_pend.get("source_profile_username") or "") == str(
             source_profile_username or ""
         ):
+            _armed = str(_pend.get("visual_candidate_id") or "").strip()
+            if _pv and _armed and _pv != _armed:
+                _followers_clear_pending_visual_candidate_skip()
+        _pend_ac = visual_loop_state.get("pending_recent_already_connected_visual_candidate_skip")
+        if isinstance(_pend_ac, dict) and str(_pend_ac.get("source_profile_username") or "") == str(
+            source_profile_username or ""
+        ):
+            _armed_ac = str(_pend_ac.get("visual_candidate_id") or "").strip()
+            if _pv and _armed_ac and _pv != _armed_ac:
+                _followers_clear_pending_already_connected_visual_skip(
+                    clear_reason="picked_other_visual_candidate_id",
+                )
+
+    def _ac_blocked_visual_ids() -> set[str]:
+        bag = visual_loop_state.setdefault("blocked_already_connected_visual_candidate_ids", {})
+        if not isinstance(bag, dict):
+            bag = {}
+            visual_loop_state["blocked_already_connected_visual_candidate_ids"] = bag
+        sk = str(source_profile_username or "").strip()
+        st = bag.get(sk)
+        if not isinstance(st, set):
+            st = set()
+            bag[sk] = st
+        return st
+
+    def _ac_register_blocked_visual_after_postopen_skip(
+        *,
+        visual_candidate_id: str,
+        follower_username: str,
+        skip_reason: str,
+    ) -> None:
+        v = str(visual_candidate_id or "").strip()
+        if not v:
             return
-        _pv = str(p.get("visual_candidate_id") or "").strip()
-        _armed = str(_pend.get("visual_candidate_id") or "").strip()
-        if _pv and _armed and _pv != _armed:
-            _followers_clear_pending_visual_candidate_skip()
+        s = _ac_blocked_visual_ids()
+        s.add(v)
+        try:
+            log(
+                "info",
+                "followers_already_connected_visual_candidate_blocked_until_scroll",
+                source_profile_username=source_profile_username,
+                visual_candidate_id=v,
+                follower_username=str(follower_username or "")[:120],
+                skip_reason=str(skip_reason or "")[:220],
+                blocked_count=len(s),
+            )
+        except Exception:
+            pass
+
+    def _followers_clear_ac_visual_blocks_after_scroll(*, clear_reason: str) -> None:
+        bag = visual_loop_state.get("blocked_already_connected_visual_candidate_ids")
+        if not isinstance(bag, dict):
+            return
+        sk = str(source_profile_username or "").strip()
+        st = bag.pop(sk, None)
+        n = len(st) if isinstance(st, set) else 0
+        if n > 0:
+            try:
+                log(
+                    "info",
+                    "followers_already_connected_visual_candidate_blocks_cleared_after_scroll",
+                    source_profile_username=source_profile_username,
+                    clear_reason=str(clear_reason or "")[:180],
+                    cleared_count=int(n),
+                )
+            except Exception:
+                pass
 
     def _trace_visual_candidate_post_follower_open(
         *,
@@ -5351,6 +6080,9 @@ def _run_followers_list_engine_session(
         )
 
         followers_xml_detect_skipped_this_iter = False
+        _sess_vf_sync = visual_loop_state.get("session_vf_detail")
+        if isinstance(_sess_vf_sync, dict) and _sess_vf_sync:
+            session_vf_detail_for_loop = dict(_sess_vf_sync)
         if (
             skip_followers_xml_detect_next_iter
             and det_xml_last_for_bypass is not None
@@ -6174,6 +6906,22 @@ def _run_followers_list_engine_session(
         _defer_visual_followers_surface_ok = bool(_visual_followers_surface) or bool(
             _vf_rendered_strong_committed_ok
         )
+        _fbc_defer = 0
+        if isinstance(det, dict):
+            _fbc_defer = int(det.get("follow_buttons_visual_count") or 0)
+        if _fbc_defer <= 0 and isinstance(session_vf_detail_for_loop, dict):
+            _fbc_defer = int(session_vf_detail_for_loop.get("visual_follow_button_count") or 0)
+        _vision_rejected_pick = _picker_err_pick == "vision_validation_rejected" or (
+            _empty_reason_pick == "vision_validation_rejected"
+        )
+        _defer_xml_stale_pick_vision_rejected_visible_follow = (
+            bool(_defer_visual_followers_surface_ok)
+            and bool(gate_passed)
+            and len(candidates) == 0
+            and _vision_rejected_pick
+            and _fbc_defer >= 1
+            and bool(getattr(config, "ENABLE_VISUAL_FOLLOWERS_CANDIDATE_PICKER", False))
+        )
         _prog_max_passes_cfg = int(
             getattr(config, "FOLLOWERS_LIST_PROGRESSIVE_EXPLORATION_MAX_PASSES", 3) or 3
         )
@@ -6202,11 +6950,23 @@ def _run_followers_list_engine_session(
                 not in FOLLOWERS_ENGINE_XML_STALE_EXIT_REASONS
                 or _defer_xml_stale_pick_legit_empty_xml_open
                 or _defer_xml_stale_pick_legit_unsafe_low_follow_only
+                or _defer_xml_stale_pick_vision_rejected_visible_follow
             )
+        )
+        _defer_xml_stale_pick_committed_strong_no_tap_safe = (
+            bool(_defer_xml_stale_for_visual_scroll)
+            and bool(_vf_rendered_strong_committed_ok)
+            and str(gate_block_reason or "") == "committed_rendered_strong_visual_ok"
+            and bool(getattr(config, "ENABLE_VISUAL_FOLLOWERS_CANDIDATE_PICKER", False))
+            and not _defer_xml_stale_pick_legit_empty_xml_open
+            and not _defer_xml_stale_pick_legit_unsafe_low_follow_only
+            and not _defer_xml_stale_pick_vision_rejected_visible_follow
         )
         if _defer_xml_stale_for_visual_scroll and (
             _defer_xml_stale_pick_legit_empty_xml_open
             or _defer_xml_stale_pick_legit_unsafe_low_follow_only
+            or _defer_xml_stale_pick_vision_rejected_visible_follow
+            or _defer_xml_stale_pick_committed_strong_no_tap_safe
         ):
             if _defer_xml_stale_pick_legit_empty_xml_open:
                 try:
@@ -6277,6 +7037,79 @@ def _run_followers_list_engine_session(
                             }
                     except (TypeError, ValueError):
                         exploratory_scroll_reposition_meta = None
+            elif _defer_xml_stale_pick_vision_rejected_visible_follow:
+                try:
+                    log(
+                        "info",
+                        "followers_visual_vision_rejected_deferred_to_scroll",
+                        loop_iteration=followers_engine_loop_iteration,
+                        source_profile_username=source_profile_username,
+                        picker_error=_picker_err_pick,
+                        empty_reason=_empty_reason_pick,
+                        follow_button_count=int(_fbc_defer),
+                        gate_passed=bool(gate_passed),
+                        open_detection_method=str(open_detection_method or ""),
+                    )
+                except Exception:
+                    pass
+                if followers_allow_visual_exploratory_scroll_once(
+                    reason="vision_rejected_visible_follow_defer",
+                    source_profile_username=source_profile_username,
+                ):
+                    exploratory_scroll_permit_armed_this_iter = True
+                    exploratory_scroll_profile_this_iter = "zero_follow_spans_soft"
+                    exploratory_scroll_reposition_meta = None
+                    try:
+                        log(
+                            "info",
+                            "followers_visual_empty_mapping_scroll_permit_armed",
+                            source_profile_username=source_profile_username,
+                            loop_iteration=followers_engine_loop_iteration,
+                            defer_reason="vision_validation_rejected",
+                            follow_button_count=int(_fbc_defer),
+                            scroll_profile=exploratory_scroll_profile_this_iter,
+                        )
+                    except Exception:
+                        pass
+            elif _defer_xml_stale_pick_committed_strong_no_tap_safe:
+                try:
+                    log(
+                        "info",
+                        "followers_visual_no_tap_safe_candidate_deferred_to_scroll",
+                        loop_iteration=followers_engine_loop_iteration,
+                        source_profile_username=source_profile_username,
+                        gate_block_reason=str(gate_block_reason or ""),
+                        empty_reason=_empty_reason_pick,
+                        picker_error=_picker_err_pick,
+                        row_mapping_empty_reason=str(
+                            _row_mapping_diag.get("row_mapping_empty_reason") or ""
+                        ),
+                        follow_button_count=int(_fbc_defer),
+                        vf_rendered_strong_committed_ok=bool(
+                            _vf_rendered_strong_committed_ok
+                        ),
+                    )
+                except Exception:
+                    pass
+                if followers_allow_visual_exploratory_scroll_once(
+                    reason="no_tap_safe_candidate_committed_rendered_strong",
+                    source_profile_username=source_profile_username,
+                ):
+                    exploratory_scroll_permit_armed_this_iter = True
+                    exploratory_scroll_profile_this_iter = "zero_follow_spans_soft"
+                    exploratory_scroll_reposition_meta = None
+                    try:
+                        log(
+                            "info",
+                            "followers_visual_empty_mapping_scroll_permit_armed",
+                            source_profile_username=source_profile_username,
+                            loop_iteration=followers_engine_loop_iteration,
+                            defer_reason="no_tap_safe_candidate_committed_rendered_strong",
+                            follow_button_count=int(_fbc_defer),
+                            scroll_profile=exploratory_scroll_profile_this_iter,
+                        )
+                    except Exception:
+                        pass
         elif _defer_xml_stale_for_visual_scroll and _defer_pick_soft_progressive:
             try:
                 log(
@@ -6389,6 +7222,7 @@ def _run_followers_list_engine_session(
                 return _stale_pic
 
         def _first_eligible_follower_pick(cand_list: list) -> dict | None:
+            visual_loop_state["_ac_pending_had_skip_hit"] = False
             for c in cand_list:
                 ckey = _norm_ig_handle(str(c.get("username") or ""))
                 if ckey == src_key:
@@ -6444,6 +7278,47 @@ def _run_followers_list_engine_session(
                     except Exception:
                         pass
                     continue
+                _cv_ac_blk = str(c.get("visual_candidate_id") or "").strip()
+                if _cv_ac_blk and _cv_ac_blk in _ac_blocked_visual_ids():
+                    try:
+                        log(
+                            "info",
+                            "followers_candidate_skipped_blocked_already_connected_visual_candidate",
+                            source_profile_username=source_profile_username,
+                            visual_candidate_id=_cv_ac_blk,
+                            follower_username=str(
+                                c.get("username") or c.get("resolved_username_hint") or ""
+                            )[:120],
+                            memory_scope="until_list_scroll_removes_row_from_mapping",
+                        )
+                    except Exception:
+                        pass
+                    continue
+                _pend_ac = visual_loop_state.get(
+                    "pending_recent_already_connected_visual_candidate_skip"
+                )
+                if isinstance(_pend_ac, dict) and str(
+                    _pend_ac.get("source_profile_username") or ""
+                ) == str(source_profile_username or ""):
+                    _arm_ac = str(_pend_ac.get("visual_candidate_id") or "").strip()
+                    _c_id_ac = str(c.get("visual_candidate_id") or "").strip()
+                    if _arm_ac and _c_id_ac == _arm_ac:
+                        visual_loop_state["_ac_pending_had_skip_hit"] = True
+                        try:
+                            log(
+                                "info",
+                                "followers_candidate_skipped_recent_already_connected_visual_candidate",
+                                source_profile_username=source_profile_username,
+                                visual_candidate_id=_c_id_ac,
+                                follower_username=str(
+                                    _pend_ac.get("follower_username") or c.get("username") or ""
+                                )[:120],
+                                skip_reason=str(_pend_ac.get("skip_reason") or "")[:200],
+                                memory_scope="until_other_visual_pick_or_list_scroll",
+                            )
+                        except Exception:
+                            pass
+                        continue
                 _pend_vc = visual_loop_state.get(
                     "pending_recent_verified_follow_visual_candidate_skip"
                 )
@@ -6467,10 +7342,58 @@ def _run_followers_list_engine_session(
                         _followers_clear_pending_visual_candidate_skip()
                         continue
                 return c
+            vids_blk = [
+                str(c.get("visual_candidate_id") or "").strip()
+                for c in cand_list
+                if str(c.get("visual_candidate_id") or "").strip()
+            ]
+            if vids_blk:
+                _bid_all = _ac_blocked_visual_ids()
+                if all(v in _bid_all for v in vids_blk):
+                    visual_loop_state["_ac_all_blocked_need_scroll"] = True
             return None
 
+        def _followers_note_ac_pending_scroll_forced_if_needed(
+            pick_ctx: dict | None, cand_len: int
+        ) -> bool:
+            if pick_ctx is not None or cand_len == 0:
+                visual_loop_state.pop("_ac_pending_had_skip_hit", None)
+                visual_loop_state.pop("_ac_all_blocked_need_scroll", None)
+                return False
+            _all_blk = bool(visual_loop_state.pop("_ac_all_blocked_need_scroll", False))
+            _pending_hit = bool(visual_loop_state.pop("_ac_pending_had_skip_hit", False))
+            if not _pending_hit and not _all_blk:
+                return False
+            _psk = visual_loop_state.get("pending_recent_already_connected_visual_candidate_skip")
+            _psk = _psk if isinstance(_psk, dict) else {}
+            _reason = (
+                "no_eligible_pick_after_pending_already_connected_row_skip"
+                if _pending_hit
+                else "all_visible_candidates_blocked_already_connected_until_scroll"
+            )
+            try:
+                log(
+                    "info",
+                    "followers_recent_already_connected_visual_candidate_scroll_forced",
+                    source_profile_username=source_profile_username,
+                    visual_candidate_id=str(_psk.get("visual_candidate_id") or "")[:120],
+                    follower_username=str(_psk.get("follower_username") or "")[:120],
+                    candidates_len=cand_len,
+                    reason=_reason,
+                    trigger_pending_same_row=bool(_pending_hit),
+                    trigger_all_visible_blocked=bool(_all_blk),
+                )
+            except Exception:
+                pass
+            return True
+
+        _ac_scroll_forced = False
         pick = _first_eligible_follower_pick(candidates)
         _followers_clear_pending_if_pick_other_visual_id(pick)
+        _ac_scroll_forced = (
+            _ac_scroll_forced
+            or _followers_note_ac_pending_scroll_forced_if_needed(pick, len(candidates))
+        )
         det_sparse_loop: dict | None = None
 
         if pick is None and len(candidates) == 0:
@@ -6501,8 +7424,125 @@ def _run_followers_list_engine_session(
                 candidates = _collect_follower_candidates()
                 pick = _first_eligible_follower_pick(candidates)
                 _followers_clear_pending_if_pick_other_visual_id(pick)
+                _ac_scroll_forced = (
+                    _ac_scroll_forced
+                    or _followers_note_ac_pending_scroll_forced_if_needed(
+                        pick, len(candidates)
+                    )
+                )
                 if pick is not None:
                     visible_follow_buttons_stall_scrolls = 0
+
+        if _ac_scroll_forced and pick is None:
+            try:
+                log(
+                    "info",
+                    "followers_recent_already_connected_visual_candidate_forced_scroll_execution_started",
+                    source_profile_username=source_profile_username,
+                    scroll_used_before=int(scroll_used),
+                    max_scroll=int(max_scroll),
+                    candidates_len=len(candidates) if isinstance(candidates, list) else -1,
+                )
+            except Exception:
+                pass
+            if scroll_used >= max_scroll:
+                try:
+                    log(
+                        "warning",
+                        "followers_recent_already_connected_visual_candidate_forced_scroll_blocked_scroll_cap",
+                        source_profile_username=source_profile_username,
+                        scroll_used=int(scroll_used),
+                        max_scroll=int(max_scroll),
+                    )
+                except Exception:
+                    pass
+            else:
+                _scroll_diag: dict[str, Any] = {}
+                _sc_ac = scroll_followers_list_forward(
+                    d,
+                    apply_exploratory_xml_override=False,
+                    scroll_profile="default",
+                    source_profile_username=source_profile_username,
+                    scroll_reposition_meta=None,
+                    bypass_post_tap_capture_gate=True,
+                    bypass_scroll_xml_guards=True,
+                    scroll_diag_out=_scroll_diag,
+                )
+                if _sc_ac:
+                    scroll_used += 1
+                    try:
+                        log(
+                            "info",
+                            "followers_recent_already_connected_visual_candidate_forced_scroll_execution_success",
+                            source_profile_username=source_profile_username,
+                            scroll_used_after=int(scroll_used),
+                        )
+                    except Exception:
+                        pass
+                    _eng_log(
+                        "followers_list_scroll",
+                        "info",
+                        "scroll_already_connected_forced",
+                        {"scroll_index": scroll_used, "direction": "forward"},
+                    )
+                    _followers_try_refresh_injection_screenshot_after_scroll(
+                        d,
+                        open_list_meta,
+                        source_profile_username=source_profile_username,
+                        scroll_used=scroll_used,
+                        reason="followers_scroll_success_already_connected_forced",
+                    )
+                    _followers_clear_pending_visual_candidate_skip()
+                    _followers_clear_pending_already_connected_visual_skip(
+                        clear_reason="followers_scroll_success_already_connected_forced",
+                    )
+                    _followers_clear_ac_visual_blocks_after_scroll(
+                        clear_reason="followers_scroll_success_already_connected_forced",
+                    )
+                    continue
+                try:
+                    _cm_ac = followers_session_committed_meta()
+                    _vf_ac = (
+                        visual_loop_state.get("session_vf_detail")
+                        if isinstance(visual_loop_state.get("session_vf_detail"), dict)
+                        else {}
+                    )
+                    log(
+                        "warning",
+                        "followers_recent_already_connected_visual_candidate_forced_scroll_execution_failed",
+                        source_profile_username=source_profile_username,
+                        scroll_used=int(scroll_used),
+                        failure_reason=str(_scroll_diag.get("failure_reason") or "scroll_returned_false"),
+                        scroll_helper_succeeded=bool(_scroll_diag.get("scroll_helper_succeeded")),
+                        whether_physical_swipe_attempted=bool(
+                            _scroll_diag.get("whether_physical_swipe_attempted")
+                        ),
+                        bypass_post_tap_capture_gate=bool(
+                            _scroll_diag.get("bypass_post_tap_capture_gate")
+                        ),
+                        bypass_scroll_xml_guards=bool(_scroll_diag.get("bypass_scroll_xml_guards")),
+                        committed_source=str(
+                            (_cm_ac or {}).get("followers_list_committed_source") or ""
+                        )[:120],
+                        det_is_followers_list=bool(
+                            isinstance(det, dict) and bool(det.get("is_followers_list"))
+                        ),
+                        session_vf_available=bool(_vf_ac),
+                        visual_user_rows_detected=int(_vf_ac.get("visual_user_rows_detected") or 0)
+                        if _vf_ac
+                        else 0,
+                        visual_follow_button_count=int(_vf_ac.get("visual_follow_button_count") or 0)
+                        if _vf_ac
+                        else 0,
+                        visual_search_area_detected=bool(_vf_ac.get("visual_search_area_detected"))
+                        if _vf_ac
+                        else False,
+                        visual_followers_title_hint=bool(_vf_ac.get("visual_followers_title_hint"))
+                        if _vf_ac
+                        else False,
+                    )
+                except Exception:
+                    pass
 
         if pick is None:
             if len(candidates) == 0:
@@ -6579,6 +7619,12 @@ def _run_followers_list_engine_session(
                             reason="followers_scroll_success_sparse_micro",
                         )
                         _followers_clear_pending_visual_candidate_skip()
+                        _followers_clear_pending_already_connected_visual_skip(
+                            clear_reason="followers_scroll_success_sparse_micro",
+                        )
+                        _followers_clear_ac_visual_blocks_after_scroll(
+                            clear_reason="followers_scroll_success_sparse_micro",
+                        )
                     continue
                 if (
                     bool(det_sparse.get("is_followers_list"))
@@ -6617,7 +7663,19 @@ def _run_followers_list_engine_session(
                     scroll_used=scroll_used,
                 )
                 break
-            elif not scroll_followers_list_forward(
+            if exploratory_scroll_permit_armed_this_iter:
+                try:
+                    log(
+                        "info",
+                        "followers_visual_empty_mapping_scroll_attempted",
+                        source_profile_username=source_profile_username,
+                        loop_iteration=followers_engine_loop_iteration,
+                        scroll_profile=exploratory_scroll_profile_this_iter,
+                        scroll_used_before=int(scroll_used),
+                    )
+                except Exception:
+                    pass
+            if not scroll_followers_list_forward(
                 d,
                 apply_exploratory_xml_override=exploratory_scroll_permit_armed_this_iter,
                 scroll_profile=(
@@ -6641,6 +7699,18 @@ def _run_followers_list_engine_session(
                         exploratory_scroll_profile_this_iter or ""
                     ).strip()
                 scroll_used += 1
+                if exploratory_scroll_permit_armed_this_iter:
+                    try:
+                        log(
+                            "info",
+                            "followers_visual_empty_mapping_scroll_used",
+                            source_profile_username=source_profile_username,
+                            loop_iteration=followers_engine_loop_iteration,
+                            scroll_profile=exploratory_scroll_profile_this_iter,
+                            scroll_index=int(scroll_used),
+                        )
+                    except Exception:
+                        pass
                 _eng_log(
                     "followers_list_scroll",
                     "info",
@@ -6682,6 +7752,12 @@ def _run_followers_list_engine_session(
                     reason="followers_scroll_success",
                 )
                 _followers_clear_pending_visual_candidate_skip()
+                _followers_clear_pending_already_connected_visual_skip(
+                    clear_reason="followers_scroll_success_main_loop",
+                )
+                _followers_clear_ac_visual_blocks_after_scroll(
+                    clear_reason="followers_scroll_success_main_loop",
+                )
                 continue
 
         log(
@@ -6741,6 +7817,51 @@ def _run_followers_list_engine_session(
                 ok_r, _ = return_to_followers_list(d, source_profile_username, pkg)
                 if not ok_r:
                     return 42
+                continue
+
+        if (
+            _vcid_for_pick
+            and _resolved_prefollow
+            and _is_plausible_public_ig_username(str(_resolved_prefollow))
+            and str(account_id or "").strip()
+        ):
+            _db_row_b1 = _followers_visual_load_interacted_db_row(
+                account_id=str(account_id),
+                target_username=str(_resolved_prefollow),
+                source_profile=source_profile_username,
+                supabase_mode=supabase_mode,
+            )
+            _b1_ok, _b1_reason, _b1_detail = (
+                social_memory.db_row_persistent_active_follow_connection(_db_row_b1)
+            )
+            if _b1_ok:
+                log(
+                    "info",
+                    "followers_candidate_preopen_skipped_persistent_already_connected",
+                    source_profile_username=source_profile_username,
+                    follower_username=str(_resolved_prefollow),
+                    visual_candidate_id=_vcid_for_pick,
+                    skip_reason=_b1_reason,
+                    memory_status=str((_b1_detail or {}).get("memory_status") or ""),
+                    following_status=str((_b1_detail or {}).get("following_status") or ""),
+                    interaction_lifecycle_state=str(
+                        (_b1_detail or {}).get("interaction_lifecycle_state") or ""
+                    ),
+                )
+                _followers_visual_emit_already_connected_skip_event(
+                    account_id=str(account_id),
+                    run_id=run_id,
+                    supabase_mode=supabase_mode,
+                    follower_username=str(_resolved_prefollow),
+                    source_profile_username=source_profile_username,
+                    skip_reason=f"persistent_preopen_already_connected:{_b1_reason}",
+                    visual_candidate_id=_vcid_for_pick,
+                    memory_detail=_b1_detail,
+                )
+                _fk_skip = _norm_ig_handle(str(_resolved_prefollow))
+                if _fk_skip:
+                    _RUNTIME_SEEN_FOLLOWER_USERNAMES.add(_fk_skip)
+                    _RUNTIME_FOLLOWED_USERNAMES.add(_fk_skip)
                 continue
 
         if not open_follower_profile_from_list(d, pick, source_profile_username, pkg):
@@ -6861,6 +7982,82 @@ def _run_followers_list_engine_session(
                 if not ok_r:
                     return 42
                 continue
+            if (
+                pending_username
+                and not _resolved_prefollow
+                and _vcid_for_pick
+                and str(account_id or "").strip()
+            ):
+                _db_row_b2 = _followers_visual_load_interacted_db_row(
+                    account_id=str(account_id),
+                    target_username=follower_un,
+                    source_profile=source_profile_username,
+                    supabase_mode=supabase_mode,
+                )
+                _b2_ok, _b2_reason, _b2_detail = (
+                    social_memory.db_row_persistent_active_follow_connection(_db_row_b2)
+                )
+                if _b2_ok:
+                    log(
+                        "info",
+                        "followers_candidate_postopen_skipped_persistent_already_connected",
+                        source_profile_username=source_profile_username,
+                        follower_username=follower_un,
+                        visual_candidate_id=_vcid_for_pick,
+                        skip_reason=_b2_reason,
+                        memory_status=str((_b2_detail or {}).get("memory_status") or ""),
+                        following_status=str((_b2_detail or {}).get("following_status") or ""),
+                        interaction_lifecycle_state=str(
+                            (_b2_detail or {}).get("interaction_lifecycle_state") or ""
+                        ),
+                    )
+                    try:
+                        visual_loop_state["pending_recent_already_connected_visual_candidate_skip"] = {
+                            "source_profile_username": str(source_profile_username or ""),
+                            "visual_candidate_id": str(_vcid_for_pick or "").strip(),
+                            "follower_username": str(follower_un or "").strip(),
+                            "skip_reason": f"persistent_postopen_already_connected:{_b2_reason}",
+                            "armed_loop_iteration": int(followers_engine_loop_iteration),
+                            "armed_at_monotonic": float(time.monotonic()),
+                        }
+                        log(
+                            "info",
+                            "followers_recent_already_connected_visual_candidate_skip_armed",
+                            source_profile_username=source_profile_username,
+                            visual_candidate_id=str(_vcid_for_pick or ""),
+                            follower_username=str(follower_un or ""),
+                            skip_reason=f"persistent_postopen_already_connected:{_b2_reason}",
+                            armed_loop_iteration=int(followers_engine_loop_iteration),
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        _ac_register_blocked_visual_after_postopen_skip(
+                            visual_candidate_id=str(_vcid_for_pick or ""),
+                            follower_username=str(follower_un or ""),
+                            skip_reason=f"persistent_postopen_already_connected:{_b2_reason}",
+                        )
+                    except Exception:
+                        pass
+                    _RUNTIME_SEEN_FOLLOWER_USERNAMES.add(fkey)
+                    _RUNTIME_FOLLOWED_USERNAMES.add(fkey)
+                    _ok_b2, _how_b2 = _visual_candidate_already_connected_fast_return(
+                        d,
+                        source_profile_username=source_profile_username,
+                        pkg=pkg,
+                        follower_username=follower_un,
+                        visual_candidate_id=_vcid_for_pick,
+                        skip_reason=f"persistent_postopen_already_connected:{_b2_reason}",
+                        memory_detail=_b2_detail,
+                        follow_header_state=None,
+                        account_id=str(account_id),
+                        run_id=run_id,
+                        supabase_mode=supabase_mode,
+                        visual_loop_state=visual_loop_state,
+                    )
+                    if not _ok_b2:
+                        return 42
+                    continue
             _ct_start_candidate_attempt_timer(fkey)
             streak = _RUNTIME_FOLLOWERS_POST_RESOLVE_STREAK.get(fkey, 0) + 1
             _RUNTIME_FOLLOWERS_POST_RESOLVE_STREAK[fkey] = streak
@@ -7200,6 +8397,49 @@ def _run_followers_list_engine_session(
                     reason=f"follow_header_not_invite:{_follow_hdr_snap}",
                     follow_header_state=_follow_hdr_snap,
                 )
+            if _vcid_sm and _follow_hdr_snap in ("following", "requested"):
+                log(
+                    "info",
+                    "visual_candidate_already_connected_skip",
+                    source_profile_username=source_profile_username,
+                    follower_username=follower_un,
+                    visual_candidate_id=pick.get("visual_candidate_id"),
+                    skip_reason="candidate_already_connected_skip",
+                    follow_header_state=_follow_hdr_snap,
+                    memory_status="ui_header_only",
+                    following_status=str(_follow_hdr_snap),
+                )
+                _fk_snap = _norm_ig_handle(str(follower_un or ""))
+                if _fk_snap:
+                    _RUNTIME_SEEN_FOLLOWER_USERNAMES.add(_fk_snap)
+                    _RUNTIME_FOLLOWED_USERNAMES.add(_fk_snap)
+                _hdr_mem = {
+                    "memory_status": "ui_header",
+                    "following_status": str(_follow_hdr_snap),
+                }
+                _ok_snap, _how_snap = _visual_candidate_already_connected_fast_return(
+                    d,
+                    source_profile_username=source_profile_username,
+                    pkg=pkg,
+                    follower_username=str(follower_un or ""),
+                    visual_candidate_id=str(pick.get("visual_candidate_id") or ""),
+                    skip_reason=(
+                        "candidate_already_connected_skip:"
+                        f"follow_header_not_invite:{_follow_hdr_snap}"
+                    ),
+                    memory_detail=_hdr_mem,
+                    follow_header_state=str(_follow_hdr_snap),
+                    account_id=str(account_id),
+                    run_id=run_id,
+                    supabase_mode=supabase_mode,
+                    visual_loop_state=visual_loop_state,
+                )
+                if not _ok_snap:
+                    return 42
+                _ct_clear_candidate_attempt_timer()
+                if _fk_snap:
+                    _RUNTIME_FOLLOWERS_POST_RESOLVE_STREAK.pop(_fk_snap, None)
+                continue
             _follow_invite_visible = _follow_hdr_snap == "follow" or _ct_list_raw_follow_invite_visible(
                 d
             )
@@ -8088,6 +9328,9 @@ def _run_followers_list_engine_session(
                 )
                 force_stop_used = True
                 _followers_clear_pending_visual_candidate_skip()
+                _followers_clear_pending_already_connected_visual_skip(
+                    clear_reason="already_connected_safe_stop",
+                )
                 runner_invalidate_visual_followers_session_after_safe_stop(
                     d,
                     source_profile_username=source_profile_username,
@@ -8240,6 +9483,7 @@ def _run_followers_list_engine_session(
                 follow_state_after=str((follow_out or {}).get("follow_state_after") or ""),
                 skipped_tap=bool((follow_out or {}).get("skipped_tap")),
                 det=det if isinstance(det, dict) else None,
+                session_likes_used=int(_SESSION_COUNTERS.get("likes") or 0),
             )
             if supabase_mode and account_id and str(follower_un or "").strip():
                 _mute_pf = _pf.get("mute") if isinstance(_pf.get("mute"), dict) else {}
@@ -8264,6 +9508,43 @@ def _run_followers_list_engine_session(
                         timings_ms=_mute_pf.get("timings_ms")
                         if isinstance(_mute_pf.get("timings_ms"), dict)
                         else {},
+                    )
+                _likes_pf = _pf.get("likes") if isinstance(_pf.get("likes"), dict) else {}
+                _likes_phase = str(_likes_pf.get("phase_outcome") or "")
+                _liked_n = int(_likes_pf.get("liked_count") or 0)
+                if _likes_phase in ("success", "partial_success") and _liked_n > 0:
+                    _SESSION_COUNTERS["likes"] = int(_SESSION_COUNTERS.get("likes") or 0) + _liked_n
+                    _safe_supabase_call(
+                        "record_post_like_interaction_success",
+                        account_id,
+                        follower_un,
+                        source_profile_username,
+                        run_id=run_id or None,
+                        session_id=_SESSION_SOCIAL_ID or None,
+                        liked_count=_liked_n,
+                        target_count=int(_likes_pf.get("target_count") or 0),
+                        attempted_count=int(_likes_pf.get("attempted_count") or 0),
+                        skipped_already_liked_count=int(
+                            _likes_pf.get("skipped_already_liked_count") or 0
+                        ),
+                        phase_outcome=_likes_phase,
+                        post_like_mode=str(_likes_pf.get("post_like_mode") or ""),
+                        visual_candidate_id=str(pick.get("visual_candidate_id") or ""),
+                        timings_ms=_likes_pf.get("timings_ms")
+                        if isinstance(_likes_pf.get("timings_ms"), dict)
+                        else {},
+                        per_post=_likes_pf.get("per_post")
+                        if isinstance(_likes_pf.get("per_post"), list)
+                        else None,
+                    )
+                    log(
+                        "info",
+                        "post_likes_persisted",
+                        target_username=follower_un,
+                        source_profile_username=source_profile_username,
+                        liked_count=_liked_n,
+                        phase_outcome=_likes_phase,
+                        visual_candidate_id=str(pick.get("visual_candidate_id") or ""),
                     )
             ok_back = bool(_pf.get("return_ok"))
             how = str(_pf.get("return_how") or "")
@@ -8382,6 +9663,9 @@ def _run_followers_list_engine_session(
                         )
                         force_stop_used = True
                         _followers_clear_pending_visual_candidate_skip()
+                        _followers_clear_pending_already_connected_visual_skip(
+                            clear_reason="post_follow_safe_stop",
+                        )
                         runner_invalidate_visual_followers_session_after_safe_stop(
                             d,
                             source_profile_username=source_profile_username,
@@ -8558,6 +9842,12 @@ def _run_followers_list_engine_session(
             return pic_final
 
     _followers_clear_pending_visual_candidate_skip()
+    _followers_clear_pending_already_connected_visual_skip(
+        clear_reason="followers_engine_loop_end",
+    )
+    _followers_clear_ac_visual_blocks_after_scroll(
+        clear_reason="followers_engine_loop_end",
+    )
     _prog_max_end = int(
         getattr(config, "FOLLOWERS_LIST_PROGRESSIVE_EXPLORATION_MAX_PASSES", 3) or 3
     )

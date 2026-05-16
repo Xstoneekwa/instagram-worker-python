@@ -5267,6 +5267,47 @@ def _visual_followers_resolve_username_in_row_band(
     return best[1] if best else None
 
 
+def _visual_followers_username_band_probe(
+    d: u2.Device,
+    *,
+    row_top: int,
+    row_bottom: int,
+    sample_limit: int = 8,
+) -> dict[str, Any]:
+    """Observability: TextViews in row band matching the followers-handle regex."""
+    samples: list[str] = []
+    if row_bottom <= row_top:
+        return {"handle_like_textview_count": 0, "sample_texts": samples}
+    tol = max(10, (row_bottom - row_top) // 6)
+    lo = row_top - tol
+    hi = row_bottom + tol
+    band_c = (row_top + row_bottom) // 2
+    scored: list[tuple[int, str]] = []
+    try:
+        for el in d(className="android.widget.TextView").all():
+            try:
+                raw_t = (el.info.get("text") or "").strip().lstrip("@")
+                if not raw_t or not _FOLLOWERS_HANDLE_RE.match(raw_t):
+                    continue
+                b = el.info.get("bounds") or {}
+                cy = (int(b.get("top", 0)) + int(b.get("bottom", 0))) // 2
+                if cy < lo or cy > hi:
+                    continue
+                dist = abs(cy - band_c)
+                scored.append((dist, raw_t))
+            except Exception:
+                continue
+    except Exception:
+        return {"handle_like_textview_count": 0, "sample_texts": [], "probe_error": True}
+    scored.sort(key=lambda z: z[0])
+    for _dist, txt in scored:
+        if txt not in samples:
+            samples.append(txt)
+            if len(samples) >= sample_limit:
+                break
+    return {"handle_like_textview_count": len(scored), "sample_texts": samples}
+
+
 _FOLLOWERS_TITLE_TEXTS = frozenset(
     {
         "Followers",
@@ -5643,7 +5684,14 @@ def followers_session_committed_meta() -> dict[str, Any]:
 # Committed followers sessions that may reuse rendered-strong ``visual_fallback_detail``
 # without ``visual_match`` (merge, light revalidate, runner gates).
 FOLLOWERS_RENDERED_STRONG_COMMITTED_SOURCES: frozenset[str] = frozenset(
-    ("entry_v2_rendered_strong", "post_follow_compact_visual_return")
+    (
+        "entry_v2_rendered_strong",
+        "post_follow_compact_visual_return",
+        # Already-connected fast return promoted `session_vf_detail` from
+        # `detect_followers_list_screen_visual_fallback` after direct Back — same
+        # rendered-strong semantics as CT post-follow visual return-to-list.
+        "already_connected_direct_back_visual_confirmed",
+    )
 )
 
 
@@ -8105,6 +8153,105 @@ def _followers_profile_tabs_visible(d: u2.Device) -> bool:
     return False
 
 
+_POST_FOLLOW_PROFILE_TABS_GRID_MARGIN_PX = 12
+
+
+def _followers_profile_tabs_bottom_y_px(
+    d: u2.Device,
+    *,
+    window_h: int | None = None,
+) -> tuple[int | None, str]:
+    """
+    Bottom edge (device Y) of the profile posts / reels / tagged tab strip, if found.
+    Uses the same resource/description signals as ``_followers_profile_tabs_visible``,
+    but returns geometry so callers can clamp grid scans strictly below the strip.
+    """
+    try:
+        _, wh = d.window_size()
+    except Exception:
+        wh = int(window_h or 2400)
+    wh = max(480, int(wh))
+    y_top_min = int(wh * 0.10)
+    y_bot_max = int(wh * 0.92)
+
+    def _bounds_bottom(el: Any) -> int | None:
+        try:
+            b = (el.info or {}).get("bounds") or {}
+            bot = int(b.get("bottom", 0))
+            top = int(b.get("top", 0))
+            if bot <= 0 or bot <= top:
+                return None
+            if top < y_top_min or bot > y_bot_max:
+                return None
+            return bot
+        except Exception:
+            return None
+
+    def _nodes_for_selector(sel: Any) -> list[Any]:
+        try:
+            if not sel.exists(timeout=0.06):
+                return []
+        except Exception:
+            return []
+        try:
+            if hasattr(sel, "all"):
+                return list(sel.all())
+        except Exception:
+            pass
+        return [sel]
+
+    checks: list[tuple[str, Callable[[], Any]]] = [
+        ("resourceId:profile_tabs_container", lambda: d(resourceIdMatches=r".*:id/profile_tabs_container")),
+        ("resourceId:profile_tab_layout", lambda: d(resourceIdMatches=r".*:id/profile_tab_layout")),
+        ("resourceId:profile_tabs", lambda: d(resourceIdMatches=r".*:id/profile_tabs[^_].*")),
+        ("resourceId:media_tab", lambda: d(resourceIdMatches=r".*:id/media_tab")),
+        ("resourceId:profile_tab_icon_view", lambda: d(resourceIdMatches=r".*:id/profile_tab_icon_view")),
+        ("descriptionContains:Grid", lambda: d(descriptionContains="Grid")),
+        ("descriptionContains:Reels", lambda: d(descriptionContains="Reels")),
+        ("descriptionContains:Tagged", lambda: d(descriptionContains="Tagged")),
+    ]
+    best: int | None = None
+    best_phase = ""
+    for phase, fact in checks:
+        try:
+            sel = fact()
+        except Exception:
+            continue
+        for el in _nodes_for_selector(sel):
+            bb = _bounds_bottom(el)
+            if bb is None:
+                continue
+            if best is None or bb > best:
+                best = bb
+                best_phase = phase
+    return (best, best_phase) if best is not None else (None, "")
+
+
+def _post_follow_dynamic_first_row_search_y_min_layout(
+    d: u2.Device,
+    ih: int,
+    ui_hints: dict[str, Any],
+) -> tuple[int, str, int | None, int]:
+    """
+    Lower Y bound (screenshot / device pixels, same space as ``ih``) for scanning the
+    first post grid row. Priority: tab strip bottom (authoritative), then Suggested/Discover
+    text hint band, then permissive default ratio.
+    Returns ``(search_y_min_px, source, profile_tabs_bottom_y_raw_or_none, margin_px)``.
+    """
+    margin = int(_POST_FOLLOW_PROFILE_TABS_GRID_MARGIN_PX)
+    ih = max(120, int(ih))
+    tabs_bt, _phase = _followers_profile_tabs_bottom_y_px(d, window_h=ih)
+    if tabs_bt is not None:
+        y_floor = min(max(8, int(tabs_bt) + margin), ih - 8)
+        return y_floor, "profile_tabs_bottom", int(tabs_bt), margin
+    overlay = bool(ui_hints.get("suggested_for_you") or ui_hints.get("discover_people"))
+    if overlay:
+        y_floor = max(8, min(int(ih * float(_POST_FOLLOW_LIKES_GRID_Y0_RATIO)), ih - 8))
+        return y_floor, "suggested_hint_ratio", None, margin
+    y_floor = max(8, min(int(ih * 0.20), ih - 8))
+    return y_floor, "default_ratio", None, margin
+
+
 def _followers_stacked_central_textview_run(d: u2.Device, w: int, h: int) -> int:
     """Longest run of vertically stacked TextView centers in the central list band (condition C)."""
     y_lo, y_hi = int(h * 0.28), int(h * 0.88)
@@ -9316,6 +9463,36 @@ def visual_extract_followers_candidates_from_screenshot(
         resolved_u = _visual_followers_resolve_username_in_row_band(
             d, row_top=top_o, row_bottom=bot_o
         )
+        if not resolved_u:
+            try:
+                _utz_o = _scale_bounds_to_original(
+                    approx_username_text_zone,
+                    aw=aw,
+                    ah=ah,
+                    orig_w=orig_w,
+                    orig_h=orig_h,
+                )
+                _band_probe = _visual_followers_username_band_probe(
+                    d, row_top=top_o, row_bottom=bot_o
+                )
+                log(
+                    "info",
+                    "followers_visual_candidate_username_hint_missing_preopen",
+                    source_profile_username=str(source_profile_username or ""),
+                    visual_candidate_id=visual_candidate_id_pre,
+                    span_index=idx,
+                    row_band_top=top_o,
+                    row_band_bottom=bot_o,
+                    approx_row_bounds=row_o,
+                    approx_username_text_zone=_utz_o,
+                    screenshot_path=str(path),
+                    handle_like_textview_count=int(
+                        _band_probe.get("handle_like_textview_count") or 0
+                    ),
+                    sample_handle_like_texts=_band_probe.get("sample_texts") or [],
+                )
+            except Exception:
+                pass
         if (
             action_norm
             and resolved_u
@@ -10410,6 +10587,715 @@ def _visual_profile_lower_grid_mostly_blank(
     return False, 0.0
 
 
+_POST_FOLLOW_LIKES_GRID_Y0_RATIO = 0.52
+_POST_FOLLOW_LIKES_GRID_Y1_RATIO = 0.92
+_POST_FOLLOW_LIKES_GRID_VAR_THR = 120.0
+_POST_FOLLOW_LIKES_GRID_PARTIAL_VAR_THR = 80.0
+_POST_FOLLOW_LIKES_GRID_UPPER_Y0_RATIO = 0.33
+_POST_FOLLOW_LIKES_GRID_UPPER_Y1_RATIO = 0.52
+_POST_FOLLOW_LIKES_GRID_DEEP_Y0_RATIO = 0.62
+_POST_FOLLOW_LIKES_GRID_DEEP_Y1_RATIO = 0.92
+
+
+def _post_follow_likes_grid_ui_surface_hints(d: u2.Device) -> dict[str, Any]:
+    """Overlay + profile tab chrome for post-follow grid classification."""
+    overlay = _post_follow_overlay_ui_hints(d)
+    tabs_visible = False
+    try:
+        tabs_visible = bool(_followers_profile_tabs_visible(d))
+    except Exception:
+        tabs_visible = False
+    return {
+        "suggested_for_you": bool(overlay.get("suggested_for_you")),
+        "discover_people": bool(overlay.get("discover_people")),
+        "profile_tabs_visible": tabs_visible,
+    }
+
+
+def _visual_profile_post_grid_band_probe(
+    im: Any,
+    iw: int,
+    ih: int,
+    *,
+    grid_y0_ratio: float = _POST_FOLLOW_LIKES_GRID_Y0_RATIO,
+    grid_y1_ratio: float = _POST_FOLLOW_LIKES_GRID_Y1_RATIO,
+    upper_y0_ratio: float = _POST_FOLLOW_LIKES_GRID_UPPER_Y0_RATIO,
+    upper_y1_ratio: float = _POST_FOLLOW_LIKES_GRID_UPPER_Y1_RATIO,
+    deep_y0_ratio: float = _POST_FOLLOW_LIKES_GRID_DEEP_Y0_RATIO,
+    deep_y1_ratio: float = _POST_FOLLOW_LIKES_GRID_DEEP_Y1_RATIO,
+    var_thr: float = _POST_FOLLOW_LIKES_GRID_VAR_THR,
+    partial_var_thr: float = _POST_FOLLOW_LIKES_GRID_PARTIAL_VAR_THR,
+    surface_hints: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Probe lower (post-grid) and upper-mid bands; classify visible / partial / not_visible."""
+    cols = 3
+    cell_w = max(24, iw // cols)
+    cell_h = cell_w
+    order = ((0, 0), (1, 0), (2, 0), (0, 1), (1, 1), (2, 1))
+
+    def _band_stats(y0_ratio: float, y1_ratio: float) -> dict[str, Any]:
+        y0 = int(ih * y0_ratio)
+        y1 = int(ih * y1_ratio)
+        max_v = 0.0
+        solid = 0
+        partial_cells = 0
+        for col, row in order:
+            x0 = col * cell_w
+            cy0 = y0 + row * cell_h
+            if cy0 + cell_h > y1 or x0 + cell_w > iw:
+                continue
+            v = _visual_image_cell_luma_variance(im, x0, cy0, cell_w, cell_h)
+            max_v = max(max_v, float(v))
+            if v >= var_thr:
+                solid += 1
+            elif v >= partial_var_thr:
+                partial_cells += 1
+        return {
+            "max_variance": max_v,
+            "solid_cell_count": solid,
+            "partial_cell_count": partial_cells,
+        }
+
+    lower = _band_stats(grid_y0_ratio, grid_y1_ratio)
+    upper = _band_stats(upper_y0_ratio, upper_y1_ratio)
+    deep = _band_stats(deep_y0_ratio, deep_y1_ratio)
+    lower_blank, lower_blank_conf = _visual_profile_lower_grid_mostly_blank(
+        im,
+        iw,
+        ih,
+        grid_y0_ratio=grid_y0_ratio,
+        grid_y1_ratio=grid_y1_ratio,
+        var_thr=partial_var_thr,
+        min_blank_cells=4,
+    )
+
+    hints = surface_hints if isinstance(surface_hints, dict) else {}
+    suggested = bool(hints.get("suggested_for_you"))
+    discover = bool(hints.get("discover_people"))
+    tabs_visible = bool(hints.get("profile_tabs_visible"))
+    lower_solid = int(lower.get("solid_cell_count") or 0)
+    deep_solid = int(deep.get("solid_cell_count") or 0)
+    upper_solid = int(upper.get("solid_cell_count") or 0)
+    overlay_blocks_visible = bool(suggested or discover)
+
+    raw_visible = lower_solid >= 1
+    grid_confirmed = bool(
+        tabs_visible
+        and deep_solid >= 1
+        and (not overlay_blocks_visible or deep_solid >= 2)
+    )
+
+    if raw_visible and grid_confirmed and not overlay_blocks_visible:
+        state = "visible"
+    elif overlay_blocks_visible:
+        if deep_solid >= 1 or lower_solid >= 1 or upper_solid >= 1:
+            state = "partial"
+        else:
+            state = "not_visible"
+    elif raw_visible and tabs_visible and deep_solid >= 1:
+        state = "visible"
+    elif raw_visible:
+        state = "partial"
+    elif bool(lower_blank) and float(upper.get("max_variance") or 0.0) >= var_thr:
+        state = "partial"
+    elif (
+        float(lower.get("max_variance") or 0.0) >= partial_var_thr
+        or int(lower.get("partial_cell_count") or 0) >= 1
+        or float(upper.get("max_variance") or 0.0) >= var_thr
+    ):
+        state = "partial"
+    else:
+        state = "not_visible"
+
+    return {
+        "grid_state": state,
+        "lower_max_variance": round(float(lower.get("max_variance") or 0.0), 2),
+        "lower_solid_cell_count": lower_solid,
+        "lower_partial_cell_count": int(lower.get("partial_cell_count") or 0),
+        "lower_mostly_blank": bool(lower_blank),
+        "lower_blank_confidence": round(float(lower_blank_conf), 4),
+        "upper_max_variance": round(float(upper.get("max_variance") or 0.0), 2),
+        "upper_solid_cell_count": upper_solid,
+        "deep_lower_max_variance": round(float(deep.get("max_variance") or 0.0), 2),
+        "deep_lower_solid_cell_count": deep_solid,
+        "suggested_for_you": suggested,
+        "discover_people": discover,
+        "profile_tabs_visible": tabs_visible,
+        "overlay_blocks_visible": overlay_blocks_visible,
+        "grid_y0_ratio": grid_y0_ratio,
+        "grid_y1_ratio": grid_y1_ratio,
+        "deep_y0_ratio": deep_y0_ratio,
+        "deep_y1_ratio": deep_y1_ratio,
+    }
+
+
+def _dynamic_first_post_grid_row_from_image(
+    im: Any,
+    iw: int,
+    ih: int,
+    *,
+    var_thr: float = _POST_FOLLOW_LIKES_GRID_VAR_THR,
+    search_y_min_ratio: float = 0.20,
+    search_y_max_ratio: float = 0.62,
+    search_y_min_px: int | None = None,
+) -> dict[str, Any]:
+    """
+    Scan below the tab band for the topmost Y band that looks like a real 3-wide post row
+    (variance in image cells). Used to avoid a fixed grid_y0_ratio missing the physical first row.
+    When ``search_y_min_px`` is set (e.g. tab strip bottom + margin), it overrides the ratio floor.
+    """
+    if ih < 120 or iw < 120:
+        return {"ok": False}
+    cols = 3
+    cell_w = max(24, iw // cols)
+    cell_h = cell_w
+    if search_y_min_px is not None:
+        y_lo = max(8, int(search_y_min_px))
+    else:
+        y_lo = max(8, int(ih * float(search_y_min_ratio)))
+    y_hi = min(ih - 2 * cell_h - 12, int(ih * float(search_y_max_ratio)))
+    step = max(4, cell_h // 5)
+    if y_hi <= y_lo + step:
+        return {"ok": False}
+
+    ranked: list[tuple[int, int]] = []
+    gy = y_lo
+    while gy <= y_hi:
+        solids = 0
+        for col in (0, 1, 2):
+            x0 = col * cell_w
+            if x0 + cell_w > iw:
+                continue
+            try:
+                v = _visual_image_cell_luma_variance(im, x0, gy, cell_w, cell_h)
+            except Exception:
+                v = 0.0
+            if float(v) >= float(var_thr):
+                solids += 1
+        if solids >= 1:
+            ranked.append((solids, gy))
+        gy += step
+    if not ranked:
+        return {"ok": False}
+    ranked.sort(key=lambda t: (-t[0], t[1]))
+    best_solid, gy_best = ranked[0]
+    return {
+        "ok": True,
+        "first_row_top": int(gy_best),
+        "first_row_bottom": int(gy_best + cell_h),
+        "solid_count": int(best_solid),
+        "cell_h": int(cell_h),
+    }
+
+
+def _sparse_post_grid_partial_acceptable_for_post_follow(probe: dict[str, Any]) -> bool:
+    """Single-row / sparse grids: accept partial band state only under strict anti-Suggested guards."""
+    if str(probe.get("grid_state") or "").strip().lower() != "partial":
+        return False
+    if not bool(probe.get("profile_tabs_visible")):
+        return False
+    if bool(probe.get("suggested_for_you")) or bool(probe.get("discover_people")):
+        return False
+    if bool(probe.get("overlay_blocks_visible")):
+        return False
+    if bool(probe.get("lower_mostly_blank")):
+        return False
+    solids = (
+        int(probe.get("upper_solid_cell_count") or 0)
+        + int(probe.get("lower_solid_cell_count") or 0)
+        + int(probe.get("deep_lower_solid_cell_count") or 0)
+    )
+    return solids >= 1
+
+
+def _post_follow_merge_grid_probe_meta(
+    out: dict[str, Any], probe: dict[str, Any]
+) -> None:
+    out["dynamic_first_row_probe_ok"] = bool(probe.get("dynamic_first_row_probe_ok"))
+    out["dynamic_first_row_top"] = probe.get("dynamic_first_row_top")
+    out["dynamic_first_row_bottom"] = probe.get("dynamic_first_row_bottom")
+    out["dynamic_first_row_solid_count"] = probe.get("dynamic_first_row_solid_count")
+    out["dynamic_first_row_cell_h"] = probe.get("dynamic_first_row_cell_h")
+    out["grid_probe_screenshot_path"] = probe.get("screenshot_path")
+    out["grid_probe_source"] = "post_follow_likes_grid_probe_same_capture"
+
+
+def _post_follow_likes_profile_scroll_swipe(
+    d: u2.Device,
+    *,
+    scroll_profile: str,
+    ww: int,
+    wh: int,
+) -> dict[str, Any]:
+    """Bounded vertical swipe on profile to reveal post grid (finger up = content down)."""
+    sp = str(scroll_profile or "micro").strip().lower()
+    xmid = int(ww * 0.5)
+    if sp == "long":
+        y_start = int(wh * 0.72)
+        y_end = int(wh * 0.38)
+        duration_s = 0.14
+    else:
+        y_start = int(wh * 0.58)
+        y_end = int(wh * 0.48)
+        duration_s = 0.11
+    y_start = max(int(wh * 0.22), min(int(wh * 0.88), y_start))
+    y_end = max(int(wh * 0.12), min(y_start - 8, y_end))
+    try:
+        _followers_log_scroll_or_swipe_about_to_run(
+            d,
+            source_function="_post_follow_likes_profile_scroll_swipe",
+            reason=f"post_follow_likes_grid_{sp}",
+        )
+        d.swipe(xmid, y_start, xmid, y_end, duration_s)
+        swipe_ok = True
+    except Exception as e:
+        return {
+            "swipe_ok": False,
+            "scroll_profile": sp,
+            "y_start": y_start,
+            "y_end": y_end,
+            "duration_s": duration_s,
+            "error": str(e),
+        }
+    return {
+        "swipe_ok": True,
+        "scroll_profile": sp,
+        "y_start": y_start,
+        "y_end": y_end,
+        "duration_s": duration_s,
+        "error": None,
+    }
+
+
+def _post_follow_likes_profile_still_on_candidate(
+    d: u2.Device,
+    *,
+    follower_username: str,
+    pkg: str,
+) -> tuple[bool, str]:
+    """Light guard: still on a profile surface and action bar matches follower when known."""
+    fu = str(follower_username or "").strip().lstrip("@")
+    try:
+        prof = bool(
+            _try_profile_signals_once(d, "", pkg)
+            or _guess_profile_screen(d, pkg, "")
+            in ("likely_profile", "profile_header_rid", "action_bar_title")
+        )
+    except Exception:
+        prof = False
+    if not prof:
+        return False, "not_profile_surface"
+    if not fu:
+        return True, ""
+    try:
+        ab = str(read_current_profile_username_for_follow_gate(d) or "").strip().lstrip("@")
+    except Exception:
+        ab = ""
+    if ab and _normalize_handle(ab) == _normalize_handle(fu):
+        return True, ""
+    if ab:
+        return False, "action_bar_mismatch"
+    return True, ""
+
+
+def ensure_post_grid_visible_for_post_follow_likes(
+    d: u2.Device,
+    *,
+    source_profile_username: str | None = None,
+    follower_username: str | None = None,
+    visual_candidate_id: str | None = None,
+    budget_s: float | None = None,
+) -> dict[str, Any]:
+    """
+    Before post-follow open: probe lower post grid band, scroll profile if needed (max 2 swipes).
+    """
+    t0 = time.perf_counter()
+    pkg = str(getattr(config, "INSTAGRAM_PACKAGE", "") or "")
+    src = str(source_profile_username or "").strip()
+    cand = str(follower_username or "").strip().lstrip("@")
+    vcid = str(visual_candidate_id or "").strip()
+    budget = max(2.5, float(budget_s or 8.0))
+    timings: dict[str, float] = {}
+    scroll_profiles_used: list[str] = []
+    screenshot_paths: list[str] = []
+
+    def _probe_once() -> tuple[dict[str, Any], str | None]:
+        _ensure_debug_dirs()
+        shot = str(
+            _SCREENSHOTS_DIR
+            / f"post_follow_likes_grid_probe_{int(time.time() * 1000)}.png"
+        )
+        try:
+            screenshot(d, shot)
+        except Exception as e:
+            return {}, f"screenshot_failed:{e}"
+        screenshot_paths.append(shot)
+        try:
+            from PIL import Image
+
+            im = Image.open(shot).convert("RGB")
+        except Exception as e:
+            return {}, f"pil_failed:{e}"
+        iw, ih = im.size
+        ui_hints = _post_follow_likes_grid_ui_surface_hints(d)
+        probe = _visual_profile_post_grid_band_probe(
+            im, iw, ih, surface_hints=ui_hints
+        )
+        probe["screenshot_path"] = shot
+        probe["image_w"] = iw
+        probe["image_h"] = ih
+        (
+            search_y_min_px,
+            search_y_min_src,
+            profile_tabs_bottom_y_px,
+            tabs_margin_px,
+        ) = _post_follow_dynamic_first_row_search_y_min_layout(d, ih, ui_hints)
+        _ov_block = bool(
+            ui_hints.get("suggested_for_you") or ui_hints.get("discover_people")
+        )
+        dyn = _dynamic_first_post_grid_row_from_image(
+            im,
+            iw,
+            ih,
+            var_thr=_POST_FOLLOW_LIKES_GRID_VAR_THR,
+            search_y_min_px=int(search_y_min_px),
+        )
+        if bool(dyn.get("ok")):
+            probe["dynamic_first_row_probe_ok"] = True
+            probe["dynamic_first_row_top"] = dyn.get("first_row_top")
+            probe["dynamic_first_row_bottom"] = dyn.get("first_row_bottom")
+            probe["dynamic_first_row_solid_count"] = dyn.get("solid_count")
+            probe["dynamic_first_row_cell_h"] = dyn.get("cell_h")
+            try:
+                _ymin_ratio = round(float(search_y_min_px) / float(ih), 5)
+                log(
+                    "info",
+                    "post_follow_post_likes_dynamic_grid_first_row_resolved",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    follower_username=cand,
+                    first_row_top=dyn.get("first_row_top"),
+                    first_row_bottom=dyn.get("first_row_bottom"),
+                    grid_probe_source="post_follow_likes_grid_probe_same_capture",
+                    screenshot_path=shot,
+                    solid_count=dyn.get("solid_count"),
+                    cell_h=dyn.get("cell_h"),
+                    overlay_blocks_post_grid_top_hint=_ov_block,
+                    dynamic_first_row_search_y_min_ratio=_ymin_ratio,
+                    profile_tabs_bottom_y_px=profile_tabs_bottom_y_px,
+                    dynamic_first_row_search_y_min_px=int(search_y_min_px),
+                    dynamic_first_row_search_y_min_source=str(search_y_min_src),
+                    profile_tabs_grid_margin_px=int(tabs_margin_px),
+                    candidate_row_above_profile_tabs_blocked=False,
+                )
+            except Exception:
+                pass
+        else:
+            probe["dynamic_first_row_probe_ok"] = False
+            probe["dynamic_first_row_top"] = None
+            probe["dynamic_first_row_bottom"] = None
+            probe["dynamic_first_row_solid_count"] = None
+            probe["dynamic_first_row_cell_h"] = None
+        return probe, None
+
+    def _log_checked(probe: dict[str, Any], *, phase: str) -> None:
+        st = str(probe.get("grid_state") or "")
+        log(
+            "info",
+            "post_follow_post_likes_grid_visibility_checked",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            follower_username=cand,
+            phase=phase,
+            grid_state=st,
+            lower_max_variance=probe.get("lower_max_variance"),
+            lower_solid_cell_count=probe.get("lower_solid_cell_count"),
+            lower_partial_cell_count=probe.get("lower_partial_cell_count"),
+            lower_mostly_blank=probe.get("lower_mostly_blank"),
+            upper_max_variance=probe.get("upper_max_variance"),
+            deep_lower_solid_cell_count=probe.get("deep_lower_solid_cell_count"),
+            suggested_for_you=probe.get("suggested_for_you"),
+            profile_tabs_visible=probe.get("profile_tabs_visible"),
+            screenshot_path=probe.get("screenshot_path"),
+        )
+        if st == "partial":
+            log(
+                "info",
+                "post_follow_post_likes_grid_partial_visible",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                follower_username=cand,
+                phase=phase,
+                lower_max_variance=probe.get("lower_max_variance"),
+                upper_max_variance=probe.get("upper_max_variance"),
+                screenshot_path=probe.get("screenshot_path"),
+            )
+        elif st == "not_visible":
+            log(
+                "info",
+                "post_follow_post_likes_grid_not_visible",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                follower_username=cand,
+                phase=phase,
+                lower_max_variance=probe.get("lower_max_variance"),
+                screenshot_path=probe.get("screenshot_path"),
+            )
+
+    out: dict[str, Any] = {
+        "ok": False,
+        "grid_state_before": "",
+        "grid_state_after": "",
+        "scroll_used": False,
+        "scroll_profile": None,
+        "scroll_profiles_used": [],
+        "attempts": 0,
+        "failure_reason": None,
+        "partial_sparse_grid_accepted": False,
+        "sparse_grid_accepted": False,
+        "screenshot_paths": screenshot_paths,
+        "timings_ms": timings,
+    }
+
+    if (time.perf_counter() - t0) > budget:
+        out["failure_reason"] = "grid_prep_budget_exceeded"
+        timings["grid_prep_total_ms"] = round((time.perf_counter() - t0) * 1000, 2)
+        out["timings_ms"] = timings
+        return out
+
+    probe0, perr = _probe_once()
+    if perr:
+        out["failure_reason"] = perr
+        timings["grid_prep_total_ms"] = round((time.perf_counter() - t0) * 1000, 2)
+        out["timings_ms"] = timings
+        return out
+
+    probe_last: dict[str, Any] = probe0
+    state = str(probe0.get("grid_state") or "not_visible")
+    out["grid_state_before"] = state
+    _log_checked(probe0, phase="initial")
+
+    if state == "visible":
+        out["ok"] = True
+        out["grid_state_after"] = "visible"
+        log(
+            "info",
+            "post_follow_post_likes_grid_visible_confirmed",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            follower_username=cand,
+            phase="initial",
+            scroll_used=False,
+            screenshot_path=probe0.get("screenshot_path"),
+        )
+        timings["grid_prep_total_ms"] = round((time.perf_counter() - t0) * 1000, 2)
+        out["timings_ms"] = timings
+        out["screenshot_paths"] = screenshot_paths
+        _post_follow_merge_grid_probe_meta(out, probe0)
+        return out
+
+    try:
+        ww, wh = d.window_size()
+    except Exception:
+        ww, wh = 1080, 2400
+
+    elapsed_after_initial_probe_s = float(time.perf_counter() - t0)
+    remaining_after_initial_probe_s = float(budget) - elapsed_after_initial_probe_s
+    reserve_second_pass_s = float(
+        getattr(config, "POST_FOLLOW_LIKES_GRID_SECOND_PASS_RESERVE_S", 5.5) or 5.5
+    )
+    reserve_second_pass_s = max(4.0, min(reserve_second_pass_s, 12.0))
+    suggested_overlay = bool(probe0.get("suggested_for_you"))
+    promote_long_first = (
+        state == "partial"
+        and suggested_overlay
+        and remaining_after_initial_probe_s < reserve_second_pass_s
+    )
+    try:
+        log(
+            "info",
+            "post_follow_post_likes_grid_budget_snapshot",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            follower_username=cand,
+            budget_s_received=round(float(budget), 4),
+            elapsed_inside_grid_prepare_after_initial_probe_s=round(
+                elapsed_after_initial_probe_s, 4
+            ),
+            remaining_grid_budget_after_initial_probe_s=round(
+                remaining_after_initial_probe_s, 4
+            ),
+            second_pass_reserve_s=round(reserve_second_pass_s, 4),
+            suggested_for_you=suggested_overlay,
+            grid_state_before=state,
+            promote_long_first_on_partial=bool(promote_long_first),
+        )
+    except Exception:
+        pass
+    if promote_long_first:
+        try:
+            log(
+                "info",
+                "post_follow_post_likes_scroll_strategy_promoted_to_long_due_to_budget",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                follower_username=cand,
+                budget_s_received=round(float(budget), 4),
+                elapsed_inside_grid_prepare_s=round(
+                    elapsed_after_initial_probe_s, 4
+                ),
+                remaining_grid_budget_before_scroll=round(
+                    remaining_after_initial_probe_s, 4
+                ),
+                suggested_for_you=bool(suggested_overlay),
+                grid_state_before=state,
+                chosen_scroll_profile="long",
+                decision_reason=(
+                    "partial_plus_suggested_overlay_and_remaining_budget_below_"
+                    "second_pass_reserve_promote_long_first"
+                ),
+            )
+        except Exception:
+            pass
+
+    attempts = 0
+    state_after = state
+    while attempts < 2 and (time.perf_counter() - t0) <= budget:
+        sp = "micro" if state_after in ("partial", "visible") else "long"
+        if attempts == 1 and state_after == "partial":
+            sp = "long"
+        if attempts == 0 and promote_long_first and state_after == "partial":
+            sp = "long"
+        log(
+            "info",
+            "post_follow_post_likes_profile_scroll_started",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            follower_username=cand,
+            scroll_profile=sp,
+            attempt=attempts + 1,
+            grid_state_before=state_after,
+        )
+        t_sw = time.perf_counter()
+        sw = _post_follow_likes_profile_scroll_swipe(
+            d, scroll_profile=sp, ww=ww, wh=wh
+        )
+        timings[f"profile_scroll_{attempts + 1}_ms"] = round(
+            (time.perf_counter() - t_sw) * 1000, 2
+        )
+        attempts += 1
+        out["scroll_used"] = True
+        scroll_profiles_used.append(str(sw.get("scroll_profile") or sp))
+        out["scroll_profile"] = scroll_profiles_used[-1]
+        out["scroll_profiles_used"] = list(scroll_profiles_used)
+        out["attempts"] = attempts
+
+        if not sw.get("swipe_ok"):
+            out["failure_reason"] = f"profile_scroll_failed:{sw.get('error')}"
+            break
+
+        log(
+            "info",
+            "post_follow_post_likes_profile_scroll_used",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            follower_username=cand,
+            scroll_profile=sp,
+            attempt=attempts,
+            y_start=sw.get("y_start"),
+            y_end=sw.get("y_end"),
+            duration_s=sw.get("duration_s"),
+            grid_state_before=state_after,
+        )
+        time.sleep(0.42)
+
+        on_prof, why = _post_follow_likes_profile_still_on_candidate(
+            d, follower_username=cand, pkg=pkg
+        )
+        if not on_prof:
+            out["failure_reason"] = f"profile_lost_after_scroll:{why}"
+            break
+
+        probe1, perr1 = _probe_once()
+        if perr1:
+            out["failure_reason"] = perr1
+            break
+        probe_last = probe1
+        state_after = str(probe1.get("grid_state") or "not_visible")
+        _log_checked(probe1, phase=f"after_scroll_{attempts}")
+
+        if state_after == "visible":
+            out["ok"] = True
+            out["grid_state_after"] = "visible"
+            log(
+                "info",
+                "post_follow_post_likes_grid_visible_confirmed",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                follower_username=cand,
+                phase=f"after_scroll_{attempts}",
+                scroll_used=True,
+                scroll_profile=sp,
+                attempt=attempts,
+                screenshot_path=probe1.get("screenshot_path"),
+            )
+            timings["grid_prep_total_ms"] = round((time.perf_counter() - t0) * 1000, 2)
+            out["timings_ms"] = timings
+            out["screenshot_paths"] = screenshot_paths
+            _post_follow_merge_grid_probe_meta(out, probe1)
+            return out
+
+    out["grid_state_after"] = state_after
+    if not out.get("ok") and _sparse_post_grid_partial_acceptable_for_post_follow(
+        probe_last
+    ):
+        out["ok"] = True
+        out["failure_reason"] = None
+        out["partial_sparse_grid_accepted"] = True
+        out["sparse_grid_accepted"] = True
+        _post_follow_merge_grid_probe_meta(out, probe_last)
+        try:
+            log(
+                "info",
+                "post_follow_post_likes_sparse_grid_accepted",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                follower_username=cand,
+                partial_sparse_grid_accepted=True,
+                grid_state_after=str(probe_last.get("grid_state") or ""),
+                lower_solid_cell_count=probe_last.get("lower_solid_cell_count"),
+                upper_solid_cell_count=probe_last.get("upper_solid_cell_count"),
+                deep_lower_solid_cell_count=probe_last.get(
+                    "deep_lower_solid_cell_count"
+                ),
+                profile_tabs_visible=probe_last.get("profile_tabs_visible"),
+                screenshot_path=probe_last.get("screenshot_path"),
+            )
+        except Exception:
+            pass
+    elif not out.get("ok"):
+        if not out.get("failure_reason"):
+            out["failure_reason"] = "post_grid_not_visible_before_open"
+        log(
+            "warning",
+            "post_follow_post_likes_grid_still_not_visible",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            follower_username=cand,
+            grid_state_before=out.get("grid_state_before"),
+            grid_state_after=state_after,
+            scroll_used=bool(out.get("scroll_used")),
+            scroll_profiles_used=scroll_profiles_used,
+            attempts=attempts,
+            screenshot_path=screenshot_paths[-1] if screenshot_paths else None,
+        )
+
+    timings["grid_prep_total_ms"] = round((time.perf_counter() - t0) * 1000, 2)
+    out["timings_ms"] = timings
+    out["screenshot_paths"] = screenshot_paths
+    return out
+
+
 def visual_profile_has_no_posts(
     d: u2.Device,
     *,
@@ -10707,14 +11593,218 @@ def visual_detect_private_profile(
     return base_out
 
 
+_VISUAL_POST_OPEN_SELECTION_MAX_VARIANCE = "max_variance"
+_VISUAL_POST_OPEN_SELECTION_FIRST_ROW_LTR = (
+    "first_row_left_to_right_recent_priority"
+)
+_VISUAL_GRID_CELL_TAP_FRAC_X = 0.42
+_VISUAL_GRID_CELL_TAP_FRAC_Y = 0.52
+_VISUAL_RECENT_POST_OPEN_PRE_TAP_SETTLE_S = 0.25
+_VISUAL_GRID_CELL_RETRY_TAP_FRAC_X = 0.50
+_VISUAL_GRID_CELL_RETRY_TAP_FRAC_Y = 0.55
+
+
+def _visual_grid_cell_tap_xy_device(
+    x0: int,
+    y0: int,
+    cell_w: int,
+    cell_h: int,
+    *,
+    iw: int,
+    ih: int,
+    ww: int,
+    wh: int,
+    offset_ix: int = 0,
+    offset_iy: int = 0,
+    tap_frac_x: float = _VISUAL_GRID_CELL_TAP_FRAC_X,
+    tap_frac_y: float = _VISUAL_GRID_CELL_TAP_FRAC_Y,
+) -> tuple[int, int]:
+    """Inset tap inside grid cell (avoids Reel corner icon and cell edges)."""
+    cx_img = x0 + int(cell_w * float(tap_frac_x)) + int(offset_ix)
+    cy_img = y0 + int(cell_h * float(tap_frac_y)) + int(offset_iy)
+    cx_img = max(x0 + 8, min(x0 + cell_w - 8, cx_img))
+    cy_img = max(y0 + 8, min(y0 + cell_h - 8, cy_img))
+    tap_x, tap_y = _visual_xy_image_to_device(cx_img, cy_img, iw, ih, ww, wh)
+    return max(2, min(ww - 3, tap_x)), max(2, min(wh - 3, tap_y))
+
+
+def _visual_select_profile_grid_cell(
+    im: Any,
+    *,
+    iw: int,
+    ih: int,
+    grid_y0: int,
+    grid_y1: int,
+    selection_policy: str,
+    var_thr: float = 120.0,
+) -> tuple[tuple[int, int, int, int, float] | None, list[dict[str, Any]]]:
+    cols = 3
+    cell_w = max(24, iw // cols)
+    cell_h = cell_w
+    if selection_policy == _VISUAL_POST_OPEN_SELECTION_FIRST_ROW_LTR:
+        scan_order = [(0, 0), (1, 0), (2, 0)]
+    else:
+        scan_order = [(0, 0), (1, 0), (2, 0), (0, 1), (1, 1), (2, 1)]
+
+    ordered_candidates: list[dict[str, Any]] = []
+    chosen: tuple[int, int, int, int, float] | None = None
+    for col, row in scan_order:
+        x0 = col * cell_w
+        y0 = grid_y0 + row * cell_h
+        if y0 + cell_h > grid_y1 or x0 + cell_w > iw:
+            ordered_candidates.append(
+                {
+                    "col": col,
+                    "row": row,
+                    "eligible": False,
+                    "variance": 0.0,
+                    "reason": "out_of_grid_band",
+                }
+            )
+            continue
+        v = _visual_image_cell_luma_variance(im, x0, y0, cell_w, cell_h)
+        eligible = bool(v >= var_thr)
+        ordered_candidates.append(
+            {
+                "col": col,
+                "row": row,
+                "eligible": eligible,
+                "variance": round(float(v), 2),
+            }
+        )
+        if not eligible:
+            continue
+        if selection_policy == _VISUAL_POST_OPEN_SELECTION_FIRST_ROW_LTR:
+            chosen = (col, row, x0, y0, v)
+            break
+        if chosen is None or v > chosen[4]:
+            chosen = (col, row, x0, y0, v)
+    return chosen, ordered_candidates
+
+
+def _visual_detect_post_viewer_opened_after_tap(
+    d: u2.Device,
+    *,
+    pkg: str,
+    expected_follower_username: str = "",
+    act_before: Any = None,
+) -> dict[str, Any]:
+    """
+    Post-open detection aligned with post-follow like viewer guard (not legacy profile guess alone).
+    """
+    signals: list[str] = []
+    liked_ui, liked_m, _ = _ui_post_viewer_broad_like_chrome_hint(d)
+    not_liked_ui, not_liked_m, _ = _ui_post_viewer_not_liked_quick(d)
+    like_ui = bool(liked_ui or not_liked_ui)
+    if liked_ui:
+        signals.append(f"viewer_chrome_hint:{liked_m}")
+    if not_liked_ui:
+        signals.append(f"not_liked_ui:{not_liked_m}")
+
+    ab_raw = ""
+    try:
+        ab_raw = str(read_current_profile_username_for_follow_gate(d) or "").strip()
+    except Exception:
+        ab_raw = ""
+    posts_bar = _visual_post_viewer_action_bar_is_post_viewer_mode(ab_raw)
+    if posts_bar:
+        signals.append(f"action_bar_posts_mode:{ab_raw[:48]}")
+
+    exp_fu = _normalize_handle(expected_follower_username)
+    hdr_u, hdr_m = _visual_post_viewer_header_username_from_ui(
+        d, expected_username=exp_fu
+    )
+    hdr_norm = _normalize_handle(hdr_u)
+    if hdr_u:
+        signals.append(f"post_header:{hdr_m}")
+
+    post_chrome = like_ui
+    if not post_chrome:
+        for label in (
+            "Like",
+            "Unlike",
+            "J'aime",
+            "Jaime",
+            "Gefällt mir",
+            "Me gusta",
+        ):
+            try:
+                if d(descriptionContains=label).exists(timeout=0.14):
+                    post_chrome = True
+                    signals.append(f"description_chrome:{label}")
+                    break
+            except Exception:
+                continue
+
+    meta = _followers_current_pkg_activity(d)
+    act_now = meta.get("current_activity")
+    activity_changed = bool(act_before and act_now and act_now != act_before)
+    if activity_changed:
+        signals.append("activity_changed")
+
+    still_grid = False
+    if not post_chrome and not posts_bar:
+        try:
+            still_grid = bool(
+                _try_profile_signals_once(d, "", pkg)
+                and _followers_profile_tabs_visible(d)
+            )
+        except Exception:
+            still_grid = False
+    if still_grid:
+        signals.append("still_profile_grid")
+
+    post_detected = False
+    detect_reason = ""
+    if like_ui:
+        post_detected = True
+        detect_reason = "like_unlike_ui"
+    elif posts_bar and post_chrome:
+        post_detected = True
+        detect_reason = "posts_action_bar_with_post_chrome"
+    elif posts_bar and hdr_norm and exp_fu and hdr_norm == exp_fu:
+        post_detected = True
+        detect_reason = "posts_action_bar_header_username_match"
+    elif activity_changed and not still_grid:
+        post_detected = True
+        detect_reason = "activity_changed_off_profile_grid"
+    elif post_chrome and not still_grid:
+        post_detected = True
+        detect_reason = "post_chrome_without_profile_grid"
+
+    prof_still = bool(still_grid and not post_detected)
+    return {
+        "post_detected": post_detected,
+        "detect_reason": detect_reason,
+        "viewer_detection_signals_seen": signals,
+        "prof_still_on_candidate_profile": prof_still,
+        "still_profile_grid": still_grid,
+        "like_ui_present": like_ui,
+        "posts_action_bar": posts_bar,
+        "post_header_username_detected": hdr_u,
+        "action_bar_title": ab_raw,
+        "current_activity": act_now,
+        "current_package": meta.get("current_package"),
+    }
+
+
 def visual_open_recent_post_from_profile(
     d: u2.Device,
     *,
     source_profile_username: str | None = None,
+    expected_follower_username: str | None = None,
+    grid_y0_ratio: float = 0.33,
+    grid_y1_ratio: float = 0.92,
+    selection_policy: str = _VISUAL_POST_OPEN_SELECTION_MAX_VARIANCE,
+    dynamic_grid_first_row_top_px: int | None = None,
+    dynamic_grid_first_row_bottom_px: int | None = None,
+    grid_probe_source: str | None = None,
+    grid_probe_screenshot_path: str | None = None,
 ) -> dict[str, Any]:
     """
-    From an open profile grid: screenshot, pick a high-variance 3×3 grid cell (top-left first),
-    tap to open the post. Does not like or follow. Post viewer inferred via UI / activity.
+    From an open profile grid: screenshot, pick a grid cell, tap to open the post.
+    ``selection_policy=first_row_left_to_right_recent_priority`` (post-follow likes):
+    first eligible cell in row 0 left→right. Default legacy: max variance over 6 cells.
     """
     global _VISUAL_POST_LIKE_TAPS_RECORDED
     _VISUAL_POST_LIKE_TAPS_RECORDED = 0
@@ -10855,25 +11945,195 @@ def visual_open_recent_post_from_profile(
         }
 
     iw, ih = im.size
-    grid_y0 = int(ih * 0.33)
-    grid_y1 = int(ih * 0.92)
-    cols = 3
-    cell_w = max(24, iw // cols)
+    y0_ratio = max(0.12, min(0.78, float(grid_y0_ratio)))
+    y1_ratio = max(y0_ratio + 0.08, min(0.98, float(grid_y1_ratio)))
+    cell_w = max(24, iw // 3)
     cell_h = cell_w
-    var_thr = 120.0
-    order = [(0, 0), (1, 0), (2, 0), (0, 1), (1, 1), (2, 1)]
-    chosen: tuple[int, int, int, int, float] | None = None
-    for col, row in order:
-        x0 = col * cell_w
-        y0 = grid_y0 + row * cell_h
-        if y0 + cell_h > grid_y1 or x0 + cell_w > iw:
-            continue
-        v = _visual_image_cell_luma_variance(im, x0, y0, cell_w, cell_h)
-        if col == 0 and row == 0 and v >= var_thr:
-            chosen = (col, row, x0, y0, v)
-            break
-        if chosen is None or v > chosen[4]:
-            chosen = (col, row, x0, y0, v)
+    grid_y1 = int(ih * y1_ratio)
+
+    prior_raw_top = dynamic_grid_first_row_top_px
+    prior_raw_bottom = dynamic_grid_first_row_bottom_px
+    try:
+        prior_dynamic_first_row_top_px = (
+            int(prior_raw_top) if prior_raw_top is not None else None
+        )
+    except (TypeError, ValueError):
+        prior_dynamic_first_row_top_px = None
+    try:
+        prior_dynamic_first_row_bottom_px = (
+            int(prior_raw_bottom) if prior_raw_bottom is not None else None
+        )
+    except (TypeError, ValueError):
+        prior_dynamic_first_row_bottom_px = None
+
+    try:
+        open_grid_ui_hints = _post_follow_likes_grid_ui_surface_hints(d)
+    except Exception:
+        open_grid_ui_hints = {}
+    overlay_blocks_post_grid_top_hint = bool(
+        open_grid_ui_hints.get("suggested_for_you")
+        or open_grid_ui_hints.get("discover_people")
+    )
+    (
+        dynamic_first_row_search_y_min_px,
+        dynamic_first_row_search_y_min_source,
+        open_profile_tabs_bottom_y_px,
+        open_profile_tabs_margin_px,
+    ) = _post_follow_dynamic_first_row_search_y_min_layout(d, ih, open_grid_ui_hints)
+    dynamic_first_row_search_y_min_ratio = round(
+        float(dynamic_first_row_search_y_min_px) / float(ih), 5
+    )
+    prior_dynamic_row_discarded = (
+        prior_dynamic_first_row_top_px is not None
+        and int(prior_dynamic_first_row_top_px)
+        < int(dynamic_first_row_search_y_min_px) - 4
+    )
+
+    dyn_fresh = _dynamic_first_post_grid_row_from_image(
+        im,
+        iw,
+        ih,
+        var_thr=_POST_FOLLOW_LIKES_GRID_VAR_THR,
+        search_y_min_px=int(dynamic_first_row_search_y_min_px),
+    )
+    fresh_row_found = bool(dyn_fresh.get("ok"))
+    fresh_dynamic_first_row_top_px: int | None = None
+    fresh_dynamic_first_row_bottom_px: int | None = None
+    if fresh_row_found:
+        fresh_dynamic_first_row_top_px = int(dyn_fresh["first_row_top"])
+        fresh_dynamic_first_row_bottom_px = int(dyn_fresh["first_row_bottom"])
+
+    delta_top_px: int | None = None
+    delta_bottom_px: int | None = None
+    if fresh_dynamic_first_row_top_px is not None and prior_dynamic_first_row_top_px is not None:
+        delta_top_px = int(
+            fresh_dynamic_first_row_top_px - prior_dynamic_first_row_top_px
+        )
+    if (
+        fresh_dynamic_first_row_bottom_px is not None
+        and prior_dynamic_first_row_bottom_px is not None
+    ):
+        delta_bottom_px = int(
+            fresh_dynamic_first_row_bottom_px - prior_dynamic_first_row_bottom_px
+        )
+
+    row_source_used = (
+        "open_shot_fresh" if fresh_row_found else "prior_probe_fallback"
+    )
+    try:
+        log(
+            "info",
+            "visual_recent_post_dynamic_grid_first_row_revalidated_on_open_shot",
+            prior_dynamic_first_row_top_px=prior_dynamic_first_row_top_px,
+            prior_dynamic_first_row_bottom_px=prior_dynamic_first_row_bottom_px,
+            fresh_dynamic_first_row_top_px=fresh_dynamic_first_row_top_px,
+            fresh_dynamic_first_row_bottom_px=fresh_dynamic_first_row_bottom_px,
+            delta_top_px=delta_top_px,
+            delta_bottom_px=delta_bottom_px,
+            fresh_row_found=fresh_row_found,
+            row_source_used=row_source_used,
+            open_shot_path=shot,
+            grid_probe_screenshot_path_ref=grid_probe_screenshot_path,
+            source_profile_username=source_profile_username or "",
+            suggested_for_you_ui_hint=bool(
+                open_grid_ui_hints.get("suggested_for_you")
+            ),
+            discover_people_ui_hint=bool(open_grid_ui_hints.get("discover_people")),
+            overlay_blocks_post_grid_top_hint=overlay_blocks_post_grid_top_hint,
+            dynamic_first_row_search_y_min_ratio=dynamic_first_row_search_y_min_ratio,
+            prior_dynamic_row_discarded=prior_dynamic_row_discarded,
+            profile_tabs_bottom_y_px=open_profile_tabs_bottom_y_px,
+            dynamic_first_row_search_y_min_px=int(dynamic_first_row_search_y_min_px),
+            dynamic_first_row_search_y_min_source=str(
+                dynamic_first_row_search_y_min_source
+            ),
+            profile_tabs_grid_margin_px=int(open_profile_tabs_margin_px),
+            candidate_row_above_profile_tabs_blocked=False,
+        )
+    except Exception:
+        pass
+
+    if fresh_row_found and prior_dynamic_first_row_top_px is not None:
+        _top_div = (
+            abs(int(fresh_dynamic_first_row_top_px) - prior_dynamic_first_row_top_px)
+            >= 24
+        )
+        _bot_div = False
+        if (
+            fresh_dynamic_first_row_bottom_px is not None
+            and prior_dynamic_first_row_bottom_px is not None
+        ):
+            _bot_div = (
+                abs(
+                    int(fresh_dynamic_first_row_bottom_px)
+                    - int(prior_dynamic_first_row_bottom_px)
+                )
+                >= 24
+            )
+        if _top_div or _bot_div:
+            try:
+                log(
+                    "info",
+                    "visual_recent_post_dynamic_grid_first_row_prior_probe_replaced_by_open_shot",
+                    prior_dynamic_first_row_top_px=prior_dynamic_first_row_top_px,
+                    prior_dynamic_first_row_bottom_px=prior_dynamic_first_row_bottom_px,
+                    fresh_dynamic_first_row_top_px=fresh_dynamic_first_row_top_px,
+                    fresh_dynamic_first_row_bottom_px=fresh_dynamic_first_row_bottom_px,
+                    delta_top_px=delta_top_px,
+                    delta_bottom_px=delta_bottom_px,
+                    open_shot_path=shot,
+                    source_profile_username=source_profile_username or "",
+                )
+            except Exception:
+                pass
+
+    dyn_src = (
+        str(grid_probe_source).strip()
+        if grid_probe_source
+        else "post_follow_dynamic_row"
+    )
+    base_probe_src = dyn_src
+
+    if fresh_row_found and fresh_dynamic_first_row_top_px is not None:
+        gy_raw = int(fresh_dynamic_first_row_top_px)
+        grid_y0 = max(8, min(gy_raw, ih - cell_h - 8, int(ih * 0.82)))
+        dynamic_applied = True
+        dyn_src = f"{base_probe_src}_open_shot_fresh"
+        if grid_y1 < grid_y0 + cell_h + 6:
+            grid_y1 = min(ih - 8, grid_y0 + cell_h + max(cell_h * 5, int(ih * 0.32)))
+    else:
+        dyn_top = dynamic_grid_first_row_top_px
+        if prior_dynamic_row_discarded:
+            dyn_top = None
+        if dyn_top is None:
+            grid_y0 = int(ih * y0_ratio)
+            dynamic_applied = False
+        else:
+            try:
+                gy_raw = int(dyn_top)
+            except (TypeError, ValueError):
+                grid_y0 = int(ih * y0_ratio)
+                dynamic_applied = False
+            else:
+                grid_y0 = max(8, min(gy_raw, ih - cell_h - 8, int(ih * 0.82)))
+                dynamic_applied = True
+            if dynamic_applied and grid_y1 < grid_y0 + cell_h + 6:
+                grid_y1 = min(
+                    ih - 8, grid_y0 + cell_h + max(cell_h * 5, int(ih * 0.32))
+                )
+    grid_y0 = max(int(grid_y0), int(dynamic_first_row_search_y_min_px))
+    grid_y0 = max(8, min(int(grid_y0), ih - cell_h - 8, int(ih * 0.82)))
+    if grid_y1 < grid_y0 + cell_h + 6:
+        grid_y1 = min(ih - 8, grid_y0 + cell_h + max(cell_h * 5, int(ih * 0.32)))
+    pol = str(selection_policy or _VISUAL_POST_OPEN_SELECTION_MAX_VARIANCE)
+    chosen, ordered_candidates = _visual_select_profile_grid_cell(
+        im,
+        iw=iw,
+        ih=ih,
+        grid_y0=grid_y0,
+        grid_y1=grid_y1,
+        selection_policy=pol,
+    )
 
     if chosen is None:
         log(
@@ -10887,6 +12147,10 @@ def visual_open_recent_post_from_profile(
             post_detected=False,
             source_profile_username=source_profile_username or "",
             failure_reason="no_grid_cell",
+            grid_y0_ratio=y0_ratio,
+            grid_y1_ratio=y1_ratio,
+            selection_policy=pol,
+            ordered_candidates=ordered_candidates[:6],
         )
         return {
             "ok": False,
@@ -10901,11 +12165,69 @@ def visual_open_recent_post_from_profile(
         }
 
     col, row, x0, y0, var = chosen
-    cx_img = x0 + cell_w // 2
-    cy_img = y0 + cell_h // 2
-    tap_x, tap_y = _visual_xy_image_to_device(cx_img, cy_img, iw, ih, ww, wh)
-    tap_x = max(2, min(ww - 3, tap_x))
-    tap_y = max(2, min(wh - 3, tap_y))
+    try:
+        log(
+            "info",
+            "visual_recent_post_candidate_ordering_applied",
+            selection_policy=pol,
+            ordered_candidates=ordered_candidates[:6],
+            selected_col=col,
+            selected_row=row,
+            selected_variance=round(float(var), 2),
+            grid_y0_ratio=y0_ratio,
+            grid_y1_ratio=y1_ratio,
+            source_profile_username=source_profile_username or "",
+        )
+    except Exception:
+        pass
+
+    candidate_row_above_profile_tabs_blocked = False
+    if open_profile_tabs_bottom_y_px is not None:
+        if int(y0) < int(open_profile_tabs_bottom_y_px) + int(
+            open_profile_tabs_margin_px
+        ):
+            candidate_row_above_profile_tabs_blocked = True
+
+    if candidate_row_above_profile_tabs_blocked:
+        try:
+            log(
+                "info",
+                "visual_recent_post_open_aborted_candidate_above_profile_tabs",
+                selected_col=col,
+                selected_row=row,
+                cell_top_y_px=int(y0),
+                profile_tabs_bottom_y_px=int(open_profile_tabs_bottom_y_px),
+                profile_tabs_grid_margin_px=int(open_profile_tabs_margin_px),
+                dynamic_first_row_search_y_min_px=int(
+                    dynamic_first_row_search_y_min_px
+                ),
+                dynamic_first_row_search_y_min_source=str(
+                    dynamic_first_row_search_y_min_source
+                ),
+                grid_y0_px=int(grid_y0),
+                grid_y1_px=int(grid_y1),
+                source_profile_username=source_profile_username or "",
+            )
+        except Exception:
+            pass
+        return {
+            "ok": False,
+            "tap_x": None,
+            "tap_y": None,
+            "current_activity": act0,
+            "current_package": pkg0,
+            "profile_detected": prof0,
+            "post_detected": False,
+            "source_profile_username": source_profile_username or "",
+            "failure_reason": "candidate_above_profile_tabs",
+        }
+
+    tap_x, tap_y = _visual_grid_cell_tap_xy_device(
+        x0, y0, cell_w, cell_h, iw=iw, ih=ih, ww=ww, wh=wh
+    )
+    first_tap_coords = [tap_x, tap_y]
+    retry_used = False
+    retry_strategy = ""
 
     log(
         "info",
@@ -10916,27 +12238,71 @@ def visual_open_recent_post_from_profile(
         tap_x=tap_x,
         tap_y=tap_y,
         cell_w=cell_w,
+        grid_y0_ratio=y0_ratio,
+        grid_y1_ratio=y1_ratio,
+        grid_y0_px=grid_y0,
+        grid_y1_px=grid_y1,
+        dynamic_grid_first_row_applied=dynamic_applied,
+        grid_probe_source_dyn=dyn_src if dynamic_applied else None,
+        grid_probe_screenshot_path_ref=grid_probe_screenshot_path
+        if dynamic_applied
+        else None,
+        selection_policy=pol,
         current_activity=act0,
         current_package=pkg0,
         profile_detected=prof0,
         post_detected=False,
         source_profile_username=source_profile_username or "",
+        profile_tabs_bottom_y_px=open_profile_tabs_bottom_y_px,
+        dynamic_first_row_search_y_min_px=int(dynamic_first_row_search_y_min_px),
+        dynamic_first_row_search_y_min_source=str(
+            dynamic_first_row_search_y_min_source
+        ),
+        candidate_row_above_profile_tabs_blocked=False,
     )
 
+    _settle_s = float(_VISUAL_RECENT_POST_OPEN_PRE_TAP_SETTLE_S)
     try:
-        d.click(tap_x, tap_y)
-    except Exception as e:
+        time.sleep(_settle_s)
+    except Exception:
+        pass
+    try:
+        log(
+            "info",
+            "visual_recent_post_open_pre_tap_settle_applied",
+            settle_s=round(_settle_s, 3),
+            selected_col=col,
+            selected_row=row,
+            tap_x=tap_x,
+            tap_y=tap_y,
+            source_profile_username=source_profile_username or "",
+        )
+    except Exception:
+        pass
+
+    def _send_open_tap(tx: int, ty: int) -> bool:
+        try:
+            d.click(tx, ty)
+            return True
+        except Exception:
+            return False
+
+    if not _send_open_tap(tap_x, tap_y):
         log(
             "error",
             "visual_recent_post_open_failed",
             tap_x=tap_x,
             tap_y=tap_y,
+            selected_col=col,
+            selected_row=row,
+            first_tap_coords=first_tap_coords,
+            retry_used=False,
             current_activity=act0,
             current_package=pkg0,
             profile_detected=prof0,
             post_detected=False,
             source_profile_username=source_profile_username or "",
-            failure_reason=f"tap_failed:{e}",
+            failure_reason="tap_failed",
         )
         return {
             "ok": False,
@@ -10947,7 +12313,7 @@ def visual_open_recent_post_from_profile(
             "profile_detected": prof0,
             "post_detected": False,
             "source_profile_username": source_profile_username or "",
-            "failure_reason": f"tap_failed:{e}",
+            "failure_reason": "tap_failed",
         }
 
     meta_mid = _followers_current_pkg_activity(d)
@@ -10956,6 +12322,8 @@ def visual_open_recent_post_from_profile(
         "visual_recent_post_open_tap_sent",
         tap_x=tap_x,
         tap_y=tap_y,
+        selected_col=col,
+        selected_row=row,
         current_activity=meta_mid.get("current_activity"),
         current_package=meta_mid.get("current_package"),
         profile_detected=prof0,
@@ -10964,34 +12332,169 @@ def visual_open_recent_post_from_profile(
     )
 
     time.sleep(1.6)
+    exp_fu = str(expected_follower_username or "").strip().lstrip("@")
+    det_open = _visual_detect_post_viewer_opened_after_tap(
+        d,
+        pkg=pkg,
+        expected_follower_username=exp_fu,
+        act_before=act0,
+    )
+    post_detected = bool(det_open.get("post_detected"))
+    prof_still = bool(det_open.get("prof_still_on_candidate_profile"))
+    viewer_signals = list(det_open.get("viewer_detection_signals_seen") or [])
+
+    if not post_detected and prof_still:
+        retry_used = True
+        retry_strategy = "same_cell_more_central_point"
+        _retry_fx = float(_VISUAL_GRID_CELL_RETRY_TAP_FRAC_X)
+        _retry_fy = float(_VISUAL_GRID_CELL_RETRY_TAP_FRAC_Y)
+        retry_x, retry_y = _visual_grid_cell_tap_xy_device(
+            x0,
+            y0,
+            cell_w,
+            cell_h,
+            iw=iw,
+            ih=ih,
+            ww=ww,
+            wh=wh,
+            tap_frac_x=_retry_fx,
+            tap_frac_y=_retry_fy,
+        )
+        try:
+            log(
+                "info",
+                "visual_recent_post_open_retry_started",
+                selected_col=col,
+                selected_row=row,
+                first_tap_coords=first_tap_coords,
+                retry_strategy=retry_strategy,
+                retry_tap_frac_x=round(_retry_fx, 4),
+                retry_tap_frac_y=round(_retry_fy, 4),
+                viewer_detection_signals_seen=viewer_signals[:20],
+                source_profile_username=source_profile_username or "",
+            )
+        except Exception:
+            pass
+        if _send_open_tap(retry_x, retry_y):
+            try:
+                log(
+                    "info",
+                    "visual_recent_post_open_retry_tap_sent",
+                    tap_x=retry_x,
+                    tap_y=retry_y,
+                    retry_strategy=retry_strategy,
+                    retry_tap_frac_x=round(_retry_fx, 4),
+                    retry_tap_frac_y=round(_retry_fy, 4),
+                    selected_col=col,
+                    selected_row=row,
+                    source_profile_username=source_profile_username or "",
+                )
+            except Exception:
+                pass
+            time.sleep(1.6)
+            det_retry = _visual_detect_post_viewer_opened_after_tap(
+                d,
+                pkg=pkg,
+                expected_follower_username=exp_fu,
+                act_before=act0,
+            )
+            post_detected = bool(det_retry.get("post_detected"))
+            prof_still = bool(det_retry.get("prof_still_on_candidate_profile"))
+            viewer_signals = list(det_retry.get("viewer_detection_signals_seen") or [])
+            tap_x, tap_y = retry_x, retry_y
+            if post_detected:
+                try:
+                    log(
+                        "info",
+                        "visual_recent_post_open_retry_success",
+                        tap_x=tap_x,
+                        tap_y=tap_y,
+                        retry_strategy=retry_strategy,
+                        retry_tap_frac_x=round(_retry_fx, 4),
+                        retry_tap_frac_y=round(_retry_fy, 4),
+                        viewer_detection_signals_seen=viewer_signals[:20],
+                        detect_reason=det_retry.get("detect_reason"),
+                        source_profile_username=source_profile_username or "",
+                    )
+                except Exception:
+                    pass
+            else:
+                try:
+                    log(
+                        "warning",
+                        "visual_recent_post_open_retry_failed",
+                        tap_x=tap_x,
+                        tap_y=tap_y,
+                        retry_strategy=retry_strategy,
+                        retry_tap_frac_x=round(_retry_fx, 4),
+                        retry_tap_frac_y=round(_retry_fy, 4),
+                        viewer_detection_signals_seen=viewer_signals[:20],
+                        source_profile_username=source_profile_username or "",
+                    )
+                except Exception:
+                    pass
+        else:
+            try:
+                log(
+                    "warning",
+                    "visual_recent_post_open_retry_failed",
+                    retry_strategy=retry_strategy,
+                    retry_tap_frac_x=round(_retry_fx, 4),
+                    retry_tap_frac_y=round(_retry_fy, 4),
+                    failure_reason="retry_tap_failed",
+                    source_profile_username=source_profile_username or "",
+                )
+            except Exception:
+                pass
+
     meta1 = _followers_current_pkg_activity(d)
     act1 = meta1.get("current_activity")
-    post_detected = False
-    for label in (
-        "Like",
-        "Unlike",
-        "J'aime",
-        "Jaime",
-        "Gefällt mir",
-        "Me gusta",
-    ):
+
+    foreign_profile = False
+    ab_after = ""
+    if exp_fu and not post_detected and prof_still:
         try:
-            if d(descriptionContains=label).exists(timeout=0.12):
-                post_detected = True
-                break
+            ab_after = str(
+                read_current_profile_username_for_follow_gate(d) or ""
+            ).strip().lstrip("@")
         except Exception:
-            continue
-    if not post_detected and act1 != act0:
-        post_detected = True
-    if not post_detected:
-        prof_still = bool(
-            _try_profile_signals_once(d, "", pkg)
-            or _guess_profile_screen(d, pkg, "")
-            in ("likely_profile", "profile_header_rid", "action_bar_title")
-        )
-        post_detected = not prof_still
+            ab_after = ""
+        if ab_after and not _visual_post_viewer_action_bar_is_post_viewer_mode(ab_after):
+            if _normalize_handle(ab_after) != _normalize_handle(exp_fu):
+                foreign_profile = True
 
     meta_fin = _followers_current_pkg_activity(d)
+    if foreign_profile:
+        log(
+            "warning",
+            "visual_recent_post_open_foreign_profile",
+            tap_x=tap_x,
+            tap_y=tap_y,
+            expected_follower_username=exp_fu,
+            action_bar_title_after_tap=ab_after,
+            current_activity=meta_fin.get("current_activity"),
+            current_package=meta_fin.get("current_package"),
+            source_profile_username=source_profile_username or "",
+        )
+        try:
+            d.press("back")
+            time.sleep(0.45)
+        except Exception:
+            pass
+        return {
+            "ok": False,
+            "tap_x": tap_x,
+            "tap_y": tap_y,
+            "current_activity": meta_fin.get("current_activity"),
+            "current_package": meta_fin.get("current_package"),
+            "profile_detected": True,
+            "post_detected": False,
+            "source_profile_username": source_profile_username or "",
+            "failure_reason": "opened_foreign_profile_instead_of_post",
+            "foreign_profile_opened": True,
+            "action_bar_title_after_tap": ab_after,
+        }
+
     if post_detected:
         log(
             "info",
@@ -11021,6 +12524,13 @@ def visual_open_recent_post_from_profile(
         "visual_recent_post_open_failed",
         tap_x=tap_x,
         tap_y=tap_y,
+        selected_col=col,
+        selected_row=row,
+        first_tap_coords=first_tap_coords,
+        retry_used=retry_used,
+        retry_strategy=retry_strategy or None,
+        viewer_detection_signals_seen=viewer_signals[:24],
+        selection_policy=pol,
         current_activity=meta_fin.get("current_activity"),
         current_package=meta_fin.get("current_package"),
         profile_detected=prof0,
@@ -11032,6 +12542,13 @@ def visual_open_recent_post_from_profile(
         "ok": False,
         "tap_x": tap_x,
         "tap_y": tap_y,
+        "selected_col": col,
+        "selected_row": row,
+        "first_tap_coords": first_tap_coords,
+        "retry_used": retry_used,
+        "retry_strategy": retry_strategy or None,
+        "viewer_detection_signals_seen": viewer_signals[:24],
+        "selection_policy": pol,
         "current_activity": meta_fin.get("current_activity"),
         "current_package": meta_fin.get("current_package"),
         "profile_detected": prof0,
@@ -11041,40 +12558,845 @@ def visual_open_recent_post_from_profile(
     }
 
 
-def _visual_filled_heart_red_ratio(im: Any, iw: int, ih: int) -> float:
-    """Share of pixels in the viewer heart ROI that look like a filled (liked) heart."""
-    lb_left = int(iw * 0.055)
-    lb_top = int(ih * 0.555)
-    lb_right = int(iw * 0.145)
-    lb_bottom = int(ih * 0.63)
+# Action bar band (below post media) — not mid-image where post content red dominates.
+_VISUAL_POST_HEART_ROI_LEFT_RATIO = 0.04
+_VISUAL_POST_HEART_ROI_TOP_RATIO = 0.695
+_VISUAL_POST_HEART_ROI_RIGHT_RATIO = 0.115
+_VISUAL_POST_HEART_ROI_BOTTOM_RATIO = 0.785
+# Fallback colour: only in localized heart icon ROI; never conclude liked on weak/ambiguous red.
+_VISUAL_ALREADY_LIKED_RED_RATIO_STRONG = 0.22
+_VISUAL_ALREADY_LIKED_RED_RATIO_AMBIGUOUS = 0.085
+
+# Strict action-button semantics (already-liked / verify) vs broad viewer chrome hints.
+_POST_VIEWER_ACTION_BUTTON_LIKED_DESC_RE = re.compile(
+    r"^(?:Unlike|Je n'aime plus|Gefällt mir nicht mehr)$",
+    re.IGNORECASE,
+)
+_POST_VIEWER_ACTION_BUTTON_NOT_LIKED_DESC_RE = re.compile(
+    r"^(?:Like|J'aime|Jaime|Me gusta|Gefällt mir)$",
+    re.IGNORECASE,
+)
+_POST_VIEWER_BROAD_LIKED_BY_DESC_RE = re.compile(
+    r"(?i)liked\s+by|^\d+[\s,.]*likes?\b|others?\s+liked",
+)
+_POST_VIEWER_BOUNDS_RE = re.compile(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]")
+
+
+def _device_window_wh(d: u2.Device) -> tuple[int, int]:
+    try:
+        w, h = d.window_size()
+        return max(1, int(w)), max(1, int(h))
+    except Exception:
+        return 1080, 2400
+
+
+def _parse_ui_bounds_str(bounds_raw: Any) -> dict[str, int] | None:
+    if isinstance(bounds_raw, dict):
+        try:
+            l = int(bounds_raw.get("left", 0))
+            t = int(bounds_raw.get("top", 0))
+            r = int(bounds_raw.get("right", 0))
+            b = int(bounds_raw.get("bottom", 0))
+            if r > l and b > t:
+                return {"left": l, "top": t, "right": r, "bottom": b}
+        except (TypeError, ValueError):
+            pass
+        return None
+    s = str(bounds_raw or "").strip()
+    m = _POST_VIEWER_BOUNDS_RE.search(s)
+    if not m:
+        return None
+    l, t, r, b = (int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4)))
+    if r <= l or b <= t:
+        return None
+    return {"left": l, "top": t, "right": r, "bottom": b}
+
+
+def _bounds_center_in_heart_action_band(
+    bounds: dict[str, int] | None,
+    *,
+    iw: int,
+    ih: int,
+) -> bool:
+    if not bounds:
+        return False
+    cx = (int(bounds["left"]) + int(bounds["right"])) // 2
+    cy = (int(bounds["top"]) + int(bounds["bottom"])) // 2
+    return (
+        int(iw * _VISUAL_POST_HEART_ROI_LEFT_RATIO)
+        <= cx
+        <= int(iw * _VISUAL_POST_HEART_ROI_RIGHT_RATIO)
+        and int(ih * _VISUAL_POST_HEART_ROI_TOP_RATIO)
+        <= cy
+        <= int(ih * _VISUAL_POST_HEART_ROI_BOTTOM_RATIO)
+    )
+
+
+def _ui_element_semantic_proof(el: Any, method: str) -> dict[str, Any]:
+    info: dict[str, Any] = {}
+    try:
+        info = dict(el.info or {})
+    except Exception:
+        info = {}
+    bounds = _parse_ui_bounds_str(info.get("bounds"))
+    desc = str(info.get("contentDescription") or info.get("content-desc") or "").strip()
+    text = str(info.get("text") or "").strip()
+    rid = str(
+        info.get("resourceId")
+        or info.get("resource-id")
+        or info.get("resourceName")
+        or ""
+    ).strip()
+    return {
+        "detection_method": method,
+        "matched_node_resource_id": rid,
+        "matched_node_content_desc": desc,
+        "matched_node_text": text,
+        "matched_node_bounds": bounds,
+        "matched_node_clickable": bool(info.get("clickable")),
+        "matched_node_class": str(info.get("className") or info.get("class") or ""),
+    }
+
+
+def _classify_like_semantic_desc(desc: str, text: str = "") -> str:
+    d = str(desc or "").strip()
+    t = str(text or "").strip()
+    if _POST_VIEWER_ACTION_BUTTON_LIKED_DESC_RE.match(d):
+        return "action_button_liked"
+    if _POST_VIEWER_ACTION_BUTTON_NOT_LIKED_DESC_RE.match(d):
+        return "action_button_not_liked"
+    dl = d.lower()
+    if _POST_VIEWER_BROAD_LIKED_BY_DESC_RE.search(d) or _POST_VIEWER_BROAD_LIKED_BY_DESC_RE.search(
+        t
+    ):
+        return "broad_liked_by_hint"
+    if "liked" in dl and "unlike" not in dl:
+        return "broad_liked_substring"
+    if re.search(r"(?i)\blike\b", d) and "unlike" not in dl:
+        return "broad_like_substring"
+    return "other"
+
+
+def _semantic_proof_extras(
+    proof: dict[str, Any],
+    *,
+    trusted_for_already_liked: bool,
+    match_scope: str,
+) -> dict[str, Any]:
+    desc = str(proof.get("matched_node_content_desc") or "")
+    text = str(proof.get("matched_node_text") or "")
+    cls = _classify_like_semantic_desc(desc, text)
+    iw, ih = 1080, 2400
+    bounds = proof.get("matched_node_bounds")
+    if isinstance(bounds, dict):
+        try:
+            iw = max(int(bounds["right"]), 1080)
+            ih = max(int(bounds["bottom"]), 2400)
+        except (TypeError, ValueError, KeyError):
+            pass
+    in_band = _bounds_center_in_heart_action_band(
+        bounds if isinstance(bounds, dict) else None, iw=iw, ih=ih
+    )
+    return {
+        "semantic_match_scope": match_scope,
+        "semantic_match_trusted_for_already_liked": bool(trusted_for_already_liked),
+        "semantic_node_class": cls,
+        "semantic_heart_action_band": bool(in_band),
+    }
+
+
+def _ui_proof_trusted_action_button_liked(
+    proof: dict[str, Any],
+    d: u2.Device,
+) -> bool:
+    desc = str(proof.get("matched_node_content_desc") or "")
+    if _classify_like_semantic_desc(desc) != "action_button_liked":
+        return False
+    iw, ih = _device_window_wh(d)
+    bounds = proof.get("matched_node_bounds")
+    if isinstance(bounds, dict):
+        return _bounds_center_in_heart_action_band(bounds, iw=iw, ih=ih)
+    return bool(proof.get("matched_node_clickable"))
+
+
+def _ui_proof_trusted_action_button_not_liked(
+    proof: dict[str, Any],
+    d: u2.Device,
+) -> bool:
+    desc = str(proof.get("matched_node_content_desc") or "")
+    if _classify_like_semantic_desc(desc) != "action_button_not_liked":
+        return False
+    iw, ih = _device_window_wh(d)
+    bounds = proof.get("matched_node_bounds")
+    if isinstance(bounds, dict):
+        return _bounds_center_in_heart_action_band(bounds, iw=iw, ih=ih)
+    return bool(proof.get("matched_node_clickable"))
+
+
+def _hierarchy_collect_like_semantic_nodes(hier: str) -> list[dict[str, Any]]:
+    if not hier:
+        return []
+    out: list[dict[str, Any]] = []
+    try:
+        root = ET.fromstring(hier)
+    except ET.ParseError:
+        return out
+    for el in root.iter():
+        desc = str(el.attrib.get("content-desc") or "").strip()
+        text = str(el.attrib.get("text") or "").strip()
+        if not desc and not text:
+            continue
+        dl = desc.lower()
+        tl = text.lower()
+        if not any(
+            k in dl or k in tl
+            for k in ("like", "unlike", "gusta", "jaime", "gefällt")
+        ):
+            continue
+        bounds = _parse_ui_bounds_str(el.attrib.get("bounds"))
+        node = {
+            "matched_node_resource_id": str(el.attrib.get("resource-id") or ""),
+            "matched_node_content_desc": desc,
+            "matched_node_text": text,
+            "matched_node_bounds": bounds,
+            "matched_node_clickable": str(el.attrib.get("clickable") or "").lower()
+            == "true",
+            "matched_node_class": str(el.attrib.get("class") or ""),
+            "semantic_node_class": _classify_like_semantic_desc(desc, text),
+        }
+        out.append(node)
+    return out
+
+
+def _log_rejected_broad_liked_semantic_candidates(
+    d: u2.Device,
+    *,
+    source_profile_username: str | None,
+) -> None:
+    """Log (and reject) broad 'Liked…' hints that must not drive already-liked=true."""
+    probes: list[tuple[str, Callable[[], Any]]] = [
+        ("ui_description_liked_substring", lambda: d(descriptionContains="Liked")),
+        ("ui_text_liked_substring", lambda: d(textContains="Liked")),
+        ("ui_description_like_substring", lambda: d(descriptionContains="Like")),
+    ]
+    for method, pred in probes:
+        try:
+            el = pred()
+            if not el.exists(timeout=0.1):
+                continue
+            proof = _ui_element_semantic_proof(el, method)
+            cls = _classify_like_semantic_desc(
+                str(proof.get("matched_node_content_desc") or ""),
+                str(proof.get("matched_node_text") or ""),
+            )
+            if cls in ("action_button_liked", "action_button_not_liked"):
+                continue
+            extras = _semantic_proof_extras(
+                proof,
+                trusted_for_already_liked=False,
+                match_scope="broad_viewer_hint",
+            )
+            merged = dict(proof)
+            merged.update(extras)
+            log(
+                "info",
+                "visual_post_already_liked_semantic_candidate_rejected_non_action_button",
+                source_profile_username=source_profile_username or "",
+                rejection_reason=cls,
+                **merged,
+            )
+        except Exception:
+            continue
+
+    try:
+        hier = str(d.dump_hierarchy(compressed=False))
+    except Exception:
+        try:
+            hier = str(d.dump_hierarchy())
+        except Exception:
+            hier = ""
+    for node in _hierarchy_collect_like_semantic_nodes(hier):
+        cls = str(node.get("semantic_node_class") or "")
+        if cls not in ("broad_liked_by_hint", "broad_liked_substring", "broad_like_substring"):
+            continue
+        proof = dict(node)
+        extras = _semantic_proof_extras(
+            proof,
+            trusted_for_already_liked=False,
+            match_scope="broad_viewer_hint",
+        )
+        merged = dict(proof)
+        merged.update(extras)
+        log(
+            "info",
+            "visual_post_already_liked_semantic_candidate_rejected_non_action_button",
+            source_profile_username=source_profile_username or "",
+            rejection_reason=cls,
+            hierarchy_scan=True,
+            **merged,
+        )
+
+
+def _ui_post_viewer_broad_like_chrome_hint(d: u2.Device) -> tuple[bool, str, float]:
+    """
+    Weak viewer-open chrome only (may match 'Liked by …'); never used for already-liked=true.
+    """
+    checks: list[tuple[str, Callable[[], object], float]] = [
+        ("ui_description_unlike", lambda: d(descriptionContains="Unlike"), 0.75),
+        ("ui_description_liked", lambda: d(descriptionContains="Liked"), 0.7),
+        ("ui_text_unlike", lambda: d(textContains="Unlike"), 0.72),
+        ("ui_description_fr_unlike", lambda: d(descriptionContains="Je n'aime plus"), 0.74),
+        ("ui_description_de_unlike", lambda: d(descriptionContains="Gefällt mir nicht mehr"), 0.72),
+        ("ui_description_exact_like", lambda: d(descriptionMatches="(?i)^Like$"), 0.74),
+    ]
+    for method, pred, conf in checks:
+        try:
+            if pred().exists(timeout=0.12):
+                return True, method, conf
+        except Exception:
+            continue
+    return False, "", 0.0
+
+
+def _ui_post_viewer_action_button_liked_strict(
+    d: u2.Device,
+) -> tuple[bool, str, float, dict[str, Any]]:
+    """Trusted already-liked: exact Unlike (or localized) on the action heart button."""
+    checks: list[tuple[str, Callable[[], object], float]] = [
+        ("ui_description_unlike_exact", lambda: d(descriptionMatches="(?i)^Unlike$"), 0.94),
+        ("ui_description_fr_unlike", lambda: d(descriptionMatches="(?i)^Je n'aime plus$"), 0.92),
+        (
+            "ui_description_de_unlike",
+            lambda: d(descriptionMatches="(?i)^Gefällt mir nicht mehr$"),
+            0.9,
+        ),
+        ("ui_text_unlike_exact", lambda: d(textMatches="(?i)^Unlike$"), 0.9),
+    ]
+    for method, pred, conf in checks:
+        try:
+            el = pred()
+            if not el.exists(timeout=0.14):
+                continue
+            proof = _ui_element_semantic_proof(el, method)
+            if _ui_proof_trusted_action_button_liked(proof, d):
+                proof.update(
+                    _semantic_proof_extras(
+                        proof,
+                        trusted_for_already_liked=True,
+                        match_scope="action_button",
+                    )
+                )
+                return True, method, conf, proof
+        except Exception:
+            continue
+    return False, "", 0.0, {}
+
+
+def _ui_post_viewer_action_button_not_liked_strict(
+    d: u2.Device,
+) -> tuple[bool, str, float, dict[str, Any]]:
+    """Trusted not-liked: exact Like (or localized) on the action heart button."""
+    if _ui_post_viewer_action_button_liked_strict(d)[0]:
+        return False, "", 0.0, {}
+    checks: list[tuple[str, Callable[[], object], float]] = [
+        ("ui_description_exact_like", lambda: d(descriptionMatches="(?i)^Like$"), 0.94),
+        ("ui_description_fr_jaime", lambda: d(descriptionMatches="(?i)^J'aime$|^Jaime$"), 0.92),
+        ("ui_description_es_like", lambda: d(descriptionMatches="(?i)^Me gusta$"), 0.9),
+        ("ui_text_exact_like", lambda: d(textMatches="(?i)^Like$"), 0.9),
+        ("ui_description_de_like", lambda: d(descriptionMatches="(?i)^Gefällt mir$"), 0.88),
+    ]
+    for method, pred, conf in checks:
+        try:
+            el = pred()
+            if not el.exists(timeout=0.12):
+                continue
+            proof = _ui_element_semantic_proof(el, method)
+            if _ui_proof_trusted_action_button_not_liked(proof, d):
+                proof.update(
+                    _semantic_proof_extras(
+                        proof,
+                        trusted_for_already_liked=False,
+                        match_scope="action_button",
+                    )
+                )
+                return True, method, conf, proof
+        except Exception:
+            continue
+    return False, "", 0.0, {}
+
+
+def _visual_post_like_pad_heart_bounds(
+    raw_bounds: dict[str, Any],
+    *,
+    iw: int,
+    ih: int,
+) -> dict[str, int] | None:
+    """Tight symmetric pad around accessibility bounds (aligned with *_heart_bounds_from_ui)."""
+    try:
+        l = int(raw_bounds.get("left", 0))
+        t = int(raw_bounds.get("top", 0))
+        r = int(raw_bounds.get("right", 0))
+        b = int(raw_bounds.get("bottom", 0))
+    except (TypeError, ValueError):
+        return None
+    if r <= l + 2 or b <= t + 2:
+        return None
+    pad = 2
+    l = max(0, min(iw - 4, l - pad))
+    t = max(0, min(ih - 4, t - pad))
+    r = max(l + 6, min(iw - 1, r + pad))
+    b = max(t + 6, min(ih - 1, b + pad))
+    return {"left": l, "top": t, "right": r, "bottom": b}
+
+
+def _visual_post_like_ui_header_anchor_bounds(
+    d: u2.Device,
+    *,
+    iw: int,
+    ih: int,
+    exp_handle: str,
+) -> tuple[dict[str, int] | None, str]:
+    if not exp_handle:
+        return None, ""
+    probes: list[tuple[str, Callable[[], Any]]] = [
+        ("ui_post_anchor_text_exact", lambda: d(text=exp_handle)),
+        ("ui_post_anchor_text_contains", lambda: d(textContains=exp_handle)),
+        (
+            "ui_post_anchor_description_contains",
+            lambda: d(descriptionContains=exp_handle),
+        ),
+    ]
+    best: tuple[int, dict[str, int]] | None = None
+    best_method = ""
+    for method, pred in probes:
+        try:
+            el = pred()
+            if not el.exists(timeout=0.13):
+                continue
+            pb = _visual_post_like_pad_heart_bounds(
+                dict(el.info.get("bounds") or {}),
+                iw=iw,
+                ih=ih,
+            )
+            if not pb:
+                continue
+            top = int(pb["top"])
+            if top < int(ih * 0.03) or top > int(ih * 0.55):
+                continue
+            if best is None or top < best[0]:
+                best = (top, pb)
+                best_method = method
+        except Exception:
+            continue
+    if best:
+        return best[1], best_method or "ui_post_header_anchor"
+    return None, ""
+
+
+def _visual_post_like_hierarchy_header_anchor_bounds(
+    hier: str,
+    *,
+    ih: int,
+    exp_handle: str,
+) -> tuple[dict[str, int] | None, str]:
+    if not hier or not exp_handle:
+        return None, ""
+    try:
+        root = ET.fromstring(hier)
+    except ET.ParseError:
+        return None, ""
+    want = exp_handle.lower()
+    best_top: int | None = None
+    best_bb: dict[str, int] | None = None
+    for el in root.iter():
+        text = str(el.attrib.get("text") or "").strip()
+        if not text:
+            continue
+        if _normalize_handle(text.lstrip("@")).lower() != want:
+            continue
+        bb = _parse_ui_bounds_str(el.attrib.get("bounds"))
+        if not bb:
+            continue
+        tp = int(bb["top"])
+        if tp < int(ih * 0.03) or tp > int(ih * 0.55):
+            continue
+        if best_top is None or tp < best_top:
+            best_top = tp
+            best_bb = bb
+    if best_bb:
+        return best_bb, "hierarchy_username_text_exact"
+    return None, ""
+
+
+def _visual_post_like_collect_action_heart_candidates(
+    hier: str,
+    *,
+    iw: int,
+    ih: int,
+) -> list[dict[str, Any]]:
+    """Strict action-button Like/Unlike nodes from one hierarchy dump."""
+    out: list[dict[str, Any]] = []
+    for node in _hierarchy_collect_like_semantic_nodes(hier):
+        cls = str(node.get("semantic_node_class") or "")
+        if cls not in ("action_button_liked", "action_button_not_liked"):
+            continue
+        b = node.get("matched_node_bounds")
+        if not isinstance(b, dict):
+            continue
+        if not _bounds_center_in_heart_action_band(b, iw=iw, ih=ih):
+            continue
+        st = "liked" if cls == "action_button_liked" else "not_liked"
+        cy = (int(b["top"]) + int(b["bottom"])) // 2
+        out.append(
+            {
+                **node,
+                "heart_state": st,
+                "center_y": cy,
+            }
+        )
+    return out
+
+
+def _visual_post_like_select_anchored_heart_from_dump(
+    d: u2.Device,
+    *,
+    iw: int,
+    ih: int,
+    expected_follower_username: str,
+    hier: str,
+) -> tuple[dict[str, int] | None, str, dict[str, Any]]:
+    """
+    Pick the heart for the *current* opened post: drop hearts above the resolved
+    post header bottom (y_floor). Safe-abort when multiple hearts show with no header.
+    """
+    meta: dict[str, Any] = {
+        "expected_follower_username": expected_follower_username,
+        "post_header_bounds": None,
+        "post_header_method": "",
+        "y_floor": None,
+        "selected_like_button_bounds": None,
+        "selected_like_button_state": None,
+        "failure_reason": None,
+        "hard_abort": False,
+        "allow_legacy_fallback": False,
+    }
+    exp = _normalize_handle(expected_follower_username)
+    if not exp:
+        meta["allow_legacy_fallback"] = True
+        meta["failure_reason"] = "no_expected_username_for_anchor"
+        return None, "", meta
+
+    candidates = _visual_post_like_collect_action_heart_candidates(
+        hier, iw=iw, ih=ih
+    )
+    slim = []
+    for c in candidates:
+        b = c.get("matched_node_bounds")
+        if not isinstance(b, dict):
+            continue
+        slim.append(
+            {
+                "bounds": dict(b),
+                "heart_state": c.get("heart_state"),
+                "resource_id": c.get("matched_node_resource_id"),
+                "desc": (str(c.get("matched_node_content_desc") or ""))[:180],
+                "text": (str(c.get("matched_node_text") or ""))[:120],
+            }
+        )
+    try:
+        log(
+            "info",
+            "visual_post_like_candidates_collected",
+            expected_follower_username=exp,
+            candidate_count=len(slim),
+            candidates=slim[:8],
+        )
+    except Exception:
+        pass
+
+    if not candidates:
+        meta["allow_legacy_fallback"] = True
+        meta["failure_reason"] = "no_action_heart_candidates_in_hierarchy"
+        return None, "", meta
+
+    hb, hm = _visual_post_like_ui_header_anchor_bounds(
+        d, iw=iw, ih=ih, exp_handle=exp
+    )
+    if hb is None:
+        hb, hm = _visual_post_like_hierarchy_header_anchor_bounds(
+            hier, ih=ih, exp_handle=exp
+        )
+    y_floor: int | None = None
+    if hb is not None:
+        try:
+            y_floor = int(hb["bottom"]) + max(12, int(ih * 0.015))
+        except (TypeError, ValueError, KeyError):
+            y_floor = None
+    meta["post_header_bounds"] = hb
+    meta["post_header_method"] = hm
+    meta["y_floor"] = y_floor
+
+    if y_floor is None:
+        if len(candidates) == 1:
+            b0 = candidates[0].get("matched_node_bounds")
+            if isinstance(b0, dict):
+                pb = _visual_post_like_pad_heart_bounds(b0, iw=iw, ih=ih)
+                if pb:
+                    st0 = str(candidates[0].get("heart_state") or "")
+                    meta["selected_like_button_bounds"] = pb
+                    meta["selected_like_button_state"] = st0
+                    try:
+                        log(
+                            "info",
+                            "visual_post_like_target_anchored_to_current_post",
+                            expected_follower_username=exp,
+                            post_header_bounds=None,
+                            y_floor=None,
+                            selected_like_button_bounds=pb,
+                            selected_like_button_state=st0,
+                            anchor_mode="single_heart_no_header_fallback",
+                        )
+                    except Exception:
+                        pass
+                    return pb, "hierarchy_heart_single_no_header_fallback", meta
+        meta["hard_abort"] = True
+        meta["failure_reason"] = "ambiguous_like_hearts_no_header_anchor"
+        return None, "ambiguous_like_hearts_no_header_anchor", meta
+
+    kept: list[dict[str, Any]] = []
+    for c in candidates:
+        b = c.get("matched_node_bounds")
+        if not isinstance(b, dict):
+            continue
+        cy = (int(b["top"]) + int(b["bottom"])) // 2
+        if cy < int(y_floor):
+            try:
+                log(
+                    "info",
+                    "visual_post_like_candidate_rejected_above_current_post_header",
+                    expected_follower_username=exp,
+                    candidate_center_y=cy,
+                    y_floor=int(y_floor),
+                    candidate_bounds=dict(b),
+                    heart_state=c.get("heart_state"),
+                )
+            except Exception:
+                pass
+            continue
+        kept.append(c)
+
+    if not kept:
+        meta["hard_abort"] = True
+        meta["failure_reason"] = "no_like_candidates_below_post_header_y_floor"
+        return None, "like_heart_empty_below_post_header_y_floor", meta
+
+    prefer_nl = [k for k in kept if str(k.get("heart_state") or "") == "not_liked"]
+    pool = prefer_nl or kept
+    chosen = max(
+        pool,
+        key=lambda k: int(
+            (k.get("matched_node_bounds") or {}).get("bottom", 0)  # type: ignore[union-attr]
+        ),
+    )
+    bb = chosen.get("matched_node_bounds")
+    st_ch = str(chosen.get("heart_state") or "")
+    if not isinstance(bb, dict):
+        meta["hard_abort"] = True
+        meta["failure_reason"] = "chosen_heart_missing_bounds"
+        return None, "like_heart_chosen_missing_bounds", meta
+    pb = _visual_post_like_pad_heart_bounds(bb, iw=iw, ih=ih)
+    if not pb:
+        meta["hard_abort"] = True
+        meta["failure_reason"] = "like_heart_pad_failed"
+        return None, "like_heart_pad_failed", meta
+    meta["selected_like_button_bounds"] = pb
+    meta["selected_like_button_state"] = st_ch
+    try:
+        log(
+            "info",
+            "visual_post_like_target_anchored_to_current_post",
+            expected_follower_username=exp,
+            post_header_bounds=hb,
+            y_floor=y_floor,
+            selected_like_button_bounds=pb,
+            selected_like_button_state=st_ch,
+            anchor_mode="header_y_floor_bottommost_action_row",
+        )
+    except Exception:
+        pass
+    return pb, "hierarchy_heart_anchored_below_post_header", meta
+
+
+def _visual_post_like_heart_bounds_from_ui(
+    d: u2.Device,
+    *,
+    iw: int,
+    ih: int,
+) -> tuple[dict[str, int] | None, str]:
+    """Resolve heart control bounds from accessibility (device px ≈ screenshot px)."""
+    probes: list[tuple[str, Callable[[], Any]]] = [
+        ("ui_bounds_unlike", lambda: d(descriptionContains="Unlike")),
+        ("ui_bounds_like_exact", lambda: d(descriptionMatches="(?i)^Like$")),
+        ("ui_bounds_fr_jaime", lambda: d(descriptionMatches="(?i)^J'aime$|^Jaime$")),
+        ("ui_bounds_es_megusta", lambda: d(descriptionMatches="(?i)^Me gusta$")),
+    ]
+    for method, pred in probes:
+        try:
+            el = pred()
+            if not el.wait(timeout=0.14):
+                continue
+            raw = el.info.get("bounds") or {}
+            l = int(raw.get("left", 0))
+            t = int(raw.get("top", 0))
+            r = int(raw.get("right", 0))
+            b = int(raw.get("bottom", 0))
+            if r <= l + 2 or b <= t + 2:
+                continue
+            pad = 2
+            l = max(0, min(iw - 4, l - pad))
+            t = max(0, min(ih - 4, t - pad))
+            r = max(l + 6, min(iw - 1, r + pad))
+            b = max(t + 6, min(ih - 1, b + pad))
+            return {"left": l, "top": t, "right": r, "bottom": b}, method
+        except Exception:
+            continue
+    return None, ""
+
+
+def _visual_post_like_heart_crop_bounds(
+    iw: int,
+    ih: int,
+    *,
+    heart_bounds: dict[str, Any] | None = None,
+    d: u2.Device | None = None,
+    expected_follower_username: str | None = None,
+) -> tuple[dict[str, int] | None, str]:
+    """Image-space heart ROI; prefers anchored UI+hierarchy picks when username known."""
+    if isinstance(heart_bounds, dict):
+        try:
+            l = int(heart_bounds.get("left", 0))
+            t = int(heart_bounds.get("top", 0))
+            r = int(heart_bounds.get("right", 0))
+            b = int(heart_bounds.get("bottom", 0))
+            if r > l + 4 and b > t + 4:
+                return {"left": l, "top": t, "right": r, "bottom": b}, "caller_heart_bounds"
+        except (TypeError, ValueError):
+            pass
+    follower_u = _normalize_handle(str(expected_follower_username or ""))
+    hier = ""
+    if d is not None and follower_u:
+        try:
+            hier = str(d.dump_hierarchy(compressed=False))
+        except Exception:
+            try:
+                hier = str(d.dump_hierarchy())
+            except Exception:
+                hier = ""
+        if hier:
+            pick_b, pick_src, anch = _visual_post_like_select_anchored_heart_from_dump(
+                d,
+                iw=iw,
+                ih=ih,
+                expected_follower_username=follower_u,
+                hier=hier,
+            )
+            if pick_b is not None:
+                return pick_b, pick_src
+            if bool(anch.get("hard_abort")):
+                reason = str(anch.get("failure_reason") or pick_src or "")
+                return None, reason or "heart_anchor_hard_abort"
+
+    if d is not None:
+        ui_b, ui_m = _visual_post_like_heart_bounds_from_ui(d, iw=iw, ih=ih)
+        if ui_b:
+            return ui_b, ui_m
+        if follower_u and hier:
+            return None, "heart_bounds_unresolved_after_anchor_attempt"
+    return {
+        "left": int(iw * _VISUAL_POST_HEART_ROI_LEFT_RATIO),
+        "top": int(ih * _VISUAL_POST_HEART_ROI_TOP_RATIO),
+        "right": int(iw * _VISUAL_POST_HEART_ROI_RIGHT_RATIO),
+        "bottom": int(ih * _VISUAL_POST_HEART_ROI_BOTTOM_RATIO),
+    }, "action_bar_ratio_fallback"
+
+
+def _visual_post_like_heart_crop_bounds_simple(
+    iw: int,
+    ih: int,
+    *,
+    heart_bounds: dict[str, Any] | None = None,
+    d: u2.Device | None = None,
+    expected_follower_username: str | None = None,
+) -> dict[str, int]:
+    b, _ = _visual_post_like_heart_crop_bounds(
+        iw,
+        ih,
+        heart_bounds=heart_bounds,
+        d=d,
+        expected_follower_username=expected_follower_username,
+    )
+    if b is None:
+        return {
+            "left": int(iw * _VISUAL_POST_HEART_ROI_LEFT_RATIO),
+            "top": int(ih * _VISUAL_POST_HEART_ROI_TOP_RATIO),
+            "right": int(iw * _VISUAL_POST_HEART_ROI_RIGHT_RATIO),
+            "bottom": int(ih * _VISUAL_POST_HEART_ROI_BOTTOM_RATIO),
+        }
+    return b
+
+
+def _visual_filled_heart_red_ratio(
+    im: Any,
+    iw: int,
+    ih: int,
+    *,
+    heart_bounds: dict[str, Any] | None = None,
+    d: u2.Device | None = None,
+) -> tuple[float, dict[str, int], str]:
+    """Share of pixels in the localized heart ROI that look like a filled (liked) heart."""
+    b, bounds_src = _visual_post_like_heart_crop_bounds(
+        iw, ih, heart_bounds=heart_bounds, d=d
+    )
+    if b is None:
+        b = {
+            "left": int(iw * _VISUAL_POST_HEART_ROI_LEFT_RATIO),
+            "top": int(ih * _VISUAL_POST_HEART_ROI_TOP_RATIO),
+            "right": int(iw * _VISUAL_POST_HEART_ROI_RIGHT_RATIO),
+            "bottom": int(ih * _VISUAL_POST_HEART_ROI_BOTTOM_RATIO),
+        }
+        bounds_src = f"{bounds_src}|ratio_fallback_after_none_bounds"
+    lb_left, lb_top = b["left"], b["top"]
+    lb_right, lb_bottom = b["right"], b["bottom"]
     if lb_right <= lb_left + 4 or lb_bottom <= lb_top + 4:
-        return 0.0
+        return 0.0, b, bounds_src
     roi = im.crop((lb_left, lb_top, lb_right + 1, lb_bottom + 1))
     n = 0
     nr = 0
     for rr, gg, bb in roi.getdata():
-        r, g, b = int(rr), int(gg), int(bb)
+        r, g, bch = int(rr), int(gg), int(bb)
         n += 1
-        if r >= 130 and r >= g + 22 and r >= b + 18:
+        if r >= 140 and r >= g + 28 and r >= bch + 24:
             nr += 1
-    return nr / max(n, 1)
+    return nr / max(n, 1), b, bounds_src
 
 
 def _ui_post_viewer_liked_quick(d: u2.Device) -> tuple[bool, str, float]:
-    """Fast UiAutomator hints that the post is already liked (Unlike / localized unlike)."""
-    checks: list[tuple[str, Callable[[], object], float]] = [
-        ("ui_description_unlike", lambda: d(descriptionContains="Unlike"), 0.9),
-        ("ui_description_liked", lambda: d(descriptionContains="Liked"), 0.82),
-        ("ui_text_unlike", lambda: d(textContains="Unlike"), 0.85),
-        ("ui_description_fr_unlike", lambda: d(descriptionContains="Je n'aime plus"), 0.88),
-        ("ui_description_de_unlike", lambda: d(descriptionContains="Gefällt mir nicht mehr"), 0.85),
-    ]
-    for method, pred, conf in checks:
-        try:
-            if pred().exists(timeout=0.14):
-                return True, method, conf
-        except Exception:
-            continue
+    """Broad viewer chrome hint only (may match 'Liked by …'); not for already-liked decisions."""
+    return _ui_post_viewer_broad_like_chrome_hint(d)
+
+
+def _ui_post_viewer_not_liked_quick(d: u2.Device) -> tuple[bool, str, float]:
+    """Broad viewer chrome: exact action-button Like when present (not 'Liked by …')."""
+    ok, method, conf, _proof = _ui_post_viewer_action_button_not_liked_strict(d)
+    if ok:
+        return True, method, conf
+    hint, hint_m, hint_c = _ui_post_viewer_broad_like_chrome_hint(d)
+    if hint and hint_m in (
+        "ui_description_exact_like",
+        "ui_description_unlike",
+        "ui_text_unlike",
+    ):
+        return True, hint_m, hint_c
     return False, "", 0.0
 
 
@@ -11083,34 +13405,357 @@ def _hierarchy_suggests_liked_state(hier: str) -> bool:
         return False
     needles = (
         'content-desc="Unlike"',
-        "content-desc=\"Unlike\"",
-        "Unlike",
-        "Je n'aime plus",
-        "Gefällt mir nicht mehr",
+        'content-desc="Je n\'aime plus"',
+        'content-desc="Gefällt mir nicht mehr"',
         'text="Unlike"',
     )
     return any(n in hier for n in needles)
+
+
+def _hierarchy_suggests_not_liked_state(hier: str) -> bool:
+    if not hier or _hierarchy_suggests_liked_state(hier):
+        return False
+    needles = (
+        'content-desc="Like"',
+        'content-desc="J\'aime"',
+        'content-desc="Jaime"',
+        'content-desc="Me gusta"',
+        'content-desc="Gefällt mir"',
+        'text="Like"',
+    )
+    return any(n in hier for n in needles)
+
+
+# Post-tap verify only: heart action row_feed_button_like (IG) or tight bounds in heart band.
+_POST_VERIFY_HEART_RID_RE = re.compile(
+    r"(row_feed_button_like|clip_button_like|media_action_bar_like_button|feed_like)",
+    re.I,
+)
+
+
+def _verify_post_tap_text_is_unlike_semantic(desc: str, text: str = "") -> bool:
+    """Unlike / localized unlike / 'double tap … unlike' — rejects engagement / Liked by."""
+    c = f"{desc} {text}".strip()
+    if not c:
+        return False
+    if _POST_VIEWER_BROAD_LIKED_BY_DESC_RE.search(c):
+        return False
+    cl = c.lower()
+    if "liked by" in cl:
+        return False
+    if re.fullmatch(r"(?i)\d[\d,.\s]*\s*likes?", c.strip()):
+        return False
+    if re.search(r"(?i)\bunlike\b", c):
+        return True
+    if re.search(r"(?i)double\s+tap[^\n]*\bunlike\b", c):
+        return True
+    if "je n'aime plus" in cl or "gefällt mir nicht mehr" in cl:
+        return True
+    return False
+
+
+def _ui_heart_button_trusted_for_post_verify(proof: dict[str, Any], d: u2.Device) -> bool:
+    desc = str(proof.get("matched_node_content_desc") or "")
+    text = str(proof.get("matched_node_text") or "")
+    if not _verify_post_tap_text_is_unlike_semantic(desc, text):
+        return False
+    rid = str(proof.get("matched_node_resource_id") or "")
+    iw, ih = _device_window_wh(d)
+    bounds = proof.get("matched_node_bounds")
+    if _POST_VERIFY_HEART_RID_RE.search(rid):
+        return True
+    if isinstance(bounds, dict) and _bounds_center_in_heart_action_band(
+        bounds, iw=iw, ih=ih
+    ):
+        return True
+    return False
+
+
+def _ui_post_viewer_liked_state_for_verify(
+    d: u2.Device,
+) -> tuple[bool, str, float, dict[str, Any]]:
+    """
+    Post-tap verification only: accept Unlike / Double tap to unlike on the real heart control.
+    Does not use broad engagement or 'Liked by' (filtered in _verify_post_tap_text_is_unlike_semantic).
+    """
+    ok, method, conf, proof = _ui_post_viewer_action_button_liked_strict(d)
+    if ok:
+        return True, method, conf, proof
+
+    probes: list[tuple[str, Callable[[], Any], float]] = [
+        (
+            "ui_action_button_unlike_desc_contains",
+            lambda: d(descriptionContains="Unlike"),
+            0.9,
+        ),
+        (
+            "ui_action_button_unlike_regex",
+            lambda: d(descriptionMatches=r"(?i).*\bunlike\b.*"),
+            0.86,
+        ),
+    ]
+    for method_label, pred, conf in probes:
+        try:
+            el = pred()
+            if not el.exists(timeout=0.16):
+                continue
+            proof = _ui_element_semantic_proof(el, method_label)
+            if _ui_heart_button_trusted_for_post_verify(proof, d):
+                proof["verification_relaxed"] = True
+                return True, "ui_action_button_unlike", conf, proof
+        except Exception:
+            continue
+
+    try:
+        el = d(resourceId="com.instagram.android:id/row_feed_button_like")
+        if el.exists(timeout=0.12):
+            proof = _ui_element_semantic_proof(
+                el, "ui_resource_row_feed_button_like_probe"
+            )
+            if _ui_heart_button_trusted_for_post_verify(proof, d):
+                return True, "ui_action_button_unlike", 0.91, proof
+    except Exception:
+        pass
+
+    return False, "", 0.0, {}
+
+
+def _hierarchy_liked_state_for_post_verify(hier: str) -> tuple[bool, str]:
+    """
+    Post-tap verify: heart button resource-id + unlike semantics, then legacy literal needles.
+    """
+    if not hier:
+        return False, ""
+    if _hierarchy_suggests_liked_state(hier):
+        return True, "hierarchy_unlike_literal"
+
+    try:
+        root = ET.fromstring(hier)
+    except ET.ParseError:
+        return False, ""
+
+    iw, ih = 1080, 2400
+    for el in root.iter():
+        rid = str(el.attrib.get("resource-id") or "")
+        desc = str(el.attrib.get("content-desc") or "").strip()
+        text = str(el.attrib.get("text") or "").strip()
+        combined = f"{desc} {text}".strip()
+        if not combined:
+            continue
+        if _POST_VIEWER_BROAD_LIKED_BY_DESC_RE.search(combined):
+            continue
+        if not _verify_post_tap_text_is_unlike_semantic(desc, text):
+            continue
+        in_heart = False
+        if _POST_VERIFY_HEART_RID_RE.search(rid):
+            in_heart = True
+        else:
+            b = _parse_ui_bounds_str(el.attrib.get("bounds"))
+            if b and _bounds_center_in_heart_action_band(b, iw=iw, ih=ih):
+                in_heart = True
+        if in_heart:
+            return True, "hierarchy_unlike_button"
+    return False, ""
+
+
+def _visual_post_like_verify_red_thresholds() -> tuple[float, float]:
+    """Returns (strong, ambiguous_weak) for verify-only red ratio logging."""
+    strong = float(
+        getattr(config, "VISUAL_POST_LIKE_VERIFY_RED_RATIO_STRONG", 0.14) or 0.14
+    )
+    weak = max(0.05, strong * 0.55)
+    return strong, weak
+
+
+def _sanitize_verify_pre_tap_heart_bounds(
+    hb: dict[str, Any] | None,
+    *,
+    iw: int,
+    ih: int,
+) -> dict[str, int] | None:
+    """Clip image-space bounds from visual_post_like_target_detected to a sane ROI."""
+    if not isinstance(hb, dict) or iw <= 8 or ih <= 8:
+        return None
+    try:
+        l = int(hb.get("left", -1))
+        t = int(hb.get("top", -1))
+        r = int(hb.get("right", -1))
+        b = int(hb.get("bottom", -1))
+    except (TypeError, ValueError):
+        return None
+    if r <= l + 4 or b <= t + 4:
+        return None
+    l = max(0, min(iw - 4, l))
+    t = max(0, min(ih - 4, t))
+    r = max(l + 6, min(iw - 1, r))
+    b = max(t + 6, min(ih - 1, b))
+    if r <= l + 4 or b <= t + 4:
+        return None
+    return {"left": l, "top": t, "right": r, "bottom": b}
+
+
+def _visual_filled_heart_red_ratio_for_verify(
+    im: Any,
+    iw: int,
+    ih: int,
+    d: u2.Device,
+    *,
+    preferred_heart_bounds: dict[str, Any] | None = None,
+) -> tuple[float, dict[str, int], str]:
+    """
+    Post-like verify: prefer pre-tap like-button ROI (image space) when provided, then UI Unlike/Like
+    probes, then action-bar ratio fallback.
+    """
+    pb = _sanitize_verify_pre_tap_heart_bounds(preferred_heart_bounds, iw=iw, ih=ih)
+    if pb is not None:
+        ratio, crop_b, _inner = _visual_filled_heart_red_ratio(
+            im, iw, ih, heart_bounds=pb, d=None
+        )
+        return ratio, crop_b, "pre_tap_like_button_bounds"
+
+    hb, hb_src = _visual_post_like_heart_bounds_from_ui(d, iw=iw, ih=ih)
+    if hb:
+        ratio, crop_b, src_inner = _visual_filled_heart_red_ratio(
+            im, iw, ih, heart_bounds=dict(hb), d=None
+        )
+        eff_src = hb_src if str(hb_src or "").startswith("ui_bounds") else src_inner
+        return ratio, crop_b, str(eff_src or src_inner or hb_src or "")
+
+    ratio, crop_b, src = _visual_filled_heart_red_ratio(im, iw, ih, heart_bounds=None, d=d)
+    return ratio, crop_b, str(src or "")
+
+
+def _try_verify_red_ratio_from_image_file(
+    image_path: str | None,
+    d: u2.Device,
+    *,
+    preferred_heart_bounds: dict[str, Any] | None = None,
+) -> tuple[float | None, dict[str, int] | None, str]:
+    """
+    Fast path: analyze existing PNG (e.g. visual_post_like_after_tap_*.png) without a new screenshot.
+    Returns (ratio or None if skipped, crop_bounds, bounds_source_tag).
+    """
+    if not image_path:
+        return None, None, "no_path"
+    try:
+        p = Path(str(image_path).strip())
+        if not p.is_file():
+            return None, None, "missing_file"
+        from PIL import Image
+
+        im = Image.open(str(p)).convert("RGB")
+        iw, ih = im.size
+        ratio, hb_dict, hsrc = _visual_filled_heart_red_ratio_for_verify(
+            im,
+            iw,
+            ih,
+            d,
+            preferred_heart_bounds=preferred_heart_bounds,
+        )
+        return float(ratio), hb_dict, str(hsrc or "")
+    except Exception:
+        return None, None, "read_failed"
+
+
+def _visual_post_already_liked_out(
+    *,
+    already_liked: bool,
+    detection_method: str,
+    confidence: float,
+    meta: dict[str, Any],
+    source_profile_username: str | None,
+    semantic_like_state: str = "",
+    already_liked_decision_reason: str = "",
+    crop_bounds: dict[str, int] | None = None,
+    red_ratio: float | None = None,
+    semantic_proof: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "already_liked": bool(already_liked),
+        "detection_method": detection_method,
+        "confidence": float(confidence),
+        "current_activity": meta.get("current_activity"),
+        "current_package": meta.get("current_package"),
+        "source_profile_username": source_profile_username or "",
+        "semantic_like_state": semantic_like_state,
+        "already_liked_decision_reason": already_liked_decision_reason,
+    }
+    if isinstance(semantic_proof, dict):
+        for k in (
+            "matched_node_resource_id",
+            "matched_node_content_desc",
+            "matched_node_text",
+            "matched_node_bounds",
+            "semantic_match_scope",
+            "semantic_match_trusted_for_already_liked",
+            "semantic_node_class",
+            "semantic_heart_action_band",
+        ):
+            if k in semantic_proof:
+                out[k] = semantic_proof[k]
+    if crop_bounds is not None:
+        out["crop_bounds"] = dict(crop_bounds)
+    if red_ratio is not None:
+        out["red_ratio"] = round(float(red_ratio), 4)
+    return out
 
 
 def visual_post_already_liked(
     d: u2.Device,
     *,
     source_profile_username: str | None = None,
+    heart_bounds: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Detect whether the open post viewer already shows a liked state (no tap).
+  Semantic Unlike/Like first; colour fallback only when unambiguous and strong.
     """
     meta = _followers_current_pkg_activity(d)
-    ok_ui, method_ui, conf_ui = _ui_post_viewer_liked_quick(d)
-    if ok_ui:
-        return {
-            "already_liked": True,
-            "detection_method": method_ui,
-            "confidence": conf_ui,
-            "current_activity": meta.get("current_activity"),
-            "current_package": meta.get("current_package"),
-            "source_profile_username": source_profile_username or "",
-        }
+
+    _log_rejected_broad_liked_semantic_candidates(
+        d, source_profile_username=source_profile_username
+    )
+
+    ok_liked, method_liked, conf_liked, proof_liked = (
+        _ui_post_viewer_action_button_liked_strict(d)
+    )
+    if ok_liked:
+        out = _visual_post_already_liked_out(
+            already_liked=True,
+            detection_method=method_liked,
+            confidence=conf_liked,
+            meta=meta,
+            source_profile_username=source_profile_username,
+            semantic_like_state="unlike",
+            already_liked_decision_reason="action_button_unlike_confirmed",
+            semantic_proof=proof_liked,
+        )
+        try:
+            log("info", "visual_post_already_liked_decided", **out)
+        except Exception:
+            pass
+        return out
+
+    ok_not_liked, method_not, conf_not, proof_not = (
+        _ui_post_viewer_action_button_not_liked_strict(d)
+    )
+    if ok_not_liked:
+        out = _visual_post_already_liked_out(
+            already_liked=False,
+            detection_method=method_not,
+            confidence=conf_not,
+            meta=meta,
+            source_profile_username=source_profile_username,
+            semantic_like_state="like",
+            already_liked_decision_reason="semantic_like_confirmed_not_liked",
+            semantic_proof=proof_not,
+        )
+        try:
+            log("info", "visual_post_already_liked_decided", **out)
+        except Exception:
+            pass
+        return out
+
     hier = ""
     try:
         hier = str(d.dump_hierarchy(compressed=False))
@@ -11119,16 +13764,41 @@ def visual_post_already_liked(
             hier = str(d.dump_hierarchy())
         except Exception:
             hier = ""
+
     if _hierarchy_suggests_liked_state(hier):
-        return {
-            "already_liked": True,
-            "detection_method": "hierarchy_unlike_hint",
-            "confidence": 0.72,
-            "current_activity": meta.get("current_activity"),
-            "current_package": meta.get("current_package"),
-            "source_profile_username": source_profile_username or "",
-        }
-    # Visual fallback: strong red fill in heart ROI (outline-only hearts stay pale).
+        out = _visual_post_already_liked_out(
+            already_liked=True,
+            detection_method="hierarchy_unlike_hint",
+            confidence=0.72,
+            meta=meta,
+            source_profile_username=source_profile_username,
+            semantic_like_state="unlike",
+            already_liked_decision_reason="hierarchy_unlike_confirmed",
+        )
+        try:
+            log("info", "visual_post_already_liked_decided", **out)
+        except Exception:
+            pass
+        return out
+
+    if _hierarchy_suggests_not_liked_state(hier):
+        out = _visual_post_already_liked_out(
+            already_liked=False,
+            detection_method="hierarchy_like_hint",
+            confidence=0.7,
+            meta=meta,
+            source_profile_username=source_profile_username,
+            semantic_like_state="like",
+            already_liked_decision_reason="hierarchy_like_confirmed_not_liked",
+        )
+        try:
+            log("info", "visual_post_already_liked_decided", **out)
+        except Exception:
+            pass
+        return out
+
+    crop_bounds: dict[str, int] | None = None
+    red_ratio = 0.0
     try:
         _ensure_debug_dirs()
         shot = str(
@@ -11140,26 +13810,80 @@ def visual_post_already_liked(
 
         im = Image.open(shot).convert("RGB")
         iw, ih = im.size
-        ratio = _visual_filled_heart_red_ratio(im, iw, ih)
-        if ratio >= 0.085:
-            return {
-                "already_liked": True,
-                "detection_method": "visual_heart_red_fallback",
-                "confidence": float(min(0.82, 0.35 + ratio * 4.5)),
-                "current_activity": meta.get("current_activity"),
-                "current_package": meta.get("current_package"),
-                "source_profile_username": source_profile_username or "",
-            }
+        red_ratio, crop_bounds, bounds_src = _visual_filled_heart_red_ratio(
+            im, iw, ih, heart_bounds=heart_bounds, d=d
+        )
+        if red_ratio >= _VISUAL_ALREADY_LIKED_RED_RATIO_STRONG:
+            if bounds_src.startswith("ui_bounds"):
+                out = _visual_post_already_liked_out(
+                    already_liked=True,
+                    detection_method="visual_heart_red_fallback",
+                    confidence=float(min(0.82, 0.38 + red_ratio * 3.8)),
+                    meta=meta,
+                    source_profile_username=source_profile_username,
+                    semantic_like_state="ambiguous",
+                    already_liked_decision_reason="visual_red_strong_in_ui_heart_bounds",
+                    crop_bounds=crop_bounds,
+                    red_ratio=red_ratio,
+                )
+                try:
+                    log(
+                        "info",
+                        "visual_post_already_liked_decided",
+                        heart_bounds_source=bounds_src,
+                        **out,
+                    )
+                except Exception:
+                    pass
+                return out
+            try:
+                log(
+                    "info",
+                    "visual_post_already_liked_fallback_rejected_non_ui_heart_bounds",
+                    source_profile_username=source_profile_username or "",
+                    red_ratio=round(red_ratio, 4),
+                    crop_bounds=crop_bounds,
+                    heart_bounds_source=bounds_src,
+                    semantic_like_state="ambiguous",
+                    already_liked_decision_reason="red_strong_but_not_ui_heart_crop_continue_to_tap",
+                )
+            except Exception:
+                pass
+        elif red_ratio >= _VISUAL_ALREADY_LIKED_RED_RATIO_AMBIGUOUS:
+            try:
+                log(
+                    "info",
+                    "visual_post_already_liked_fallback_rejected_low_confidence",
+                    source_profile_username=source_profile_username or "",
+                    red_ratio=round(red_ratio, 4),
+                    crop_bounds=crop_bounds,
+                    heart_bounds_source=bounds_src,
+                    strong_threshold=_VISUAL_ALREADY_LIKED_RED_RATIO_STRONG,
+                    ambiguous_threshold=_VISUAL_ALREADY_LIKED_RED_RATIO_AMBIGUOUS,
+                    semantic_like_state="ambiguous",
+                    already_liked_decision_reason="visual_red_ambiguous_continue_to_like_tap",
+                )
+            except Exception:
+                pass
     except Exception:
         pass
-    return {
-        "already_liked": False,
-        "detection_method": "none",
-        "confidence": 0.0,
-        "current_activity": meta.get("current_activity"),
-        "current_package": meta.get("current_package"),
-        "source_profile_username": source_profile_username or "",
-    }
+
+    out = _visual_post_already_liked_out(
+        already_liked=False,
+        detection_method="none",
+        confidence=0.0,
+        meta=meta,
+        source_profile_username=source_profile_username,
+        semantic_like_state="unknown",
+        already_liked_decision_reason="not_liked_no_semantic_or_strong_visual",
+        crop_bounds=crop_bounds,
+        red_ratio=red_ratio if crop_bounds else None,
+    )
+    try:
+        log("info", "visual_post_already_liked_decided", **out)
+    except Exception:
+        pass
+    return out
 
 
 def visual_verify_post_liked(
@@ -11169,14 +13893,49 @@ def visual_verify_post_liked(
     tap_x: int | None = None,
     tap_y: int | None = None,
     detect_confidence: float | None = None,
+    post_tap_screenshot_path: str | None = None,
+    pre_tap_like_button_bounds: dict[str, Any] | None = None,
+    **kwargs: Any,
 ) -> dict[str, Any]:
     """
-    Poll the device after a like tap to confirm liked state (Unlike / hierarchy / heart ROI).
+    After a real like tap: fast UI → post_tap PNG (prefer pre-tap heart ROI) → hierarchy → fresh screenshot.
+    The wall-clock deadline is enforced between heavy phases so multiple attempts stay meaningful.
     """
-    timeout_s = float(getattr(config, "VISUAL_POST_LIKE_VERIFY_TIMEOUT_S", 2.5) or 2.5)
-    deadline = time.time() + max(0.4, timeout_s)
+    kwargs.pop("like_button_state_before", None)
+    like_kw_bounds = kwargs.pop("like_button_bounds", None)
+    pref_bounds = pre_tap_like_button_bounds
+    if pref_bounds is None and isinstance(like_kw_bounds, dict):
+        pref_bounds = like_kw_bounds
+    if kwargs:
+        _ = kwargs
+    timeout_s = float(getattr(config, "VISUAL_POST_LIKE_VERIFY_TIMEOUT_S", 3.2) or 3.2)
+    max_attempts = int(
+        getattr(config, "VISUAL_POST_LIKE_VERIFY_MAX_ATTEMPTS", 4) or 4
+    )
+    max_attempts = max(1, min(max_attempts, 8))
+    deadline = time.time() + max(0.35, timeout_s)
+    red_strong, red_soft = _visual_post_like_verify_red_thresholds()
     meta0 = _followers_current_pkg_activity(d)
     dc = float(detect_confidence) if detect_confidence is not None else 0.0
+    post_tap_file_analyzed = False
+    fail_snap: dict[str, Any] = {
+        "attempts_count": 0,
+        "last_ui_candidate_method": "",
+        "last_ui_matched_node_resource_id": "",
+        "last_ui_matched_node_content_desc": "",
+        "last_ui_matched_node_text": "",
+        "last_ui_matched_node_bounds": None,
+        "last_hierarchy_liked_hint": "",
+        "last_red_ratio": None,
+        "last_heart_bounds": None,
+        "last_heart_bounds_source": "",
+        "verify_red_ratio_strong_threshold": round(red_strong, 4),
+        "verify_max_attempts_cap": max_attempts,
+        "post_tap_reuse_eligible": bool(
+            post_tap_screenshot_path and str(post_tap_screenshot_path).strip()
+        ),
+        "verify_pre_tap_bounds_supplied": bool(pref_bounds),
+    }
     log(
         "info",
         "visual_post_like_verify_started",
@@ -11187,12 +13946,20 @@ def visual_verify_post_liked(
         current_activity=meta0.get("current_activity"),
         current_package=meta0.get("current_package"),
         source_profile_username=source_profile_username or "",
+        verify_timeout_s=round(timeout_s, 3),
+        verify_max_attempts_cap=max_attempts,
+        verify_red_ratio_strong_threshold=round(red_strong, 4),
+        post_tap_reuse_eligible=fail_snap["post_tap_reuse_eligible"],
+        verify_pre_tap_bounds_supplied=fail_snap["verify_pre_tap_bounds_supplied"],
     )
 
-    poll = 0.32
+    poll = 0.14
     attempt = 0
-    while time.time() < deadline:
+    while attempt < max_attempts:
+        if time.time() >= deadline:
+            break
         attempt += 1
+        fail_snap["attempts_count"] = attempt
         meta_att = _followers_current_pkg_activity(d)
         log(
             "info",
@@ -11201,12 +13968,32 @@ def visual_verify_post_liked(
             tap_x=tap_x,
             tap_y=tap_y,
             confidence=round(dc, 4),
-            verification_method="ui_then_hierarchy_then_visual",
+            verification_method="fast_ui_then_reuse_roi_then_hierarchy_then_fresh",
             current_activity=meta_att.get("current_activity"),
             current_package=meta_att.get("current_package"),
             source_profile_username=source_profile_username or "",
+            verify_max_attempts_cap=max_attempts,
+            seconds_left=max(0.0, round(deadline - time.time(), 3)),
+            verify_pre_tap_bounds_supplied=bool(pref_bounds),
         )
-        ok_ui, method_ui, conf_ui = _ui_post_viewer_liked_quick(d)
+
+        ok_ui, method_ui, conf_ui, proof_ui = _ui_post_viewer_liked_state_for_verify(d)
+        if proof_ui:
+            fail_snap["last_ui_candidate_method"] = str(
+                proof_ui.get("detection_method") or method_ui or ""
+            )
+            fail_snap["last_ui_matched_node_resource_id"] = str(
+                proof_ui.get("matched_node_resource_id") or ""
+            )
+            fail_snap["last_ui_matched_node_content_desc"] = str(
+                proof_ui.get("matched_node_content_desc") or ""
+            )
+            fail_snap["last_ui_matched_node_text"] = str(
+                proof_ui.get("matched_node_text") or ""
+            )
+            fail_snap["last_ui_matched_node_bounds"] = proof_ui.get(
+                "matched_node_bounds"
+            )
         if ok_ui:
             meta = _followers_current_pkg_activity(d)
             log(
@@ -11219,12 +14006,91 @@ def visual_verify_post_liked(
                 current_activity=meta.get("current_activity"),
                 current_package=meta.get("current_package"),
                 source_profile_username=source_profile_username or "",
+                matched_node_resource_id=proof_ui.get("matched_node_resource_id"),
+                matched_node_content_desc=proof_ui.get("matched_node_content_desc"),
+                matched_node_bounds=proof_ui.get("matched_node_bounds"),
+                semantic_match_scope=proof_ui.get("semantic_match_scope"),
+                semantic_match_trusted_for_already_liked=proof_ui.get(
+                    "semantic_match_trusted_for_already_liked"
+                ),
+                verify_attempt=attempt,
             )
             return {
                 "liked_verified": True,
                 "verification_method": method_ui,
                 "confidence": conf_ui,
             }
+
+        if time.time() >= deadline:
+            break
+
+        if not post_tap_file_analyzed and post_tap_screenshot_path:
+            post_tap_file_analyzed = True
+            ratio_f, hb_f, src_f = _try_verify_red_ratio_from_image_file(
+                post_tap_screenshot_path,
+                d,
+                preferred_heart_bounds=pref_bounds,
+            )
+            if ratio_f is not None:
+                fail_snap["last_red_ratio"] = round(float(ratio_f), 4)
+                fail_snap["last_heart_bounds"] = hb_f
+                fail_snap["last_heart_bounds_source"] = str(src_f or "")
+                try:
+                    log(
+                        "info",
+                        "visual_post_like_verify_post_tap_image_analyzed",
+                        tap_x=tap_x,
+                        tap_y=tap_y,
+                        screenshot_path=str(post_tap_screenshot_path),
+                        red_ratio=round(float(ratio_f), 4),
+                        heart_bounds_source=str(src_f or ""),
+                        source_profile_username=source_profile_username or "",
+                        verify_attempt=attempt,
+                        verify_pre_tap_bounds_supplied=bool(pref_bounds),
+                    )
+                except Exception:
+                    pass
+                if ratio_f >= red_strong:
+                    conf_v = float(min(0.92, 0.4 + float(ratio_f) * 4.0))
+                    meta = _followers_current_pkg_activity(d)
+                    log(
+                        "info",
+                        "visual_post_like_verify_success",
+                        tap_x=tap_x,
+                        tap_y=tap_y,
+                        verification_method="visual_filled_heart_red_ratio_verify_post_tap_reuse",
+                        confidence=round(conf_v, 4),
+                        current_activity=meta.get("current_activity"),
+                        current_package=meta.get("current_package"),
+                        source_profile_username=source_profile_username or "",
+                        red_ratio=round(float(ratio_f), 4),
+                        heart_bounds_source=str(src_f or ""),
+                        verify_attempt=attempt,
+                    )
+                    return {
+                        "liked_verified": True,
+                        "verification_method": "visual_filled_heart_red_ratio_verify_post_tap_reuse",
+                        "confidence": conf_v,
+                    }
+                if red_soft <= float(ratio_f) < red_strong:
+                    try:
+                        log(
+                            "info",
+                            "visual_post_like_verify_red_ratio_below_threshold",
+                            tap_x=tap_x,
+                            tap_y=tap_y,
+                            red_ratio=round(float(ratio_f), 4),
+                            red_ratio_strong_threshold=round(red_strong, 4),
+                            red_ratio_soft_band=round(red_soft, 4),
+                            heart_bounds_source=str(src_f or ""),
+                            source_profile_username=source_profile_username or "",
+                            sample_source="post_tap_screenshot_reuse",
+                        )
+                    except Exception:
+                        pass
+
+        if time.time() >= deadline:
+            break
 
         hier = ""
         try:
@@ -11234,25 +14100,31 @@ def visual_verify_post_liked(
                 hier = str(d.dump_hierarchy())
             except Exception:
                 hier = ""
-        if _hierarchy_suggests_liked_state(hier):
+        ok_h, hier_m = _hierarchy_liked_state_for_post_verify(hier)
+        fail_snap["last_hierarchy_liked_hint"] = str(hier_m or "")
+        if ok_h:
             meta = _followers_current_pkg_activity(d)
-            conf = 0.74
+            conf = 0.76 if hier_m == "hierarchy_unlike_button" else 0.74
             log(
                 "info",
                 "visual_post_like_verify_success",
                 tap_x=tap_x,
                 tap_y=tap_y,
-                verification_method="hierarchy_unlike_hint",
+                verification_method=hier_m,
                 confidence=conf,
                 current_activity=meta.get("current_activity"),
                 current_package=meta.get("current_package"),
                 source_profile_username=source_profile_username or "",
+                verify_attempt=attempt,
             )
             return {
                 "liked_verified": True,
-                "verification_method": "hierarchy_unlike_hint",
+                "verification_method": hier_m,
                 "confidence": conf,
             }
+
+        if time.time() >= deadline:
+            break
 
         try:
             _ensure_debug_dirs()
@@ -11265,43 +14137,99 @@ def visual_verify_post_liked(
 
             im = Image.open(shot).convert("RGB")
             iw, ih = im.size
-            ratio = _visual_filled_heart_red_ratio(im, iw, ih)
-            if ratio >= 0.095:
-                conf_v = float(min(0.92, 0.42 + ratio * 4.2))
+            ratio, hb_dict, hsrc = _visual_filled_heart_red_ratio_for_verify(
+                im, iw, ih, d, preferred_heart_bounds=pref_bounds
+            )
+            fail_snap["last_red_ratio"] = round(float(ratio), 4)
+            fail_snap["last_heart_bounds"] = hb_dict
+            fail_snap["last_heart_bounds_source"] = str(hsrc or "")
+            if ratio >= red_strong:
+                conf_v = float(min(0.92, 0.4 + ratio * 4.0))
                 meta = _followers_current_pkg_activity(d)
                 log(
                     "info",
                     "visual_post_like_verify_success",
                     tap_x=tap_x,
                     tap_y=tap_y,
-                    verification_method="visual_heart_red",
+                    verification_method="visual_filled_heart_red_ratio_verify",
                     confidence=round(conf_v, 4),
                     current_activity=meta.get("current_activity"),
                     current_package=meta.get("current_package"),
                     source_profile_username=source_profile_username or "",
+                    red_ratio=round(ratio, 4),
+                    heart_bounds_source=hsrc,
+                    verify_attempt=attempt,
                 )
                 return {
                     "liked_verified": True,
-                    "verification_method": "visual_heart_red",
+                    "verification_method": "visual_filled_heart_red_ratio_verify",
                     "confidence": conf_v,
                 }
+            if ratio >= red_soft and ratio < red_strong:
+                try:
+                    log(
+                        "info",
+                        "visual_post_like_verify_red_ratio_below_threshold",
+                        tap_x=tap_x,
+                        tap_y=tap_y,
+                        red_ratio=round(ratio, 4),
+                        red_ratio_strong_threshold=round(red_strong, 4),
+                        red_ratio_soft_band=round(red_soft, 4),
+                        heart_bounds_source=hsrc,
+                        source_profile_username=source_profile_username or "",
+                        sample_source="fresh_screenshot",
+                    )
+                except Exception:
+                    pass
         except Exception:
             pass
 
-        time.sleep(poll)
+        if time.time() < deadline:
+            time.sleep(poll)
+
+    try:
+        el = d(resourceId="com.instagram.android:id/row_feed_button_like")
+        if el.exists(timeout=0.22):
+            diag = _ui_element_semantic_proof(el, "failure_diag_row_feed_button_like")
+            fail_snap.setdefault(
+                "last_ui_matched_node_resource_id",
+                str(diag.get("matched_node_resource_id") or ""),
+            )
+            fail_snap.setdefault(
+                "last_ui_matched_node_content_desc",
+                str(diag.get("matched_node_content_desc") or ""),
+            )
+            fail_snap.setdefault(
+                "last_ui_matched_node_bounds",
+                diag.get("matched_node_bounds"),
+            )
+    except Exception:
+        pass
 
     meta_f = _followers_current_pkg_activity(d)
-    log(
-        "info",
-        "visual_post_like_verify_failed",
-        tap_x=tap_x,
-        tap_y=tap_y,
-        verification_method="none",
-        confidence=round(dc, 4),
-        current_activity=meta_f.get("current_activity"),
-        current_package=meta_f.get("current_package"),
-        source_profile_username=source_profile_username or "",
-    )
+    try:
+        log(
+            "info",
+            "visual_post_like_verify_failed",
+            tap_x=tap_x,
+            tap_y=tap_y,
+            verification_method="none",
+            confidence=round(dc, 4),
+            current_activity=meta_f.get("current_activity"),
+            current_package=meta_f.get("current_package"),
+            source_profile_username=source_profile_username or "",
+            **fail_snap,
+        )
+    except Exception:
+        log(
+            "info",
+            "visual_post_like_verify_failed",
+            tap_x=tap_x,
+            tap_y=tap_y,
+            verification_method="none",
+            confidence=round(dc, 4),
+            source_profile_username=source_profile_username or "",
+        )
     return {
         "liked_verified": False,
         "verification_method": "none",
@@ -11309,11 +14237,215 @@ def visual_verify_post_liked(
     }
 
 
+_POST_VIEWER_ACTION_BAR_TITLES_NORM = frozenset(
+    {
+        "posts",
+        "post",
+        "publications",
+        "publication",
+        "reels",
+        "beiträge",
+        "beitrage",
+        "publicaciones",
+        "publicación",
+    }
+)
+
+
+def _visual_post_viewer_action_bar_is_post_viewer_mode(title_raw: str) -> bool:
+    """True when top action bar is the normal post-viewer title (e.g. Posts), not a username."""
+    t = str(title_raw or "").strip().lower()
+    if not t:
+        return False
+    if t in _POST_VIEWER_ACTION_BAR_TITLES_NORM:
+        return True
+    if len(t) <= 28 and any(mk in t for mk in ("posts", "publications", "reels", "beitr")):
+        return True
+    return False
+
+
+def _is_plausible_ig_username_handle(handle: str) -> bool:
+    u = _normalize_handle(handle)
+    if not u or len(u) < 2 or len(u) > 30:
+        return False
+    if u in _POST_VIEWER_ACTION_BAR_TITLES_NORM:
+        return False
+    return bool(re.fullmatch(r"[a-z0-9._]+", u))
+
+
+def _visual_post_viewer_header_username_from_ui(
+    d: u2.Device,
+    *,
+    expected_username: str = "",
+) -> tuple[str, str]:
+    """Read post-owner handle from post header row (below Posts action bar), not action bar."""
+    exp = _normalize_handle(expected_username)
+    if exp:
+        probes: list[tuple[str, Callable[[], Any]]] = [
+            ("ui_post_header_text_exact", lambda: d(text=exp)),
+            ("ui_post_header_text_contains", lambda: d(textContains=exp)),
+            (
+                "ui_post_header_description_contains",
+                lambda: d(descriptionContains=exp),
+            ),
+        ]
+        for method, pred in probes:
+            try:
+                if pred().exists(timeout=0.14):
+                    return exp, method
+            except Exception:
+                continue
+        try:
+            hier = str(d.dump_hierarchy(compressed=False))
+        except Exception:
+            try:
+                hier = str(d.dump_hierarchy())
+            except Exception:
+                hier = ""
+        if hier and f'text="{exp}"' in hier.lower():
+            return exp, "hierarchy_post_header_text"
+    return "", ""
+
+
+def _visual_post_viewer_context_guard_for_like(
+    d: u2.Device,
+    *,
+    expected_context: dict[str, Any],
+    expected_follower_username: str | None = None,
+    source_profile_username: str | None = None,
+    pkg: str,
+) -> tuple[bool, str, dict[str, Any]]:
+    """
+    Post-open guard: baseline was captured on candidate profile; current screen is post viewer.
+    Do not compare profile fingerprint to post-viewer capture (legacy verify path).
+    """
+    exp_u = _normalize_handle(
+        str(
+            expected_context.get("username_norm")
+            or expected_context.get("header_username_detected")
+            or ""
+        )
+    )
+    exp_fu = _normalize_handle(str(expected_follower_username or ""))
+    src_n = _normalize_handle(str(source_profile_username or ""))
+    if exp_fu and exp_u and exp_u != exp_fu:
+        return False, "baseline_username_mismatch", {
+            "expected_username": exp_u,
+            "follower_username": exp_fu,
+        }
+    if exp_fu and not exp_u:
+        exp_u = exp_fu
+
+    liked_ui, liked_m, _ = _ui_post_viewer_liked_quick(d)
+    not_liked_ui, not_liked_m, _ = _ui_post_viewer_not_liked_quick(d)
+    like_ui_present = bool(liked_ui or not_liked_ui)
+    like_ui_method = str(not_liked_m or liked_m or "")
+
+    post_chrome = bool(like_ui_present)
+    if not post_chrome:
+        for label in (
+            "Like",
+            "Unlike",
+            "J'aime",
+            "Jaime",
+            "Gefällt mir",
+            "Me gusta",
+        ):
+            try:
+                if d(descriptionContains=label).exists(timeout=0.1):
+                    post_chrome = True
+                    break
+            except Exception:
+                continue
+
+    still_profile_grid = False
+    try:
+        still_profile_grid = bool(
+            _try_profile_signals_once(d, "", pkg)
+            and _followers_profile_tabs_visible(d)
+        )
+    except Exception:
+        still_profile_grid = False
+
+    ab_raw = ""
+    try:
+        ab_raw = str(read_current_profile_username_for_follow_gate(d) or "").strip()
+    except Exception:
+        ab_raw = ""
+    ab_norm = _normalize_handle(ab_raw)
+    posts_action_bar = _visual_post_viewer_action_bar_is_post_viewer_mode(ab_raw)
+
+    post_header_u, post_header_method = _visual_post_viewer_header_username_from_ui(
+        d, expected_username=exp_u
+    )
+    post_header_norm = _normalize_handle(post_header_u)
+
+    meta: dict[str, Any] = {
+        "expected_profile_fingerprint": str(
+            expected_context.get("profile_visual_fingerprint")
+            or expected_context.get("profile_fingerprint")
+            or ""
+        )[:64],
+        "expected_username": exp_u,
+        "expected_follower_username": exp_fu or exp_u,
+        "action_bar_title": ab_raw,
+        "action_bar_title_norm": ab_norm,
+        "action_bar_posts_mode": posts_action_bar,
+        "post_header_username_detected": post_header_u,
+        "post_header_username_method": post_header_method,
+        "post_viewer_chrome": post_chrome,
+        "viewer_chrome_confirmed": post_chrome,
+        "like_ui_present": like_ui_present,
+        "like_ui_method": like_ui_method,
+        "still_profile_grid": still_profile_grid,
+    }
+
+    if still_profile_grid and not post_chrome:
+        return False, "still_on_profile_grid_not_post_viewer", meta
+
+    if not post_chrome:
+        return False, "post_viewer_chrome_not_confirmed", meta
+
+    if post_header_norm and exp_u and post_header_norm != exp_u:
+        return False, "post_header_username_mismatch", {
+            **meta,
+            "mismatch_username": post_header_norm,
+        }
+
+    if posts_action_bar and like_ui_present:
+        if post_header_norm and exp_u and post_header_norm == exp_u:
+            return True, "post_viewer_posts_action_bar_header_match", meta
+        return True, "post_viewer_posts_action_bar_allowed", meta
+
+    if post_header_norm and exp_u and post_header_norm == exp_u and like_ui_present:
+        return True, "post_header_username_match", meta
+
+    if ab_norm and exp_u and ab_norm == exp_u and like_ui_present:
+        return True, "action_bar_username_with_post_chrome", meta
+
+    if (
+        ab_norm
+        and _is_plausible_ig_username_handle(ab_norm)
+        and exp_u
+        and ab_norm != exp_u
+        and ab_norm != src_n
+        and not posts_action_bar
+    ):
+        return False, "foreign_profile_action_bar", meta
+
+    if like_ui_present:
+        return True, "post_open_baseline_trusted_like_ui", meta
+
+    return False, "post_viewer_context_insufficient", meta
+
+
 def visual_like_open_post(
     d: u2.Device,
     *,
     source_profile_username: str | None = None,
     expected_profile_context: dict[str, Any] | None = None,
+    post_opened_via_profile_grid: bool = False,
+    expected_follower_username: str | None = None,
 ) -> dict[str, Any]:
     """
     Estimate like control from a screenshot of the open post.
@@ -11435,16 +14567,46 @@ def visual_like_open_post(
         }
 
     iw, ih = im.size
-    lb_left = int(iw * 0.055)
-    lb_top = int(ih * 0.555)
-    lb_right = int(iw * 0.145)
-    lb_bottom = int(ih * 0.63)
-    like_button_bounds: dict[str, int] = {
-        "left": lb_left,
-        "top": lb_top,
-        "right": lb_right,
-        "bottom": lb_bottom,
-    }
+    like_button_bounds, heart_bounds_source = _visual_post_like_heart_crop_bounds(
+        iw,
+        ih,
+        d=d,
+        expected_follower_username=str(expected_follower_username or ""),
+    )
+    if like_button_bounds is None:
+        fail_lbl = str(heart_bounds_source or "like_bounds_unresolved_safe_abort")
+        log(
+            "error",
+            "visual_post_like_failed",
+            like_button_bounds=None,
+            tap_x=None,
+            tap_y=None,
+            confidence=0.0,
+            current_activity=meta0.get("current_activity"),
+            current_package=meta0.get("current_package"),
+            source_profile_username=source_profile_username or "",
+            failure_reason=fail_lbl,
+            expected_follower_username=str(expected_follower_username or ""),
+        )
+        return {
+            "ok": False,
+            "like_button_bounds": None,
+            "tap_x": None,
+            "tap_y": None,
+            "confidence": 0.0,
+            "current_activity": meta0.get("current_activity"),
+            "current_package": meta0.get("current_package"),
+            "source_profile_username": source_profile_username or "",
+            "failure_reason": fail_lbl,
+            "dry_run": effective_dry,
+            "real_tap_sent": False,
+            "already_liked": False,
+        }
+
+    lb_left = like_button_bounds["left"]
+    lb_top = like_button_bounds["top"]
+    lb_right = like_button_bounds["right"]
+    lb_bottom = like_button_bounds["bottom"]
     cx = (lb_left + lb_right) // 2
     cy = (lb_top + lb_bottom) // 2
     tap_x, tap_y = _visual_xy_image_to_device(cx, cy, iw, ih, ww, wh)
@@ -11459,6 +14621,7 @@ def visual_like_open_post(
         "info",
         "visual_post_like_target_detected",
         like_button_bounds=like_button_bounds,
+        heart_bounds_source=heart_bounds_source,
         tap_x=tap_x,
         tap_y=tap_y,
         confidence=round(confidence, 4),
@@ -11470,7 +14633,9 @@ def visual_like_open_post(
 
     if real_visual:
         al_pre = visual_post_already_liked(
-            d, source_profile_username=source_profile_username
+            d,
+            source_profile_username=source_profile_username,
+            heart_bounds=like_button_bounds,
         )
         if al_pre.get("already_liked"):
             meta_skip = _followers_current_pkg_activity(d)
@@ -11575,53 +14740,160 @@ def visual_like_open_post(
                     "liked_verified": False,
                     "verification_method": "profile_context_lock",
                 }
-            vctx = visual_verify_same_profile_context(
-                d,
-                expected_context=exp_ctx,
-                source_profile_username=source_profile_username,
-            )
-            if (not vctx.get("same_profile")) or float(
-                vctx.get("confidence") or 0.0
-            ) < min_ctx:
-                meta_ctx = _followers_current_pkg_activity(d)
-                log(
-                    "info",
-                    "visual_profile_context_mismatch_abort",
-                    action="visual_post_like_real",
-                    abort_reason="verify_failed_or_low_confidence",
-                    expected_profile_fingerprint=vctx.get(
-                        "expected_profile_fingerprint"
-                    ),
-                    current_profile_fingerprint=vctx.get(
-                        "current_profile_fingerprint"
-                    ),
-                    confidence=float(vctx.get("confidence") or 0.0),
-                    same_profile=bool(vctx.get("same_profile")),
-                    verification_method=str(vctx.get("verification_method") or ""),
-                    current_activity=meta_ctx.get("current_activity"),
-                    current_package=meta_ctx.get("current_package"),
-                    source_profile_username=source_profile_username or "",
+            pkg_ctx = str(getattr(config, "INSTAGRAM_PACKAGE", "") or "")
+            if bool(post_opened_via_profile_grid):
+                po_ok, po_why, po_meta = _visual_post_viewer_context_guard_for_like(
+                    d,
+                    expected_context=exp_ctx,
+                    expected_follower_username=expected_follower_username,
+                    source_profile_username=source_profile_username,
+                    pkg=pkg_ctx,
                 )
-                return {
-                    "ok": False,
-                    "already_liked": False,
-                    "skipped": False,
-                    "real_tap_sent": False,
-                    "profile_context_mismatch": True,
-                    "like_button_bounds": like_button_bounds,
-                    "tap_x": tap_x,
-                    "tap_y": tap_y,
-                    "confidence": confidence,
-                    "current_activity": meta_ctx.get("current_activity"),
-                    "current_package": meta_ctx.get("current_package"),
-                    "source_profile_username": source_profile_username or "",
-                    "failure_reason": "profile_context_mismatch",
-                    "dry_run": False,
-                    "liked_verified": False,
-                    "verification_method": str(
-                        vctx.get("verification_method") or "profile_context_lock"
-                    ),
-                }
+                if not po_ok:
+                    meta_ctx = _followers_current_pkg_activity(d)
+                    try:
+                        log(
+                            "warning",
+                            "post_follow_post_likes_post_open_context_guard_rejected",
+                            source_profile_username=source_profile_username or "",
+                            expected_follower_username=str(
+                                expected_follower_username or ""
+                            )[:120],
+                            guard_reason=po_why,
+                            action_bar_title=po_meta.get("action_bar_title"),
+                            action_bar_posts_mode=po_meta.get("action_bar_posts_mode"),
+                            post_header_username_detected=po_meta.get(
+                                "post_header_username_detected"
+                            ),
+                            post_header_username_method=po_meta.get(
+                                "post_header_username_method"
+                            ),
+                            viewer_chrome_confirmed=po_meta.get(
+                                "viewer_chrome_confirmed"
+                            ),
+                            like_ui_present=po_meta.get("like_ui_present"),
+                            like_ui_method=po_meta.get("like_ui_method"),
+                            expected_username=po_meta.get("expected_username"),
+                        )
+                    except Exception:
+                        pass
+                    log(
+                        "info",
+                        "visual_profile_context_mismatch_abort",
+                        action="visual_post_like_real",
+                        abort_reason=f"post_open_context_guard_failed:{po_why}",
+                        expected_profile_fingerprint=po_meta.get(
+                            "expected_profile_fingerprint"
+                        ),
+                        current_profile_fingerprint="",
+                        confidence=0.0,
+                        same_profile=False,
+                        verification_method="post_open_context_guard",
+                        post_opened_via_profile_grid=True,
+                        current_activity=meta_ctx.get("current_activity"),
+                        current_package=meta_ctx.get("current_package"),
+                        source_profile_username=source_profile_username or "",
+                        expected_username=po_meta.get("expected_username"),
+                        action_bar_title=po_meta.get("action_bar_title"),
+                        post_header_username_detected=po_meta.get(
+                            "post_header_username_detected"
+                        ),
+                        viewer_chrome_confirmed=po_meta.get("viewer_chrome_confirmed"),
+                        like_ui_present=po_meta.get("like_ui_present"),
+                    )
+                    return {
+                        "ok": False,
+                        "already_liked": False,
+                        "skipped": False,
+                        "real_tap_sent": False,
+                        "profile_context_mismatch": True,
+                        "like_button_bounds": like_button_bounds,
+                        "tap_x": tap_x,
+                        "tap_y": tap_y,
+                        "confidence": confidence,
+                        "current_activity": meta_ctx.get("current_activity"),
+                        "current_package": meta_ctx.get("current_package"),
+                        "source_profile_username": source_profile_username or "",
+                        "failure_reason": f"post_open_context_guard_failed:{po_why}",
+                        "dry_run": False,
+                        "liked_verified": False,
+                        "verification_method": "post_open_context_guard",
+                    }
+                try:
+                    log(
+                        "info",
+                        "post_follow_post_likes_post_open_context_guard_passed",
+                        source_profile_username=source_profile_username or "",
+                        expected_follower_username=str(
+                            expected_follower_username or ""
+                        )[:120],
+                        guard_reason=po_why,
+                        expected_profile_fingerprint=po_meta.get(
+                            "expected_profile_fingerprint"
+                        ),
+                        action_bar_title=po_meta.get("action_bar_title"),
+                        action_bar_posts_mode=po_meta.get("action_bar_posts_mode"),
+                        post_header_username_detected=po_meta.get(
+                            "post_header_username_detected"
+                        ),
+                        post_header_username_method=po_meta.get(
+                            "post_header_username_method"
+                        ),
+                        viewer_chrome_confirmed=po_meta.get("viewer_chrome_confirmed"),
+                        like_ui_present=po_meta.get("like_ui_present"),
+                        like_ui_method=po_meta.get("like_ui_method"),
+                        post_viewer_chrome=po_meta.get("post_viewer_chrome"),
+                    )
+                except Exception:
+                    pass
+            else:
+                vctx = visual_verify_same_profile_context(
+                    d,
+                    expected_context=exp_ctx,
+                    source_profile_username=source_profile_username,
+                )
+                if (not vctx.get("same_profile")) or float(
+                    vctx.get("confidence") or 0.0
+                ) < min_ctx:
+                    meta_ctx = _followers_current_pkg_activity(d)
+                    log(
+                        "info",
+                        "visual_profile_context_mismatch_abort",
+                        action="visual_post_like_real",
+                        abort_reason="verify_failed_or_low_confidence",
+                        expected_profile_fingerprint=vctx.get(
+                            "expected_profile_fingerprint"
+                        ),
+                        current_profile_fingerprint=vctx.get(
+                            "current_profile_fingerprint"
+                        ),
+                        confidence=float(vctx.get("confidence") or 0.0),
+                        same_profile=bool(vctx.get("same_profile")),
+                        verification_method=str(vctx.get("verification_method") or ""),
+                        current_activity=meta_ctx.get("current_activity"),
+                        current_package=meta_ctx.get("current_package"),
+                        source_profile_username=source_profile_username or "",
+                    )
+                    return {
+                        "ok": False,
+                        "already_liked": False,
+                        "skipped": False,
+                        "real_tap_sent": False,
+                        "profile_context_mismatch": True,
+                        "like_button_bounds": like_button_bounds,
+                        "tap_x": tap_x,
+                        "tap_y": tap_y,
+                        "confidence": confidence,
+                        "current_activity": meta_ctx.get("current_activity"),
+                        "current_package": meta_ctx.get("current_package"),
+                        "source_profile_username": source_profile_username or "",
+                        "failure_reason": "profile_context_mismatch",
+                        "dry_run": False,
+                        "liked_verified": False,
+                        "verification_method": str(
+                            vctx.get("verification_method") or "profile_context_lock"
+                        ),
+                    }
 
     _VISUAL_POST_LIKE_TAPS_RECORDED += 1
     meta1 = _followers_current_pkg_activity(d)
@@ -16111,19 +19383,35 @@ def _followers_scroll_list_forward(
     scroll_profile: str = "default",
     source_profile_username: str | None = None,
     scroll_reposition_meta: dict[str, Any] | None = None,
+    bypass_post_tap_capture_gate: bool = False,
+    bypass_scroll_xml_guards: bool = False,
+    scroll_diag_out: dict[str, Any] | None = None,
 ) -> bool:
     global _FOLLOWERS_VISUAL_EXPLORATORY_SCROLL_ONCE
     global _FOLLOWERS_VISUAL_EXPLORATORY_SCROLL_REASON
+
+    def _sd(key: str, val: Any) -> None:
+        if scroll_diag_out is None:
+            return
+        scroll_diag_out[key] = val
+
     if _followers_abort_scroll_if_post_tap_lock("_followers_scroll_list_forward"):
+        _sd("failure_reason", "post_tap_lock_active")
+        _sd("whether_physical_swipe_attempted", False)
         return False
-    if not _followers_post_tap_capture_gate_ok():
+    if not bypass_post_tap_capture_gate and not _followers_post_tap_capture_gate_ok():
         log(
             "info",
             "followers_post_tap_scroll_prevented",
             source="_followers_scroll_list_forward",
             reason="post_tap_immediate_capture_not_done",
         )
+        _sd("failure_reason", "post_tap_immediate_capture_not_done")
+        _sd("whether_physical_swipe_attempted", False)
+        _sd("bypass_post_tap_capture_gate", False)
         return False
+    if bypass_post_tap_capture_gate:
+        _sd("bypass_post_tap_capture_gate", True)
     use_exploratory = bool(apply_exploratory_xml_override) and bool(
         _FOLLOWERS_VISUAL_EXPLORATORY_SCROLL_ONCE
     )
@@ -16144,15 +19432,17 @@ def _followers_scroll_list_forward(
         )
         permit_reason_snapshot = str(_FOLLOWERS_VISUAL_EXPLORATORY_SCROLL_REASON or "")
     else:
-        if _FOLLOWERS_VISUAL_XML_STALE_EXHAUSTED:
+        if not bypass_scroll_xml_guards and _FOLLOWERS_VISUAL_XML_STALE_EXHAUSTED:
             log(
                 "info",
                 "followers_post_tap_scroll_prevented",
                 source="_followers_scroll_list_forward",
                 reason="followers_visual_xml_stale_exhausted",
             )
+            _sd("failure_reason", "followers_visual_xml_stale_exhausted")
+            _sd("whether_physical_swipe_attempted", False)
             return False
-        if (
+        if not bypass_scroll_xml_guards and (
             _FOLLOWERS_LAST_OPEN_DETECTION_METHOD == "visual_fallback"
             and _FOLLOWERS_LAST_ITER_CANDIDATE_COUNT == 0
             and not _FOLLOWERS_VISUAL_HAD_NONEMPTY_CANDIDATE_ROWS
@@ -16163,8 +19453,13 @@ def _followers_scroll_list_forward(
                 source="_followers_scroll_list_forward",
                 reason="visual_fallback_zero_candidates_wait_for_xml_refresh",
             )
+            _sd("failure_reason", "visual_fallback_zero_candidates_wait_for_xml_refresh")
+            _sd("whether_physical_swipe_attempted", False)
             return False
+    if bypass_scroll_xml_guards:
+        _sd("bypass_scroll_xml_guards", True)
     log("info", "followers_list_scroll", direction="forward")
+    _sd("whether_physical_swipe_attempted", True)
     scroll_ok = False
     fallback_fixed_micro_used = False
     if micro_reposition:
@@ -16397,6 +19692,12 @@ def _followers_scroll_list_forward(
             )
         except Exception:
             pass
+    _sd("scroll_helper_succeeded", bool(scroll_ok))
+    if scroll_diag_out is not None and not scroll_ok:
+        scroll_diag_out.setdefault(
+            "failure_reason",
+            "recyclerview_and_fallback_swipe_failed",
+        )
     return scroll_ok
 
 
@@ -16407,11 +19708,19 @@ def scroll_followers_list_forward(
     scroll_profile: str = "default",
     source_profile_username: str | None = None,
     scroll_reposition_meta: dict[str, Any] | None = None,
+    bypass_post_tap_capture_gate: bool = False,
+    bypass_scroll_xml_guards: bool = False,
+    scroll_diag_out: dict[str, Any] | None = None,
 ) -> bool:
     """Bounded scroll on the followers RecyclerView (or fallback swipe).
 
     ``scroll_profile``: ``default`` | ``micro_reposition`` (unsafe-low-CTA defer) |
     ``zero_follow_spans_soft`` (exploratory defer after zero blue spans).
+
+    ``bypass_post_tap_capture_gate`` / ``bypass_scroll_xml_guards`` are narrow escape
+    hatches for runner paths that return to a followers list validated visually while XML
+    gates (post-tap capture marker, xml-stale exhaustion, zero-candidate visual-fallback
+    guard) would otherwise block scrolling.
     """
     return _followers_scroll_list_forward(
         d,
@@ -16419,6 +19728,9 @@ def scroll_followers_list_forward(
         scroll_profile=scroll_profile,
         source_profile_username=source_profile_username,
         scroll_reposition_meta=scroll_reposition_meta,
+        bypass_post_tap_capture_gate=bypass_post_tap_capture_gate,
+        bypass_scroll_xml_guards=bypass_scroll_xml_guards,
+        scroll_diag_out=scroll_diag_out,
     )
 
 
@@ -17553,7 +20865,7 @@ def _vf_followers_rendered_strong_list_structure_strong_no_visible_follow_cta(
         return False
     if int(vf.get("visual_follow_button_count") or 0) != 0:
         return False
-    if int(vf.get("visual_user_rows_detected") or 0) < 19:
+    if int(vf.get("visual_user_rows_detected") or 0) < 15:
         return False
     return True
 
@@ -19009,6 +22321,35 @@ def _followers_entry_v2_second_pass_shell_partial_render(det: dict[str, Any]) ->
     return True
 
 
+def _followers_entry_v2_second_pass_borderline_zero_cta_rows(
+    det: dict[str, Any],
+) -> tuple[bool, str, dict[str, Any]]:
+    """
+    fcb=0 with strong followers chrome but row-band count in 12–18: allow a fresh
+    second-pass capture before failing entry.
+    """
+    vf = det.get("visual_fallback_detail")
+    meta: dict[str, Any] = {}
+    if not isinstance(vf, dict):
+        return False, "no_visual_fallback_detail", meta
+    fcb = int(vf.get("visual_follow_button_count") or 0)
+    rows = int(vf.get("visual_user_rows_detected") or 0)
+    meta["fcb"] = fcb
+    meta["rows"] = rows
+    if fcb != 0:
+        return False, "fcb_not_zero", meta
+    if rows < 12 or rows >= 19:
+        return False, "rows_not_in_borderline_band", meta
+    if not bool(vf.get("visual_search_area_detected")):
+        return False, "search_area_missing", meta
+    sigs_raw = vf.get("visual_signals") or []
+    if not any(str(x) == "search_strip" for x in sigs_raw):
+        return False, "search_strip_missing", meta
+    if not bool(vf.get("visual_followers_title_hint")):
+        return False, "followers_title_hint_missing", meta
+    return True, "borderline_zero_cta_rows", meta
+
+
 def _followers_entry_v2_second_pass_fresh_capture_and_detect(
     d: u2.Device,
     source_profile_username: str,
@@ -19138,15 +22479,34 @@ def _followers_entry_v2_post_tap_confirm(
             vision_validation_result="not_evaluated",
             phase="immediate_quality_gate",
         )
-    need_fresh_second = (
+    _borderline_ok, _borderline_reason, _borderline_meta = (
+        _followers_entry_v2_second_pass_borderline_zero_cta_rows(det_imm)
+    )
+    need_fresh_second = bool(
         _followers_entry_v2_post_tap_semantic_followers_context(tap_diag)
-        and _followers_entry_v2_second_pass_shell_partial_render(det_imm)
+        and (
+            _followers_entry_v2_second_pass_shell_partial_render(det_imm)
+            or _borderline_ok
+        )
     )
     delay_sec = 0.9
     _prev_shot = str(paths.get("screenshot_path") or "")[:400]
     paths_sp: dict[str, Any] = dict(paths)
     det2: dict[str, Any]
     if need_fresh_second:
+        if _borderline_ok:
+            try:
+                log(
+                    "info",
+                    "followers_entry_v2_second_pass_fresh_capture_for_borderline_zero_cta_rows",
+                    source_profile_username=source_profile_username,
+                    rows=_borderline_meta.get("rows"),
+                    fcb=_borderline_meta.get("fcb"),
+                    reason=_borderline_reason,
+                    screenshot_path=_prev_shot,
+                )
+            except Exception:
+                pass
         try:
             log(
                 "info",
@@ -19154,6 +22514,7 @@ def _followers_entry_v2_post_tap_confirm(
                 source_profile_username=source_profile_username,
                 previous_screenshot_path=_prev_shot,
                 delay_ms=int(delay_sec * 1000),
+                borderline_zero_cta_rows=bool(_borderline_ok),
             )
         except Exception:
             pass
@@ -23880,6 +27241,755 @@ def run_mute_engine_v2(
     )
 
 
+def _post_follow_post_likes_count_from_range(spec: str) -> int:
+    """Parse likes count range (e.g. '1-1', '2-3') and return one random target in band."""
+    raw = str(spec or "1-1").strip()
+    lo, hi = 1, 1
+    if "-" in raw:
+        parts = raw.split("-", 1)
+        try:
+            lo = max(0, int(parts[0].strip()))
+            hi = max(lo, int(parts[1].strip()))
+        except (TypeError, ValueError):
+            lo, hi = 1, 1
+    else:
+        try:
+            lo = hi = max(0, int(raw))
+        except (TypeError, ValueError):
+            lo = hi = 1
+    if hi <= lo:
+        return lo
+    return int(random.randint(lo, hi))
+
+
+def _post_follow_post_likes_out_template() -> dict[str, Any]:
+    return {
+        "ok": False,
+        "skipped": True,
+        "skipped_reason": None,
+        "phase_outcome": "skipped",
+        "target_count": 0,
+        "attempted_count": 0,
+        "liked_count": 0,
+        "skipped_already_liked_count": 0,
+        "failed_navigation_count": 0,
+        "post_like_mode": "profile_grid_single_v1",
+        "timings_ms": {},
+        "per_post": [],
+    }
+
+
+def run_post_follow_post_likes_phase(
+    d: u2.Device,
+    *,
+    pkg: str,
+    source_profile_username: str,
+    follower_username: str,
+    visual_candidate_id: str,
+    follow_success_verified: bool,
+    follow_state_after: str,
+    skipped_tap: bool,
+    session_likes_used: int = 0,
+) -> dict[str, Any]:
+    """
+    Post-follow: like recent post(s) on the open candidate profile (V1: single post).
+    Best-effort; does not return to followers list (caller runs return CT next).
+    """
+    from navigation_engine import NavigationEngineState, observe_instagram_state
+
+    t_all = time.perf_counter()
+    timings: dict[str, float] = {}
+    pkg = str(pkg or getattr(config, "INSTAGRAM_PACKAGE", "") or "")
+    src = str(source_profile_username or "").strip()
+    cand = str(follower_username or "").strip().lstrip("@")
+    vcid = str(visual_candidate_id or "").strip()
+    fs_after = str(follow_state_after or "").strip()
+    follow_priv = bool(getattr(config, "FOLLOW_PRIVATE_ACCOUNTS", False))
+    pending_rq = fs_after == "requested"
+
+    out = _post_follow_post_likes_out_template()
+    out["post_like_mode"] = "profile_grid_single_v1"
+
+    def _likes_cfg_effective() -> dict[str, Any]:
+        return {
+            "post_follow_enabled": bool(
+                getattr(config, "POST_FOLLOW_POST_LIKES_ENABLED", False)
+            ),
+            "real_visual_like_enabled": bool(
+                getattr(config, "ENABLE_REAL_VISUAL_POST_LIKE", False)
+            ),
+            "percentage": int(getattr(config, "POST_FOLLOW_POST_LIKES_PERCENTAGE", 100) or 100),
+            "count_range": str(
+                getattr(config, "POST_FOLLOW_POST_LIKES_COUNT_RANGE", "1-1") or "1-1"
+            ),
+            "total_likes_limit": int(
+                getattr(config, "POST_FOLLOW_TOTAL_LIKES_LIMIT", 150) or 150
+            ),
+            "session_likes_used": max(0, int(session_likes_used or 0)),
+            "budget_s": float(getattr(config, "POST_FOLLOW_POST_LIKES_BUDGET_S", 10.0) or 10.0),
+        }
+
+    def _log_likes_early_exit(skipped_reason: str, **extra: Any) -> None:
+        cfg = _likes_cfg_effective()
+        try:
+            log(
+                "info",
+                "post_follow_post_likes_phase_skipped",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                follower_username=cand,
+                skipped_reason=str(skipped_reason or ""),
+                POST_FOLLOW_POST_LIKES_ENABLED_effective=cfg["post_follow_enabled"],
+                ENABLE_REAL_VISUAL_POST_LIKE_effective=cfg["real_visual_like_enabled"],
+                POST_FOLLOW_POST_LIKES_PERCENTAGE_effective=cfg["percentage"],
+                POST_FOLLOW_TOTAL_LIKES_LIMIT_effective=cfg["total_likes_limit"],
+                session_likes_used=cfg["session_likes_used"],
+                **extra,
+            )
+        except Exception:
+            pass
+
+    def _finish(
+        *,
+        phase_outcome: str,
+        skipped_reason: str | None = None,
+        skipped: bool = True,
+        ok: bool = False,
+        log_early_exit: bool = False,
+        **counts: Any,
+    ) -> dict[str, Any]:
+        if log_early_exit and skipped_reason:
+            _log_likes_early_exit(skipped_reason)
+        timings["likes_total_ms"] = round((time.perf_counter() - t_all) * 1000, 2)
+        out["timings_ms"] = dict(timings)
+        out["phase_outcome"] = phase_outcome
+        out["skipped"] = skipped
+        out["skipped_reason"] = skipped_reason
+        out["ok"] = ok
+        for k, v in counts.items():
+            if k in out:
+                out[k] = v
+        return out
+
+    log(
+        "info",
+        "post_follow_post_likes_phase_started",
+        visual_candidate_id=vcid,
+        source_profile_username=src,
+        follower_username=cand,
+        follow_success_verified=bool(follow_success_verified),
+        follow_state_after=fs_after,
+    )
+    _cfg_snap = _likes_cfg_effective()
+    try:
+        log(
+            "info",
+            "post_follow_post_likes_config_snapshot",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            follower_username=cand,
+            post_follow_enabled=_cfg_snap["post_follow_enabled"],
+            real_visual_like_enabled=_cfg_snap["real_visual_like_enabled"],
+            percentage=_cfg_snap["percentage"],
+            count_range=_cfg_snap["count_range"],
+            total_likes_limit=_cfg_snap["total_likes_limit"],
+            session_likes_used=_cfg_snap["session_likes_used"],
+            budget_s=round(float(_cfg_snap["budget_s"]), 3),
+        )
+    except Exception:
+        pass
+
+    if not cand:
+        _log_likes_early_exit("unresolved_follower_username")
+        return _finish(phase_outcome="skipped", skipped_reason="unresolved_follower_username")
+
+    if not follow_success_verified:
+        return _finish(
+            phase_outcome="skipped",
+            skipped_reason="follow_not_verified",
+            log_early_exit=True,
+        )
+
+    if skipped_tap:
+        return _finish(
+            phase_outcome="skipped",
+            skipped_reason="skipped_tap_already_connected",
+            log_early_exit=True,
+        )
+
+    if pending_rq and follow_priv:
+        return _finish(
+            phase_outcome="skipped",
+            skipped_reason="private_follow_request_pending",
+            log_early_exit=True,
+        )
+
+    if not _cfg_snap["post_follow_enabled"]:
+        return _finish(
+            phase_outcome="skipped",
+            skipped_reason="likes_disabled_by_config",
+            log_early_exit=True,
+        )
+
+    if not _cfg_snap["real_visual_like_enabled"]:
+        return _finish(
+            phase_outcome="skipped",
+            skipped_reason="real_post_like_disabled_by_config",
+            log_early_exit=True,
+        )
+
+    pct = int(_cfg_snap["percentage"])
+    pct = max(0, min(100, pct))
+    if pct < 100 and random.randint(1, 100) > pct:
+        return _finish(
+            phase_outcome="skipped",
+            skipped_reason="likes_percentage_roll_skip",
+            log_early_exit=True,
+        )
+
+    total_lim = int(_cfg_snap["total_likes_limit"])
+    used = int(_cfg_snap["session_likes_used"])
+    if total_lim > 0 and used >= total_lim:
+        _log_likes_early_exit(
+            "likes_skipped_session_quota",
+            note="session_quota_before_target_count",
+        )
+        log(
+            "info",
+            "post_follow_post_likes_session_quota_reached",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            session_likes_used=used,
+            session_likes_limit=total_lim,
+        )
+        return _finish(
+            phase_outcome="skipped",
+            skipped_reason="likes_skipped_session_quota",
+        )
+
+    budget_s = float(_cfg_snap["budget_s"])
+    budget_s = max(3.0, min(budget_s, 30.0))
+
+    target_count = _post_follow_post_likes_count_from_range(str(_cfg_snap["count_range"]))
+    if total_lim > 0:
+        target_count = min(target_count, max(0, total_lim - used))
+    if target_count <= 0:
+        _log_likes_early_exit(
+            "likes_skipped_session_quota",
+            note="no_remaining_like_slots_for_target",
+            target_count=target_count,
+        )
+        log(
+            "info",
+            "post_follow_post_likes_session_quota_reached",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            session_likes_used=used,
+            session_likes_limit=total_lim,
+            note="no_remaining_like_slots_for_target",
+        )
+        return _finish(
+            phase_outcome="skipped",
+            skipped_reason="likes_skipped_session_quota",
+        )
+
+    log(
+        "info",
+        "post_follow_post_likes_target_count_decided",
+        visual_candidate_id=vcid,
+        source_profile_username=src,
+        follower_username=cand,
+        target_count=target_count,
+        session_likes_used=used,
+        session_likes_limit=total_lim,
+    )
+    out["target_count"] = target_count
+
+    t_prof = time.perf_counter()
+    ab = ""
+    try:
+        ab = str(read_current_profile_username_for_follow_gate(d) or "").strip().lstrip("@")
+    except Exception:
+        ab = ""
+    nav_prof: dict[str, Any] = {}
+    try:
+        nav_prof = observe_instagram_state(
+            d,
+            expected_package=pkg,
+            last_known_state=NavigationEngineState.CANDIDATE_PROFILE.value,
+            context={
+                "phase": "post_follow_post_likes_profile_guard",
+                "visual_candidate_id": vcid,
+                "source_profile_username": src,
+                "disable_followers_visual_fallback": True,
+                "expected_state": "CANDIDATE_PROFILE",
+            },
+        )
+    except Exception as e:
+        nav_prof = {"state": "UNKNOWN", "confidence": 0.0, "reason": str(e)}
+    timings["profile_guard_ms"] = round((time.perf_counter() - t_prof) * 1000, 2)
+    st_prof = str(nav_prof.get("state") or "")
+    prof_like = st_prof in (
+        NavigationEngineState.PROFILE.value,
+        NavigationEngineState.CANDIDATE_PROFILE.value,
+        NavigationEngineState.PRIVATE_PROFILE.value,
+    )
+    ab_match = bool(ab) and _normalize_handle(ab) == _normalize_handle(cand)
+    if not prof_like and not ab_match:
+        log(
+            "warning",
+            "post_follow_post_likes_phase_skipped",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            reason="profile_not_confirmed",
+            navigation_state=st_prof,
+            action_bar_title=ab,
+        )
+        return _finish(
+            phase_outcome="skipped",
+            skipped_reason="profile_not_confirmed_before_likes",
+        )
+
+    per_post: list[dict[str, Any]] = []
+    liked_count = 0
+    skipped_already = 0
+    failed_nav = 0
+    attempted_count = 0
+
+    for post_idx in range(target_count):
+        if (time.perf_counter() - t_all) > budget_s:
+            break
+        attempted_count += 1
+        post_rec: dict[str, Any] = {"index": post_idx, "outcome": "pending"}
+        profile_baseline: dict[str, Any] | None = None
+
+        log(
+            "info",
+            "post_follow_post_like_open_started",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            follower_username=cand,
+            post_index=post_idx,
+        )
+        t_grid = time.perf_counter()
+        grid_rem_s = max(1.5, budget_s - (time.perf_counter() - t_all))
+        grid_out = ensure_post_grid_visible_for_post_follow_likes(
+            d,
+            source_profile_username=src,
+            follower_username=cand,
+            visual_candidate_id=vcid,
+            budget_s=grid_rem_s,
+        )
+        timings[f"grid_prep_{post_idx}_ms"] = round(
+            (time.perf_counter() - t_grid) * 1000, 2
+        )
+
+        if not grid_out.get("ok"):
+            failed_nav += 1
+            post_rec["outcome"] = "grid_not_visible"
+            fr_grid = str(
+                grid_out.get("failure_reason") or "post_grid_not_visible_before_open"
+            )
+            if fr_grid != "post_grid_not_visible_before_open":
+                fr_grid = "post_grid_not_visible_before_open"
+            post_rec["failure_reason"] = fr_grid
+            per_post.append(post_rec)
+            log(
+                "warning",
+                "post_follow_post_likes_open_skipped_grid_not_visible",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                follower_username=cand,
+                failure_reason=fr_grid,
+                grid_state_before=grid_out.get("grid_state_before"),
+                grid_state_after=grid_out.get("grid_state_after"),
+                scroll_used=grid_out.get("scroll_used"),
+                scroll_profile=grid_out.get("scroll_profile"),
+                attempts=grid_out.get("attempts"),
+            )
+            log(
+                "warning",
+                "post_follow_post_like_open_failed",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                follower_username=cand,
+                failure_reason=fr_grid,
+            )
+            return _finish(
+                phase_outcome="failed_safe_continue",
+                skipped_reason="likes_failed_open_post_safe_continue",
+                skipped=False,
+                ok=False,
+                attempted_count=attempted_count,
+                liked_count=liked_count,
+                skipped_already_liked_count=skipped_already,
+                failed_navigation_count=failed_nav,
+                per_post=per_post,
+            )
+
+        if bool(getattr(config, "ENABLE_VISUAL_PROFILE_CONTEXT_LOCK", False)):
+            t_ctx = time.perf_counter()
+            profile_baseline = visual_capture_profile_context(
+                d, source_profile_username=src
+            )
+            timings[f"context_baseline_{post_idx}_ms"] = round(
+                (time.perf_counter() - t_ctx) * 1000, 2
+            )
+            if isinstance(profile_baseline, dict) and cand:
+                ab_ctx = str(
+                    profile_baseline.get("header_username_detected") or ""
+                ).strip().lstrip("@")
+                if not ab_ctx or _normalize_handle(ab_ctx) != _normalize_handle(cand):
+                    profile_baseline = {
+                        **dict(profile_baseline),
+                        "header_username_detected": cand,
+                        "username_norm": _normalize_handle(cand),
+                    }
+            try:
+                log(
+                    "info",
+                    "post_follow_post_likes_context_baseline_prepared",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    follower_username=cand,
+                    baseline_ok=bool((profile_baseline or {}).get("ok")),
+                    profile_fingerprint=str(
+                        (profile_baseline or {}).get("profile_fingerprint") or ""
+                    )[:64],
+                    header_username_detected=str(
+                        (profile_baseline or {}).get("header_username_detected") or ""
+                    )[:120],
+                )
+            except Exception:
+                pass
+
+        t_open = time.perf_counter()
+        dr_top = grid_out.get("dynamic_first_row_top")
+        dr_bottom = grid_out.get("dynamic_first_row_bottom")
+        gps = grid_out.get("grid_probe_source")
+        gpss = grid_out.get("grid_probe_screenshot_path")
+        open_out = visual_open_recent_post_from_profile(
+            d,
+            source_profile_username=src,
+            expected_follower_username=cand,
+            grid_y0_ratio=_POST_FOLLOW_LIKES_GRID_Y0_RATIO,
+            grid_y1_ratio=_POST_FOLLOW_LIKES_GRID_Y1_RATIO,
+            selection_policy=_VISUAL_POST_OPEN_SELECTION_FIRST_ROW_LTR,
+            dynamic_grid_first_row_top_px=(
+                int(dr_top) if isinstance(dr_top, (int, float)) else None
+            ),
+            dynamic_grid_first_row_bottom_px=(
+                int(dr_bottom) if isinstance(dr_bottom, (int, float)) else None
+            ),
+            grid_probe_source=str(gps).strip() if gps else None,
+            grid_probe_screenshot_path=str(gpss).strip() if gpss else None,
+        )
+        timings[f"open_post_{post_idx}_ms"] = round(
+            (time.perf_counter() - t_open) * 1000, 2
+        )
+
+        if open_out.get("no_posts_profile"):
+            post_rec["outcome"] = "no_posts"
+            per_post.append(post_rec)
+            log(
+                "info",
+                "post_follow_post_likes_phase_skipped",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                reason="likes_skipped_no_posts",
+            )
+            return _finish(
+                phase_outcome="skipped",
+                skipped_reason="likes_skipped_no_posts",
+                skipped=True,
+                ok=True,
+                attempted_count=attempted_count,
+                liked_count=0,
+                skipped_already_liked_count=0,
+                failed_navigation_count=failed_nav,
+                per_post=per_post,
+            )
+
+        if not open_out.get("ok") or not open_out.get("post_detected"):
+            failed_nav += 1
+            post_rec["outcome"] = "open_failed"
+            fr_open = str(open_out.get("failure_reason") or "")
+            if fr_open == "opened_foreign_profile_instead_of_post":
+                pass
+            elif (
+                fr_open == "post_viewer_not_detected"
+                and open_out.get("tap_x") is not None
+                and open_out.get("tap_y") is not None
+            ):
+                fr_open = "post_viewer_not_detected_after_tap"
+            post_rec["failure_reason"] = fr_open
+            per_post.append(post_rec)
+            log(
+                "warning",
+                "post_follow_post_like_open_failed",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                follower_username=cand,
+                failure_reason=fr_open,
+                tap_x=open_out.get("tap_x"),
+                tap_y=open_out.get("tap_y"),
+            )
+            return _finish(
+                phase_outcome="failed_safe_continue",
+                skipped_reason="likes_failed_open_post_safe_continue",
+                skipped=False,
+                ok=False,
+                attempted_count=attempted_count,
+                liked_count=liked_count,
+                skipped_already_liked_count=skipped_already,
+                failed_navigation_count=failed_nav,
+                per_post=per_post,
+            )
+
+        log(
+            "info",
+            "post_follow_post_like_open_success",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            tap_x=open_out.get("tap_x"),
+            tap_y=open_out.get("tap_y"),
+        )
+
+        al_pre = visual_post_already_liked(
+            d, source_profile_username=src, heart_bounds=None
+        )
+        if al_pre.get("already_liked"):
+            skipped_already += 1
+            post_rec["outcome"] = "already_liked"
+            post_rec["detection_method"] = al_pre.get("detection_method")
+            per_post.append(post_rec)
+            log(
+                "info",
+                "post_follow_post_like_already_liked_skipped",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                follower_username=cand,
+                detection_method=al_pre.get("detection_method"),
+                confidence=al_pre.get("confidence"),
+                semantic_like_state=al_pre.get("semantic_like_state"),
+                already_liked_decision_reason=al_pre.get(
+                    "already_liked_decision_reason"
+                ),
+                crop_bounds=al_pre.get("crop_bounds"),
+                red_ratio=al_pre.get("red_ratio"),
+            )
+            ret_p = visual_return_to_profile_from_post(d, source_profile_username=src)
+            if ret_p.get("ok"):
+                log(
+                    "info",
+                    "post_follow_post_likes_return_to_profile_success",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                )
+            else:
+                log(
+                    "warning",
+                    "post_follow_post_likes_return_to_profile_failed",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    failure_reason=ret_p.get("failure_reason"),
+                )
+            return _finish(
+                phase_outcome="skipped",
+                skipped_reason="likes_skipped_already_liked",
+                skipped=True,
+                ok=True,
+                attempted_count=attempted_count,
+                liked_count=0,
+                skipped_already_liked_count=skipped_already,
+                failed_navigation_count=failed_nav,
+                per_post=per_post,
+            )
+
+        like_out = visual_like_open_post(
+            d,
+            source_profile_username=src,
+            expected_profile_context=profile_baseline,
+            post_opened_via_profile_grid=True,
+            expected_follower_username=cand,
+        )
+        if like_out.get("real_tap_sent"):
+            log(
+                "info",
+                "post_follow_post_like_tap_sent",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                tap_x=like_out.get("tap_x"),
+                tap_y=like_out.get("tap_y"),
+            )
+
+        verify_on = bool(
+            getattr(config, "POST_FOLLOW_POST_LIKES_VERIFY_AFTER_TAP", True)
+        ) or bool(getattr(config, "VISUAL_POST_LIKE_VERIFY_AFTER_TAP", True))
+        liked_verified = False
+        if (
+            bool(getattr(config, "ENABLE_REAL_VISUAL_POST_LIKE", False))
+            and like_out.get("ok")
+            and like_out.get("real_tap_sent")
+            and verify_on
+        ):
+            t_ver = time.perf_counter()
+            ver = visual_verify_post_liked(
+                d,
+                source_profile_username=src,
+                tap_x=like_out.get("tap_x"),
+                tap_y=like_out.get("tap_y"),
+                detect_confidence=like_out.get("confidence"),
+                post_tap_screenshot_path=like_out.get("post_tap_screenshot_path"),
+                pre_tap_like_button_bounds=like_out.get("like_button_bounds"),
+                like_button_state_before=like_out.get("like_button_state_before"),
+            )
+            timings[f"verify_post_{post_idx}_ms"] = round(
+                (time.perf_counter() - t_ver) * 1000, 2
+            )
+            liked_verified = bool(ver.get("liked_verified"))
+            post_rec["verification_method"] = ver.get("verification_method")
+            if liked_verified:
+                log(
+                    "info",
+                    "post_follow_post_like_verify_success",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                )
+            else:
+                log(
+                    "info",
+                    "post_follow_post_like_verify_failed",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                )
+        elif like_out.get("ok") and (
+            like_out.get("real_tap_sent") or like_out.get("dry_run")
+        ):
+            liked_verified = bool(like_out.get("ok"))
+
+        if liked_verified:
+            liked_count += 1
+            post_rec["outcome"] = "liked"
+            per_post.append(post_rec)
+        else:
+            failed_nav += 1
+            post_rec["outcome"] = "verify_failed"
+            post_rec["failure_reason"] = str(like_out.get("failure_reason") or "")
+            per_post.append(post_rec)
+            ret_pf = visual_return_to_profile_from_post(d, source_profile_username=src)
+            if ret_pf.get("ok"):
+                log(
+                    "info",
+                    "post_follow_post_likes_return_to_profile_success",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                )
+            else:
+                log(
+                    "warning",
+                    "post_follow_post_likes_return_to_profile_failed",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    failure_reason=ret_pf.get("failure_reason"),
+                )
+            return _finish(
+                phase_outcome="failed_safe_continue",
+                skipped_reason="likes_failed_verify_safe_continue",
+                skipped=False,
+                ok=False,
+                attempted_count=attempted_count,
+                liked_count=liked_count,
+                skipped_already_liked_count=skipped_already,
+                failed_navigation_count=failed_nav,
+                per_post=per_post,
+            )
+
+        ret_ok = visual_return_to_profile_from_post(d, source_profile_username=src)
+        if ret_ok.get("ok"):
+            log(
+                "info",
+                "post_follow_post_likes_return_to_profile_success",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+            )
+        else:
+            log(
+                "warning",
+                "post_follow_post_likes_return_to_profile_failed",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                failure_reason=ret_ok.get("failure_reason"),
+            )
+            return _finish(
+                phase_outcome="failed_safe_continue",
+                skipped_reason="likes_return_to_profile_failed",
+                skipped=False,
+                ok=liked_count > 0,
+                attempted_count=attempted_count,
+                liked_count=liked_count,
+                skipped_already_liked_count=skipped_already,
+                failed_navigation_count=failed_nav + 1,
+                per_post=per_post,
+            )
+
+    out_liked = liked_count
+    if out_liked >= target_count and target_count > 0:
+        log(
+            "info",
+            "post_follow_post_likes_phase_success",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            liked_count=out_liked,
+            target_count=target_count,
+        )
+        return _finish(
+            phase_outcome="success",
+            skipped=False,
+            ok=True,
+            attempted_count=attempted_count,
+            liked_count=out_liked,
+            skipped_already_liked_count=skipped_already,
+            failed_navigation_count=failed_nav,
+            per_post=per_post,
+        )
+    if out_liked > 0:
+        log(
+            "info",
+            "post_follow_post_likes_phase_partial",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            liked_count=out_liked,
+            target_count=target_count,
+        )
+        return _finish(
+            phase_outcome="partial_success",
+            skipped=False,
+            ok=True,
+            attempted_count=attempted_count,
+            liked_count=out_liked,
+            skipped_already_liked_count=skipped_already,
+            failed_navigation_count=failed_nav,
+            per_post=per_post,
+        )
+    log(
+        "info",
+        "post_follow_post_likes_phase_skipped",
+        visual_candidate_id=vcid,
+        source_profile_username=src,
+        reason="no_verified_likes",
+    )
+    return _finish(
+        phase_outcome="skipped",
+        skipped_reason="no_verified_likes",
+        attempted_count=attempted_count,
+        liked_count=0,
+        skipped_already_liked_count=skipped_already,
+        failed_navigation_count=failed_nav,
+        per_post=per_post,
+    )
+
+
 def run_visual_candidate_post_follow_phase(
     d: u2.Device,
     *,
@@ -23891,6 +28001,7 @@ def run_visual_candidate_post_follow_phase(
     follow_state_after: str,
     skipped_tap: bool,
     det: dict[str, Any] | None,
+    session_likes_used: int = 0,
 ) -> dict[str, Any]:
     """
     Post-follow: observe UI, optional real mute, controlled return to CT followers list.
@@ -24124,6 +28235,12 @@ def run_visual_candidate_post_follow_phase(
                 mute_partial=True,
                 timings_ms=v2.get("timings_ms") or {},
             )
+            _post_mute_state_checkpoint(
+                d,
+                pkg=pkg,
+                source_profile_username=src,
+                visual_candidate_id=vcid,
+            )
         else:
             log(
                 "warning",
@@ -24136,6 +28253,20 @@ def run_visual_candidate_post_follow_phase(
                 mute_v2_abort_reason=v2.get("abort_reason"),
                 timings_ms=v2.get("timings_ms") or {},
             )
+
+    likes_out: dict[str, Any] = _post_follow_post_likes_out_template()
+    if follow_success_verified and cand:
+        likes_out = run_post_follow_post_likes_phase(
+            d,
+            pkg=pkg,
+            source_profile_username=src,
+            follower_username=cand,
+            visual_candidate_id=vcid,
+            follow_success_verified=follow_success_verified,
+            follow_state_after=fs_after,
+            skipped_tap=skipped_tap,
+            session_likes_used=int(session_likes_used or 0),
+        )
 
     mute_ok = bool(mute_out.get("ok"))
     mute_attempted = bool(mute_out.get("mute_started"))
@@ -24199,6 +28330,7 @@ def run_visual_candidate_post_follow_phase(
     _vf_ev_out = _post_follow_return_take_pending_visual_evidence_for_runner()
     _out: dict[str, Any] = {
         "mute": mute_out,
+        "likes": likes_out,
         "return_ok": bool(ok_ret),
         "return_how": str(how_ret or ""),
         "return_failure_reason": fail_re,
