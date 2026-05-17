@@ -20,6 +20,13 @@ from followers_exploration import (
     followers_progressive_max_passes,
     followers_scroll_soft_max_per_session,
 )
+from followers_injection_evidence import (
+    invalidate_followers_injection_evidence,
+    note_followers_injection_capture,
+    set_committed_light_revalidate_ok,
+    should_skip_committed_loop_top_detect,
+    should_skip_post_return_injection_capture,
+)
 from visual_follow_history import (
     VISUAL_FOLLOW_HISTORY_CONTINUE,
     mark_visual_follow_target_processed,
@@ -3332,7 +3339,13 @@ def _followers_try_refresh_injection_screenshot_after_scroll(
         except Exception:
             pass
     if capture_ok:
-        open_list_meta["latest_followers_injection_screenshot_path"] = str(out)
+        note_followers_injection_capture(
+            open_list_meta,
+            screenshot_path=str(out),
+            capture_reason="post_scroll",
+            source_profile_username=source_profile_username,
+            scroll_used=int(scroll_used),
+        )
     if capture_ok:
         try:
             from followers_inter_candidate_perf import (
@@ -3376,6 +3389,47 @@ def _followers_try_post_return_picker_injection_refresh(
     prior = ""
     if isinstance(open_list_meta, dict):
         prior = str(open_list_meta.get("latest_followers_injection_screenshot_path") or "").strip()
+    _skip_cap, _skip_meta = should_skip_post_return_injection_capture(
+        open_list_meta,
+        visual_loop_state,
+        source_profile_username=source_profile_username,
+    )
+    if _skip_cap:
+        visual_loop_state["post_return_picker_refresh_pending"] = False
+        visual_loop_state.pop("post_return_picker_refresh_meta", None)
+        try:
+            from followers_inter_candidate_perf import (
+                inter_candidate_segment_b_note_evidence_source,
+                inter_candidate_segment_b_pre_picker_injection_capture_end,
+            )
+
+            inter_candidate_segment_b_pre_picker_injection_capture_end()
+            inter_candidate_segment_b_note_evidence_source(source="post_return_injection")
+        except Exception:
+            pass
+        try:
+            log(
+                "info",
+                "followers_post_return_injection_capture_skipped_evidence_fresh",
+                source_profile_username=source_profile_username,
+                evidence_age_ms=_skip_meta.get("evidence_age_ms"),
+                evidence_capture_reason=str(
+                    _skip_meta.get("evidence_capture_reason") or ""
+                )[:80],
+                screenshot_path=str(_skip_meta.get("screenshot_path") or "")[:400],
+                reason="promoted_return_evidence_fresh",
+            )
+        except Exception:
+            pass
+        return
+    try:
+        from followers_inter_candidate_perf import (
+            inter_candidate_segment_b_pre_picker_injection_capture_start,
+        )
+
+        inter_candidate_segment_b_pre_picker_injection_capture_start()
+    except Exception:
+        pass
     settle_raw = float(
         getattr(config, "FOLLOWERS_POST_RETURN_PICKER_INJECTION_SETTLE_S", 0.75) or 0.75
     )
@@ -3418,8 +3472,23 @@ def _followers_try_post_return_picker_injection_refresh(
             )
         except Exception:
             pass
-    if capture_ok and isinstance(open_list_meta, dict):
-        open_list_meta["latest_followers_injection_screenshot_path"] = str(out)
+    if capture_ok:
+        note_followers_injection_capture(
+            open_list_meta,
+            screenshot_path=str(out),
+            capture_reason="post_return",
+            source_profile_username=source_profile_username,
+            scroll_used=0,
+            visual_loop_state=visual_loop_state,
+        )
+    try:
+        from followers_inter_candidate_perf import (
+            inter_candidate_segment_b_pre_picker_injection_capture_end,
+        )
+
+        inter_candidate_segment_b_pre_picker_injection_capture_end()
+    except Exception:
+        pass
     if capture_ok:
         try:
             from followers_inter_candidate_perf import (
@@ -5538,6 +5607,26 @@ def _run_followers_list_engine_session(
         )
 
     max_iter = int(getattr(config, "FOLLOWERS_LIST_MAX_ITERATIONS_PER_RUN", 35))
+    _follow_max_per_run = int(getattr(config, "FOLLOW_MAX_PER_RUN", 5))
+    _followers_iter_attr = getattr(config, "FOLLOWERS_LIST_MAX_ITERATIONS_PER_RUN", None)
+    log(
+        "info",
+        "followers_engine_goal_resolved",
+        follows_goal_effective=max_iter,
+        follows_goal_source=(
+            "config.FOLLOWERS_LIST_MAX_ITERATIONS_PER_RUN"
+            if _followers_iter_attr is not None
+            else "getattr_default_35"
+        ),
+        followers_list_max_iterations_per_run=max_iter,
+        follow_max_per_run=_follow_max_per_run,
+        follow_max_per_run_applies_to="standard_search_dm_target_loop_only",
+        supabase_mode=bool(supabase_mode),
+        account_id=str(account_id or ""),
+        run_id=str(run_id or ""),
+        config_fallback_followers_list_max_iterations=35,
+        config_fallback_follow_max_per_run=5,
+    )
     max_scroll = int(followers_scroll_soft_max_per_session())
     scroll_used = 0
     processed = 0
@@ -6150,7 +6239,59 @@ def _run_followers_list_engine_session(
         _sess_vf_sync = visual_loop_state.get("session_vf_detail")
         if isinstance(_sess_vf_sync, dict) and _sess_vf_sync:
             session_vf_detail_for_loop = dict(_sess_vf_sync)
-        if (
+        _cm_loop_early = followers_session_committed_meta()
+        _ca_at_loop_early = float(_cm_loop_early.get("followers_list_committed_at") or 0)
+        _committed_age_loop_early = (
+            round((time.perf_counter() - _ca_at_loop_early) * 1000.0, 2)
+            if _ca_at_loop_early > 0
+            else -1.0
+        )
+        _list_committed_loop_early = followers_session_list_committed_open_for(
+            source_profile_username
+        )
+        try:
+            from followers_inter_candidate_perf import (
+                inter_candidate_segment_b_pre_picker_loop_detect_start,
+            )
+
+            inter_candidate_segment_b_pre_picker_loop_detect_start()
+        except Exception:
+            pass
+        _skip_loop_detect, _skip_loop_detect_meta = should_skip_committed_loop_top_detect(
+            open_list_meta,
+            visual_loop_state,
+            source_profile_username=source_profile_username,
+            committed_age_ms=_committed_age_loop_early,
+            list_committed_open=bool(_list_committed_loop_early),
+        )
+        if _skip_loop_detect:
+            det = _followers_det_skip_redetect_after_visual_bypass(
+                det_xml_last_for_bypass if isinstance(det_xml_last_for_bypass, dict) else {},
+                session_vf_detail_for_loop,
+                open_detection_method,
+            )
+            det_xml_last_for_bypass = det
+            followers_xml_detect_skipped_this_iter = True
+            try:
+                log(
+                    "info",
+                    "followers_committed_loop_detect_skipped_evidence_fresh",
+                    source_profile_username=source_profile_username,
+                    loop_iteration=followers_engine_loop_iteration,
+                    iteration=processed,
+                    evidence_age_ms=_skip_loop_detect_meta.get("evidence_age_ms"),
+                    committed_age_ms=_skip_loop_detect_meta.get("committed_age_ms"),
+                    evidence_capture_reason=str(
+                        _skip_loop_detect_meta.get("evidence_capture_reason") or ""
+                    )[:80],
+                    screenshot_path=str(_skip_loop_detect_meta.get("screenshot_path") or "")[
+                        :400
+                    ],
+                    reason="committed_surface_evidence_fresh",
+                )
+            except Exception:
+                pass
+        elif (
             skip_followers_xml_detect_next_iter
             and det_xml_last_for_bypass is not None
             and isinstance(session_vf_detail_for_loop, dict)
@@ -6173,6 +6314,14 @@ def _run_followers_list_engine_session(
         else:
             det = detect_followers_list_screen(d, source_profile_username=source_profile_username)
             det_xml_last_for_bypass = det
+        try:
+            from followers_inter_candidate_perf import (
+                inter_candidate_segment_b_pre_picker_loop_detect_end,
+            )
+
+            inter_candidate_segment_b_pre_picker_loop_detect_end()
+        except Exception:
+            pass
 
         _det_odm = det.get("open_detection_method")
         if _det_odm:
@@ -6205,6 +6354,12 @@ def _run_followers_list_engine_session(
                 source_profile_username=source_profile_username,
                 iteration=processed,
             )
+            invalidate_followers_injection_evidence(
+                open_list_meta,
+                visual_loop_state,
+                reason="foreground_package_mismatch",
+                source_profile_username=source_profile_username,
+            )
             runner_invalidate_visual_followers_session_after_safe_stop(
                 d,
                 source_profile_username=source_profile_username,
@@ -6225,6 +6380,12 @@ def _run_followers_list_engine_session(
                 source_profile_username=source_profile_username,
                 iteration=processed,
                 expected_package=pkg,
+            )
+            invalidate_followers_injection_evidence(
+                open_list_meta,
+                visual_loop_state,
+                reason="verify_app_foreground_false",
+                source_profile_username=source_profile_username,
             )
             runner_invalidate_visual_followers_session_after_safe_stop(
                 d,
@@ -6263,6 +6424,12 @@ def _run_followers_list_engine_session(
                     iteration=processed,
                     foreground_package=str(nav_obs_fg.get("foreground_package") or ""),
                 )
+                invalidate_followers_injection_evidence(
+                    open_list_meta,
+                    visual_loop_state,
+                    reason="launcher_wrong_surface",
+                    source_profile_username=source_profile_username,
+                )
                 runner_invalidate_visual_followers_session_after_safe_stop(
                     d,
                     source_profile_username=source_profile_username,
@@ -6287,6 +6454,12 @@ def _run_followers_list_engine_session(
                     navigation_state=_st_nav,
                     source_profile_username=source_profile_username,
                     iteration=processed,
+                )
+                invalidate_followers_injection_evidence(
+                    open_list_meta,
+                    visual_loop_state,
+                    reason="screen_class_other",
+                    source_profile_username=source_profile_username,
                 )
                 runner_invalidate_visual_followers_session_after_safe_stop(
                     d,
@@ -6359,6 +6532,14 @@ def _run_followers_list_engine_session(
             else:
                 bypassed_xml_stale_this_iter = True
 
+        if bool(visual_loop_state.get("post_return_picker_refresh_pending")):
+            _followers_try_post_return_picker_injection_refresh(
+                d,
+                open_list_meta,
+                visual_loop_state=visual_loop_state,
+                source_profile_username=source_profile_username,
+            )
+
         if not det.get("is_followers_list"):
             if followers_session_list_committed_open_for(source_profile_username):
                 _cm = followers_session_committed_meta()
@@ -6380,6 +6561,14 @@ def _run_followers_list_engine_session(
                     session_vf_detail_for_loop=session_vf_detail_for_loop,
                     open_list_meta=open_list_meta,
                 )
+                try:
+                    from followers_inter_candidate_perf import (
+                        inter_candidate_segment_b_pre_picker_committed_revalidate_start,
+                    )
+
+                    inter_candidate_segment_b_pre_picker_committed_revalidate_start()
+                except Exception:
+                    pass
                 _light_st, _light_meta = followers_committed_surface_light_revalidate(
                     d,
                     source_profile_username=source_profile_username,
@@ -6423,7 +6612,15 @@ def _run_followers_list_engine_session(
                     if isinstance(_vfd_sync, dict) and _vfd_sync:
                         session_vf_detail_for_loop = dict(_vfd_sync)
                         visual_loop_state["session_vf_detail"] = session_vf_detail_for_loop
+                    set_committed_light_revalidate_ok(visual_loop_state, ok=True)
                 elif _light_st == "wrong_surface":
+                    invalidate_followers_injection_evidence(
+                        open_list_meta,
+                        visual_loop_state,
+                        reason="committed_light_wrong_surface",
+                        source_profile_username=source_profile_username,
+                    )
+                    set_committed_light_revalidate_ok(visual_loop_state, ok=False)
                     log(
                         "warning",
                         "followers_engine_committed_surface_lost",
@@ -6503,6 +6700,7 @@ def _run_followers_list_engine_session(
                     if isinstance(_vfd_sync, dict) and _vfd_sync:
                         session_vf_detail_for_loop = dict(_vfd_sync)
                         visual_loop_state["session_vf_detail"] = session_vf_detail_for_loop
+                    set_committed_light_revalidate_ok(visual_loop_state, ok=True)
                 else:
                     rv_ok, rv_meta = followers_surface_quick_revalidate(
                         d,
@@ -6577,7 +6775,15 @@ def _run_followers_list_engine_session(
                                 if _tag not in _sigs:
                                     _sigs.append(_tag)
                             det["signals"] = _sigs
+                            set_committed_light_revalidate_ok(visual_loop_state, ok=True)
                         else:
+                            invalidate_followers_injection_evidence(
+                                open_list_meta,
+                                visual_loop_state,
+                                reason="committed_surface_revalidate_failed",
+                                source_profile_username=source_profile_username,
+                            )
+                            set_committed_light_revalidate_ok(visual_loop_state, ok=False)
                             log(
                                 "warning",
                                 "followers_engine_committed_surface_lost",
@@ -6597,6 +6803,14 @@ def _run_followers_list_engine_session(
                             )
                             followers_session_clear_list_committed_open(source_profile_username)
                             return 42
+                try:
+                    from followers_inter_candidate_perf import (
+                        inter_candidate_segment_b_pre_picker_committed_revalidate_end,
+                    )
+
+                    inter_candidate_segment_b_pre_picker_committed_revalidate_end()
+                except Exception:
+                    pass
             elif _visual_followers_surface and not bypassed_xml_stale_this_iter:
                 _stale_pic = _followers_xml_stale_engine_stop(
                     stop_reason=stop_r_loop or "visual_fallback_xml_not_followers_list",
@@ -6663,13 +6877,6 @@ def _run_followers_list_engine_session(
                     )
                 _eng_log("followers_list_recovered", "success", "surface_restored", {"method": how})
                 continue
-
-        _followers_try_post_return_picker_injection_refresh(
-            d,
-            open_list_meta,
-            visual_loop_state=visual_loop_state,
-            source_profile_username=source_profile_username,
-        )
 
         log(
             "info",
@@ -8237,6 +8444,14 @@ def _run_followers_list_engine_session(
                     _RUNTIME_SEEN_FOLLOWER_USERNAMES.add(_fk_skip)
                     _RUNTIME_FOLLOWED_USERNAMES.add(_fk_skip)
                 continue
+
+        invalidate_followers_injection_evidence(
+            open_list_meta,
+            visual_loop_state,
+            reason="opening_follower_profile",
+            source_profile_username=source_profile_username,
+        )
+        set_committed_light_revalidate_ok(visual_loop_state, ok=False)
 
         if not open_follower_profile_from_list(d, pick, source_profile_username, pkg):
             _eng_log(
@@ -10242,7 +10457,14 @@ def _run_followers_list_engine_session(
                 )
                 _vf_promoted = False
                 if _promo_shot and os.path.isfile(_promo_shot):
-                    open_list_meta["latest_followers_injection_screenshot_path"] = _promo_shot
+                    note_followers_injection_capture(
+                        open_list_meta,
+                        screenshot_path=_promo_shot,
+                        capture_reason="post_return_promoted",
+                        source_profile_username=source_profile_username,
+                        scroll_used=0,
+                        visual_loop_state=visual_loop_state,
+                    )
                     if _promo_vf:
                         session_vf_detail_for_loop = dict(_promo_vf)
                         visual_loop_state["session_vf_detail"] = session_vf_detail_for_loop

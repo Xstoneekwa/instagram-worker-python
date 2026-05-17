@@ -8,7 +8,7 @@ Instrumentation only — no flow behavior changes.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from logs import log
@@ -27,6 +27,50 @@ def _is_placeholder_profile_username(username: str) -> bool:
     if u.startswith("vf_row") or u.startswith("vfp_"):
         return True
     return False
+
+
+@dataclass
+class _SegmentBIterationSnap:
+    iteration_index: int = 0
+    t_start: float = 0.0
+    t_picker_start: float = 0.0
+    t_picker_end: float = 0.0
+    t_mapping_start: float = 0.0
+    t_mapping_end: float = 0.0
+    t_scroll_start: float = 0.0
+    t_scroll_end: float = 0.0
+    t_refresh_after_scroll_end: float = 0.0
+    t_pre_picker_loop_detect_start: float = 0.0
+    t_pre_picker_loop_detect_end: float = 0.0
+    t_pre_picker_committed_revalidate_start: float = 0.0
+    t_pre_picker_committed_revalidate_end: float = 0.0
+    t_pre_picker_injection_capture_start: float = 0.0
+    t_pre_picker_injection_capture_end: float = 0.0
+
+    picker_candidate_count: int = 0
+    picker_empty: bool = False
+    picker_empty_reason: str = ""
+    picker_error: str = ""
+
+    rows_spans_detected: int = 0
+    mapped_count: int = 0
+    cta_allowed_count: int = 0
+    tap_safe_candidate_count: int = 0
+    row_mapping_empty_reason: str = ""
+
+    vision_gate_passed: bool = False
+    vision_gate_block_reason: str = ""
+    visual_follow_button_count: int = 0
+    visual_user_rows_detected: int = 0
+
+    evidence_source: str = ""
+    scroll_used: bool = False
+    scroll_reason: str = ""
+    scroll_reason_armed: str = ""
+
+    candidates_injected_count: int = 0
+    mapping_ran: bool = False
+    picker_ran: bool = False
 
 
 @dataclass
@@ -65,6 +109,15 @@ class _InterCandidatePerfState:
     counting_loop_iterations: bool = False
     profile_verified_real_username: str = ""
 
+    segment_b_iter: _SegmentBIterationSnap | None = None
+    segment_b_empty_reasons: list[str] = field(default_factory=list)
+    segment_b_scroll_reasons: list[str] = field(default_factory=list)
+    segment_b_total_picker_ms: float = 0.0
+    segment_b_total_row_mapping_ms: float = 0.0
+    segment_b_total_scroll_ms: float = 0.0
+    segment_b_total_refresh_after_scroll_ms: float = 0.0
+    segment_b_iteration_perf_emitted: int = 0
+
 
 _STATE = _InterCandidatePerfState()
 
@@ -72,6 +125,116 @@ _STATE = _InterCandidatePerfState()
 def _reset_state() -> None:
     global _STATE
     _STATE = _InterCandidatePerfState()
+
+
+def _segment_b_window_active() -> bool:
+    return bool(
+        _STATE.active
+        and _STATE.t_post_return_success > 0.0
+        and _STATE.t_candidate_selected <= 0.0
+        and _STATE.counting_loop_iterations
+    )
+
+
+def _infer_segment_b_iteration_outcome(snap: _SegmentBIterationSnap) -> str:
+    if snap.candidates_injected_count > 0:
+        return "candidate_selected"
+    if snap.scroll_used:
+        return "retry_after_scroll"
+    if snap.picker_empty and not snap.scroll_used:
+        return "empty_no_scroll"
+    return "other"
+
+
+def _emit_segment_b_iteration_perf(*, outcome: str) -> None:
+    snap = _STATE.segment_b_iter
+    if snap is None or not _segment_b_window_active():
+        return
+    now = time.monotonic()
+    picker_ms = _ms_between(snap.t_picker_start, snap.t_picker_end)
+    row_mapping_ms = _ms_between(snap.t_mapping_start, snap.t_mapping_end)
+    scroll_ms = _ms_between(snap.t_scroll_start, snap.t_scroll_end)
+    refresh_ms = _ms_between(snap.t_scroll_end, snap.t_refresh_after_scroll_end)
+    if snap.t_refresh_after_scroll_end <= 0.0 and snap.t_scroll_end > 0.0:
+        refresh_ms = 0.0
+    iteration_total_ms = _ms_between(snap.t_start, now)
+
+    _STATE.segment_b_total_picker_ms += picker_ms
+    _STATE.segment_b_total_row_mapping_ms += row_mapping_ms
+    _STATE.segment_b_total_scroll_ms += scroll_ms
+    _STATE.segment_b_total_refresh_after_scroll_ms += refresh_ms
+    _STATE.segment_b_iteration_perf_emitted += 1
+
+    empty_reason = str(snap.picker_empty_reason or snap.picker_error or "").strip()
+    if snap.picker_empty and empty_reason:
+        _STATE.segment_b_empty_reasons.append(empty_reason)
+    scroll_reason = str(snap.scroll_reason or snap.scroll_reason_armed or "").strip()
+    if snap.scroll_used and scroll_reason:
+        _STATE.segment_b_scroll_reasons.append(scroll_reason)
+
+    payload: dict[str, Any] = {
+        "from_follower_username": _STATE.from_follower_username,
+        "to_follower_username": _STATE.expected_username_hint,
+        "source_profile_username": _STATE.source_profile_username,
+        "iteration_index": int(snap.iteration_index),
+        "iteration_total_ms": iteration_total_ms,
+        "picker_ms": picker_ms,
+        "row_mapping_ms": row_mapping_ms,
+        "scroll_ms": scroll_ms,
+        "refresh_after_scroll_ms": refresh_ms,
+        "pre_picker_loop_detect_ms": _ms_between(
+            snap.t_pre_picker_loop_detect_start, snap.t_pre_picker_loop_detect_end
+        ),
+        "pre_picker_committed_revalidate_ms": _ms_between(
+            snap.t_pre_picker_committed_revalidate_start,
+            snap.t_pre_picker_committed_revalidate_end,
+        ),
+        "pre_picker_injection_capture_ms": _ms_between(
+            snap.t_pre_picker_injection_capture_start,
+            snap.t_pre_picker_injection_capture_end,
+        ),
+        "picker_candidate_count": int(snap.picker_candidate_count),
+        "picker_empty": bool(snap.picker_empty),
+        "picker_empty_reason": empty_reason,
+        "rows_spans_detected": int(snap.rows_spans_detected),
+        "mapped_count": int(snap.mapped_count),
+        "cta_allowed_count": int(snap.cta_allowed_count),
+        "tap_safe_candidate_count": int(snap.tap_safe_candidate_count),
+        "vision_gate_passed": bool(snap.vision_gate_passed),
+        "vision_gate_block_reason": str(snap.vision_gate_block_reason or ""),
+        "evidence_source": str(snap.evidence_source or "other"),
+        "visual_follow_button_count": int(snap.visual_follow_button_count),
+        "visual_user_rows_detected": int(snap.visual_user_rows_detected),
+        "scroll_used": bool(snap.scroll_used),
+        "scroll_reason": scroll_reason,
+        "iteration_outcome": str(outcome or _infer_segment_b_iteration_outcome(snap)),
+        "picker_ran": bool(snap.picker_ran),
+        "mapping_ran": bool(snap.mapping_ran),
+        "picker_error": str(snap.picker_error or ""),
+        "row_mapping_empty_reason": str(snap.row_mapping_empty_reason or ""),
+        "candidates_injected_count": int(snap.candidates_injected_count),
+    }
+    try:
+        log("info", "followers_segment_b_picker_iteration_perf", **payload)
+    except Exception:
+        pass
+    _STATE.segment_b_iter = None
+
+
+def _segment_b_start_iteration() -> None:
+    if not _segment_b_window_active():
+        return
+    _STATE.segment_b_iter = _SegmentBIterationSnap(
+        iteration_index=int(_STATE.loop_iterations_until_pick),
+        t_start=time.monotonic(),
+    )
+
+
+def _segment_b_finalize_current_iteration(*, outcome: str | None = None) -> None:
+    if _STATE.segment_b_iter is None:
+        return
+    oc = outcome or _infer_segment_b_iteration_outcome(_STATE.segment_b_iter)
+    _emit_segment_b_iteration_perf(outcome=oc)
 
 
 def inter_candidate_set_detect_bucket(bucket: str | None) -> None:
@@ -88,6 +251,216 @@ def inter_candidate_count_detect_followers_list() -> None:
         _STATE.post_return_detect_calls += 1
     elif b == "open_profile":
         _STATE.open_profile_detect_calls += 1
+
+
+def inter_candidate_segment_b_note_evidence_source(*, source: str) -> None:
+    if not _segment_b_window_active() or _STATE.segment_b_iter is None:
+        return
+    _STATE.segment_b_iter.evidence_source = str(source or "other").strip() or "other"
+
+
+def inter_candidate_segment_b_note_gate(
+    *,
+    gate_passed: bool,
+    gate_block_reason: str = "",
+    visual_follow_button_count: int = 0,
+    visual_user_rows_detected: int = 0,
+) -> None:
+    if not _segment_b_window_active() or _STATE.segment_b_iter is None:
+        return
+    snap = _STATE.segment_b_iter
+    snap.vision_gate_passed = bool(gate_passed)
+    snap.vision_gate_block_reason = str(gate_block_reason or "")
+    try:
+        snap.visual_follow_button_count = int(visual_follow_button_count)
+        snap.visual_user_rows_detected = int(visual_user_rows_detected)
+    except (TypeError, ValueError):
+        pass
+
+
+def _segment_b_mark_phase_start(snap: _SegmentBIterationSnap, field_start: str) -> None:
+    t = time.monotonic()
+    if getattr(snap, field_start, 0.0) <= 0.0:
+        setattr(snap, field_start, t)
+
+
+def _segment_b_mark_phase_end(snap: _SegmentBIterationSnap, field_end: str) -> None:
+    t = time.monotonic()
+    if getattr(snap, field_end, 0.0) <= 0.0:
+        setattr(snap, field_end, t)
+
+
+def inter_candidate_segment_b_pre_picker_loop_detect_start() -> None:
+    if not _segment_b_window_active() or _STATE.segment_b_iter is None:
+        return
+    _segment_b_mark_phase_start(_STATE.segment_b_iter, "t_pre_picker_loop_detect_start")
+
+
+def inter_candidate_segment_b_pre_picker_loop_detect_end() -> None:
+    if not _segment_b_window_active() or _STATE.segment_b_iter is None:
+        return
+    _segment_b_mark_phase_end(_STATE.segment_b_iter, "t_pre_picker_loop_detect_end")
+
+
+def inter_candidate_segment_b_pre_picker_committed_revalidate_start() -> None:
+    if not _segment_b_window_active() or _STATE.segment_b_iter is None:
+        return
+    _segment_b_mark_phase_start(_STATE.segment_b_iter, "t_pre_picker_committed_revalidate_start")
+
+
+def inter_candidate_segment_b_pre_picker_committed_revalidate_end() -> None:
+    if not _segment_b_window_active() or _STATE.segment_b_iter is None:
+        return
+    _segment_b_mark_phase_end(_STATE.segment_b_iter, "t_pre_picker_committed_revalidate_end")
+
+
+def inter_candidate_segment_b_pre_picker_injection_capture_start() -> None:
+    if not _segment_b_window_active() or _STATE.segment_b_iter is None:
+        return
+    _segment_b_mark_phase_start(_STATE.segment_b_iter, "t_pre_picker_injection_capture_start")
+
+
+def inter_candidate_segment_b_pre_picker_injection_capture_end() -> None:
+    if not _segment_b_window_active() or _STATE.segment_b_iter is None:
+        return
+    _segment_b_mark_phase_end(_STATE.segment_b_iter, "t_pre_picker_injection_capture_end")
+
+
+def inter_candidate_segment_b_picker_phase_start() -> None:
+    if not _segment_b_window_active() or _STATE.segment_b_iter is None:
+        return
+    snap = _STATE.segment_b_iter
+    snap.picker_ran = True
+    if snap.t_picker_start <= 0.0:
+        snap.t_picker_start = time.monotonic()
+
+
+def inter_candidate_segment_b_note_picker_result(
+    vp_inj: dict[str, Any] | None,
+) -> None:
+    if not _segment_b_window_active() or _STATE.segment_b_iter is None:
+        return
+    snap = _STATE.segment_b_iter
+    if snap.t_picker_end <= 0.0 and snap.t_picker_start > 0.0:
+        snap.t_picker_end = time.monotonic()
+    inj = vp_inj if isinstance(vp_inj, dict) else {}
+    try:
+        snap.picker_candidate_count = int(inj.get("candidate_count") or 0)
+    except (TypeError, ValueError):
+        snap.picker_candidate_count = 0
+    snap.picker_empty = snap.picker_candidate_count <= 0
+    snap.picker_empty_reason = str(
+        inj.get("empty_reason") or inj.get("reason") or ""
+    ).strip()
+    snap.picker_error = str(inj.get("picker_error") or "").strip()
+    try:
+        spans = inj.get("spans_count")
+        if spans is not None:
+            snap.rows_spans_detected = int(spans)
+    except (TypeError, ValueError):
+        pass
+
+
+def inter_candidate_segment_b_mapping_phase_start() -> None:
+    if not _segment_b_window_active() or _STATE.segment_b_iter is None:
+        return
+    snap = _STATE.segment_b_iter
+    snap.mapping_ran = True
+    if snap.t_mapping_start <= 0.0:
+        snap.t_mapping_start = time.monotonic()
+
+
+def inter_candidate_segment_b_note_mapping_result(
+    row_mapping_diag: dict[str, Any] | None,
+) -> None:
+    if not _segment_b_window_active() or _STATE.segment_b_iter is None:
+        return
+    snap = _STATE.segment_b_iter
+    if snap.t_mapping_end <= 0.0 and snap.t_mapping_start > 0.0:
+        snap.t_mapping_end = time.monotonic()
+    diag = row_mapping_diag if isinstance(row_mapping_diag, dict) else {}
+    try:
+        snap.mapped_count = int(diag.get("mapped_count") or 0)
+        snap.cta_allowed_count = int(diag.get("cta_allowed_count") or 0)
+        snap.tap_safe_candidate_count = int(snap.mapped_count)
+        if snap.rows_spans_detected <= 0:
+            snap.rows_spans_detected = int(diag.get("span_count") or 0)
+    except (TypeError, ValueError):
+        pass
+    snap.row_mapping_empty_reason = str(diag.get("row_mapping_empty_reason") or "").strip()
+
+
+def inter_candidate_segment_b_note_candidates_injected(*, count: int) -> None:
+    if not _segment_b_window_active() or _STATE.segment_b_iter is None:
+        return
+    try:
+        _STATE.segment_b_iter.candidates_injected_count = int(count)
+    except (TypeError, ValueError):
+        pass
+
+
+def inter_candidate_segment_b_note_scroll_reason_armed(*, reason: str) -> None:
+    if not _segment_b_window_active() or _STATE.segment_b_iter is None:
+        return
+    r = str(reason or "").strip()
+    if r:
+        _STATE.segment_b_iter.scroll_reason_armed = r
+
+
+def inter_candidate_segment_b_note_scroll_deferred_from_pick(
+    *,
+    empty_reason: str = "",
+    picker_error: str = "",
+    defer_kind: str = "",
+) -> None:
+    """Map defer branch to a stable scroll_reason label (instrumentation only)."""
+    pe = str(picker_error or "").strip()
+    er = str(empty_reason or "").strip()
+    dk = str(defer_kind or "").strip()
+    reason = "other"
+    if pe == "vision_validation_rejected" or er == "vision_validation_rejected":
+        reason = "vision_rejected"
+    elif er == "no_blue_follow_spans" or dk == "zero_follow_spans":
+        reason = "no_blue_follow_spans"
+    elif dk in ("unsafe_low_follow", "no_tap_safe_committed"):
+        reason = "no_tap_safe_candidate"
+    elif er in ("no_rows_after_filter",):
+        reason = "no_rows_after_filter"
+    inter_candidate_segment_b_note_scroll_reason_armed(reason=reason)
+
+
+def inter_candidate_segment_b_scroll_phase_start() -> None:
+    if not _segment_b_window_active() or _STATE.segment_b_iter is None:
+        return
+    snap = _STATE.segment_b_iter
+    if snap.t_scroll_start <= 0.0:
+        snap.t_scroll_start = time.monotonic()
+    if not snap.scroll_reason and snap.scroll_reason_armed:
+        snap.scroll_reason = snap.scroll_reason_armed
+
+
+def inter_candidate_segment_b_note_exploratory_scroll_used(
+    *,
+    scroll_profile: str = "",
+) -> None:
+    if not _segment_b_window_active() or _STATE.segment_b_iter is None:
+        return
+    snap = _STATE.segment_b_iter
+    snap.scroll_used = True
+    if snap.t_scroll_end <= 0.0 and snap.t_scroll_start > 0.0:
+        snap.t_scroll_end = time.monotonic()
+    prof = str(scroll_profile or "").strip()
+    if prof and not snap.scroll_reason:
+        snap.scroll_reason = prof
+
+
+def inter_candidate_segment_b_note_refresh_after_scroll() -> None:
+    if not _segment_b_window_active() or _STATE.segment_b_iter is None:
+        return
+    snap = _STATE.segment_b_iter
+    snap.t_refresh_after_scroll_end = time.monotonic()
+    if snap.evidence_source != "post_return_injection":
+        snap.evidence_source = "post_scroll_refresh"
 
 
 def inter_candidate_on_likes_phase_success(
@@ -144,7 +517,10 @@ def inter_candidate_on_loop_iteration() -> None:
         return
     if _STATE.t_candidate_selected > 0.0:
         return
+    if _STATE.segment_b_iter is not None:
+        _segment_b_finalize_current_iteration(outcome=None)
     _STATE.loop_iterations_until_pick += 1
+    _segment_b_start_iteration()
 
 
 def inter_candidate_on_picker_empty() -> None:
@@ -166,6 +542,8 @@ def inter_candidate_on_candidate_selected(
 ) -> None:
     if not _STATE.active:
         return
+    if _STATE.segment_b_iter is not None and _segment_b_window_active():
+        _segment_b_finalize_current_iteration(outcome="candidate_selected")
     _STATE.counting_loop_iterations = False
     _STATE.t_candidate_selected = time.monotonic()
     hint = str(follower_username or resolved_username_hint or "").strip().lstrip("@")
@@ -297,7 +675,7 @@ def _build_summary_payload(
     segment_d = _ms_between(t_c, t_d) if t_c > 0.0 and t_d > 0.0 else 0.0
     segment_e = _ms_between(t_d, t_e) if t_d > 0.0 else 0.0
 
-    return {
+    payload: dict[str, Any] = {
         "from_follower_username": _STATE.from_follower_username,
         "to_follower_username": str(target_username or "").strip().lstrip("@"),
         "source_profile_username": _STATE.source_profile_username,
@@ -322,7 +700,19 @@ def _build_summary_payload(
         "follow_verify_phase_ms": follow_verify_phase_ms,
         "profile_verified_username": _STATE.profile_verified_real_username,
         "outcome": "success",
+        "segment_b_iteration_count": int(_STATE.segment_b_iteration_perf_emitted),
+        "segment_b_empty_reasons": list(_STATE.segment_b_empty_reasons),
+        "segment_b_scroll_reasons": list(_STATE.segment_b_scroll_reasons),
+        "segment_b_total_picker_ms": round(float(_STATE.segment_b_total_picker_ms), 2),
+        "segment_b_total_row_mapping_ms": round(
+            float(_STATE.segment_b_total_row_mapping_ms), 2
+        ),
+        "segment_b_total_scroll_ms": round(float(_STATE.segment_b_total_scroll_ms), 2),
+        "segment_b_total_refresh_after_scroll_ms": round(
+            float(_STATE.segment_b_total_refresh_after_scroll_ms), 2
+        ),
     }
+    return payload
 
 
 def inter_candidate_on_follow_verify_success(
