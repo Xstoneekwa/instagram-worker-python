@@ -9810,6 +9810,10 @@ def visual_extract_followers_candidates_from_screenshot(
     runtime_seen: set[str] | None = None,
     action_account_username: str | None = None,
     phase: str | None = None,
+    open_list_meta: dict[str, Any] | None = None,
+    visual_loop_state: dict[str, Any] | None = None,
+    list_committed_open: bool = False,
+    committed_age_ms: float | None = None,
 ) -> dict[str, Any]:
     """
     Build structured visual follower-row candidates from an on-disk screenshot (PIL pixels only).
@@ -9832,6 +9836,9 @@ def visual_extract_followers_candidates_from_screenshot(
         "source_profile_username": source_profile_username or "",
         "sample_candidates": [],
         "picker_error": None,
+        "internal_gate_skipped": False,
+        "internal_gate_ms": 0.0,
+        "picker_core_ms": 0.0,
     }
     path = screenshot_path
     if not path:
@@ -9885,12 +9892,57 @@ def visual_extract_followers_candidates_from_screenshot(
         return out
 
     aw, ah = im_rgb.size
+    internal_gate_skipped = False
+    t_internal_gate = time.perf_counter()
     if vision_required:
-        if not _vision_validation_visual_followers_candidate_gate(
+        skip_internal_gate = False
+        skip_internal_meta: dict[str, Any] = {}
+        try:
+            from followers_injection_evidence import (
+                should_skip_picker_internal_vision_gate,
+            )
+
+            skip_internal_gate, skip_internal_meta = should_skip_picker_internal_vision_gate(
+                open_list_meta,
+                visual_loop_state,
+                source_profile_username=str(source_profile_username or ""),
+                screenshot_path=str(work_path),
+                picker_phase=str(phase or ""),
+                list_committed_open=bool(list_committed_open),
+                committed_age_ms=committed_age_ms,
+            )
+        except Exception:
+            skip_internal_gate = False
+            skip_internal_meta = {}
+        if skip_internal_gate:
+            internal_gate_skipped = True
+            out["internal_gate_skipped"] = True
+            out["internal_gate_ms"] = round(
+                (time.perf_counter() - t_internal_gate) * 1000.0, 2
+            )
+            try:
+                log(
+                    "info",
+                    "followers_picker_internal_gate_skipped_committed_evidence_fresh",
+                    source_profile_username=str(source_profile_username or "")[:120],
+                    screenshot_path=str(work_path)[:400],
+                    evidence_age_ms=float(skip_internal_meta.get("evidence_age_ms") or 0.0),
+                    committed_age_ms=float(skip_internal_meta.get("committed_age_ms") or 0.0),
+                    reason=str(
+                        skip_internal_meta.get("reason")
+                        or "same_fresh_committed_evidence_already_revalidated"
+                    ),
+                )
+            except Exception:
+                pass
+        elif not _vision_validation_visual_followers_candidate_gate(
             screenshot_path=str(work_path),
             d=d,
             source_profile_username=source_profile_username,
         ):
+            out["internal_gate_ms"] = round(
+                (time.perf_counter() - t_internal_gate) * 1000.0, 2
+            )
             out["picker_error"] = (
                 "vision_validation_rejected"
                 if scroll_executed == 0
@@ -9914,6 +9966,11 @@ def visual_extract_followers_candidates_from_screenshot(
             )
             _followers_visual_picker_terminal_reset(_stall_key)
             return out
+        else:
+            out["internal_gate_ms"] = round(
+                (time.perf_counter() - t_internal_gate) * 1000.0, 2
+            )
+    t_picker_core = time.perf_counter()
     try:
         log(
             "info",
@@ -9964,6 +10021,7 @@ def visual_extract_followers_candidates_from_screenshot(
                 )
             except Exception:
                 pass
+            out["picker_core_ms"] = round((time.perf_counter() - t_picker_core) * 1000.0, 2)
             return out
         _FOLLOWERS_VISUAL_PICKER_INCOMPLETE_STARTS[_stall_key] = _next_inc
 
@@ -10391,6 +10449,8 @@ def visual_extract_followers_candidates_from_screenshot(
                 dry_run=dry_run,
                 visual_only=True,
             )
+        out["internal_gate_skipped"] = bool(internal_gate_skipped)
+        out["picker_core_ms"] = round((time.perf_counter() - t_picker_core) * 1000.0, 2)
         _followers_visual_picker_terminal_reset(_stall_key)
         return out
     except Exception as e:
@@ -10417,6 +10477,8 @@ def visual_extract_followers_candidates_from_screenshot(
             sum(confidences) / len(confidences) if confidences else 0.0
         )
         out["sample_candidates"] = built[:5]
+        out["internal_gate_skipped"] = bool(internal_gate_skipped)
+        out["picker_core_ms"] = round((time.perf_counter() - t_picker_core) * 1000.0, 2)
         _followers_visual_picker_terminal_reset(_stall_key)
         return out
 

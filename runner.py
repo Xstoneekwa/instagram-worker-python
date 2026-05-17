@@ -96,6 +96,7 @@ from instagram_navigation import (
     followers_surface_quick_revalidate,
     followers_session_reset_list_committed_open,
     followers_session_list_committed_open_for,
+    followers_session_committed_open_age_ms,
     followers_session_committed_meta,
     followers_session_merge_det_for_committed_visual_surface,
     followers_session_clear_list_committed_open,
@@ -3161,6 +3162,38 @@ def _is_plausible_public_ig_username(raw: str) -> bool:
     if s.startswith("vf_row_"):
         return False
     return bool(_IG_PUBLIC_HANDLE_RE.fullmatch(s))
+
+
+def _followers_pick_mapping_anonymous_defer_after_vision_rejected(
+    pick: dict | None,
+    *,
+    vision_rejected: bool,
+    picker_err: str,
+    empty_reason: str,
+) -> bool:
+    """
+  V3.2-C1: mapping-only vf_row_* without a reliable username after vision_validation_rejected.
+  Opening these profiles is high-cost (wrong row / already-connected); scroll first.
+    """
+    if not isinstance(pick, dict) or not vision_rejected:
+        return False
+    pe = str(picker_err or "").strip()
+    er = str(empty_reason or "").strip()
+    if pe != "vision_validation_rejected" and er != "vision_validation_rejected":
+        return False
+    vcid = str(pick.get("visual_candidate_id") or "").strip()
+    if not vcid.startswith("vf_row_"):
+        return False
+    sel = str(pick.get("selection_method") or pick.get("source") or "").strip()
+    if sel and sel != "visual_row_mapping":
+        return False
+    hint = str(pick.get("resolved_username_hint") or "").strip().lstrip("@")
+    if _is_plausible_public_ig_username(hint):
+        return False
+    un = str(pick.get("username") or "").strip().lstrip("@")
+    if _is_plausible_public_ig_username(un):
+        return False
+    return True
 
 
 def _ct_clear_candidate_attempt_timer() -> None:
@@ -7110,6 +7143,12 @@ def _run_followers_list_engine_session(
                         runtime_seen=_RUNTIME_SEEN_FOLLOWER_USERNAMES,
                         action_account_username=_acct_inj if _acct_inj else None,
                         phase="followers_engine_inject",
+                        open_list_meta=open_list_meta,
+                        visual_loop_state=visual_loop_state,
+                        list_committed_open=followers_session_list_committed_open_for(
+                            source_profile_username
+                        ),
+                        committed_age_ms=followers_session_committed_open_age_ms(),
                     )
                     try:
                         log(
@@ -7120,6 +7159,11 @@ def _run_followers_list_engine_session(
                             source_profile_username=source_profile_username,
                             screenshot_path=str(_shot_inj),
                             picker_error=str(_vp_inj.get("picker_error") or ""),
+                            internal_gate_skipped=bool(
+                                _vp_inj.get("internal_gate_skipped")
+                            ),
+                            internal_gate_ms=float(_vp_inj.get("internal_gate_ms") or 0.0),
+                            picker_core_ms=float(_vp_inj.get("picker_core_ms") or 0.0),
                         )
                         if int(_vp_inj.get("candidate_count") or 0) == 0:
                             try:
@@ -7783,7 +7827,91 @@ def _run_followers_list_engine_session(
             candidates if isinstance(candidates, list) else [],
             scroll_used=int(scroll_used),
         )
-        pick = _first_eligible_follower_pick(candidates)
+
+        def _followers_maybe_defer_mapping_anonymous_pick_before_open(
+            pick_in: dict | None,
+        ) -> dict | None:
+            if not _followers_pick_mapping_anonymous_defer_after_vision_rejected(
+                pick_in,
+                vision_rejected=bool(_vision_rejected_pick),
+                picker_err=str(_picker_err_pick or ""),
+                empty_reason=str(_empty_reason_pick or ""),
+            ):
+                return pick_in
+            _vcid_def = str((pick_in or {}).get("visual_candidate_id") or "").strip()
+            _defer_reason = "vision_rejected_mapping_without_username"
+            try:
+                log(
+                    "info",
+                    "followers_mapping_anonymous_candidate_deferred_to_scroll",
+                    source_profile_username=source_profile_username,
+                    visual_candidate_id=_vcid_def,
+                    picker_empty_reason=str(_empty_reason_pick or "")[:160],
+                    picker_error=str(_picker_err_pick or "")[:160],
+                    mapped_count=int(_row_mapping_diag.get("mapped_count") or 0),
+                    cta_allowed_count=int(_row_mapping_diag.get("cta_allowed_count") or 0),
+                    tap_safe_candidate_count=int(_row_mapping_diag.get("mapped_count") or 0),
+                    defer_reason=_defer_reason,
+                    selection_method=str((pick_in or {}).get("selection_method") or "")[:80],
+                )
+                log(
+                    "info",
+                    "followers_mapping_anonymous_pick_abandoned_before_open",
+                    source_profile_username=source_profile_username,
+                    visual_candidate_id=_vcid_def,
+                    follower_username=str((pick_in or {}).get("username") or "")[:120],
+                    defer_reason=_defer_reason,
+                )
+            except Exception:
+                pass
+            try:
+                from followers_inter_candidate_perf import (
+                    inter_candidate_segment_b_abandon_mapping_anonymous_pick_before_open,
+                    inter_candidate_segment_b_note_scroll_deferred_from_pick,
+                )
+
+                inter_candidate_segment_b_abandon_mapping_anonymous_pick_before_open()
+                inter_candidate_segment_b_note_scroll_deferred_from_pick(
+                    empty_reason=_empty_reason_pick,
+                    picker_error=_picker_err_pick,
+                    defer_kind="vision_rejected_mapping_without_username",
+                )
+            except Exception:
+                pass
+            if _vcid_def:
+                try:
+                    _ac_register_blocked_visual_after_postopen_skip(
+                        visual_candidate_id=_vcid_def,
+                        follower_username=str((pick_in or {}).get("username") or ""),
+                        skip_reason=_defer_reason,
+                    )
+                except Exception:
+                    pass
+            if followers_allow_visual_exploratory_scroll_once(
+                reason="vision_rejected_mapping_anonymous_defer",
+                source_profile_username=source_profile_username,
+            ):
+                nonlocal exploratory_scroll_permit_armed_this_iter
+                nonlocal exploratory_scroll_profile_this_iter
+                exploratory_scroll_permit_armed_this_iter = True
+                exploratory_scroll_profile_this_iter = "zero_follow_spans_soft"
+                try:
+                    log(
+                        "info",
+                        "followers_visual_empty_mapping_scroll_permit_armed",
+                        source_profile_username=source_profile_username,
+                        loop_iteration=followers_engine_loop_iteration,
+                        defer_reason=_defer_reason,
+                        follow_button_count=int(_fbc_defer),
+                        scroll_profile=exploratory_scroll_profile_this_iter,
+                    )
+                except Exception:
+                    pass
+            return None
+
+        pick = _followers_maybe_defer_mapping_anonymous_pick_before_open(
+            _first_eligible_follower_pick(candidates)
+        )
         _followers_clear_pending_if_pick_other_visual_id(pick)
         _ac_scroll_forced = (
             _ac_scroll_forced
@@ -7858,7 +7986,9 @@ def _run_followers_list_engine_session(
                     )
                     time.sleep(0.45)
                     candidates = _collect_follower_candidates()
-                    pick = _first_eligible_follower_pick(candidates)
+                    pick = _followers_maybe_defer_mapping_anonymous_pick_before_open(
+                        _first_eligible_follower_pick(candidates)
+                    )
                     _followers_clear_pending_if_pick_other_visual_id(pick)
                     _ac_scroll_forced = (
                         _ac_scroll_forced

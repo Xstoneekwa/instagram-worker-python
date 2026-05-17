@@ -72,6 +72,10 @@ class _SegmentBIterationSnap:
     mapping_ran: bool = False
     picker_ran: bool = False
 
+    internal_gate_skipped: bool = False
+    internal_gate_ms: float = 0.0
+    picker_core_ms: float = 0.0
+
 
 @dataclass
 class _InterCandidatePerfState:
@@ -213,6 +217,9 @@ def _emit_segment_b_iteration_perf(*, outcome: str) -> None:
         "picker_error": str(snap.picker_error or ""),
         "row_mapping_empty_reason": str(snap.row_mapping_empty_reason or ""),
         "candidates_injected_count": int(snap.candidates_injected_count),
+        "internal_gate_skipped": bool(snap.internal_gate_skipped),
+        "internal_gate_ms": float(snap.internal_gate_ms),
+        "picker_core_ms": float(snap.picker_core_ms),
     }
     try:
         log("info", "followers_segment_b_picker_iteration_perf", **payload)
@@ -353,6 +360,15 @@ def inter_candidate_segment_b_note_picker_result(
         inj.get("empty_reason") or inj.get("reason") or ""
     ).strip()
     snap.picker_error = str(inj.get("picker_error") or "").strip()
+    snap.internal_gate_skipped = bool(inj.get("internal_gate_skipped"))
+    try:
+        snap.internal_gate_ms = float(inj.get("internal_gate_ms") or 0.0)
+    except (TypeError, ValueError):
+        snap.internal_gate_ms = 0.0
+    try:
+        snap.picker_core_ms = float(inj.get("picker_core_ms") or 0.0)
+    except (TypeError, ValueError):
+        snap.picker_core_ms = 0.0
     try:
         spans = inj.get("spans_count")
         if spans is not None:
@@ -424,9 +440,17 @@ def inter_candidate_segment_b_note_scroll_deferred_from_pick(
         reason = "no_blue_follow_spans"
     elif dk in ("unsafe_low_follow", "no_tap_safe_committed"):
         reason = "no_tap_safe_candidate"
+    elif dk == "vision_rejected_mapping_without_username":
+        reason = "vision_rejected_mapping_anonymous"
     elif er in ("no_rows_after_filter",):
         reason = "no_rows_after_filter"
     inter_candidate_segment_b_note_scroll_reason_armed(reason=reason)
+
+
+def inter_candidate_segment_b_abandon_mapping_anonymous_pick_before_open() -> None:
+    """Finalize Segment B iteration as scroll retry without closing the pick window (C1)."""
+    if _STATE.segment_b_iter is not None and _segment_b_window_active():
+        _segment_b_finalize_current_iteration(outcome="retry_after_scroll")
 
 
 def inter_candidate_segment_b_scroll_phase_start() -> None:

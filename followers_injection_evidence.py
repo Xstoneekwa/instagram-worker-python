@@ -196,3 +196,57 @@ def should_skip_committed_loop_top_detect(
 def set_committed_light_revalidate_ok(visual_loop_state: dict[str, Any] | None, *, ok: bool) -> None:
     if isinstance(visual_loop_state, dict):
         visual_loop_state[_VLS_LIGHT_OK] = bool(ok)
+
+
+_PICKER_INTERNAL_GATE_SKIP_PHASES: frozenset[str] = frozenset({"followers_engine_inject"})
+
+
+def should_skip_picker_internal_vision_gate(
+    open_list_meta: dict[str, Any] | None,
+    visual_loop_state: dict[str, Any] | None,
+    *,
+    source_profile_username: str,
+    screenshot_path: str,
+    picker_phase: str | None = None,
+    list_committed_open: bool = False,
+    committed_age_ms: float | None = None,
+) -> tuple[bool, dict[str, Any]]:
+    """
+    V3.2-D1: skip redundant picker-internal vision gate when committed surface was
+    light-revalidated on the same fresh injection screenshot (Segment B inject path).
+    """
+    meta: dict[str, Any] = {"skip": False}
+    phase = str(picker_phase or "").strip()
+    if phase not in _PICKER_INTERNAL_GATE_SKIP_PHASES:
+        return False, meta
+    if not list_committed_open:
+        return False, meta
+    c_age = float(committed_age_ms if committed_age_ms is not None else -1.0)
+    if c_age < 0.0 or c_age > committed_skip_full_detect_max_age_ms():
+        return False, meta
+    if not isinstance(visual_loop_state, dict) or not bool(
+        visual_loop_state.get(_VLS_LIGHT_OK)
+    ):
+        return False, meta
+    path = str(screenshot_path or "").strip()
+    inj_path = ""
+    if isinstance(open_list_meta, dict):
+        inj_path = str(open_list_meta.get(_META_PATH) or "").strip()
+    if not path or not inj_path or path != inj_path or not os.path.isfile(path):
+        return False, meta
+    if not injection_evidence_is_usable(
+        open_list_meta,
+        source_profile_username=source_profile_username,
+        max_age_ms=injection_evidence_max_age_ms(),
+        visual_loop_state=visual_loop_state,
+    ):
+        return False, meta
+    ev_age = injection_evidence_age_ms(open_list_meta)
+    meta = {
+        "skip": True,
+        "evidence_age_ms": round(ev_age, 2),
+        "committed_age_ms": round(c_age, 2),
+        "screenshot_path": path[:400],
+        "reason": "same_fresh_committed_evidence_already_revalidated",
+    }
+    return True, meta
