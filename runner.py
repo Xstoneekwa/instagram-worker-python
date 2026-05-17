@@ -374,6 +374,10 @@ def _is_welcome_scan_run(args: argparse.Namespace) -> bool:
     return _parse_run_type(args) == "dm_welcome_scan"
 
 
+def _is_dm_sender_dry_run_run(args: argparse.Namespace) -> bool:
+    return _parse_run_type(args) == "dm_sender_dry_run"
+
+
 def _recoverable_target_exit(code: int) -> bool:
     codes = getattr(config, "FAST_RECOVERABLE_TARGET_EXIT_CODES", ()) or ()
     return int(code) in codes
@@ -10751,14 +10755,15 @@ def main() -> int:
         "--run-type",
         type=str,
         default="",
-        help="Execution mode: dm_welcome_baseline | dm_welcome_scan (V4.1 baseline / V4.2-B enqueue only)",
+        help="Execution mode: dm_welcome_baseline | dm_welcome_scan | dm_sender_dry_run",
     )
     args = parser.parse_args()
     supabase_mode = _is_supabase_mode(args)
     welcome_baseline_run = _is_welcome_baseline_run(args)
     welcome_scan_run = _is_welcome_scan_run(args)
+    dm_sender_dry_run = _is_dm_sender_dry_run_run(args)
 
-    if (welcome_baseline_run or welcome_scan_run) and not supabase_mode:
+    if (welcome_baseline_run or welcome_scan_run or dm_sender_dry_run) and not supabase_mode:
         log(
             "error",
             "run_aborted",
@@ -10794,7 +10799,7 @@ def main() -> int:
             and (getattr(config, "FOLLOWERS_SOURCE_USERNAME", "") or "").strip()
         )
         if not targets:
-            if welcome_baseline_run or welcome_scan_run:
+            if welcome_baseline_run or welcome_scan_run or dm_sender_dry_run:
                 log(
                     "info",
                     "welcome_run_no_pending_targets_ok",
@@ -11142,6 +11147,41 @@ def main() -> int:
             target_username=account_username,
         )
         return _return_with_cleanup(d, ws_code)
+
+    if dm_sender_dry_run:
+        if not supabase_mode or not account_id:
+            log("error", "run_aborted", reason="dm_sender_dry_run_missing_account")
+            return _return_with_cleanup(d, 11)
+        from dm_sender_engine import dispatch_dm_sender_dry_run
+
+        ds_code = dispatch_dm_sender_dry_run(
+            d,
+            account_id=account_id,
+            run_id=run_id or None,
+        )
+        if supabase_mode and run_id:
+            _update_run_status_safe(
+                run_id=run_id,
+                status="completed" if ds_code == 0 else "failed",
+                totals={
+                    "total": 1,
+                    "success": 1 if ds_code == 0 else 0,
+                    "failed": 0 if ds_code == 0 else 1,
+                },
+                performance_summary={
+                    "run_type": "dm_sender_dry_run",
+                    "exit_code": ds_code,
+                },
+            )
+        reset_perf_counters()
+        _emit_performance_summary(
+            t0=t_session,
+            warm_session_used=warm_session_used,
+            force_stop_used=force_stop_used,
+            exit_code=ds_code,
+            target_username=None,
+        )
+        return _return_with_cleanup(d, ds_code)
 
     if bool(getattr(config, "ENABLE_FOLLOWERS_LIST_ENGINE", False)):
         source_profile_username = (getattr(config, "FOLLOWERS_SOURCE_USERNAME", "") or "").strip()

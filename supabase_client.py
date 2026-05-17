@@ -1417,6 +1417,132 @@ def enqueue_welcome_dm_job_if_eligible(
     return None
 
 
+def _parse_rpc_job_row(row: Any) -> dict[str, Any] | None:
+    if isinstance(row, dict):
+        return row
+    if isinstance(row, list) and row:
+        first = row[0]
+        return first if isinstance(first, dict) else None
+    return None
+
+
+def claim_next_dm_job(
+    account_id: str,
+    reserved_by: str,
+    *,
+    dm_type: str | None = None,
+) -> dict[str, Any] | None:
+    """RPC claim_next_dm_job: pending → reserved."""
+    params: dict[str, Any] = {
+        "p_account_id": str(account_id),
+        "p_reserved_by": str(reserved_by or "").strip(),
+    }
+    if dm_type:
+        params["p_dm_type"] = str(dm_type)
+    return _parse_rpc_job_row(call_rpc("claim_next_dm_job", params))
+
+
+def claim_dm_job_by_id(
+    account_id: str,
+    job_id: str,
+    reserved_by: str,
+) -> dict[str, Any] | None:
+    """
+    Reserve a specific pending job (test harness). Atomic via status filter on PATCH.
+    """
+    aid = str(account_id or "").strip()
+    jid = str(job_id or "").strip()
+    rb = str(reserved_by or "").strip()
+    if not aid or not jid or not rb:
+        return None
+    now = _utc_now_iso()
+    rows = _request_json(
+        "PATCH",
+        "ig_dm_jobs",
+        query={
+            "id": f"eq.{jid}",
+            "account_id": f"eq.{aid}",
+            "status": "eq.pending",
+        },
+        body={
+            "status": "reserved",
+            "reserved_at": now,
+            "reserved_by": rb,
+            "updated_at": now,
+        },
+        prefer_representation=True,
+    )
+    if rows and isinstance(rows, list) and rows:
+        return rows[0]
+    return None
+
+
+def get_dm_job_by_id(job_id: str) -> dict[str, Any] | None:
+    jid = str(job_id or "").strip()
+    if not jid:
+        return None
+    rows = _request_json(
+        "GET",
+        "ig_dm_jobs",
+        query={"select": "*", "id": f"eq.{jid}", "limit": "1"},
+    )
+    if rows and isinstance(rows, list) and rows:
+        return rows[0]
+    return None
+
+
+def mark_dm_job_running(job_id: str) -> dict[str, Any] | None:
+    return _parse_rpc_job_row(
+        call_rpc("mark_dm_job_running", {"p_job_id": str(job_id)})
+    )
+
+
+def release_dm_job_after_dry_run(
+    job_id: str,
+    *,
+    thread_state: str,
+    sendable: bool,
+    skip_reason_candidate: str | None = None,
+    metadata_patch: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """RPC release_dm_job_after_dry_run: running/reserved → pending + dry-run metadata."""
+    return _parse_rpc_job_row(
+        call_rpc(
+            "release_dm_job_after_dry_run",
+            {
+                "p_job_id": str(job_id),
+                "p_thread_state": str(thread_state or ""),
+                "p_sendable": bool(sendable),
+                "p_skip_reason_candidate": skip_reason_candidate,
+                "p_metadata_patch": metadata_patch or {},
+            },
+        )
+    )
+
+
+def complete_dm_job(
+    job_id: str,
+    final_status: str,
+    *,
+    skip_reason: str | None = None,
+    last_error: str | None = None,
+    increment_attempt: bool = False,
+    retry_delay_seconds: int | None = None,
+    metadata_patch: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """RPC complete_dm_job: terminal or failed→pending retry."""
+    params: dict[str, Any] = {
+        "p_job_id": str(job_id),
+        "p_final_status": str(final_status),
+        "p_skip_reason": skip_reason,
+        "p_last_error": last_error,
+        "p_increment_attempt": bool(increment_attempt),
+        "p_retry_delay_seconds": retry_delay_seconds,
+        "p_metadata_patch": metadata_patch or {},
+    }
+    return _parse_rpc_job_row(call_rpc("complete_dm_job", params))
+
+
 def mark_welcome_baseline_completed(
     account_id: str,
     *,
