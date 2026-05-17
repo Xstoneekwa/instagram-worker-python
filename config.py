@@ -322,9 +322,14 @@ UPDATE_UNLOCK_CODE = "TECH_ONLY_SECRET"
 SUSPEND_INSTAGRAM_APP_FOR_LOCK = False
 
 # --- V4.1 Welcome baseline scan (no DM send, no ig_dm_jobs) ---
-# When True: only harvest the first visible followers surface (no scroll).
-WELCOME_BASELINE_INITIAL_VISIBLE_ONLY = True
-# Extra scroll passes after the first harvest (0 = visible surface only).
-WELCOME_BASELINE_MAX_SCROLLS_V1 = 0
+# V4.1-E: bounded baseline window (multi-scroll) vs legacy visible-only smoke.
+WELCOME_BASELINE_WINDOW_MODE_ENABLED = True
+# Legacy lab mode: first screen only, never sets welcome_baseline_completed_at.
+WELCOME_BASELINE_INITIAL_VISIBLE_ONLY = False
+WELCOME_BASELINE_MAX_SCROLLS_V1 = 8
+WELCOME_BASELINE_MIN_ROWS_V1 = 30
+WELCOME_BASELINE_MAX_SECONDS_V1 = 120
+WELCOME_BASELINE_STAGNATION_NO_NEW_ROWS_MAX = 2
+WELCOME_BASELINE_POST_SCROLL_SETTLE_S = 0.65
 WELCOME_BASELINE_OWN_PROFILE_SETTLE_S = 1.2
 WELCOME_BASELINE_FOLLOWERS_OPEN_WAIT_S = 4.0

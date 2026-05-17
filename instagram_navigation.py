@@ -9020,6 +9020,48 @@ def _followers_store_detect_hierarchy_xml(hierarchy_xml: str, *, xml_path: str =
         _LAST_FOLLOWERS_DETECT_HIERARCHY_XML_PATH = str(xml_path)
 
 
+def followers_clear_detect_hierarchy_cache() -> None:
+    """Drop cached followers-list hierarchy (pre-scroll XML must not be reused)."""
+    global _LAST_FOLLOWERS_DETECT_HIERARCHY_XML, _LAST_FOLLOWERS_DETECT_HIERARCHY_XML_PATH
+    _LAST_FOLLOWERS_DETECT_HIERARCHY_XML = ""
+    _LAST_FOLLOWERS_DETECT_HIERARCHY_XML_PATH = ""
+
+
+def followers_refresh_detect_hierarchy_cache(
+    d: u2.Device,
+    *,
+    screen_index: int = 0,
+) -> str:
+    """
+    Single fresh dump_hierarchy for post-scroll baseline harvest (stores cache for XML-first path).
+    """
+    followers_clear_detect_hierarchy_cache()
+    try:
+        try:
+            hier = d.dump_hierarchy(compressed=False)
+        except TypeError:
+            hier = d.dump_hierarchy()
+        hier_text = hier if isinstance(hier, str) else str(hier or "")
+    except Exception:
+        return ""
+    if not hier_text.strip():
+        return ""
+    _ensure_debug_dirs()
+    xml_path = _XML_DIR / f"followers_baseline_window_screen_{int(screen_index)}.xml"
+    try:
+        xml_path.write_text(hier_text, encoding="utf-8")
+        _bump_xml_fetch()
+    except Exception:
+        xml_path = _XML_DIR / "followers_baseline_window_screen.xml"
+        try:
+            xml_path.write_text(hier_text, encoding="utf-8")
+            _bump_xml_fetch()
+        except Exception:
+            pass
+    _followers_store_detect_hierarchy_xml(hier_text, xml_path=str(xml_path))
+    return hier_text.strip()
+
+
 def _followers_resolve_detect_hierarchy_xml(
     d: u2.Device,
     hierarchy_xml: str | None = None,
