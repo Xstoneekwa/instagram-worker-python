@@ -6092,6 +6092,10 @@ _FOLLOWERS_POST_TAP_IMMEDIATE_CAPTURE_DONE: bool = False
 # Count of detect_followers_list_screen calls after followers stat tap (reset per open attempt).
 _FOLLOWERS_POST_TAP_DETECT_ATTEMPT_COUNT: int = 0
 
+# Latest followers-list hierarchy capture (post-tap debug XML); used when live U2 probes are empty.
+_LAST_FOLLOWERS_DETECT_HIERARCHY_XML: str = ""
+_LAST_FOLLOWERS_DETECT_HIERARCHY_XML_PATH: str = ""
+
 # While True: block programmatic scroll/swipe (see _followers_abort_scroll_if_post_tap_lock).
 POST_TAP_FOLLOWERS_DETECTION_IN_PROGRESS: bool = False
 
@@ -8999,10 +9003,341 @@ def _safe_ui_all(sel: Any) -> list[Any]:
     return []
 
 
+_OWN_UNIFIED_FOLLOWERS_TAB_TITLE_RE = re.compile(
+    r"^\d+\s+followers$",
+    re.IGNORECASE,
+)
+_OWN_UNIFIED_FOLLOWERS_TAB_TITLE_FR_RE = re.compile(
+    r"^\d+\s+abonn",
+    re.IGNORECASE,
+)
+
+
+def _followers_store_detect_hierarchy_xml(hierarchy_xml: str, *, xml_path: str = "") -> None:
+    global _LAST_FOLLOWERS_DETECT_HIERARCHY_XML, _LAST_FOLLOWERS_DETECT_HIERARCHY_XML_PATH
+    _LAST_FOLLOWERS_DETECT_HIERARCHY_XML = str(hierarchy_xml or "")
+    if xml_path:
+        _LAST_FOLLOWERS_DETECT_HIERARCHY_XML_PATH = str(xml_path)
+
+
+def _followers_resolve_detect_hierarchy_xml(
+    d: u2.Device,
+    hierarchy_xml: str | None = None,
+    *,
+    live_incomplete: bool = False,
+) -> str:
+    hier = str(hierarchy_xml or "").strip()
+    if hier:
+        return hier
+    if str(_LAST_FOLLOWERS_DETECT_HIERARCHY_XML or "").strip():
+        return str(_LAST_FOLLOWERS_DETECT_HIERARCHY_XML).strip()
+    path = str(_LAST_FOLLOWERS_DETECT_HIERARCHY_XML_PATH or "").strip()
+    if path:
+        try:
+            return Path(path).read_text(encoding="utf-8")
+        except Exception:
+            pass
+    if live_incomplete:
+        try:
+            try:
+                fresh = str(d.dump_hierarchy(compressed=False))
+            except TypeError:
+                fresh = str(d.dump_hierarchy())
+            if fresh.strip():
+                return fresh.strip()
+        except Exception:
+            pass
+    return ""
+
+
+def _own_unified_followers_tab_title_matches(text: str) -> bool:
+    raw = str(text or "").strip()
+    if not raw:
+        return False
+    if _OWN_UNIFIED_FOLLOWERS_TAB_TITLE_RE.match(raw):
+        return True
+    if _OWN_UNIFIED_FOLLOWERS_TAB_TITLE_FR_RE.match(raw):
+        return True
+    low = raw.lower()
+    if "follower" in low and re.match(r"^\d+", raw):
+        return True
+    return False
+
+
+def _xml_element_selected(el: ET.Element, parent_map: dict[ET.Element, ET.Element | None]) -> bool:
+    cur: ET.Element | None = el
+    while cur is not None:
+        if str(cur.get("selected") or "").lower() == "true":
+            return True
+        cur = parent_map.get(cur)
+    return False
+
+
+def _detect_own_unified_followers_list_from_hierarchy_xml(
+    hierarchy_xml: str,
+    *,
+    source_profile_username: str = "",
+) -> dict[str, Any]:
+    """
+    Own-profile unified followers list (Instagram unified_follow_list_* layout).
+    Does not require action bar title 'Followers' — username title + selected tab is enough.
+    """
+    meta: dict[str, Any] = {
+        "detected": False,
+        "signals": [],
+        "has_tab_layout": False,
+        "selected_followers_tab_text": "",
+        "follow_list_username_count": 0,
+        "follow_list_container_present": False,
+        "recycler_present": False,
+        "listview_present": False,
+        "action_bar_title": "",
+        "detection_source": "hierarchy_xml",
+    }
+    hier = str(hierarchy_xml or "").strip()
+    if not hier:
+        return meta
+    try:
+        try:
+            root = ET.fromstring(hier)
+        except ET.ParseError:
+            root = ET.fromstring(f"<wrap>{hier}</wrap>")
+    except Exception:
+        return meta
+    parent_map = _followers_entry_v2_xml_hierarchy_parent_map(root)
+    selected_tab = ""
+    for el in root.iter():
+        rid = str(el.get("resource-id") or "").lower()
+        cls = str(el.get("class") or "").lower()
+        if "unified_follow_list_tab_layout" in rid:
+            meta["has_tab_layout"] = True
+        if "follow_list_container" in rid:
+            meta["follow_list_container_present"] = True
+        if "follow_list_username" in rid:
+            meta["follow_list_username_count"] = int(meta["follow_list_username_count"]) + 1
+        if "recyclerview" in cls:
+            meta["recycler_present"] = True
+        if cls == "android.widget.listview" or rid.endswith(":id/list"):
+            meta["listview_present"] = True
+        if "action_bar_title" in rid:
+            t = str(el.get("text") or el.get("content-desc") or "").strip()
+            if t:
+                meta["action_bar_title"] = t
+        text = str(el.get("text") or "").strip()
+        if text and _own_unified_followers_tab_title_matches(text):
+            if _xml_element_selected(el, parent_map):
+                selected_tab = text
+    meta["selected_followers_tab_text"] = selected_tab
+    src = _normalize_handle(str(source_profile_username or ""))
+    ab = _normalize_handle(str(meta.get("action_bar_title") or ""))
+    title_ok = bool(not src or not ab or ab == src)
+    rows_ok = int(meta["follow_list_username_count"]) >= 1
+    list_chrome_ok = bool(meta["recycler_present"] or meta["listview_present"])
+    tab_ok = bool(meta["has_tab_layout"] and selected_tab)
+    if tab_ok and rows_ok and title_ok:
+        meta["detected"] = True
+        meta["signals"] = [
+            "own_unified_followers_list_detected",
+            "unified_follow_list_tab_layout",
+            "selected_followers_tab",
+            "follow_list_username",
+        ]
+        if meta["follow_list_container_present"]:
+            meta["signals"].append("follow_list_container")
+        if list_chrome_ok:
+            meta["signals"].append("list_chrome_recycler_or_listview")
+    return meta
+
+
+def _detect_own_unified_followers_list_live(
+    d: u2.Device,
+    *,
+    source_profile_username: str = "",
+) -> dict[str, Any]:
+    meta: dict[str, Any] = {
+        "detected": False,
+        "signals": [],
+        "has_tab_layout": False,
+        "selected_followers_tab_text": "",
+        "follow_list_username_count": 0,
+        "follow_list_container_present": False,
+        "recycler_present": False,
+        "listview_present": False,
+        "detection_source": "live_u2",
+    }
+    try:
+        if d(resourceIdMatches=r".*:id/unified_follow_list_tab_layout$").exists(timeout=0.12):
+            meta["has_tab_layout"] = True
+    except Exception:
+        pass
+    try:
+        if d(resourceIdMatches=r".*:id/follow_list_container$").exists(timeout=0.08):
+            meta["follow_list_container_present"] = True
+    except Exception:
+        pass
+    try:
+        meta["follow_list_username_count"] = len(
+            _safe_ui_all(d(resourceIdMatches=r".*:id/follow_list_username$"))
+        )
+    except Exception:
+        pass
+    try:
+        meta["recycler_present"] = len(_safe_ui_all(d(classNameMatches=".*RecyclerView.*"))) > 0
+    except Exception:
+        pass
+    try:
+        meta["listview_present"] = len(_safe_ui_all(d(className="android.widget.ListView"))) > 0
+    except Exception:
+        pass
+    try:
+        for el in _safe_ui_all(d(resourceIdMatches=r".*:id/title$")):
+            try:
+                inf = _follow_safe_info(el)
+                text = str(inf.get("text") or "").strip()
+                if not _own_unified_followers_tab_title_matches(text):
+                    continue
+                if bool(inf.get("selected")):
+                    meta["selected_followers_tab_text"] = text
+                    break
+            except Exception:
+                continue
+    except Exception:
+        pass
+    tab_ok = bool(meta["has_tab_layout"] and meta["selected_followers_tab_text"])
+    rows_ok = int(meta["follow_list_username_count"]) >= 1
+    list_chrome_ok = bool(meta["recycler_present"] or meta["listview_present"])
+    if tab_ok and rows_ok and list_chrome_ok:
+        meta["detected"] = True
+        meta["signals"] = [
+            "own_unified_followers_list_detected",
+            "unified_follow_list_tab_layout",
+            "selected_followers_tab",
+            "follow_list_username",
+        ]
+    return meta
+
+
+def _apply_own_unified_followers_list_to_det(
+    out: dict[str, Any],
+    own_meta: dict[str, Any],
+) -> None:
+    if not bool(own_meta.get("detected")):
+        out["own_unified_followers_list_detected"] = False
+        return
+    out["own_unified_followers_list_detected"] = True
+    out["is_followers_list"] = True
+    out["open_detection_method"] = "own_unified_follow_list"
+    out["relaxed_list_open"] = True
+    if own_meta.get("recycler_present"):
+        out["recycler_present"] = True
+    if own_meta.get("listview_present"):
+        out["listview_present"] = True
+    if int(own_meta.get("follow_list_username_count") or 0) > 0:
+        out["candidate_username_count"] = max(
+            int(out.get("candidate_username_count") or 0),
+            int(own_meta.get("follow_list_username_count") or 0),
+        )
+    sig = out.get("signals")
+    if not isinstance(sig, list):
+        sig = []
+        out["signals"] = sig
+    for s in list(own_meta.get("signals") or []):
+        if s not in sig:
+            sig.append(s)
+    if f"own_unified:{own_meta.get('detection_source')}" not in sig:
+        sig.append(f"own_unified:{own_meta.get('detection_source')}")
+    tab = str(own_meta.get("selected_followers_tab_text") or "").strip()
+    if tab:
+        out["visible_header_texts"] = list(dict.fromkeys([tab] + list(out.get("visible_header_texts") or [])))[:20]
+
+
+def _harvest_own_unified_xml_first_eligible(d: u2.Device) -> bool:
+    """True when own-unified followers list should harvest from cached hierarchy XML first."""
+    if str(_FOLLOWERS_LAST_OPEN_DETECTION_METHOD or "").strip() == "own_unified_follow_list":
+        return True
+    hier = _followers_resolve_detect_hierarchy_xml(d, None, live_incomplete=False)
+    return bool(hier.strip()) and "follow_list_username" in hier
+
+
+def _extract_own_unified_followers_usernames_from_hierarchy_xml(
+    hierarchy_xml: str,
+    *,
+    source_profile_username: str = "",
+    runtime_seen: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    """
+    Parse visible handles from own-profile unified followers list hierarchy XML.
+    Targets com.instagram.android:id/follow_list_username nodes only (no generic TextView scan).
+    """
+    seen = runtime_seen if runtime_seen is not None else set()
+    source_key = _normalize_handle(source_profile_username or "")
+    hier = str(hierarchy_xml or "").strip()
+    if not hier:
+        return []
+    try:
+        try:
+            root = ET.fromstring(hier)
+        except ET.ParseError:
+            root = ET.fromstring(f"<wrap>{hier}</wrap>")
+    except Exception:
+        return []
+
+    by_user: dict[str, dict[str, Any]] = {}
+    doc_order = 0
+    for el in root.iter():
+        rid = str(el.get("resource-id") or "")
+        if "follow_list_username" not in rid:
+            continue
+        raw_t = str(el.get("text") or "").strip().lstrip("@")
+        if not raw_t or not _FOLLOWERS_HANDLE_RE.match(raw_t):
+            continue
+        key = _normalize_handle(raw_t)
+        if not key or key == source_key or key in by_user:
+            continue
+        bounds: dict[str, Any] = {}
+        bounds_raw = str(el.get("bounds") or "").strip()
+        if bounds_raw:
+            m = re.match(
+                r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]",
+                bounds_raw,
+            )
+            if m:
+                bounds = {
+                    "left": int(m.group(1)),
+                    "top": int(m.group(2)),
+                    "right": int(m.group(3)),
+                    "bottom": int(m.group(4)),
+                }
+        c = _followers_bounds_center(bounds) if bounds else None
+        row_y = int(c[1]) if c else doc_order * 100
+        by_user[key] = {
+            "username": raw_t,
+            "bounds": bounds,
+            "row_center": [int(c[0]) if c else 0, row_y],
+            "already_seen_runtime": key in seen,
+            "resource_id": rid,
+        }
+        doc_order += 1
+
+    rows = sorted(by_user.values(), key=lambda r: (r["row_center"][1], r["username"]))
+    for r in rows:
+        log(
+            "info",
+            "followers_candidate_seen",
+            username=r["username"],
+            source_profile_username=source_profile_username,
+            already_seen_runtime=bool(r["already_seen_runtime"]),
+            resource_id=r.get("resource_id"),
+            extraction_source="own_unified_follow_list_username_xml",
+        )
+    return rows
+
+
 def detect_followers_list_screen(
     d: u2.Device,
     *,
     source_profile_username: str = "",
+    hierarchy_xml: str | None = None,
 ) -> dict[str, Any]:
     """
     Heuristic followers list: strict title + list chrome, OR relaxed list/content signals
@@ -9048,6 +9383,7 @@ def detect_followers_list_screen(
         "relaxed_rules_matched": [],
         "strict_list_open": False,
         "relaxed_list_open": False,
+        "own_unified_followers_list_detected": False,
         "current_package": cur_pkg,
         "current_activity": cur_act,
         "current_screen_guess": "unknown",
@@ -9083,6 +9419,24 @@ def detect_followers_list_screen(
                     _probe_fail("action_bar_get_text", e)
         except Exception as e:
             _probe_fail("action_bar_title_probe", e)
+        if not str(out.get("action_bar_title") or "").strip():
+            try:
+                ab_large = d(resourceIdMatches=r".*:id/action_bar_large_title_auto_size$")
+                if ab_large.exists(timeout=0.12):
+                    try:
+                        large_title = str(ab_large.get_text() or "").strip()
+                        if large_title:
+                            out["action_bar_title"] = large_title
+                            out["signals"].append("action_bar_large_title_auto_size")
+                            log(
+                                "info",
+                                "followers_entry_profile_action_bar_large_title_resolved",
+                                title=large_title[:120],
+                            )
+                    except Exception as e:
+                        _probe_fail("action_bar_large_title_get_text", e)
+            except Exception as e:
+                _probe_fail("action_bar_large_title_probe", e)
 
         # Toolbar / top strip texts for diagnostics
         try:
@@ -9319,6 +9673,36 @@ def detect_followers_list_screen(
         strict_hit = bool(title_ok and list_chrome)
         out["strict_list_open"] = strict_hit
 
+        live_incomplete = bool(
+            not list_chrome
+            or int(out.get("candidate_username_count") or 0) == 0
+        )
+        hier_for_own = _followers_resolve_detect_hierarchy_xml(
+            d,
+            hierarchy_xml,
+            live_incomplete=live_incomplete,
+        )
+        own_meta: dict[str, Any] = {"detected": False}
+        if hier_for_own:
+            own_meta = _detect_own_unified_followers_list_from_hierarchy_xml(
+                hier_for_own,
+                source_profile_username=source_profile_username,
+            )
+            if not bool(own_meta.get("detected")):
+                own_live = _detect_own_unified_followers_list_live(
+                    d,
+                    source_profile_username=source_profile_username,
+                )
+                if bool(own_live.get("detected")):
+                    own_meta = own_live
+        else:
+            own_live = _detect_own_unified_followers_list_live(
+                d,
+                source_profile_username=source_profile_username,
+            )
+            if bool(own_live.get("detected")):
+                own_meta = own_live
+
         out["is_followers_list"] = bool(relaxed_hit or strict_hit)
         if out["is_followers_list"]:
             out["open_detection_method"] = "xml"
@@ -9329,6 +9713,25 @@ def detect_followers_list_screen(
         else:
             out["open_detection_method"] = None
 
+        if bool(own_meta.get("detected")):
+            _apply_own_unified_followers_list_to_det(out, own_meta)
+            try:
+                log(
+                    "info",
+                    "followers_list_own_unified_detected",
+                    source_profile_username=source_profile_username or "",
+                    detection_source=str(own_meta.get("detection_source") or ""),
+                    selected_followers_tab_text=str(
+                        own_meta.get("selected_followers_tab_text") or ""
+                    )[:80],
+                    follow_list_username_count=int(
+                        own_meta.get("follow_list_username_count") or 0
+                    ),
+                    has_tab_layout=bool(own_meta.get("has_tab_layout")),
+                )
+            except Exception:
+                pass
+
         try:
             log(
                 "info",
@@ -9338,6 +9741,10 @@ def detect_followers_list_screen(
                 strict_list_open=out["strict_list_open"],
                 relaxed_list_open=out["relaxed_list_open"],
                 relaxed_rules_matched=out["relaxed_rules_matched"],
+                own_unified_followers_list_detected=bool(
+                    out.get("own_unified_followers_list_detected")
+                ),
+                open_detection_method=out.get("open_detection_method"),
                 action_bar_title=out["action_bar_title"],
                 recycler_present=out["recycler_present"],
                 listview_present=out["listview_present"],
@@ -21277,6 +21684,7 @@ def _followers_after_tap_immediate_capture_and_detect(
     shot = _SCREENSHOTS_DIR / "followers_after_tap_immediate.png"
     xml_path = _XML_DIR / "followers_after_tap_immediate.xml"
     paths: dict[str, Any] = {"screenshot_path": str(shot), "xml_path": str(xml_path)}
+    hier_text = ""
     try:
         screenshot(d, str(shot))
     except Exception as e:
@@ -21286,7 +21694,9 @@ def _followers_after_tap_immediate_capture_and_detect(
             hier = d.dump_hierarchy(compressed=False)
         except TypeError:
             hier = d.dump_hierarchy()
-        xml_path.write_text(hier, encoding="utf-8")
+        hier_text = hier if isinstance(hier, str) else str(hier or "")
+        xml_path.write_text(hier_text, encoding="utf-8")
+        _followers_store_detect_hierarchy_xml(hier_text, xml_path=str(xml_path))
         _bump_xml_fetch()
     except Exception as e:
         paths["xml_error"] = str(e)
@@ -21313,7 +21723,9 @@ def _followers_after_tap_immediate_capture_and_detect(
         phase="before_first_detect",
     )
     det = detect_followers_list_screen(
-        d, source_profile_username=source_profile_username
+        d,
+        source_profile_username=source_profile_username,
+        hierarchy_xml=hier_text or None,
     )
     det = _followers_apply_visual_fallback_if_needed(
         d,
@@ -22482,6 +22894,62 @@ def _followers_run_visual_open_xml_empty_diagnostic(
     _FOLLOWERS_ENGINE_STOP_REASON = "visual_open_xml_empty"
 
 
+def harvest_visible_followers_usernames(
+    d: u2.Device,
+    *,
+    source_profile_username: str,
+    runtime_seen: set[str] | None = None,
+) -> tuple[list[str], dict[str, Any]]:
+    """
+    Visible follower handles on the current followers list (no scroll).
+    Own unified followers list: XML-first via follow_list_username in cached hierarchy.
+    Other surfaces: live U2 TextView scan (unchanged).
+    """
+    seen = runtime_seen if runtime_seen is not None else set()
+    extraction_methods: list[str] = []
+    rows: list[dict[str, Any]] = []
+
+    if _harvest_own_unified_xml_first_eligible(d):
+        hier = _followers_resolve_detect_hierarchy_xml(d, None, live_incomplete=False)
+        if hier:
+            rows = _extract_own_unified_followers_usernames_from_hierarchy_xml(
+                hier,
+                source_profile_username=source_profile_username,
+                runtime_seen=seen,
+            )
+            if rows:
+                extraction_methods.append("own_unified_follow_list_username_xml")
+            else:
+                log(
+                    "info",
+                    "followers_harvest_own_unified_xml_empty",
+                    source_profile_username=source_profile_username,
+                    hierarchy_xml_len=len(hier),
+                )
+
+    if not rows:
+        rows = _iter_followers_candidates_collect(
+            d,
+            source_profile_username=source_profile_username,
+            runtime_seen=seen,
+        )
+        if rows:
+            extraction_methods.append("live_u2_textview_handle_regex")
+
+    usernames: list[str] = []
+    for r in rows:
+        u = str(r.get("username") or "").strip()
+        if u:
+            usernames.append(u)
+    meta = {
+        "visible_rows_count": len(rows),
+        "usernames_count": len(usernames),
+        "sample_usernames": usernames[:12],
+        "extraction_methods": extraction_methods,
+    }
+    return usernames, meta
+
+
 def _iter_followers_candidates_collect(
     d: u2.Device,
     *,
@@ -22675,7 +23143,316 @@ def _followers_open_success_payload(
     }
 
 
+_FOLLOWERS_ENTRY_XML_FAMILIAR_EXACT_METHOD = (
+    "hierarchy_xml_profile_header_followers_stacked_familiar_exact"
+)
+_FOLLOWERS_ENTRY_XML_CD_FOLLOWERS_METHOD = "hierarchy_xml_content_desc_followers_metric"
+_FOLLOWERS_ENTRY_XML_FAMILIAR_RID_SUFFIX = "profile_header_followers_stacked_familiar"
+_FOLLOWERS_ENTRY_XML_CD_FOLLOWERS_RE = re.compile(
+    r"^\d+\s*followers$",
+    re.IGNORECASE,
+)
+_FOLLOWERS_ENTRY_XML_CD_FOLLOWERS_COMPACT_RE = re.compile(
+    r"^\d+followers$",
+    re.IGNORECASE,
+)
+
+
+def _resolve_profile_action_bar_title_for_entry(
+    d: u2.Device,
+    *,
+    hierarchy_xml: str | None = None,
+) -> str:
+    """Own profile often uses action_bar_large_title_auto_size instead of action_bar_title."""
+    for rid_pat, log_large in (
+        (r".*:id/action_bar_title.*", False),
+        (r".*:id/action_bar_large_title_auto_size$", True),
+    ):
+        try:
+            ab = d(resourceIdMatches=rid_pat)
+            if ab.exists(timeout=0.12):
+                title = str(ab.get_text() or "").strip()
+                if title:
+                    if log_large:
+                        log(
+                            "info",
+                            "followers_entry_profile_action_bar_large_title_resolved",
+                            title=title[:120],
+                            source="u2",
+                        )
+                    return title
+        except Exception:
+            continue
+    hier = (hierarchy_xml or "").strip()
+    if not hier:
+        return ""
+    try:
+        try:
+            root = ET.fromstring(hier)
+        except ET.ParseError:
+            root = ET.fromstring(f"<wrap>{hier}</wrap>")
+    except Exception:
+        return ""
+    for suffix in ("action_bar_large_title_auto_size", "action_bar_title"):
+        for el in root.iter():
+            rid = str(el.get("resource-id") or "")
+            if suffix not in rid:
+                continue
+            title = str(el.get("text") or el.get("content-desc") or "").strip()
+            if title:
+                if suffix == "action_bar_large_title_auto_size":
+                    log(
+                        "info",
+                        "followers_entry_profile_action_bar_large_title_resolved",
+                        title=title[:120],
+                        source="hierarchy_xml",
+                    )
+                return title
+    return ""
+
+
+def _followers_entry_v2_xml_hierarchy_parent_map(
+    root: ET.Element,
+) -> dict[ET.Element, ET.Element | None]:
+    parent_map: dict[ET.Element, ET.Element | None] = {root: None}
+
+    def _walk(el: ET.Element) -> None:
+        for ch in list(el):
+            parent_map[ch] = el
+            _walk(ch)
+
+    _walk(root)
+    return parent_map
+
+
+def _followers_entry_v2_rid_is_familiar_followers_column(rid: str) -> bool:
+    rl = str(rid or "").lower()
+    return _FOLLOWERS_ENTRY_XML_FAMILIAR_RID_SUFFIX in rl
+
+
+def _followers_entry_v2_xml_content_desc_is_followers_metric(cd: str) -> bool:
+    raw = str(cd or "").strip()
+    if not raw:
+        return False
+    if _FOLLOWERS_ENTRY_XML_CD_FOLLOWERS_RE.match(raw):
+        return True
+    if _FOLLOWERS_ENTRY_XML_CD_FOLLOWERS_COMPACT_RE.match(raw):
+        return True
+    norm = _follow_norm(raw)
+    if _followers_reject_following_column_label(raw):
+        return False
+    if _followers_reject_posts_label(raw):
+        return False
+    return bool(
+        _FOLLOWERS_ENTRY_XML_CD_FOLLOWERS_RE.match(norm)
+        or _FOLLOWERS_ENTRY_XML_CD_FOLLOWERS_COMPACT_RE.match(norm.replace(" ", ""))
+    )
+
+
+def _followers_entry_v2_entry_title_gate_ok(
+    *,
+    source_profile_username: str,
+    profile_action_bar_title: str,
+    profile_verified: bool,
+) -> bool:
+    if not bool(profile_verified):
+        return False
+    abn = _normalize_handle(str(profile_action_bar_title or ""))
+    srcn = _normalize_handle(str(source_profile_username or ""))
+    return bool(abn and srcn and abn == srcn)
+
+
+def _followers_entry_v2_xml_pick_clickable_bounds(
+    el: ET.Element,
+    parent_map: dict[ET.Element, ET.Element | None],
+) -> dict[str, int] | None:
+    if str(el.get("clickable") or "").lower() == "true":
+        bd = _dm_parse_bounds_attr_xml(el.get("bounds"))
+        if bd:
+            return bd
+    anc = _dm_nearest_clickable_xml_ancestor(el, parent_map)
+    if anc is not None:
+        bd = _dm_parse_bounds_attr_xml(anc.get("bounds"))
+        if bd:
+            return bd
+    return _dm_parse_bounds_attr_xml(el.get("bounds"))
+
+
+def _followers_entry_v2_xml_tap_in_familiar_followers_column(w: int, cx: int) -> bool:
+    """
+    Full-width familiar metrics (own profile): avatar left, three columns on the right.
+    Followers center is ~47–72% screen width — stricter legacy 45% gate rejects valid taps.
+    """
+    if w <= 0:
+        return True
+    nx = float(cx) / float(w)
+    if nx < 0.38:
+        return False
+    if nx > 0.76:
+        return False
+    return True
+
+
+def _followers_entry_v2_xml_bounds_in_metrics_band(
+    bd: dict[str, int],
+    *,
+    w: int,
+    h: int,
+) -> bool:
+    try:
+        cy = (int(bd["top"]) + int(bd["bottom"])) // 2
+        cx = (int(bd["left"]) + int(bd["right"])) // 2
+    except Exception:
+        return False
+    y_lo, y_hi = int(h * 0.10), int(h * 0.46)
+    if cy < y_lo or cy > y_hi:
+        return False
+    if cx < int(w * 0.02) or cx > int(w * 0.98):
+        return False
+    return _followers_entry_v2_xml_tap_in_familiar_followers_column(int(w), cx)
+
+
+def _followers_entry_v2_xml_bounds_to_raw_candidate(
+    bd: dict[str, int],
+    *,
+    method: str,
+    tap_source: str,
+    detected: str,
+    score: int,
+) -> dict[str, Any]:
+    left = int(bd["left"])
+    top = int(bd["top"])
+    right = int(bd["right"])
+    bottom = int(bd["bottom"])
+    cx = (left + right) // 2
+    cy = (top + bottom) // 2
+    return {
+        "score": int(score),
+        "cx": cx,
+        "cy": cy,
+        "tbounds": dict(bd),
+        "method": method,
+        "tap_source": tap_source,
+        "detected": detected[:220],
+        "stat_type": "followers",
+        "semantic_followers_metric": True,
+        "detail_signals": [
+            method,
+            tap_source,
+            "profile_verified:true",
+            "hierarchy_xml_familiar",
+        ],
+    }
+
+
+def _followers_entry_v2_xml_familiar_followers_candidates(
+    hierarchy_xml: str,
+    *,
+    w: int,
+    h: int,
+    source_profile_username: str,
+    profile_verified: bool,
+    profile_action_bar_title: str,
+) -> list[dict[str, Any]]:
+    """
+    XML-first followers stat candidates from an already-captured entry hierarchy dump.
+    Targets own-profile familiar metrics (profile_header_followers_stacked_familiar).
+    """
+    if not _followers_entry_v2_entry_title_gate_ok(
+        source_profile_username=source_profile_username,
+        profile_action_bar_title=profile_action_bar_title,
+        profile_verified=profile_verified,
+    ):
+        return []
+    hier = (hierarchy_xml or "").strip()
+    if not hier:
+        return []
+    try:
+        try:
+            root = ET.fromstring(hier)
+        except ET.ParseError:
+            root = ET.fromstring(f"<wrap>{hier}</wrap>")
+    except Exception:
+        return []
+    parent_map = _followers_entry_v2_xml_hierarchy_parent_map(root)
+    out: list[dict[str, Any]] = []
+    seen_bounds: set[tuple[int, int, int, int]] = set()
+
+    def _append_candidate(
+        bd: dict[str, int],
+        *,
+        method: str,
+        tap_source: str,
+        detected: str,
+        score: int,
+    ) -> None:
+        if not _followers_entry_v2_xml_bounds_in_metrics_band(bd, w=w, h=h):
+            return
+        key = (
+            int(bd["left"]),
+            int(bd["top"]),
+            int(bd["right"]),
+            int(bd["bottom"]),
+        )
+        if key in seen_bounds:
+            return
+        seen_bounds.add(key)
+        out.append(
+            _followers_entry_v2_xml_bounds_to_raw_candidate(
+                bd,
+                method=method,
+                tap_source=tap_source,
+                detected=detected,
+                score=score,
+            )
+        )
+
+    for el in root.iter():
+        rid = str(el.get("resource-id") or "")
+        if not _followers_entry_v2_rid_is_familiar_followers_column(rid):
+            continue
+        bd = _followers_entry_v2_xml_pick_clickable_bounds(el, parent_map)
+        if not bd:
+            continue
+        _append_candidate(
+            bd,
+            method=_FOLLOWERS_ENTRY_XML_FAMILIAR_EXACT_METHOD,
+            tap_source="hierarchy_xml_familiar_exact",
+            detected=_FOLLOWERS_ENTRY_XML_FAMILIAR_RID_SUFFIX,
+            score=12700,
+        )
+        break
+
+    if out:
+        return out
+
+    for el in root.iter():
+        cd = str(el.get("content-desc") or "").strip()
+        if not _followers_entry_v2_xml_content_desc_is_followers_metric(cd):
+            continue
+        rid = str(el.get("resource-id") or "").lower()
+        if "profile_header_following" in rid and "follower" not in rid:
+            continue
+        if "profile_header_post" in rid or "profile_header_posts" in rid:
+            continue
+        bd = _followers_entry_v2_xml_pick_clickable_bounds(el, parent_map)
+        if not bd:
+            continue
+        _append_candidate(
+            bd,
+            method=_FOLLOWERS_ENTRY_XML_CD_FOLLOWERS_METHOD,
+            tap_source="hierarchy_xml_content_desc_followers",
+            detected=cd[:220],
+            score=11200,
+        )
+        break
+
+    return out
+
+
 _FOLLOWERS_ENTRY_V2_SOURCE_BY_METHOD: dict[str, str] = {
+    "hierarchy_xml_profile_header_followers_stacked_familiar_exact": "xml_text",
+    "hierarchy_xml_content_desc_followers_metric": "xml_text",
     "resource_id_profile_header_followers_stacked_familiar_exact": "xml_text",
     "resource_id_followers_stacked_familiar": "stats_band_structure",
     "text_label_with_count_block": "hybrid",
@@ -22689,6 +23466,10 @@ _FOLLOWERS_ENTRY_V2_SOURCE_BY_METHOD: dict[str, str] = {
 
 
 def _followers_entry_v2_confidence(score: int, method: str) -> float:
+    if method == _FOLLOWERS_ENTRY_XML_FAMILIAR_EXACT_METHOD:
+        return 0.97
+    if method == _FOLLOWERS_ENTRY_XML_CD_FOLLOWERS_METHOD:
+        return 0.88
     if method == "resource_id_profile_header_followers_stacked_familiar_exact":
         return 0.97
     if method == "resource_id_followers_stacked_familiar":
@@ -22779,6 +23560,28 @@ def _followers_collect_stat_entry_candidates_for_v2(
     ly_lo, ly_hi = _followers_stat_strip_y_for_text_labels(h)
     raw: list[dict[str, Any]] = []
 
+    profile_action_bar_title_resolved = str(profile_action_bar_title or "").strip()
+    if not profile_action_bar_title_resolved:
+        profile_action_bar_title_resolved = _resolve_profile_action_bar_title_for_entry(
+            d,
+            hierarchy_xml=hierarchy_xml,
+        )
+
+    hier_xml = (hierarchy_xml or "").strip()
+    if hier_xml:
+        try:
+            for xml_cand in _followers_entry_v2_xml_familiar_followers_candidates(
+                hier_xml,
+                w=int(w),
+                h=int(h),
+                source_profile_username=str(source_profile_username or ""),
+                profile_verified=bool(profile_verified),
+                profile_action_bar_title=profile_action_bar_title_resolved,
+            ):
+                raw.append(xml_cand)
+        except Exception:
+            pass
+
     try:
         hv = followers_stats_surface_harvester_v2(
             d,
@@ -22788,7 +23591,7 @@ def _followers_collect_stat_entry_candidates_for_v2(
             hierarchy_xml=hierarchy_xml,
             profile_verified=bool(profile_verified),
             profile_screen_class=str(profile_screen_class or ""),
-            profile_action_bar_title=str(profile_action_bar_title or ""),
+            profile_action_bar_title=profile_action_bar_title_resolved,
         )
         for rmt in list(hv.get("raw_metric_taps") or [])[:6]:
             try:
@@ -23114,7 +23917,7 @@ def _followers_collect_stat_entry_candidates_for_v2(
             and not text_like
             and _followers_screen_class_is_profile_like(profile_screen_class)
         ):
-            abn = _normalize_handle(str(profile_action_bar_title or ""))
+            abn = _normalize_handle(str(profile_action_bar_title_resolved or ""))
             srcn = _normalize_handle(str(source_profile_username or ""))
             if abn and srcn and abn == srcn:
                 raw.append(g_raw)
@@ -23147,6 +23950,12 @@ def detect_followers_entry_candidates(
         w, h = d.window_size()
     except Exception:
         pass
+    resolved_title = str(profile_action_bar_title or "").strip()
+    if not resolved_title:
+        resolved_title = _resolve_profile_action_bar_title_for_entry(
+            d,
+            hierarchy_xml=hierarchy_xml,
+        )
     raw = _followers_collect_stat_entry_candidates_for_v2(
         d,
         w=int(w),
@@ -23155,7 +23964,7 @@ def detect_followers_entry_candidates(
         hierarchy_xml=hierarchy_xml,
         profile_verified=profile_verified,
         profile_screen_class=profile_screen_class,
-        profile_action_bar_title=profile_action_bar_title,
+        profile_action_bar_title=resolved_title,
     )
     out = [_followers_entry_v2_public_candidate(r) for r in raw]
     out.sort(key=lambda c: float(c.get("confidence") or 0.0), reverse=True)
@@ -23307,6 +24116,11 @@ def _followers_entry_v2_entry_candidate_followers_metric_ok(
     if bool(c.get("semantic_followers_metric")):
         return True, ""
     mlow = str(c.get("method") or "").lower()
+    if mlow in (
+        _FOLLOWERS_ENTRY_XML_FAMILIAR_EXACT_METHOD,
+        _FOLLOWERS_ENTRY_XML_CD_FOLLOWERS_METHOD,
+    ):
+        return True, ""
     if "profile_header_following" not in mlow and (
         "profile_header_followers" in mlow or "followers_stacked_familiar" in mlow
     ):
@@ -24929,6 +25743,7 @@ def _followers_entry_v2_second_pass_fresh_capture_and_detect(
     shot = _SCREENSHOTS_DIR / "followers_after_tap_second_pass.png"
     xml_path = _XML_DIR / "followers_after_tap_second_pass.xml"
     paths: dict[str, Any] = {"screenshot_path": str(shot), "xml_path": str(xml_path)}
+    hier_text = ""
     try:
         screenshot(d, str(shot))
     except Exception as e:
@@ -24938,7 +25753,9 @@ def _followers_entry_v2_second_pass_fresh_capture_and_detect(
             hier = d.dump_hierarchy(compressed=False)
         except TypeError:
             hier = d.dump_hierarchy()
-        xml_path.write_text(hier, encoding="utf-8")
+        hier_text = hier if isinstance(hier, str) else str(hier or "")
+        xml_path.write_text(hier_text, encoding="utf-8")
+        _followers_store_detect_hierarchy_xml(hier_text, xml_path=str(xml_path))
         _bump_xml_fetch()
     except Exception as e:
         paths["xml_error"] = str(e)
@@ -24947,7 +25764,9 @@ def _followers_entry_v2_second_pass_fresh_capture_and_detect(
     except Exception:
         pass
     det = detect_followers_list_screen(
-        d, source_profile_username=source_profile_username
+        d,
+        source_profile_username=source_profile_username,
+        hierarchy_xml=hier_text or None,
     )
     det = _followers_apply_visual_fallback_if_needed(
         d,
@@ -24995,6 +25814,21 @@ def _followers_entry_v2_post_tap_confirm(
             phase="immediate_post_tap",
         )
         if _rs_imm == "success":
+            _hier_rs = ""
+            if paths.get("xml_path"):
+                try:
+                    _hier_rs = Path(str(paths.get("xml_path"))).read_text(encoding="utf-8")
+                except Exception:
+                    _hier_rs = ""
+            if _hier_rs:
+                _own_rs = _detect_own_unified_followers_list_from_hierarchy_xml(
+                    _hier_rs,
+                    source_profile_username=source_profile_username,
+                )
+                if bool(_own_rs.get("detected")):
+                    _apply_own_unified_followers_list_to_det(det_imm, _own_rs)
+            if not bool(det_imm.get("is_followers_list")):
+                det_imm["open_detection_method"] = "rendered_strong_vision"
             return True, det_imm, det_imm, _FOLLOWERS_POST_TAP_DETECT_ATTEMPT_COUNT
         if _rs_imm == "vision_rejected":
             return False, det_imm, det_imm, _FOLLOWERS_POST_TAP_DETECT_ATTEMPT_COUNT
@@ -25390,6 +26224,12 @@ def _open_followers_list_from_profile_v2(
         stats_harvest_raw_node_count=stats_harvest_raw_node_count,
     )
 
+    entry_action_bar_title = str(det_surface.get("action_bar_title") or "").strip()
+    if not entry_action_bar_title:
+        entry_action_bar_title = _resolve_profile_action_bar_title_for_entry(
+            d,
+            hierarchy_xml=hier_followers_entry or None,
+        )
     candidates = detect_followers_entry_candidates(
         d,
         source_profile_username,
@@ -25399,7 +26239,7 @@ def _open_followers_list_from_profile_v2(
         hierarchy_xml=hier_followers_entry or None,
         profile_verified=profile_verified,
         profile_screen_class=str(fp_s.get("screen_class") or ""),
-        profile_action_bar_title=str(det_surface.get("action_bar_title") or ""),
+        profile_action_bar_title=entry_action_bar_title,
     )
     for c in candidates[:14]:
         log(

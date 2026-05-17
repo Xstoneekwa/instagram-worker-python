@@ -1182,3 +1182,117 @@ def record_post_like_interaction_success(
             },
         )
     return mout
+
+
+def call_rpc(function_name: str, params: dict[str, Any] | None = None) -> Any:
+    """Invoke a Postgres RPC via PostgREST (service role)."""
+    fn = str(function_name or "").strip()
+    if not fn:
+        raise ValueError("function_name is required")
+    base = _base_url()
+    key = _service_key()
+    url = f"{base}/rest/v1/rpc/{fn}"
+    headers = {
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+    }
+    body = params if params is not None else {}
+    data = json.dumps(body, separators=(",", ":")).encode("utf-8")
+    req = request.Request(url=url, method="POST", headers=headers, data=data)
+    try:
+        with request.urlopen(req, timeout=30) as resp:
+            raw = resp.read()
+            if not raw:
+                return None
+            return json.loads(raw.decode("utf-8"))
+    except error.HTTPError as e:
+        detail = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Supabase RPC {fn} failed: {e.code} {detail}") from e
+    except error.URLError as e:
+        raise RuntimeError(f"Supabase RPC request error: {e}") from e
+
+
+def ensure_account_dm_settings(account_id: str) -> dict[str, Any]:
+    """
+    Ensure ig_account_dm_settings exists. Does not enable welcome or outreach.
+    """
+    aid = str(account_id or "").strip()
+    if not aid:
+        raise ValueError("account_id is required")
+    rows = _request_json(
+        "GET",
+        "ig_account_dm_settings",
+        query={"select": "*", "account_id": f"eq.{aid}", "limit": "1"},
+    )
+    if rows:
+        return rows[0]
+    now = _utc_now_iso()
+    created = _request_json(
+        "POST",
+        "ig_account_dm_settings",
+        body={
+            "account_id": aid,
+            "welcome_enabled": False,
+            "outreach_enabled": False,
+            "created_at": now,
+            "updated_at": now,
+        },
+        prefer_representation=True,
+    )
+    if not created:
+        raise RuntimeError("ensure_account_dm_settings: empty insert response")
+    return created[0]
+
+
+def upsert_account_follower_seen_baseline(
+    account_id: str,
+    follower_username: str,
+    *,
+    scan_run_id: str | None = None,
+) -> dict[str, Any] | None:
+    """RPC upsert_account_follower_seen with is_baseline_scan=true."""
+    row = call_rpc(
+        "upsert_account_follower_seen",
+        {
+            "p_account_id": str(account_id),
+            "p_follower_username": str(follower_username),
+            "p_source_scan_run_id": scan_run_id,
+            "p_is_baseline_scan": True,
+        },
+    )
+    if isinstance(row, dict):
+        return row
+    if isinstance(row, list) and row:
+        first = row[0]
+        return first if isinstance(first, dict) else None
+    return None
+
+
+def mark_welcome_baseline_completed(
+    account_id: str,
+    *,
+    scan_run_id: str | None = None,
+) -> dict[str, Any] | None:
+    """Set welcome_baseline_completed_at on ig_account_dm_settings."""
+    aid = str(account_id or "").strip()
+    if not aid:
+        raise ValueError("account_id is required")
+    ensure_account_dm_settings(aid)
+    now = _utc_now_iso()
+    patch: dict[str, Any] = {
+        "welcome_baseline_completed_at": now,
+        "updated_at": now,
+    }
+    if scan_run_id:
+        patch["welcome_baseline_scan_run_id"] = str(scan_run_id)
+    rows = _request_json(
+        "PATCH",
+        "ig_account_dm_settings",
+        query={"account_id": f"eq.{aid}"},
+        body=patch,
+        prefer_representation=True,
+    )
+    if rows and isinstance(rows, list):
+        return rows[0]
+    return None

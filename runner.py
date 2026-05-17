@@ -362,6 +362,14 @@ def _is_supabase_mode(args: argparse.Namespace) -> bool:
     return bool((getattr(args, "account_id", None) or "").strip() or (getattr(args, "username", None) or "").strip())
 
 
+def _parse_run_type(args: argparse.Namespace) -> str:
+    return str(getattr(args, "run_type", "") or "").strip().lower()
+
+
+def _is_welcome_baseline_run(args: argparse.Namespace) -> bool:
+    return _parse_run_type(args) == "dm_welcome_baseline"
+
+
 def _recoverable_target_exit(code: int) -> bool:
     codes = getattr(config, "FAST_RECOVERABLE_TARGET_EXIT_CODES", ()) or ()
     return int(code) in codes
@@ -10735,8 +10743,19 @@ def main() -> int:
     parser.add_argument("--account-id", type=str, default="", help="Supabase ig_accounts.id")
     parser.add_argument("--username", type=str, default="", help="Supabase ig_accounts.username")
     parser.add_argument("--limit", type=int, default=25, help="Supabase pending target fetch limit")
+    parser.add_argument(
+        "--run-type",
+        type=str,
+        default="",
+        help="Execution mode: dm_welcome_baseline (V4.1 own-followers baseline, no DM/jobs)",
+    )
     args = parser.parse_args()
     supabase_mode = _is_supabase_mode(args)
+    welcome_baseline_run = _is_welcome_baseline_run(args)
+
+    if welcome_baseline_run and not supabase_mode:
+        log("error", "run_aborted", reason="welcome_baseline_requires_supabase_account")
+        return 11
 
     account_id = ""
     run_id = ""
@@ -10765,7 +10784,13 @@ def main() -> int:
             and (getattr(config, "FOLLOWERS_SOURCE_USERNAME", "") or "").strip()
         )
         if not targets:
-            if followers_engine_has_explicit_source:
+            if welcome_baseline_run:
+                log(
+                    "info",
+                    "welcome_baseline_no_pending_targets_ok",
+                    account_id=account_id,
+                )
+            elif followers_engine_has_explicit_source:
                 log(
                     "info",
                     "run_followers_engine_no_pending_targets_ok",
@@ -10833,6 +10858,7 @@ def main() -> int:
         supabase_mode=supabase_mode,
         account_id=account_id or None,
         run_id=run_id or None,
+        run_type=_parse_run_type(args) or None,
     )
     reset_dm_send_run_state()
     global _RUNTIME_REAL_DM_SENT_COUNT, _RUNTIME_FOLLOW_COUNT, _RUNTIME_FOLLOWED_USERNAMES
@@ -11001,6 +11027,58 @@ def main() -> int:
             )
         return _return_with_cleanup(d, 3)
     t = _phase("verify_app_running", t)
+
+    if welcome_baseline_run:
+        if not supabase_mode or not account_id:
+            log("error", "run_aborted", reason="welcome_baseline_missing_account")
+            return _return_with_cleanup(d, 11)
+        account_username = ""
+        if supabase_mode:
+            _acct = _safe_supabase_call(
+                "load_account",
+                account_id=account_id or None,
+                username=(args.username or "").strip() or None,
+            )
+            if _acct:
+                account_username = str(_acct.get("username") or "").strip()
+        if not account_username:
+            log("error", "run_aborted", reason="welcome_baseline_missing_account_username")
+            return _return_with_cleanup(d, 1)
+        from welcome_baseline_scanner import run_welcome_baseline_scan
+
+        log(
+            "info",
+            "welcome_baseline_run_started",
+            account_id=account_id,
+            account_username=account_username,
+            run_id=run_id or None,
+        )
+        bl_code = run_welcome_baseline_scan(
+            d,
+            account_id=account_id,
+            account_username=account_username,
+            run_id=run_id or None,
+        )
+        if supabase_mode and run_id:
+            _update_run_status_safe(
+                run_id=run_id,
+                status="completed" if bl_code == 0 else "failed",
+                totals={"total": 1, "success": 1 if bl_code == 0 else 0, "failed": 0 if bl_code == 0 else 1},
+                performance_summary={
+                    "run_type": "dm_welcome_baseline",
+                    "exit_code": bl_code,
+                    "account_username": account_username,
+                },
+            )
+        reset_perf_counters()
+        _emit_performance_summary(
+            t0=t_session,
+            warm_session_used=warm_session_used,
+            force_stop_used=force_stop_used,
+            exit_code=bl_code,
+            target_username=account_username,
+        )
+        return _return_with_cleanup(d, bl_code)
 
     if bool(getattr(config, "ENABLE_FOLLOWERS_LIST_ENGINE", False)):
         source_profile_username = (getattr(config, "FOLLOWERS_SOURCE_USERNAME", "") or "").strip()

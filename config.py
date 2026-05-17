@@ -320,3 +320,11 @@ ENABLE_STRICT_UPDATE_LOCK = True
 UPDATE_UNLOCK_CODE = "TECH_ONLY_SECRET"
 # When True, lock_instagram_update_system also runs `pm suspend` on Instagram (not recommended: can block app start).
 SUSPEND_INSTAGRAM_APP_FOR_LOCK = False
+
+# --- V4.1 Welcome baseline scan (no DM send, no ig_dm_jobs) ---
+# When True: only harvest the first visible followers surface (no scroll).
+WELCOME_BASELINE_INITIAL_VISIBLE_ONLY = True
+# Extra scroll passes after the first harvest (0 = visible surface only).
+WELCOME_BASELINE_MAX_SCROLLS_V1 = 0
+WELCOME_BASELINE_OWN_PROFILE_SETTLE_S = 1.2
+WELCOME_BASELINE_FOLLOWERS_OPEN_WAIT_S = 4.0
