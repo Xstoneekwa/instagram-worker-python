@@ -280,17 +280,35 @@ def _safe_teardown_navigation(
         log("warning", "dm_sender_teardown_navigation_failed", error=str(e)[:200])
 
 
+def _resolve_dm_sender_only_job_id() -> tuple[str, str]:
+    """Resolve job filter: shell env wins over config.DM_SENDER_ONLY_JOB_ID."""
+    env_raw = os.environ.get("DM_SENDER_ONLY_JOB_ID")
+    if env_raw is not None:
+        return str(env_raw).strip(), "env"
+    cfg = str(getattr(config, "DM_SENDER_ONLY_JOB_ID", "") or "").strip()
+    if cfg:
+        return cfg, "config"
+    return "", "config_empty"
+
+
 def _claim_job_for_run(
     account_id: str,
     reserved_by: str,
     *,
     dm_type: str,
+    only_job_id: str = "",
 ) -> dict[str, Any] | None:
-    only_id = str(getattr(config, "DM_SENDER_ONLY_JOB_ID", "") or "").strip()
+    only_id = str(only_job_id or "").strip()
     if only_id:
         job = supabase_client.claim_dm_job_by_id(account_id, only_id, reserved_by)
         if job:
-            log("info", "dm_sender_job_claimed", job_id=only_id, claim_mode="by_id")
+            log(
+                "info",
+                "dm_sender_job_claimed",
+                job_id=only_id,
+                claim_mode="claim_by_id",
+                recipient_username=job.get("recipient_username"),
+            )
         return job
     job = supabase_client.claim_next_dm_job(
         account_id,
@@ -437,6 +455,13 @@ def run_dm_sender_dry_run(
     dm_type = str(getattr(config, "DM_SENDER_DEFAULT_DM_TYPE", "welcome") or "welcome")
     max_jobs = max(0, int(getattr(config, "DM_SENDER_DRY_RUN_MAX_JOBS_PER_RUN", 1) or 1))
     reserved_by = _resolve_reserved_by(d)
+    only_job_id, filter_source = _resolve_dm_sender_only_job_id()
+    log(
+        "info",
+        "dm_sender_job_filter_resolved",
+        only_job_id=only_job_id or None,
+        filter_source=filter_source,
+    )
 
     jobs_claimed = 0
     jobs_released = 0
@@ -461,7 +486,9 @@ def run_dm_sender_dry_run(
         settings = {}
 
     for _ in range(max_jobs):
-        job = _claim_job_for_run(aid, reserved_by, dm_type=dm_type)
+        job = _claim_job_for_run(
+            aid, reserved_by, dm_type=dm_type, only_job_id=only_job_id
+        )
         if not job:
             log("info", "dm_sender_no_pending_job", account_id=aid, dm_type=dm_type)
             break
