@@ -3333,6 +3333,15 @@ def _followers_try_refresh_injection_screenshot_after_scroll(
             pass
     if capture_ok:
         open_list_meta["latest_followers_injection_screenshot_path"] = str(out)
+    if capture_ok:
+        try:
+            from followers_inter_candidate_perf import (
+                inter_candidate_segment_b_note_refresh_after_scroll,
+            )
+
+            inter_candidate_segment_b_note_refresh_after_scroll()
+        except Exception:
+            pass
     try:
         log(
             "info",
@@ -3411,6 +3420,17 @@ def _followers_try_post_return_picker_injection_refresh(
             pass
     if capture_ok and isinstance(open_list_meta, dict):
         open_list_meta["latest_followers_injection_screenshot_path"] = str(out)
+    if capture_ok:
+        try:
+            from followers_inter_candidate_perf import (
+                inter_candidate_segment_b_note_evidence_source,
+            )
+
+            inter_candidate_segment_b_note_evidence_source(
+                source="post_return_injection"
+            )
+        except Exception:
+            pass
     try:
         log(
             "info",
@@ -6828,6 +6848,21 @@ def _run_followers_list_engine_session(
                 committed_rendered_strong_visual_ok=bool(_vf_rendered_strong_committed_ok),
                 source_profile_username=source_profile_username,
             )
+            try:
+                from followers_inter_candidate_perf import (
+                    inter_candidate_segment_b_note_gate,
+                )
+
+                inter_candidate_segment_b_note_gate(
+                    gate_passed=bool(gate_passed),
+                    gate_block_reason=str(gate_block_reason or ""),
+                    visual_follow_button_count=int(_vf_g.get("visual_follow_button_count") or 0),
+                    visual_user_rows_detected=int(
+                        _vf_g.get("visual_user_rows_detected") or 0
+                    ),
+                )
+            except Exception:
+                pass
             if (
                 gate_passed
                 and _vf_rendered_strong_committed_ok
@@ -6853,6 +6888,14 @@ def _run_followers_list_engine_session(
                     _acct_inj = str(
                         getattr(config, "VISUAL_FOLLOWERS_ACTION_ACCOUNT_USERNAME", "") or ""
                     ).strip()
+                    try:
+                        from followers_inter_candidate_perf import (
+                            inter_candidate_segment_b_picker_phase_start,
+                        )
+
+                        inter_candidate_segment_b_picker_phase_start()
+                    except Exception:
+                        pass
                     _vp_inj = visual_extract_followers_candidates_from_screenshot(
                         d,
                         screenshot_path=_shot_inj,
@@ -6885,10 +6928,26 @@ def _run_followers_list_engine_session(
                     _inj = list(_vp_inj.get("candidates") or [])
                     if isinstance(_vp_inj, dict):
                         _vp_inj_for_defer = dict(_vp_inj)
+                    try:
+                        from followers_inter_candidate_perf import (
+                            inter_candidate_segment_b_note_picker_result,
+                        )
+
+                        inter_candidate_segment_b_note_picker_result(_vp_inj)
+                    except Exception:
+                        pass
                 if not _inj:
                     _max_map = int(
                         getattr(config, "VISUAL_FOLLOWERS_MAX_CANDIDATES_PER_SCREEN", 5) or 5
                     )
+                    try:
+                        from followers_inter_candidate_perf import (
+                            inter_candidate_segment_b_mapping_phase_start,
+                        )
+
+                        inter_candidate_segment_b_mapping_phase_start()
+                    except Exception:
+                        pass
                     _mapped, _row_mapping_diag = visual_map_followers_rows_from_screenshot(
                         _shot_inj,
                         max_candidates=_max_map,
@@ -6898,6 +6957,14 @@ def _run_followers_list_engine_session(
                         _mapped,
                         source_profile_username=source_profile_username,
                     )
+                    try:
+                        from followers_inter_candidate_perf import (
+                            inter_candidate_segment_b_note_mapping_result,
+                        )
+
+                        inter_candidate_segment_b_note_mapping_result(_row_mapping_diag)
+                    except Exception:
+                        pass
                 if _inj:
                     candidates = _inj
                     followers_engine_clear_stop_reason()
@@ -6918,6 +6985,14 @@ def _run_followers_list_engine_session(
                         source_profile_username=source_profile_username,
                         injection_source=_src_inj,
                     )
+                    try:
+                        from followers_inter_candidate_perf import (
+                            inter_candidate_segment_b_note_candidates_injected,
+                        )
+
+                        inter_candidate_segment_b_note_candidates_injected(count=len(_inj))
+                    except Exception:
+                        pass
         if len(candidates) > 0:
             visible_follow_buttons_stall_scrolls = 0
             visual_loop_state["list_progressive_exploration_passes_used"] = 0
@@ -7044,6 +7119,18 @@ def _run_followers_list_engine_session(
                     )
                 except Exception:
                     pass
+                try:
+                    from followers_inter_candidate_perf import (
+                        inter_candidate_segment_b_note_scroll_deferred_from_pick,
+                    )
+
+                    inter_candidate_segment_b_note_scroll_deferred_from_pick(
+                        empty_reason=_empty_reason_pick,
+                        picker_error=_picker_err_pick,
+                        defer_kind="zero_follow_spans",
+                    )
+                except Exception:
+                    pass
                 if followers_allow_visual_exploratory_scroll_once(
                     reason="zero_follow_spans_defer",
                     source_profile_username=source_profile_username,
@@ -7066,6 +7153,18 @@ def _run_followers_list_engine_session(
                             _row_mapping_diag.get("row_mapping_skip_reasons") or {}
                         ),
                         reason="follow_cta_allowed_but_tap_y_outside_safe_band",
+                    )
+                except Exception:
+                    pass
+                try:
+                    from followers_inter_candidate_perf import (
+                        inter_candidate_segment_b_note_scroll_deferred_from_pick,
+                    )
+
+                    inter_candidate_segment_b_note_scroll_deferred_from_pick(
+                        empty_reason=_empty_reason_pick,
+                        picker_error=_picker_err_pick,
+                        defer_kind="unsafe_low_follow",
                     )
                 except Exception:
                     pass
@@ -7105,6 +7204,18 @@ def _run_followers_list_engine_session(
                     )
                 except Exception:
                     pass
+                try:
+                    from followers_inter_candidate_perf import (
+                        inter_candidate_segment_b_note_scroll_deferred_from_pick,
+                    )
+
+                    inter_candidate_segment_b_note_scroll_deferred_from_pick(
+                        empty_reason=_empty_reason_pick,
+                        picker_error=_picker_err_pick,
+                        defer_kind="vision_rejected",
+                    )
+                except Exception:
+                    pass
                 if followers_allow_visual_exploratory_scroll_once(
                     reason="vision_rejected_visible_follow_defer",
                     source_profile_username=source_profile_username,
@@ -7141,6 +7252,18 @@ def _run_followers_list_engine_session(
                         vf_rendered_strong_committed_ok=bool(
                             _vf_rendered_strong_committed_ok
                         ),
+                    )
+                except Exception:
+                    pass
+                try:
+                    from followers_inter_candidate_perf import (
+                        inter_candidate_segment_b_note_scroll_deferred_from_pick,
+                    )
+
+                    inter_candidate_segment_b_note_scroll_deferred_from_pick(
+                        empty_reason=_empty_reason_pick,
+                        picker_error=_picker_err_pick,
+                        defer_kind="no_tap_safe_committed",
                     )
                 except Exception:
                     pass
@@ -7462,41 +7585,82 @@ def _run_followers_list_engine_session(
         det_sparse_loop: dict | None = None
 
         if pick is None and len(candidates) == 0:
-            det_sparse_loop = detect_followers_list_screen(
-                d, source_profile_username=source_profile_username
+            _skip_sparse_detect_no_blue_defer = (
+                bool(exploratory_scroll_permit_armed_this_iter)
+                and str(_empty_reason_pick or "") == "no_blue_follow_spans"
+                and str(_picker_err_pick or "") == ""
+                and not bool(_vision_rejected_pick)
+                and int(_row_mapping_diag.get("mapped_count") or 0) == 0
+                and int(_row_mapping_diag.get("cta_allowed_count") or 0) == 0
+                and int(_fbc_defer) == 0
+                and bool(_vf_rendered_strong_committed_ok)
+                and bool(gate_passed)
+                and bool(_defer_visual_followers_surface_ok)
             )
-            fbc_pre = int(det_sparse_loop.get("follow_buttons_visual_count") or 0)
-            if fbc_pre == 0:
+            if _skip_sparse_detect_no_blue_defer:
+                det_sparse_loop = dict(det) if isinstance(det, dict) else {}
+                det_sparse_loop["is_followers_list"] = True
+                det_sparse_loop["follow_buttons_visual_count"] = 0
+                _sparse_skip_sigs = list(det_sparse_loop.get("signals") or [])
+                if "sparse_detect_skipped_before_scroll" not in _sparse_skip_sigs:
+                    _sparse_skip_sigs.append("sparse_detect_skipped_before_scroll")
+                det_sparse_loop["signals"] = _sparse_skip_sigs
                 visible_follow_buttons_stall_scrolls = 0
-            elif bool(det_sparse_loop.get("is_followers_list")) and fbc_pre > 0:
-                log(
-                    "info",
-                    "visual_followers_scroll_blocked_visible_follow_buttons",
-                    source_profile_username=source_profile_username,
-                    follow_button_count=fbc_pre,
-                    note="hierarchy_refresh_then_re_resolve_before_any_scroll",
-                )
-                log(
-                    "info",
-                    "visual_followers_candidate_resolution_retry_before_scroll",
-                    source_profile_username=source_profile_username,
-                    follow_button_count=fbc_pre,
-                )
-                followers_force_hierarchy_refresh(
+                try:
+                    log(
+                        "info",
+                        "followers_visual_empty_frame_sparse_detect_skipped_before_scroll",
+                        source_profile_username=source_profile_username,
+                        picker_empty_reason=str(_empty_reason_pick or "")[:160],
+                        visual_follow_button_count=int(_fbc_defer),
+                        mapped_count=int(_row_mapping_diag.get("mapped_count") or 0),
+                        tap_safe_candidate_count=int(_row_mapping_diag.get("mapped_count") or 0),
+                        cta_allowed_count=int(_row_mapping_diag.get("cta_allowed_count") or 0),
+                        reason="no_blue_follow_spans_defer_already_armed",
+                        exploratory_scroll_profile=str(
+                            exploratory_scroll_profile_this_iter or ""
+                        )[:80],
+                        vf_rendered_strong_committed_ok=bool(_vf_rendered_strong_committed_ok),
+                    )
+                except Exception:
+                    pass
+            else:
+                det_sparse_loop = detect_followers_list_screen(
                     d, source_profile_username=source_profile_username
                 )
-                time.sleep(0.45)
-                candidates = _collect_follower_candidates()
-                pick = _first_eligible_follower_pick(candidates)
-                _followers_clear_pending_if_pick_other_visual_id(pick)
-                _ac_scroll_forced = (
-                    _ac_scroll_forced
-                    or _followers_note_ac_pending_scroll_forced_if_needed(
-                        pick, len(candidates)
-                    )
-                )
-                if pick is not None:
+            if not _skip_sparse_detect_no_blue_defer:
+                fbc_pre = int(det_sparse_loop.get("follow_buttons_visual_count") or 0)
+                if fbc_pre == 0:
                     visible_follow_buttons_stall_scrolls = 0
+                elif bool(det_sparse_loop.get("is_followers_list")) and fbc_pre > 0:
+                    log(
+                        "info",
+                        "visual_followers_scroll_blocked_visible_follow_buttons",
+                        source_profile_username=source_profile_username,
+                        follow_button_count=fbc_pre,
+                        note="hierarchy_refresh_then_re_resolve_before_any_scroll",
+                    )
+                    log(
+                        "info",
+                        "visual_followers_candidate_resolution_retry_before_scroll",
+                        source_profile_username=source_profile_username,
+                        follow_button_count=fbc_pre,
+                    )
+                    followers_force_hierarchy_refresh(
+                        d, source_profile_username=source_profile_username
+                    )
+                    time.sleep(0.45)
+                    candidates = _collect_follower_candidates()
+                    pick = _first_eligible_follower_pick(candidates)
+                    _followers_clear_pending_if_pick_other_visual_id(pick)
+                    _ac_scroll_forced = (
+                        _ac_scroll_forced
+                        or _followers_note_ac_pending_scroll_forced_if_needed(
+                            pick, len(candidates)
+                        )
+                    )
+                    if pick is not None:
+                        visible_follow_buttons_stall_scrolls = 0
 
         if _ac_scroll_forced and pick is None:
             try:
@@ -7519,6 +7683,8 @@ def _run_followers_list_engine_session(
                     visual_loop_state.get("list_progressive_exploration_exhausted")
                 ),
                 session_elapsed_s=float(time.perf_counter() - t0),
+                exploration_passes_used=int(_prog_passes_used_snap),
+                exploration_max_passes=int(_prog_max_passes_cfg),
             )
             if _forced_scroll_stop:
                 try:
@@ -7753,6 +7919,8 @@ def _run_followers_list_engine_session(
                                 visual_loop_state.get("list_progressive_exploration_exhausted")
                             ),
                             session_elapsed_s=float(time.perf_counter() - t0),
+                            exploration_passes_used=int(_prog_passes_used_snap),
+                            exploration_max_passes=int(_prog_max_passes_cfg),
                         )
                         if (
                             not _sparse_should_exit
@@ -7811,6 +7979,8 @@ def _run_followers_list_engine_session(
                     visual_loop_state.get("list_progressive_exploration_exhausted")
                 ),
                 session_elapsed_s=float(time.perf_counter() - t0),
+                exploration_passes_used=int(_prog_passes_used_snap),
+                exploration_max_passes=int(_prog_max_passes_cfg),
             )
             if _main_scroll_stop:
                 _expl_v1.log_stop_reason(
@@ -7828,6 +7998,14 @@ def _run_followers_list_engine_session(
                 )
                 break
             if exploratory_scroll_permit_armed_this_iter:
+                try:
+                    from followers_inter_candidate_perf import (
+                        inter_candidate_segment_b_scroll_phase_start,
+                    )
+
+                    inter_candidate_segment_b_scroll_phase_start()
+                except Exception:
+                    pass
                 try:
                     log(
                         "info",
@@ -7887,9 +8065,13 @@ def _run_followers_list_engine_session(
                         try:
                             from followers_inter_candidate_perf import (
                                 inter_candidate_on_exploratory_scroll_used,
+                                inter_candidate_segment_b_note_exploratory_scroll_used,
                             )
 
                             inter_candidate_on_exploratory_scroll_used()
+                            inter_candidate_segment_b_note_exploratory_scroll_used(
+                                scroll_profile=exploratory_scroll_profile_this_iter,
+                            )
                         except Exception:
                             pass
                     except Exception:
