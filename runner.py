@@ -370,6 +370,10 @@ def _is_welcome_baseline_run(args: argparse.Namespace) -> bool:
     return _parse_run_type(args) == "dm_welcome_baseline"
 
 
+def _is_welcome_scan_run(args: argparse.Namespace) -> bool:
+    return _parse_run_type(args) == "dm_welcome_scan"
+
+
 def _recoverable_target_exit(code: int) -> bool:
     codes = getattr(config, "FAST_RECOVERABLE_TARGET_EXIT_CODES", ()) or ()
     return int(code) in codes
@@ -10747,14 +10751,20 @@ def main() -> int:
         "--run-type",
         type=str,
         default="",
-        help="Execution mode: dm_welcome_baseline (V4.1 own-followers baseline, no DM/jobs)",
+        help="Execution mode: dm_welcome_baseline | dm_welcome_scan (V4.1 baseline / V4.2-B enqueue only)",
     )
     args = parser.parse_args()
     supabase_mode = _is_supabase_mode(args)
     welcome_baseline_run = _is_welcome_baseline_run(args)
+    welcome_scan_run = _is_welcome_scan_run(args)
 
-    if welcome_baseline_run and not supabase_mode:
-        log("error", "run_aborted", reason="welcome_baseline_requires_supabase_account")
+    if (welcome_baseline_run or welcome_scan_run) and not supabase_mode:
+        log(
+            "error",
+            "run_aborted",
+            reason="welcome_run_requires_supabase_account",
+            run_type=_parse_run_type(args),
+        )
         return 11
 
     account_id = ""
@@ -10784,11 +10794,12 @@ def main() -> int:
             and (getattr(config, "FOLLOWERS_SOURCE_USERNAME", "") or "").strip()
         )
         if not targets:
-            if welcome_baseline_run:
+            if welcome_baseline_run or welcome_scan_run:
                 log(
                     "info",
-                    "welcome_baseline_no_pending_targets_ok",
+                    "welcome_run_no_pending_targets_ok",
                     account_id=account_id,
+                    run_type=_parse_run_type(args),
                 )
             elif followers_engine_has_explicit_source:
                 log(
@@ -11079,6 +11090,58 @@ def main() -> int:
             target_username=account_username,
         )
         return _return_with_cleanup(d, bl_code)
+
+    if welcome_scan_run:
+        if not supabase_mode or not account_id:
+            log("error", "run_aborted", reason="welcome_scan_missing_account")
+            return _return_with_cleanup(d, 11)
+        account_username = ""
+        if supabase_mode:
+            _acct = _safe_supabase_call(
+                "load_account",
+                account_id=account_id or None,
+                username=(args.username or "").strip() or None,
+            )
+            if _acct:
+                account_username = str(_acct.get("username") or "").strip()
+        if not account_username:
+            log("error", "run_aborted", reason="welcome_scan_missing_account_username")
+            return _return_with_cleanup(d, 1)
+        from welcome_scan_producer import run_welcome_scan_producer
+
+        log(
+            "info",
+            "welcome_scan_run_dispatch",
+            account_id=account_id,
+            account_username=account_username,
+            run_id=run_id or None,
+        )
+        ws_code = run_welcome_scan_producer(
+            d,
+            account_id=account_id,
+            account_username=account_username,
+            run_id=run_id or None,
+        )
+        if supabase_mode and run_id:
+            _update_run_status_safe(
+                run_id=run_id,
+                status="completed" if ws_code == 0 else "failed",
+                totals={"total": 1, "success": 1 if ws_code == 0 else 0, "failed": 0 if ws_code == 0 else 1},
+                performance_summary={
+                    "run_type": "dm_welcome_scan",
+                    "exit_code": ws_code,
+                    "account_username": account_username,
+                },
+            )
+        reset_perf_counters()
+        _emit_performance_summary(
+            t0=t_session,
+            warm_session_used=warm_session_used,
+            force_stop_used=force_stop_used,
+            exit_code=ws_code,
+            target_username=account_username,
+        )
+        return _return_with_cleanup(d, ws_code)
 
     if bool(getattr(config, "ENABLE_FOLLOWERS_LIST_ENGINE", False)):
         source_profile_username = (getattr(config, "FOLLOWERS_SOURCE_USERNAME", "") or "").strip()

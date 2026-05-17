@@ -1269,6 +1269,154 @@ def upsert_account_follower_seen_baseline(
     return None
 
 
+def _normalize_follower_username(username: str) -> str:
+    return str(username or "").strip().lstrip("@").lower()
+
+
+def get_account_dm_settings(account_id: str) -> dict[str, Any] | None:
+    """Load ig_account_dm_settings row (no insert)."""
+    aid = str(account_id or "").strip()
+    if not aid:
+        return None
+    rows = _request_json(
+        "GET",
+        "ig_account_dm_settings",
+        query={"select": "*", "account_id": f"eq.{aid}", "limit": "1"},
+    )
+    if rows and isinstance(rows, list):
+        return rows[0]
+    return None
+
+
+def fetch_followers_by_usernames(
+    account_id: str,
+    usernames: list[str],
+) -> dict[str, dict[str, Any]]:
+    """
+    Batch lookup ig_account_followers for handles on current screen.
+    Returns map follower_username_normalized -> row.
+    """
+    aid = str(account_id or "").strip()
+    keys = []
+    seen: set[str] = set()
+    for raw in usernames:
+        k = _normalize_follower_username(raw)
+        if k and k not in seen:
+            seen.add(k)
+            keys.append(k)
+    if not aid or not keys:
+        return {}
+    in_clause = ",".join(keys)
+    rows = _request_json(
+        "GET",
+        "ig_account_followers",
+        query={
+            "select": "id,follower_username,follower_username_normalized,baseline_existing,welcome_dm_status,skip_reason,last_seen_at",
+            "account_id": f"eq.{aid}",
+            "follower_username_normalized": f"in.({in_clause})",
+        },
+    )
+    out: dict[str, dict[str, Any]] = {}
+    if not rows or not isinstance(rows, list):
+        return out
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        nk = str(row.get("follower_username_normalized") or "").strip().lower()
+        if nk:
+            out[nk] = row
+    return out
+
+
+def upsert_account_follower_seen_scan(
+    account_id: str,
+    follower_username: str,
+    *,
+    scan_run_id: str | None = None,
+) -> dict[str, Any] | None:
+    """RPC upsert_account_follower_seen with is_baseline_scan=false (welcome scan path)."""
+    row = call_rpc(
+        "upsert_account_follower_seen",
+        {
+            "p_account_id": str(account_id),
+            "p_follower_username": str(follower_username),
+            "p_source_scan_run_id": scan_run_id,
+            "p_is_baseline_scan": False,
+        },
+    )
+    if isinstance(row, dict):
+        return row
+    if isinstance(row, list) and row:
+        first = row[0]
+        return first if isinstance(first, dict) else None
+    return None
+
+
+def persist_welcome_scan_anchor_gap(
+    account_id: str,
+    follower_username: str,
+    *,
+    scan_run_id: str | None = None,
+) -> dict[str, Any] | None:
+    """
+    Post-anchor unknown: remember follower without Welcome eligibility.
+    welcome_dm_status=skipped, skip_reason=baseline_anchor_gap, baseline_existing=false.
+    """
+    row = upsert_account_follower_seen_scan(
+        account_id,
+        follower_username,
+        scan_run_id=scan_run_id,
+    )
+    if not row or not row.get("id"):
+        return row
+    fid = str(row["id"])
+    now = _utc_now_iso()
+    patched = _request_json(
+        "PATCH",
+        "ig_account_followers",
+        query={"id": f"eq.{fid}"},
+        body={
+            "welcome_dm_status": "skipped",
+            "skip_reason": "baseline_anchor_gap",
+            "baseline_existing": False,
+            "updated_at": now,
+        },
+        prefer_representation=True,
+    )
+    if patched and isinstance(patched, list) and patched:
+        return patched[0]
+    return row
+
+
+def enqueue_welcome_dm_job_if_eligible(
+    account_id: str,
+    follower_username: str,
+    *,
+    scan_run_id: str | None = None,
+    template_id: str | None = None,
+    message_body: str | None = None,
+    priority: int = 10,
+) -> dict[str, Any] | None:
+    """RPC enqueue_welcome_dm_job_if_eligible (no DM send). Returns job row or None."""
+    row = call_rpc(
+        "enqueue_welcome_dm_job_if_eligible",
+        {
+            "p_account_id": str(account_id),
+            "p_follower_username": str(follower_username),
+            "p_source_scan_run_id": scan_run_id,
+            "p_message_body": message_body,
+            "p_template_id": template_id,
+            "p_priority": int(priority),
+        },
+    )
+    if isinstance(row, dict):
+        return row
+    if isinstance(row, list) and row:
+        first = row[0]
+        return first if isinstance(first, dict) else None
+    return None
+
+
 def mark_welcome_baseline_completed(
     account_id: str,
     *,
