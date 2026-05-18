@@ -18,7 +18,7 @@ from instagram_navigation import (
     detect_followers_list_screen,
     followers_clear_detect_hierarchy_cache,
     followers_refresh_detect_hierarchy_cache,
-    harvest_visible_followers_usernames,
+    harvest_visible_followers_rows,
     scroll_followers_list_forward,
 )
 from logs import log
@@ -30,12 +30,21 @@ from own_profile_navigation import (
 
 DiscoveryPhase = Literal["pre_anchor", "post_anchor"]
 
+_LAST_WELCOME_SCAN_SUMMARY: dict[str, Any] = {}
+
+
+def get_last_welcome_scan_summary() -> dict[str, Any]:
+    """Last welcome_scan_run_summary payload (for session orchestrator)."""
+    return dict(_LAST_WELCOME_SCAN_SUMMARY)
+
 
 def _norm_username(raw: str) -> str:
     return str(raw or "").strip().lstrip("@").lower()
 
 
 def _emit_run_summary(**kwargs: Any) -> None:
+    global _LAST_WELCOME_SCAN_SUMMARY
+    _LAST_WELCOME_SCAN_SUMMARY = dict(kwargs)
     log("info", "welcome_scan_run_summary", **kwargs)
 
 
@@ -84,6 +93,9 @@ def run_welcome_scan_producer(
     consecutive_known = 0
     stagnation_no_new_rows = 0
     runtime_seen: set[str] = set()
+    new_follower_usernames_detected: list[str] = []
+    new_follower_usernames_enqueued: list[str] = []
+    new_follower_visible_rows_enqueued: list[dict[str, Any]] = []
     enqueue_blocked_global = False
     enqueue_block_reason: str | None = None
 
@@ -106,6 +118,9 @@ def run_welcome_scan_producer(
             known_count=known_count,
             unknown_pre_anchor_count=unknown_pre_anchor_count,
             unknown_post_anchor_gap_count=unknown_post_anchor_gap_count,
+            new_follower_usernames_detected=list(new_follower_usernames_detected),
+            new_follower_usernames_enqueued=list(new_follower_usernames_enqueued),
+            new_follower_visible_rows_enqueued=list(new_follower_visible_rows_enqueued),
             jobs_enqueued_count=jobs_enqueued_count,
             jobs_not_enqueued_count=jobs_not_enqueued_count,
             first_anchor_username=first_anchor_username,
@@ -199,11 +214,15 @@ def run_welcome_scan_producer(
         if _should_stop_scan():
             return
 
-        batch, meta = harvest_visible_followers_usernames(
+        row_models, meta = harvest_visible_followers_rows(
             d,
             source_profile_username=uname,
             runtime_seen=runtime_seen,
+            force_fresh_hierarchy=(screen_index > 0),
+            screen_index=screen_index,
         )
+        batch = [str(r.get("username") or "").strip() for r in row_models if r.get("username")]
+        row_by_key = {_norm_username(str(r.get("username") or "")): r for r in row_models}
         screens_scanned += 1
 
         ordered_handles: list[str] = []
@@ -270,6 +289,7 @@ def run_welcome_scan_producer(
 
             if phase == "pre_anchor":
                 unknown_pre_anchor_count += 1
+                new_follower_usernames_detected.append(str(handle).strip())
                 log(
                     "info",
                     "welcome_scan_new_follower_pre_anchor_detected",
@@ -332,6 +352,30 @@ def run_welcome_scan_producer(
 
                 if job and job.get("id"):
                     jobs_enqueued_count += 1
+                    new_follower_usernames_enqueued.append(str(handle).strip())
+                    row_snap = row_by_key.get(key)
+                    if row_snap:
+                        new_follower_visible_rows_enqueued.append(
+                            {
+                                "username": str(row_snap.get("username") or handle),
+                                "row_index": row_snap.get("row_index"),
+                                "username_bounds": dict(row_snap.get("username_bounds") or {}),
+                                "tap_bounds": dict(
+                                    row_snap.get("tap_bounds")
+                                    or row_snap.get("bounds")
+                                    or {}
+                                ),
+                                "extraction_source": str(
+                                    row_snap.get("extraction_source") or ""
+                                ),
+                                "screen_index": int(row_snap.get("screen_index") or screen_index),
+                                "hierarchy_source": str(
+                                    row_snap.get("hierarchy_source")
+                                    or meta.get("hierarchy_source")
+                                    or ""
+                                ),
+                            }
+                        )
                     log(
                         "info",
                         "welcome_scan_welcome_job_enqueued",

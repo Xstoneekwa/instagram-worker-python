@@ -1417,13 +1417,21 @@ def enqueue_welcome_dm_job_if_eligible(
     return None
 
 
+def is_valid_dm_job_row(row: dict[str, Any] | None) -> bool:
+    """True when row looks like a claimed ig_dm_jobs record (non-empty UUID id)."""
+    return bool(row) and bool(str(row.get("id") or "").strip())
+
+
 def _parse_rpc_job_row(row: Any) -> dict[str, Any] | None:
+    parsed: dict[str, Any] | None = None
     if isinstance(row, dict):
-        return row
-    if isinstance(row, list) and row:
+        parsed = row
+    elif isinstance(row, list) and row:
         first = row[0]
-        return first if isinstance(first, dict) else None
-    return None
+        parsed = first if isinstance(first, dict) else None
+    if not is_valid_dm_job_row(parsed):
+        return None
+    return parsed
 
 
 def claim_next_dm_job(

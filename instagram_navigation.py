@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import random
 import re
 import time
@@ -227,14 +228,25 @@ def is_lightweight_search_screen(d: u2.Device, pkg: str | None = None) -> bool:
         return False
 
 
-def apply_search_surface_reuse_metrics(d: u2.Device, pkg: str, reason: str) -> bool:
+def apply_search_surface_reuse_metrics(
+    d: u2.Device,
+    pkg: str,
+    reason: str,
+    *,
+    source_profile_username: str = "",
+) -> bool:
     """Set perf + log search_surface_reused when EditText is ready (no nav click)."""
     global _perf
     t_ed = time.perf_counter()
     ed_reuse = _wait_search_edittext(d)
     if ed_reuse is None:
         return False
-    strict_ok, strict_why = instagram_search_surface_strict_ok(d, ed_reuse, pkg=pkg)
+    strict_ok, strict_why = instagram_search_surface_strict_ok(
+        d,
+        ed_reuse,
+        pkg=pkg,
+        source_profile_username=source_profile_username,
+    )
     if not strict_ok:
         invalidate_search_surface_cache(f"surface_reuse_strict_failed:{strict_why}")
         log(
@@ -301,7 +313,9 @@ def return_to_search_from_profile(d: u2.Device, pkg: str | None = None) -> bool:
                 "search_back_to_search_ok",
                 search_back_to_search_ms=round(_perf["search_back_to_search_ms"], 2),
             )
-            return apply_search_surface_reuse_metrics(d, pkg, "back_from_profile")
+            return apply_search_surface_reuse_metrics(
+                d, pkg, "back_from_profile", source_profile_username=""
+            )
         time.sleep(0.08)
     _perf["search_back_to_search_ms"] = (time.perf_counter() - t0) * 1000
     log(
@@ -1436,19 +1450,54 @@ def open_accounts_tab(d: u2.Device) -> bool:
     return False
 
 
-def open_search(d: u2.Device, *, _surface_recovery_depth: int = 0) -> bool:
+def open_search(
+    d: u2.Device,
+    *,
+    _surface_recovery_depth: int = 0,
+    source_profile_username: str = "",
+    allow_percent_fallback: bool = True,
+    block_if_dm_thread: bool = False,
+) -> bool:
     """Open bottom-nav Search: resource-id first, short settle, exit as soon as EditText exists."""
     global _perf
     settle = min(float(getattr(config, "OPEN_SEARCH_SETTLE_S", 0.12)), 0.12)
     pkg = config.INSTAGRAM_PACKAGE
+    src_user = str(source_profile_username or "").strip()
+
+    if block_if_dm_thread and is_dm_thread_screen(d, pkg):
+        log(
+            "error",
+            "dm_sender_open_search_blocked_from_dm_thread",
+            source_profile_username=src_user or None,
+            foreground_package=_current_foreground_package(d),
+        )
+        return False
 
     if should_reuse_search_surface(d, pkg):
-        if apply_search_surface_reuse_metrics(d, pkg, "cache_ttl"):
+        if is_followers_list_surface_quick(d, source_profile_username=src_user):
+            invalidate_search_surface_cache("followers_list_local_search")
+            _log_followers_local_search_rejected(
+                phase="open_search_cache_reuse",
+                source_profile_username=src_user,
+                detail="cache_hit_blocked",
+            )
+        elif apply_search_surface_reuse_metrics(
+            d, pkg, "cache_ttl", source_profile_username=src_user
+        ):
             log("info", "search_surface_cache_hit", message="TTL cache + EditText ok")
             return True
 
     if is_lightweight_search_screen(d, pkg):
-        if apply_search_surface_reuse_metrics(d, pkg, "lightweight_signals"):
+        if is_followers_list_surface_quick(d, source_profile_username=src_user):
+            invalidate_search_surface_cache("followers_list_local_search")
+            _log_followers_local_search_rejected(
+                phase="open_search_lightweight",
+                source_profile_username=src_user,
+                detail="lightweight_blocked",
+            )
+        elif apply_search_surface_reuse_metrics(
+            d, pkg, "lightweight_signals", source_profile_username=src_user
+        ):
             return True
 
     _perf["search_surface_reused"] = False
@@ -1506,6 +1555,14 @@ def open_search(d: u2.Device, *, _surface_recovery_depth: int = 0) -> bool:
                 log("debug", "open_search_attempt_failed", selector=name, error=str(e))
 
     if not clicked:
+        if not allow_percent_fallback:
+            log(
+                "error",
+                "open_search_no_selector_percent_fallback_disabled",
+                source_profile_username=src_user or None,
+                block_if_dm_thread=bool(block_if_dm_thread),
+            )
+            return False
         w, h = d.window_size()
         d.click(int(w * 0.72), int(h * 0.94))
         click_name = "percent_fallback"
@@ -1541,7 +1598,9 @@ def open_search(d: u2.Device, *, _surface_recovery_depth: int = 0) -> bool:
         invalidate_search_surface_cache("open_search_no_edittext")
         return False
 
-    strict_ok, strict_why = instagram_search_surface_strict_ok(d, ed, pkg=pkg)
+    strict_ok, strict_why = instagram_search_surface_strict_ok(
+        d, ed, pkg=pkg, source_profile_username=src_user
+    )
     if strict_ok:
         log(
             "info",
@@ -1550,6 +1609,7 @@ def open_search(d: u2.Device, *, _surface_recovery_depth: int = 0) -> bool:
             detail="post_edittext",
             selector=click_name,
         )
+        _mark_search_surface_ok(d, pkg)
         return True
 
     log(
@@ -1581,7 +1641,11 @@ def open_search(d: u2.Device, *, _surface_recovery_depth: int = 0) -> bool:
         source_profile_username="",
         source_account_context=None,
     ):
-        return open_search(d, _surface_recovery_depth=_surface_recovery_depth + 1)
+        return open_search(
+            d,
+            _surface_recovery_depth=_surface_recovery_depth + 1,
+            source_profile_username=src_user,
+        )
 
     return False
 
@@ -1654,15 +1718,293 @@ def _visible_text_suggests_android_launcher_search(txt: str | None) -> bool:
     return any(m in key for m in markers)
 
 
+def is_followers_list_surface_quick(
+    d: u2.Device,
+    *,
+    source_profile_username: str = "",
+) -> bool:
+    """
+    Fast live U2 probe for own unified followers list chrome (no XML cache / full detect).
+    Used in global-search strict checks and post-exit verification hot paths.
+    """
+    _ = source_profile_username
+    try:
+        tab = d(resourceIdMatches=r".*:id/unified_follow_list_tab_layout$")
+        rows = d(resourceIdMatches=r".*:id/follow_list_username$")
+        if tab.exists(timeout=0.05) and rows.exists(timeout=0.05):
+            return True
+        try:
+            if int(rows.count) >= 1 and tab.exists(timeout=0.04):
+                return True
+        except Exception:
+            pass
+    except Exception:
+        pass
+    return False
+
+
+def is_followers_list_local_search_surface(
+    d: u2.Device,
+    *,
+    source_profile_username: str = "",
+) -> bool:
+    """
+    True when the visible search field belongs to a Followers list, not global Explore.
+    May consult cached followers hierarchy from the last scan scroll — not safe after navigation.
+    Use ``is_followers_list_local_search_surface_fresh`` after back / surface transitions.
+    """
+    try:
+        det = detect_followers_list_screen(
+            d,
+            source_profile_username=str(source_profile_username or "").strip(),
+        )
+        return bool(det.get("is_followers_list"))
+    except Exception:
+        return False
+
+
+def followers_dump_fresh_hierarchy(
+    d: u2.Device,
+    *,
+    store_in_cache: bool = False,
+) -> str:
+    """dump_hierarchy after clearing followers detect cache (avoids stale scan XML)."""
+    followers_clear_detect_hierarchy_cache()
+    try:
+        try:
+            hier = d.dump_hierarchy(compressed=False)
+        except TypeError:
+            hier = d.dump_hierarchy()
+        text = hier if isinstance(hier, str) else str(hier or "")
+    except Exception:
+        return ""
+    text = str(text or "").strip()
+    if store_in_cache and text:
+        _followers_store_detect_hierarchy_xml(text)
+    return text
+
+
+def detect_followers_list_screen_fresh(
+    d: u2.Device,
+    *,
+    source_profile_username: str = "",
+    hierarchy_xml: str | None = None,
+) -> tuple[dict[str, Any], str]:
+    """
+    Followers-list detect for post-navigation checks: never reads pre-transition cache.
+    Returns (det, fresh_hierarchy_xml).
+    """
+    fresh_xml = str(hierarchy_xml or "").strip()
+    if not fresh_xml:
+        fresh_xml = followers_dump_fresh_hierarchy(d, store_in_cache=False)
+    else:
+        followers_clear_detect_hierarchy_cache()
+    det = detect_followers_list_screen(
+        d,
+        source_profile_username=str(source_profile_username or "").strip(),
+        hierarchy_xml=fresh_xml or None,
+    )
+    det["followers_detect_hierarchy_source"] = (
+        "fresh_dump" if fresh_xml else "live_only_no_dump"
+    )
+    if str(_LAST_FOLLOWERS_DETECT_HIERARCHY_XML or "").strip():
+        det["followers_detect_stale_cache_present"] = True
+    else:
+        det["followers_detect_stale_cache_present"] = False
+    return det, fresh_xml
+
+
+def observe_followers_list_surface_fresh(
+    d: u2.Device,
+    *,
+    source_profile_username: str = "",
+    artifact_stem: str,
+) -> dict[str, Any]:
+    """
+    Fresh hierarchy detect + screenshot/XML artifacts (DM sender exit forensics).
+    """
+    _ensure_debug_dirs()
+    stem = str(artifact_stem or "dm_sender_followers_exit").strip()
+    shot_path = _SCREENSHOTS_DIR / f"{stem}.png"
+    xml_path = _XML_DIR / f"{stem}.xml"
+    out: dict[str, Any] = {
+        "artifact_stem": stem,
+        "screenshot_path": None,
+        "xml_path": None,
+        "followers_detected_fresh": False,
+        "fresh_hierarchy_len": 0,
+    }
+    try:
+        screenshot(d, str(shot_path))
+        out["screenshot_path"] = str(shot_path)
+    except Exception as e:
+        out["screenshot_error"] = str(e)[:200]
+
+    fresh_xml = followers_dump_fresh_hierarchy(d, store_in_cache=False)
+    out["fresh_hierarchy_len"] = len(fresh_xml)
+    try:
+        xml_path.write_text(fresh_xml, encoding="utf-8")
+        _bump_xml_fetch()
+        out["xml_path"] = str(xml_path)
+    except Exception as e:
+        out["xml_write_error"] = str(e)[:200]
+
+    det, _ = detect_followers_list_screen_fresh(
+        d,
+        source_profile_username=source_profile_username,
+        hierarchy_xml=fresh_xml,
+    )
+    out["followers_detected_fresh"] = bool(det.get("is_followers_list"))
+    out["current_package"] = det.get("current_package")
+    out["current_activity"] = det.get("current_activity")
+    out["action_bar_title"] = det.get("action_bar_title")
+    out["signals"] = list(det.get("signals") or [])[:12]
+    out["own_unified_followers_list_detected"] = bool(
+        det.get("own_unified_followers_list_detected")
+    )
+    out["open_detection_method"] = det.get("open_detection_method")
+    out["relaxed_list_open"] = bool(det.get("relaxed_list_open"))
+    out["strict_list_open"] = bool(det.get("strict_list_open"))
+    out["followers_detect_hierarchy_source"] = det.get("followers_detect_hierarchy_source")
+    out["followers_detect_stale_cache_present"] = det.get(
+        "followers_detect_stale_cache_present"
+    )
+    out["detection"] = det
+    return out
+
+
+def is_followers_list_local_search_surface_fresh(
+    d: u2.Device,
+    *,
+    source_profile_username: str = "",
+) -> tuple[bool, dict[str, Any]]:
+    """Fresh detect only; returns (is_followers_list, observation dict)."""
+    obs = observe_followers_list_surface_fresh(
+        d,
+        source_profile_username=source_profile_username,
+        artifact_stem="dm_sender_followers_exit_probe",
+    )
+    return bool(obs.get("followers_detected_fresh")), obs
+
+
+def tap_instagram_action_bar_back_button(
+    d: u2.Device,
+    pkg: str | None = None,
+) -> tuple[bool, str]:
+    """
+    Tap the Instagram action-bar Back control (followers list / sub-screens).
+    Returns (clicked, method).
+    """
+    pkg = str(pkg or getattr(config, "INSTAGRAM_PACKAGE", "") or "com.instagram.android")
+    for ipkg in _instagram_package_candidates(d):
+        rid = f"{ipkg}:id/action_bar_button_back"
+        try:
+            sel = d(resourceId=rid)
+            if sel.wait(timeout=0.1):
+                sel.click()
+                return True, rid
+        except Exception:
+            continue
+    try:
+        sel = d(resourceIdMatches=r".*:id/action_bar_button_back")
+        if sel.wait(timeout=0.1):
+            sel.click()
+            return True, "rid_matches_action_bar_button_back"
+    except Exception:
+        pass
+    for desc in ("Back", "Navigate up", "Retour"):
+        for factory in (
+            lambda t=desc: d(description=t),
+            lambda t=desc: d(descriptionContains=t),
+        ):
+            try:
+                o = factory()
+                if o.wait(timeout=0.08):
+                    o.click()
+                    return True, f"description_{desc}"
+            except Exception:
+                continue
+    return False, "action_bar_back_not_found"
+
+
+def exit_followers_list_surface(
+    d: u2.Device,
+    *,
+    source_profile_username: str = "",
+    pkg: str | None = None,
+    action_bar_settle_s: float | None = None,
+    hardware_back_max: int | None = None,
+) -> tuple[bool, str]:
+    """
+    Leave a Followers list: action-bar Back first, then bounded hardware Back fallback.
+    Returns (ok, method).
+    """
+    pkg = str(pkg or getattr(config, "INSTAGRAM_PACKAGE", "") or "com.instagram.android")
+    src = str(source_profile_username or "").strip()
+    settle = float(
+        action_bar_settle_s
+        if action_bar_settle_s is not None
+        else getattr(config, "DM_SENDER_FOLLOWERS_EXIT_SETTLE_S", 0.45) or 0.45
+    )
+    hw_max = max(
+        0,
+        int(
+            hardware_back_max
+            if hardware_back_max is not None
+            else getattr(config, "DM_SENDER_FOLLOWERS_EXIT_HARDWARE_BACK_MAX", 3) or 3
+        ),
+    )
+
+    det0, _ = detect_followers_list_screen_fresh(d, source_profile_username=src)
+    if not bool(det0.get("is_followers_list")):
+        return True, "not_on_followers_list"
+
+    clicked, tap_method = tap_instagram_action_bar_back_button(d, pkg)
+    if clicked:
+        time.sleep(settle)
+        det_ab, _ = detect_followers_list_screen_fresh(d, source_profile_username=src)
+        if not bool(det_ab.get("is_followers_list")):
+            return True, f"action_bar_back:{tap_method}"
+
+    for step in range(hw_max):
+        try:
+            d.press("back")
+        except Exception:
+            pass
+        time.sleep(settle)
+        det_hw, _ = detect_followers_list_screen_fresh(d, source_profile_username=src)
+        if not bool(det_hw.get("is_followers_list")):
+            return True, f"hardware_back:{step + 1}"
+
+    return False, "still_on_followers_list"
+
+
+def _log_followers_local_search_rejected(
+    *,
+    phase: str,
+    source_profile_username: str = "",
+    detail: str = "",
+) -> None:
+    log(
+        "info",
+        "dm_sender_local_followers_search_surface_rejected",
+        phase=phase,
+        source_profile_username=str(source_profile_username or "")[:160],
+        detail=detail,
+    )
+
+
 def instagram_search_surface_strict_ok(
     d: u2.Device,
     ed,
     *,
     pkg: str | None = None,
+    source_profile_username: str = "",
 ) -> tuple[bool, str]:
     """
     True only when Instagram is foreground, the focused search EditText is from IG,
     and the field text is not the Android launcher / universal search placeholder.
+    Rejects Followers-list local search bars (DM sender / global search must not reuse them).
     """
     pkg = str(pkg or getattr(config, "INSTAGRAM_PACKAGE", "") or "")
     fg = _current_foreground_package(d)
@@ -1671,6 +2013,15 @@ def instagram_search_surface_strict_ok(
     ed_pkg = _edittext_package_name(ed)
     if ed_pkg and ed_pkg != pkg:
         return False, f"edittext_package_mismatch:{ed_pkg}"
+    if is_followers_list_surface_quick(
+        d, source_profile_username=source_profile_username
+    ):
+        _log_followers_local_search_rejected(
+            phase="instagram_search_surface_strict_ok",
+            source_profile_username=source_profile_username,
+            detail="followers_list_quick_probe",
+        )
+        return False, "followers_list_local_search_surface"
     txt = _search_edittext_text_strip(ed)
     if _visible_text_suggests_android_launcher_search(txt):
         return False, "launcher_search_hint_in_field"
@@ -2378,13 +2729,60 @@ def _try_profile_signals_once(d: u2.Device, username: str, package: str) -> str 
     return None
 
 
-def tap_account_result(d: u2.Device, username: str) -> bool:
+def tap_account_result(
+    d: u2.Device,
+    username: str,
+    *,
+    nav_timing_origin: float | None = None,
+) -> bool:
     """Tap chosen row: FastIME+fused uses hot resource-id poll + direct tap; else legacy find."""
 
     def scan_once():
         return find_real_account_text_element(d, username, dump_on_failure=False)
 
+    def _log_first_result_seen(el_seen: object, *, via: str) -> None:
+        if first_result_at[0] is not None:
+            return
+        first_result_at[0] = time.perf_counter()
+        ms = (
+            round((first_result_at[0] - t_origin) * 1000.0, 2)
+            if nav_timing_origin is not None
+            else None
+        )
+        log(
+            "info",
+            "dm_sender_search_result_first_seen",
+            username=username,
+            via=via,
+            username_type_to_first_result_ms=ms,
+        )
+
+    def _log_exact_match_ready(el_match: object, *, via: str) -> None:
+        if exact_match_at[0] is not None:
+            return
+        exact_match_at[0] = time.perf_counter()
+        first_ms = (
+            round((exact_match_at[0] - first_result_at[0]) * 1000.0, 2)
+            if first_result_at[0] is not None
+            else None
+        )
+        log(
+            "info",
+            "dm_sender_exact_result_match_ready",
+            username=username,
+            via=via,
+            first_result_to_exact_match_ms=first_ms,
+        )
+
     global _perf
+    t_origin = (
+        float(nav_timing_origin)
+        if nav_timing_origin is not None
+        else time.perf_counter()
+    )
+    first_result_at: list[float | None] = [None]
+    exact_match_at: list[float | None] = [None]
+
     fused = _peek_pending_fused_fast_ime_row(username)
     if fused:
         _clear_pending_fused_fast_ime_row()
@@ -2401,9 +2799,13 @@ def tap_account_result(d: u2.Device, username: str) -> bool:
             timeout_s = float(config.ACCOUNTS_RESULT_WAIT_S)
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
-            el = find_first_row_search_username_hot(d, username)
+            hot_probe = find_first_row_search_username_hot(d, username)
+            if hot_probe is not None:
+                _log_first_result_seen(hot_probe, via="hot_row")
+            el = hot_probe
             if el is not None:
                 hot_el_found = True
+                _log_exact_match_ready(el, via="hot_row")
                 log(
                     "info",
                     "row_hot_path_first_match",
@@ -2418,8 +2820,16 @@ def tap_account_result(d: u2.Device, username: str) -> bool:
                 if get_search_ui_mode() == "mixed_results"
                 else float(config.ACCOUNTS_RESULT_WAIT_S)
             )
+
+            def _legacy_scan():
+                found = scan_once()
+                if found is not None:
+                    _log_first_result_seen(found, via="legacy_scan")
+                    _log_exact_match_ready(found, via="legacy_scan")
+                return found
+
             el = retry_until_jitter(
-                scan_once,
+                _legacy_scan,
                 timeout_s=timeout_legacy,
                 poll_min_s=0.05,
                 poll_max_s=0.07,
@@ -2432,8 +2842,16 @@ def tap_account_result(d: u2.Device, username: str) -> bool:
             if get_search_ui_mode() == "mixed_results"
             else float(config.ACCOUNTS_RESULT_WAIT_S)
         )
+
+        def _full_scan():
+            found = scan_once()
+            if found is not None:
+                _log_first_result_seen(found, via="full_scan")
+                _log_exact_match_ready(found, via="full_scan")
+            return found
+
         el = retry_until_jitter(
-            scan_once,
+            _full_scan,
             timeout_s=timeout,
             poll_min_s=0.05,
             poll_max_s=0.07,
@@ -2463,10 +2881,30 @@ def tap_account_result(d: u2.Device, username: str) -> bool:
             cy = (b["top"] + b["bottom"]) // 2
             tap_mode = "legacy_bounds"
 
+        exact_to_tap_ms = (
+            round((time.perf_counter() - exact_match_at[0]) * 1000.0, 2)
+            if exact_match_at[0] is not None
+            else None
+        )
+        log(
+            "info",
+            "dm_sender_account_result_tap_started",
+            username=username,
+            exact_match_to_tap_ms=exact_to_tap_ms,
+        )
         t_click = time.perf_counter()
         d.click(cx, cy)
         row_tap_ms = (time.perf_counter() - t_click) * 1000
         _perf["row_tap_command_ms"] = row_tap_ms
+        log(
+            "info",
+            "dm_sender_account_result_tapped",
+            username=username,
+            row_tap_command_ms=round(row_tap_ms, 2),
+            x=cx,
+            y=cy,
+            tap_mode=tap_mode,
+        )
         log(
             "info",
             "row_tap_command_done",
@@ -3525,10 +3963,14 @@ def finalize_after_real_send(
     *,
     use_fast_reset_between_targets: bool = False,
     pre_send_composer_text_len: int = 0,
+    restore_global_search: bool = True,
 ) -> dict[str, Any]:
     """
-    Best-effort post-real-send: short UI signal poll, draft cleanup, profile, search, temp reset.
+    Best-effort post-real-send: short UI signal poll, draft cleanup, profile, optional search.
     Does not click Send again. Instrumented for metrics and logs.
+
+    DM sender sets restore_global_search=False so global Search is restored only via
+    prepare_dm_sender_global_search_surface (no percent-fallback open_search from DM thread).
     """
     global _perf
     pkg = pkg or config.INSTAGRAM_PACKAGE
@@ -3598,31 +4040,40 @@ def finalize_after_real_send(
 
     t_search = time.perf_counter()
     ok_search = False
-    if use_fast_reset_between_targets:
-        ok_search = bool(reset_to_search_for_next_target(d, pkg))
+    if restore_global_search:
+        if use_fast_reset_between_targets:
+            ok_search = bool(reset_to_search_for_next_target(d, pkg))
+        else:
+            ok_search = bool(return_to_search_from_profile(d, pkg))
+            if not ok_search:
+                try:
+                    ok_search = bool(open_search(d))
+                except Exception:
+                    ok_search = False
+        search_ms = (time.perf_counter() - t_search) * 1000
+        out["back_to_search_ok"] = bool(ok_search)
+        set_perf_metric("post_send_profile_to_search_ms", search_ms)
+        if ok_search:
+            log(
+                "info",
+                "dm_send_post_back_to_search_ok",
+                username=username,
+                ms=round(search_ms, 2),
+            )
+        else:
+            log(
+                "warning",
+                "dm_send_post_back_to_search_failed",
+                username=username,
+                ms=round(search_ms, 2),
+            )
     else:
-        ok_search = bool(return_to_search_from_profile(d, pkg))
-        if not ok_search:
-            try:
-                ok_search = bool(open_search(d))
-            except Exception:
-                ok_search = False
-    search_ms = (time.perf_counter() - t_search) * 1000
-    out["back_to_search_ok"] = bool(ok_search)
-    set_perf_metric("post_send_profile_to_search_ms", search_ms)
-    if ok_search:
+        out["back_to_search_ok"] = False
         log(
             "info",
-            "dm_send_post_back_to_search_ok",
+            "dm_send_post_search_restore_deferred",
             username=username,
-            ms=round(search_ms, 2),
-        )
-    else:
-        log(
-            "warning",
-            "dm_send_post_back_to_search_failed",
-            username=username,
-            ms=round(search_ms, 2),
+            reason="dm_sender_prepare_post_job",
         )
 
     # Do not reset DM send/thread snapshots here: runner still reads them for Supabase logs.
@@ -3630,7 +4081,9 @@ def finalize_after_real_send(
 
     total_ms = (time.perf_counter() - t_total) * 1000
     set_perf_metric("post_send_finalize_total_ms", total_ms)
-    if ok_profile and ok_search:
+    if not restore_global_search:
+        cleanup = "profile_only_search_deferred" if ok_profile else "profile_failed_search_deferred"
+    elif ok_profile and ok_search:
         cleanup = "complete"
     elif ok_profile:
         cleanup = "partial_search_failed"
@@ -3647,6 +4100,331 @@ def finalize_after_real_send(
         post_send_cleanup_reason=cleanup,
         post_send_finalize_total_ms=round(total_ms, 2),
     )
+    return out
+
+
+def find_visible_followers_row_by_username(
+    d: u2.Device,
+    username: str,
+    *,
+    source_profile_username: str = "",
+    force_fresh_hierarchy: bool = True,
+    screen_index: int = 0,
+) -> dict[str, Any] | None:
+    """
+    Locate a visible followers-list row (same harvest path as welcome scan).
+    """
+    target = _normalize_handle(username)
+    if not target:
+        return None
+    src = str(source_profile_username or "").strip()
+    rows, _meta = harvest_visible_followers_rows(
+        d,
+        source_profile_username=src,
+        runtime_seen=set(),
+        force_fresh_hierarchy=bool(force_fresh_hierarchy),
+        screen_index=int(screen_index),
+    )
+    for row in rows:
+        if _normalize_handle(str(row.get("username") or "")) == target:
+            return dict(row)
+    return None
+
+
+def scroll_followers_list_to_find_row(
+    d: u2.Device,
+    username: str,
+    *,
+    source_profile_username: str = "",
+    max_scrolls: int | None = None,
+    screen_index: int = 0,
+) -> tuple[dict[str, Any] | None, int, list[str]]:
+    """
+    Bounded forward scroll only — caller must prove target absent from visible snapshot first.
+    Returns (row, scroll_count, visible_usernames_after_last_scroll).
+    """
+    src = str(source_profile_username or "").strip()
+    cap = int(
+        max_scrolls
+        if max_scrolls is not None
+        else getattr(config, "WELCOME_LIST_SENDER_MAX_SCROLL_FIND", 3) or 3
+    )
+    cap = max(0, cap)
+    settle_s = float(
+        getattr(config, "WELCOME_LIST_SENDER_SCROLL_SETTLE_S", 0.45) or 0.45
+    )
+    last_visible: list[str] = []
+
+    for scroll_idx in range(1, cap + 1):
+        if not scroll_followers_list_forward(
+            d,
+            source_profile_username=src,
+            bypass_post_tap_capture_gate=True,
+            bypass_scroll_xml_guards=True,
+        ):
+            break
+        followers_clear_detect_hierarchy_cache()
+        if settle_s > 0:
+            time.sleep(min(settle_s, 1.5))
+        rows, _meta = harvest_visible_followers_rows(
+            d,
+            source_profile_username=src,
+            runtime_seen=set(),
+            force_fresh_hierarchy=True,
+            screen_index=int(screen_index) + scroll_idx,
+        )
+        last_visible = [str(r.get("username") or "") for r in rows if r.get("username")]
+        target = _normalize_handle(username)
+        for row in rows:
+            if _normalize_handle(str(row.get("username") or "")) == target:
+                return dict(row), scroll_idx, last_visible
+    return None, cap, last_visible
+
+
+def tap_followers_list_username_row(
+    d: u2.Device,
+    row: dict[str, Any],
+    *,
+    username: str,
+) -> tuple[bool, int, int]:
+    """Tap center of a harvested followers row. Returns (ok, tap_x, tap_y)."""
+    bounds = dict(row.get("tap_bounds") or row.get("bounds") or {})
+    if bounds:
+        cx = (int(bounds["left"]) + int(bounds["right"])) // 2
+        cy = (int(bounds["top"]) + int(bounds["bottom"])) // 2
+    else:
+        rc = row.get("row_center") or [0, 0]
+        cx = int(rc[0])
+        cy = int(rc[1])
+    try:
+        d.click(cx, cy)
+        return True, cx, cy
+    except Exception as e:
+        log(
+            "error",
+            "welcome_list_sender_row_tap_failed",
+            username=username,
+            error=str(e)[:200],
+            bounds=bounds,
+        )
+        return False, cx, cy
+
+
+def return_welcome_list_from_dm_to_followers(
+    d: u2.Device,
+    username: str,
+    pkg: str | None = None,
+    *,
+    source_profile_username: str = "",
+    pre_send_composer_text_len: int = 0,
+) -> dict[str, Any]:
+    """
+  Welcome list-native post-send / post-skip: DM → action-bar back → profile → action-bar back → followers.
+  No global Search, no percent_fallback, no open_search.
+    """
+    pkg = pkg or config.INSTAGRAM_PACKAGE
+    src = str(source_profile_username or "").strip()
+    settle_s = float(
+        getattr(config, "WELCOME_LIST_SENDER_BACK_SETTLE_S", 0.45) or 0.45
+    )
+    out: dict[str, Any] = {
+        "back_to_profile_ok": False,
+        "followers_surface_ok": False,
+    }
+
+    sig_ok, sig_reason = _dm_post_send_signal_poll(
+        d, pre_send_text_len=int(pre_send_composer_text_len or 0)
+    )
+    out["post_send_signal_ok"] = bool(sig_ok)
+    out["post_send_signal_reason"] = sig_reason
+    try:
+        clear_dm_draft(d)
+    except Exception:
+        pass
+    try:
+        finalize_dm_draft_before_back(d)
+    except Exception:
+        pass
+
+    log(
+        "info",
+        "welcome_list_sender_back_dm_to_profile_started",
+        username=username,
+        source_profile_username=src or None,
+    )
+    t0 = time.perf_counter()
+    tapped, tap_method = tap_instagram_action_bar_back_button(d, pkg)
+    if tapped and settle_s > 0:
+        time.sleep(settle_s)
+    prof_ok = bool(tapped) and verify_profile(d, username)
+    out["back_to_profile_ok"] = prof_ok
+    log(
+        "info",
+        "welcome_list_sender_back_dm_to_profile_done",
+        username=username,
+        tapped=bool(tapped),
+        tap_method=tap_method,
+        profile_verified=prof_ok,
+        ms=round((time.perf_counter() - t0) * 1000.0, 2),
+    )
+
+    log(
+        "info",
+        "welcome_list_sender_back_profile_to_followers_started",
+        username=username,
+        source_profile_username=src or None,
+    )
+    t1 = time.perf_counter()
+    tapped2, tap_method2 = tap_instagram_action_bar_back_button(d, pkg)
+    if tapped2 and settle_s > 0:
+        time.sleep(settle_s)
+
+    poll_attempts = int(
+        getattr(config, "WELCOME_LIST_SENDER_BACK_PROFILE_POLL_ATTEMPTS", 4) or 4
+    )
+    poll_interval_s = float(
+        getattr(config, "WELCOME_LIST_SENDER_BACK_PROFILE_POLL_INTERVAL_S", 0.35)
+        or 0.35
+    )
+    poll_attempts = max(1, poll_attempts)
+
+    log(
+        "info",
+        "welcome_list_sender_back_profile_to_followers_poll_started",
+        username=username,
+        source_profile_username=src or None,
+        poll_attempts=poll_attempts,
+        poll_interval_s=poll_interval_s,
+    )
+
+    followers_ok = False
+    det: dict[str, Any] = {}
+    fresh_hierarchy_xml = ""
+    extra_back_tapped = False
+
+    def _poll_followers_once() -> tuple[bool, dict[str, Any], str]:
+        det_loc, fresh_xml = detect_followers_list_screen_fresh(
+            d, source_profile_username=src
+        )
+        return bool(det_loc.get("is_followers_list")), det_loc, str(fresh_xml or "")
+
+    def _repoll_after_extra_back() -> None:
+        nonlocal followers_ok, det, fresh_hierarchy_xml, extra_back_tapped
+        for repoll_attempt in range(poll_attempts):
+            if repoll_attempt > 0 and poll_interval_s > 0:
+                time.sleep(poll_interval_s)
+            followers_ok, det, fresh_hierarchy_xml = _poll_followers_once()
+            if followers_ok:
+                log(
+                    "info",
+                    "welcome_list_sender_back_profile_to_followers_poll_success",
+                    username=username,
+                    source_profile_username=src or None,
+                    poll_attempt=repoll_attempt + 1,
+                    extra_back_tapped=True,
+                    action_bar_title=det.get("action_bar_title"),
+                )
+                break
+
+    for attempt in range(poll_attempts):
+        if attempt > 0 and poll_interval_s > 0:
+            time.sleep(poll_interval_s)
+        followers_ok, det, fresh_hierarchy_xml = _poll_followers_once()
+        if followers_ok:
+            log(
+                "info",
+                "welcome_list_sender_back_profile_to_followers_poll_success",
+                username=username,
+                source_profile_username=src or None,
+                poll_attempt=attempt + 1,
+                extra_back_tapped=extra_back_tapped,
+                action_bar_title=det.get("action_bar_title"),
+            )
+            break
+
+        ab_title = str(det.get("action_bar_title") or "")
+        on_recipient_profile = _normalize_handle(ab_title) == _normalize_handle(
+            username
+        )
+        if on_recipient_profile:
+            log(
+                "info",
+                "welcome_list_sender_back_profile_to_followers_early_extra_back_triggered",
+                username=username,
+                source_profile_username=src or None,
+                action_bar_title=ab_title,
+                poll_attempt=attempt + 1,
+                reason="recipient_profile_detected_early",
+            )
+            log(
+                "info",
+                "welcome_list_sender_back_profile_to_followers_extra_back_tapped",
+                username=username,
+                source_profile_username=src or None,
+                action_bar_title=ab_title,
+            )
+            tapped3, _tap_method3 = tap_instagram_action_bar_back_button(d, pkg)
+            extra_back_tapped = bool(tapped3)
+            if tapped3 and settle_s > 0:
+                time.sleep(settle_s)
+            _repoll_after_extra_back()
+            break
+
+    if not followers_ok and not extra_back_tapped:
+        ab_title = str(det.get("action_bar_title") or "")
+        on_recipient_profile = _normalize_handle(ab_title) == _normalize_handle(
+            username
+        )
+        if on_recipient_profile:
+            log(
+                "info",
+                "welcome_list_sender_back_profile_to_followers_extra_back_tapped",
+                username=username,
+                source_profile_username=src or None,
+                action_bar_title=ab_title,
+            )
+            tapped3, _tap_method3 = tap_instagram_action_bar_back_button(d, pkg)
+            extra_back_tapped = bool(tapped3)
+            if tapped3 and settle_s > 0:
+                time.sleep(settle_s)
+            _repoll_after_extra_back()
+
+    if not followers_ok:
+        log(
+            "info",
+            "welcome_list_sender_back_profile_to_followers_poll_failed",
+            username=username,
+            source_profile_username=src or None,
+            extra_back_tapped=extra_back_tapped,
+            action_bar_title=det.get("action_bar_title"),
+            signals=det.get("signals"),
+        )
+
+    out["followers_surface_ok"] = followers_ok
+    out["extra_back_tapped"] = extra_back_tapped
+    log(
+        "info",
+        "welcome_list_sender_back_profile_to_followers_done",
+        username=username,
+        tapped=bool(tapped2),
+        tap_method=tap_method2,
+        followers_detected_fresh=followers_ok,
+        ms=round((time.perf_counter() - t1) * 1000.0, 2),
+        action_bar_title=det.get("action_bar_title"),
+        signals=det.get("signals"),
+        extra_back_tapped=extra_back_tapped,
+    )
+    if followers_ok:
+        log(
+            "info",
+            "welcome_list_sender_followers_surface_restored",
+            username=username,
+            source_profile_username=src or None,
+            followers_detect_hierarchy_source=det.get("followers_detect_hierarchy_source"),
+            fresh_hierarchy_xml_len=len(fresh_hierarchy_xml),
+            via="profile_to_followers_poll",
+            extra_back_tapped=extra_back_tapped,
+        )
     return out
 
 
@@ -3711,6 +4489,30 @@ def detect_unsupported_start_surface(d: u2.Device) -> str | None:
     except Exception:
         pass
     return None
+
+
+def detect_unexpected_android_media_permission_dialog(
+    d: u2.Device,
+) -> tuple[bool, str]:
+    """
+    Detect Android permission controller (e.g. photos/videos) — do not auto-allow.
+    """
+    fg = _current_foreground_package(d)
+    if "permissioncontroller" in fg or "packageinstaller" in fg:
+        return True, f"foreground:{fg}"
+    needles = (
+        "Allow Instagram to access photos",
+        "access photos and videos",
+        "Select photos and videos",
+        "Allow all",
+    )
+    for frag in needles:
+        try:
+            if d(textContains=frag).exists(timeout=0.06):
+                return True, f"text:{frag[:40]}"
+        except Exception:
+            continue
+    return False, ""
 
 
 def dismiss_android_permission_dialog(d: u2.Device) -> bool:
@@ -4012,7 +4814,11 @@ def _dm_detect_history_signal(
 
 
 def detect_dm_thread_state(
-    d: u2.Device, username: str, pkg: str | None = None
+    d: u2.Device,
+    username: str,
+    pkg: str | None = None,
+    *,
+    composer_timeout_s: float | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """
     Detect DM thread state after opening Message:
@@ -4035,7 +4841,10 @@ def detect_dm_thread_state(
         "username": username,
     }
 
-    composer_timeout_s = float(getattr(config, "DM_THREAD_DETECT_MAX_S", 2.5))
+    if composer_timeout_s is None:
+        composer_timeout_s = float(getattr(config, "DM_THREAD_DETECT_MAX_S", 2.5))
+    else:
+        composer_timeout_s = float(composer_timeout_s)
     composer_visible = False
     composer_signal = ""
     composer_bounds: dict[str, int] | None = None
@@ -4113,7 +4922,176 @@ def detect_dm_thread_state(
     return thread_state, snap
 
 
-def open_dm_thread_from_profile(d: u2.Device, username: str) -> str:
+def _welcome_dm_forensics_username_key(username: str) -> str:
+    raw = str(username or "").strip().lstrip("@")
+    key = re.sub(r"[^a-zA-Z0-9._-]+", "_", raw).strip("_")
+    return (key[:80] if key else "unknown")
+
+
+def _welcome_dm_message_button_present(d: u2.Device) -> bool:
+    for factory in (
+        lambda: d(text="Message"),
+        lambda: d(textContains="Message"),
+        lambda: d(descriptionContains="Message"),
+    ):
+        try:
+            if factory().exists(timeout=0.05):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _welcome_dm_read_action_bar_title(d: u2.Device) -> str:
+    try:
+        ab = d(resourceIdMatches=r".*:id/action_bar_title.*")
+        if ab.exists(timeout=0.08):
+            return str(ab.get_text() or "").strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _welcome_dm_modal_signal(d: u2.Device) -> str:
+    if _session_modal_or_crash(d):
+        return "session_modal_or_crash"
+    try:
+        if d(className="android.app.AlertDialog").exists(timeout=0.05):
+            return "alert_dialog"
+        if d(classNameMatches=r".*[Dd]ialog.*").exists(timeout=0.05):
+            return "dialog_class"
+    except Exception:
+        pass
+    try:
+        unsupported = detect_unsupported_start_surface(d)
+        if unsupported:
+            return str(unsupported)
+    except Exception:
+        pass
+    return ""
+
+
+def _capture_welcome_dm_forensics_artifacts(
+    d: u2.Device,
+    username: str,
+    *,
+    artifact_suffix: str,
+) -> dict[str, Any]:
+    """
+    Welcome list-native DM forensics: screenshot + hierarchy XML under logs/.
+    artifact_suffix: post_message_tap | thread_unknown
+    """
+    _ensure_debug_dirs()
+    key = _welcome_dm_forensics_username_key(username)
+    stem = f"welcome_dm_{artifact_suffix}_{key}"
+    shot_path = _SCREENSHOTS_DIR / f"{stem}.png"
+    xml_path = _XML_DIR / f"{stem}.xml"
+    out: dict[str, Any] = {
+        "artifact_stem": stem,
+        "screenshot_path": None,
+        "xml_path": None,
+    }
+    try:
+        screenshot(d, str(shot_path))
+        out["screenshot_path"] = str(shot_path)
+    except Exception as e:
+        out["screenshot_error"] = str(e)[:200]
+    try:
+        try:
+            hier = d.dump_hierarchy(compressed=False)
+        except TypeError:
+            hier = d.dump_hierarchy()
+        xml_path.write_text(hier, encoding="utf-8")
+        out["xml_path"] = str(xml_path)
+    except Exception as e:
+        out["xml_write_error"] = str(e)[:200]
+    return out
+
+
+def _observe_welcome_dm_classification_surface(
+    d: u2.Device,
+    username: str,
+    *,
+    pkg: str,
+    snap: dict[str, Any] | None = None,
+    artifacts: dict[str, Any] | None = None,
+    detection_elapsed_ms: float | None = None,
+    button_signal: str = "",
+) -> dict[str, Any]:
+    """Structured observation for welcome_dm_*_observed logs (no business decisions)."""
+    snap = dict(snap or {})
+    artifacts = dict(artifacts or {})
+    meta = _followers_current_pkg_activity(d)
+    current_pkg = str(meta.get("current_package") or pkg or "")
+    composer_visible = bool(snap.get("composer_visible"))
+    has_history = bool(snap.get("has_history") or snap.get("has_history_signal"))
+    message_present = _welcome_dm_message_button_present(d)
+    obs: dict[str, Any] = {
+        "username": str(username or "").strip(),
+        "current_package": current_pkg or None,
+        "current_activity": meta.get("current_activity"),
+        "action_bar_title": _welcome_dm_read_action_bar_title(d),
+        "composer_visible": composer_visible,
+        "composer_signal": str(snap.get("composer_signal") or ""),
+        "existing_history_signal": has_history,
+        "history_signal_type": str(snap.get("history_signal_type") or ""),
+        "restricted_signal": bool(_dm_restricted_surfaces(d)),
+        "dm_not_available_signal": not message_present,
+        "message_button_present": message_present,
+        "modal_signal": _welcome_dm_modal_signal(d) or None,
+        "button_signal": str(button_signal or "") or None,
+        "screenshot_path": artifacts.get("screenshot_path"),
+        "xml_path": artifacts.get("xml_path"),
+        "is_dm_thread_screen": bool(is_dm_thread_screen(d, current_pkg or pkg)),
+        "current_screen_guess": _guess_profile_screen(d, current_pkg or pkg, username),
+    }
+    if detection_elapsed_ms is not None:
+        obs["detection_elapsed_ms"] = round(float(detection_elapsed_ms), 2)
+    return obs
+
+
+def _welcome_dm_forensics_debug_enabled() -> bool:
+    env_raw = os.environ.get("WELCOME_DM_FORENSICS_DEBUG")
+    if env_raw is not None:
+        return str(env_raw).strip().lower() in ("1", "true", "yes", "on")
+    return bool(getattr(config, "WELCOME_DM_FORENSICS_DEBUG", False))
+
+
+def _welcome_dm_should_capture_forensics_artifacts(thread_state: str) -> bool:
+    if str(thread_state or "") == "unknown":
+        return True
+    return _welcome_dm_forensics_debug_enabled()
+
+
+def _log_welcome_dm_thread_unknown_observed(
+    d: u2.Device,
+    username: str,
+    *,
+    pkg: str,
+    snap: dict[str, Any],
+    button_signal: str,
+    detection_elapsed_ms: float,
+) -> None:
+    artifacts: dict[str, Any] = {}
+    if _welcome_dm_should_capture_forensics_artifacts("unknown"):
+        artifacts = _capture_welcome_dm_forensics_artifacts(
+            d, username, artifact_suffix="thread_unknown"
+        )
+    obs = _observe_welcome_dm_classification_surface(
+        d,
+        username,
+        pkg=pkg,
+        snap=snap,
+        artifacts=artifacts,
+        detection_elapsed_ms=detection_elapsed_ms,
+        button_signal=button_signal,
+    )
+    log("info", "welcome_dm_thread_unknown_observed", **obs)
+
+
+def open_dm_thread_from_profile(
+    d: u2.Device, username: str, *, welcome_list_native: bool = False
+) -> str:
     global _LAST_DM_THREAD_ATTEMPTED, _LAST_DM_THREAD_STATE, _LAST_DM_THREAD_CLASSIFY_SNAPSHOT
     _LAST_DM_THREAD_ATTEMPTED = True
     try:
@@ -4158,8 +5136,26 @@ def open_dm_thread_from_profile(d: u2.Device, username: str) -> str:
     time.sleep(float(getattr(config, "DM_THREAD_POST_OPEN_SETTLE_S", 0.45)))
     # detect_dm_thread_state (must be called after clicking Message)
     t_detect = time.perf_counter()
-    thread_state, snap = detect_dm_thread_state(d, username, pkg=pkg)
-    _perf["dm_thread_detect_ms"] = (time.perf_counter() - t_detect) * 1000
+    detect_timeout_s = float(getattr(config, "DM_THREAD_DETECT_MAX_S", 2.5))
+    if welcome_list_native:
+        detect_timeout_s = float(
+            getattr(config, "WELCOME_DM_THREAD_DETECT_MAX_S", 9.0) or 9.0
+        )
+        log(
+            "info",
+            "welcome_dm_thread_detect_started",
+            username=username,
+            composer_timeout_s=detect_timeout_s,
+            welcome_list_native=True,
+        )
+    thread_state, snap = detect_dm_thread_state(
+        d,
+        username,
+        pkg=pkg,
+        composer_timeout_s=detect_timeout_s,
+    )
+    dm_thread_detect_ms = (time.perf_counter() - t_detect) * 1000
+    _perf["dm_thread_detect_ms"] = dm_thread_detect_ms
     _LAST_DM_THREAD_STATE = thread_state
     _LAST_DM_THREAD_CLASSIFY_SNAPSHOT = snap
 
@@ -4168,8 +5164,19 @@ def open_dm_thread_from_profile(d: u2.Device, username: str) -> str:
         "dm_thread_state_detected",
         username=username,
         thread_state=thread_state,
-        dm_thread_detect_ms=round(float(_perf["dm_thread_detect_ms"]), 2),
+        dm_thread_detect_ms=round(float(dm_thread_detect_ms), 2),
     )
+
+    if welcome_list_native and thread_state == "unknown":
+        _log_welcome_dm_thread_unknown_observed(
+            d,
+            username,
+            pkg=pkg,
+            snap=dict(snap),
+            button_signal=button_signal,
+            detection_elapsed_ms=dm_thread_detect_ms,
+        )
+
     return thread_state
 
 
@@ -4191,7 +5198,13 @@ def verify_dm_composer_safe(d: u2.Device, pkg: str | None = None) -> tuple[bool,
     return False, "no_dm_composer"
 
 
-def type_dm_draft_only(d: u2.Device, draft: str, pkg: str | None = None) -> tuple[bool, Any]:
+def type_dm_draft_only(
+    d: u2.Device,
+    draft: str,
+    pkg: str | None = None,
+    *,
+    force_method: str | None = None,
+) -> tuple[bool, Any]:
     _ = pkg or config.INSTAGRAM_PACKAGE
     t0 = time.perf_counter()
     ed = _dm_find_focus_composer(d)
@@ -4248,7 +5261,13 @@ def type_dm_draft_only(d: u2.Device, draft: str, pkg: str | None = None) -> tupl
         "text_prefix_after_set_text": "",
     }
 
-    if fast_ime and is_fast_ime_available(serial):
+    use_fast_ime = (
+        force_method != "set_text"
+        and bool(fast_ime)
+        and is_fast_ime_available(serial)
+        and force_method in (None, "", "fast_ime")
+    )
+    if use_fast_ime:
         cmd_ok, _, sw_ok, br_ok = run_fast_ime_input(serial, text, fast_ime_id=fast_ime)
         fastime_ok = bool(cmd_ok and (sw_ok or br_ok))
         type_meta["method"] = "fast_ime"
@@ -22936,24 +23955,73 @@ def _followers_run_visual_open_xml_empty_diagnostic(
     _FOLLOWERS_ENGINE_STOP_REASON = "visual_open_xml_empty"
 
 
-def harvest_visible_followers_usernames(
+def _followers_row_tap_bounds(username_bounds: dict[str, Any]) -> dict[str, int]:
+    """Expand username TextView bounds into a tappable row band (avatar + handle)."""
+    if not username_bounds:
+        return {}
+    try:
+        left = int(username_bounds["left"])
+        right = int(username_bounds["right"])
+        top = int(username_bounds["top"])
+        bottom = int(username_bounds["bottom"])
+    except (KeyError, TypeError, ValueError):
+        return {}
+    h = max(1, bottom - top)
+    pad = max(16, h)
+    return {
+        "left": left,
+        "right": right,
+        "top": max(0, top - pad),
+        "bottom": bottom + pad,
+    }
+
+
+def harvest_visible_followers_rows(
     d: u2.Device,
     *,
     source_profile_username: str,
     runtime_seen: set[str] | None = None,
-) -> tuple[list[str], dict[str, Any]]:
+    force_fresh_hierarchy: bool = False,
+    screen_index: int = 0,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """
-    Visible follower handles on the current followers list (no scroll).
-    Own unified followers list: XML-first via follow_list_username in cached hierarchy.
-    Other surfaces: live U2 TextView scan (unchanged).
+    Visible follower rows on the current followers list (no scroll).
+    Same XML-first path as welcome_scan_producer (follow_list_username).
     """
     seen = runtime_seen if runtime_seen is not None else set()
     extraction_methods: list[str] = []
+    hierarchy_source = "cached"
     rows: list[dict[str, Any]] = []
+    hier = ""
 
-    if _harvest_own_unified_xml_first_eligible(d):
+    if force_fresh_hierarchy:
+        hier = followers_refresh_detect_hierarchy_cache(d, screen_index=int(screen_index))
+        hierarchy_source = "fresh_dump"
+    elif _harvest_own_unified_xml_first_eligible(d):
         hier = _followers_resolve_detect_hierarchy_xml(d, None, live_incomplete=False)
-        if hier:
+        hierarchy_source = "cached"
+
+    if hier and "follow_list_username" in hier:
+        rows = _extract_own_unified_followers_usernames_from_hierarchy_xml(
+            hier,
+            source_profile_username=source_profile_username,
+            runtime_seen=seen,
+        )
+        if rows:
+            extraction_methods.append("own_unified_follow_list_username_xml")
+        else:
+            log(
+                "info",
+                "followers_harvest_own_unified_xml_empty",
+                source_profile_username=source_profile_username,
+                hierarchy_xml_len=len(hier),
+                hierarchy_source=hierarchy_source,
+            )
+
+    if not rows and not force_fresh_hierarchy:
+        hier = followers_refresh_detect_hierarchy_cache(d, screen_index=int(screen_index))
+        hierarchy_source = "fresh_dump_retry"
+        if hier and "follow_list_username" in hier:
             rows = _extract_own_unified_followers_usernames_from_hierarchy_xml(
                 hier,
                 source_profile_username=source_profile_username,
@@ -22961,13 +24029,6 @@ def harvest_visible_followers_usernames(
             )
             if rows:
                 extraction_methods.append("own_unified_follow_list_username_xml")
-            else:
-                log(
-                    "info",
-                    "followers_harvest_own_unified_xml_empty",
-                    source_profile_username=source_profile_username,
-                    hierarchy_xml_len=len(hier),
-                )
 
     if not rows:
         rows = _iter_followers_candidates_collect(
@@ -22977,18 +24038,54 @@ def harvest_visible_followers_usernames(
         )
         if rows:
             extraction_methods.append("live_u2_textview_handle_regex")
+            hierarchy_source = "live_u2"
 
-    usernames: list[str] = []
-    for r in rows:
-        u = str(r.get("username") or "").strip()
-        if u:
-            usernames.append(u)
+    enriched: list[dict[str, Any]] = []
+    for idx, row in enumerate(rows):
+        item = dict(row)
+        bounds = dict(item.get("bounds") or {})
+        item["row_index"] = idx
+        item["username_bounds"] = dict(bounds)
+        tap_b = _followers_row_tap_bounds(bounds)
+        item["tap_bounds"] = tap_b if tap_b else dict(bounds)
+        if not item.get("extraction_source"):
+            item["extraction_source"] = (
+                extraction_methods[-1] if extraction_methods else "unknown"
+            )
+        item["screen_index"] = int(screen_index)
+        item["hierarchy_source"] = hierarchy_source
+        enriched.append(item)
+
+    usernames = [str(r.get("username") or "").strip() for r in enriched if r.get("username")]
     meta = {
-        "visible_rows_count": len(rows),
+        "visible_rows_count": len(enriched),
         "usernames_count": len(usernames),
         "sample_usernames": usernames[:12],
         "extraction_methods": extraction_methods,
+        "hierarchy_source": hierarchy_source,
+        "hierarchy_xml_len": len(hier or ""),
+        "screen_index": int(screen_index),
     }
+    return enriched, meta
+
+
+def harvest_visible_followers_usernames(
+    d: u2.Device,
+    *,
+    source_profile_username: str,
+    runtime_seen: set[str] | None = None,
+    force_fresh_hierarchy: bool = False,
+    screen_index: int = 0,
+) -> tuple[list[str], dict[str, Any]]:
+    """Visible follower handles (delegates to harvest_visible_followers_rows)."""
+    rows, meta = harvest_visible_followers_rows(
+        d,
+        source_profile_username=source_profile_username,
+        runtime_seen=runtime_seen,
+        force_fresh_hierarchy=force_fresh_hierarchy,
+        screen_index=screen_index,
+    )
+    usernames = [str(r.get("username") or "").strip() for r in rows if r.get("username")]
     return usernames, meta
 
 

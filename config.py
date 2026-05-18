@@ -44,6 +44,9 @@ PROFILE_VERIFY_LIGHTWEIGHT_MAX_S = 1.5
 PROFILE_VERIFY_POLL_S = 0.08
 # DM open (safe mode: detect only, never type/send)
 DM_THREAD_DETECT_MAX_S = 2.5
+# V4.5-B Welcome list-native: slow modal DM threads (poll early-exit until composer or cap).
+WELCOME_DM_THREAD_DETECT_MAX_S = 9.0
+WELCOME_DM_FORENSICS_DEBUG = False
 DM_THREAD_POLL_S = 0.08
 DM_THREAD_POST_OPEN_SETTLE_S = 0.45
 DM_THREAD_STATE_MAX_WAIT_S = 2.0
@@ -348,3 +351,19 @@ DM_SENDER_RESERVED_BY = ""
 # Override at runtime: DM_SENDER_ONLY_JOB_ID="<uuid>" python3 runner.py ...
 DM_SENDER_ONLY_JOB_ID = ""
 DM_SENDER_FAILED_RETRY_DELAY_SECONDS = 300
+
+# --- V4.4 Welcome session real send ---
+# Override: DM_SENDER_REAL_SEND_ENABLED=true python3 runner.py --run-type dm_welcome_session_send ...
+DM_SENDER_REAL_SEND_ENABLED = False
+WELCOME_SESSION_SEND_MAX_JOBS = 3
+# V4.5 Welcome list-native sender (Followers row → profile → DM, no global Search)
+WELCOME_LIST_SENDER_MAX_SCROLL_FIND = 3
+WELCOME_LIST_SENDER_SCROLL_SETTLE_S = 0.45
+WELCOME_LIST_SENDER_BACK_SETTLE_S = 0.45
+WELCOME_LIST_SENDER_BACK_PROFILE_POLL_ATTEMPTS = 4
+WELCOME_LIST_SENDER_BACK_PROFILE_POLL_INTERVAL_S = 0.35
+DM_SENDER_FOLLOWERS_EXIT_SETTLE_S = 0.45
+DM_SENDER_FOLLOWERS_EXIT_HARDWARE_BACK_MAX = 3
+DM_SENDER_GLOBAL_SEARCH_READY_TTL_S = 120.0
+# After scan→sender or post-job prepare, skip re-verify open_search for this window (seconds).
+DM_SENDER_GLOBAL_SEARCH_TRUST_MAX_AGE_S = 120.0
