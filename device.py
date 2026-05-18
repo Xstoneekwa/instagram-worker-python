@@ -93,21 +93,16 @@ def set_ime(serial: str | None, ime: str) -> bool:
 
 def fast_input_text(serial: str | None, text: str) -> tuple[int, str]:
     """
-    Send text via FastInputIME broadcast (no shell quoting of msg — argv list).
+    Send text via FastInputIME broadcast.
+
+    Uses ``adb shell sh -c`` with a single quoted message so spaces, newlines,
+    apostrophes and unicode are not split by the device shell (avoids ``pkg=merci`` /
+    ``Ceci: inaccessible`` failures).
     """
-    code, out, err = _adb_run(
-        serial,
-        [
-            "shell",
-            "am",
-            "broadcast",
-            "-a",
-            "ADB_INPUT_TEXT",
-            "--es",
-            "msg",
-            text,
-        ],
-    )
+    import shlex
+
+    inner = f"am broadcast -a ADB_INPUT_TEXT --es msg {shlex.quote(str(text or ''))}"
+    code, out, err = _adb_run(serial, ["shell", "sh", "-c", inner])
     tail = (out + " " + err).strip()[-300:]
     log("debug", "fast_input_broadcast", exit_code=code, output_tail=tail)
     return code, tail
