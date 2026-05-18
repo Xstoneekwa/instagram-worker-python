@@ -287,6 +287,22 @@ class FollowersExplorationV1:
             **extra,
         )
 
+    def _suppress_stagnation_pending_initial_budget(
+        self,
+        *,
+        follows_completed: int,
+        exploration_passes_used: int,
+        exploration_max_passes: int,
+        list_progressive_exhausted: bool,
+    ) -> bool:
+        """Keep exploring when progressive budget remains and no follow was attempted yet."""
+        return (
+            int(follows_completed) == 0
+            and not bool(list_progressive_exhausted)
+            and int(exploration_max_passes) > 0
+            and int(exploration_passes_used) < int(exploration_max_passes)
+        )
+
     def should_stop_scrolling(
         self,
         *,
@@ -296,6 +312,8 @@ class FollowersExplorationV1:
         max_iter: int,
         list_progressive_exhausted: bool,
         session_elapsed_s: float,
+        exploration_passes_used: int = 0,
+        exploration_max_passes: int = 0,
     ) -> tuple[bool, str]:
         if not exploration_v1_enabled():
             if scroll_used >= max_scroll_soft:
@@ -309,6 +327,24 @@ class FollowersExplorationV1:
             getattr(config, "FOLLOWERS_EXPLORATION_V1_NO_NEW_VISUAL_PROGRESS_MAX", 5) or 5
         )
         if int(self.state.get("no_new_visual_progress_count") or 0) >= max(1, no_prog_max):
+            if self._suppress_stagnation_pending_initial_budget(
+                follows_completed=int(follows_completed),
+                exploration_passes_used=int(exploration_passes_used),
+                exploration_max_passes=int(exploration_max_passes),
+                list_progressive_exhausted=bool(list_progressive_exhausted),
+            ):
+                self._emit(
+                    "followers_exploration_stagnation_stop_suppressed_pending_initial_budget",
+                    stop_reason="stagnation_no_new_visual_progress",
+                    follows_completed_count=int(follows_completed),
+                    exploration_passes_used=int(exploration_passes_used),
+                    exploration_max_passes=int(exploration_max_passes),
+                    list_progressive_exploration_exhausted=bool(list_progressive_exhausted),
+                    no_new_visual_progress_count=int(
+                        self.state.get("no_new_visual_progress_count") or 0
+                    ),
+                )
+                return False, ""
             return True, "stagnation_no_new_visual_progress"
 
         no_actionable_max = int(
