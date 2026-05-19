@@ -119,6 +119,10 @@ def run_welcome_session_send(
         scan_new_follower_usernames_enqueued=scan_summary.get(
             "new_follower_usernames_enqueued"
         ),
+        scan_job_ids_enqueued_count=len(
+            scan_summary.get("new_follower_job_ids_enqueued") or []
+        ),
+        scan_final_screen_index=scan_summary.get("scan_final_screen_index"),
         scan_stop_reason=scan_summary.get("stop_reason"),
     )
 
@@ -203,7 +207,9 @@ def run_welcome_session_send(
         sender_processed_recipients=sender_summary.get("processed_recipients"),
         sender_sent_recipients=sender_summary.get("sent_recipients"),
         sender_skipped_recipients=sender_summary.get("skipped_recipients"),
-        recipients_targeted=sender_summary.get("recipients_targeted"),
+        recipients_planned=sender_summary.get("recipients_planned"),
+        selection_strategy=sender_summary.get("selection_strategy"),
+        session_claim_mode=sender_summary.get("session_claim_mode"),
         list_navigation_total_ms=sender_summary.get("list_navigation_total_ms"),
         dm_send_total_ms=sender_summary.get("dm_send_total_ms"),
         scan_exit_code=scan_code,

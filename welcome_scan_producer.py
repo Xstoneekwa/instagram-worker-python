@@ -98,6 +98,7 @@ def run_welcome_scan_producer(
     new_follower_usernames_detected: list[str] = []
     new_follower_usernames_enqueued: list[str] = []
     new_follower_visible_rows_enqueued: list[dict[str, Any]] = []
+    new_follower_job_ids_enqueued: list[dict[str, Any]] = []
     enqueue_blocked_global = False
     enqueue_block_reason: str | None = None
 
@@ -123,6 +124,8 @@ def run_welcome_scan_producer(
             new_follower_usernames_detected=list(new_follower_usernames_detected),
             new_follower_usernames_enqueued=list(new_follower_usernames_enqueued),
             new_follower_visible_rows_enqueued=list(new_follower_visible_rows_enqueued),
+            new_follower_job_ids_enqueued=list(new_follower_job_ids_enqueued),
+            scan_final_screen_index=int(scrolls_done),
             jobs_enqueued_count=jobs_enqueued_count,
             jobs_not_enqueued_count=jobs_not_enqueued_count,
             first_anchor_username=first_anchor_username,
@@ -365,19 +368,26 @@ def run_welcome_scan_producer(
 
                 if job and job.get("id"):
                     jobs_enqueued_count += 1
+                    jid = str(job.get("id"))
                     new_follower_usernames_enqueued.append(str(handle).strip())
                     row_snap = row_by_key.get(key)
+                    row_bounds: dict[str, Any] = {}
+                    username_bounds: dict[str, Any] = {}
+                    tap_bounds: dict[str, Any] = {}
                     if row_snap:
+                        username_bounds = dict(row_snap.get("username_bounds") or {})
+                        tap_bounds = dict(
+                            row_snap.get("tap_bounds")
+                            or row_snap.get("bounds")
+                            or {}
+                        )
+                        row_bounds = dict(row_snap.get("bounds") or tap_bounds)
                         new_follower_visible_rows_enqueued.append(
                             {
                                 "username": str(row_snap.get("username") or handle),
                                 "row_index": row_snap.get("row_index"),
-                                "username_bounds": dict(row_snap.get("username_bounds") or {}),
-                                "tap_bounds": dict(
-                                    row_snap.get("tap_bounds")
-                                    or row_snap.get("bounds")
-                                    or {}
-                                ),
+                                "username_bounds": username_bounds,
+                                "tap_bounds": tap_bounds,
                                 "extraction_source": str(
                                     row_snap.get("extraction_source") or ""
                                 ),
@@ -389,12 +399,25 @@ def run_welcome_scan_producer(
                                 ),
                             }
                         )
+                    new_follower_job_ids_enqueued.append(
+                        {
+                            "job_id": jid,
+                            "username": str(handle).strip(),
+                            "screen_index": int(
+                                row_snap.get("screen_index") if row_snap else screen_index
+                            ),
+                            "row_index": row_snap.get("row_index") if row_snap else None,
+                            "tap_bounds": tap_bounds or None,
+                            "username_bounds": username_bounds or None,
+                            "bounds": row_bounds or None,
+                        }
+                    )
                     log(
                         "info",
                         "welcome_scan_welcome_job_enqueued",
                         account_id=aid,
                         username=handle,
-                        job_id=str(job.get("id")),
+                        job_id=jid,
                         screen_index=screen_index,
                         discovery_phase=phase,
                         job_status=str(job.get("status") or ""),

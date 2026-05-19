@@ -29,6 +29,7 @@ from dm_sender_engine import (
 )
 from instagram_navigation import (
     detect_followers_list_screen_fresh,
+    followers_clear_detect_hierarchy_cache,
     followers_refresh_detect_hierarchy_cache,
     harvest_visible_followers_rows,
     get_last_dm_thread_classify_snapshot,
@@ -224,33 +225,258 @@ def _resolve_followers_row(
     return None, scrolls, "not_found", debug
 
 
-def _resolve_pending_recipients(
-    scan_summary: dict[str, Any],
+def _session_scan_jobs_from_summary(scan_summary: dict[str, Any]) -> list[dict[str, Any]]:
+    """Job entries enqueued during the current scan, in discovery order."""
+    out: list[dict[str, Any]] = []
+    for entry in scan_summary.get("new_follower_job_ids_enqueued") or []:
+        if not isinstance(entry, dict):
+            continue
+        jid = str(entry.get("job_id") or "").strip()
+        username = str(entry.get("username") or "").strip()
+        if not jid or not username:
+            continue
+        out.append(dict(entry))
+    return out
+
+
+def _sender_start_visible_usernames(
+    d: u2.Device,
     *,
+    account_username: str,
+    screen_index: int,
+) -> tuple[list[str], dict[str, Any]]:
+    rows, meta = harvest_visible_followers_rows(
+        d,
+        source_profile_username=account_username,
+        runtime_seen=set(),
+        force_fresh_hierarchy=True,
+        screen_index=int(screen_index),
+    )
+    visible = [str(r.get("username") or "") for r in rows if r.get("username")]
+    return visible, meta
+
+
+def _restore_followers_list_to_scan_start_zone(
+    d: u2.Device,
+    *,
+    account_username: str,
+    pkg: str,
+) -> tuple[bool, str]:
+    """
+    Reset followers list scroll to the top: action-bar back to own profile, then re-open followers.
+    """
+    from instagram_navigation import tap_instagram_action_bar_back_button
+    from own_profile_navigation import open_own_followers_list_from_own_profile
+
+    settle_s = float(
+        getattr(config, "WELCOME_LIST_SENDER_BACK_SETTLE_S", 0.45) or 0.45
+    )
+    det, _ = detect_followers_list_screen_fresh(
+        d, source_profile_username=account_username
+    )
+    if bool(det.get("is_followers_list")):
+        tapped, _method = tap_instagram_action_bar_back_button(d, pkg)
+        if tapped and settle_s > 0:
+            time.sleep(settle_s)
+    ok_open, open_meta = open_own_followers_list_from_own_profile(
+        d, account_username, pkg=pkg
+    )
+    if not ok_open:
+        reason = str((open_meta or {}).get("failure_reason") or "reopen_failed")
+        return False, reason
+    followers_clear_detect_hierarchy_cache()
+    followers_refresh_detect_hierarchy_cache(d, screen_index=0)
+    return True, "profile_back_reopen_followers"
+
+
+def _anchor_available_for_username(
+    username: str,
+    scan_anchors: dict[str, dict[str, Any]],
+) -> bool:
+    key = _norm_username(username)
+    if key not in scan_anchors:
+        return False
+    return _row_from_scan_anchor(scan_anchors[key]) is not None
+
+
+def _order_scan_jobs_viewport_first(
+    candidates: list[dict[str, Any]],
+    *,
+    visible_keys: set[str],
+) -> list[dict[str, Any]]:
+    """Visible rows first, then higher screen_index (closer to end-of-scan viewport)."""
+
+    def _sort_key(entry: dict[str, Any]) -> tuple[int, int, int]:
+        ukey = _norm_username(str(entry.get("username") or ""))
+        visible_rank = 0 if ukey in visible_keys else 1
+        screen_idx = int(entry.get("screen_index") or 0)
+        row_idx = entry.get("row_index")
+        row_rank = int(row_idx) if row_idx is not None else 9999
+        return (visible_rank, -screen_idx, row_rank)
+
+    return sorted(candidates, key=_sort_key)
+
+
+def _build_planned_session_jobs(
+    selected: list[dict[str, Any]],
+    *,
+    selection_strategy: str,
+    scan_anchors: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    planned: list[dict[str, Any]] = []
+    for idx, entry in enumerate(selected):
+        username = str(entry.get("username") or "").strip()
+        planned.append(
+            {
+                "job_id": str(entry.get("job_id") or "").strip(),
+                "username": username,
+                "screen_index": int(entry.get("screen_index") or 0),
+                "row_index": entry.get("row_index"),
+                "anchor_available": _anchor_available_for_username(
+                    username, scan_anchors
+                ),
+                "selection_reason": selection_strategy,
+                "planned_index": idx,
+            }
+        )
+    return planned
+
+
+def _planned_jobs_need_restore_scan_start(
+    planned: list[dict[str, Any]],
+    *,
+    visible_keys: set[str],
+    scan_final_screen_index: int,
+) -> bool:
+    if scan_final_screen_index <= 0 or not planned:
+        return False
+    for job in planned:
+        ukey = _norm_username(str(job.get("username") or ""))
+        if ukey in visible_keys:
+            continue
+        if int(job.get("screen_index") or 0) < scan_final_screen_index:
+            return True
+    return False
+
+
+def _resolve_session_sender_plan(
+    d: u2.Device,
+    scan: dict[str, Any],
+    *,
+    account_username: str,
+    pkg: str,
     max_jobs: int,
-) -> list[str]:
-    enqueued = [
-        str(u).strip()
-        for u in (scan_summary.get("new_follower_usernames_enqueued") or [])
-        if str(u).strip()
-    ]
-    detected = [
-        str(u).strip()
-        for u in (scan_summary.get("new_follower_usernames_detected") or [])
-        if str(u).strip()
-    ]
-    ordered: list[str] = []
-    seen: set[str] = set()
-    for src in (enqueued, detected):
-        for u in src:
-            key = _norm_username(u)
-            if not key or key in seen:
-                continue
-            seen.add(key)
-            ordered.append(u)
-            if len(ordered) >= max_jobs:
-                return ordered
-    return ordered[:max_jobs]
+    scan_anchors: dict[str, dict[str, Any]],
+) -> tuple[list[dict[str, Any]], str, dict[str, Any]]:
+    """
+    Build planned session jobs and optional reposition to scan-start zone.
+    Returns (planned_jobs, selection_strategy, position_meta).
+    """
+    candidates = _session_scan_jobs_from_summary(scan)
+    scan_final_screen_index = int(scan.get("scan_final_screen_index") or 0)
+    position_meta: dict[str, Any] = {
+        "scan_final_screen_index": scan_final_screen_index,
+        "scan_jobs_total": len(candidates),
+    }
+
+    visible, harvest_meta = _sender_start_visible_usernames(
+        d,
+        account_username=account_username,
+        screen_index=scan_final_screen_index,
+    )
+    visible_keys = {_norm_username(u) for u in visible}
+    position_meta["sender_start_visible_usernames"] = list(visible)
+    position_meta["sender_start_surface"] = str(
+        harvest_meta.get("hierarchy_source") or ""
+    )
+
+    scan_order_slice = candidates[:max_jobs]
+    needs_restore = _planned_jobs_need_restore_scan_start(
+        [
+            {
+                "username": e.get("username"),
+                "screen_index": e.get("screen_index"),
+            }
+            for e in scan_order_slice
+        ],
+        visible_keys=visible_keys,
+        scan_final_screen_index=scan_final_screen_index,
+    )
+    position_meta["restore_needed"] = needs_restore
+    selection_strategy = "scan_order"
+
+    if needs_restore:
+        log(
+            "info",
+            "welcome_list_sender_reposition_started",
+            account_username=account_username,
+            scan_final_screen_index=scan_final_screen_index,
+            planned_usernames=[str(e.get("username") or "") for e in scan_order_slice],
+            visible_usernames=list(visible),
+            reason="planned_scan_order_jobs_not_in_current_viewport",
+        )
+        ok_restore, method = _restore_followers_list_to_scan_start_zone(
+            d, account_username=account_username, pkg=pkg
+        )
+        position_meta["reposition_method"] = method
+        position_meta["reposition_success"] = ok_restore
+        if ok_restore:
+            selection_strategy = "restore_scan_start_zone"
+            visible, harvest_meta = _sender_start_visible_usernames(
+                d,
+                account_username=account_username,
+                screen_index=0,
+            )
+            visible_keys = {_norm_username(u) for u in visible}
+            position_meta["sender_start_visible_usernames_after_restore"] = list(
+                visible
+            )
+            log(
+                "info",
+                "welcome_list_sender_reposition_finished",
+                account_username=account_username,
+                method=method,
+                success=True,
+                visible_usernames=list(visible),
+            )
+            selected = scan_order_slice
+        else:
+            selection_strategy = "current_viewport_order"
+            selected = _order_scan_jobs_viewport_first(
+                candidates, visible_keys=visible_keys
+            )[:max_jobs]
+            log(
+                "info",
+                "welcome_list_sender_reposition_finished",
+                account_username=account_username,
+                method=method,
+                success=False,
+                fallback_strategy=selection_strategy,
+            )
+    else:
+        if scan_final_screen_index > 0:
+            not_visible = [
+                str(e.get("username") or "")
+                for e in scan_order_slice
+                if _norm_username(str(e.get("username") or "")) not in visible_keys
+            ]
+            if not_visible and scan_order_slice:
+                selection_strategy = "current_viewport_order"
+                selected = _order_scan_jobs_viewport_first(
+                    candidates, visible_keys=visible_keys
+                )[:max_jobs]
+            else:
+                selected = scan_order_slice
+        else:
+            selected = scan_order_slice
+
+    planned = _build_planned_session_jobs(
+        selected,
+        selection_strategy=selection_strategy,
+        scan_anchors=scan_anchors,
+    )
+    position_meta["selection_strategy"] = selection_strategy
+    return planned, selection_strategy, position_meta
 
 
 def _verify_followers_surface(
@@ -429,6 +655,7 @@ def execute_welcome_list_job(
     account_id: str,
     account_username: str,
     scan_anchors: dict[str, dict[str, Any]],
+    planned_job_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     job_id = str(job.get("id") or "")
     recipient = str(job.get("recipient_username") or "").strip()
@@ -501,6 +728,28 @@ def execute_welcome_list_job(
                 fail_reason = "thread_state_unknown_after_message"
             else:
                 fail_reason = "list_navigation_failed"
+            plan_ctx = dict(planned_job_context or {})
+            lookup_path = str(_nav_meta.get("lookup_path_used") or "")
+            row_missing = lookup_path in (
+                "not_found",
+                "scroll_exhausted",
+                "fresh_miss_despite_visible",
+            )
+            if plan_ctx.get("current_scan_session") and row_missing:
+                fail_reason = "current_scan_planned_row_not_found"
+                log(
+                    "error",
+                    "welcome_list_sender_current_scan_row_not_found",
+                    job_id=job_id,
+                    recipient_username=recipient,
+                    planned_index=int(plan_ctx.get("planned_index") or 0),
+                    selection_strategy=str(plan_ctx.get("selection_strategy") or ""),
+                    reposition_applied=bool(plan_ctx.get("reposition_applied")),
+                    possible_unfollow_or_surface_shift=True,
+                    lookup_path_used=lookup_path,
+                    scrolls_attempted=_nav_meta.get("followers_scrolls_to_find"),
+                    scan_anchor_present=bool(_nav_meta.get("scan_anchor_present")),
+                )
             updated_job, outcome = _complete_job_failed_retry(
                 job,
                 last_error=fail_reason,
@@ -660,13 +909,20 @@ def run_welcome_list_sender(
     max_jobs = max(0, int(max_jobs))
 
     scan = dict(scan_summary or {})
-    scan_order = _resolve_pending_recipients(scan, max_jobs=max_jobs)
+    current_scan_session_mode = scan_summary is not None
+    session_scan_jobs = _session_scan_jobs_from_summary(scan)
 
     summary: dict[str, Any] = {
         "account_id": aid,
         "run_id": run_id,
         "max_jobs": max_jobs,
         "sender_mode": "welcome_list_native",
+        "current_scan_session_mode": current_scan_session_mode,
+        "session_claim_mode": (
+            "current_scan_job_ids"
+            if current_scan_session_mode
+            else "global_claim_next"
+        ),
         "jobs_claimed_count": 0,
         "jobs_sent_count": 0,
         "jobs_skipped_count": 0,
@@ -675,7 +931,8 @@ def run_welcome_list_sender(
         "sent_recipients": [],
         "skipped_recipients": [],
         "failed_recipients": [],
-        "recipients_targeted": list(scan_order),
+        "planned_session_jobs": [],
+        "recipients_planned": [],
         "recipients_sent": [],
         "recipients_skipped": [],
         "recipients_failed": [],
@@ -704,23 +961,78 @@ def run_welcome_list_sender(
         account_username=acct_user,
         run_id=run_id,
         max_jobs=max_jobs,
-    )
-    log(
-        "info",
-        "welcome_list_sender_pending_recipients_resolved",
-        account_id=aid,
-        recipients_targeted=scan_order,
-        scan_enqueued_count=len(scan.get("new_follower_usernames_enqueued") or []),
-        scan_detected_count=len(scan.get("new_follower_usernames_detected") or []),
+        current_scan_session_mode=current_scan_session_mode,
+        scan_jobs_total=len(session_scan_jobs),
     )
 
     followers_ok, _obs = _verify_followers_surface(
         d, account_username=acct_user, context="welcome_list_sender_start"
     )
     if followers_ok:
-        followers_refresh_detect_hierarchy_cache(d, screen_index=0)
+        scan_final_idx = int(scan.get("scan_final_screen_index") or 0)
+        followers_refresh_detect_hierarchy_cache(d, screen_index=scan_final_idx)
 
     scan_anchors = _scan_row_anchors_by_username(scan)
+
+    planned_session_jobs: list[dict[str, Any]] = []
+    selection_strategy = ""
+    position_meta: dict[str, Any] = {}
+
+    if current_scan_session_mode and not only_job_id:
+        if followers_ok and session_scan_jobs:
+            planned_session_jobs, selection_strategy, position_meta = (
+                _resolve_session_sender_plan(
+                    d,
+                    scan,
+                    account_username=acct_user,
+                    pkg=pkg,
+                    max_jobs=max_jobs,
+                    scan_anchors=scan_anchors,
+                )
+            )
+        else:
+            planned_session_jobs = []
+            selection_strategy = "no_current_scan_jobs"
+            position_meta = {
+                "scan_final_screen_index": int(scan.get("scan_final_screen_index") or 0),
+                "scan_jobs_total": 0,
+            }
+        summary["planned_session_jobs"] = list(planned_session_jobs)
+        summary["recipients_planned"] = [
+            str(p.get("username") or "") for p in planned_session_jobs
+        ]
+        summary["selection_strategy"] = selection_strategy
+        summary["scan_final_screen_index"] = position_meta.get(
+            "scan_final_screen_index"
+        )
+        if session_scan_jobs:
+            log(
+                "info",
+                "welcome_list_sender_start_position_resolved",
+                account_id=aid,
+                scan_final_screen_index=position_meta.get("scan_final_screen_index"),
+                visible_usernames_at_sender_start=position_meta.get(
+                    "sender_start_visible_usernames"
+                ),
+                strategy=selection_strategy,
+                restore_needed=position_meta.get("restore_needed"),
+                reposition_success=position_meta.get("reposition_success"),
+            )
+        log(
+            "info",
+            "welcome_list_sender_session_plan_built",
+            account_id=aid,
+            plan_source="current_scan",
+            planned_jobs=planned_session_jobs,
+            scan_jobs_total=position_meta.get("scan_jobs_total", len(session_scan_jobs)),
+            max_jobs=max_jobs,
+            selection_strategy=selection_strategy,
+            scan_final_screen_index=position_meta.get("scan_final_screen_index"),
+            sender_start_surface=position_meta.get("sender_start_surface"),
+            sender_start_visible_usernames=position_meta.get(
+                "sender_start_visible_usernames"
+            ),
+        )
 
     if not followers_ok:
         summary["sender_status"] = "failed"
@@ -737,8 +1049,47 @@ def run_welcome_list_sender(
         log("error", "welcome_list_sender_settings_load_failed", error=str(e))
         settings = {}
 
+    if current_scan_session_mode and not only_job_id and not session_scan_jobs:
+        log(
+            "info",
+            "welcome_list_sender_no_current_scan_jobs",
+            account_id=aid,
+            account_username=acct_user,
+            run_id=run_id,
+            scan_jobs_total=0,
+            max_jobs=max_jobs,
+        )
+        summary["sender_status"] = "success"
+        summary["loop_exit_reason"] = "no_current_scan_jobs"
+        summary["total_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
+        _LAST_WELCOME_LIST_SENDER_SUMMARY = dict(summary)
+        log("info", "welcome_list_sender_summary", **summary)
+        log(
+            "info",
+            "welcome_list_sender_completed",
+            account_id=aid,
+            run_id=run_id,
+            sender_status="success",
+        )
+        return 0, summary
+
     loop_exit_reason: str | None = None
-    for _ in range(max_jobs):
+    job_iterations: list[dict[str, Any]] = []
+    reposition_applied = bool(
+        position_meta.get("reposition_success")
+        or selection_strategy == "restore_scan_start_zone"
+    )
+
+    if only_job_id:
+        job_iterations = [{"job_id": only_job_id, "username": "", "planned_index": 0}]
+    elif current_scan_session_mode:
+        job_iterations = list(planned_session_jobs)
+    else:
+        job_iterations = [
+            {"job_id": "", "username": "", "planned_index": i} for i in range(max_jobs)
+        ]
+
+    for planned in job_iterations:
         if _dm_sender_session_should_abort():
             loop_exit_reason = "permission_dialog_abort"
             log(
@@ -750,18 +1101,99 @@ def run_welcome_list_sender(
             )
             break
 
+        planned_job_id = str(planned.get("job_id") or "").strip()
+        planned_username = str(planned.get("username") or "").strip()
+        planned_index = int(planned.get("planned_index") or 0)
+
+        if current_scan_session_mode and not only_job_id:
+            if not planned_job_id:
+                continue
+            claim_job_id = planned_job_id
+        elif only_job_id:
+            claim_job_id = only_job_id
+        elif current_scan_session_mode:
+            continue
+        else:
+            claim_job_id = ""
+
         job = _claim_job_for_run(
-            aid, reserved_by, dm_type="welcome", only_job_id=only_job_id
+            aid,
+            reserved_by,
+            dm_type="welcome",
+            only_job_id=claim_job_id if claim_job_id else "",
         )
+
+        if current_scan_session_mode and not only_job_id:
+            if not job or not str(job.get("id") or "").strip():
+                log(
+                    "warning",
+                    "welcome_list_sender_scan_job_claim_failed",
+                    account_id=aid,
+                    job_id=planned_job_id,
+                    planned_username=planned_username,
+                    planned_index=planned_index,
+                )
+                summary["jobs_failed_count"] += 1
+                if planned_username:
+                    summary["failed_recipients"].append(planned_username)
+                    summary["recipients_failed"].append(planned_username)
+                continue
+
+            claimed_id = str(job.get("id") or "").strip()
+            claimed_user = str(job.get("recipient_username") or "").strip()
+            if claimed_id != planned_job_id or (
+                planned_username
+                and _norm_username(claimed_user) != _norm_username(planned_username)
+            ):
+                log(
+                    "warning",
+                    "welcome_list_sender_claim_outside_current_scan_blocked",
+                    account_id=aid,
+                    planned_job_id=planned_job_id,
+                    planned_username=planned_username,
+                    claimed_job_id=claimed_id,
+                    claimed_username=claimed_user,
+                )
+                continue
+
+            log(
+                "info",
+                "welcome_list_sender_job_claimed",
+                claim_source="current_scan_job_id",
+                job_id=claimed_id,
+                recipient_username=claimed_user,
+                planned_index=planned_index,
+                selection_strategy=selection_strategy or planned.get("selection_reason"),
+            )
+        elif job and str(job.get("id") or "").strip():
+            log(
+                "info",
+                "welcome_list_sender_job_claimed",
+                claim_source="claim_next_global"
+                if not claim_job_id
+                else "dm_sender_only_job_id",
+                job_id=str(job.get("id") or ""),
+                recipient_username=job.get("recipient_username"),
+                planned_index=planned_index,
+            )
+
         if not job or not str(job.get("id") or "").strip():
-            loop_exit_reason = "no_pending_job"
+            if current_scan_session_mode:
+                loop_exit_reason = "scan_session_jobs_exhausted"
+            else:
+                loop_exit_reason = "no_pending_job"
             log(
                 "info",
                 "welcome_list_sender_no_pending_job",
                 account_id=aid,
                 run_id=run_id,
                 exit_reason=loop_exit_reason,
+                current_scan_session_mode=current_scan_session_mode,
             )
+            break
+
+        if len(summary["processed_recipients"]) >= max_jobs:
+            loop_exit_reason = "max_jobs_reached"
             break
 
         if _dm_sender_session_should_abort():
@@ -788,6 +1220,16 @@ def run_welcome_list_sender(
         summary["jobs_claimed_count"] += 1
         summary["processed_recipients"].append(recipient)
 
+        planned_job_context: dict[str, Any] | None = None
+        if current_scan_session_mode and not only_job_id:
+            planned_job_context = {
+                "current_scan_session": True,
+                "planned_index": planned_index,
+                "selection_strategy": selection_strategy
+                or str(planned.get("selection_reason") or ""),
+                "reposition_applied": reposition_applied,
+            }
+
         try:
             result = execute_welcome_list_job(
                 d,
@@ -796,6 +1238,7 @@ def run_welcome_list_sender(
                 account_id=aid,
                 account_username=acct_user,
                 scan_anchors=scan_anchors,
+                planned_job_context=planned_job_context,
             )
         except Exception as e:
             log(
@@ -868,7 +1311,10 @@ def run_welcome_list_sender(
     failed = int(summary["jobs_failed_count"])
     sent = int(summary["jobs_sent_count"])
 
-    if claimed == 0:
+    if str(summary.get("loop_exit_reason") or "") == "no_current_scan_jobs":
+        sender_status = "success"
+        exit_code = 0
+    elif claimed == 0:
         sender_status = "no_jobs"
         exit_code = 0
     elif failed > 0 and sent == 0:
