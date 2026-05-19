@@ -12,6 +12,179 @@ from typing import Any
 
 from logs import log
 
+
+ROW_CTA_XML_REJECT_CLASSES: frozenset[str] = frozenset(
+    {
+        "follow_back",
+        "message",
+        "following",
+        "requested",
+        "contact",
+    }
+)
+
+FOLLOW_XML_CTA_BAND_OVERLAP_MIN = 0.45
+FOLLOW_XML_CTA_AMBIGUOUS_OVERLAP_DELTA = 0.08
+
+
+def normalize_own_unified_row_cta_xml_text(raw: str) -> tuple[str, str]:
+    """Map follow_list_row_large_follow_button XML text to (row_cta_class, display text)."""
+    t = str(raw or "").strip()
+    if not t:
+        return "unknown", ""
+    low = t.lower()
+    if low in ("follow", "suivre"):
+        return "follow", t
+    if "follow back" in low or "suivre en retour" in low:
+        return "follow_back", t
+    if low in ("message", "envoyer un message"):
+        return "message", t
+    if low in ("following", "suivi(e)", "abonné"):
+        return "following", t
+    if low in ("requested", "demandé"):
+        return "requested", t
+    if low in ("contact", "contacts"):
+        return "contact", t
+    return "unknown", t
+
+
+def is_row_cta_xml_reject_class(cta_cls: str) -> bool:
+    return str(cta_cls or "").strip() in ROW_CTA_XML_REJECT_CLASSES
+
+
+def _vertical_band_overlap_frac(
+    top_a: int, bottom_a: int, top_b: int, bottom_b: int
+) -> float:
+    il = max(int(top_a), int(top_b))
+    ir = min(int(bottom_a), int(bottom_b))
+    if ir <= il:
+        return 0.0
+    inter = float(ir - il)
+    ha = float(max(1, int(bottom_a) - int(top_a)))
+    hb = float(max(1, int(bottom_b) - int(top_b)))
+    return inter / max(1.0, min(ha, hb))
+
+
+def _xml_row_vertical_band(row: dict[str, Any]) -> tuple[int, int] | None:
+    bands: list[tuple[int, int]] = []
+    for key in ("row_bounds", "bounds", "row_cta_xml_bounds"):
+        b = row.get(key)
+        if not isinstance(b, dict):
+            continue
+        try:
+            top = int(b.get("top", 0))
+            bot = int(b.get("bottom", 0))
+        except (TypeError, ValueError):
+            continue
+        if bot > top:
+            bands.append((top, bot))
+    if not bands:
+        return None
+    return min(t for t, _ in bands), max(b for _, b in bands)
+
+
+def match_visual_row_band_to_xml_cta_row(
+    row_top: int,
+    row_bottom: int,
+    xml_rows: list[dict[str, Any]],
+    *,
+    overlap_min: float = FOLLOW_XML_CTA_BAND_OVERLAP_MIN,
+) -> tuple[dict[str, Any] | None, float, bool]:
+    if not xml_rows:
+        return None, 0.0, False
+    scored: list[tuple[float, dict[str, Any]]] = []
+    for row in xml_rows:
+        if not isinstance(row, dict):
+            continue
+        band = _xml_row_vertical_band(row)
+        if band is None:
+            continue
+        xt, xb = band
+        frac = _vertical_band_overlap_frac(int(row_top), int(row_bottom), xt, xb)
+        if frac >= float(overlap_min):
+            scored.append((frac, row))
+    if not scored:
+        return None, 0.0, False
+    scored.sort(key=lambda t: (-t[0], str(t[1].get("username") or "")))
+    best_frac, best_row = scored[0]
+    ambiguous = False
+    if len(scored) > 1:
+        second_frac = scored[1][0]
+        if second_frac >= float(overlap_min) and (
+            second_frac >= best_frac - FOLLOW_XML_CTA_AMBIGUOUS_OVERLAP_DELTA
+        ):
+            ambiguous = True
+    return best_row, float(best_frac), ambiguous
+
+
+def follow_xml_cta_gate_for_visual_band(
+    *,
+    row_top: int,
+    row_bottom: int,
+    xml_cta_rows: list[dict[str, Any]],
+    source_profile_username: str,
+    visual_candidate_id: str,
+    span_index: int,
+    resolved_username: str = "",
+) -> tuple[bool, dict[str, Any] | None, float]:
+    if not xml_cta_rows:
+        return False, None, 0.0
+    match, overlap, ambiguous = match_visual_row_band_to_xml_cta_row(
+        row_top, row_bottom, xml_cta_rows
+    )
+    if ambiguous:
+        try:
+            log(
+                "info",
+                "followers_visual_candidate_xml_cta_match_ambiguous",
+                source_profile_username=str(source_profile_username or "")[:120],
+                visual_candidate_id=str(visual_candidate_id or "")[:80],
+                span_index=int(span_index),
+                overlap_frac=round(float(overlap), 4),
+                resolved_username_hint=str(resolved_username or "")[:80],
+            )
+        except Exception:
+            pass
+        return False, match, float(overlap)
+    if match is None:
+        return False, None, 0.0
+    cta_cls = str(match.get("row_cta_xml_class") or "").strip()
+    if is_row_cta_xml_reject_class(cta_cls):
+        try:
+            log(
+                "info",
+                "followers_visual_candidate_rejected_non_follow_cta",
+                username=str(match.get("username") or resolved_username or "")[:80],
+                row_cta_xml_class=cta_cls[:40],
+                row_cta_xml_text=str(match.get("row_cta_xml_text") or "")[:80],
+                visual_candidate_id=str(visual_candidate_id or "")[:80],
+                span_index=int(span_index),
+                overlap_frac=round(float(overlap), 4),
+                source_profile_username=str(source_profile_username or "")[:120],
+            )
+        except Exception:
+            pass
+        return True, match, float(overlap)
+    return False, match, float(overlap)
+
+
+def attach_follow_xml_cta_fields_to_candidate(
+    cand: dict[str, Any], xml_row: dict[str, Any] | None
+) -> None:
+    if not isinstance(cand, dict) or not isinstance(xml_row, dict):
+        return
+    cand["row_cta_xml_class"] = str(xml_row.get("row_cta_xml_class") or "")
+    cand["row_cta_xml_text"] = str(xml_row.get("row_cta_xml_text") or "")
+    if xml_row.get("username"):
+        cand["row_cta_xml_username"] = str(xml_row.get("username") or "")
+
+
+def runner_pick_reject_non_follow_xml_cta(candidate: dict[str, Any]) -> tuple[bool, str]:
+    cta_cls = str(candidate.get("row_cta_xml_class") or "").strip()
+    if is_row_cta_xml_reject_class(cta_cls):
+        return True, f"row_cta_xml_{cta_cls}"
+    return False, ""
+
 # Reuse Instagram visual helpers (PIL-only path inside these helpers).
 from instagram_navigation import (
     _compute_visual_candidate_tap_points_from_bounds,

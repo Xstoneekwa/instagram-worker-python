@@ -42,6 +42,133 @@ _LAST_SEARCH_SURFACE_TS: float = 0.0
 _LAST_SEARCH_SURFACE_OK: bool = False
 _LAST_SEARCH_SURFACE_PKG: str = ""
 _LAST_SEARCH_SURFACE_ACTIVITY_FAMILY: str = ""
+_SEARCH_SURFACE_FRESHLY_CONFIRMED_FOR_FOLLOW_CT: bool = False
+# Followers-engine CT open only (Search → tap CT profile). Never set for DM sender.
+_FOLLOW_CT_SEARCH_CONTEXT_ACTIVE: bool = False
+_FOLLOW_CT_EXACT_ROW_TAP_BOUNDS: dict[str, int] | None = None
+
+
+def enter_follow_ct_search_context() -> None:
+    """Followers engine: enable Follow-CT-only search fast paths until clear."""
+    global _FOLLOW_CT_SEARCH_CONTEXT_ACTIVE
+    _FOLLOW_CT_SEARCH_CONTEXT_ACTIVE = True
+    _clear_follow_ct_exact_row_tap_bounds()
+    _clear_follow_ct_serp_band_cache()
+
+
+def clear_follow_ct_search_context() -> None:
+    global _FOLLOW_CT_SEARCH_CONTEXT_ACTIVE
+    _FOLLOW_CT_SEARCH_CONTEXT_ACTIVE = False
+    _clear_follow_ct_exact_row_tap_bounds()
+    _clear_follow_ct_serp_band_cache()
+
+
+def is_follow_ct_search_context_active() -> bool:
+    return bool(_FOLLOW_CT_SEARCH_CONTEXT_ACTIVE)
+
+
+def _follow_ct_search_active(*, explicit: bool = False) -> bool:
+    """Followers-engine CT open: explicit param and/or session global flag."""
+    return bool(explicit) or is_follow_ct_search_context_active()
+
+
+_FOLLOW_CT_SERP_BAND_CACHE: tuple[int, int | None, int, int] | None = None
+
+
+def _clear_follow_ct_serp_band_cache() -> None:
+    global _FOLLOW_CT_SERP_BAND_CACHE
+    _FOLLOW_CT_SERP_BAND_CACHE = None
+
+
+def _is_exact_row_search_resource_id(rid: str) -> bool:
+    r = str(rid or "").strip()
+    if not r:
+        return False
+    return r == ROW_SEARCH_USERNAME_EXACT_RES or r.endswith(
+        f"/{ROW_SEARCH_USER_USERNAME_RES_NAME}"
+    )
+
+
+def _follow_ct_cached_serp_y_band(d: u2.Device) -> tuple[int, int | None, int, int]:
+    """One SERP band harvest per Follow-CT search session (amortize mixed polls)."""
+    global _FOLLOW_CT_SERP_BAND_CACHE
+    if _FOLLOW_CT_SERP_BAND_CACHE is not None:
+        return _FOLLOW_CT_SERP_BAND_CACHE
+    tab_b, posts_t, hh = _serp_y_band(d)
+    search_bottom = _chrome_bottom_y(d, hh, tab_b)
+    _FOLLOW_CT_SERP_BAND_CACHE = (tab_b, posts_t, hh, search_bottom)
+    return _FOLLOW_CT_SERP_BAND_CACHE
+
+
+def _follow_ct_prewarm_serp_band_cache(d: u2.Device) -> None:
+    """Fill SERP band cache early (mixed Follow-CT) so legacy evaluate paths avoid a cold ~7s probe."""
+    if not is_follow_ct_search_context_active():
+        return
+    try:
+        if get_search_ui_mode() != "mixed_results":
+            return
+    except Exception:
+        return
+    try:
+        _follow_ct_cached_serp_y_band(d)
+    except Exception:
+        pass
+
+
+def _follow_ct_exact_row_light_serp_guard(
+    *,
+    cy: int,
+    height: int,
+    width: int,
+) -> tuple[bool, str]:
+    """
+    Follow-CT exact row_search_user_username only: lightweight Y guard without UiAutomator SERP harvest.
+    row_search_user_username is account-row specific on mixed SERP (not Posts/media row types).
+    """
+    _ = width
+    if cy <= int(height * 0.12):
+        return False, "above_search_chrome"
+    if cy >= int(height * 0.90):
+        return False, "bottom_media_band"
+    if cy < int(height * 0.16):
+        return False, "upper_chrome_band"
+    return True, "accepted"
+
+
+def _clear_follow_ct_exact_row_tap_bounds() -> None:
+    global _FOLLOW_CT_EXACT_ROW_TAP_BOUNDS
+    _FOLLOW_CT_EXACT_ROW_TAP_BOUNDS = None
+
+
+def _store_follow_ct_exact_row_tap_bounds(tb: dict[str, int]) -> None:
+    global _FOLLOW_CT_EXACT_ROW_TAP_BOUNDS
+    try:
+        _FOLLOW_CT_EXACT_ROW_TAP_BOUNDS = {
+            k: int(tb[k]) for k in ("left", "top", "right", "bottom")
+        }
+    except (KeyError, TypeError, ValueError):
+        _FOLLOW_CT_EXACT_ROW_TAP_BOUNDS = None
+
+
+def _peek_follow_ct_exact_row_tap_bounds() -> dict[str, int] | None:
+    b = _FOLLOW_CT_EXACT_ROW_TAP_BOUNDS
+    if not b:
+        return None
+    return dict(b)
+
+
+def mark_search_surface_fresh_for_follow_ct() -> None:
+    """Follow CT: ensure_global_search just confirmed global Search; skip redundant reopen."""
+    global _SEARCH_SURFACE_FRESHLY_CONFIRMED_FOR_FOLLOW_CT
+    _SEARCH_SURFACE_FRESHLY_CONFIRMED_FOR_FOLLOW_CT = True
+
+
+def consume_search_surface_fresh_for_follow_ct() -> bool:
+    global _SEARCH_SURFACE_FRESHLY_CONFIRMED_FOR_FOLLOW_CT
+    if not _SEARCH_SURFACE_FRESHLY_CONFIRMED_FOR_FOLLOW_CT:
+        return False
+    _SEARCH_SURFACE_FRESHLY_CONFIRMED_FOR_FOLLOW_CT = False
+    return True
 
 # Phase timings for performance_summary (reset each run from runner)
 _perf: dict[str, float | int | bool] = {}
@@ -490,7 +617,10 @@ def find_first_row_search_username_hot(d: u2.Device, username: str):
 
 
 def find_username_elements_by_resource_id(
-    d: u2.Device, username: str
+    d: u2.Device,
+    username: str,
+    *,
+    follow_ct_search_context: bool = False,
 ) -> list[tuple[object, str]]:
     """
     Strong signal: TextViews with id row_search_user_username matching exact handle.
@@ -499,7 +629,18 @@ def find_username_elements_by_resource_id(
     target = _normalize_handle(username)
     seen: set[int] = set()
     matches: list[tuple[object, str]] = []
+    _t_collect_raw = time.perf_counter()
     raw = _collect_raw_row_search_elements(d)
+    if _follow_ct_search_active(explicit=follow_ct_search_context):
+        try:
+            log(
+                "info",
+                "follow_ct_search_collect_raw_ms",
+                username=username,
+                duration_ms=round((time.perf_counter() - _t_collect_raw) * 1000.0, 2),
+            )
+        except Exception:
+            pass
 
     for el, rid_hint in raw:
         try:
@@ -957,8 +1098,42 @@ def evaluate_account_row_candidate(
     }
 
 
+def _element_resource_name(el) -> str:
+    try:
+        return str((el.info or {}).get("resourceName") or "")
+    except Exception:
+        return ""
+
+
+def _exact_mixed_search_row_fast_accept_eligible(
+    *,
+    cy: int,
+    posts_top: int | None,
+    height: int,
+    search_bottom: int,
+    width: int,
+    has_remove: bool,
+) -> tuple[bool, str]:
+    """Exact row_search_user_username in mixed SERP: skip slow posts_top stabilization."""
+    if has_remove:
+        return False, "remove_button"
+    if cy <= search_bottom + _scale_px(2, width):
+        return False, "above_search_results"
+    if cy >= int(height * 0.92):
+        return False, "bottom_media_band"
+    if posts_top is not None and cy >= posts_top - _scale_px(6, width):
+        return False, "posts_section_band"
+    return True, "accepted"
+
+
 def evaluate_row_search_username_element(
-    d: u2.Device, text_el, username: str, *, mixed_results: bool
+    d: u2.Device,
+    text_el,
+    username: str,
+    *,
+    mixed_results: bool,
+    follow_ct_search_context: bool = False,
+    resource_id_hint: str = "",
 ) -> dict:
     """
     row_search_user_username resource id: account SERP row; accept without avatar.
@@ -996,11 +1171,237 @@ def evaluate_row_search_username_element(
             "from_resource_id": True,
         }
 
+    follow_ct_active = _follow_ct_search_active(explicit=follow_ct_search_context)
+    rid_hint = str(resource_id_hint or "").strip()
+    remove_probe_ms = 0.0
+    serp_band_ms = 0.0
+
+    if (
+        follow_ct_active
+        and mixed_results
+        and _is_exact_row_search_resource_id(rid_hint)
+    ):
+        element_rid = _element_resource_name(text_el)
+        effective_rid = element_rid or rid_hint
+        if rid_hint and not element_rid:
+            try:
+                log(
+                    "info",
+                    "follow_ct_search_evaluate_rid_mismatch",
+                    username=username,
+                    resource_id_hint=rid_hint,
+                    element_resource_name=element_rid,
+                    effective_rid=effective_rid,
+                    follow_ct_active=True,
+                )
+            except Exception:
+                pass
+        is_exact_row_rid = True
+        has_remove_early = False
+        fast_ok, fast_block = _follow_ct_exact_row_light_serp_guard(
+            cy=cy,
+            height=h,
+            width=w,
+        )
+        serp_band_skipped = bool(fast_ok)
+        if serp_band_skipped:
+            try:
+                log(
+                    "info",
+                    "follow_ct_search_serp_band_skipped_exact_row",
+                    username=username,
+                    resource_id_hint=rid_hint,
+                    effective_rid=effective_rid,
+                    center_y=int(cy),
+                    bounds=tb,
+                )
+            except Exception:
+                pass
+        else:
+            _t_serp = time.perf_counter()
+            tab_b, posts_t, hh, search_bottom = _follow_ct_cached_serp_y_band(d)
+            serp_band_ms = round((time.perf_counter() - _t_serp) * 1000.0, 2)
+            fast_ok, fast_block = _exact_mixed_search_row_fast_accept_eligible(
+                cy=cy,
+                posts_top=posts_t,
+                height=hh,
+                search_bottom=search_bottom,
+                width=w,
+                has_remove=has_remove_early,
+            )
+        try:
+            log(
+                "info",
+                "follow_ct_search_exact_short_circuit_used",
+                username=username,
+                resource_id_hint=rid_hint,
+                effective_rid=effective_rid,
+                follow_ct_search_serp_band_ms=serp_band_ms,
+                follow_ct_search_remove_probe_ms=remove_probe_ms,
+                follow_ct_search_serp_band_skipped=serp_band_skipped,
+                fast_ok=bool(fast_ok),
+                fast_block=str(fast_block or "")[:80],
+            )
+        except Exception:
+            pass
+        if fast_ok and follow_ct_active:
+            try:
+                log(
+                    "info",
+                    "follow_ct_search_evaluate_context_snapshot",
+                    username=username,
+                    follow_ct_search_context=bool(follow_ct_search_context),
+                    global_context_active=is_follow_ct_search_context_active(),
+                    follow_ct_active=True,
+                    fast_ok=True,
+                    search_ui_mode=get_search_ui_mode(),
+                    resource_id=effective_rid,
+                )
+            except Exception:
+                pass
+            _store_follow_ct_exact_row_tap_bounds(tb)
+            try:
+                log(
+                    "info",
+                    "follow_ct_exact_row_fast_accept_without_avatar_scan",
+                    username=username,
+                    resource_id=effective_rid,
+                    bounds=tb,
+                    center_y=cy,
+                )
+            except Exception:
+                pass
+            return {
+                "accept": True,
+                "reason": None,
+                "el": text_el,
+                "bounds": tb,
+                "center_y": cy,
+                "has_avatar": False,
+                "has_remove_button": False,
+                "avatar_area": 0,
+                "from_resource_id": True,
+                "fast_path": "follow_ct_exact_row_no_avatar_scan",
+            }
+
     tab_b, posts_t, hh = _serp_y_band(d)
     search_bottom = _chrome_bottom_y(d, hh, tab_b)
+    element_rid = _element_resource_name(text_el)
+    effective_rid = element_rid or rid_hint
+    if rid_hint and not element_rid and _is_exact_row_search_resource_id(rid_hint):
+        try:
+            log(
+                "info",
+                "follow_ct_search_evaluate_rid_mismatch",
+                username=username,
+                resource_id_hint=rid_hint,
+                element_resource_name=element_rid,
+                effective_rid=effective_rid,
+                follow_ct_active=follow_ct_active,
+            )
+        except Exception:
+            pass
+    is_exact_row_rid = _is_exact_row_search_resource_id(effective_rid)
+
+    if mixed_results and is_exact_row_rid:
+        _t_remove = time.perf_counter()
+        has_remove_early = _remove_button_same_row(d, tb, w, hh)
+        remove_probe_ms = round((time.perf_counter() - _t_remove) * 1000.0, 2)
+        if follow_ct_active:
+            try:
+                log(
+                    "info",
+                    "follow_ct_search_remove_probe_ms",
+                    username=username,
+                    duration_ms=remove_probe_ms,
+                )
+            except Exception:
+                pass
+        fast_ok, fast_block = _exact_mixed_search_row_fast_accept_eligible(
+            cy=cy,
+            posts_top=posts_t,
+            height=hh,
+            search_bottom=search_bottom,
+            width=w,
+            has_remove=has_remove_early,
+        )
+        if fast_ok:
+            try:
+                log(
+                    "info",
+                    "follow_ct_search_evaluate_context_snapshot",
+                    username=username,
+                    follow_ct_search_context=bool(follow_ct_search_context),
+                    global_context_active=is_follow_ct_search_context_active(),
+                    follow_ct_active=_follow_ct_search_active(
+                        explicit=follow_ct_search_context
+                    ),
+                    fast_ok=True,
+                    search_ui_mode=get_search_ui_mode(),
+                    resource_id=effective_rid,
+                )
+            except Exception:
+                pass
+            if _follow_ct_search_active(explicit=follow_ct_search_context):
+                _store_follow_ct_exact_row_tap_bounds(tb)
+                try:
+                    log(
+                        "info",
+                        "follow_ct_exact_row_fast_accept_without_avatar_scan",
+                        username=username,
+                        resource_id=effective_rid,
+                        bounds=tb,
+                        center_y=cy,
+                    )
+                except Exception:
+                    pass
+                return {
+                    "accept": True,
+                    "reason": None,
+                    "el": text_el,
+                    "bounds": tb,
+                    "center_y": cy,
+                    "has_avatar": False,
+                    "has_remove_button": False,
+                    "avatar_area": 0,
+                    "from_resource_id": True,
+                    "fast_path": "follow_ct_exact_row_no_avatar_scan",
+                }
+            has_av, av_area = _find_best_avatar_for_row(d, tb, w, hh)
+            return {
+                "accept": True,
+                "reason": None,
+                "el": text_el,
+                "bounds": tb,
+                "center_y": cy,
+                "has_avatar": has_av,
+                "has_remove_button": False,
+                "avatar_area": av_area,
+                "from_resource_id": True,
+                "fast_path": "exact_row_resource_id_mixed",
+            }
+        log(
+            "info",
+            "exact_row_accept_blocked",
+            username=username,
+            reason=fast_block,
+            center_y=cy,
+            resource_id=effective_rid,
+            bounds=tb,
+        )
 
     if mixed_results:
         if not _cy_in_mixed_results_band(cy, posts_t, hh, search_bottom, w):
+            if is_exact_row_rid:
+                log(
+                    "info",
+                    "exact_row_accept_blocked",
+                    username=username,
+                    reason="y_band",
+                    center_y=cy,
+                    resource_id=effective_rid,
+                    bounds=tb,
+                )
             return {
                 "accept": False,
                 "reason": "y_band",
@@ -1097,16 +1498,25 @@ def _iter_exact_text_match_elements(d: u2.Device, disp: str):
         yield sel
 
 
-def find_real_account_text_element(d: u2.Device, username: str, *, dump_on_failure: bool = True):
+def find_real_account_text_element(
+    d: u2.Device,
+    username: str,
+    *,
+    dump_on_failure: bool = True,
+    follow_ct_search_context: bool = False,
+):
     """
     Resource-id row_search_user_username first (GramAddict/Propulse style), then XPath TextViews.
     Ranking: resource-id rows, then has_avatar, then smallest center_y, then largest avatar.
     """
     mixed = get_search_ui_mode() == "mixed_results"
+    follow_ct_active = _follow_ct_search_active(explicit=follow_ct_search_context)
     accepted: list[dict] = []
     weak_rows: list[tuple[int, dict, object, str | None]] = []
 
-    for el, rid in find_username_elements_by_resource_id(d, username):
+    for el, rid in find_username_elements_by_resource_id(
+        d, username, follow_ct_search_context=follow_ct_search_context
+    ):
         try:
             txt = el.get_text()
             tb = {k: int(el.info["bounds"][k]) for k in ("left", "top", "right", "bottom")}
@@ -1126,7 +1536,14 @@ def find_real_account_text_element(d: u2.Device, username: str, *, dump_on_failu
             center_y=cy,
         )
 
-        ev = evaluate_row_search_username_element(d, el, username, mixed_results=mixed)
+        ev = evaluate_row_search_username_element(
+            d,
+            el,
+            username,
+            mixed_results=mixed,
+            follow_ct_search_context=follow_ct_search_context,
+            resource_id_hint=rid,
+        )
         pl = _candidate_payload(
             tb=ev["bounds"],
             center_y=ev["center_y"],
@@ -1141,7 +1558,83 @@ def find_real_account_text_element(d: u2.Device, username: str, *, dump_on_failu
 
         if ev["accept"]:
             ev["resource_id"] = rid
+            if (
+                follow_ct_active
+                and str(ev.get("fast_path") or "")
+                == "follow_ct_exact_row_no_avatar_scan"
+            ):
+                log(
+                    "info",
+                    "exact_account_row_fast_accept_used",
+                    username=username,
+                    resource_id=rid,
+                    fast_path="follow_ct_exact_row_no_avatar_scan",
+                )
+                log("info", "real_account_row_accepted_resource_id", **pl)
+                log(
+                    "info",
+                    "real_account_result_found",
+                    username=username,
+                    selected_y=ev["center_y"],
+                    left=ev["bounds"]["left"],
+                    candidates=1,
+                    avatar_area=0,
+                    search_ui_mode=get_search_ui_mode(),
+                    via_resource_id=True,
+                    resource_id=rid,
+                    fast_path="follow_ct_exact_row_no_avatar_scan",
+                )
+                return el
             if mixed:
+                settle_ms = float(
+                    getattr(config, "EXACT_ACCOUNT_ROW_FAST_ACCEPT_SETTLE_MS", 120.0)
+                )
+                if settle_ms > 0:
+                    time.sleep(max(0.0, settle_ms) / 1000.0)
+                    ev_recheck = evaluate_row_search_username_element(
+                        d,
+                        el,
+                        username,
+                        mixed_results=mixed,
+                        follow_ct_search_context=follow_ct_search_context,
+                        resource_id_hint=rid,
+                    )
+                    if not ev_recheck.get("accept"):
+                        log(
+                            "warning",
+                            "exact_account_row_fast_accept_recheck_failed",
+                            username=username,
+                            reason=str(ev_recheck.get("reason") or "")[:80],
+                        )
+                    else:
+                        log(
+                            "info",
+                            "exact_account_row_fast_accept_used",
+                            username=username,
+                            resource_id=rid,
+                        )
+                        log("info", "real_account_row_accepted_resource_id", **pl)
+                        log(
+                            "info",
+                            "real_account_result_found",
+                            username=username,
+                            selected_y=ev["center_y"],
+                            left=ev["bounds"]["left"],
+                            candidates=1,
+                            avatar_area=ev["avatar_area"],
+                            search_ui_mode=get_search_ui_mode(),
+                            via_resource_id=True,
+                            resource_id=rid,
+                            fast_path="mixed_resource_id_fast_accept",
+                        )
+                        return el
+                else:
+                    log(
+                        "info",
+                        "exact_account_row_fast_accept_used",
+                        username=username,
+                        resource_id=rid,
+                    )
                 log("info", "real_account_row_accepted_resource_id", **pl)
                 log(
                     "info",
@@ -2099,6 +2592,20 @@ def clear_search_field_robust(
         return False, "none"
 
     try:
+        pre_txt = _search_edittext_text_strip(ed)
+    except Exception:
+        pre_txt = ""
+    if _search_field_clear_snapshot_ok(pre_txt, previous_username):
+        log(
+            "info",
+            "search_field_clear_skipped_already_empty",
+            intended_username=intended_username,
+            text_preview=(pre_txt or "")[:120],
+            is_placeholder=_is_search_placeholder(pre_txt),
+        )
+        return True, "skipped_already_empty"
+
+    try:
         ed.click()
         time.sleep(0.05)
     except Exception:
@@ -2211,19 +2718,73 @@ def _typing_confirmed(d: u2.Device, ed, username: str) -> bool:
     return False
 
 
+def _resolve_search_edittext_for_type_search(
+    d: u2.Device,
+    *,
+    follow_ct_typing: bool,
+    desc: str,
+) -> object | None:
+    if follow_ct_typing:
+        t0 = time.perf_counter()
+        ed = _wait_search_edittext(d)
+        if ed is not None:
+            log(
+                "info",
+                "follow_ct_search_edittext_short_wait_used",
+                phase=desc,
+                immediate_probe=True,
+                wait_ms=round((time.perf_counter() - t0) * 1000, 2),
+            )
+            return ed
+        short_s = float(
+            getattr(config, "FOLLOW_CT_SEARCH_FIELD_WAIT_S", 0.4) or 0.4
+        )
+        short_s = max(0.2, min(0.5, short_s))
+        ed = retry_until(
+            lambda: _wait_search_edittext(d),
+            timeout_s=short_s,
+            poll_s=config.UI_FAST_POLL_S,
+            desc=f"{desc}_follow_ct_short",
+        )
+        log(
+            "info",
+            "follow_ct_search_edittext_short_wait_used",
+            phase=desc,
+            immediate_probe=False,
+            short_retry_s=short_s,
+            wait_ms=round((time.perf_counter() - t0) * 1000, 2),
+            found=ed is not None,
+        )
+        return ed
+    return retry_until(
+        lambda: _wait_search_edittext(d),
+        timeout_s=config.SEARCH_FIELD_WAIT_S,
+        poll_s=config.UI_FAST_POLL_S,
+        desc=desc,
+    )
+
+
 def type_search(
-    d: u2.Device, username: str, *, previous_username: str | None = None
+    d: u2.Device,
+    username: str,
+    *,
+    previous_username: str | None = None,
+    follow_ct_surface_confirmed: bool = False,
 ) -> bool:
     """Robust clear, then FastIME or set_text; fused row detect when FastIME."""
     global _perf, _TYPE_SEARCH_FAILURE_REASON
     _TYPE_SEARCH_FAILURE_REASON = None
     _clear_pending_fused_fast_ime_row()
+    follow_ct_typing = bool(follow_ct_surface_confirmed) or is_follow_ct_search_context_active()
+    if follow_ct_surface_confirmed or consume_search_surface_fresh_for_follow_ct():
+        log(
+            "info",
+            "follow_ct_search_surface_fast_path_used",
+            username=str(username or "")[:80],
+        )
     t_typ = time.perf_counter()
-    ed = retry_until(
-        lambda: _wait_search_edittext(d),
-        timeout_s=config.SEARCH_FIELD_WAIT_S,
-        poll_s=config.UI_FAST_POLL_S,
-        desc="search_edittext",
+    ed = _resolve_search_edittext_for_type_search(
+        d, follow_ct_typing=follow_ct_typing, desc="search_edittext"
     )
     if ed is None:
         log(
@@ -2233,12 +2794,26 @@ def type_search(
         )
         _perf["recovery_used"] = True
         _tap_search_bar_fallback(d)
-        ed = retry_until(
-            lambda: _wait_search_edittext(d),
-            timeout_s=config.SEARCH_EDITTEXT_RETRY_AFTER_TAP_S,
-            poll_s=config.UI_FAST_POLL_S,
-            desc="search_edittext_after_fallback_tap",
+        retry_s = (
+            float(getattr(config, "FOLLOW_CT_SEARCH_FIELD_WAIT_S", 0.4))
+            if follow_ct_typing
+            else float(config.SEARCH_EDITTEXT_RETRY_AFTER_TAP_S)
         )
+        if follow_ct_typing:
+            retry_s = max(0.2, min(0.5, retry_s))
+            ed = retry_until(
+                lambda: _wait_search_edittext(d),
+                timeout_s=retry_s,
+                poll_s=config.UI_FAST_POLL_S,
+                desc="search_edittext_after_fallback_tap_follow_ct",
+            )
+        else:
+            ed = retry_until(
+                lambda: _wait_search_edittext(d),
+                timeout_s=config.SEARCH_EDITTEXT_RETRY_AFTER_TAP_S,
+                poll_s=config.UI_FAST_POLL_S,
+                desc="search_edittext_after_fallback_tap",
+            )
     if ed is None:
         log("error", "search_edittext_not_found")
         invalidate_search_surface_cache("no_edittext")
@@ -2397,7 +2972,24 @@ def type_search(
     fast_ime_switch_ok: bool | None = None
     fast_ime_broadcast_ok: bool | None = None
 
-    if fast_ime and is_fast_ime_available(serial):
+    if follow_ct_typing:
+        log(
+            "info",
+            "follow_ct_search_direct_set_text_used",
+            username=str(username or "")[:80],
+        )
+        try:
+            ed.set_text(username)
+            typing_method = "set_text"
+        except Exception:
+            typing_method = "send_keys"
+            try:
+                d.send_keys(username)
+            except Exception:
+                typing_method = "shell_input"
+                safe = username.replace(" ", "%s")
+                shell(d, f"input text {safe}")
+    elif fast_ime and is_fast_ime_available(serial):
         ok_cmd, tag, fast_ime_switch_ok, fast_ime_broadcast_ok = run_fast_ime_input(
             serial, username, fast_ime_id=fast_ime
         )
@@ -2413,7 +3005,7 @@ def type_search(
             typing_method = tag
             used_fast_path = True
 
-    if not used_fast_path:
+    if not follow_ct_typing and not used_fast_path:
         try:
             ed.set_text(username)
             typing_method = "set_text"
@@ -2447,6 +3039,7 @@ def type_search(
             st_log["fast_ime_switch_ok"] = fast_ime_switch_ok
             st_log["fast_ime_broadcast_ok"] = bool(fast_ime_broadcast_ok)
         log("info", "search_typed", **st_log)
+        _follow_ct_prewarm_serp_band_cache(d)
         return True
 
     typing_command_ms = (time.perf_counter() - t_cmd_start) * 1000
@@ -2481,6 +3074,8 @@ def type_search(
     log("info", "search_typed", **st_log)
     if ok:
         _mark_search_surface_ok(d, config.INSTAGRAM_PACKAGE)
+        if follow_ct_typing:
+            _follow_ct_prewarm_serp_band_cache(d)
     else:
         invalidate_search_surface_cache("type_not_confirmed")
     return ok
@@ -2734,11 +3329,50 @@ def tap_account_result(
     username: str,
     *,
     nav_timing_origin: float | None = None,
+    follow_ct_search_context: bool = False,
 ) -> bool:
     """Tap chosen row: FastIME+fused uses hot resource-id poll + direct tap; else legacy find."""
+    follow_ct_active = _follow_ct_search_active(explicit=follow_ct_search_context)
+    try:
+        log(
+            "info",
+            "follow_ct_search_tap_context_snapshot",
+            username=username,
+            follow_ct_search_context=bool(follow_ct_search_context),
+            global_context_active=is_follow_ct_search_context_active(),
+            follow_ct_active=bool(follow_ct_active),
+            fast_ok=None,
+            search_ui_mode=get_search_ui_mode(),
+            resource_id="",
+        )
+    except Exception:
+        pass
 
     def scan_once():
-        return find_real_account_text_element(d, username, dump_on_failure=False)
+        return find_real_account_text_element(
+            d,
+            username,
+            dump_on_failure=False,
+            follow_ct_search_context=follow_ct_search_context,
+        )
+
+    def scan_once_hot():
+        if not follow_ct_active:
+            return None
+        hot = find_first_row_search_username_hot(d, username)
+        if hot is None:
+            return None
+        ev_hot = evaluate_row_search_username_element(
+            d,
+            hot,
+            username,
+            mixed_results=True,
+            follow_ct_search_context=True,
+            resource_id_hint=ROW_SEARCH_USERNAME_EXACT_RES,
+        )
+        if ev_hot.get("accept"):
+            return hot
+        return None
 
     def _log_first_result_seen(el_seen: object, *, via: str) -> None:
         if first_result_at[0] is not None:
@@ -2789,6 +3423,7 @@ def tap_account_result(
 
     hot_el_found = False
     el = None
+    fast_accept_used = False
     t_detect = time.perf_counter()
     poll_s = float(getattr(config, "HOT_ROW_POLL_S", 0.12))
 
@@ -2837,26 +3472,63 @@ def tap_account_result(
             )
             hot_el_found = False
     else:
-        timeout = (
-            float(getattr(config, "MIXED_RESULTS_ROW_DETECT_MAX_S", 2.5))
-            if get_search_ui_mode() == "mixed_results"
-            else float(config.ACCOUNTS_RESULT_WAIT_S)
-        )
+        el = None
+        fast_accept_used = False
+        if get_search_ui_mode() == "mixed_results":
+            if follow_ct_active:
+                found_hot = scan_once_hot()
+                if found_hot is not None:
+                    el = found_hot
+                    fast_accept_used = True
+                    _log_first_result_seen(el, via="follow_ct_hot_row")
+                    _log_exact_match_ready(el, via="follow_ct_hot_row")
+                    log(
+                        "info",
+                        "exact_account_row_fast_accept_used",
+                        username=username,
+                        via="follow_ct_hot_row",
+                    )
+            fast_deadline = time.monotonic() + float(
+                getattr(config, "EXACT_ACCOUNT_ROW_FAST_POLL_MAX_S", 2.0)
+            )
+            fast_poll_s = float(getattr(config, "EXACT_ACCOUNT_ROW_FAST_POLL_S", 0.10))
+            while time.monotonic() < fast_deadline and el is None:
+                found_fast = scan_once_hot() if follow_ct_active else scan_once()
+                if found_fast is not None:
+                    el = found_fast
+                    fast_accept_used = True
+                    _log_first_result_seen(el, via="fast_poll")
+                    _log_exact_match_ready(el, via="fast_poll")
+                    log(
+                        "info",
+                        "exact_account_row_fast_accept_used",
+                        username=username,
+                        via="fast_poll",
+                    )
+                    break
+                time.sleep(fast_poll_s)
 
-        def _full_scan():
-            found = scan_once()
-            if found is not None:
-                _log_first_result_seen(found, via="full_scan")
-                _log_exact_match_ready(found, via="full_scan")
-            return found
+        if el is None:
+            timeout = (
+                float(getattr(config, "MIXED_RESULTS_ROW_DETECT_MAX_S", 2.5))
+                if get_search_ui_mode() == "mixed_results"
+                else float(config.ACCOUNTS_RESULT_WAIT_S)
+            )
 
-        el = retry_until_jitter(
-            _full_scan,
-            timeout_s=timeout,
-            poll_min_s=0.05,
-            poll_max_s=0.07,
-            desc="real_account_textview",
-        )
+            def _full_scan():
+                found = scan_once()
+                if found is not None:
+                    _log_first_result_seen(found, via="full_scan")
+                    _log_exact_match_ready(found, via="full_scan")
+                return found
+
+            el = retry_until_jitter(
+                _full_scan,
+                timeout_s=timeout,
+                poll_min_s=0.05,
+                poll_max_s=0.07,
+                desc="real_account_textview",
+            )
 
     _perf["row_detect_ms"] = (time.perf_counter() - t_detect) * 1000
     if el is None:
@@ -2873,6 +3545,46 @@ def tap_account_result(
         if hot_el_found:
             cx, cy, b = _tap_hot_username_center_jitter(d, el)
             tap_mode = "hot_center_jitter"
+        elif fast_accept_used:
+            cached_tb = (
+                _peek_follow_ct_exact_row_tap_bounds() if follow_ct_active else None
+            )
+            if cached_tb:
+                b = cached_tb
+                cx = (b["left"] + b["right"]) // 2
+                cy = (b["top"] + b["bottom"]) // 2
+                tap_mode = "follow_ct_cached_bounds_center"
+                try:
+                    log(
+                        "info",
+                        "follow_ct_exact_row_cached_bounds_tap_used",
+                        username=username,
+                        bounds=b,
+                        x=cx,
+                        y=cy,
+                    )
+                except Exception:
+                    pass
+            else:
+                try:
+                    tb_fast = {
+                        k: int(el.info["bounds"][k])
+                        for k in ("left", "top", "right", "bottom")
+                    }
+                    cx = (tb_fast["left"] + tb_fast["right"]) // 2
+                    cy = (tb_fast["top"] + tb_fast["bottom"]) // 2
+                    b = tb_fast
+                    tap_mode = "fast_accept_username_center"
+                except Exception:
+                    b = _tap_bounds_for_account_row(d, el)
+                    if not b:
+                        b = {
+                            k: int(el.info["bounds"][k])
+                            for k in ("left", "top", "right", "bottom")
+                        }
+                    cx = (b["left"] + b["right"]) // 2
+                    cy = (b["top"] + b["bottom"]) // 2
+                    tap_mode = "legacy_bounds"
         else:
             b = _tap_bounds_for_account_row(d, el)
             if not b:
@@ -2886,6 +3598,13 @@ def tap_account_result(
             if exact_match_at[0] is not None
             else None
         )
+        if fast_accept_used:
+            log(
+                "info",
+                "exact_account_row_fast_tap_used",
+                username=username,
+                exact_match_to_tap_ms=exact_to_tap_ms,
+            )
         log(
             "info",
             "dm_sender_account_result_tap_started",
@@ -4928,18 +5647,70 @@ def _welcome_dm_forensics_username_key(username: str) -> str:
     return (key[:80] if key else "unknown")
 
 
+def _welcome_dm_message_button_factories(
+    d: u2.Device,
+) -> tuple[tuple[str, Callable[[], Any]], ...]:
+    return (
+        ("text:Message", lambda: d(text="Message")),
+        ("textContains:Message", lambda: d(textContains="Message")),
+        ("description:Message", lambda: d(descriptionContains="Message")),
+    )
+
+
 def _welcome_dm_message_button_present(d: u2.Device) -> bool:
-    for factory in (
-        lambda: d(text="Message"),
-        lambda: d(textContains="Message"),
-        lambda: d(descriptionContains="Message"),
-    ):
+    for _label, factory in _welcome_dm_message_button_factories(d):
         try:
             if factory().exists(timeout=0.05):
                 return True
         except Exception:
             continue
     return False
+
+
+def _welcome_dm_try_tap_message_button(
+    d: u2.Device,
+    *,
+    wait_s: float = 0.4,
+) -> tuple[bool, str, str, int | None, int | None]:
+    """
+    Resolve Message CTA fresh and tap once.
+    Returns: tapped, button_signal, click_method, tap_x, tap_y.
+    """
+    for label, factory in _welcome_dm_message_button_factories(d):
+        try:
+            el = factory()
+            if not el.wait(timeout=float(wait_s)):
+                continue
+            info = el.info or {}
+            bounds = dict(info.get("bounds") or {})
+            center = _followers_bounds_center(bounds)
+            if center is not None:
+                tap_x, tap_y = int(center[0]), int(center[1])
+                d.click(tap_x, tap_y)
+                return True, label, "bounds_center_click", tap_x, tap_y
+            el.click()
+            return True, label, "u2_selector_click", None, None
+        except Exception:
+            continue
+    return False, "", "", None, None
+
+
+def _welcome_dm_quick_composer_visible(d: u2.Device, pkg: str) -> bool:
+    if is_dm_thread_screen(d, pkg):
+        return True
+    visible, _sig, _bounds, _el = _dm_detect_composer_signal(
+        d, current_pkg=pkg, timeout_s=0.25
+    )
+    return bool(visible)
+
+
+def _welcome_dm_still_on_profile_with_message_cta(d: u2.Device, pkg: str) -> bool:
+    """True when DM thread is not open but profile Message CTA is still visible."""
+    if is_dm_thread_screen(d, pkg):
+        return False
+    if _welcome_dm_quick_composer_visible(d, pkg):
+        return False
+    return bool(_welcome_dm_message_button_present(d))
 
 
 def _welcome_dm_read_action_bar_title(d: u2.Device) -> str:
@@ -5101,22 +5872,9 @@ def open_dm_thread_from_profile(
     _LAST_DM_THREAD_STATE = "unknown"
 
     t_open = time.perf_counter()
-    button_signal = ""
-    tapped = False
-    for label, factory in (
-        ("text:Message", lambda: d(text="Message")),
-        ("textContains:Message", lambda: d(textContains="Message")),
-        ("description:Message", lambda: d(descriptionContains="Message")),
-    ):
-        try:
-            el = factory()
-            if el.wait(timeout=0.4):
-                el.click()
-                tapped = True
-                button_signal = label
-                break
-        except Exception:
-            continue
+    tapped, button_signal, click_method, tap_x, tap_y = _welcome_dm_try_tap_message_button(
+        d, wait_s=0.4
+    )
     dm_open_click_ms = (time.perf_counter() - t_open) * 1000
     _perf["dm_open_click_ms"] = dm_open_click_ms
 
@@ -5127,13 +5885,59 @@ def open_dm_thread_from_profile(
 
     log(
         "info",
-        "dm_thread_opened",
+        "dm_message_button_clicked",
         username=username,
         button_signal=button_signal,
+        click_method=click_method,
         dm_open_click_ms=round(dm_open_click_ms, 2),
+        tap_x=tap_x,
+        tap_y=tap_y,
+        click_attempt=1,
+        welcome_list_native=bool(welcome_list_native),
     )
 
-    time.sleep(float(getattr(config, "DM_THREAD_POST_OPEN_SETTLE_S", 0.45)))
+    post_open_settle_s = float(getattr(config, "DM_THREAD_POST_OPEN_SETTLE_S", 0.45))
+    time.sleep(post_open_settle_s)
+
+    message_click_attempts = 1
+    if welcome_list_native and _welcome_dm_still_on_profile_with_message_cta(d, pkg):
+        log(
+            "info",
+            "welcome_dm_message_click_retry_scheduled",
+            username=username,
+            button_signal=button_signal,
+            first_click_method=click_method,
+            post_open_settle_s=round(post_open_settle_s, 3),
+        )
+        t_retry = time.perf_counter()
+        retry_tapped, retry_signal, retry_method, retry_x, retry_y = (
+            _welcome_dm_try_tap_message_button(d, wait_s=0.35)
+        )
+        retry_click_ms = (time.perf_counter() - t_retry) * 1000
+        if retry_tapped:
+            message_click_attempts = 2
+            button_signal = retry_signal or button_signal
+            log(
+                "info",
+                "welcome_dm_message_click_retry_tapped",
+                username=username,
+                button_signal=button_signal,
+                click_method=retry_method,
+                dm_retry_click_ms=round(retry_click_ms, 2),
+                tap_x=retry_x,
+                tap_y=retry_y,
+                click_attempt=2,
+            )
+            time.sleep(post_open_settle_s)
+        else:
+            log(
+                "warning",
+                "welcome_dm_message_click_retry_failed",
+                username=username,
+                dm_retry_click_ms=round(retry_click_ms, 2),
+                reason="message_button_not_found_on_retry",
+            )
+
     # detect_dm_thread_state (must be called after clicking Message)
     t_detect = time.perf_counter()
     detect_timeout_s = float(getattr(config, "DM_THREAD_DETECT_MAX_S", 2.5))
@@ -5165,7 +5969,20 @@ def open_dm_thread_from_profile(
         username=username,
         thread_state=thread_state,
         dm_thread_detect_ms=round(float(dm_thread_detect_ms), 2),
+        message_click_attempts=int(message_click_attempts),
     )
+
+    if thread_state not in ("unknown", "dm_not_available"):
+        log(
+            "info",
+            "dm_thread_opened",
+            username=username,
+            thread_state=thread_state,
+            button_signal=button_signal,
+            dm_open_click_ms=round(dm_open_click_ms, 2),
+            message_click_attempts=int(message_click_attempts),
+            composer_visible=bool(snap.get("composer_visible")),
+        )
 
     if welcome_list_native and thread_state == "unknown":
         _log_welcome_dm_thread_unknown_observed(
@@ -5436,6 +6253,13 @@ def _follow_ui_state_snapshot(d: u2.Device) -> str:
     for lab in ("Following", "Abonné", "Abonnée", "Suivi"):
         if _exists_near_top(lab):
             return "following"
+    try:
+        if d(textContains="Follow back").exists(timeout=0.05) or d(
+            textContains="Suivre en retour"
+        ).exists(timeout=0.03):
+            return "follow_back"
+    except Exception:
+        pass
     if d(text="Follow").exists(timeout=0.06) or d(text="Suivre").exists(timeout=0.06):
         return "follow"
     return "unknown"
@@ -5579,7 +6403,7 @@ def wait_for_follow_button_safe(
             time.sleep(poll_s)
             continue
         last_ui = _follow_ui_state_snapshot(d)
-        if last_ui in ("following", "requested"):
+        if last_ui in ("following", "requested", "follow_back"):
             return None, {
                 "outcome": "already_connected",
                 "ui_state": last_ui,
@@ -6412,6 +7236,31 @@ def perform_follow_safe(
         )
 
     state_before = _follow_ui_state_snapshot(d)
+    if state_before in ("following", "requested", "follow_back"):
+        _record(
+            "follow_completed",
+            {
+                "target_username": username,
+                "follow_state_before": state_before,
+                "follow_state_after": state_before,
+                "verify_attempts": 0,
+                "navigation_state": "profile",
+                "skipped_tap": True,
+                "timings_ms": {"total": round((time.perf_counter() - t_all) * 1000, 2)},
+                "note": "header_non_follow_cta_before_wait",
+            },
+        )
+        return {
+            "ok": True,
+            "failure_code": None,
+            "tapped": False,
+            "skipped_tap": True,
+            "already_following": True,
+            "follow_state_before": state_before,
+            "follow_state_after": state_before,
+            "verify_attempts": 0,
+            "events": events,
+        }
     _record(
         "follow_started",
         {
@@ -6426,9 +7275,7 @@ def perform_follow_safe(
         },
     )
 
-    _use_follow_action_v2 = bool(profile_already_open) and bool(
-        str(visual_candidate_id or "").strip()
-    )
+    _use_follow_action_v2 = bool(profile_already_open)
     _src_prof = str(source_profile_username or "").strip()
 
     btn, meta = (None, {})
@@ -6480,7 +7327,7 @@ def perform_follow_safe(
     if btn is None:
         if profile_already_open:
             lu = str(meta.get("last_ui_state") or meta.get("ui_state") or "").strip()
-            if lu in ("following", "requested"):
+            if lu in ("following", "requested", "follow_back"):
                 _record(
                     "follow_completed",
                     {
@@ -9964,6 +10811,8 @@ def _post_follow_dynamic_first_row_search_y_min_layout(
     margin = int(_POST_FOLLOW_PROFILE_TABS_GRID_MARGIN_PX)
     ih = max(120, int(ih))
     tabs_bt, _phase = _followers_profile_tabs_bottom_y_px(d, window_h=ih)
+    if tabs_bt is None and bool(ui_hints.get("profile_tabs_visible")):
+        tabs_bt, _phase = _followers_profile_tabs_bottom_y_px(d, window_h=ih)
     if tabs_bt is not None:
         y_floor = min(max(8, int(tabs_bt) + margin), ih - 8)
         return y_floor, "profile_tabs_bottom", int(tabs_bt), margin
@@ -10320,6 +11169,44 @@ def _harvest_own_unified_xml_first_eligible(d: u2.Device) -> bool:
     return bool(hier.strip()) and "follow_list_username" in hier
 
 
+def _parse_follow_list_xml_bounds(el: Any) -> dict[str, int]:
+    bounds_raw = str(el.get("bounds") or "").strip()
+    if not bounds_raw:
+        return {}
+    m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", bounds_raw)
+    if not m:
+        return {}
+    return {
+        "left": int(m.group(1)),
+        "top": int(m.group(2)),
+        "right": int(m.group(3)),
+        "bottom": int(m.group(4)),
+    }
+
+
+def _normalize_own_unified_row_cta_xml_text(raw: str) -> tuple[str, str]:
+    """Map follow_list_row_large_follow_button text to row_cta_class + display label."""
+    t = str(raw or "").strip()
+    if not t:
+        return "unknown", ""
+    low = t.lower()
+    if low in ("follow", "suivre"):
+        return "follow", t
+    if low in ("follow back", "suivre en retour", "follow back "):
+        return "follow_back", t
+    if "follow back" in low or "suivre en retour" in low:
+        return "follow_back", t
+    if low in ("message", "envoyer un message"):
+        return "message", t
+    if low in ("following", "suivi(e)", "abonné"):
+        return "following", t
+    if low in ("requested", "demandé"):
+        return "requested", t
+    if low in ("contact", "contacts"):
+        return "contact", t
+    return "unknown", t
+
+
 def _extract_own_unified_followers_usernames_from_hierarchy_xml(
     hierarchy_xml: str,
     *,
@@ -10328,7 +11215,7 @@ def _extract_own_unified_followers_usernames_from_hierarchy_xml(
 ) -> list[dict[str, Any]]:
     """
     Parse visible handles from own-profile unified followers list hierarchy XML.
-    Targets com.instagram.android:id/follow_list_username nodes only (no generic TextView scan).
+    Per-row: username + follow_list_row_large_follow_button CTA text/bounds.
     """
     seen = runtime_seen if runtime_seen is not None else set()
     source_key = _normalize_handle(source_profile_username or "")
@@ -10347,36 +11234,48 @@ def _extract_own_unified_followers_usernames_from_hierarchy_xml(
     doc_order = 0
     for el in root.iter():
         rid = str(el.get("resource-id") or "")
-        if "follow_list_username" not in rid:
+        if "follow_list_container" not in rid:
             continue
-        raw_t = str(el.get("text") or "").strip().lstrip("@")
-        if not raw_t or not _FOLLOWERS_HANDLE_RE.match(raw_t):
+        username_raw = ""
+        username_bounds: dict[str, int] = {}
+        username_rid = ""
+        cta_xml_text = ""
+        cta_xml_rid = ""
+        cta_xml_bounds: dict[str, int] = {}
+        row_bounds = _parse_follow_list_xml_bounds(el)
+        for sub in el.iter():
+            sr = str(sub.get("resource-id") or "")
+            if "follow_list_username" in sr:
+                cand = str(sub.get("text") or "").strip().lstrip("@")
+                if cand and _FOLLOWERS_HANDLE_RE.match(cand):
+                    username_raw = cand
+                    username_bounds = _parse_follow_list_xml_bounds(sub)
+                    username_rid = sr
+            elif "follow_list_row_large_follow_button" in sr:
+                cta_xml_text = str(sub.get("text") or "").strip()
+                cta_xml_rid = sr
+                cta_xml_bounds = _parse_follow_list_xml_bounds(sub)
+        if not username_raw:
             continue
-        key = _normalize_handle(raw_t)
+        key = _normalize_handle(username_raw)
         if not key or key == source_key or key in by_user:
             continue
-        bounds: dict[str, Any] = {}
-        bounds_raw = str(el.get("bounds") or "").strip()
-        if bounds_raw:
-            m = re.match(
-                r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]",
-                bounds_raw,
-            )
-            if m:
-                bounds = {
-                    "left": int(m.group(1)),
-                    "top": int(m.group(2)),
-                    "right": int(m.group(3)),
-                    "bottom": int(m.group(4)),
-                }
+        bounds = username_bounds if username_bounds else row_bounds
         c = _followers_bounds_center(bounds) if bounds else None
         row_y = int(c[1]) if c else doc_order * 100
+        cta_cls, cta_disp = _normalize_own_unified_row_cta_xml_text(cta_xml_text)
         by_user[key] = {
-            "username": raw_t,
+            "username": username_raw,
             "bounds": bounds,
+            "row_bounds": row_bounds,
             "row_center": [int(c[0]) if c else 0, row_y],
             "already_seen_runtime": key in seen,
-            "resource_id": rid,
+            "resource_id": username_rid,
+            "extraction_source": "own_unified_follow_list_username_xml",
+            "row_cta_xml_text": cta_xml_text,
+            "row_cta_xml_resource_id": cta_xml_rid,
+            "row_cta_xml_bounds": cta_xml_bounds,
+            "row_cta_xml_class": cta_cls,
         }
         doc_order += 1
 
@@ -10390,7 +11289,189 @@ def _extract_own_unified_followers_usernames_from_hierarchy_xml(
             already_seen_runtime=bool(r["already_seen_runtime"]),
             resource_id=r.get("resource_id"),
             extraction_source="own_unified_follow_list_username_xml",
+            row_cta_xml_text=str(r.get("row_cta_xml_text") or "")[:80],
+            row_cta_xml_class=str(r.get("row_cta_xml_class") or "")[:40],
         )
+    return rows
+
+
+def harvest_follow_list_row_cta_from_hierarchy_xml(
+    hierarchy_xml: str,
+    *,
+    source_profile_username: str = "",
+) -> list[dict[str, Any]]:
+    """
+    Follow-flow only: visible followers list rows with username + CTA from XML.
+    Does not replace ``_extract_own_unified_followers_usernames_from_hierarchy_xml`` (Welcome/DM).
+    """
+    from visual_row_mapping import normalize_own_unified_row_cta_xml_text
+
+    source_key = _normalize_handle(source_profile_username or "")
+    hier = str(hierarchy_xml or "").strip()
+    if not hier:
+        return []
+    try:
+        try:
+            root = ET.fromstring(hier)
+        except ET.ParseError:
+            root = ET.fromstring(f"<wrap>{hier}</wrap>")
+    except Exception:
+        return []
+
+    by_user: dict[str, dict[str, Any]] = {}
+
+    def _bounds_from_elem(el: Any) -> dict[str, int]:
+        bd = _dm_parse_bounds_attr_xml(str(el.get("bounds") or ""))
+        return dict(bd) if bd else {}
+
+    for el in root.iter():
+        rid = str(el.get("resource-id") or "")
+        if "follow_list_container" not in rid:
+            continue
+        username_raw = ""
+        username_bounds: dict[str, int] = {}
+        cta_xml_text = ""
+        cta_xml_bounds: dict[str, int] = {}
+        row_bounds = _bounds_from_elem(el)
+        for sub in el.iter():
+            sr = str(sub.get("resource-id") or "")
+            if "follow_list_username" in sr:
+                cand = str(sub.get("text") or "").strip().lstrip("@")
+                if cand and _FOLLOWERS_HANDLE_RE.match(cand):
+                    username_raw = cand
+                    username_bounds = _bounds_from_elem(sub)
+            elif "follow_list_row_large_follow_button" in sr:
+                cta_xml_text = str(sub.get("text") or "").strip()
+                cta_xml_bounds = _bounds_from_elem(sub)
+        if not username_raw:
+            continue
+        key = _normalize_handle(username_raw)
+        if not key or key == source_key or key in by_user:
+            continue
+        bounds = username_bounds if username_bounds else row_bounds
+        cta_cls, cta_disp = normalize_own_unified_row_cta_xml_text(cta_xml_text)
+        band_top = bounds.get("top", row_bounds.get("top", 0))
+        band_bot = bounds.get("bottom", row_bounds.get("bottom", 0))
+        if cta_xml_bounds:
+            band_top = min(int(band_top), int(cta_xml_bounds.get("top", band_top)))
+            band_bot = max(int(band_bot), int(cta_xml_bounds.get("bottom", band_bot)))
+        row_band = {
+            "left": int(bounds.get("left", 0)),
+            "top": int(band_top),
+            "right": int(bounds.get("right", 0)),
+            "bottom": int(band_bot),
+        }
+        by_user[key] = {
+            "username": username_raw,
+            "bounds": bounds,
+            "row_bounds": row_band,
+            "row_cta_xml_text": cta_xml_text,
+            "row_cta_xml_bounds": cta_xml_bounds,
+            "row_cta_xml_class": cta_cls,
+            "row_cta_xml_display": cta_disp,
+        }
+
+    if not by_user:
+        cta_nodes: list[tuple[int, int, int, str]] = []
+        user_nodes: list[tuple[str, dict[str, int]]] = []
+        for el in root.iter():
+            sr = str(el.get("resource-id") or "")
+            bd = _bounds_from_elem(el)
+            if not bd:
+                continue
+            cy = (int(bd["top"]) + int(bd["bottom"])) // 2
+            if "follow_list_row_large_follow_button" in sr:
+                cta_nodes.append((cy, int(bd["top"]), int(bd["bottom"]), str(el.get("text") or "").strip()))
+            elif "follow_list_username" in sr:
+                cand = str(el.get("text") or "").strip().lstrip("@")
+                if cand and _FOLLOWERS_HANDLE_RE.match(cand):
+                    user_nodes.append((cand, bd))
+        for username_raw, ub in user_nodes:
+            key = _normalize_handle(username_raw)
+            if not key or key == source_key or key in by_user:
+                continue
+            ucy = (int(ub["top"]) + int(ub["bottom"])) // 2
+            best_cta: tuple[int, int, int, str] | None = None
+            best_dy = 10**9
+            for ccy, ct, cb, ctxt in cta_nodes:
+                if ccy < int(ub["top"]) - 80 or ccy > int(ub["bottom"]) + 80:
+                    continue
+                dy = abs(ccy - ucy)
+                if dy < best_dy:
+                    best_dy = dy
+                    best_cta = (ccy, ct, cb, ctxt)
+            cta_xml_text = best_cta[3] if best_cta else ""
+            cta_xml_bounds = (
+                {"top": best_cta[1], "bottom": best_cta[2], "left": ub.get("left", 0), "right": ub.get("right", 0)}
+                if best_cta
+                else {}
+            )
+            cta_cls, cta_disp = normalize_own_unified_row_cta_xml_text(cta_xml_text)
+            band_bot = max(int(ub["bottom"]), int(cta_xml_bounds.get("bottom", ub["bottom"])))
+            band_top = min(int(ub["top"]), int(cta_xml_bounds.get("top", ub["top"])))
+            by_user[key] = {
+                "username": username_raw,
+                "bounds": dict(ub),
+                "row_bounds": {
+                    "left": int(ub.get("left", 0)),
+                    "top": int(band_top),
+                    "right": int(ub.get("right", 0)),
+                    "bottom": int(band_bot),
+                },
+                "row_cta_xml_text": cta_xml_text,
+                "row_cta_xml_bounds": cta_xml_bounds,
+                "row_cta_xml_class": cta_cls,
+                "row_cta_xml_display": cta_disp,
+            }
+
+    return sorted(by_user.values(), key=lambda r: int((r.get("row_bounds") or {}).get("top", 0)))
+
+
+def harvest_follow_list_row_cta_for_follow_flow(
+    d: u2.Device,
+    *,
+    source_profile_username: str = "",
+) -> list[dict[str, Any]]:
+    """
+    Follow engine only: read cached followers-list hierarchy (one live dump if cache lacks CTA nodes).
+    """
+    from visual_row_mapping import is_row_cta_xml_reject_class
+
+    hier = _followers_resolve_detect_hierarchy_xml(d, None, live_incomplete=False)
+    hierarchy_source = "cached"
+    if not hier or "follow_list_row_large_follow_button" not in hier:
+        try:
+            try:
+                live = d.dump_hierarchy(compressed=False)
+            except TypeError:
+                live = d.dump_hierarchy()
+            live_text = live if isinstance(live, str) else str(live or "")
+        except Exception:
+            live_text = ""
+        if live_text.strip():
+            hier = live_text.strip()
+            hierarchy_source = "live_dump_follow_cta_gate"
+    rows: list[dict[str, Any]] = []
+    if hier and "follow_list_username" in hier:
+        rows = harvest_follow_list_row_cta_from_hierarchy_xml(
+            hier,
+            source_profile_username=source_profile_username,
+        )
+    reject_count = sum(
+        1 for r in rows if is_row_cta_xml_reject_class(str(r.get("row_cta_xml_class") or ""))
+    )
+    try:
+        log(
+            "info",
+            "followers_xml_cta_harvest_done",
+            rows_count=len(rows),
+            reject_count=int(reject_count),
+            source_profile_username=str(source_profile_username or "")[:120],
+            hierarchy_source=str(hierarchy_source),
+            hierarchy_len=len(hier or ""),
+        )
+    except Exception:
+        pass
     return rows
 
 
@@ -11282,6 +12363,7 @@ def visual_extract_followers_candidates_from_screenshot(
     visual_loop_state: dict[str, Any] | None = None,
     list_committed_open: bool = False,
     committed_age_ms: float | None = None,
+    follow_xml_cta_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """
     Build structured visual follower-row candidates from an on-disk screenshot (PIL pixels only).
@@ -11675,6 +12757,25 @@ def visual_extract_followers_candidates_from_screenshot(
             extra={"selection_method": "visual_screenshot"},
         )
 
+        _xml_match_for_cand: dict[str, Any] | None = None
+        if follow_xml_cta_rows:
+            from visual_row_mapping import (
+                attach_follow_xml_cta_fields_to_candidate,
+                follow_xml_cta_gate_for_visual_band,
+            )
+
+            _xml_reject, _xml_match_for_cand, _xml_overlap = follow_xml_cta_gate_for_visual_band(
+                row_top=top_o,
+                row_bottom=bot_o,
+                xml_cta_rows=list(follow_xml_cta_rows),
+                source_profile_username=str(source_profile_username or ""),
+                visual_candidate_id=visual_candidate_id_pre,
+                span_index=idx,
+                resolved_username="",
+            )
+            if _xml_reject:
+                continue
+
         if cy < int(orig_h * 0.065) or cy > int(orig_h * 0.92):
             log(
                 "info",
@@ -11778,6 +12879,10 @@ def visual_extract_followers_candidates_from_screenshot(
                 float(cta_row.get("frac_blue_full") or 0.0),
             ),
         }
+        if _xml_match_for_cand is not None:
+            from visual_row_mapping import attach_follow_xml_cta_fields_to_candidate
+
+            attach_follow_xml_cta_fields_to_candidate(cand, _xml_match_for_cand)
         cand.update(_compute_visual_candidate_tap_points_from_bounds(row_o, av_o, tz_o, fb_o))
         built.append(cand)
         confidences.append(row_conf)
@@ -12989,7 +14094,10 @@ def _dynamic_first_post_grid_row_from_image(
         y_lo = max(8, int(search_y_min_px))
     else:
         y_lo = max(8, int(ih * float(search_y_min_ratio)))
-    y_hi = min(ih - 2 * cell_h - 12, int(ih * float(search_y_max_ratio)))
+    y_hi_ratio = int(ih * float(search_y_max_ratio))
+    y_hi = min(ih - 2 * cell_h - 12, y_hi_ratio)
+    if search_y_min_px is not None:
+        y_hi = min(ih - 2 * cell_h - 12, max(y_hi, y_lo + cell_h + 8))
     step = max(4, cell_h // 5)
     if y_hi <= y_lo + step:
         return {"ok": False}
@@ -13235,8 +14343,41 @@ def _single_post_sparse_grid_acceptable_for_post_follow(
     return True
 
 
-def _sparse_post_grid_partial_acceptable_for_post_follow(probe: dict[str, Any]) -> bool:
+def _post_follow_sparse_post_scroll_grid_acceptable(
+    probe: dict[str, Any],
+    *,
+    scroll_used: bool,
+) -> bool:
+    """
+    After profile scroll only: partial grid with real tiles below tabs may open even if
+    suggested_for_you XML hint remains true (lolie/emistyle class of false negatives).
+    """
+    if not scroll_used:
+        return False
+    if str(probe.get("grid_state") or "").strip().lower() != "partial":
+        return False
+    if not bool(probe.get("profile_tabs_visible")):
+        return False
+    if int(probe.get("lower_solid_cell_count") or 0) < 3:
+        return False
+    if not bool(probe.get("dynamic_first_row_probe_ok")):
+        return False
+    if not _single_post_sparse_grid_has_post_tile_proof(probe):
+        return False
+    below_ok, _ = _single_post_candidate_proven_below_profile_tabs(probe)
+    return bool(below_ok)
+
+
+def _sparse_post_grid_partial_acceptable_for_post_follow(
+    probe: dict[str, Any],
+    *,
+    scroll_used: bool = False,
+) -> bool:
     """Single-row / sparse grids: accept partial band state only under strict anti-Suggested guards."""
+    if scroll_used and _post_follow_sparse_post_scroll_grid_acceptable(
+        probe, scroll_used=True
+    ):
+        return True
     if str(probe.get("grid_state") or "").strip().lower() != "partial":
         return False
     if not bool(probe.get("profile_tabs_visible")):
@@ -13434,6 +14575,8 @@ def _log_post_follow_post_likes_perf_summary(
             return_to_profile_total_ms=return_to_profile_total_ms,
             return_success=return_success,
             already_liked_decision_ms=already_liked_decision_ms,
+            post_open_context_guard_ms=lk.get("post_open_context_guard_ms"),
+            still_profile_grid_probe_ms=lk.get("still_profile_grid_probe_ms"),
             grid_readiness_mode=grid_readiness_mode,
             final_grid_state=final_grid_state,
             final_suggested_for_you=final_suggested_for_you,
@@ -14076,6 +15219,66 @@ def ensure_post_grid_visible_for_post_follow_likes(
         except Exception:
             pass
 
+        if (
+            state_after != "visible"
+            and _post_follow_sparse_post_scroll_grid_acceptable(
+                probe1, scroll_used=True
+            )
+        ):
+            out["ok"] = True
+            out["grid_state_after"] = str(probe1.get("grid_state") or "partial")
+            out["failure_reason"] = None
+            out["partial_sparse_grid_accepted"] = True
+            out["sparse_grid_accepted"] = True
+            out["sparse_post_scroll_accepted"] = True
+            _post_follow_merge_grid_probe_meta(out, probe1)
+            try:
+                log(
+                    "info",
+                    "post_follow_post_grid_sparse_post_scroll_accepted",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    follower_username=cand,
+                    acceptance_phase=f"after_scroll_{attempts}",
+                    lower_solid_cell_count=probe1.get("lower_solid_cell_count"),
+                    dynamic_first_row_top=probe1.get("dynamic_first_row_top"),
+                    profile_tabs_bottom_y_px=probe1.get("profile_tabs_bottom_y_px"),
+                    suggested_for_you=probe1.get("suggested_for_you"),
+                    screenshot_path=probe1.get("screenshot_path"),
+                    **_single_post_sparse_grid_accept_log_fields(probe1),
+                )
+            except Exception:
+                pass
+            timings["grid_prep_total_ms"] = round((time.perf_counter() - t0) * 1000, 2)
+            out["timings_ms"] = timings
+            out["screenshot_paths"] = screenshot_paths
+            try:
+                log(
+                    "info",
+                    "post_follow_post_likes_perf_grid_ready",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    follower_username=cand,
+                    readiness_mode="sparse_post_scroll_accepted",
+                    total_grid_prepare_ms=timings.get("grid_prep_total_ms"),
+                    scroll_attempts_used=int(attempts),
+                    final_grid_state=str(probe1.get("grid_state") or "partial"),
+                    final_suggested_for_you=probe1.get("suggested_for_you"),
+                    final_profile_tabs_visible=probe1.get("profile_tabs_visible"),
+                    elapsed_from_phase_start_ms=_likes_perf_elapsed_ms(
+                        likes_perf_phase_t0
+                    ),
+                )
+            except Exception:
+                pass
+            out["likes_perf_grid"] = {
+                "initial_probe_ms": dict(p0perf),
+                "scroll_cycles": list(scroll_perf_cycles),
+                "grid_prepare_total_ms": timings.get("grid_prep_total_ms"),
+                "budget_snapshot_ms": budget_snapshot_total_ms,
+            }
+            return out
+
         if state_after == "visible":
             out["ok"] = True
             out["grid_state_after"] = "visible"
@@ -14135,16 +15338,37 @@ def ensure_post_grid_visible_for_post_follow_likes(
         "final_profile_tabs_visible": probe_last.get("profile_tabs_visible"),
     }
     if not out.get("ok") and _sparse_post_grid_partial_acceptable_for_post_follow(
-        probe_last
+        probe_last,
+        scroll_used=bool(out.get("scroll_used")),
     ):
         out["ok"] = True
         out["failure_reason"] = None
         out["partial_sparse_grid_accepted"] = True
         out["sparse_grid_accepted"] = True
+        _post_scroll_sparse = _post_follow_sparse_post_scroll_grid_acceptable(
+            probe_last, scroll_used=bool(out.get("scroll_used"))
+        )
+        if _post_scroll_sparse:
+            out["sparse_post_scroll_accepted"] = True
         _single_sparse = _single_post_sparse_grid_acceptable_for_post_follow(probe_last)
         _post_follow_merge_grid_probe_meta(out, probe_last)
         try:
-            if _single_sparse:
+            if _post_scroll_sparse:
+                log(
+                    "info",
+                    "post_follow_post_grid_sparse_post_scroll_accepted",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    follower_username=cand,
+                    acceptance_phase="after_scroll_final",
+                    lower_solid_cell_count=probe_last.get("lower_solid_cell_count"),
+                    dynamic_first_row_top=probe_last.get("dynamic_first_row_top"),
+                    profile_tabs_bottom_y_px=probe_last.get("profile_tabs_bottom_y_px"),
+                    suggested_for_you=probe_last.get("suggested_for_you"),
+                    screenshot_path=probe_last.get("screenshot_path"),
+                    **_single_post_sparse_grid_accept_log_fields(probe_last),
+                )
+            elif _single_sparse:
                 log(
                     "info",
                     "post_follow_post_likes_single_post_sparse_grid_accepted",
@@ -14188,7 +15412,11 @@ def ensure_post_grid_visible_for_post_follow_likes(
                 visual_candidate_id=vcid,
                 source_profile_username=src,
                 follower_username=cand,
-                readiness_mode="sparse_accepted",
+                readiness_mode=(
+                    "sparse_post_scroll_accepted"
+                    if _post_scroll_sparse
+                    else "sparse_accepted"
+                ),
                 total_grid_prepare_ms=timings.get("grid_prep_total_ms"),
                 scroll_attempts_used=int(attempts),
                 final_grid_state=str(probe_last.get("grid_state") or ""),
@@ -14574,6 +15802,18 @@ _VISUAL_POST_VIEWER_OPEN_POLL_INITIAL_S = 0.38
 _VISUAL_POST_VIEWER_OPEN_POLL_INTERVAL_S = 0.18
 _VISUAL_POST_VIEWER_OPEN_POLL_MAX_S = 1.35
 _VISUAL_POST_VIEWER_OPEN_POLL_RETRY_MAX_S = 1.45
+_POST_FOLLOW_OPEN_LIKE_PROOF_TTL_MS = 20_000.0
+_post_follow_open_like_proof_stash: dict[str, Any] | None = None
+_TRUSTED_POST_FOLLOW_OPEN_NOT_LIKED_RID_SUFFIX = ":not_liked"
+_TRUSTED_POST_FOLLOW_OPEN_NOT_LIKED_EXACT_SIGNALS = frozenset(
+    {
+        "ui_description_exact_like",
+        "ui_text_exact_like",
+        "ui_description_fr_jaime",
+        "ui_description_es_like",
+        "ui_description_de_like",
+    }
+)
 _VISUAL_RETURN_PROFILE_POLL_INITIAL_S = 0.15
 _VISUAL_RETURN_PROFILE_POLL_INTERVAL_S = 0.18
 _VISUAL_RETURN_PROFILE_POLL_MAX_S = 1.0
@@ -15136,6 +16376,7 @@ def visual_open_recent_post_from_profile(
     grid_probe_source: str | None = None,
     grid_probe_screenshot_path: str | None = None,
     likes_perf_phase_t0: float | None = None,
+    post_follow_stash_open_like_proof: bool = False,
 ) -> dict[str, Any]:
     """
     From an open profile grid: screenshot, pick a grid cell, tap to open the post.
@@ -15144,6 +16385,8 @@ def visual_open_recent_post_from_profile(
     """
     global _VISUAL_POST_LIKE_TAPS_RECORDED
     _VISUAL_POST_LIKE_TAPS_RECORDED = 0
+    if post_follow_stash_open_like_proof:
+        _clear_post_follow_open_like_proof_stash()
     pkg = str(getattr(config, "INSTAGRAM_PACKAGE", "") or "")
     meta0 = _followers_current_pkg_activity(d)
     act0 = meta0.get("current_activity")
@@ -16001,6 +17244,17 @@ def visual_open_recent_post_from_profile(
         )
 
     if post_detected:
+        det_final = (
+            det_retry
+            if retry_used and bool(det_retry.get("post_detected"))
+            else det_open
+        )
+        if post_follow_stash_open_like_proof and exp_fu:
+            _stash_post_follow_open_like_proof(
+                det_final,
+                source_profile_username=source_profile_username or "",
+                follower_username=exp_fu,
+            )
         log(
             "info",
             "visual_recent_post_open_success",
@@ -16281,12 +17535,23 @@ def _hierarchy_collect_like_semantic_nodes(hier: str) -> list[dict[str, Any]]:
     return out
 
 
+def _dump_post_viewer_hierarchy(d: u2.Device) -> str:
+    """Single UIAutomator hierarchy read for post-viewer like / already-liked paths."""
+    try:
+        return str(d.dump_hierarchy(compressed=False))
+    except Exception:
+        try:
+            return str(d.dump_hierarchy())
+        except Exception:
+            return ""
+
+
 def _log_rejected_broad_liked_semantic_candidates(
     d: u2.Device,
     *,
     source_profile_username: str | None,
-) -> None:
-    """Log (and reject) broad 'Liked…' hints that must not drive already-liked=true."""
+) -> str:
+    """Log (and reject) broad 'Liked…' hints; return hierarchy dump for reuse downstream."""
     probes: list[tuple[str, Callable[[], Any]]] = [
         ("ui_description_liked_substring", lambda: d(descriptionContains="Liked")),
         ("ui_text_liked_substring", lambda: d(textContains="Liked")),
@@ -16321,13 +17586,7 @@ def _log_rejected_broad_liked_semantic_candidates(
         except Exception:
             continue
 
-    try:
-        hier = str(d.dump_hierarchy(compressed=False))
-    except Exception:
-        try:
-            hier = str(d.dump_hierarchy())
-        except Exception:
-            hier = ""
+    hier = _dump_post_viewer_hierarchy(d)
     for node in _hierarchy_collect_like_semantic_nodes(hier):
         cls = str(node.get("semantic_node_class") or "")
         if cls not in ("broad_liked_by_hint", "broad_liked_substring", "broad_like_substring"):
@@ -16348,6 +17607,7 @@ def _log_rejected_broad_liked_semantic_candidates(
             hierarchy_scan=True,
             **merged,
         )
+    return hier
 
 
 def _ui_post_viewer_broad_like_chrome_hint(d: u2.Device) -> tuple[bool, str, float]:
@@ -16795,16 +18055,15 @@ def _visual_post_like_heart_crop_bounds(
                 return {"left": l, "top": t, "right": r, "bottom": b}, "caller_heart_bounds"
         except (TypeError, ValueError):
             pass
+    if d is not None:
+        ui_b, ui_m = _visual_post_like_heart_bounds_from_ui(d, iw=iw, ih=ih)
+        if ui_b:
+            return ui_b, ui_m
+
     follower_u = _normalize_handle(str(expected_follower_username or ""))
     hier = ""
     if d is not None and follower_u:
-        try:
-            hier = str(d.dump_hierarchy(compressed=False))
-        except Exception:
-            try:
-                hier = str(d.dump_hierarchy())
-            except Exception:
-                hier = ""
+        hier = _dump_post_viewer_hierarchy(d)
         if hier:
             pick_b, pick_src, anch = _visual_post_like_select_anchored_heart_from_dump(
                 d,
@@ -16818,11 +18077,6 @@ def _visual_post_like_heart_crop_bounds(
             if bool(anch.get("hard_abort")):
                 reason = str(anch.get("failure_reason") or pick_src or "")
                 return None, reason or "heart_anchor_hard_abort"
-
-    if d is not None:
-        ui_b, ui_m = _visual_post_like_heart_bounds_from_ui(d, iw=iw, ih=ih)
-        if ui_b:
-            return ui_b, ui_m
         if follower_u and hier:
             return None, "heart_bounds_unresolved_after_anchor_attempt"
     return {
@@ -17542,19 +18796,220 @@ def _visual_post_already_liked_out(
     return out
 
 
+def _clear_post_follow_open_like_proof_stash() -> None:
+    global _post_follow_open_like_proof_stash
+    _post_follow_open_like_proof_stash = None
+
+
+def _post_follow_open_like_proof_stash_is_trusted(stash: dict[str, Any]) -> bool:
+    if not bool(stash.get("posts_action_bar")):
+        return False
+    path = str(stash.get("viewer_detect_path") or "")
+    proof_method = str(stash.get("proof_method") or "")
+    if path == "phase_a_like_unlike_fast":
+        return proof_method.endswith(_TRUSTED_POST_FOLLOW_OPEN_NOT_LIKED_RID_SUFFIX)
+    if path == "phase_a2_exact_like_desc_fast":
+        return proof_method in _TRUSTED_POST_FOLLOW_OPEN_NOT_LIKED_EXACT_SIGNALS
+    return False
+
+
+def _validate_post_follow_open_like_proof_stash(
+    *,
+    source_profile_username: str | None,
+    expected_follower_username: str | None,
+) -> tuple[bool, dict[str, Any] | None, float, str]:
+    """
+    Peek post-follow open proof (non-destructive). Returns
+    (ok, stash, age_ms, reject_reason).
+    """
+    global _post_follow_open_like_proof_stash
+    stash = _post_follow_open_like_proof_stash
+    if not isinstance(stash, dict) or not stash:
+        return False, None, 0.0, "proof_absent"
+
+    age_ms = round(
+        (time.perf_counter() - float(stash.get("stashed_at_monotonic") or 0.0))
+        * 1000.0,
+        2,
+    )
+    if age_ms > float(_POST_FOLLOW_OPEN_LIKE_PROOF_TTL_MS):
+        return False, None, age_ms, "proof_expired"
+
+    src_n = _normalize_handle(str(source_profile_username or ""))
+    fu_n = _normalize_handle(str(expected_follower_username or ""))
+    stash_src = str(stash.get("source_profile_username") or "")
+    stash_fu = str(stash.get("follower_username") or "")
+    if stash_src and src_n and stash_src != src_n:
+        return False, None, age_ms, "source_profile_mismatch"
+    if stash_fu and fu_n and stash_fu != fu_n:
+        return False, None, age_ms, "follower_username_mismatch"
+
+    if not _post_follow_open_like_proof_stash_is_trusted(stash):
+        return False, None, age_ms, "proof_not_trusted"
+
+    return True, dict(stash), age_ms, ""
+
+
+def _post_follow_open_like_proof_from_viewer_detect(
+    det: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Trusted not-liked proof from post-open viewer detect only (no band_mismatch)."""
+    if not bool(det.get("post_detected")):
+        return None
+    path = str(det.get("viewer_detect_path") or "")
+    positive_rid = str(det.get("viewer_detect_a1_positive_rid") or "")
+    exact_sig = str(
+        det.get("viewer_detect_a2_exact_desc_signal")
+        or det.get("viewer_detect_a2b_signal")
+        or ""
+    )
+    guard_res = str(
+        det.get("viewer_detect_exact_desc_guard_result")
+        or det.get("viewer_detect_a2_guard_result")
+        or ""
+    )
+    posts_bar = bool(det.get("posts_action_bar")) or ("posts_bar" in guard_res)
+
+    if path == "phase_a_like_unlike_fast":
+        if positive_rid.endswith(_TRUSTED_POST_FOLLOW_OPEN_NOT_LIKED_RID_SUFFIX):
+            return {
+                "viewer_detect_path": path,
+                "proof_method": positive_rid,
+                "posts_action_bar": posts_bar,
+            }
+        return None
+
+    if path == "phase_a2_exact_like_desc_fast":
+        if exact_sig not in _TRUSTED_POST_FOLLOW_OPEN_NOT_LIKED_EXACT_SIGNALS:
+            return None
+        if not posts_bar:
+            return None
+        return {
+            "viewer_detect_path": path,
+            "proof_method": exact_sig,
+            "posts_action_bar": True,
+        }
+
+    return None
+
+
+def _stash_post_follow_open_like_proof(
+    det: dict[str, Any],
+    *,
+    source_profile_username: str,
+    follower_username: str,
+) -> None:
+    global _post_follow_open_like_proof_stash
+    payload = _post_follow_open_like_proof_from_viewer_detect(det)
+    if not payload:
+        return
+    src_n = _normalize_handle(source_profile_username)
+    fu_n = _normalize_handle(follower_username)
+    _post_follow_open_like_proof_stash = {
+        **payload,
+        "stashed_at_monotonic": time.perf_counter(),
+        "source_profile_username": src_n,
+        "follower_username": fu_n,
+    }
+    try:
+        log(
+            "info",
+            "post_follow_open_like_proof_stashed",
+            viewer_detect_path=payload.get("viewer_detect_path"),
+            proof_method=payload.get("proof_method"),
+            follower_username=fu_n,
+            source_profile_username=src_n,
+            posts_action_bar=bool(payload.get("posts_action_bar")),
+        )
+    except Exception:
+        pass
+
+
+def _try_reuse_post_follow_open_like_proof_already_liked(
+    d: u2.Device,
+    *,
+    source_profile_username: str | None,
+    expected_follower_username: str | None,
+) -> dict[str, Any] | None:
+    ok, stash, age_ms, reject_reason = _validate_post_follow_open_like_proof_stash(
+        source_profile_username=source_profile_username,
+        expected_follower_username=expected_follower_username,
+    )
+    if not ok or not stash:
+        if reject_reason:
+            try:
+                log(
+                    "info",
+                    "visual_post_already_liked_open_proof_rejected",
+                    reject_reason=reject_reason,
+                    age_ms=age_ms,
+                    source_profile_username=source_profile_username or "",
+                    expected_follower_username=expected_follower_username or "",
+                )
+            except Exception:
+                pass
+        return None
+
+    proof_method = str(stash.get("proof_method") or "")
+    src_n = _normalize_handle(str(source_profile_username or ""))
+    fu_n = _normalize_handle(str(expected_follower_username or ""))
+    meta = _followers_current_pkg_activity(d)
+    try:
+        log(
+            "info",
+            "visual_post_already_liked_open_proof_reused",
+            age_ms=age_ms,
+            proof_method=proof_method,
+            viewer_detect_path=str(stash.get("viewer_detect_path") or ""),
+            decision="not_liked",
+            source_profile_username=src_n,
+            expected_follower_username=fu_n,
+        )
+    except Exception:
+        pass
+    out = _visual_post_already_liked_out(
+        already_liked=False,
+        detection_method="post_follow_open_like_proof_reuse",
+        confidence=0.91,
+        meta=meta,
+        source_profile_username=source_profile_username,
+        semantic_like_state="like",
+        already_liked_decision_reason="post_follow_open_like_proof_reused_not_liked",
+    )
+    out["open_proof_reused"] = True
+    out["open_proof_age_ms"] = age_ms
+    out["open_proof_method"] = proof_method
+    return out
+
+
 def visual_post_already_liked(
     d: u2.Device,
     *,
     source_profile_username: str | None = None,
     heart_bounds: dict[str, Any] | None = None,
+    post_follow_primary_precheck: bool = False,
+    expected_follower_username: str | None = None,
 ) -> dict[str, Any]:
     """
     Detect whether the open post viewer already shows a liked state (no tap).
   Semantic Unlike/Like first; colour fallback only when unambiguous and strong.
     """
+    if post_follow_primary_precheck:
+        reused = _try_reuse_post_follow_open_like_proof_already_liked(
+            d,
+            source_profile_username=source_profile_username,
+            expected_follower_username=expected_follower_username,
+        )
+        if reused is not None:
+            try:
+                log("info", "visual_post_already_liked_decided", **reused)
+            except Exception:
+                pass
+            return reused
+
     meta = _followers_current_pkg_activity(d)
 
-    _log_rejected_broad_liked_semantic_candidates(
+    hier_prefetch = _log_rejected_broad_liked_semantic_candidates(
         d, source_profile_username=source_profile_username
     )
 
@@ -17562,6 +19017,16 @@ def visual_post_already_liked(
         _ui_post_viewer_action_button_liked_strict(d)
     )
     if ok_liked:
+        try:
+            log(
+                "info",
+                "visual_post_already_liked_second_dump_skipped_strict_ui",
+                source_profile_username=source_profile_username or "",
+                detection_method=method_liked,
+                already_liked_decision_reason="action_button_unlike_confirmed",
+            )
+        except Exception:
+            pass
         out = _visual_post_already_liked_out(
             already_liked=True,
             detection_method=method_liked,
@@ -17582,6 +19047,16 @@ def visual_post_already_liked(
         _ui_post_viewer_action_button_not_liked_strict(d)
     )
     if ok_not_liked:
+        try:
+            log(
+                "info",
+                "visual_post_already_liked_second_dump_skipped_strict_ui",
+                source_profile_username=source_profile_username or "",
+                detection_method=method_not,
+                already_liked_decision_reason="semantic_like_confirmed_not_liked",
+            )
+        except Exception:
+            pass
         out = _visual_post_already_liked_out(
             already_liked=False,
             detection_method=method_not,
@@ -17598,14 +19073,19 @@ def visual_post_already_liked(
             pass
         return out
 
-    hier = ""
-    try:
-        hier = str(d.dump_hierarchy(compressed=False))
-    except Exception:
+    if hier_prefetch:
+        hier = hier_prefetch
         try:
-            hier = str(d.dump_hierarchy())
+            log(
+                "info",
+                "visual_post_already_liked_hierarchy_reuse_used",
+                source_profile_username=source_profile_username or "",
+                hierarchy_chars=len(hier),
+            )
         except Exception:
-            hier = ""
+            pass
+    else:
+        hier = _dump_post_viewer_hierarchy(d)
 
     if _hierarchy_suggests_liked_state(hier):
         out = _visual_post_already_liked_out(
@@ -18176,6 +19656,30 @@ def _visual_post_viewer_header_username_from_ui(
     return "", ""
 
 
+def _visual_post_viewer_posts_action_bar_quick(d: u2.Device) -> bool:
+    """Lightweight Posts action-bar probe (avoids full profile username harvest)."""
+    for pred in (
+        lambda: d(text="Posts"),
+        lambda: d(textContains="Posts"),
+        lambda: d(description="Posts"),
+        lambda: d(descriptionContains="Posts"),
+    ):
+        try:
+            if pred().exists(timeout=0.1):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _like_ui_method_is_exact_action_button(method: str) -> bool:
+    m = str(method or "")
+    return "exact_like" in m or m in (
+        "ui_description_exact_like",
+        "ui_text_exact_like",
+    )
+
+
 def _visual_post_viewer_context_guard_for_like(
     d: u2.Device,
     *,
@@ -18183,6 +19687,8 @@ def _visual_post_viewer_context_guard_for_like(
     expected_follower_username: str | None = None,
     source_profile_username: str | None = None,
     pkg: str,
+    post_follow_like_fast_path: bool = False,
+    guard_perf_out: dict[str, Any] | None = None,
 ) -> tuple[bool, str, dict[str, Any]]:
     """
     Post-open guard: baseline was captured on candidate profile; current screen is post viewer.
@@ -18205,10 +19711,126 @@ def _visual_post_viewer_context_guard_for_like(
     if exp_fu and not exp_u:
         exp_u = exp_fu
 
+    t_guard0 = time.perf_counter()
+    exp_fp = str(
+        expected_context.get("profile_visual_fingerprint")
+        or expected_context.get("profile_fingerprint")
+        or ""
+    )[:64]
+
+    if post_follow_like_fast_path:
+        pf_ok, pf_stash, pf_age_ms, pf_reject = (
+            _validate_post_follow_open_like_proof_stash(
+                source_profile_username=source_profile_username,
+                expected_follower_username=expected_follower_username or exp_fu,
+            )
+        )
+        if pf_ok and pf_stash and exp_fp and (exp_fu or exp_u):
+            proof_method = str(pf_stash.get("proof_method") or "")
+            like_ui_method = (
+                proof_method
+                if _like_ui_method_is_exact_action_button(proof_method)
+                or proof_method.endswith(_TRUSTED_POST_FOLLOW_OPEN_NOT_LIKED_RID_SUFFIX)
+                else "ui_description_exact_like"
+            )
+            proof_fast_meta: dict[str, Any] = {
+                "expected_profile_fingerprint": exp_fp,
+                "expected_username": exp_u,
+                "expected_follower_username": exp_fu or exp_u,
+                "action_bar_title": "Posts",
+                "action_bar_title_norm": "posts",
+                "action_bar_posts_mode": True,
+                "post_header_username_detected": "",
+                "post_header_username_method": "",
+                "post_viewer_chrome": True,
+                "viewer_chrome_confirmed": True,
+                "like_ui_present": True,
+                "like_ui_method": like_ui_method,
+                "still_profile_grid": False,
+                "post_follow_open_proof_reused_for_context_guard": True,
+                "post_follow_open_proof_age_ms": pf_age_ms,
+            }
+            try:
+                log(
+                    "info",
+                    "post_follow_open_like_proof_reused_for_context_guard",
+                    age_ms=pf_age_ms,
+                    proof_method=proof_method,
+                    viewer_detect_path=str(pf_stash.get("viewer_detect_path") or ""),
+                    source_profile_username=src_n,
+                    follower_username=exp_fu or exp_u,
+                    decision="allowed",
+                    guard_reason="post_viewer_posts_action_bar_allowed",
+                )
+            except Exception:
+                pass
+            if guard_perf_out is not None:
+                guard_perf_out["still_profile_grid_probe_ms"] = 0.0
+                guard_perf_out["post_open_context_guard_ms"] = round(
+                    (time.perf_counter() - t_guard0) * 1000.0, 2
+                )
+                guard_perf_out["post_follow_open_proof_context_guard_reused"] = True
+            return True, "post_viewer_posts_action_bar_allowed", proof_fast_meta
+        if pf_reject:
+            try:
+                log(
+                    "info",
+                    "post_follow_open_like_proof_context_guard_rejected",
+                    reject_reason=pf_reject,
+                    age_ms=pf_age_ms,
+                    proof_method=str((pf_stash or {}).get("proof_method") or ""),
+                    source_profile_username=src_n,
+                    follower_username=exp_fu or exp_u,
+                )
+            except Exception:
+                pass
+
     liked_ui, liked_m, _ = _ui_post_viewer_liked_quick(d)
     not_liked_ui, not_liked_m, _ = _ui_post_viewer_not_liked_quick(d)
     like_ui_present = bool(liked_ui or not_liked_ui)
     like_ui_method = str(not_liked_m or liked_m or "")
+
+    if (
+        post_follow_like_fast_path
+        and like_ui_present
+        and _like_ui_method_is_exact_action_button(like_ui_method)
+        and _visual_post_viewer_posts_action_bar_quick(d)
+        and (exp_fu or exp_u)
+        and exp_fp
+    ):
+        fast_meta: dict[str, Any] = {
+            "expected_profile_fingerprint": exp_fp,
+            "expected_username": exp_u,
+            "expected_follower_username": exp_fu or exp_u,
+            "action_bar_title": "Posts",
+            "action_bar_title_norm": "posts",
+            "action_bar_posts_mode": True,
+            "post_header_username_detected": "",
+            "post_header_username_method": "",
+            "post_viewer_chrome": True,
+            "viewer_chrome_confirmed": True,
+            "like_ui_present": True,
+            "like_ui_method": like_ui_method,
+            "still_profile_grid": False,
+        }
+        try:
+            log(
+                "info",
+                "visual_post_like_context_guard_fast_allowed_posts_action_bar_like_ui",
+                source_profile_username=source_profile_username or "",
+                expected_follower_username=str(expected_follower_username or "")[:120],
+                expected_username=exp_u,
+                like_ui_method=like_ui_method,
+                guard_reason="post_viewer_posts_action_bar_allowed",
+            )
+        except Exception:
+            pass
+        if guard_perf_out is not None:
+            guard_perf_out["still_profile_grid_probe_ms"] = 0.0
+            guard_perf_out["post_open_context_guard_ms"] = round(
+                (time.perf_counter() - t_guard0) * 1000.0, 2
+            )
+        return True, "post_viewer_posts_action_bar_allowed", fast_meta
 
     post_chrome = bool(like_ui_present)
     if not post_chrome:
@@ -18228,6 +19850,7 @@ def _visual_post_viewer_context_guard_for_like(
                 continue
 
     still_profile_grid = False
+    t_grid0 = time.perf_counter()
     try:
         still_profile_grid = bool(
             _try_profile_signals_once(d, "", pkg)
@@ -18235,6 +19858,33 @@ def _visual_post_viewer_context_guard_for_like(
         )
     except Exception:
         still_profile_grid = False
+    grid_probe_ms = round((time.perf_counter() - t_grid0) * 1000.0, 2)
+    if guard_perf_out is not None:
+        guard_perf_out["still_profile_grid_probe_ms"] = grid_probe_ms
+
+    if still_profile_grid and not post_chrome:
+        if guard_perf_out is not None:
+            guard_perf_out["post_open_context_guard_ms"] = round(
+                (time.perf_counter() - t_guard0) * 1000.0, 2
+            )
+        return False, "still_on_profile_grid_not_post_viewer", {
+            "expected_username": exp_u,
+            "expected_follower_username": exp_fu or exp_u,
+            "still_profile_grid": still_profile_grid,
+            "post_viewer_chrome": post_chrome,
+        }
+
+    if not post_chrome:
+        if guard_perf_out is not None:
+            guard_perf_out["post_open_context_guard_ms"] = round(
+                (time.perf_counter() - t_guard0) * 1000.0, 2
+            )
+        return False, "post_viewer_chrome_not_confirmed", {
+            "expected_username": exp_u,
+            "expected_follower_username": exp_fu or exp_u,
+            "still_profile_grid": still_profile_grid,
+            "post_viewer_chrome": post_chrome,
+        }
 
     ab_raw = ""
     try:
@@ -18673,13 +20323,23 @@ def visual_like_open_post(
                 }
             pkg_ctx = str(getattr(config, "INSTAGRAM_PACKAGE", "") or "")
             if bool(post_opened_via_profile_grid):
+                _guard_perf: dict[str, Any] = {}
                 po_ok, po_why, po_meta = _visual_post_viewer_context_guard_for_like(
                     d,
                     expected_context=exp_ctx,
                     expected_follower_username=expected_follower_username,
                     source_profile_username=source_profile_username,
                     pkg=pkg_ctx,
+                    post_follow_like_fast_path=bool(post_opened_via_profile_grid),
+                    guard_perf_out=_guard_perf,
                 )
+                if _lkperf is not None:
+                    _lkperf["post_open_context_guard_ms"] = float(
+                        _guard_perf.get("post_open_context_guard_ms") or 0.0
+                    )
+                    _lkperf["still_profile_grid_probe_ms"] = float(
+                        _guard_perf.get("still_profile_grid_probe_ms") or 0.0
+                    )
                 if not po_ok:
                     meta_ctx = _followers_current_pkg_activity(d)
                     try:
@@ -18919,6 +20579,7 @@ def visual_like_open_post(
             current_package=meta1.get("current_package"),
             source_profile_username=source_profile_username or "",
         )
+        _clear_post_follow_open_like_proof_stash()
         time.sleep(1.2)
         post_shot = str(
             _SCREENSHOTS_DIR / f"visual_post_like_after_tap_{int(time.time() * 1000)}.png"
@@ -24089,6 +25750,26 @@ def harvest_visible_followers_usernames(
     return usernames, meta
 
 
+def _collect_own_unified_followers_rows_from_hierarchy(
+    d: u2.Device,
+    *,
+    source_profile_username: str,
+    runtime_seen: set[str],
+    hierarchy_source: str,
+) -> list[dict[str, Any]]:
+    """Harvest follow_list_username rows from cached or fresh hierarchy XML (Welcome-aligned)."""
+    hier = _followers_resolve_detect_hierarchy_xml(d, None, live_incomplete=False)
+    if hierarchy_source == "fresh_dump":
+        hier = followers_refresh_detect_hierarchy_cache(d, screen_index=0)
+    if not hier or "follow_list_username" not in hier:
+        return []
+    return _extract_own_unified_followers_usernames_from_hierarchy_xml(
+        hier,
+        source_profile_username=source_profile_username,
+        runtime_seen=runtime_seen,
+    )
+
+
 def _iter_followers_candidates_collect(
     d: u2.Device,
     *,
@@ -24181,9 +25862,51 @@ def iter_followers_candidates(
         open_detection_method=_iter_odm,
     )
 
-    rows = _iter_followers_candidates_collect(
-        d, source_profile_username=source_profile_username, runtime_seen=runtime_seen
-    )
+    rows: list[dict[str, Any]] = []
+    if _harvest_own_unified_xml_first_eligible(d):
+        rows = _collect_own_unified_followers_rows_from_hierarchy(
+            d,
+            source_profile_username=source_profile_username,
+            runtime_seen=runtime_seen,
+            hierarchy_source="cached",
+        )
+        if rows:
+            log(
+                "info",
+                "followers_iter_own_unified_xml_harvest",
+                source_profile_username=source_profile_username,
+                candidate_rows_parsed=len(rows),
+                hierarchy_source="cached",
+                open_detection_method=_iter_odm,
+            )
+        else:
+            rows = _collect_own_unified_followers_rows_from_hierarchy(
+                d,
+                source_profile_username=source_profile_username,
+                runtime_seen=runtime_seen,
+                hierarchy_source="fresh_dump",
+            )
+            if rows:
+                log(
+                    "info",
+                    "followers_iter_own_unified_xml_harvest",
+                    source_profile_username=source_profile_username,
+                    candidate_rows_parsed=len(rows),
+                    hierarchy_source="fresh_dump",
+                    open_detection_method=_iter_odm,
+                )
+            else:
+                log(
+                    "info",
+                    "followers_iter_own_unified_xml_empty",
+                    source_profile_username=source_profile_username,
+                    open_detection_method=_iter_odm,
+                )
+
+    if not rows:
+        rows = _iter_followers_candidates_collect(
+            d, source_profile_username=source_profile_username, runtime_seen=runtime_seen
+        )
 
     if (
         not rows
@@ -31967,6 +33690,7 @@ def run_post_follow_post_likes_phase(
         log_early_exit: bool = False,
         **counts: Any,
     ) -> dict[str, Any]:
+        _clear_post_follow_open_like_proof_stash()
         if log_early_exit and skipped_reason:
             _log_likes_early_exit(skipped_reason)
         timings["likes_total_ms"] = round((time.perf_counter() - t_all) * 1000, 2)
@@ -32382,6 +34106,7 @@ def run_post_follow_post_likes_phase(
             grid_probe_source=str(gps).strip() if gps else None,
             grid_probe_screenshot_path=str(gpss).strip() if gpss else None,
             likes_perf_phase_t0=_likes_perf_ctx.get("phase_t0"),
+            post_follow_stash_open_like_proof=True,
         )
         timings[f"open_post_{post_idx}_ms"] = round(
             (time.perf_counter() - t_open) * 1000, 2
@@ -32474,13 +34199,24 @@ def run_post_follow_post_likes_phase(
 
         t_al_run0 = time.perf_counter()
         al_pre = visual_post_already_liked(
-            d, source_profile_username=src, heart_bounds=None
+            d,
+            source_profile_username=src,
+            heart_bounds=None,
+            post_follow_primary_precheck=True,
+            expected_follower_username=cand,
         )
         _likes_perf_ctx["already_liked_decision_ms"] = round(
             (time.perf_counter() - t_al_run0) * 1000.0, 2
         )
-        _likes_perf_ctx["already_liked_decision_reused"] = False
-        _likes_perf_ctx["already_liked_recheck_reason"] = "runner_primary_precheck"
+        if al_pre.get("open_proof_reused"):
+            _likes_perf_ctx["already_liked_decision_reused"] = True
+            _likes_perf_ctx["already_liked_recheck_reason"] = str(
+                al_pre.get("already_liked_decision_reason")
+                or "post_follow_open_like_proof_reused_not_liked"
+            )[:160]
+        else:
+            _likes_perf_ctx["already_liked_decision_reused"] = False
+            _likes_perf_ctx["already_liked_recheck_reason"] = "runner_primary_precheck"
         if al_pre.get("already_liked"):
             skipped_already += 1
             post_rec["outcome"] = "already_liked"
@@ -32879,6 +34615,7 @@ def run_visual_candidate_post_follow_phase(
     skipped_tap: bool,
     det: dict[str, Any] | None,
     session_likes_used: int = 0,
+    own_unified_xml_list: bool = False,
 ) -> dict[str, Any]:
     """
     Post-follow: observe UI, optional real mute, controlled return to CT followers list.
@@ -32909,6 +34646,10 @@ def run_visual_candidate_post_follow_phase(
         follow_success_verified=bool(follow_success_verified),
         follow_state_after=fs_after,
         skipped_tap=bool(skipped_tap),
+        own_unified_xml_list=bool(own_unified_xml_list),
+        pick_mode=(
+            "own_unified_xml_list" if own_unified_xml_list else "visual_candidate"
+        ),
     )
 
     det_use: dict[str, Any] = dict(det) if isinstance(det, dict) else {}
@@ -33147,7 +34888,9 @@ def run_visual_candidate_post_follow_phase(
 
     mute_ok = bool(mute_out.get("ok"))
     mute_attempted = bool(mute_out.get("mute_started"))
-    compact_post_follow_return = bool(follow_success_verified and bool(vcid))
+    compact_post_follow_return = bool(
+        follow_success_verified and (bool(vcid) or own_unified_xml_list)
+    )
     if compact_post_follow_return:
         if should_mute and mute_ok and bool(mute_out.get("mute_v2_partial")):
             compact_reason_str = "follow_verified_mute_partial"
@@ -33551,6 +35294,7 @@ def ensure_global_search_surface(
         if open_search(d):
             meta["ok"] = True
             meta["reason"] = "open_search_ok"
+            mark_search_surface_fresh_for_follow_ct()
             log(
                 "info",
                 "instagram_search_surface_verified",
@@ -33762,9 +35506,22 @@ def visual_candidate_follow_pre_follow_screen_guard(
     out["navigation_reason"] = str(nav.get("reason") or "")
 
     try:
-        det_fresh = detect_followers_list_screen(
+        det_fresh, _pre_follow_fresh_hier_xml = detect_followers_list_screen_fresh(
             d, source_profile_username=src_raw
         )
+        try:
+            log(
+                "info",
+                "visual_follow_pre_follow_guard_fresh_detect_used",
+                source_profile_username=src_raw,
+                visual_candidate_id=vcid or None,
+                followers_detect_hierarchy_source=str(
+                    det_fresh.get("followers_detect_hierarchy_source") or ""
+                ),
+                is_followers_list=bool(det_fresh.get("is_followers_list")),
+            )
+        except Exception:
+            pass
         out["followers_list_xml_hint"] = bool(
             det_fresh.get("is_followers_list")
             and (

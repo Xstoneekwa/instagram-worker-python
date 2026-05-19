@@ -18,6 +18,8 @@ from instagram_navigation import (
     detect_followers_list_screen,
     followers_clear_detect_hierarchy_cache,
     followers_refresh_detect_hierarchy_cache,
+    followers_session_list_committed_open_for,
+    followers_session_merge_det_for_committed_visual_surface,
     harvest_visible_followers_rows,
     scroll_followers_list_forward,
 )
@@ -175,7 +177,7 @@ def run_welcome_scan_producer(
         log("error", "welcome_scan_aborted", reason="own_profile_verify_failed")
         return _finish("failed", 1, "own_profile_verify_failed")
 
-    ok_followers, _fol_meta = open_own_followers_list_from_own_profile(
+    ok_followers, fol_meta = open_own_followers_list_from_own_profile(
         d,
         uname,
         pkg=str(getattr(config, "INSTAGRAM_PACKAGE", "") or ""),
@@ -184,7 +186,18 @@ def run_welcome_scan_producer(
         log("error", "welcome_scan_aborted", reason="own_followers_open_failed")
         return _finish("failed", 1, "own_followers_open_failed")
 
-    det = detect_followers_list_screen(d, source_profile_username=uname)
+    fol_meta = fol_meta if isinstance(fol_meta, dict) else {}
+    det = fol_meta.get("det")
+    if not (isinstance(det, dict) and bool(det.get("is_followers_list"))):
+        det = detect_followers_list_screen(d, source_profile_username=uname)
+        if followers_session_list_committed_open_for(uname):
+            det = followers_session_merge_det_for_committed_visual_surface(
+                det,
+                session_vf_detail_for_loop=None,
+                open_list_meta=fol_meta.get("open_meta")
+                if isinstance(fol_meta.get("open_meta"), dict)
+                else None,
+            )
     if not bool(det.get("is_followers_list")):
         log("error", "welcome_scan_aborted", reason="followers_surface_not_verified")
         return _finish("failed", 1, "followers_surface_not_verified")

@@ -15,6 +15,8 @@ from instagram_navigation import (
     _normalize_handle,
     _tap_profile_followers_stat,
     detect_followers_list_screen,
+    followers_session_list_committed_open_for,
+    followers_session_merge_det_for_committed_visual_surface,
     open_followers_list_from_profile,
     verify_app_foreground,
     verify_profile,
@@ -207,6 +209,21 @@ def verify_own_profile(
     return bool(ok), meta
 
 
+def _merge_det_if_followers_list_committed_open(
+    det: dict[str, Any],
+    account_username: str,
+    open_meta: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Reuse visual_fallback proof from open_followers_list_from_profile when session is committed."""
+    if not followers_session_list_committed_open_for(account_username):
+        return det
+    return followers_session_merge_det_for_committed_visual_surface(
+        det,
+        session_vf_detail_for_loop=None,
+        open_list_meta=open_meta if isinstance(open_meta, dict) else None,
+    )
+
+
 def open_own_followers_list_from_own_profile(
     d: u2.Device,
     account_username: str,
@@ -249,11 +266,13 @@ def open_own_followers_list_from_own_profile(
         time.sleep(min(wait_s, 8.0))
 
     det = detect_followers_list_screen(d, source_profile_username=account_username)
+    det = _merge_det_if_followers_list_committed_open(det, account_username, open_meta)
     if not bool(det.get("is_followers_list")):
         ok_tap, tap_diag = _tap_profile_followers_stat(d)
         if ok_tap:
             time.sleep(min(wait_s, 6.0))
             det = detect_followers_list_screen(d, source_profile_username=account_username)
+            det = _merge_det_if_followers_list_committed_open(det, account_username, open_meta)
         if not bool(det.get("is_followers_list")):
             log(
                 "info",

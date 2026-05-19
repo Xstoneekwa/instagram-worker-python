@@ -17,6 +17,8 @@ APP_START_WAIT_S = 2.5
 # Short pause when reusing warm Instagram session (no force-stop)
 WARM_SESSION_MICRO_WAIT_S = 0.08
 SEARCH_FIELD_WAIT_S = 5.0
+# Follow CT only: short EditText poll when global Search was just confirmed (seconds)
+FOLLOW_CT_SEARCH_FIELD_WAIT_S = 0.4
 # Robust clear: max DELETE keyevents (batched) after clear_text/set_text("") fail
 SEARCH_FIELD_CLEAR_MAX_DEL_EVENTS = 120
 SEARCH_FIELD_CLEAR_DEL_BATCH_SIZE = 12
