@@ -5454,38 +5454,38 @@ def _reenter_ct_followers_list_after_canonical_reset(
     so the followers engine can continue in the same process.
     """
     pkg = config.INSTAGRAM_PACKAGE
-    gsurf = ensure_global_search_surface(
-        d,
-        intended_username=source_profile_username,
-        source_profile_username=source_profile_username,
-        source_account_context=account_id,
-    )
-    if not gsurf.get("ok"):
-        log(
-            "warning",
-            "canonical_reset_reenter_failed",
-            phase="global_search_surface",
-            context=context,
-            source_profile_username=source_profile_username,
-        )
-        return False
-    if not _open_search_with_recovery(
-        d,
-        pkg=pkg,
-        username=source_profile_username,
-        context=context,
-        skip_when_follow_ct_surface_fresh=True,
-    ):
-        log(
-            "warning",
-            "canonical_reset_reenter_failed",
-            phase="open_search",
-            context=context,
-            source_profile_username=source_profile_username,
-        )
-        return False
     enter_follow_ct_search_context()
     try:
+        gsurf = ensure_global_search_surface(
+            d,
+            intended_username=source_profile_username,
+            source_profile_username=source_profile_username,
+            source_account_context=account_id,
+        )
+        if not gsurf.get("ok"):
+            log(
+                "warning",
+                "canonical_reset_reenter_failed",
+                phase="global_search_surface",
+                context=context,
+                source_profile_username=source_profile_username,
+            )
+            return False
+        if not _open_search_with_recovery(
+            d,
+            pkg=pkg,
+            username=source_profile_username,
+            context=context,
+            skip_when_follow_ct_surface_fresh=True,
+        ):
+            log(
+                "warning",
+                "canonical_reset_reenter_failed",
+                phase="open_search",
+                context=context,
+                source_profile_username=source_profile_username,
+            )
+            return False
         if not type_search(
             d,
             source_profile_username,
@@ -5600,38 +5600,38 @@ def _run_followers_list_engine_session(
         )
 
     t0 = time.perf_counter()
-    gsurf = ensure_global_search_surface(
-        d,
-        intended_username=source_profile_username,
-        source_profile_username=source_profile_username,
-        source_account_context=account_id,
-    )
-    if not gsurf.get("ok"):
-        _eng_log(
-            "followers_engine_aborted",
-            "failed",
-            "global_search_surface_failed",
-            {"reason": gsurf.get("reason")},
-        )
-        _emit_performance_summary(
-            t0=t0,
-            warm_session_used=warm_session_used,
-            force_stop_used=force_stop_used,
-            exit_code=64,
-            target_username=source_profile_username,
-        )
-        return 64
-    if not _open_search_with_recovery(
-        d,
-        pkg=pkg,
-        username=source_profile_username,
-        context="followers_engine_start",
-        skip_when_follow_ct_surface_fresh=True,
-    ):
-        _eng_log("followers_engine_aborted", "failed", "open_search_failed", {})
-        return 4
     enter_follow_ct_search_context()
     try:
+        gsurf = ensure_global_search_surface(
+            d,
+            intended_username=source_profile_username,
+            source_profile_username=source_profile_username,
+            source_account_context=account_id,
+        )
+        if not gsurf.get("ok"):
+            _eng_log(
+                "followers_engine_aborted",
+                "failed",
+                "global_search_surface_failed",
+                {"reason": gsurf.get("reason")},
+            )
+            _emit_performance_summary(
+                t0=t0,
+                warm_session_used=warm_session_used,
+                force_stop_used=force_stop_used,
+                exit_code=64,
+                target_username=source_profile_username,
+            )
+            return 64
+        if not _open_search_with_recovery(
+            d,
+            pkg=pkg,
+            username=source_profile_username,
+            context="followers_engine_start",
+            skip_when_follow_ct_surface_fresh=True,
+        ):
+            _eng_log("followers_engine_aborted", "failed", "open_search_failed", {})
+            return 4
         if not type_search(
             d,
             source_profile_username,

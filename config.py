@@ -19,6 +19,12 @@ WARM_SESSION_MICRO_WAIT_S = 0.08
 SEARCH_FIELD_WAIT_S = 5.0
 # Follow CT only: short EditText poll when global Search was just confirmed (seconds)
 FOLLOW_CT_SEARCH_FIELD_WAIT_S = 0.4
+# Follow CT: confirm typed handle via search field text only (SERP row scan deferred to tap)
+FOLLOW_CT_TYPING_CONFIRM_MAX_S = 0.45
+# Follow CT: skip redundant type_search precheck after open_search strict OK (seconds)
+FOLLOW_CT_OPEN_SEARCH_STRICT_RECENT_TTL_S = 45.0
+# Per-attempt timeout when probing bottom-nav Search tab resource ids (seconds)
+OPEN_SEARCH_TAB_PROBE_TIMEOUT_S = 0.06
 # Robust clear: max DELETE keyevents (batched) after clear_text/set_text("") fail
 SEARCH_FIELD_CLEAR_MAX_DEL_EVENTS = 120
 SEARCH_FIELD_CLEAR_DEL_BATCH_SIZE = 12

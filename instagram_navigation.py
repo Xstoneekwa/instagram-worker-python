@@ -43,6 +43,7 @@ _LAST_SEARCH_SURFACE_OK: bool = False
 _LAST_SEARCH_SURFACE_PKG: str = ""
 _LAST_SEARCH_SURFACE_ACTIVITY_FAMILY: str = ""
 _SEARCH_SURFACE_FRESHLY_CONFIRMED_FOR_FOLLOW_CT: bool = False
+_FOLLOW_CT_OPEN_SEARCH_STRICT_VERIFIED_AT: float = 0.0
 # Followers-engine CT open only (Search → tap CT profile). Never set for DM sender.
 _FOLLOW_CT_SEARCH_CONTEXT_ACTIVE: bool = False
 _FOLLOW_CT_EXACT_ROW_TAP_BOUNDS: dict[str, int] | None = None
@@ -61,6 +62,7 @@ def clear_follow_ct_search_context() -> None:
     _FOLLOW_CT_SEARCH_CONTEXT_ACTIVE = False
     _clear_follow_ct_exact_row_tap_bounds()
     _clear_follow_ct_serp_band_cache()
+    clear_follow_ct_open_search_strict_verified()
 
 
 def is_follow_ct_search_context_active() -> bool:
@@ -169,6 +171,51 @@ def consume_search_surface_fresh_for_follow_ct() -> bool:
         return False
     _SEARCH_SURFACE_FRESHLY_CONFIRMED_FOR_FOLLOW_CT = False
     return True
+
+
+def is_search_surface_fresh_for_follow_ct() -> bool:
+    """Non-consuming peek: global Search confirmed for Follow CT in this session."""
+    return bool(_SEARCH_SURFACE_FRESHLY_CONFIRMED_FOR_FOLLOW_CT)
+
+
+def mark_follow_ct_open_search_strict_verified() -> None:
+    """Follow CT: open_search strict OK just succeeded; type_search may skip redundant precheck."""
+    global _FOLLOW_CT_OPEN_SEARCH_STRICT_VERIFIED_AT
+    _FOLLOW_CT_OPEN_SEARCH_STRICT_VERIFIED_AT = time.monotonic()
+
+
+def clear_follow_ct_open_search_strict_verified() -> None:
+    global _FOLLOW_CT_OPEN_SEARCH_STRICT_VERIFIED_AT
+    _FOLLOW_CT_OPEN_SEARCH_STRICT_VERIFIED_AT = 0.0
+
+
+def _follow_ct_open_search_strict_verified_recent() -> tuple[bool, float]:
+    """Return (recent_ok, age_ms) when open_search strict succeeded within TTL."""
+    global _FOLLOW_CT_OPEN_SEARCH_STRICT_VERIFIED_AT
+    if _FOLLOW_CT_OPEN_SEARCH_STRICT_VERIFIED_AT <= 0.0:
+        return False, 0.0
+    age_ms = (time.monotonic() - _FOLLOW_CT_OPEN_SEARCH_STRICT_VERIFIED_AT) * 1000.0
+    ttl_s = float(getattr(config, "FOLLOW_CT_OPEN_SEARCH_STRICT_RECENT_TTL_S", 45.0) or 45.0)
+    return age_ms <= ttl_s * 1000.0, age_ms
+
+
+def _search_surface_cache_state_label() -> str:
+    if not _LAST_SEARCH_SURFACE_OK:
+        return "cache_cold"
+    return "cache_present_not_reused"
+
+
+def _open_search_skip_lightweight_follow_ct_cold_bootstrap(d: u2.Device, pkg: str) -> bool:
+    """
+    Follow CT bootstrap when TTL cache cannot reuse: skip expensive is_lightweight probe
+    on cold IG feed (often ~10–15s) and open Search via tab click directly.
+    """
+    if not is_follow_ct_search_context_active():
+        return False
+    if should_reuse_search_surface(d, pkg):
+        return False
+    return True
+
 
 # Phase timings for performance_summary (reset each run from runner)
 _perf: dict[str, float | int | bool] = {}
@@ -1966,7 +2013,16 @@ def open_search(
         )
         return False
 
+    t_open_entry = time.perf_counter()
+    log(
+        "info",
+        "open_search_started",
+        source_profile_username=src_user or None,
+        foreground_package=_current_foreground_package(d),
+    )
+
     if should_reuse_search_surface(d, pkg):
+        t_reuse = time.perf_counter()
         if is_followers_list_surface_quick(d, source_profile_username=src_user):
             invalidate_search_surface_cache("followers_list_local_search")
             _log_followers_local_search_rejected(
@@ -1977,75 +2033,65 @@ def open_search(
         elif apply_search_surface_reuse_metrics(
             d, pkg, "cache_ttl", source_profile_username=src_user
         ):
-            log("info", "search_surface_cache_hit", message="TTL cache + EditText ok")
-            return True
-
-    if is_lightweight_search_screen(d, pkg):
-        if is_followers_list_surface_quick(d, source_profile_username=src_user):
-            invalidate_search_surface_cache("followers_list_local_search")
-            _log_followers_local_search_rejected(
-                phase="open_search_lightweight",
-                source_profile_username=src_user,
-                detail="lightweight_blocked",
+            log(
+                "info",
+                "search_surface_cache_hit",
+                message="TTL cache + EditText ok",
+                reuse_check_ms=round((time.perf_counter() - t_reuse) * 1000, 2),
             )
-        elif apply_search_surface_reuse_metrics(
-            d, pkg, "lightweight_signals", source_profile_username=src_user
-        ):
             return True
+        log(
+            "debug",
+            "open_search_cache_reuse_unavailable",
+            reuse_check_ms=round((time.perf_counter() - t_reuse) * 1000, 2),
+        )
+
+    skip_lightweight_cold = _open_search_skip_lightweight_follow_ct_cold_bootstrap(d, pkg)
+    if skip_lightweight_cold:
+        log(
+            "info",
+            "open_search_lightweight_skipped_follow_ct_cold_bootstrap",
+            reason="follow_ct_no_reusable_search_surface_cache",
+            cache_state=_search_surface_cache_state_label(),
+            source_profile_username=src_user or None,
+            elapsed_since_open_search_started_ms=round(
+                (time.perf_counter() - t_open_entry) * 1000, 2
+            ),
+        )
+    else:
+        t_light = time.perf_counter()
+        if is_lightweight_search_screen(d, pkg):
+            if is_followers_list_surface_quick(d, source_profile_username=src_user):
+                invalidate_search_surface_cache("followers_list_local_search")
+                _log_followers_local_search_rejected(
+                    phase="open_search_lightweight",
+                    source_profile_username=src_user,
+                    detail="lightweight_blocked",
+                )
+            elif apply_search_surface_reuse_metrics(
+                d, pkg, "lightweight_signals", source_profile_username=src_user
+            ):
+                log(
+                    "info",
+                    "open_search_lightweight_reuse_ok",
+                    lightweight_check_ms=round((time.perf_counter() - t_light) * 1000, 2),
+                )
+                return True
+        log(
+            "debug",
+            "open_search_lightweight_not_reused",
+            lightweight_check_ms=round((time.perf_counter() - t_light) * 1000, 2),
+            elapsed_since_open_search_started_ms=round(
+                (time.perf_counter() - t_open_entry) * 1000, 2
+            ),
+        )
 
     _perf["search_surface_reused"] = False
     _perf["search_open_skipped_ms"] = 0.0
     t_click_phase = time.perf_counter()
-    clicked = False
-    click_name: str | None = None
-
-    for suffix in _SEARCH_TAB_RID_SUFFIXES:
-        try:
-            sel = d(resourceIdMatches=f".*:id/{suffix}")
-            if sel.wait(timeout=0.06):
-                sel.click()
-                clicked = True
-                click_name = f"rid_matches_{suffix}"
-                log("info", "open_search_clicked", selector=click_name)
-                break
-        except Exception as e:
-            log("debug", "open_search_rid_failed", suffix=suffix, error=str(e))
-
-    if not clicked:
-        for ipkg in _instagram_package_candidates(d):
-            for suffix in _SEARCH_TAB_RID_SUFFIXES:
-                rid = f"{ipkg}:id/{suffix}"
-                try:
-                    s = d(resourceId=rid)
-                    if s.wait(timeout=0.05):
-                        s.click()
-                        clicked = True
-                        click_name = rid
-                        log("info", "open_search_clicked", selector=click_name)
-                        break
-                except Exception:
-                    continue
-            if clicked:
-                break
-
-    if not clicked:
-        selectors: list[tuple[str, Callable[[], object]]] = [
-            ("desc_en", lambda: d(descriptionContains="Search")),
-            ("desc_fr", lambda: d(descriptionContains="Recherche")),
-            ("desc_explore", lambda: d(descriptionContains="Search and explore")),
-            ("desc_explorer", lambda: d(descriptionContains="Explorer")),
-        ]
-        for name, factory in selectors:
-            try:
-                o = factory()
-                if o.wait(timeout=0.05):
-                    o.click()
-                    clicked = True
-                    click_name = name
-                    log("info", "open_search_clicked", selector=name)
-                    break
-            except Exception as e:
-                log("debug", "open_search_attempt_failed", selector=name, error=str(e))
+    clicked, click_name = _click_search_tab_in_open_search(d)
+    if clicked and click_name:
+        log("info", "open_search_clicked", selector=click_name)
 
     if not clicked:
         if not allow_percent_fallback:
@@ -2091,9 +2137,54 @@ def open_search(
         invalidate_search_surface_cache("open_search_no_edittext")
         return False
 
-    strict_ok, strict_why = instagram_search_surface_strict_ok(
-        d, ed, pkg=pkg, source_profile_username=src_user
+    t_strict = time.perf_counter()
+    strict_ok = False
+    strict_why = ""
+    search_tab_rid_click = bool(
+        clicked
+        and click_name
+        and str(click_name) != "percent_fallback"
     )
+    if is_follow_ct_search_context_active() and search_tab_rid_click:
+        strict_ok, strict_why = _follow_ct_trusted_type_search_surface_ok(d, ed, pkg=pkg)
+        trusted_verify_ms = (time.perf_counter() - t_strict) * 1000
+        log(
+            "info",
+            "open_search_follow_ct_trusted_verify_used",
+            ok=strict_ok,
+            reason=strict_why,
+            verify_ms=round(trusted_verify_ms, 2),
+            selector=click_name,
+        )
+        if not strict_ok:
+            t_fb = time.perf_counter()
+            strict_ok, strict_why = instagram_search_surface_strict_ok(
+                d, ed, pkg=pkg, source_profile_username=src_user
+            )
+            fallback_verify_ms = (time.perf_counter() - t_fb) * 1000
+            log(
+                "info",
+                "open_search_strict_verify",
+                ok=strict_ok,
+                reason=strict_why,
+                strict_verify_ms=round(fallback_verify_ms, 2),
+                selector=click_name,
+                follow_ct_trusted_fallback=True,
+            )
+    else:
+        strict_ok, strict_why = instagram_search_surface_strict_ok(
+            d, ed, pkg=pkg, source_profile_username=src_user
+        )
+        log(
+            "info",
+            "open_search_strict_verify",
+            ok=strict_ok,
+            reason=strict_why,
+            strict_verify_ms=round((time.perf_counter() - t_strict) * 1000, 2),
+            selector=click_name,
+        )
+    strict_verify_ms = (time.perf_counter() - t_strict) * 1000
+    _perf["search_strict_verify_ms"] = strict_verify_ms
     if strict_ok:
         log(
             "info",
@@ -2101,9 +2192,15 @@ def open_search(
             phase="open_search",
             detail="post_edittext",
             selector=click_name,
+            strict_verify_ms=round(strict_verify_ms, 2),
         )
         _mark_search_surface_ok(d, pkg)
+        if is_follow_ct_search_context_active():
+            mark_follow_ct_open_search_strict_verified()
         return True
+
+    if is_follow_ct_search_context_active():
+        clear_follow_ct_open_search_strict_verified()
 
     log(
         "info",
@@ -2521,6 +2618,28 @@ def instagram_search_surface_strict_ok(
     return True, "ok"
 
 
+def _follow_ct_trusted_type_search_surface_ok(
+    d: u2.Device,
+    ed,
+    *,
+    pkg: str | None = None,
+) -> tuple[bool, str]:
+    """
+    Follow CT: minimal rails when ensure_global/open_search already proved global Search.
+    Skips duplicate get_text launcher probe (deferred to first mismatch recovery).
+    """
+    pkg = str(pkg or getattr(config, "INSTAGRAM_PACKAGE", "") or "")
+    fg = _current_foreground_package(d)
+    if fg != pkg:
+        return False, f"foreground_package_mismatch:{fg}"
+    ed_pkg = _edittext_package_name(ed)
+    if ed_pkg and ed_pkg != pkg:
+        return False, f"edittext_package_mismatch:{ed_pkg}"
+    if is_followers_list_surface_quick(d):
+        return False, "followers_list_local_search_surface"
+    return True, "ok"
+
+
 def _field_still_matches_previous_query(cur: str, previous_username: str | None) -> bool:
     if not previous_username or not cur:
         return False
@@ -2702,20 +2821,143 @@ def clear_search_field_robust(
     return False, "incomplete"
 
 
-def _typing_confirmed(d: u2.Device, ed, username: str) -> bool:
-    """
-    After fast IME broadcast (or any typing): success when search EditText shows the handle
-    OR a row_search_user_username element matches the exact username.
-    """
+def _typing_confirmed_follow_ct_field_only(ed, username: str) -> bool:
+    """Follow CT: confirm via search EditText only (no SERP row harvest)."""
     try:
         cur = ed.get_text() or ""
         if username in cur or _normalize_handle(cur) == _normalize_handle(username):
             return True
     except Exception:
         pass
+    return False
+
+
+def _typing_confirmed(d: u2.Device, ed, username: str) -> bool:
+    """
+    After fast IME broadcast (or any typing): success when search EditText shows the handle
+    OR a row_search_user_username element matches the exact username.
+    """
+    if _typing_confirmed_follow_ct_field_only(ed, username):
+        return True
     if find_username_elements_by_resource_id(d, username):
         return True
     return False
+
+
+def _click_search_tab_in_open_search(d: u2.Device) -> tuple[bool, str | None]:
+    """
+    Probe bottom-nav Search / Explorer tab and click when found.
+    Returns (clicked, selector_name). Logs per-probe timing (P0 instrumentation).
+    P1: exact resourceId before expensive resourceIdMatches regex.
+    """
+    probe_timeout = float(
+        getattr(config, "OPEN_SEARCH_TAB_PROBE_TIMEOUT_S", 0.06) or 0.06
+    )
+    probe_timeout = max(0.04, min(0.12, probe_timeout))
+    exact_wait = min(0.05, probe_timeout)
+    t_phase = time.perf_counter()
+    log("info", "open_search_pre_click_probe_started", probe_timeout_s=probe_timeout)
+
+    clicked = False
+    click_name: str | None = None
+
+    for ipkg in _instagram_package_candidates(d):
+        for suffix in _SEARCH_TAB_RID_SUFFIXES:
+            rid = f"{ipkg}:id/{suffix}"
+            t_probe = time.perf_counter()
+            found = False
+            err_s = ""
+            try:
+                s = d(resourceId=rid)
+                found = bool(s.wait(timeout=exact_wait))
+                if found:
+                    s.click()
+                    clicked = True
+                    click_name = rid
+            except Exception as e:
+                err_s = str(e)[:160]
+            log(
+                "info",
+                "open_search_tab_exact_rid_probe",
+                suffix=suffix,
+                probe="resourceId",
+                package=ipkg,
+                resource_id=rid,
+                found=found,
+                wait_ms=round((time.perf_counter() - t_probe) * 1000, 2),
+                error=err_s or None,
+            )
+            if clicked:
+                break
+        if clicked:
+            break
+
+    if not clicked:
+        for suffix in _SEARCH_TAB_RID_SUFFIXES:
+            t_probe = time.perf_counter()
+            found = False
+            err_s = ""
+            try:
+                sel = d(resourceIdMatches=f".*:id/{suffix}")
+                found = bool(sel.wait(timeout=probe_timeout))
+                if found:
+                    sel.click()
+                    clicked = True
+                    click_name = f"rid_matches_{suffix}"
+            except Exception as e:
+                err_s = str(e)[:160]
+            log(
+                "info",
+                "open_search_tab_rid_probe",
+                suffix=suffix,
+                probe="resourceIdMatches",
+                found=found,
+                wait_ms=round((time.perf_counter() - t_probe) * 1000, 2),
+                error=err_s or None,
+            )
+            if clicked:
+                break
+
+    if not clicked:
+        selectors: list[tuple[str, Callable[[], object]]] = [
+            ("desc_en", lambda: d(descriptionContains="Search")),
+            ("desc_fr", lambda: d(descriptionContains="Recherche")),
+            ("desc_explore", lambda: d(descriptionContains="Search and explore")),
+            ("desc_explorer", lambda: d(descriptionContains="Explorer")),
+        ]
+        for name, factory in selectors:
+            t_probe = time.perf_counter()
+            found = False
+            err_s = ""
+            try:
+                o = factory()
+                found = bool(o.wait(timeout=min(0.05, probe_timeout)))
+                if found:
+                    o.click()
+                    clicked = True
+                    click_name = name
+            except Exception as e:
+                err_s = str(e)[:160]
+            log(
+                "info",
+                "open_search_tab_desc_probe",
+                selector=name,
+                found=found,
+                wait_ms=round((time.perf_counter() - t_probe) * 1000, 2),
+                error=err_s or None,
+            )
+            if clicked:
+                break
+
+    pre_click_ms = (time.perf_counter() - t_phase) * 1000
+    log(
+        "info",
+        "open_search_pre_click_probe_finished",
+        pre_click_ms=round(pre_click_ms, 2),
+        clicked=clicked,
+        selector=click_name,
+    )
+    return clicked, click_name
 
 
 def _resolve_search_edittext_for_type_search(
@@ -2776,6 +3018,7 @@ def type_search(
     _TYPE_SEARCH_FAILURE_REASON = None
     _clear_pending_fused_fast_ime_row()
     follow_ct_typing = bool(follow_ct_surface_confirmed) or is_follow_ct_search_context_active()
+    surface_trusted_for_typing = bool(follow_ct_surface_confirmed) or is_search_surface_fresh_for_follow_ct()
     if follow_ct_surface_confirmed or consume_search_surface_fresh_for_follow_ct():
         log(
             "info",
@@ -2823,14 +3066,72 @@ def type_search(
         return False
 
     pkg_ig = str(getattr(config, "INSTAGRAM_PACKAGE", "") or "")
-    ok_surf, surf_why = instagram_search_surface_strict_ok(d, ed, pkg=pkg_ig)
-    if ok_surf:
+    skip_strict_precheck = bool(
+        follow_ct_typing
+        and (
+            follow_ct_surface_confirmed
+            or surface_trusted_for_typing
+            or is_search_surface_fresh_for_follow_ct()
+        )
+    )
+    strict_recent_ok, strict_recent_age_ms = _follow_ct_open_search_strict_verified_recent()
+    fully_skip_precheck = bool(
+        follow_ct_typing
+        and follow_ct_surface_confirmed
+        and strict_recent_ok
+        and (
+            is_search_surface_fresh_for_follow_ct()
+            or surface_trusted_for_typing
+        )
+    )
+    t_precheck = time.perf_counter()
+    if fully_skip_precheck:
+        if is_search_surface_fresh_for_follow_ct():
+            consume_search_surface_fresh_for_follow_ct()
+        ok_surf = True
+        surf_why = "fully_skipped_recent_open_search_strict_ok"
+        precheck_ms = (time.perf_counter() - t_precheck) * 1000
         log(
             "info",
-            "instagram_search_surface_verified",
-            phase="type_search_precheck",
-            detail="initial",
+            "follow_ct_type_search_precheck_fully_skipped_recent_strict_ok",
+            username=str(username or "")[:80],
+            precheck_ms=round(precheck_ms, 2),
+            strict_verify_age_ms=round(strict_recent_age_ms, 2),
+            source_profile_username=str(username or "")[:80],
         )
+    elif skip_strict_precheck:
+        if is_search_surface_fresh_for_follow_ct():
+            consume_search_surface_fresh_for_follow_ct()
+        ok_surf, surf_why = _follow_ct_trusted_type_search_surface_ok(d, ed, pkg=pkg_ig)
+        precheck_ms = (time.perf_counter() - t_precheck) * 1000
+        if ok_surf:
+            log(
+                "info",
+                "follow_ct_type_search_strict_precheck_skipped",
+                username=str(username or "")[:80],
+                precheck_ms=round(precheck_ms, 2),
+                detail="trusted_global_search_surface",
+            )
+        else:
+            log(
+                "info",
+                "follow_ct_type_search_trusted_precheck_failed",
+                username=str(username or "")[:80],
+                reason=surf_why,
+                precheck_ms=round(precheck_ms, 2),
+            )
+    else:
+        ok_surf, surf_why = instagram_search_surface_strict_ok(d, ed, pkg=pkg_ig)
+        precheck_ms = (time.perf_counter() - t_precheck) * 1000
+    if ok_surf:
+        if not skip_strict_precheck and not fully_skip_precheck:
+            log(
+                "info",
+                "instagram_search_surface_verified",
+                phase="type_search_precheck",
+                detail="initial",
+                precheck_ms=round(precheck_ms, 2),
+            )
     else:
         log(
             "info",
@@ -2907,64 +3208,85 @@ def type_search(
             detail="after_recovery",
         )
 
+    follow_ct_pre_set_text_fast = bool(
+        follow_ct_typing
+        and follow_ct_surface_confirmed
+        and strict_recent_ok
+        and ok_surf
+        and not str(previous_username or "").strip()
+    )
+
     serial = get_device_serial(d)
     t_cmd_start = time.perf_counter()
-    ok_clear, clear_method = clear_search_field_robust(
-        d,
-        serial,
-        ed=ed,
-        previous_username=previous_username,
-        intended_username=username,
-    )
-    log(
-        "info",
-        "search_field_clear_method",
-        search_field_clear_method=clear_method,
-        ok=ok_clear,
-    )
-    if not ok_clear:
-        _TYPE_SEARCH_FAILURE_REASON = "search_field_not_cleared"
-        _perf["typing_command_ms"] = (time.perf_counter() - t_typ) * 1000
-        _perf["typing_confirm_ms"] = 0.0
-        log("error", "type_search_aborted", reason="search_field_not_cleared")
-        return False
-
-    ed = _wait_search_edittext(d) or ed
-    preview = _search_edittext_text_strip(ed)
-    log(
-        "info",
-        "search_field_before_typing_text",
-        text_preview=preview[:100],
-        text_len=len(preview),
-        username=username,
-    )
-    if not _search_field_clear_snapshot_ok(preview, previous_username):
-        _TYPE_SEARCH_FAILURE_REASON = "search_field_not_cleared"
-        _perf["typing_command_ms"] = (time.perf_counter() - t_typ) * 1000
-        _perf["typing_confirm_ms"] = 0.0
+    if follow_ct_pre_set_text_fast:
         log(
-            "error",
-            "search_field_clear_failed",
-            reason="non_empty_before_type",
-            preview=preview[:80],
-            is_placeholder=_is_search_placeholder(preview),
-            still_matches_previous=_field_still_matches_previous_query(
-                preview, previous_username
-            ),
+            "info",
+            "follow_ct_type_search_pre_set_text_fast_path_used",
+            username=str(username or "")[:80],
+            skipped_clear=True,
+            reused_edittext=True,
+            skipped_preview_text=True,
+            skipped_focus_probe=True,
+            strict_verify_age_ms=round(strict_recent_age_ms, 2),
+            reason="follow_ct_bootstrap_strict_recent_no_previous_query",
         )
-        return False
+    else:
+        ok_clear, clear_method = clear_search_field_robust(
+            d,
+            serial,
+            ed=ed,
+            previous_username=previous_username,
+            intended_username=username,
+        )
+        log(
+            "info",
+            "search_field_clear_method",
+            search_field_clear_method=clear_method,
+            ok=ok_clear,
+        )
+        if not ok_clear:
+            _TYPE_SEARCH_FAILURE_REASON = "search_field_not_cleared"
+            _perf["typing_command_ms"] = (time.perf_counter() - t_typ) * 1000
+            _perf["typing_confirm_ms"] = 0.0
+            log("error", "type_search_aborted", reason="search_field_not_cleared")
+            return False
 
-    focused = False
-    try:
-        focused = bool((ed.info or {}).get("focused"))
-    except Exception:
-        pass
-    if not focused:
+        ed = _wait_search_edittext(d) or ed
+        preview = _search_edittext_text_strip(ed)
+        log(
+            "info",
+            "search_field_before_typing_text",
+            text_preview=preview[:100],
+            text_len=len(preview),
+            username=username,
+        )
+        if not _search_field_clear_snapshot_ok(preview, previous_username):
+            _TYPE_SEARCH_FAILURE_REASON = "search_field_not_cleared"
+            _perf["typing_command_ms"] = (time.perf_counter() - t_typ) * 1000
+            _perf["typing_confirm_ms"] = 0.0
+            log(
+                "error",
+                "search_field_clear_failed",
+                reason="non_empty_before_type",
+                preview=preview[:80],
+                is_placeholder=_is_search_placeholder(preview),
+                still_matches_previous=_field_still_matches_previous_query(
+                    preview, previous_username
+                ),
+            )
+            return False
+
+        focused = False
         try:
-            ed.click()
-            time.sleep(0.04)
+            focused = bool((ed.info or {}).get("focused"))
         except Exception:
             pass
+        if not focused:
+            try:
+                ed.click()
+                time.sleep(0.04)
+            except Exception:
+                pass
 
     typing_method = "set_text"
     used_fast_path = False
@@ -2972,15 +3294,19 @@ def type_search(
     fast_ime_switch_ok: bool | None = None
     fast_ime_broadcast_ok: bool | None = None
 
+    follow_ct_set_text_command_ok = False
+    follow_ct_set_text_ms = 0.0
     if follow_ct_typing:
         log(
             "info",
             "follow_ct_search_direct_set_text_used",
             username=str(username or "")[:80],
         )
+        t_follow_ct_set = time.perf_counter()
         try:
             ed.set_text(username)
             typing_method = "set_text"
+            follow_ct_set_text_command_ok = True
         except Exception:
             typing_method = "send_keys"
             try:
@@ -2989,6 +3315,8 @@ def type_search(
                 typing_method = "shell_input"
                 safe = username.replace(" ", "%s")
                 shell(d, f"input text {safe}")
+        follow_ct_set_text_ms = (time.perf_counter() - t_follow_ct_set) * 1000
+        _perf["follow_ct_search_set_text_ms"] = follow_ct_set_text_ms
     elif fast_ime and is_fast_ime_available(serial):
         ok_cmd, tag, fast_ime_switch_ok, fast_ime_broadcast_ok = run_fast_ime_input(
             serial, username, fast_ime_id=fast_ime
@@ -3045,28 +3373,88 @@ def type_search(
     typing_command_ms = (time.perf_counter() - t_cmd_start) * 1000
     _perf["typing_command_ms"] = typing_command_ms
 
-    def _confirm_typing_deadline() -> float:
-        return time.monotonic() + float(
-            getattr(config, "TYPING_CONFIRM_MAX_S", config.TYPE_SEARCH_CONFIRM_S)
+    if (
+        follow_ct_typing
+        and follow_ct_surface_confirmed
+        and follow_ct_set_text_command_ok
+        and strict_recent_ok
+    ):
+        log(
+            "info",
+            "follow_ct_search_typed_optimistic_after_set_text",
+            username=str(username or "")[:80],
+            set_text_ms=round(follow_ct_set_text_ms, 2),
+            strict_verify_age_ms=round(strict_recent_age_ms, 2),
+            reason="follow_ct_strict_surface_row_result_will_confirm",
         )
+        _perf["typing_confirm_ms"] = 0.0
+        _perf["follow_ct_search_field_get_text_confirm_ms"] = 0.0
+        st_log: dict = {
+            "username": username,
+            "typing_method": typing_method,
+            "typing_confirm_ms": 0.0,
+            "ok": True,
+            "typing_confirm_method": "follow_ct_optimistic_after_set_text",
+            "follow_ct_search_set_text_ms": round(follow_ct_set_text_ms, 2),
+        }
+        if fast_ime_switch_ok is not None:
+            st_log["fast_ime_switch_ok"] = fast_ime_switch_ok
+            st_log["fast_ime_broadcast_ok"] = bool(fast_ime_broadcast_ok)
+        log("info", "search_typed", **st_log)
+        _mark_search_surface_ok(d, config.INSTAGRAM_PACKAGE)
+        _follow_ct_prewarm_serp_band_cache(d)
+        return True
 
-    # Non-fastIME: field text or row_search_user_username (exact handle).
     t_confirm_start = time.perf_counter()
-    deadline = _confirm_typing_deadline()
-    while time.monotonic() < deadline:
-        if _typing_confirmed(d, ed, username):
-            break
-        time.sleep(config.UI_FAST_POLL_S)
+    confirm_method = "full"
+    if follow_ct_typing:
+        ok = _typing_confirmed_follow_ct_field_only(ed, username)
+        field_get_text_ms = (time.perf_counter() - t_confirm_start) * 1000
+        _perf["follow_ct_search_field_get_text_confirm_ms"] = field_get_text_ms
+        if ok:
+            confirm_method = "follow_ct_search_typing_confirm_single_read_used"
+        if not ok:
+            ok = bool(
+                find_username_elements_by_resource_id(
+                    d, username, follow_ct_search_context=True
+                )
+            )
+            if ok:
+                confirm_method = "follow_ct_row_fallback_once"
+    else:
+        def _confirm_typing_deadline() -> float:
+            return time.monotonic() + float(
+                getattr(config, "TYPING_CONFIRM_MAX_S", config.TYPE_SEARCH_CONFIRM_S)
+            )
+
+        deadline = _confirm_typing_deadline()
+        ok = False
+        while time.monotonic() < deadline:
+            if _typing_confirmed(d, ed, username):
+                ok = True
+                break
+            time.sleep(config.UI_FAST_POLL_S)
+        if not ok:
+            ok = _typing_confirmed(d, ed, username)
+
     typing_confirm_ms = (time.perf_counter() - t_confirm_start) * 1000
 
-    ok = _typing_confirmed(d, ed, username)
-
     _perf["typing_confirm_ms"] = typing_confirm_ms
+    if follow_ct_typing:
+        log(
+            "info",
+            "follow_ct_search_typing_confirm",
+            username=str(username or "")[:80],
+            ok=ok,
+            typing_confirm_method=confirm_method,
+            typing_confirm_ms=round(typing_confirm_ms, 2),
+        )
     st_log: dict = {
         "username": username,
         "typing_method": typing_method,
         "typing_confirm_ms": round(typing_confirm_ms, 2),
         "ok": ok,
+        "typing_confirm_method": confirm_method,
     }
     if fast_ime_switch_ok is not None:
         st_log["fast_ime_switch_ok"] = fast_ime_switch_ok
