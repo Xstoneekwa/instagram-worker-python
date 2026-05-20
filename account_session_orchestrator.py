@@ -12,10 +12,18 @@ from typing import Any, Callable
 
 import uiautomator2 as u2
 
+import config
 import supabase_client
+from device import app_start, press_home
 from dm_follow_handoff import HandoffResult, prepare_dm_to_follow_handoff
 from dm_sender_engine import _resolve_dm_sender_real_send_enabled
+from instagram_navigation import verify_app_foreground
 from logs import log
+from own_profile_navigation import open_own_profile_from_bottom_nav, verify_own_profile
+from unfollow_session_orchestrator import (
+    get_last_unfollow_session_probe_summary,
+    run_unfollow_session,
+)
 from unfollow_eligibility_engine import plan_unfollow_targets
 from unfollow_settings import UNFOLLOW_MODES_DB_STRICT, load_unfollow_settings
 from welcome_list_sender import get_last_welcome_list_sender_summary
@@ -274,6 +282,343 @@ def _run_follow_to_unfollow_handoff_diagnostic(
     return summary
 
 
+def _follow_to_unfollow_probe_enabled() -> bool:
+    return bool(getattr(config, "ACCOUNT_SESSION_FOLLOW_TO_UNFOLLOW_PROBE_ENABLED", False))
+
+
+def _current_package(d: u2.Device) -> str:
+    try:
+        return str((d.app_current() or {}).get("package") or "")
+    except Exception:
+        return ""
+
+
+def _prepare_follow_to_unfollow_probe_surface(
+    d: u2.Device,
+    *,
+    account_id: str,
+    account_username: str,
+    run_id: str | None,
+) -> dict[str, Any]:
+    """
+    H2-only surface prep before the Unfollow probe.
+
+    This intentionally does not open Following; the Unfollow orchestrator keeps
+    ownership of identity guard, own profile navigation, Following open, and harvest.
+    """
+    t0 = time.perf_counter()
+    aid = str(account_id or "").strip()
+    uname = str(account_username or "").strip()
+    pkg = str(getattr(config, "INSTAGRAM_PACKAGE", "") or "com.instagram.android")
+    method = "home_app_start_own_profile"
+    out: dict[str, Any] = {
+        "surface_prep_attempted": True,
+        "surface_prep_ok": False,
+        "surface_prep_method": method,
+        "surface_prep_ms": 0.0,
+        "surface_prep_failure_reason": "",
+        "current_package": _current_package(d),
+        "own_profile_verified": False,
+    }
+
+    def _finish(ok: bool, failure_reason: str = "") -> dict[str, Any]:
+        out["surface_prep_ok"] = bool(ok)
+        out["surface_prep_failure_reason"] = str(failure_reason or "")
+        out["current_package"] = _current_package(d)
+        out["surface_prep_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
+        log(
+            "info",
+            "follow_to_unfollow_probe_surface_prep_completed",
+            account_id=aid,
+            account_username=uname,
+            run_id=run_id,
+            ok=out["surface_prep_ok"],
+            method=out["surface_prep_method"],
+            duration_ms=out["surface_prep_ms"],
+            current_package=out["current_package"] or None,
+            failure_reason=out["surface_prep_failure_reason"] or None,
+            own_profile_verified=out["own_profile_verified"],
+        )
+        if not ok:
+            log(
+                "error",
+                "follow_to_unfollow_probe_surface_prep_failed",
+                account_id=aid,
+                account_username=uname,
+                run_id=run_id,
+                method=out["surface_prep_method"],
+                duration_ms=out["surface_prep_ms"],
+                current_package=out["current_package"] or None,
+                failure_reason=out["surface_prep_failure_reason"] or "surface_prep_failed",
+            )
+        return out
+
+    log(
+        "info",
+        "follow_to_unfollow_probe_surface_prep_started",
+        account_id=aid,
+        account_username=uname,
+        run_id=run_id,
+        method=method,
+        current_package=out["current_package"] or None,
+    )
+
+    try:
+        press_home(d)
+        time.sleep(0.3)
+        app_start(d, pkg)
+        settle_s = min(float(getattr(config, "APP_START_WAIT_S", 2.5) or 2.5), 2.5)
+        if settle_s > 0:
+            time.sleep(settle_s)
+
+        if not verify_app_foreground(d, pkg):
+            return _finish(False, "instagram_not_foreground_after_app_start")
+
+        if not open_own_profile_from_bottom_nav(d):
+            return _finish(False, "own_profile_open_failed")
+
+        verified, meta = verify_own_profile(d, uname)
+        out["own_profile_verified"] = bool(verified)
+        out["own_profile_meta"] = meta
+        if not verified:
+            return _finish(False, "own_profile_verify_failed")
+
+        return _finish(True)
+    except Exception as e:
+        out["surface_prep_exception"] = str(e)
+        return _finish(False, "surface_prep_exception")
+
+
+def _probe_summary_from_unfollow_summary(
+    *,
+    enabled: bool,
+    executed: bool,
+    probe_only: bool,
+    exit_code: int | None,
+    unfollow_summary: dict[str, Any],
+    skip_reason: str = "",
+) -> dict[str, Any]:
+    actions_sent = int(unfollow_summary.get("unfollow_actions_sent") or 0)
+    return {
+        "enabled": bool(enabled),
+        "executed": bool(executed),
+        "probe_only": bool(probe_only),
+        "status": str(unfollow_summary.get("status") or ""),
+        "exit_code": exit_code,
+        "following_surface_ok": bool(unfollow_summary.get("following_surface_ok")),
+        "visible_rows_count": int(unfollow_summary.get("visible_rows_count") or 0),
+        "visible_plan_matches_count": int(
+            unfollow_summary.get("visible_plan_matches_count") or 0
+        ),
+        "unfollow_actions_sent": actions_sent,
+        "unfollow_actions_verified": int(unfollow_summary.get("unfollow_actions_verified") or 0),
+        "failure_reason": str(unfollow_summary.get("failure_reason") or ""),
+        "total_ms": float(unfollow_summary.get("total_ms") or 0.0),
+        "skip_reason": str(skip_reason or ""),
+    }
+
+
+def _skip_follow_to_unfollow_probe(
+    *,
+    account_id: str,
+    account_username: str,
+    run_id: str | None,
+    probe_enabled: bool,
+    skip_reason: str,
+    diagnostic: dict[str, Any],
+) -> dict[str, Any]:
+    summary = {
+        "enabled": bool(probe_enabled),
+        "executed": False,
+        "probe_only": True,
+        "skip_reason": str(skip_reason or "probe_skipped"),
+        "status": "skipped",
+        "unfollow_actions_sent": 0,
+        "unfollow_actions_verified": 0,
+    }
+    log(
+        "info",
+        "follow_to_unfollow_handoff_probe_skipped",
+        account_id=account_id,
+        account_username=account_username,
+        run_id=run_id,
+        skip_reason=summary["skip_reason"],
+        handoff_would_run=bool(diagnostic.get("handoff_would_run")),
+        probe_enabled=bool(probe_enabled),
+        unfollow_enabled=bool(diagnostic.get("unfollow_enabled")),
+        unfollow_mode=str(diagnostic.get("unfollow_mode") or ""),
+        has_pending_unfollow=bool(diagnostic.get("has_pending_unfollow")),
+    )
+    return summary
+
+
+def _run_follow_to_unfollow_probe(
+    d: u2.Device,
+    *,
+    account_id: str,
+    account_username: str,
+    run_id: str | None,
+    follow_exit_code: int | None,
+    follow_total_ms: float,
+    diagnostic: dict[str, Any],
+) -> dict[str, Any]:
+    """H2 only: forced Unfollow probe. Never dispatches real Unfollow."""
+    t0 = time.perf_counter()
+    aid = str(account_id or "").strip()
+    uname = str(account_username or "").strip()
+    mode = str(diagnostic.get("unfollow_mode") or "")
+    pending_count = int(diagnostic.get("pending_unfollow_count") or 0)
+    surface_prep: dict[str, Any] = {}
+
+    log(
+        "info",
+        "follow_to_unfollow_handoff_probe_started",
+        account_id=aid,
+        account_username=uname,
+        run_id=run_id,
+        previous_phase="follow",
+        follow_exit_code=follow_exit_code,
+        follow_total_ms=round(float(follow_total_ms), 2),
+        unfollow_mode=mode,
+        pending_unfollow_count=pending_count,
+        probe_only=True,
+    )
+
+    try:
+        surface_prep = _prepare_follow_to_unfollow_probe_surface(
+            d,
+            account_id=aid,
+            account_username=uname,
+            run_id=run_id,
+        )
+        if not bool(surface_prep.get("surface_prep_ok")):
+            out = {
+                "enabled": True,
+                "executed": False,
+                "probe_only": True,
+                "status": "skipped",
+                "exit_code": None,
+                "following_surface_ok": False,
+                "visible_rows_count": 0,
+                "visible_plan_matches_count": 0,
+                "unfollow_actions_sent": 0,
+                "unfollow_actions_verified": 0,
+                "failure_reason": str(
+                    surface_prep.get("surface_prep_failure_reason")
+                    or "surface_prep_failed"
+                ),
+                "skip_reason": "surface_prep_failed",
+                "total_ms": round((time.perf_counter() - t0) * 1000.0, 2),
+                **surface_prep,
+            }
+            log(
+                "info",
+                "follow_to_unfollow_handoff_probe_skipped",
+                account_id=aid,
+                account_username=uname,
+                run_id=run_id,
+                skip_reason=out["skip_reason"],
+                failure_reason=out["failure_reason"],
+                probe_only=True,
+                surface_prep_attempted=out.get("surface_prep_attempted"),
+                surface_prep_ok=out.get("surface_prep_ok"),
+                surface_prep_method=out.get("surface_prep_method"),
+                surface_prep_ms=out.get("surface_prep_ms"),
+                surface_prep_failure_reason=out.get("surface_prep_failure_reason"),
+                unfollow_actions_sent=0,
+            )
+            return out
+
+        # Protection H2: call the low-level probe API with dry_probe_only=True.
+        exit_code = run_unfollow_session(
+            d,
+            account_id=aid,
+            account_username=uname,
+            run_id=run_id,
+            dry_probe_only=True,
+        )
+        unfollow_summary = get_last_unfollow_session_probe_summary()
+        out = _probe_summary_from_unfollow_summary(
+            enabled=True,
+            executed=True,
+            probe_only=True,
+            exit_code=int(exit_code),
+            unfollow_summary=unfollow_summary,
+        )
+        out.update(surface_prep)
+        out["total_ms"] = float(unfollow_summary.get("total_ms") or round((time.perf_counter() - t0) * 1000.0, 2))
+        if int(out.get("unfollow_actions_sent") or 0) != 0:
+            out["status"] = "failed_probe_actions_sent_nonzero"
+            out["failure_reason"] = "probe_actions_sent_nonzero"
+            log(
+                "error",
+                "follow_to_unfollow_handoff_probe_failed",
+                account_id=aid,
+                account_username=uname,
+                run_id=run_id,
+                probe_only=True,
+                failure_reason=out["failure_reason"],
+                unfollow_actions_sent=out.get("unfollow_actions_sent"),
+            )
+        log(
+            "info",
+            "follow_to_unfollow_handoff_probe_completed",
+            account_id=aid,
+            account_username=uname,
+            run_id=run_id,
+            probe_only=True,
+            status=out.get("status"),
+            exit_code=out.get("exit_code"),
+            following_surface_ok=out.get("following_surface_ok"),
+            visible_rows_count=out.get("visible_rows_count"),
+            visible_plan_matches_count=out.get("visible_plan_matches_count"),
+            unfollow_actions_sent=out.get("unfollow_actions_sent"),
+            unfollow_actions_verified=out.get("unfollow_actions_verified"),
+            failure_reason=out.get("failure_reason"),
+            surface_prep_attempted=out.get("surface_prep_attempted"),
+            surface_prep_ok=out.get("surface_prep_ok"),
+            surface_prep_method=out.get("surface_prep_method"),
+            surface_prep_ms=out.get("surface_prep_ms"),
+            surface_prep_failure_reason=out.get("surface_prep_failure_reason"),
+            total_ms=out.get("total_ms"),
+        )
+        return out
+    except Exception as e:
+        out = {
+            "enabled": True,
+            "executed": True,
+            "probe_only": True,
+            "status": "failed_exception",
+            "exit_code": 1,
+            "following_surface_ok": False,
+            "visible_rows_count": 0,
+            "visible_plan_matches_count": 0,
+            "unfollow_actions_sent": 0,
+            "unfollow_actions_verified": 0,
+            "failure_reason": str(e),
+            "total_ms": round((time.perf_counter() - t0) * 1000.0, 2),
+            **surface_prep,
+        }
+        log(
+            "error",
+            "follow_to_unfollow_handoff_probe_failed",
+            account_id=aid,
+            account_username=uname,
+            run_id=run_id,
+            probe_only=True,
+            status=out["status"],
+            failure_reason=out["failure_reason"],
+            surface_prep_attempted=out.get("surface_prep_attempted"),
+            surface_prep_ok=out.get("surface_prep_ok"),
+            surface_prep_method=out.get("surface_prep_method"),
+            surface_prep_ms=out.get("surface_prep_ms"),
+            surface_prep_failure_reason=out.get("surface_prep_failure_reason"),
+            unfollow_actions_sent=0,
+            total_ms=out["total_ms"],
+        )
+        return out
+
+
 def run_account_session(
     d: u2.Device,
     *,
@@ -402,6 +747,17 @@ def run_account_session(
     follow_t0 = follow_t1 = 0.0
     handoff_result: HandoffResult | None = None
     follow_to_unfollow_diagnostic: dict[str, Any] = {}
+    follow_to_unfollow_probe: dict[str, Any] = {
+        "enabled": _follow_to_unfollow_probe_enabled(),
+        "executed": False,
+        "probe_only": True,
+        "skip_reason": "probe_disabled"
+        if not _follow_to_unfollow_probe_enabled()
+        else "follow_phase_not_completed",
+        "status": "skipped",
+        "unfollow_actions_sent": 0,
+        "unfollow_actions_verified": 0,
+    }
 
     run_follow, transition_reason = _should_run_follow_after_welcome(
         welcome_enabled=welcome_enabled,
@@ -503,6 +859,38 @@ def run_account_session(
                 follow_total_ms=(follow_t1 - follow_t0) * 1000.0,
                 session_started_at=t0,
             )
+            probe_enabled = _follow_to_unfollow_probe_enabled()
+            if not probe_enabled:
+                follow_to_unfollow_probe = _skip_follow_to_unfollow_probe(
+                    account_id=aid,
+                    account_username=uname,
+                    run_id=run_id,
+                    probe_enabled=False,
+                    skip_reason="probe_disabled",
+                    diagnostic=follow_to_unfollow_diagnostic,
+                )
+            elif not bool(follow_to_unfollow_diagnostic.get("handoff_would_run")):
+                follow_to_unfollow_probe = _skip_follow_to_unfollow_probe(
+                    account_id=aid,
+                    account_username=uname,
+                    run_id=run_id,
+                    probe_enabled=True,
+                    skip_reason=str(
+                        follow_to_unfollow_diagnostic.get("handoff_skip_reason")
+                        or "handoff_gates_not_met"
+                    ),
+                    diagnostic=follow_to_unfollow_diagnostic,
+                )
+            else:
+                follow_to_unfollow_probe = _run_follow_to_unfollow_probe(
+                    d,
+                    account_id=aid,
+                    account_username=uname,
+                    run_id=run_id,
+                    follow_exit_code=follow_exit_code,
+                    follow_total_ms=(follow_t1 - follow_t0) * 1000.0,
+                    diagnostic=follow_to_unfollow_diagnostic,
+                )
 
     session_status = _account_session_status(
         transition_reason=transition_reason,
@@ -580,6 +968,7 @@ def run_account_session(
             "unfollow_plan_reason"
         ),
         follow_to_unfollow_diagnostic_ms=follow_to_unfollow_diagnostic.get("diagnostic_ms"),
+        follow_to_unfollow_probe=follow_to_unfollow_probe,
         handoff_ok=handoff_result.ok if handoff_result is not None else None,
         handoff_reason=handoff_result.reason if handoff_result is not None else None,
         handoff_surface_label=handoff_result.surface_label if handoff_result is not None else None,
