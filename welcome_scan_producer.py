@@ -259,6 +259,27 @@ def run_welcome_scan_producer(
 
         usernames_seen_total = len(runtime_seen)
 
+        if ordered_handles:
+            try:
+                supabase_client.mark_followbacks_from_seen_followers(
+                    aid,
+                    ordered_handles,
+                    source="welcome_followers_scan",
+                )
+            except Exception as e:
+                log(
+                    "warning",
+                    "followback_memory_mark_failed",
+                    account_id=aid,
+                    source="welcome_followers_scan",
+                    input_count=len(ordered_handles),
+                    normalized_count=0,
+                    updated_count=0,
+                    matched_count=0,
+                    duration_ms=0.0,
+                    error=str(e)[:500],
+                )
+
         known_map = supabase_client.fetch_followers_by_usernames(aid, ordered_handles)
 
         log(

@@ -1786,6 +1786,133 @@ def fetch_followers_by_usernames(
     return out
 
 
+def mark_followbacks_from_seen_followers(
+    account_id: str,
+    follower_usernames: list[str],
+    source: str = "followers_scan",
+) -> dict[str, Any]:
+    """Mark existing bot-followed interacted users as following back when seen in Followers."""
+    t0 = datetime.now(timezone.utc)
+    aid = str(account_id or "").strip()
+    src = str(source or "followers_scan").strip() or "followers_scan"
+    keys: list[str] = []
+    seen: set[str] = set()
+    for raw in follower_usernames:
+        key = _canonical_interaction_username(str(raw or ""))
+        if not key or key in seen:
+            continue
+        if _invalid_interacted_username_reason(key) is not None:
+            continue
+        seen.add(key)
+        keys.append(key)
+
+    started = datetime.now(timezone.utc)
+    log(
+        "info",
+        "followback_memory_mark_started",
+        account_id=aid,
+        source=src,
+        input_count=len(follower_usernames or []),
+        normalized_count=len(keys),
+    )
+
+    if not aid or not keys:
+        duration_ms = round((datetime.now(timezone.utc) - t0).total_seconds() * 1000.0, 2)
+        out = {
+            "ok": True,
+            "account_id": aid,
+            "source": src,
+            "input_count": len(follower_usernames or []),
+            "normalized_count": len(keys),
+            "matched_count": 0,
+            "updated_count": 0,
+            "skipped_count": len(follower_usernames or []) - len(keys),
+            "duration_ms": duration_ms,
+        }
+        log("info", "followback_memory_mark_completed", **out)
+        return out
+
+    now = _utc_now_iso()
+    matched_usernames: set[str] = set()
+    chunk_size = 100
+    try:
+        for i in range(0, len(keys), chunk_size):
+            chunk = keys[i : i + chunk_size]
+            in_clause = ",".join(chunk)
+            base_query = {
+                "select": "id,username",
+                "account_id": f"eq.{aid}",
+                "username": f"in.({in_clause})",
+                "followed_by_bot": "eq.true",
+                "follow_status": "eq.following",
+                "unfollowed_at": "is.null",
+            }
+            first_seen_rows = _request_json_tolerate_unknown_columns(
+                "PATCH",
+                "ig_interacted_users",
+                query={**base_query, "followback_detected_at": "is.null"},
+                body={
+                    "is_following_back": True,
+                    "followback_detected_at": now,
+                    "updated_at": now,
+                },
+                prefer_representation=True,
+            )
+            if isinstance(first_seen_rows, list):
+                for row in first_seen_rows:
+                    if isinstance(row, dict):
+                        username = _canonical_interaction_username(str(row.get("username") or ""))
+                        if username:
+                            matched_usernames.add(username)
+
+            rows = _request_json_tolerate_unknown_columns(
+                "PATCH",
+                "ig_interacted_users",
+                query=base_query,
+                body={
+                    "is_following_back": True,
+                    "updated_at": now,
+                },
+                prefer_representation=True,
+            )
+            if isinstance(rows, list):
+                for row in rows:
+                    if isinstance(row, dict):
+                        username = _canonical_interaction_username(str(row.get("username") or ""))
+                        if username:
+                            matched_usernames.add(username)
+        duration_ms = round((datetime.now(timezone.utc) - started).total_seconds() * 1000.0, 2)
+        out = {
+            "ok": True,
+            "account_id": aid,
+            "source": src,
+            "input_count": len(follower_usernames or []),
+            "normalized_count": len(keys),
+            "matched_count": len(matched_usernames),
+            "updated_count": len(matched_usernames),
+            "skipped_count": len(keys) - len(matched_usernames),
+            "duration_ms": duration_ms,
+        }
+        log("info", "followback_memory_mark_completed", **out)
+        return out
+    except Exception as exc:
+        duration_ms = round((datetime.now(timezone.utc) - started).total_seconds() * 1000.0, 2)
+        out = {
+            "ok": False,
+            "account_id": aid,
+            "source": src,
+            "input_count": len(follower_usernames or []),
+            "normalized_count": len(keys),
+            "matched_count": len(matched_usernames),
+            "updated_count": len(matched_usernames),
+            "skipped_count": len(keys) - len(matched_usernames),
+            "duration_ms": duration_ms,
+            "error": str(exc)[:500],
+        }
+        log("warning", "followback_memory_mark_failed", **out)
+        return out
+
+
 def upsert_account_follower_seen_scan(
     account_id: str,
     follower_username: str,

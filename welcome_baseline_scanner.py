@@ -370,6 +370,27 @@ def run_welcome_baseline_scan(
 
         duplicate_runtime_count += dup_this_screen
 
+        if batch:
+            try:
+                supabase_client.mark_followbacks_from_seen_followers(
+                    aid,
+                    [str(u).strip().lstrip("@") for u in batch],
+                    source="welcome_baseline_followers_scan",
+                )
+            except Exception as e:
+                log(
+                    "warning",
+                    "followback_memory_mark_failed",
+                    account_id=aid,
+                    source="welcome_baseline_followers_scan",
+                    input_count=len(batch),
+                    normalized_count=0,
+                    updated_count=0,
+                    matched_count=0,
+                    duration_ms=0.0,
+                    error=str(e)[:500],
+                )
+
         to_persist = [u for u in new_handles if _norm_username(u) not in unique_persisted]
         new_persisted = 0
         if to_persist:
