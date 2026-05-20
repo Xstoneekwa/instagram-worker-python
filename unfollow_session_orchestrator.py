@@ -140,6 +140,10 @@ def _real_action_max_per_run() -> int:
     return max(0, int(getattr(config, "UNFOLLOW_SESSION_REAL_ACTION_MAX_PER_RUN", 1)))
 
 
+def _scroll_max_passes() -> int:
+    return max(0, int(getattr(config, "UNFOLLOW_SESSION_SCROLL_MAX_PASSES", 10)))
+
+
 def _base_session_summary(
     *,
     aid: str,
@@ -174,6 +178,15 @@ def _base_session_summary(
         "visible_eligibility_cache_hits": 0,
         "visible_eligibility_cache_misses": 0,
         "visible_eligibility_db_query_count": 0,
+        "visible_eligibility_total_db_queries": 0,
+        "visible_eligibility_total_cache_hits": 0,
+        "visible_eligibility_total_cache_misses": 0,
+        "visible_eligibility_total_lookup_ms": 0.0,
+        "visible_eligibility_total_eval_ms": 0.0,
+        "multi_action_mode": False,
+        "scroll_passes_used": 0,
+        "scroll_stop_reason": "",
+        "multi_action_stop_reason": "",
         "probe_target_username": "",
         "probe_target_selection_reason": "",
         "real_target_username": "",
@@ -315,6 +328,517 @@ def _evaluate_visible_unfollow_with_session_cache(
         visible_eligibility_cache_size=len(row_cache),
     )
     return visible_eval
+
+
+def _aggregate_visible_perf_totals(totals: dict[str, Any], visible_eval: dict[str, Any]) -> None:
+    totals["visible_eligibility_total_db_queries"] = int(
+        totals.get("visible_eligibility_total_db_queries") or 0
+    ) + int(visible_eval.get("visible_eligibility_db_query_count") or 0)
+    totals["visible_eligibility_total_cache_hits"] = int(
+        totals.get("visible_eligibility_total_cache_hits") or 0
+    ) + int(visible_eval.get("visible_eligibility_cache_hits") or 0)
+    totals["visible_eligibility_total_cache_misses"] = int(
+        totals.get("visible_eligibility_total_cache_misses") or 0
+    ) + int(visible_eval.get("visible_eligibility_cache_misses") or 0)
+    totals["visible_eligibility_total_lookup_ms"] = round(
+        float(totals.get("visible_eligibility_total_lookup_ms") or 0.0)
+        + float(visible_eval.get("visible_eligibility_lookup_ms") or 0.0),
+        2,
+    )
+    totals["visible_eligibility_total_eval_ms"] = round(
+        float(totals.get("visible_eligibility_total_eval_ms") or 0.0)
+        + float(visible_eval.get("visible_eligibility_eval_ms") or 0.0),
+        2,
+    )
+
+
+def _scroll_following_list_for_unfollow(d: u2.Device, *, account_username: str) -> dict[str, Any]:
+    try:
+        w, h = d.window_size()
+    except Exception:
+        w, h = 1080, 2400
+    x = int(w * 0.50)
+    y_start = int(h * 0.78)
+    y_end = int(h * 0.36)
+    out = {
+        "ok": False,
+        "failure_reason": "",
+        "tap_x": x,
+        "start_y": y_start,
+        "end_y": y_end,
+    }
+    try:
+        d.swipe(x, y_start, x, y_end, 0.10)
+    except Exception as exc:
+        out["failure_reason"] = "swipe_failed"
+        out["error"] = str(exc)[:200]
+        return out
+    time.sleep(0.55)
+    det = detect_own_following_list_screen(d, account_username=account_username)
+    out["surface_detection"] = det
+    if not det.get("is_following_list"):
+        out["failure_reason"] = str(det.get("failure_reason") or "following_surface_lost_after_scroll")
+        return out
+    out["ok"] = True
+    return out
+
+
+def _run_real_unfollow_multi_loop(
+    d: u2.Device,
+    *,
+    aid: str,
+    uname: str,
+    run_id: str | None,
+    settings: Any,
+    base_summary: dict[str, Any],
+    planned_usernames: set[str],
+    planned_by_username: dict[str, dict[str, Any]],
+    rows: list[dict[str, Any]],
+    harvest_meta: dict[str, Any],
+    harvest_fields: dict[str, Any],
+    visible_eligibility_row_cache: dict[str, dict[str, Any] | None],
+    real_action_max: int,
+    t0: float,
+) -> int:
+    verified = 0
+    sent = 0
+    failed = 0
+    persisted = 0
+    scroll_passes_used = 0
+    scroll_stop_reason = ""
+    stop_reason = ""
+    completed_usernames: set[str] = set()
+    last_fields = dict(harvest_fields)
+    totals: dict[str, Any] = {
+        "visible_eligibility_total_db_queries": 0,
+        "visible_eligibility_total_cache_hits": 0,
+        "visible_eligibility_total_cache_misses": 0,
+        "visible_eligibility_total_lookup_ms": 0.0,
+        "visible_eligibility_total_eval_ms": 0.0,
+    }
+    max_scroll_passes = _scroll_max_passes()
+
+    def emit_final(status: str, failure_reason: str = "") -> int:
+        event_name = (
+            "unfollow_multi_action_loop_stopped"
+            if status.startswith("failed_")
+            else "unfollow_multi_action_loop_completed"
+        )
+        log(
+            "info",
+            event_name,
+            status=status,
+            stop_reason=stop_reason or status,
+            failure_reason=failure_reason,
+            unfollow_actions_verified_so_far=verified,
+            real_action_max_per_run=real_action_max,
+            scroll_passes_used=scroll_passes_used,
+            scroll_stop_reason=scroll_stop_reason,
+        )
+        summary = {
+            **base_summary,
+            **last_fields,
+            **totals,
+            "multi_action_mode": True,
+            "real_action_max_per_run": real_action_max,
+            "unfollow_actions_sent": sent,
+            "unfollow_actions_verified": verified,
+            "unfollow_actions_failed": failed,
+            "unfollow_results_persisted_count": persisted,
+            "scroll_passes_used": scroll_passes_used,
+            "scroll_stop_reason": scroll_stop_reason,
+            "multi_action_stop_reason": stop_reason or status,
+            "status": status,
+            "failure_reason": failure_reason,
+            "total_ms": round((time.perf_counter() - t0) * 1000.0, 2),
+        }
+        _emit_summary(summary)
+        return 0 if not status.startswith("failed_") else 1
+
+    log(
+        "info",
+        "unfollow_multi_action_loop_started",
+        account_id=aid,
+        account_username=uname,
+        real_action_max_per_run=real_action_max,
+        scroll_max_passes=max_scroll_passes,
+    )
+
+    iteration_index = 0
+    while verified < real_action_max:
+        iteration_index += 1
+        log(
+            "info",
+            "unfollow_multi_action_iteration_started",
+            iteration_index=iteration_index,
+            unfollow_actions_verified_so_far=verified,
+            real_action_max_per_run=real_action_max,
+            scroll_passes_used=scroll_passes_used,
+        )
+
+        while True:
+            visible_usernames = [str(row.get("username") or "") for row in rows]
+            visible_eval = _evaluate_visible_unfollow_with_session_cache(
+                aid,
+                visible_usernames,
+                settings=settings,
+                row_cache=visible_eligibility_row_cache,
+            )
+            _aggregate_visible_perf_totals(totals, visible_eval)
+            visible_candidates = _visible_candidates_by_username(visible_eval)
+            for done in completed_usernames:
+                visible_candidates.pop(done, None)
+            eval_fields = {
+                **_harvest_summary_fields(rows, harvest_meta, planned_usernames),
+                **_visible_eligibility_summary_fields(visible_eval),
+            }
+            eval_fields.update(
+                {
+                    "visible_eligible_matches_count": len(visible_candidates),
+                    "visible_eligible_matches_usernames": [
+                        str(c.get("username") or "")
+                        for c in visible_candidates.values()
+                    ][:50],
+                }
+            )
+            selection_t0 = time.perf_counter()
+            target_row, selection_reason = _select_visible_eligible_target_row(
+                rows,
+                visible_candidates,
+            )
+            eval_fields["visible_target_selection_ms"] = round(
+                (time.perf_counter() - selection_t0) * 1000.0,
+                2,
+            )
+            last_fields = {**last_fields, **eval_fields}
+            if target_row is not None:
+                break
+
+            log(
+                "info",
+                "unfollow_multi_action_target_exhausted_in_viewport",
+                iteration_index=iteration_index,
+                unfollow_actions_verified_so_far=verified,
+                real_action_max_per_run=real_action_max,
+                visible_eligible_matches_count=0,
+                scroll_passes_used=scroll_passes_used,
+            )
+            if scroll_passes_used >= max_scroll_passes:
+                scroll_stop_reason = "scroll_budget_exhausted"
+                stop_reason = "eligible_targets_exhausted"
+                log(
+                    "info",
+                    "unfollow_multi_action_loop_completed",
+                    stop_reason=stop_reason,
+                    scroll_stop_reason=scroll_stop_reason,
+                    unfollow_actions_verified_so_far=verified,
+                    real_action_max_per_run=real_action_max,
+                )
+                status = (
+                    "success_real_unfollow_multi_partial_exhausted"
+                    if verified > 0
+                    else "no_visible_eligible_unfollow_target"
+                )
+                return emit_final(status)
+
+            log(
+                "info",
+                "unfollow_multi_action_scroll_started",
+                iteration_index=iteration_index,
+                unfollow_actions_verified_so_far=verified,
+                real_action_max_per_run=real_action_max,
+                scroll_passes_used=scroll_passes_used,
+            )
+            before_scroll_keys = _visible_username_keys(
+                [str(row.get("username") or "") for row in rows]
+            )
+            scroll = _scroll_following_list_for_unfollow(d, account_username=uname)
+            if not scroll.get("ok"):
+                scroll_stop_reason = str(scroll.get("failure_reason") or "following_surface_lost_after_scroll")
+                stop_reason = "scroll_surface_lost"
+                log(
+                    "info",
+                    "unfollow_multi_action_scroll_surface_lost",
+                    iteration_index=iteration_index,
+                    scroll_passes_used=scroll_passes_used,
+                    stop_reason=stop_reason,
+                    failure_reason=scroll_stop_reason,
+                )
+                return emit_final("failed_unfollow_multi_action", scroll_stop_reason)
+            scroll_passes_used += 1
+            rows, harvest_meta = harvest_visible_following_rows_for_unfollow(d, account_username=uname)
+            after_scroll_keys = _visible_username_keys(
+                [str(row.get("username") or "") for row in rows]
+            )
+            log(
+                "info",
+                "unfollow_multi_action_scroll_completed",
+                iteration_index=iteration_index,
+                unfollow_actions_verified_so_far=verified,
+                real_action_max_per_run=real_action_max,
+                visible_rows_count=len(rows),
+                scroll_passes_used=scroll_passes_used,
+                before_scroll_usernames=before_scroll_keys[:20],
+                after_scroll_usernames=after_scroll_keys[:20],
+            )
+            if after_scroll_keys and after_scroll_keys == before_scroll_keys:
+                scroll_stop_reason = "end_of_list_or_no_new_rows_detected"
+                stop_reason = "eligible_targets_exhausted"
+                log(
+                    "info",
+                    "unfollow_multi_action_loop_completed",
+                    stop_reason=stop_reason,
+                    scroll_stop_reason=scroll_stop_reason,
+                    unfollow_actions_verified_so_far=verified,
+                    real_action_max_per_run=real_action_max,
+                    scroll_passes_used=scroll_passes_used,
+                )
+                status = (
+                    "success_real_unfollow_multi_partial_exhausted"
+                    if verified > 0
+                    else "no_visible_eligible_unfollow_target"
+                )
+                return emit_final(status)
+
+        target_username = str(target_row.get("username") or "")
+        target_key = normalize_unfollow_username(target_username)
+        log(
+            "info",
+            "unfollow_visible_eligible_target_selected",
+            username=target_username,
+            username_normalized=target_key,
+            row_index=int(target_row.get("row_index") or 0),
+            selection_reason=selection_reason,
+            visible_match_source=str(last_fields.get("visible_match_source") or ""),
+        )
+        log(
+            "info",
+            "unfollow_real_target_selected",
+            username=target_username,
+            username_normalized=target_key,
+            row_index=int(target_row.get("row_index") or 0),
+            selection_reason=selection_reason,
+            row_cta_class=str(target_row.get("row_cta_class") or ""),
+            cta_text=str(target_row.get("cta_text") or "")[:80],
+        )
+
+        target_fields = {
+            **last_fields,
+            "probe_target_username": "",
+            "probe_target_selection_reason": "",
+            "real_target_username": target_username,
+        }
+        tapped, tap_meta = tap_following_list_username_row_for_unfollow_probe(
+            d,
+            target_row,
+            selection_reason=selection_reason,
+        )
+        if not tapped:
+            failed += 1
+            stop_reason = "target_row_tap_failed"
+            last_fields = {**target_fields, "unfollow_actions_failed": failed}
+            return emit_final(
+                "failed_unfollow_multi_action",
+                str(tap_meta.get("failure_reason") or "target_row_tap_failed"),
+            )
+
+        profile_det = verify_unfollow_target_profile_strict(
+            d,
+            expected_target_username=target_username,
+        )
+        if not profile_det.get("ok"):
+            failed += 1
+            stop_reason = "target_profile_open_failed"
+            ret = return_to_following_list_after_unfollow_action(d, account_username=uname)
+            last_fields = {
+                **target_fields,
+                "target_profile_open_ok": False,
+                "return_to_following_list_ok": bool(ret.get("ok")),
+                "unfollow_actions_failed": failed,
+            }
+            return emit_final(
+                "failed_unfollow_multi_action",
+                str(profile_det.get("failure_reason") or "target_profile_open_failed"),
+            )
+
+        sheet = open_unfollow_actions_sheet_from_profile_probe(
+            d,
+            expected_target_username=target_username,
+        )
+        if not sheet.get("ok"):
+            failed += 1
+            stop_reason = "actions_sheet_open_failed"
+            ret = return_to_following_list_after_unfollow_action(d, account_username=uname)
+            last_fields = {
+                **target_fields,
+                "target_profile_open_ok": True,
+                "following_actions_sheet_open_ok": False,
+                "return_to_following_list_ok": bool(ret.get("ok")),
+                "unfollow_actions_failed": failed,
+            }
+            return emit_final(
+                "failed_unfollow_multi_action",
+                str(sheet.get("failure_reason") or "actions_sheet_open_failed"),
+            )
+        if not bool(sheet.get("unfollow_option_visible")):
+            failed += 1
+            stop_reason = "unfollow_option_missing"
+            ret = return_to_following_list_after_unfollow_action(d, account_username=uname)
+            last_fields = {
+                **target_fields,
+                "target_profile_open_ok": True,
+                "following_actions_sheet_open_ok": True,
+                "unfollow_option_visible": False,
+                "return_to_following_list_ok": bool(ret.get("ok")),
+                "unfollow_actions_failed": failed,
+            }
+            return emit_final("failed_unfollow_multi_action", "unfollow_option_missing")
+
+        tap_out = tap_unfollow_in_following_sheet(d, target_username=target_username)
+        if tap_out.get("ok"):
+            sent += 1
+        else:
+            failed += 1
+            stop_reason = "unfollow_tap_failed"
+            ret = return_to_following_list_after_unfollow_action(d, account_username=uname)
+            last_fields = {
+                **target_fields,
+                "target_profile_open_ok": True,
+                "following_actions_sheet_open_ok": True,
+                "unfollow_option_visible": True,
+                "return_to_following_list_ok": bool(ret.get("ok")),
+                "unfollow_actions_sent": sent,
+                "unfollow_actions_failed": failed,
+            }
+            return emit_final(
+                "failed_unfollow_multi_action",
+                str(tap_out.get("failure_reason") or "unfollow_tap_failed"),
+            )
+
+        verify_out = verify_unfollow_action_success_after_tap(d, target_username=target_username)
+        verify_ok = bool(verify_out.get("ok"))
+        cand = (
+            _visible_candidates_by_username({"visible_eligible_matches": list(visible_candidates.values())}).get(target_key)
+            or planned_by_username.get(target_key)
+            or {}
+        )
+        persist_out = supabase_client.record_unfollow_interaction_outcome(
+            aid,
+            target_username,
+            run_id=run_id,
+            unfollow_ok=verify_ok,
+            unfollow_mode_applied=str(settings.mode or ""),
+            interaction_row_id=str(cand.get("interaction_row_id") or cand.get("id") or "").strip() or None,
+            failure_reason=str(verify_out.get("failure_reason") or tap_out.get("failure_reason") or ""),
+        )
+        persist_ok = bool(persist_out.get("ok"))
+        if persist_ok:
+            persisted += 1
+        else:
+            log(
+                "info",
+                "unfollow_result_persist_failed",
+                account_id=aid,
+                username=target_username,
+                reason=str(persist_out.get("error") or "persist_failed"),
+            )
+        ret = return_to_following_list_after_unfollow_action(d, account_username=uname)
+        return_ok = bool(ret.get("ok"))
+        if not verify_ok:
+            failed += 1
+            stop_reason = "unfollow_verify_failed"
+            last_fields = {
+                **target_fields,
+                "target_profile_open_ok": True,
+                "following_actions_sheet_open_ok": True,
+                "unfollow_option_visible": True,
+                "unfollow_actions_sent": sent,
+                "unfollow_actions_verified": verified,
+                "unfollow_actions_failed": failed,
+                "unfollow_results_persisted_count": persisted,
+                "unfollow_action_verify_ok": False,
+                "unfollow_persistence_ok": persist_ok,
+                "return_to_following_list_ok": return_ok,
+            }
+            return emit_final(
+                "failed_unfollow_multi_action",
+                str(verify_out.get("failure_reason") or "unfollow_verify_failed"),
+            )
+        if not persist_ok:
+            failed += 1
+            stop_reason = "unfollow_persistence_failed"
+            last_fields = {
+                **target_fields,
+                "target_profile_open_ok": True,
+                "following_actions_sheet_open_ok": True,
+                "unfollow_option_visible": True,
+                "unfollow_actions_sent": sent,
+                "unfollow_actions_verified": verified,
+                "unfollow_actions_failed": failed,
+                "unfollow_results_persisted_count": persisted,
+                "unfollow_action_verify_ok": True,
+                "unfollow_persistence_ok": False,
+                "return_to_following_list_ok": return_ok,
+            }
+            return emit_final(
+                "failed_unfollow_multi_action",
+                str(persist_out.get("error") or "unfollow_persistence_failed"),
+            )
+        if not return_ok:
+            failed += 1
+            stop_reason = "return_to_following_list_failed"
+            last_fields = {
+                **target_fields,
+                "target_profile_open_ok": True,
+                "following_actions_sheet_open_ok": True,
+                "unfollow_option_visible": True,
+                "unfollow_actions_sent": sent,
+                "unfollow_actions_verified": verified,
+                "unfollow_actions_failed": failed,
+                "unfollow_results_persisted_count": persisted,
+                "unfollow_action_verify_ok": True,
+                "unfollow_persistence_ok": True,
+                "return_to_following_list_ok": False,
+            }
+            return emit_final("failed_unfollow_multi_action", "return_to_following_list_failed")
+
+        verified += 1
+        completed_usernames.add(target_key)
+        visible_eligibility_row_cache[target_key] = None
+        last_fields = {
+            **target_fields,
+            "target_profile_open_ok": True,
+            "following_actions_sheet_open_ok": True,
+            "unfollow_option_visible": True,
+            "unfollow_actions_sent": sent,
+            "unfollow_actions_verified": verified,
+            "unfollow_actions_failed": failed,
+            "unfollow_results_persisted_count": persisted,
+            "unfollow_action_verify_ok": True,
+            "unfollow_persistence_ok": True,
+            "return_to_following_list_ok": True,
+        }
+        log(
+            "info",
+            "unfollow_multi_action_iteration_completed",
+            iteration_index=iteration_index,
+            target_username=target_username,
+            unfollow_actions_verified_so_far=verified,
+            real_action_max_per_run=real_action_max,
+            scroll_passes_used=scroll_passes_used,
+        )
+        rows, harvest_meta = harvest_visible_following_rows_for_unfollow(d, account_username=uname)
+
+    stop_reason = "limit_reached"
+    log(
+        "info",
+        "unfollow_multi_action_loop_completed",
+        stop_reason=stop_reason,
+        unfollow_actions_verified_so_far=verified,
+        real_action_max_per_run=real_action_max,
+        scroll_passes_used=scroll_passes_used,
+    )
+    return emit_final("success_real_unfollow_multi_limit_reached")
 
 
 def run_unfollow_session(
@@ -495,6 +1019,24 @@ def run_unfollow_session(
             **post_sort_harvest_fields,
             **sort_fields,
         }
+
+    if real_action_active:
+        return _run_real_unfollow_multi_loop(
+            d,
+            aid=aid,
+            uname=uname,
+            run_id=run_id,
+            settings=settings,
+            base_summary=base_summary,
+            planned_usernames=planned_usernames,
+            planned_by_username=planned_by_username,
+            rows=rows,
+            harvest_meta=harvest_meta,
+            harvest_fields=harvest_fields,
+            visible_eligibility_row_cache=visible_eligibility_row_cache,
+            real_action_max=real_action_max,
+            t0=t0,
+        )
 
     visible_usernames = [str(row.get("username") or "") for row in rows]
     visible_eval = _evaluate_visible_unfollow_with_session_cache(

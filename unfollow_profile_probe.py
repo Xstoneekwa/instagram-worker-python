@@ -29,6 +29,11 @@ _FOLLOWING_BUTTON_LABELS = (
     "Siguiendo",
     "Gefolgt",
 )
+_FOLLOWING_BUTTON_MAX_PRE_TAP_SHIFT_PX = 140
+
+
+def _elapsed_ms(start: float) -> float:
+    return round((time.perf_counter() - start) * 1000.0, 2)
 
 
 def _dump_hierarchy(d: u2.Device) -> str:
@@ -39,6 +44,12 @@ def _dump_hierarchy(d: u2.Device) -> str:
             return str(d.dump_hierarchy() or "")
     except Exception:
         return ""
+
+
+def _dump_hierarchy_with_timing(d: u2.Device) -> tuple[str, float]:
+    start = time.perf_counter()
+    hierarchy = _dump_hierarchy(d)
+    return hierarchy, _elapsed_ms(start)
 
 
 def _parse_xml_root(hierarchy_xml: str) -> ET.Element | None:
@@ -72,6 +83,19 @@ def _bounds_center(bounds: dict[str, Any]) -> tuple[int, int] | None:
     if right <= left or bottom <= top:
         return None
     return (left + right) // 2, (top + bottom) // 2
+
+
+def _center_shift_metrics(
+    initial_bounds: dict[str, Any],
+    refreshed_bounds: dict[str, Any],
+) -> tuple[int, int, int]:
+    initial_center = _bounds_center(initial_bounds)
+    refreshed_center = _bounds_center(refreshed_bounds)
+    if initial_center is None or refreshed_center is None:
+        return 0, 0, 0
+    delta_x = int(refreshed_center[0] - initial_center[0])
+    delta_y = int(refreshed_center[1] - initial_center[1])
+    return delta_x, delta_y, max(abs(delta_x), abs(delta_y))
 
 
 def _safe_window_size(d: u2.Device) -> tuple[int, int]:
@@ -153,8 +177,9 @@ def detect_profile_following_button_for_unfollow(
     helper because profiles opened from the owner's Following list can place the
     CTA below bio / followed-by / link content.
     """
+    total_start = time.perf_counter()
     screen_w, screen_h = _safe_window_size(d)
-    hierarchy = _dump_hierarchy(d)
+    hierarchy, dump_ms = _dump_hierarchy_with_timing(d)
     root = _parse_xml_root(hierarchy)
     reject_reasons_count: dict[str, int] = {}
     candidates_seen = 0
@@ -162,7 +187,7 @@ def detect_profile_following_button_for_unfollow(
     best: dict[str, Any] | None = None
 
     if root is None:
-        return {
+        out = {
             "ok": False,
             "failure_reason": "hierarchy_xml_parse_failed",
             "expected_target_username": expected_target_username,
@@ -170,6 +195,19 @@ def detect_profile_following_button_for_unfollow(
             "candidates_rejected_count": 0,
             "reject_reasons_count": {},
         }
+        log(
+            "info",
+            "unfollow_perf_following_button_detect_ms",
+            expected_target_username=expected_target_username,
+            ok=False,
+            failure_reason="hierarchy_xml_parse_failed",
+            total_ms=_elapsed_ms(total_start),
+            dump_hierarchy_ms=dump_ms,
+            hierarchy_xml_len=len(str(hierarchy or "")),
+            candidates_seen_count=0,
+            candidates_rejected_count=0,
+        )
+        return out
 
     for el in root.iter():
         text = str(el.get("text") or "").strip()
@@ -228,7 +266,7 @@ def detect_profile_following_button_for_unfollow(
             best = accepted
 
     if best is None:
-        return {
+        out = {
             "ok": False,
             "failure_reason": "following_button_not_found",
             "expected_target_username": expected_target_username,
@@ -236,6 +274,19 @@ def detect_profile_following_button_for_unfollow(
             "candidates_rejected_count": candidates_rejected,
             "reject_reasons_count": reject_reasons_count,
         }
+        log(
+            "info",
+            "unfollow_perf_following_button_detect_ms",
+            expected_target_username=expected_target_username,
+            ok=False,
+            failure_reason="following_button_not_found",
+            total_ms=_elapsed_ms(total_start),
+            dump_hierarchy_ms=dump_ms,
+            hierarchy_xml_len=len(str(hierarchy or "")),
+            candidates_seen_count=candidates_seen,
+            candidates_rejected_count=candidates_rejected,
+        )
+        return out
 
     out = {
         "ok": True,
@@ -257,6 +308,18 @@ def detect_profile_following_button_for_unfollow(
         "reject_reasons_count": reject_reasons_count,
     }
     log("info", "unfollow_profile_following_button_detected", **out)
+    log(
+        "info",
+        "unfollow_perf_following_button_detect_ms",
+        expected_target_username=expected_target_username,
+        ok=True,
+        failure_reason="",
+        total_ms=_elapsed_ms(total_start),
+        dump_hierarchy_ms=dump_ms,
+        hierarchy_xml_len=len(str(hierarchy or "")),
+        candidates_seen_count=candidates_seen,
+        candidates_rejected_count=candidates_rejected,
+    )
     return out
 
 
@@ -429,6 +492,7 @@ def _element_bounds(el: Any) -> dict[str, int]:
 
 
 def _detect_actions_sheet_signals(d: u2.Device) -> dict[str, Any]:
+    start = time.perf_counter()
     mute_el, mute_text, mute_method = _find_text(
         d,
         ("Mute", "Mettre en sourdine", "Sourdine"),
@@ -441,7 +505,7 @@ def _detect_actions_sheet_signals(d: u2.Device) -> dict[str, Any]:
         d,
         ("Unfollow", "Ne plus suivre"),
     )
-    return {
+    out = {
         "mute_visible": mute_el is not None,
         "mute_text": mute_text,
         "mute_detection_method": mute_method,
@@ -452,22 +516,43 @@ def _detect_actions_sheet_signals(d: u2.Device) -> dict[str, Any]:
         "unfollow_text": unfollow_text,
         "unfollow_detection_method": unfollow_method,
     }
+    log(
+        "info",
+        "unfollow_perf_actions_sheet_signal_detect_ms",
+        total_ms=_elapsed_ms(start),
+        mute_visible=bool(out["mute_visible"]),
+        restrict_visible=bool(out["restrict_visible"]),
+        unfollow_visible=bool(out["unfollow_visible"]),
+    )
+    return out
 
 
 def detect_unfollow_option_in_following_sheet(d: u2.Device) -> dict[str, Any]:
     """Detect the exact Unfollow option in the open Following actions sheet."""
+    total_start = time.perf_counter()
     el, text, method = _find_text(d, ("Unfollow", "Ne plus suivre"))
     if el is None:
-        return {
+        out = {
             "ok": False,
             "failure_reason": "unfollow_option_not_found",
             "option_text": "",
             "detection_method": "",
             "bounds": {},
         }
+        log(
+            "info",
+            "unfollow_perf_unfollow_option_detect_ms",
+            ok=False,
+            failure_reason="unfollow_option_not_found",
+            total_ms=_elapsed_ms(total_start),
+            bounds_info_ms=0.0,
+        )
+        return out
+    bounds_start = time.perf_counter()
     bounds = _element_bounds(el)
+    bounds_info_ms = _elapsed_ms(bounds_start)
     center = _bounds_center(bounds)
-    return {
+    out = {
         "ok": center is not None,
         "failure_reason": "" if center is not None else "unfollow_option_bounds_missing",
         "option_text": text,
@@ -476,6 +561,17 @@ def detect_unfollow_option_in_following_sheet(d: u2.Device) -> dict[str, Any]:
         "tap_x": int(center[0]) if center else 0,
         "tap_y": int(center[1]) if center else 0,
     }
+    log(
+        "info",
+        "unfollow_perf_unfollow_option_detect_ms",
+        ok=bool(out["ok"]),
+        failure_reason=str(out["failure_reason"]),
+        total_ms=_elapsed_ms(total_start),
+        bounds_info_ms=bounds_info_ms,
+        option_text=text,
+        detection_method=method,
+    )
+    return out
 
 
 def tap_unfollow_in_following_sheet(
@@ -521,13 +617,19 @@ def tap_unfollow_in_following_sheet(
     return out
 
 
-def _profile_follow_state_after_unfollow(d: u2.Device) -> str:
+def _exact_follow_button_visible_after_unfollow(d: u2.Device) -> bool:
     for label in ("Follow", "Suivre"):
         try:
             if d(text=label).exists(timeout=0.08):
-                return "follow"
+                return True
         except Exception:
             continue
+    return False
+
+
+def _profile_follow_state_after_unfollow(d: u2.Device) -> str:
+    if _exact_follow_button_visible_after_unfollow(d):
+        return "follow"
     det = detect_profile_following_button_for_unfollow(d, expected_target_username="")
     if det.get("ok"):
         return "following"
@@ -542,31 +644,86 @@ def verify_unfollow_action_success_after_tap(
 ) -> dict[str, Any]:
     """Verify minimal post-unfollow success: sheet closed and Following no longer visible."""
     log("info", "unfollow_action_verify_started", target_username=target_username)
-    deadline = time.monotonic() + max(0.5, float(timeout_s))
+    timeout = max(0.5, float(timeout_s))
+    deadline = time.monotonic() + timeout
+    fast_path_deadline = time.monotonic() + min(1.5, max(0.5, timeout * 0.45))
     sheet_closed = False
-    profile_follow_state_after = ""
+    profile_follow_state_after = "unknown"
+    iterations = 0
+    follow_visible = False
     while time.monotonic() < deadline:
+        iterations += 1
+        phase_start = time.perf_counter()
         signals = _detect_actions_sheet_signals(d)
+        sheet_signal_check_ms = _elapsed_ms(phase_start)
         sheet_closed = not bool(
             signals.get("mute_visible")
             or signals.get("restrict_visible")
             or signals.get("unfollow_visible")
         )
-        profile_follow_state_after = _profile_follow_state_after_unfollow(d)
-        following_absent = profile_follow_state_after != "following"
-        if sheet_closed and following_absent:
+        follow_start = time.perf_counter()
+        follow_visible = _exact_follow_button_visible_after_unfollow(d)
+        follow_exact_check_ms = _elapsed_ms(follow_start)
+        log(
+            "info",
+            "unfollow_perf_post_tap_verify_phase",
+            target_username=target_username,
+            phase="fast_path",
+            iteration=iterations,
+            sheet_closed=sheet_closed,
+            follow_visible=follow_visible,
+            sheet_signal_check_ms=sheet_signal_check_ms,
+            follow_exact_check_ms=follow_exact_check_ms,
+            fallback_following_absent_check_ms=0.0,
+        )
+        if sheet_closed and follow_visible:
             out = {
                 "ok": True,
                 "verification_method": "sheet_closed_and_profile_following_absent",
                 "sheet_closed": True,
                 "profile_following_absent": True,
-                "profile_follow_state_after": profile_follow_state_after,
+                "profile_follow_state_after": "follow",
                 "failure_reason": "",
                 "target_username": target_username,
+                "verify_iterations": iterations,
             }
             log("info", "unfollow_action_verified", **out)
             return out
+        if sheet_closed and time.monotonic() >= fast_path_deadline:
+            break
         time.sleep(0.25)
+
+    fallback_start = time.perf_counter()
+    det = detect_profile_following_button_for_unfollow(d, expected_target_username="")
+    fallback_ms = _elapsed_ms(fallback_start)
+    profile_follow_state_after = "following" if det.get("ok") else "following_absent"
+    following_absent = profile_follow_state_after != "following"
+    log(
+        "info",
+        "unfollow_perf_post_tap_verify_phase",
+        target_username=target_username,
+        phase="fallback_following_absent",
+        iteration=iterations + 1,
+        sheet_closed=sheet_closed,
+        follow_visible=follow_visible,
+        sheet_signal_check_ms=0.0,
+        follow_exact_check_ms=0.0,
+        fallback_following_absent_check_ms=fallback_ms,
+        profile_follow_state_after=profile_follow_state_after,
+    )
+    if sheet_closed and following_absent:
+        out = {
+            "ok": True,
+            "verification_method": "sheet_closed_and_profile_following_absent",
+            "sheet_closed": True,
+            "profile_following_absent": True,
+            "profile_follow_state_after": profile_follow_state_after,
+            "failure_reason": "",
+            "target_username": target_username,
+            "verify_iterations": iterations,
+        }
+        log("info", "unfollow_action_verified", **out)
+        return out
 
     out = {
         "ok": False,
@@ -576,9 +733,71 @@ def verify_unfollow_action_success_after_tap(
         "profile_follow_state_after": profile_follow_state_after or "unknown",
         "failure_reason": "unfollow_verify_conditions_not_met",
         "target_username": target_username,
+        "verify_iterations": iterations,
     }
     log("info", "unfollow_action_verify_failed", **out)
     return out
+
+
+def _following_button_visible_in_hierarchy(hierarchy_xml: str, *, d: u2.Device) -> bool:
+    root = _parse_xml_root(hierarchy_xml)
+    if root is None:
+        return False
+    screen_w, screen_h = _safe_window_size(d)
+    for el in root.iter():
+        text = str(el.get("text") or "").strip()
+        content_desc = str(el.get("content-desc") or "").strip()
+        label_ok, _ = _following_button_label_match(text, content_desc)
+        if not label_ok:
+            continue
+        bounds = _parse_bounds_attr(el.get("bounds"))
+        if not _unfollow_button_bounds_reject_reason(bounds, screen_w=screen_w, screen_h=screen_h):
+            return True
+    return False
+
+
+def _post_following_tap_evidence(d: u2.Device) -> dict[str, Any]:
+    hierarchy, dump_ms = _dump_hierarchy_with_timing(d)
+    profile_username, method, meta = _extract_profile_username_from_hierarchy(hierarchy)
+    return {
+        "action_bar_title_after_tap": str(meta.get("action_bar_title") or ""),
+        "profile_username_after_tap": profile_username,
+        "profile_username_method_after_tap": method,
+        "following_button_still_visible_after_tap": _following_button_visible_in_hierarchy(hierarchy, d=d),
+        "hierarchy_len_after_tap": len(str(hierarchy or "")),
+        "post_tap_hierarchy_dump_ms": dump_ms,
+    }
+
+
+def _actions_sheet_open_from_signals(signals: dict[str, Any]) -> bool:
+    return bool(
+        signals.get("mute_visible")
+        or signals.get("restrict_visible")
+        or signals.get("unfollow_visible")
+    )
+
+
+def _following_tap_retry_block_reason(
+    evidence: dict[str, Any],
+    *,
+    expected_target_username: str,
+) -> str:
+    expected = normalize_unfollow_username(expected_target_username)
+    action_bar_title = normalize_unfollow_username(
+        str(evidence.get("action_bar_title_after_tap") or "")
+    )
+    profile_username = normalize_unfollow_username(
+        str(evidence.get("profile_username_after_tap") or "")
+    )
+    if not expected:
+        return "expected_target_username_missing"
+    if action_bar_title != expected:
+        return "action_bar_title_after_tap_mismatch"
+    if profile_username != expected:
+        return "profile_username_after_tap_mismatch"
+    if not bool(evidence.get("following_button_still_visible_after_tap")):
+        return "following_button_not_visible_after_tap"
+    return ""
 
 
 def open_unfollow_actions_sheet_from_profile_probe(
@@ -606,10 +825,91 @@ def open_unfollow_actions_sheet_from_profile_probe(
         log("info", "unfollow_actions_sheet_open_failed", **out)
         return out
 
-    method = str(btn_det.get("detection_method") or "")
-    bounds = dict(btn_det.get("bounds") or {})
-    tap_x = int(btn_det.get("tap_x") or btn_det.get("center_x") or 0)
-    tap_y = int(btn_det.get("tap_y") or btn_det.get("center_y") or 0)
+    initial_bounds = dict(btn_det.get("bounds") or {})
+    log(
+        "info",
+        "unfollow_profile_following_button_pre_tap_revalidation_started",
+        expected_target_username=expected_target_username,
+        initial_bounds=initial_bounds,
+        revalidation_method="detect_profile_following_button_for_unfollow",
+    )
+    refreshed = detect_profile_following_button_for_unfollow(
+        d,
+        expected_target_username=expected_target_username,
+    )
+    refreshed_bounds = dict(refreshed.get("bounds") or {})
+    delta_x, delta_y, bounds_shift_px = _center_shift_metrics(initial_bounds, refreshed_bounds)
+    revalidation_failure = ""
+    initial_resource_id = str(btn_det.get("resource_id") or "")
+    refreshed_resource_id = str(refreshed.get("resource_id") or "")
+    if not refreshed.get("ok"):
+        revalidation_failure = "following_button_pre_tap_revalidation_failed"
+    elif initial_resource_id and refreshed_resource_id and initial_resource_id != refreshed_resource_id:
+        revalidation_failure = "following_button_semantic_identity_changed"
+    elif bool(btn_det.get("clickable")) and not bool(refreshed.get("clickable")):
+        revalidation_failure = "following_button_no_longer_clickable"
+    elif bounds_shift_px > _FOLLOWING_BUTTON_MAX_PRE_TAP_SHIFT_PX:
+        revalidation_failure = "following_button_bounds_shift_too_large"
+
+    if revalidation_failure:
+        log(
+            "info",
+            "unfollow_profile_following_button_pre_tap_revalidation_failed",
+            expected_target_username=expected_target_username,
+            initial_bounds=initial_bounds,
+            refreshed_bounds=refreshed_bounds,
+            center_delta_x=delta_x,
+            center_delta_y=delta_y,
+            bounds_shift_px=bounds_shift_px,
+            revalidation_method=str(refreshed.get("detection_method") or ""),
+            failure_reason=revalidation_failure,
+        )
+        out = {
+            "ok": False,
+            "failure_reason": revalidation_failure,
+            "expected_target_username": expected_target_username,
+            "following_detection_method": str(btn_det.get("detection_method") or ""),
+            "unfollow_option_visible": False,
+            "sheet_context_signals": {},
+            "initial_bounds": initial_bounds,
+            "refreshed_bounds": refreshed_bounds,
+            "center_delta_x": delta_x,
+            "center_delta_y": delta_y,
+            "bounds_shift_px": bounds_shift_px,
+        }
+        log("info", "unfollow_actions_sheet_open_failed", **out)
+        return out
+
+    if bounds_shift_px > 0:
+        log(
+            "info",
+            "unfollow_profile_following_button_bounds_refreshed",
+            expected_target_username=expected_target_username,
+            initial_bounds=initial_bounds,
+            refreshed_bounds=refreshed_bounds,
+            center_delta_x=delta_x,
+            center_delta_y=delta_y,
+            bounds_shift_px=bounds_shift_px,
+            revalidation_method=str(refreshed.get("detection_method") or ""),
+            failure_reason="",
+        )
+    log(
+        "info",
+        "unfollow_profile_following_button_pre_tap_revalidated",
+        expected_target_username=expected_target_username,
+        initial_bounds=initial_bounds,
+        refreshed_bounds=refreshed_bounds,
+        center_delta_x=delta_x,
+        center_delta_y=delta_y,
+        bounds_shift_px=bounds_shift_px,
+        revalidation_method=str(refreshed.get("detection_method") or ""),
+        failure_reason="",
+    )
+
+    method = str(refreshed.get("detection_method") or btn_det.get("detection_method") or "")
+    bounds = refreshed_bounds
+    tap_x = int(refreshed.get("tap_x") or refreshed.get("center_x") or 0)
+    tap_y = int(refreshed.get("tap_y") or refreshed.get("center_y") or 0)
     try:
         d.click(tap_x, tap_y)
     except Exception as exc:
@@ -624,6 +924,11 @@ def open_unfollow_actions_sheet_from_profile_probe(
             "bounds": bounds,
             "tap_x": tap_x,
             "tap_y": tap_y,
+            "initial_bounds": initial_bounds,
+            "refreshed_bounds": refreshed_bounds,
+            "center_delta_x": delta_x,
+            "center_delta_y": delta_y,
+            "bounds_shift_px": bounds_shift_px,
         }
         log("info", "unfollow_actions_sheet_open_failed", **out)
         return out
@@ -635,15 +940,16 @@ def open_unfollow_actions_sheet_from_profile_probe(
         bounds=bounds,
         tap_x=tap_x,
         tap_y=tap_y,
+        initial_bounds=initial_bounds,
+        refreshed_bounds=refreshed_bounds,
+        center_delta_x=delta_x,
+        center_delta_y=delta_y,
+        bounds_shift_px=bounds_shift_px,
     )
 
     time.sleep(0.85)
     signals = _detect_actions_sheet_signals(d)
-    sheet_open = bool(
-        signals.get("mute_visible")
-        or signals.get("restrict_visible")
-        or signals.get("unfollow_visible")
-    )
+    sheet_open = _actions_sheet_open_from_signals(signals)
     out = {
         "ok": sheet_open,
         "failure_reason": "" if sheet_open else "actions_sheet_signals_missing",
@@ -653,6 +959,11 @@ def open_unfollow_actions_sheet_from_profile_probe(
         "option_text": str(signals.get("unfollow_text") or ""),
         "detection_method": str(signals.get("unfollow_detection_method") or ""),
         "sheet_context_signals": signals,
+        "initial_bounds": initial_bounds,
+        "refreshed_bounds": refreshed_bounds,
+        "center_delta_x": delta_x,
+        "center_delta_y": delta_y,
+        "bounds_shift_px": bounds_shift_px,
     }
     if sheet_open:
         log("info", "unfollow_actions_sheet_opened", **out)
@@ -673,6 +984,186 @@ def open_unfollow_actions_sheet_from_profile_probe(
                 expected_target_username=expected_target_username,
             )
     else:
+        post_tap_evidence = _post_following_tap_evidence(d)
+        out.update(post_tap_evidence)
+        retry_block_reason = _following_tap_retry_block_reason(
+            post_tap_evidence,
+            expected_target_username=expected_target_username,
+        )
+        if not retry_block_reason:
+            log(
+                "info",
+                "unfollow_profile_following_button_tap_retry_started",
+                expected_target_username=expected_target_username,
+                retry_index=1,
+                refreshed_bounds_retry={},
+                tap_x=0,
+                tap_y=0,
+                sheet_open_after_retry=False,
+                failure_reason="",
+                action_bar_title_after_tap=str(post_tap_evidence.get("action_bar_title_after_tap") or ""),
+                profile_username_after_tap=str(post_tap_evidence.get("profile_username_after_tap") or ""),
+                following_button_still_visible_after_tap=bool(
+                    post_tap_evidence.get("following_button_still_visible_after_tap")
+                ),
+            )
+            retry_det = detect_profile_following_button_for_unfollow(
+                d,
+                expected_target_username=expected_target_username,
+            )
+            refreshed_bounds_retry = dict(retry_det.get("bounds") or {})
+            retry_tap_x = int(retry_det.get("tap_x") or retry_det.get("center_x") or 0)
+            retry_tap_y = int(retry_det.get("tap_y") or retry_det.get("center_y") or 0)
+            retry_failure_reason = ""
+            if not retry_det.get("ok"):
+                retry_failure_reason = str(
+                    retry_det.get("failure_reason") or "following_button_retry_revalidation_failed"
+                )
+            log(
+                "info",
+                "unfollow_profile_following_button_tap_retry_revalidated",
+                expected_target_username=expected_target_username,
+                retry_index=1,
+                refreshed_bounds_retry=refreshed_bounds_retry,
+                tap_x=retry_tap_x,
+                tap_y=retry_tap_y,
+                sheet_open_after_retry=False,
+                failure_reason=retry_failure_reason,
+                retry_detection_method=str(retry_det.get("detection_method") or ""),
+            )
+            if retry_failure_reason:
+                log(
+                    "info",
+                    "unfollow_profile_following_button_tap_retry_failed",
+                    expected_target_username=expected_target_username,
+                    retry_index=1,
+                    refreshed_bounds_retry=refreshed_bounds_retry,
+                    tap_x=retry_tap_x,
+                    tap_y=retry_tap_y,
+                    sheet_open_after_retry=False,
+                    failure_reason=retry_failure_reason,
+                )
+            else:
+                try:
+                    d.click(retry_tap_x, retry_tap_y)
+                    log(
+                        "info",
+                        "unfollow_profile_following_button_tap_retry_tapped",
+                        expected_target_username=expected_target_username,
+                        retry_index=1,
+                        refreshed_bounds_retry=refreshed_bounds_retry,
+                        tap_x=retry_tap_x,
+                        tap_y=retry_tap_y,
+                        sheet_open_after_retry=False,
+                        failure_reason="",
+                    )
+                    time.sleep(0.85)
+                    retry_signals = _detect_actions_sheet_signals(d)
+                    sheet_open_after_retry = _actions_sheet_open_from_signals(retry_signals)
+                    if sheet_open_after_retry:
+                        out.update(
+                            {
+                                "ok": True,
+                                "failure_reason": "",
+                                "following_detection_method": str(
+                                    retry_det.get("detection_method") or method
+                                ),
+                                "unfollow_option_visible": bool(
+                                    retry_signals.get("unfollow_visible")
+                                ),
+                                "option_text": str(retry_signals.get("unfollow_text") or ""),
+                                "detection_method": str(
+                                    retry_signals.get("unfollow_detection_method") or ""
+                                ),
+                                "sheet_context_signals": retry_signals,
+                                "retry_index": 1,
+                                "refreshed_bounds_retry": refreshed_bounds_retry,
+                                "retry_tap_x": retry_tap_x,
+                                "retry_tap_y": retry_tap_y,
+                                "sheet_open_after_retry": True,
+                            }
+                        )
+                        log(
+                            "info",
+                            "unfollow_profile_following_button_tap_retry_succeeded",
+                            expected_target_username=expected_target_username,
+                            retry_index=1,
+                            refreshed_bounds_retry=refreshed_bounds_retry,
+                            tap_x=retry_tap_x,
+                            tap_y=retry_tap_y,
+                            sheet_open_after_retry=True,
+                            failure_reason="",
+                        )
+                        log("info", "unfollow_actions_sheet_opened", **out)
+                        if retry_signals.get("unfollow_visible"):
+                            log(
+                                "info",
+                                "unfollow_actions_sheet_unfollow_option_detected",
+                                option_text=str(retry_signals.get("unfollow_text") or ""),
+                                detection_method=str(
+                                    retry_signals.get("unfollow_detection_method") or ""
+                                ),
+                                sheet_context_signals=retry_signals,
+                                expected_target_username=expected_target_username,
+                            )
+                        else:
+                            log(
+                                "warning",
+                                "unfollow_actions_sheet_unfollow_option_missing",
+                                sheet_context_signals=retry_signals,
+                                expected_target_username=expected_target_username,
+                            )
+                        return out
+                    retry_failure_reason = "actions_sheet_signals_missing_after_retry"
+                    log(
+                        "info",
+                        "unfollow_profile_following_button_tap_retry_failed",
+                        expected_target_username=expected_target_username,
+                        retry_index=1,
+                        refreshed_bounds_retry=refreshed_bounds_retry,
+                        tap_x=retry_tap_x,
+                        tap_y=retry_tap_y,
+                        sheet_open_after_retry=False,
+                        failure_reason=retry_failure_reason,
+                    )
+                    out.update(
+                        {
+                            "retry_index": 1,
+                            "refreshed_bounds_retry": refreshed_bounds_retry,
+                            "retry_tap_x": retry_tap_x,
+                            "retry_tap_y": retry_tap_y,
+                            "sheet_open_after_retry": False,
+                            "retry_failure_reason": retry_failure_reason,
+                            "sheet_context_signals_after_retry": retry_signals,
+                        }
+                    )
+                except Exception as exc:
+                    retry_failure_reason = "following_button_retry_tap_failed"
+                    log(
+                        "info",
+                        "unfollow_profile_following_button_tap_retry_failed",
+                        expected_target_username=expected_target_username,
+                        retry_index=1,
+                        refreshed_bounds_retry=refreshed_bounds_retry,
+                        tap_x=retry_tap_x,
+                        tap_y=retry_tap_y,
+                        sheet_open_after_retry=False,
+                        failure_reason=retry_failure_reason,
+                        error=str(exc)[:200],
+                    )
+                    out.update(
+                        {
+                            "retry_index": 1,
+                            "refreshed_bounds_retry": refreshed_bounds_retry,
+                            "retry_tap_x": retry_tap_x,
+                            "retry_tap_y": retry_tap_y,
+                            "sheet_open_after_retry": False,
+                            "retry_failure_reason": retry_failure_reason,
+                            "retry_error": str(exc)[:200],
+                        }
+                    )
+        else:
+            out["retry_skipped_reason"] = retry_block_reason
         log("info", "unfollow_actions_sheet_open_failed", **out)
     return out
 

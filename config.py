@@ -237,9 +237,10 @@ SESSION_TOTAL_FOLLOWS_CAP = 0
 SESSION_TOTAL_UNFOLLOWS_CAP = 0
 SESSION_TOTAL_LIKES_CAP = 0
 SESSION_TOTAL_PM_CAP = 0
-# Unfollow session real action gate. Default is probe-only; Phase 2C allows at most 1 real unfollow/run.
+# Unfollow session real action gate. Default is probe-only; Phase 2E validation allows up to 10 real unfollows/run.
 UNFOLLOW_SESSION_REAL_ACTION_ENABLED = _env_bool("UNFOLLOW_SESSION_REAL_ACTION_ENABLED", False)
-UNFOLLOW_SESSION_REAL_ACTION_MAX_PER_RUN = max(0, min(_env_int("UNFOLLOW_SESSION_REAL_ACTION_MAX_PER_RUN", 1), 1))
+UNFOLLOW_SESSION_REAL_ACTION_MAX_PER_RUN = max(0, min(_env_int("UNFOLLOW_SESSION_REAL_ACTION_MAX_PER_RUN", 1), 10))
+UNFOLLOW_SESSION_SCROLL_MAX_PASSES = max(0, min(_env_int("UNFOLLOW_SESSION_SCROLL_MAX_PASSES", 10), 50))
 SESSION_TOTAL_INTERACTIONS_LIMIT = 0
 SESSION_TOTAL_SUCCESSFUL_INTERACTIONS_LIMIT = 0
 # When True, session exit code stays non-zero if configured quotas/phases are unmet (strict mode).
