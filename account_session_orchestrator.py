@@ -16,6 +16,8 @@ import supabase_client
 from dm_follow_handoff import HandoffResult, prepare_dm_to_follow_handoff
 from dm_sender_engine import _resolve_dm_sender_real_send_enabled
 from logs import log
+from unfollow_eligibility_engine import plan_unfollow_targets
+from unfollow_settings import UNFOLLOW_MODES_DB_STRICT, load_unfollow_settings
 from welcome_list_sender import get_last_welcome_list_sender_summary
 from welcome_scan_producer import get_last_welcome_scan_summary
 from welcome_session_orchestrator import dispatch_welcome_session_send
@@ -111,6 +113,165 @@ def _account_session_status(
     if follow_exit_code in (0, 97, 98):
         return "success"
     return "failed"
+
+
+def _follow_exit_handoff_gate(follow_exit_code: int | None) -> tuple[bool, str]:
+    if follow_exit_code == 0:
+        return True, "follow_completed"
+    if follow_exit_code == 97:
+        return True, "follow_partial_safe_stop_probe_candidate"
+    if follow_exit_code == 98:
+        return False, "follow_exit_code_not_allowed"
+    if follow_exit_code is None:
+        return False, "follow_not_executed"
+    return False, "follow_exit_code_not_allowed"
+
+
+def _run_follow_to_unfollow_handoff_diagnostic(
+    *,
+    account_id: str,
+    account_username: str,
+    run_id: str | None,
+    followers_source_username: str,
+    follow_phase_executed: bool,
+    follow_exit_code: int | None,
+    follow_total_ms: float,
+    session_started_at: float,
+) -> dict[str, Any]:
+    """H1 only: DB/settings diagnostic, no Unfollow dispatch and no UI navigation."""
+    diag_t0 = time.perf_counter()
+    aid = str(account_id or "").strip()
+    uname = str(account_username or "").strip()
+    src = str(followers_source_username or "").strip()
+    session_elapsed_ms = (time.perf_counter() - float(session_started_at)) * 1000.0
+
+    log(
+        "info",
+        "follow_to_unfollow_handoff_diagnostic_started",
+        account_id=aid,
+        account_username=uname,
+        run_id=run_id,
+        followers_source_username=src or None,
+        previous_phase="follow",
+        follow_phase_executed=bool(follow_phase_executed),
+        follow_exit_code=follow_exit_code,
+        follow_engine_exit_code=follow_exit_code,
+        follow_total_ms=round(float(follow_total_ms), 2),
+    )
+
+    summary: dict[str, Any] = {
+        "status": "completed",
+        "account_id": aid,
+        "account_username": uname,
+        "run_id": run_id,
+        "followers_source_username": src or None,
+        "follow_phase_executed": bool(follow_phase_executed),
+        "follow_exit_code": follow_exit_code,
+        "follow_engine_exit_code": follow_exit_code,
+        "follow_total_ms": round(float(follow_total_ms), 2),
+        "previous_phase": "follow",
+        "diagnostic_only": True,
+        "handoff_would_run": False,
+        "would_launch_unfollow": False,
+        "handoff_decision": "would_skip_unfollow",
+        "handoff_skip_reason": "",
+        "pending_unfollow_count": 0,
+        "pending_unfollow_count_scope": "probe_limit_1",
+        "has_pending_unfollow": False,
+        "unfollow_enabled": False,
+        "unfollow_mode": "",
+        "unfollow_sort_mode": "",
+        "unfollow_session_limit": 0,
+        "unfollow_plan_reason": "",
+        "plan_reason": "",
+        "unfollow_plan_skipped_counts": {},
+        "skipped_counts": {},
+        "session_elapsed_ms": round(session_elapsed_ms, 2),
+        "session_time_remaining_ms": None,
+        "diagnostic_ms": 0.0,
+    }
+
+    skip_reasons: list[str] = []
+    if not aid or not uname:
+        skip_reasons.append("missing_account_context")
+    follow_gate_ok, follow_gate_reason = _follow_exit_handoff_gate(follow_exit_code)
+    if not follow_phase_executed:
+        skip_reasons.append("follow_phase_not_executed")
+    if not follow_gate_ok:
+        skip_reasons.append(follow_gate_reason)
+
+    try:
+        settings = load_unfollow_settings(aid, ensure_row=False)
+        plan = plan_unfollow_targets(
+            aid,
+            settings=settings,
+            limit=1,
+        )
+
+        pending_unfollow_count = int(plan.get("candidates_count") or 0)
+        plan_reason = str(plan.get("plan_reason") or "")
+        mode = str(settings.mode or "")
+
+        summary.update(
+            {
+                "pending_unfollow_count": pending_unfollow_count,
+                "has_pending_unfollow": pending_unfollow_count > 0,
+                "unfollow_enabled": bool(settings.enabled),
+                "unfollow_mode": mode,
+                "unfollow_sort_mode": str(settings.sort_mode or ""),
+                "unfollow_session_limit": int(settings.session_limit),
+                "unfollow_plan_reason": plan_reason,
+                "plan_reason": plan_reason,
+                "unfollow_plan_skipped_counts": dict(plan.get("skipped_counts") or {}),
+                "skipped_counts": dict(plan.get("skipped_counts") or {}),
+            }
+        )
+
+        if not bool(settings.enabled):
+            skip_reasons.append("unfollow_disabled")
+        if mode not in UNFOLLOW_MODES_DB_STRICT:
+            skip_reasons.append(
+                "unfollow_mode_ui_dependent"
+                if mode.startswith("unfollow-any")
+                else "unfollow_mode_not_supported_offline"
+            )
+        if pending_unfollow_count <= 0:
+            skip_reasons.append("no_pending_unfollow")
+
+        unique_skip_reasons: list[str] = []
+        for reason in skip_reasons:
+            reason_s = str(reason or "").strip()
+            if reason_s and reason_s not in unique_skip_reasons:
+                unique_skip_reasons.append(reason_s)
+
+        would_launch = not unique_skip_reasons
+        summary.update(
+            {
+                "handoff_would_run": bool(would_launch),
+                "would_launch_unfollow": bool(would_launch),
+                "handoff_decision": (
+                    "would_launch_unfollow" if would_launch else "would_skip_unfollow"
+                ),
+                "handoff_skip_reason": (
+                    "" if would_launch else (unique_skip_reasons[0] if unique_skip_reasons else "unknown")
+                ),
+                "handoff_skip_reasons": unique_skip_reasons,
+            }
+        )
+    except Exception as e:
+        summary.update(
+            {
+                "status": "failed",
+                "handoff_decision": "would_skip_unfollow",
+                "handoff_skip_reason": "pending_count_failed",
+                "handoff_skip_reasons": ["pending_count_failed"],
+                "diagnostic_error": str(e),
+            }
+        )
+
+    summary["diagnostic_ms"] = round((time.perf_counter() - diag_t0) * 1000.0, 2)
+    log("info", "follow_to_unfollow_handoff_diagnostic_completed", **summary)
+    return summary
 
 
 def run_account_session(
@@ -240,6 +401,7 @@ def run_account_session(
     follow_exit_code: int | None = None
     follow_t0 = follow_t1 = 0.0
     handoff_result: HandoffResult | None = None
+    follow_to_unfollow_diagnostic: dict[str, Any] = {}
 
     run_follow, transition_reason = _should_run_follow_after_welcome(
         welcome_enabled=welcome_enabled,
@@ -331,6 +493,16 @@ def run_account_session(
                 follow_engine_exit_code=follow_exit_code,
                 follow_total_ms=round((follow_t1 - follow_t0) * 1000.0, 2),
             )
+            follow_to_unfollow_diagnostic = _run_follow_to_unfollow_handoff_diagnostic(
+                account_id=aid,
+                account_username=uname,
+                run_id=run_id,
+                followers_source_username=src,
+                follow_phase_executed=follow_phase_executed,
+                follow_exit_code=follow_exit_code,
+                follow_total_ms=(follow_t1 - follow_t0) * 1000.0,
+                session_started_at=t0,
+            )
 
     session_status = _account_session_status(
         transition_reason=transition_reason,
@@ -373,6 +545,41 @@ def run_account_session(
         followers_source_username=src,
         follow_engine_exit_code=follow_exit_code,
         follow_total_ms=round((follow_t1 - follow_t0) * 1000.0, 2) if follow_phase_executed else 0.0,
+        follow_to_unfollow_handoff_diagnostic_status=follow_to_unfollow_diagnostic.get("status"),
+        follow_to_unfollow_handoff={
+            "diagnostic_only": True,
+            "would_run": follow_to_unfollow_diagnostic.get("handoff_would_run"),
+            "skip_reason": follow_to_unfollow_diagnostic.get("handoff_skip_reason"),
+            "pending_unfollow_count": follow_to_unfollow_diagnostic.get("pending_unfollow_count"),
+            "has_pending_unfollow": follow_to_unfollow_diagnostic.get("has_pending_unfollow"),
+            "unfollow_mode": follow_to_unfollow_diagnostic.get("unfollow_mode"),
+            "plan_reason": follow_to_unfollow_diagnostic.get("plan_reason"),
+        } if follow_to_unfollow_diagnostic else None,
+        follow_to_unfollow_would_launch_unfollow=follow_to_unfollow_diagnostic.get(
+            "would_launch_unfollow"
+        ),
+        follow_to_unfollow_handoff_would_run=follow_to_unfollow_diagnostic.get(
+            "handoff_would_run"
+        ),
+        follow_to_unfollow_handoff_decision=follow_to_unfollow_diagnostic.get(
+            "handoff_decision"
+        ),
+        follow_to_unfollow_handoff_skip_reason=follow_to_unfollow_diagnostic.get(
+            "handoff_skip_reason"
+        ),
+        pending_unfollow_count=follow_to_unfollow_diagnostic.get("pending_unfollow_count"),
+        has_pending_unfollow=follow_to_unfollow_diagnostic.get("has_pending_unfollow"),
+        pending_unfollow_count_scope=follow_to_unfollow_diagnostic.get(
+            "pending_unfollow_count_scope"
+        ),
+        follow_to_unfollow_unfollow_enabled=follow_to_unfollow_diagnostic.get(
+            "unfollow_enabled"
+        ),
+        follow_to_unfollow_unfollow_mode=follow_to_unfollow_diagnostic.get("unfollow_mode"),
+        follow_to_unfollow_unfollow_plan_reason=follow_to_unfollow_diagnostic.get(
+            "unfollow_plan_reason"
+        ),
+        follow_to_unfollow_diagnostic_ms=follow_to_unfollow_diagnostic.get("diagnostic_ms"),
         handoff_ok=handoff_result.ok if handoff_result is not None else None,
         handoff_reason=handoff_result.reason if handoff_result is not None else None,
         handoff_surface_label=handoff_result.surface_label if handoff_result is not None else None,
