@@ -39,7 +39,7 @@ from unfollow_profile_probe import (
     verify_unfollow_action_success_after_tap,
     verify_unfollow_target_profile_strict,
 )
-from unfollow_settings import load_unfollow_settings
+from unfollow_settings import UNFOLLOW_MODE_ANY, load_unfollow_settings
 
 _LAST_UNFOLLOW_SESSION_PROBE_SUMMARY: dict[str, Any] = {}
 
@@ -118,6 +118,23 @@ def _select_visible_eligible_target_row(
         )
         if key and key in visible_candidates_by_username:
             return row, "visible_eligible_db_lookup"
+    return None, ""
+
+
+def _select_visible_any_target_row(
+    rows: list[dict[str, Any]],
+    visible_candidates_by_username: dict[str, dict[str, Any]],
+    *,
+    completed_usernames: set[str],
+) -> tuple[dict[str, Any] | None, str]:
+    for row in rows:
+        key = normalize_unfollow_username(
+            str(row.get("username_normalized") or row.get("username") or "")
+        )
+        if not key or key in completed_usernames:
+            continue
+        if key and key in visible_candidates_by_username:
+            return row, "visible_any_safe_row"
     return None, ""
 
 
@@ -213,6 +230,10 @@ def _base_session_summary(
         "post_sort_visible_rows_count": 0,
         "pre_sort_visible_plan_matches_count": 0,
         "post_sort_visible_plan_matches_count": 0,
+        "any_mode_visible_candidates_count": 0,
+        "any_mode_whitelist_skips_count": 0,
+        "any_mode_rows_without_interaction_history_count": 0,
+        "any_mode_selected_count": 0,
     }
 
 
@@ -274,6 +295,48 @@ def _visible_eligibility_summary_fields(visible_eval: dict[str, Any]) -> dict[st
     }
 
 
+def _visible_any_summary_fields(visible_eval: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "visible_eligible_matches_count": int(
+            visible_eval.get("visible_eligible_matches_count") or 0
+        ),
+        "visible_eligible_matches_usernames": list(
+            visible_eval.get("visible_eligible_matches_usernames") or []
+        )[:50],
+        "visible_eligibility_lookup_count": int(
+            visible_eval.get("visible_eligibility_lookup_count") or 0
+        ),
+        "visible_eligibility_skip_counts": dict(
+            visible_eval.get("visible_eligibility_skip_counts") or {}
+        ),
+        "visible_match_source": str(visible_eval.get("visible_match_source") or "visible_any_ui_rows"),
+        "visible_eligibility_lookup_ms": float(
+            visible_eval.get("visible_eligibility_lookup_ms") or 0.0
+        ),
+        "visible_eligibility_eval_ms": float(
+            visible_eval.get("visible_eligibility_eval_ms") or 0.0
+        ),
+        "visible_eligibility_cache_hits": int(
+            visible_eval.get("visible_eligibility_cache_hits") or 0
+        ),
+        "visible_eligibility_cache_misses": int(
+            visible_eval.get("visible_eligibility_cache_misses") or 0
+        ),
+        "visible_eligibility_db_query_count": int(
+            visible_eval.get("visible_eligibility_db_query_count") or 0
+        ),
+        "any_mode_visible_candidates_count": int(
+            visible_eval.get("any_mode_visible_candidates_count") or 0
+        ),
+        "any_mode_whitelist_skips_count": int(
+            visible_eval.get("any_mode_whitelist_skips_count") or 0
+        ),
+        "any_mode_rows_without_interaction_history_count": int(
+            visible_eval.get("any_mode_rows_without_interaction_history_count") or 0
+        ),
+    }
+
+
 def _evaluate_visible_unfollow_with_session_cache(
     aid: str,
     visible_usernames: list[str],
@@ -330,6 +393,184 @@ def _evaluate_visible_unfollow_with_session_cache(
     return visible_eval
 
 
+def _evaluate_visible_unfollow_any_with_session_cache(
+    aid: str,
+    rows: list[dict[str, Any]],
+    *,
+    account_username: str,
+    row_cache: dict[str, dict[str, Any] | None],
+    completed_usernames: set[str],
+) -> dict[str, Any]:
+    keys = _visible_username_keys([str(row.get("username") or "") for row in rows])
+    missing = [key for key in keys if key not in row_cache]
+    cache_hits = len(keys) - len(missing)
+
+    lookup_t0 = time.perf_counter()
+    fetched: dict[str, dict[str, Any]] = {}
+    if missing:
+        fetched = supabase_client.fetch_visible_unfollow_eligibility_rows(aid, missing)
+        for key in missing:
+            row_cache[key] = fetched.get(key)
+    lookup_ms = round((time.perf_counter() - lookup_t0) * 1000.0, 2)
+
+    eval_t0 = time.perf_counter()
+    account_key = normalize_unfollow_username(account_username)
+    skip_counts: dict[str, int] = {
+        "invalid_username": 0,
+        "own_account": 0,
+        "already_completed_in_run": 0,
+        "row_cta_follow": 0,
+        "row_cta_follow_back": 0,
+        "whitelist": 0,
+    }
+    candidates: list[dict[str, Any]] = []
+    ineligible_rows: list[dict[str, Any]] = []
+    rows_without_history = 0
+    whitelist_skips = 0
+
+    for row in rows:
+        username = str(row.get("username") or "")
+        key = normalize_unfollow_username(str(row.get("username_normalized") or username))
+        row_index = int(row.get("row_index") or 0)
+        row_cta_class = str(row.get("row_cta_class") or "unknown")
+        db_row = row_cache.get(key)
+        interaction_row_id = str((db_row or {}).get("id") or "") if isinstance(db_row, dict) else ""
+        reject_reason = ""
+
+        if not key:
+            reject_reason = "invalid_username"
+        elif key == account_key:
+            reject_reason = "own_account"
+        elif key in completed_usernames:
+            reject_reason = "already_completed_in_run"
+        elif row_cta_class == "follow":
+            reject_reason = "row_cta_follow"
+        elif row_cta_class == "follow_back":
+            reject_reason = "row_cta_follow_back"
+        elif isinstance(db_row, dict) and bool(db_row.get("whitelist_protected")):
+            reject_reason = "whitelist"
+
+        if reject_reason:
+            skip_counts[reject_reason] = int(skip_counts.get(reject_reason, 0)) + 1
+            if reject_reason == "whitelist":
+                whitelist_skips += 1
+                log(
+                    "info",
+                    "unfollow_any_whitelist_skip",
+                    username=username or key,
+                    username_normalized=key,
+                    row_index=row_index,
+                    row_cta_class=row_cta_class,
+                    interaction_row_id=interaction_row_id,
+                    reject_reason=reject_reason,
+                )
+            log(
+                "info",
+                "unfollow_any_visible_candidate_rejected",
+                username=username or key,
+                username_normalized=key,
+                row_index=row_index,
+                row_cta_class=row_cta_class,
+                interaction_row_id=interaction_row_id,
+                reject_reason=reject_reason,
+            )
+            ineligible_rows.append(
+                {
+                    "username": username or key,
+                    "username_normalized": key,
+                    "visible_index": row_index,
+                    "eligible": False,
+                    "skip_reason": reject_reason,
+                    "interaction_row_id": interaction_row_id,
+                    "row_cta_class": row_cta_class,
+                }
+            )
+            continue
+
+        if db_row is None:
+            rows_without_history += 1
+        elif isinstance(db_row, dict) and db_row.get("unfollowed_at"):
+            log(
+                "info",
+                "unfollow_any_visible_following_but_db_already_unfollowed",
+                username=username or key,
+                username_normalized=key,
+                row_index=row_index,
+                row_cta_class=row_cta_class,
+                interaction_row_id=interaction_row_id,
+                unfollowed_at=db_row.get("unfollowed_at"),
+            )
+
+        candidate = {
+            "username": username or key,
+            "username_normalized": key,
+            "visible_index": row_index,
+            "interaction_row_id": interaction_row_id,
+            "row_cta_class": row_cta_class,
+            "eligibility_reason": "unfollow_any_visible_safe_row",
+            "has_interaction_history": isinstance(db_row, dict),
+        }
+        candidates.append(candidate)
+        log(
+            "info",
+            "unfollow_any_visible_candidate_allowed",
+            username=username or key,
+            username_normalized=key,
+            row_index=row_index,
+            row_cta_class=row_cta_class,
+            interaction_row_id=interaction_row_id,
+        )
+
+    eval_ms = round((time.perf_counter() - eval_t0) * 1000.0, 2)
+    out = {
+        "visible_eligible_matches": candidates,
+        "visible_ineligible_rows": ineligible_rows,
+        "visible_eligibility_skip_counts": skip_counts,
+        "visible_eligibility_lookup_count": len(keys),
+        "visible_eligible_matches_count": len(candidates),
+        "visible_eligible_matches_usernames": [
+            str(c.get("username") or "") for c in candidates
+        ],
+        "visible_match_source": "visible_any_ui_rows",
+        "visible_eligibility_lookup_ms": lookup_ms,
+        "visible_eligibility_eval_ms": eval_ms,
+        "visible_eligibility_cache_hits": cache_hits,
+        "visible_eligibility_cache_misses": len(missing),
+        "visible_eligibility_db_query_count": 1 if missing else 0,
+        "visible_eligibility_cache_size": len(row_cache),
+        "any_mode_visible_candidates_count": len(candidates),
+        "any_mode_whitelist_skips_count": whitelist_skips,
+        "any_mode_rows_without_interaction_history_count": rows_without_history,
+    }
+    log(
+        "info",
+        "unfollow_any_visible_candidates_evaluated",
+        account_id=aid,
+        visible_eligibility_lookup_count=out["visible_eligibility_lookup_count"],
+        any_mode_visible_candidates_count=out["any_mode_visible_candidates_count"],
+        any_mode_whitelist_skips_count=whitelist_skips,
+        any_mode_rows_without_interaction_history_count=rows_without_history,
+        visible_eligibility_cache_hits=cache_hits,
+        visible_eligibility_cache_misses=len(missing),
+        visible_eligibility_db_query_count=1 if missing else 0,
+        visible_eligibility_lookup_ms=lookup_ms,
+        visible_eligibility_eval_ms=eval_ms,
+    )
+    return out
+
+
+def _aggregate_visible_any_perf_totals(totals: dict[str, Any], visible_eval: dict[str, Any]) -> None:
+    totals["any_mode_visible_candidates_count"] = int(
+        totals.get("any_mode_visible_candidates_count") or 0
+    ) + int(visible_eval.get("any_mode_visible_candidates_count") or 0)
+    totals["any_mode_whitelist_skips_count"] = int(
+        totals.get("any_mode_whitelist_skips_count") or 0
+    ) + int(visible_eval.get("any_mode_whitelist_skips_count") or 0)
+    totals["any_mode_rows_without_interaction_history_count"] = int(
+        totals.get("any_mode_rows_without_interaction_history_count") or 0
+    ) + int(visible_eval.get("any_mode_rows_without_interaction_history_count") or 0)
+
+
 def _aggregate_visible_perf_totals(totals: dict[str, Any], visible_eval: dict[str, Any]) -> None:
     totals["visible_eligibility_total_db_queries"] = int(
         totals.get("visible_eligibility_total_db_queries") or 0
@@ -383,6 +624,29 @@ def _scroll_following_list_for_unfollow(d: u2.Device, *, account_username: str) 
     return out
 
 
+def _persist_unfollow_outcome_for_session(
+    aid: str,
+    target_username: str,
+    *,
+    run_id: str | None,
+    settings: Any,
+    verify_ok: bool,
+    interaction_row_id: str | None,
+    failure_reason: str,
+) -> dict[str, Any]:
+    mode = str(getattr(settings, "mode", "") or "")
+    return supabase_client.record_unfollow_interaction_outcome(
+        aid,
+        target_username,
+        run_id=run_id,
+        unfollow_ok=verify_ok,
+        unfollow_mode_applied=mode,
+        interaction_row_id=interaction_row_id,
+        failure_reason=failure_reason,
+        allow_any_upsert=(mode == UNFOLLOW_MODE_ANY),
+    )
+
+
 def _run_real_unfollow_multi_loop(
     d: u2.Device,
     *,
@@ -408,13 +672,19 @@ def _run_real_unfollow_multi_loop(
     scroll_stop_reason = ""
     stop_reason = ""
     completed_usernames: set[str] = set()
+    any_mode_selected_count = 0
     last_fields = dict(harvest_fields)
+    any_mode_active = str(getattr(settings, "mode", "") or "") == UNFOLLOW_MODE_ANY
     totals: dict[str, Any] = {
         "visible_eligibility_total_db_queries": 0,
         "visible_eligibility_total_cache_hits": 0,
         "visible_eligibility_total_cache_misses": 0,
         "visible_eligibility_total_lookup_ms": 0.0,
         "visible_eligibility_total_eval_ms": 0.0,
+        "any_mode_visible_candidates_count": 0,
+        "any_mode_whitelist_skips_count": 0,
+        "any_mode_rows_without_interaction_history_count": 0,
+        "any_mode_selected_count": 0,
     }
     max_scroll_passes = _scroll_max_passes()
 
@@ -477,35 +747,65 @@ def _run_real_unfollow_multi_loop(
         )
 
         while True:
-            visible_usernames = [str(row.get("username") or "") for row in rows]
-            visible_eval = _evaluate_visible_unfollow_with_session_cache(
-                aid,
-                visible_usernames,
-                settings=settings,
-                row_cache=visible_eligibility_row_cache,
-            )
-            _aggregate_visible_perf_totals(totals, visible_eval)
-            visible_candidates = _visible_candidates_by_username(visible_eval)
-            for done in completed_usernames:
-                visible_candidates.pop(done, None)
-            eval_fields = {
-                **_harvest_summary_fields(rows, harvest_meta, planned_usernames),
-                **_visible_eligibility_summary_fields(visible_eval),
-            }
-            eval_fields.update(
-                {
-                    "visible_eligible_matches_count": len(visible_candidates),
-                    "visible_eligible_matches_usernames": [
-                        str(c.get("username") or "")
-                        for c in visible_candidates.values()
-                    ][:50],
-                }
-            )
             selection_t0 = time.perf_counter()
-            target_row, selection_reason = _select_visible_eligible_target_row(
-                rows,
-                visible_candidates,
-            )
+            if any_mode_active:
+                visible_eval = _evaluate_visible_unfollow_any_with_session_cache(
+                    aid,
+                    rows,
+                    account_username=uname,
+                    row_cache=visible_eligibility_row_cache,
+                    completed_usernames=completed_usernames,
+                )
+                _aggregate_visible_perf_totals(totals, visible_eval)
+                _aggregate_visible_any_perf_totals(totals, visible_eval)
+                visible_candidates = _visible_candidates_by_username(visible_eval)
+                eval_fields = {
+                    **_harvest_summary_fields(rows, harvest_meta, planned_usernames),
+                    **_visible_any_summary_fields(visible_eval),
+                }
+                eval_fields.update(
+                    {
+                        "visible_eligible_matches_count": len(visible_candidates),
+                        "visible_eligible_matches_usernames": [
+                            str(c.get("username") or "")
+                            for c in visible_candidates.values()
+                        ][:50],
+                    }
+                )
+                target_row, selection_reason = _select_visible_any_target_row(
+                    rows,
+                    visible_candidates,
+                    completed_usernames=completed_usernames,
+                )
+            else:
+                visible_usernames = [str(row.get("username") or "") for row in rows]
+                visible_eval = _evaluate_visible_unfollow_with_session_cache(
+                    aid,
+                    visible_usernames,
+                    settings=settings,
+                    row_cache=visible_eligibility_row_cache,
+                )
+                _aggregate_visible_perf_totals(totals, visible_eval)
+                visible_candidates = _visible_candidates_by_username(visible_eval)
+                for done in completed_usernames:
+                    visible_candidates.pop(done, None)
+                eval_fields = {
+                    **_harvest_summary_fields(rows, harvest_meta, planned_usernames),
+                    **_visible_eligibility_summary_fields(visible_eval),
+                }
+                eval_fields.update(
+                    {
+                        "visible_eligible_matches_count": len(visible_candidates),
+                        "visible_eligible_matches_usernames": [
+                            str(c.get("username") or "")
+                            for c in visible_candidates.values()
+                        ][:50],
+                    }
+                )
+                target_row, selection_reason = _select_visible_eligible_target_row(
+                    rows,
+                    visible_candidates,
+                )
             eval_fields["visible_target_selection_ms"] = round(
                 (time.perf_counter() - selection_t0) * 1000.0,
                 2,
@@ -602,6 +902,20 @@ def _run_real_unfollow_multi_loop(
 
         target_username = str(target_row.get("username") or "")
         target_key = normalize_unfollow_username(target_username)
+        if any_mode_active:
+            any_mode_selected_count += 1
+            totals["any_mode_selected_count"] = any_mode_selected_count
+            cand = visible_candidates.get(target_key) or {}
+            log(
+                "info",
+                "unfollow_any_target_selected",
+                username=target_username,
+                username_normalized=target_key,
+                row_index=int(target_row.get("row_index") or 0),
+                selection_reason=selection_reason,
+                row_cta_class=str(target_row.get("row_cta_class") or ""),
+                interaction_row_id=str(cand.get("interaction_row_id") or ""),
+            )
         log(
             "info",
             "unfollow_visible_eligible_target_selected",
@@ -722,12 +1036,12 @@ def _run_real_unfollow_multi_loop(
             or planned_by_username.get(target_key)
             or {}
         )
-        persist_out = supabase_client.record_unfollow_interaction_outcome(
+        persist_out = _persist_unfollow_outcome_for_session(
             aid,
             target_username,
             run_id=run_id,
-            unfollow_ok=verify_ok,
-            unfollow_mode_applied=str(settings.mode or ""),
+            settings=settings,
+            verify_ok=verify_ok,
             interaction_row_id=str(cand.get("interaction_row_id") or cand.get("id") or "").strip() or None,
             failure_reason=str(verify_out.get("failure_reason") or tap_out.get("failure_reason") or ""),
         )
@@ -1272,12 +1586,12 @@ def run_unfollow_session(
         or {}
     )
     interaction_row_id = str(cand.get("interaction_row_id") or cand.get("id") or "").strip() or None
-    persist_out = supabase_client.record_unfollow_interaction_outcome(
+    persist_out = _persist_unfollow_outcome_for_session(
         aid,
         target_username,
         run_id=run_id,
-        unfollow_ok=verify_ok,
-        unfollow_mode_applied=str(settings.mode or ""),
+        settings=settings,
+        verify_ok=verify_ok,
         interaction_row_id=interaction_row_id,
         failure_reason=str(verify_out.get("failure_reason") or tap_out.get("failure_reason") or ""),
     )

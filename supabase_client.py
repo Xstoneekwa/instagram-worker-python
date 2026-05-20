@@ -958,6 +958,7 @@ def record_unfollow_interaction_outcome(
     unfollow_mode_applied: str,
     interaction_row_id: str | None = None,
     failure_reason: str | None = None,
+    allow_any_upsert: bool = False,
 ) -> dict[str, Any]:
     """Persist a real Unfollow action result on ig_interacted_users."""
     u_gate = _canonical_interaction_username(username)
@@ -992,6 +993,82 @@ def record_unfollow_interaction_outcome(
     if row is None:
         row = load_interacted_user(account_id, username, "")
         rid = str((row or {}).get("id") or "").strip()
+    if not rid and allow_any_upsert and str(unfollow_mode_applied or "") == "unfollow-any":
+        log(
+            "info",
+            "unfollow_any_interaction_row_missing_before_persist",
+            account_id=str(account_id or ""),
+            username=str(username or ""),
+            normalized_username=u_gate,
+            unfollow_mode_applied=str(unfollow_mode_applied or ""),
+        )
+        upsert_out = merge_interacted_user_row(
+            account_id,
+            username,
+            "",
+            {
+                "interaction_type": "unfollow",
+                "followed_by_bot": False,
+                "followed": True,
+                "follow_status": "following",
+                "interaction_lifecycle_state": "active_following",
+                "unfollowed": False,
+            },
+        )
+        if upsert_out.get("ok"):
+            row = load_interacted_user(account_id, username, "")
+            rid = str((row or {}).get("id") or "").strip()
+            if rid:
+                log(
+                    "info",
+                    "unfollow_any_interaction_row_upserted",
+                    account_id=str(account_id or ""),
+                    username=str(username or ""),
+                    normalized_username=u_gate,
+                    interaction_row_id=rid,
+                    unfollow_mode_applied=str(unfollow_mode_applied or ""),
+                )
+            else:
+                log(
+                    "info",
+                    "unfollow_any_interaction_row_upserted_but_id_missing",
+                    account_id=str(account_id or ""),
+                    username=str(username or ""),
+                    normalized_username=u_gate,
+                    unfollow_mode_applied=str(unfollow_mode_applied or ""),
+                    upsert_ok=True,
+                )
+                log(
+                    "info",
+                    "unfollow_result_persist_failed",
+                    account_id=str(account_id or ""),
+                    username=str(username or ""),
+                    normalized_username=u_gate,
+                    reason="interaction_row_id_missing_after_any_upsert",
+                )
+                return {"ok": False, "error": "interaction_row_id_missing_after_any_upsert"}
+        else:
+            upsert_error = str(upsert_out.get("error") or "interaction_row_upsert_failed")[:500]
+            log(
+                "info",
+                "unfollow_any_interaction_row_upsert_failed",
+                account_id=str(account_id or ""),
+                username=str(username or ""),
+                normalized_username=u_gate,
+                unfollow_mode_applied=str(unfollow_mode_applied or ""),
+                error=upsert_error,
+                upsert_ok=bool(upsert_out.get("ok")),
+            )
+            log(
+                "info",
+                "unfollow_result_persist_failed",
+                account_id=str(account_id or ""),
+                username=str(username or ""),
+                normalized_username=u_gate,
+                reason="interaction_row_not_found",
+                upsert_error=upsert_error,
+            )
+            return {"ok": False, "error": upsert_error}
     if not rid:
         log(
             "info",
@@ -1044,6 +1121,18 @@ def record_unfollow_interaction_outcome(
             body=patch,
             prefer_representation=False,
         )
+        if str(unfollow_mode_applied or "") == "unfollow-any":
+            log(
+                "info",
+                "unfollow_any_persisted",
+                account_id=str(account_id or ""),
+                username=u_gate,
+                interaction_row_id=rid,
+                unfollow_ok=bool(unfollow_ok),
+                unfollow_result=patch["unfollow_result"],
+                unfollow_attempts=attempts,
+                unfollow_mode_applied=str(unfollow_mode_applied or ""),
+            )
         log(
             "info",
             "unfollow_result_persisted",
