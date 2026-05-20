@@ -414,6 +414,10 @@ def _is_account_session_run(args: argparse.Namespace) -> bool:
     return _parse_run_type(args) == "account_session"
 
 
+def _is_unfollow_session_run(args: argparse.Namespace) -> bool:
+    return _parse_run_type(args) == "unfollow_session"
+
+
 def _recoverable_target_exit(code: int) -> bool:
     codes = getattr(config, "FAST_RECOVERABLE_TARGET_EXIT_CODES", ()) or ()
     return int(code) in codes
@@ -478,6 +482,7 @@ def _exit_reason_from_code(code: int) -> str:
         71: "follow_started_without_tap_watchdog",
         72: "failed_no_follow_tap",
         74: "follow_review_popup_unhandled",
+        75: "active_instagram_account_mismatch",
         99: "follow_review_popup_unhandled_safe_stop",
     }
     return mapping.get(code, f"exit_code_{code}")
@@ -11248,7 +11253,7 @@ def main() -> int:
         "--run-type",
         type=str,
         default="",
-        help="Execution mode: dm_welcome_baseline | dm_welcome_scan | dm_sender_dry_run | dm_welcome_session_send | account_session",
+        help="Execution mode: dm_welcome_baseline | dm_welcome_scan | dm_sender_dry_run | dm_welcome_session_send | account_session | unfollow_session",
     )
     args = parser.parse_args()
     supabase_mode = _is_supabase_mode(args)
@@ -11257,6 +11262,7 @@ def main() -> int:
     dm_sender_dry_run = _is_dm_sender_dry_run_run(args)
     welcome_session_send_run = _is_welcome_session_send_run(args)
     account_session_run = _is_account_session_run(args)
+    unfollow_session_run = _is_unfollow_session_run(args)
 
     if (
         welcome_baseline_run
@@ -11264,6 +11270,7 @@ def main() -> int:
         or dm_sender_dry_run
         or welcome_session_send_run
         or account_session_run
+        or unfollow_session_run
     ) and not supabase_mode:
         log(
             "error",
@@ -11274,6 +11281,7 @@ def main() -> int:
         return 11
 
     account_id = ""
+    account_username = ""
     run_id = ""
     db_targets: list[dict] = []
     if supabase_mode:
@@ -11289,6 +11297,7 @@ def main() -> int:
         if not account_id:
             log("error", "run_aborted", reason="supabase_account_missing_id")
             return 10
+        account_username = str(account.get("username") or "").strip()
         db_targets = _safe_supabase_call(
             "load_pending_targets",
             account_id=account_id,
@@ -11306,6 +11315,7 @@ def main() -> int:
                 or dm_sender_dry_run
                 or welcome_session_send_run
                 or account_session_run
+                or unfollow_session_run
             ):
                 log(
                     "info",
@@ -11552,6 +11562,66 @@ def main() -> int:
         return _return_with_cleanup(d, 3)
     t = _phase("verify_app_running", t)
 
+    if (
+        supabase_mode
+        and not unfollow_session_run
+        and account_id
+        and account_username
+    ):
+        from account_identity_guard import (
+            ACCOUNT_IDENTITY_MISMATCH_REASON,
+            verify_active_instagram_account_matches_expected,
+        )
+
+        effective_run_type = _parse_run_type(args) or (
+            "followers_list_engine"
+            if bool(getattr(config, "ENABLE_FOLLOWERS_LIST_ENGINE", False))
+            else "supabase_account_run"
+        )
+        identity = verify_active_instagram_account_matches_expected(
+            d,
+            expected_account_username=account_username,
+            account_id=account_id,
+            run_type=effective_run_type,
+            run_id=run_id or None,
+            stage="runner_account_identity_preflight",
+        )
+        if not identity.ok:
+            log(
+                "error",
+                "run_aborted",
+                reason=ACCOUNT_IDENTITY_MISMATCH_REASON,
+                account_id=account_id,
+                expected_account_username=account_username,
+                actual_logged_in_username=identity.actual_logged_in_username,
+                run_type=effective_run_type,
+                run_id=run_id or None,
+                stage="runner_account_identity_preflight",
+            )
+            if supabase_mode and run_id:
+                _update_run_status_safe(
+                    run_id=run_id,
+                    status="failed",
+                    totals={"total": 1, "success": 0, "failed": 1},
+                    performance_summary={
+                        "reason": ACCOUNT_IDENTITY_MISMATCH_REASON,
+                        "run_type": effective_run_type,
+                        "expected_account_username": account_username,
+                        "actual_logged_in_username": identity.actual_logged_in_username,
+                        "account_identity_failure_reason": identity.failure_reason,
+                        "account_identity_verification_method": identity.verification_method,
+                    },
+                )
+            reset_perf_counters()
+            _emit_performance_summary(
+                t0=t_session,
+                warm_session_used=warm_session_used,
+                force_stop_used=force_stop_used,
+                exit_code=75,
+                target_username=account_username or None,
+            )
+            return _return_with_cleanup(d, 75)
+
     if welcome_baseline_run:
         if not supabase_mode or not account_id:
             log("error", "run_aborted", reason="welcome_baseline_missing_account")
@@ -11690,6 +11760,71 @@ def main() -> int:
             target_username=None,
         )
         return _return_with_cleanup(d, ds_code)
+
+    if unfollow_session_run:
+        if not supabase_mode or not account_id:
+            log("error", "run_aborted", reason="unfollow_session_missing_account")
+            return _return_with_cleanup(d, 11)
+        account_username = ""
+        if supabase_mode:
+            _acct_unf = _safe_supabase_call(
+                "load_account",
+                account_id=account_id or None,
+                username=(args.username or "").strip() or None,
+            )
+            if _acct_unf:
+                account_username = str(_acct_unf.get("username") or "").strip()
+        if not account_username:
+            log("error", "run_aborted", reason="unfollow_session_missing_account_username")
+            return _return_with_cleanup(d, 1)
+        from unfollow_session_orchestrator import (
+            dispatch_unfollow_session,
+            get_last_unfollow_session_probe_summary,
+        )
+
+        log(
+            "info",
+            "unfollow_session_run_dispatch",
+            account_id=account_id,
+            account_username=account_username,
+            run_id=run_id or None,
+            probe_only=True,
+            unfollow_actions_sent=0,
+        )
+        unf_code = dispatch_unfollow_session(
+            d,
+            account_id=account_id,
+            account_username=account_username,
+            run_id=run_id or None,
+        )
+        unf_summary = get_last_unfollow_session_probe_summary()
+        if supabase_mode and run_id:
+            _update_run_status_safe(
+                run_id=run_id,
+                status="completed" if unf_code == 0 else "failed",
+                totals={
+                    "total": 1,
+                    "success": 1 if unf_code == 0 else 0,
+                    "failed": 0 if unf_code == 0 else 1,
+                },
+                performance_summary={
+                    "run_type": "unfollow_session",
+                    "exit_code": unf_code,
+                    "account_username": account_username,
+                    "probe_only": True,
+                    "unfollow_actions_sent": 0,
+                    "unfollow_session_probe_summary": unf_summary,
+                },
+            )
+        reset_perf_counters()
+        _emit_performance_summary(
+            t0=t_session,
+            warm_session_used=warm_session_used,
+            force_stop_used=force_stop_used,
+            exit_code=unf_code,
+            target_username=account_username,
+        )
+        return _return_with_cleanup(d, unf_code)
 
     if account_session_run:
         if not supabase_mode or not account_id:
