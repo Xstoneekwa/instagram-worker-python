@@ -16026,6 +16026,7 @@ def visual_detect_private_profile(
     Does not tap. Distinct from empty public grid (Suggested / No posts yet).
     """
     meta = _followers_current_pkg_activity(d)
+    t0 = time.perf_counter()
     pkg_s = str(meta.get("current_package") or "")
     act_s = str(meta.get("current_activity") or "")
     src = source_profile_username or ""
@@ -16033,6 +16034,8 @@ def visual_detect_private_profile(
         "private_profile_detected": False,
         "detection_method": "none",
         "confidence": 0.0,
+        "probe_ms": 0.0,
+        "hierarchy_fallback_used": False,
         "current_activity": act_s,
         "current_package": pkg_s,
         "source_profile_username": src,
@@ -16088,11 +16091,15 @@ def visual_detect_private_profile(
                 out["private_profile_detected"] = True
                 out["detection_method"] = method
                 out["confidence"] = float(conf)
+                out["probe_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
+                out["hierarchy_fallback_used"] = False
                 log(
                     "info",
                     "visual_private_profile_detected",
                     detection_method=out["detection_method"],
                     confidence=out["confidence"],
+                    private_profile_probe_ms=out["probe_ms"],
+                    private_profile_hierarchy_fallback_used=False,
                     current_activity=out["current_activity"],
                     current_package=out["current_package"],
                     source_profile_username=src,
@@ -16113,11 +16120,15 @@ def visual_detect_private_profile(
                 out["private_profile_detected"] = True
                 out["detection_method"] = f"ui_descriptionContains:{method_suffix}"
                 out["confidence"] = 0.85
+                out["probe_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
+                out["hierarchy_fallback_used"] = False
                 log(
                     "info",
                     "visual_private_profile_detected",
                     detection_method=out["detection_method"],
                     confidence=out["confidence"],
+                    private_profile_probe_ms=out["probe_ms"],
+                    private_profile_hierarchy_fallback_used=False,
                     current_activity=out["current_activity"],
                     current_package=out["current_package"],
                     source_profile_username=src,
@@ -16154,11 +16165,15 @@ def visual_detect_private_profile(
             out["private_profile_detected"] = True
             out["detection_method"] = method
             out["confidence"] = 0.79
+            out["probe_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
+            out["hierarchy_fallback_used"] = True
             log(
                 "info",
                 "visual_private_profile_detected",
                 detection_method=out["detection_method"],
                 confidence=out["confidence"],
+                private_profile_probe_ms=out["probe_ms"],
+                private_profile_hierarchy_fallback_used=True,
                 current_activity=out["current_activity"],
                 current_package=out["current_package"],
                 source_profile_username=src,
@@ -16172,8 +16187,12 @@ def visual_detect_private_profile(
         source_profile_username=src,
         current_activity=act_s,
         current_package=pkg_s,
+        private_profile_probe_ms=round((time.perf_counter() - t0) * 1000.0, 2),
+        private_profile_hierarchy_fallback_used=True,
     )
     _private_detect_done()
+    base_out["probe_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
+    base_out["hierarchy_fallback_used"] = True
     return base_out
 
 

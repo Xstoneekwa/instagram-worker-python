@@ -9,6 +9,8 @@ from typing import Any
 from urllib import error, parse, request
 from datetime import datetime, timezone
 
+from logs import log
+
 _LOG_CONTEXT_ACCOUNT_ID: str | None = None
 _LOG_CONTEXT_RUN_ID: str | None = None
 
@@ -821,6 +823,7 @@ def record_follow_interaction_outcome(
     if failure_reason:
         payload_delta["failure_reason"] = failure_reason
 
+    eligible_unfollow_log_payload: dict[str, Any] | None = None
     if follow_ok:
         fs = (follow_status or ("already_following" if skipped_tap else "following"))[:200]
         payload_delta = {
@@ -841,6 +844,43 @@ def record_follow_interaction_outcome(
         }
         if not skipped_tap:
             patch["followed_at"] = now
+            patch["followed_by_bot"] = True
+            try:
+                from unfollow_settings import (
+                    compute_eligible_unfollow_at_iso,
+                    load_unfollow_settings,
+                )
+
+                unfollow_settings = load_unfollow_settings(
+                    str(account_id or ""),
+                    ensure_row=False,
+                )
+                eligible_unfollow_at = compute_eligible_unfollow_at_iso(
+                    now,
+                    after_days=int(unfollow_settings.after_days),
+                )
+                if eligible_unfollow_at:
+                    patch["eligible_unfollow_at"] = eligible_unfollow_at
+                    eligible_unfollow_log_payload = {
+                        "level": "info",
+                        "event": "follow_eligible_unfollow_at_persisted",
+                        "account_id": str(account_id or ""),
+                        "username": str(username or ""),
+                        "followed_at": now,
+                        "unfollow_after_days": int(unfollow_settings.after_days),
+                        "eligible_unfollow_at": eligible_unfollow_at,
+                    }
+                else:
+                    raise ValueError("eligible_unfollow_at_empty")
+            except Exception as e:
+                log(
+                    "warning",
+                    "follow_eligible_unfollow_at_compute_failed",
+                    account_id=str(account_id or ""),
+                    username=str(username or ""),
+                    followed_at=now,
+                    error=str(e)[:300],
+                )
         if str(fs).lower() == "requested":
             patch["follow_requested_at"] = now
         if run_id:
@@ -871,6 +911,20 @@ def record_follow_interaction_outcome(
     patch = {k: v for k, v in patch.items() if v is not None}
     mout = merge_interacted_user_row(account_id, username, source_profile, patch)
     if mout.get("ok") and follow_ok:
+        if eligible_unfollow_log_payload is not None:
+            log(
+                "info",
+                "follow_eligible_unfollow_at_persisted",
+                account_id=eligible_unfollow_log_payload.get("account_id"),
+                username=eligible_unfollow_log_payload.get("username"),
+                followed_at=eligible_unfollow_log_payload.get("followed_at"),
+                unfollow_after_days=eligible_unfollow_log_payload.get(
+                    "unfollow_after_days"
+                ),
+                eligible_unfollow_at=eligible_unfollow_log_payload.get(
+                    "eligible_unfollow_at"
+                ),
+            )
         _ev = (
             "follow_requested"
             if str(fs or "").strip().lower() == "requested"
@@ -1286,6 +1340,152 @@ def get_account_dm_settings(account_id: str) -> dict[str, Any] | None:
     if rows and isinstance(rows, list):
         return rows[0]
     return None
+
+
+def parse_utc_iso_timestamp(raw: Any) -> datetime | None:
+    """Parse ISO-8601 timestamp to timezone-aware UTC datetime."""
+    if not raw:
+        return None
+    try:
+        ts = str(raw).replace("Z", "+00:00")
+        dt = datetime.fromisoformat(ts)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def get_account_unfollow_settings(account_id: str) -> dict[str, Any] | None:
+    """Load ig_account_unfollow_settings row (no insert)."""
+    aid = str(account_id or "").strip()
+    if not aid:
+        return None
+    rows = _request_json(
+        "GET",
+        "ig_account_unfollow_settings",
+        query={"select": "*", "account_id": f"eq.{aid}", "limit": "1"},
+    )
+    if rows and isinstance(rows, list):
+        return rows[0]
+    return None
+
+
+def get_account_follow_settings(account_id: str) -> dict[str, Any] | None:
+    """Load ig_account_follow_settings row (no insert)."""
+    aid = str(account_id or "").strip()
+    if not aid:
+        return None
+    rows = _request_json(
+        "GET",
+        "ig_account_follow_settings",
+        query={"select": "*", "account_id": f"eq.{aid}", "limit": "1"},
+    )
+    if rows and isinstance(rows, list):
+        return rows[0]
+    return None
+
+
+def ensure_account_follow_settings(account_id: str) -> dict[str, Any]:
+    """Ensure ig_account_follow_settings exists. Defaults to skipping private profiles."""
+    aid = str(account_id or "").strip()
+    if not aid:
+        raise ValueError("account_id is required")
+    existing = get_account_follow_settings(aid)
+    if existing:
+        return existing
+    now = _utc_now_iso()
+    created = _request_json(
+        "POST",
+        "ig_account_follow_settings",
+        body={
+            "account_id": aid,
+            "dont_follow_private_accounts": True,
+            "created_at": now,
+            "updated_at": now,
+        },
+        prefer_representation=True,
+    )
+    if not created:
+        raise RuntimeError("ensure_account_follow_settings: empty insert response")
+    return created[0]
+
+
+def ensure_account_unfollow_settings(account_id: str) -> dict[str, Any]:
+    """
+    Ensure ig_account_unfollow_settings exists with package defaults (Growth/Pro/Premium).
+    Does not enable unfollow by default.
+    """
+    aid = str(account_id or "").strip()
+    if not aid:
+        raise ValueError("account_id is required")
+    existing = get_account_unfollow_settings(aid)
+    if existing:
+        return existing
+    now = _utc_now_iso()
+    snap = {
+        "unfollow_mode": "unfollow",
+        "unfollow_after_days": 3,
+        "unfollow_per_session_limit": 50,
+        "unfollow_per_day_limit": 200,
+        "unfollow_sort_mode": "default",
+        "source": "package_default_growth_pro_premium",
+    }
+    created = _request_json(
+        "POST",
+        "ig_account_unfollow_settings",
+        body={
+            "account_id": aid,
+            "unfollow_enabled": False,
+            "unfollow_only": False,
+            "do_unfollow_first": False,
+            "unfollow_after_days": 3,
+            "unfollow_mode": "unfollow",
+            "unfollow_sort_mode": "default",
+            "unfollow_per_session_limit": 50,
+            "unfollow_per_day_limit": 200,
+            "package_default_snapshot": snap,
+            "created_at": now,
+            "updated_at": now,
+        },
+        prefer_representation=True,
+    )
+    if not created:
+        raise RuntimeError("ensure_account_unfollow_settings: empty insert response")
+    return created[0]
+
+
+def fetch_unfollow_strict_candidate_rows(
+    account_id: str,
+    *,
+    limit: int = 500,
+) -> list[dict[str, Any]]:
+    """
+    Load ig_interacted_users rows that may qualify for strict unfollow modes (DB pre-filter).
+    Final eligibility (delay, lifecycle, followback) is applied in unfollow_eligibility_engine.
+    """
+    aid = str(account_id or "").strip()
+    if not aid:
+        return []
+    cap = max(1, min(int(limit), 2000))
+    rows = _request_json(
+        "GET",
+        "ig_interacted_users",
+        query={
+            "select": "*",
+            "account_id": f"eq.{aid}",
+            "followed_by_bot": "eq.true",
+            "followed_at": "not.is.null",
+            "unfollowed_at": "is.null",
+            "whitelist_protected": "eq.false",
+            "follow_status": "eq.following",
+            "order": "eligible_unfollow_at.asc.nullslast,followed_at.asc",
+            "limit": str(cap),
+        },
+    )
+    if not rows or not isinstance(rows, list):
+        return []
+    return [r for r in rows if isinstance(r, dict)]
 
 
 def fetch_followers_by_usernames(
