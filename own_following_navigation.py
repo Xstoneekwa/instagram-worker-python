@@ -31,6 +31,15 @@ _FOLLOWERS_TAB_TEXTS = (
     "Abonné(e)s",
     "Seguidores",
 )
+_UNFOLLOW_SORT_OPTION_TEXT_BY_MODE = {
+    "oldest-to-newest": "Date followed: earliest",
+    "newest-to-oldest": "Date followed: latest",
+}
+_UNFOLLOW_SORT_OPTION_TEXTS = (
+    "Default",
+    "Date followed: latest",
+    "Date followed: earliest",
+)
 
 
 def _dump_hierarchy(d: u2.Device) -> str:
@@ -85,6 +94,10 @@ def _element_selected(el: ET.Element, parents: dict[ET.Element, ET.Element | Non
     return False
 
 
+def _element_text(el: ET.Element) -> str:
+    return str(el.get("text") or el.get("content-desc") or "").strip()
+
+
 def _is_following_label(raw: str) -> bool:
     text = str(raw or "").strip().lower()
     if not text:
@@ -126,6 +139,322 @@ def _parse_xml_root(hierarchy_xml: str) -> ET.Element | None:
             return ET.fromstring(f"<wrap>{hierarchy}</wrap>")
     except Exception:
         return None
+
+
+def _guess_sort_mode_from_label(raw: str) -> str:
+    text = str(raw or "").strip().lower()
+    if not text:
+        return ""
+    if "earliest" in text:
+        return "oldest-to-newest"
+    if "latest" in text:
+        return "newest-to-oldest"
+    if "default" in text:
+        return "default"
+    return ""
+
+
+def _sort_option_signals(hierarchy_xml: str) -> dict[str, Any]:
+    root = _parse_xml_root(hierarchy_xml)
+    signals: dict[str, Any] = {
+        "default_visible": False,
+        "latest_visible": False,
+        "earliest_visible": False,
+        "visible_options": [],
+    }
+    if root is None:
+        return signals
+    visible_options: list[str] = []
+    for el in root.iter():
+        text = _element_text(el)
+        if text in _UNFOLLOW_SORT_OPTION_TEXTS:
+            visible_options.append(text)
+        if text == "Default":
+            signals["default_visible"] = True
+        elif text == "Date followed: latest":
+            signals["latest_visible"] = True
+        elif text == "Date followed: earliest":
+            signals["earliest_visible"] = True
+    signals["visible_options"] = visible_options
+    return signals
+
+
+def _find_exact_text_element(
+    hierarchy_xml: str,
+    wanted_text: str,
+) -> tuple[ET.Element | None, dict[str, int], tuple[int, int] | None, str]:
+    root = _parse_xml_root(hierarchy_xml)
+    if root is None:
+        return None, {}, None, ""
+    for el in root.iter():
+        text = _element_text(el)
+        if text != wanted_text:
+            continue
+        bounds = _parse_bounds(el.get("bounds"))
+        center = _bounds_center(bounds)
+        if center is None:
+            continue
+        return el, bounds, center, "exact_text"
+    return None, {}, None, ""
+
+
+def detect_unfollow_following_sort_control(
+    d: u2.Device,
+    *,
+    hierarchy_xml: str | None = None,
+) -> dict[str, Any]:
+    """Detect the visible Sort by control on the Following list."""
+    hierarchy = str(hierarchy_xml or "").strip() or _dump_hierarchy(d)
+    out: dict[str, Any] = {
+        "ok": False,
+        "current_sort_label": "",
+        "current_sort_mode_ui_guess": "",
+        "bounds": {},
+        "resource_id": "",
+        "text": "",
+        "failure_reason": "",
+    }
+    root = _parse_xml_root(hierarchy)
+    if root is None:
+        out["failure_reason"] = "hierarchy_xml_parse_failed"
+        log("info", "unfollow_sort_control_not_found", **out)
+        return out
+
+    candidates: list[tuple[int, int, ET.Element, dict[str, int], str, str]] = []
+    for el in root.iter():
+        text = _element_text(el)
+        text_l = text.lower()
+        rid = str(el.get("resource-id") or "")
+        rid_l = rid.lower()
+        if not text:
+            continue
+        looks_like_sort = (
+            text_l.startswith("sorted by ")
+            or text_l in {"sorted by default", "sorted by date followed: latest", "sorted by date followed: earliest"}
+            or ("sort" in rid_l and ("default" in text_l or "date followed" in text_l))
+        )
+        if not looks_like_sort:
+            continue
+        bounds = _parse_bounds(el.get("bounds"))
+        center = _bounds_center(bounds)
+        if center is None:
+            continue
+        cx, cy = center
+        candidates.append((cy, cx, el, bounds, text, rid))
+
+    if not candidates:
+        out["failure_reason"] = "sort_control_not_found"
+        log("info", "unfollow_sort_control_not_found", **out)
+        return out
+
+    candidates.sort(key=lambda item: (item[0], item[1]))
+    _, _, el, bounds, text, rid = candidates[0]
+    out.update(
+        {
+            "ok": True,
+            "current_sort_label": text,
+            "current_sort_mode_ui_guess": _guess_sort_mode_from_label(text),
+            "bounds": bounds,
+            "resource_id": rid,
+            "text": text,
+            "class": str(el.get("class") or ""),
+        }
+    )
+    log("info", "unfollow_sort_control_detected", **out)
+    return out
+
+
+def open_unfollow_following_sort_sheet(
+    d: u2.Device,
+    *,
+    requested_sort_mode: str,
+    sort_control: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Open Instagram's Following-list Sort by sheet/menu."""
+    control = sort_control if isinstance(sort_control, dict) else {}
+    if not control.get("ok"):
+        control = detect_unfollow_following_sort_control(d)
+
+    out: dict[str, Any] = {
+        "ok": False,
+        "requested_sort_mode": str(requested_sort_mode or ""),
+        "sort_control_text": str(control.get("text") or control.get("current_sort_label") or ""),
+        "sort_control_bounds": dict(control.get("bounds") or {}),
+        "sheet_option_signals": {},
+        "failure_reason": "",
+    }
+    if not control.get("ok"):
+        out["failure_reason"] = str(control.get("failure_reason") or "sort_control_not_found")
+        log("info", "unfollow_sort_sheet_open_failed", **out)
+        return out
+
+    center = _bounds_center(dict(control.get("bounds") or {}))
+    if center is None:
+        out["failure_reason"] = "sort_control_bounds_missing"
+        log("info", "unfollow_sort_sheet_open_failed", **out)
+        return out
+
+    tap_x, tap_y = center
+    log("info", "unfollow_sort_sheet_open_started", **out, tap_x=tap_x, tap_y=tap_y)
+    try:
+        d.click(tap_x, tap_y)
+    except Exception as exc:
+        out["failure_reason"] = "sort_control_tap_failed"
+        out["error"] = str(exc)[:200]
+        log("info", "unfollow_sort_sheet_open_failed", **out, tap_x=tap_x, tap_y=tap_y)
+        return out
+
+    time.sleep(0.65)
+    signals = _sort_option_signals(_dump_hierarchy(d))
+    sheet_open = bool(
+        signals.get("default_visible")
+        or signals.get("latest_visible")
+        or signals.get("earliest_visible")
+    )
+    out.update(
+        {
+            "ok": sheet_open,
+            "sheet_option_signals": signals,
+            "failure_reason": "" if sheet_open else "sort_sheet_options_missing",
+            "tap_x": tap_x,
+            "tap_y": tap_y,
+        }
+    )
+    log("info", "unfollow_sort_sheet_opened" if sheet_open else "unfollow_sort_sheet_open_failed", **out)
+    return out
+
+
+def apply_unfollow_following_sort_mode(
+    d: u2.Device,
+    *,
+    requested_sort_mode: str,
+    sort_control: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Apply requested Following sort mode. Default is an explicit no-op."""
+    requested = str(requested_sort_mode or "default").strip().lower() or "default"
+    if requested == "default":
+        log(
+            "info",
+            "unfollow_sort_apply_skipped_default_mode",
+            requested_sort_mode=requested,
+        )
+        return {
+            "ok": True,
+            "skipped": True,
+            "requested_sort_mode": requested,
+            "failure_reason": "",
+            "option_text": "",
+            "detection_method": "",
+            "bounds": {},
+            "tap_x": 0,
+            "tap_y": 0,
+        }
+
+    option_text = _UNFOLLOW_SORT_OPTION_TEXT_BY_MODE.get(requested)
+    if not option_text:
+        return {
+            "ok": False,
+            "skipped": False,
+            "requested_sort_mode": requested,
+            "failure_reason": "unsupported_unfollow_sort_mode",
+            "option_text": "",
+            "detection_method": "",
+            "bounds": {},
+            "tap_x": 0,
+            "tap_y": 0,
+        }
+
+    opened = open_unfollow_following_sort_sheet(
+        d,
+        requested_sort_mode=requested,
+        sort_control=sort_control,
+    )
+    if not opened.get("ok"):
+        return {
+            **opened,
+            "skipped": False,
+            "option_text": option_text,
+            "detection_method": "",
+            "bounds": {},
+            "tap_x": 0,
+            "tap_y": 0,
+        }
+
+    _, bounds, center, method = _find_exact_text_element(_dump_hierarchy(d), option_text)
+    if center is None:
+        out = {
+            **opened,
+            "ok": False,
+            "skipped": False,
+            "failure_reason": "sort_option_not_found",
+            "option_text": option_text,
+            "detection_method": "",
+            "bounds": {},
+            "tap_x": 0,
+            "tap_y": 0,
+        }
+        log("info", "unfollow_sort_option_detected", **out)
+        return out
+
+    tap_x, tap_y = center
+    out = {
+        **opened,
+        "ok": True,
+        "skipped": False,
+        "failure_reason": "",
+        "option_text": option_text,
+        "detection_method": method,
+        "bounds": bounds,
+        "tap_x": tap_x,
+        "tap_y": tap_y,
+    }
+    log("info", "unfollow_sort_option_detected", **out)
+    log("info", "unfollow_sort_option_tap_started", **out)
+    try:
+        d.click(tap_x, tap_y)
+    except Exception as exc:
+        out["ok"] = False
+        out["failure_reason"] = "sort_option_tap_failed"
+        out["error"] = str(exc)[:200]
+        return out
+    log("info", "unfollow_sort_option_tapped", **out)
+    return out
+
+
+def verify_unfollow_following_sort_applied(
+    d: u2.Device,
+    *,
+    account_username: str,
+    requested_sort_mode: str,
+    settle_s: float = 1.25,
+) -> dict[str, Any]:
+    """Verify sort application and that we are still on the owner Following list."""
+    requested = str(requested_sort_mode or "default").strip().lower() or "default"
+    if settle_s > 0:
+        time.sleep(min(float(settle_s), 4.0))
+
+    hierarchy = _dump_hierarchy(d)
+    det = detect_own_following_list_screen(
+        d,
+        account_username=account_username,
+        hierarchy_xml=hierarchy,
+    )
+    control = detect_unfollow_following_sort_control(d, hierarchy_xml=hierarchy)
+    ui_after = str(control.get("current_sort_mode_ui_guess") or "")
+    strong = requested == "default" or (bool(control.get("ok")) and ui_after == requested)
+    surface_ok = bool(det.get("is_following_list"))
+    ok = surface_ok and (strong or requested != "default")
+    out = {
+        "ok": ok,
+        "requested_sort_mode": requested,
+        "following_surface_ok": surface_ok,
+        "sort_mode_ui_after": ui_after,
+        "sort_label_after": str(control.get("current_sort_label") or ""),
+        "verification_strength": "strong_ui_label" if strong else "surface_only_fallback",
+        "failure_reason": "" if ok else str(det.get("failure_reason") or "following_list_not_verified_after_sort"),
+    }
+    log("info", "unfollow_sort_apply_verified" if ok else "unfollow_sort_apply_verify_failed", **out)
+    return out
 
 
 def detect_own_following_list_screen(

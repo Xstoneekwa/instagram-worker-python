@@ -948,6 +948,125 @@ def record_follow_interaction_outcome(
     return mout
 
 
+def record_unfollow_interaction_outcome(
+    account_id: str,
+    username: str,
+    *,
+    run_id: str | None,
+    session_id: str | None = None,
+    unfollow_ok: bool,
+    unfollow_mode_applied: str,
+    interaction_row_id: str | None = None,
+    failure_reason: str | None = None,
+) -> dict[str, Any]:
+    """Persist a real Unfollow action result on ig_interacted_users."""
+    u_gate = _canonical_interaction_username(username)
+    inv_gate = _invalid_interacted_username_reason(u_gate)
+    if inv_gate is not None:
+        log(
+            "info",
+            "unfollow_result_persist_failed",
+            account_id=str(account_id or ""),
+            username=str(username or ""),
+            normalized_username=u_gate,
+            reason=inv_gate,
+        )
+        return {"ok": False, "error": "skipped_invalid_interacted_username"}
+
+    now = _utc_now_iso()
+    row: dict[str, Any] | None = None
+    rid = str(interaction_row_id or "").strip()
+    if rid:
+        rows = _request_json(
+            "GET",
+            "ig_interacted_users",
+            query={
+                "select": "*",
+                "id": f"eq.{rid}",
+                "account_id": f"eq.{str(account_id or '').strip()}",
+                "limit": "1",
+            },
+        )
+        if rows:
+            row = rows[0]
+    if row is None:
+        row = load_interacted_user(account_id, username, "")
+        rid = str((row or {}).get("id") or "").strip()
+    if not rid:
+        log(
+            "info",
+            "unfollow_result_persist_failed",
+            account_id=str(account_id or ""),
+            username=str(username or ""),
+            reason="interaction_row_not_found",
+        )
+        return {"ok": False, "error": "interaction_row_not_found"}
+
+    attempts = int((row or {}).get("unfollow_attempts") or 0) + 1
+    patch: dict[str, Any] = {
+        "unfollow_attempts": attempts,
+        "last_unfollow_attempt_at": now,
+        "unfollow_result": "success" if unfollow_ok else "failed",
+        "unfollow_mode_applied": str(unfollow_mode_applied or "")[:120],
+    }
+    if run_id:
+        patch["run_id"] = str(run_id)
+        patch["last_run_id"] = str(run_id)
+    if session_id:
+        patch["last_session_id"] = str(session_id)
+    if unfollow_ok:
+        patch.update(
+            {
+                "unfollowed_at": now,
+                "unfollowed": True,
+                "followed": False,
+                "follow_status": "unfollowed",
+                "interaction_lifecycle_state": "unfollowed_completed",
+                "interaction_status": "success",
+                "last_interaction_at": now,
+                "was_successful": True,
+                "unfollow_skip_reason": None,
+            }
+        )
+    else:
+        patch.update(
+            {
+                "interaction_status": "failed",
+                "unfollow_skip_reason": str(failure_reason or "unfollow_failed")[:500],
+            }
+        )
+
+    try:
+        _request_json_tolerate_unknown_columns(
+            "PATCH",
+            "ig_interacted_users",
+            query={"id": f"eq.{rid}"},
+            body=patch,
+            prefer_representation=False,
+        )
+        log(
+            "info",
+            "unfollow_result_persisted",
+            account_id=str(account_id or ""),
+            username=u_gate,
+            interaction_row_id=rid,
+            unfollow_ok=bool(unfollow_ok),
+            unfollow_result=patch["unfollow_result"],
+            unfollow_attempts=attempts,
+        )
+        return {"ok": True, "interaction_row_id": rid, "unfollow_attempts": attempts}
+    except RuntimeError as exc:
+        log(
+            "info",
+            "unfollow_result_persist_failed",
+            account_id=str(account_id or ""),
+            username=u_gate,
+            interaction_row_id=rid,
+            error=str(exc)[:500],
+        )
+        return {"ok": False, "error": str(exc)}
+
+
 def record_interaction_skip_memory(
     account_id: str,
     username: str,
@@ -1486,6 +1605,56 @@ def fetch_unfollow_strict_candidate_rows(
     if not rows or not isinstance(rows, list):
         return []
     return [r for r in rows if isinstance(r, dict)]
+
+
+def fetch_visible_unfollow_eligibility_rows(
+    account_id: str,
+    usernames: list[str],
+) -> dict[str, dict[str, Any]]:
+    """
+    Batch lookup ig_interacted_users rows for visible Following-list usernames.
+    Final eligibility remains in unfollow_eligibility_engine.
+    """
+    aid = str(account_id or "").strip()
+    keys: list[str] = []
+    seen: set[str] = set()
+    for raw in usernames:
+        key = _canonical_interaction_username(str(raw or ""))
+        if not key or key in seen:
+            continue
+        if _invalid_interacted_username_reason(key) is not None:
+            continue
+        seen.add(key)
+        keys.append(key)
+
+    if not aid or not keys:
+        return {}
+
+    # Viewport batches are small (typically 7-20). Cap defensively to avoid
+    # accidentally turning visible matching into a broad table scan.
+    keys = keys[:50]
+    rows = _request_json(
+        "GET",
+        "ig_interacted_users",
+        query={
+            # Viewport batches are tiny; select all avoids brittle failures when
+            # optional rollout columns are absent/present across environments.
+            "select": "*",
+            "account_id": f"eq.{aid}",
+            "username": f"in.({','.join(keys)})",
+            "limit": str(len(keys)),
+        },
+    )
+    out: dict[str, dict[str, Any]] = {}
+    if not rows or not isinstance(rows, list):
+        return out
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        key = _canonical_interaction_username(str(row.get("username") or ""))
+        if key:
+            out[key] = row
+    return out
 
 
 def fetch_followers_by_usernames(

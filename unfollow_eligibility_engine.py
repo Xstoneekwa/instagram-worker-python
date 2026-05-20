@@ -23,6 +23,19 @@ from unfollow_settings import (
 _ACTIVE_FOLLOWING = "active_following"
 
 
+_STRICT_SKIP_KEYS = (
+    "too_soon",
+    "whitelist",
+    "already_unfollowed",
+    "missing_followed_by_bot",
+    "missing_followed_at",
+    "lifecycle_ineligible",
+    "follow_status_not_following",
+    "missing_followback_confirmation",
+    "not_following_back",
+)
+
+
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -86,6 +99,88 @@ def _lifecycle_allows_strict_unfollow(row: dict[str, Any]) -> bool:
     return False
 
 
+def _empty_skip_counts(*, include_visible_keys: bool = False) -> dict[str, int]:
+    keys = list(_STRICT_SKIP_KEYS)
+    if include_visible_keys:
+        keys.extend(
+            (
+                "not_found_in_interacted_users",
+                "followback_state_not_allowed",
+                "unfollow_disabled",
+                "unfollow_mode_not_supported",
+            )
+        )
+    return {key: 0 for key in keys}
+
+
+def _strict_unfollow_skip_reason(
+    row: dict[str, Any],
+    *,
+    settings: UnfollowSettings,
+    now: datetime,
+    visible_lookup: bool = False,
+) -> str:
+    if _row_effective_unfollowed(row):
+        return "already_unfollowed"
+
+    if not bool(row.get("followed_by_bot")):
+        return "missing_followed_by_bot"
+
+    if not row.get("followed_at"):
+        return "missing_followed_at"
+
+    if bool(row.get("whitelist_protected")):
+        return "whitelist"
+
+    if _row_follow_status(row) != "following":
+        return "follow_status_not_following"
+
+    if not _lifecycle_allows_strict_unfollow(row):
+        return "lifecycle_ineligible"
+
+    eligible_at = _resolve_eligible_unfollow_at(row, after_days=settings.after_days)
+    if eligible_at is None:
+        return "missing_followed_at"
+
+    if now < eligible_at:
+        return "too_soon"
+
+    followback = _row_is_following_back(row)
+    if settings.mode == "unfollow-non-followers":
+        if followback is None:
+            return "missing_followback_confirmation"
+        if followback:
+            return "followback_state_not_allowed" if visible_lookup else "not_following_back"
+
+    return ""
+
+
+def _candidate_payload_from_row(
+    row: dict[str, Any],
+    *,
+    settings: UnfollowSettings,
+) -> dict[str, Any]:
+    eligible_at = _resolve_eligible_unfollow_at(row, after_days=settings.after_days)
+    username = str(row.get("username") or "").strip()
+    return {
+        "username": username,
+        "username_normalized": normalize_social_username(username),
+        "followed_at": row.get("followed_at"),
+        "eligible_unfollow_at": eligible_at.isoformat() if eligible_at is not None else "",
+        "eligible_unfollow_at_source": (
+            "column" if row.get("eligible_unfollow_at") else "computed_from_followed_at"
+        ),
+        "is_following_back": _row_is_following_back(row),
+        "source_profile": str(
+            row.get("last_source_profile")
+            or row.get("source_profile")
+            or ""
+        ),
+        "interaction_row_id": str(row.get("id") or ""),
+        "eligibility_reason": "bot_follow_delay_elapsed",
+    }
+
+
 def _empty_plan(
     account_id: str,
     settings: UnfollowSettings,
@@ -122,17 +217,7 @@ def plan_unfollow_targets(
     session_cap = int(limit if limit is not None else cfg.session_limit)
     session_cap = max(0, session_cap)
 
-    skipped: dict[str, int] = {
-        "too_soon": 0,
-        "whitelist": 0,
-        "already_unfollowed": 0,
-        "missing_followed_by_bot": 0,
-        "missing_followed_at": 0,
-        "lifecycle_ineligible": 0,
-        "follow_status_not_following": 0,
-        "missing_followback_confirmation": 0,
-        "not_following_back": 0,
-    }
+    skipped = _empty_skip_counts()
 
     if not cfg.enabled:
         out = _empty_plan(aid, cfg, plan_reason="unfollow_disabled")
@@ -170,73 +255,16 @@ def plan_unfollow_targets(
         if session_cap > 0 and len(candidates) >= session_cap:
             break
 
-        if _row_effective_unfollowed(row):
-            skipped["already_unfollowed"] += 1
+        skip_reason = _strict_unfollow_skip_reason(row, settings=cfg, now=now)
+        if skip_reason:
+            skipped[skip_reason] = int(skipped.get(skip_reason, 0)) + 1
             continue
-
-        if not bool(row.get("followed_by_bot")):
-            skipped["missing_followed_by_bot"] += 1
-            continue
-
-        if not row.get("followed_at"):
-            skipped["missing_followed_at"] += 1
-            continue
-
-        if bool(row.get("whitelist_protected")):
-            skipped["whitelist"] += 1
-            continue
-
-        if _row_follow_status(row) != "following":
-            skipped["follow_status_not_following"] += 1
-            continue
-
-        if not _lifecycle_allows_strict_unfollow(row):
-            skipped["lifecycle_ineligible"] += 1
-            continue
-
-        eligible_at = _resolve_eligible_unfollow_at(row, after_days=cfg.after_days)
-        if eligible_at is None:
-            skipped["missing_followed_at"] += 1
-            continue
-
-        if now < eligible_at:
-            skipped["too_soon"] += 1
-            continue
-
-        followback = _row_is_following_back(row)
-        if cfg.mode == "unfollow-non-followers":
-            if followback is None:
-                skipped["missing_followback_confirmation"] += 1
-                continue
-            if followback:
-                skipped["not_following_back"] += 1
-                continue
 
         username = str(row.get("username") or "").strip()
         if not username:
             continue
 
-        candidates.append(
-            {
-                "username": username,
-                "username_normalized": normalize_social_username(username),
-                "followed_at": row.get("followed_at"),
-                "eligible_unfollow_at": eligible_at.isoformat(),
-                "eligible_unfollow_at_source": (
-                    "column"
-                    if row.get("eligible_unfollow_at")
-                    else "computed_from_followed_at"
-                ),
-                "is_following_back": followback,
-                "source_profile": str(
-                    row.get("last_source_profile")
-                    or row.get("source_profile")
-                    or ""
-                ),
-                "interaction_row_id": str(row.get("id") or ""),
-                "eligibility_reason": "bot_follow_delay_elapsed",
-            }
-        )
+        candidates.append(_candidate_payload_from_row(row, settings=cfg))
 
     out = {
         "account_id": aid,
@@ -258,5 +286,137 @@ def plan_unfollow_targets(
         candidates_count=out["candidates_count"],
         skipped_counts=skipped,
         session_limit_applied=session_cap,
+    )
+    return out
+
+
+def evaluate_visible_unfollow_candidates(
+    account_id: str,
+    visible_usernames: list[str],
+    *,
+    settings: UnfollowSettings,
+    db_rows_by_username: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """
+    Evaluate strict Unfollow eligibility for currently visible Following rows.
+    This is intentionally independent from the per-session execution plan cap.
+    """
+    aid = str(account_id or "").strip()
+    normalized_visible: list[str] = []
+    seen: set[str] = set()
+    for raw in visible_usernames:
+        key = normalize_social_username(str(raw or ""))
+        if key and key not in seen:
+            seen.add(key)
+            normalized_visible.append(key)
+
+    log(
+        "info",
+        "unfollow_visible_eligibility_lookup_started",
+        account_id=aid,
+        visible_usernames_count=len(normalized_visible),
+        unfollow_mode=settings.mode,
+        unfollow_after_days=settings.after_days,
+    )
+
+    rows_by_username = db_rows_by_username
+    if rows_by_username is None:
+        rows_by_username = supabase_client.fetch_visible_unfollow_eligibility_rows(
+            aid,
+            normalized_visible,
+        )
+    rows_by_username = {
+        normalize_social_username(str(k or "")): v
+        for k, v in dict(rows_by_username or {}).items()
+        if normalize_social_username(str(k or "")) and isinstance(v, dict)
+    }
+
+    now = _now_utc()
+    skip_counts = _empty_skip_counts(include_visible_keys=True)
+    eligible_matches: list[dict[str, Any]] = []
+    ineligible_rows: list[dict[str, Any]] = []
+    global_skip_reason = ""
+    if not settings.enabled:
+        global_skip_reason = "unfollow_disabled"
+    elif settings.mode not in UNFOLLOW_MODES_DB_STRICT:
+        global_skip_reason = "unfollow_mode_not_supported"
+
+    for idx, username_key in enumerate(normalized_visible):
+        if global_skip_reason:
+            skip_counts[global_skip_reason] += 1
+            evaluated = {
+                "username": username_key,
+                "username_normalized": username_key,
+                "visible_index": idx,
+                "eligible": False,
+                "skip_reason": global_skip_reason,
+            }
+            ineligible_rows.append(evaluated)
+            log("info", "unfollow_visible_candidate_eligibility_evaluated", **evaluated)
+            continue
+
+        row = rows_by_username.get(username_key)
+        if row is None:
+            skip_reason = "not_found_in_interacted_users"
+            skip_counts[skip_reason] += 1
+            evaluated = {
+                "username": username_key,
+                "username_normalized": username_key,
+                "visible_index": idx,
+                "eligible": False,
+                "skip_reason": skip_reason,
+            }
+            ineligible_rows.append(evaluated)
+            log("info", "unfollow_visible_candidate_eligibility_evaluated", **evaluated)
+            continue
+
+        skip_reason = _strict_unfollow_skip_reason(
+            row,
+            settings=settings,
+            now=now,
+            visible_lookup=True,
+        )
+        eligible = not bool(skip_reason)
+        evaluated = {
+            "username": str(row.get("username") or username_key),
+            "username_normalized": username_key,
+            "visible_index": idx,
+            "eligible": eligible,
+            "skip_reason": skip_reason,
+            "interaction_row_id": str(row.get("id") or ""),
+            "followed_at": row.get("followed_at"),
+            "eligible_unfollow_at": row.get("eligible_unfollow_at"),
+            "follow_status": _row_follow_status(row),
+            "unfollowed_at": row.get("unfollowed_at"),
+        }
+        if eligible:
+            candidate = _candidate_payload_from_row(row, settings=settings)
+            candidate["visible_index"] = idx
+            eligible_matches.append(candidate)
+        else:
+            skip_counts[skip_reason] = int(skip_counts.get(skip_reason, 0)) + 1
+            ineligible_rows.append(evaluated)
+        log("info", "unfollow_visible_candidate_eligibility_evaluated", **evaluated)
+
+    out = {
+        "visible_eligible_matches": eligible_matches,
+        "visible_ineligible_rows": ineligible_rows,
+        "visible_eligibility_skip_counts": skip_counts,
+        "visible_eligibility_lookup_count": len(normalized_visible),
+        "visible_eligible_matches_count": len(eligible_matches),
+        "visible_eligible_matches_usernames": [
+            str(c.get("username") or "") for c in eligible_matches
+        ],
+        "visible_match_source": "visible_username_db_lookup",
+    }
+    log(
+        "info",
+        "unfollow_visible_eligibility_lookup_completed",
+        account_id=aid,
+        visible_eligibility_lookup_count=out["visible_eligibility_lookup_count"],
+        visible_eligible_matches_count=out["visible_eligible_matches_count"],
+        visible_eligible_matches_usernames=out["visible_eligible_matches_usernames"][:50],
+        visible_eligibility_skip_counts=skip_counts,
+        visible_match_source=out["visible_match_source"],
     )
     return out

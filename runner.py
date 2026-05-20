@@ -11781,6 +11781,22 @@ def main() -> int:
             dispatch_unfollow_session,
             get_last_unfollow_session_probe_summary,
         )
+        from unfollow_settings import load_unfollow_settings
+
+        requested_probe_only = False
+        dispatch_settings = load_unfollow_settings(account_id, ensure_row=False)
+        dispatch_real_action_enabled = bool(
+            getattr(config, "UNFOLLOW_SESSION_REAL_ACTION_ENABLED", False)
+        )
+        dispatch_real_action_max = max(
+            0, int(getattr(config, "UNFOLLOW_SESSION_REAL_ACTION_MAX_PER_RUN", 1))
+        )
+        dispatch_effective_probe_only = not bool(
+            dispatch_real_action_enabled
+            and dispatch_settings.enabled
+            and dispatch_real_action_max > 0
+            and not requested_probe_only
+        )
 
         log(
             "info",
@@ -11788,7 +11804,12 @@ def main() -> int:
             account_id=account_id,
             account_username=account_username,
             run_id=run_id or None,
-            probe_only=True,
+            requested_probe_only=requested_probe_only,
+            effective_probe_only=dispatch_effective_probe_only,
+            real_action_enabled=dispatch_real_action_enabled,
+            real_action_max_per_run=dispatch_real_action_max,
+            unfollow_enabled=bool(dispatch_settings.enabled),
+            unfollow_sort_mode=str(dispatch_settings.sort_mode or ""),
             unfollow_actions_sent=0,
         )
         unf_code = dispatch_unfollow_session(
@@ -11811,8 +11832,8 @@ def main() -> int:
                     "run_type": "unfollow_session",
                     "exit_code": unf_code,
                     "account_username": account_username,
-                    "probe_only": True,
-                    "unfollow_actions_sent": 0,
+                    "probe_only": bool(unf_summary.get("probe_only", dispatch_effective_probe_only)),
+                    "unfollow_actions_sent": int(unf_summary.get("unfollow_actions_sent") or 0),
                     "unfollow_session_probe_summary": unf_summary,
                 },
             )

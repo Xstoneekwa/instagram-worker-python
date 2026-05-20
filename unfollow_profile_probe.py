@@ -1,0 +1,775 @@
+"""Non-destructive profile/sheet probe for Unfollow Phase 2B.
+
+This module may tap a Following-list row and the target profile's Following
+button, but it never taps the Unfollow option and never persists an unfollow.
+"""
+
+from __future__ import annotations
+
+import re
+import time
+import xml.etree.ElementTree as ET
+from typing import Any
+
+import uiautomator2 as u2
+
+from logs import log
+from own_following_navigation import detect_own_following_list_screen
+from unfollow_list_harvest import normalize_unfollow_username
+
+_HANDLE_RE = re.compile(r"^[A-Za-z0-9._]{1,30}$")
+_FOLLOWING_BUTTON_LABELS = (
+    "Following",
+    "Suivi",
+    "Suivie",
+    "Suivi(e)",
+    "Abonné",
+    "Abonnée",
+    "Abonné(e)",
+    "Siguiendo",
+    "Gefolgt",
+)
+
+
+def _dump_hierarchy(d: u2.Device) -> str:
+    try:
+        try:
+            return str(d.dump_hierarchy(compressed=False) or "")
+        except TypeError:
+            return str(d.dump_hierarchy() or "")
+    except Exception:
+        return ""
+
+
+def _parse_xml_root(hierarchy_xml: str) -> ET.Element | None:
+    text = str(hierarchy_xml or "").strip()
+    if not text:
+        return None
+    try:
+        try:
+            return ET.fromstring(text)
+        except ET.ParseError:
+            return ET.fromstring(f"<wrap>{text}</wrap>")
+    except Exception:
+        return None
+
+
+def _looks_like_username(raw: str) -> bool:
+    value = str(raw or "").strip().lstrip("@")
+    return bool(value and _HANDLE_RE.match(value))
+
+
+def _bounds_center(bounds: dict[str, Any]) -> tuple[int, int] | None:
+    if not isinstance(bounds, dict) or not bounds:
+        return None
+    try:
+        left = int(bounds.get("left", 0))
+        right = int(bounds.get("right", 0))
+        top = int(bounds.get("top", 0))
+        bottom = int(bounds.get("bottom", 0))
+    except Exception:
+        return None
+    if right <= left or bottom <= top:
+        return None
+    return (left + right) // 2, (top + bottom) // 2
+
+
+def _safe_window_size(d: u2.Device) -> tuple[int, int]:
+    try:
+        w, h = d.window_size()
+        return int(w), int(h)
+    except Exception:
+        return 1080, 2400
+
+
+def _point_inside(bounds: dict[str, Any], x: int, y: int) -> bool:
+    if not isinstance(bounds, dict) or not bounds:
+        return False
+    try:
+        return (
+            int(bounds.get("left", 0)) <= int(x) <= int(bounds.get("right", 0))
+            and int(bounds.get("top", 0)) <= int(y) <= int(bounds.get("bottom", 0))
+        )
+    except Exception:
+        return False
+
+
+def _parse_bounds_attr(raw: str | None) -> dict[str, int]:
+    text = str(raw or "")
+    m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", text)
+    if not m:
+        return {}
+    return {
+        "left": int(m.group(1)),
+        "top": int(m.group(2)),
+        "right": int(m.group(3)),
+        "bottom": int(m.group(4)),
+    }
+
+
+def _following_button_label_match(text: str, content_desc: str) -> tuple[bool, str]:
+    t = str(text or "").strip()
+    cd = str(content_desc or "").strip()
+    if t in _FOLLOWING_BUTTON_LABELS:
+        return True, "text_exact_following"
+    # Keep content-desc narrow to avoid profile stats such as "5,425 following".
+    cd_low = cd.lower()
+    if "following button" in cd_low or cd in _FOLLOWING_BUTTON_LABELS:
+        return True, "content_desc_following_button"
+    return False, "text_not_exact_following"
+
+
+def _unfollow_button_bounds_reject_reason(
+    bounds: dict[str, int],
+    *,
+    screen_w: int,
+    screen_h: int,
+) -> str:
+    center = _bounds_center(bounds)
+    if center is None:
+        return "bounds_missing"
+    cx, cy = center
+    width = int(bounds.get("right", 0)) - int(bounds.get("left", 0))
+    height = int(bounds.get("bottom", 0)) - int(bounds.get("top", 0))
+    if cy < int(screen_h * 0.16) or cy > int(screen_h * 0.62):
+        return "outside_unfollow_profile_button_band"
+    if cx < int(screen_w * 0.08) or cx > int(screen_w * 0.92):
+        return "outside_profile_cta_x_band"
+    if width < int(screen_w * 0.12) or width > int(screen_w * 0.62):
+        return "bounds_shape_rejected"
+    if height < 28 or height > int(screen_h * 0.11):
+        return "bounds_shape_rejected"
+    return ""
+
+
+def detect_profile_following_button_for_unfollow(
+    d: u2.Device,
+    *,
+    expected_target_username: str,
+) -> dict[str, Any]:
+    """Find the profile Following button in the Unfollow probe context.
+
+    This detector is intentionally more tolerant vertically than the Follow/Mute
+    helper because profiles opened from the owner's Following list can place the
+    CTA below bio / followed-by / link content.
+    """
+    screen_w, screen_h = _safe_window_size(d)
+    hierarchy = _dump_hierarchy(d)
+    root = _parse_xml_root(hierarchy)
+    reject_reasons_count: dict[str, int] = {}
+    candidates_seen = 0
+    candidates_rejected = 0
+    best: dict[str, Any] | None = None
+
+    if root is None:
+        return {
+            "ok": False,
+            "failure_reason": "hierarchy_xml_parse_failed",
+            "expected_target_username": expected_target_username,
+            "candidates_seen_count": 0,
+            "candidates_rejected_count": 0,
+            "reject_reasons_count": {},
+        }
+
+    for el in root.iter():
+        text = str(el.get("text") or "").strip()
+        content_desc = str(el.get("content-desc") or "").strip()
+        label_ok, label_method = _following_button_label_match(text, content_desc)
+        if not label_ok:
+            continue
+
+        candidates_seen += 1
+        rid = str(el.get("resource-id") or "")
+        cls = str(el.get("class") or "")
+        bounds = _parse_bounds_attr(el.get("bounds"))
+        center = _bounds_center(bounds)
+        cx, cy = center if center is not None else (0, 0)
+        clickable = str(el.get("clickable") or "").lower() == "true"
+        candidate = {
+            "text": text,
+            "content_desc": content_desc,
+            "resource_id": rid,
+            "class_name": cls,
+            "bounds": bounds,
+            "center_x": cx,
+            "center_y": cy,
+            "clickable": clickable,
+            "detection_method": label_method,
+            "expected_target_username": expected_target_username,
+        }
+        log("info", "unfollow_profile_following_button_candidate_seen", **candidate)
+
+        reject_reason = _unfollow_button_bounds_reject_reason(
+            bounds,
+            screen_w=screen_w,
+            screen_h=screen_h,
+        )
+        if reject_reason:
+            candidates_rejected += 1
+            reject_reasons_count[reject_reason] = int(reject_reasons_count.get(reject_reason, 0)) + 1
+            log(
+                "info",
+                "unfollow_profile_following_button_candidate_rejected",
+                **candidate,
+                reject_reason=reject_reason,
+            )
+            continue
+
+        # Prefer clickable nodes, but accept non-clickable text if bounds are strong:
+        # some Instagram builds expose the visible TextView while the parent handles taps.
+        score = (2 if clickable else 1, -abs(cy - int(screen_h * 0.48)))
+        accepted = {
+            **candidate,
+            "score": score,
+            "tap_x": cx,
+            "tap_y": cy,
+        }
+        if best is None or accepted["score"] > best["score"]:
+            best = accepted
+
+    if best is None:
+        return {
+            "ok": False,
+            "failure_reason": "following_button_not_found",
+            "expected_target_username": expected_target_username,
+            "candidates_seen_count": candidates_seen,
+            "candidates_rejected_count": candidates_rejected,
+            "reject_reasons_count": reject_reasons_count,
+        }
+
+    out = {
+        "ok": True,
+        "failure_reason": "",
+        "expected_target_username": expected_target_username,
+        "detection_method": str(best.get("detection_method") or ""),
+        "text": str(best.get("text") or ""),
+        "content_desc": str(best.get("content_desc") or ""),
+        "resource_id": str(best.get("resource_id") or ""),
+        "class_name": str(best.get("class_name") or ""),
+        "bounds": dict(best.get("bounds") or {}),
+        "center_x": int(best.get("center_x") or 0),
+        "center_y": int(best.get("center_y") or 0),
+        "tap_x": int(best.get("tap_x") or 0),
+        "tap_y": int(best.get("tap_y") or 0),
+        "clickable": bool(best.get("clickable")),
+        "candidates_seen_count": candidates_seen,
+        "candidates_rejected_count": candidates_rejected,
+        "reject_reasons_count": reject_reasons_count,
+    }
+    log("info", "unfollow_profile_following_button_detected", **out)
+    return out
+
+
+def tap_following_list_username_row_for_unfollow_probe(
+    d: u2.Device,
+    row: dict[str, Any],
+    *,
+    selection_reason: str,
+) -> tuple[bool, dict[str, Any]]:
+    """Tap only the username/left row zone. Never tap Message or the overflow menu."""
+    username = str(row.get("username") or "")
+    w, _h = _safe_window_size(d)
+    username_bounds = dict(row.get("username_bounds") or {})
+    row_bounds = dict(row.get("row_bounds") or {})
+    cta_bounds = dict(row.get("cta_bounds") or {})
+
+    center = _bounds_center(username_bounds)
+    tap_method = "username_bounds_center"
+    if center is None:
+        if row_bounds:
+            try:
+                left = int(row_bounds.get("left", 0))
+                top = int(row_bounds.get("top", 0))
+                bottom = int(row_bounds.get("bottom", 0))
+                cx = min(int(w * 0.42), left + int(w * 0.34))
+                cy = (top + bottom) // 2
+                center = (cx, cy)
+                tap_method = "row_left_center_fallback"
+            except Exception:
+                center = None
+    if center is None:
+        meta = {
+            "username": username,
+            "row_index": int(row.get("row_index") or 0),
+            "selection_reason": selection_reason,
+            "failure_reason": "tap_bounds_missing",
+        }
+        log("info", "unfollow_following_row_profile_tap_started", **meta)
+        return False, meta
+
+    tap_x, tap_y = center
+    cta_guard_hit = _point_inside(cta_bounds, tap_x, tap_y)
+    right_guard_hit = int(tap_x) > int(w * 0.62)
+    meta = {
+        "username": username,
+        "row_index": int(row.get("row_index") or 0),
+        "tap_x": tap_x,
+        "tap_y": tap_y,
+        "tap_method": tap_method,
+        "selection_reason": selection_reason,
+        "cta_guard_hit": cta_guard_hit,
+        "right_guard_hit": right_guard_hit,
+    }
+    log("info", "unfollow_following_row_profile_tap_started", **meta)
+    if cta_guard_hit or right_guard_hit:
+        meta["failure_reason"] = "tap_point_not_left_safe"
+        return False, meta
+
+    try:
+        d.click(tap_x, tap_y)
+        log("info", "unfollow_following_row_profile_tap_dispatched", **meta)
+        return True, meta
+    except Exception as exc:
+        meta["failure_reason"] = "tap_dispatch_failed"
+        meta["error"] = str(exc)[:200]
+        return False, meta
+
+
+def _extract_profile_username_from_hierarchy(hierarchy_xml: str) -> tuple[str, str, dict[str, Any]]:
+    root = _parse_xml_root(hierarchy_xml)
+    meta: dict[str, Any] = {
+        "action_bar_title": "",
+        "candidate_texts": [],
+        "hierarchy_xml_len": len(str(hierarchy_xml or "")),
+    }
+    if root is None:
+        return "", "hierarchy_xml_parse_failed", meta
+
+    candidates: list[tuple[int, str, str]] = []
+    for el in root.iter():
+        rid = str(el.get("resource-id") or "")
+        rid_l = rid.lower()
+        text = str(el.get("text") or el.get("content-desc") or "").strip().lstrip("@")
+        if not text or not _looks_like_username(text):
+            continue
+        if "action_bar_title" in rid_l:
+            meta["action_bar_title"] = text
+            candidates.append((0, text, "action_bar_title"))
+        elif "profile_header" in rid_l and "username" in rid_l:
+            candidates.append((1, text, "profile_header_username"))
+        elif "username" in rid_l and "row_search" not in rid_l and "follow_list" not in rid_l:
+            candidates.append((2, text, "username_resource_id"))
+        elif "title" in rid_l:
+            candidates.append((3, text, "title_resource_id"))
+    if not candidates:
+        return "", "profile_username_not_found", meta
+    candidates.sort(key=lambda item: item[0])
+    meta["candidate_texts"] = [
+        {"username": value, "method": method, "rank": rank}
+        for rank, value, method in candidates[:8]
+    ]
+    _, username, method = candidates[0]
+    return username, method, meta
+
+
+def verify_unfollow_target_profile_strict(
+    d: u2.Device,
+    *,
+    expected_target_username: str,
+    timeout_s: float = 4.0,
+) -> dict[str, Any]:
+    """Require the opened profile username to exactly match the selected row."""
+    expected = normalize_unfollow_username(expected_target_username)
+    deadline = time.monotonic() + max(0.2, float(timeout_s))
+    last_actual = ""
+    last_method = ""
+    last_meta: dict[str, Any] = {}
+    while time.monotonic() < deadline:
+        hierarchy = _dump_hierarchy(d)
+        actual_raw, method, meta = _extract_profile_username_from_hierarchy(hierarchy)
+        actual = normalize_unfollow_username(actual_raw)
+        last_actual = actual_raw
+        last_method = method
+        last_meta = meta
+        if actual and actual == expected:
+            out = {
+                "ok": True,
+                "expected_target_username": expected_target_username,
+                "actual_profile_username": actual_raw,
+                "verification_method": f"profile_username_exact:{method}",
+                "failure_reason": "",
+                "meta": meta,
+            }
+            log("info", "unfollow_target_profile_open_verified", **out)
+            return out
+        time.sleep(0.18)
+
+    out = {
+        "ok": False,
+        "expected_target_username": expected_target_username,
+        "actual_profile_username": last_actual,
+        "verification_method": f"profile_username_exact:{last_method or 'not_found'}",
+        "failure_reason": (
+            "target_profile_username_mismatch"
+            if last_actual
+            else "target_profile_username_not_detected"
+        ),
+        "meta": last_meta,
+    }
+    log("info", "unfollow_target_profile_open_failed", **out)
+    return out
+
+
+def _find_text(d: u2.Device, labels: tuple[str, ...]) -> tuple[Any, str, str]:
+    for label in labels:
+        try:
+            el = d(text=label)
+            if el.exists(timeout=0.12):
+                return el, label, "text_exact"
+        except Exception:
+            continue
+    return None, "", ""
+
+
+def _element_bounds(el: Any) -> dict[str, int]:
+    try:
+        return {k: int((el.info.get("bounds") or {}).get(k, 0)) for k in ("left", "top", "right", "bottom")}
+    except Exception:
+        return {}
+
+
+def _detect_actions_sheet_signals(d: u2.Device) -> dict[str, Any]:
+    mute_el, mute_text, mute_method = _find_text(
+        d,
+        ("Mute", "Mettre en sourdine", "Sourdine"),
+    )
+    restrict_el, restrict_text, restrict_method = _find_text(
+        d,
+        ("Restrict", "Restreindre"),
+    )
+    unfollow_el, unfollow_text, unfollow_method = _find_text(
+        d,
+        ("Unfollow", "Ne plus suivre"),
+    )
+    return {
+        "mute_visible": mute_el is not None,
+        "mute_text": mute_text,
+        "mute_detection_method": mute_method,
+        "restrict_visible": restrict_el is not None,
+        "restrict_text": restrict_text,
+        "restrict_detection_method": restrict_method,
+        "unfollow_visible": unfollow_el is not None,
+        "unfollow_text": unfollow_text,
+        "unfollow_detection_method": unfollow_method,
+    }
+
+
+def detect_unfollow_option_in_following_sheet(d: u2.Device) -> dict[str, Any]:
+    """Detect the exact Unfollow option in the open Following actions sheet."""
+    el, text, method = _find_text(d, ("Unfollow", "Ne plus suivre"))
+    if el is None:
+        return {
+            "ok": False,
+            "failure_reason": "unfollow_option_not_found",
+            "option_text": "",
+            "detection_method": "",
+            "bounds": {},
+        }
+    bounds = _element_bounds(el)
+    center = _bounds_center(bounds)
+    return {
+        "ok": center is not None,
+        "failure_reason": "" if center is not None else "unfollow_option_bounds_missing",
+        "option_text": text,
+        "detection_method": method,
+        "bounds": bounds,
+        "tap_x": int(center[0]) if center else 0,
+        "tap_y": int(center[1]) if center else 0,
+    }
+
+
+def tap_unfollow_in_following_sheet(
+    d: u2.Device,
+    *,
+    target_username: str,
+) -> dict[str, Any]:
+    """Tap the exact Unfollow option. Caller must have already passed real-action guards."""
+    opt = detect_unfollow_option_in_following_sheet(d)
+    if not opt.get("ok"):
+        out = {
+            "ok": False,
+            "failure_reason": str(opt.get("failure_reason") or "unfollow_option_not_found"),
+            "target_username": target_username,
+            "option_text": str(opt.get("option_text") or ""),
+            "detection_method": str(opt.get("detection_method") or ""),
+            "bounds": dict(opt.get("bounds") or {}),
+            "tap_x": int(opt.get("tap_x") or 0),
+            "tap_y": int(opt.get("tap_y") or 0),
+        }
+        log("info", "unfollow_sheet_unfollow_option_tap_started", **out)
+        return out
+
+    out = {
+        "ok": True,
+        "failure_reason": "",
+        "target_username": target_username,
+        "option_text": str(opt.get("option_text") or ""),
+        "detection_method": str(opt.get("detection_method") or ""),
+        "bounds": dict(opt.get("bounds") or {}),
+        "tap_x": int(opt.get("tap_x") or 0),
+        "tap_y": int(opt.get("tap_y") or 0),
+    }
+    log("info", "unfollow_sheet_unfollow_option_tap_started", **out)
+    try:
+        d.click(int(out["tap_x"]), int(out["tap_y"]))
+    except Exception as exc:
+        out["ok"] = False
+        out["failure_reason"] = "unfollow_option_tap_failed"
+        out["error"] = str(exc)[:200]
+        return out
+    log("info", "unfollow_sheet_unfollow_option_tapped", **out)
+    return out
+
+
+def _profile_follow_state_after_unfollow(d: u2.Device) -> str:
+    for label in ("Follow", "Suivre"):
+        try:
+            if d(text=label).exists(timeout=0.08):
+                return "follow"
+        except Exception:
+            continue
+    det = detect_profile_following_button_for_unfollow(d, expected_target_username="")
+    if det.get("ok"):
+        return "following"
+    return "following_absent"
+
+
+def verify_unfollow_action_success_after_tap(
+    d: u2.Device,
+    *,
+    target_username: str,
+    timeout_s: float = 4.0,
+) -> dict[str, Any]:
+    """Verify minimal post-unfollow success: sheet closed and Following no longer visible."""
+    log("info", "unfollow_action_verify_started", target_username=target_username)
+    deadline = time.monotonic() + max(0.5, float(timeout_s))
+    sheet_closed = False
+    profile_follow_state_after = ""
+    while time.monotonic() < deadline:
+        signals = _detect_actions_sheet_signals(d)
+        sheet_closed = not bool(
+            signals.get("mute_visible")
+            or signals.get("restrict_visible")
+            or signals.get("unfollow_visible")
+        )
+        profile_follow_state_after = _profile_follow_state_after_unfollow(d)
+        following_absent = profile_follow_state_after != "following"
+        if sheet_closed and following_absent:
+            out = {
+                "ok": True,
+                "verification_method": "sheet_closed_and_profile_following_absent",
+                "sheet_closed": True,
+                "profile_following_absent": True,
+                "profile_follow_state_after": profile_follow_state_after,
+                "failure_reason": "",
+                "target_username": target_username,
+            }
+            log("info", "unfollow_action_verified", **out)
+            return out
+        time.sleep(0.25)
+
+    out = {
+        "ok": False,
+        "verification_method": "sheet_closed_and_profile_following_absent",
+        "sheet_closed": bool(sheet_closed),
+        "profile_following_absent": profile_follow_state_after != "following",
+        "profile_follow_state_after": profile_follow_state_after or "unknown",
+        "failure_reason": "unfollow_verify_conditions_not_met",
+        "target_username": target_username,
+    }
+    log("info", "unfollow_action_verify_failed", **out)
+    return out
+
+
+def open_unfollow_actions_sheet_from_profile_probe(
+    d: u2.Device,
+    *,
+    expected_target_username: str,
+) -> dict[str, Any]:
+    """Tap profile Following and verify the actions sheet. Never taps Unfollow."""
+    btn_det = detect_profile_following_button_for_unfollow(
+        d,
+        expected_target_username=expected_target_username,
+    )
+    if not btn_det.get("ok"):
+        out = {
+            "ok": False,
+            "failure_reason": str(btn_det.get("failure_reason") or "following_button_not_found"),
+            "expected_target_username": expected_target_username,
+            "following_detection_method": "",
+            "unfollow_option_visible": False,
+            "sheet_context_signals": {},
+            "candidates_seen_count": int(btn_det.get("candidates_seen_count") or 0),
+            "candidates_rejected_count": int(btn_det.get("candidates_rejected_count") or 0),
+            "reject_reasons_count": dict(btn_det.get("reject_reasons_count") or {}),
+        }
+        log("info", "unfollow_actions_sheet_open_failed", **out)
+        return out
+
+    method = str(btn_det.get("detection_method") or "")
+    bounds = dict(btn_det.get("bounds") or {})
+    tap_x = int(btn_det.get("tap_x") or btn_det.get("center_x") or 0)
+    tap_y = int(btn_det.get("tap_y") or btn_det.get("center_y") or 0)
+    try:
+        d.click(tap_x, tap_y)
+    except Exception as exc:
+        out = {
+            "ok": False,
+            "failure_reason": "following_button_tap_failed",
+            "expected_target_username": expected_target_username,
+            "following_detection_method": method,
+            "error": str(exc)[:200],
+            "unfollow_option_visible": False,
+            "sheet_context_signals": {},
+            "bounds": bounds,
+            "tap_x": tap_x,
+            "tap_y": tap_y,
+        }
+        log("info", "unfollow_actions_sheet_open_failed", **out)
+        return out
+    log(
+        "info",
+        "unfollow_profile_following_button_tapped",
+        expected_target_username=expected_target_username,
+        following_detection_method=method,
+        bounds=bounds,
+        tap_x=tap_x,
+        tap_y=tap_y,
+    )
+
+    time.sleep(0.85)
+    signals = _detect_actions_sheet_signals(d)
+    sheet_open = bool(
+        signals.get("mute_visible")
+        or signals.get("restrict_visible")
+        or signals.get("unfollow_visible")
+    )
+    out = {
+        "ok": sheet_open,
+        "failure_reason": "" if sheet_open else "actions_sheet_signals_missing",
+        "expected_target_username": expected_target_username,
+        "following_detection_method": method,
+        "unfollow_option_visible": bool(signals.get("unfollow_visible")),
+        "option_text": str(signals.get("unfollow_text") or ""),
+        "detection_method": str(signals.get("unfollow_detection_method") or ""),
+        "sheet_context_signals": signals,
+    }
+    if sheet_open:
+        log("info", "unfollow_actions_sheet_opened", **out)
+        if signals.get("unfollow_visible"):
+            log(
+                "info",
+                "unfollow_actions_sheet_unfollow_option_detected",
+                option_text=str(signals.get("unfollow_text") or ""),
+                detection_method=str(signals.get("unfollow_detection_method") or ""),
+                sheet_context_signals=signals,
+                expected_target_username=expected_target_username,
+            )
+        else:
+            log(
+                "warning",
+                "unfollow_actions_sheet_unfollow_option_missing",
+                sheet_context_signals=signals,
+                expected_target_username=expected_target_username,
+            )
+    else:
+        log("info", "unfollow_actions_sheet_open_failed", **out)
+    return out
+
+
+def return_to_following_list_after_unfollow_probe(
+    d: u2.Device,
+    *,
+    account_username: str,
+    max_back_steps: int = 3,
+) -> dict[str, Any]:
+    """Close any sheet/profile opened by the probe and return to owner Following."""
+    log(
+        "info",
+        "unfollow_probe_return_to_following_list_started",
+        account_username=account_username,
+        max_back_steps=max_back_steps,
+    )
+    sheet_closed = False
+    # First back is expected to close the actions sheet if it is open.
+    try:
+        d.press("back")
+        sheet_closed = True
+        log("info", "unfollow_probe_sheet_closed", account_username=account_username, method="back")
+    except Exception as exc:
+        log(
+            "info",
+            "unfollow_probe_sheet_closed",
+            account_username=account_username,
+            method="back",
+            error=str(exc)[:200],
+        )
+    time.sleep(0.35)
+
+    last_det: dict[str, Any] = {}
+    for step in range(max(1, int(max_back_steps))):
+        det = detect_own_following_list_screen(d, account_username=account_username)
+        last_det = det
+        if det.get("is_following_list"):
+            out = {
+                "ok": True,
+                "method": "already_or_back",
+                "back_steps": step,
+                "sheet_closed": sheet_closed,
+                "failure_reason": "",
+            }
+            log("info", "unfollow_probe_return_to_following_list_ok", **out)
+            return out
+        try:
+            d.press("back")
+        except Exception:
+            pass
+        time.sleep(0.45)
+
+    out = {
+        "ok": False,
+        "method": "back",
+        "back_steps": max(1, int(max_back_steps)),
+        "sheet_closed": sheet_closed,
+        "failure_reason": str(last_det.get("failure_reason") or "following_list_not_detected"),
+        "last_detection": last_det,
+    }
+    log("info", "unfollow_probe_return_to_following_list_failed", **out)
+    return out
+
+
+def return_to_following_list_after_unfollow_action(
+    d: u2.Device,
+    *,
+    account_username: str,
+    max_back_steps: int = 3,
+) -> dict[str, Any]:
+    """Return from target profile to owner Following after a real Unfollow tap."""
+    log(
+        "info",
+        "unfollow_action_return_to_following_list_started",
+        account_username=account_username,
+        max_back_steps=max_back_steps,
+    )
+    last_det: dict[str, Any] = {}
+    for step in range(max(1, int(max_back_steps))):
+        det = detect_own_following_list_screen(d, account_username=account_username)
+        last_det = det
+        if det.get("is_following_list"):
+            out = {"ok": True, "method": "already_on_following", "back_steps": step, "failure_reason": ""}
+            log("info", "unfollow_action_return_to_following_list_ok", **out)
+            return out
+        try:
+            d.press("back")
+        except Exception:
+            pass
+        time.sleep(0.45)
+    out = {
+        "ok": False,
+        "method": "back",
+        "back_steps": max(1, int(max_back_steps)),
+        "failure_reason": str(last_det.get("failure_reason") or "following_list_not_detected"),
+        "last_detection": last_det,
+    }
+    log("info", "unfollow_action_return_to_following_list_failed", **out)
+    return out

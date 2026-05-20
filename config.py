@@ -1,5 +1,24 @@
 """Minimal config for the experimental uiautomator2 worker."""
 
+import os
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return bool(default)
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or str(raw).strip() == "":
+        return int(default)
+    try:
+        return int(str(raw).strip())
+    except ValueError:
+        return int(default)
+
 # Target account to open (exact match under Accounts tab).
 # Controlled real-send test: prefer empty / new thread only (no prior DM history with this account).
 TARGET_USERNAME = "mythyllus"
@@ -218,6 +237,9 @@ SESSION_TOTAL_FOLLOWS_CAP = 0
 SESSION_TOTAL_UNFOLLOWS_CAP = 0
 SESSION_TOTAL_LIKES_CAP = 0
 SESSION_TOTAL_PM_CAP = 0
+# Unfollow session real action gate. Default is probe-only; Phase 2C allows at most 1 real unfollow/run.
+UNFOLLOW_SESSION_REAL_ACTION_ENABLED = _env_bool("UNFOLLOW_SESSION_REAL_ACTION_ENABLED", False)
+UNFOLLOW_SESSION_REAL_ACTION_MAX_PER_RUN = max(0, min(_env_int("UNFOLLOW_SESSION_REAL_ACTION_MAX_PER_RUN", 1), 1))
 SESSION_TOTAL_INTERACTIONS_LIMIT = 0
 SESSION_TOTAL_SUCCESSFUL_INTERACTIONS_LIMIT = 0
 # When True, session exit code stays non-zero if configured quotas/phases are unmet (strict mode).
