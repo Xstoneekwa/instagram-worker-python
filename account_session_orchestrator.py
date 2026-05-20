@@ -286,6 +286,22 @@ def _follow_to_unfollow_probe_enabled() -> bool:
     return bool(getattr(config, "ACCOUNT_SESSION_FOLLOW_TO_UNFOLLOW_PROBE_ENABLED", False))
 
 
+def _follow_to_unfollow_real_enabled() -> bool:
+    return bool(getattr(config, "ACCOUNT_SESSION_FOLLOW_TO_UNFOLLOW_REAL_ENABLED", False))
+
+
+def _follow_to_unfollow_real_max_actions_requested() -> int:
+    try:
+        return int(getattr(config, "ACCOUNT_SESSION_FOLLOW_TO_UNFOLLOW_REAL_MAX_ACTIONS", 1))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _follow_to_unfollow_real_max_actions_effective() -> int:
+    requested = _follow_to_unfollow_real_max_actions_requested()
+    return max(0, min(int(requested), 3))
+
+
 def _current_package(d: u2.Device) -> str:
     try:
         return str((d.app_current() or {}).get("package") or "")
@@ -301,7 +317,7 @@ def _prepare_follow_to_unfollow_probe_surface(
     run_id: str | None,
 ) -> dict[str, Any]:
     """
-    H2-only surface prep before the Unfollow probe.
+    Follow -> Unfollow handoff surface prep shared by H2 probe and H3 real.
 
     This intentionally does not open Following; the Unfollow orchestrator keeps
     ownership of identity guard, own profile navigation, Following open, and harvest.
@@ -418,6 +434,46 @@ def _probe_summary_from_unfollow_summary(
     }
 
 
+def _real_summary_from_unfollow_summary(
+    *,
+    enabled: bool,
+    executed: bool,
+    exit_code: int | None,
+    unfollow_summary: dict[str, Any],
+    real_max_actions_requested: int,
+    real_max_actions_effective: int,
+    skip_reason: str = "",
+) -> dict[str, Any]:
+    return {
+        "enabled": bool(enabled),
+        "executed": bool(executed),
+        "probe_only": False,
+        "status": str(unfollow_summary.get("status") or ""),
+        "exit_code": exit_code,
+        "real_max_actions": int(real_max_actions_effective),
+        "real_max_actions_requested": int(real_max_actions_requested),
+        "real_max_actions_effective": int(real_max_actions_effective),
+        "following_surface_ok": bool(unfollow_summary.get("following_surface_ok")),
+        "visible_rows_count": int(unfollow_summary.get("visible_rows_count") or 0),
+        "visible_plan_matches_count": int(
+            unfollow_summary.get("visible_plan_matches_count") or 0
+        ),
+        "unfollow_actions_sent": int(unfollow_summary.get("unfollow_actions_sent") or 0),
+        "unfollow_actions_verified": int(
+            unfollow_summary.get("unfollow_actions_verified") or 0
+        ),
+        "unfollow_actions_failed": int(
+            unfollow_summary.get("unfollow_actions_failed") or 0
+        ),
+        "unfollow_results_persisted_count": int(
+            unfollow_summary.get("unfollow_results_persisted_count") or 0
+        ),
+        "failure_reason": str(unfollow_summary.get("failure_reason") or ""),
+        "unfollow_total_ms": float(unfollow_summary.get("total_ms") or 0.0),
+        "skip_reason": str(skip_reason or ""),
+    }
+
+
 def _skip_follow_to_unfollow_probe(
     *,
     account_id: str,
@@ -450,6 +506,268 @@ def _skip_follow_to_unfollow_probe(
         has_pending_unfollow=bool(diagnostic.get("has_pending_unfollow")),
     )
     return summary
+
+
+def _skip_follow_to_unfollow_real(
+    *,
+    account_id: str,
+    account_username: str,
+    run_id: str | None,
+    real_enabled: bool,
+    skip_reason: str,
+    diagnostic: dict[str, Any],
+    follow_exit_code: int | None,
+    real_max_actions_requested: int,
+    real_max_actions_effective: int,
+    failure_reason: str = "",
+    surface_prep: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    summary = {
+        "enabled": bool(real_enabled),
+        "executed": False,
+        "probe_only": False,
+        "skip_reason": str(skip_reason or "real_handoff_skipped"),
+        "status": "skipped",
+        "exit_code": None,
+        "real_max_actions": int(real_max_actions_effective),
+        "real_max_actions_requested": int(real_max_actions_requested),
+        "real_max_actions_effective": int(real_max_actions_effective),
+        "unfollow_actions_sent": 0,
+        "unfollow_actions_verified": 0,
+        "unfollow_actions_failed": 0,
+        "unfollow_results_persisted_count": 0,
+        "following_surface_ok": False,
+        "visible_rows_count": 0,
+        "visible_plan_matches_count": 0,
+        "failure_reason": str(failure_reason or ""),
+    }
+    if surface_prep:
+        summary.update(surface_prep)
+    log(
+        "info",
+        "follow_to_unfollow_handoff_real_skipped",
+        account_id=account_id,
+        account_username=account_username,
+        run_id=run_id,
+        skip_reason=summary["skip_reason"],
+        real_enabled=bool(real_enabled),
+        handoff_would_run=bool(diagnostic.get("handoff_would_run")),
+        follow_exit_code=follow_exit_code,
+        unfollow_enabled=bool(diagnostic.get("unfollow_enabled")),
+        unfollow_mode=str(diagnostic.get("unfollow_mode") or ""),
+        has_pending_unfollow=bool(diagnostic.get("has_pending_unfollow")),
+        real_max_actions=int(real_max_actions_effective),
+        real_max_actions_requested=int(real_max_actions_requested),
+        real_max_actions_effective=int(real_max_actions_effective),
+        failure_reason=summary["failure_reason"] or None,
+    )
+    return summary
+
+
+def _follow_to_unfollow_real_skip_reason(
+    *,
+    account_id: str,
+    account_username: str,
+    follow_exit_code: int | None,
+    diagnostic: dict[str, Any],
+    real_max_actions_effective: int,
+) -> str:
+    if not str(account_id or "").strip() or not str(account_username or "").strip():
+        return "missing_account_context"
+    if follow_exit_code != 0:
+        return "follow_exit_code_not_zero_h3_real"
+    if not bool(diagnostic.get("handoff_would_run")):
+        return str(diagnostic.get("handoff_skip_reason") or "handoff_gates_not_met")
+    if not bool(diagnostic.get("unfollow_enabled")):
+        return "unfollow_disabled"
+    mode = str(diagnostic.get("unfollow_mode") or "")
+    if mode not in UNFOLLOW_MODES_DB_STRICT:
+        return "unfollow_mode_not_supported_for_h3_real"
+    if not bool(diagnostic.get("has_pending_unfollow")):
+        return "no_pending_unfollow"
+    if int(real_max_actions_effective) < 1:
+        return "real_max_actions_invalid"
+    return ""
+
+
+def _run_follow_to_unfollow_real(
+    d: u2.Device,
+    *,
+    account_id: str,
+    account_username: str,
+    run_id: str | None,
+    follow_exit_code: int | None,
+    follow_total_ms: float,
+    diagnostic: dict[str, Any],
+) -> dict[str, Any]:
+    """H3 only: explicit real Unfollow handoff with a hard low cap."""
+    t0 = time.perf_counter()
+    aid = str(account_id or "").strip()
+    uname = str(account_username or "").strip()
+    mode = str(diagnostic.get("unfollow_mode") or "")
+    pending_count = int(diagnostic.get("pending_unfollow_count") or 0)
+    real_max_requested = _follow_to_unfollow_real_max_actions_requested()
+    real_max_effective = _follow_to_unfollow_real_max_actions_effective()
+    surface_prep: dict[str, Any] = {}
+
+    log(
+        "info",
+        "follow_to_unfollow_handoff_real_started",
+        account_id=aid,
+        account_username=uname,
+        run_id=run_id,
+        previous_phase="follow",
+        follow_exit_code=follow_exit_code,
+        follow_total_ms=round(float(follow_total_ms), 2),
+        unfollow_mode=mode,
+        pending_unfollow_count=pending_count,
+        real_max_actions=int(real_max_effective),
+        real_max_actions_requested=int(real_max_requested),
+        real_max_actions_effective=int(real_max_effective),
+        surface_prep_required=True,
+    )
+
+    skip_reason = _follow_to_unfollow_real_skip_reason(
+        account_id=aid,
+        account_username=uname,
+        follow_exit_code=follow_exit_code,
+        diagnostic=diagnostic,
+        real_max_actions_effective=real_max_effective,
+    )
+    if skip_reason:
+        return _skip_follow_to_unfollow_real(
+            account_id=aid,
+            account_username=uname,
+            run_id=run_id,
+            real_enabled=True,
+            skip_reason=skip_reason,
+            diagnostic=diagnostic,
+            follow_exit_code=follow_exit_code,
+            real_max_actions_requested=real_max_requested,
+            real_max_actions_effective=real_max_effective,
+        )
+
+    try:
+        surface_prep = _prepare_follow_to_unfollow_probe_surface(
+            d,
+            account_id=aid,
+            account_username=uname,
+            run_id=run_id,
+        )
+        if not bool(surface_prep.get("surface_prep_ok")):
+            return _skip_follow_to_unfollow_real(
+                account_id=aid,
+                account_username=uname,
+                run_id=run_id,
+                real_enabled=True,
+                skip_reason="surface_prep_failed",
+                diagnostic=diagnostic,
+                follow_exit_code=follow_exit_code,
+                real_max_actions_requested=real_max_requested,
+                real_max_actions_effective=real_max_effective,
+                failure_reason=str(
+                    surface_prep.get("surface_prep_failure_reason")
+                    or "surface_prep_failed"
+                ),
+                surface_prep=surface_prep,
+            )
+
+        exit_code = run_unfollow_session(
+            d,
+            account_id=aid,
+            account_username=uname,
+            run_id=run_id,
+            dry_probe_only=False,
+            real_action_enabled_override=True,
+            real_action_max_override=real_max_effective,
+        )
+        unfollow_summary = get_last_unfollow_session_probe_summary()
+        out = _real_summary_from_unfollow_summary(
+            enabled=True,
+            executed=True,
+            exit_code=int(exit_code),
+            unfollow_summary=unfollow_summary,
+            real_max_actions_requested=real_max_requested,
+            real_max_actions_effective=real_max_effective,
+        )
+        out.update(surface_prep)
+        out["total_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
+
+        if int(out.get("unfollow_actions_sent") or 0) > int(real_max_effective):
+            out["status"] = "failed_real_actions_cap_exceeded"
+            out["failure_reason"] = "real_actions_cap_exceeded"
+            log(
+                "error",
+                "follow_to_unfollow_handoff_real_failed",
+                account_id=aid,
+                account_username=uname,
+                run_id=run_id,
+                status=out["status"],
+                failure_reason=out["failure_reason"],
+                unfollow_actions_sent=out.get("unfollow_actions_sent"),
+                real_max_actions=int(real_max_effective),
+            )
+
+        log(
+            "info",
+            "follow_to_unfollow_handoff_real_completed",
+            account_id=aid,
+            account_username=uname,
+            run_id=run_id,
+            status=out.get("status"),
+            exit_code=out.get("exit_code"),
+            unfollow_actions_sent=out.get("unfollow_actions_sent"),
+            unfollow_actions_verified=out.get("unfollow_actions_verified"),
+            unfollow_actions_failed=out.get("unfollow_actions_failed"),
+            unfollow_results_persisted_count=out.get("unfollow_results_persisted_count"),
+            following_surface_ok=out.get("following_surface_ok"),
+            visible_rows_count=out.get("visible_rows_count"),
+            visible_plan_matches_count=out.get("visible_plan_matches_count"),
+            failure_reason=out.get("failure_reason"),
+            total_ms=out.get("total_ms"),
+            real_max_actions=out.get("real_max_actions"),
+            real_max_actions_requested=out.get("real_max_actions_requested"),
+            real_max_actions_effective=out.get("real_max_actions_effective"),
+            surface_prep_attempted=out.get("surface_prep_attempted"),
+            surface_prep_ok=out.get("surface_prep_ok"),
+        )
+        return out
+    except Exception as e:
+        out = {
+            "enabled": True,
+            "executed": True,
+            "probe_only": False,
+            "status": "failed_exception",
+            "exit_code": 1,
+            "real_max_actions": int(real_max_effective),
+            "real_max_actions_requested": int(real_max_requested),
+            "real_max_actions_effective": int(real_max_effective),
+            "following_surface_ok": False,
+            "visible_rows_count": 0,
+            "visible_plan_matches_count": 0,
+            "unfollow_actions_sent": 0,
+            "unfollow_actions_verified": 0,
+            "unfollow_actions_failed": 0,
+            "unfollow_results_persisted_count": 0,
+            "failure_reason": str(e),
+            "total_ms": round((time.perf_counter() - t0) * 1000.0, 2),
+            **surface_prep,
+        }
+        log(
+            "error",
+            "follow_to_unfollow_handoff_real_failed",
+            account_id=aid,
+            account_username=uname,
+            run_id=run_id,
+            status=out["status"],
+            failure_reason=out["failure_reason"],
+            unfollow_actions_sent=0,
+            real_max_actions=int(real_max_effective),
+            surface_prep_attempted=out.get("surface_prep_attempted"),
+            surface_prep_ok=out.get("surface_prep_ok"),
+            total_ms=out["total_ms"],
+        )
+        return out
 
 
 def _run_follow_to_unfollow_probe(
@@ -758,6 +1076,22 @@ def run_account_session(
         "unfollow_actions_sent": 0,
         "unfollow_actions_verified": 0,
     }
+    follow_to_unfollow_real: dict[str, Any] = {
+        "enabled": _follow_to_unfollow_real_enabled(),
+        "executed": False,
+        "probe_only": False,
+        "skip_reason": "real_handoff_disabled"
+        if not _follow_to_unfollow_real_enabled()
+        else "follow_phase_not_completed",
+        "status": "skipped",
+        "real_max_actions": _follow_to_unfollow_real_max_actions_effective(),
+        "real_max_actions_requested": _follow_to_unfollow_real_max_actions_requested(),
+        "real_max_actions_effective": _follow_to_unfollow_real_max_actions_effective(),
+        "unfollow_actions_sent": 0,
+        "unfollow_actions_verified": 0,
+        "unfollow_actions_failed": 0,
+        "unfollow_results_persisted_count": 0,
+    }
 
     run_follow, transition_reason = _should_run_follow_after_welcome(
         welcome_enabled=welcome_enabled,
@@ -860,29 +1194,19 @@ def run_account_session(
                 session_started_at=t0,
             )
             probe_enabled = _follow_to_unfollow_probe_enabled()
-            if not probe_enabled:
-                follow_to_unfollow_probe = _skip_follow_to_unfollow_probe(
-                    account_id=aid,
-                    account_username=uname,
-                    run_id=run_id,
-                    probe_enabled=False,
-                    skip_reason="probe_disabled",
-                    diagnostic=follow_to_unfollow_diagnostic,
-                )
-            elif not bool(follow_to_unfollow_diagnostic.get("handoff_would_run")):
-                follow_to_unfollow_probe = _skip_follow_to_unfollow_probe(
-                    account_id=aid,
-                    account_username=uname,
-                    run_id=run_id,
-                    probe_enabled=True,
-                    skip_reason=str(
-                        follow_to_unfollow_diagnostic.get("handoff_skip_reason")
-                        or "handoff_gates_not_met"
-                    ),
-                    diagnostic=follow_to_unfollow_diagnostic,
-                )
-            else:
-                follow_to_unfollow_probe = _run_follow_to_unfollow_probe(
+            real_enabled = _follow_to_unfollow_real_enabled()
+            if real_enabled:
+                if probe_enabled:
+                    follow_to_unfollow_probe = _skip_follow_to_unfollow_probe(
+                        account_id=aid,
+                        account_username=uname,
+                        run_id=run_id,
+                        probe_enabled=True,
+                        skip_reason="real_handoff_enabled",
+                        diagnostic=follow_to_unfollow_diagnostic,
+                    )
+                    follow_to_unfollow_probe["probe_bypassed_reason"] = "real_handoff_enabled"
+                follow_to_unfollow_real = _run_follow_to_unfollow_real(
                     d,
                     account_id=aid,
                     account_username=uname,
@@ -891,6 +1215,49 @@ def run_account_session(
                     follow_total_ms=(follow_t1 - follow_t0) * 1000.0,
                     diagnostic=follow_to_unfollow_diagnostic,
                 )
+            else:
+                follow_to_unfollow_real = _skip_follow_to_unfollow_real(
+                    account_id=aid,
+                    account_username=uname,
+                    run_id=run_id,
+                    real_enabled=False,
+                    skip_reason="real_handoff_disabled",
+                    diagnostic=follow_to_unfollow_diagnostic,
+                    follow_exit_code=follow_exit_code,
+                    real_max_actions_requested=_follow_to_unfollow_real_max_actions_requested(),
+                    real_max_actions_effective=_follow_to_unfollow_real_max_actions_effective(),
+                )
+                if not probe_enabled:
+                    follow_to_unfollow_probe = _skip_follow_to_unfollow_probe(
+                        account_id=aid,
+                        account_username=uname,
+                        run_id=run_id,
+                        probe_enabled=False,
+                        skip_reason="probe_disabled",
+                        diagnostic=follow_to_unfollow_diagnostic,
+                    )
+                elif not bool(follow_to_unfollow_diagnostic.get("handoff_would_run")):
+                    follow_to_unfollow_probe = _skip_follow_to_unfollow_probe(
+                        account_id=aid,
+                        account_username=uname,
+                        run_id=run_id,
+                        probe_enabled=True,
+                        skip_reason=str(
+                            follow_to_unfollow_diagnostic.get("handoff_skip_reason")
+                            or "handoff_gates_not_met"
+                        ),
+                        diagnostic=follow_to_unfollow_diagnostic,
+                    )
+                else:
+                    follow_to_unfollow_probe = _run_follow_to_unfollow_probe(
+                        d,
+                        account_id=aid,
+                        account_username=uname,
+                        run_id=run_id,
+                        follow_exit_code=follow_exit_code,
+                        follow_total_ms=(follow_t1 - follow_t0) * 1000.0,
+                        diagnostic=follow_to_unfollow_diagnostic,
+                    )
 
     session_status = _account_session_status(
         transition_reason=transition_reason,
@@ -969,6 +1336,11 @@ def run_account_session(
         ),
         follow_to_unfollow_diagnostic_ms=follow_to_unfollow_diagnostic.get("diagnostic_ms"),
         follow_to_unfollow_probe=follow_to_unfollow_probe,
+        follow_to_unfollow_real=follow_to_unfollow_real,
+        mandatory_unfollow_executed=bool(
+            follow_to_unfollow_real.get("executed")
+            and int(follow_to_unfollow_real.get("unfollow_actions_sent") or 0) > 0
+        ),
         handoff_ok=handoff_result.ok if handoff_result is not None else None,
         handoff_reason=handoff_result.reason if handoff_result is not None else None,
         handoff_surface_label=handoff_result.surface_label if handoff_result is not None else None,

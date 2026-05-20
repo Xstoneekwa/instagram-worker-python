@@ -243,6 +243,9 @@ UNFOLLOW_SESSION_REAL_ACTION_MAX_PER_RUN = max(0, min(_env_int("UNFOLLOW_SESSION
 UNFOLLOW_SESSION_SCROLL_MAX_PASSES = max(0, min(_env_int("UNFOLLOW_SESSION_SCROLL_MAX_PASSES", 10), 50))
 # Account session H2: after Follow, optionally run Unfollow in forced probe-only mode.
 ACCOUNT_SESSION_FOLLOW_TO_UNFOLLOW_PROBE_ENABLED = _env_bool("ACCOUNT_SESSION_FOLLOW_TO_UNFOLLOW_PROBE_ENABLED", False)
+# Account session H3: explicit real Follow -> Unfollow handoff, disabled by default.
+ACCOUNT_SESSION_FOLLOW_TO_UNFOLLOW_REAL_ENABLED = _env_bool("ACCOUNT_SESSION_FOLLOW_TO_UNFOLLOW_REAL_ENABLED", False)
+ACCOUNT_SESSION_FOLLOW_TO_UNFOLLOW_REAL_MAX_ACTIONS = _env_int("ACCOUNT_SESSION_FOLLOW_TO_UNFOLLOW_REAL_MAX_ACTIONS", 1)
 SESSION_TOTAL_INTERACTIONS_LIMIT = 0
 SESSION_TOTAL_SUCCESSFUL_INTERACTIONS_LIMIT = 0
 # When True, session exit code stays non-zero if configured quotas/phases are unmet (strict mode).

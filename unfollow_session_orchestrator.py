@@ -169,7 +169,15 @@ def _base_session_summary(
     settings: Any,
     plan: dict[str, Any],
     probe_only: bool,
+    real_action_enabled: bool | None = None,
+    real_action_max_per_run: int | None = None,
 ) -> dict[str, Any]:
+    real_enabled = _real_action_enabled() if real_action_enabled is None else bool(real_action_enabled)
+    real_max = (
+        _real_action_max_per_run()
+        if real_action_max_per_run is None
+        else max(0, int(real_action_max_per_run))
+    )
     return {
         "account_id": aid,
         "account_username": uname,
@@ -212,8 +220,8 @@ def _base_session_summary(
         "unfollow_option_visible": False,
         "return_to_following_list_ok": False,
         "probe_only": probe_only,
-        "real_action_enabled": _real_action_enabled(),
-        "real_action_max_per_run": _real_action_max_per_run(),
+        "real_action_enabled": real_enabled,
+        "real_action_max_per_run": real_max,
         "unfollow_actions_sent": 0,
         "unfollow_actions_verified": 0,
         "unfollow_actions_failed": 0,
@@ -1162,13 +1170,23 @@ def run_unfollow_session(
     account_username: str,
     run_id: str | None = None,
     dry_probe_only: bool = True,
+    real_action_enabled_override: bool | None = None,
+    real_action_max_override: int | None = None,
 ) -> int:
     """Run unfollow_session: probe by default; real Unfollow only with explicit config opt-in."""
     t0 = time.perf_counter()
     aid = str(account_id or "").strip()
     uname = str(account_username or "").strip()
-    config_real_enabled = _real_action_enabled()
-    real_action_max = _real_action_max_per_run()
+    config_real_enabled = (
+        _real_action_enabled()
+        if real_action_enabled_override is None
+        else bool(real_action_enabled_override)
+    )
+    real_action_max = (
+        _real_action_max_per_run()
+        if real_action_max_override is None
+        else max(0, int(real_action_max_override))
+    )
 
     settings = load_unfollow_settings(aid, ensure_row=False)
     plan = plan_unfollow_targets(aid, settings=settings)
@@ -1193,6 +1211,7 @@ def run_unfollow_session(
         probe_only=probe_only,
         real_action_enabled=config_real_enabled,
         real_action_active=real_action_active,
+        real_action_max_per_run=real_action_max,
         unfollow_enabled=bool(settings.enabled),
         unfollow_actions_sent=0,
     )
@@ -1204,6 +1223,8 @@ def run_unfollow_session(
         settings=settings,
         plan=plan,
         probe_only=probe_only,
+        real_action_enabled=config_real_enabled,
+        real_action_max_per_run=real_action_max,
     )
 
     identity = verify_active_instagram_account_matches_expected(
