@@ -123,6 +123,174 @@ def _account_session_status(
     return "failed"
 
 
+def _as_optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _last_follow_engine_summary(run_followers_list_engine_session: FollowEngineRunner) -> dict[str, Any]:
+    raw = getattr(run_followers_list_engine_session, "last_session_summary", None)
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def _diagnostic_text(*parts: Any) -> str:
+    chunks: list[str] = []
+    for part in parts:
+        if isinstance(part, dict):
+            chunks.extend(str(v) for v in part.values())
+        elif isinstance(part, (list, tuple, set)):
+            chunks.extend(str(v) for v in part)
+        elif part is not None:
+            chunks.append(str(part))
+    return " ".join(chunks).lower()
+
+
+def _blocked_class_from_markers(*parts: Any) -> str | None:
+    text = _diagnostic_text(*parts)
+    if "active_instagram_account_mismatch" in text or "account_mismatch" in text:
+        return "blocked_account_mismatch"
+    if "challenge" in text:
+        return "blocked_challenge"
+    if "restriction" in text or "restricted" in text or "blocked" in text:
+        return "blocked_restriction"
+    return None
+
+
+def _phase_statuses(
+    *,
+    welcome_enabled: bool,
+    welcome_phase_executed: bool,
+    welcome_session_status: str,
+    follow_phase_executed: bool,
+    follow_phase_skipped_reason: str | None,
+    follow_exit_code: int | None,
+    follow_to_unfollow_real: dict[str, Any],
+) -> tuple[str, str, str]:
+    if not welcome_enabled:
+        welcome_phase_status = "skipped"
+    elif not welcome_phase_executed:
+        welcome_phase_status = "not_started"
+    elif str(welcome_session_status or "") == "success":
+        welcome_phase_status = "completed"
+    elif str(welcome_session_status or "") == "partial_success":
+        welcome_phase_status = "partial"
+    elif str(welcome_session_status or "") == "failed":
+        welcome_phase_status = "failed"
+    else:
+        welcome_phase_status = "unknown"
+
+    if not follow_phase_executed:
+        follow_phase_status = (
+            "skipped" if str(follow_phase_skipped_reason or "").strip() else "not_started"
+        )
+    elif follow_exit_code == 0:
+        follow_phase_status = "completed"
+    elif follow_exit_code == 97:
+        follow_phase_status = "partial_safe_stopped"
+    elif follow_exit_code == 98:
+        follow_phase_status = "partial_safe_stopped"
+    elif follow_exit_code in (3, 4, 40, 44, 53, 54):
+        follow_phase_status = "partial_resumable"
+    elif follow_exit_code is None:
+        follow_phase_status = "unknown"
+    else:
+        follow_phase_status = "failed"
+
+    real_status = str(follow_to_unfollow_real.get("status") or "")
+    if not bool(follow_to_unfollow_real.get("enabled")):
+        unfollow_phase_status = "skipped"
+    elif not bool(follow_to_unfollow_real.get("executed")):
+        unfollow_phase_status = "skipped"
+    elif real_status == "success_real_unfollow":
+        unfollow_phase_status = "completed"
+    elif real_status.startswith("failed"):
+        unfollow_phase_status = "failed"
+    elif real_status:
+        unfollow_phase_status = real_status
+    else:
+        unfollow_phase_status = "unknown"
+
+    return welcome_phase_status, follow_phase_status, unfollow_phase_status
+
+
+def _session_termination_class(
+    *,
+    session_status: str,
+    follow_phase_executed: bool,
+    follow_exit_code: int | None,
+    follow_quota_remaining: int | None,
+    follow_to_unfollow_diagnostic: dict[str, Any],
+    follow_to_unfollow_real: dict[str, Any],
+    follow_phase_skipped_reason: str | None,
+    transition_reason: str,
+) -> str:
+    blocked = _blocked_class_from_markers(
+        follow_to_unfollow_diagnostic,
+        follow_to_unfollow_real,
+        follow_phase_skipped_reason,
+        transition_reason,
+    )
+    if blocked:
+        return blocked
+    if not follow_phase_executed:
+        return "unknown" if session_status != "failed" else "recoverable_failure"
+    if follow_exit_code == 0:
+        if follow_quota_remaining is not None and follow_quota_remaining > 0:
+            return "partial_resumable"
+        return "completed"
+    if follow_exit_code == 97:
+        if bool(follow_to_unfollow_real.get("executed")):
+            return "partial_safe_but_continued"
+        return "partial_safe_stopped"
+    if follow_exit_code == 98:
+        return "partial_safe_stopped"
+    if follow_exit_code in (3, 4, 40, 44, 53, 54):
+        return "recoverable_failure" if follow_exit_code in (3, 4, 40, 44) else "partial_resumable"
+    if follow_exit_code in (42, 71, 72, 74, 75, 96, 99):
+        return "non_recoverable_failure"
+    if follow_exit_code is None:
+        return "unknown"
+    return "unknown"
+
+
+def _restart_eligibility(
+    *,
+    session_termination_class: str,
+    follow_quota_remaining: int | None,
+    follow_to_unfollow_diagnostic: dict[str, Any],
+    follow_to_unfollow_real: dict[str, Any],
+) -> tuple[str, str]:
+    blocked = _blocked_class_from_markers(
+        follow_to_unfollow_diagnostic,
+        follow_to_unfollow_real,
+    )
+    if blocked:
+        return "blocked", blocked
+    if session_termination_class == "completed":
+        return "not_needed", "session_completed"
+    if session_termination_class == "partial_safe_but_continued":
+        if follow_quota_remaining is not None and follow_quota_remaining > 0:
+            return "eligible", "quota_remaining_after_safe_continued"
+        return "not_needed", "safe_continued_no_known_quota_remaining"
+    if session_termination_class in ("partial_safe_stopped", "partial_resumable"):
+        if follow_quota_remaining is not None and follow_quota_remaining <= 0:
+            return "not_needed", "no_quota_remaining"
+        if follow_quota_remaining is None:
+            return "unknown", "quota_remaining_unknown"
+        return "eligible", "quota_remaining"
+    if session_termination_class == "recoverable_failure":
+        return "eligible", "recoverable_failure"
+    if session_termination_class.startswith("blocked_"):
+        return "blocked", session_termination_class
+    if session_termination_class == "non_recoverable_failure":
+        return "blocked", "non_recoverable_failure"
+    return "unknown", "termination_class_unknown"
+
+
 def _follow_exit_handoff_gate(follow_exit_code: int | None) -> tuple[bool, str]:
     if follow_exit_code == 0:
         return True, "follow_completed"
@@ -1219,6 +1387,7 @@ def run_account_session(
     follow_phase_skipped_reason: str | None = None
     follow_exit_code: int | None = None
     follow_t0 = follow_t1 = 0.0
+    follow_engine_summary: dict[str, Any] = {}
     handoff_result: HandoffResult | None = None
     follow_to_unfollow_diagnostic: dict[str, Any] = {}
     follow_to_unfollow_probe: dict[str, Any] = {
@@ -1337,12 +1506,19 @@ def run_account_session(
             )
             follow_t1 = time.perf_counter()
             follow_phase_executed = True
+            follow_engine_summary = _last_follow_engine_summary(
+                run_followers_list_engine_session
+            )
             log(
                 "info",
                 "account_session_follow_phase_completed",
                 account_id=aid,
                 run_id=run_id,
                 follow_engine_exit_code=follow_exit_code,
+                follows_completed_count=follow_engine_summary.get("follows_completed_count"),
+                follow_processed_count=follow_engine_summary.get("follow_processed_count"),
+                follow_session_outcome=follow_engine_summary.get("follow_session_outcome"),
+                follow_stop_reason=follow_engine_summary.get("follow_stop_reason"),
                 follow_total_ms=round((follow_t1 - follow_t0) * 1000.0, 2),
             )
             follow_to_unfollow_diagnostic = _run_follow_to_unfollow_handoff_diagnostic(
@@ -1430,6 +1606,54 @@ def run_account_session(
     )
     exit_code = 0 if session_status == "success" else 1
     total_ms = (time.perf_counter() - t0) * 1000.0
+    follows_completed_count = _as_optional_int(
+        follow_engine_summary.get("follows_completed_count")
+    )
+    follow_processed_count = _as_optional_int(
+        follow_engine_summary.get("follow_processed_count")
+    )
+    follows_goal_effective = _as_optional_int(
+        follow_engine_summary.get("follows_goal_effective")
+    )
+    follow_quota_target = follows_goal_effective
+    follow_quota_remaining = (
+        max(0, follow_quota_target - follows_completed_count)
+        if follow_quota_target is not None and follows_completed_count is not None
+        else None
+    )
+    follow_session_outcome = str(
+        follow_engine_summary.get("follow_session_outcome") or ""
+    )
+    follow_stop_reason = str(follow_engine_summary.get("follow_stop_reason") or "")
+    (
+        welcome_phase_status,
+        follow_phase_status,
+        unfollow_phase_status,
+    ) = _phase_statuses(
+        welcome_enabled=welcome_enabled,
+        welcome_phase_executed=welcome_phase_executed,
+        welcome_session_status=welcome_session_status,
+        follow_phase_executed=follow_phase_executed,
+        follow_phase_skipped_reason=follow_phase_skipped_reason,
+        follow_exit_code=follow_exit_code,
+        follow_to_unfollow_real=follow_to_unfollow_real,
+    )
+    session_termination_class = _session_termination_class(
+        session_status=session_status,
+        follow_phase_executed=follow_phase_executed,
+        follow_exit_code=follow_exit_code,
+        follow_quota_remaining=follow_quota_remaining,
+        follow_to_unfollow_diagnostic=follow_to_unfollow_diagnostic,
+        follow_to_unfollow_real=follow_to_unfollow_real,
+        follow_phase_skipped_reason=follow_phase_skipped_reason,
+        transition_reason=transition_reason,
+    )
+    restart_eligibility, restart_block_reason = _restart_eligibility(
+        session_termination_class=session_termination_class,
+        follow_quota_remaining=follow_quota_remaining,
+        follow_to_unfollow_diagnostic=follow_to_unfollow_diagnostic,
+        follow_to_unfollow_real=follow_to_unfollow_real,
+    )
 
     log(
         "info",
@@ -1439,7 +1663,11 @@ def run_account_session(
         run_id=run_id,
         total_ms=round(total_ms, 2),
         session_status=session_status,
+        session_termination_class=session_termination_class,
+        restart_eligibility=restart_eligibility,
+        restart_block_reason=restart_block_reason,
         transition_reason=transition_reason,
+        welcome_phase_status=welcome_phase_status,
         welcome_enabled=welcome_enabled,
         welcome_phase_executed=welcome_phase_executed,
         welcome_bypass_reason=welcome_bypass_reason,
@@ -1458,10 +1686,18 @@ def run_account_session(
         welcome_total_ms=round((welcome_t1 - welcome_t0) * 1000.0, 2) if welcome_phase_executed else 0.0,
         welcome_scan_total_ms=scan_summary.get("total_ms"),
         welcome_sender_total_ms=sender_summary.get("total_ms"),
+        follow_phase_status=follow_phase_status,
         follow_phase_executed=follow_phase_executed,
         follow_phase_skipped_reason=follow_phase_skipped_reason,
         followers_source_username=src,
         follow_engine_exit_code=follow_exit_code,
+        follows_completed_count=follows_completed_count,
+        follow_session_outcome=follow_session_outcome or None,
+        follow_stop_reason=follow_stop_reason or None,
+        follow_processed_count=follow_processed_count,
+        follows_goal_effective=follows_goal_effective,
+        follow_quota_target=follow_quota_target,
+        follow_quota_remaining=follow_quota_remaining,
         follow_total_ms=round((follow_t1 - follow_t0) * 1000.0, 2) if follow_phase_executed else 0.0,
         follow_to_unfollow_handoff_diagnostic_status=follow_to_unfollow_diagnostic.get("status"),
         follow_to_unfollow_handoff={
@@ -1498,6 +1734,7 @@ def run_account_session(
             "unfollow_plan_reason"
         ),
         follow_to_unfollow_diagnostic_ms=follow_to_unfollow_diagnostic.get("diagnostic_ms"),
+        unfollow_phase_status=unfollow_phase_status,
         follow_to_unfollow_probe=follow_to_unfollow_probe,
         follow_to_unfollow_real=follow_to_unfollow_real,
         mandatory_unfollow_executed=bool(

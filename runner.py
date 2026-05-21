@@ -5646,6 +5646,36 @@ def _run_followers_list_engine_session(
     _VISUAL_FOLLOWERS_OPEN_COUNT_THIS_SESSION = 0
     pkg = config.INSTAGRAM_PACKAGE
     src_key = _norm_ig_handle(source_profile_username)
+    processed = 0
+    follows_completed_count = 0
+    max_iter: int | None = None
+    _followers_session_summary: dict[str, Any] = {
+        "source_profile_username": source_profile_username,
+        "account_id": str(account_id or ""),
+        "run_id": str(run_id or ""),
+        "follow_processed_count": None,
+        "follows_completed_count": None,
+        "follows_goal_effective": None,
+        "follow_session_outcome": "",
+        "follow_stop_reason": "",
+        "exit_code": None,
+    }
+
+    def _publish_followers_session_summary(**updates: Any) -> None:
+        _followers_session_summary.update(updates)
+        try:
+            setattr(
+                _run_followers_list_engine_session,
+                "last_session_summary",
+                dict(_followers_session_summary),
+            )
+        except Exception:
+            pass
+
+    _publish_followers_session_summary(
+        follow_processed_count=0,
+        follows_completed_count=0,
+    )
     log(
         "info",
         "visual_followers_ct_source_loaded",
@@ -5832,6 +5862,10 @@ def _run_followers_list_engine_session(
     max_iter = int(getattr(config, "FOLLOWERS_LIST_MAX_ITERATIONS_PER_RUN", 35))
     _follow_max_per_run = int(getattr(config, "FOLLOW_MAX_PER_RUN", 5))
     _followers_iter_attr = getattr(config, "FOLLOWERS_LIST_MAX_ITERATIONS_PER_RUN", None)
+    _publish_followers_session_summary(
+        follows_goal_effective=max_iter,
+        follow_stop_reason="",
+    )
     log(
         "info",
         "followers_engine_goal_resolved",
@@ -5852,8 +5886,6 @@ def _run_followers_list_engine_session(
     )
     max_scroll = int(followers_scroll_soft_max_per_session())
     scroll_used = 0
-    processed = 0
-    follows_completed_count = 0
     followers_engine_loop_iteration = 0
     prev_candidate_row_count: int | None = None
     sparse_follow_scrolls = 0
@@ -10152,6 +10184,11 @@ def _run_followers_list_engine_session(
                             "follower_username": follower_un,
                         },
                     )
+                    _publish_followers_session_summary(
+                        exit_code=99,
+                        follow_session_outcome="follow_review_popup_unhandled_safe_stop",
+                        follow_stop_reason="follow_review_popup_unhandled",
+                    )
                     _emit_performance_summary(
                         t0=t0,
                         warm_session_used=warm_session_used,
@@ -10653,6 +10690,11 @@ def _run_followers_list_engine_session(
                             "surface_revalidate_after_back": _surf_after,
                         },
                     )
+                    _publish_followers_session_summary(
+                        exit_code=98,
+                        follow_session_outcome="already_connected_safe_skipped",
+                        follow_stop_reason=str(_vc_skip_reason or "already_connected_safe_stop"),
+                    )
                     _emit_performance_summary(
                         t0=t0,
                         warm_session_used=warm_session_used,
@@ -11003,6 +11045,11 @@ def _run_followers_list_engine_session(
                                     "visual_candidate_id": pick.get("visual_candidate_id"),
                                 },
                             )
+                            _publish_followers_session_summary(
+                                exit_code=97,
+                                follow_session_outcome="partial_safe_stopped",
+                                follow_stop_reason=str(_pf_fail or "post_follow_return_ct_failed"),
+                            )
                             _emit_performance_summary(
                                 t0=t0,
                                 warm_session_used=warm_session_used,
@@ -11141,6 +11188,14 @@ def _run_followers_list_engine_session(
 
     finally:
         try:
+            _publish_followers_session_summary(
+                follow_processed_count=int(processed),
+                follows_completed_count=int(follows_completed_count),
+                follow_stop_reason=(
+                    _followers_loop_finally_stop
+                    or str(get_followers_engine_stop_reason() or "")[:160]
+                ),
+            )
             log(
                 "info",
                 "followers_engine_session_finished",
@@ -11213,6 +11268,14 @@ def _run_followers_list_engine_session(
         exploration_passes_used=_expl_used_end,
         exploration_max_passes=_prog_max_end,
         followers_session_outcome=_followers_sess_outcome,
+    )
+    _publish_followers_session_summary(
+        exit_code=0,
+        follow_processed_count=int(processed),
+        follows_completed_count=int(follows_completed_count),
+        follows_goal_effective=int(max_iter or 0),
+        follow_session_outcome=_followers_sess_outcome,
+        follow_stop_reason=str(stop_final or ""),
     )
     log(
         "info",
