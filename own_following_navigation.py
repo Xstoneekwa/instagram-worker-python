@@ -669,6 +669,10 @@ def detect_own_following_list_screen(
         "listview_present": False,
         "action_bar_title": "",
         "cta_counts": {},
+        "following_list_end_detected": False,
+        "suggested_for_you_visible": False,
+        "suggestion_follow_buttons_count": 0,
+        "following_list_end_reason": "",
         "hierarchy_xml_len": len(hierarchy),
         "account_username": str(account_username or ""),
     }
@@ -688,12 +692,24 @@ def detect_own_following_list_screen(
         "follow_back": 0,
         "unknown": 0,
     }
+    suggested_top = 0
 
     for el in root.iter():
         rid = str(el.get("resource-id") or "")
         rid_l = rid.lower()
         cls_l = str(el.get("class") or "").lower()
         text = str(el.get("text") or el.get("content-desc") or "").strip()
+        text_norm = _normalize_ui_text(text)
+        bounds = _parse_bounds(el.get("bounds"))
+        if text_norm == "suggested for you":
+            out["suggested_for_you_visible"] = True
+            if bounds:
+                top = int(bounds.get("top", 0))
+                if suggested_top <= 0 or top < suggested_top:
+                    suggested_top = top
+        elif text_norm == "follow" and bool(out["suggested_for_you_visible"]):
+            if not bounds or suggested_top <= 0 or int(bounds.get("top", 0)) >= suggested_top:
+                out["suggestion_follow_buttons_count"] = int(out["suggestion_follow_buttons_count"] or 0) + 1
         if "unified_follow_list_tab_layout" in rid_l:
             out["unified_follow_list_tab_layout_present"] = True
         if "follow_list_container" in rid_l:
@@ -722,6 +738,12 @@ def detect_own_following_list_screen(
 
     out["usernames_visible_count"] = len(usernames)
     out["cta_counts"] = cta_counts
+    out["following_list_end_detected"] = bool(
+        out["suggested_for_you_visible"]
+        and int(out["suggestion_follow_buttons_count"] or 0) > 0
+    )
+    if out["following_list_end_detected"]:
+        out["following_list_end_reason"] = "suggested_for_you_section_visible"
 
     list_chrome_ok = bool(
         out["follow_list_container_present"]
@@ -729,6 +751,7 @@ def detect_own_following_list_screen(
         or out["listview_present"]
     )
     rows_ok = int(out["usernames_visible_count"] or 0) > 0
+    end_ok = bool(out["following_list_end_detected"])
     expected_key = normalize_unfollow_username(account_username)
     action_bar_key = normalize_unfollow_username(str(out.get("action_bar_title") or ""))
     if bool(out["followers_tab_active"]):
@@ -739,11 +762,15 @@ def detect_own_following_list_screen(
         out["failure_reason"] = "following_tab_not_active"
     elif not list_chrome_ok:
         out["failure_reason"] = "following_list_chrome_missing"
-    elif not rows_ok:
+    elif not rows_ok and not end_ok:
         out["failure_reason"] = "following_usernames_missing"
     else:
         out["is_following_list"] = True
-        out["detected_reason"] = "selected_following_tab_with_visible_usernames"
+        out["detected_reason"] = (
+            "selected_following_tab_at_suggested_for_you_end"
+            if end_ok and not rows_ok
+            else "selected_following_tab_with_visible_usernames"
+        )
 
     if out["is_following_list"]:
         log("info", "unfollow_following_list_detected", **out)

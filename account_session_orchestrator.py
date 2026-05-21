@@ -297,9 +297,18 @@ def _follow_to_unfollow_real_max_actions_requested() -> int:
         return 1
 
 
+def _follow_to_unfollow_real_hard_max() -> int:
+    try:
+        raw = int(getattr(config, "ACCOUNT_SESSION_FOLLOW_TO_UNFOLLOW_REAL_HARD_MAX", 3))
+    except (TypeError, ValueError):
+        raw = 3
+    return max(0, min(raw, 10))
+
+
 def _follow_to_unfollow_real_max_actions_effective() -> int:
     requested = _follow_to_unfollow_real_max_actions_requested()
-    return max(0, min(int(requested), 3))
+    hard_max = _follow_to_unfollow_real_hard_max()
+    return max(0, min(int(requested), hard_max))
 
 
 def _current_package(d: u2.Device) -> str:
@@ -442,6 +451,7 @@ def _real_summary_from_unfollow_summary(
     unfollow_summary: dict[str, Any],
     real_max_actions_requested: int,
     real_max_actions_effective: int,
+    real_hard_max: int,
     skip_reason: str = "",
 ) -> dict[str, Any]:
     return {
@@ -452,6 +462,7 @@ def _real_summary_from_unfollow_summary(
         "exit_code": exit_code,
         "real_max_actions": int(real_max_actions_effective),
         "real_max_actions_requested": int(real_max_actions_requested),
+        "real_hard_max": int(real_hard_max),
         "real_max_actions_effective": int(real_max_actions_effective),
         "following_surface_ok": bool(unfollow_summary.get("following_surface_ok")),
         "visible_rows_count": int(unfollow_summary.get("visible_rows_count") or 0),
@@ -519,6 +530,7 @@ def _skip_follow_to_unfollow_real(
     follow_exit_code: int | None,
     real_max_actions_requested: int,
     real_max_actions_effective: int,
+    real_hard_max: int,
     failure_reason: str = "",
     surface_prep: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -531,6 +543,7 @@ def _skip_follow_to_unfollow_real(
         "exit_code": None,
         "real_max_actions": int(real_max_actions_effective),
         "real_max_actions_requested": int(real_max_actions_requested),
+        "real_hard_max": int(real_hard_max),
         "real_max_actions_effective": int(real_max_actions_effective),
         "unfollow_actions_sent": 0,
         "unfollow_actions_verified": 0,
@@ -607,6 +620,7 @@ def _run_follow_to_unfollow_real(
     mode = str(diagnostic.get("unfollow_mode") or "")
     pending_count = int(diagnostic.get("pending_unfollow_count") or 0)
     real_max_requested = _follow_to_unfollow_real_max_actions_requested()
+    real_hard_max = _follow_to_unfollow_real_hard_max()
     real_max_effective = _follow_to_unfollow_real_max_actions_effective()
     surface_prep: dict[str, Any] = {}
 
@@ -623,6 +637,7 @@ def _run_follow_to_unfollow_real(
         pending_unfollow_count=pending_count,
         real_max_actions=int(real_max_effective),
         real_max_actions_requested=int(real_max_requested),
+        real_hard_max=int(real_hard_max),
         real_max_actions_effective=int(real_max_effective),
         surface_prep_required=True,
     )
@@ -645,6 +660,7 @@ def _run_follow_to_unfollow_real(
             follow_exit_code=follow_exit_code,
             real_max_actions_requested=real_max_requested,
             real_max_actions_effective=real_max_effective,
+            real_hard_max=real_hard_max,
         )
 
     try:
@@ -665,6 +681,7 @@ def _run_follow_to_unfollow_real(
                 follow_exit_code=follow_exit_code,
                 real_max_actions_requested=real_max_requested,
                 real_max_actions_effective=real_max_effective,
+                real_hard_max=real_hard_max,
                 failure_reason=str(
                     surface_prep.get("surface_prep_failure_reason")
                     or "surface_prep_failed"
@@ -689,6 +706,7 @@ def _run_follow_to_unfollow_real(
             unfollow_summary=unfollow_summary,
             real_max_actions_requested=real_max_requested,
             real_max_actions_effective=real_max_effective,
+            real_hard_max=real_hard_max,
         )
         out.update(surface_prep)
         out["total_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
@@ -727,6 +745,7 @@ def _run_follow_to_unfollow_real(
             total_ms=out.get("total_ms"),
             real_max_actions=out.get("real_max_actions"),
             real_max_actions_requested=out.get("real_max_actions_requested"),
+            real_hard_max=out.get("real_hard_max"),
             real_max_actions_effective=out.get("real_max_actions_effective"),
             surface_prep_attempted=out.get("surface_prep_attempted"),
             surface_prep_ok=out.get("surface_prep_ok"),
@@ -741,6 +760,7 @@ def _run_follow_to_unfollow_real(
             "exit_code": 1,
             "real_max_actions": int(real_max_effective),
             "real_max_actions_requested": int(real_max_requested),
+            "real_hard_max": int(real_hard_max),
             "real_max_actions_effective": int(real_max_effective),
             "following_surface_ok": False,
             "visible_rows_count": 0,
@@ -1086,6 +1106,7 @@ def run_account_session(
         "status": "skipped",
         "real_max_actions": _follow_to_unfollow_real_max_actions_effective(),
         "real_max_actions_requested": _follow_to_unfollow_real_max_actions_requested(),
+        "real_hard_max": _follow_to_unfollow_real_hard_max(),
         "real_max_actions_effective": _follow_to_unfollow_real_max_actions_effective(),
         "unfollow_actions_sent": 0,
         "unfollow_actions_verified": 0,
@@ -1226,6 +1247,7 @@ def run_account_session(
                     follow_exit_code=follow_exit_code,
                     real_max_actions_requested=_follow_to_unfollow_real_max_actions_requested(),
                     real_max_actions_effective=_follow_to_unfollow_real_max_actions_effective(),
+                    real_hard_max=_follow_to_unfollow_real_hard_max(),
                 )
                 if not probe_enabled:
                     follow_to_unfollow_probe = _skip_follow_to_unfollow_probe(

@@ -290,6 +290,10 @@ def _harvest_summary_fields(
         "row_cta_counts": dict(harvest_meta.get("row_cta_counts") or {}),
         "visible_plan_matches_count": len(visible_matches),
         "visible_plan_matches_usernames": visible_matches[:50],
+        "following_list_end_detected": bool(harvest_meta.get("following_list_end_detected")),
+        "suggested_for_you_visible": bool(harvest_meta.get("suggested_for_you_visible")),
+        "suggestion_follow_buttons_count": int(harvest_meta.get("suggestion_follow_buttons_count") or 0),
+        "following_list_end_reason": str(harvest_meta.get("following_list_end_reason") or ""),
     }
 
 
@@ -1011,6 +1015,40 @@ def _run_real_unfollow_multi_loop(
                 visible_eligible_matches_count=0,
                 scroll_passes_used=scroll_passes_used,
             )
+            if bool(harvest_meta.get("following_list_end_detected")):
+                scroll_stop_reason = "following_list_end_reached"
+                stop_reason = "following_list_end_reached"
+                end_fields = {
+                    "following_list_end_detected": True,
+                    "suggested_for_you_visible": bool(harvest_meta.get("suggested_for_you_visible")),
+                    "suggestion_follow_buttons_count": int(harvest_meta.get("suggestion_follow_buttons_count") or 0),
+                    "following_list_end_reason": str(
+                        harvest_meta.get("following_list_end_reason")
+                        or "suggested_for_you_section_visible"
+                    ),
+                }
+                last_fields = {**last_fields, **end_fields}
+                log(
+                    "info",
+                    "unfollow_following_list_end_detected",
+                    scroll_passes_used=scroll_passes_used,
+                    visible_rows_count=len(rows),
+                    **end_fields,
+                )
+                log(
+                    "info",
+                    "unfollow_exploration_v2_end_of_list_reached",
+                    scroll_passes_used=scroll_passes_used,
+                    **exploration_fields(exploration_stop_reason=stop_reason),
+                    **end_fields,
+                )
+                status = (
+                    "success_real_unfollow_multi_partial_end_of_list"
+                    if verified > 0
+                    else "no_more_following_rows"
+                )
+                return emit_final(status)
+
             if (
                 stop_after_skipped_effective > 0
                 and unique_skipped_usernames_count() >= stop_after_skipped_effective
@@ -1104,6 +1142,46 @@ def _run_real_unfollow_multi_loop(
                 before_scroll_usernames=before_scroll_keys[:20],
                 after_scroll_usernames=after_scroll_keys[:20],
             )
+            if bool(harvest_meta.get("following_list_end_detected")) and (
+                not after_scroll_keys or after_scroll_keys == before_scroll_keys
+            ):
+                scroll_stop_reason = "following_list_end_reached"
+                stop_reason = "following_list_end_reached"
+                end_fields = {
+                    "following_list_end_detected": True,
+                    "suggested_for_you_visible": bool(harvest_meta.get("suggested_for_you_visible")),
+                    "suggestion_follow_buttons_count": int(harvest_meta.get("suggestion_follow_buttons_count") or 0),
+                    "following_list_end_reason": str(
+                        harvest_meta.get("following_list_end_reason")
+                        or "suggested_for_you_section_visible"
+                    ),
+                }
+                last_fields = {
+                    **last_fields,
+                    **_harvest_summary_fields(rows, harvest_meta, planned_usernames),
+                    **end_fields,
+                }
+                log(
+                    "info",
+                    "unfollow_following_list_end_detected",
+                    scroll_passes_used=scroll_passes_used,
+                    visible_rows_count=len(rows),
+                    **end_fields,
+                )
+                log(
+                    "info",
+                    "unfollow_exploration_v2_end_of_list_reached",
+                    scroll_passes_used=scroll_passes_used,
+                    **exploration_fields(exploration_stop_reason=stop_reason),
+                    **end_fields,
+                )
+                status = (
+                    "success_real_unfollow_multi_partial_end_of_list"
+                    if verified > 0
+                    else "no_more_following_rows"
+                )
+                return emit_final(status)
+
             if after_scroll_keys and after_scroll_keys == before_scroll_keys:
                 scroll_stop_reason = "end_of_list_or_no_new_rows_detected"
                 stop_reason = "eligible_targets_exhausted"

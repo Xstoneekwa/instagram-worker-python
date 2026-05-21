@@ -77,6 +77,42 @@ def _looks_like_username(raw: str) -> bool:
     return bool(value and _HANDLE_RE.match(value))
 
 
+def _node_text(el: ET.Element) -> str:
+    return str(el.get("text") or el.get("content-desc") or "").strip()
+
+
+def _suggested_for_you_signals(root: ET.Element) -> dict[str, Any]:
+    suggested_top = 0
+    suggested_visible = False
+    follow_buttons_count = 0
+    for el in root.iter():
+        text = _node_text(el)
+        normalized = re.sub(r"\s+", " ", text).strip().lower()
+        bounds = _parse_bounds(el.get("bounds"))
+        if normalized == "suggested for you":
+            suggested_visible = True
+            if bounds:
+                top = int(bounds.get("top", 0))
+                if suggested_top <= 0 or top < suggested_top:
+                    suggested_top = top
+            continue
+        if not suggested_visible or normalized != "follow":
+            continue
+        if not bounds or suggested_top <= 0 or int(bounds.get("top", 0)) >= suggested_top:
+            follow_buttons_count += 1
+    return {
+        "suggested_for_you_visible": suggested_visible,
+        "suggested_for_you_top": suggested_top,
+        "suggestion_follow_buttons_count": follow_buttons_count,
+        "following_list_end_detected": bool(suggested_visible and follow_buttons_count > 0),
+        "following_list_end_reason": (
+            "suggested_for_you_section_visible"
+            if suggested_visible and follow_buttons_count > 0
+            else ""
+        ),
+    }
+
+
 def harvest_visible_following_rows_for_unfollow(
     d: u2.Device,
     *,
@@ -121,6 +157,8 @@ def harvest_visible_following_rows_for_unfollow(
         log("info", "unfollow_following_rows_harvested", **meta)
         return [], meta
 
+    end_signals = _suggested_for_you_signals(root)
+    suggested_top = int(end_signals.get("suggested_for_you_top") or 0)
     by_key: dict[str, dict[str, Any]] = {}
     doc_order = 0
     for el in root.iter():
@@ -133,6 +171,8 @@ def harvest_visible_following_rows_for_unfollow(
         cta_text = ""
         cta_bounds: dict[str, int] = {}
         row_bounds = _parse_bounds(el.get("bounds"))
+        if suggested_top > 0 and row_bounds and int(row_bounds.get("top", 0)) >= suggested_top:
+            continue
 
         for sub in el.iter():
             srid = str(sub.get("resource-id") or "")
@@ -144,6 +184,9 @@ def harvest_visible_following_rows_for_unfollow(
             elif "follow_list_row_large_follow_button" in srid:
                 cta_text = str(sub.get("text") or sub.get("content-desc") or "").strip()
                 cta_bounds = _parse_bounds(sub.get("bounds"))
+
+        if suggested_top > 0 and username_bounds and int(username_bounds.get("top", 0)) >= suggested_top:
+            continue
 
         username_key = normalize_unfollow_username(username)
         if not username_key or username_key == source_key or username_key in by_key:
@@ -186,6 +229,7 @@ def harvest_visible_following_rows_for_unfollow(
         "hierarchy_xml_len": len(hierarchy),
         "extraction_source": "own_following_unified_follow_list_xml" if rows else "no_rows",
         "sample_usernames": [str(r.get("username") or "") for r in rows[:12]],
+        **end_signals,
     }
     log("info", "unfollow_following_rows_harvested", **meta)
     return rows, meta
