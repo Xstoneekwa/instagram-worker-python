@@ -284,6 +284,17 @@ ACCOUNT_SESSION_FOLLOW_TO_UNFOLLOW_REAL_HARD_MAX = max(
     0,
     min(_env_int("ACCOUNT_SESSION_FOLLOW_TO_UNFOLLOW_REAL_HARD_MAX", 3), 10),
 )
+# Auto Restart V1A: passive resume-plan defaults only. No scheduler is wired here.
+AUTO_RESTART_ENABLED = _env_bool("AUTO_RESTART_ENABLED", False)
+AUTO_RESTART_DELAY_MINUTES = max(0, _env_int("AUTO_RESTART_DELAY_MINUTES", 20))
+AUTO_RESTART_MAX_ATTEMPTS_PER_SESSION = max(
+    0,
+    _env_int("AUTO_RESTART_MAX_ATTEMPTS_PER_SESSION", 2),
+)
+AUTO_RESTART_MAX_ATTEMPTS_PER_DAY = max(
+    0,
+    _env_int("AUTO_RESTART_MAX_ATTEMPTS_PER_DAY", 3),
+)
 SESSION_TOTAL_INTERACTIONS_LIMIT = 0
 SESSION_TOTAL_SUCCESSFUL_INTERACTIONS_LIMIT = 0
 # When True, session exit code stays non-zero if configured quotas/phases are unmet (strict mode).
