@@ -118,7 +118,7 @@ def _quota_value(
     return UNKNOWN
 
 
-def _current_phase(summary: dict[str, Any]) -> str:
+def _current_phase(summary: dict[str, Any], resume_plan: dict[str, Any] | None = None) -> str:
     statuses = {
         "welcome": str(summary.get("welcome_phase_status") or ""),
         "follow": str(summary.get("follow_phase_status") or ""),
@@ -127,10 +127,21 @@ def _current_phase(summary: dict[str, Any]) -> str:
     for phase in ("welcome", "follow", "unfollow"):
         if statuses[phase] in {"running", "in_progress"}:
             return phase
-    for phase in ("unfollow", "follow", "welcome"):
-        if statuses[phase] not in {"", "skipped", "completed"}:
-            return phase
-    return "completed" if str(summary.get("session_status") or "") == "success" else UNKNOWN
+    session_status = str(summary.get("session_status") or "")
+    restart_allowed = _as_bool(
+        _value(
+            summary.get("restart_allowed"),
+            _nested(resume_plan or {}, "restart_allowed"),
+            default=None,
+        )
+    )
+    if session_status == "success":
+        if restart_allowed is True:
+            return "idle_waiting_restart"
+        if restart_allowed is False:
+            return "completed"
+        return UNKNOWN
+    return UNKNOWN
 
 
 def _restart_count(summary: dict[str, Any], resume_plan: dict[str, Any]) -> Any:
@@ -163,7 +174,6 @@ def _build_badges(snapshot: dict[str, Any]) -> list[str]:
         str(snapshot.get("follow_phase_status") or ""),
         str(snapshot.get("unfollow_phase_status") or ""),
     }
-    current_phase = str(snapshot.get("current_phase") or "")
     quota_remaining_values = [
         _as_int(snapshot.get("follow_quota_remaining")),
         _as_int(snapshot.get("unfollow_quota_remaining")),
@@ -183,9 +193,7 @@ def _build_badges(snapshot: dict[str, Any]) -> list[str]:
 
     if (
         session_status == "running"
-        or current_phase in {"welcome", "follow", "unfollow"}
         or "running" in phase_statuses
-        or "in_progress" in phase_statuses
     ):
         badges.append("running")
     if termination == "completed":
@@ -364,7 +372,7 @@ def build_admin_reliability_snapshot(
         "unsafe_markers": unsafe,
     }
     snapshot["restart_count"] = _restart_count(safe_summary, safe_plan)
-    snapshot["current_phase"] = _current_phase(snapshot)
+    snapshot["current_phase"] = _current_phase(snapshot, safe_plan)
     snapshot["badges"] = _build_badges(snapshot)
     return snapshot
 

@@ -14,6 +14,10 @@ import uiautomator2 as u2
 
 import config
 import supabase_client
+from account_session_reliability_schema import (
+    build_admin_reliability_snapshot,
+    build_escalation_event,
+)
 from account_session_resume_engine import build_account_session_resume_plan
 from device import app_start, press_home
 from dm_follow_handoff import HandoffResult, prepare_dm_to_follow_handoff
@@ -1773,6 +1777,124 @@ def run_account_session(
             error=auto_restart_resume_plan_error,
         )
 
+    reliability_v1d_enabled = True
+    reliability_v1d_dry_run = True
+    admin_reliability_snapshot: dict[str, Any] | None = None
+    admin_reliability_snapshot_error: str | None = None
+    escalation_event: dict[str, Any] | None = None
+    escalation_event_error: str | None = None
+    escalation_required = False
+    escalation_event_type: str | None = None
+    escalation_severity: str | None = None
+    escalation_reason: str | None = None
+    escalation_action_required: str | None = None
+    reliability_summary = {
+        "account_id": aid,
+        "account_username": uname,
+        "run_id": run_id,
+        "package_name": str(getattr(config, "INSTAGRAM_PACKAGE", "") or ""),
+        "session_status": session_status,
+        "session_termination_class": session_termination_class,
+        "restart_eligibility": restart_eligibility,
+        "restart_block_reason": restart_block_reason,
+        "welcome_enabled": welcome_enabled,
+        "welcome_phase_status": welcome_phase_status,
+        "follow_phase_status": follow_phase_status,
+        "unfollow_phase_status": unfollow_phase_status,
+        "follow_engine_exit_code": follow_exit_code,
+        "follows_completed_count": follows_completed_count,
+        "follow_processed_count": follow_processed_count,
+        "follows_goal_effective": follows_goal_effective,
+        "follow_quota_target": follow_quota_target,
+        "follow_quota_remaining": follow_quota_remaining,
+        "follow_session_outcome": follow_session_outcome or None,
+        "follow_stop_reason": follow_stop_reason or None,
+        "welcome_sender_jobs_sent_count": sender_summary.get("jobs_sent_count"),
+        "mandatory_unfollow_executed": mandatory_unfollow_executed,
+        "unfollow_actions_verified": follow_to_unfollow_real.get(
+            "unfollow_actions_verified"
+        ),
+        "unfollow_results_persisted_count": follow_to_unfollow_real.get(
+            "unfollow_results_persisted_count"
+        ),
+        "follow_to_unfollow_real": follow_to_unfollow_real,
+        "auto_restart_restart_allowed": auto_restart_restart_allowed,
+        "auto_restart_restart_block_reason": auto_restart_restart_block_reason,
+        "auto_restart_resume_plan": auto_restart_resume_plan,
+        "auto_restart_resume_plan_error": auto_restart_resume_plan_error,
+    }
+    log(
+        "info",
+        "reliability_v1d_dry_run_started",
+        account_id=aid,
+        account_username=uname,
+        run_id=run_id,
+        reliability_v1d_enabled=reliability_v1d_enabled,
+        dry_run=reliability_v1d_dry_run,
+        session_termination_class=session_termination_class,
+        restart_eligibility=restart_eligibility,
+    )
+    try:
+        admin_reliability_snapshot = build_admin_reliability_snapshot(
+            reliability_summary,
+            resume_plan=auto_restart_resume_plan,
+        )
+    except Exception as e:
+        admin_reliability_snapshot_error = str(e)
+        log(
+            "warning",
+            "reliability_v1d_dry_run_failed",
+            account_id=aid,
+            account_username=uname,
+            run_id=run_id,
+            reliability_v1d_enabled=reliability_v1d_enabled,
+            dry_run=reliability_v1d_dry_run,
+            stage="admin_reliability_snapshot",
+            error=admin_reliability_snapshot_error,
+        )
+    try:
+        escalation_event = build_escalation_event(
+            reliability_summary,
+            resume_plan=auto_restart_resume_plan,
+        )
+        if isinstance(escalation_event, dict):
+            escalation_required = True
+            escalation_event_type = str(escalation_event.get("event_type") or "")
+            escalation_severity = str(escalation_event.get("severity") or "")
+            escalation_reason = str(escalation_event.get("reason") or "")
+            escalation_action_required = str(
+                escalation_event.get("action_required") or ""
+            )
+    except Exception as e:
+        escalation_event_error = str(e)
+        log(
+            "warning",
+            "reliability_v1d_dry_run_failed",
+            account_id=aid,
+            account_username=uname,
+            run_id=run_id,
+            reliability_v1d_enabled=reliability_v1d_enabled,
+            dry_run=reliability_v1d_dry_run,
+            stage="escalation_event",
+            error=escalation_event_error,
+        )
+    log(
+        "info",
+        "reliability_v1d_dry_run_completed",
+        account_id=aid,
+        account_username=uname,
+        run_id=run_id,
+        reliability_v1d_enabled=reliability_v1d_enabled,
+        dry_run=reliability_v1d_dry_run,
+        snapshot_built=admin_reliability_snapshot is not None,
+        escalation_required=escalation_required,
+        escalation_event_type=escalation_event_type,
+        escalation_severity=escalation_severity,
+        escalation_reason=escalation_reason,
+        snapshot_error=admin_reliability_snapshot_error,
+        escalation_error=escalation_event_error,
+    )
+
     log(
         "info",
         "account_session_summary",
@@ -1865,6 +1987,17 @@ def run_account_session(
         auto_restart_phases_to_run=auto_restart_phases_to_run,
         auto_restart_quota_remaining=auto_restart_quota_remaining,
         auto_restart_reason=auto_restart_reason,
+        reliability_v1d_enabled=reliability_v1d_enabled,
+        reliability_v1d_dry_run=reliability_v1d_dry_run,
+        admin_reliability_snapshot=admin_reliability_snapshot,
+        admin_reliability_snapshot_error=admin_reliability_snapshot_error,
+        escalation_event=escalation_event,
+        escalation_event_error=escalation_event_error,
+        escalation_required=escalation_required,
+        escalation_event_type=escalation_event_type,
+        escalation_severity=escalation_severity,
+        escalation_reason=escalation_reason,
+        escalation_action_required=escalation_action_required,
         handoff_ok=handoff_result.ok if handoff_result is not None else None,
         handoff_reason=handoff_result.reason if handoff_result is not None else None,
         handoff_surface_label=handoff_result.surface_label if handoff_result is not None else None,
