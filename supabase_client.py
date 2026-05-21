@@ -7,7 +7,7 @@ import os
 import re
 from typing import Any
 from urllib import error, parse, request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from logs import log
 
@@ -1667,6 +1667,7 @@ def fetch_unfollow_strict_candidate_rows(
     account_id: str,
     *,
     limit: int = 500,
+    after_days: int = 0,
 ) -> list[dict[str, Any]]:
     """
     Load ig_interacted_users rows that may qualify for strict unfollow modes (DB pre-filter).
@@ -1676,24 +1677,102 @@ def fetch_unfollow_strict_candidate_rows(
     if not aid:
         return []
     cap = max(1, min(int(limit), 2000))
-    rows = _request_json(
-        "GET",
-        "ig_interacted_users",
-        query={
-            "select": "*",
-            "account_id": f"eq.{aid}",
-            "followed_by_bot": "eq.true",
-            "followed_at": "not.is.null",
-            "unfollowed_at": "is.null",
-            "whitelist_protected": "eq.false",
-            "follow_status": "eq.following",
-            "order": "eligible_unfollow_at.asc.nullslast,followed_at.asc",
-            "limit": str(cap),
-        },
+    out_cap = max(cap, min(cap * 2, 2000))
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=max(0, int(after_days)))
+
+    base_query = {
+        "select": "*",
+        "account_id": f"eq.{aid}",
+        "followed_by_bot": "eq.true",
+        "followed_at": "not.is.null",
+        "unfollowed_at": "is.null",
+        "whitelist_protected": "eq.false",
+        "follow_status": "eq.following",
+    }
+
+    def _load(query_extra: dict[str, str], query_limit: int) -> list[dict[str, Any]]:
+        if query_limit <= 0:
+            return []
+        rows = _request_json(
+            "GET",
+            "ig_interacted_users",
+            query={
+                **base_query,
+                **query_extra,
+                "limit": str(max(1, min(int(query_limit), 2000))),
+            },
+        )
+        if not rows or not isinstance(rows, list):
+            return []
+        return [r for r in rows if isinstance(r, dict)]
+
+    def _merge_unique(
+        dst: list[dict[str, Any]],
+        src: list[dict[str, Any]],
+        seen_ids: set[str],
+        seen_usernames: set[str],
+    ) -> None:
+        for row in src:
+            row_id = str(row.get("id") or "").strip()
+            username = str(row.get("username") or "").strip().lower()
+            if (row_id and row_id in seen_ids) or (username and username in seen_usernames):
+                continue
+            if row_id:
+                seen_ids.add(row_id)
+            if username:
+                seen_usernames.add(username)
+            dst.append(row)
+            if len(dst) >= out_cap:
+                break
+
+    out: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    seen_usernames: set[str] = set()
+
+    # Priority 1: rows with a stored eligibility timestamp that is already due.
+    _merge_unique(
+        out,
+        _load(
+            {
+                "eligible_unfollow_at": f"lte.{now.isoformat()}",
+                "order": "eligible_unfollow_at.asc,followed_at.asc",
+            },
+            cap,
+        ),
+        seen_ids,
+        seen_usernames,
     )
-    if not rows or not isinstance(rows, list):
-        return []
-    return [r for r in rows if isinstance(r, dict)]
+
+    # Priority 2: legacy rows where eligibility is computed from followed_at.
+    _merge_unique(
+        out,
+        _load(
+            {
+                "eligible_unfollow_at": "is.null",
+                "followed_at": f"lte.{cutoff.isoformat()}",
+                "order": "followed_at.asc",
+            },
+            cap,
+        ),
+        seen_ids,
+        seen_usernames,
+    )
+
+    # Fill remaining slots with the historical broad prefilter so skipped_counts
+    # still capture near-future or malformed rows when the eligible pool is small.
+    _merge_unique(
+        out,
+        _load(
+            {
+                "order": "eligible_unfollow_at.asc.nullslast,followed_at.asc",
+            },
+            max(0, out_cap - len(out)),
+        ),
+        seen_ids,
+        seen_usernames,
+    )
+    return out
 
 
 def fetch_visible_unfollow_eligibility_rows(

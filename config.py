@@ -241,6 +241,9 @@ SESSION_TOTAL_PM_CAP = 0
 UNFOLLOW_SESSION_REAL_ACTION_ENABLED = _env_bool("UNFOLLOW_SESSION_REAL_ACTION_ENABLED", False)
 UNFOLLOW_SESSION_REAL_ACTION_MAX_PER_RUN = max(0, min(_env_int("UNFOLLOW_SESSION_REAL_ACTION_MAX_PER_RUN", 1), 10))
 UNFOLLOW_SESSION_SCROLL_MAX_PASSES = max(0, min(_env_int("UNFOLLOW_SESSION_SCROLL_MAX_PASSES", 10), 50))
+# V2 exploration placeholders only. 0 = disabled; not used as stop conditions yet.
+UNFOLLOW_SESSION_STOP_AFTER_SKIPPED = max(0, _env_int("UNFOLLOW_SESSION_STOP_AFTER_SKIPPED", 0))
+UNFOLLOW_SESSION_MAX_MINUTES = max(0, _env_int("UNFOLLOW_SESSION_MAX_MINUTES", 0))
 # Account session H2: after Follow, optionally run Unfollow in forced probe-only mode.
 ACCOUNT_SESSION_FOLLOW_TO_UNFOLLOW_PROBE_ENABLED = _env_bool("ACCOUNT_SESSION_FOLLOW_TO_UNFOLLOW_PROBE_ENABLED", False)
 # Account session H3: explicit real Follow -> Unfollow handoff, disabled by default.

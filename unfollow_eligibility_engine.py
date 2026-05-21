@@ -247,7 +247,11 @@ def plan_unfollow_targets(
 
     now = _now_utc()
     fetch_cap = max(session_cap * 4, 50) if session_cap > 0 else 200
-    rows = supabase_client.fetch_unfollow_strict_candidate_rows(aid, limit=fetch_cap)
+    rows = supabase_client.fetch_unfollow_strict_candidate_rows(
+        aid,
+        limit=fetch_cap,
+        after_days=cfg.after_days,
+    )
 
     candidates: list[dict[str, Any]] = []
 

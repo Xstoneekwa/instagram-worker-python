@@ -161,6 +161,34 @@ def _scroll_max_passes() -> int:
     return max(0, int(getattr(config, "UNFOLLOW_SESSION_SCROLL_MAX_PASSES", 10)))
 
 
+def _stop_after_skipped() -> int:
+    return max(0, int(getattr(config, "UNFOLLOW_SESSION_STOP_AFTER_SKIPPED", 0)))
+
+
+def _max_minutes() -> int:
+    return max(0, int(getattr(config, "UNFOLLOW_SESSION_MAX_MINUTES", 0)))
+
+
+_STRICT_EXPLORATION_SKIP_REASONS = {
+    "not_found_in_interacted_users",
+    "too_soon",
+    "whitelist",
+    "already_unfollowed",
+    "missing_followed_by_bot",
+    "missing_followed_at",
+    "lifecycle_ineligible",
+    "follow_status_not_following",
+    "missing_followback_confirmation",
+    "not_following_back",
+    "followback_state_not_allowed",
+    "unfollow_disabled",
+    "unfollow_mode_not_supported",
+    "invalid_username",
+    "own_account",
+    "already_completed_in_run",
+}
+
+
 def _base_session_summary(
     *,
     aid: str,
@@ -695,6 +723,133 @@ def _run_real_unfollow_multi_loop(
         "any_mode_selected_count": 0,
     }
     max_scroll_passes = _scroll_max_passes()
+    stop_after_skipped_effective = _stop_after_skipped()
+    max_minutes_effective = _max_minutes()
+    exploration_started_at = time.perf_counter()
+    seen_usernames: set[str] = set()
+    skipped_usernames_by_reason: dict[str, set[str]] = {
+        reason: set() for reason in sorted(_STRICT_EXPLORATION_SKIP_REASONS)
+    }
+    eligible_seen_usernames: set[str] = set()
+    db_matched_usernames: set[str] = set()
+    visible_plan_matched_usernames: set[str] = set()
+    visible_plan_matches_current: list[str] = []
+    visible_usernames_seen_total = 0
+    duplicate_visible_usernames_count = 0
+    scroll_progress_unique_new_count = 0
+
+    def exploration_fields(*, exploration_stop_reason: str = "") -> dict[str, Any]:
+        skip_reason_counts_total = {
+            reason: len(usernames)
+            for reason, usernames in sorted(skipped_usernames_by_reason.items())
+            if usernames
+        }
+        skipped_union: set[str] = set()
+        for usernames in skipped_usernames_by_reason.values():
+            skipped_union.update(usernames)
+        unique_seen = len(seen_usernames)
+        unique_eligible = len(eligible_seen_usernames)
+        return {
+            "unique_usernames_seen_count": unique_seen,
+            "unique_skipped_usernames_count": len(skipped_union),
+            "skip_reason_counts_total": skip_reason_counts_total,
+            "unique_eligible_seen_count": unique_eligible,
+            "eligible_hit_rate": round(unique_eligible / unique_seen, 4) if unique_seen else 0.0,
+            "db_match_rate": round(len(db_matched_usernames) / unique_seen, 4) if unique_seen else 0.0,
+            "visible_usernames_seen_total": visible_usernames_seen_total,
+            "duplicate_visible_usernames_count": duplicate_visible_usernames_count,
+            "scroll_progress_unique_new_count": scroll_progress_unique_new_count,
+            "exploration_stop_reason": exploration_stop_reason,
+            "stop_after_skipped_effective": stop_after_skipped_effective,
+            "max_minutes_effective": max_minutes_effective,
+            "planned_usernames_count": len(planned_usernames),
+            "visible_plan_matches_count_current": len(visible_plan_matches_current),
+            "visible_plan_matches_usernames_current": visible_plan_matches_current[:50],
+            "visible_plan_matches_count_total_unique": len(visible_plan_matched_usernames),
+            "visible_plan_match_rate": (
+                round(len(visible_plan_matched_usernames) / len(planned_usernames), 4)
+                if planned_usernames
+                else 0.0
+            ),
+            "plan_guided_mode": "instrumentation_only",
+        }
+
+    def unique_skipped_usernames_count() -> int:
+        skipped_union: set[str] = set()
+        for usernames in skipped_usernames_by_reason.values():
+            skipped_union.update(usernames)
+        return len(skipped_union)
+
+    def max_minutes_reached() -> bool:
+        if max_minutes_effective <= 0:
+            return False
+        elapsed_minutes = (time.perf_counter() - exploration_started_at) / 60.0
+        return elapsed_minutes >= float(max_minutes_effective)
+
+    def record_exploration_viewport(
+        visible_usernames: list[str],
+        visible_eval: dict[str, Any],
+    ) -> dict[str, Any]:
+        nonlocal visible_usernames_seen_total
+        nonlocal duplicate_visible_usernames_count
+        nonlocal scroll_progress_unique_new_count
+        nonlocal visible_plan_matches_current
+
+        new_keys: set[str] = set()
+        current_plan_matches: list[str] = []
+        current_plan_match_keys: set[str] = set()
+        scroll_progress_unique_new_count = 0
+        for idx, raw in enumerate(visible_usernames):
+            visible_usernames_seen_total += 1
+            key = normalize_unfollow_username(str(raw or ""))
+            if not key:
+                skipped_usernames_by_reason.setdefault("invalid_username", set()).add(
+                    f"invalid:{visible_usernames_seen_total}:{idx}"
+                )
+                continue
+            if key in planned_usernames and key not in current_plan_match_keys:
+                current_plan_match_keys.add(key)
+                current_plan_matches.append(str(raw or key))
+            if key in seen_usernames:
+                duplicate_visible_usernames_count += 1
+                continue
+            seen_usernames.add(key)
+            new_keys.add(key)
+            scroll_progress_unique_new_count += 1
+            if key in planned_usernames:
+                visible_plan_matched_usernames.add(key)
+
+        visible_plan_matches_current = current_plan_matches[:50]
+
+        for cand in list(visible_eval.get("visible_eligible_matches") or []):
+            if not isinstance(cand, dict):
+                continue
+            key = normalize_unfollow_username(
+                str(cand.get("username_normalized") or cand.get("username") or "")
+            )
+            if key and key in new_keys and key not in completed_usernames:
+                eligible_seen_usernames.add(key)
+                db_matched_usernames.add(key)
+
+        for row in list(visible_eval.get("visible_ineligible_rows") or []):
+            if not isinstance(row, dict):
+                continue
+            key = normalize_unfollow_username(
+                str(row.get("username_normalized") or row.get("username") or "")
+            )
+            if not key or key not in new_keys:
+                continue
+            if key in completed_usernames:
+                skipped_usernames_by_reason.setdefault("already_completed_in_run", set()).add(key)
+                continue
+            reason = str(row.get("skip_reason") or "").strip() or "unknown"
+            if reason not in _STRICT_EXPLORATION_SKIP_REASONS:
+                skipped_usernames_by_reason.setdefault(reason, set())
+            skipped_usernames_by_reason[reason].add(key)
+            if str(row.get("interaction_row_id") or "").strip():
+                db_matched_usernames.add(key)
+
+        return exploration_fields()
 
     def emit_final(status: str, failure_reason: str = "") -> int:
         event_name = (
@@ -702,21 +857,30 @@ def _run_real_unfollow_multi_loop(
             if status.startswith("failed_")
             else "unfollow_multi_action_loop_completed"
         )
+        exploration_stop = stop_reason or status
+        exploration_summary = exploration_fields(exploration_stop_reason=exploration_stop)
         log(
             "info",
             event_name,
             status=status,
-            stop_reason=stop_reason or status,
+            stop_reason=exploration_stop,
             failure_reason=failure_reason,
             unfollow_actions_verified_so_far=verified,
             real_action_max_per_run=real_action_max,
             scroll_passes_used=scroll_passes_used,
             scroll_stop_reason=scroll_stop_reason,
         )
+        log(
+            "info",
+            "unfollow_exploration_v2_completed",
+            scroll_passes_used=scroll_passes_used,
+            **exploration_summary,
+        )
         summary = {
             **base_summary,
             **last_fields,
             **totals,
+            **exploration_summary,
             "multi_action_mode": True,
             "real_action_max_per_run": real_action_max,
             "unfollow_actions_sent": sent,
@@ -725,7 +889,7 @@ def _run_real_unfollow_multi_loop(
             "unfollow_results_persisted_count": persisted,
             "scroll_passes_used": scroll_passes_used,
             "scroll_stop_reason": scroll_stop_reason,
-            "multi_action_stop_reason": stop_reason or status,
+            "multi_action_stop_reason": exploration_stop,
             "status": status,
             "failure_reason": failure_reason,
             "total_ms": round((time.perf_counter() - t0) * 1000.0, 2),
@@ -740,6 +904,12 @@ def _run_real_unfollow_multi_loop(
         account_username=uname,
         real_action_max_per_run=real_action_max,
         scroll_max_passes=max_scroll_passes,
+    )
+    log(
+        "info",
+        "unfollow_exploration_v2_started",
+        scroll_passes_used=scroll_passes_used,
+        **exploration_fields(),
     )
 
     iteration_index = 0
@@ -794,6 +964,10 @@ def _run_real_unfollow_multi_loop(
                     row_cache=visible_eligibility_row_cache,
                 )
                 _aggregate_visible_perf_totals(totals, visible_eval)
+                exploration_viewport_fields = record_exploration_viewport(
+                    visible_usernames,
+                    visible_eval,
+                )
                 visible_candidates = _visible_candidates_by_username(visible_eval)
                 for done in completed_usernames:
                     visible_candidates.pop(done, None)
@@ -814,6 +988,12 @@ def _run_real_unfollow_multi_loop(
                     rows,
                     visible_candidates,
                 )
+                log(
+                    "info",
+                    "unfollow_exploration_v2_viewport_evaluated",
+                    scroll_passes_used=scroll_passes_used,
+                    **exploration_viewport_fields,
+                )
             eval_fields["visible_target_selection_ms"] = round(
                 (time.perf_counter() - selection_t0) * 1000.0,
                 2,
@@ -831,6 +1011,41 @@ def _run_real_unfollow_multi_loop(
                 visible_eligible_matches_count=0,
                 scroll_passes_used=scroll_passes_used,
             )
+            if (
+                stop_after_skipped_effective > 0
+                and unique_skipped_usernames_count() >= stop_after_skipped_effective
+            ):
+                scroll_stop_reason = "stop_after_skipped_reached"
+                stop_reason = "stop_after_skipped_reached"
+                log(
+                    "info",
+                    "unfollow_exploration_v2_stop_after_skipped_reached",
+                    scroll_passes_used=scroll_passes_used,
+                    **exploration_fields(exploration_stop_reason=stop_reason),
+                )
+                status = (
+                    "success_real_unfollow_multi_partial_exhausted"
+                    if verified > 0
+                    else "no_visible_eligible_unfollow_target"
+                )
+                return emit_final(status)
+
+            if max_minutes_reached():
+                scroll_stop_reason = "max_minutes_reached"
+                stop_reason = "max_minutes_reached"
+                log(
+                    "info",
+                    "unfollow_exploration_v2_max_minutes_reached",
+                    scroll_passes_used=scroll_passes_used,
+                    **exploration_fields(exploration_stop_reason=stop_reason),
+                )
+                status = (
+                    "success_real_unfollow_multi_partial_exhausted"
+                    if verified > 0
+                    else "no_visible_eligible_unfollow_target"
+                )
+                return emit_final(status)
+
             if scroll_passes_used >= max_scroll_passes:
                 scroll_stop_reason = "scroll_budget_exhausted"
                 stop_reason = "eligible_targets_exhausted"
