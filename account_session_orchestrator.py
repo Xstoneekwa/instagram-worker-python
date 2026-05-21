@@ -452,8 +452,10 @@ def _real_summary_from_unfollow_summary(
     real_max_actions_requested: int,
     real_max_actions_effective: int,
     real_hard_max: int,
+    follow_exit_gate: dict[str, Any] | None = None,
     skip_reason: str = "",
 ) -> dict[str, Any]:
+    gate = dict(follow_exit_gate or {})
     return {
         "enabled": bool(enabled),
         "executed": bool(executed),
@@ -482,6 +484,11 @@ def _real_summary_from_unfollow_summary(
         "failure_reason": str(unfollow_summary.get("failure_reason") or ""),
         "unfollow_total_ms": float(unfollow_summary.get("total_ms") or 0.0),
         "skip_reason": str(skip_reason or ""),
+        "follow_exit_code_allowed": bool(gate.get("follow_exit_code_allowed")),
+        "follow_exit_code_allow_reason": str(gate.get("follow_exit_code_allow_reason") or ""),
+        "follow_exit_code_block_reason": str(gate.get("follow_exit_code_block_reason") or ""),
+        "allowed_follow_exit_codes": list(gate.get("allowed_follow_exit_codes") or [0, 97]),
+        "safe_partial_follow_exit_code": int(gate.get("safe_partial_follow_exit_code") or 97),
     }
 
 
@@ -531,9 +538,11 @@ def _skip_follow_to_unfollow_real(
     real_max_actions_requested: int,
     real_max_actions_effective: int,
     real_hard_max: int,
+    follow_exit_gate: dict[str, Any] | None = None,
     failure_reason: str = "",
     surface_prep: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    gate = dict(follow_exit_gate or {})
     summary = {
         "enabled": bool(real_enabled),
         "executed": False,
@@ -553,6 +562,11 @@ def _skip_follow_to_unfollow_real(
         "visible_rows_count": 0,
         "visible_plan_matches_count": 0,
         "failure_reason": str(failure_reason or ""),
+        "follow_exit_code_allowed": bool(gate.get("follow_exit_code_allowed")),
+        "follow_exit_code_allow_reason": str(gate.get("follow_exit_code_allow_reason") or ""),
+        "follow_exit_code_block_reason": str(gate.get("follow_exit_code_block_reason") or ""),
+        "allowed_follow_exit_codes": list(gate.get("allowed_follow_exit_codes") or [0, 97]),
+        "safe_partial_follow_exit_code": int(gate.get("safe_partial_follow_exit_code") or 97),
     }
     if surface_prep:
         summary.update(surface_prep)
@@ -572,6 +586,11 @@ def _skip_follow_to_unfollow_real(
         real_max_actions=int(real_max_actions_effective),
         real_max_actions_requested=int(real_max_actions_requested),
         real_max_actions_effective=int(real_max_actions_effective),
+        follow_exit_code_allowed=summary["follow_exit_code_allowed"],
+        follow_exit_code_allow_reason=summary["follow_exit_code_allow_reason"],
+        follow_exit_code_block_reason=summary["follow_exit_code_block_reason"],
+        allowed_follow_exit_codes=summary["allowed_follow_exit_codes"],
+        safe_partial_follow_exit_code=summary["safe_partial_follow_exit_code"],
         failure_reason=summary["failure_reason"] or None,
     )
     return summary
@@ -584,11 +603,13 @@ def _follow_to_unfollow_real_skip_reason(
     follow_exit_code: int | None,
     diagnostic: dict[str, Any],
     real_max_actions_effective: int,
+    follow_exit_gate: dict[str, Any] | None = None,
 ) -> str:
+    gate = dict(follow_exit_gate or {})
     if not str(account_id or "").strip() or not str(account_username or "").strip():
         return "missing_account_context"
-    if follow_exit_code != 0:
-        return "follow_exit_code_not_zero_h3_real"
+    if not bool(gate.get("follow_exit_code_allowed")):
+        return str(gate.get("follow_exit_code_block_reason") or "follow_exit_code_not_allowed_h3_real")
     if not bool(diagnostic.get("handoff_would_run")):
         return str(diagnostic.get("handoff_skip_reason") or "handoff_gates_not_met")
     if not bool(diagnostic.get("unfollow_enabled")):
@@ -601,6 +622,85 @@ def _follow_to_unfollow_real_skip_reason(
     if int(real_max_actions_effective) < 1:
         return "real_max_actions_invalid"
     return ""
+
+
+def _evaluate_h3_follow_exit_code_gate(
+    *,
+    account_id: str,
+    account_username: str,
+    follow_exit_code: int | None,
+    diagnostic: dict[str, Any],
+    real_max_actions_effective: int,
+) -> dict[str, Any]:
+    allowed_codes = [0, 97]
+    out: dict[str, Any] = {
+        "follow_exit_code": follow_exit_code,
+        "follow_exit_code_allowed": False,
+        "follow_exit_code_allow_reason": "",
+        "follow_exit_code_block_reason": "",
+        "allowed_follow_exit_codes": allowed_codes,
+        "safe_partial_follow_exit_code": 97,
+        "follow_phase_executed": True,
+        "follows_completed_count": None,
+        "follow_session_outcome": "",
+        "follow_stop_reason": "",
+    }
+    if follow_exit_code == 0:
+        out.update(
+            {
+                "follow_exit_code_allowed": True,
+                "follow_exit_code_allow_reason": "follow_completed",
+            }
+        )
+        return out
+    if follow_exit_code != 97:
+        out["follow_exit_code_block_reason"] = "follow_exit_code_not_allowed_h3_real"
+        return out
+
+    blockers: list[str] = []
+    if not str(account_id or "").strip() or not str(account_username or "").strip():
+        blockers.append("missing_account_context")
+    if not bool(diagnostic.get("handoff_would_run")):
+        blockers.append(str(diagnostic.get("handoff_skip_reason") or "handoff_gates_not_met"))
+    if not bool(diagnostic.get("unfollow_enabled")):
+        blockers.append("unfollow_disabled")
+    mode = str(diagnostic.get("unfollow_mode") or "")
+    if mode not in UNFOLLOW_MODES_DB_STRICT:
+        blockers.append("unfollow_mode_not_supported_for_h3_real")
+    if int(diagnostic.get("pending_unfollow_count") or 0) <= 0:
+        blockers.append("no_pending_unfollow")
+    if int(real_max_actions_effective) < 1:
+        blockers.append("real_max_actions_invalid")
+
+    diagnostic_blob = " ".join(str(v).lower() for v in diagnostic.values())
+    unsafe_markers = (
+        "active_instagram_account_mismatch",
+        "account_mismatch",
+        "challenge",
+        "restriction",
+        "restricted",
+        "blocked",
+        "crash",
+        "exception",
+    )
+    for marker in unsafe_markers:
+        if marker in diagnostic_blob:
+            blockers.append(f"unsafe_follow_signal_{marker}")
+            break
+
+    if blockers:
+        out["follow_exit_code_block_reason"] = "|".join(
+            reason for reason in dict.fromkeys(blockers) if reason
+        )
+        return out
+
+    out.update(
+        {
+            "follow_exit_code_allowed": True,
+            "follow_exit_code_allow_reason": "partial_safe_follow_exit_97",
+        }
+    )
+    return out
 
 
 def _run_follow_to_unfollow_real(
@@ -623,6 +723,13 @@ def _run_follow_to_unfollow_real(
     real_hard_max = _follow_to_unfollow_real_hard_max()
     real_max_effective = _follow_to_unfollow_real_max_actions_effective()
     surface_prep: dict[str, Any] = {}
+    follow_exit_gate = _evaluate_h3_follow_exit_code_gate(
+        account_id=aid,
+        account_username=uname,
+        follow_exit_code=follow_exit_code,
+        diagnostic=diagnostic,
+        real_max_actions_effective=real_max_effective,
+    )
 
     log(
         "info",
@@ -641,6 +748,23 @@ def _run_follow_to_unfollow_real(
         real_max_actions_effective=int(real_max_effective),
         surface_prep_required=True,
     )
+    log(
+        "info",
+        "follow_to_unfollow_handoff_follow_exit_code_evaluated",
+        account_id=aid,
+        account_username=uname,
+        run_id=run_id,
+        follow_exit_code=follow_exit_code,
+        follow_exit_code_allowed=bool(follow_exit_gate.get("follow_exit_code_allowed")),
+        follow_exit_code_allow_reason=str(follow_exit_gate.get("follow_exit_code_allow_reason") or ""),
+        follow_exit_code_block_reason=str(follow_exit_gate.get("follow_exit_code_block_reason") or ""),
+        allowed_follow_exit_codes=list(follow_exit_gate.get("allowed_follow_exit_codes") or [0, 97]),
+        safe_partial_follow_exit_code=int(follow_exit_gate.get("safe_partial_follow_exit_code") or 97),
+        follow_phase_executed=bool(follow_exit_gate.get("follow_phase_executed")),
+        follows_completed_count=follow_exit_gate.get("follows_completed_count"),
+        follow_session_outcome=str(follow_exit_gate.get("follow_session_outcome") or ""),
+        follow_stop_reason=str(follow_exit_gate.get("follow_stop_reason") or ""),
+    )
 
     skip_reason = _follow_to_unfollow_real_skip_reason(
         account_id=aid,
@@ -648,6 +772,7 @@ def _run_follow_to_unfollow_real(
         follow_exit_code=follow_exit_code,
         diagnostic=diagnostic,
         real_max_actions_effective=real_max_effective,
+        follow_exit_gate=follow_exit_gate,
     )
     if skip_reason:
         return _skip_follow_to_unfollow_real(
@@ -661,6 +786,7 @@ def _run_follow_to_unfollow_real(
             real_max_actions_requested=real_max_requested,
             real_max_actions_effective=real_max_effective,
             real_hard_max=real_hard_max,
+            follow_exit_gate=follow_exit_gate,
         )
 
     try:
@@ -682,6 +808,7 @@ def _run_follow_to_unfollow_real(
                 real_max_actions_requested=real_max_requested,
                 real_max_actions_effective=real_max_effective,
                 real_hard_max=real_hard_max,
+                follow_exit_gate=follow_exit_gate,
                 failure_reason=str(
                     surface_prep.get("surface_prep_failure_reason")
                     or "surface_prep_failed"
@@ -707,6 +834,7 @@ def _run_follow_to_unfollow_real(
             real_max_actions_requested=real_max_requested,
             real_max_actions_effective=real_max_effective,
             real_hard_max=real_hard_max,
+            follow_exit_gate=follow_exit_gate,
         )
         out.update(surface_prep)
         out["total_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
@@ -747,6 +875,9 @@ def _run_follow_to_unfollow_real(
             real_max_actions_requested=out.get("real_max_actions_requested"),
             real_hard_max=out.get("real_hard_max"),
             real_max_actions_effective=out.get("real_max_actions_effective"),
+            follow_exit_code_allowed=out.get("follow_exit_code_allowed"),
+            follow_exit_code_allow_reason=out.get("follow_exit_code_allow_reason"),
+            follow_exit_code_block_reason=out.get("follow_exit_code_block_reason"),
             surface_prep_attempted=out.get("surface_prep_attempted"),
             surface_prep_ok=out.get("surface_prep_ok"),
         )
@@ -762,6 +893,11 @@ def _run_follow_to_unfollow_real(
             "real_max_actions_requested": int(real_max_requested),
             "real_hard_max": int(real_hard_max),
             "real_max_actions_effective": int(real_max_effective),
+            "follow_exit_code_allowed": bool(follow_exit_gate.get("follow_exit_code_allowed")),
+            "follow_exit_code_allow_reason": str(follow_exit_gate.get("follow_exit_code_allow_reason") or ""),
+            "follow_exit_code_block_reason": str(follow_exit_gate.get("follow_exit_code_block_reason") or ""),
+            "allowed_follow_exit_codes": list(follow_exit_gate.get("allowed_follow_exit_codes") or [0, 97]),
+            "safe_partial_follow_exit_code": int(follow_exit_gate.get("safe_partial_follow_exit_code") or 97),
             "following_surface_ok": False,
             "visible_rows_count": 0,
             "visible_plan_matches_count": 0,
@@ -1108,6 +1244,11 @@ def run_account_session(
         "real_max_actions_requested": _follow_to_unfollow_real_max_actions_requested(),
         "real_hard_max": _follow_to_unfollow_real_hard_max(),
         "real_max_actions_effective": _follow_to_unfollow_real_max_actions_effective(),
+        "follow_exit_code_allowed": False,
+        "follow_exit_code_allow_reason": "",
+        "follow_exit_code_block_reason": "",
+        "allowed_follow_exit_codes": [0, 97],
+        "safe_partial_follow_exit_code": 97,
         "unfollow_actions_sent": 0,
         "unfollow_actions_verified": 0,
         "unfollow_actions_failed": 0,

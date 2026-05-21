@@ -19,6 +19,16 @@ def _env_int(name: str, default: int) -> int:
     except ValueError:
         return int(default)
 
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or str(raw).strip() == "":
+        return float(default)
+    try:
+        return float(str(raw).strip())
+    except ValueError:
+        return float(default)
+
 # Target account to open (exact match under Accounts tab).
 # Controlled real-send test: prefer empty / new thread only (no prior DM history with this account).
 TARGET_USERNAME = "mythyllus"
@@ -241,6 +251,27 @@ SESSION_TOTAL_PM_CAP = 0
 UNFOLLOW_SESSION_REAL_ACTION_ENABLED = _env_bool("UNFOLLOW_SESSION_REAL_ACTION_ENABLED", False)
 UNFOLLOW_SESSION_REAL_ACTION_MAX_PER_RUN = max(0, min(_env_int("UNFOLLOW_SESSION_REAL_ACTION_MAX_PER_RUN", 1), 10))
 UNFOLLOW_SESSION_SCROLL_MAX_PASSES = max(0, min(_env_int("UNFOLLOW_SESSION_SCROLL_MAX_PASSES", 10), 50))
+UNFOLLOW_SESSION_SCROLL_V2_LITE_ENABLED = _env_bool("UNFOLLOW_SESSION_SCROLL_V2_LITE_ENABLED", False)
+UNFOLLOW_SESSION_SCROLL_V2_LITE_DISTANCE_RATIO = max(
+    0.30,
+    min(_env_float("UNFOLLOW_SESSION_SCROLL_V2_LITE_DISTANCE_RATIO", 0.72), 0.78),
+)
+UNFOLLOW_SESSION_SCROLL_V2_LITE_SETTLE_S = max(
+    0.20,
+    min(_env_float("UNFOLLOW_SESSION_SCROLL_V2_LITE_SETTLE_S", 0.45), 1.00),
+)
+UNFOLLOW_SESSION_SCROLL_V2_LITE_MIN_NEW_USERNAMES = max(
+    0,
+    _env_int("UNFOLLOW_SESSION_SCROLL_V2_LITE_MIN_NEW_USERNAMES", 3),
+)
+UNFOLLOW_SESSION_SCROLL_V2_LITE_MAX_UNCHANGED_SCROLLS = max(
+    1,
+    _env_int("UNFOLLOW_SESSION_SCROLL_V2_LITE_MAX_UNCHANGED_SCROLLS", 3),
+)
+UNFOLLOW_SESSION_MAX_RECOVERABLE_ACTION_FAILURES = max(
+    0,
+    _env_int("UNFOLLOW_SESSION_MAX_RECOVERABLE_ACTION_FAILURES", 2),
+)
 # V2 exploration placeholders only. 0 = disabled; not used as stop conditions yet.
 UNFOLLOW_SESSION_STOP_AFTER_SKIPPED = max(0, _env_int("UNFOLLOW_SESSION_STOP_AFTER_SKIPPED", 0))
 UNFOLLOW_SESSION_MAX_MINUTES = max(0, _env_int("UNFOLLOW_SESSION_MAX_MINUTES", 0))

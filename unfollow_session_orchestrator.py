@@ -161,6 +161,36 @@ def _scroll_max_passes() -> int:
     return max(0, int(getattr(config, "UNFOLLOW_SESSION_SCROLL_MAX_PASSES", 10)))
 
 
+def _scroll_v2_lite_enabled() -> bool:
+    return bool(getattr(config, "UNFOLLOW_SESSION_SCROLL_V2_LITE_ENABLED", False))
+
+
+def _scroll_v2_lite_distance_ratio() -> float:
+    return max(
+        0.30,
+        min(float(getattr(config, "UNFOLLOW_SESSION_SCROLL_V2_LITE_DISTANCE_RATIO", 0.72)), 0.78),
+    )
+
+
+def _scroll_v2_lite_settle_s() -> float:
+    return max(
+        0.20,
+        min(float(getattr(config, "UNFOLLOW_SESSION_SCROLL_V2_LITE_SETTLE_S", 0.45)), 1.00),
+    )
+
+
+def _scroll_v2_lite_min_new_usernames() -> int:
+    return max(0, int(getattr(config, "UNFOLLOW_SESSION_SCROLL_V2_LITE_MIN_NEW_USERNAMES", 3)))
+
+
+def _scroll_v2_lite_max_unchanged_scrolls() -> int:
+    return max(1, int(getattr(config, "UNFOLLOW_SESSION_SCROLL_V2_LITE_MAX_UNCHANGED_SCROLLS", 3)))
+
+
+def _max_recoverable_action_failures() -> int:
+    return max(0, int(getattr(config, "UNFOLLOW_SESSION_MAX_RECOVERABLE_ACTION_FAILURES", 2)))
+
+
 def _stop_after_skipped() -> int:
     return max(0, int(getattr(config, "UNFOLLOW_SESSION_STOP_AFTER_SKIPPED", 0)))
 
@@ -634,33 +664,71 @@ def _aggregate_visible_perf_totals(totals: dict[str, Any], visible_eval: dict[st
 
 
 def _scroll_following_list_for_unfollow(d: u2.Device, *, account_username: str) -> dict[str, Any]:
+    v2_enabled = _scroll_v2_lite_enabled()
+    strategy = "v2_lite" if v2_enabled else "legacy"
+    settle_s = _scroll_v2_lite_settle_s() if v2_enabled else 0.55
     try:
         w, h = d.window_size()
     except Exception:
         w, h = 1080, 2400
     x = int(w * 0.50)
-    y_start = int(h * 0.78)
-    y_end = int(h * 0.36)
+    if v2_enabled:
+        distance_ratio = _scroll_v2_lite_distance_ratio()
+        y_start_ratio = 0.86
+        y_end_ratio = max(0.10, y_start_ratio - distance_ratio)
+        distance_ratio = y_start_ratio - y_end_ratio
+        y_start = int(h * y_start_ratio)
+        y_end = int(h * y_end_ratio)
+        log(
+            "info",
+            "unfollow_scroll_v2_lite_started",
+            scroll_strategy=strategy,
+            scroll_distance_ratio=round(float(y_start_ratio - y_end_ratio), 4),
+            scroll_settle_s=round(float(settle_s), 3),
+            tap_x=x,
+            start_y=y_start,
+            end_y=y_end,
+        )
+    else:
+        y_start = int(h * 0.78)
+        y_end = int(h * 0.36)
+        distance_ratio = 0.42
     out = {
         "ok": False,
         "failure_reason": "",
         "tap_x": x,
         "start_y": y_start,
         "end_y": y_end,
+        "scroll_strategy": strategy,
+        "scroll_v2_lite_enabled": v2_enabled,
+        "scroll_distance_ratio": round(float(distance_ratio), 4),
+        "scroll_settle_s": round(float(settle_s), 3),
+        "scroll_duration_ms": 0.0,
     }
+    scroll_t0 = time.perf_counter()
     try:
         d.swipe(x, y_start, x, y_end, 0.10)
     except Exception as exc:
         out["failure_reason"] = "swipe_failed"
         out["error"] = str(exc)[:200]
+        out["scroll_duration_ms"] = round((time.perf_counter() - scroll_t0) * 1000.0, 2)
+        if v2_enabled:
+            log("info", "unfollow_scroll_v2_lite_fallback", **out)
         return out
-    time.sleep(0.55)
+    time.sleep(settle_s)
+    out["scroll_duration_ms"] = round((time.perf_counter() - scroll_t0) * 1000.0, 2)
     det = detect_own_following_list_screen(d, account_username=account_username)
     out["surface_detection"] = det
+    out["surface_ok_after_scroll"] = bool(det.get("is_following_list"))
+    out["end_of_list_detected"] = bool(det.get("following_list_end_detected"))
     if not det.get("is_following_list"):
         out["failure_reason"] = str(det.get("failure_reason") or "following_surface_lost_after_scroll")
+        if v2_enabled:
+            log("info", "unfollow_scroll_v2_lite_fallback", **out)
         return out
     out["ok"] = True
+    if v2_enabled:
+        log("info", "unfollow_scroll_v2_lite_completed", **out)
     return out
 
 
@@ -712,6 +780,12 @@ def _run_real_unfollow_multi_loop(
     scroll_stop_reason = ""
     stop_reason = ""
     completed_usernames: set[str] = set()
+    failed_usernames_this_run: set[str] = set()
+    recoverable_action_failure_usernames: list[str] = []
+    recoverable_action_failure_reasons: dict[str, str] = {}
+    recoverable_action_failures_count = 0
+    session_continued_after_recoverable_failure = False
+    max_recoverable_action_failures = _max_recoverable_action_failures()
     any_mode_selected_count = 0
     last_fields = dict(harvest_fields)
     any_mode_active = str(getattr(settings, "mode", "") or "") == UNFOLLOW_MODE_ANY
@@ -725,6 +799,18 @@ def _run_real_unfollow_multi_loop(
         "any_mode_whitelist_skips_count": 0,
         "any_mode_rows_without_interaction_history_count": 0,
         "any_mode_selected_count": 0,
+        "scroll_strategy_used": "v2_lite" if _scroll_v2_lite_enabled() else "legacy",
+        "scroll_v2_lite_enabled": _scroll_v2_lite_enabled(),
+        "scroll_avg_new_usernames_per_pass": 0.0,
+        "scroll_avg_overlap_ratio": 0.0,
+        "scroll_unchanged_streak_max": 0,
+        "scroll_surface_failures_count": 0,
+        "scroll_v2_lite_fallback_count": 0,
+        "recoverable_action_failures_count": 0,
+        "recoverable_action_failure_usernames": [],
+        "recoverable_action_failure_reasons": {},
+        "max_recoverable_action_failures": max_recoverable_action_failures,
+        "session_continued_after_recoverable_failure": False,
     }
     max_scroll_passes = _scroll_max_passes()
     stop_after_skipped_effective = _stop_after_skipped()
@@ -741,6 +827,13 @@ def _run_real_unfollow_multi_loop(
     visible_usernames_seen_total = 0
     duplicate_visible_usernames_count = 0
     scroll_progress_unique_new_count = 0
+    scroll_new_usernames_total = 0
+    scroll_overlap_ratio_total = 0.0
+    scroll_progress_eval_count = 0
+    unchanged_scroll_streak = 0
+    unchanged_scroll_streak_max = 0
+    scroll_surface_failures_count = 0
+    scroll_v2_lite_fallback_count = 0
 
     def exploration_fields(*, exploration_stop_reason: str = "") -> dict[str, Any]:
         skip_reason_counts_total = {
@@ -778,6 +871,29 @@ def _run_real_unfollow_multi_loop(
             "plan_guided_mode": "instrumentation_only",
         }
 
+    def refresh_recoverable_action_summary_totals() -> None:
+        totals["recoverable_action_failures_count"] = recoverable_action_failures_count
+        totals["recoverable_action_failure_usernames"] = recoverable_action_failure_usernames[:50]
+        totals["recoverable_action_failure_reasons"] = dict(recoverable_action_failure_reasons)
+        totals["max_recoverable_action_failures"] = max_recoverable_action_failures
+        totals["session_continued_after_recoverable_failure"] = session_continued_after_recoverable_failure
+
+    def is_recoverable_action_sheet_failure(sheet_out: dict[str, Any], *, return_ok: bool) -> bool:
+        reason = str(sheet_out.get("failure_reason") or "").strip()
+        retry_reason = str(sheet_out.get("retry_failure_reason") or "").strip()
+        recoverable_reasons = {
+            "actions_sheet_signals_missing",
+            "actions_sheet_signals_missing_after_retry",
+            "sheet_not_opened",
+            "actions_sheet_not_opened",
+        }
+        return bool(
+            return_ok
+            and not bool(sheet_out.get("ok"))
+            and not bool(sheet_out.get("unfollow_option_visible"))
+            and (reason in recoverable_reasons or retry_reason in recoverable_reasons)
+        )
+
     def unique_skipped_usernames_count() -> int:
         skipped_union: set[str] = set()
         for usernames in skipped_usernames_by_reason.values():
@@ -789,6 +905,21 @@ def _run_real_unfollow_multi_loop(
             return False
         elapsed_minutes = (time.perf_counter() - exploration_started_at) / 60.0
         return elapsed_minutes >= float(max_minutes_effective)
+
+    def refresh_scroll_summary_totals() -> None:
+        totals["scroll_avg_new_usernames_per_pass"] = (
+            round(scroll_new_usernames_total / scroll_progress_eval_count, 4)
+            if scroll_progress_eval_count
+            else 0.0
+        )
+        totals["scroll_avg_overlap_ratio"] = (
+            round(scroll_overlap_ratio_total / scroll_progress_eval_count, 4)
+            if scroll_progress_eval_count
+            else 0.0
+        )
+        totals["scroll_unchanged_streak_max"] = unchanged_scroll_streak_max
+        totals["scroll_surface_failures_count"] = scroll_surface_failures_count
+        totals["scroll_v2_lite_fallback_count"] = scroll_v2_lite_fallback_count
 
     def record_exploration_viewport(
         visible_usernames: list[str],
@@ -843,7 +974,7 @@ def _run_real_unfollow_multi_loop(
             )
             if not key or key not in new_keys:
                 continue
-            if key in completed_usernames:
+            if key in completed_usernames or key in failed_usernames_this_run:
                 skipped_usernames_by_reason.setdefault("already_completed_in_run", set()).add(key)
                 continue
             reason = str(row.get("skip_reason") or "").strip() or "unknown"
@@ -863,6 +994,8 @@ def _run_real_unfollow_multi_loop(
         )
         exploration_stop = stop_reason or status
         exploration_summary = exploration_fields(exploration_stop_reason=exploration_stop)
+        refresh_scroll_summary_totals()
+        refresh_recoverable_action_summary_totals()
         log(
             "info",
             event_name,
@@ -975,6 +1108,8 @@ def _run_real_unfollow_multi_loop(
                 visible_candidates = _visible_candidates_by_username(visible_eval)
                 for done in completed_usernames:
                     visible_candidates.pop(done, None)
+                for failed_key in failed_usernames_this_run:
+                    visible_candidates.pop(failed_key, None)
                 eval_fields = {
                     **_harvest_summary_fields(rows, harvest_meta, planned_usernames),
                     **_visible_eligibility_summary_fields(visible_eval),
@@ -1117,6 +1252,11 @@ def _run_real_unfollow_multi_loop(
             if not scroll.get("ok"):
                 scroll_stop_reason = str(scroll.get("failure_reason") or "following_surface_lost_after_scroll")
                 stop_reason = "scroll_surface_lost"
+                if str(scroll_stop_reason) != "swipe_failed":
+                    scroll_surface_failures_count += 1
+                if bool(scroll.get("scroll_v2_lite_enabled")):
+                    scroll_v2_lite_fallback_count += 1
+                refresh_scroll_summary_totals()
                 log(
                     "info",
                     "unfollow_multi_action_scroll_surface_lost",
@@ -1131,6 +1271,64 @@ def _run_real_unfollow_multi_loop(
             after_scroll_keys = _visible_username_keys(
                 [str(row.get("username") or "") for row in rows]
             )
+            before_set = set(before_scroll_keys)
+            after_set = set(after_scroll_keys)
+            new_after_count = len([key for key in after_scroll_keys if key not in before_set])
+            overlap_count = len(before_set.intersection(after_set))
+            after_count = len(after_scroll_keys)
+            overlap_ratio = round(overlap_count / after_count, 4) if after_count else 0.0
+            if after_scroll_keys and after_scroll_keys == before_scroll_keys:
+                unchanged_scroll_streak += 1
+            else:
+                unchanged_scroll_streak = 0
+            unchanged_scroll_streak_max = max(unchanged_scroll_streak_max, unchanged_scroll_streak)
+            scroll_new_usernames_total += new_after_count
+            scroll_overlap_ratio_total += overlap_ratio
+            scroll_progress_eval_count += 1
+            if bool(scroll.get("scroll_v2_lite_enabled")) and new_after_count < _scroll_v2_lite_min_new_usernames():
+                scroll_v2_lite_fallback_count += 1
+                log(
+                    "info",
+                    "unfollow_scroll_v2_lite_fallback",
+                    fallback_reason="low_new_usernames_after_scroll",
+                    min_new_usernames=_scroll_v2_lite_min_new_usernames(),
+                    new_usernames_after_scroll_count=new_after_count,
+                    scroll_passes_used=scroll_passes_used,
+                    **{
+                        k: v
+                        for k, v in scroll.items()
+                        if k not in {"surface_detection"}
+                    },
+                )
+            refresh_scroll_summary_totals()
+            progress_fields = {
+                "scroll_strategy": str(scroll.get("scroll_strategy") or "legacy"),
+                "scroll_distance_ratio": float(scroll.get("scroll_distance_ratio") or 0.0),
+                "scroll_settle_s": float(scroll.get("scroll_settle_s") or 0.0),
+                "scroll_duration_ms": float(scroll.get("scroll_duration_ms") or 0.0),
+                "before_visible_usernames_count": len(before_scroll_keys),
+                "after_visible_usernames_count": after_count,
+                "new_usernames_after_scroll_count": new_after_count,
+                "overlap_usernames_count": overlap_count,
+                "overlap_ratio": overlap_ratio,
+                "unchanged_scroll_streak": unchanged_scroll_streak,
+                "unchanged_scroll_stop_threshold": (
+                    _scroll_v2_lite_max_unchanged_scrolls()
+                    if bool(scroll.get("scroll_v2_lite_enabled"))
+                    else 1
+                ),
+                "surface_ok_after_scroll": bool(scroll.get("surface_ok_after_scroll")),
+                "end_of_list_detected": bool(
+                    scroll.get("end_of_list_detected")
+                    or harvest_meta.get("following_list_end_detected")
+                ),
+            }
+            log(
+                "info",
+                "unfollow_scroll_progress_evaluated",
+                scroll_passes_used=scroll_passes_used,
+                **progress_fields,
+            )
             log(
                 "info",
                 "unfollow_multi_action_scroll_completed",
@@ -1141,6 +1339,7 @@ def _run_real_unfollow_multi_loop(
                 scroll_passes_used=scroll_passes_used,
                 before_scroll_usernames=before_scroll_keys[:20],
                 after_scroll_usernames=after_scroll_keys[:20],
+                **progress_fields,
             )
             if bool(harvest_meta.get("following_list_end_detected")) and (
                 not after_scroll_keys or after_scroll_keys == before_scroll_keys
@@ -1182,7 +1381,16 @@ def _run_real_unfollow_multi_loop(
                 )
                 return emit_final(status)
 
-            if after_scroll_keys and after_scroll_keys == before_scroll_keys:
+            unchanged_stop_threshold = (
+                _scroll_v2_lite_max_unchanged_scrolls()
+                if bool(scroll.get("scroll_v2_lite_enabled"))
+                else 1
+            )
+            if (
+                after_scroll_keys
+                and after_scroll_keys == before_scroll_keys
+                and unchanged_scroll_streak >= unchanged_stop_threshold
+            ):
                 scroll_stop_reason = "end_of_list_or_no_new_rows_detected"
                 stop_reason = "eligible_targets_exhausted"
                 log(
@@ -1282,15 +1490,85 @@ def _run_real_unfollow_multi_loop(
         )
         if not sheet.get("ok"):
             failed += 1
-            stop_reason = "actions_sheet_open_failed"
             ret = return_to_following_list_after_unfollow_action(d, account_username=uname)
+            return_ok = bool(ret.get("ok"))
+            sheet_failure_reason = str(sheet.get("failure_reason") or "actions_sheet_open_failed")
+            recoverable = is_recoverable_action_sheet_failure(sheet, return_ok=return_ok)
+            log(
+                "info",
+                "unfollow_recoverable_action_failure_detected",
+                username=target_username,
+                username_normalized=target_key,
+                failure_reason=sheet_failure_reason,
+                retry_failure_reason=str(sheet.get("retry_failure_reason") or ""),
+                return_to_following_list_ok=return_ok,
+                recoverable=recoverable,
+                recoverable_action_failures_count=recoverable_action_failures_count,
+                max_recoverable_action_failures=max_recoverable_action_failures,
+                unfollow_actions_sent=sent,
+            )
             last_fields = {
                 **target_fields,
                 "target_profile_open_ok": True,
                 "following_actions_sheet_open_ok": False,
-                "return_to_following_list_ok": bool(ret.get("ok")),
+                "following_actions_sheet_failure_reason": str(
+                    sheet.get("failure_reason") or "actions_sheet_open_failed"
+                ),
+                "unfollow_option_visible": bool(sheet.get("unfollow_option_visible")),
+                "sheet_context_signals": dict(sheet.get("sheet_context_signals") or {}),
+                "return_to_following_list_ok": return_ok,
                 "unfollow_actions_failed": failed,
             }
+            if recoverable and recoverable_action_failures_count < max_recoverable_action_failures:
+                recoverable_action_failures_count += 1
+                session_continued_after_recoverable_failure = True
+                failed_usernames_this_run.add(target_key)
+                completed_usernames.add(target_key)
+                visible_eligibility_row_cache[target_key] = None
+                if target_username not in recoverable_action_failure_usernames:
+                    recoverable_action_failure_usernames.append(target_username)
+                recoverable_action_failure_reasons[target_username] = sheet_failure_reason
+                refresh_recoverable_action_summary_totals()
+                log(
+                    "info",
+                    "unfollow_recoverable_action_failure_skipped_target",
+                    username=target_username,
+                    username_normalized=target_key,
+                    failure_reason=sheet_failure_reason,
+                    recoverable_action_failures_count=recoverable_action_failures_count,
+                    max_recoverable_action_failures=max_recoverable_action_failures,
+                )
+                rows, harvest_meta = harvest_visible_following_rows_for_unfollow(
+                    d,
+                    account_username=uname,
+                )
+                last_fields = {
+                    **last_fields,
+                    **_harvest_summary_fields(rows, harvest_meta, planned_usernames),
+                }
+                log(
+                    "info",
+                    "unfollow_recoverable_action_failure_continue",
+                    username=target_username,
+                    username_normalized=target_key,
+                    failure_reason=sheet_failure_reason,
+                    unfollow_actions_verified_so_far=verified,
+                    real_action_max_per_run=real_action_max,
+                    scroll_passes_used=scroll_passes_used,
+                    return_to_following_list_ok=return_ok,
+                )
+                continue
+            if recoverable:
+                log(
+                    "info",
+                    "unfollow_recoverable_action_failure_limit_reached",
+                    username=target_username,
+                    username_normalized=target_key,
+                    failure_reason=sheet_failure_reason,
+                    recoverable_action_failures_count=recoverable_action_failures_count,
+                    max_recoverable_action_failures=max_recoverable_action_failures,
+                )
+            stop_reason = "actions_sheet_open_failed"
             return emit_final(
                 "failed_unfollow_multi_action",
                 str(sheet.get("failure_reason") or "actions_sheet_open_failed"),

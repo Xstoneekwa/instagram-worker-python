@@ -3339,6 +3339,7 @@ _POST_FOLLOW_RETURN_CT_SAFE_STOP_FAILURE_REASONS: frozenset[str] = frozenset(
         "post_follow_return_ct_aborted_to_prevent_drift",
         "post_follow_return_ct_round_budget_exceeded",
         "post_follow_return_ct_compact_contract_violation",
+        "post_follow_likes_failure_return_ct_recovery_failed",
     }
 )
 
@@ -10888,6 +10889,10 @@ def _run_followers_list_engine_session(
                         elif _pf_fail == "post_follow_return_ct_compact_contract_violation":
                             _partial_note = (
                                 "follow_verified_but_compact_return_contract_violation"
+                            )
+                        elif _pf_fail == "post_follow_likes_failure_return_ct_recovery_failed":
+                            _partial_note = (
+                                "follow_verified_but_post_follow_likes_return_ct_recovery_failed"
                             )
                         _partial_log: dict[str, Any] = {
                             "source_profile_username": source_profile_username,

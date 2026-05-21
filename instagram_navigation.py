@@ -32367,6 +32367,204 @@ def post_follow_controlled_return_to_followers_list(
     return False, str(how_last or "failed"), fail_reason
 
 
+def _post_follow_likes_failure_recover_return_ct(
+    d: u2.Device,
+    *,
+    pkg: str,
+    source_profile_username: str,
+    follower_username: str,
+    visual_candidate_id: str,
+) -> dict[str, Any]:
+    """
+    Bounded recovery after a post-follow like open failure.
+
+    The likes phase is best-effort. Recovery only tries to re-establish a known
+    source followers-list surface; it never taps candidate rows or follows again.
+    """
+    from navigation_engine import NavigationEngineState, observe_instagram_state
+
+    src = str(source_profile_username or "").strip()
+    cand = str(follower_username or "").strip()
+    vcid = str(visual_candidate_id or "").strip()
+    out: dict[str, Any] = {
+        "attempted": True,
+        "ok": False,
+        "how": "",
+        "failure_reason": "post_follow_likes_failure_return_ct_recovery_failed",
+        "surface_state": "",
+        "action_bar_title": "",
+        "back_to_candidate_profile_ok": False,
+    }
+
+    log(
+        "info",
+        "post_follow_likes_failure_recovery_started",
+        visual_candidate_id=vcid,
+        source_profile_username=src,
+        follower_username=cand,
+        max_return_attempts=2,
+    )
+
+    det_s: dict[str, Any] = {}
+    try:
+        det_s = detect_followers_list_screen(d, source_profile_username=src)
+    except Exception:
+        det_s = {}
+    try:
+        nav_s = observe_instagram_state(
+            d,
+            expected_package=pkg,
+            last_known_state=NavigationEngineState.CANDIDATE_PROFILE.value,
+            context={
+                "phase": "post_follow_likes_failure_recovery_surface",
+                "visual_candidate_id": vcid,
+                "source_profile_username": src,
+                "det": det_s,
+                "disable_followers_visual_fallback": False,
+            },
+        )
+    except Exception as e:
+        nav_s = {"state": "UNKNOWN", "confidence": 0.0, "reason": str(e)}
+
+    action_bar_title = str(det_s.get("action_bar_title") or "").strip()
+    state_s = str(nav_s.get("state") or "")
+    out["surface_state"] = state_s
+    out["action_bar_title"] = action_bar_title[:120]
+    cand_n = _normalize_handle(cand)
+    ab_n = _normalize_handle(action_bar_title) if action_bar_title else ""
+    candidate_profile_ok = bool(
+        cand_n
+        and ab_n == cand_n
+        and state_s
+        in (
+            NavigationEngineState.CANDIDATE_PROFILE.value,
+            NavigationEngineState.PROFILE.value,
+            NavigationEngineState.PRIVATE_PROFILE.value,
+        )
+    )
+
+    log(
+        "info",
+        "post_follow_likes_failure_recovery_surface_detected",
+        visual_candidate_id=vcid,
+        source_profile_username=src,
+        follower_username=cand,
+        navigation_state=state_s,
+        navigation_confidence=float(nav_s.get("confidence") or 0.0),
+        navigation_reason=str(nav_s.get("reason") or ""),
+        action_bar_title=action_bar_title[:120],
+        current_screen_guess=str(det_s.get("current_screen_guess") or ""),
+        is_followers_list=bool(det_s.get("is_followers_list")),
+        candidate_profile_ok=bool(candidate_profile_ok),
+    )
+
+    if not candidate_profile_ok and not bool(det_s.get("is_followers_list")):
+        if not verify_app_foreground(d, pkg):
+            log(
+                "warning",
+                "post_follow_likes_failure_recovery_return_ct_failed",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                follower_username=cand,
+                failure_reason="instagram_not_foreground",
+            )
+            out["failure_reason"] = "post_follow_likes_failure_return_ct_recovery_failed"
+            return out
+        try:
+            d.press("back")
+            time.sleep(0.45)
+        except Exception:
+            pass
+        try:
+            det_s = detect_followers_list_screen(d, source_profile_username=src)
+        except Exception:
+            det_s = {}
+        action_bar_title = str(det_s.get("action_bar_title") or "").strip()
+        ab_n = _normalize_handle(action_bar_title) if action_bar_title else ""
+        candidate_profile_ok = bool(cand_n and ab_n == cand_n)
+
+    out["back_to_candidate_profile_ok"] = bool(
+        candidate_profile_ok or det_s.get("is_followers_list")
+    )
+    log(
+        "info",
+        "post_follow_likes_failure_recovery_back_to_candidate_profile_ok",
+        visual_candidate_id=vcid,
+        source_profile_username=src,
+        follower_username=cand,
+        ok=bool(out["back_to_candidate_profile_ok"]),
+        action_bar_title=str(det_s.get("action_bar_title") or "")[:120],
+        is_followers_list=bool(det_s.get("is_followers_list")),
+    )
+    if not bool(out["back_to_candidate_profile_ok"]):
+        log(
+            "warning",
+            "post_follow_likes_failure_recovery_return_ct_failed",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            follower_username=cand,
+            failure_reason="candidate_profile_or_ct_list_not_confirmed",
+            action_bar_title=str(det_s.get("action_bar_title") or "")[:120],
+            is_followers_list=bool(det_s.get("is_followers_list")),
+        )
+        return out
+
+    log(
+        "info",
+        "post_follow_likes_failure_recovery_return_ct_started",
+        visual_candidate_id=vcid,
+        source_profile_username=src,
+        follower_username=cand,
+        max_rounds=2,
+        compact_after_follow_verified_mute=False,
+    )
+    try:
+        ok_ret, how_ret, fail_re = post_follow_controlled_return_to_followers_list(
+            d,
+            pkg=pkg,
+            source_profile_username=src,
+            follower_username=cand,
+            visual_candidate_id=vcid,
+            det=det_s,
+            max_rounds=2,
+            compact_after_follow_verified_mute=False,
+            compact_reason=None,
+        )
+    except Exception as e:
+        ok_ret, how_ret, fail_re = (
+            False,
+            f"exception:{type(e).__name__}",
+            "post_follow_likes_failure_return_ct_recovery_failed",
+        )
+
+    out["ok"] = bool(ok_ret)
+    out["how"] = str(how_ret or "")
+    out["failure_reason"] = (
+        "" if ok_ret else "post_follow_likes_failure_return_ct_recovery_failed"
+    )
+    if ok_ret:
+        log(
+            "info",
+            "post_follow_likes_failure_recovery_return_ct_ok",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            follower_username=cand,
+            how=str(how_ret or ""),
+        )
+    else:
+        log(
+            "warning",
+            "post_follow_likes_failure_recovery_return_ct_failed",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            follower_username=cand,
+            how=str(how_ret or ""),
+            inner_failure_reason=str(fail_re or ""),
+            failure_reason="post_follow_likes_failure_return_ct_recovery_failed",
+        )
+    return out
+
+
 # --- Mute Engine V2: bounded, non-recovery mute after verified follow (best-effort) ---
 
 # Nominal post-follow window (observe + overlay + fingerprint); Following CTA search needs extra time.
@@ -33987,6 +34185,9 @@ def _post_follow_post_likes_out_template() -> dict[str, Any]:
         "skipped": True,
         "skipped_reason": None,
         "phase_outcome": "skipped",
+        "post_follow_likes_recoverable_failure_count": 0,
+        "post_follow_likes_return_ct_recovery_used": False,
+        "post_follow_likes_return_ct_recovery_ok": False,
         "target_count": 0,
         "attempted_count": 0,
         "liked_count": 0,
@@ -34106,6 +34307,8 @@ def run_post_follow_post_likes_phase(
         out["skipped"] = skipped
         out["skipped_reason"] = skipped_reason
         out["ok"] = ok
+        if str(phase_outcome or "") == "failed_safe_continue":
+            out["post_follow_likes_recoverable_failure_count"] = 1
         for k, v in counts.items():
             if k in out:
                 out[k] = v
@@ -35292,6 +35495,24 @@ def run_visual_candidate_post_follow_phase(
             skipped_tap=skipped_tap,
             session_likes_used=int(session_likes_used or 0),
         )
+    likes_recoverable_failure = bool(
+        str(likes_out.get("phase_outcome") or "") == "failed_safe_continue"
+        or int(likes_out.get("post_follow_likes_recoverable_failure_count") or 0) > 0
+    )
+    if likes_recoverable_failure:
+        likes_out["post_follow_likes_recoverable_failure_count"] = max(
+            1, int(likes_out.get("post_follow_likes_recoverable_failure_count") or 0)
+        )
+        log(
+            "info",
+            "post_follow_likes_skipped_recoverable",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            follower_username=cand,
+            phase_outcome=str(likes_out.get("phase_outcome") or ""),
+            skipped_reason=str(likes_out.get("skipped_reason") or ""),
+            failed_navigation_count=int(likes_out.get("failed_navigation_count") or 0),
+        )
 
     mute_ok = bool(mute_out.get("ok"))
     mute_attempted = bool(mute_out.get("mute_started"))
@@ -35324,6 +35545,8 @@ def run_visual_candidate_post_follow_phase(
         mute_ok=mute_ok,
         should_mute=bool(should_mute),
         follow_success_verified=bool(follow_success_verified),
+        post_follow_likes_recoverable_failure=bool(likes_recoverable_failure),
+        post_follow_likes_return_ct_recovery_planned=bool(likes_recoverable_failure),
     )
     try:
         from followers_inter_candidate_perf import inter_candidate_on_post_return_ct_started
@@ -35331,16 +35554,42 @@ def run_visual_candidate_post_follow_phase(
         inter_candidate_on_post_return_ct_started()
     except Exception:
         pass
-    ok_ret, how_ret, fail_re = post_follow_controlled_return_to_followers_list(
-        d,
-        pkg=pkg,
-        source_profile_username=src,
-        follower_username=cand,
-        visual_candidate_id=vcid,
-        det=det_use,
-        max_rounds=1 if compact_post_follow_return else 4,
-        compact_after_follow_verified_mute=compact_post_follow_return,
-        compact_reason=compact_reason_str if compact_post_follow_return else None,
+    likes_return_recovery_used = False
+    likes_return_recovery_ok = False
+    if likes_recoverable_failure:
+        rec = _post_follow_likes_failure_recover_return_ct(
+            d,
+            pkg=pkg,
+            source_profile_username=src,
+            follower_username=cand,
+            visual_candidate_id=vcid,
+        )
+        likes_return_recovery_used = bool(rec.get("attempted"))
+        likes_return_recovery_ok = bool(rec.get("ok"))
+        ok_ret = bool(rec.get("ok"))
+        how_ret = str(rec.get("how") or "")
+        fail_re = (
+            None
+            if ok_ret
+            else "post_follow_likes_failure_return_ct_recovery_failed"
+        )
+    else:
+        ok_ret, how_ret, fail_re = post_follow_controlled_return_to_followers_list(
+            d,
+            pkg=pkg,
+            source_profile_username=src,
+            follower_username=cand,
+            visual_candidate_id=vcid,
+            det=det_use,
+            max_rounds=1 if compact_post_follow_return else 4,
+            compact_after_follow_verified_mute=compact_post_follow_return,
+            compact_reason=compact_reason_str if compact_post_follow_return else None,
+        )
+    likes_out["post_follow_likes_return_ct_recovery_used"] = bool(
+        likes_return_recovery_used
+    )
+    likes_out["post_follow_likes_return_ct_recovery_ok"] = bool(
+        likes_return_recovery_ok
     )
     try:
         from followers_inter_candidate_perf import inter_candidate_on_post_return_ct_finished
@@ -35371,6 +35620,25 @@ def run_visual_candidate_post_follow_phase(
             failure_reason=str(fail_re or ""),
             how=str(how_ret or ""),
         )
+    log(
+        "info",
+        "post_follow_likes_recovery_summary",
+        visual_candidate_id=vcid,
+        source_profile_username=src,
+        follower_username=cand,
+        post_follow_likes_recoverable_failure_count=int(
+            likes_out.get("post_follow_likes_recoverable_failure_count") or 0
+        ),
+        post_follow_likes_return_ct_recovery_used=bool(
+            likes_out.get("post_follow_likes_return_ct_recovery_used")
+        ),
+        post_follow_likes_return_ct_recovery_ok=bool(
+            likes_out.get("post_follow_likes_return_ct_recovery_ok")
+        ),
+        return_ok=bool(ok_ret),
+        return_how=str(how_ret or ""),
+        return_failure_reason=str(fail_re or ""),
+    )
 
     _vf_ev_out = _post_follow_return_take_pending_visual_evidence_for_runner()
     _out: dict[str, Any] = {
@@ -35382,6 +35650,15 @@ def run_visual_candidate_post_follow_phase(
         "follow_success_verified": bool(follow_success_verified),
         "navigation_observed": nav_obs,
         "overlay_hints": overlay,
+        "post_follow_likes_recoverable_failure_count": int(
+            likes_out.get("post_follow_likes_recoverable_failure_count") or 0
+        ),
+        "post_follow_likes_return_ct_recovery_used": bool(
+            likes_out.get("post_follow_likes_return_ct_recovery_used")
+        ),
+        "post_follow_likes_return_ct_recovery_ok": bool(
+            likes_out.get("post_follow_likes_return_ct_recovery_ok")
+        ),
     }
     for _k in ("return_list_screenshot_path", "return_visual_fallback_detail"):
         if _k in _vf_ev_out:
