@@ -14,6 +14,7 @@ import uiautomator2 as u2
 
 import config
 import supabase_client
+from account_session_resume_engine import build_account_session_resume_plan
 from device import app_start, press_home
 from dm_follow_handoff import HandoffResult, prepare_dm_to_follow_handoff
 from dm_sender_engine import _resolve_dm_sender_real_send_enabled
@@ -1654,6 +1655,123 @@ def run_account_session(
         follow_to_unfollow_diagnostic=follow_to_unfollow_diagnostic,
         follow_to_unfollow_real=follow_to_unfollow_real,
     )
+    mandatory_unfollow_executed = bool(
+        follow_to_unfollow_real.get("executed")
+        and int(follow_to_unfollow_real.get("unfollow_actions_sent") or 0) > 0
+    )
+    auto_restart_v1b_dry_run = True
+    auto_restart_v1b_enabled = bool(getattr(config, "AUTO_RESTART_ENABLED", False))
+    auto_restart_resume_plan: dict[str, Any] | None = None
+    auto_restart_resume_plan_error: str | None = None
+    auto_restart_restart_allowed = False
+    auto_restart_restart_block_reason = ""
+    auto_restart_phases_to_run: dict[str, Any] | None = None
+    auto_restart_quota_remaining: dict[str, Any] | None = None
+    auto_restart_reason = ""
+    try:
+        auto_restart_summary = {
+            "account_id": aid,
+            "account_username": uname,
+            "run_id": run_id,
+            "session_status": session_status,
+            "session_termination_class": session_termination_class,
+            "restart_eligibility": restart_eligibility,
+            "restart_block_reason": restart_block_reason,
+            "welcome_enabled": welcome_enabled,
+            "welcome_phase_status": welcome_phase_status,
+            "follow_phase_status": follow_phase_status,
+            "unfollow_phase_status": unfollow_phase_status,
+            "follow_engine_exit_code": follow_exit_code,
+            "follows_completed_count": follows_completed_count,
+            "follow_processed_count": follow_processed_count,
+            "follows_goal_effective": follows_goal_effective,
+            "follow_quota_target": follow_quota_target,
+            "follow_quota_remaining": follow_quota_remaining,
+            "follow_session_outcome": follow_session_outcome or None,
+            "follow_stop_reason": follow_stop_reason or None,
+            "follow_to_unfollow_handoff_skip_reason": follow_to_unfollow_diagnostic.get(
+                "handoff_skip_reason"
+            ),
+            "pending_unfollow_count": follow_to_unfollow_diagnostic.get(
+                "pending_unfollow_count"
+            ),
+            "mandatory_unfollow_executed": mandatory_unfollow_executed,
+            "unfollow_actions_verified": follow_to_unfollow_real.get(
+                "unfollow_actions_verified"
+            ),
+            "unfollow_results_persisted_count": follow_to_unfollow_real.get(
+                "unfollow_results_persisted_count"
+            ),
+            "follow_to_unfollow_real": follow_to_unfollow_real,
+        }
+        log(
+            "info",
+            "auto_restart_v1b_dry_run_started",
+            account_id=aid,
+            account_username=uname,
+            run_id=run_id,
+            auto_restart_enabled=auto_restart_v1b_enabled,
+            dry_run=auto_restart_v1b_dry_run,
+            session_termination_class=session_termination_class,
+            restart_eligibility=restart_eligibility,
+        )
+        auto_restart_resume_plan = build_account_session_resume_plan(
+            auto_restart_summary,
+            settings={
+                "auto_restart_delay_minutes": getattr(
+                    config,
+                    "AUTO_RESTART_DELAY_MINUTES",
+                    20,
+                ),
+                "auto_restart_max_attempts_per_session": getattr(
+                    config,
+                    "AUTO_RESTART_MAX_ATTEMPTS_PER_SESSION",
+                    2,
+                ),
+            },
+        )
+        auto_restart_restart_allowed = bool(
+            auto_restart_resume_plan.get("restart_allowed")
+        )
+        auto_restart_restart_block_reason = str(
+            auto_restart_resume_plan.get("restart_block_reason") or ""
+        )
+        _phases = auto_restart_resume_plan.get("phases_to_run")
+        auto_restart_phases_to_run = _phases if isinstance(_phases, dict) else None
+        _quota_remaining = auto_restart_resume_plan.get("quota_remaining")
+        auto_restart_quota_remaining = (
+            _quota_remaining if isinstance(_quota_remaining, dict) else None
+        )
+        auto_restart_reason = str(auto_restart_resume_plan.get("reason") or "")
+        log(
+            "info",
+            "auto_restart_v1b_dry_run_completed",
+            account_id=aid,
+            account_username=uname,
+            run_id=run_id,
+            auto_restart_enabled=auto_restart_v1b_enabled,
+            dry_run=auto_restart_v1b_dry_run,
+            restart_allowed=auto_restart_restart_allowed,
+            restart_block_reason=auto_restart_restart_block_reason,
+            phases_to_run=auto_restart_phases_to_run,
+            quota_remaining=auto_restart_quota_remaining,
+            reason=auto_restart_reason,
+        )
+    except Exception as e:
+        auto_restart_resume_plan_error = str(e)
+        auto_restart_restart_allowed = False
+        auto_restart_restart_block_reason = "resume_plan_builder_failed"
+        auto_restart_reason = "resume_plan_builder_failed"
+        log(
+            "warning",
+            "auto_restart_v1b_dry_run_failed",
+            account_id=aid,
+            account_username=uname,
+            run_id=run_id,
+            auto_restart_enabled=auto_restart_v1b_enabled,
+            dry_run=auto_restart_v1b_dry_run,
+            error=auto_restart_resume_plan_error,
+        )
 
     log(
         "info",
@@ -1737,10 +1855,16 @@ def run_account_session(
         unfollow_phase_status=unfollow_phase_status,
         follow_to_unfollow_probe=follow_to_unfollow_probe,
         follow_to_unfollow_real=follow_to_unfollow_real,
-        mandatory_unfollow_executed=bool(
-            follow_to_unfollow_real.get("executed")
-            and int(follow_to_unfollow_real.get("unfollow_actions_sent") or 0) > 0
-        ),
+        mandatory_unfollow_executed=mandatory_unfollow_executed,
+        auto_restart_v1b_enabled=auto_restart_v1b_enabled,
+        auto_restart_v1b_dry_run=auto_restart_v1b_dry_run,
+        auto_restart_resume_plan=auto_restart_resume_plan,
+        auto_restart_resume_plan_error=auto_restart_resume_plan_error,
+        auto_restart_restart_allowed=auto_restart_restart_allowed,
+        auto_restart_restart_block_reason=auto_restart_restart_block_reason,
+        auto_restart_phases_to_run=auto_restart_phases_to_run,
+        auto_restart_quota_remaining=auto_restart_quota_remaining,
+        auto_restart_reason=auto_restart_reason,
         handoff_ok=handoff_result.ok if handoff_result is not None else None,
         handoff_reason=handoff_result.reason if handoff_result is not None else None,
         handoff_surface_label=handoff_result.surface_label if handoff_result is not None else None,
