@@ -30,6 +30,9 @@ _FOLLOWING_BUTTON_LABELS = (
     "Gefolgt",
 )
 _FOLLOWING_BUTTON_MAX_PRE_TAP_SHIFT_PX = 140
+_FOLLOWING_BUTTON_RETRY_STABLE_SHIFT_PX = 50
+_FOLLOWING_BUTTON_BOUNDS_SHIFT_RETRY_SETTLE_S = 1.0
+_FOLLOWING_BUTTON_RETRY_SECOND_DETECT_SETTLE_S = 0.5
 
 
 def _elapsed_ms(start: float) -> float:
@@ -800,6 +803,203 @@ def _following_tap_retry_block_reason(
     return ""
 
 
+def _following_button_retry_detection_log_fields(det: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "bounds": dict(det.get("bounds") or {}),
+        "resource_id": str(det.get("resource_id") or ""),
+        "text": str(det.get("text") or ""),
+        "content_desc": str(det.get("content_desc") or ""),
+        "detection_method": str(det.get("detection_method") or ""),
+    }
+
+
+def _following_button_methods_compatible(method_a: str, method_b: str) -> bool:
+    a = str(method_a or "").strip()
+    b = str(method_b or "").strip()
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    return a in {"text_exact_following", "content_desc_following_button"} and b in {
+        "text_exact_following",
+        "content_desc_following_button",
+    }
+
+
+def _retry_following_button_after_bounds_shift(
+    d: u2.Device,
+    *,
+    expected_target_username: str,
+    initial_bounds: dict[str, Any],
+    refreshed_bounds: dict[str, Any],
+    center_delta_x: int,
+    center_delta_y: int,
+    bounds_shift_px: int,
+) -> tuple[bool, dict[str, Any], dict[str, Any]]:
+    """Re-check a moving Following button and accept only a stable final pair."""
+    retry_meta: dict[str, Any] = {
+        "retry_attempted": True,
+        "retry_failure_reason": "",
+        "retry_shift_px": None,
+        "profile_ok": False,
+        "detector_ok": False,
+    }
+    log(
+        "info",
+        "following_button_bounds_shift_retry_started",
+        expected_target_username=expected_target_username,
+        initial_bounds=initial_bounds,
+        refreshed_bounds=refreshed_bounds,
+        bounds_shift_px=bounds_shift_px,
+        center_delta_x=center_delta_x,
+        center_delta_y=center_delta_y,
+    )
+
+    time.sleep(_FOLLOWING_BUTTON_BOUNDS_SHIFT_RETRY_SETTLE_S)
+    profile = verify_unfollow_target_profile_strict(
+        d,
+        expected_target_username=expected_target_username,
+        timeout_s=2.0,
+    )
+    retry_meta["profile_ok"] = bool(profile.get("ok"))
+    log(
+        "info",
+        "following_button_bounds_shift_retry_profile_revalidated",
+        ok=retry_meta["profile_ok"],
+        actual_profile_username=str(profile.get("actual_profile_username") or ""),
+        failure_reason=str(profile.get("failure_reason") or ""),
+    )
+    if not retry_meta["profile_ok"]:
+        retry_meta["retry_failure_reason"] = "target_profile_retry_revalidation_failed"
+        log(
+            "info",
+            "following_button_bounds_shift_retry_failed",
+            failure_reason=retry_meta["retry_failure_reason"],
+            retry_shift_px=retry_meta["retry_shift_px"],
+            profile_ok=retry_meta["profile_ok"],
+            detector_ok=retry_meta["detector_ok"],
+        )
+        return False, {}, retry_meta
+
+    retry_1 = detect_profile_following_button_for_unfollow(
+        d,
+        expected_target_username=expected_target_username,
+    )
+    retry_meta["detector_ok"] = bool(retry_1.get("ok"))
+    log(
+        "info",
+        "following_button_bounds_shift_retry_detected",
+        retry_index=1,
+        **_following_button_retry_detection_log_fields(retry_1),
+    )
+    if not retry_1.get("ok"):
+        retry_meta["retry_failure_reason"] = str(
+            retry_1.get("failure_reason") or "following_button_retry_detect_1_failed"
+        )
+        log(
+            "info",
+            "following_button_bounds_shift_retry_failed",
+            failure_reason=retry_meta["retry_failure_reason"],
+            retry_shift_px=retry_meta["retry_shift_px"],
+            profile_ok=retry_meta["profile_ok"],
+            detector_ok=retry_meta["detector_ok"],
+        )
+        return False, {}, retry_meta
+
+    time.sleep(_FOLLOWING_BUTTON_RETRY_SECOND_DETECT_SETTLE_S)
+    retry_2 = detect_profile_following_button_for_unfollow(
+        d,
+        expected_target_username=expected_target_username,
+    )
+    retry_meta["detector_ok"] = bool(retry_2.get("ok"))
+    log(
+        "info",
+        "following_button_bounds_shift_retry_detected",
+        retry_index=2,
+        **_following_button_retry_detection_log_fields(retry_2),
+    )
+    if not retry_2.get("ok"):
+        retry_meta["retry_failure_reason"] = str(
+            retry_2.get("failure_reason") or "following_button_retry_detect_2_failed"
+        )
+        log(
+            "info",
+            "following_button_bounds_shift_retry_failed",
+            failure_reason=retry_meta["retry_failure_reason"],
+            retry_shift_px=retry_meta["retry_shift_px"],
+            profile_ok=retry_meta["profile_ok"],
+            detector_ok=retry_meta["detector_ok"],
+        )
+        return False, {}, retry_meta
+
+    final_profile = verify_unfollow_target_profile_strict(
+        d,
+        expected_target_username=expected_target_username,
+        timeout_s=2.0,
+    )
+    retry_meta["profile_ok"] = bool(final_profile.get("ok"))
+    log(
+        "info",
+        "following_button_bounds_shift_retry_profile_revalidated",
+        ok=retry_meta["profile_ok"],
+        actual_profile_username=str(final_profile.get("actual_profile_username") or ""),
+        failure_reason=str(final_profile.get("failure_reason") or ""),
+    )
+    if not retry_meta["profile_ok"]:
+        retry_meta["retry_failure_reason"] = "target_profile_final_revalidation_failed"
+        log(
+            "info",
+            "following_button_bounds_shift_retry_failed",
+            failure_reason=retry_meta["retry_failure_reason"],
+            retry_shift_px=retry_meta["retry_shift_px"],
+            profile_ok=retry_meta["profile_ok"],
+            detector_ok=retry_meta["detector_ok"],
+        )
+        return False, {}, retry_meta
+
+    retry_1_bounds = dict(retry_1.get("bounds") or {})
+    retry_2_bounds = dict(retry_2.get("bounds") or {})
+    retry_dx, retry_dy, retry_shift = _center_shift_metrics(retry_1_bounds, retry_2_bounds)
+    retry_meta["retry_shift_px"] = retry_shift
+
+    rid_1 = str(retry_1.get("resource_id") or "")
+    rid_2 = str(retry_2.get("resource_id") or "")
+    method_1 = str(retry_1.get("detection_method") or "")
+    method_2 = str(retry_2.get("detection_method") or "")
+    failure_reason = ""
+    if rid_1 and rid_2 and rid_1 != rid_2:
+        failure_reason = "following_button_retry_resource_id_changed"
+    elif not _following_button_methods_compatible(method_1, method_2):
+        failure_reason = "following_button_retry_detection_method_changed"
+    elif bool(retry_1.get("clickable")) and not bool(retry_2.get("clickable")):
+        failure_reason = "following_button_retry_no_longer_clickable"
+    elif retry_shift > _FOLLOWING_BUTTON_RETRY_STABLE_SHIFT_PX:
+        failure_reason = "following_button_retry_bounds_still_unstable"
+
+    if failure_reason:
+        retry_meta["retry_failure_reason"] = failure_reason
+        log(
+            "info",
+            "following_button_bounds_shift_retry_failed",
+            failure_reason=failure_reason,
+            retry_shift_px=retry_shift,
+            profile_ok=retry_meta["profile_ok"],
+            detector_ok=retry_meta["detector_ok"],
+        )
+        return False, {}, retry_meta
+
+    log(
+        "info",
+        "following_button_bounds_shift_retry_stable",
+        stable_bounds=retry_2_bounds,
+        stable_resource_id=rid_2,
+        retry_shift_px=retry_shift,
+        retry_center_delta_x=retry_dx,
+        retry_center_delta_y=retry_dy,
+    )
+    return True, retry_2, retry_meta
+
+
 def open_unfollow_actions_sheet_from_profile_probe(
     d: u2.Device,
     *,
@@ -852,33 +1052,66 @@ def open_unfollow_actions_sheet_from_profile_probe(
         revalidation_failure = "following_button_bounds_shift_too_large"
 
     if revalidation_failure:
-        log(
-            "info",
-            "unfollow_profile_following_button_pre_tap_revalidation_failed",
-            expected_target_username=expected_target_username,
-            initial_bounds=initial_bounds,
-            refreshed_bounds=refreshed_bounds,
-            center_delta_x=delta_x,
-            center_delta_y=delta_y,
-            bounds_shift_px=bounds_shift_px,
-            revalidation_method=str(refreshed.get("detection_method") or ""),
-            failure_reason=revalidation_failure,
-        )
-        out = {
-            "ok": False,
-            "failure_reason": revalidation_failure,
-            "expected_target_username": expected_target_username,
-            "following_detection_method": str(btn_det.get("detection_method") or ""),
-            "unfollow_option_visible": False,
-            "sheet_context_signals": {},
-            "initial_bounds": initial_bounds,
-            "refreshed_bounds": refreshed_bounds,
-            "center_delta_x": delta_x,
-            "center_delta_y": delta_y,
-            "bounds_shift_px": bounds_shift_px,
-        }
-        log("info", "unfollow_actions_sheet_open_failed", **out)
-        return out
+        if revalidation_failure == "following_button_bounds_shift_too_large":
+            retry_ok, retry_det, retry_meta = _retry_following_button_after_bounds_shift(
+                d,
+                expected_target_username=expected_target_username,
+                initial_bounds=initial_bounds,
+                refreshed_bounds=refreshed_bounds,
+                center_delta_x=delta_x,
+                center_delta_y=delta_y,
+                bounds_shift_px=bounds_shift_px,
+            )
+            if retry_ok:
+                refreshed = retry_det
+                refreshed_bounds = dict(refreshed.get("bounds") or {})
+                delta_x, delta_y, bounds_shift_px = _center_shift_metrics(
+                    initial_bounds,
+                    refreshed_bounds,
+                )
+                revalidation_failure = ""
+            else:
+                revalidation_failure = str(
+                    retry_meta.get("retry_failure_reason")
+                    or "following_button_bounds_shift_retry_failed"
+                )
+
+        if not revalidation_failure:
+            pass
+        else:
+            log(
+                "info",
+                "unfollow_profile_following_button_pre_tap_revalidation_failed",
+                expected_target_username=expected_target_username,
+                initial_bounds=initial_bounds,
+                refreshed_bounds=refreshed_bounds,
+                center_delta_x=delta_x,
+                center_delta_y=delta_y,
+                bounds_shift_px=bounds_shift_px,
+                revalidation_method=str(refreshed.get("detection_method") or ""),
+                failure_reason=revalidation_failure,
+            )
+            out = {
+                "ok": False,
+                "failure_reason": (
+                    "following_button_bounds_shift_too_large"
+                    if revalidation_failure.startswith("following_button_retry_")
+                    or revalidation_failure.startswith("target_profile_")
+                    else revalidation_failure
+                ),
+                "expected_target_username": expected_target_username,
+                "following_detection_method": str(btn_det.get("detection_method") or ""),
+                "unfollow_option_visible": False,
+                "sheet_context_signals": {},
+                "initial_bounds": initial_bounds,
+                "refreshed_bounds": refreshed_bounds,
+                "center_delta_x": delta_x,
+                "center_delta_y": delta_y,
+                "bounds_shift_px": bounds_shift_px,
+                "retry_failure_reason": revalidation_failure,
+            }
+            log("info", "unfollow_actions_sheet_open_failed", **out)
+            return out
 
     if bounds_shift_px > 0:
         log(
