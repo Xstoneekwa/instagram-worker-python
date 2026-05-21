@@ -32,14 +32,19 @@ _FOLLOWERS_TAB_TEXTS = (
     "Seguidores",
 )
 _UNFOLLOW_SORT_OPTION_TEXT_BY_MODE = {
-    "oldest-to-newest": "Date followed: earliest",
-    "newest-to-oldest": "Date followed: latest",
+    "oldest-to-newest": "Date followed: Earliest",
+    "newest-to-oldest": "Date followed: Latest",
 }
 _UNFOLLOW_SORT_OPTION_TEXTS = (
     "Default",
-    "Date followed: latest",
-    "Date followed: earliest",
+    "Date followed: Latest",
+    "Date followed: Earliest",
 )
+_UNFOLLOW_SORT_OPTION_BY_NORMALIZED = {
+    "default": "Default",
+    "date followed: latest": "Date followed: Latest",
+    "date followed: earliest": "Date followed: Earliest",
+}
 
 
 def _dump_hierarchy(d: u2.Device) -> str:
@@ -96,6 +101,18 @@ def _element_selected(el: ET.Element, parents: dict[ET.Element, ET.Element | Non
 
 def _element_text(el: ET.Element) -> str:
     return str(el.get("text") or el.get("content-desc") or "").strip()
+
+
+def _normalize_ui_text(raw: str) -> str:
+    return re.sub(r"\s+", " ", str(raw or "").strip()).lower()
+
+
+def _screen_size(d: u2.Device) -> tuple[int, int]:
+    try:
+        w, h = d.window_size()
+        return int(w), int(h)
+    except Exception:
+        return 1080, 2400
 
 
 def _is_following_label(raw: str) -> bool:
@@ -157,45 +174,165 @@ def _guess_sort_mode_from_label(raw: str) -> str:
 def _sort_option_signals(hierarchy_xml: str) -> dict[str, Any]:
     root = _parse_xml_root(hierarchy_xml)
     signals: dict[str, Any] = {
+        "sort_by_title_visible": False,
         "default_visible": False,
         "latest_visible": False,
         "earliest_visible": False,
         "visible_options": [],
+        "sheet_text_candidates": [],
+        "normalized_candidates": [],
     }
     if root is None:
         return signals
     visible_options: list[str] = []
+    text_candidates: list[str] = []
+    normalized_candidates: list[str] = []
     for el in root.iter():
         text = _element_text(el)
-        if text in _UNFOLLOW_SORT_OPTION_TEXTS:
-            visible_options.append(text)
-        if text == "Default":
+        if not text:
+            continue
+        normalized = _normalize_ui_text(text)
+        if text not in text_candidates:
+            text_candidates.append(text)
+        if normalized and normalized not in normalized_candidates:
+            normalized_candidates.append(normalized)
+        canonical = _UNFOLLOW_SORT_OPTION_BY_NORMALIZED.get(normalized)
+        if canonical and canonical not in visible_options:
+            visible_options.append(canonical)
+        if normalized == "sort by":
+            signals["sort_by_title_visible"] = True
+        if normalized == "default":
             signals["default_visible"] = True
-        elif text == "Date followed: latest":
+        elif normalized == "date followed: latest":
             signals["latest_visible"] = True
-        elif text == "Date followed: earliest":
+        elif normalized == "date followed: earliest":
             signals["earliest_visible"] = True
     signals["visible_options"] = visible_options
+    signals["sheet_text_candidates"] = text_candidates[:80]
+    signals["normalized_candidates"] = normalized_candidates[:80]
     return signals
 
 
-def _find_exact_text_element(
+def _row_bounds_for_option(
+    el: ET.Element,
+    text_bounds: dict[str, int],
+    *,
+    parents: dict[ET.Element, ET.Element | None],
+    screen_width: int,
+) -> dict[str, int]:
+    best = dict(text_bounds)
+    cur: ET.Element | None = el
+    while cur is not None:
+        bounds = _parse_bounds(cur.get("bounds"))
+        if bounds:
+            width = int(bounds.get("right", 0)) - int(bounds.get("left", 0))
+            height = int(bounds.get("bottom", 0)) - int(bounds.get("top", 0))
+            if width >= max(240, int(screen_width * 0.45)) and 30 <= height <= 220:
+                best = bounds
+                break
+        cur = parents.get(cur)
+    if best == text_bounds:
+        row_pad_y = max(28, min(72, (text_bounds.get("bottom", 0) - text_bounds.get("top", 0)) * 2))
+        center_y = (int(text_bounds.get("top", 0)) + int(text_bounds.get("bottom", 0))) // 2
+        best = {
+            "left": 0,
+            "top": max(0, center_y - row_pad_y),
+            "right": int(screen_width),
+            "bottom": center_y + row_pad_y,
+        }
+    return best
+
+
+def _find_sort_option_element(
     hierarchy_xml: str,
     wanted_text: str,
-) -> tuple[ET.Element | None, dict[str, int], tuple[int, int] | None, str]:
+    *,
+    screen_width: int,
+) -> tuple[ET.Element | None, dict[str, int], tuple[int, int] | None, str, list[str]]:
     root = _parse_xml_root(hierarchy_xml)
     if root is None:
-        return None, {}, None, ""
+        return None, {}, None, "", []
+    wanted_normalized = _normalize_ui_text(wanted_text)
+    parents = _parent_map(root)
+    normalized_candidates: list[str] = []
     for el in root.iter():
         text = _element_text(el)
-        if text != wanted_text:
+        normalized = _normalize_ui_text(text)
+        if normalized and normalized not in normalized_candidates:
+            normalized_candidates.append(normalized)
+        if normalized != wanted_normalized:
             continue
         bounds = _parse_bounds(el.get("bounds"))
         center = _bounds_center(bounds)
         if center is None:
             continue
-        return el, bounds, center, "exact_text"
-    return None, {}, None, ""
+        row_bounds = _row_bounds_for_option(
+            el,
+            bounds,
+            parents=parents,
+            screen_width=screen_width,
+        )
+        row_center = _bounds_center(row_bounds) or center
+        method = "normalized_text_row_bounds" if row_bounds != bounds else "normalized_text"
+        return el, row_bounds, row_center, method, normalized_candidates[:80]
+    return None, {}, None, "", normalized_candidates[:80]
+
+
+def _find_sort_sheet_geometry_fallback(
+    hierarchy_xml: str,
+    requested_sort_mode: str,
+    *,
+    screen_width: int,
+    screen_height: int,
+) -> dict[str, Any]:
+    root = _parse_xml_root(hierarchy_xml)
+    if root is None:
+        return {"ok": False, "failure_reason": "hierarchy_xml_parse_failed"}
+    default_bounds: dict[str, int] = {}
+    title_visible = False
+    for el in root.iter():
+        text = _normalize_ui_text(_element_text(el))
+        if text == "sort by":
+            title_visible = True
+        if text == "default" and not default_bounds:
+            default_bounds = _parse_bounds(el.get("bounds"))
+    if not title_visible or not default_bounds:
+        return {"ok": False, "failure_reason": "sort_sheet_geometry_prereqs_missing"}
+    mode_to_row_offset = {
+        "newest-to-oldest": 1,
+        "oldest-to-newest": 2,
+    }
+    row_offset = mode_to_row_offset.get(str(requested_sort_mode or "").strip().lower())
+    if row_offset is None:
+        return {"ok": False, "failure_reason": "sort_sheet_geometry_unsupported_mode"}
+
+    default_center = _bounds_center(default_bounds)
+    if default_center is None or screen_width <= 0 or screen_height <= 0:
+        return {"ok": False, "failure_reason": "sort_sheet_geometry_bounds_missing"}
+    row_step = max(64, min(180, int(screen_height * 0.052)))
+    target_y = default_center[1] + (row_step * row_offset)
+    if target_y <= default_center[1] or target_y >= screen_height:
+        return {"ok": False, "failure_reason": "sort_sheet_geometry_target_out_of_screen"}
+    bounds = {
+        "left": 0,
+        "top": max(0, target_y - (row_step // 2)),
+        "right": int(screen_width),
+        "bottom": min(int(screen_height), target_y + (row_step // 2)),
+    }
+    center = _bounds_center(bounds)
+    if center is None:
+        return {"ok": False, "failure_reason": "sort_sheet_geometry_center_missing"}
+    return {
+        "ok": True,
+        "failure_reason": "",
+        "bounds": bounds,
+        "tap_x": center[0],
+        "tap_y": center[1],
+        "detection_method": "sort_sheet_geometry_fallback",
+        "default_bounds": default_bounds,
+        "row_step": row_step,
+        "row_offset": row_offset,
+    }
 
 
 def detect_unfollow_following_sort_control(
@@ -307,7 +444,8 @@ def open_unfollow_following_sort_sheet(
     time.sleep(0.65)
     signals = _sort_option_signals(_dump_hierarchy(d))
     sheet_open = bool(
-        signals.get("default_visible")
+        signals.get("sort_by_title_visible")
+        or signals.get("default_visible")
         or signals.get("latest_visible")
         or signals.get("earliest_visible")
     )
@@ -380,8 +518,55 @@ def apply_unfollow_following_sort_mode(
             "tap_y": 0,
         }
 
-    _, bounds, center, method = _find_exact_text_element(_dump_hierarchy(d), option_text)
+    hierarchy = _dump_hierarchy(d)
+    screen_width, screen_height = _screen_size(d)
+    _, bounds, center, method, normalized_candidates = _find_sort_option_element(
+        hierarchy,
+        option_text,
+        screen_width=screen_width,
+    )
     if center is None:
+        fallback = _find_sort_sheet_geometry_fallback(
+            hierarchy,
+            requested,
+            screen_width=screen_width,
+            screen_height=screen_height,
+        )
+        if fallback.get("ok"):
+            bounds = dict(fallback.get("bounds") or {})
+            tap_x = int(fallback.get("tap_x") or 0)
+            tap_y = int(fallback.get("tap_y") or 0)
+            method = str(fallback.get("detection_method") or "sort_sheet_geometry_fallback")
+            out = {
+                **opened,
+                "ok": True,
+                "skipped": False,
+                "failure_reason": "",
+                "option_text": option_text,
+                "detection_method": method,
+                "bounds": bounds,
+                "tap_x": tap_x,
+                "tap_y": tap_y,
+                "normalized_candidates": normalized_candidates,
+                "geometry_fallback": {
+                    "default_bounds": dict(fallback.get("default_bounds") or {}),
+                    "row_step": int(fallback.get("row_step") or 0),
+                    "row_offset": int(fallback.get("row_offset") or 0),
+                },
+            }
+            log("info", "unfollow_sort_option_geometry_fallback_used", **out)
+            log("info", "unfollow_sort_option_detected", **out)
+            log("info", "unfollow_sort_option_tap_started", **out)
+            try:
+                d.click(tap_x, tap_y)
+            except Exception as exc:
+                out["ok"] = False
+                out["failure_reason"] = "sort_option_tap_failed"
+                out["error"] = str(exc)[:200]
+                log("info", "unfollow_sort_apply_failed", **out)
+                return out
+            log("info", "unfollow_sort_option_tapped", **out)
+            return out
         out = {
             **opened,
             "ok": False,
@@ -392,8 +577,11 @@ def apply_unfollow_following_sort_mode(
             "bounds": {},
             "tap_x": 0,
             "tap_y": 0,
+            "normalized_candidates": normalized_candidates,
+            "geometry_fallback_failure_reason": str(fallback.get("failure_reason") or ""),
         }
         log("info", "unfollow_sort_option_detected", **out)
+        log("info", "unfollow_sort_apply_failed", **out)
         return out
 
     tap_x, tap_y = center
@@ -407,6 +595,7 @@ def apply_unfollow_following_sort_mode(
         "bounds": bounds,
         "tap_x": tap_x,
         "tap_y": tap_y,
+        "normalized_candidates": normalized_candidates,
     }
     log("info", "unfollow_sort_option_detected", **out)
     log("info", "unfollow_sort_option_tap_started", **out)
@@ -416,6 +605,7 @@ def apply_unfollow_following_sort_mode(
         out["ok"] = False
         out["failure_reason"] = "sort_option_tap_failed"
         out["error"] = str(exc)[:200]
+        log("info", "unfollow_sort_apply_failed", **out)
         return out
     log("info", "unfollow_sort_option_tapped", **out)
     return out
