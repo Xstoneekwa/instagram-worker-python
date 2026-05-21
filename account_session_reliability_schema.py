@@ -156,9 +156,37 @@ def _build_badges(snapshot: dict[str, Any]) -> list[str]:
     session_status = str(snapshot.get("session_status") or "")
     restart_allowed = _as_bool(snapshot.get("restart_allowed"))
     restart_block_reason = str(snapshot.get("restart_block_reason") or "")
+    restart_eligibility = str(snapshot.get("restart_eligibility") or "")
     unsafe = set(snapshot.get("unsafe_markers") or [])
+    phase_statuses = {
+        str(snapshot.get("welcome_phase_status") or ""),
+        str(snapshot.get("follow_phase_status") or ""),
+        str(snapshot.get("unfollow_phase_status") or ""),
+    }
+    current_phase = str(snapshot.get("current_phase") or "")
+    quota_remaining_values = [
+        _as_int(snapshot.get("follow_quota_remaining")),
+        _as_int(snapshot.get("unfollow_quota_remaining")),
+        _as_int(snapshot.get("welcome_remaining")),
+    ]
+    quota_remaining_total = sum(
+        value for value in quota_remaining_values if value is not None
+    )
+    has_known_quota_remaining = any(value is not None for value in quota_remaining_values)
+    non_blocking_restart_reasons = {
+        "",
+        "session_completed",
+        "restart_not_needed",
+        "safe_continued_no_known_quota_remaining",
+        "no_quota_remaining",
+    }
 
-    if session_status == "running" or snapshot.get("current_phase") not in {UNKNOWN, "completed"}:
+    if (
+        session_status == "running"
+        or current_phase in {"welcome", "follow", "unfollow"}
+        or "running" in phase_statuses
+        or "in_progress" in phase_statuses
+    ):
         badges.append("running")
     if termination == "completed":
         badges.append("completed")
@@ -166,9 +194,13 @@ def _build_badges(snapshot: dict[str, Any]) -> list[str]:
         badges.append("partial_resumable")
     if restart_allowed:
         badges.append("restart_scheduled")
-    elif restart_block_reason:
+    elif (
+        restart_eligibility == "blocked"
+        or (has_known_quota_remaining and quota_remaining_total > 0)
+        or restart_block_reason not in non_blocking_restart_reasons
+    ):
         badges.append("restart_blocked")
-    if termination == "completed" and not restart_block_reason:
+    if termination == "completed" and restart_eligibility in {"not_needed", ""}:
         badges.append("healthy")
     if "challenge" in unsafe:
         badges.append("challenge")
