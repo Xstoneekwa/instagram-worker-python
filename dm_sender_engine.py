@@ -52,6 +52,7 @@ from logs import log
 
 _DM_SENDER_GLOBAL_SEARCH_READY: dict[str, Any] = {}
 _DM_SENDER_SESSION_ABORT_PERMISSION: bool = False
+_LAST_DM_SENDER_NAV_TIMINGS: dict[str, float] = {}
 
 _TRUSTED_GLOBAL_SEARCH_CONTEXTS = frozenset(
     {
@@ -125,6 +126,33 @@ def _dm_sender_global_search_recently_verified(
         else getattr(config, "DM_SENDER_GLOBAL_SEARCH_READY_TTL_S", 120.0) or 120.0
     )
     return (time.perf_counter() - float(st.get("at") or 0.0)) < ttl
+
+
+def _reset_dm_sender_nav_timings() -> None:
+    global _LAST_DM_SENDER_NAV_TIMINGS
+    _LAST_DM_SENDER_NAV_TIMINGS = {
+        "navigation_ms": 0.0,
+        "search_ms": 0.0,
+        "thread_open_ms": 0.0,
+    }
+
+
+def _set_dm_sender_nav_timings(
+    *,
+    navigation_ms: float = 0.0,
+    search_ms: float = 0.0,
+    thread_open_ms: float = 0.0,
+) -> None:
+    global _LAST_DM_SENDER_NAV_TIMINGS
+    _LAST_DM_SENDER_NAV_TIMINGS = {
+        "navigation_ms": round(max(0.0, float(navigation_ms or 0.0)), 2),
+        "search_ms": round(max(0.0, float(search_ms or 0.0)), 2),
+        "thread_open_ms": round(max(0.0, float(thread_open_ms or 0.0)), 2),
+    }
+
+
+def _get_dm_sender_nav_timings() -> dict[str, float]:
+    return dict(_LAST_DM_SENDER_NAV_TIMINGS)
 
 
 def _check_dm_sender_permission_blocker(
@@ -362,12 +390,89 @@ def _exit_followers_list_surface_for_sender(
     return False
 
 
+def _dm_sender_composer_visible_quick(d: u2.Device) -> bool:
+    try:
+        return _dm_find_focus_composer(d) is not None
+    except Exception:
+        return False
+
+
+def _dm_sender_profile_back_to_search_fast_path(
+    d: u2.Device,
+    *,
+    pkg: str,
+    account_username: str,
+    context: str,
+    last_recipient_username: str = "",
+) -> bool:
+    """Use Instagram's top-left profile back button to restore the trusted Search surface."""
+    src = str(account_username or "").strip()
+    log(
+        "info",
+        "dm_sender_post_job_profile_back_to_search_started",
+        context=context,
+        account_username=src or None,
+        last_recipient_username=last_recipient_username or None,
+    )
+    tapped, tap_method = tap_instagram_action_bar_back_button(d, pkg)
+    if not tapped:
+        log(
+            "warning",
+            "dm_sender_post_job_profile_back_to_search_failed",
+            context=context,
+            reason="action_bar_back_not_found",
+            account_username=src or None,
+        )
+        return False
+    log(
+        "info",
+        "dm_sender_post_job_profile_action_bar_back_tapped",
+        context=context,
+        tap_method=tap_method,
+        account_username=src or None,
+    )
+    deadline = time.monotonic() + float(getattr(config, "BACK_TO_SEARCH_MAX_WAIT_S", 3.0))
+    while time.monotonic() < deadline:
+        if is_lightweight_search_screen(d, pkg):
+            verified, why = _verify_dm_sender_global_search_surface(
+                d, pkg=pkg, account_username=src, full_followers_check=False
+            )
+            if verified:
+                _mark_dm_sender_global_search_ready(src, context=context)
+                log(
+                    "info",
+                    "dm_sender_post_job_profile_back_to_search_ok",
+                    context=context,
+                    account_username=src or None,
+                    verify_reason=why,
+                )
+                return True
+            log(
+                "warning",
+                "dm_sender_post_job_profile_back_to_search_failed",
+                context=context,
+                reason=why,
+                account_username=src or None,
+            )
+            return False
+        time.sleep(0.08)
+    log(
+        "warning",
+        "dm_sender_post_job_profile_back_to_search_failed",
+        context=context,
+        reason="search_timeout",
+        account_username=src or None,
+    )
+    return False
+
+
 def prepare_dm_sender_global_search_surface(
     d: u2.Device,
     *,
     account_username: str,
     context: str,
     last_recipient_username: str = "",
+    prefer_back_stack_to_search: bool = False,
 ) -> bool:
     """
     Leave Followers list / DM thread / profile and open verified global Instagram Search.
@@ -386,7 +491,11 @@ def prepare_dm_sender_global_search_surface(
     invalidate_search_surface_cache(f"dm_sender_prepare:{context}")
 
     try:
-        if last_recipient_username and is_dm_thread_screen(d, pkg):
+        if (
+            last_recipient_username
+            and is_dm_thread_screen(d, pkg)
+            and not prefer_back_stack_to_search
+        ):
             return_to_profile_from_dm(d, last_recipient_username, pkg)
     except Exception as e:
         log(
@@ -396,7 +505,26 @@ def prepare_dm_sender_global_search_surface(
             error=str(e)[:200],
         )
 
-    det_pre, _ = detect_followers_list_screen_fresh(d, source_profile_username=src)
+    quick_pre = is_followers_list_surface_quick(d, source_profile_username=src)
+    det_pre: dict[str, Any] = {}
+    if quick_pre:
+        log(
+            "info",
+            "dm_sender_post_job_followers_probe_full_check",
+            context=context,
+            phase="pre_exit",
+            reason="quick_probe_true",
+            account_username=src or None,
+        )
+        det_pre, _ = detect_followers_list_screen_fresh(d, source_profile_username=src)
+    else:
+        log(
+            "info",
+            "dm_sender_post_job_followers_probe_quick_false",
+            context=context,
+            phase="pre_exit",
+            account_username=src or None,
+        )
     if bool(det_pre.get("is_followers_list")):
         if not _exit_followers_list_surface_for_sender(
             d, account_username=src, context=context
@@ -410,18 +538,40 @@ def prepare_dm_sender_global_search_surface(
             )
             return False
 
-    dm_back_max = int(getattr(config, "DM_SENDER_SURFACE_PREPARE_DM_BACK_MAX", 3) or 3)
-    for _ in range(dm_back_max):
-        if is_dm_thread_screen(d, pkg):
-            try:
-                d.press("back")
-            except Exception:
-                pass
-            time.sleep(0.2)
-            continue
-        break
+    if not (context == "dm_sender_post_job" and prefer_back_stack_to_search):
+        dm_back_max = int(getattr(config, "DM_SENDER_SURFACE_PREPARE_DM_BACK_MAX", 3) or 3)
+        for _ in range(dm_back_max):
+            if is_dm_thread_screen(d, pkg):
+                try:
+                    d.press("back")
+                except Exception:
+                    pass
+                time.sleep(0.2)
+                continue
+            break
 
-    det_post_exit, _ = detect_followers_list_screen_fresh(d, source_profile_username=src)
+    quick_post_exit = is_followers_list_surface_quick(d, source_profile_username=src)
+    det_post_exit: dict[str, Any] = {}
+    if quick_post_exit:
+        log(
+            "info",
+            "dm_sender_post_job_followers_probe_full_check",
+            context=context,
+            phase="post_exit",
+            reason="quick_probe_true",
+            account_username=src or None,
+        )
+        det_post_exit, _ = detect_followers_list_screen_fresh(
+            d, source_profile_username=src
+        )
+    else:
+        log(
+            "info",
+            "dm_sender_post_job_followers_probe_quick_false",
+            context=context,
+            phase="post_exit",
+            account_username=src or None,
+        )
     if bool(det_post_exit.get("is_followers_list")):
         log(
             "error",
@@ -443,6 +593,170 @@ def prepare_dm_sender_global_search_surface(
             account_username=src or None,
         )
         return False
+
+    if context == "dm_sender_post_job" and prefer_back_stack_to_search:
+        log(
+            "info",
+            "dm_sender_post_job_back_stack_fast_path_started",
+            context=context,
+            account_username=src or None,
+            last_recipient_username=last_recipient_username or None,
+        )
+        profile_ok = False
+        try:
+            if last_recipient_username:
+                if is_lightweight_search_screen(d, pkg):
+                    verified, why = _verify_dm_sender_global_search_surface(
+                        d, pkg=pkg, account_username=src, full_followers_check=False
+                    )
+                    if verified:
+                        _mark_dm_sender_global_search_ready(src, context=context)
+                        log(
+                            "info",
+                            "dm_sender_post_job_back_stack_search_ok",
+                            context=context,
+                            account_username=src or None,
+                            verify_reason=why,
+                            phase="already_search",
+                        )
+                        log(
+                            "info",
+                            "dm_sender_post_job_surface_prepare_done",
+                            context=context,
+                            account_username=src or None,
+                            method="back_stack_fast_path",
+                        )
+                        return True
+                log(
+                    "info",
+                    "dm_sender_post_job_first_back_to_restore_profile_started",
+                    context=context,
+                    account_username=src or None,
+                    last_recipient_username=last_recipient_username,
+                    dm_thread_visible=bool(is_dm_thread_screen(d, pkg)),
+                    composer_visible=bool(_dm_sender_composer_visible_quick(d)),
+                )
+                tapped, tap_method = tap_instagram_action_bar_back_button(d, pkg)
+                if tapped:
+                    log(
+                        "info",
+                        "dm_sender_post_job_dm_action_bar_back_tapped",
+                        context=context,
+                        tap_method=tap_method,
+                        last_recipient_username=last_recipient_username,
+                    )
+                    time.sleep(0.2)
+                else:
+                    try:
+                        d.press("back")
+                    except Exception:
+                        pass
+                    time.sleep(0.2)
+                if is_lightweight_search_screen(d, pkg):
+                    verified, why = _verify_dm_sender_global_search_surface(
+                        d, pkg=pkg, account_username=src, full_followers_check=False
+                    )
+                    if verified:
+                        _mark_dm_sender_global_search_ready(src, context=context)
+                        log(
+                            "info",
+                            "dm_sender_post_job_back_stack_search_ok",
+                            context=context,
+                            account_username=src or None,
+                            verify_reason=why,
+                            phase="profile_already_restored",
+                        )
+                        log(
+                            "info",
+                            "dm_sender_post_job_surface_prepare_done",
+                            context=context,
+                            account_username=src or None,
+                            method="back_stack_fast_path",
+                        )
+                        return True
+                profile_ok = bool(verify_profile(d, last_recipient_username))
+        except Exception as e:
+            log(
+                "warning",
+                "dm_sender_post_job_back_stack_fast_path_failed",
+                context=context,
+                phase="return_to_profile",
+                error=str(e)[:200],
+            )
+            profile_ok = False
+
+        if profile_ok:
+            log(
+                "info",
+                "dm_sender_post_job_back_stack_profile_ok",
+                context=context,
+                account_username=src or None,
+                last_recipient_username=last_recipient_username or None,
+            )
+            try:
+                search_ok = _dm_sender_profile_back_to_search_fast_path(
+                    d,
+                    pkg=pkg,
+                    account_username=src,
+                    context=context,
+                    last_recipient_username=last_recipient_username,
+                )
+                if not search_ok:
+                    search_ok = bool(return_to_search_from_profile(d, pkg))
+                    if search_ok:
+                        verified, why = _verify_dm_sender_global_search_surface(
+                            d, pkg=pkg, account_username=src, full_followers_check=False
+                        )
+                        if verified:
+                            _mark_dm_sender_global_search_ready(src, context=context)
+                        else:
+                            search_ok = False
+                    log(
+                        "info" if search_ok else "warning",
+                        "dm_sender_post_job_profile_back_to_search_fallback_result",
+                        context=context,
+                        ok=bool(search_ok),
+                    )
+                if search_ok:
+                    log(
+                        "info",
+                        "dm_sender_post_job_back_stack_search_ok",
+                        context=context,
+                        account_username=src or None,
+                        verify_reason="ok",
+                    )
+                    log(
+                        "info",
+                        "dm_sender_post_job_surface_prepare_done",
+                        context=context,
+                        account_username=src or None,
+                        method="back_stack_fast_path",
+                    )
+                    return True
+                log(
+                    "warning",
+                    "dm_sender_post_job_back_stack_fast_path_failed",
+                    context=context,
+                    phase="return_to_search",
+                    reason="profile_back_to_search_failed",
+                )
+            except Exception as e:
+                log(
+                    "warning",
+                    "dm_sender_post_job_back_stack_fast_path_failed",
+                    context=context,
+                    phase="return_to_search",
+                    error=str(e)[:200],
+                )
+        else:
+            log(
+                "warning",
+                "dm_sender_post_job_back_stack_fast_path_failed",
+                context=context,
+                phase="return_to_profile",
+                reason="profile_not_verified",
+                last_recipient_username=last_recipient_username or None,
+            )
 
     from_dm = bool(last_recipient_username) and is_dm_thread_screen(d, pkg)
     if from_dm:
@@ -563,6 +877,7 @@ def _open_search_with_recovery(
     context: str,
     account_username: str = "",
     skip_if_recently_verified: bool = True,
+    allow_percent_fallback: bool = True,
 ) -> bool:
     src = str(account_username or "").strip()
     t0 = time.perf_counter()
@@ -623,7 +938,7 @@ def _open_search_with_recovery(
         pkg=pkg,
         account_username=src,
         context=context,
-        allow_percent_fallback=True,
+        allow_percent_fallback=allow_percent_fallback,
         block_if_dm_thread=True,
         caller_context=context,
     ):
@@ -833,13 +1148,18 @@ def _navigate_to_recipient_dm_thread(
     *,
     pkg: str,
     account_username: str = "",
+    dm_type: str = "",
+    previous_username: str | None = None,
 ) -> tuple[str, bool]:
     """
     Search → profile → DM thread. Returns (thread_state, navigation_ok).
     """
     uname = str(username or "").strip()
     src = str(account_username or "").strip()
+    prev_uname = str(previous_username or "").strip()
+    dm_type_norm = str(dm_type or "").strip().lower()
     t_nav = time.perf_counter()
+    _reset_dm_sender_nav_timings()
     log("info", "dm_sender_navigation_started", username=uname)
 
     if _check_dm_sender_permission_blocker(d, username=uname, context="navigation"):
@@ -851,6 +1171,7 @@ def _navigate_to_recipient_dm_thread(
             return "unknown", False
 
     t_before_search = time.perf_counter()
+    trusted_search_reuse = False
     if _dm_sender_trust_global_search_ready(src):
         log(
             "info",
@@ -858,6 +1179,7 @@ def _navigate_to_recipient_dm_thread(
             username=uname,
             context="dm_sender_navigate",
         )
+        trusted_search_reuse = True
         search_ok = True
     else:
         search_ok = _open_search_with_recovery(
@@ -867,6 +1189,7 @@ def _navigate_to_recipient_dm_thread(
             context="dm_sender_navigate",
             account_username=src,
             skip_if_recently_verified=True,
+            allow_percent_fallback=(dm_type_norm != "outreach"),
         )
     if not search_ok:
         log("error", "dm_sender_open_search_failed", username=uname)
@@ -887,7 +1210,20 @@ def _navigate_to_recipient_dm_thread(
 
     t_type = time.perf_counter()
     log("info", "dm_sender_username_typing_started", username=uname)
-    if not type_search(d, uname, previous_username=None):
+    previous_for_type = (
+        prev_uname
+        if dm_type_norm == "outreach" and prev_uname and trusted_search_reuse
+        else None
+    )
+    if previous_for_type:
+        log(
+            "info",
+            "dm_sender_previous_username_reused",
+            previous_username=previous_for_type,
+            current_username=uname,
+            dm_type=dm_type_norm,
+        )
+    if not type_search(d, uname, previous_username=previous_for_type):
         log("error", "dm_sender_type_search_failed", username=uname)
         return "unknown", False
     log(
@@ -914,6 +1250,7 @@ def _navigate_to_recipient_dm_thread(
         log("error", "dm_sender_tap_account_failed", username=uname)
         return "unknown", False
     tap_segment_ms = round((time.perf_counter() - t_tap) * 1000.0, 2)
+    search_total_ms = round((time.perf_counter() - t_before_search) * 1000.0, 2)
 
     t_prof = time.perf_counter()
     if not verify_profile(d, uname):
@@ -931,15 +1268,35 @@ def _navigate_to_recipient_dm_thread(
     )
 
     reset_dm_thread_probe_state()
-    thread_state = open_dm_thread_from_profile(d, uname)
+    t_thread_open = time.perf_counter()
+    thread_state = open_dm_thread_from_profile(
+        d,
+        uname,
+        outreach_mode=(dm_type_norm == "outreach"),
+    )
+    thread_open_ms = round((time.perf_counter() - t_thread_open) * 1000.0, 2)
     log(
         "info",
         "dm_sender_dm_thread_opened",
         username=uname,
         thread_state=thread_state,
+        thread_open_ms=thread_open_ms,
     )
 
-    if thread_state not in ("dm_not_available", "unknown"):
+    snap = get_last_dm_thread_classify_snapshot()
+    if (
+        dm_type_norm == "outreach"
+        and thread_state == "existing_thread"
+        and bool(snap)
+    ):
+        log(
+            "info",
+            "dm_sender_skip_composer_probe_existing_thread",
+            username=uname,
+            dm_type=dm_type_norm,
+            classify_snapshot=True,
+        )
+    elif thread_state not in ("dm_not_available", "unknown"):
         ok_comp, comp_reason = verify_dm_composer_safe(d, pkg)
         log(
             "info",
@@ -949,6 +1306,11 @@ def _navigate_to_recipient_dm_thread(
             composer_reason=comp_reason,
         )
 
+    _set_dm_sender_nav_timings(
+        navigation_ms=(time.perf_counter() - t_nav) * 1000.0,
+        search_ms=search_total_ms,
+        thread_open_ms=thread_open_ms,
+    )
     return thread_state, thread_state not in ("unknown",)
 
 
@@ -958,6 +1320,7 @@ def _safe_teardown_navigation(
     *,
     pkg: str,
     account_username: str = "",
+    prefer_back_stack_to_search: bool = False,
 ) -> None:
     """Exit DM thread safely, then restore verified global Search (no percent-fallback from DM)."""
     if _check_dm_sender_permission_blocker(
@@ -969,6 +1332,7 @@ def _safe_teardown_navigation(
         account_username=account_username,
         context="dm_sender_post_job",
         last_recipient_username=username,
+        prefer_back_stack_to_search=prefer_back_stack_to_search,
     )
 
 
@@ -1638,6 +2002,7 @@ def execute_dm_job_real_send(
     settings: dict[str, Any],
     account_id: str,
     account_username: str = "",
+    previous_username: str | None = None,
 ) -> dict[str, Any]:
     """Claimed job → navigate → send or skip/fail terminal complete."""
     _ = account_id
@@ -1676,11 +2041,19 @@ def execute_dm_job_real_send(
     outcome = "failed_retry"
     final_status = "pending"
     updated_job: dict[str, Any] | None = None
+    nav_timings: dict[str, float] = {}
+    post_job_ms = 0.0
 
     try:
         thread_state, nav_ok = _navigate_to_recipient_dm_thread(
-            d, recipient, pkg=pkg, account_username=account_username
+            d,
+            recipient,
+            pkg=pkg,
+            account_username=account_username,
+            dm_type=dm_type,
+            previous_username=previous_username,
         )
+        nav_timings = _get_dm_sender_nav_timings()
         snap = get_last_dm_thread_classify_snapshot()
         log(
             "info",
@@ -1782,9 +2155,15 @@ def execute_dm_job_real_send(
                     )
                     final_status = str((updated_job or {}).get("status") or "pending")
     finally:
+        t_post_job = time.perf_counter()
         _safe_teardown_navigation(
-            d, recipient, pkg=pkg, account_username=account_username
+            d,
+            recipient,
+            pkg=pkg,
+            account_username=account_username,
+            prefer_back_stack_to_search=(dm_type == "outreach"),
         )
+        post_job_ms = round((time.perf_counter() - t_post_job) * 1000.0, 2)
 
     return {
         "job_id": job_id,
@@ -1796,6 +2175,10 @@ def execute_dm_job_real_send(
         "outcome": outcome,
         "final_job_status": final_status,
         "job": updated_job,
+        "navigation_ms": float(nav_timings.get("navigation_ms") or 0.0),
+        "search_ms": float(nav_timings.get("search_ms") or 0.0),
+        "thread_open_ms": float(nav_timings.get("thread_open_ms") or 0.0),
+        "post_job_ms": post_job_ms,
     }
 
 
@@ -1846,6 +2229,10 @@ def run_dm_sender_send(
         "skipped_recipients": [],
         "failed_recipients": [],
         "sender_status": "not_started",
+        "total_navigation_ms": 0.0,
+        "total_post_job_ms": 0.0,
+        "total_search_ms": 0.0,
+        "total_thread_open_ms": 0.0,
     }
 
     log(
@@ -1885,6 +2272,7 @@ def run_dm_sender_send(
         settings = {}
 
     last_result: dict[str, Any] = {}
+    last_recipient_username = ""
     for _ in range(max_jobs):
         job = _claim_job_for_run(
             aid, reserved_by, dm_type=dm_type_resolved, only_job_id=only_job_id
@@ -1903,7 +2291,33 @@ def run_dm_sender_send(
             settings=settings,
             account_id=aid,
             account_username=acct_user,
+            previous_username=(
+                last_recipient_username
+                if dm_type_resolved == "outreach"
+                else None
+            ),
         )
+        summary["total_navigation_ms"] = round(
+            float(summary.get("total_navigation_ms") or 0.0)
+            + float(last_result.get("navigation_ms") or 0.0),
+            2,
+        )
+        summary["total_post_job_ms"] = round(
+            float(summary.get("total_post_job_ms") or 0.0)
+            + float(last_result.get("post_job_ms") or 0.0),
+            2,
+        )
+        summary["total_search_ms"] = round(
+            float(summary.get("total_search_ms") or 0.0)
+            + float(last_result.get("search_ms") or 0.0),
+            2,
+        )
+        summary["total_thread_open_ms"] = round(
+            float(summary.get("total_thread_open_ms") or 0.0)
+            + float(last_result.get("thread_open_ms") or 0.0),
+            2,
+        )
+        last_recipient_username = recipient
         outcome = str(last_result.get("outcome") or "")
         if outcome == "sent":
             summary["jobs_sent_count"] += 1

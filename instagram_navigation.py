@@ -6277,6 +6277,28 @@ def _welcome_dm_still_on_profile_with_message_cta(d: u2.Device, pkg: str) -> boo
     return bool(_welcome_dm_message_button_present(d))
 
 
+def _detect_and_dismiss_business_privacy_popup(d: u2.Device) -> bool:
+    """Dismiss only Instagram's exact business-chat privacy popup."""
+    try:
+        title = d(textContains="Business chats and your privacy")
+        if not title.exists(timeout=0.08):
+            return False
+        ok = d(text="OK")
+        if not ok.exists(timeout=0.12):
+            return False
+        ok.click()
+        log("info", "dm_sender_business_privacy_popup_dismissed")
+        time.sleep(0.25)
+        return True
+    except Exception as e:
+        log(
+            "warning",
+            "dm_sender_business_privacy_popup_dismiss_failed",
+            error=str(e)[:200],
+        )
+        return False
+
+
 def _welcome_dm_read_action_bar_title(d: u2.Device) -> str:
     try:
         ab = d(resourceIdMatches=r".*:id/action_bar_title.*")
@@ -6425,7 +6447,11 @@ def _log_welcome_dm_thread_unknown_observed(
 
 
 def open_dm_thread_from_profile(
-    d: u2.Device, username: str, *, welcome_list_native: bool = False
+    d: u2.Device,
+    username: str,
+    *,
+    welcome_list_native: bool = False,
+    outreach_mode: bool = False,
 ) -> str:
     global _LAST_DM_THREAD_ATTEMPTED, _LAST_DM_THREAD_STATE, _LAST_DM_THREAD_CLASSIFY_SNAPSHOT
     _LAST_DM_THREAD_ATTEMPTED = True
@@ -6462,8 +6488,83 @@ def open_dm_thread_from_profile(
 
     post_open_settle_s = float(getattr(config, "DM_THREAD_POST_OPEN_SETTLE_S", 0.45))
     time.sleep(post_open_settle_s)
+    business_popup_dismissed = _detect_and_dismiss_business_privacy_popup(d)
+
+    composer_quick = _welcome_dm_quick_composer_visible(d, pkg)
+    dm_thread_quick = bool(is_dm_thread_screen(d, pkg))
+    still_profile_with_message = False
+    if not composer_quick and not dm_thread_quick and not business_popup_dismissed:
+        try:
+            still_profile_with_message = bool(
+                verify_profile(d, username) and _welcome_dm_message_button_present(d)
+            )
+        except Exception:
+            still_profile_with_message = False
+    log(
+        "info",
+        "dm_message_button_click_transition_check",
+        username=username,
+        composer_visible=bool(composer_quick),
+        dm_thread_visible=bool(dm_thread_quick),
+        business_privacy_popup_dismissed=bool(business_popup_dismissed),
+        still_profile_with_message=bool(still_profile_with_message),
+        outreach_mode=bool(outreach_mode),
+        click_attempt=1,
+    )
 
     message_click_attempts = 1
+    if (
+        outreach_mode
+        and still_profile_with_message
+        and _welcome_dm_still_on_profile_with_message_cta(d, pkg)
+    ):
+        log(
+            "info",
+            "dm_message_button_click_retry_scheduled",
+            username=username,
+            button_signal=button_signal,
+            first_click_method=click_method,
+            reason="profile_still_visible_after_message_click",
+        )
+        t_retry = time.perf_counter()
+        retry_tapped, retry_signal, retry_method, retry_x, retry_y = (
+            _welcome_dm_try_tap_message_button(d, wait_s=0.35)
+        )
+        retry_click_ms = (time.perf_counter() - t_retry) * 1000
+        if retry_tapped:
+            message_click_attempts = 2
+            button_signal = retry_signal or button_signal
+            log(
+                "info",
+                "dm_message_button_click_retry_tapped",
+                username=username,
+                button_signal=button_signal,
+                click_method=retry_method,
+                dm_retry_click_ms=round(retry_click_ms, 2),
+                tap_x=retry_x,
+                tap_y=retry_y,
+                click_attempt=2,
+            )
+            time.sleep(post_open_settle_s)
+            if _detect_and_dismiss_business_privacy_popup(d):
+                business_popup_dismissed = True
+        else:
+            log(
+                "warning",
+                "dm_message_button_click_no_transition",
+                username=username,
+                dm_retry_click_ms=round(retry_click_ms, 2),
+                reason="message_button_retry_not_tapped",
+            )
+    elif outreach_mode and still_profile_with_message:
+        log(
+            "warning",
+            "dm_message_button_click_no_transition",
+            username=username,
+            reason="profile_still_visible_after_message_click",
+            click_attempt=1,
+        )
+
     if welcome_list_native and _welcome_dm_still_on_profile_with_message_cta(d, pkg):
         log(
             "info",
@@ -6522,6 +6623,25 @@ def open_dm_thread_from_profile(
         pkg=pkg,
         composer_timeout_s=detect_timeout_s,
     )
+    if thread_state == "unknown" and _detect_and_dismiss_business_privacy_popup(d):
+        business_popup_dismissed = True
+        log(
+            "info",
+            "dm_sender_dm_thread_unknown_retry_after_business_popup",
+            username=username,
+        )
+        thread_state, snap = detect_dm_thread_state(
+            d,
+            username,
+            pkg=pkg,
+            composer_timeout_s=detect_timeout_s,
+        )
+        if thread_state == "unknown":
+            log(
+                "warning",
+                "dm_sender_dm_thread_unknown_after_popup_retry",
+                username=username,
+            )
     dm_thread_detect_ms = (time.perf_counter() - t_detect) * 1000
     _perf["dm_thread_detect_ms"] = dm_thread_detect_ms
     _LAST_DM_THREAD_STATE = thread_state
