@@ -1550,6 +1550,101 @@ def get_account_dm_settings(account_id: str) -> dict[str, Any] | None:
     return None
 
 
+def get_account_dm_counter_today(account_id: str) -> dict[str, Any] | None:
+    """Return today's DM counter row when it exists; does not create one."""
+    aid = str(account_id or "").strip()
+    if not aid:
+        return None
+    today = datetime.now(timezone.utc).date().isoformat()
+    rows = _request_json(
+        "GET",
+        "ig_account_dm_counters",
+        query={
+            "select": "*",
+            "account_id": f"eq.{aid}",
+            "counter_date": f"eq.{today}",
+            "limit": "1",
+        },
+    )
+    if rows and isinstance(rows, list):
+        return rows[0]
+    return None
+
+
+def requeue_stale_outreach_dm_jobs(
+    account_id: str,
+    *,
+    stale_minutes: int,
+) -> list[dict[str, Any]]:
+    """Requeue stale reserved/running outreach jobs before a controlled V1 run."""
+    aid = str(account_id or "").strip()
+    minutes = max(1, int(stale_minutes or 1))
+    if not aid:
+        return []
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
+    rows = _request_json(
+        "GET",
+        "ig_dm_jobs",
+        query={
+            "select": "id,status,attempts,max_attempts,updated_at,reserved_by,recipient_username",
+            "account_id": f"eq.{aid}",
+            "dm_type": "eq.outreach",
+            "status": "in.(reserved,running)",
+            "updated_at": f"lt.{cutoff}",
+        },
+    )
+    if not isinstance(rows, list):
+        return []
+
+    requeued: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        try:
+            attempts = int(row.get("attempts") or 0)
+            max_attempts = int(row.get("max_attempts") or 0)
+        except (TypeError, ValueError):
+            continue
+        if attempts >= max_attempts:
+            continue
+        job_id = str(row.get("id") or "").strip()
+        if not job_id:
+            continue
+        updated_rows = _request_json(
+            "PATCH",
+            "ig_dm_jobs",
+            query={
+                "id": f"eq.{job_id}",
+                "account_id": f"eq.{aid}",
+                "dm_type": "eq.outreach",
+                "status": "in.(reserved,running)",
+                "updated_at": f"lt.{cutoff}",
+            },
+            body={
+                "status": "pending",
+                "reserved_by": None,
+                "reserved_at": None,
+                "updated_at": _utc_now_iso(),
+            },
+            prefer_representation=True,
+        )
+        if updated_rows and isinstance(updated_rows, list):
+            updated = updated_rows[0]
+            if isinstance(updated, dict):
+                requeued.append(updated)
+                log(
+                    "warning",
+                    "outreach_stale_job_requeued",
+                    account_id=aid,
+                    job_id=job_id,
+                    previous_status=row.get("status"),
+                    stale_minutes=minutes,
+                    recipient_username=row.get("recipient_username"),
+                    reserved_by=row.get("reserved_by"),
+                )
+    return requeued
+
+
 def parse_utc_iso_timestamp(raw: Any) -> datetime | None:
     """Parse ISO-8601 timestamp to timezone-aware UTC datetime."""
     if not raw:
@@ -2071,6 +2166,39 @@ def enqueue_welcome_dm_job_if_eligible(
             "p_message_body": message_body,
             "p_template_id": template_id,
             "p_priority": int(priority),
+        },
+    )
+    if isinstance(row, dict):
+        return row
+    if isinstance(row, list) and row:
+        first = row[0]
+        return first if isinstance(first, dict) else None
+    return None
+
+
+def enqueue_outreach_dm_job(
+    account_id: str,
+    recipient_username: str,
+    *,
+    message_body: str | None = None,
+    template_id: str | None = None,
+    source: str = "manual",
+    campaign_id: str | None = None,
+    priority: int = 0,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """RPC enqueue_outreach_dm_job (no DM send). Returns job row or None."""
+    row = call_rpc(
+        "enqueue_outreach_dm_job",
+        {
+            "p_account_id": str(account_id),
+            "p_recipient_username": str(recipient_username),
+            "p_message_body": message_body,
+            "p_template_id": template_id,
+            "p_source": str(source or "manual"),
+            "p_campaign_id": campaign_id,
+            "p_priority": int(priority),
+            "p_metadata": metadata or {},
         },
     )
     if isinstance(row, dict):

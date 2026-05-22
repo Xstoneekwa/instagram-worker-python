@@ -179,6 +179,7 @@ def _dm_sender_open_search(
     context: str,
     allow_percent_fallback: bool = True,
     block_if_dm_thread: bool = True,
+    caller_context: str = "",
 ) -> bool:
     if _check_dm_sender_permission_blocker(d, context=context):
         return False
@@ -188,6 +189,7 @@ def _dm_sender_open_search(
             source_profile_username=account_username,
             allow_percent_fallback=allow_percent_fallback,
             block_if_dm_thread=block_if_dm_thread,
+            caller_context=caller_context or context,
         )
     )
 
@@ -475,6 +477,23 @@ def prepare_dm_sender_global_search_surface(
             return False
 
     allow_pct = not from_dm
+    disable_post_job_percent_fallback = bool(
+        getattr(config, "DM_SENDER_DISABLE_POST_JOB_PERCENT_FALLBACK", True)
+    )
+    if context == "dm_sender_post_job" and disable_post_job_percent_fallback:
+        allow_pct = False
+    log(
+        "info",
+        "dm_sender_post_job_search_guard_context",
+        context=context,
+        account_username=src or None,
+        last_recipient_username=last_recipient_username or None,
+        from_dm=bool(from_dm),
+        post_job_percent_fallback_disabled=bool(
+            context == "dm_sender_post_job" and disable_post_job_percent_fallback
+        ),
+        allow_percent_fallback=bool(allow_pct),
+    )
     if not _dm_sender_open_search(
         d,
         pkg=pkg,
@@ -482,6 +501,7 @@ def prepare_dm_sender_global_search_surface(
         context=context,
         allow_percent_fallback=allow_pct,
         block_if_dm_thread=True,
+        caller_context=context,
     ):
         log(
             "error",
@@ -605,6 +625,7 @@ def _open_search_with_recovery(
         context=context,
         allow_percent_fallback=True,
         block_if_dm_thread=True,
+        caller_context=context,
     ):
         ok, _why = _verify_dm_sender_global_search_surface(
             d, pkg=pkg, account_username=src, full_followers_check=False
@@ -642,6 +663,7 @@ def _open_search_with_recovery(
         context=f"{context}_recovery",
         allow_percent_fallback=False,
         block_if_dm_thread=True,
+        caller_context=f"{context}_recovery",
     ):
         return False
     ok, _why = _verify_dm_sender_global_search_surface(
@@ -679,6 +701,30 @@ def _evaluate_welcome_sendability(
     return False, "unknown_thread_state"
 
 
+def _evaluate_outreach_sendability(
+    thread_state: str,
+    settings: dict[str, Any],
+) -> tuple[bool, str | None]:
+    """Outreach-specific DM gate; keeps cold outreach separate from Welcome rules."""
+    skip_existing = bool(settings.get("outreach_skip_if_existing_thread", True))
+
+    if thread_state == "empty_new_thread":
+        return True, None
+
+    if thread_state == "existing_thread":
+        if skip_existing:
+            return False, "existing_thread"
+        return True, None
+
+    if thread_state == "restricted_account":
+        return False, "restricted_account"
+
+    if thread_state == "dm_not_available":
+        return False, "dm_not_available"
+
+    return False, "unknown_thread_state"
+
+
 def _finalize_job_after_dry_run(
     job: dict[str, Any],
     *,
@@ -696,6 +742,10 @@ def _finalize_job_after_dry_run(
 
     if dm_type == "welcome":
         sendable, skip_reason_candidate = _evaluate_welcome_sendability(
+            thread_state, settings
+        )
+    elif dm_type == "outreach":
+        sendable, skip_reason_candidate = _evaluate_outreach_sendability(
             thread_state, settings
         )
 
@@ -1057,7 +1107,11 @@ def execute_dm_job_dry_run(
             sendable, skip_candidate = _evaluate_welcome_sendability(
                 thread_state, settings
             )
-            if dm_type != "welcome":
+            if dm_type == "outreach":
+                sendable, skip_candidate = _evaluate_outreach_sendability(
+                    thread_state, settings
+                )
+            elif dm_type != "welcome":
                 sendable = thread_state == "empty_new_thread"
                 skip_candidate = None if sendable else thread_state
 
@@ -1649,7 +1703,11 @@ def execute_dm_job_real_send(
             sendable, skip_candidate = _evaluate_welcome_sendability(
                 thread_state, settings
             )
-            if dm_type != "welcome":
+            if dm_type == "outreach":
+                sendable, skip_candidate = _evaluate_outreach_sendability(
+                    thread_state, settings
+                )
+            elif dm_type != "welcome":
                 sendable = thread_state == "empty_new_thread"
                 skip_candidate = None if sendable else thread_state
 
@@ -1781,6 +1839,8 @@ def run_dm_sender_send(
         "jobs_sent_count": 0,
         "jobs_skipped_count": 0,
         "jobs_failed_count": 0,
+        "existing_thread_skips_count": 0,
+        "sendability_failures_count": 0,
         "processed_recipients": [],
         "sent_recipients": [],
         "skipped_recipients": [],
@@ -1851,6 +1911,10 @@ def run_dm_sender_send(
         elif outcome == "skipped":
             summary["jobs_skipped_count"] += 1
             summary["skipped_recipients"].append(recipient)
+            if str(last_result.get("thread_state") or "") == "existing_thread":
+                summary["existing_thread_skips_count"] += 1
+            if not bool(last_result.get("sendable")):
+                summary["sendability_failures_count"] += 1
         elif outcome == "failed_retry":
             summary["jobs_failed_count"] += 1
             summary["failed_recipients"].append(recipient)

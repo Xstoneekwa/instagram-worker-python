@@ -410,6 +410,10 @@ def _is_welcome_session_send_run(args: argparse.Namespace) -> bool:
     return _parse_run_type(args) == "dm_welcome_session_send"
 
 
+def _is_outreach_session_run(args: argparse.Namespace) -> bool:
+    return _parse_run_type(args) == "outreach_session"
+
+
 def _is_account_session_run(args: argparse.Namespace) -> bool:
     return _parse_run_type(args) == "account_session"
 
@@ -11321,7 +11325,7 @@ def main() -> int:
         "--run-type",
         type=str,
         default="",
-        help="Execution mode: dm_welcome_baseline | dm_welcome_scan | dm_sender_dry_run | dm_welcome_session_send | account_session | unfollow_session",
+        help="Execution mode: dm_welcome_baseline | dm_welcome_scan | dm_sender_dry_run | dm_welcome_session_send | outreach_session | account_session | unfollow_session",
     )
     args = parser.parse_args()
     supabase_mode = _is_supabase_mode(args)
@@ -11329,6 +11333,7 @@ def main() -> int:
     welcome_scan_run = _is_welcome_scan_run(args)
     dm_sender_dry_run = _is_dm_sender_dry_run_run(args)
     welcome_session_send_run = _is_welcome_session_send_run(args)
+    outreach_session_run = _is_outreach_session_run(args)
     account_session_run = _is_account_session_run(args)
     unfollow_session_run = _is_unfollow_session_run(args)
 
@@ -11337,6 +11342,7 @@ def main() -> int:
         or welcome_scan_run
         or dm_sender_dry_run
         or welcome_session_send_run
+        or outreach_session_run
         or account_session_run
         or unfollow_session_run
     ) and not supabase_mode:
@@ -11382,6 +11388,7 @@ def main() -> int:
                 or welcome_scan_run
                 or dm_sender_dry_run
                 or welcome_session_send_run
+                or outreach_session_run
                 or account_session_run
                 or unfollow_session_run
             ):
@@ -11828,6 +11835,67 @@ def main() -> int:
             target_username=None,
         )
         return _return_with_cleanup(d, ds_code)
+
+    if outreach_session_run:
+        if not supabase_mode or not account_id:
+            log("error", "run_aborted", reason="outreach_session_missing_account")
+            return _return_with_cleanup(d, 11)
+        account_username = ""
+        if supabase_mode:
+            _acct_out = _safe_supabase_call(
+                "load_account",
+                account_id=account_id or None,
+                username=(args.username or "").strip() or None,
+            )
+            if _acct_out:
+                account_username = str(_acct_out.get("username") or "").strip()
+        if not account_username:
+            log("error", "run_aborted", reason="outreach_session_missing_account_username")
+            return _return_with_cleanup(d, 1)
+        from outreach_session_orchestrator import (
+            dispatch_outreach_session,
+            get_last_outreach_session_summary,
+        )
+
+        log(
+            "info",
+            "outreach_session_run_dispatch",
+            account_id=account_id,
+            account_username=account_username,
+            run_id=run_id or None,
+        )
+        out_code = dispatch_outreach_session(
+            d,
+            account_id=account_id,
+            account_username=account_username,
+            run_id=run_id or None,
+        )
+        out_summary = get_last_outreach_session_summary()
+        if supabase_mode and run_id:
+            _update_run_status_safe(
+                run_id=run_id,
+                status="completed" if out_code == 0 else "failed",
+                totals={
+                    "total": 1,
+                    "success": 1 if out_code == 0 else 0,
+                    "failed": 0 if out_code == 0 else 1,
+                },
+                performance_summary={
+                    "run_type": "outreach_session",
+                    "exit_code": out_code,
+                    "account_username": account_username,
+                    "outreach_session_summary": out_summary,
+                },
+            )
+        reset_perf_counters()
+        _emit_performance_summary(
+            t0=t_session,
+            warm_session_used=warm_session_used,
+            force_stop_used=force_stop_used,
+            exit_code=out_code,
+            target_username=account_username,
+        )
+        return _return_with_cleanup(d, out_code)
 
     if unfollow_session_run:
         if not supabase_mode or not account_id:

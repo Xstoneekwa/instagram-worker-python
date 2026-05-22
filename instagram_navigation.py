@@ -1997,18 +1997,21 @@ def open_search(
     source_profile_username: str = "",
     allow_percent_fallback: bool = True,
     block_if_dm_thread: bool = False,
+    caller_context: str = "",
 ) -> bool:
     """Open bottom-nav Search: resource-id first, short settle, exit as soon as EditText exists."""
     global _perf
     settle = min(float(getattr(config, "OPEN_SEARCH_SETTLE_S", 0.12)), 0.12)
     pkg = config.INSTAGRAM_PACKAGE
     src_user = str(source_profile_username or "").strip()
+    ctx = str(caller_context or "").strip()
 
     if block_if_dm_thread and is_dm_thread_screen(d, pkg):
         log(
             "error",
             "dm_sender_open_search_blocked_from_dm_thread",
             source_profile_username=src_user or None,
+            caller_context=ctx or None,
             foreground_package=_current_foreground_package(d),
         )
         return False
@@ -2018,11 +2021,29 @@ def open_search(
         "info",
         "open_search_started",
         source_profile_username=src_user or None,
+        caller_context=ctx or None,
         foreground_package=_current_foreground_package(d),
+    )
+    log(
+        "info",
+        "open_search_pipeline_phase",
+        phase="started",
+        caller_context=ctx or None,
+        source_profile_username=src_user or None,
+        allow_percent_fallback=bool(allow_percent_fallback),
+        block_if_dm_thread=bool(block_if_dm_thread),
+        recovery_depth=int(_surface_recovery_depth),
     )
 
     if should_reuse_search_surface(d, pkg):
         t_reuse = time.perf_counter()
+        log(
+            "info",
+            "open_search_pipeline_phase",
+            phase="reuse_check",
+            caller_context=ctx or None,
+            source_profile_username=src_user or None,
+        )
         if is_followers_list_surface_quick(d, source_profile_username=src_user):
             invalidate_search_surface_cache("followers_list_local_search")
             _log_followers_local_search_rejected(
@@ -2037,12 +2058,21 @@ def open_search(
                 "info",
                 "search_surface_cache_hit",
                 message="TTL cache + EditText ok",
+                caller_context=ctx or None,
                 reuse_check_ms=round((time.perf_counter() - t_reuse) * 1000, 2),
+            )
+            log(
+                "info",
+                "open_search_pipeline_phase",
+                phase="reuse_ok",
+                caller_context=ctx or None,
+                elapsed_ms=round((time.perf_counter() - t_open_entry) * 1000, 2),
             )
             return True
         log(
             "debug",
             "open_search_cache_reuse_unavailable",
+            caller_context=ctx or None,
             reuse_check_ms=round((time.perf_counter() - t_reuse) * 1000, 2),
         )
 
@@ -2074,12 +2104,21 @@ def open_search(
                 log(
                     "info",
                     "open_search_lightweight_reuse_ok",
+                    caller_context=ctx or None,
                     lightweight_check_ms=round((time.perf_counter() - t_light) * 1000, 2),
+                )
+                log(
+                    "info",
+                    "open_search_pipeline_phase",
+                    phase="lightweight_reuse_ok",
+                    caller_context=ctx or None,
+                    elapsed_ms=round((time.perf_counter() - t_open_entry) * 1000, 2),
                 )
                 return True
         log(
             "debug",
             "open_search_lightweight_not_reused",
+            caller_context=ctx or None,
             lightweight_check_ms=round((time.perf_counter() - t_light) * 1000, 2),
             elapsed_since_open_search_started_ms=round(
                 (time.perf_counter() - t_open_entry) * 1000, 2
@@ -2089,24 +2128,54 @@ def open_search(
     _perf["search_surface_reused"] = False
     _perf["search_open_skipped_ms"] = 0.0
     t_click_phase = time.perf_counter()
+    log(
+        "info",
+        "open_search_pipeline_phase",
+        phase="selector_probe",
+        caller_context=ctx or None,
+        source_profile_username=src_user or None,
+    )
     clicked, click_name = _click_search_tab_in_open_search(d)
     if clicked and click_name:
-        log("info", "open_search_clicked", selector=click_name)
+        log("info", "open_search_clicked", selector=click_name, caller_context=ctx or None)
 
     if not clicked:
         if not allow_percent_fallback:
             log(
+                "warning",
+                "fallback_tap_rejected",
+                reason="percent_fallback_disabled",
+                caller_context=ctx or None,
+                source_profile_username=src_user or None,
+                block_if_dm_thread=bool(block_if_dm_thread),
+            )
+            log(
                 "error",
                 "open_search_no_selector_percent_fallback_disabled",
                 source_profile_username=src_user or None,
+                caller_context=ctx or None,
                 block_if_dm_thread=bool(block_if_dm_thread),
             )
             return False
         w, h = d.window_size()
+        log(
+            "warning",
+            "fallback_tap_executed",
+            caller_context=ctx or None,
+            source_profile_username=src_user or None,
+            x_ratio=0.72,
+            y_ratio=0.94,
+        )
         d.click(int(w * 0.72), int(h * 0.94))
         click_name = "percent_fallback"
         _perf["recovery_used"] = True
-        log("warning", "open_search_fallback_tap", x_ratio=0.72, y_ratio=0.94)
+        log(
+            "warning",
+            "open_search_fallback_tap",
+            caller_context=ctx or None,
+            x_ratio=0.72,
+            y_ratio=0.94,
+        )
 
     search_click_ms = (time.perf_counter() - t_click_phase) * 1000
     time.sleep(settle)
@@ -2131,8 +2200,17 @@ def open_search(
         search_click_ms=round(search_click_ms, 2),
         search_field_ready_ms=round(search_field_ready_ms, 2),
         selector=click_name,
+        caller_context=ctx or None,
         ok=ok,
     )
+    if click_name == "percent_fallback":
+        log(
+            "info",
+            "fallback_tap_result",
+            caller_context=ctx or None,
+            ok=bool(ok),
+            search_field_ready_ms=round(search_field_ready_ms, 2),
+        )
     if not ok:
         invalidate_search_surface_cache("open_search_no_edittext")
         return False
@@ -2155,6 +2233,7 @@ def open_search(
             reason=strict_why,
             verify_ms=round(trusted_verify_ms, 2),
             selector=click_name,
+            caller_context=ctx or None,
         )
         if not strict_ok:
             t_fb = time.perf_counter()
@@ -2169,6 +2248,7 @@ def open_search(
                 reason=strict_why,
                 strict_verify_ms=round(fallback_verify_ms, 2),
                 selector=click_name,
+                caller_context=ctx or None,
                 follow_ct_trusted_fallback=True,
             )
     else:
@@ -2182,16 +2262,26 @@ def open_search(
             reason=strict_why,
             strict_verify_ms=round((time.perf_counter() - t_strict) * 1000, 2),
             selector=click_name,
+            caller_context=ctx or None,
         )
     strict_verify_ms = (time.perf_counter() - t_strict) * 1000
     _perf["search_strict_verify_ms"] = strict_verify_ms
     if strict_ok:
         log(
             "info",
+            "open_search_pipeline_phase",
+            phase="strict_verify_ok",
+            caller_context=ctx or None,
+            selector=click_name,
+            elapsed_ms=round((time.perf_counter() - t_open_entry) * 1000, 2),
+        )
+        log(
+            "info",
             "instagram_search_surface_verified",
             phase="open_search",
             detail="post_edittext",
             selector=click_name,
+            caller_context=ctx or None,
             strict_verify_ms=round(strict_verify_ms, 2),
         )
         _mark_search_surface_ok(d, pkg)
@@ -2208,6 +2298,7 @@ def open_search(
         phase="open_search",
         detail=strict_why,
         selector=click_name,
+        caller_context=ctx or None,
         foreground_package=_current_foreground_package(d),
         edittext_package=_edittext_package_name(ed),
         instagram_package=pkg,
@@ -2220,6 +2311,7 @@ def open_search(
             phase="open_search",
             after_recovery=False,
             verify_reason=strict_why,
+            caller_context=ctx or None,
             foreground_package=_current_foreground_package(d),
         )
         return False
@@ -2235,6 +2327,9 @@ def open_search(
             d,
             _surface_recovery_depth=_surface_recovery_depth + 1,
             source_profile_username=src_user,
+            allow_percent_fallback=allow_percent_fallback,
+            block_if_dm_thread=block_if_dm_thread,
+            caller_context=ctx,
         )
 
     return False
@@ -3318,9 +3413,11 @@ def type_search(
         follow_ct_set_text_ms = (time.perf_counter() - t_follow_ct_set) * 1000
         _perf["follow_ct_search_set_text_ms"] = follow_ct_set_text_ms
     elif fast_ime and is_fast_ime_available(serial):
+        t_fast_ime = time.perf_counter()
         ok_cmd, tag, fast_ime_switch_ok, fast_ime_broadcast_ok = run_fast_ime_input(
             serial, username, fast_ime_id=fast_ime
         )
+        fast_ime_attempt_ms = (time.perf_counter() - t_fast_ime) * 1000
         log(
             "info",
             "fast_ime_typing",
@@ -3328,6 +3425,16 @@ def type_search(
             fast_ime_switch_ok=fast_ime_switch_ok,
             fast_ime_broadcast_ok=fast_ime_broadcast_ok,
             command_ok=ok_cmd,
+        )
+        log(
+            "info",
+            "fastime_attempt_timing",
+            username=str(username or "")[:80],
+            command_ok=bool(ok_cmd),
+            tag=str(tag or "")[:80],
+            fast_ime_switch_ok=bool(fast_ime_switch_ok),
+            fast_ime_broadcast_ok=bool(fast_ime_broadcast_ok),
+            attempt_ms=round(fast_ime_attempt_ms, 2),
         )
         if ok_cmd:
             typing_method = tag
@@ -3367,6 +3474,18 @@ def type_search(
             st_log["fast_ime_switch_ok"] = fast_ime_switch_ok
             st_log["fast_ime_broadcast_ok"] = bool(fast_ime_broadcast_ok)
         log("info", "search_typed", **st_log)
+        log(
+            "info",
+            "type_search_timing_breakdown",
+            username=str(username or "")[:80],
+            ok=True,
+            typing_method=typing_method,
+            used_fast_path=True,
+            precheck_ms=round(precheck_ms, 2),
+            typing_command_ms=round(typing_command_ms, 2),
+            typing_confirm_ms=0.0,
+            follow_ct_typing=bool(follow_ct_typing),
+        )
         _follow_ct_prewarm_serp_band_cache(d)
         return True
 
@@ -3401,6 +3520,18 @@ def type_search(
             st_log["fast_ime_switch_ok"] = fast_ime_switch_ok
             st_log["fast_ime_broadcast_ok"] = bool(fast_ime_broadcast_ok)
         log("info", "search_typed", **st_log)
+        log(
+            "info",
+            "type_search_timing_breakdown",
+            username=str(username or "")[:80],
+            ok=True,
+            typing_method=typing_method,
+            used_fast_path=bool(used_fast_path),
+            precheck_ms=round(precheck_ms, 2),
+            typing_command_ms=round(typing_command_ms, 2),
+            typing_confirm_ms=0.0,
+            follow_ct_typing=bool(follow_ct_typing),
+        )
         _mark_search_surface_ok(d, config.INSTAGRAM_PACKAGE)
         _follow_ct_prewarm_serp_band_cache(d)
         return True
@@ -3466,6 +3597,19 @@ def type_search(
             _follow_ct_prewarm_serp_band_cache(d)
     else:
         invalidate_search_surface_cache("type_not_confirmed")
+    log(
+        "info",
+        "type_search_timing_breakdown",
+        username=str(username or "")[:80],
+        ok=bool(ok),
+        typing_method=typing_method,
+        used_fast_path=bool(used_fast_path),
+        precheck_ms=round(precheck_ms, 2),
+        typing_command_ms=round(typing_command_ms, 2),
+        typing_confirm_ms=round(typing_confirm_ms, 2),
+        follow_ct_typing=bool(follow_ct_typing),
+        failure_reason=None if ok else "type_not_confirmed",
+    )
     return ok
 
 
@@ -3805,6 +3949,33 @@ def tap_account_result(
     first_result_at: list[float | None] = [None]
     exact_match_at: list[float | None] = [None]
 
+    def _log_row_evaluation_summary(*, found: bool, selected_path: str) -> None:
+        first_seen_ms = (
+            round((first_result_at[0] - t_origin) * 1000.0, 2)
+            if first_result_at[0] is not None
+            else None
+        )
+        exact_ready_ms = (
+            round((exact_match_at[0] - t_origin) * 1000.0, 2)
+            if exact_match_at[0] is not None
+            else None
+        )
+        log(
+            "info",
+            "row_evaluation_summary",
+            username=username,
+            found=bool(found),
+            selected_path=selected_path,
+            fused_fast_ime=bool(fused),
+            hot_el_found=bool(hot_el_found),
+            fast_accept_used=bool(fast_accept_used),
+            search_ui_mode=get_search_ui_mode(),
+            row_detect_ms=round(float(_perf.get("row_detect_ms", 0.0) or 0.0), 2),
+            first_result_ms=first_seen_ms,
+            exact_match_ms=exact_ready_ms,
+            reject_reasons_top=[],
+        )
+
     fused = _peek_pending_fused_fast_ime_row(username)
     if fused:
         _clear_pending_fused_fast_ime_row()
@@ -3923,6 +4094,7 @@ def tap_account_result(
         _perf["row_tap_command_ms"] = 0.0
         _perf["post_tap_settle_ms"] = 0.0
         _perf["profile_transition_wait_ms"] = 0.0
+        _log_row_evaluation_summary(found=False, selected_path="not_found")
         _dump_no_real_account_row_debug(d, username)
         log("error", "tap_account_no_element", username=username)
         return False
@@ -3993,6 +4165,10 @@ def tap_account_result(
                 username=username,
                 exact_match_to_tap_ms=exact_to_tap_ms,
             )
+        selected_path = (
+            "hot_row" if hot_el_found else "fast_accept" if fast_accept_used else "legacy"
+        )
+        _log_row_evaluation_summary(found=True, selected_path=selected_path)
         log(
             "info",
             "dm_sender_account_result_tap_started",

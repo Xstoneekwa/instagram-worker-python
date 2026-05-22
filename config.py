@@ -436,10 +436,18 @@ DM_SENDER_RESERVED_BY = ""
 # Override at runtime: DM_SENDER_ONLY_JOB_ID="<uuid>" python3 runner.py ...
 DM_SENDER_ONLY_JOB_ID = ""
 DM_SENDER_FAILED_RETRY_DELAY_SECONDS = 300
+# Outreach standalone hard safety caps. These are local guardrails only; business
+# quotas still belong to Supabase/orchestrator policy.
+OUTREACH_HARD_MAX_PER_SESSION = max(0, _env_int("OUTREACH_HARD_MAX_PER_SESSION", 5))
+OUTREACH_HARD_MAX_PER_DAY = max(0, _env_int("OUTREACH_HARD_MAX_PER_DAY", 40))
+STALE_OUTREACH_JOB_MINUTES = max(1, _env_int("STALE_OUTREACH_JOB_MINUTES", 30))
 
 # --- V4.4 Welcome session real send ---
 # Override: DM_SENDER_REAL_SEND_ENABLED=true python3 runner.py --run-type dm_welcome_session_send ...
-DM_SENDER_REAL_SEND_ENABLED = False
+DM_SENDER_REAL_SEND_ENABLED = os.getenv(
+    "DM_SENDER_REAL_SEND_ENABLED",
+    "false"
+).lower() == "true"
 WELCOME_SESSION_SEND_MAX_JOBS = 3
 # V4.5 Welcome list-native sender (Followers row → profile → DM, no global Search)
 WELCOME_LIST_SENDER_MAX_SCROLL_FIND = 3
@@ -452,3 +460,8 @@ DM_SENDER_FOLLOWERS_EXIT_HARDWARE_BACK_MAX = 3
 DM_SENDER_GLOBAL_SEARCH_READY_TTL_S = 120.0
 # After scan→sender or post-job prepare, skip re-verify open_search for this window (seconds).
 DM_SENDER_GLOBAL_SEARCH_TRUST_MAX_AGE_S = 120.0
+# DM sender post-job safety: disable blind bottom-nav percent fallback after a job teardown.
+DM_SENDER_DISABLE_POST_JOB_PERCENT_FALLBACK = os.getenv(
+    "DM_SENDER_DISABLE_POST_JOB_PERCENT_FALLBACK",
+    "true",
+).lower() == "true"
