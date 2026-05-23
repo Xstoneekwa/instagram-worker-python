@@ -286,6 +286,9 @@ def _base_session_summary(
         "unfollow_results_persisted_count": 0,
         "unfollow_action_verify_ok": False,
         "unfollow_persistence_ok": False,
+        "outreach_handoff_candidates_count": 0,
+        "outreach_handoff_candidates": [],
+        "outreach_handoff_mode": "dry_run",
         "unfollow_enabled": bool(settings.enabled),
         "sort_apply_attempted": False,
         "sort_apply_ok": False,
@@ -755,6 +758,25 @@ def _persist_unfollow_outcome_for_session(
     )
 
 
+def _log_unfollow_outreach_handoff_candidate(
+    *,
+    account_id: str,
+    username: str,
+    run_id: str | None,
+    persist_out: dict[str, Any],
+) -> dict[str, Any]:
+    candidate = {
+        "account_id": str(account_id or ""),
+        "username": str(username or ""),
+        "run_id": str(run_id or "") or None,
+        "unfollowed_at": persist_out.get("unfollowed_at"),
+        "handoff_mode": "dry_run",
+        "reason": "unfollow_persisted_success",
+    }
+    log("info", "unfollow_outreach_handoff_candidate", **candidate)
+    return candidate
+
+
 def _run_real_unfollow_multi_loop(
     d: u2.Device,
     *,
@@ -781,6 +803,7 @@ def _run_real_unfollow_multi_loop(
     stop_reason = ""
     completed_usernames: set[str] = set()
     failed_usernames_this_run: set[str] = set()
+    outreach_handoff_candidates: list[dict[str, Any]] = []
     recoverable_action_failure_usernames: list[str] = []
     recoverable_action_failure_reasons: dict[str, str] = {}
     recoverable_action_failures_count = 0
@@ -1024,6 +1047,9 @@ def _run_real_unfollow_multi_loop(
             "unfollow_actions_verified": verified,
             "unfollow_actions_failed": failed,
             "unfollow_results_persisted_count": persisted,
+            "outreach_handoff_candidates_count": len(outreach_handoff_candidates),
+            "outreach_handoff_candidates": outreach_handoff_candidates[:50],
+            "outreach_handoff_mode": "dry_run",
             "scroll_passes_used": scroll_passes_used,
             "scroll_stop_reason": scroll_stop_reason,
             "multi_action_stop_reason": exploration_stop,
@@ -1627,6 +1653,15 @@ def _run_real_unfollow_multi_loop(
         persist_ok = bool(persist_out.get("ok"))
         if persist_ok:
             persisted += 1
+            if verify_ok:
+                outreach_handoff_candidates.append(
+                    _log_unfollow_outreach_handoff_candidate(
+                        account_id=aid,
+                        username=target_username,
+                        run_id=run_id,
+                        persist_out=persist_out,
+                    )
+                )
         else:
             log(
                 "info",
@@ -2188,6 +2223,7 @@ def run_unfollow_session(
         failure_reason=str(verify_out.get("failure_reason") or tap_out.get("failure_reason") or ""),
     )
     persist_ok = bool(persist_out.get("ok"))
+    outreach_handoff_candidates: list[dict[str, Any]] = []
     if persist_ok:
         log(
             "info",
@@ -2197,6 +2233,15 @@ def run_unfollow_session(
             unfollow_ok=verify_ok,
             interaction_row_id=interaction_row_id,
         )
+        if verify_ok:
+            outreach_handoff_candidates.append(
+                _log_unfollow_outreach_handoff_candidate(
+                    account_id=aid,
+                    username=target_username,
+                    run_id=run_id,
+                    persist_out=persist_out,
+                )
+            )
     else:
         log(
             "info",
@@ -2234,6 +2279,9 @@ def run_unfollow_session(
         "unfollow_results_persisted_count": 1 if persist_ok else 0,
         "unfollow_action_verify_ok": verify_ok,
         "unfollow_persistence_ok": persist_ok,
+        "outreach_handoff_candidates_count": len(outreach_handoff_candidates),
+        "outreach_handoff_candidates": outreach_handoff_candidates,
+        "outreach_handoff_mode": "dry_run",
         "return_to_following_list_ok": return_ok,
         "status": status,
         "failure_reason": failure_reason,

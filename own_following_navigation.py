@@ -107,6 +107,15 @@ def _normalize_ui_text(raw: str) -> str:
     return re.sub(r"\s+", " ", str(raw or "").strip()).lower()
 
 
+def _is_suggested_for_you_header(text_norm: str, resource_id: str = "") -> bool:
+    rid_l = str(resource_id or "").lower()
+    return bool(
+        text_norm == "suggested for you"
+        or ("suggested" in text_norm and "for you" in text_norm)
+        or ("row_header_textview" in rid_l and "suggested" in text_norm)
+    )
+
+
 def _screen_size(d: u2.Device) -> tuple[int, int]:
     try:
         w, h = d.window_size()
@@ -671,6 +680,7 @@ def detect_own_following_list_screen(
         "cta_counts": {},
         "following_list_end_detected": False,
         "suggested_for_you_visible": False,
+        "suggested_for_you_top": 0,
         "suggestion_follow_buttons_count": 0,
         "following_list_end_reason": "",
         "hierarchy_xml_len": len(hierarchy),
@@ -701,15 +711,16 @@ def detect_own_following_list_screen(
         text = str(el.get("text") or el.get("content-desc") or "").strip()
         text_norm = _normalize_ui_text(text)
         bounds = _parse_bounds(el.get("bounds"))
-        if text_norm == "suggested for you":
+        if _is_suggested_for_you_header(text_norm, rid):
             out["suggested_for_you_visible"] = True
             if bounds:
                 top = int(bounds.get("top", 0))
                 if suggested_top <= 0 or top < suggested_top:
                     suggested_top = top
-        elif text_norm == "follow" and bool(out["suggested_for_you_visible"]):
+        elif bool(out["suggested_for_you_visible"]):
             if not bounds or suggested_top <= 0 or int(bounds.get("top", 0)) >= suggested_top:
-                out["suggestion_follow_buttons_count"] = int(out["suggestion_follow_buttons_count"] or 0) + 1
+                if text_norm in ("follow", "following") or "row_recommended_user_follow_button" in rid_l:
+                    out["suggestion_follow_buttons_count"] = int(out["suggestion_follow_buttons_count"] or 0) + 1
         if "unified_follow_list_tab_layout" in rid_l:
             out["unified_follow_list_tab_layout_present"] = True
         if "follow_list_container" in rid_l:
@@ -738,12 +749,10 @@ def detect_own_following_list_screen(
 
     out["usernames_visible_count"] = len(usernames)
     out["cta_counts"] = cta_counts
-    out["following_list_end_detected"] = bool(
-        out["suggested_for_you_visible"]
-        and int(out["suggestion_follow_buttons_count"] or 0) > 0
-    )
+    out["suggested_for_you_top"] = suggested_top
+    out["following_list_end_detected"] = bool(out["suggested_for_you_visible"])
     if out["following_list_end_detected"]:
-        out["following_list_end_reason"] = "suggested_for_you_section_visible"
+        out["following_list_end_reason"] = "suggested_for_you_header_visible"
 
     list_chrome_ok = bool(
         out["follow_list_container_present"]
@@ -767,8 +776,8 @@ def detect_own_following_list_screen(
     else:
         out["is_following_list"] = True
         out["detected_reason"] = (
-            "selected_following_tab_at_suggested_for_you_end"
-            if end_ok and not rows_ok
+            "following_tab_suggested_for_you_header_visible"
+            if end_ok
             else "selected_following_tab_with_visible_usernames"
         )
 

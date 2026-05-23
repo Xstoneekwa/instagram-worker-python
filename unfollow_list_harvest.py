@@ -81,6 +81,15 @@ def _node_text(el: ET.Element) -> str:
     return str(el.get("text") or el.get("content-desc") or "").strip()
 
 
+def _is_suggested_for_you_header(normalized: str, resource_id: str = "") -> bool:
+    rid_l = str(resource_id or "").lower()
+    return bool(
+        normalized == "suggested for you"
+        or ("suggested" in normalized and "for you" in normalized)
+        or ("row_header_textview" in rid_l and "suggested" in normalized)
+    )
+
+
 def _suggested_for_you_signals(root: ET.Element) -> dict[str, Any]:
     suggested_top = 0
     suggested_visible = False
@@ -88,26 +97,29 @@ def _suggested_for_you_signals(root: ET.Element) -> dict[str, Any]:
     for el in root.iter():
         text = _node_text(el)
         normalized = re.sub(r"\s+", " ", text).strip().lower()
+        rid = str(el.get("resource-id") or "")
+        rid_l = rid.lower()
         bounds = _parse_bounds(el.get("bounds"))
-        if normalized == "suggested for you":
+        if _is_suggested_for_you_header(normalized, rid):
             suggested_visible = True
             if bounds:
                 top = int(bounds.get("top", 0))
                 if suggested_top <= 0 or top < suggested_top:
                     suggested_top = top
             continue
-        if not suggested_visible or normalized != "follow":
+        if not suggested_visible:
             continue
         if not bounds or suggested_top <= 0 or int(bounds.get("top", 0)) >= suggested_top:
-            follow_buttons_count += 1
+            if normalized in ("follow", "following") or "row_recommended_user_follow_button" in rid_l:
+                follow_buttons_count += 1
     return {
         "suggested_for_you_visible": suggested_visible,
         "suggested_for_you_top": suggested_top,
         "suggestion_follow_buttons_count": follow_buttons_count,
-        "following_list_end_detected": bool(suggested_visible and follow_buttons_count > 0),
+        "following_list_end_detected": bool(suggested_visible),
         "following_list_end_reason": (
-            "suggested_for_you_section_visible"
-            if suggested_visible and follow_buttons_count > 0
+            "suggested_for_you_header_visible"
+            if suggested_visible
             else ""
         ),
     }
