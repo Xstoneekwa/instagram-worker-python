@@ -3107,12 +3107,14 @@ def type_search(
     *,
     previous_username: str | None = None,
     follow_ct_surface_confirmed: bool = False,
+    outreach_trusted_search: bool = False,
 ) -> bool:
     """Robust clear, then FastIME or set_text; fused row detect when FastIME."""
     global _perf, _TYPE_SEARCH_FAILURE_REASON
     _TYPE_SEARCH_FAILURE_REASON = None
     _clear_pending_fused_fast_ime_row()
     follow_ct_typing = bool(follow_ct_surface_confirmed) or is_follow_ct_search_context_active()
+    outreach_trusted_typing = bool(outreach_trusted_search) and not follow_ct_typing
     surface_trusted_for_typing = bool(follow_ct_surface_confirmed) or is_search_surface_fresh_for_follow_ct()
     if follow_ct_surface_confirmed or consume_search_surface_fresh_for_follow_ct():
         log(
@@ -3215,6 +3217,17 @@ def type_search(
                 reason=surf_why,
                 precheck_ms=round(precheck_ms, 2),
             )
+    elif outreach_trusted_typing:
+        ok_surf, surf_why = _follow_ct_trusted_type_search_surface_ok(d, ed, pkg=pkg_ig)
+        precheck_ms = (time.perf_counter() - t_precheck) * 1000
+        log(
+            "info",
+            "dm_sender_outreach_type_search_trusted_precheck",
+            username=str(username or "")[:80],
+            ok=bool(ok_surf),
+            reason=surf_why,
+            precheck_ms=round(precheck_ms, 2),
+        )
     else:
         ok_surf, surf_why = instagram_search_surface_strict_ok(d, ed, pkg=pkg_ig)
         precheck_ms = (time.perf_counter() - t_precheck) * 1000
@@ -3313,6 +3326,66 @@ def type_search(
 
     serial = get_device_serial(d)
     t_cmd_start = time.perf_counter()
+    if outreach_trusted_typing and ok_surf:
+        t_set = time.perf_counter()
+        direct_ok = False
+        direct_reason = ""
+        try:
+            ed.set_text(username)
+            typing_method = "set_text"
+            cur = ed.get_text() or ""
+            direct_ok = _normalize_handle(cur) == _normalize_handle(username)
+            if not direct_ok:
+                direct_reason = "strict_confirm_mismatch"
+        except Exception as e:
+            direct_reason = str(e)[:120]
+        direct_ms = (time.perf_counter() - t_set) * 1000
+        if direct_ok:
+            typing_command_ms = (time.perf_counter() - t_cmd_start) * 1000
+            _perf["typing_command_ms"] = typing_command_ms
+            _perf["typing_confirm_ms"] = 0.0
+            log(
+                "info",
+                "dm_sender_outreach_trusted_set_text_used",
+                username=str(username or "")[:80],
+                previous_username=str(previous_username or "")[:80] or None,
+                set_text_ms=round(direct_ms, 2),
+                strict_confirm=True,
+            )
+            log(
+                "info",
+                "search_typed",
+                username=username,
+                typing_method=typing_method,
+                typing_confirm_ms=0.0,
+                ok=True,
+                typing_confirm_method="outreach_trusted_strict_get_text",
+            )
+            log(
+                "info",
+                "type_search_timing_breakdown",
+                username=str(username or "")[:80],
+                ok=True,
+                typing_method=typing_method,
+                used_fast_path=True,
+                precheck_ms=round(precheck_ms, 2),
+                typing_command_ms=round(typing_command_ms, 2),
+                typing_confirm_ms=0.0,
+                follow_ct_typing=False,
+                outreach_trusted_search=True,
+            )
+            _mark_search_surface_ok(d, config.INSTAGRAM_PACKAGE)
+            return True
+        log(
+            "warning",
+            "dm_sender_outreach_trusted_set_text_fallback",
+            username=str(username or "")[:80],
+            previous_username=str(previous_username or "")[:80] or None,
+            reason=direct_reason or "unknown",
+            set_text_ms=round(direct_ms, 2),
+        )
+        t_cmd_start = time.perf_counter()
+
     if follow_ct_pre_set_text_fast:
         log(
             "info",
@@ -3862,9 +3935,11 @@ def tap_account_result(
     *,
     nav_timing_origin: float | None = None,
     follow_ct_search_context: bool = False,
+    outreach_search_context: bool = False,
 ) -> bool:
     """Tap chosen row: FastIME+fused uses hot resource-id poll + direct tap; else legacy find."""
     follow_ct_active = _follow_ct_search_active(explicit=follow_ct_search_context)
+    outreach_active = bool(outreach_search_context)
     try:
         log(
             "info",
@@ -3873,6 +3948,7 @@ def tap_account_result(
             follow_ct_search_context=bool(follow_ct_search_context),
             global_context_active=is_follow_ct_search_context_active(),
             follow_ct_active=bool(follow_ct_active),
+            outreach_search_context=bool(outreach_active),
             fast_ok=None,
             search_ui_mode=get_search_ui_mode(),
             resource_id="",
@@ -3889,11 +3965,22 @@ def tap_account_result(
         )
 
     def scan_once_hot():
-        if not follow_ct_active:
+        if not (follow_ct_active or outreach_active):
             return None
         hot = find_first_row_search_username_hot(d, username)
         if hot is None:
             return None
+        if outreach_active and get_search_ui_mode() == "mixed_results":
+            try:
+                log(
+                    "info",
+                    "dm_sender_outreach_row_hot_accept_used",
+                    username=username,
+                    resource_id=ROW_SEARCH_USERNAME_EXACT_RES,
+                )
+            except Exception:
+                pass
+            return hot
         ev_hot = evaluate_row_search_username_element(
             d,
             hot,
@@ -4034,25 +4121,29 @@ def tap_account_result(
         el = None
         fast_accept_used = False
         if get_search_ui_mode() == "mixed_results":
-            if follow_ct_active:
+            if follow_ct_active or outreach_active:
                 found_hot = scan_once_hot()
                 if found_hot is not None:
                     el = found_hot
                     fast_accept_used = True
-                    _log_first_result_seen(el, via="follow_ct_hot_row")
-                    _log_exact_match_ready(el, via="follow_ct_hot_row")
+                    hot_via = "follow_ct_hot_row" if follow_ct_active else "outreach_hot_row"
+                    _log_first_result_seen(el, via=hot_via)
+                    _log_exact_match_ready(el, via=hot_via)
                     log(
                         "info",
                         "exact_account_row_fast_accept_used",
                         username=username,
-                        via="follow_ct_hot_row",
+                        via=hot_via,
                     )
-            fast_deadline = time.monotonic() + float(
+            fast_poll_max_s = float(
                 getattr(config, "EXACT_ACCOUNT_ROW_FAST_POLL_MAX_S", 2.0)
             )
+            if outreach_active:
+                fast_poll_max_s = max(fast_poll_max_s, 8.0)
+            fast_deadline = time.monotonic() + fast_poll_max_s
             fast_poll_s = float(getattr(config, "EXACT_ACCOUNT_ROW_FAST_POLL_S", 0.10))
             while time.monotonic() < fast_deadline and el is None:
-                found_fast = scan_once_hot() if follow_ct_active else scan_once()
+                found_fast = scan_once_hot() if (follow_ct_active or outreach_active) else scan_once()
                 if found_fast is not None:
                     el = found_fast
                     fast_accept_used = True

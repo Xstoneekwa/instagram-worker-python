@@ -694,29 +694,22 @@ def prepare_dm_sender_global_search_surface(
                 last_recipient_username=last_recipient_username or None,
             )
             try:
-                search_ok = _dm_sender_profile_back_to_search_fast_path(
-                    d,
-                    pkg=pkg,
-                    account_username=src,
+                log(
+                    "info",
+                    "dm_sender_post_job_profile_hardware_back_to_search_started",
                     context=context,
-                    last_recipient_username=last_recipient_username,
+                    account_username=src or None,
+                    last_recipient_username=last_recipient_username or None,
                 )
-                if not search_ok:
-                    search_ok = bool(return_to_search_from_profile(d, pkg))
-                    if search_ok:
-                        verified, why = _verify_dm_sender_global_search_surface(
-                            d, pkg=pkg, account_username=src, full_followers_check=False
-                        )
-                        if verified:
-                            _mark_dm_sender_global_search_ready(src, context=context)
-                        else:
-                            search_ok = False
-                    log(
-                        "info" if search_ok else "warning",
-                        "dm_sender_post_job_profile_back_to_search_fallback_result",
-                        context=context,
-                        ok=bool(search_ok),
-                    )
+                search_ok = bool(return_to_search_from_profile(d, pkg))
+                if search_ok:
+                    _mark_dm_sender_global_search_ready(src, context=context)
+                log(
+                    "info" if search_ok else "warning",
+                    "dm_sender_post_job_profile_hardware_back_to_search_result",
+                    context=context,
+                    ok=bool(search_ok),
+                )
                 if search_ok:
                     log(
                         "info",
@@ -878,6 +871,7 @@ def _open_search_with_recovery(
     account_username: str = "",
     skip_if_recently_verified: bool = True,
     allow_percent_fallback: bool = True,
+    skip_post_open_verify_for_outreach: bool = False,
 ) -> bool:
     src = str(account_username or "").strip()
     t0 = time.perf_counter()
@@ -942,6 +936,38 @@ def _open_search_with_recovery(
         block_if_dm_thread=True,
         caller_context=context,
     ):
+        if (
+            skip_post_open_verify_for_outreach
+            and context == "dm_sender_navigate"
+            and not allow_percent_fallback
+        ):
+            prepare_ms = round((time.perf_counter() - t0) * 1000.0, 2)
+            log(
+                "info",
+                "dm_sender_open_search_post_verify_skip_outreach",
+                username=username,
+                context=context,
+                prepare_ms=prepare_ms,
+                reason="open_search_strict_verified",
+            )
+            _mark_dm_sender_global_search_ready(src, context=context)
+            log(
+                "info",
+                "dm_sender_global_search_ready_from_open_search_strict",
+                username=username,
+                context=context,
+                prepare_ms=prepare_ms,
+            )
+            log(
+                "info",
+                "dm_sender_global_search_surface_verified",
+                username=username,
+                context=context,
+                prepare_ms=prepare_ms,
+                verify_reason="open_search_strict_verified",
+                post_open_verify_skipped=True,
+            )
+            return True
         ok, _why = _verify_dm_sender_global_search_surface(
             d, pkg=pkg, account_username=src, full_followers_check=False
         )
@@ -1190,6 +1216,7 @@ def _navigate_to_recipient_dm_thread(
             account_username=src,
             skip_if_recently_verified=True,
             allow_percent_fallback=(dm_type_norm != "outreach"),
+            skip_post_open_verify_for_outreach=(dm_type_norm == "outreach"),
         )
     if not search_ok:
         log("error", "dm_sender_open_search_failed", username=uname)
@@ -1223,7 +1250,12 @@ def _navigate_to_recipient_dm_thread(
             current_username=uname,
             dm_type=dm_type_norm,
         )
-    if not type_search(d, uname, previous_username=previous_for_type):
+    if not type_search(
+        d,
+        uname,
+        previous_username=previous_for_type,
+        outreach_trusted_search=(dm_type_norm == "outreach" and search_ok),
+    ):
         log("error", "dm_sender_type_search_failed", username=uname)
         return "unknown", False
     log(
@@ -1246,7 +1278,12 @@ def _navigate_to_recipient_dm_thread(
         set_search_ui_mode("accounts_tab" if accounts_tab_clicked else "mixed_results")
 
     t_tap = time.perf_counter()
-    if not tap_account_result(d, uname, nav_timing_origin=t_type):
+    if not tap_account_result(
+        d,
+        uname,
+        nav_timing_origin=t_type,
+        outreach_search_context=(dm_type_norm == "outreach"),
+    ):
         log("error", "dm_sender_tap_account_failed", username=uname)
         return "unknown", False
     tap_segment_ms = round((time.perf_counter() - t_tap) * 1000.0, 2)
@@ -2003,6 +2040,7 @@ def execute_dm_job_real_send(
     account_id: str,
     account_username: str = "",
     previous_username: str | None = None,
+    restore_search_after_job: bool = True,
 ) -> dict[str, Any]:
     """Claimed job → navigate → send or skip/fail terminal complete."""
     _ = account_id
@@ -2156,13 +2194,22 @@ def execute_dm_job_real_send(
                     final_status = str((updated_job or {}).get("status") or "pending")
     finally:
         t_post_job = time.perf_counter()
-        _safe_teardown_navigation(
-            d,
-            recipient,
-            pkg=pkg,
-            account_username=account_username,
-            prefer_back_stack_to_search=(dm_type == "outreach"),
-        )
+        if dm_type == "outreach" and not bool(restore_search_after_job):
+            log(
+                "info",
+                "dm_sender_post_job_restore_skipped_final_outreach_job",
+                job_id=job_id,
+                recipient_username=recipient,
+                dm_type=dm_type,
+            )
+        else:
+            _safe_teardown_navigation(
+                d,
+                recipient,
+                pkg=pkg,
+                account_username=account_username,
+                prefer_back_stack_to_search=(dm_type == "outreach"),
+            )
         post_job_ms = round((time.perf_counter() - t_post_job) * 1000.0, 2)
 
     return {
@@ -2273,7 +2320,7 @@ def run_dm_sender_send(
 
     last_result: dict[str, Any] = {}
     last_recipient_username = ""
-    for _ in range(max_jobs):
+    for job_index in range(max_jobs):
         job = _claim_job_for_run(
             aid, reserved_by, dm_type=dm_type_resolved, only_job_id=only_job_id
         )
@@ -2295,6 +2342,9 @@ def run_dm_sender_send(
                 last_recipient_username
                 if dm_type_resolved == "outreach"
                 else None
+            ),
+            restore_search_after_job=not (
+                dm_type_resolved == "outreach" and job_index >= max_jobs - 1
             ),
         )
         summary["total_navigation_ms"] = round(
