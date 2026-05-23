@@ -12,6 +12,7 @@ from typing import Any
 import uiautomator2 as u2
 
 import config
+import supabase_client
 from dm_sender_engine import _resolve_dm_sender_real_send_enabled
 from logs import log
 from welcome_list_sender import run_welcome_list_sender
@@ -55,7 +56,29 @@ def run_welcome_session_send(
     t0 = time.perf_counter()
     aid = str(account_id or "").strip()
     uname = str(account_username or "").strip()
-    max_jobs = int(getattr(config, "WELCOME_SESSION_SEND_MAX_JOBS", 3) or 3)
+    env_max_jobs = max(0, int(getattr(config, "WELCOME_SESSION_SEND_MAX_JOBS", 3) or 3))
+    try:
+        settings = supabase_client.get_account_dm_settings(aid) or {}
+    except Exception as exc:
+        settings = {}
+        log("error", "welcome_session_settings_load_failed", account_id=aid, error=str(exc))
+    raw_db_max_jobs = settings.get("welcome_per_session_limit") if settings else None
+    db_max_jobs = (
+        max(0, int(raw_db_max_jobs))
+        if raw_db_max_jobs is not None and str(raw_db_max_jobs).strip() != ""
+        else env_max_jobs
+    )
+    max_jobs = min(db_max_jobs, env_max_jobs)
+    log(
+        "info",
+        "welcome_effective_limits_resolved",
+        account_id=aid,
+        run_id=run_id,
+        db_welcome_per_session_limit=db_max_jobs,
+        env_welcome_send_max_jobs=env_max_jobs,
+        effective_welcome_send_max=max_jobs,
+        source="min(db,env_hard_cap)",
+    )
 
     log(
         "info",

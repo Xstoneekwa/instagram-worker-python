@@ -157,6 +157,12 @@ def _real_action_max_per_run() -> int:
     return max(0, int(getattr(config, "UNFOLLOW_SESSION_REAL_ACTION_MAX_PER_RUN", 1)))
 
 
+def _effective_real_action_max_per_run(settings: Any, env_hard_cap: int | None = None) -> int:
+    db_limit = max(0, int(getattr(settings, "session_limit", 0) or 0))
+    hard_cap = _real_action_max_per_run() if env_hard_cap is None else max(0, int(env_hard_cap))
+    return min(db_limit, hard_cap)
+
+
 def _scroll_max_passes() -> int:
     return max(0, int(getattr(config, "UNFOLLOW_SESSION_SCROLL_MAX_PASSES", 10)))
 
@@ -288,7 +294,12 @@ def _base_session_summary(
         "unfollow_persistence_ok": False,
         "outreach_handoff_candidates_count": 0,
         "outreach_handoff_candidates": [],
-        "outreach_handoff_mode": "dry_run",
+        "outreach_handoff_mode": _unfollow_outreach_handoff_mode(),
+        "outreach_handoff_enqueue_mode": _unfollow_outreach_handoff_mode(),
+        "outreach_handoff_enqueue_attempted_count": 0,
+        "outreach_handoff_enqueued_count": 0,
+        "outreach_handoff_skipped_count": 0,
+        "outreach_handoff_skipped_reasons": {},
         "unfollow_enabled": bool(settings.enabled),
         "sort_apply_attempted": False,
         "sort_apply_ok": False,
@@ -764,17 +775,149 @@ def _log_unfollow_outreach_handoff_candidate(
     username: str,
     run_id: str | None,
     persist_out: dict[str, Any],
+    interaction_row_id: str | None = None,
 ) -> dict[str, Any]:
+    mode = _unfollow_outreach_handoff_mode()
     candidate = {
         "account_id": str(account_id or ""),
         "username": str(username or ""),
         "run_id": str(run_id or "") or None,
+        "interaction_row_id": str(
+            interaction_row_id or persist_out.get("interaction_row_id") or ""
+        ).strip() or None,
         "unfollowed_at": persist_out.get("unfollowed_at"),
-        "handoff_mode": "dry_run",
+        "handoff_mode": mode,
         "reason": "unfollow_persisted_success",
     }
     log("info", "unfollow_outreach_handoff_candidate", **candidate)
     return candidate
+
+
+def _unfollow_outreach_handoff_mode() -> str:
+    raw = str(getattr(config, "UNFOLLOW_OUTREACH_HANDOFF_MODE", "dry_run") or "dry_run")
+    return "enqueue" if raw.strip().lower() == "enqueue" else "dry_run"
+
+
+def _empty_outreach_handoff_enqueue_result(reason: str = "") -> dict[str, Any]:
+    return {
+        "attempted": 0,
+        "enqueued": 0,
+        "skipped": 0,
+        "skip_reason": str(reason or ""),
+    }
+
+
+def _add_outreach_handoff_enqueue_result(
+    totals: dict[str, Any],
+    result: dict[str, Any],
+) -> None:
+    totals["attempted"] = int(totals.get("attempted") or 0) + int(result.get("attempted") or 0)
+    totals["enqueued"] = int(totals.get("enqueued") or 0) + int(result.get("enqueued") or 0)
+    totals["skipped"] = int(totals.get("skipped") or 0) + int(result.get("skipped") or 0)
+    reason = str(result.get("skip_reason") or "").strip()
+    if reason and int(result.get("skipped") or 0) > 0:
+        reasons = totals.setdefault("skipped_reasons", {})
+        reasons[reason] = int(reasons.get(reason) or 0) + 1
+
+
+def _maybe_enqueue_unfollow_outreach_handoff(
+    *,
+    account_id: str,
+    username: str,
+    run_id: str | None,
+    interaction_row_id: str | None,
+) -> dict[str, Any]:
+    mode = _unfollow_outreach_handoff_mode()
+    if mode != "enqueue":
+        return _empty_outreach_handoff_enqueue_result("handoff_disabled")
+
+    aid = str(account_id or "").strip()
+    recipient = str(username or "").strip()
+    if not aid:
+        log("info", "unfollow_outreach_handoff_skipped", reason="missing_account_id")
+        return {**_empty_outreach_handoff_enqueue_result("missing_account_id"), "skipped": 1}
+    if not recipient:
+        log("info", "unfollow_outreach_handoff_skipped", account_id=aid, reason="missing_username")
+        return {**_empty_outreach_handoff_enqueue_result("missing_username"), "skipped": 1}
+
+    campaign_id = str(getattr(config, "OUTREACH_UNFOLLOW_HANDOFF_CAMPAIGN_ID", "") or "").strip() or None
+    metadata = {
+        "handoff": "unfollow",
+        "handoff_mode": "enqueue",
+        "unfollow_run_id": str(run_id or "") or None,
+        "interaction_row_id": str(interaction_row_id or "").strip() or None,
+        "source": "unfollow_session",
+    }
+    source = "campaign" if campaign_id else "manual"
+    priority = int(getattr(config, "UNFOLLOW_OUTREACH_HANDOFF_PRIORITY", 0) or 0)
+    log(
+        "info",
+        "unfollow_outreach_handoff_enqueue_attempted",
+        account_id=aid,
+        username=recipient,
+        run_id=run_id,
+        interaction_row_id=metadata["interaction_row_id"],
+        campaign_id=campaign_id,
+        source=source,
+        priority=priority,
+    )
+    try:
+        job = supabase_client.enqueue_outreach_dm_job(
+            aid,
+            recipient,
+            message_body=None,
+            template_id=None,
+            source=source,
+            campaign_id=campaign_id,
+            priority=priority,
+            metadata=metadata,
+        )
+    except Exception as exc:
+        log(
+            "error",
+            "unfollow_outreach_handoff_skipped",
+            account_id=aid,
+            username=recipient,
+            reason="rpc_error",
+            error=str(exc)[:500],
+        )
+        return {"attempted": 1, "enqueued": 0, "skipped": 1, "skip_reason": "rpc_error"}
+
+    if not isinstance(job, dict) or not str(job.get("id") or "").strip():
+        log("info", "unfollow_outreach_handoff_skipped", account_id=aid, username=recipient, reason="rpc_null")
+        return {"attempted": 1, "enqueued": 0, "skipped": 1, "skip_reason": "rpc_null"}
+
+    job_metadata = job.get("metadata") if isinstance(job.get("metadata"), dict) else {}
+    job_status = str(job.get("status") or "")
+    if job_status != "pending" or job_metadata != metadata:
+        log(
+            "info",
+            "unfollow_outreach_handoff_skipped",
+            account_id=aid,
+            username=recipient,
+            reason="duplicate_or_existing_job",
+            job_id=str(job.get("id") or ""),
+            status=job_status,
+            idempotency_key=str(job.get("idempotency_key") or ""),
+        )
+        return {
+            "attempted": 1,
+            "enqueued": 0,
+            "skipped": 1,
+            "skip_reason": "duplicate_or_existing_job",
+        }
+
+    log(
+        "info",
+        "unfollow_outreach_handoff_enqueued",
+        account_id=aid,
+        username=recipient,
+        job_id=str(job.get("id") or ""),
+        status=job_status,
+        idempotency_key=str(job.get("idempotency_key") or ""),
+        campaign_id=campaign_id,
+    )
+    return {"attempted": 1, "enqueued": 1, "skipped": 0, "skip_reason": ""}
 
 
 def _run_real_unfollow_multi_loop(
@@ -804,6 +947,12 @@ def _run_real_unfollow_multi_loop(
     completed_usernames: set[str] = set()
     failed_usernames_this_run: set[str] = set()
     outreach_handoff_candidates: list[dict[str, Any]] = []
+    outreach_handoff_enqueue = {
+        "attempted": 0,
+        "enqueued": 0,
+        "skipped": 0,
+        "skipped_reasons": {},
+    }
     recoverable_action_failure_usernames: list[str] = []
     recoverable_action_failure_reasons: dict[str, str] = {}
     recoverable_action_failures_count = 0
@@ -1049,7 +1198,12 @@ def _run_real_unfollow_multi_loop(
             "unfollow_results_persisted_count": persisted,
             "outreach_handoff_candidates_count": len(outreach_handoff_candidates),
             "outreach_handoff_candidates": outreach_handoff_candidates[:50],
-            "outreach_handoff_mode": "dry_run",
+            "outreach_handoff_mode": _unfollow_outreach_handoff_mode(),
+            "outreach_handoff_enqueue_mode": _unfollow_outreach_handoff_mode(),
+            "outreach_handoff_enqueue_attempted_count": outreach_handoff_enqueue["attempted"],
+            "outreach_handoff_enqueued_count": outreach_handoff_enqueue["enqueued"],
+            "outreach_handoff_skipped_count": outreach_handoff_enqueue["skipped"],
+            "outreach_handoff_skipped_reasons": outreach_handoff_enqueue["skipped_reasons"],
             "scroll_passes_used": scroll_passes_used,
             "scroll_stop_reason": scroll_stop_reason,
             "multi_action_stop_reason": exploration_stop,
@@ -1654,13 +1808,24 @@ def _run_real_unfollow_multi_loop(
         if persist_ok:
             persisted += 1
             if verify_ok:
+                interaction_row_id = str(persist_out.get("interaction_row_id") or "").strip() or None
                 outreach_handoff_candidates.append(
                     _log_unfollow_outreach_handoff_candidate(
                         account_id=aid,
                         username=target_username,
                         run_id=run_id,
                         persist_out=persist_out,
+                        interaction_row_id=interaction_row_id,
                     )
+                )
+                _add_outreach_handoff_enqueue_result(
+                    outreach_handoff_enqueue,
+                    _maybe_enqueue_unfollow_outreach_handoff(
+                        account_id=aid,
+                        username=target_username,
+                        run_id=run_id,
+                        interaction_row_id=interaction_row_id,
+                    ),
                 )
         else:
             log(
@@ -1788,13 +1953,24 @@ def run_unfollow_session(
         if real_action_enabled_override is None
         else bool(real_action_enabled_override)
     )
-    real_action_max = (
+    settings = load_unfollow_settings(aid, ensure_row=False)
+    env_real_action_max = (
         _real_action_max_per_run()
         if real_action_max_override is None
         else max(0, int(real_action_max_override))
     )
-
-    settings = load_unfollow_settings(aid, ensure_row=False)
+    real_action_max = _effective_real_action_max_per_run(settings, env_real_action_max)
+    log(
+        "info",
+        "unfollow_effective_limits_resolved",
+        account_id=aid,
+        run_id=run_id,
+        unfollow_mode=str(getattr(settings, "mode", "") or ""),
+        db_unfollow_per_session_limit=int(getattr(settings, "session_limit", 0) or 0),
+        env_real_action_max_per_run=env_real_action_max,
+        effective_real_action_max_per_run=real_action_max,
+        source="min(db,env_hard_cap)",
+    )
     plan = plan_unfollow_targets(aid, settings=settings)
     planned_usernames = _planned_username_set(plan)
     planned_by_username = _planned_candidates_by_username(plan)
@@ -2224,6 +2400,12 @@ def run_unfollow_session(
     )
     persist_ok = bool(persist_out.get("ok"))
     outreach_handoff_candidates: list[dict[str, Any]] = []
+    outreach_handoff_enqueue = {
+        "attempted": 0,
+        "enqueued": 0,
+        "skipped": 0,
+        "skipped_reasons": {},
+    }
     if persist_ok:
         log(
             "info",
@@ -2240,7 +2422,17 @@ def run_unfollow_session(
                     username=target_username,
                     run_id=run_id,
                     persist_out=persist_out,
+                    interaction_row_id=interaction_row_id,
                 )
+            )
+            _add_outreach_handoff_enqueue_result(
+                outreach_handoff_enqueue,
+                _maybe_enqueue_unfollow_outreach_handoff(
+                    account_id=aid,
+                    username=target_username,
+                    run_id=run_id,
+                    interaction_row_id=interaction_row_id,
+                ),
             )
     else:
         log(
@@ -2281,7 +2473,12 @@ def run_unfollow_session(
         "unfollow_persistence_ok": persist_ok,
         "outreach_handoff_candidates_count": len(outreach_handoff_candidates),
         "outreach_handoff_candidates": outreach_handoff_candidates,
-        "outreach_handoff_mode": "dry_run",
+        "outreach_handoff_mode": _unfollow_outreach_handoff_mode(),
+        "outreach_handoff_enqueue_mode": _unfollow_outreach_handoff_mode(),
+        "outreach_handoff_enqueue_attempted_count": outreach_handoff_enqueue["attempted"],
+        "outreach_handoff_enqueued_count": outreach_handoff_enqueue["enqueued"],
+        "outreach_handoff_skipped_count": outreach_handoff_enqueue["skipped"],
+        "outreach_handoff_skipped_reasons": outreach_handoff_enqueue["skipped_reasons"],
         "return_to_following_list_ok": return_ok,
         "status": status,
         "failure_reason": failure_reason,

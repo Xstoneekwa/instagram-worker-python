@@ -115,6 +115,12 @@ def _coerce_sort_mode(raw: Any) -> str:
     return UNFOLLOW_SORT_DEFAULT
 
 
+def _coerce_nonnegative_int(raw: Any, default: int) -> int:
+    if raw is None or str(raw).strip() == "":
+        return max(0, int(default))
+    return max(0, int(raw))
+
+
 def _row_to_settings(account_id: str, row: dict[str, Any], *, defaults_used: bool) -> UnfollowSettings:
     snap = row.get("package_default_snapshot")
     if not isinstance(snap, dict):
@@ -124,13 +130,20 @@ def _row_to_settings(account_id: str, row: dict[str, Any], *, defaults_used: boo
         enabled=bool(row.get("unfollow_enabled")),
         unfollow_only=bool(row.get("unfollow_only")),
         do_unfollow_first=bool(row.get("do_unfollow_first")),
-        after_days=max(0, int(row.get("unfollow_after_days") or PACKAGE_DEFAULT_UNFOLLOW_AFTER_DAYS)),
+        after_days=_coerce_nonnegative_int(
+            row.get("unfollow_after_days"),
+            PACKAGE_DEFAULT_UNFOLLOW_AFTER_DAYS,
+        ),
         mode=_coerce_mode(row.get("unfollow_mode")),
         sort_mode=_coerce_sort_mode(row.get("unfollow_sort_mode")),
-        session_limit=max(
-            0, int(row.get("unfollow_per_session_limit") or PACKAGE_DEFAULT_SESSION_LIMIT)
+        session_limit=_coerce_nonnegative_int(
+            row.get("unfollow_per_session_limit"),
+            PACKAGE_DEFAULT_SESSION_LIMIT,
         ),
-        day_limit=max(0, int(row.get("unfollow_per_day_limit") or PACKAGE_DEFAULT_DAY_LIMIT)),
+        day_limit=_coerce_nonnegative_int(
+            row.get("unfollow_per_day_limit"),
+            PACKAGE_DEFAULT_DAY_LIMIT,
+        ),
         defaults_used=defaults_used,
         package_default_snapshot=dict(snap),
     )
