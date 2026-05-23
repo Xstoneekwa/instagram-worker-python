@@ -441,11 +441,6 @@ DM_SENDER_FAILED_RETRY_DELAY_SECONDS = 300
 OUTREACH_HARD_MAX_PER_SESSION = max(0, _env_int("OUTREACH_HARD_MAX_PER_SESSION", 5))
 OUTREACH_HARD_MAX_PER_DAY = max(0, _env_int("OUTREACH_HARD_MAX_PER_DAY", 40))
 STALE_OUTREACH_JOB_MINUTES = max(1, _env_int("STALE_OUTREACH_JOB_MINUTES", 30))
-# Unfollow -> Outreach handoff producer. Default stays observability-only.
-UNFOLLOW_OUTREACH_HANDOFF_MODE = os.getenv("UNFOLLOW_OUTREACH_HANDOFF_MODE", "dry_run").strip().lower()
-OUTREACH_UNFOLLOW_HANDOFF_CAMPAIGN_ID = os.getenv("OUTREACH_UNFOLLOW_HANDOFF_CAMPAIGN_ID", "").strip()
-UNFOLLOW_OUTREACH_HANDOFF_PRIORITY = _env_int("UNFOLLOW_OUTREACH_HANDOFF_PRIORITY", 0)
-
 # --- V4.4 Welcome session real send ---
 # Override: DM_SENDER_REAL_SEND_ENABLED=true python3 runner.py --run-type dm_welcome_session_send ...
 DM_SENDER_REAL_SEND_ENABLED = os.getenv(

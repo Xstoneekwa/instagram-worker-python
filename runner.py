@@ -422,6 +422,19 @@ def _is_unfollow_session_run(args: argparse.Namespace) -> bool:
     return _parse_run_type(args) == "unfollow_session"
 
 
+def _is_unfollow_outreach_pipeline_run(args: argparse.Namespace) -> bool:
+    return _parse_run_type(args) == "unfollow_outreach_pipeline"
+
+
+def _unfollow_outreach_pipeline_enabled() -> bool:
+    return str(os.getenv("UNFOLLOW_OUTREACH_PIPELINE_ENABLED", "")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def _recoverable_target_exit(code: int) -> bool:
     codes = getattr(config, "FAST_RECOVERABLE_TARGET_EXIT_CODES", ()) or ()
     return int(code) in codes
@@ -11325,7 +11338,7 @@ def main() -> int:
         "--run-type",
         type=str,
         default="",
-        help="Execution mode: dm_welcome_baseline | dm_welcome_scan | dm_sender_dry_run | dm_welcome_session_send | outreach_session | account_session | unfollow_session",
+        help="Execution mode: dm_welcome_baseline | dm_welcome_scan | dm_sender_dry_run | dm_welcome_session_send | outreach_session | account_session | unfollow_session | unfollow_outreach_pipeline",
     )
     args = parser.parse_args()
     supabase_mode = _is_supabase_mode(args)
@@ -11336,6 +11349,7 @@ def main() -> int:
     outreach_session_run = _is_outreach_session_run(args)
     account_session_run = _is_account_session_run(args)
     unfollow_session_run = _is_unfollow_session_run(args)
+    unfollow_outreach_pipeline_run = _is_unfollow_outreach_pipeline_run(args)
 
     if (
         welcome_baseline_run
@@ -11345,6 +11359,7 @@ def main() -> int:
         or outreach_session_run
         or account_session_run
         or unfollow_session_run
+        or unfollow_outreach_pipeline_run
     ) and not supabase_mode:
         log(
             "error",
@@ -11391,6 +11406,7 @@ def main() -> int:
                 or outreach_session_run
                 or account_session_run
                 or unfollow_session_run
+                or unfollow_outreach_pipeline_run
             ):
                 log(
                     "info",
@@ -11835,6 +11851,412 @@ def main() -> int:
             target_username=None,
         )
         return _return_with_cleanup(d, ds_code)
+
+    if unfollow_outreach_pipeline_run:
+        if not supabase_mode or not account_id:
+            log("error", "run_aborted", reason="unfollow_outreach_pipeline_missing_account")
+            return _return_with_cleanup(d, 11)
+        account_username = ""
+        if supabase_mode:
+            _acct_pipe = _safe_supabase_call(
+                "load_account",
+                account_id=account_id or None,
+                username=(args.username or "").strip() or None,
+            )
+            if _acct_pipe:
+                account_username = str(_acct_pipe.get("username") or "").strip()
+        if not account_username:
+            log("error", "run_aborted", reason="unfollow_outreach_pipeline_missing_account_username")
+            return _return_with_cleanup(d, 1)
+
+        def _publish_pipeline_summary(
+            *,
+            parent_status: str,
+            exit_code: int,
+            unfollow_exit_code: int | None = None,
+            unfollow_summary: dict[str, Any] | None = None,
+            outreach_job_selection_mode: str = "",
+            selected_external_job_id: str = "",
+            interphase_strategy: str = "",
+            interphase_search_ready_attempted: bool = False,
+            interphase_search_ready_ok: bool = False,
+            interphase_search_ready_reason: str = "",
+            reused_helper_name: str = "",
+            interphase_cleanup_ok: bool = False,
+            outreach_exit_code: int | None = None,
+            outreach_summary: dict[str, Any] | None = None,
+        ) -> None:
+            us = dict(unfollow_summary or {})
+            osum = dict(outreach_summary or {})
+            summary = {
+                "run_type": "unfollow_outreach_pipeline",
+                "parent_run_id": run_id or None,
+                "unfollow_exit_code": unfollow_exit_code,
+                "unfollow_status": us.get("status"),
+                "unfollow_actions_verified": int(us.get("unfollow_actions_verified") or 0),
+                "unfollow_observed_success_count": int(us.get("unfollow_observed_success_count") or 0),
+                "outreach_job_selection_mode": outreach_job_selection_mode or None,
+                "selected_external_job_id": selected_external_job_id or None,
+                "interphase_strategy": interphase_strategy or None,
+                "interphase_search_ready_attempted": bool(interphase_search_ready_attempted),
+                "interphase_search_ready_ok": bool(interphase_search_ready_ok),
+                "interphase_search_ready_reason": interphase_search_ready_reason or None,
+                "reused_helper_name": reused_helper_name or None,
+                "interphase_cleanup_ok": bool(interphase_cleanup_ok),
+                "outreach_exit_code": outreach_exit_code,
+                "outreach_session_status": osum.get("session_status"),
+                "outreach_jobs_claimed": int(osum.get("jobs_claimed") or 0),
+                "outreach_jobs_sent": int(osum.get("jobs_completed") or 0),
+                "outreach_jobs_skipped": int(osum.get("jobs_skipped") or 0),
+                "outreach_jobs_failed": int(osum.get("jobs_failed") or 0),
+                "parent_status": parent_status,
+            }
+            log("info", "unfollow_outreach_pipeline_summary", **summary)
+            if supabase_mode and run_id:
+                _update_run_status_safe(
+                    run_id=run_id,
+                    status="completed" if exit_code == 0 else "failed",
+                    totals={
+                        "total": 1,
+                        "success": 1 if exit_code == 0 else 0,
+                        "failed": 0 if exit_code == 0 else 1,
+                    },
+                    performance_summary=summary,
+                )
+
+        def _prepare_unfollow_outreach_interphase_search_ready() -> dict[str, Any]:
+            t_search = time.perf_counter()
+            out = {
+                "attempted": True,
+                "ok": False,
+                "reason": "",
+                "duration_ms": 0.0,
+                "reused_helper_name": "open_search",
+            }
+
+            def _finish(ok: bool, reason: str) -> dict[str, Any]:
+                out["ok"] = bool(ok)
+                out["reason"] = str(reason or "")
+                out["duration_ms"] = round((time.perf_counter() - t_search) * 1000.0, 2)
+                return out
+
+            log(
+                "info",
+                "unfollow_outreach_pipeline_interphase_search_ready_started",
+                account_id=account_id,
+                run_id=run_id or None,
+                helper="open_search",
+                allow_percent_fallback=False,
+                block_if_dm_thread=True,
+            )
+            try:
+                if not verify_app_foreground(d, config.INSTAGRAM_PACKAGE):
+                    return _finish(False, "instagram_not_foreground")
+                if is_dm_thread_screen(d, config.INSTAGRAM_PACKAGE):
+                    return _finish(False, "unexpected_dm_thread")
+                if not open_search(
+                    d,
+                    allow_percent_fallback=False,
+                    block_if_dm_thread=True,
+                    caller_context="unfollow_outreach_pipeline_interphase",
+                ):
+                    return _finish(False, "open_search_failed")
+                if not is_lightweight_search_screen(d, config.INSTAGRAM_PACKAGE):
+                    return _finish(False, "search_surface_not_verified")
+                ed = d(className="android.widget.EditText")
+                if not ed.wait(timeout=0.25):
+                    return _finish(False, "search_edittext_not_ready")
+                return _finish(True, "search_ready")
+            except Exception as exc:
+                out["error"] = str(exc)[:500]
+                return _finish(False, "exception")
+
+        if not _unfollow_outreach_pipeline_enabled():
+            log(
+                "warning",
+                "unfollow_outreach_pipeline_disabled",
+                account_id=account_id,
+                account_username=account_username,
+                run_id=run_id or None,
+            )
+            _publish_pipeline_summary(parent_status="disabled", exit_code=0)
+            reset_perf_counters()
+            _emit_performance_summary(
+                t0=t_session,
+                warm_session_used=warm_session_used,
+                force_stop_used=force_stop_used,
+                exit_code=0,
+                target_username=account_username,
+            )
+            return _return_with_cleanup(d, 0)
+
+        from unfollow_session_orchestrator import (
+            dispatch_unfollow_session,
+            get_last_unfollow_session_probe_summary,
+        )
+        from outreach_session_orchestrator import (
+            dispatch_outreach_session,
+            get_last_outreach_session_summary,
+        )
+
+        log(
+            "info",
+            "unfollow_outreach_pipeline_started",
+            account_id=account_id,
+            account_username=account_username,
+            run_id=run_id or None,
+            phase_handoff_only=True,
+            external_outreach_queue_only=True,
+        )
+        unf_code = dispatch_unfollow_session(
+            d,
+            account_id=account_id,
+            account_username=account_username,
+            run_id=run_id or None,
+        )
+        unf_summary = get_last_unfollow_session_probe_summary()
+        if int(unf_code) != 0:
+            _publish_pipeline_summary(
+                parent_status="unfollow_failed",
+                exit_code=1,
+                unfollow_exit_code=int(unf_code),
+                unfollow_summary=unf_summary,
+            )
+            reset_perf_counters()
+            _emit_performance_summary(
+                t0=t_session,
+                warm_session_used=warm_session_used,
+                force_stop_used=force_stop_used,
+                exit_code=1,
+                target_username=account_username,
+            )
+            return _return_with_cleanup(d, 1)
+
+        explicit_job_id = str(os.environ.get("DM_SENDER_ONLY_JOB_ID") or "").strip()
+        explicit_job_id_source = "env" if explicit_job_id else "queue"
+        if not explicit_job_id:
+            explicit_job_id = str(getattr(config, "DM_SENDER_ONLY_JOB_ID", "") or "").strip()
+            explicit_job_id_source = "config" if explicit_job_id else "queue"
+        outreach_job_selection_mode = "explicit_external_job_id" if explicit_job_id else "external_queue"
+        if explicit_job_id:
+            try:
+                explicit_job = supabase_client.get_dm_job_by_id(explicit_job_id)
+            except Exception as exc:
+                explicit_job = None
+                log(
+                    "error",
+                    "unfollow_outreach_pipeline_external_job_load_failed",
+                    account_id=account_id,
+                    run_id=run_id or None,
+                    job_id=explicit_job_id,
+                    error=str(exc)[:500],
+                )
+            metadata = explicit_job.get("metadata") if isinstance(explicit_job, dict) else {}
+            metadata_handoff = str((metadata or {}).get("handoff") or "").strip()
+            if not isinstance(explicit_job, dict) or not str(explicit_job.get("id") or "").strip():
+                _publish_pipeline_summary(
+                    parent_status="external_outreach_job_not_found",
+                    exit_code=1,
+                    unfollow_exit_code=int(unf_code),
+                    unfollow_summary=unf_summary,
+                    outreach_job_selection_mode=outreach_job_selection_mode,
+                    selected_external_job_id=explicit_job_id,
+                )
+                reset_perf_counters()
+                _emit_performance_summary(
+                    t0=t_session,
+                    warm_session_used=warm_session_used,
+                    force_stop_used=force_stop_used,
+                    exit_code=1,
+                    target_username=account_username,
+                )
+                return _return_with_cleanup(d, 1)
+            if metadata_handoff == "unfollow":
+                log(
+                    "error",
+                    "unfollow_outreach_pipeline_refused_unfollow_generated_job",
+                    account_id=account_id,
+                    run_id=run_id or None,
+                    job_id=explicit_job_id,
+                    status=str(explicit_job.get("status") or ""),
+                    recipient_username=str(explicit_job.get("recipient_username") or ""),
+                )
+                _publish_pipeline_summary(
+                    parent_status="refused_unfollow_generated_outreach_job",
+                    exit_code=1,
+                    unfollow_exit_code=int(unf_code),
+                    unfollow_summary=unf_summary,
+                    outreach_job_selection_mode=outreach_job_selection_mode,
+                    selected_external_job_id=explicit_job_id,
+                )
+                reset_perf_counters()
+                _emit_performance_summary(
+                    t0=t_session,
+                    warm_session_used=warm_session_used,
+                    force_stop_used=force_stop_used,
+                    exit_code=1,
+                    target_username=account_username,
+                )
+                return _return_with_cleanup(d, 1)
+            log(
+                "info",
+                "unfollow_outreach_pipeline_external_job_selected",
+                account_id=account_id,
+                run_id=run_id or None,
+                job_id=explicit_job_id,
+                job_id_source=explicit_job_id_source,
+                status=str(explicit_job.get("status") or ""),
+                dm_type=str(explicit_job.get("dm_type") or ""),
+                source=str(explicit_job.get("source") or ""),
+                campaign_id=str(explicit_job.get("campaign_id") or "") or None,
+                metadata_handoff=metadata_handoff or None,
+            )
+        else:
+            log(
+                "info",
+                "unfollow_outreach_pipeline_external_queue_selected",
+                account_id=account_id,
+                run_id=run_id or None,
+                note="Outreach recipients must already exist in ig_dm_jobs from n8n/dashboard/client; Unfollow does not enqueue recipients.",
+            )
+
+        log(
+            "info",
+            "unfollow_outreach_pipeline_unfollow_phase_completed",
+            account_id=account_id,
+            run_id=run_id or None,
+            unfollow_status=str(unf_summary.get("status") or ""),
+            unfollow_observed_success_count=int(
+                unf_summary.get("unfollow_observed_success_count") or 0
+            ),
+            outreach_job_selection_mode=outreach_job_selection_mode,
+            selected_external_job_id=explicit_job_id or None,
+        )
+
+        interphase_search = _prepare_unfollow_outreach_interphase_search_ready()
+        interphase_search_ok = bool(interphase_search.get("ok"))
+        interphase_strategy = "search_ready" if interphase_search_ok else "force_stop_fallback"
+        interphase_cleanup_ok = bool(interphase_search_ok)
+        interphase_force_stop_used = False
+        log(
+            "info" if interphase_search_ok else "warning",
+            "unfollow_outreach_pipeline_interphase_search_ready_ok"
+            if interphase_search_ok
+            else "unfollow_outreach_pipeline_interphase_search_ready_failed",
+            account_id=account_id,
+            run_id=run_id or None,
+            ok=interphase_search_ok,
+            reason=str(interphase_search.get("reason") or ""),
+            duration_ms=interphase_search.get("duration_ms"),
+            reused_helper_name=str(interphase_search.get("reused_helper_name") or ""),
+            fallback_planned=not interphase_search_ok,
+        )
+
+        if not interphase_search_ok:
+            try:
+                _cleanup_session_apps(d)
+                app_start(d, config.INSTAGRAM_PACKAGE)
+                interphase_cleanup_ok = True
+                interphase_force_stop_used = True
+            except Exception as exc:
+                interphase_cleanup_ok = False
+                interphase_force_stop_used = True
+                log(
+                    "error",
+                    "unfollow_outreach_pipeline_interphase_cleanup_failed",
+                    account_id=account_id,
+                    run_id=run_id or None,
+                    error=str(exc)[:500],
+                )
+        if not interphase_search_ok:
+            log(
+                "info",
+                "unfollow_outreach_pipeline_interphase_cleanup_completed",
+                account_id=account_id,
+                run_id=run_id or None,
+                ok=interphase_cleanup_ok,
+                outreach_job_selection_mode=outreach_job_selection_mode,
+                selected_external_job_id=explicit_job_id or None,
+                interphase_strategy=interphase_strategy,
+            )
+        if not interphase_cleanup_ok:
+            _publish_pipeline_summary(
+                parent_status="outreach_failed",
+                exit_code=1,
+                unfollow_exit_code=int(unf_code),
+                unfollow_summary=unf_summary,
+                outreach_job_selection_mode=outreach_job_selection_mode,
+                selected_external_job_id=explicit_job_id,
+                interphase_strategy=interphase_strategy,
+                interphase_search_ready_attempted=bool(interphase_search.get("attempted")),
+                interphase_search_ready_ok=interphase_search_ok,
+                interphase_search_ready_reason=str(interphase_search.get("reason") or ""),
+                reused_helper_name=str(interphase_search.get("reused_helper_name") or ""),
+                interphase_cleanup_ok=False,
+            )
+            reset_perf_counters()
+            _emit_performance_summary(
+                t0=t_session,
+                warm_session_used=warm_session_used,
+                force_stop_used=bool(force_stop_used or interphase_force_stop_used),
+                exit_code=1,
+                target_username=account_username,
+            )
+            return _return_with_cleanup(d, 1)
+
+        out_code = dispatch_outreach_session(
+            d,
+            account_id=account_id,
+            account_username=account_username,
+            run_id=run_id or None,
+        )
+        out_summary = get_last_outreach_session_summary()
+
+        out_status = str(out_summary.get("session_status") or "")
+        out_claimed = int(out_summary.get("jobs_claimed") or 0)
+        out_sent = int(out_summary.get("jobs_completed") or 0)
+        out_skipped = int(out_summary.get("jobs_skipped") or 0)
+        out_failed = int(out_summary.get("jobs_failed") or 0)
+        if out_status == "no_quota":
+            parent_status = "outreach_no_quota"
+            parent_exit = 0
+        elif out_claimed == 0:
+            parent_status = "no_external_outreach_job"
+            parent_exit = 0
+        elif int(out_code) != 0 or out_failed > 0:
+            parent_status = "outreach_failed"
+            parent_exit = 1
+        elif out_skipped > 0 and out_sent == 0:
+            parent_status = "completed_clean_skip"
+            parent_exit = 0
+        else:
+            parent_status = "completed_clean"
+            parent_exit = 0
+        _publish_pipeline_summary(
+            parent_status=parent_status,
+            exit_code=parent_exit,
+            unfollow_exit_code=int(unf_code),
+            unfollow_summary=unf_summary,
+            outreach_job_selection_mode=outreach_job_selection_mode,
+            selected_external_job_id=explicit_job_id,
+            interphase_strategy=interphase_strategy,
+            interphase_search_ready_attempted=bool(interphase_search.get("attempted")),
+            interphase_search_ready_ok=interphase_search_ok,
+            interphase_search_ready_reason=str(interphase_search.get("reason") or ""),
+            reused_helper_name=str(interphase_search.get("reused_helper_name") or ""),
+            interphase_cleanup_ok=interphase_cleanup_ok,
+            outreach_exit_code=int(out_code),
+            outreach_summary=out_summary,
+        )
+        reset_perf_counters()
+        _emit_performance_summary(
+            t0=t_session,
+            warm_session_used=warm_session_used,
+            force_stop_used=bool(force_stop_used or interphase_force_stop_used),
+            exit_code=parent_exit,
+            target_username=account_username,
+        )
+        return _return_with_cleanup(d, parent_exit)
 
     if outreach_session_run:
         if not supabase_mode or not account_id:
