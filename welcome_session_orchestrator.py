@@ -42,6 +42,13 @@ def _session_status(
     return "success"
 
 
+def _as_nonnegative_int(value: Any, default: int = 0) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return max(0, int(default))
+
+
 def run_welcome_session_send(
     d: u2.Device,
     *,
@@ -64,20 +71,48 @@ def run_welcome_session_send(
         log("error", "welcome_session_settings_load_failed", account_id=aid, error=str(exc))
     raw_db_max_jobs = settings.get("welcome_per_session_limit") if settings else None
     db_max_jobs = (
-        max(0, int(raw_db_max_jobs))
+        _as_nonnegative_int(raw_db_max_jobs)
         if raw_db_max_jobs is not None and str(raw_db_max_jobs).strip() != ""
         else env_max_jobs
     )
-    max_jobs = min(db_max_jobs, env_max_jobs)
+    db_welcome_day_limit = _as_nonnegative_int(
+        settings.get("welcome_per_day_limit") if settings else None,
+        db_max_jobs,
+    )
+    db_total_dm_day_limit = _as_nonnegative_int(
+        settings.get("total_dm_per_day_limit") if settings else None,
+        db_welcome_day_limit,
+    )
+    try:
+        counter = supabase_client.get_account_dm_counter_today(aid) or {}
+    except Exception as exc:
+        counter = {}
+        log("error", "welcome_session_counter_load_failed", account_id=aid, error=str(exc))
+    welcome_sent_today = _as_nonnegative_int(counter.get("welcome_sent_count"), 0)
+    total_dm_sent_today = _as_nonnegative_int(counter.get("total_dm_sent_count"), 0)
+    welcome_day_remaining_today = max(0, db_welcome_day_limit - welcome_sent_today)
+    total_dm_day_remaining_today = max(0, db_total_dm_day_limit - total_dm_sent_today)
+    max_jobs = min(
+        db_max_jobs,
+        env_max_jobs,
+        welcome_day_remaining_today,
+        total_dm_day_remaining_today,
+    )
     log(
         "info",
         "welcome_effective_limits_resolved",
         account_id=aid,
         run_id=run_id,
         db_welcome_per_session_limit=db_max_jobs,
+        db_welcome_per_day_limit=db_welcome_day_limit,
+        db_total_dm_per_day_limit=db_total_dm_day_limit,
+        welcome_sent_today=welcome_sent_today,
+        total_dm_sent_today=total_dm_sent_today,
+        welcome_day_remaining_today=welcome_day_remaining_today,
+        total_dm_day_remaining_today=total_dm_day_remaining_today,
         env_welcome_send_max_jobs=env_max_jobs,
         effective_welcome_send_max=max_jobs,
-        source="min(db,env_hard_cap)",
+        source="min(db_session,env_hard_cap,db_day_remaining,total_dm_day_remaining)",
     )
 
     log(

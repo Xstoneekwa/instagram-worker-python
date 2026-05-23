@@ -1571,6 +1571,49 @@ def get_account_dm_counter_today(account_id: str) -> dict[str, Any] | None:
     return None
 
 
+def count_successful_unfollows_today(account_id: str) -> int:
+    """Count successful unfollows for the account in the current UTC day."""
+    aid = str(account_id or "").strip()
+    if not aid:
+        return 0
+    start = datetime.now(timezone.utc).replace(
+        hour=0,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+    end = start + timedelta(days=1)
+    rows = _request_json(
+        "GET",
+        "ig_interacted_users",
+        query={
+            "select": "id,unfollowed_at",
+            "account_id": f"eq.{aid}",
+            "unfollow_result": "eq.success",
+            "unfollowed_at": f"gte.{start.isoformat()}",
+            "limit": "10000",
+        },
+    )
+    if not isinstance(rows, list):
+        return 0
+    total = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        raw = str(row.get("unfollowed_at") or "").strip()
+        if not raw:
+            continue
+        try:
+            ts = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        if start <= ts.astimezone(timezone.utc) < end:
+            total += 1
+    return total
+
+
 def requeue_stale_outreach_dm_jobs(
     account_id: str,
     *,

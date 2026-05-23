@@ -44,6 +44,13 @@ def _norm_username(raw: str) -> str:
     return str(raw or "").strip().lstrip("@").lower()
 
 
+def _as_nonnegative_int(value: Any, default: int = 0) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return max(0, int(default))
+
+
 def _emit_run_summary(**kwargs: Any) -> None:
     global _LAST_WELCOME_SCAN_SUMMARY
     _LAST_WELCOME_SCAN_SUMMARY = dict(kwargs)
@@ -77,6 +84,13 @@ def run_welcome_scan_producer(
     baseline_completed = False
     welcome_template_id: str | None = None
     session_job_cap = 10
+    db_welcome_per_session_limit = 10
+    db_welcome_per_day_limit = 10
+    db_total_dm_per_day_limit = 10
+    welcome_sent_today = 0
+    total_dm_sent_today = 0
+    welcome_day_remaining_today = 10
+    total_dm_day_remaining_today = 10
 
     screens_scanned = 0
     scrolls_done = 0
@@ -115,6 +129,14 @@ def run_welcome_scan_producer(
             status=status,
             welcome_enabled=welcome_enabled,
             baseline_completed=baseline_completed,
+            db_welcome_per_session_limit=db_welcome_per_session_limit,
+            db_welcome_per_day_limit=db_welcome_per_day_limit,
+            db_total_dm_per_day_limit=db_total_dm_per_day_limit,
+            welcome_sent_today=welcome_sent_today,
+            total_dm_sent_today=total_dm_sent_today,
+            welcome_day_remaining_today=welcome_day_remaining_today,
+            total_dm_day_remaining_today=total_dm_day_remaining_today,
+            effective_welcome_scan_cap=session_job_cap,
             screens_scanned=screens_scanned,
             scrolls_done=scrolls_done,
             usernames_seen_total=usernames_seen_total,
@@ -159,8 +181,46 @@ def run_welcome_scan_producer(
     welcome_template_id = (
         str(settings.get("welcome_template_id") or "").strip() or None
     )
-    session_job_cap = max(
-        0, int(settings.get("welcome_per_session_limit") or 10)
+    db_welcome_per_session_limit = _as_nonnegative_int(
+        settings.get("welcome_per_session_limit"),
+        10,
+    )
+    db_welcome_per_day_limit = _as_nonnegative_int(
+        settings.get("welcome_per_day_limit"),
+        db_welcome_per_session_limit,
+    )
+    db_total_dm_per_day_limit = _as_nonnegative_int(
+        settings.get("total_dm_per_day_limit"),
+        db_welcome_per_day_limit,
+    )
+    try:
+        counter = supabase_client.get_account_dm_counter_today(aid) or {}
+    except Exception as e:
+        counter = {}
+        log("error", "welcome_scan_counter_load_failed", account_id=aid, error=str(e))
+    welcome_sent_today = _as_nonnegative_int(counter.get("welcome_sent_count"), 0)
+    total_dm_sent_today = _as_nonnegative_int(counter.get("total_dm_sent_count"), 0)
+    welcome_day_remaining_today = max(0, db_welcome_per_day_limit - welcome_sent_today)
+    total_dm_day_remaining_today = max(0, db_total_dm_per_day_limit - total_dm_sent_today)
+    session_job_cap = min(
+        db_welcome_per_session_limit,
+        welcome_day_remaining_today,
+        total_dm_day_remaining_today,
+    )
+    log(
+        "info",
+        "welcome_scan_effective_limits_resolved",
+        account_id=aid,
+        run_id=scan_run_id,
+        db_welcome_per_session_limit=db_welcome_per_session_limit,
+        db_welcome_per_day_limit=db_welcome_per_day_limit,
+        db_total_dm_per_day_limit=db_total_dm_per_day_limit,
+        welcome_sent_today=welcome_sent_today,
+        total_dm_sent_today=total_dm_sent_today,
+        welcome_day_remaining_today=welcome_day_remaining_today,
+        total_dm_day_remaining_today=total_dm_day_remaining_today,
+        effective_welcome_scan_cap=session_job_cap,
+        source="min(db_session,db_day_remaining,total_dm_day_remaining)",
     )
 
     if not welcome_enabled:
@@ -170,6 +230,10 @@ def run_welcome_scan_producer(
     if not baseline_completed:
         log("info", "welcome_scan_skipped", account_id=aid, reason="baseline_not_completed")
         return _finish("skipped", 0, "baseline_not_completed")
+
+    if session_job_cap <= 0:
+        log("info", "welcome_scan_skipped", account_id=aid, reason="welcome_day_limit_reached")
+        return _finish("skipped", 0, "welcome_day_limit_reached")
 
     if not open_own_profile_from_bottom_nav(d):
         log("error", "welcome_scan_aborted", reason="own_profile_open_failed")

@@ -157,10 +157,17 @@ def _real_action_max_per_run() -> int:
     return max(0, int(getattr(config, "UNFOLLOW_SESSION_REAL_ACTION_MAX_PER_RUN", 1)))
 
 
-def _effective_real_action_max_per_run(settings: Any, env_hard_cap: int | None = None) -> int:
+def _effective_real_action_max_per_run(
+    settings: Any,
+    env_hard_cap: int | None = None,
+    day_remaining: int | None = None,
+) -> int:
     db_limit = max(0, int(getattr(settings, "session_limit", 0) or 0))
     hard_cap = _real_action_max_per_run() if env_hard_cap is None else max(0, int(env_hard_cap))
-    return min(db_limit, hard_cap)
+    caps = [db_limit, hard_cap]
+    if day_remaining is not None:
+        caps.append(max(0, int(day_remaining)))
+    return min(caps)
 
 
 def _scroll_max_passes() -> int:
@@ -286,6 +293,10 @@ def _base_session_summary(
         "probe_only": probe_only,
         "real_action_enabled": real_enabled,
         "real_action_max_per_run": real_max,
+        "db_unfollow_per_day_limit": int(getattr(settings, "day_limit", 0) or 0),
+        "unfollows_done_today": 0,
+        "unfollow_day_remaining_today": int(getattr(settings, "day_limit", 0) or 0),
+        "source_day_counter": "ig_interacted_users.unfollowed_at",
         "unfollow_actions_sent": 0,
         "unfollow_actions_verified": 0,
         "unfollow_actions_failed": 0,
@@ -1809,7 +1820,24 @@ def run_unfollow_session(
         if real_action_max_override is None
         else max(0, int(real_action_max_override))
     )
-    real_action_max = _effective_real_action_max_per_run(settings, env_real_action_max)
+    db_unfollow_day_limit = max(0, int(getattr(settings, "day_limit", 0) or 0))
+    try:
+        unfollows_done_today = supabase_client.count_successful_unfollows_today(aid)
+    except Exception as exc:
+        unfollows_done_today = db_unfollow_day_limit
+        log(
+            "error",
+            "unfollow_day_counter_load_failed",
+            account_id=aid,
+            run_id=run_id,
+            error=str(exc)[:500],
+        )
+    unfollow_day_remaining_today = max(0, db_unfollow_day_limit - int(unfollows_done_today or 0))
+    real_action_max = _effective_real_action_max_per_run(
+        settings,
+        env_real_action_max,
+        unfollow_day_remaining_today,
+    )
     log(
         "info",
         "unfollow_effective_limits_resolved",
@@ -1817,9 +1845,13 @@ def run_unfollow_session(
         run_id=run_id,
         unfollow_mode=str(getattr(settings, "mode", "") or ""),
         db_unfollow_per_session_limit=int(getattr(settings, "session_limit", 0) or 0),
+        db_unfollow_per_day_limit=db_unfollow_day_limit,
+        unfollows_done_today=int(unfollows_done_today or 0),
+        unfollow_day_remaining_today=unfollow_day_remaining_today,
         env_real_action_max_per_run=env_real_action_max,
         effective_real_action_max_per_run=real_action_max,
-        source="min(db,env_hard_cap)",
+        source_day_counter="ig_interacted_users.unfollowed_at",
+        source="min(db_session,env_hard_cap,db_day_remaining)",
     )
     plan = plan_unfollow_targets(aid, settings=settings)
     planned_usernames = _planned_username_set(plan)
@@ -1858,6 +1890,31 @@ def run_unfollow_session(
         real_action_enabled=config_real_enabled,
         real_action_max_per_run=real_action_max,
     )
+    base_summary.update(
+        {
+            "db_unfollow_per_day_limit": db_unfollow_day_limit,
+            "unfollows_done_today": int(unfollows_done_today or 0),
+            "unfollow_day_remaining_today": unfollow_day_remaining_today,
+            "source_day_counter": "ig_interacted_users.unfollowed_at",
+        }
+    )
+
+    if (
+        not bool(dry_probe_only)
+        and config_real_enabled
+        and bool(settings.enabled)
+        and unfollow_day_remaining_today <= 0
+    ):
+        summary = {
+            **base_summary,
+            "status": "no_quota",
+            "failure_reason": "unfollow_day_limit_reached",
+            "multi_action_stop_reason": "unfollow_day_limit_reached",
+            "total_ms": round((time.perf_counter() - t0) * 1000.0, 2),
+        }
+        _emit_summary(summary)
+        return 0
+
     identity = verify_active_instagram_account_matches_expected(
         d,
         expected_account_username=uname,
