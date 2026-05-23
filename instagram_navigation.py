@@ -287,6 +287,10 @@ def reset_perf_counters() -> None:
         "search_open_skipped_ms": 0.0,
         "typing_command_ms": 0.0,
         "typing_confirm_ms": 0.0,
+        "typing_precheck_edittext_reused": False,
+        "typing_precheck_ms": 0.0,
+        "typing_set_text_ms": 0.0,
+        "typing_get_text_confirm_ms": 0.0,
         "row_detect_ms": 0.0,
         "row_tap_command_ms": 0.0,
         "post_tap_settle_ms": 0.0,
@@ -3108,6 +3112,7 @@ def type_search(
     previous_username: str | None = None,
     follow_ct_surface_confirmed: bool = False,
     outreach_trusted_search: bool = False,
+    outreach_trusted_edittext_verified: bool = False,
 ) -> bool:
     """Robust clear, then FastIME or set_text; fused row detect when FastIME."""
     global _perf, _TYPE_SEARCH_FAILURE_REASON
@@ -3115,6 +3120,9 @@ def type_search(
     _clear_pending_fused_fast_ime_row()
     follow_ct_typing = bool(follow_ct_surface_confirmed) or is_follow_ct_search_context_active()
     outreach_trusted_typing = bool(outreach_trusted_search) and not follow_ct_typing
+    reuse_outreach_edittext_precheck = bool(
+        outreach_trusted_typing and outreach_trusted_edittext_verified
+    )
     surface_trusted_for_typing = bool(follow_ct_surface_confirmed) or is_search_surface_fresh_for_follow_ct()
     if follow_ct_surface_confirmed or consume_search_surface_fresh_for_follow_ct():
         log(
@@ -3217,9 +3225,23 @@ def type_search(
                 reason=surf_why,
                 precheck_ms=round(precheck_ms, 2),
             )
+    elif reuse_outreach_edittext_precheck:
+        ok_surf = True
+        surf_why = "recent_parent_fast_path_edittext_verified"
+        precheck_ms = (time.perf_counter() - t_precheck) * 1000
+        _perf["typing_precheck_edittext_reused"] = True
+        log(
+            "info",
+            "dm_sender_outreach_type_search_precheck_reused",
+            username=str(username or "")[:80],
+            ok=True,
+            reason=surf_why,
+            precheck_ms=round(precheck_ms, 2),
+        )
     elif outreach_trusted_typing:
         ok_surf, surf_why = _follow_ct_trusted_type_search_surface_ok(d, ed, pkg=pkg_ig)
         precheck_ms = (time.perf_counter() - t_precheck) * 1000
+        _perf["typing_precheck_edittext_reused"] = False
         log(
             "info",
             "dm_sender_outreach_type_search_trusted_precheck",
@@ -3231,8 +3253,13 @@ def type_search(
     else:
         ok_surf, surf_why = instagram_search_surface_strict_ok(d, ed, pkg=pkg_ig)
         precheck_ms = (time.perf_counter() - t_precheck) * 1000
+    _perf["typing_precheck_ms"] = precheck_ms
     if ok_surf:
-        if not skip_strict_precheck and not fully_skip_precheck:
+        if (
+            not skip_strict_precheck
+            and not fully_skip_precheck
+            and not reuse_outreach_edittext_precheck
+        ):
             log(
                 "info",
                 "instagram_search_surface_verified",
@@ -3330,16 +3357,24 @@ def type_search(
         t_set = time.perf_counter()
         direct_ok = False
         direct_reason = ""
+        set_text_ms = 0.0
+        get_text_confirm_ms = 0.0
         try:
+            t_set_text = time.perf_counter()
             ed.set_text(username)
+            set_text_ms = (time.perf_counter() - t_set_text) * 1000
             typing_method = "set_text"
+            t_get_text = time.perf_counter()
             cur = ed.get_text() or ""
+            get_text_confirm_ms = (time.perf_counter() - t_get_text) * 1000
             direct_ok = _normalize_handle(cur) == _normalize_handle(username)
             if not direct_ok:
                 direct_reason = "strict_confirm_mismatch"
         except Exception as e:
             direct_reason = str(e)[:120]
         direct_ms = (time.perf_counter() - t_set) * 1000
+        _perf["typing_set_text_ms"] = set_text_ms
+        _perf["typing_get_text_confirm_ms"] = get_text_confirm_ms
         if direct_ok:
             typing_command_ms = (time.perf_counter() - t_cmd_start) * 1000
             _perf["typing_command_ms"] = typing_command_ms
@@ -3350,6 +3385,8 @@ def type_search(
                 username=str(username or "")[:80],
                 previous_username=str(previous_username or "")[:80] or None,
                 set_text_ms=round(direct_ms, 2),
+                typing_set_text_ms=round(set_text_ms, 2),
+                typing_get_text_confirm_ms=round(get_text_confirm_ms, 2),
                 strict_confirm=True,
             )
             log(
@@ -3371,6 +3408,9 @@ def type_search(
                 precheck_ms=round(precheck_ms, 2),
                 typing_command_ms=round(typing_command_ms, 2),
                 typing_confirm_ms=0.0,
+                typing_precheck_edittext_reused=bool(reuse_outreach_edittext_precheck),
+                typing_set_text_ms=round(set_text_ms, 2),
+                typing_get_text_confirm_ms=round(get_text_confirm_ms, 2),
                 follow_ct_typing=False,
                 outreach_trusted_search=True,
             )
@@ -3383,6 +3423,8 @@ def type_search(
             previous_username=str(previous_username or "")[:80] or None,
             reason=direct_reason or "unknown",
             set_text_ms=round(direct_ms, 2),
+            typing_set_text_ms=round(set_text_ms, 2),
+            typing_get_text_confirm_ms=round(get_text_confirm_ms, 2),
         )
         t_cmd_start = time.perf_counter()
 

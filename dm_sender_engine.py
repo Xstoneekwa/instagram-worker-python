@@ -24,6 +24,7 @@ from instagram_navigation import (
     detect_unsupported_start_surface,
     dismiss_android_permission_dialog,
     finalize_after_real_send,
+    get_perf_snapshot,
     get_last_dm_thread_classify_snapshot,
     invalidate_search_surface_cache,
     is_dm_thread_screen,
@@ -134,6 +135,24 @@ def _reset_dm_sender_nav_timings() -> None:
         "navigation_ms": 0.0,
         "search_ms": 0.0,
         "thread_open_ms": 0.0,
+        "parent_search_ready_fast_path_attempted": False,
+        "parent_search_ready_fast_path_used": False,
+        "parent_search_ready_fast_path_reject_reason": "",
+        "search_surface_age_ms": None,
+        "sender_prepare_reused_search_surface": False,
+        "sender_prepare_lightweight_verify_ms": 0.0,
+        "sender_prepare_full_open_search_ms": 0.0,
+        "fast_path_total_verify_ms": 0.0,
+        "fast_path_foreground_check_ms": 0.0,
+        "fast_path_no_dm_thread_check_ms": 0.0,
+        "fast_path_search_surface_check_ms": 0.0,
+        "fast_path_edittext_check_ms": 0.0,
+        "fast_path_direct_edittext_probe_ms": 0.0,
+        "fast_path_waits_count": 0,
+        "fast_path_timeout_reason": "",
+        "fast_path_mode": "",
+        "fast_path_parent_proof_used": False,
+        "typing_precheck_edittext_reused": False,
     }
 
 
@@ -142,12 +161,70 @@ def _set_dm_sender_nav_timings(
     navigation_ms: float = 0.0,
     search_ms: float = 0.0,
     thread_open_ms: float = 0.0,
+    parent_search_ready_fast_path_attempted: bool = False,
+    parent_search_ready_fast_path_used: bool = False,
+    parent_search_ready_fast_path_reject_reason: str = "",
+    search_surface_age_ms: float | None = None,
+    sender_prepare_reused_search_surface: bool = False,
+    sender_prepare_lightweight_verify_ms: float = 0.0,
+    sender_prepare_full_open_search_ms: float = 0.0,
+    fast_path_total_verify_ms: float = 0.0,
+    fast_path_foreground_check_ms: float = 0.0,
+    fast_path_no_dm_thread_check_ms: float = 0.0,
+    fast_path_search_surface_check_ms: float = 0.0,
+    fast_path_edittext_check_ms: float = 0.0,
+    fast_path_direct_edittext_probe_ms: float = 0.0,
+    fast_path_waits_count: int = 0,
+    fast_path_timeout_reason: str = "",
+    fast_path_mode: str = "",
+    fast_path_parent_proof_used: bool = False,
+    typing_precheck_edittext_reused: bool = False,
 ) -> None:
     global _LAST_DM_SENDER_NAV_TIMINGS
     _LAST_DM_SENDER_NAV_TIMINGS = {
         "navigation_ms": round(max(0.0, float(navigation_ms or 0.0)), 2),
         "search_ms": round(max(0.0, float(search_ms or 0.0)), 2),
         "thread_open_ms": round(max(0.0, float(thread_open_ms or 0.0)), 2),
+        "parent_search_ready_fast_path_attempted": bool(parent_search_ready_fast_path_attempted),
+        "parent_search_ready_fast_path_used": bool(parent_search_ready_fast_path_used),
+        "parent_search_ready_fast_path_reject_reason": str(
+            parent_search_ready_fast_path_reject_reason or ""
+        ),
+        "search_surface_age_ms": (
+            round(max(0.0, float(search_surface_age_ms)), 2)
+            if search_surface_age_ms is not None
+            else None
+        ),
+        "sender_prepare_reused_search_surface": bool(sender_prepare_reused_search_surface),
+        "sender_prepare_lightweight_verify_ms": round(
+            max(0.0, float(sender_prepare_lightweight_verify_ms or 0.0)), 2
+        ),
+        "sender_prepare_full_open_search_ms": round(
+            max(0.0, float(sender_prepare_full_open_search_ms or 0.0)), 2
+        ),
+        "fast_path_total_verify_ms": round(
+            max(0.0, float(fast_path_total_verify_ms or 0.0)), 2
+        ),
+        "fast_path_foreground_check_ms": round(
+            max(0.0, float(fast_path_foreground_check_ms or 0.0)), 2
+        ),
+        "fast_path_no_dm_thread_check_ms": round(
+            max(0.0, float(fast_path_no_dm_thread_check_ms or 0.0)), 2
+        ),
+        "fast_path_search_surface_check_ms": round(
+            max(0.0, float(fast_path_search_surface_check_ms or 0.0)), 2
+        ),
+        "fast_path_edittext_check_ms": round(
+            max(0.0, float(fast_path_edittext_check_ms or 0.0)), 2
+        ),
+        "fast_path_direct_edittext_probe_ms": round(
+            max(0.0, float(fast_path_direct_edittext_probe_ms or 0.0)), 2
+        ),
+        "fast_path_waits_count": max(0, int(fast_path_waits_count or 0)),
+        "fast_path_timeout_reason": str(fast_path_timeout_reason or ""),
+        "fast_path_mode": str(fast_path_mode or ""),
+        "fast_path_parent_proof_used": bool(fast_path_parent_proof_used),
+        "typing_precheck_edittext_reused": bool(typing_precheck_edittext_reused),
     }
 
 
@@ -220,6 +297,414 @@ def _dm_sender_open_search(
             caller_context=caller_context or context,
         )
     )
+
+
+def _outreach_trust_parent_search_ready_enabled() -> bool:
+    return str(os.getenv("OUTREACH_TRUST_PARENT_SEARCH_READY", "")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _parent_search_ready_max_age_ms() -> float:
+    raw = str(os.getenv("OUTREACH_PARENT_SEARCH_READY_MAX_AGE_MS", "20000") or "20000")
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 20000.0
+
+
+def _parent_search_ready_fast_verify_max_ms() -> float:
+    raw = str(
+        os.getenv("OUTREACH_PARENT_SEARCH_READY_FAST_VERIFY_MAX_MS", "1500") or "1500"
+    )
+    try:
+        return max(250.0, float(raw))
+    except ValueError:
+        return 1500.0
+
+
+def _parent_search_ready_fast_path_mode() -> str:
+    raw = str(os.getenv("OUTREACH_PARENT_SEARCH_READY_FAST_PATH_MODE", "v3") or "v3")
+    mode = raw.strip().lower()
+    return mode if mode in {"v3"} else "v3"
+
+
+def _parent_search_ready_age_ms(parent_search_ready: dict[str, Any]) -> float | None:
+    raw = parent_search_ready.get("verified_at_monotonic")
+    try:
+        return max(0.0, (time.perf_counter() - float(raw)) * 1000.0)
+    except (TypeError, ValueError):
+        return None
+
+
+def _bounded_wait_timeout_s(deadline: float, cap_s: float) -> float:
+    remaining_s = max(0.0, deadline - time.perf_counter())
+    return max(0.0, min(cap_s, remaining_s))
+
+
+def _fast_path_no_dm_thread_visible_bounded(
+    d: u2.Device,
+    *,
+    pkg: str,
+    deadline: float,
+) -> tuple[bool, str]:
+    if time.perf_counter() >= deadline:
+        return False, "fast_verify_timeout"
+    try:
+        cur = d.app_current()
+        if (cur or {}).get("package", "") != pkg:
+            return False, "instagram_not_foreground"
+    except Exception:
+        return False, "foreground_check_failed"
+    if time.perf_counter() >= deadline:
+        return False, "fast_verify_timeout"
+    try:
+        _w, h = d.window_size()
+    except Exception:
+        return False, "window_size_failed"
+    if time.perf_counter() >= deadline:
+        return False, "fast_verify_timeout"
+    try:
+        composer = d(resourceId=f"{pkg}:id/row_thread_composer_edittext")
+        timeout_s = _bounded_wait_timeout_s(deadline, 0.08)
+        if timeout_s <= 0.0:
+            return False, "fast_verify_timeout"
+        if composer.exists(timeout=timeout_s):
+            try:
+                b = (composer.info or {}).get("bounds") or {}
+                if int(b.get("top", 0)) > h * 0.25:
+                    return False, "dm_thread_visible"
+            except Exception:
+                return False, "dm_thread_visible"
+    except Exception:
+        return False, "dm_thread_probe_failed"
+    return True, "ok"
+
+
+def _fast_path_followers_list_visible_bounded(
+    d: u2.Device,
+    *,
+    deadline: float,
+) -> tuple[bool, str]:
+    if time.perf_counter() >= deadline:
+        return False, "fast_verify_timeout"
+    try:
+        tab = d(resourceIdMatches=r".*:id/unified_follow_list_tab_layout$")
+        rows = d(resourceIdMatches=r".*:id/follow_list_username$")
+        tab_timeout_s = _bounded_wait_timeout_s(deadline, 0.04)
+        if tab_timeout_s <= 0.0:
+            return False, "fast_verify_timeout"
+        tab_visible = tab.exists(timeout=tab_timeout_s)
+        row_timeout_s = _bounded_wait_timeout_s(deadline, 0.04)
+        if row_timeout_s <= 0.0:
+            return False, "fast_verify_timeout"
+        rows_visible = rows.exists(timeout=row_timeout_s)
+        return bool(tab_visible and rows_visible), "ok"
+    except Exception:
+        return False, "followers_list_probe_failed"
+
+
+def _fast_path_search_surface_bounded(
+    d: u2.Device,
+    *,
+    pkg: str,
+    deadline: float,
+) -> tuple[bool, str, Any | None]:
+    if time.perf_counter() >= deadline:
+        return False, "fast_verify_timeout", None
+    try:
+        cur = d.app_current()
+        if (cur or {}).get("package", "") != pkg:
+            return False, "instagram_not_foreground", None
+    except Exception:
+        return False, "foreground_check_failed", None
+    if _check_dm_sender_permission_blocker(d, context="parent_search_ready_fast_path"):
+        return False, "permission_blocker", None
+    if time.perf_counter() >= deadline:
+        return False, "fast_verify_timeout", None
+    followers_visible, followers_reason = _fast_path_followers_list_visible_bounded(
+        d, deadline=deadline
+    )
+    if followers_reason == "fast_verify_timeout":
+        return False, followers_reason, None
+    if followers_visible:
+        return False, "followers_list_local_search_surface", None
+    if time.perf_counter() >= deadline:
+        return False, "fast_verify_timeout", None
+    try:
+        ed = d(className="android.widget.EditText")
+        timeout_s = _bounded_wait_timeout_s(deadline, 0.20)
+        if timeout_s <= 0.0:
+            return False, "fast_verify_timeout", None
+        if not ed.wait(timeout=timeout_s):
+            return False, "search_edittext_not_ready", None
+        try:
+            b = (ed.info or {}).get("bounds") or {}
+            _w, h = d.window_size()
+            if int(b.get("bottom", 0)) > int(h * 0.38):
+                return False, "search_edittext_not_top_band", None
+        except Exception:
+            pass
+        return True, "ok", ed
+    except Exception:
+        return False, "search_surface_probe_failed", None
+
+
+def _fast_path_direct_search_edittext_probe_v3(
+    d: u2.Device,
+    *,
+    pkg: str,
+    deadline: float,
+) -> tuple[bool, str, Any | None]:
+    """Parent-proof guard: only confirm a concrete top-band Search EditText."""
+    if time.perf_counter() >= deadline:
+        return False, "fast_verify_timeout", None
+
+    def _validate_edittext(candidate: Any, source: str) -> tuple[bool, str, Any | None]:
+        if time.perf_counter() >= deadline:
+            return False, "fast_verify_timeout", None
+        try:
+            info = candidate.info or {}
+        except Exception:
+            return False, f"{source}_info_unavailable", None
+        class_name = str(info.get("className") or info.get("class") or "")
+        if class_name and "EditText" not in class_name:
+            return False, f"{source}_not_edittext", None
+        if info.get("enabled") is False:
+            return False, f"{source}_disabled", None
+        bounds = info.get("bounds") or {}
+        try:
+            _w, h = d.window_size()
+            bottom = int(bounds.get("bottom", 0))
+            top = int(bounds.get("top", 0))
+            if bottom <= 0 or bottom > int(h * 0.38):
+                return False, f"{source}_not_top_band", None
+            if top < 0:
+                return False, f"{source}_invalid_bounds", None
+        except Exception:
+            return False, f"{source}_bounds_unavailable", None
+        return True, "ok", candidate
+
+    exact_rids = (
+        f"{pkg}:id/action_bar_search_edit_text",
+        "com.instagram.android:id/action_bar_search_edit_text",
+        f"{pkg}:id/row_search_edit_text",
+        "com.instagram.android:id/row_search_edit_text",
+    )
+    for rid in exact_rids:
+        if time.perf_counter() >= deadline:
+            return False, "fast_verify_timeout", None
+        try:
+            candidate = d(resourceId=rid)
+            timeout_s = _bounded_wait_timeout_s(deadline, 0.08)
+            if timeout_s <= 0.0:
+                return False, "fast_verify_timeout", None
+            if not candidate.wait(timeout=timeout_s):
+                continue
+            ok, reason, ed = _validate_edittext(candidate, "rid")
+            if ok:
+                return True, "ok", ed
+            return False, reason, None
+        except Exception:
+            continue
+
+    if time.perf_counter() >= deadline:
+        return False, "fast_verify_timeout", None
+    try:
+        candidate = d(className="android.widget.EditText")
+        timeout_s = _bounded_wait_timeout_s(deadline, 0.12)
+        if timeout_s <= 0.0:
+            return False, "fast_verify_timeout", None
+        if not candidate.wait(timeout=timeout_s):
+            return False, "search_edittext_not_ready", None
+        return _validate_edittext(candidate, "class")
+    except Exception:
+        return False, "direct_edittext_probe_failed", None
+
+
+def _try_parent_search_ready_fast_path(
+    d: u2.Device,
+    *,
+    pkg: str,
+    username: str,
+    account_id: str,
+    account_username: str,
+    run_id: str | None,
+    dm_type: str,
+    parent_search_ready: dict[str, Any] | None,
+) -> dict[str, Any]:
+    t0 = time.perf_counter()
+    signal = dict(parent_search_ready or {})
+    age_ms = _parent_search_ready_age_ms(signal) if signal else None
+    max_verify_ms = _parent_search_ready_fast_verify_max_ms()
+    deadline = t0 + (max_verify_ms / 1000.0)
+    fast_path_mode = _parent_search_ready_fast_path_mode()
+    out: dict[str, Any] = {
+        "attempted": True,
+        "used": False,
+        "reject_reason": "",
+        "search_surface_age_ms": age_ms,
+        "lightweight_verify_ms": 0.0,
+        "fast_path_total_verify_ms": 0.0,
+        "fast_path_foreground_check_ms": 0.0,
+        "fast_path_no_dm_thread_check_ms": 0.0,
+        "fast_path_search_surface_check_ms": 0.0,
+        "fast_path_edittext_check_ms": 0.0,
+        "fast_path_direct_edittext_probe_ms": 0.0,
+        "fast_path_waits_count": 0,
+        "fast_path_timeout_reason": "",
+        "fast_path_mode": fast_path_mode,
+        "fast_path_parent_proof_used": False,
+        "typing_precheck_edittext_reused": False,
+    }
+
+    def _reject(reason: str) -> dict[str, Any]:
+        reason_s = str(reason or "rejected")
+        out["reject_reason"] = reason_s
+        if reason_s == "fast_verify_timeout":
+            out["fast_path_timeout_reason"] = reason_s
+        elapsed_ms = round((time.perf_counter() - t0) * 1000.0, 2)
+        out["lightweight_verify_ms"] = elapsed_ms
+        out["fast_path_total_verify_ms"] = elapsed_ms
+        log(
+            "info",
+            "dm_sender_parent_search_ready_fast_path_rejected",
+            username=username,
+            dm_type=dm_type,
+            fast_path_reject_reason=out["reject_reason"],
+            parent_search_ready_age_ms=(
+                round(float(age_ms), 2) if age_ms is not None else None
+            ),
+            sender_prepare_lightweight_verify_ms=out["lightweight_verify_ms"],
+            fast_path_total_verify_ms=out["fast_path_total_verify_ms"],
+            fast_path_foreground_check_ms=out["fast_path_foreground_check_ms"],
+            fast_path_no_dm_thread_check_ms=out["fast_path_no_dm_thread_check_ms"],
+            fast_path_search_surface_check_ms=out["fast_path_search_surface_check_ms"],
+            fast_path_edittext_check_ms=out["fast_path_edittext_check_ms"],
+            fast_path_direct_edittext_probe_ms=out["fast_path_direct_edittext_probe_ms"],
+            fast_path_waits_count=out["fast_path_waits_count"],
+            fast_path_timeout_reason=out["fast_path_timeout_reason"] or None,
+            fast_path_mode=out["fast_path_mode"],
+            fast_path_parent_proof_used=out["fast_path_parent_proof_used"],
+        )
+        return out
+
+    def _timeout_reject_if_needed() -> dict[str, Any] | None:
+        if time.perf_counter() >= deadline:
+            return _reject("fast_verify_timeout")
+        return None
+
+    log(
+        "info",
+        "dm_sender_parent_search_ready_fast_path_attempted",
+        username=username,
+        dm_type=dm_type,
+        flag_enabled=_outreach_trust_parent_search_ready_enabled(),
+        parent_search_ready_verified=bool(signal.get("verified")),
+        parent_search_ready_context=str(signal.get("context") or "") or None,
+        parent_search_ready_age_ms=round(float(age_ms), 2) if age_ms is not None else None,
+        parent_search_ready_max_age_ms=round(_parent_search_ready_max_age_ms(), 2),
+        parent_search_ready_verified_at_source=str(signal.get("verified_at_source") or "")
+        or None,
+        fast_path_verify_budget_ms=round(max_verify_ms, 2),
+        fast_path_mode=fast_path_mode,
+    )
+
+    if str(dm_type or "").strip().lower() != "outreach":
+        return _reject("dm_type_not_outreach")
+    if not _outreach_trust_parent_search_ready_enabled():
+        return _reject("flag_disabled")
+    if not signal:
+        return _reject("missing_signal")
+    if not bool(signal.get("verified")):
+        return _reject("signal_not_verified")
+    if str(signal.get("context") or "") != "unfollow_outreach_pipeline":
+        return _reject("context_mismatch")
+    if str(signal.get("account_id") or "").strip() != str(account_id or "").strip():
+        return _reject("account_id_mismatch")
+    signal_run_id = str(signal.get("run_id") or "").strip()
+    current_run_id = str(run_id or "").strip()
+    if signal_run_id and current_run_id and signal_run_id != current_run_id:
+        return _reject("run_id_mismatch")
+    if age_ms is None:
+        return _reject("missing_verified_at")
+    if age_ms > _parent_search_ready_max_age_ms():
+        return _reject("signal_too_old")
+
+    timeout_reject = _timeout_reject_if_needed()
+    if timeout_reject is not None:
+        return timeout_reject
+    t_phase = time.perf_counter()
+    foreground_ok = verify_app_foreground(d, pkg)
+    out["fast_path_foreground_check_ms"] = round(
+        (time.perf_counter() - t_phase) * 1000.0, 2
+    )
+    if not foreground_ok:
+        return _reject("instagram_not_foreground")
+    timeout_reject = _timeout_reject_if_needed()
+    if timeout_reject is not None:
+        return timeout_reject
+
+    t_phase = time.perf_counter()
+    no_dm_thread_ok, no_dm_thread_reason = _fast_path_no_dm_thread_visible_bounded(
+        d, pkg=pkg, deadline=deadline
+    )
+    out["fast_path_waits_count"] += 1
+    out["fast_path_no_dm_thread_check_ms"] = round(
+        (time.perf_counter() - t_phase) * 1000.0, 2
+    )
+    if not no_dm_thread_ok:
+        return _reject(no_dm_thread_reason or "dm_thread_check_failed")
+    timeout_reject = _timeout_reject_if_needed()
+    if timeout_reject is not None:
+        return timeout_reject
+
+    t_phase = time.perf_counter()
+    ok_surface, why, ed = _fast_path_direct_search_edittext_probe_v3(
+        d, pkg=pkg, deadline=deadline
+    )
+    out["fast_path_waits_count"] += 1
+    direct_edittext_ms = round((time.perf_counter() - t_phase) * 1000.0, 2)
+    out["fast_path_search_surface_check_ms"] = 0.0
+    out["fast_path_edittext_check_ms"] = direct_edittext_ms
+    out["fast_path_direct_edittext_probe_ms"] = direct_edittext_ms
+    if not ok_surface:
+        return _reject(why or "search_surface_not_verified")
+    if ed is None:
+        return _reject("search_edittext_not_ready")
+    timeout_reject = _timeout_reject_if_needed()
+    if timeout_reject is not None:
+        return timeout_reject
+
+    out["used"] = True
+    out["typing_precheck_edittext_reused"] = True
+    out["fast_path_parent_proof_used"] = True
+    elapsed_ms = round((time.perf_counter() - t0) * 1000.0, 2)
+    out["lightweight_verify_ms"] = elapsed_ms
+    out["fast_path_total_verify_ms"] = elapsed_ms
+    log(
+        "info",
+        "dm_sender_parent_search_ready_fast_path_used",
+        username=username,
+        dm_type=dm_type,
+        parent_search_ready_age_ms=round(float(age_ms), 2),
+        sender_prepare_reused_search_surface=True,
+        sender_prepare_lightweight_verify_ms=out["lightweight_verify_ms"],
+        fast_path_total_verify_ms=out["fast_path_total_verify_ms"],
+        fast_path_foreground_check_ms=out["fast_path_foreground_check_ms"],
+        fast_path_no_dm_thread_check_ms=out["fast_path_no_dm_thread_check_ms"],
+        fast_path_search_surface_check_ms=out["fast_path_search_surface_check_ms"],
+        fast_path_edittext_check_ms=out["fast_path_edittext_check_ms"],
+        fast_path_direct_edittext_probe_ms=out["fast_path_direct_edittext_probe_ms"],
+        fast_path_waits_count=out["fast_path_waits_count"],
+        fast_path_mode=out["fast_path_mode"],
+        fast_path_parent_proof_used=True,
+        typing_precheck_edittext_reused=True,
+    )
+    return out
 
 
 def _log_followers_exit_observed(
@@ -1173,9 +1658,12 @@ def _navigate_to_recipient_dm_thread(
     username: str,
     *,
     pkg: str,
+    account_id: str = "",
+    run_id: str | None = None,
     account_username: str = "",
     dm_type: str = "",
     previous_username: str | None = None,
+    parent_search_ready: dict[str, Any] | None = None,
 ) -> tuple[str, bool]:
     """
     Search → profile → DM thread. Returns (thread_state, navigation_ok).
@@ -1198,6 +1686,14 @@ def _navigate_to_recipient_dm_thread(
 
     t_before_search = time.perf_counter()
     trusted_search_reuse = False
+    parent_fast_path = {
+        "attempted": False,
+        "used": False,
+        "reject_reason": "",
+        "search_surface_age_ms": None,
+        "lightweight_verify_ms": 0.0,
+    }
+    full_open_search_ms = 0.0
     if _dm_sender_trust_global_search_ready(src):
         log(
             "info",
@@ -1208,16 +1704,34 @@ def _navigate_to_recipient_dm_thread(
         trusted_search_reuse = True
         search_ok = True
     else:
-        search_ok = _open_search_with_recovery(
-            d,
-            pkg=pkg,
-            username=uname,
-            context="dm_sender_navigate",
-            account_username=src,
-            skip_if_recently_verified=True,
-            allow_percent_fallback=(dm_type_norm != "outreach"),
-            skip_post_open_verify_for_outreach=(dm_type_norm == "outreach"),
-        )
+        if dm_type_norm == "outreach":
+            parent_fast_path = _try_parent_search_ready_fast_path(
+                d,
+                pkg=pkg,
+                username=uname,
+                account_id=account_id,
+                account_username=src,
+                run_id=run_id,
+                dm_type=dm_type_norm,
+                parent_search_ready=parent_search_ready,
+            )
+            search_ok = bool(parent_fast_path.get("used"))
+            trusted_search_reuse = bool(search_ok)
+        else:
+            search_ok = False
+        if not search_ok:
+            t_full_open = time.perf_counter()
+            search_ok = _open_search_with_recovery(
+                d,
+                pkg=pkg,
+                username=uname,
+                context="dm_sender_navigate",
+                account_username=src,
+                skip_if_recently_verified=True,
+                allow_percent_fallback=(dm_type_norm != "outreach"),
+                skip_post_open_verify_for_outreach=(dm_type_norm == "outreach"),
+            )
+            full_open_search_ms = (time.perf_counter() - t_full_open) * 1000.0
     if not search_ok:
         log("error", "dm_sender_open_search_failed", username=uname)
         return "unknown", False
@@ -1255,9 +1769,15 @@ def _navigate_to_recipient_dm_thread(
         uname,
         previous_username=previous_for_type,
         outreach_trusted_search=(dm_type_norm == "outreach" and search_ok),
+        outreach_trusted_edittext_verified=bool(
+            dm_type_norm == "outreach"
+            and search_ok
+            and parent_fast_path.get("typing_precheck_edittext_reused")
+        ),
     ):
         log("error", "dm_sender_type_search_failed", username=uname)
         return "unknown", False
+    type_perf = get_perf_snapshot()
     log(
         "info",
         "dm_sender_username_typed",
@@ -1267,6 +1787,14 @@ def _navigate_to_recipient_dm_thread(
             (time.perf_counter() - t_nav) * 1000.0, 2
         ),
         sender_prepare_to_open_search_ms=sender_prepare_to_open_search_ms,
+        typing_precheck_edittext_reused=bool(
+            type_perf.get("typing_precheck_edittext_reused")
+        ),
+        typing_precheck_ms=round(float(type_perf.get("typing_precheck_ms") or 0.0), 2),
+        typing_set_text_ms=round(float(type_perf.get("typing_set_text_ms") or 0.0), 2),
+        typing_get_text_confirm_ms=round(
+            float(type_perf.get("typing_get_text_confirm_ms") or 0.0), 2
+        ),
     )
 
     if bool(getattr(config, "FAST_SKIP_ACCOUNTS_TAB", True)) and bool(
@@ -1347,6 +1875,44 @@ def _navigate_to_recipient_dm_thread(
         navigation_ms=(time.perf_counter() - t_nav) * 1000.0,
         search_ms=search_total_ms,
         thread_open_ms=thread_open_ms,
+        parent_search_ready_fast_path_attempted=bool(parent_fast_path.get("attempted")),
+        parent_search_ready_fast_path_used=bool(parent_fast_path.get("used")),
+        parent_search_ready_fast_path_reject_reason=str(
+            parent_fast_path.get("reject_reason") or ""
+        ),
+        search_surface_age_ms=parent_fast_path.get("search_surface_age_ms"),
+        sender_prepare_reused_search_surface=bool(parent_fast_path.get("used")),
+        sender_prepare_lightweight_verify_ms=float(
+            parent_fast_path.get("lightweight_verify_ms") or 0.0
+        ),
+        sender_prepare_full_open_search_ms=full_open_search_ms,
+        fast_path_total_verify_ms=float(
+            parent_fast_path.get("fast_path_total_verify_ms") or 0.0
+        ),
+        fast_path_foreground_check_ms=float(
+            parent_fast_path.get("fast_path_foreground_check_ms") or 0.0
+        ),
+        fast_path_no_dm_thread_check_ms=float(
+            parent_fast_path.get("fast_path_no_dm_thread_check_ms") or 0.0
+        ),
+        fast_path_search_surface_check_ms=float(
+            parent_fast_path.get("fast_path_search_surface_check_ms") or 0.0
+        ),
+        fast_path_edittext_check_ms=float(
+            parent_fast_path.get("fast_path_edittext_check_ms") or 0.0
+        ),
+        fast_path_direct_edittext_probe_ms=float(
+            parent_fast_path.get("fast_path_direct_edittext_probe_ms") or 0.0
+        ),
+        fast_path_waits_count=int(parent_fast_path.get("fast_path_waits_count") or 0),
+        fast_path_timeout_reason=str(parent_fast_path.get("fast_path_timeout_reason") or ""),
+        fast_path_mode=str(parent_fast_path.get("fast_path_mode") or ""),
+        fast_path_parent_proof_used=bool(
+            parent_fast_path.get("fast_path_parent_proof_used")
+        ),
+        typing_precheck_edittext_reused=bool(
+            type_perf.get("typing_precheck_edittext_reused")
+        ),
     )
     return thread_state, thread_state not in ("unknown",)
 
@@ -2039,8 +2605,10 @@ def execute_dm_job_real_send(
     settings: dict[str, Any],
     account_id: str,
     account_username: str = "",
+    run_id: str | None = None,
     previous_username: str | None = None,
     restore_search_after_job: bool = True,
+    parent_search_ready: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Claimed job → navigate → send or skip/fail terminal complete."""
     _ = account_id
@@ -2087,9 +2655,12 @@ def execute_dm_job_real_send(
             d,
             recipient,
             pkg=pkg,
+            account_id=account_id,
+            run_id=run_id,
             account_username=account_username,
             dm_type=dm_type,
             previous_username=previous_username,
+            parent_search_ready=parent_search_ready,
         )
         nav_timings = _get_dm_sender_nav_timings()
         snap = get_last_dm_thread_classify_snapshot()
@@ -2226,6 +2797,54 @@ def execute_dm_job_real_send(
         "search_ms": float(nav_timings.get("search_ms") or 0.0),
         "thread_open_ms": float(nav_timings.get("thread_open_ms") or 0.0),
         "post_job_ms": post_job_ms,
+        "parent_search_ready_fast_path_attempted": bool(
+            nav_timings.get("parent_search_ready_fast_path_attempted")
+        ),
+        "parent_search_ready_fast_path_used": bool(
+            nav_timings.get("parent_search_ready_fast_path_used")
+        ),
+        "parent_search_ready_fast_path_reject_reason": str(
+            nav_timings.get("parent_search_ready_fast_path_reject_reason") or ""
+        ),
+        "search_surface_age_ms": nav_timings.get("search_surface_age_ms"),
+        "sender_prepare_reused_search_surface": bool(
+            nav_timings.get("sender_prepare_reused_search_surface")
+        ),
+        "sender_prepare_lightweight_verify_ms": float(
+            nav_timings.get("sender_prepare_lightweight_verify_ms") or 0.0
+        ),
+        "sender_prepare_full_open_search_ms": float(
+            nav_timings.get("sender_prepare_full_open_search_ms") or 0.0
+        ),
+        "fast_path_total_verify_ms": float(
+            nav_timings.get("fast_path_total_verify_ms") or 0.0
+        ),
+        "fast_path_foreground_check_ms": float(
+            nav_timings.get("fast_path_foreground_check_ms") or 0.0
+        ),
+        "fast_path_no_dm_thread_check_ms": float(
+            nav_timings.get("fast_path_no_dm_thread_check_ms") or 0.0
+        ),
+        "fast_path_search_surface_check_ms": float(
+            nav_timings.get("fast_path_search_surface_check_ms") or 0.0
+        ),
+        "fast_path_edittext_check_ms": float(
+            nav_timings.get("fast_path_edittext_check_ms") or 0.0
+        ),
+        "fast_path_direct_edittext_probe_ms": float(
+            nav_timings.get("fast_path_direct_edittext_probe_ms") or 0.0
+        ),
+        "fast_path_waits_count": int(nav_timings.get("fast_path_waits_count") or 0),
+        "fast_path_timeout_reason": str(
+            nav_timings.get("fast_path_timeout_reason") or ""
+        ),
+        "fast_path_mode": str(nav_timings.get("fast_path_mode") or ""),
+        "fast_path_parent_proof_used": bool(
+            nav_timings.get("fast_path_parent_proof_used")
+        ),
+        "typing_precheck_edittext_reused": bool(
+            nav_timings.get("typing_precheck_edittext_reused")
+        ),
     }
 
 
@@ -2237,6 +2856,7 @@ def run_dm_sender_send(
     run_id: str | None = None,
     max_jobs: int | None = None,
     dm_type: str | None = None,
+    parent_search_ready: dict[str, Any] | None = None,
 ) -> tuple[int, dict[str, Any]]:
     """
     Real Welcome DM send: claim → navigate → type job.message_body → send → complete.
@@ -2255,6 +2875,16 @@ def run_dm_sender_send(
     real_enabled, real_source = _resolve_dm_sender_real_send_enabled()
     reserved_by = _resolve_reserved_by(d)
     only_job_id, filter_source = _resolve_dm_sender_only_job_id()
+    parent_verified_at = None
+    parent_signal_age_at_sender_start_ms = None
+    if parent_search_ready:
+        try:
+            parent_verified_at = float(parent_search_ready.get("verified_at_monotonic"))
+            parent_signal_age_at_sender_start_ms = round(
+                (time.perf_counter() - parent_verified_at) * 1000.0, 2
+            )
+        except (TypeError, ValueError):
+            parent_verified_at = None
 
     summary: dict[str, Any] = {
         "account_id": aid,
@@ -2280,6 +2910,16 @@ def run_dm_sender_send(
         "total_post_job_ms": 0.0,
         "total_search_ms": 0.0,
         "total_thread_open_ms": 0.0,
+        "parent_search_ready_fast_path_used": False,
+        "parent_search_ready_fast_path_reject_reason": "",
+        "search_surface_age_ms": None,
+        "sender_prepare_reused_search_surface": False,
+        "sender_prepare_lightweight_verify_ms": 0.0,
+        "sender_prepare_full_open_search_ms": 0.0,
+        "fast_path_total_verify_ms": 0.0,
+        "fast_path_mode": "",
+        "fast_path_parent_proof_used": False,
+        "typing_precheck_edittext_reused": False,
     }
 
     log(
@@ -2292,6 +2932,12 @@ def run_dm_sender_send(
         reserved_by=reserved_by,
         real_send_enabled=real_enabled,
         real_send_source=real_source,
+        parent_search_ready_verified=bool((parent_search_ready or {}).get("verified")),
+        parent_search_ready_verified_at_source=str(
+            (parent_search_ready or {}).get("verified_at_source") or ""
+        )
+        or None,
+        parent_signal_age_at_sender_start_ms=parent_signal_age_at_sender_start_ms,
     )
     log(
         "info",
@@ -2321,8 +2967,26 @@ def run_dm_sender_send(
     last_result: dict[str, Any] = {}
     last_recipient_username = ""
     for job_index in range(max_jobs):
+        t_claim = time.perf_counter()
         job = _claim_job_for_run(
             aid, reserved_by, dm_type=dm_type_resolved, only_job_id=only_job_id
+        )
+        claim_ms = round((time.perf_counter() - t_claim) * 1000.0, 2)
+        parent_signal_age_after_claim_ms = None
+        if parent_verified_at is not None:
+            parent_signal_age_after_claim_ms = round(
+                (time.perf_counter() - parent_verified_at) * 1000.0, 2
+            )
+        log(
+            "info",
+            "dm_sender_job_claim_timing",
+            account_id=aid,
+            run_id=run_id,
+            dm_type=dm_type_resolved,
+            job_index=job_index,
+            job_claim_before_sender_ms=claim_ms,
+            parent_signal_age_at_sender_attempt_ms=parent_signal_age_after_claim_ms,
+            claimed=bool(job),
         )
         if not job:
             log("info", "dm_sender_no_pending_job", account_id=aid, dm_type=dm_type_resolved)
@@ -2338,6 +3002,7 @@ def run_dm_sender_send(
             settings=settings,
             account_id=aid,
             account_username=acct_user,
+            run_id=run_id,
             previous_username=(
                 last_recipient_username
                 if dm_type_resolved == "outreach"
@@ -2346,6 +3011,7 @@ def run_dm_sender_send(
             restore_search_after_job=not (
                 dm_type_resolved == "outreach" and job_index >= max_jobs - 1
             ),
+            parent_search_ready=parent_search_ready,
         )
         summary["total_navigation_ms"] = round(
             float(summary.get("total_navigation_ms") or 0.0)
@@ -2367,6 +3033,36 @@ def run_dm_sender_send(
             + float(last_result.get("thread_open_ms") or 0.0),
             2,
         )
+        if bool(last_result.get("parent_search_ready_fast_path_used")):
+            summary["parent_search_ready_fast_path_used"] = True
+        reject_reason = str(last_result.get("parent_search_ready_fast_path_reject_reason") or "")
+        if reject_reason:
+            summary["parent_search_ready_fast_path_reject_reason"] = reject_reason
+        if last_result.get("search_surface_age_ms") is not None:
+            summary["search_surface_age_ms"] = last_result.get("search_surface_age_ms")
+        if bool(last_result.get("sender_prepare_reused_search_surface")):
+            summary["sender_prepare_reused_search_surface"] = True
+        summary["sender_prepare_lightweight_verify_ms"] = round(
+            float(summary.get("sender_prepare_lightweight_verify_ms") or 0.0)
+            + float(last_result.get("sender_prepare_lightweight_verify_ms") or 0.0),
+            2,
+        )
+        summary["sender_prepare_full_open_search_ms"] = round(
+            float(summary.get("sender_prepare_full_open_search_ms") or 0.0)
+            + float(last_result.get("sender_prepare_full_open_search_ms") or 0.0),
+            2,
+        )
+        summary["fast_path_total_verify_ms"] = round(
+            float(summary.get("fast_path_total_verify_ms") or 0.0)
+            + float(last_result.get("fast_path_total_verify_ms") or 0.0),
+            2,
+        )
+        if str(last_result.get("fast_path_mode") or ""):
+            summary["fast_path_mode"] = str(last_result.get("fast_path_mode") or "")
+        if bool(last_result.get("fast_path_parent_proof_used")):
+            summary["fast_path_parent_proof_used"] = True
+        if bool(last_result.get("typing_precheck_edittext_reused")):
+            summary["typing_precheck_edittext_reused"] = True
         last_recipient_username = recipient
         outcome = str(last_result.get("outcome") or "")
         if outcome == "sent":

@@ -88,10 +88,21 @@ def run_outreach_session(
     account_id: str,
     account_username: str,
     run_id: str | None = None,
+    parent_search_ready: dict[str, Any] | None = None,
 ) -> int:
     t0 = time.perf_counter()
     aid = str(account_id or "").strip()
     uname = str(account_username or "").strip()
+    parent_verified_at = None
+    parent_signal_age_at_outreach_start_ms = None
+    if parent_search_ready:
+        try:
+            parent_verified_at = float(parent_search_ready.get("verified_at_monotonic"))
+            parent_signal_age_at_outreach_start_ms = round(
+                (time.perf_counter() - parent_verified_at) * 1000.0, 2
+            )
+        except (TypeError, ValueError):
+            parent_verified_at = None
 
     log(
         "info",
@@ -100,6 +111,12 @@ def run_outreach_session(
         account_username=uname,
         run_id=run_id,
         dm_type="outreach",
+        parent_search_ready_verified=bool((parent_search_ready or {}).get("verified")),
+        parent_search_ready_verified_at_source=str(
+            (parent_search_ready or {}).get("verified_at_source") or ""
+        )
+        or None,
+        parent_signal_age_at_outreach_start_ms=parent_signal_age_at_outreach_start_ms,
     )
 
     try:
@@ -218,6 +235,22 @@ def run_outreach_session(
         _publish_summary(summary)
         return 0
 
+    t_sender_dispatch = time.perf_counter()
+    parent_signal_age_before_sender_ms = None
+    if parent_verified_at is not None:
+        parent_signal_age_before_sender_ms = round(
+            (t_sender_dispatch - parent_verified_at) * 1000.0, 2
+        )
+    log(
+        "info",
+        "outreach_dispatch_to_sender_started",
+        account_id=aid,
+        run_id=run_id,
+        outreach_dispatch_to_sender_attempt_ms=round(
+            (t_sender_dispatch - t0) * 1000.0, 2
+        ),
+        parent_signal_age_at_sender_attempt_ms=parent_signal_age_before_sender_ms,
+    )
     code, sender_summary = run_dm_sender_send(
         d,
         account_id=aid,
@@ -225,6 +258,7 @@ def run_outreach_session(
         run_id=run_id,
         max_jobs=int(quota["max_jobs_effective"]),
         dm_type="outreach",
+        parent_search_ready=parent_search_ready,
     )
 
     jobs_claimed = _as_nonnegative_int(sender_summary.get("jobs_claimed_count"), 0)
@@ -257,6 +291,16 @@ def run_outreach_session(
         "sendability_failures": sendability_failures,
         "session_status": session_status,
         "exit_code": int(code),
+        "parent_search_ready_fast_path_used": bool(
+            sender_summary.get("parent_search_ready_fast_path_used")
+        ),
+        "parent_search_ready_fast_path_reject_reason": str(
+            sender_summary.get("parent_search_ready_fast_path_reject_reason") or ""
+        ),
+        "search_surface_age_ms": sender_summary.get("search_surface_age_ms"),
+        "sender_prepare_reused_search_surface": bool(
+            sender_summary.get("sender_prepare_reused_search_surface")
+        ),
         "sender_summary": sender_summary,
         "total_ms": round((time.perf_counter() - t0) * 1000.0, 2),
     }
@@ -270,10 +314,12 @@ def dispatch_outreach_session(
     account_id: str,
     account_username: str,
     run_id: str | None = None,
+    parent_search_ready: dict[str, Any] | None = None,
 ) -> int:
     return run_outreach_session(
         d,
         account_id=account_id,
         account_username=account_username,
         run_id=run_id,
+        parent_search_ready=parent_search_ready,
     )

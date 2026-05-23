@@ -11909,6 +11909,17 @@ def main() -> int:
                 "outreach_jobs_sent": int(osum.get("jobs_completed") or 0),
                 "outreach_jobs_skipped": int(osum.get("jobs_skipped") or 0),
                 "outreach_jobs_failed": int(osum.get("jobs_failed") or 0),
+                "outreach_sender_fast_path_used": bool(
+                    osum.get("parent_search_ready_fast_path_used")
+                    or (osum.get("sender_summary") or {}).get("parent_search_ready_fast_path_used")
+                ),
+                "outreach_sender_fast_path_reject_reason": str(
+                    osum.get("parent_search_ready_fast_path_reject_reason")
+                    or (osum.get("sender_summary") or {}).get(
+                        "parent_search_ready_fast_path_reject_reason"
+                    )
+                    or ""
+                ) or None,
                 "parent_status": parent_status,
             }
             log("info", "unfollow_outreach_pipeline_summary", **summary)
@@ -11938,6 +11949,9 @@ def main() -> int:
                 out["ok"] = bool(ok)
                 out["reason"] = str(reason or "")
                 out["duration_ms"] = round((time.perf_counter() - t_search) * 1000.0, 2)
+                if ok:
+                    out["verified_at_monotonic"] = time.perf_counter()
+                    out["verified_at_epoch"] = time.time()
                 return out
 
             log(
@@ -12204,11 +12218,61 @@ def main() -> int:
             )
             return _return_with_cleanup(d, 1)
 
+        parent_search_ready_signal = {
+            "verified": bool(interphase_search_ok),
+            "verified_at_monotonic": interphase_search.get("verified_at_monotonic"),
+            "verified_at_epoch": interphase_search.get("verified_at_epoch"),
+            "verified_at_source": "search_ready_log",
+            "signal_created_at_monotonic": time.perf_counter(),
+            "context": "unfollow_outreach_pipeline",
+            "account_id": account_id,
+            "run_id": run_id or None,
+            "interphase_strategy": interphase_strategy,
+        }
+        parent_signal_created_ms_after_verify = 0.0
+        try:
+            parent_signal_created_ms_after_verify = round(
+                (
+                    float(parent_search_ready_signal["signal_created_at_monotonic"])
+                    - float(parent_search_ready_signal["verified_at_monotonic"])
+                )
+                * 1000.0,
+                2,
+            )
+        except (TypeError, ValueError):
+            parent_signal_created_ms_after_verify = 0.0
+        log(
+            "info",
+            "unfollow_outreach_pipeline_parent_search_ready_signal",
+            account_id=account_id,
+            run_id=run_id or None,
+            parent_search_ready_verified=bool(parent_search_ready_signal["verified"]),
+            parent_search_ready_context=parent_search_ready_signal["context"],
+            interphase_strategy=interphase_strategy,
+            parent_search_ready_verified_at_source=parent_search_ready_signal[
+                "verified_at_source"
+            ],
+            parent_search_ready_signal_created_ms_after_strict_verify=(
+                parent_signal_created_ms_after_verify
+            ),
+        )
+
+        t_outreach_dispatch = time.perf_counter()
         out_code = dispatch_outreach_session(
             d,
             account_id=account_id,
             account_username=account_username,
             run_id=run_id or None,
+            parent_search_ready=parent_search_ready_signal,
+        )
+        log(
+            "info",
+            "unfollow_outreach_pipeline_outreach_dispatch_completed",
+            account_id=account_id,
+            run_id=run_id or None,
+            parent_to_outreach_dispatch_ms=round(
+                (time.perf_counter() - t_outreach_dispatch) * 1000.0, 2
+            ),
         )
         out_summary = get_last_outreach_session_summary()
 
