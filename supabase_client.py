@@ -156,6 +156,55 @@ def load_account(account_id: str | None = None, username: str | None = None) -> 
     return rows[0]
 
 
+def load_open_account_assignment_for_dispatch(account_id: str) -> dict[str, Any] | None:
+    """Read the latest reserved/active assignment with device and clone context."""
+    aid = (account_id or "").strip()
+    if not aid:
+        raise ValueError("account_id is required")
+
+    assignment_rows = _request_json(
+        "GET",
+        "account_assignments",
+        query={
+            "select": "*",
+            "account_id": f"eq.{aid}",
+            "status": "in.(reserved,active)",
+            "order": "created_at.desc",
+            "limit": "1",
+        },
+    ) or []
+    if not assignment_rows:
+        return None
+
+    assignment = dict(assignment_rows[0])
+    device_id = str(assignment.get("device_id") or "").strip()
+    clone_id = str(assignment.get("clone_id") or "").strip()
+
+    device: dict[str, Any] = {}
+    if device_id:
+        device_rows = _request_json(
+            "GET",
+            "phone_devices",
+            query={"select": "*", "id": f"eq.{device_id}", "limit": "1"},
+        ) or []
+        if device_rows:
+            device = dict(device_rows[0])
+
+    clone: dict[str, Any] = {}
+    if clone_id:
+        clone_rows = _request_json(
+            "GET",
+            "phone_clones",
+            query={"select": "*", "id": f"eq.{clone_id}", "limit": "1"},
+        ) or []
+        if clone_rows:
+            clone = dict(clone_rows[0])
+
+    assignment["phone_device"] = device
+    assignment["phone_clone"] = clone
+    return assignment
+
+
 def load_pending_targets(account_id: str, limit: int = 25) -> list[dict[str, Any]]:
     # Eligible queue rows only. Excludes terminal statuses (e.g. completed, failed, success,
     # send_blocked_tested) because they are not pending or queued.

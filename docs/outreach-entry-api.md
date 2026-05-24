@@ -349,6 +349,59 @@ Future work:
 - Entry 2D/2E should handle credentials, provisioning, login, 2FA, and
   checkpoint flows.
 
+## Entry 2C-3 Worker Assignment Dispatch Resolver
+
+Entry 2C-3 v1 connects only the Python worker startup path for
+`run_type=outreach_session` to the Entry 2C assignment model. The resolver is
+read-only and resolves:
+
+```text
+account_id + run_type
+  -> account_assignments(status in reserved, active)
+  -> phone_clones
+  -> phone_devices
+  -> adb_serial for local worker connect_device(...)
+```
+
+Feature flags are OFF by default:
+
+- `ACCOUNT_ASSIGNMENT_DISPATCH_ENABLED=false`
+- `ACCOUNT_ASSIGNMENT_DISPATCH_REQUIRE_ASSIGNMENT=false`
+- `ACCOUNT_ASSIGNMENT_DISPATCH_ENFORCE_WINDOW=false`
+- `ACCOUNT_ASSIGNMENT_DISPATCH_RUN_TYPES=outreach_session`
+- `ACCOUNT_ASSIGNMENT_DISPATCH_LOG_SENSITIVE=false`
+
+When disabled, the worker keeps the legacy `DEVICE_SERIAL` / default ADB
+behavior. When enabled for `outreach_session`, the worker reads the latest
+`reserved` or `active` assignment for the target account, validates that its
+`assignment_type` is `outreach_only` or `full_cycle`, and uses the assignment
+device `adb_serial` as a local variable before `connect_device(...)`.
+
+Entry 2C-3 v1 deliberately does not:
+
+- mutate `account_assignments.status` from `reserved` to `active`;
+- release assignments at session end;
+- implement the business 6h session guard or phone rest runtime;
+- provision credentials, auto-login, relogin, 2FA, or checkpoint flows;
+- dispatch `account_session`, unfollow, welcome, or follow sessions from
+  assignments;
+- change sender/orchestrator behavior or quotas.
+
+Logs use stable events such as `account_assignment_dispatch_resolved`,
+`account_assignment_dispatch_missing`,
+`account_assignment_dispatch_incompatible`,
+`account_assignment_dispatch_fallback_legacy`, and
+`account_assignment_dispatch_window_inactive`. Sensitive ops fields such as
+`adb_serial`, `device_udid`, host, hub label, and hub port are redacted by
+default; only a serial suffix/hash is logged unless the explicit ops flag is
+enabled.
+
+Roadmap note: an Ops Realtime Foundation can later add `runtime_events`,
+`worker_heartbeats`, `device_heartbeats`, and rate limiter signals. Supabase
+Realtime is the V1 target for that foundation; Redis can remain an optional V2.
+No Realtime, Redis, scheduler, or rate limiter implementation is part of
+Entry 2C-3 v1.
+
 ## Remote Secrets
 
 Remote Edge Function secrets must be configured on the Supabase project before

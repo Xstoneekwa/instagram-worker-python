@@ -38,6 +38,25 @@ INSTAGRAM_PACKAGE = "com.instagram.android"
 # None = use default device from adb / uiautomator2
 DEVICE_SERIAL = None
 
+# Entry 2C-3 assignment dispatch is opt-in and read-only by default.
+ACCOUNT_ASSIGNMENT_DISPATCH_ENABLED = _env_bool("ACCOUNT_ASSIGNMENT_DISPATCH_ENABLED", False)
+ACCOUNT_ASSIGNMENT_DISPATCH_REQUIRE_ASSIGNMENT = _env_bool(
+    "ACCOUNT_ASSIGNMENT_DISPATCH_REQUIRE_ASSIGNMENT",
+    False,
+)
+ACCOUNT_ASSIGNMENT_DISPATCH_ENFORCE_WINDOW = _env_bool(
+    "ACCOUNT_ASSIGNMENT_DISPATCH_ENFORCE_WINDOW",
+    False,
+)
+ACCOUNT_ASSIGNMENT_DISPATCH_RUN_TYPES = os.getenv(
+    "ACCOUNT_ASSIGNMENT_DISPATCH_RUN_TYPES",
+    "outreach_session",
+)
+ACCOUNT_ASSIGNMENT_DISPATCH_LOG_SENSITIVE = _env_bool(
+    "ACCOUNT_ASSIGNMENT_DISPATCH_LOG_SENSITIVE",
+    False,
+)
+
 # ADBKeyboard (optional). Low-latency ADB_INPUT_TEXT broadcast when installed.
 FAST_IME = "com.android.adbkeyboard/.AdbIME"
 

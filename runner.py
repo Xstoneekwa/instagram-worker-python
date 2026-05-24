@@ -35,6 +35,10 @@ from visual_follow_history import (
 
 import config
 import supabase_client
+from assignment_dispatch_resolver import (
+    resolve_account_assignment_runtime_context,
+    sensitive_log_fields,
+)
 from device import (
     app_start,
     check_instagram_version_lock,
@@ -392,6 +396,11 @@ def _is_supabase_mode(args: argparse.Namespace) -> bool:
 
 def _parse_run_type(args: argparse.Namespace) -> str:
     return str(getattr(args, "run_type", "") or "").strip().lower()
+
+
+def _account_assignment_dispatch_run_types() -> set[str]:
+    raw = str(getattr(config, "ACCOUNT_ASSIGNMENT_DISPATCH_RUN_TYPES", "") or "")
+    return {part.strip().lower() for part in raw.split(",") if part.strip()}
 
 
 def _is_welcome_baseline_run(args: argparse.Namespace) -> bool:
@@ -11502,11 +11511,87 @@ def main() -> int:
     t = t_session
     warm_session_used = False
     force_stop_used = False
+    device_serial = config.DEVICE_SERIAL
 
-    d = connect_device(config.DEVICE_SERIAL)
+    dispatch_run_type = _parse_run_type(args)
+    if bool(getattr(config, "ACCOUNT_ASSIGNMENT_DISPATCH_ENABLED", False)):
+        dispatch_run_types = _account_assignment_dispatch_run_types()
+        if dispatch_run_type not in dispatch_run_types:
+            log(
+                "info",
+                "account_assignment_dispatch_disabled",
+                account_id=account_id or None,
+                run_type=dispatch_run_type or None,
+                reason="run_type_not_enabled",
+                fallback_used=True,
+            )
+        else:
+            dispatch_ctx = resolve_account_assignment_runtime_context(
+                account_id,
+                dispatch_run_type,
+                require_assignment=bool(
+                    getattr(config, "ACCOUNT_ASSIGNMENT_DISPATCH_REQUIRE_ASSIGNMENT", False)
+                ),
+                enforce_window=bool(
+                    getattr(config, "ACCOUNT_ASSIGNMENT_DISPATCH_ENFORCE_WINDOW", False)
+                ),
+            )
+            dispatch_log_fields = sensitive_log_fields(
+                dispatch_ctx,
+                include_sensitive=bool(
+                    getattr(config, "ACCOUNT_ASSIGNMENT_DISPATCH_LOG_SENSITIVE", False)
+                ),
+            )
+            if bool(dispatch_ctx.get("assignment_found")):
+                device_serial = str(dispatch_ctx.get("adb_serial") or "").strip() or device_serial
+                log("info", "account_assignment_dispatch_resolved", **dispatch_log_fields)
+            else:
+                dispatch_reason = str(dispatch_ctx.get("reason") or "assignment_not_found")
+                dispatch_requires_assignment = bool(
+                    getattr(config, "ACCOUNT_ASSIGNMENT_DISPATCH_REQUIRE_ASSIGNMENT", False)
+                )
+                dispatch_incompatible = dispatch_reason in {
+                    "assignment_type_incompatible",
+                    "device_adb_serial_missing",
+                }
+                dispatch_window_inactive = dispatch_reason == "assignment_window_inactive"
+                if dispatch_incompatible:
+                    dispatch_event = "account_assignment_dispatch_incompatible"
+                    dispatch_exit_code = 13
+                elif dispatch_window_inactive:
+                    dispatch_event = "account_assignment_dispatch_window_inactive"
+                    dispatch_exit_code = 12
+                elif dispatch_requires_assignment:
+                    dispatch_event = "account_assignment_dispatch_missing"
+                    dispatch_exit_code = 12
+                else:
+                    dispatch_event = "account_assignment_dispatch_fallback_legacy"
+                    dispatch_exit_code = 0
+
+                log(
+                    "error" if dispatch_exit_code else "warning",
+                    dispatch_event,
+                    **dispatch_log_fields,
+                )
+                if dispatch_exit_code:
+                    log("error", "run_aborted", reason=dispatch_reason)
+                    if supabase_mode and run_id:
+                        _update_run_status_safe(
+                            run_id=run_id,
+                            status="failed",
+                            totals={"total": len(targets), "success": 0, "failed": len(targets)},
+                            performance_summary={
+                                "reason": dispatch_reason,
+                                "run_type": dispatch_run_type or None,
+                                "assignment_dispatch_context": dispatch_log_fields,
+                            },
+                        )
+                    return dispatch_exit_code
+
+    d = connect_device(device_serial)
     t = _phase("connect_device", t)
 
-    disable_android_animations(config.DEVICE_SERIAL)
+    disable_android_animations(device_serial)
     t = _phase("disable_android_animations", t)
 
     if not health_check(d):
