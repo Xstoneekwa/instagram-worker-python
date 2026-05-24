@@ -272,11 +272,82 @@ Relation to existing `ig_accounts` operational fields:
 
 Roadmap after Entry 2C:
 
-- Entry 2C-2: optional auto-assign RPC and richer timeslot catalog;
+- Entry 2C-2: auto-assign RPC;
 - Entry 2C-3: worker/dispatcher reads assignments and resolves host/device/clone;
 - B3: business session 6h window guard and phone rest/runtime scheduler;
 - Entry 2D: credential onboarding, password update, and secret references;
 - Entry 2E: provisioning jobs, login/relogin/2FA/checkpoint handling.
+
+## Entry 2C-2 Auto-Assign Helper
+
+Entry 2C-2 adds a service-role SQL helper:
+
+```sql
+public.auto_assign_account_from_subscription(
+  p_subscription_account_id uuid,
+  p_starts_at timestamptz,
+  p_ends_at timestamptz,
+  p_preferred_device_id uuid default null,
+  p_preferred_clone_id uuid default null,
+  p_metadata jsonb default '{}'::jsonb
+)
+```
+
+The function reserves one available clone for an account-scoped subscription and
+creates `account_assignments.status='reserved'`. It returns the assignment,
+device, clone, account, subscription, assignment type, slot kind, and requested
+window as JSON.
+
+Security:
+
+- the function is `SECURITY DEFINER`;
+- execution is service-role only;
+- `PUBLIC`, `anon`, and `authenticated` must not have execute privileges;
+- Entry 2C-2 includes a corrective grants migration to keep
+  `anon_can_execute=false`, `authenticated_can_execute=false`, and
+  `service_role_can_execute=true`.
+
+Selection policy:
+
+- `client_subscription_accounts.status` must be `active`;
+- `client_subscriptions.status` must be `active` for `p_starts_at`;
+- `p_ends_at` must be greater than `p_starts_at`;
+- no open assignment may already exist for the same `account_id`;
+- `assignment_type` comes from `client_subscriptions.subscription_type`;
+- `slot_kind` is `full_cycle_6h` for `full_cycle` and `outreach_short` for
+  `outreach_only`;
+- eligible devices have `status in ('available', 'active')`;
+- eligible devices use the exact matching pool or `shared`;
+- eligible clones must have `status='available'`;
+- clone windows must not overlap an open assignment;
+- preferred device/clone IDs are honored only if compatible.
+
+The clone candidate is locked with `FOR UPDATE SKIP LOCKED`, and Entry 2C
+constraints/triggers still act as the final guard for account double assignment,
+pool/type mismatches, and clone window overlap.
+
+Status update policy:
+
+- inserts `account_assignments.status='reserved'`;
+- sets `phone_clones.status='reserved'`;
+- sets `phone_clones.current_account_id` to the assigned account;
+- does **not** update `phone_devices.status`;
+- treats `account_assignments` as the source of truth.
+
+Entry 2C-2 deliberately does not add a timeslot catalog. The requested
+`starts_at`/`ends_at` window is stored directly on the assignment. Future
+scheduler work may add a richer catalog and may safely support planning on
+currently reserved/active clones. In v1, clones must be `available` to avoid
+ambiguity around logged-in accounts and warm sessions.
+
+Future work:
+
+- `release_assignment(...)` should release the assignment and restore clone
+  availability;
+- Entry 2C-3 should connect worker dispatch to assignment/device/clone routing;
+- B3 should enforce runtime session windows and phone rest;
+- Entry 2D/2E should handle credentials, provisioning, login, 2FA, and
+  checkpoint flows.
 
 ## Remote Secrets
 
