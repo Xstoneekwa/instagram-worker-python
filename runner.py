@@ -12011,7 +12011,9 @@ def main() -> int:
         from outreach_session_orchestrator import (
             dispatch_outreach_session,
             get_last_outreach_session_summary,
+            prepare_outreach_session,
         )
+        from dm_sender_engine import release_prepared_dm_jobs
 
         log(
             "info",
@@ -12147,6 +12149,87 @@ def main() -> int:
             selected_external_job_id=explicit_job_id or None,
         )
 
+        outreach_prepare = prepare_outreach_session(
+            d,
+            account_id=account_id,
+            account_username=account_username,
+            run_id=run_id or None,
+            reject_unfollow_handoff_jobs=True,
+        )
+        prepared_jobs = list(outreach_prepare.get("prepared_jobs") or [])
+        prepared_jobs_count = int(outreach_prepare.get("prepared_jobs_count") or 0)
+        prepare_status = str(outreach_prepare.get("session_status") or "")
+        log(
+            "info",
+            "unfollow_outreach_pipeline_outreach_prepare_completed",
+            account_id=account_id,
+            run_id=run_id or None,
+            outreach_prepare_status=prepare_status,
+            outreach_prepare_jobs_count=prepared_jobs_count,
+            outreach_prepare_ms=outreach_prepare.get("outreach_prepare_ms"),
+        )
+        if prepare_status == "no_quota":
+            _publish_pipeline_summary(
+                parent_status="outreach_no_quota",
+                exit_code=0,
+                unfollow_exit_code=int(unf_code),
+                unfollow_summary=unf_summary,
+                outreach_job_selection_mode=outreach_job_selection_mode,
+                selected_external_job_id=explicit_job_id,
+                outreach_exit_code=0,
+                outreach_summary=outreach_prepare,
+            )
+            reset_perf_counters()
+            _emit_performance_summary(
+                t0=t_session,
+                warm_session_used=warm_session_used,
+                force_stop_used=force_stop_used,
+                exit_code=0,
+                target_username=account_username,
+            )
+            return _return_with_cleanup(d, 0)
+        if int(outreach_prepare.get("exit_code") or 0) != 0:
+            _publish_pipeline_summary(
+                parent_status="outreach_failed",
+                exit_code=1,
+                unfollow_exit_code=int(unf_code),
+                unfollow_summary=unf_summary,
+                outreach_job_selection_mode=outreach_job_selection_mode,
+                selected_external_job_id=explicit_job_id,
+                outreach_exit_code=int(outreach_prepare.get("exit_code") or 1),
+                outreach_summary=outreach_prepare,
+            )
+            reset_perf_counters()
+            _emit_performance_summary(
+                t0=t_session,
+                warm_session_used=warm_session_used,
+                force_stop_used=force_stop_used,
+                exit_code=1,
+                target_username=account_username,
+            )
+            return _return_with_cleanup(d, 1)
+        if prepared_jobs_count <= 0:
+            _publish_pipeline_summary(
+                parent_status="no_external_outreach_job",
+                exit_code=0,
+                unfollow_exit_code=int(unf_code),
+                unfollow_summary=unf_summary,
+                outreach_job_selection_mode=outreach_job_selection_mode,
+                selected_external_job_id=explicit_job_id,
+                outreach_exit_code=int(outreach_prepare.get("exit_code") or 0),
+                outreach_summary=outreach_prepare,
+            )
+            reset_perf_counters()
+            _emit_performance_summary(
+                t0=t_session,
+                warm_session_used=warm_session_used,
+                force_stop_used=force_stop_used,
+                exit_code=0,
+                target_username=account_username,
+            )
+            return _return_with_cleanup(d, 0)
+
+        t_search_ready_after_prepare = time.perf_counter()
         interphase_search = _prepare_unfollow_outreach_interphase_search_ready()
         interphase_search_ok = bool(interphase_search.get("ok"))
         interphase_strategy = "search_ready" if interphase_search_ok else "force_stop_fallback"
@@ -12164,6 +12247,9 @@ def main() -> int:
             duration_ms=interphase_search.get("duration_ms"),
             reused_helper_name=str(interphase_search.get("reused_helper_name") or ""),
             fallback_planned=not interphase_search_ok,
+            search_ready_after_prepare_ms=round(
+                (time.perf_counter() - t_search_ready_after_prepare) * 1000.0, 2
+            ),
         )
 
         if not interphase_search_ok:
@@ -12194,6 +12280,10 @@ def main() -> int:
                 interphase_strategy=interphase_strategy,
             )
         if not interphase_cleanup_ok:
+            release_out = release_prepared_dm_jobs(
+                prepared_jobs,
+                reason="unfollow_outreach_pipeline_search_ready_failed",
+            )
             _publish_pipeline_summary(
                 parent_status="outreach_failed",
                 exit_code=1,
@@ -12207,6 +12297,12 @@ def main() -> int:
                 interphase_search_ready_reason=str(interphase_search.get("reason") or ""),
                 reused_helper_name=str(interphase_search.get("reused_helper_name") or ""),
                 interphase_cleanup_ok=False,
+                outreach_summary={
+                    **outreach_prepare,
+                    "jobs_released_or_requeued_on_search_ready_failure": release_out.get(
+                        "released_count"
+                    ),
+                },
             )
             reset_perf_counters()
             _emit_performance_summary(
@@ -12258,12 +12354,14 @@ def main() -> int:
         )
 
         t_outreach_dispatch = time.perf_counter()
+        t_search_ready_to_sender = time.perf_counter()
         out_code = dispatch_outreach_session(
             d,
             account_id=account_id,
             account_username=account_username,
             run_id=run_id or None,
             parent_search_ready=parent_search_ready_signal,
+            prepared_outreach=outreach_prepare,
         )
         log(
             "info",
@@ -12272,6 +12370,9 @@ def main() -> int:
             run_id=run_id or None,
             parent_to_outreach_dispatch_ms=round(
                 (time.perf_counter() - t_outreach_dispatch) * 1000.0, 2
+            ),
+            search_ready_to_outreach_session_completed_ms=round(
+                (time.perf_counter() - t_search_ready_to_sender) * 1000.0, 2
             ),
         )
         out_summary = get_last_outreach_session_summary()

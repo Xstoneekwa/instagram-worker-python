@@ -3441,6 +3441,7 @@ def type_search(
             reason="follow_ct_bootstrap_strict_recent_no_previous_query",
         )
     else:
+        t_clear = time.perf_counter()
         ok_clear, clear_method = clear_search_field_robust(
             d,
             serial,
@@ -3448,11 +3449,14 @@ def type_search(
             previous_username=previous_username,
             intended_username=username,
         )
+        clear_ms = (time.perf_counter() - t_clear) * 1000
+        _perf["post_job_clear_previous_username_ms"] = clear_ms
         log(
             "info",
             "search_field_clear_method",
             search_field_clear_method=clear_method,
             ok=ok_clear,
+            post_job_clear_previous_username_ms=round(clear_ms, 2),
         )
         if not ok_clear:
             _TYPE_SEARCH_FAILURE_REASON = "search_field_not_cleared"

@@ -54,6 +54,7 @@ from logs import log
 _DM_SENDER_GLOBAL_SEARCH_READY: dict[str, Any] = {}
 _DM_SENDER_SESSION_ABORT_PERMISSION: bool = False
 _LAST_DM_SENDER_NAV_TIMINGS: dict[str, float] = {}
+_LAST_DM_SENDER_POST_JOB_RESTORE: dict[str, Any] = {}
 
 _TRUSTED_GLOBAL_SEARCH_CONTEXTS = frozenset(
     {
@@ -133,6 +134,8 @@ def _reset_dm_sender_nav_timings() -> None:
     global _LAST_DM_SENDER_NAV_TIMINGS
     _LAST_DM_SENDER_NAV_TIMINGS = {
         "navigation_ms": 0.0,
+        "navigation_to_username_typed_total_ms": 0.0,
+        "sender_prepare_to_open_search_ms": 0.0,
         "search_ms": 0.0,
         "thread_open_ms": 0.0,
         "parent_search_ready_fast_path_attempted": False,
@@ -153,12 +156,15 @@ def _reset_dm_sender_nav_timings() -> None:
         "fast_path_mode": "",
         "fast_path_parent_proof_used": False,
         "typing_precheck_edittext_reused": False,
+        "post_job_clear_previous_username_ms": 0.0,
     }
 
 
 def _set_dm_sender_nav_timings(
     *,
     navigation_ms: float = 0.0,
+    navigation_to_username_typed_total_ms: float = 0.0,
+    sender_prepare_to_open_search_ms: float = 0.0,
     search_ms: float = 0.0,
     thread_open_ms: float = 0.0,
     parent_search_ready_fast_path_attempted: bool = False,
@@ -179,10 +185,17 @@ def _set_dm_sender_nav_timings(
     fast_path_mode: str = "",
     fast_path_parent_proof_used: bool = False,
     typing_precheck_edittext_reused: bool = False,
+    post_job_clear_previous_username_ms: float = 0.0,
 ) -> None:
     global _LAST_DM_SENDER_NAV_TIMINGS
     _LAST_DM_SENDER_NAV_TIMINGS = {
         "navigation_ms": round(max(0.0, float(navigation_ms or 0.0)), 2),
+        "navigation_to_username_typed_total_ms": round(
+            max(0.0, float(navigation_to_username_typed_total_ms or 0.0)), 2
+        ),
+        "sender_prepare_to_open_search_ms": round(
+            max(0.0, float(sender_prepare_to_open_search_ms or 0.0)), 2
+        ),
         "search_ms": round(max(0.0, float(search_ms or 0.0)), 2),
         "thread_open_ms": round(max(0.0, float(thread_open_ms or 0.0)), 2),
         "parent_search_ready_fast_path_attempted": bool(parent_search_ready_fast_path_attempted),
@@ -225,11 +238,109 @@ def _set_dm_sender_nav_timings(
         "fast_path_mode": str(fast_path_mode or ""),
         "fast_path_parent_proof_used": bool(fast_path_parent_proof_used),
         "typing_precheck_edittext_reused": bool(typing_precheck_edittext_reused),
+        "post_job_clear_previous_username_ms": round(
+            max(0.0, float(post_job_clear_previous_username_ms or 0.0)), 2
+        ),
     }
 
 
 def _get_dm_sender_nav_timings() -> dict[str, float]:
     return dict(_LAST_DM_SENDER_NAV_TIMINGS)
+
+
+def _reset_dm_sender_post_job_restore() -> None:
+    global _LAST_DM_SENDER_POST_JOB_RESTORE
+    _LAST_DM_SENDER_POST_JOB_RESTORE = {
+        "post_job_restore_mode": "",
+        "post_job_restore_final_mode": "",
+        "post_job_restore_final_reason": "",
+        "post_job_back_to_previous_search_attempted": False,
+        "post_job_previous_search_results_detected": False,
+        "post_job_previous_search_username_present": False,
+        "post_job_reuse_previous_search_surface_ms": 0.0,
+        "post_job_fallback_open_search_reason": "",
+        "post_job_restore_attempts_count": 0,
+        "post_job_restore_used_fresh_open_search": False,
+        "post_job_restore_used_back_stack": False,
+        "post_job_restore_success_after_retry": False,
+    }
+
+
+def _set_dm_sender_post_job_restore(**values: Any) -> None:
+    global _LAST_DM_SENDER_POST_JOB_RESTORE
+    if not _LAST_DM_SENDER_POST_JOB_RESTORE:
+        _reset_dm_sender_post_job_restore()
+    _LAST_DM_SENDER_POST_JOB_RESTORE.update(values)
+
+
+def _get_dm_sender_post_job_restore() -> dict[str, Any]:
+    return dict(_LAST_DM_SENDER_POST_JOB_RESTORE)
+
+
+def _record_dm_sender_post_job_restore_attempt(
+    *,
+    attempt: str,
+    ok: bool,
+    reason: str = "",
+    final_mode: str = "",
+    used_back_stack: bool = False,
+    used_fresh_open_search: bool = False,
+    success_after_retry: bool = False,
+    previous_username_present: bool | None = None,
+    reuse_ms: float | None = None,
+) -> None:
+    state = _get_dm_sender_post_job_restore()
+    attempts_count = int(state.get("post_job_restore_attempts_count") or 0) + 1
+    updates: dict[str, Any] = {
+        "post_job_restore_attempts_count": attempts_count,
+        "post_job_restore_used_back_stack": bool(
+            state.get("post_job_restore_used_back_stack") or used_back_stack
+        ),
+        "post_job_restore_used_fresh_open_search": bool(
+            state.get("post_job_restore_used_fresh_open_search") or used_fresh_open_search
+        ),
+        "post_job_restore_success_after_retry": bool(
+            state.get("post_job_restore_success_after_retry") or success_after_retry
+        ),
+    }
+    if final_mode:
+        updates["post_job_restore_mode"] = final_mode
+        updates["post_job_restore_final_mode"] = final_mode
+        updates["post_job_restore_final_reason"] = reason
+        if final_mode != "fresh_open_search_used":
+            updates["post_job_fallback_open_search_reason"] = ""
+    if final_mode in (
+        "previous_search_results_reused",
+        "previous_search_results_reused_after_retry",
+    ):
+        updates["post_job_previous_search_results_detected"] = True
+    if previous_username_present is not None:
+        updates["post_job_previous_search_username_present"] = bool(previous_username_present)
+    if reuse_ms is not None:
+        updates["post_job_reuse_previous_search_surface_ms"] = round(
+            max(0.0, float(reuse_ms or 0.0)), 2
+        )
+    if final_mode == "fresh_open_search_used":
+        updates["post_job_fallback_open_search_reason"] = reason
+    elif not ok and reason:
+        updates["post_job_restore_final_reason"] = reason
+    _set_dm_sender_post_job_restore(**updates)
+    log(
+        "info" if ok else "warning",
+        "post_job_restore_attempt_result",
+        post_job_restore_attempt=str(attempt or ""),
+        ok=bool(ok),
+        reason=str(reason or "") or None,
+        post_job_restore_final_mode=str(final_mode or "") or None,
+        post_job_restore_attempts_count=attempts_count,
+        post_job_restore_used_fresh_open_search=bool(updates["post_job_restore_used_fresh_open_search"]),
+        post_job_restore_used_back_stack=bool(updates["post_job_restore_used_back_stack"]),
+        post_job_restore_success_after_retry=bool(updates["post_job_restore_success_after_retry"]),
+    )
+
+
+def _normalize_dm_sender_handle(value: str) -> str:
+    return str(value or "").strip().lstrip("@").lower()
 
 
 def _check_dm_sender_permission_blocker(
@@ -1080,6 +1191,11 @@ def prepare_dm_sender_global_search_surface(
         return False
 
     if context == "dm_sender_post_job" and prefer_back_stack_to_search:
+        t_restore = time.perf_counter()
+        _set_dm_sender_post_job_restore(
+            post_job_back_to_previous_search_attempted=True,
+            post_job_restore_used_back_stack=True,
+        )
         log(
             "info",
             "dm_sender_post_job_back_stack_fast_path_started",
@@ -1111,7 +1227,239 @@ def prepare_dm_sender_global_search_surface(
                             account_username=src or None,
                             method="back_stack_fast_path",
                         )
+                        _set_dm_sender_post_job_restore(
+                            post_job_previous_search_results_detected=True,
+                            post_job_reuse_previous_search_surface_ms=round(
+                                (time.perf_counter() - t_restore) * 1000.0, 2
+                            ),
+                        )
+                        _record_dm_sender_post_job_restore_attempt(
+                            attempt="already_on_search",
+                            ok=True,
+                            reason="already_search_verified",
+                            final_mode="previous_search_results_reused",
+                            used_back_stack=True,
+                            reuse_ms=(time.perf_counter() - t_restore) * 1000.0,
+                        )
                         return True
+                start_dm_thread_visible = bool(is_dm_thread_screen(d, pkg))
+                start_composer_visible = bool(_dm_sender_composer_visible_quick(d))
+                start_screen = (
+                    "thread"
+                    if start_dm_thread_visible or start_composer_visible
+                    else "profile"
+                    if verify_profile(d, last_recipient_username)
+                    else "unknown"
+                )
+                log(
+                    "info",
+                    "dm_sender_post_job_restore_start_screen",
+                    context=context,
+                    account_username=src or None,
+                    last_recipient_username=last_recipient_username or None,
+                    post_job_restore_start_screen=start_screen,
+                    dm_thread_visible=start_dm_thread_visible,
+                    composer_visible=start_composer_visible,
+                )
+                if start_screen == "thread":
+                    fast_t0 = time.perf_counter()
+                    log(
+                        "info",
+                        "dm_sender_post_job_restore_fast_path_started",
+                        context=context,
+                        account_username=src or None,
+                        last_recipient_username=last_recipient_username or None,
+                        post_job_restore_start_screen=start_screen,
+                    )
+                    t_thread_profile = time.perf_counter()
+                    tapped, tap_method = tap_instagram_action_bar_back_button(d, pkg)
+                    if tapped:
+                        log(
+                            "info",
+                            "dm_sender_post_job_restore_fast_thread_back_tapped",
+                            context=context,
+                            tap_method=tap_method,
+                            last_recipient_username=last_recipient_username,
+                        )
+                        time.sleep(0.2)
+                    else:
+                        try:
+                            d.press("back")
+                        except Exception:
+                            pass
+                        time.sleep(0.2)
+                    thread_to_profile_ms = round(
+                        (time.perf_counter() - t_thread_profile) * 1000.0, 2
+                    )
+                    if is_lightweight_search_screen(d, pkg):
+                        verified, why = _verify_dm_sender_global_search_surface(
+                            d, pkg=pkg, account_username=src, full_followers_check=False
+                        )
+                        if verified:
+                            reuse_ms = round((time.perf_counter() - t_restore) * 1000.0, 2)
+                            _mark_dm_sender_global_search_ready(src, context=context)
+                            _record_dm_sender_post_job_restore_attempt(
+                                attempt="thread_back_direct_to_search",
+                                ok=True,
+                                reason="thread_back_direct_to_search_ok",
+                                final_mode="previous_search_results_reused",
+                                used_back_stack=True,
+                                previous_username_present=False,
+                                reuse_ms=reuse_ms,
+                            )
+                            log(
+                                "info",
+                                "dm_sender_post_job_restore_fast_path_done",
+                                context=context,
+                                post_job_restore_fast_path_used=True,
+                                post_job_restore_thread_to_profile_ms=thread_to_profile_ms,
+                                post_job_restore_profile_to_search_ms=0.0,
+                                post_job_restore_verify_search_ms=0.0,
+                                post_job_restore_timeout_saved_estimate_ms=round(
+                                    float(getattr(config, "BACK_TO_SEARCH_MAX_WAIT_S", 2.5))
+                                    * 1000.0,
+                                    2,
+                                ),
+                            )
+                            log(
+                                "info",
+                                "dm_sender_post_job_surface_prepare_done",
+                                context=context,
+                                account_username=src or None,
+                                method="thread_back_direct_to_search_fast_path",
+                            )
+                            return True
+                    profile_ready = bool(verify_profile(d, last_recipient_username))
+                    if profile_ready:
+                        t_profile_search = time.perf_counter()
+                        search_ok = bool(return_to_search_from_profile(d, pkg))
+                        profile_to_search_ms = round(
+                            (time.perf_counter() - t_profile_search) * 1000.0, 2
+                        )
+                        if search_ok:
+                            reuse_ms = round((time.perf_counter() - t_restore) * 1000.0, 2)
+                            _mark_dm_sender_global_search_ready(src, context=context)
+                            _record_dm_sender_post_job_restore_attempt(
+                                attempt="thread_to_profile_to_search",
+                                ok=True,
+                                reason="thread_to_profile_to_search_ok",
+                                final_mode="previous_search_results_reused",
+                                used_back_stack=True,
+                                previous_username_present=False,
+                                reuse_ms=reuse_ms,
+                            )
+                            log(
+                                "info",
+                                "dm_sender_post_job_restore_fast_path_done",
+                                context=context,
+                                post_job_restore_fast_path_used=True,
+                                post_job_restore_thread_to_profile_ms=thread_to_profile_ms,
+                                post_job_restore_profile_to_search_ms=profile_to_search_ms,
+                                post_job_restore_verify_search_ms=profile_to_search_ms,
+                                post_job_restore_timeout_saved_estimate_ms=round(
+                                    float(getattr(config, "BACK_TO_SEARCH_MAX_WAIT_S", 2.5))
+                                    * 1000.0,
+                                    2,
+                                ),
+                            )
+                            log(
+                                "info",
+                                "dm_sender_post_job_surface_prepare_done",
+                                context=context,
+                                account_username=src or None,
+                                method="thread_to_profile_to_search_fast_path",
+                            )
+                            return True
+                        _record_dm_sender_post_job_restore_attempt(
+                            attempt="thread_to_profile_to_search",
+                            ok=False,
+                            reason="thread_to_profile_to_search_failed",
+                            used_back_stack=True,
+                        )
+                        log(
+                            "warning",
+                            "dm_sender_post_job_restore_fast_path_failed",
+                            context=context,
+                            reason="thread_to_profile_to_search_failed",
+                            post_job_restore_thread_to_profile_ms=thread_to_profile_ms,
+                            post_job_restore_profile_to_search_ms=profile_to_search_ms,
+                        )
+                    else:
+                        _record_dm_sender_post_job_restore_attempt(
+                            attempt="thread_to_profile",
+                            ok=False,
+                            reason="profile_not_verified_after_thread_back",
+                            used_back_stack=True,
+                        )
+                        log(
+                            "warning",
+                            "dm_sender_post_job_restore_fast_path_failed",
+                            context=context,
+                            reason="profile_not_verified_after_thread_back",
+                            post_job_restore_thread_to_profile_ms=thread_to_profile_ms,
+                            post_job_restore_elapsed_ms=round(
+                                (time.perf_counter() - fast_t0) * 1000.0, 2
+                            ),
+                        )
+                if verify_profile(d, last_recipient_username):
+                    log(
+                        "info",
+                        "dm_sender_post_job_profile_hardware_back_to_search_started",
+                        context=context,
+                        account_username=src or None,
+                        last_recipient_username=last_recipient_username or None,
+                        phase="profile_already_restored",
+                    )
+                    search_ok = bool(return_to_search_from_profile(d, pkg))
+                    if search_ok:
+                        _mark_dm_sender_global_search_ready(src, context=context)
+                        previous_present = False
+                        try:
+                            ed_prev = _wait_search_edittext(d)
+                            cur_txt = ed_prev.get_text() if ed_prev is not None else ""
+                            previous_present = _normalize_dm_sender_handle(
+                                str(last_recipient_username or "")
+                            ) in _normalize_dm_sender_handle(str(cur_txt or ""))
+                        except Exception:
+                            previous_present = False
+                        reuse_ms = round((time.perf_counter() - t_restore) * 1000.0, 2)
+                        _set_dm_sender_post_job_restore(
+                            post_job_previous_search_results_detected=True,
+                            post_job_previous_search_username_present=previous_present,
+                            post_job_reuse_previous_search_surface_ms=reuse_ms,
+                        )
+                        _record_dm_sender_post_job_restore_attempt(
+                            attempt="profile_hardware_back_to_search",
+                            ok=True,
+                            reason="profile_hardware_back_to_search_ok",
+                            final_mode="previous_search_results_reused",
+                            used_back_stack=True,
+                            previous_username_present=previous_present,
+                            reuse_ms=reuse_ms,
+                        )
+                        log(
+                            "info",
+                            "dm_sender_post_job_previous_search_results_reused",
+                            context=context,
+                            account_username=src or None,
+                            last_recipient_username=last_recipient_username or None,
+                            post_job_previous_search_username_present=previous_present,
+                            post_job_reuse_previous_search_surface_ms=reuse_ms,
+                        )
+                        log(
+                            "info",
+                            "dm_sender_post_job_surface_prepare_done",
+                            context=context,
+                            account_username=src or None,
+                            method="previous_search_results_hardware_back",
+                        )
+                        return True
+                    _record_dm_sender_post_job_restore_attempt(
+                        attempt="profile_hardware_back_to_search",
+                        ok=False,
+                        reason="profile_hardware_back_to_search_failed",
+                        used_back_stack=True,
+                    )
                 log(
                     "info",
                     "dm_sender_post_job_first_back_to_restore_profile_started",
@@ -1157,6 +1505,21 @@ def prepare_dm_sender_global_search_surface(
                             context=context,
                             account_username=src or None,
                             method="back_stack_fast_path",
+                        )
+                        _set_dm_sender_post_job_restore(
+                            post_job_previous_search_results_detected=True,
+                            post_job_reuse_previous_search_surface_ms=round(
+                                (time.perf_counter() - t_restore) * 1000.0, 2
+                            ),
+                        )
+                        _record_dm_sender_post_job_restore_attempt(
+                            attempt="action_bar_back_to_search",
+                            ok=True,
+                            reason="search_detected_after_action_bar_back",
+                            final_mode="previous_search_results_reused_after_retry",
+                            used_back_stack=True,
+                            success_after_retry=True,
+                            reuse_ms=(time.perf_counter() - t_restore) * 1000.0,
                         )
                         return True
                 profile_ok = bool(verify_profile(d, last_recipient_username))
@@ -1210,7 +1573,22 @@ def prepare_dm_sender_global_search_surface(
                         account_username=src or None,
                         method="back_stack_fast_path",
                     )
+                    _record_dm_sender_post_job_restore_attempt(
+                        attempt="profile_hardware_back_to_search_retry",
+                        ok=True,
+                        reason="profile_hardware_back_to_search_ok_after_retry",
+                        final_mode="previous_search_results_reused_after_retry",
+                        used_back_stack=True,
+                        success_after_retry=True,
+                        reuse_ms=(time.perf_counter() - t_restore) * 1000.0,
+                    )
                     return True
+                _record_dm_sender_post_job_restore_attempt(
+                    attempt="profile_hardware_back_to_search_retry",
+                    ok=False,
+                    reason="profile_back_to_search_failed",
+                    used_back_stack=True,
+                )
                 log(
                     "warning",
                     "dm_sender_post_job_back_stack_fast_path_failed",
@@ -1286,6 +1664,14 @@ def prepare_dm_sender_global_search_surface(
         ),
         allow_percent_fallback=bool(allow_pct),
     )
+    _set_dm_sender_post_job_restore(
+        post_job_fallback_open_search_reason="previous_search_results_unavailable",
+    )
+    _record_dm_sender_post_job_restore_attempt(
+        attempt="previous_search_results_unavailable",
+        ok=False,
+        reason="previous_search_results_unavailable",
+    )
     if not _dm_sender_open_search(
         d,
         pkg=pkg,
@@ -1302,6 +1688,13 @@ def prepare_dm_sender_global_search_surface(
             reason="open_search_failed",
             account_username=src or None,
         )
+        _record_dm_sender_post_job_restore_attempt(
+            attempt="fresh_open_search",
+            ok=False,
+            reason="open_search_failed",
+            final_mode="restore_failed",
+            used_fresh_open_search=True,
+        )
         return False
 
     verified, why = _verify_dm_sender_global_search_surface(
@@ -1315,9 +1708,37 @@ def prepare_dm_sender_global_search_surface(
             reason=why,
             account_username=src or None,
         )
+        _record_dm_sender_post_job_restore_attempt(
+            attempt="fresh_open_search_verify",
+            ok=False,
+            reason=why,
+            final_mode="restore_failed",
+            used_fresh_open_search=True,
+        )
         return False
 
     _mark_dm_sender_global_search_ready(src, context=context)
+    search_perf = get_perf_snapshot()
+    reused_by_open_search_helper = bool(search_perf.get("search_surface_reused"))
+    final_mode = (
+        "previous_search_results_reused_after_retry"
+        if reused_by_open_search_helper
+        else "fresh_open_search_used"
+    )
+    final_reason = (
+        "open_search_helper_reused_search_surface_after_retry"
+        if reused_by_open_search_helper
+        else "fresh_open_search_verified"
+    )
+    _record_dm_sender_post_job_restore_attempt(
+        attempt="fresh_open_search",
+        ok=True,
+        reason=final_reason,
+        final_mode=final_mode,
+        used_fresh_open_search=not reused_by_open_search_helper,
+        used_back_stack=bool(reused_by_open_search_helper),
+        success_after_retry=bool(reused_by_open_search_helper),
+    )
     log(
         "info",
         "dm_sender_post_job_global_search_verified",
@@ -1778,14 +2199,13 @@ def _navigate_to_recipient_dm_thread(
         log("error", "dm_sender_type_search_failed", username=uname)
         return "unknown", False
     type_perf = get_perf_snapshot()
+    navigation_to_username_typed_total_ms = round((time.perf_counter() - t_nav) * 1000.0, 2)
     log(
         "info",
         "dm_sender_username_typed",
         username=uname,
         username_type_ms=round((time.perf_counter() - t_type) * 1000.0, 2),
-        navigation_to_username_typed_total_ms=round(
-            (time.perf_counter() - t_nav) * 1000.0, 2
-        ),
+        navigation_to_username_typed_total_ms=navigation_to_username_typed_total_ms,
         sender_prepare_to_open_search_ms=sender_prepare_to_open_search_ms,
         typing_precheck_edittext_reused=bool(
             type_perf.get("typing_precheck_edittext_reused")
@@ -1873,6 +2293,8 @@ def _navigate_to_recipient_dm_thread(
 
     _set_dm_sender_nav_timings(
         navigation_ms=(time.perf_counter() - t_nav) * 1000.0,
+        navigation_to_username_typed_total_ms=navigation_to_username_typed_total_ms,
+        sender_prepare_to_open_search_ms=sender_prepare_to_open_search_ms,
         search_ms=search_total_ms,
         thread_open_ms=thread_open_ms,
         parent_search_ready_fast_path_attempted=bool(parent_fast_path.get("attempted")),
@@ -1913,6 +2335,9 @@ def _navigate_to_recipient_dm_thread(
         typing_precheck_edittext_reused=bool(
             type_perf.get("typing_precheck_edittext_reused")
         ),
+        post_job_clear_previous_username_ms=float(
+            type_perf.get("post_job_clear_previous_username_ms") or 0.0
+        ),
     )
     return thread_state, thread_state not in ("unknown",)
 
@@ -1926,9 +2351,18 @@ def _safe_teardown_navigation(
     prefer_back_stack_to_search: bool = False,
 ) -> None:
     """Exit DM thread safely, then restore verified global Search (no percent-fallback from DM)."""
+    _reset_dm_sender_post_job_restore()
+    if prefer_back_stack_to_search:
+        _set_dm_sender_post_job_restore(post_job_restore_used_back_stack=True)
     if _check_dm_sender_permission_blocker(
         d, username=username, context="post_job_teardown"
     ):
+        _record_dm_sender_post_job_restore_attempt(
+            attempt="permission_blocker",
+            ok=False,
+            reason="permission_blocker",
+            final_mode="restore_failed",
+        )
         return
     prepare_dm_sender_global_search_surface(
         d,
@@ -1986,6 +2420,125 @@ def _claim_job_for_run(
         priority=job.get("priority"),
     )
     return job
+
+
+def prepare_dm_sender_jobs(
+    d: u2.Device,
+    *,
+    account_id: str,
+    dm_type: str,
+    max_jobs: int,
+) -> dict[str, Any]:
+    """Claim jobs without touching UI so callers can prepare before Search-ready."""
+    t0 = time.perf_counter()
+    aid = str(account_id or "").strip()
+    dm_type_resolved = str(dm_type or "").strip()
+    limit = max(0, int(max_jobs or 0))
+    reserved_by = _resolve_reserved_by(d)
+    only_job_id, filter_source = _resolve_dm_sender_only_job_id()
+    jobs: list[dict[str, Any]] = []
+    log(
+        "info",
+        "dm_sender_prepare_jobs_started",
+        account_id=aid,
+        dm_type=dm_type_resolved,
+        max_jobs=limit,
+        only_job_id=only_job_id or None,
+        filter_source=filter_source,
+        reserved_by=reserved_by,
+    )
+    for job_index in range(limit):
+        t_claim = time.perf_counter()
+        job = _claim_job_for_run(
+            aid,
+            reserved_by,
+            dm_type=dm_type_resolved,
+            only_job_id=only_job_id,
+        )
+        claim_ms = round((time.perf_counter() - t_claim) * 1000.0, 2)
+        log(
+            "info",
+            "dm_sender_prepare_job_claim_attempt",
+            account_id=aid,
+            dm_type=dm_type_resolved,
+            job_index=job_index,
+            claimed=bool(job),
+            job_claim_before_sender_ms=claim_ms,
+            job_id=str((job or {}).get("id") or "") or None,
+            recipient_username=str((job or {}).get("recipient_username") or "") or None,
+        )
+        if not job:
+            break
+        jobs.append(job)
+        if only_job_id:
+            break
+    prepare_ms = round((time.perf_counter() - t0) * 1000.0, 2)
+    log(
+        "info",
+        "dm_sender_prepare_jobs_completed",
+        account_id=aid,
+        dm_type=dm_type_resolved,
+        prepared_jobs_count=len(jobs),
+        prepared_job_ids=[str(job.get("id") or "") for job in jobs],
+        prepare_ms=prepare_ms,
+    )
+    return {
+        "jobs": jobs,
+        "prepared_jobs_count": len(jobs),
+        "reserved_by": reserved_by,
+        "only_job_id": only_job_id or "",
+        "filter_source": filter_source,
+        "prepare_ms": prepare_ms,
+    }
+
+
+def release_prepared_dm_jobs(
+    jobs: list[dict[str, Any]],
+    *,
+    reason: str,
+) -> dict[str, Any]:
+    released = 0
+    failed = 0
+    job_ids: list[str] = []
+    for job in list(jobs or []):
+        job_id = str((job or {}).get("id") or "").strip()
+        if not job_id:
+            continue
+        job_ids.append(job_id)
+        try:
+            row = supabase_client.release_dm_job_after_dry_run(
+                job_id,
+                thread_state=str(reason or "prepared_not_sent"),
+                sendable=False,
+                skip_reason_candidate=str(reason or "prepared_not_sent"),
+                metadata_patch={"prepared_job_released": True, "release_reason": reason},
+            )
+            if row:
+                released += 1
+            else:
+                failed += 1
+        except Exception as exc:
+            failed += 1
+            log(
+                "warning",
+                "dm_sender_prepared_job_release_failed",
+                job_id=job_id,
+                reason=reason,
+                error=str(exc)[:300],
+            )
+    log(
+        "info",
+        "dm_sender_prepared_jobs_released",
+        reason=reason,
+        jobs_released_or_requeued_on_search_ready_failure=released,
+        release_failed_count=failed,
+        job_ids=job_ids,
+    )
+    return {
+        "released_count": released,
+        "failed_count": failed,
+        "job_ids": job_ids,
+    }
 
 
 def execute_dm_job_dry_run(
@@ -2609,6 +3162,8 @@ def execute_dm_job_real_send(
     previous_username: str | None = None,
     restore_search_after_job: bool = True,
     parent_search_ready: dict[str, Any] | None = None,
+    job_index: int = 0,
+    jobs_total: int = 0,
 ) -> dict[str, Any]:
     """Claimed job → navigate → send or skip/fail terminal complete."""
     _ = account_id
@@ -2649,6 +3204,9 @@ def execute_dm_job_real_send(
     updated_job: dict[str, Any] | None = None
     nav_timings: dict[str, float] = {}
     post_job_ms = 0.0
+    navigation_finished = False
+    send_confirmed = False
+    job_terminal_handled = False
 
     try:
         thread_state, nav_ok = _navigate_to_recipient_dm_thread(
@@ -2662,6 +3220,7 @@ def execute_dm_job_real_send(
             previous_username=previous_username,
             parent_search_ready=parent_search_ready,
         )
+        navigation_finished = True
         nav_timings = _get_dm_sender_nav_timings()
         snap = get_last_dm_thread_classify_snapshot()
         log(
@@ -2681,6 +3240,7 @@ def execute_dm_job_real_send(
                 thread_state=thread_state,
             )
             final_status = str((updated_job or {}).get("status") or "pending")
+            job_terminal_handled = True
         else:
             sendable, skip_candidate = _evaluate_welcome_sendability(
                 thread_state, settings
@@ -2703,12 +3263,14 @@ def execute_dm_job_real_send(
                     job, skip_reason=reason, thread_state=thread_state
                 )
                 final_status = str((updated_job or {}).get("status") or "skipped")
+                job_terminal_handled = True
             elif not sendable:
                 skip_reason = str(skip_candidate or thread_state or "not_sendable")
                 updated_job, outcome = _complete_job_skipped(
                     job, skip_reason=skip_reason, thread_state=thread_state
                 )
                 final_status = str((updated_job or {}).get("status") or "skipped")
+                job_terminal_handled = True
             elif thread_state in ("unknown", "composer_visible_uncertain"):
                 updated_job, outcome = _complete_job_failed_retry(
                     job,
@@ -2716,6 +3278,7 @@ def execute_dm_job_real_send(
                     thread_state=thread_state,
                 )
                 final_status = str((updated_job or {}).get("status") or "pending")
+                job_terminal_handled = True
             else:
                 sent_ok, send_out, fail_reason = _perform_real_welcome_dm_send(
                     d,
@@ -2740,6 +3303,8 @@ def execute_dm_job_real_send(
                     )
                     outcome = "sent"
                     final_status = str((updated_job or {}).get("status") or "sent")
+                    send_confirmed = True
+                    job_terminal_handled = True
                     log(
                         "info",
                         "dm_sender_job_completed_sent",
@@ -2763,9 +3328,30 @@ def execute_dm_job_real_send(
                         )}},
                     )
                     final_status = str((updated_job or {}).get("status") or "pending")
+                    job_terminal_handled = True
     finally:
         t_post_job = time.perf_counter()
-        if dm_type == "outreach" and not bool(restore_search_after_job):
+        post_job_restore = _get_dm_sender_post_job_restore()
+        if not navigation_finished:
+            log(
+                "warning",
+                "dm_sender_post_job_restore_skipped_navigation_incomplete",
+                job_id=job_id,
+                recipient_username=recipient,
+                dm_type=dm_type,
+                job_index=job_index,
+                jobs_total=jobs_total,
+                send_confirmed_before_restore=send_confirmed,
+                job_terminal_handled=job_terminal_handled,
+                job_status_before_post_job_restore=final_status,
+            )
+        elif dm_type == "outreach" and not bool(restore_search_after_job):
+            _reset_dm_sender_post_job_restore()
+            _set_dm_sender_post_job_restore(
+                post_job_restore_mode="skipped_final_job",
+                post_job_restore_final_mode="skipped_final_job",
+                post_job_restore_final_reason="final_outreach_job",
+            )
             log(
                 "info",
                 "dm_sender_post_job_restore_skipped_final_outreach_job",
@@ -2774,6 +3360,19 @@ def execute_dm_job_real_send(
                 dm_type=dm_type,
             )
         else:
+            log(
+                "info",
+                "dm_sender_before_post_job_restore",
+                job_id=job_id,
+                recipient_username=recipient,
+                dm_type=dm_type,
+                job_index=job_index,
+                jobs_total=jobs_total,
+                send_confirmed_before_restore=send_confirmed,
+                job_terminal_handled=job_terminal_handled,
+                job_status_before_post_job_restore=final_status,
+                outcome=outcome,
+            )
             _safe_teardown_navigation(
                 d,
                 recipient,
@@ -2781,7 +3380,92 @@ def execute_dm_job_real_send(
                 account_username=account_username,
                 prefer_back_stack_to_search=(dm_type == "outreach"),
             )
+            post_job_restore = _get_dm_sender_post_job_restore()
         post_job_ms = round((time.perf_counter() - t_post_job) * 1000.0, 2)
+        if navigation_finished:
+            if not str(post_job_restore.get("post_job_restore_final_mode") or ""):
+                _set_dm_sender_post_job_restore(
+                    post_job_restore_mode="restore_failed",
+                    post_job_restore_final_mode="restore_failed",
+                    post_job_restore_final_reason="restore_surface_prepare_failed",
+                )
+                post_job_restore = _get_dm_sender_post_job_restore()
+            log(
+                "info",
+                "post_job_restore_final_mode",
+                job_id=job_id,
+                recipient_username=recipient,
+                dm_type=dm_type,
+                job_index=job_index,
+                jobs_total=jobs_total,
+                post_job_restore_final_mode=str(
+                    post_job_restore.get("post_job_restore_final_mode") or ""
+                ),
+                post_job_restore_final_reason=str(
+                    post_job_restore.get("post_job_restore_final_reason") or ""
+                )
+                or None,
+                post_job_restore_attempts_count=int(
+                    post_job_restore.get("post_job_restore_attempts_count") or 0
+                ),
+                post_job_restore_used_fresh_open_search=bool(
+                    post_job_restore.get("post_job_restore_used_fresh_open_search")
+                ),
+                post_job_restore_used_back_stack=bool(
+                    post_job_restore.get("post_job_restore_used_back_stack")
+                ),
+                post_job_restore_success_after_retry=bool(
+                    post_job_restore.get("post_job_restore_success_after_retry")
+                ),
+            )
+            log(
+                "info",
+                "dm_sender_post_job_restore_summary",
+                job_id=job_id,
+                recipient_username=recipient,
+                dm_type=dm_type,
+                job_index=job_index,
+                jobs_total=jobs_total,
+                post_job_restore_mode=str(post_job_restore.get("post_job_restore_mode") or ""),
+                post_job_restore_final_mode=str(
+                    post_job_restore.get("post_job_restore_final_mode") or ""
+                ),
+                post_job_restore_final_reason=str(
+                    post_job_restore.get("post_job_restore_final_reason") or ""
+                )
+                or None,
+                post_job_restore_attempts_count=int(
+                    post_job_restore.get("post_job_restore_attempts_count") or 0
+                ),
+                post_job_restore_used_fresh_open_search=bool(
+                    post_job_restore.get("post_job_restore_used_fresh_open_search")
+                ),
+                post_job_restore_used_back_stack=bool(
+                    post_job_restore.get("post_job_restore_used_back_stack")
+                ),
+                post_job_restore_success_after_retry=bool(
+                    post_job_restore.get("post_job_restore_success_after_retry")
+                ),
+                post_job_back_to_previous_search_attempted=bool(
+                    post_job_restore.get("post_job_back_to_previous_search_attempted")
+                ),
+                post_job_previous_search_results_detected=bool(
+                    post_job_restore.get("post_job_previous_search_results_detected")
+                ),
+                post_job_previous_search_username_present=bool(
+                    post_job_restore.get("post_job_previous_search_username_present")
+                ),
+                post_job_reuse_previous_search_surface_ms=float(
+                    post_job_restore.get("post_job_reuse_previous_search_surface_ms") or 0.0
+                ),
+                post_job_fallback_open_search_reason=str(
+                    post_job_restore.get("post_job_fallback_open_search_reason") or ""
+                )
+                or None,
+                post_job_ms=post_job_ms,
+                send_confirmed_before_restore=send_confirmed,
+                job_terminal_handled=job_terminal_handled,
+            )
 
     return {
         "job_id": job_id,
@@ -2794,9 +3478,41 @@ def execute_dm_job_real_send(
         "final_job_status": final_status,
         "job": updated_job,
         "navigation_ms": float(nav_timings.get("navigation_ms") or 0.0),
+        "navigation_to_username_typed_total_ms": float(
+            nav_timings.get("navigation_to_username_typed_total_ms") or 0.0
+        ),
+        "sender_prepare_to_open_search_ms": float(
+            nav_timings.get("sender_prepare_to_open_search_ms") or 0.0
+        ),
         "search_ms": float(nav_timings.get("search_ms") or 0.0),
         "thread_open_ms": float(nav_timings.get("thread_open_ms") or 0.0),
         "post_job_ms": post_job_ms,
+        "post_job_restore": post_job_restore,
+        "post_job_restore_mode": str(post_job_restore.get("post_job_restore_mode") or ""),
+        "post_job_restore_final_mode": str(
+            post_job_restore.get("post_job_restore_final_mode") or ""
+        ),
+        "post_job_restore_final_reason": str(
+            post_job_restore.get("post_job_restore_final_reason") or ""
+        ),
+        "post_job_restore_attempts_count": int(
+            post_job_restore.get("post_job_restore_attempts_count") or 0
+        ),
+        "post_job_restore_used_fresh_open_search": bool(
+            post_job_restore.get("post_job_restore_used_fresh_open_search")
+        ),
+        "post_job_restore_used_back_stack": bool(
+            post_job_restore.get("post_job_restore_used_back_stack")
+        ),
+        "post_job_restore_success_after_retry": bool(
+            post_job_restore.get("post_job_restore_success_after_retry")
+        ),
+        "post_job_previous_search_results_detected": bool(
+            post_job_restore.get("post_job_previous_search_results_detected")
+        ),
+        "post_job_fallback_open_search_reason": str(
+            post_job_restore.get("post_job_fallback_open_search_reason") or ""
+        ),
         "parent_search_ready_fast_path_attempted": bool(
             nav_timings.get("parent_search_ready_fast_path_attempted")
         ),
@@ -2845,6 +3561,9 @@ def execute_dm_job_real_send(
         "typing_precheck_edittext_reused": bool(
             nav_timings.get("typing_precheck_edittext_reused")
         ),
+        "post_job_clear_previous_username_ms": float(
+            nav_timings.get("post_job_clear_previous_username_ms") or 0.0
+        ),
     }
 
 
@@ -2857,6 +3576,8 @@ def run_dm_sender_send(
     max_jobs: int | None = None,
     dm_type: str | None = None,
     parent_search_ready: dict[str, Any] | None = None,
+    prepared_jobs: list[dict[str, Any]] | None = None,
+    settings_override: dict[str, Any] | None = None,
 ) -> tuple[int, dict[str, Any]]:
     """
     Real Welcome DM send: claim → navigate → type job.message_body → send → complete.
@@ -2868,9 +3589,17 @@ def run_dm_sender_send(
     dm_type_resolved = str(
         dm_type or getattr(config, "DM_SENDER_DEFAULT_DM_TYPE", "welcome") or "welcome"
     )
+    prepared_job_list = list(prepared_jobs or [])
+    using_prepared_jobs = prepared_jobs is not None
     if max_jobs is None:
-        max_jobs = int(getattr(config, "WELCOME_SESSION_SEND_MAX_JOBS", 3) or 3)
+        max_jobs = (
+            len(prepared_job_list)
+            if using_prepared_jobs
+            else int(getattr(config, "WELCOME_SESSION_SEND_MAX_JOBS", 3) or 3)
+        )
     max_jobs = max(0, int(max_jobs))
+    if using_prepared_jobs:
+        max_jobs = min(max_jobs, len(prepared_job_list))
 
     real_enabled, real_source = _resolve_dm_sender_real_send_enabled()
     reserved_by = _resolve_reserved_by(d)
@@ -2895,6 +3624,8 @@ def run_dm_sender_send(
         "real_send_source": real_source,
         "filter_source": filter_source,
         "only_job_id": only_job_id or None,
+        "using_prepared_jobs": bool(using_prepared_jobs),
+        "prepared_jobs_count": len(prepared_job_list),
         "jobs_claimed_count": 0,
         "jobs_sent_count": 0,
         "jobs_skipped_count": 0,
@@ -2907,6 +3638,13 @@ def run_dm_sender_send(
         "failed_recipients": [],
         "sender_status": "not_started",
         "total_navigation_ms": 0.0,
+        "search_ready_to_first_username_typed_ms": 0.0,
+        "first_job_sender_prepare_ms": 0.0,
+        "avg_inter_job_ms": 0.0,
+        "inter_job_total_ms_values": [],
+        "previous_search_reuse_count": 0,
+        "previous_search_reuse_fail_count": 0,
+        "fallback_open_search_between_jobs_count": 0,
         "total_post_job_ms": 0.0,
         "total_search_ms": 0.0,
         "total_thread_open_ms": 0.0,
@@ -2929,6 +3667,8 @@ def run_dm_sender_send(
         run_id=run_id,
         dm_type=dm_type_resolved,
         max_jobs=max_jobs,
+        using_prepared_jobs=bool(using_prepared_jobs),
+        prepared_jobs_count=len(prepared_job_list),
         reserved_by=reserved_by,
         real_send_enabled=real_enabled,
         real_send_source=real_source,
@@ -2958,20 +3698,28 @@ def run_dm_sender_send(
         summary["total_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
         return 1, summary
 
-    try:
-        settings = supabase_client.get_account_dm_settings(aid) or {}
-    except Exception as e:
-        log("error", "dm_sender_settings_load_failed", error=str(e))
-        settings = {}
+    if settings_override is not None:
+        settings = dict(settings_override or {})
+    else:
+        try:
+            settings = supabase_client.get_account_dm_settings(aid) or {}
+        except Exception as e:
+            log("error", "dm_sender_settings_load_failed", error=str(e))
+            settings = {}
 
     last_result: dict[str, Any] = {}
     last_recipient_username = ""
+    previous_restore_mode = ""
     for job_index in range(max_jobs):
-        t_claim = time.perf_counter()
-        job = _claim_job_for_run(
-            aid, reserved_by, dm_type=dm_type_resolved, only_job_id=only_job_id
-        )
-        claim_ms = round((time.perf_counter() - t_claim) * 1000.0, 2)
+        if using_prepared_jobs:
+            job = prepared_job_list[job_index] if job_index < len(prepared_job_list) else None
+            claim_ms = 0.0
+        else:
+            t_claim = time.perf_counter()
+            job = _claim_job_for_run(
+                aid, reserved_by, dm_type=dm_type_resolved, only_job_id=only_job_id
+            )
+            claim_ms = round((time.perf_counter() - t_claim) * 1000.0, 2)
         parent_signal_age_after_claim_ms = None
         if parent_verified_at is not None:
             parent_signal_age_after_claim_ms = round(
@@ -2987,6 +3735,8 @@ def run_dm_sender_send(
             job_claim_before_sender_ms=claim_ms,
             parent_signal_age_at_sender_attempt_ms=parent_signal_age_after_claim_ms,
             claimed=bool(job),
+            using_prepared_jobs=bool(using_prepared_jobs),
+            job_id=str((job or {}).get("id") or "") or None,
         )
         if not job:
             log("info", "dm_sender_no_pending_job", account_id=aid, dm_type=dm_type_resolved)
@@ -3012,12 +3762,56 @@ def run_dm_sender_send(
                 dm_type_resolved == "outreach" and job_index >= max_jobs - 1
             ),
             parent_search_ready=parent_search_ready,
+            job_index=job_index,
+            jobs_total=max_jobs,
         )
+        if job_index > 0:
+            inter_job_ms = float(
+                last_result.get("navigation_to_username_typed_total_ms") or 0.0
+            )
+            summary["inter_job_total_ms_values"].append(inter_job_ms)
+            vals = list(summary.get("inter_job_total_ms_values") or [])
+            summary["avg_inter_job_ms"] = round(
+                sum(float(v or 0.0) for v in vals) / max(1, len(vals)),
+                2,
+            )
+            log(
+                "info",
+                "dm_sender_inter_job_timing",
+                job_index=job_index,
+                jobs_total=max_jobs,
+                inter_job_total_ms=inter_job_ms,
+                next_username_ready_ms=inter_job_ms,
+                post_job_restore_mode=previous_restore_mode or None,
+            )
+        restore_mode = str(
+            last_result.get("post_job_restore_final_mode")
+            or last_result.get("post_job_restore_mode")
+            or ""
+        )
+        if restore_mode in (
+            "previous_search_results_reused",
+            "previous_search_results_reused_after_retry",
+        ):
+            summary["previous_search_reuse_count"] += 1
+        elif restore_mode == "fresh_open_search_used":
+            summary["previous_search_reuse_fail_count"] += 1
+            summary["fallback_open_search_between_jobs_count"] += 1
+        elif restore_mode == "restore_failed":
+            summary["previous_search_reuse_fail_count"] += 1
+        previous_restore_mode = restore_mode
         summary["total_navigation_ms"] = round(
             float(summary.get("total_navigation_ms") or 0.0)
             + float(last_result.get("navigation_ms") or 0.0),
             2,
         )
+        if job_index == 0:
+            summary["search_ready_to_first_username_typed_ms"] = float(
+                last_result.get("navigation_to_username_typed_total_ms") or 0.0
+            )
+            summary["first_job_sender_prepare_ms"] = float(
+                last_result.get("sender_prepare_to_open_search_ms") or 0.0
+            )
         summary["total_post_job_ms"] = round(
             float(summary.get("total_post_job_ms") or 0.0)
             + float(last_result.get("post_job_ms") or 0.0),

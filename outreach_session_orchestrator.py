@@ -14,7 +14,12 @@ import uiautomator2 as u2
 
 import config
 import supabase_client
-from dm_sender_engine import _resolve_dm_sender_real_send_enabled, run_dm_sender_send
+from dm_sender_engine import (
+    _resolve_dm_sender_real_send_enabled,
+    prepare_dm_sender_jobs,
+    release_prepared_dm_jobs,
+    run_dm_sender_send,
+)
 from logs import log
 
 _LAST_OUTREACH_SESSION_SUMMARY: dict[str, Any] = {}
@@ -82,6 +87,168 @@ def _resolve_effective_max_jobs(settings: dict[str, Any], counter: dict[str, Any
     }
 
 
+def prepare_outreach_session(
+    d: u2.Device,
+    *,
+    account_id: str,
+    account_username: str,
+    run_id: str | None = None,
+    reject_unfollow_handoff_jobs: bool = False,
+) -> dict[str, Any]:
+    t0 = time.perf_counter()
+    aid = str(account_id or "").strip()
+    uname = str(account_username or "").strip()
+    log(
+        "info",
+        "outreach_prepare_started",
+        account_id=aid,
+        account_username=uname,
+        run_id=run_id,
+        dm_type="outreach",
+    )
+    try:
+        settings = supabase_client.get_account_dm_settings(aid) or {}
+    except Exception as exc:
+        settings = {}
+        log("error", "outreach_prepare_settings_load_failed", account_id=aid, error=str(exc))
+
+    real_enabled, real_source = _resolve_dm_sender_real_send_enabled()
+    base: dict[str, Any] = {
+        "account_id": aid,
+        "account_username": uname,
+        "run_id": run_id,
+        "dm_type": "outreach",
+        "outreach_enabled": bool(settings.get("outreach_enabled")),
+        "real_send_enabled": bool(real_enabled),
+        "real_send_source": real_source,
+        "prepared_jobs": [],
+        "prepared_jobs_count": 0,
+        "session_status": "not_started",
+    }
+    if not bool(settings.get("outreach_enabled")):
+        out = {
+            **base,
+            "session_status": "blocked_disabled",
+            "failure_reason": "outreach_disabled",
+            "exit_code": 1,
+            "outreach_prepare_ms": round((time.perf_counter() - t0) * 1000.0, 2),
+        }
+        _publish_summary(out)
+        return out
+    if not real_enabled:
+        out = {
+            **base,
+            "session_status": "blocked_disabled",
+            "failure_reason": "real_send_disabled",
+            "exit_code": 1,
+            "outreach_prepare_ms": round((time.perf_counter() - t0) * 1000.0, 2),
+        }
+        _publish_summary(out)
+        return out
+
+    try:
+        counter = supabase_client.get_account_dm_counter_today(aid)
+    except Exception as exc:
+        counter = None
+        log("error", "outreach_prepare_counter_load_failed", account_id=aid, error=str(exc))
+    if not _is_valid_counter_row(counter):
+        out = {
+            **base,
+            "session_status": "blocked_missing_counters",
+            "failure_reason": "missing_or_invalid_counters",
+            "exit_code": 1,
+            "outreach_prepare_ms": round((time.perf_counter() - t0) * 1000.0, 2),
+        }
+        _publish_summary(out)
+        return out
+
+    stale_minutes = _as_nonnegative_int(
+        getattr(config, "STALE_OUTREACH_JOB_MINUTES", 30),
+        30,
+    )
+    try:
+        stale_requeued = supabase_client.requeue_stale_outreach_dm_jobs(
+            aid,
+            stale_minutes=stale_minutes,
+        )
+    except Exception as exc:
+        stale_requeued = []
+        log("warning", "outreach_prepare_stale_job_cleanup_failed", account_id=aid, error=str(exc))
+
+    quota = _resolve_effective_max_jobs(settings, counter)
+    log(
+        "info",
+        "outreach_prepare_quota_resolved",
+        account_id=aid,
+        run_id=run_id,
+        **quota,
+        stale_jobs_requeued=len(stale_requeued),
+    )
+    if int(quota.get("max_jobs_effective") or 0) <= 0:
+        out = {
+            **base,
+            **quota,
+            "stale_jobs_requeued": len(stale_requeued),
+            "session_status": "no_quota",
+            "exit_code": 0,
+            "outreach_prepare_ms": round((time.perf_counter() - t0) * 1000.0, 2),
+        }
+        _publish_summary(out)
+        return out
+
+    prep = prepare_dm_sender_jobs(
+        d,
+        account_id=aid,
+        dm_type="outreach",
+        max_jobs=int(quota["max_jobs_effective"]),
+    )
+    jobs = list(prep.get("jobs") or [])
+    rejected_unfollow_handoff_jobs: list[dict[str, Any]] = []
+    if reject_unfollow_handoff_jobs:
+        kept_jobs: list[dict[str, Any]] = []
+        for job in jobs:
+            metadata = job.get("metadata") if isinstance(job, dict) else {}
+            metadata_handoff = str((metadata or {}).get("handoff") or "").strip()
+            if metadata_handoff == "unfollow":
+                rejected_unfollow_handoff_jobs.append(job)
+                continue
+            kept_jobs.append(job)
+        jobs = kept_jobs
+        if rejected_unfollow_handoff_jobs:
+            release_prepared_dm_jobs(
+                rejected_unfollow_handoff_jobs,
+                reason="rejected_unfollow_generated_outreach_job",
+            )
+    out = {
+        **base,
+        **quota,
+        "settings": settings,
+        "stale_jobs_requeued": len(stale_requeued),
+        "prepared_jobs": jobs,
+        "prepared_jobs_count": len(jobs),
+        "prepared_job_ids": [str(job.get("id") or "") for job in jobs],
+        "rejected_unfollow_handoff_jobs_count": len(rejected_unfollow_handoff_jobs),
+        "rejected_unfollow_handoff_job_ids": [
+            str(job.get("id") or "") for job in rejected_unfollow_handoff_jobs
+        ],
+        "outreach_prepare_ms": round((time.perf_counter() - t0) * 1000.0, 2),
+        "sender_prepare_claim_ms": prep.get("prepare_ms"),
+        "session_status": "prepared" if jobs else "no_jobs",
+        "exit_code": 0,
+    }
+    log(
+        "info",
+        "outreach_prepare_jobs_claimed",
+        account_id=aid,
+        run_id=run_id,
+        outreach_prepare_jobs_count=len(jobs),
+        prepared_job_ids=out["prepared_job_ids"],
+        outreach_prepare_ms=out["outreach_prepare_ms"],
+    )
+    _publish_summary(out)
+    return out
+
+
 def run_outreach_session(
     d: u2.Device,
     *,
@@ -89,6 +256,7 @@ def run_outreach_session(
     account_username: str,
     run_id: str | None = None,
     parent_search_ready: dict[str, Any] | None = None,
+    prepared_outreach: dict[str, Any] | None = None,
 ) -> int:
     t0 = time.perf_counter()
     aid = str(account_id or "").strip()
@@ -119,11 +287,16 @@ def run_outreach_session(
         parent_signal_age_at_outreach_start_ms=parent_signal_age_at_outreach_start_ms,
     )
 
-    try:
-        settings = supabase_client.get_account_dm_settings(aid) or {}
-    except Exception as exc:
-        settings = {}
-        log("error", "outreach_session_settings_load_failed", account_id=aid, error=str(exc))
+    prepared = dict(prepared_outreach or {})
+    prepared_jobs = list(prepared.get("prepared_jobs") or [])
+    settings = dict(prepared.get("settings") or {})
+    using_prepared_jobs = bool(prepared_outreach is not None)
+    if not settings:
+        try:
+            settings = supabase_client.get_account_dm_settings(aid) or {}
+        except Exception as exc:
+            settings = {}
+            log("error", "outreach_session_settings_load_failed", account_id=aid, error=str(exc))
 
     real_enabled, real_source = _resolve_dm_sender_real_send_enabled()
     legacy_real_enabled = bool(getattr(config, "ENABLE_REAL_DM_SEND", False))
@@ -163,7 +336,7 @@ def run_outreach_session(
         "sendability_failures": 0,
     }
 
-    if not bool(settings.get("outreach_enabled")):
+    if not using_prepared_jobs and not bool(settings.get("outreach_enabled")):
         summary = {
             **base_summary,
             "session_status": "blocked_disabled",
@@ -174,7 +347,7 @@ def run_outreach_session(
         _publish_summary(summary)
         return 1
 
-    if not real_enabled:
+    if not using_prepared_jobs and not real_enabled:
         summary = {
             **base_summary,
             "session_status": "blocked_disabled",
@@ -185,55 +358,72 @@ def run_outreach_session(
         _publish_summary(summary)
         return 1
 
-    try:
-        counter = supabase_client.get_account_dm_counter_today(aid)
-    except Exception as exc:
-        counter = None
-        log("error", "outreach_session_counter_load_failed", account_id=aid, error=str(exc))
-
-    if not _is_valid_counter_row(counter):
-        log(
-            "error",
-            "outreach_missing_counters_block",
-            account_id=aid,
-            run_id=run_id,
-            counter_present=bool(counter),
-        )
-        summary = {
-            **base_summary,
-            "session_status": "blocked_missing_counters",
-            "exit_code": 1,
-            "failure_reason": "missing_or_invalid_counters",
-            "total_ms": round((time.perf_counter() - t0) * 1000.0, 2),
+    if using_prepared_jobs:
+        quota = {
+            k: prepared.get(k)
+            for k in (
+                "max_jobs_effective",
+                "outreach_per_session_limit",
+                "outreach_per_day_limit",
+                "total_dm_per_day_limit",
+                "outreach_hard_max_per_session",
+                "outreach_hard_max_per_day",
+                "outreach_sent_today",
+                "total_dm_sent_today",
+            )
+            if k in prepared
         }
-        _publish_summary(summary)
-        return 1
+        stale_requeued = [None] * int(prepared.get("stale_jobs_requeued") or 0)
+    else:
+        try:
+            counter = supabase_client.get_account_dm_counter_today(aid)
+        except Exception as exc:
+            counter = None
+            log("error", "outreach_session_counter_load_failed", account_id=aid, error=str(exc))
 
-    stale_minutes = _as_nonnegative_int(
-        getattr(config, "STALE_OUTREACH_JOB_MINUTES", 30),
-        30,
-    )
-    try:
-        stale_requeued = supabase_client.requeue_stale_outreach_dm_jobs(
-            aid,
-            stale_minutes=stale_minutes,
+        if not _is_valid_counter_row(counter):
+            log(
+                "error",
+                "outreach_missing_counters_block",
+                account_id=aid,
+                run_id=run_id,
+                counter_present=bool(counter),
+            )
+            summary = {
+                **base_summary,
+                "session_status": "blocked_missing_counters",
+                "exit_code": 1,
+                "failure_reason": "missing_or_invalid_counters",
+                "total_ms": round((time.perf_counter() - t0) * 1000.0, 2),
+            }
+            _publish_summary(summary)
+            return 1
+
+        stale_minutes = _as_nonnegative_int(
+            getattr(config, "STALE_OUTREACH_JOB_MINUTES", 30),
+            30,
         )
-    except Exception as exc:
-        stale_requeued = []
-        log("warning", "outreach_stale_job_cleanup_failed", account_id=aid, error=str(exc))
+        try:
+            stale_requeued = supabase_client.requeue_stale_outreach_dm_jobs(
+                aid,
+                stale_minutes=stale_minutes,
+            )
+        except Exception as exc:
+            stale_requeued = []
+            log("warning", "outreach_stale_job_cleanup_failed", account_id=aid, error=str(exc))
 
-    quota = _resolve_effective_max_jobs(settings, counter)
-    if int(quota.get("max_jobs_effective") or 0) <= 0:
-        summary = {
-            **base_summary,
-            **quota,
-            "stale_jobs_requeued": len(stale_requeued),
-            "session_status": "no_quota",
-            "exit_code": 0,
-            "total_ms": round((time.perf_counter() - t0) * 1000.0, 2),
-        }
-        _publish_summary(summary)
-        return 0
+        quota = _resolve_effective_max_jobs(settings, counter)
+        if int(quota.get("max_jobs_effective") or 0) <= 0:
+            summary = {
+                **base_summary,
+                **quota,
+                "stale_jobs_requeued": len(stale_requeued),
+                "session_status": "no_quota",
+                "exit_code": 0,
+                "total_ms": round((time.perf_counter() - t0) * 1000.0, 2),
+            }
+            _publish_summary(summary)
+            return 0
 
     t_sender_dispatch = time.perf_counter()
     parent_signal_age_before_sender_ms = None
@@ -256,9 +446,11 @@ def run_outreach_session(
         account_id=aid,
         account_username=uname,
         run_id=run_id,
-        max_jobs=int(quota["max_jobs_effective"]),
+        max_jobs=(len(prepared_jobs) if using_prepared_jobs else int(quota["max_jobs_effective"])),
         dm_type="outreach",
         parent_search_ready=parent_search_ready,
+        prepared_jobs=prepared_jobs if using_prepared_jobs else None,
+        settings_override=settings if using_prepared_jobs else None,
     )
 
     jobs_claimed = _as_nonnegative_int(sender_summary.get("jobs_claimed_count"), 0)
@@ -287,6 +479,8 @@ def run_outreach_session(
         "jobs_failed": jobs_failed,
         "jobs_skipped": jobs_skipped,
         "stale_jobs_requeued": len(stale_requeued),
+        "using_prepared_jobs": bool(using_prepared_jobs),
+        "prepared_jobs_count": len(prepared_jobs),
         "existing_thread_skips": existing_thread_skips,
         "sendability_failures": sendability_failures,
         "session_status": session_status,
@@ -315,6 +509,7 @@ def dispatch_outreach_session(
     account_username: str,
     run_id: str | None = None,
     parent_search_ready: dict[str, Any] | None = None,
+    prepared_outreach: dict[str, Any] | None = None,
 ) -> int:
     return run_outreach_session(
         d,
@@ -322,4 +517,5 @@ def dispatch_outreach_session(
         account_username=account_username,
         run_id=run_id,
         parent_search_ready=parent_search_ready,
+        prepared_outreach=prepared_outreach,
     )
