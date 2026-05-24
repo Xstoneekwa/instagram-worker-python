@@ -203,6 +203,81 @@ Future dashboard/API surface (not implemented in Entry 2B):
 - Admin: `POST /admin/subscriptions/:id/modules`
 - Admin: `POST /admin/subscriptions/:id/sync-entitlements`
 
+## Entry 2C Device / Clone / Assignment Model
+
+Entry 2C adds the capacity and assignment layer for phones, clones/app profiles,
+and account-scoped subscription assignments. It does not change the worker
+runtime, Edge Functions, credentials, auto-login, provisioning, campaigns,
+imports, or session window guards.
+
+Production target:
+
+- development/test may use Android Studio emulators such as `emulator-5554`;
+- production uses real Android phones connected by USB hubs to a Mac worker host;
+- phones may become `offline`, `unauthorized`, `maintenance`, or `disabled`;
+- ADB serials are operational routing hints, not the only durable identity.
+
+Tables:
+
+- `phone_devices`
+  - admin-only device inventory;
+  - `device_kind in ('emulator', 'physical_phone')`;
+  - `pool_type in ('full_cycle', 'outreach_only', 'shared')`;
+  - `status in ('available', 'reserved', 'active', 'maintenance', 'offline', 'unauthorized', 'disabled')`;
+  - ops fields: `adb_serial`, `device_udid`, `host_machine`, `hub_label`, `hub_port`, `status_reason`;
+  - `max_clones` stores capacity; do not assume a global 4-clone limit.
+- `phone_clones`
+  - admin-only clone/app-profile inventory for a device;
+  - supports emulator clones and real-phone app instances/profiles;
+  - `current_account_id` is denormalized/admin-only; the source of truth is
+    `account_assignments`.
+- `account_assignments`
+  - links `client_subscriptions` / `client_subscription_accounts` to
+    `phone_devices` / `phone_clones`;
+  - `assignment_type in ('full_cycle', 'outreach_only')`;
+  - `slot_kind in ('full_cycle_6h', 'outreach_short')`;
+  - includes `starts_at` / `ends_at` reservation windows but does not enforce
+    runtime session duration.
+
+Validation rules:
+
+- `clone.device_id` must match `account_assignments.device_id`;
+- `subscription_account.account_id` must match `account_assignments.account_id`;
+- `subscription.client_id` must match `account_assignments.client_id`;
+- `assignment_type` must match `client_subscriptions.subscription_type`;
+- `full_cycle` uses `slot_kind='full_cycle_6h'`;
+- `outreach_only` uses `slot_kind='outreach_short'`;
+- device `pool_type` must match the assignment type or be `shared`;
+- one open assignment (`pending`, `reserved`, `active`) per account;
+- a clone cannot have overlapping open assignment windows.
+
+Dashboard visibility:
+
+- client dashboard should read a future safe view/RPC only, with statuses such as
+  `pending_assignment`, `preparing`, `connected`, `action_required`, `paused`;
+- client dashboard must never read `adb_serial`, `device_udid`, `host_machine`,
+  `hub_label`, `hub_port`, clone internals, `ig_accounts.email`, or
+  `ig_accounts.password`;
+- admin/assistant dashboards may see device kind, pool, host/hub/port, status,
+  status reason, max clones, and clone capacity.
+
+Relation to existing `ig_accounts` operational fields:
+
+- `phone_devices` + `phone_clones` + `account_assignments` are the future source
+  of truth for assignment;
+- live `ig_accounts.device_id`, `device_name`, `device_udid`, `clone_mode`, and
+  `login_method` remain legacy/compat ops fields;
+- Entry 2C does not sync assignment data back into `ig_accounts`;
+- client dashboard reads must still avoid direct `ig_accounts` exposure.
+
+Roadmap after Entry 2C:
+
+- Entry 2C-2: optional auto-assign RPC and richer timeslot catalog;
+- Entry 2C-3: worker/dispatcher reads assignments and resolves host/device/clone;
+- B3: business session 6h window guard and phone rest/runtime scheduler;
+- Entry 2D: credential onboarding, password update, and secret references;
+- Entry 2E: provisioning jobs, login/relogin/2FA/checkpoint handling.
+
 ## Remote Secrets
 
 Remote Edge Function secrets must be configured on the Supabase project before
