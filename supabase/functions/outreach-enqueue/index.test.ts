@@ -1,5 +1,7 @@
 import {
+  accessDecision,
   normalizeUsername,
+  parseAllowedAccountIds,
   sanitizeMetadata,
   validateForbiddenTopLevelFields,
   validateSource,
@@ -62,5 +64,46 @@ Deno.test("sanitizes safe metadata and drops unknown safe-by-omission fields", (
   }
   if ("arbitrary" in metadata.metadata) {
     throw new Error("unknown metadata key was not dropped");
+  }
+});
+
+Deno.test("entry2a access decision requires database entitlement by default", () => {
+  const accountId = "42c625c2-e761-4100-8a9d-7ae1373de97d";
+  const missing = accessDecision(false, accountId);
+  if (missing.ok || missing.error !== "account_outreach_entitlement_required") {
+    throw new Error("missing ownership/entitlement was not rejected");
+  }
+
+  const active = accessDecision(true, accountId);
+  if (!active.ok || active.mode !== "db") {
+    throw new Error("active database entitlement was not accepted");
+  }
+});
+
+Deno.test("entry2a access decision rejects failed ownership checks unless explicit fallback is enabled", () => {
+  const accountId = "42c625c2-e761-4100-8a9d-7ae1373de97d";
+  const failed = accessDecision(false, accountId, {
+    dbCheckFailed: true,
+    allowlistFallback: false,
+    allowlistAllowed: true,
+  });
+  if (failed.ok || failed.error !== "account_ownership_check_failed") {
+    throw new Error("failed DB ownership check was not rejected");
+  }
+
+  const fallback = accessDecision(false, accountId, {
+    dbCheckFailed: true,
+    allowlistFallback: true,
+    allowlistAllowed: true,
+  });
+  if (!fallback.ok || fallback.mode !== "allowlist_fallback") {
+    throw new Error("explicit ops allowlist fallback did not allow account");
+  }
+});
+
+Deno.test("entry2a allowlist parsing trims empty values", () => {
+  const parsed = parseAllowedAccountIds(" a, ,b ,, c ");
+  if (parsed.join("|") !== "a|b|c") {
+    throw new Error("allowlist parser did not trim empty values");
   }
 });

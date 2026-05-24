@@ -40,12 +40,62 @@ Optional:
 
 ```text
 OUTREACH_ENQUEUE_ALLOWED_ORIGINS=https://dashboard.example.com
-OUTREACH_ENQUEUE_ALLOWED_ACCOUNT_IDS=<uuid>,<uuid>   # temporary ownership guard
+OUTREACH_ENQUEUE_ALLOWED_ACCOUNT_IDS=<uuid>,<uuid>   # temporary ops fallback only
+OUTREACH_ENQUEUE_ALLOWLIST_FALLBACK_ENABLED=false
 OUTREACH_ENQUEUE_MAX_BATCH_SIZE=100
 OUTREACH_ENQUEUE_MAX_PENDING_PER_ACCOUNT=500
 ```
 
-`OUTREACH_ENQUEUE_INTERNAL_API_TOKEN` is mandatory. If it is missing, the function returns `503`.
+`OUTREACH_ENQUEUE_INTERNAL_API_TOKEN` authenticates internal producers such as
+n8n or a dashboard backend. Client JWT requests can also be accepted, but they
+must pass the database ownership and entitlement helper.
+
+`OUTREACH_ENQUEUE_ALLOWED_ACCOUNT_IDS` was the Entry 1 MVP guard. In Entry 2A it
+is not the production authorization model. It is only used when
+`OUTREACH_ENQUEUE_ALLOWLIST_FALLBACK_ENABLED=true`, and only for internal-token
+requests. Keep that fallback disabled in production after ownership rows are
+seeded.
+
+## Entry 2A Ownership / Entitlement Model
+
+Entry 2A adds a multi-client gate before the Edge Function calls
+`public.enqueue_outreach_dm_job(...)`:
+
+```text
+producer auth
+  -> account_id belongs to an active client
+  -> active outreach entitlement for that client
+  -> ig_account_dm_settings.outreach_enabled=true
+  -> enqueue_outreach_dm_job(...)
+```
+
+Tables:
+
+- `clients`
+- `client_users`
+- `client_instagram_accounts`
+- `client_entitlements`
+
+Helpers:
+
+- `public.client_can_enqueue_outreach(auth_user_id, account_id)` for future
+  client JWT flows.
+- `public.client_account_has_outreach_entitlement(account_id)` for internal
+  producer flows authenticated by `OUTREACH_ENQUEUE_INTERNAL_API_TOKEN`.
+
+The Edge Function still never reads or exposes `ig_accounts` directly to a
+dashboard client. `ig_accounts` may contain operationally sensitive fields such
+as credentials or device identifiers on the live project. Client dashboard reads
+must use filtered views/endpoints in a later Entry 2C patch.
+
+Entry 2A also revokes direct `authenticated` execution of
+`public.enqueue_outreach_dm_job(...)`. Producers should go through the Edge
+Function so ownership, entitlement, metadata, source, and forbidden-field checks
+are enforced consistently.
+
+Credentials/password update, auto-login, provisioning, device/clone/timeslot
+assignment, campaigns/imports, `import_csv`, admin cancel/requeue, and
+Slack/Discord alerting are intentionally out of scope for Entry 2A.
 
 ## Remote Secrets
 
@@ -56,6 +106,7 @@ running HTTP validation. Never commit or print the real token value.
 supabase secrets set --project-ref zgafnshkjywfltxgbtzg \
   OUTREACH_ENQUEUE_INTERNAL_API_TOKEN="<shared-bearer-token>" \
   OUTREACH_ENQUEUE_ALLOWED_ACCOUNT_IDS="42c625c2-e761-4100-8a9d-7ae1373de97d" \
+  OUTREACH_ENQUEUE_ALLOWLIST_FALLBACK_ENABLED="false" \
   OUTREACH_ENQUEUE_MAX_BATCH_SIZE="100" \
   OUTREACH_ENQUEUE_MAX_PENDING_PER_ACCOUNT="500"
 ```
@@ -156,6 +207,114 @@ export OUTREACH_ENQUEUE_INTERNAL_API_TOKEN="<shared-bearer-token>"
 ./scripts/validate-entry1.sh
 ```
 
+For Entry 2A, first apply the migration and seed ownership/entitlement rows for the
+test account. **Checkpoint proof uses SQL seed + SQL helper checks + Edge Function
+curl** (see below). PostgREST `POST /rest/v1/*` currently returns `PGRST102` on the
+linked project even for manual curl with valid JSON, so `validate-entry2a.sh`
+defaults to **edge-only** mode and does not treat REST seed as checkpoint proof.
+
+```bash
+export SUPABASE_URL="https://zgafnshkjywfltxgbtzg.supabase.co"
+export ENTRY2A_BASE_URL="$SUPABASE_URL/functions/v1/outreach-enqueue"
+export ENTRY2A_ACCOUNT_ID="42c625c2-e761-4100-8a9d-7ae1373de97d"
+export OUTREACH_ENQUEUE_INTERNAL_API_TOKEN="<shared-bearer-token>"
+
+# After SQL seed below:
+./scripts/validate-entry2a.sh
+
+# Optional: also exercise PostgREST paths (diagnostic; may fail with PGRST102)
+# export SUPABASE_SERVICE_ROLE_KEY="<service-role-key>"
+# ENTRY2A_REST_ENABLED=1 ./scripts/validate-entry2a.sh
+
+# Optional: disabled-entitlement Edge rejection (after SQL sets active=false)
+# ENTRY2A_RUN_DISABLED_TEST=1 ./scripts/validate-entry2a.sh
+```
+
+SQL seed for the test account (checkpoint proof):
+
+```sql
+INSERT INTO public.clients (id, name, status, metadata)
+VALUES (
+  '00000000-0000-4000-8000-000000002e2a'::uuid,
+  'Entry 2A Test Client',
+  'active',
+  '{"source": "entry2a-validate"}'::jsonb
+)
+ON CONFLICT (id) DO UPDATE
+SET name = EXCLUDED.name,
+    status = EXCLUDED.status,
+    metadata = EXCLUDED.metadata;
+
+INSERT INTO public.client_instagram_accounts (
+  id,
+  client_id,
+  account_id,
+  label,
+  onboarding_status,
+  provisioning_status,
+  login_status
+)
+VALUES (
+  '00000000-0000-4000-8000-00000012e2a1'::uuid,
+  '00000000-0000-4000-8000-000000002e2a'::uuid,
+  '42c625c2-e761-4100-8a9d-7ae1373de97d'::uuid,
+  'Entry 2A Test Account',
+  'ready',
+  'ready',
+  'connected'
+)
+ON CONFLICT (id) DO UPDATE
+SET client_id = EXCLUDED.client_id,
+    account_id = EXCLUDED.account_id,
+    label = EXCLUDED.label,
+    onboarding_status = EXCLUDED.onboarding_status,
+    provisioning_status = EXCLUDED.provisioning_status,
+    login_status = EXCLUDED.login_status;
+
+INSERT INTO public.client_entitlements (
+  id,
+  client_id,
+  feature_code,
+  entitlement_type,
+  active,
+  metadata
+)
+VALUES (
+  '00000000-0000-4000-8000-00000012e2a2'::uuid,
+  '00000000-0000-4000-8000-000000002e2a'::uuid,
+  'outreach',
+  'standalone',
+  true,
+  '{"source": "entry2a-validate"}'::jsonb
+)
+ON CONFLICT (id) DO UPDATE
+SET active = EXCLUDED.active,
+    entitlement_type = EXCLUDED.entitlement_type,
+    metadata = EXCLUDED.metadata;
+```
+
+SQL verification:
+
+```sql
+SELECT public.client_account_has_outreach_entitlement(
+  '42c625c2-e761-4100-8a9d-7ae1373de97d'::uuid
+) AS can_enqueue_test_account;
+
+SELECT public.client_account_has_outreach_entitlement(
+  '00000000-0000-4000-8000-000000000999'::uuid
+) AS can_enqueue_random_account;
+
+SELECT tablename, rowsecurity
+FROM pg_tables
+WHERE schemaname = 'public'
+  AND tablename IN (
+    'clients',
+    'client_users',
+    'client_instagram_accounts',
+    'client_entitlements'
+  );
+```
+
 The script validates:
 
 - single enqueue returns `ok=true`, a `job_id`, `status=pending`, and frozen message text;
@@ -210,7 +369,8 @@ ORDER BY created_at DESC;
 Implemented now:
 
 - bearer-token auth;
-- optional account allowlist guard;
+- Entry 2A ownership/entitlement guard;
+- optional account allowlist fallback for internal producers only when explicitly enabled;
 - `outreach_enabled=true`;
 - username trim / strip `@` / lowercase / obvious invalid-character rejection;
 - source allowlist: `n8n`, `dashboard`, `manual`, `campaign`;
@@ -225,8 +385,8 @@ Implemented now:
 
 MVP TODO:
 
-- replace `OUTREACH_ENQUEUE_ALLOWED_ACCOUNT_IDS` with real tenant/account ownership;
-- check paid package/add-on tables when they exist;
+- seed production client ownership and entitlements;
+- add filtered dashboard read endpoints instead of exposing `ig_accounts`;
 - add `import_csv` enum or map it in a v2 product decision;
 - add import/campaign tracking tables;
 - add bulk RPC for high-volume imports.

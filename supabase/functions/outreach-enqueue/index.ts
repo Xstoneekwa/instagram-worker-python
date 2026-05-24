@@ -9,6 +9,10 @@
 
 type Source = "dashboard" | "n8n" | "manual" | "campaign";
 type EnqueueResult = "created" | "duplicate_existing";
+type ProducerAuth =
+  | { ok: true; mode: "internal"; authUserId: null }
+  | { ok: true; mode: "client"; authUserId: string }
+  | { ok: false; response: Response };
 
 const SOURCE_ALLOWLIST = new Set<Source>(["dashboard", "n8n", "manual", "campaign"]);
 const FORBIDDEN_TOP_LEVEL_FIELDS = new Set([
@@ -137,27 +141,42 @@ function requireEnv(name: string): string {
   return value;
 }
 
-function assertAuthenticated(req: Request): { ok: true } | { ok: false; response: Response } {
+async function verifyClientJwt(token: string): Promise<string | null> {
+  const url = requireEnv("SUPABASE_URL").replace(/\/+$/, "");
+  const key = requireEnv("SUPABASE_SERVICE_ROLE_KEY");
+  const res = await fetch(`${url}/auth/v1/user`, {
+    headers: {
+      "apikey": key,
+      "authorization": `Bearer ${token}`,
+    },
+  });
+  if (!res.ok) return null;
+  const user = await res.json();
+  return typeof user?.id === "string" && isUuid(user.id) ? user.id : null;
+}
+
+async function assertProducerAuthenticated(req: Request): Promise<ProducerAuth> {
   const expected = (Deno.env.get("OUTREACH_ENQUEUE_INTERNAL_API_TOKEN") || "").trim();
   const auth = req.headers.get("authorization") || "";
   const got = auth.toLowerCase().startsWith("bearer ") ? auth.slice(7).trim() : "";
   const headers = corsHeaders(req);
-  if (!expected) {
-    return {
-      ok: false,
-      response: jsonResponse(503, {
-        ok: false,
-        error: "internal_api_token_not_configured",
-      }, headers),
-    };
-  }
-  if (!got || got !== expected) {
+  if (!got) {
     return {
       ok: false,
       response: jsonResponse(401, { ok: false, error: "unauthorized" }, headers),
     };
   }
-  return { ok: true };
+  if (expected && got === expected) {
+    return { ok: true, mode: "internal", authUserId: null };
+  }
+  const authUserId = await verifyClientJwt(got);
+  if (!authUserId) {
+    return {
+      ok: false,
+      response: jsonResponse(401, { ok: false, error: "unauthorized" }, headers),
+    };
+  }
+  return { ok: true, mode: "client", authUserId };
 }
 
 function parsePositiveIntEnv(name: string, fallback: number): number {
@@ -288,18 +307,93 @@ async function ensureMessageResolvable(
   return { ok: true, messageBody: rawBody || null, templateId };
 }
 
-function validateOwnershipGuard(accountId: string): { ok: true } | { ok: false; error: string } {
-  const allowed = (Deno.env.get("OUTREACH_ENQUEUE_ALLOWED_ACCOUNT_IDS") || "")
+export function parseAllowedAccountIds(raw: string): string[] {
+  return raw
     .split(",")
     .map((x) => x.trim())
     .filter(Boolean);
-  if (allowed.length > 0 && !allowed.includes(accountId)) {
-    return { ok: false, error: "account_not_allowed" };
-  }
-  return { ok: true };
 }
 
-async function validateCommon(payload: Record<string, unknown>): Promise<
+export function allowlistFallbackEnabled(): boolean {
+  return ["1", "true", "yes", "on"].includes(
+    (Deno.env.get("OUTREACH_ENQUEUE_ALLOWLIST_FALLBACK_ENABLED") || "").trim().toLowerCase(),
+  );
+}
+
+export function accountAllowedByEnv(accountId: string): boolean {
+  const allowed = parseAllowedAccountIds(Deno.env.get("OUTREACH_ENQUEUE_ALLOWED_ACCOUNT_IDS") || "");
+  return allowed.length > 0 && allowed.includes(accountId);
+}
+
+export function accessDecision(
+  hasDbEntitlement: boolean,
+  accountId: string,
+  options: {
+    dbCheckFailed?: boolean;
+    allowlistFallback?: boolean;
+    allowlistAllowed?: boolean;
+  } = {},
+): { ok: true; mode: "db" | "allowlist_fallback" } | { ok: false; error: string; status: number } {
+  const {
+    dbCheckFailed = false,
+    allowlistFallback = false,
+    allowlistAllowed = false,
+  } = options;
+  if (hasDbEntitlement) return { ok: true, mode: "db" };
+  if (allowlistFallback && allowlistAllowed) return { ok: true, mode: "allowlist_fallback" };
+  if (dbCheckFailed) return { ok: false, error: "account_ownership_check_failed", status: 503 };
+  if (!isUuid(accountId)) return { ok: false, error: "account_id_invalid", status: 400 };
+  return { ok: false, error: "account_outreach_entitlement_required", status: 403 };
+}
+
+async function rpcBoolean(path: string, payload: Record<string, unknown>): Promise<boolean> {
+  const result = await supabaseJson(path, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  return result === true;
+}
+
+async function hasClientAccountAccess(authUserId: string, accountId: string): Promise<boolean> {
+  return await rpcBoolean("/rest/v1/rpc/client_can_enqueue_outreach", {
+    p_auth_user_id: authUserId,
+    p_account_id: accountId,
+  });
+}
+
+async function hasInternalAccountAccess(accountId: string): Promise<boolean> {
+  return await rpcBoolean("/rest/v1/rpc/client_account_has_outreach_entitlement", {
+    p_account_id: accountId,
+  });
+}
+
+async function validateOwnershipGuard(
+  accountId: string,
+  auth: Extract<ProducerAuth, { ok: true }>,
+): Promise<{ ok: true; mode: "db" | "allowlist_fallback" } | { ok: false; error: string; status: number }> {
+  const fallback = allowlistFallbackEnabled();
+  const fallbackAllowed = accountAllowedByEnv(accountId);
+  try {
+    const hasAccess = auth.mode === "client"
+      ? await hasClientAccountAccess(auth.authUserId, accountId)
+      : await hasInternalAccountAccess(accountId);
+    return accessDecision(hasAccess, accountId, {
+      allowlistFallback: auth.mode === "internal" && fallback,
+      allowlistAllowed: fallbackAllowed,
+    });
+  } catch {
+    return accessDecision(false, accountId, {
+      dbCheckFailed: true,
+      allowlistFallback: auth.mode === "internal" && fallback,
+      allowlistAllowed: fallbackAllowed,
+    });
+  }
+}
+
+async function validateCommon(
+  payload: Record<string, unknown>,
+  auth: Extract<ProducerAuth, { ok: true }>,
+): Promise<
   | {
     ok: true;
     accountId: string;
@@ -319,8 +413,8 @@ async function validateCommon(payload: Record<string, unknown>): Promise<
   if (!isUuid(payload.account_id)) return { ok: false, error: "account_id_invalid", status: 400 };
   const accountId = String(payload.account_id).trim();
 
-  const ownership = validateOwnershipGuard(accountId);
-  if (!ownership.ok) return { ok: false, error: ownership.error, status: 403 };
+  const ownership = await validateOwnershipGuard(accountId, auth);
+  if (!ownership.ok) return { ok: false, error: ownership.error, status: ownership.status };
 
   const sourceResult = validateSource(payload.source);
   if (!sourceResult.ok) return { ok: false, error: sourceResult.error, status: 400 };
@@ -358,6 +452,7 @@ async function validateCommon(payload: Record<string, unknown>): Promise<
 async function enqueueOne(
   payload: Record<string, unknown>,
   base?: Awaited<ReturnType<typeof validateCommon>> & { ok: true },
+  auth?: Extract<ProducerAuth, { ok: true }>,
 ): Promise<Record<string, unknown>> {
   const usernameResult = validateUsername(payload.recipient_username);
   if (!usernameResult.ok) {
@@ -368,7 +463,14 @@ async function enqueueOne(
     };
   }
 
-  const common = base ?? await validateCommon(payload);
+  if (!base && !auth) {
+    return {
+      recipient_username: usernameResult.username,
+      ok: false,
+      error: "auth_context_required",
+    };
+  }
+  const common = base ?? await validateCommon(payload, auth as Extract<ProducerAuth, { ok: true }>);
   if (!common.ok) {
     return {
       recipient_username: usernameResult.username,
@@ -424,10 +526,14 @@ function logEvent(event: string, payload: Record<string, unknown>) {
   console.log(JSON.stringify({ ts: new Date().toISOString(), event, ...payload }));
 }
 
-async function handleSingle(req: Request, payload: Record<string, unknown>) {
+async function handleSingle(
+  req: Request,
+  payload: Record<string, unknown>,
+  auth: Extract<ProducerAuth, { ok: true }>,
+) {
   const headers = corsHeaders(req);
   const rid = requestId(req);
-  const common = await validateCommon(payload);
+  const common = await validateCommon(payload, auth);
   if (!common.ok) {
     logEvent("outreach_enqueue_rejected", {
       request_id: rid,
@@ -465,7 +571,11 @@ async function handleSingle(req: Request, payload: Record<string, unknown>) {
   return jsonResponse(result.ok ? 200 : 400, { ...result, request_id: rid }, headers);
 }
 
-async function handleBulk(req: Request, payload: Record<string, unknown>) {
+async function handleBulk(
+  req: Request,
+  payload: Record<string, unknown>,
+  auth: Extract<ProducerAuth, { ok: true }>,
+) {
   const headers = corsHeaders(req);
   const rid = requestId(req);
   const recipients = Array.isArray(payload.recipients) ? payload.recipients : null;
@@ -485,7 +595,7 @@ async function handleBulk(req: Request, payload: Record<string, unknown>) {
     }, headers);
   }
 
-  const common = await validateCommon(payload);
+  const common = await validateCommon(payload, auth);
   if (!common.ok) {
     return jsonResponse(common.status || 400, { ok: false, error: common.error, request_id: rid }, headers);
   }
@@ -537,7 +647,7 @@ async function handleRequest(req: Request): Promise<Response> {
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers });
   if (req.method !== "POST") return jsonResponse(405, { ok: false, error: "method_not_allowed" }, headers);
 
-  const auth = assertAuthenticated(req);
+  const auth = await assertProducerAuthenticated(req);
   if (!auth.ok) return auth.response;
 
   let payload: Record<string, unknown>;
@@ -553,10 +663,10 @@ async function handleRequest(req: Request): Promise<Response> {
   try {
     const path = new URL(req.url).pathname.replace(/\/+$/, "");
     if (path.endsWith("/outreach/enqueue") || path.endsWith("/enqueue")) {
-      return await handleSingle(req, payload);
+      return await handleSingle(req, payload, auth);
     }
     if (path.endsWith("/outreach/bulk-enqueue") || path.endsWith("/bulk-enqueue")) {
-      return await handleBulk(req, payload);
+      return await handleBulk(req, payload, auth);
     }
     return jsonResponse(404, { ok: false, error: "route_not_found" }, headers);
   } catch (error) {
