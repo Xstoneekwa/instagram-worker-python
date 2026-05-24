@@ -97,6 +97,112 @@ Credentials/password update, auto-login, provisioning, device/clone/timeslot
 assignment, campaigns/imports, `import_csv`, admin cancel/requeue, and
 Slack/Discord alerting are intentionally out of scope for Entry 2A.
 
+## Entry 2B Account-Scoped Subscriptions
+
+Entry 2B adds the product/billing layer that distinguishes `full_cycle` from
+`outreach_only` without changing worker flows or runtime quotas.
+
+Tables:
+
+- `client_subscriptions`
+  - product contract for one client;
+  - `subscription_type in ('full_cycle', 'outreach_only')`;
+  - lifecycle status only (`active`, `paused`, `cancelled`, `expired`);
+  - no device assignment, credentials, package quotas, or runtime settings.
+- `client_subscription_accounts`
+  - links a subscription to one or more `client_instagram_accounts`;
+  - makes subscriptions account-scoped so one client can run different packages
+    on different Instagram accounts.
+- `client_subscription_modules`
+  - modules included in or added onto the subscription;
+  - `feature_code in ('welcome', 'follow', 'unfollow', 'outreach')`;
+  - `outreach_only` subscriptions may only enable `outreach`.
+
+Runtime authorization remains in `client_entitlements`. Entry 2B adds nullable
+account/source columns so future synced entitlements can be account-scoped:
+
+- `account_id`
+- `source_subscription_id`
+- `source_subscription_account_id`
+- `source_subscription_module_id`
+
+`account_id IS NULL` keeps Entry 2A client-wide entitlement behavior for existing
+rows. Account-scoped rows apply only to that Instagram account. The Outreach
+helpers accept either form:
+
+```text
+client-wide entitlement: client_id + feature_code
+account-scoped entitlement: client_id + account_id + feature_code
+```
+
+The migration also adds
+`public.sync_client_subscription_entitlements(subscription_id)`, an explicit
+service-role/admin function. It is intentionally **not** a trigger. Admin/backend
+code should call it after changing a subscription, subscription account, or
+module. This avoids silent package changes overwriting runtime settings.
+
+The sync mapping is intentional:
+
+- `client_subscription_modules.entitlement_type='included'` becomes
+  `client_entitlements.entitlement_type='bundle'`.
+- `client_subscription_modules.entitlement_type='addon'` remains
+  `client_entitlements.entitlement_type='addon'`.
+
+Product/runtime separation:
+
+- `client_subscriptions` / `client_subscription_modules` = billing/product.
+- `client_entitlements` = runtime authorization effective for APIs/helpers.
+- `ig_account_dm_settings`, `ig_account_unfollow_settings`,
+  `ig_account_follow_settings`, `ig_account_dm_counters` = runtime settings and
+  counters.
+
+Entry 2B deliberately does not freeze package numbers such as follow/unfollow
+daily limits or Welcome DM limits. The initial Outreach runtime baseline remains
+the existing account DM settings/runtime decision (for example, current
+`outreach_per_session_limit` defaults), and full package settings are deferred to
+the later production readiness settings freeze.
+
+Agency/multi-account classification is also deferred. The account-scoped model
+supports clients with multiple Instagram accounts now; a later admin/dashboard
+patch can add a safe `client_type`/agency override or computed classification
+without changing the subscription-account relationship.
+
+Future agency classification roadmap:
+
+- compute agency when `count(client_instagram_accounts) > 1`;
+- allow an admin override;
+- show agency status in the admin dashboard;
+- support multi-account client dashboard views;
+- add agency-specific billing/permissions if needed;
+- allow virtual assistants to filter agency clients.
+
+Premium AI modules are also future scope. Entry 2B does not add
+`ai_comment` or `ai_targeting` as runtime `feature_code` values because no
+backend flows exist yet. Do not expose these modules as operational until their
+workers, queues, safety controls, quotas, and dashboards exist.
+
+Future Premium AI roadmap:
+
+- AI targeting settings and source/scoring;
+- AI comment prompts/settings;
+- AI comment queue/jobs;
+- quotas/counters;
+- dashboard client config;
+- admin monitoring;
+- safety review;
+- runtime worker implementation.
+
+Future dashboard/API surface (not implemented in Entry 2B):
+
+- Client: `GET /client/subscription`
+- Client: `GET /client/modules`
+- Client: `GET /client/limits-visible`
+- Admin: `GET /admin/subscriptions`
+- Admin: `POST /admin/subscriptions`
+- Admin: `PATCH /admin/subscriptions/:id`
+- Admin: `POST /admin/subscriptions/:id/modules`
+- Admin: `POST /admin/subscriptions/:id/sync-entitlements`
+
 ## Remote Secrets
 
 Remote Edge Function secrets must be configured on the Supabase project before
