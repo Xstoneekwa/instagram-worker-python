@@ -45,6 +45,21 @@ class RuntimeHeartbeatTest(unittest.TestCase):
             out = runtime_heartbeat.heartbeat_worker(worker_id="worker-1", status="idle")
         self.assertTrue(out["published"])
         self.assertEqual(upsert_worker.call_args.args[0]["status"], "idle")
+        self.assertIn("last_seen_at", upsert_worker.call_args.args[0])
+
+    def test_worker_heartbeat_payload_includes_last_seen_at(self) -> None:
+        fixed_ts = "2026-05-25T12:00:00+00:00"
+        with (
+            patch.object(runtime_heartbeat.config, "RUNTIME_HEARTBEATS_ENABLED", True, create=True),
+            patch.object(runtime_heartbeat, "_utc_now_iso", return_value=fixed_ts),
+            patch.object(
+                runtime_heartbeat.supabase_client,
+                "upsert_worker_heartbeat",
+                return_value={"worker_id": "worker-1"},
+            ) as upsert_worker,
+        ):
+            runtime_heartbeat.heartbeat_worker(worker_id="worker-1", status="running")
+        self.assertEqual(upsert_worker.call_args.args[0]["last_seen_at"], fixed_ts)
 
     def test_device_heartbeat_missing_device_id_skips(self) -> None:
         with patch.object(runtime_heartbeat.config, "RUNTIME_HEARTBEATS_ENABLED", True, create=True):
@@ -68,6 +83,41 @@ class RuntimeHeartbeatTest(unittest.TestCase):
         self.assertTrue(out["published"])
         self.assertEqual(upsert_device.call_args.args[0]["status"], "busy")
         self.assertEqual(upsert_device.call_args.args[0]["adb_serial"], "emulator-5554")
+        self.assertIn("last_seen_at", upsert_device.call_args.args[0])
+
+    def test_device_heartbeat_payload_includes_last_seen_at(self) -> None:
+        fixed_ts = "2026-05-25T12:00:01+00:00"
+        with (
+            patch.object(runtime_heartbeat.config, "RUNTIME_HEARTBEATS_ENABLED", True, create=True),
+            patch.object(runtime_heartbeat, "_utc_now_iso", return_value=fixed_ts),
+            patch.object(
+                runtime_heartbeat.supabase_client,
+                "upsert_device_heartbeat",
+                return_value={"device_id": "00000000-0000-4000-8000-00000022c001"},
+            ) as upsert_device,
+        ):
+            runtime_heartbeat.heartbeat_device(
+                "00000000-0000-4000-8000-00000022c001",
+                status="busy",
+            )
+        self.assertEqual(upsert_device.call_args.args[0]["last_seen_at"], fixed_ts)
+
+    def test_force_heartbeat_updates_last_seen_at_each_call(self) -> None:
+        timestamps = ["2026-05-25T12:00:00+00:00", "2026-05-25T12:00:30+00:00"]
+        with (
+            patch.object(runtime_heartbeat.config, "RUNTIME_HEARTBEATS_ENABLED", True, create=True),
+            patch.object(runtime_heartbeat, "_utc_now_iso", side_effect=timestamps),
+            patch.object(
+                runtime_heartbeat.supabase_client,
+                "upsert_worker_heartbeat",
+                return_value={"worker_id": "worker-1"},
+            ) as upsert_worker,
+        ):
+            runtime_heartbeat.heartbeat_worker(worker_id="worker-1", status="running", force=True)
+            runtime_heartbeat.heartbeat_worker(worker_id="worker-1", status="idle", force=True)
+        payloads = [call.args[0] for call in upsert_worker.call_args_list]
+        self.assertEqual(payloads[0]["last_seen_at"], timestamps[0])
+        self.assertEqual(payloads[1]["last_seen_at"], timestamps[1])
 
     def test_heartbeat_failure_fail_open_no_raise(self) -> None:
         with (

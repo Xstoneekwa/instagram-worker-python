@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import socket
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 import config
@@ -39,6 +40,11 @@ def _worker_id() -> str:
 
 def _git_sha() -> str:
     return str(os.getenv("GIT_SHA") or "unknown").strip() or "unknown"
+
+
+def _utc_now_iso() -> str:
+    """Explicit heartbeat timestamp for PostgREST upsert updates."""
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _skip_throttled(cache: dict[str, float], key: str, *, force: bool) -> bool:
@@ -89,6 +95,7 @@ def heartbeat_worker(
         "process_id": str(os.getpid()),
         "git_sha": _git_sha(),
         "status": st,
+        "last_seen_at": _utc_now_iso(),
         "current_account_id": account_id or None,
         "current_run_id": run_id or None,
         "current_assignment_id": assignment_id or None,
@@ -134,6 +141,7 @@ def heartbeat_device(
         "adb_serial": str(adb_serial or "").strip() or None,
         "host_machine": str(host_machine or socket.gethostname()).strip() or None,
         "status": st,
+        "last_seen_at": _utc_now_iso(),
         "current_account_id": account_id or None,
         "current_assignment_id": assignment_id or None,
         "current_clone_id": clone_id or None,

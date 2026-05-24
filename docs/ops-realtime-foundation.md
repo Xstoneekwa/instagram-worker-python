@@ -189,6 +189,10 @@ ORF-2 intentionally does not add a dedicated heartbeat loop. Repeated heartbeat
 calls are throttled by `RUNTIME_HEARTBEAT_INTERVAL_SECONDS`, with explicit
 force support for start/stop transitions.
 
+Heartbeat upserts must send `last_seen_at` explicitly in the payload. PostgREST
+`resolution=merge-duplicates` updates do not reapply table defaults, so a
+conflict update would otherwise keep the previous smoke-test timestamp.
+
 Metadata is recursively redacted before persistence. Passwords, service-role
 keys, tokens, cookies, credentials, sessions, and `device_udid` are removed.
 `adb_serial` is converted to suffix/hash in runtime event metadata and remains
