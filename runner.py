@@ -34,6 +34,8 @@ from visual_follow_history import (
 )
 
 import config
+import runtime_events
+import runtime_heartbeat
 import supabase_client
 from assignment_dispatch_resolver import (
     resolve_account_assignment_runtime_context,
@@ -661,6 +663,25 @@ def _coerce_optional_run_id(run_id: Any) -> str | None:
         return None
     s = str(run_id).strip()
     return s or None
+
+
+_ORF_RUNTIME_CONTEXT: dict[str, Any] = {}
+
+
+def _orf_set_runtime_context(**fields: Any) -> None:
+    _ORF_RUNTIME_CONTEXT.update({k: v for k, v in fields.items() if v is not None})
+
+
+def _orf_publish_event(event_type: str, **kwargs: Any) -> dict:
+    return runtime_events.publish_runtime_event(event_type, visibility="admin_only", **kwargs)
+
+
+def _orf_heartbeat_worker(status: str, **kwargs: Any) -> dict:
+    return runtime_heartbeat.heartbeat_worker(status=status, force=True, **kwargs)
+
+
+def _orf_heartbeat_device(device_id: str | None, status: str, **kwargs: Any) -> dict:
+    return runtime_heartbeat.heartbeat_device(device_id, status=status, force=True, **kwargs)
 
 
 def _followers_visual_load_interacted_db_row(
@@ -1522,6 +1543,36 @@ def _update_run_status_safe(
         status=status,
         totals=totals,
     )
+    if status in {"completed", "failed"}:
+        event_type = "run_completed" if status == "completed" else "run_failed"
+        reason = None
+        if isinstance(performance_summary, dict):
+            reason = str(performance_summary.get("reason") or "").strip() or None
+        _orf_publish_event(
+            event_type,
+            severity="info" if status == "completed" else "error",
+            account_id=_ORF_RUNTIME_CONTEXT.get("account_id"),
+            run_id=run_id,
+            assignment_id=_ORF_RUNTIME_CONTEXT.get("assignment_id"),
+            device_id=_ORF_RUNTIME_CONTEXT.get("device_id"),
+            clone_id=_ORF_RUNTIME_CONTEXT.get("clone_id"),
+            reason=reason,
+            metadata={
+                "status": status,
+                "totals": totals,
+                "run_type": _ORF_RUNTIME_CONTEXT.get("run_type"),
+                "performance_summary": performance_summary,
+            },
+        )
+        _orf_heartbeat_worker(
+            "idle" if status == "completed" else "error",
+            account_id=_ORF_RUNTIME_CONTEXT.get("account_id"),
+            run_id=run_id,
+            assignment_id=_ORF_RUNTIME_CONTEXT.get("assignment_id"),
+            device_id=_ORF_RUNTIME_CONTEXT.get("device_id"),
+            clone_id=_ORF_RUNTIME_CONTEXT.get("clone_id"),
+            metadata={"run_status": status, "reason": reason},
+        )
 
 
 def _update_target_status_safe(
@@ -11493,6 +11544,28 @@ def main() -> int:
         run_id=run_id or None,
         run_type=_parse_run_type(args) or None,
     )
+    _orf_set_runtime_context(
+        account_id=account_id or None,
+        run_id=run_id or None,
+        run_type=_parse_run_type(args) or None,
+    )
+    _orf_publish_event(
+        "run_started",
+        account_id=account_id or None,
+        run_id=run_id or None,
+        metadata={
+            "target_count": len(targets),
+            "multi_mode": len(targets) > 1,
+            "supabase_mode": supabase_mode,
+            "run_type": _parse_run_type(args) or None,
+        },
+    )
+    _orf_heartbeat_worker(
+        "running",
+        account_id=account_id or None,
+        run_id=run_id or None,
+        metadata={"run_type": _parse_run_type(args) or None},
+    )
     reset_dm_send_run_state()
     global _RUNTIME_REAL_DM_SENT_COUNT, _RUNTIME_FOLLOW_COUNT, _RUNTIME_FOLLOWED_USERNAMES
     global _RUNTIME_SEEN_FOLLOWER_USERNAMES, _RUNTIME_INTERACTED_USERNAMES, _RUNTIME_UNFOLLOWED_USERNAMES
@@ -11514,6 +11587,8 @@ def main() -> int:
     device_serial = config.DEVICE_SERIAL
 
     dispatch_run_type = _parse_run_type(args)
+    dispatch_ctx: dict[str, Any] = {}
+    dispatch_log_fields: dict[str, Any] = {}
     if bool(getattr(config, "ACCOUNT_ASSIGNMENT_DISPATCH_ENABLED", False)):
         dispatch_run_types = _account_assignment_dispatch_run_types()
         if dispatch_run_type not in dispatch_run_types:
@@ -11545,6 +11620,21 @@ def main() -> int:
             if bool(dispatch_ctx.get("assignment_found")):
                 device_serial = str(dispatch_ctx.get("adb_serial") or "").strip() or device_serial
                 log("info", "account_assignment_dispatch_resolved", **dispatch_log_fields)
+                _orf_set_runtime_context(
+                    assignment_id=dispatch_ctx.get("assignment_id"),
+                    device_id=dispatch_ctx.get("device_id"),
+                    clone_id=dispatch_ctx.get("clone_id"),
+                )
+                _orf_publish_event(
+                    "account_assignment_dispatch_resolved",
+                    account_id=account_id or None,
+                    run_id=run_id or None,
+                    assignment_id=dispatch_ctx.get("assignment_id"),
+                    device_id=dispatch_ctx.get("device_id"),
+                    clone_id=dispatch_ctx.get("clone_id"),
+                    reason=dispatch_ctx.get("reason"),
+                    metadata=dispatch_log_fields,
+                )
             else:
                 dispatch_reason = str(dispatch_ctx.get("reason") or "assignment_not_found")
                 dispatch_requires_assignment = bool(
@@ -11573,6 +11663,21 @@ def main() -> int:
                     dispatch_event,
                     **dispatch_log_fields,
                 )
+                if dispatch_event in {
+                    "account_assignment_dispatch_missing",
+                    "account_assignment_dispatch_incompatible",
+                }:
+                    _orf_publish_event(
+                        dispatch_event,
+                        severity="error" if dispatch_exit_code else "warning",
+                        account_id=account_id or None,
+                        run_id=run_id or None,
+                        assignment_id=dispatch_ctx.get("assignment_id"),
+                        device_id=dispatch_ctx.get("device_id"),
+                        clone_id=dispatch_ctx.get("clone_id"),
+                        reason=dispatch_reason,
+                        metadata=dispatch_log_fields,
+                    )
                 if dispatch_exit_code:
                     log("error", "run_aborted", reason=dispatch_reason)
                     if supabase_mode and run_id:
@@ -11590,6 +11695,30 @@ def main() -> int:
 
     d = connect_device(device_serial)
     t = _phase("connect_device", t)
+    _orf_publish_event(
+        "device_connected",
+        account_id=account_id or None,
+        run_id=run_id or None,
+        assignment_id=dispatch_ctx.get("assignment_id"),
+        device_id=dispatch_ctx.get("device_id"),
+        clone_id=dispatch_ctx.get("clone_id"),
+        metadata={
+            "run_type": dispatch_run_type or None,
+            "assignment_found": bool(dispatch_ctx.get("assignment_found")),
+            "adb_serial": device_serial,
+        },
+    )
+    if dispatch_ctx.get("device_id"):
+        _orf_heartbeat_device(
+            str(dispatch_ctx.get("device_id") or ""),
+            "busy",
+            adb_serial=str(dispatch_ctx.get("adb_serial") or device_serial or "").strip() or None,
+            host_machine=str(dispatch_ctx.get("host_machine") or "").strip() or None,
+            account_id=account_id or None,
+            assignment_id=dispatch_ctx.get("assignment_id"),
+            clone_id=dispatch_ctx.get("clone_id"),
+            metadata={"run_type": dispatch_run_type or None},
+        )
 
     disable_android_animations(device_serial)
     t = _phase("disable_android_animations", t)

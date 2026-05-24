@@ -152,6 +152,66 @@ worker/logs/reliability snapshot
   -> webhook_dispatcher later
 ```
 
+## ORF-2 Runtime Integration
+
+ORF-2 adds opt-in, best-effort Python runtime helpers for low-volume worker
+telemetry. It does not change worker behavior when flags are off.
+
+Flags:
+
+- `RUNTIME_EVENTS_ENABLED=false`
+- `RUNTIME_HEARTBEATS_ENABLED=false`
+- `RUNTIME_EVENTS_FAIL_OPEN=true`
+- `RUNTIME_HEARTBEAT_INTERVAL_SECONDS=30`
+- `RUNTIME_EVENTS_LOG_LOCAL_FALLBACK=true`
+- `RUNTIME_EVENTS_INCLUDE_DEBUG=false`
+
+Runtime events are fail-open: Supabase insert/upsert failures log a local
+warning and return a structured failure result, but never crash the worker.
+ORF-2 publishes `admin_only` events from `runner.py` only:
+
+- `run_started`
+- `run_completed`
+- `run_failed`
+- `account_assignment_dispatch_resolved`
+- `account_assignment_dispatch_missing`
+- `account_assignment_dispatch_incompatible`
+- `device_connected`
+
+Heartbeats are also opt-in and low-volume:
+
+- `heartbeat_worker(status="running")` near run start
+- `heartbeat_worker(status="idle" | "error")` after run status updates
+- `heartbeat_device(status="busy")` after device connection only when a real
+  `phone_devices.id` is known from assignment dispatch
+
+ORF-2 intentionally does not add a dedicated heartbeat loop. Repeated heartbeat
+calls are throttled by `RUNTIME_HEARTBEAT_INTERVAL_SECONDS`, with explicit
+force support for start/stop transitions.
+
+Metadata is recursively redacted before persistence. Passwords, service-role
+keys, tokens, cookies, credentials, sessions, and `device_udid` are removed.
+`adb_serial` is converted to suffix/hash in runtime event metadata and remains
+ops-only in `device_heartbeats`. Client-safe reads still require future safe
+views/RPCs.
+
+Not included in ORF-2:
+
+- sender/orchestrator integration;
+- `dm_job_*` events;
+- account incidents;
+- Slack/Discord or webhook dispatch;
+- Redis;
+- migrations or schema changes;
+- quotas/settings runtime changes.
+
+Local tests without a device:
+
+```bash
+python3 -m py_compile runtime_events.py runtime_heartbeat.py supabase_client.py config.py runner.py
+python3 -m unittest tests/test_runtime_events.py tests/test_runtime_heartbeat.py
+```
+
 ## Redis Readiness
 
 Redis is optional V2 infrastructure, not ORF-1. It can later back:

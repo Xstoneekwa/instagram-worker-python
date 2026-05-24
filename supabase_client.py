@@ -36,6 +36,7 @@ def _request_json(
     query: dict[str, str] | None = None,
     body: dict[str, Any] | list[dict[str, Any]] | None = None,
     prefer_representation: bool = False,
+    prefer_resolution: str | None = None,
 ) -> Any:
     base = _base_url()
     key = _service_key()
@@ -47,8 +48,13 @@ def _request_json(
         "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
     }
+    prefer_parts: list[str] = []
     if prefer_representation:
-        headers["Prefer"] = "return=representation"
+        prefer_parts.append("return=representation")
+    if prefer_resolution:
+        prefer_parts.append(prefer_resolution)
+    if prefer_parts:
+        headers["Prefer"] = ",".join(prefer_parts)
 
     data = None
     if body is not None:
@@ -258,6 +264,49 @@ def create_run(account_id: str) -> dict[str, Any]:
     )
     if not row:
         raise RuntimeError("Supabase create_run returned empty response")
+    return row[0]
+
+
+def insert_runtime_event(payload: dict[str, Any]) -> dict[str, Any]:
+    """Insert one ORF runtime event via service-role REST."""
+    row = _request_json(
+        "POST",
+        "runtime_events",
+        body=dict(payload or {}),
+        prefer_representation=True,
+    )
+    if not row:
+        raise RuntimeError("Supabase insert_runtime_event returned empty response")
+    return row[0]
+
+
+def upsert_worker_heartbeat(payload: dict[str, Any]) -> dict[str, Any]:
+    """Upsert one ORF worker heartbeat keyed by worker_id."""
+    row = _request_json(
+        "POST",
+        "worker_heartbeats",
+        query={"on_conflict": "worker_id"},
+        body=dict(payload or {}),
+        prefer_representation=True,
+        prefer_resolution="resolution=merge-duplicates",
+    )
+    if not row:
+        raise RuntimeError("Supabase upsert_worker_heartbeat returned empty response")
+    return row[0]
+
+
+def upsert_device_heartbeat(payload: dict[str, Any]) -> dict[str, Any]:
+    """Upsert one ORF device heartbeat keyed by device_id."""
+    row = _request_json(
+        "POST",
+        "device_heartbeats",
+        query={"on_conflict": "device_id"},
+        body=dict(payload or {}),
+        prefer_representation=True,
+        prefer_resolution="resolution=merge-duplicates",
+    )
+    if not row:
+        raise RuntimeError("Supabase upsert_device_heartbeat returned empty response")
     return row[0]
 
 
