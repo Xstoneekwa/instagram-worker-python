@@ -402,6 +402,74 @@ Realtime is the V1 target for that foundation; Redis can remain an optional V2.
 No Realtime, Redis, scheduler, or rate limiter implementation is part of
 Entry 2C-3 v1.
 
+## Entry 2D-1 Account Credentials Metadata
+
+Entry 2D-1 adds a schema-only credential metadata registry:
+`public.account_credentials`.
+
+This table stores **metadata and secret references only**. It does not store
+Instagram passwords, encrypted passwords, raw secrets, tokens, cookies, recovery
+codes, vault payloads, screenshots, raw XML, or local plaintext credential
+files.
+
+Core model:
+
+- `account_id` links to `ig_accounts`;
+- `client_id` optionally links to `clients`;
+- `provider='instagram'`;
+- `username_at_submission` is a safe snapshot only;
+- `secret_ref` points to a future vault/KMS/secret-manager entry;
+- `secret_provider` identifies the future secret backend;
+- `credentials_version` is a safe monotonic metadata version;
+- `status in ('active', 'superseded', 'revoked')`;
+- `reauth_required` and `reauth_reason` are safe status fields;
+- `metadata` is safe JSON only.
+
+Security:
+
+- no direct `anon` or `authenticated` access;
+- RLS is enabled;
+- service-role only policy/grants;
+- one active credential per `(account_id, provider)`;
+- dashboard clients must use future Edge/RPC endpoints, not direct table reads.
+
+The client dashboard may submit or update a password in a future Entry 2D-2 API,
+but it must never read it back. Admin dashboards may read safe credential status
+and operational metadata, but never password material or raw secret values.
+
+Entry 2D-1 deliberately does not:
+
+- call a vault or secret manager;
+- implement submit/update password APIs;
+- add dashboard forms;
+- add provisioning jobs;
+- auto-login, relogin, handle 2FA, or resolve checkpoints;
+- publish incidents or Slack/Discord alerts.
+
+Future phases:
+
+- Entry 2D-2: secure submit/update API or Edge Function writes the secret to a
+  vault/KMS and stores only `secret_ref`;
+- Entry 2D-3: client/admin safe read status endpoints;
+- Entry 2D-4: password update workflow, audit, and credential version bumps;
+- Entry 2E: provisioning/login status and jobs;
+- Entry 2F/2G: incidents and alerts for credential/login states.
+
+Security NO-GO:
+
+- no password in dashboard-readable Supabase tables;
+- no password in logs;
+- no password in `account_incidents` or `runtime_events`;
+- no password in Slack/Discord or `account_incident_notifications`;
+- no password in shared `.env`;
+- no raw password API responses;
+- no local plaintext credential files.
+
+Future safe incident types may include `credentials_updated`, `reauth_required`,
+`login_failed`, `checkpoint_required`, `two_factor_required`,
+`credentials_invalid`, and `credential_rotation_failed`. Incident metadata must
+remain safe and must never include passwords or raw secret references.
+
 ## Remote Secrets
 
 Remote Edge Function secrets must be configured on the Supabase project before
