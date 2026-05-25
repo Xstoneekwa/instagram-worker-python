@@ -1,0 +1,14 @@
+# ORF-4D-2 incident notification dispatcher cron example.
+# Prefer launchd on macOS workers when possible.
+# Do not place webhook URLs or other secrets in this file.
+#
+# The dispatcher CLI loads /Users/admin/instagram-worker-python/.env itself.
+# It only checks account_incidents and sends Slack/Discord notifications
+# according to INCIDENT_NOTIFICATIONS_* flags; it does not launch runner.py
+# or any Instagram device flow.
+
+# Every 2 minutes:
+*/2 * * * * cd /Users/admin/instagram-worker-python && /usr/bin/env bash -lc 'python3 scripts/dispatch_incident_notifications.py >> logs/incident_notifications_dispatcher.out.log 2>> logs/incident_notifications_dispatcher.err.log'
+
+# Alternative every 5 minutes:
+# */5 * * * * cd /Users/admin/instagram-worker-python && /usr/bin/env bash -lc 'python3 scripts/dispatch_incident_notifications.py >> logs/incident_notifications_dispatcher.out.log 2>> logs/incident_notifications_dispatcher.err.log'

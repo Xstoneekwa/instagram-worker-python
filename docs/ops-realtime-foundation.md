@@ -567,6 +567,83 @@ Scheduling V1 (ORF-4D-2, not auto-installed):
 - cron is an acceptable fallback;
 - do not use Supabase Edge scheduled functions for webhook delivery in V1.
 
+## ORF-4D-2 Local Scheduler Templates
+
+ORF-4D-2 documents local scheduling only. It does not install or start a
+scheduler. The scheduler triggers only the incident notification dispatcher; it
+does not create incidents, does not launch `runner.py`, does not run device
+automation, and does not touch Instagram flows.
+
+Scheduled execution periodically:
+
+- reads open/acknowledged `account_incidents`;
+- sends Slack/Discord notifications according to
+  `INCIDENT_NOTIFICATIONS_CHANNELS`,
+  `INCIDENT_NOTIFICATIONS_SLACK_ENABLED`, and
+  `INCIDENT_NOTIFICATIONS_DISCORD_ENABLED`;
+- writes `account_incident_notifications` delivery history;
+- skips duplicate delivery keys created by earlier runs.
+
+Manual test before scheduling:
+
+```bash
+cd /Users/admin/instagram-worker-python
+python3 scripts/dispatch_incident_notifications.py
+```
+
+The CLI loads the repo `.env` itself. Keep webhook URLs in local `.env` only.
+Never put webhook URLs, service-role keys, tokens, cookies, or device secrets in
+`launchd` plists, cron entries, docs, or logs.
+
+Recommended Mac `launchd` template:
+
+- example: `scripts/templates/com.openai.phonefarm.incident-notifications.plist.example`;
+- default interval: 120 seconds;
+- acceptable production range: 60-300 seconds, chosen according to incident
+  volume and anti-spam needs;
+- stdout: `logs/incident_notifications_dispatcher.out.log`;
+- stderr: `logs/incident_notifications_dispatcher.err.log`.
+
+Manual install example for a user LaunchAgent:
+
+```bash
+cp scripts/templates/com.openai.phonefarm.incident-notifications.plist.example \
+  ~/Library/LaunchAgents/com.openai.phonefarm.incident-notifications.plist
+launchctl bootstrap "gui/$(id -u)" \
+  ~/Library/LaunchAgents/com.openai.phonefarm.incident-notifications.plist
+launchctl kickstart -k "gui/$(id -u)/com.openai.phonefarm.incident-notifications"
+```
+
+Manual stop/uninstall example:
+
+```bash
+launchctl bootout "gui/$(id -u)" \
+  ~/Library/LaunchAgents/com.openai.phonefarm.incident-notifications.plist
+rm ~/Library/LaunchAgents/com.openai.phonefarm.incident-notifications.plist
+```
+
+Older `launchctl load` / `launchctl unload` commands may be used on older macOS
+versions, but `bootstrap` / `bootout` is preferred on current macOS.
+
+Cron fallback:
+
+- example: `scripts/templates/incident_notifications.cron.example`;
+- includes every-2-minute and every-5-minute examples;
+- `launchd` remains preferred on Mac because it survives reboots and has clearer
+  per-user service control.
+
+Temporary disable options:
+
+```bash
+INCIDENT_NOTIFICATIONS_ENABLED=false
+INCIDENT_NOTIFICATIONS_SLACK_ENABLED=false
+INCIDENT_NOTIFICATIONS_DISCORD_ENABLED=false
+```
+
+The dispatcher logs a redacted JSON summary. Webhook URLs remain env-only and
+must never appear in Supabase, dashboard settings, templates, cron, plist files,
+payloads, metadata, `last_error`, response previews, or logs.
+
 Future dashboard/admin toggles may use a non-secret `ops_settings` table and
 override env flags later. Webhook URLs remain env-only.
 
