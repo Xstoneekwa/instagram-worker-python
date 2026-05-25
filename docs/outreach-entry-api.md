@@ -1692,6 +1692,125 @@ Prochaine etape :
 - Entry 2E-4 : integration Python/provisioner derriere feature flag, via un
   wrapper `supabase_client`, sans modifier les flows sender/orchestrators.
 
+## Entry 2E-4A Helper Python status publisher
+
+Entry 2E-4A ajoute un helper Python isole
+`instagram_account_status_publisher.py`. Il prepare l'integration future du
+runtime/provisioner avec l'API interne `instagram-account-status`, mais ne
+branche encore aucun flow runtime.
+
+Scope volontaire :
+
+- aucun appel depuis `runner.py`;
+- aucun appel depuis `account_identity_guard.py`;
+- aucun changement sender, outreach, follow ou account session;
+- aucun run device;
+- aucun webhook;
+- aucun appel HTTP reel dans les tests;
+- aucun appel RPC direct Python vers `update_client_instagram_account_status`.
+
+Flags config :
+
+```text
+INSTAGRAM_ACCOUNT_STATUS_PUBLISH_ENABLED=false
+INSTAGRAM_ACCOUNT_STATUS_API_URL=""
+INSTAGRAM_ACCOUNT_STATUS_INTERNAL_API_TOKEN=""
+INSTAGRAM_ACCOUNT_STATUS_FAIL_OPEN=true
+INSTAGRAM_ACCOUNT_STATUS_TIMEOUT_SECONDS=10.0
+```
+
+Le token interne n'est jamais logge. La publication est opt-in et fail-open par
+defaut pour ne pas casser les flows runtime existants si l'API de statut est
+indisponible.
+
+Interface helper :
+
+```python
+publish_instagram_account_status(
+    account_id: str,
+    login_status: str | None = None,
+    provisioning_status: str | None = None,
+    onboarding_status: str | None = None,
+    reauth_required: bool | None = None,
+    reauth_reason: str | None = None,
+    reason: str | None = None,
+    external_request_id: str | None = None,
+    metadata: dict | None = None,
+) -> dict
+```
+
+Comportement :
+
+- flag off -> `{"published": false, "reason": "disabled"}`;
+- URL ou token absent -> `not_configured`;
+- validation UUID-like de `account_id`;
+- au moins un champ de statut ou `reauth_required`;
+- `reason` bornee a 500 caracteres;
+- `external_request_id` safe et borne a 120 caracteres;
+- `metadata` doit etre un objet;
+- metadata sensible rejetee avant tout appel HTTP;
+- ajout de `metadata.source="python_status_publisher"` si le caller ne fournit
+  pas de source;
+- HTTP POST via `urllib.request` vers `instagram-account-status`;
+- retour safe `{"published": true, "status_code": 200, "response": ...}` en
+  succes.
+
+Metadata interdite :
+
+```text
+password, secret, secret_ref, raw_secret, token, cookie, webhook, webhook_url,
+vault, service_role, authorization, bearer, adb_serial, device_udid, xml,
+screenshot, session_cookie
+```
+
+Erreurs fail-open :
+
+- `forbidden_metadata`;
+- `reason_too_long`;
+- `external_request_id_invalid`;
+- `metadata_must_be_object`;
+- `http_error`;
+- `timeout`;
+- `network_error`.
+
+Si `INSTAGRAM_ACCOUNT_STATUS_FAIL_OPEN=false`, les erreurs de publication
+remontent sous forme d'exception controlee
+`InstagramAccountStatusPublishError`. Cette politique est reservee a des
+contextes futurs de provisioner dedie; elle ne doit pas etre activee sur les
+flows sender/follow/outreach existants sans validation specifique.
+
+Mappings runtime futurs :
+
+- `login_connected` -> `login_status='connected'`,
+  `provisioning_status='ready'`, `onboarding_status='ready'`,
+  `reauth_required=false`;
+- `two_factor_required` -> `login_status='needs_2fa'`,
+  `provisioning_status='login_verification_pending'`,
+  `onboarding_status='verification_pending'`;
+- `checkpoint_required` -> `login_status='checkpoint'`,
+  `provisioning_status='login_verification_pending'`,
+  `onboarding_status='verification_pending'`;
+- `login_failed` -> `login_status='failed'`,
+  `provisioning_status='failed'`, `onboarding_status='support_required'`,
+  `reauth_required=true`;
+- `account_identity_mismatch` -> `login_status='mismatch'`,
+  `provisioning_status='blocked'`, `onboarding_status='support_required'`;
+- `session_expired` -> `login_status='logged_out'`,
+  `provisioning_status='login_pending'`.
+
+Relation ORF/incidents :
+
+Le helper ne remplace pas `runtime_incidents.py`. Les incidents ORF restent la
+verite ops durable; les statuts `client_instagram_accounts` restent la verite
+dashboard/status. Un futur branchement mismatch pourra publier les deux signaux
+derriere feature flag, mais Entry 2E-4A ne le fait pas.
+
+Prochaine etape :
+
+- Entry 2E-4C : brancher un point cible derriere flag, probablement
+  `account_identity_guard` pour `login_status='mismatch'`, ou un futur vrai
+  provisioner login si disponible.
+
 ## Remote Secrets
 
 Remote Edge Function secrets must be configured on the Supabase project before
