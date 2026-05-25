@@ -1241,6 +1241,113 @@ Les logs de mutation restent safe : `request_id`, `action`, `action_id`,
 inclure le body complet, un token, une raison non bornee, une metadata brute ou
 un secret.
 
+## Entry 2E-1 Modele de statuts login/provisioning/onboarding
+
+Entry 2E-1 stabilise le modele de statuts de
+`public.client_instagram_accounts` avant tout branchement runtime. Cette etape
+reste schema-first et documentation-only cote application : aucun worker login,
+aucun patch Python, aucune Edge Function et aucun run device ne sont ajoutes.
+
+Sources de verite :
+
+- `account_credentials` garde uniquement la metadata credentials et les champs
+  safe `credentials_version`, `reauth_required`, `reauth_reason`,
+  `last_submitted_at` et `last_rotated_at`;
+- `client_instagram_accounts` devient la source de verite dashboard-safe pour
+  `onboarding_status`, `provisioning_status` et `login_status`;
+- `account_dashboard_actions` represente les actions UI visibles via les APIs
+  safe `dashboard-actions`;
+- `account_incidents` reste la source durable des incidents ops/admin;
+- `account_assignments`, `phone_devices` et `phone_clones` restent la source
+  d'affectation device/clone, sans exposition client directe.
+
+Les contraintes SQL existantes de `client_instagram_accounts` etaient :
+
+```text
+onboarding_status in ('pending', 'configured', 'ready', 'blocked')
+provisioning_status in ('not_started', 'pending', 'provisioning', 'ready', 'failed')
+login_status in ('unknown', 'pending', 'connected', 'needs_2fa', 'checkpoint', 'failed', 'mismatch')
+```
+
+Entry 2E-1 elargit ces CHECK constraints sans renommer les valeurs existantes
+et sans modifier les donnees.
+
+`login_status` V1 :
+
+- `unknown` : etat non encore determine;
+- `pending` : login attendu ou en attente de tentative;
+- `verification_pending` : credentials recus, verification login a lancer ou en
+  cours;
+- `connected` : compte Instagram connecte et verifie;
+- `needs_2fa` : Instagram demande une validation 2FA;
+- `checkpoint` : Instagram demande un checkpoint/security challenge;
+- `failed` : tentative login echouee;
+- `mismatch` : le compte Instagram actif ne correspond pas au compte attendu;
+- `logged_out` : session explicitement deconnectee ou expiree.
+
+`provisioning_status` V1 :
+
+- `not_started` : aucune preparation lancee;
+- `pending` : preparation demandee;
+- `assigned` : device/clone affecte;
+- `provisioning` : etat historique conserve pour compatibilite;
+- `login_pending` : login a executer;
+- `login_verification_pending` : verification login en cours ou a confirmer;
+- `ready` : compte pret pour les flows business;
+- `failed` : provisioning echoue;
+- `blocked` : provisioning bloque par une action ou un incident;
+- `paused` : provisioning volontairement suspendu.
+
+`onboarding_status` V1 :
+
+- `pending` : onboarding ouvert mais incomplet;
+- `incomplete` : informations client insuffisantes;
+- `credentials_required` : credentials Instagram requis;
+- `configured` : valeur historique indiquant une configuration de base;
+- `credentials_submitted` : credentials recus, verification a venir;
+- `verification_pending` : verification login/provisioning en attente;
+- `ready` : onboarding pret;
+- `blocked` : onboarding bloque;
+- `support_required` : intervention support requise.
+
+Mapping vers actions dashboard :
+
+- absence de credentials actifs -> `submit_instagram_credentials`;
+- `reauth_required=true` -> `update_instagram_password`;
+- `login_status='needs_2fa'` -> `complete_two_factor`;
+- `login_status='checkpoint'` -> `resolve_checkpoint`;
+- `login_status='failed'` -> `review_login_failure` ou
+  `update_instagram_password` selon la cause;
+- `login_status='mismatch'` -> `review_account_mismatch` pour `admin` ou
+  `assistant`, avec `requires_client_action=false`;
+- `login_status='connected'` et `reauth_required=false` -> resolution des
+  actions actives `submit_instagram_credentials`, `update_instagram_password`,
+  `reconnect_instagram`, `complete_two_factor`, `resolve_checkpoint` et
+  `review_login_failure`.
+
+Phases futures :
+
+- Entry 2E-2 : RPC/helper de mise a jour statut et synchronisation actions
+  depuis ces statuts;
+- Entry 2E-3 : endpoint internal ou contrat provisioner pour publier les
+  resultats login/provisioning;
+- Entry 2E-4 : integration Python worker/provisioner derriere feature flag,
+  sans modifier les flows sender/follow/outreach;
+- Entry 2F : publication incidents -> dashboard actions.
+
+Securite NO-GO :
+
+- aucun password hors Vault;
+- aucun password dans `client_instagram_accounts`;
+- aucun `secret_ref` dans les APIs de statut client;
+- aucun payload Vault dans dashboard/status/actions;
+- aucun XML brut ou screenshot brut dans les actions dashboard;
+- aucun `adb_serial`, `device_udid`, hub ou host client-side;
+- aucun `admin_message` dans les reponses client;
+- aucun direct PostgREST client;
+- aucun patch runtime ou automatisation login tant que le contrat DB/RPC 2E
+  n'est pas stabilise.
+
 ## Remote Secrets
 
 Remote Edge Function secrets must be configured on the Supabase project before
