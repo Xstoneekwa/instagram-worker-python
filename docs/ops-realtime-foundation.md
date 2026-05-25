@@ -131,11 +131,10 @@ Reliability:
 Examples: `run_started`, `device_connected`, assignment dispatch, job claimed,
 job sent, no jobs, worker/device heartbeat.
 
-`account_incidents` / `account_reliability_events` should be added later for
-durable, action-oriented incidents with lifecycle and dedupe. Examples:
-account mismatch, checkpoint, action block, restriction, login failure, device
-offline, device unauthorized, stuck jobs, provisioning failure, resume blocked,
-and max restart attempts reached.
+`account_incidents` is for durable, action-oriented account incidents with
+lifecycle and dedupe. Examples: account mismatch, checkpoint, action block,
+restriction, login failure, device offline, device unauthorized, stuck jobs,
+provisioning failure, resume blocked, and max restart attempts reached.
 
 Slack/Discord should only be sent by a future dispatcher that reads persisted
 incidents/events, applies dedupe and rate limits, and records delivery status.
@@ -151,6 +150,92 @@ worker/logs/reliability snapshot
   -> admin realtime dashboard
   -> webhook_dispatcher later
 ```
+
+## ORF-3A Account Incidents
+
+ORF-3A adds `account_incidents`, a durable account-level incident table for
+actionable safety and reliability states. It is schema-only: no
+`runtime_incidents.py`, no Python runtime hooks, no sender/orchestrator/Edge
+changes, no Slack/Discord dispatcher, no Redis, no dashboard views/RPC clients,
+and no direct client access.
+
+`runtime_events` remains the low-level realtime event stream for worker/run
+activity. `account_incidents` is the slower lifecycle record for states that
+need dedupe, acknowledgement, resolution, and safe messaging. A future incident
+may link back to `runtime_events.id` through `source_event_id`, but incidents
+can also come from scanners or reliability snapshots without a source event.
+
+Incident lifecycle:
+
+- `open`: active incident that needs operator/assistant attention.
+- `acknowledged`: active incident seen by an operator; still deduped as active.
+- `resolved`: closed incident with optional `resolved_at` / `resolved_by`.
+- `ignored`: closed/no-action state for noisy or non-actionable findings.
+
+Deduplication uses a stable `dedupe_key`, for example
+`active_instagram_account_mismatch:<account_id>` or
+`device_heartbeat_stale:<device_id>`. ORF-3A creates a partial unique index on
+`dedupe_key` for active incidents only (`open`, `acknowledged`) so resolved or
+ignored history can remain in the table. PostgREST upsert with a partial unique
+index is not reliable for this pattern. ORF-3B should add a SECURITY DEFINER
+`upsert_account_incident(...)` RPC that atomically:
+
+- increments `occurrence_count` and refreshes `last_seen_at` / context when an
+  active incident already exists;
+- inserts a new row when no active incident exists.
+
+Future runtime integration should live in `runtime_incidents.py` behind an
+OFF-by-default flag. ORF-3C should start with
+`active_instagram_account_mismatch` from the identity guard, then expand to
+selected dispatch/failure states. ORF-4 should dispatch Slack/Discord from
+persisted `account_incidents`, not directly from flows, so dedupe/rate limits
+and delivery records are centralized.
+
+Visibility model for incidents:
+
+- Admin views can include raw operational context, device routing, and detailed
+  failure metadata.
+- Assistant-safe views should include actionable but sanitized remediation
+  context.
+- Client-safe views should expose only generic state and `safe_client_message`,
+  with ownership checks.
+
+There is no direct authenticated/client access to `account_incidents` in
+ORF-3A. Future safe views/RPCs should decide exactly which fields are visible.
+Examples of `safe_client_message` values:
+
+- `Instagram is asking for an account security check before work can continue.`
+- `The assigned device is temporarily offline; operations will resume after it is restored.`
+- `We detected a login issue and need updated account access before continuing.`
+
+Incident taxonomy draft:
+
+- `active_instagram_account_mismatch`
+- `possible_username_rename_detected`
+- `account_identity_unknown`
+- `login_failed`
+- `checkpoint_detected`
+- `two_factor_required`
+- `password_changed_suspected`
+- `credentials_invalid`
+- `action_block_detected`
+- `restriction_detected`
+- `challenge_detected`
+- `rate_limited_by_instagram`
+- `device_offline`
+- `device_unauthorized`
+- `device_heartbeat_stale`
+- `worker_heartbeat_stale`
+- `assignment_dispatch_missing`
+- `assignment_dispatch_incompatible`
+- `dm_job_stuck`
+- `stale_job_requeued`
+- `dm_job_failed`
+- `queue_backlog_high`
+- `restart_blocked`
+- `resume_plan_blocked`
+- `max_restart_attempts_reached`
+- `quota_not_reached_restart_blocked`
 
 ## ORF-2 Runtime Integration
 
@@ -233,8 +318,8 @@ runtime flows.
 
 - ORF-2: add `runtime_events.py` and `runtime_heartbeat.py`; integrate minimal
   `runner.py` events behind flags/no-op fallbacks.
-- ORF-3: add incident tables/helpers and persist reliability snapshot /
-  escalation output.
+- ORF-3B/3C: add incident helpers/RPCs, then persist selected reliability
+  snapshot / escalation output behind runtime flags.
 - ORF-4: add Slack/Discord dispatcher with dedupe, rate limits, and delivery
   status. Do not send webhooks directly from flows.
 - ORF-5: add admin, assistant-safe, and client-safe views/RPCs plus Realtime
