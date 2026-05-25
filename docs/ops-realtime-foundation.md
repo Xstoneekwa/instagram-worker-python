@@ -279,10 +279,48 @@ metadata = existing.metadata || incoming_metadata
 ```
 
 Incoming keys replace existing keys at the top level. Runtime callers must
-redact secrets before calling the RPC; ORF-3B-2 will add
-`runtime_incidents.py` and a `supabase_client.py` RPC helper behind
-OFF-by-default flags. ORF-3C should be the first runtime integration point,
-starting with `active_instagram_account_mismatch`.
+redact secrets before calling the RPC.
+
+## ORF-3B-2 Runtime Incidents Helper
+
+ORF-3B-2 adds Python helpers only. It does not change `runner.py`,
+`account_identity_guard.py`, sender/orchestrators, Edge Functions, migrations,
+Slack/Discord, Redis, dashboard views, or device runs.
+
+Modules:
+
+- `runtime_incidents.py` — `publish_account_incident(...)` and pure builders.
+- `supabase_client.upsert_account_incident(payload)` — calls the ORF-3B-1 RPC;
+  no PostgREST table upsert.
+
+Flags (OFF by default):
+
+- `RUNTIME_INCIDENTS_ENABLED=false`
+- `RUNTIME_INCIDENTS_FAIL_OPEN=true`
+- `RUNTIME_INCIDENTS_LOG_LOCAL_FALLBACK=true`
+- `RUNTIME_INCIDENTS_INCLUDE_DEBUG_METADATA=false`
+
+Behavior:
+
+- When disabled, `publish_account_incident` returns
+  `{"published": false, "reason": "disabled"}` without calling Supabase.
+- When enabled, metadata is recursively redacted (reuses `runtime_events`
+  redaction rules) before RPC.
+- RPC/DB failures are fail-open: structured
+  `{"published": false, "reason": "upsert_failed"}` plus a local warning log;
+  no exception escapes to worker flows.
+- Success returns `incident_id`, `dedupe_key`, `status`, `severity`,
+  `occurrence_count`.
+- Does not write `runtime_events` or send Slack/Discord.
+
+Pure builders (no DB):
+
+- `build_identity_mismatch_incident(...)` for
+  `active_instagram_account_mismatch`.
+- `build_assignment_dispatch_incident(...)` for dispatch missing/incompatible.
+
+ORF-3C is next: integrate only identity mismatch from
+`account_identity_guard.py` behind `RUNTIME_INCIDENTS_ENABLED`.
 
 ## ORF-2 Runtime Integration
 

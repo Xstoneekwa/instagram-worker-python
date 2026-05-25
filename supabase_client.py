@@ -310,6 +310,48 @@ def upsert_device_heartbeat(payload: dict[str, Any]) -> dict[str, Any]:
     return row[0]
 
 
+def _parse_rpc_account_incident_row(row: Any) -> dict[str, Any]:
+    if isinstance(row, dict):
+        return row
+    if isinstance(row, list) and row:
+        first = row[0]
+        if isinstance(first, dict):
+            return first
+    raise RuntimeError("Supabase upsert_account_incident returned empty response")
+
+
+def upsert_account_incident(payload: dict[str, Any]) -> dict[str, Any]:
+    """Invoke ORF-3B-1 upsert_account_incident RPC (service role). Exceptions propagate."""
+    body = dict(payload or {})
+    rpc_params: dict[str, Any] = {
+        "p_incident_type": body.get("incident_type") or body.get("p_incident_type"),
+        "p_dedupe_key": body.get("dedupe_key") or body.get("p_dedupe_key"),
+        "p_severity": body.get("severity", body.get("p_severity", "warning")),
+        "p_status": body.get("status", body.get("p_status", "open")),
+        "p_client_id": body.get("client_id", body.get("p_client_id")),
+        "p_account_id": body.get("account_id", body.get("p_account_id")),
+        "p_account_username": body.get("account_username", body.get("p_account_username")),
+        "p_run_id": body.get("run_id", body.get("p_run_id")),
+        "p_assignment_id": body.get("assignment_id", body.get("p_assignment_id")),
+        "p_device_id": body.get("device_id", body.get("p_device_id")),
+        "p_clone_id": body.get("clone_id", body.get("p_clone_id")),
+        "p_source_event_id": body.get("source_event_id", body.get("p_source_event_id")),
+        "p_source": body.get("source", body.get("p_source")),
+        "p_reason": body.get("reason", body.get("p_reason")),
+        "p_failure_reason": body.get("failure_reason", body.get("p_failure_reason")),
+        "p_action_required": body.get("action_required", body.get("p_action_required")),
+        "p_safe_client_message": body.get(
+            "safe_client_message",
+            body.get("p_safe_client_message"),
+        ),
+        "p_assistant_message": body.get("assistant_message", body.get("p_assistant_message")),
+        "p_admin_message": body.get("admin_message", body.get("p_admin_message")),
+        "p_metadata": body.get("metadata", body.get("p_metadata", {})),
+    }
+    row = call_rpc("upsert_account_incident", rpc_params)
+    return _parse_rpc_account_incident_row(row)
+
+
 def insert_action_log(
     run_id: str,
     account_id: str,
