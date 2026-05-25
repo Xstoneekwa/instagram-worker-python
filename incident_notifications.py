@@ -30,7 +30,7 @@ SENSITIVE_PAYLOAD_KEYS = {
     "password",
 }
 DISPATCHER_NAME = "incident_notifications"
-DISPATCHER_VERSION = "orf-4c"
+DISPATCHER_VERSION = "orf-4d"
 DRY_RUN_DISPATCHER_VERSION = "orf-4b"
 WEBHOOK_USER_AGENT = "PhoneFarmIncidentNotifier/1.0 (+https://localhost)"
 
@@ -82,6 +82,28 @@ def parse_notification_channels(value: str | list[str] | tuple[str, ...] | None)
         if channel in VALID_CHANNELS and channel not in out:
             out.append(channel)
     return out or ["slack"]
+
+
+def _channel_toggle_enabled(channel: str) -> bool:
+    normalized = str(channel or "").strip().lower()
+    if normalized == "slack":
+        return bool(getattr(config, "INCIDENT_NOTIFICATIONS_SLACK_ENABLED", True))
+    if normalized == "discord":
+        return bool(getattr(config, "INCIDENT_NOTIFICATIONS_DISCORD_ENABLED", True))
+    return False
+
+
+def resolve_dispatch_channels(
+    value: str | list[str] | tuple[str, ...] | None = None,
+) -> tuple[list[str], list[str]]:
+    """Return (allow_list_channels, enabled_channels) after per-channel toggles."""
+    if value is None:
+        raw = getattr(config, "INCIDENT_NOTIFICATIONS_CHANNELS", "slack")
+    else:
+        raw = value
+    allowed = parse_notification_channels(raw)
+    enabled = [channel for channel in allowed if _channel_toggle_enabled(channel)]
+    return allowed, enabled
 
 
 def severity_rank(severity: str) -> int:
@@ -325,6 +347,9 @@ def _empty_summary(*, dry_run: bool | None = None) -> dict[str, Any]:
         "failed_count": 0,
         "skipped_duplicate_count": 0,
         "skipped_disabled_count": 0,
+        "skipped_channel_disabled_count": 0,
+        "selected_channels": [],
+        "enabled_channels": [],
         "errors_count": 0,
         "real_send_enabled": False,
         "dry_run": _dry_run_enabled() if dry_run is None else dry_run,
@@ -401,9 +426,7 @@ def dispatch_account_incident_notifications(
         return summary
 
     dry_run = _dry_run_enabled()
-    selected_channels = parse_notification_channels(
-        channels if channels is not None else getattr(config, "INCIDENT_NOTIFICATIONS_CHANNELS", "slack")
-    )
+    allowed_channels, selected_channels = resolve_dispatch_channels(channels)
     threshold = str(
         min_severity
         if min_severity is not None
@@ -411,8 +434,14 @@ def dispatch_account_incident_notifications(
     ).strip().lower()
     limit = max(1, int(max_per_run or getattr(config, "INCIDENT_NOTIFICATIONS_MAX_PER_RUN", 20)))
     summary = _empty_summary(dry_run=dry_run)
+    summary["selected_channels"] = list(allowed_channels)
+    summary["enabled_channels"] = list(selected_channels)
     summary["reason"] = "dry_run" if dry_run else "real_send"
     summary["real_send_enabled"] = not dry_run
+    if not selected_channels:
+        summary["reason"] = "channels_disabled"
+        summary["dispatched"] = True
+        return summary
 
     try:
         raw_incidents = supabase_client.load_account_incidents_to_notify(
@@ -439,7 +468,10 @@ def dispatch_account_incident_notifications(
 
         for incident in incidents:
             base_payload = build_incident_notification_payload(incident)
-            for channel in selected_channels:
+            for channel in allowed_channels:
+                if channel not in selected_channels:
+                    summary["skipped_channel_disabled_count"] += 1
+                    continue
                 delivery_key = build_delivery_key(channel, str(incident.get("id")))
                 if delivery_key in existing:
                     summary["skipped_duplicate_count"] += 1
@@ -525,7 +557,7 @@ def dispatch_account_incident_notifications(
     except Exception as exc:
         summary["errors_count"] += 1
         summary["reason"] = "dispatch_failed"
-        summary["error"] = str(exc)
+        summary["error"] = _sanitize_error(exc)
         _warn("incident_notification_dispatch_failed", error=str(exc))
         if _fail_open_enabled():
             return summary

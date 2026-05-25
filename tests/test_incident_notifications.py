@@ -1,9 +1,17 @@
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import sys
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import incident_notifications
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+CLI_SCRIPT = REPO_ROOT / "scripts" / "dispatch_incident_notifications.py"
 
 
 def _incident(
@@ -142,6 +150,8 @@ class IncidentNotificationsTest(unittest.TestCase):
         self.assertEqual(row["attempt_count"], 0)
         self.assertTrue(row["metadata"]["dry_run"])
         self.assertEqual(row["metadata"]["dispatcher_version"], "orf-4b")
+        self.assertEqual(out["selected_channels"], ["slack"])
+        self.assertEqual(out["enabled_channels"], ["slack"])
         self.assertIn("channel_payload", row["payload"])
 
     def test_max_per_run_respected(self) -> None:
@@ -316,7 +326,7 @@ class IncidentNotificationsTest(unittest.TestCase):
         self.assertEqual(pending["status"], "pending")
         self.assertEqual(pending["target"], "slack")
         self.assertFalse(pending["metadata"]["dry_run"])
-        self.assertEqual(pending["metadata"]["dispatcher_version"], "orf-4c")
+        self.assertEqual(pending["metadata"]["dispatcher_version"], "orf-4d")
         update_payload = update.call_args.args[1]
         self.assertEqual(update_payload["status"], "sent")
         self.assertEqual(update_payload["response_status"], 200)
@@ -445,6 +455,164 @@ class IncidentNotificationsTest(unittest.TestCase):
         long_secret = "https://hooks.slack.com/services/SECRET " + ("x" * 800)
         self.assertEqual(incident_notifications._truncate_redact(long_secret), "[redacted]")
         self.assertLessEqual(len(incident_notifications._truncate_redact("x" * 800)), 500)
+
+    def test_resolve_dispatch_channels_applies_toggles(self) -> None:
+        with (
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_CHANNELS", "slack,discord", create=True),
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_SLACK_ENABLED", True, create=True),
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_DISCORD_ENABLED", False, create=True),
+        ):
+            allowed, enabled = incident_notifications.resolve_dispatch_channels()
+        self.assertEqual(allowed, ["slack", "discord"])
+        self.assertEqual(enabled, ["slack"])
+
+    def test_slack_toggle_off_skips_slack_without_delivery_row(self) -> None:
+        incident = _incident("incident-1")
+        with (
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_ENABLED", True, create=True),
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_DRY_RUN", False, create=True),
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_CHANNELS", "slack,discord", create=True),
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_SLACK_ENABLED", False, create=True),
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_DISCORD_ENABLED", True, create=True),
+            patch.object(incident_notifications.config, "DISCORD_WEBHOOK_URL", "https://discord.com/api/webhooks/SECRET", create=True),
+            patch.object(incident_notifications.supabase_client, "load_account_incidents_to_notify", return_value=[incident]),
+            patch.object(incident_notifications.supabase_client, "load_existing_incident_notifications_by_delivery_keys", return_value={}),
+            patch.object(incident_notifications.supabase_client, "create_account_incident_notification", return_value={"id": "n1"}) as create,
+            patch.object(incident_notifications.supabase_client, "update_account_incident_notification", return_value={}),
+            patch.object(
+                incident_notifications,
+                "_post_json_webhook",
+                return_value={"ok": True, "response_status": 204, "response_body_preview": ""},
+            ) as post,
+        ):
+            out = incident_notifications.dispatch_account_incident_notifications()
+        self.assertEqual(out["skipped_channel_disabled_count"], 1)
+        self.assertEqual(out["sent_count"], 1)
+        self.assertEqual(create.call_count, 1)
+        self.assertEqual(create.call_args.args[0]["channel"], "discord")
+        post.assert_called_once()
+
+    def test_discord_toggle_off_sends_slack_only(self) -> None:
+        incident = _incident("incident-1")
+        with (
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_ENABLED", True, create=True),
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_DRY_RUN", False, create=True),
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_CHANNELS", "slack,discord", create=True),
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_SLACK_ENABLED", True, create=True),
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_DISCORD_ENABLED", False, create=True),
+            patch.object(incident_notifications.config, "SLACK_WEBHOOK_URL", "https://hooks.slack.com/services/SECRET", create=True),
+            patch.object(incident_notifications.supabase_client, "load_account_incidents_to_notify", return_value=[incident]),
+            patch.object(incident_notifications.supabase_client, "load_existing_incident_notifications_by_delivery_keys", return_value={}),
+            patch.object(incident_notifications.supabase_client, "create_account_incident_notification", return_value={"id": "n1"}) as create,
+            patch.object(incident_notifications.supabase_client, "update_account_incident_notification", return_value={}),
+            patch.object(
+                incident_notifications,
+                "_post_json_webhook",
+                return_value={"ok": True, "response_status": 200, "response_body_preview": "ok"},
+            ) as post,
+        ):
+            out = incident_notifications.dispatch_account_incident_notifications()
+        self.assertEqual(out["skipped_channel_disabled_count"], 1)
+        self.assertEqual(out["sent_count"], 1)
+        self.assertEqual(create.call_args.args[0]["channel"], "slack")
+        post.assert_called_once()
+
+    def test_both_channel_toggles_off_no_send(self) -> None:
+        incident = _incident("incident-1")
+        with (
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_ENABLED", True, create=True),
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_DRY_RUN", False, create=True),
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_CHANNELS", "slack,discord", create=True),
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_SLACK_ENABLED", False, create=True),
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_DISCORD_ENABLED", False, create=True),
+            patch.object(incident_notifications.supabase_client, "load_account_incidents_to_notify") as load,
+            patch.object(incident_notifications.supabase_client, "create_account_incident_notification") as create,
+            patch.object(incident_notifications, "_post_json_webhook") as post,
+        ):
+            out = incident_notifications.dispatch_account_incident_notifications()
+        self.assertTrue(out["dispatched"])
+        self.assertEqual(out["reason"], "channels_disabled")
+        self.assertEqual(out["enabled_channels"], [])
+        self.assertEqual(out["selected_channels"], ["slack", "discord"])
+        load.assert_not_called()
+        create.assert_not_called()
+        post.assert_not_called()
+
+    def test_disabled_channel_does_not_block_later_send(self) -> None:
+        incident = _incident("incident-1")
+        slack_key = incident_notifications.build_delivery_key("slack", "incident-1")
+        with (
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_ENABLED", True, create=True),
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_DRY_RUN", False, create=True),
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_CHANNELS", "slack", create=True),
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_SLACK_ENABLED", False, create=True),
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_DISCORD_ENABLED", True, create=True),
+            patch.object(incident_notifications.supabase_client, "load_account_incidents_to_notify", return_value=[incident]),
+            patch.object(incident_notifications.supabase_client, "load_existing_incident_notifications_by_delivery_keys", return_value={}),
+            patch.object(incident_notifications.supabase_client, "create_account_incident_notification") as create,
+        ):
+            out = incident_notifications.dispatch_account_incident_notifications()
+        self.assertEqual(out["reason"], "channels_disabled")
+        create.assert_not_called()
+        with (
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_ENABLED", True, create=True),
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_DRY_RUN", False, create=True),
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_CHANNELS", "slack", create=True),
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_SLACK_ENABLED", True, create=True),
+            patch.object(incident_notifications.config, "SLACK_WEBHOOK_URL", "https://hooks.slack.com/services/SECRET", create=True),
+            patch.object(incident_notifications.supabase_client, "load_account_incidents_to_notify", return_value=[incident]),
+            patch.object(incident_notifications.supabase_client, "load_existing_incident_notifications_by_delivery_keys", return_value={}),
+            patch.object(incident_notifications.supabase_client, "create_account_incident_notification", return_value={"id": "n1"}),
+            patch.object(incident_notifications.supabase_client, "update_account_incident_notification", return_value={}),
+            patch.object(
+                incident_notifications,
+                "_post_json_webhook",
+                return_value={"ok": True, "response_status": 200, "response_body_preview": "ok"},
+            ),
+        ):
+            out2 = incident_notifications.dispatch_account_incident_notifications()
+        self.assertEqual(out2["sent_count"], 1)
+
+    def test_cli_disabled_exits_zero_without_dispatch(self) -> None:
+        env = {**os.environ, "INCIDENT_NOTIFICATIONS_ENABLED": "false"}
+        proc = subprocess.run(
+            [sys.executable, str(CLI_SCRIPT)],
+            cwd=str(REPO_ROOT),
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(proc.returncode, 0)
+        summary = json.loads(proc.stdout.strip())
+        self.assertEqual(summary["reason"], "disabled")
+        self.assertNotIn("hooks.slack.com", proc.stdout.lower())
+        self.assertNotIn("discord.com/api/webhooks", proc.stdout.lower())
+
+    def test_cli_summary_redacts_webhook_markers(self) -> None:
+        import importlib.util
+
+        with (
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_ENABLED", True, create=True),
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_DRY_RUN", True, create=True),
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_FAIL_OPEN", True, create=True),
+            patch.object(
+                incident_notifications.supabase_client,
+                "load_account_incidents_to_notify",
+                side_effect=RuntimeError("https://hooks.slack.com/services/SECRET failed"),
+            ),
+        ):
+            spec = importlib.util.spec_from_file_location("dispatch_cli", CLI_SCRIPT)
+            cli_mod = importlib.util.module_from_spec(spec)
+            assert spec.loader is not None
+            spec.loader.exec_module(cli_mod)
+            buf: list[str] = []
+            with patch("builtins.print", side_effect=lambda *a, **k: buf.append(" ".join(str(x) for x in a))):
+                code = cli_mod.main()
+        self.assertEqual(code, 0)
+        payload = json.loads(buf[-1])
+        self.assertEqual(payload["reason"], "dispatch_failed")
+        self.assertNotIn("hooks.slack", str(payload).lower())
 
     def test_duplicate_delivery_key_skips_real_send(self) -> None:
         incident = _incident("incident-1")

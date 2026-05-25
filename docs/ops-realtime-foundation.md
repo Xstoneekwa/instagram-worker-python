@@ -521,6 +521,55 @@ should add Slack and Discord ON/OFF toggles in the admin web dashboard and in
 the local Mac backend/admin app. Toggles control sending only: incidents keep
 being created, delivery history remains, and webhook URLs are never exposed.
 
+## ORF-4D-1 Dispatcher CLI and Per-Channel Toggles
+
+ORF-4D-1 adds a one-shot local dispatcher CLI and env-only Slack/Discord send
+toggles. Runtime flows still must not call webhooks directly.
+
+Additional environment variables:
+
+- `INCIDENT_NOTIFICATIONS_SLACK_ENABLED=true`
+- `INCIDENT_NOTIFICATIONS_DISCORD_ENABLED=true`
+
+Channel model:
+
+- `INCIDENT_NOTIFICATIONS_CHANNELS` is the global allow-list and ordering, for
+  example `slack,discord`;
+- per-channel enabled flags filter the allow-list independently;
+- Slack ON + Discord ON sends to both listed channels;
+- Slack ON + Discord OFF sends Slack only;
+- Slack OFF + Discord ON sends Discord only;
+- both OFF performs no webhook sends (`reason=channels_disabled`).
+
+Disabled channels do not create `account_incident_notifications` rows in V1.
+This avoids scheduler spam and prevents a `skipped` delivery row from blocking a
+later send when the channel is turned back on. The dispatcher summary exposes
+`skipped_channel_disabled_count` for operator visibility.
+
+One-shot CLI:
+
+```bash
+python3 scripts/dispatch_incident_notifications.py
+```
+
+CLI behavior:
+
+- loads repo `.env` without printing secrets;
+- calls `dispatch_account_incident_notifications()` once;
+- prints one JSON summary with existing redaction rules;
+- exits `0` for disabled/no-op, dry-run, sent, handled failed, and fail-open
+  dispatch errors;
+- exits non-zero only for fatal init errors or non-fail-open dispatch failures.
+
+Scheduling V1 (ORF-4D-2, not auto-installed):
+
+- prefer Mac `launchd` on the worker host to run the CLI every 1-5 minutes;
+- cron is an acceptable fallback;
+- do not use Supabase Edge scheduled functions for webhook delivery in V1.
+
+Future dashboard/admin toggles may use a non-secret `ops_settings` table and
+override env flags later. Webhook URLs remain env-only.
+
 ## ORF-2 Runtime Integration
 
 ORF-2 adds opt-in, best-effort Python runtime helpers for low-volume worker
