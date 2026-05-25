@@ -1473,6 +1473,225 @@ Phases suivantes :
 - Entry 2F : incidents -> dashboard actions avec lien `incident_id` lorsque le
   mapping est stable.
 
+## Entry 2E-3A API interne `instagram-account-status`
+
+Entry 2E-3A ajoute l'Edge Function interne
+`supabase/functions/instagram-account-status`. Son role est de publier les
+resultats login/provisioning/status vers le contrat RPC 2E-2A, sans brancher
+encore le runtime Python ni le provisioner.
+
+Cette API est volontairement separee de :
+
+- `instagram-credentials`, qui reste dediee au submit/update/status safe des
+  credentials et a l'ecriture Vault;
+- `dashboard-actions`, qui reste dediee a la lecture/mutation des actions UI;
+- tout worker Python, runner, webhook ou run device.
+
+Authentification V1 :
+
+- internal-token only via `INSTAGRAM_ACCOUNT_STATUS_INTERNAL_API_TOKEN`;
+- header `Authorization: Bearer <token>`;
+- pas de JWT client en V1;
+- pas d'acces client direct;
+- jamais de log du token ni du header `Authorization`.
+
+Action V1 unique :
+
+```json
+{
+  "action": "update_status",
+  "account_id": "00000000-0000-4000-8000-000000000000",
+  "login_status": "connected",
+  "provisioning_status": "ready",
+  "onboarding_status": "ready",
+  "reauth_required": false,
+  "reauth_reason": null,
+  "reason": "login_connected",
+  "external_request_id": "optional-safe-id",
+  "metadata": {
+    "source": "provisioner",
+    "run_id": "safe-run-id",
+    "stage": "login_check"
+  }
+}
+```
+
+Validation :
+
+- `action` doit valoir `update_status`;
+- `account_id` est obligatoire et doit etre un UUID;
+- au moins un champ parmi `login_status`, `provisioning_status`,
+  `onboarding_status` ou `reauth_required` doit etre fourni;
+- `reason` est optionnelle et bornee a 500 caracteres;
+- `external_request_id` est optionnel, safe et borne a 120 caracteres;
+- `metadata` doit etre un objet JSON si fourni;
+- les champs sensibles top-level ou metadata sont rejetes :
+  password, secret, `secret_ref`, `secret_provider`, `raw_secret`, token,
+  cookie, webhook, `webhook_url`, vault, `vault_payload`, `service_role`,
+  authorization, bearer, XML brut, screenshot brut, `adb_serial` et
+  `device_udid`.
+
+Mapping vers RPC :
+
+```text
+account_id           -> p_account_id
+login_status         -> p_login_status
+provisioning_status  -> p_provisioning_status
+onboarding_status    -> p_onboarding_status
+reauth_required      -> p_reauth_required
+reauth_reason        -> p_reauth_reason
+reason               -> p_reason
+external_request_id  -> p_external_request_id
+metadata safe        -> p_metadata
+metadata.source      -> p_actor_type
+```
+
+`p_actor_type` vaut `provisioner` si `metadata.source='provisioner'`,
+`worker` si `metadata.source='worker'`, sinon `internal`.
+
+La metadata transmise a la RPC est enrichie avec :
+
+```json
+{
+  "source": "provisioner",
+  "edge_function": "instagram-account-status",
+  "request_id": "safe-request-id"
+}
+```
+
+L'API appelle uniquement :
+
+```text
+public.update_client_instagram_account_status(...)
+```
+
+Elle n'appelle pas directement `sync_account_dashboard_actions_from_status(...)`
+car la RPC d'update enchaine deja le sync dashboard actions.
+
+Exemples status/action :
+
+- login OK :
+
+```json
+{
+  "login_status": "connected",
+  "provisioning_status": "ready",
+  "onboarding_status": "ready",
+  "reauth_required": false,
+  "reason": "login_connected"
+}
+```
+
+Resultat : resolution des actions login/credentials actives.
+
+- 2FA :
+
+```json
+{
+  "login_status": "needs_2fa",
+  "provisioning_status": "login_verification_pending",
+  "onboarding_status": "verification_pending",
+  "reason": "two_factor_required"
+}
+```
+
+Resultat : upsert `complete_two_factor`.
+
+- checkpoint :
+
+```json
+{
+  "login_status": "checkpoint",
+  "provisioning_status": "login_verification_pending",
+  "onboarding_status": "verification_pending",
+  "reason": "checkpoint_required"
+}
+```
+
+Resultat : upsert `resolve_checkpoint`.
+
+- login failed :
+
+```json
+{
+  "login_status": "failed",
+  "provisioning_status": "failed",
+  "onboarding_status": "support_required",
+  "reason": "login_failed"
+}
+```
+
+Resultat : upsert `review_login_failure`.
+
+- mismatch :
+
+```json
+{
+  "login_status": "mismatch",
+  "provisioning_status": "blocked",
+  "onboarding_status": "support_required",
+  "reason": "account_identity_mismatch"
+}
+```
+
+Resultat : upsert `review_account_mismatch` pour audience admin.
+
+- logged out :
+
+```json
+{
+  "login_status": "logged_out",
+  "reason": "session_expired"
+}
+```
+
+Resultat : upsert `reconnect_instagram`.
+
+Fail behavior :
+
+- auth absente ou invalide -> `401 unauthorized`;
+- payload invalide -> `400` avec erreur stable;
+- compte introuvable -> `404 account_not_found`;
+- statut invalide / CHECK constraint -> `400 invalid_status`;
+- metadata sensible -> `400 field_forbidden:*`;
+- erreur RPC ou reseau -> `500 status_update_failed`.
+
+Contrairement au sync credentials -> dashboard actions, cette API est
+fail-closed : si la publication du statut echoue, le caller doit le savoir et
+reessayer ou remonter l'erreur.
+
+Reponse safe :
+
+```json
+{
+  "ok": true,
+  "request_id": "safe-request-id",
+  "account_id": "00000000-0000-4000-8000-000000000000",
+  "login_status": "connected",
+  "provisioning_status": "ready",
+  "onboarding_status": "ready",
+  "credentials_configured": true,
+  "reauth_required": false,
+  "reauth_reason": null,
+  "actions_upserted": [],
+  "actions_resolved": [
+    {
+      "id": "00000000-0000-4000-8000-000000000000",
+      "action_type": "complete_two_factor",
+      "status": "resolved"
+    }
+  ]
+}
+```
+
+La reponse ne contient jamais password, `secret_ref`, payload Vault, metadata
+brute sensible, token, `service_role` ou webhook.
+
+Prochaine etape :
+
+- Entry 2E-4 : integration Python/provisioner derriere feature flag, via un
+  wrapper `supabase_client`, sans modifier les flows sender/orchestrators.
+
 ## Remote Secrets
 
 Remote Edge Function secrets must be configured on the Supabase project before
