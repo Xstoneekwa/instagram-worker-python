@@ -237,6 +237,53 @@ Incident taxonomy draft:
 - `max_restart_attempts_reached`
 - `quota_not_reached_restart_blocked`
 
+## ORF-3B-1 Account Incident RPC
+
+ORF-3B-1 adds the schema-only `public.upsert_account_incident(...)` RPC. It is
+`SECURITY DEFINER`, pins `search_path` to `public`, revokes `public`, `anon`,
+and `authenticated`, and grants execute only to `service_role`. It does not add
+`runtime_incidents.py`, Python helpers, runner integration, Edge Functions,
+Slack/Discord, Redis, dashboard views, or client access.
+
+The RPC intentionally avoids PostgREST upsert because active incident dedupe is
+backed by a partial unique index:
+
+```sql
+unique (dedupe_key) where status in ('open', 'acknowledged')
+```
+
+PostgREST upsert cannot carry the full active-only conflict policy and runtime
+incident lifecycle rules. The RPC uses an explicit active-row lookup with
+`select ... for update`, then inserts when no active row exists. If a concurrent
+writer wins the insert race, the function retries and updates the newly locked
+active row.
+
+Recurrence behavior:
+
+- `open` incidents stay `open`.
+- `acknowledged` incidents stay `acknowledged`; recurrence does not reopen or
+  spam operators.
+- `resolved` and `ignored` incidents are inactive, so the same `dedupe_key`
+  can create a new active row.
+- `occurrence_count` increments on active recurrence.
+- `last_seen_at` and latest non-null context fields update on active recurrence.
+- `first_seen_at`, `created_at`, `acknowledged_at`, and `resolved_at` are not
+  modified during active recurrence.
+- Severity uses max severity and never downgrades:
+  `info < warning < error < critical`.
+
+Metadata behavior in ORF-3B-1 is a shallow JSONB merge:
+
+```sql
+metadata = existing.metadata || incoming_metadata
+```
+
+Incoming keys replace existing keys at the top level. Runtime callers must
+redact secrets before calling the RPC; ORF-3B-2 will add
+`runtime_incidents.py` and a `supabase_client.py` RPC helper behind
+OFF-by-default flags. ORF-3C should be the first runtime integration point,
+starting with `active_instagram_account_mismatch`.
+
 ## ORF-2 Runtime Integration
 
 ORF-2 adds opt-in, best-effort Python runtime helpers for low-volume worker
