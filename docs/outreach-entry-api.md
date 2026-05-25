@@ -727,6 +727,126 @@ Phases futures :
   synchronisent ou resolvent les actions;
 - dashboard repo : badge, popup, panneau, deep-links et formulaires.
 
+## Entry 2D-4B API safe `dashboard-actions`
+
+Entry 2D-4B ajoute `supabase/functions/dashboard-actions`, une Edge Function de
+lecture safe pour le centre d'actions dashboard. Elle expose uniquement :
+
+- `action='count'` pour les compteurs de pastille et de blocage;
+- `action='list'` pour le panneau pagine des actions.
+
+La fonction ne modifie aucune action. Les mutations `acknowledge`, `dismiss` et
+`resolve` restent reservees a Entry 2D-4D.
+
+Requete V1 :
+
+```json
+{
+  "action": "count",
+  "account_id": "optional uuid",
+  "audience": "client",
+  "status": "pending",
+  "limit": 20,
+  "offset": 0
+}
+```
+
+Authentification et filtrage :
+
+- client dashboard : Supabase Auth JWT;
+- internal/admin/app Mac : `DASHBOARD_ACTIONS_INTERNAL_API_TOKEN`;
+- le client JWT est force sur `audience='client'`;
+- le client JWT ne peut pas demander `admin`, `assistant` ou `ops`;
+- si `account_id` est fourni, l'ownership passe par
+  `client_can_manage_instagram_account`;
+- sans `account_id`, le client voit les actions liees a son `client_id` ou a ses
+  comptes via `client_instagram_accounts`;
+- le chemin internal peut filtrer par `audience`, `account_id` et `status`, mais
+  la reponse reste safe.
+
+Statuts actifs pour les badges :
+
+```text
+pending, acknowledged, pending_verification
+```
+
+Reponse `count` :
+
+```json
+{
+  "ok": true,
+  "pending_count": 2,
+  "blocking_count": 1,
+  "client_required_count": 1,
+  "counts_by_severity": {
+    "info": 0,
+    "warning": 1,
+    "error": 1,
+    "critical": 0
+  }
+}
+```
+
+Definitions :
+
+- `pending_count` = actions actives selon les filtres visibles;
+- `blocking_count` = actions actives avec `blocking_campaign=true`;
+- `client_required_count` = actions actives `audience='client'` et
+  `requires_client_action=true`;
+- `counts_by_severity` = actions actives groupees par severite.
+
+Reponse `list` :
+
+```json
+{
+  "ok": true,
+  "actions": [
+    {
+      "id": "00000000-0000-4000-8000-000000000000",
+      "account_id": "00000000-0000-4000-8000-000000000000",
+      "action_type": "submit_instagram_credentials",
+      "status": "pending",
+      "severity": "warning",
+      "audience": "client",
+      "requires_client_action": true,
+      "blocking_campaign": true,
+      "title": "Connect Instagram",
+      "safe_client_message": "Instagram credentials are required.",
+      "action_label": "Connect Instagram",
+      "action_deep_link": "/accounts/00000000-0000-4000-8000-000000000000/connect-instagram",
+      "created_at": "2026-05-25T20:00:00Z",
+      "updated_at": "2026-05-25T20:01:00Z"
+    }
+  ],
+  "next_offset": null
+}
+```
+
+Pagination V1 :
+
+- `limit` est borne entre `1` et `100`, defaut `20`;
+- `offset` est borne a `0` minimum;
+- tri `created_at desc, id desc`;
+- un cursor `created_at/id` pourra remplacer `offset` plus tard si necessaire.
+
+Champs volontairement exclus :
+
+- `admin_message` pour les clients;
+- `assistant_message` pour les clients;
+- `metadata` par defaut;
+- `incident_id` tant qu'il n'est pas utile a l'UI V1;
+- password, `secret_ref`, payload Vault, webhook URL, token, cookie,
+  service-role data.
+
+Securite :
+
+- aucun acces direct client PostgREST a `account_dashboard_actions`;
+- toutes les lectures passent par l'Edge Function et le service-role cote
+  serveur;
+- aucun payload Slack/Discord n'est reutilise comme payload UI;
+- aucun compte hors ownership ne doit etre visible au client;
+- aucune mutation d'action n'est incluse dans Entry 2D-4B.
+
 ## Remote Secrets
 
 Remote Edge Function secrets must be configured on the Supabase project before
