@@ -644,6 +644,89 @@ Security NO-GO for status:
 - no direct PostgREST client read of `account_credentials`;
 - no direct dashboard read of `account_incidents`.
 
+## Entry 2D-4A Centre d'actions dashboard
+
+Entry 2D-4A ajoute le socle schema-only
+`public.account_dashboard_actions`. Cette table est le modele d'etat UI pour les
+actions affichables dans les dashboards client, admin, assistant et app Mac.
+Elle prepare les pastilles de compteur, les panneaux d'actions, les popups
+bloquantes, les deep-links vers les bons formulaires et les resolutions futures.
+
+Cette table ne remplace pas les incidents :
+
+- `account_incidents` reste la source operationnelle durable pour les incidents,
+  alertes, raisons d'echec et messages admin/assistant;
+- `account_incident_notifications` reste uniquement l'audit de livraison
+  Slack/Discord;
+- `account_dashboard_actions` est la projection actionnable pour l'UI dashboard.
+
+Le modele contient notamment :
+
+- `action_type`, `action_label`, `action_deep_link`;
+- `status in ('pending','acknowledged','pending_verification','resolved','dismissed','ignored')`;
+- `severity in ('info','warning','error','critical')`;
+- `audience in ('client','admin','assistant','ops')`;
+- `requires_client_action`;
+- `blocking_campaign`;
+- `safe_client_message`, `assistant_message`, `admin_message`;
+- un `dedupe_key` unique pour les actions actives;
+- `metadata` strictement safe.
+
+`action_deep_link` doit rester une route interne dashboard sure, par exemple
+vers le formulaire de credentials, le panneau 2FA, la verification checkpoint,
+les Target Accounts ou les DM templates. Il ne doit jamais contenir d'URL
+secrete, webhook, `secret_ref` ou payload Vault.
+
+Les `action_type` V1 documentes sont :
+
+- credentials/login : `submit_instagram_credentials`,
+  `update_instagram_password`, `reconnect_instagram`,
+  `review_login_failure`, `complete_two_factor`, `resolve_checkpoint`,
+  `confirm_username_change`, `review_account_mismatch`, `contact_support`;
+- Growth/Targets : `add_targets`, `review_targets`;
+- DM templates : `update_dm_template_welcome`,
+  `update_dm_template_outreach`, `review_dm_template`.
+
+La migration ne rend pas cette liste stricte par contrainte SQL afin d'eviter
+des migrations frequentes pour chaque nouvelle action produit. Les producteurs
+et futures APIs Edge/RPC devront cependant garder une allow-list applicative.
+
+Mappings prepares :
+
+- `credentials_configured=false` -> `submit_instagram_credentials`;
+- `reauth_required=true` -> `update_instagram_password`;
+- `login_status='needs_2fa'` -> `complete_two_factor`;
+- `login_status='checkpoint'` -> `resolve_checkpoint`;
+- `login_status='mismatch'` -> `review_account_mismatch`;
+- besoin de CT/Target Accounts -> `add_targets`;
+- CT insuffisants ou FBR faible -> `review_targets`;
+- template DM manquant ou a revoir -> `update_dm_template_welcome`,
+  `update_dm_template_outreach` ou `review_dm_template`.
+
+Securite et acces :
+
+- RLS activee;
+- aucun acces direct `anon` ou `authenticated`;
+- `service_role` uniquement en V1;
+- les dashboards devront passer par de futures APIs Edge/RPC safe;
+- aucun password, `secret_ref`, payload Vault, webhook URL, token, cookie,
+  service-role data, screenshot/XML brut ou metadata sensible ne doit etre
+  stocke;
+- `admin_message` ne doit pas etre expose a l'audience client par les futures
+  APIs.
+
+Phases futures :
+
+- Entry 2D-4B : APIs Edge/RPC safe pour `count` et `list`
+  (`pending_count`, `blocking_count`, `client_required_count`, filtres par
+  compte, audience, statut et severite);
+- Entry 2D-4C : helpers create/update/sync actions et premiere liaison avec
+  credentials/status;
+- Entry 2D-4D : acknowledge/dismiss/resolve;
+- Entry 2E/2F : worker login/provisioning et publishers incidents qui creent,
+  synchronisent ou resolvent les actions;
+- dashboard repo : badge, popup, panneau, deep-links et formulaires.
+
 ## Remote Secrets
 
 Remote Edge Function secrets must be configured on the Supabase project before
