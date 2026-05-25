@@ -386,6 +386,79 @@ Planned follow-ups:
 - ORF-4D: add scheduled execution through cron, Edge Function scheduling, or a
   separate supervisor; dashboard/admin controls can come later.
 
+## ORF-4B Incident Notification Dispatcher Dry-Run
+
+ORF-4B adds a standalone `incident_notifications.py` dispatcher in dry-run mode.
+It reads actionable rows from `account_incidents`, builds safe Slack/Discord
+payloads, and records what would have been sent in
+`account_incident_notifications`. It does not send real webhooks, does not make
+HTTP calls to Slack/Discord, and is not called by runtime flows.
+
+Flags:
+
+- `INCIDENT_NOTIFICATIONS_ENABLED=false`
+- `INCIDENT_NOTIFICATIONS_FAIL_OPEN=true`
+- `INCIDENT_NOTIFICATIONS_DRY_RUN=true`
+- `INCIDENT_NOTIFICATIONS_CHANNELS=slack`
+- `INCIDENT_NOTIFICATIONS_MIN_SEVERITY=warning`
+- `INCIDENT_NOTIFICATIONS_MAX_PER_RUN=20`
+- `INCIDENT_NOTIFICATIONS_COOLDOWN_MINUTES=60`
+
+Selection V1:
+
+- source table: `account_incidents`;
+- statuses: `open`, `acknowledged`;
+- excluded statuses: `ignored`, `resolved`;
+- severity order: `info < warning < error < critical`;
+- default minimum severity: `warning`;
+- sort order: highest severity first, then `last_seen_at desc`;
+- delivery key: `{channel}:{incident_id}:opened`;
+- duplicate delivery keys are skipped.
+
+Dry-run delivery records use:
+
+- `status='skipped'`;
+- `target='dry-run'`;
+- `attempt_count=0`;
+- `metadata.dry_run=true`;
+- `metadata.reason='dry_run_no_webhook_sent'`;
+- `metadata.dispatcher='incident_notifications'`;
+- `metadata.dispatcher_version='orf-4b'`.
+
+`status='pending'` is intentionally not used for dry-run rows, because there is
+no real delivery waiting to be retried. `pending`, `sent`, and `failed` are
+reserved for ORF-4C real delivery behavior.
+
+Payload safety:
+
+- payloads may include severity, incident type, account username, shortened
+  account ID, status, occurrence count, `last_seen_at`, action/admin/assistant
+  messages, `run_id`, and a dashboard URL placeholder;
+- payloads must not include service-role keys, tokens, cookies, webhook URLs,
+  raw XML, raw stack traces, `device_udid`, full ADB serial, credentials, or
+  raw secrets.
+
+If `INCIDENT_NOTIFICATIONS_DRY_RUN=false` in ORF-4B, the dispatcher must not send
+anything. It returns `real_send_not_implemented`; real Slack/Discord delivery is
+reserved for ORF-4C.
+
+ORF-4 final completion requirement:
+
+- a dedicated Slack or Discord incident channel exists;
+- webhook URL is configured only as an environment secret;
+- `INCIDENT_NOTIFICATIONS_ENABLED=true` and
+  `INCIDENT_NOTIFICATIONS_DRY_RUN=false` are used for one controlled test;
+- one real notification is sent;
+- delivery is recorded as `sent` or `failed`;
+- webhook URL is not stored or logged;
+- runtime flows still never call webhooks directly.
+
+Future admin controls should allow Slack/Discord ON/OFF toggles from the admin
+web dashboard and from the local Mac backend/admin app. These toggles should
+stop or resume sends per channel only; they must not delete incidents, must not
+delete `account_incident_notifications` history, and must never expose webhook
+URLs in Supabase, dashboards, logs, payloads, or metadata.
+
 ## ORF-2 Runtime Integration
 
 ORF-2 adds opt-in, best-effort Python runtime helpers for low-volume worker

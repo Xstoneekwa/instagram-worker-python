@@ -352,6 +352,122 @@ def upsert_account_incident(payload: dict[str, Any]) -> dict[str, Any]:
     return _parse_rpc_account_incident_row(row)
 
 
+def load_account_incidents_to_notify(
+    *,
+    statuses: list[str] | tuple[str, ...] | None = None,
+    min_severity: str = "warning",
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    """Load active account incidents for the ORF-4 notification dispatcher."""
+    allowed_statuses = {"open", "acknowledged"}
+    severity_order = {"info": 0, "warning": 1, "error": 2, "critical": 3}
+    selected_statuses = [
+        str(status or "").strip().lower()
+        for status in (statuses or ("open", "acknowledged"))
+        if str(status or "").strip().lower() in allowed_statuses
+    ]
+    if not selected_statuses:
+        selected_statuses = ["open", "acknowledged"]
+    min_rank = severity_order.get(str(min_severity or "warning").strip().lower(), 1)
+    selected_severities = [
+        severity
+        for severity, rank in severity_order.items()
+        if rank >= min_rank
+    ]
+    safe_limit = max(1, int(limit or 20))
+    # Final severity ordering is handled by the dispatcher; this query avoids
+    # resolved/ignored rows and keeps the DB read bounded.
+    rows = _request_json(
+        "GET",
+        "account_incidents",
+        query={
+            "select": (
+                "id,created_at,updated_at,first_seen_at,last_seen_at,status,severity,"
+                "incident_type,dedupe_key,occurrence_count,client_id,account_id,"
+                "account_username,run_id,assignment_id,device_id,clone_id,source,"
+                "reason,failure_reason,action_required,safe_client_message,"
+                "assistant_message,admin_message,metadata"
+            ),
+            "status": f"in.({','.join(selected_statuses)})",
+            "severity": f"in.({','.join(selected_severities)})",
+            "order": "last_seen_at.desc",
+            "limit": str(safe_limit),
+        },
+    ) or []
+    return [dict(row) for row in rows if isinstance(row, dict)]
+
+
+def _postgrest_in_values(values: list[str]) -> str:
+    quoted = []
+    for value in values:
+        cleaned = str(value or "").strip()
+        if not cleaned:
+            continue
+        quoted.append('"' + cleaned.replace("\\", "\\\\").replace('"', '\\"') + '"')
+    return "in.(" + ",".join(quoted) + ")"
+
+
+def load_existing_incident_notifications_by_delivery_keys(
+    delivery_keys: list[str],
+) -> dict[str, dict[str, Any]]:
+    """Return existing delivery rows keyed by delivery_key."""
+    keys = []
+    for key in delivery_keys:
+        cleaned = str(key or "").strip()
+        if cleaned and cleaned not in keys:
+            keys.append(cleaned)
+    if not keys:
+        return {}
+    rows = _request_json(
+        "GET",
+        "account_incident_notifications",
+        query={
+            "select": "*",
+            "delivery_key": _postgrest_in_values(keys),
+        },
+    ) or []
+    out: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if isinstance(row, dict):
+            delivery_key = str(row.get("delivery_key") or "").strip()
+            if delivery_key:
+                out[delivery_key] = dict(row)
+    return out
+
+
+def create_account_incident_notification(payload: dict[str, Any]) -> dict[str, Any]:
+    """Insert one ORF-4 account incident notification audit row."""
+    row = _request_json(
+        "POST",
+        "account_incident_notifications",
+        body=dict(payload or {}),
+        prefer_representation=True,
+    )
+    if not row:
+        raise RuntimeError("Supabase create_account_incident_notification returned empty response")
+    return row[0]
+
+
+def update_account_incident_notification(
+    notification_id: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Update one ORF-4 account incident notification audit row."""
+    nid = str(notification_id or "").strip()
+    if not nid:
+        raise ValueError("notification_id is required")
+    row = _request_json(
+        "PATCH",
+        "account_incident_notifications",
+        query={"id": f"eq.{nid}"},
+        body=dict(payload or {}),
+        prefer_representation=True,
+    )
+    if not row:
+        raise RuntimeError("Supabase update_account_incident_notification returned empty response")
+    return row[0]
+
+
 def insert_action_log(
     run_id: str,
     account_id: str,

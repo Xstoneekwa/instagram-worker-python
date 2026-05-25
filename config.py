@@ -20,6 +20,14 @@ def _env_int(name: str, default: int) -> int:
         return int(default)
 
 
+def _env_str(name: str, default: str) -> str:
+    raw = os.environ.get(name)
+    if raw is None:
+        return str(default)
+    value = str(raw).strip()
+    return value if value else str(default)
+
+
 def _env_float(name: str, default: float) -> float:
     raw = os.environ.get(name)
     if raw is None or str(raw).strip() == "":
@@ -72,6 +80,21 @@ RUNTIME_INCIDENTS_LOG_LOCAL_FALLBACK = _env_bool("RUNTIME_INCIDENTS_LOG_LOCAL_FA
 RUNTIME_INCIDENTS_INCLUDE_DEBUG_METADATA = _env_bool(
     "RUNTIME_INCIDENTS_INCLUDE_DEBUG_METADATA",
     False,
+)
+
+# ORF-4B incident notifications are a separate dry-run dispatcher by default.
+INCIDENT_NOTIFICATIONS_ENABLED = _env_bool("INCIDENT_NOTIFICATIONS_ENABLED", False)
+INCIDENT_NOTIFICATIONS_FAIL_OPEN = _env_bool("INCIDENT_NOTIFICATIONS_FAIL_OPEN", True)
+INCIDENT_NOTIFICATIONS_DRY_RUN = _env_bool("INCIDENT_NOTIFICATIONS_DRY_RUN", True)
+INCIDENT_NOTIFICATIONS_CHANNELS = _env_str("INCIDENT_NOTIFICATIONS_CHANNELS", "slack")
+INCIDENT_NOTIFICATIONS_MIN_SEVERITY = _env_str(
+    "INCIDENT_NOTIFICATIONS_MIN_SEVERITY",
+    "warning",
+)
+INCIDENT_NOTIFICATIONS_MAX_PER_RUN = _env_int("INCIDENT_NOTIFICATIONS_MAX_PER_RUN", 20)
+INCIDENT_NOTIFICATIONS_COOLDOWN_MINUTES = _env_int(
+    "INCIDENT_NOTIFICATIONS_COOLDOWN_MINUTES",
+    60,
 )
 
 # ADBKeyboard (optional). Low-latency ADB_INPUT_TEXT broadcast when installed.
