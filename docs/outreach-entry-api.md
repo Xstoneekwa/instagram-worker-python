@@ -1105,6 +1105,142 @@ client JWT devra appliquer l'ownership, l'audience client et les restrictions UI
 avant appel RPC. Le chemin internal token pourra resoudre
 `pending_verification` apres verification worker ou support.
 
+## Entry 2D-4D-2 Mutations Edge `dashboard-actions`
+
+Entry 2D-4D-2 etend `supabase/functions/dashboard-actions` avec trois mutations
+safe :
+
+- `action='acknowledge'`;
+- `action='dismiss'`;
+- `action='resolve'`.
+
+Ces mutations restent exposees uniquement via l'Edge Function. Le dashboard ne
+lit ni ne modifie jamais `public.account_dashboard_actions` en direct via
+PostgREST. L'Edge Function charge une row safe par `action_id`, applique
+l'authentification et l'ownership, puis appelle
+`public.transition_account_dashboard_action(...)` avec le service-role.
+
+Requete mutation V1 :
+
+```json
+{
+  "action": "acknowledge",
+  "action_id": "00000000-0000-4000-8000-000000000000",
+  "reason": "optional safe text"
+}
+```
+
+`action_id` est obligatoire et doit etre un UUID. `reason` est optionnel et
+borne a 500 caracteres. Les champs sensibles sont rejetes comme pour `count` et
+`list` : password, `secret_ref`, token, cookie, webhook URL, service-role data
+ou `metadata.password`.
+
+Chargement avant mutation :
+
+- la row est lue via service-role par `action_id`;
+- les champs charges sont limites a l'etat et aux champs de reponse safe :
+  `id`, `account_id`, `client_id`, `action_type`, `status`, `severity`,
+  `audience`, `requires_client_action`, `blocking_campaign`, `title`,
+  `safe_client_message`, `action_label`, `action_deep_link`,
+  `acknowledged_at`, `dismissed_at`, `resolved_at`, `created_at`,
+  `updated_at`;
+- `metadata`, `admin_message`, `assistant_message`, `incident_id`, secrets,
+  payload Vault et webhook URL ne sont pas charges pour la reponse V1.
+
+Regles client JWT :
+
+- le client peut muter uniquement les actions `audience='client'`;
+- l'action doit appartenir au client via `client_id` ou via ownership
+  `client_can_manage_instagram_account`;
+- `acknowledge` est autorise pour `pending`, `acknowledged` et
+  `pending_verification`;
+- `dismiss` est interdit pour `pending_verification`;
+- `dismiss` est interdit lorsque `blocking_campaign=true` et
+  `requires_client_action=true`;
+- `resolve` est interdit pour `pending_verification`;
+- `resolve` est interdit lorsque `blocking_campaign=true` ou
+  `requires_client_action=true`;
+- en V1, le client peut donc resoudre seulement une action client non bloquante
+  et non requise.
+
+Regles internal token :
+
+- le chemin internal peut `acknowledge`, `dismiss` ou `resolve` toutes les
+  audiences;
+- il peut resoudre `pending_verification` apres verification worker ou support;
+- il peut masquer une action bloquante si l'operation est volontaire;
+- la reponse reste safe et ne retourne pas de metadata brute.
+
+Appel RPC :
+
+```json
+{
+  "p_action_id": "...",
+  "p_new_status": "acknowledged",
+  "p_actor_type": "client",
+  "p_actor_id": "auth-user-id-or-null",
+  "p_reason": "optional safe text",
+  "p_metadata": {
+    "source": "dashboard_actions_edge",
+    "request_id": "safe-request-id",
+    "mutation": "acknowledge"
+  }
+}
+```
+
+La metadata envoyee a la RPC ne contient jamais token, body complet, password,
+`secret_ref`, payload Vault ou webhook URL.
+
+Reponse mutation V1 :
+
+```json
+{
+  "ok": true,
+  "request_id": "safe-request-id",
+  "dashboard_action": {
+    "id": "00000000-0000-4000-8000-000000000000",
+    "account_id": "00000000-0000-4000-8000-000000000000",
+    "action_type": "submit_instagram_credentials",
+    "status": "acknowledged",
+    "severity": "info",
+    "audience": "client",
+    "requires_client_action": false,
+    "blocking_campaign": true,
+    "title": "Connexion Instagram en vérification",
+    "safe_client_message": "Vos identifiants Instagram ont été enregistrés.",
+    "action_label": "Voir le statut",
+    "action_deep_link": "/accounts/00000000-0000-4000-8000-000000000000/connect-instagram",
+    "acknowledged_at": "2026-05-25T21:30:00Z",
+    "dismissed_at": null,
+    "resolved_at": null,
+    "created_at": "2026-05-25T21:00:00Z",
+    "updated_at": "2026-05-25T21:30:00Z"
+  }
+}
+```
+
+`acknowledged` reste un statut actif pour les compteurs V1. `dismissed` et
+`resolved` sortent des statuts actifs et font disparaitre l'action des badges
+par defaut. Les statuts `resolved`, `dismissed` et `ignored` sont terminaux :
+une mutation V1 retourne `transition_not_allowed` si elle vise deja une action
+terminale.
+
+Erreurs stables :
+
+- `invalid_action`;
+- `action_id_invalid`;
+- `action_not_found`;
+- `transition_not_allowed`;
+- `audience_not_allowed`;
+- `account_not_allowed`;
+- `field_forbidden:*`;
+- `internal_error`.
+
+Les logs de mutation restent safe : `request_id`, `action`, `action_id`,
+`actor_type`, statut resultat et code erreur stable. Ils ne doivent jamais
+inclure le body complet, un token, une raison non bornee, une metadata brute ou
+un secret.
+
 ## Remote Secrets
 
 Remote Edge Function secrets must be configured on the Supabase project before

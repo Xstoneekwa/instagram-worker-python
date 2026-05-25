@@ -2,12 +2,14 @@
 /**
  * Safe dashboard action read API.
  *
- * Exposes count/list only. All reads go through service-role PostgREST calls;
- * clients never read public.account_dashboard_actions directly.
+ * Exposes safe count/list and status mutations. All reads/writes go through
+ * service-role calls; clients never access public.account_dashboard_actions
+ * directly.
  */
 
-type DashboardAction = "count" | "list";
+type DashboardAction = "count" | "list" | "acknowledge" | "dismiss" | "resolve";
 type Audience = "client" | "admin" | "assistant" | "ops";
+type DashboardMutation = "acknowledge" | "dismiss" | "resolve";
 type ProducerAuth =
   | { ok: true; mode: "internal"; authUserId: null }
   | { ok: true; mode: "client"; authUserId: string }
@@ -25,6 +27,8 @@ type ParsedPayload = {
   status: string | null;
   limit: number;
   offset: number;
+  actionId: string | null;
+  reason: string | null;
 };
 type AccessScope = {
   audience: Audience | null;
@@ -46,6 +50,8 @@ const STATUS_ALLOWLIST = new Set([
 ]);
 const AUDIENCE_ALLOWLIST = new Set(["client", "admin", "assistant", "ops"]);
 const SEVERITIES = ["info", "warning", "error", "critical"];
+const MUTATION_ACTIONS = new Set(["acknowledge", "dismiss", "resolve"]);
+const TERMINAL_STATUSES = new Set(["resolved", "dismissed", "ignored"]);
 const FORBIDDEN_TOP_LEVEL_FIELDS = new Set([
   "password",
   "secret_ref",
@@ -101,7 +107,9 @@ export function validatePayload(payload: Record<string, unknown>): { ok: true; p
   if (forbidden) return { ok: false, error: `field_forbidden:${forbidden}`, status: 400 };
 
   const action = String(payload.action || "").trim();
-  if (action !== "count" && action !== "list") return { ok: false, error: "invalid_action", status: 400 };
+  if (action !== "count" && action !== "list" && !MUTATION_ACTIONS.has(action)) {
+    return { ok: false, error: "invalid_action", status: 400 };
+  }
 
   let accountId: string | null = null;
   if (payload.account_id != null && String(payload.account_id).trim() !== "") {
@@ -123,15 +131,29 @@ export function validatePayload(payload: Record<string, unknown>): { ok: true; p
     status = rawStatus;
   }
 
+  let actionId: string | null = null;
+  let reason: string | null = null;
+  if (MUTATION_ACTIONS.has(action)) {
+    if (!isUuid(payload.action_id)) return { ok: false, error: "action_id_invalid", status: 400 };
+    actionId = String(payload.action_id).trim();
+
+    if (payload.reason != null && String(payload.reason).trim() !== "") {
+      reason = String(payload.reason).trim();
+      if (reason.length > 500) return { ok: false, error: "reason_too_long", status: 400 };
+    }
+  }
+
   return {
     ok: true,
     payload: {
-      action,
+      action: action as DashboardAction,
       accountId,
       audience,
       status,
       limit: clampLimit(payload.limit),
       offset: normalizeOffset(payload.offset),
+      actionId,
+      reason,
     },
   };
 }
@@ -425,9 +447,125 @@ function safeActionRow(row: Record<string, any>) {
     safe_client_message: row.safe_client_message ?? null,
     action_label: row.action_label ?? null,
     action_deep_link: row.action_deep_link ?? null,
+    acknowledged_at: row.acknowledged_at ?? null,
+    dismissed_at: row.dismissed_at ?? null,
+    resolved_at: row.resolved_at ?? null,
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
+}
+
+const DASHBOARD_ACTION_SELECT = [
+  "id",
+  "account_id",
+  "client_id",
+  "action_type",
+  "status",
+  "severity",
+  "audience",
+  "requires_client_action",
+  "blocking_campaign",
+  "title",
+  "safe_client_message",
+  "action_label",
+  "action_deep_link",
+  "acknowledged_at",
+  "dismissed_at",
+  "resolved_at",
+  "created_at",
+  "updated_at",
+].join(",");
+
+async function loadDashboardAction(actionId: string, deps: Dependencies): Promise<Record<string, any> | null> {
+  const rows = await supabaseJson(
+    `/rest/v1/account_dashboard_actions?id=eq.${encodeFilterValue(actionId)}&select=${DASHBOARD_ACTION_SELECT}&limit=1`,
+    { method: "GET" },
+    deps,
+  );
+  return Array.isArray(rows) && rows[0] ? rows[0] : null;
+}
+
+async function assertClientMutationAccess(
+  authUserId: string,
+  row: Record<string, any>,
+  deps: Dependencies,
+): Promise<{ ok: true; clientId: string } | { ok: false; status: number; error: string }> {
+  if (row.audience !== "client") return { ok: false, status: 403, error: "audience_not_allowed" };
+
+  try {
+    const clientId = await clientIdForAuthUser(authUserId, deps);
+    if (!clientId) return { ok: false, status: 403, error: "account_not_allowed" };
+    if (row.client_id === clientId) return { ok: true, clientId };
+
+    if (isUuid(row.account_id)) {
+      const hasAccess = await hasClientAccountAccess(authUserId, row.account_id, deps);
+      if (hasAccess) return { ok: true, clientId };
+    }
+    return { ok: false, status: 403, error: "account_not_allowed" };
+  } catch {
+    return { ok: false, status: 503, error: "account_ownership_check_failed" };
+  }
+}
+
+function mutationTargetStatus(action: DashboardMutation): string {
+  if (action === "acknowledge") return "acknowledged";
+  if (action === "dismiss") return "dismissed";
+  return "resolved";
+}
+
+function clientMutationAllowed(action: DashboardMutation, row: Record<string, any>): boolean {
+  if (TERMINAL_STATUSES.has(String(row.status))) return false;
+  if (action === "acknowledge") {
+    return row.status === "pending" || row.status === "acknowledged" || row.status === "pending_verification";
+  }
+  if (action === "dismiss") {
+    if (row.status === "pending_verification") return false;
+    return !(row.blocking_campaign === true && row.requires_client_action === true);
+  }
+  if (row.status === "pending_verification") return false;
+  return row.blocking_campaign !== true && row.requires_client_action !== true;
+}
+
+function rpcTransitionError(body: unknown): string {
+  const message = typeof (body as Record<string, unknown> | null)?.message === "string"
+    ? String((body as Record<string, unknown>).message)
+    : "";
+  if (message.includes("dashboard_action_not_found")) return "action_not_found";
+  if (message.includes("invalid_dashboard_action_transition")) return "transition_not_allowed";
+  if (message.includes("invalid_dashboard_action_status")) return "transition_not_allowed";
+  if (message.includes("metadata contains a forbidden key")) return "field_forbidden:metadata";
+  if (message.includes("reason too long")) return "reason_too_long";
+  return "internal_error";
+}
+
+async function transitionDashboardAction(input: {
+  actionId: string;
+  targetStatus: string;
+  actorType: "client" | "internal";
+  actorId: string | null;
+  reason: string | null;
+  requestId: string;
+  mutation: DashboardMutation;
+}, deps: Dependencies): Promise<{ ok: true; row: Record<string, any> } | { ok: false; error: string }> {
+  const res = await supabaseFetch("/rest/v1/rpc/transition_account_dashboard_action", {
+    method: "POST",
+    body: JSON.stringify({
+      p_action_id: input.actionId,
+      p_new_status: input.targetStatus,
+      p_actor_type: input.actorType,
+      p_actor_id: input.actorId,
+      p_reason: input.reason,
+      p_metadata: {
+        source: "dashboard_actions_edge",
+        request_id: input.requestId,
+        mutation: input.mutation,
+      },
+    }),
+  }, deps);
+  const text = await res.text();
+  const body = text ? JSON.parse(text) : null;
+  if (!res.ok) return { ok: false, error: rpcTransitionError(body) };
+  return { ok: true, row: body };
 }
 
 async function handleList(
@@ -476,6 +614,95 @@ async function handleList(
   }
 }
 
+async function handleMutation(
+  req: Request,
+  payload: ParsedPayload,
+  auth: Extract<ProducerAuth, { ok: true }>,
+  deps: Dependencies,
+) {
+  const headers = corsHeaders(req);
+  const rid = requestId(req, deps);
+  const mutation = payload.action as DashboardMutation;
+  const actionId = payload.actionId;
+  if (!actionId) return jsonResponse(400, { ok: false, error: "action_id_invalid", request_id: rid }, headers);
+
+  let row: Record<string, any> | null;
+  try {
+    row = await loadDashboardAction(actionId, deps);
+  } catch {
+    return jsonResponse(500, { ok: false, error: "internal_error", request_id: rid }, headers);
+  }
+  if (!row) return jsonResponse(404, { ok: false, error: "action_not_found", request_id: rid }, headers);
+  if (TERMINAL_STATUSES.has(String(row.status))) {
+    return jsonResponse(409, { ok: false, error: "transition_not_allowed", request_id: rid }, headers);
+  }
+
+  let actorType: "client" | "internal" = "internal";
+  let actorId: string | null = null;
+  if (auth.mode === "client") {
+    const access = await assertClientMutationAccess(auth.authUserId, row, deps);
+    if (!access.ok) {
+      logEvent(deps, "dashboard_actions_mutation_rejected", {
+        request_id: rid,
+        action: mutation,
+        action_id: actionId,
+        actor_type: "client",
+        error: access.error,
+      });
+      return jsonResponse(access.status, { ok: false, error: access.error, request_id: rid }, headers);
+    }
+    if (!clientMutationAllowed(mutation, row)) {
+      logEvent(deps, "dashboard_actions_mutation_rejected", {
+        request_id: rid,
+        action: mutation,
+        action_id: actionId,
+        actor_type: "client",
+        error: "transition_not_allowed",
+      });
+      return jsonResponse(403, { ok: false, error: "transition_not_allowed", request_id: rid }, headers);
+    }
+    actorType = "client";
+    actorId = auth.authUserId;
+  }
+
+  const transitioned = await transitionDashboardAction({
+    actionId,
+    targetStatus: mutationTargetStatus(mutation),
+    actorType,
+    actorId,
+    reason: payload.reason,
+    requestId: rid,
+    mutation,
+  }, deps);
+  if (!transitioned.ok) {
+    const status = transitioned.error === "action_not_found" ? 404
+      : transitioned.error === "transition_not_allowed" ? 409
+      : transitioned.error.startsWith("field_forbidden") || transitioned.error === "reason_too_long" ? 400
+      : 500;
+    logEvent(deps, "dashboard_actions_mutation_failed", {
+      request_id: rid,
+      action: mutation,
+      action_id: actionId,
+      actor_type: actorType,
+      error: transitioned.error,
+    });
+    return jsonResponse(status, { ok: false, error: transitioned.error, request_id: rid }, headers);
+  }
+
+  logEvent(deps, "dashboard_actions_mutation_succeeded", {
+    request_id: rid,
+    action: mutation,
+    action_id: actionId,
+    actor_type: actorType,
+    status: transitioned.row.status,
+  });
+  return jsonResponse(200, {
+    ok: true,
+    request_id: rid,
+    dashboard_action: safeActionRow(transitioned.row),
+  }, headers);
+}
+
 export async function handleRequest(req: Request, deps: Dependencies = {}): Promise<Response> {
   const headers = corsHeaders(req);
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers });
@@ -501,7 +728,8 @@ export async function handleRequest(req: Request, deps: Dependencies = {}): Prom
 
   try {
     if (payloadResult.payload.action === "count") return await handleCount(req, payloadResult.payload, auth, deps);
-    return await handleList(req, payloadResult.payload, auth, deps);
+    if (payloadResult.payload.action === "list") return await handleList(req, payloadResult.payload, auth, deps);
+    return await handleMutation(req, payloadResult.payload, auth, deps);
   } catch {
     logEvent(deps, "dashboard_actions_unhandled_error", {
       request_id: requestId(req, deps),

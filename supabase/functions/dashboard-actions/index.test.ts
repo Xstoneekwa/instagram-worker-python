@@ -11,6 +11,13 @@ const OTHER_ACCOUNT_ID = "ba027e65-e024-4e02-b8ad-5d188507c04e";
 const CLIENT_ID = "00000000-0000-4000-8000-000000002e2a";
 const AUTH_USER_ID = "00000000-0000-4000-8000-000000000001";
 const FAKE_SECRET = "not-real-password-dashboard-actions";
+const BLOCKING_ACTION_ID = "10000000-0000-4000-8000-000000000001";
+const PENDING_VERIFICATION_ACTION_ID = "10000000-0000-4000-8000-000000000002";
+const ADMIN_ACTION_ID = "10000000-0000-4000-8000-000000000003";
+const NON_BLOCKING_REQUIRED_ACTION_ID = "10000000-0000-4000-8000-000000000004";
+const OTHER_CLIENT_ACTION_ID = "10000000-0000-4000-8000-000000000005";
+const CLIENT_RESOLVABLE_ACTION_ID = "10000000-0000-4000-8000-000000000006";
+const TERMINAL_ACTION_ID = "10000000-0000-4000-8000-000000000007";
 
 type FetchCall = { url: string; body: Record<string, unknown> | null };
 type Row = Record<string, unknown>;
@@ -107,6 +114,47 @@ const FIXTURE_ROWS: Row[] = [
     created_at: "2026-05-25T16:00:00Z",
     updated_at: "2026-05-25T16:01:00Z",
   },
+  {
+    id: CLIENT_RESOLVABLE_ACTION_ID,
+    client_id: CLIENT_ID,
+    account_id: ACCOUNT_ID,
+    action_type: "review_targets",
+    status: "pending",
+    severity: "info",
+    audience: "client",
+    requires_client_action: false,
+    blocking_campaign: false,
+    title: "Review targets",
+    safe_client_message: "Targets are being reviewed.",
+    action_label: "View targets",
+    action_deep_link: "/accounts/42/targets",
+    metadata: { safe: "ignored" },
+    admin_message: "admin-only review note",
+    assistant_message: "assistant-only review note",
+    incident_id: "22222222-2222-4222-8222-222222222222",
+    secret_ref: "supabase_vault://22222222-2222-4222-8222-222222222222",
+    webhook_url: "https://hooks.example.invalid/another-secret",
+    created_at: "2026-05-25T15:00:00Z",
+    updated_at: "2026-05-25T15:01:00Z",
+  },
+  {
+    id: TERMINAL_ACTION_ID,
+    client_id: CLIENT_ID,
+    account_id: ACCOUNT_ID,
+    action_type: "resolved_smoke",
+    status: "resolved",
+    severity: "info",
+    audience: "client",
+    requires_client_action: false,
+    blocking_campaign: false,
+    title: "Resolved action",
+    safe_client_message: "Already resolved.",
+    action_label: "View",
+    action_deep_link: "/accounts/42",
+    resolved_at: "2026-05-25T14:05:00Z",
+    created_at: "2026-05-25T14:00:00Z",
+    updated_at: "2026-05-25T14:05:00Z",
+  },
 ];
 
 function withEnv(fn: () => Promise<void> | void) {
@@ -177,6 +225,12 @@ function applyActionFilters(url: URL, rows: Row[]): Row[] {
       result = result.filter((row) => row.account_id === accountId);
     }
   }
+  for (const idFilter of params.getAll("id")) {
+    if (idFilter.startsWith("eq.")) {
+      const id = idFilter.slice(3);
+      result = result.filter((row) => row.id === id);
+    }
+  }
   for (const severityFilter of params.getAll("severity")) {
     if (severityFilter.startsWith("eq.")) {
       const severity = severityFilter.slice(3);
@@ -209,6 +263,8 @@ function makeFetch(options: {
   clientAccess?: boolean;
   ownedAccountIds?: string[];
   calls?: FetchCall[];
+  transitionStatus?: number;
+  transitionError?: string;
 } = {}) {
   const calls = options.calls ?? [];
   return async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
@@ -230,6 +286,30 @@ function makeFetch(options: {
     }
     if (href.includes("/rest/v1/rpc/client_can_manage_instagram_account")) {
       return json(options.clientAccess ?? true);
+    }
+    if (href.includes("/rest/v1/rpc/transition_account_dashboard_action")) {
+      if (options.transitionStatus && options.transitionStatus >= 400) {
+        return json({ message: options.transitionError ?? "invalid_dashboard_action_transition" }, options.transitionStatus);
+      }
+      const body = bodyOf(init) ?? {};
+      const row = FIXTURE_ROWS.find((item) => item.id === body.p_action_id);
+      if (!row) return json({ message: "dashboard_action_not_found" }, 404);
+      const status = String(body.p_new_status);
+      const timestamp = "2026-05-25T21:30:00Z";
+      return json({
+        ...row,
+        status,
+        acknowledged_at: status === "acknowledged" ? (row.acknowledged_at ?? timestamp) : row.acknowledged_at ?? null,
+        dismissed_at: status === "dismissed" ? timestamp : row.dismissed_at ?? null,
+        resolved_at: status === "resolved" ? timestamp : row.resolved_at ?? null,
+        updated_at: timestamp,
+        metadata: { password: FAKE_SECRET, safe: "must-not-leak" },
+        admin_message: "admin-only transition details",
+        assistant_message: "assistant-only transition details",
+        incident_id: "33333333-3333-4333-8333-333333333333",
+        secret_ref: "supabase_vault://33333333-3333-4333-8333-333333333333",
+        webhook_url: "https://hooks.example.invalid/rpc-secret",
+      });
     }
     if (href.includes("/rest/v1/account_dashboard_actions?")) {
       const filtered = applyActionFilters(url, FIXTURE_ROWS);
@@ -255,7 +335,7 @@ Deno.test("rejette auth manquante", withEnv(async () => {
 }));
 
 Deno.test("rejette action inconnue", () => {
-  const result = validatePayload({ action: "resolve" });
+  const result = validatePayload({ action: "unknown" });
   if (result.ok || result.error !== "invalid_action") throw new Error("action inconnue acceptee");
 });
 
@@ -297,10 +377,10 @@ Deno.test("client count filtre correctement ses actions", withEnv(async () => {
     log: () => {},
   });
   const body = await res.json();
-  if (res.status !== 200 || body.pending_count !== 3 || body.blocking_count !== 1 || body.client_required_count !== 2) {
+  if (res.status !== 200 || body.pending_count !== 4 || body.blocking_count !== 1 || body.client_required_count !== 2) {
     throw new Error(`count client inattendu: ${JSON.stringify(body)}`);
   }
-  if (body.counts_by_severity.info !== 1 || body.counts_by_severity.warning !== 1 || body.counts_by_severity.error !== 1) {
+  if (body.counts_by_severity.info !== 2 || body.counts_by_severity.warning !== 1 || body.counts_by_severity.error !== 1) {
     throw new Error("counts_by_severity client incorrect");
   }
 }));
@@ -323,7 +403,7 @@ Deno.test("list retourne champs safe et exclut messages internes", withEnv(async
   });
   const body = await res.json();
   const text = JSON.stringify(body);
-  if (res.status !== 200 || body.actions.length !== 3) throw new Error("list client incorrecte");
+  if (res.status !== 200 || body.actions.length !== 5) throw new Error("list client incorrecte");
   if (text.includes("admin_message") || text.includes("assistant_message") || text.includes("metadata")) {
     throw new Error("list expose des champs internes");
   }
@@ -338,7 +418,7 @@ Deno.test("list filtre account_id status audience", withEnv(async () => {
     log: () => {},
   });
   const body = await res.json();
-  if (res.status !== 200 || body.actions.length !== 2) throw new Error("filtres list incorrects");
+  if (res.status !== 200 || body.actions.length !== 3) throw new Error("filtres list incorrects");
   if (!body.actions.every((row: Record<string, unknown>) => row.status === "pending" && row.audience === "client")) {
     throw new Error("rows non filtrees");
   }
@@ -383,5 +463,179 @@ Deno.test("client_id null visible via ownership account_id", withEnv(async () =>
   const body = await res.json();
   if (!body.actions.some((row: Record<string, unknown>) => row.action_type === "add_targets")) {
     throw new Error("action client_id null liee au compte non visible");
+  }
+}));
+
+Deno.test("mutation rejette auth manquante", withEnv(async () => {
+  const res = await handleRequest(new Request("https://example.test", {
+    method: "POST",
+    body: JSON.stringify({ action: "acknowledge", action_id: BLOCKING_ACTION_ID }),
+  }));
+  const body = await res.json();
+  if (res.status !== 401 || body.error !== "unauthorized") throw new Error("mutation sans auth acceptee");
+}));
+
+Deno.test("mutation rejette action_id invalide ou manquant et reason trop longue", () => {
+  const missing = validatePayload({ action: "acknowledge" });
+  if (missing.ok || missing.error !== "action_id_invalid") throw new Error("action_id manquant accepte");
+  const invalid = validatePayload({ action: "dismiss", action_id: "not-a-uuid" });
+  if (invalid.ok || invalid.error !== "action_id_invalid") throw new Error("action_id invalide accepte");
+  const longReason = validatePayload({ action: "resolve", action_id: CLIENT_RESOLVABLE_ACTION_ID, reason: "x".repeat(501) });
+  if (longReason.ok || longReason.error !== "reason_too_long") throw new Error("reason trop longue acceptee");
+});
+
+Deno.test("client acknowledge sa propre action client", withEnv(async () => {
+  const calls: FetchCall[] = [];
+  const res = await handleRequest(request({
+    action: "acknowledge",
+    action_id: BLOCKING_ACTION_ID,
+    reason: "vu",
+  }), {
+    fetch: makeFetch({ calls }),
+    log: () => {},
+  });
+  const body = await res.json();
+  const text = JSON.stringify(body);
+  if (res.status !== 200 || body.dashboard_action?.status !== "acknowledged" || !body.dashboard_action?.acknowledged_at) {
+    throw new Error(`acknowledge client incorrect: ${text}`);
+  }
+  const rpc = calls.find((c) => c.url.includes("transition_account_dashboard_action"));
+  if (!rpc) throw new Error("RPC transition non appelee");
+  if (rpc.body?.p_actor_type !== "client" || rpc.body?.p_actor_id !== AUTH_USER_ID || rpc.body?.p_reason !== "vu") {
+    throw new Error("actor client/reason incorrects");
+  }
+  if (JSON.stringify(rpc.body?.p_metadata).includes(FAKE_SECRET)) throw new Error("metadata RPC contient un secret");
+}));
+
+Deno.test("client ne peut pas acknowledge audience admin", withEnv(async () => {
+  const res = await handleRequest(request({ action: "acknowledge", action_id: ADMIN_ACTION_ID }), {
+    fetch: makeFetch(),
+    log: () => {},
+  });
+  const body = await res.json();
+  if (res.status !== 403 || body.error !== "audience_not_allowed") {
+    throw new Error("client a mute audience admin");
+  }
+}));
+
+Deno.test("client ne peut pas muter action hors ownership", withEnv(async () => {
+  const res = await handleRequest(request({ action: "acknowledge", action_id: OTHER_CLIENT_ACTION_ID }), {
+    fetch: makeFetch({ clientAccess: false }),
+    log: () => {},
+  });
+  const body = await res.json();
+  if (res.status !== 403 || body.error !== "account_not_allowed") {
+    throw new Error("client a mute hors ownership");
+  }
+}));
+
+Deno.test("client ne peut pas dismiss action bloquante requise", withEnv(async () => {
+  const res = await handleRequest(request({ action: "dismiss", action_id: BLOCKING_ACTION_ID }), {
+    fetch: makeFetch(),
+    log: () => {},
+  });
+  const body = await res.json();
+  if (res.status !== 403 || body.error !== "transition_not_allowed") {
+    throw new Error("dismiss bloquant requis accepte");
+  }
+}));
+
+Deno.test("client ne peut pas dismiss ou resolve pending_verification", withEnv(async () => {
+  for (const action of ["dismiss", "resolve"]) {
+    const res = await handleRequest(request({ action, action_id: PENDING_VERIFICATION_ACTION_ID }), {
+      fetch: makeFetch(),
+      log: () => {},
+    });
+    const body = await res.json();
+    if (res.status !== 403 || body.error !== "transition_not_allowed") {
+      throw new Error(`${action} pending_verification accepte`);
+    }
+  }
+}));
+
+Deno.test("client ne peut pas resolve action bloquante ou requise", withEnv(async () => {
+  const blocking = await handleRequest(request({ action: "resolve", action_id: BLOCKING_ACTION_ID }), {
+    fetch: makeFetch(),
+    log: () => {},
+  });
+  const required = await handleRequest(request({ action: "resolve", action_id: NON_BLOCKING_REQUIRED_ACTION_ID }), {
+    fetch: makeFetch(),
+    log: () => {},
+  });
+  const blockingBody = await blocking.json();
+  const requiredBody = await required.json();
+  if (blocking.status !== 403 || blockingBody.error !== "transition_not_allowed") {
+    throw new Error("resolve bloquant accepte");
+  }
+  if (required.status !== 403 || requiredBody.error !== "transition_not_allowed") {
+    throw new Error("resolve action requise accepte");
+  }
+}));
+
+Deno.test("client resolve action non bloquante non requise", withEnv(async () => {
+  const res = await handleRequest(request({ action: "resolve", action_id: CLIENT_RESOLVABLE_ACTION_ID }), {
+    fetch: makeFetch(),
+    log: () => {},
+  });
+  const body = await res.json();
+  if (res.status !== 200 || body.dashboard_action?.status !== "resolved" || !body.dashboard_action?.resolved_at) {
+    throw new Error("resolve client safe echoue");
+  }
+}));
+
+Deno.test("internal resolve pending_verification et dismiss bloquante", withEnv(async () => {
+  const resolve = await handleRequest(request({
+    action: "resolve",
+    action_id: PENDING_VERIFICATION_ACTION_ID,
+  }, "internal-token-not-real"), {
+    fetch: makeFetch(),
+    log: () => {},
+  });
+  const dismiss = await handleRequest(request({
+    action: "dismiss",
+    action_id: BLOCKING_ACTION_ID,
+  }, "internal-token-not-real"), {
+    fetch: makeFetch(),
+    log: () => {},
+  });
+  const resolveBody = await resolve.json();
+  const dismissBody = await dismiss.json();
+  if (resolve.status !== 200 || resolveBody.dashboard_action?.status !== "resolved") {
+    throw new Error("internal resolve pending_verification echoue");
+  }
+  if (dismiss.status !== 200 || dismissBody.dashboard_action?.status !== "dismissed") {
+    throw new Error("internal dismiss bloquante echoue");
+  }
+}));
+
+Deno.test("mutation response exclut metadata messages internes et secrets", withEnv(async () => {
+  const res = await handleRequest(request({ action: "resolve", action_id: CLIENT_RESOLVABLE_ACTION_ID }), {
+    fetch: makeFetch(),
+    log: () => {},
+  });
+  const body = await res.json();
+  const text = JSON.stringify(body);
+  if (res.status !== 200) throw new Error("mutation safe response echoue");
+  for (const forbidden of ["metadata", "admin_message", "assistant_message", "incident_id", FAKE_SECRET, "secret_ref", "supabase_vault://", "hooks.example"]) {
+    if (text.includes(forbidden)) throw new Error(`mutation response expose ${forbidden}`);
+  }
+}));
+
+Deno.test("mutation terminale et erreur RPC retournent transition_not_allowed safe", withEnv(async () => {
+  const terminal = await handleRequest(request({ action: "acknowledge", action_id: TERMINAL_ACTION_ID }), {
+    fetch: makeFetch(),
+    log: () => {},
+  });
+  const rpcError = await handleRequest(request({ action: "acknowledge", action_id: BLOCKING_ACTION_ID }, "internal-token-not-real"), {
+    fetch: makeFetch({ transitionStatus: 400, transitionError: "invalid_dashboard_action_transition" }),
+    log: () => {},
+  });
+  const terminalBody = await terminal.json();
+  const rpcErrorBody = await rpcError.json();
+  if (terminal.status !== 409 || terminalBody.error !== "transition_not_allowed") {
+    throw new Error("transition terminale pas rejetee");
+  }
+  if (rpcError.status !== 409 || rpcErrorBody.error !== "transition_not_allowed") {
+    throw new Error("erreur RPC transition pas mappee");
   }
 }));
