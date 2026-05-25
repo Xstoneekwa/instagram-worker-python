@@ -1,8 +1,12 @@
-"""ORF-4B dry-run account incident notification dispatcher."""
+"""ORF-4 account incident notification dispatcher."""
 
 from __future__ import annotations
 
+import json
+from datetime import datetime, timezone
 from typing import Any
+from urllib import error as urlerror
+from urllib import request as urlrequest
 
 import config
 import supabase_client
@@ -26,7 +30,9 @@ SENSITIVE_PAYLOAD_KEYS = {
     "password",
 }
 DISPATCHER_NAME = "incident_notifications"
-DISPATCHER_VERSION = "orf-4b"
+DISPATCHER_VERSION = "orf-4c"
+DRY_RUN_DISPATCHER_VERSION = "orf-4b"
+WEBHOOK_USER_AGENT = "PhoneFarmIncidentNotifier/1.0 (+https://localhost)"
 
 
 def _notifications_enabled() -> bool:
@@ -41,6 +47,17 @@ def _dry_run_enabled() -> bool:
     return bool(getattr(config, "INCIDENT_NOTIFICATIONS_DRY_RUN", True))
 
 
+def _http_timeout_seconds() -> int:
+    try:
+        return max(1, int(getattr(config, "INCIDENT_NOTIFICATIONS_HTTP_TIMEOUT_SECONDS", 10)))
+    except (TypeError, ValueError):
+        return 10
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 def _warn(event: str, **fields: Any) -> None:
     safe_fields = {
         key: value
@@ -48,7 +65,7 @@ def _warn(event: str, **fields: Any) -> None:
         if key not in {"payload", "metadata"}
     }
     if "error" in safe_fields:
-        safe_fields["error"] = str(safe_fields["error"])[:500]
+        safe_fields["error"] = _truncate_redact(safe_fields["error"])
     log("warning", event, **safe_fields)
 
 
@@ -115,6 +132,37 @@ def _redact_payload(value: Any) -> Any:
     return redacted
 
 
+def _truncate_redact(value: Any, max_len: int = 500) -> str:
+    text = "" if value is None else str(value)
+    lowered = text.lower()
+    if any(
+        marker in lowered
+        for marker in (
+            "hooks.slack.com",
+            "discord.com/api/webhooks",
+            "discordapp.com/api/webhooks",
+            "webhook_url",
+            "service_role",
+            "authorization: bearer",
+            "access_token",
+            "refresh_token",
+            "cookie",
+            "device_udid",
+            "<node",
+            "<?xml",
+        )
+    ):
+        text = "[redacted]"
+    return text[:max_len]
+
+
+def _sanitize_error(value: Any) -> str:
+    text = _truncate_redact(value)
+    if text == "[redacted]":
+        return "webhook_request_failed"
+    return text or "webhook_request_failed"
+
+
 def build_incident_notification_payload(incident: dict) -> dict:
     severity = str(incident.get("severity") or "warning").strip().lower()
     incident_type = str(incident.get("incident_type") or "unknown_incident").strip()
@@ -170,6 +218,91 @@ def build_discord_payload(payload: dict) -> dict:
     return {"content": str(safe.get("text") or safe.get("title") or "Incident notification")}
 
 
+def _post_json_webhook(url: str, body: dict, timeout: int) -> dict:
+    raw_url = str(url or "").strip()
+    if not raw_url:
+        return {"ok": False, "reason": "config_missing_webhook"}
+    data = json.dumps(_redact_payload(body or {}), separators=(",", ":")).encode("utf-8")
+    req = urlrequest.Request(
+        raw_url,
+        data=data,
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": WEBHOOK_USER_AGENT,
+        },
+    )
+    try:
+        with urlrequest.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+            status = int(getattr(resp, "status", 200) or 200)
+            preview = _truncate_redact(raw.decode("utf-8", errors="replace"))
+            return {
+                "ok": 200 <= status < 300,
+                "response_status": status,
+                "response_body_preview": preview,
+            }
+    except urlerror.HTTPError as exc:
+        raw = exc.read()
+        return {
+            "ok": False,
+            "reason": f"http_status_{int(exc.code)}",
+            "response_status": int(exc.code),
+            "response_body_preview": _truncate_redact(raw.decode("utf-8", errors="replace")),
+            "last_error": f"http_status_{int(exc.code)}",
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "reason": "webhook_request_failed",
+            "last_error": _sanitize_error(exc),
+        }
+
+
+def send_slack_webhook(payload: dict, webhook_url: str) -> dict:
+    if not str(webhook_url or "").strip():
+        return {"ok": False, "reason": "config_missing_webhook"}
+    return _post_json_webhook(
+        webhook_url,
+        build_slack_payload(payload),
+        _http_timeout_seconds(),
+    )
+
+
+def send_discord_webhook(payload: dict, webhook_url: str) -> dict:
+    if not str(webhook_url or "").strip():
+        return {"ok": False, "reason": "config_missing_webhook"}
+    return _post_json_webhook(
+        webhook_url,
+        build_discord_payload(payload),
+        _http_timeout_seconds(),
+    )
+
+
+def send_notification_webhook(channel: str, channel_payload: dict) -> dict:
+    normalized = str(channel or "").strip().lower()
+    if normalized == "slack":
+        return send_slack_webhook(
+            channel_payload,
+            str(getattr(config, "SLACK_WEBHOOK_URL", "") or ""),
+        )
+    if normalized == "discord":
+        return send_discord_webhook(
+            channel_payload,
+            str(getattr(config, "DISCORD_WEBHOOK_URL", "") or ""),
+        )
+    return {"ok": False, "reason": "invalid_channel"}
+
+
+def _webhook_configured(channel: str) -> bool:
+    normalized = str(channel or "").strip().lower()
+    if normalized == "slack":
+        return bool(str(getattr(config, "SLACK_WEBHOOK_URL", "") or "").strip())
+    if normalized == "discord":
+        return bool(str(getattr(config, "DISCORD_WEBHOOK_URL", "") or "").strip())
+    return False
+
+
 def _sort_incidents(incidents: list[dict]) -> list[dict]:
     return sorted(
         incidents,
@@ -187,10 +320,72 @@ def _empty_summary(*, dry_run: bool | None = None) -> dict[str, Any]:
         "reason": None,
         "selected_count": 0,
         "created_count": 0,
+        "attempted_count": 0,
+        "sent_count": 0,
+        "failed_count": 0,
         "skipped_duplicate_count": 0,
         "skipped_disabled_count": 0,
         "errors_count": 0,
+        "real_send_enabled": False,
         "dry_run": _dry_run_enabled() if dry_run is None else dry_run,
+    }
+
+
+def _audit_payload(channel: str, base_payload: dict) -> dict:
+    channel_payload = (
+        build_slack_payload(base_payload)
+        if channel == "slack"
+        else build_discord_payload(base_payload)
+    )
+    return _redact_payload(
+        {
+            "channel": channel,
+            "message": base_payload,
+            "channel_payload": channel_payload,
+        }
+    )
+
+
+def _base_notification_row(
+    *,
+    incident: dict,
+    channel: str,
+    delivery_key: str,
+    payload: dict,
+    dry_run: bool,
+    status: str,
+    target: str,
+    attempt_count: int,
+    metadata_reason: str,
+) -> dict:
+    return {
+        "incident_id": incident.get("id"),
+        "channel": channel,
+        "status": status,
+        "target": target,
+        "delivery_key": delivery_key,
+        "attempt_count": attempt_count,
+        "payload": payload,
+        "metadata": {
+            "dry_run": dry_run,
+            "reason": metadata_reason,
+            "dispatcher": DISPATCHER_NAME,
+            "dispatcher_version": DRY_RUN_DISPATCHER_VERSION if dry_run else DISPATCHER_VERSION,
+        },
+    }
+
+
+def _failure_update(send_result: dict) -> dict:
+    return {
+        "status": "failed",
+        "delivered_at": None,
+        "response_status": send_result.get("response_status"),
+        "response_body_preview": _truncate_redact(send_result.get("response_body_preview")),
+        "last_error": _truncate_redact(
+            send_result.get("last_error")
+            or send_result.get("reason")
+            or "webhook_request_failed"
+        ),
     }
 
 
@@ -206,11 +401,6 @@ def dispatch_account_incident_notifications(
         return summary
 
     dry_run = _dry_run_enabled()
-    if not dry_run:
-        summary = _empty_summary(dry_run=False)
-        summary.update({"reason": "real_send_not_implemented"})
-        return summary
-
     selected_channels = parse_notification_channels(
         channels if channels is not None else getattr(config, "INCIDENT_NOTIFICATIONS_CHANNELS", "slack")
     )
@@ -220,8 +410,9 @@ def dispatch_account_incident_notifications(
         else getattr(config, "INCIDENT_NOTIFICATIONS_MIN_SEVERITY", "warning")
     ).strip().lower()
     limit = max(1, int(max_per_run or getattr(config, "INCIDENT_NOTIFICATIONS_MAX_PER_RUN", 20)))
-    summary = _empty_summary(dry_run=True)
-    summary["reason"] = "dry_run"
+    summary = _empty_summary(dry_run=dry_run)
+    summary["reason"] = "dry_run" if dry_run else "real_send"
+    summary["real_send_enabled"] = not dry_run
 
     try:
         raw_incidents = supabase_client.load_account_incidents_to_notify(
@@ -253,34 +444,82 @@ def dispatch_account_incident_notifications(
                 if delivery_key in existing:
                     summary["skipped_duplicate_count"] += 1
                     continue
-                channel_payload = (
-                    build_slack_payload(base_payload)
-                    if channel == "slack"
-                    else build_discord_payload(base_payload)
+                audit_payload = _audit_payload(channel, base_payload)
+                if dry_run:
+                    row = _base_notification_row(
+                        incident=incident,
+                        channel=channel,
+                        status="skipped",
+                        target="dry-run",
+                        delivery_key=delivery_key,
+                        attempt_count=0,
+                        payload=audit_payload,
+                        dry_run=True,
+                        metadata_reason="dry_run_no_webhook_sent",
+                    )
+                    supabase_client.create_account_incident_notification(row)
+                    existing[delivery_key] = row
+                    summary["created_count"] += 1
+                    continue
+
+                summary["attempted_count"] += 1
+                if not _webhook_configured(channel):
+                    failed_row = _base_notification_row(
+                        incident=incident,
+                        channel=channel,
+                        status="failed",
+                        target=channel,
+                        delivery_key=delivery_key,
+                        attempt_count=1,
+                        payload=audit_payload,
+                        dry_run=False,
+                        metadata_reason="config_missing_webhook",
+                    )
+                    failed_row.update(
+                        {
+                            "last_attempt_at": _utc_now_iso(),
+                            "last_error": "config_missing_webhook",
+                        }
+                    )
+                    supabase_client.create_account_incident_notification(failed_row)
+                    existing[delivery_key] = failed_row
+                    summary["created_count"] += 1
+                    summary["failed_count"] += 1
+                    continue
+
+                pending_row = _base_notification_row(
+                    incident=incident,
+                    channel=channel,
+                    status="pending",
+                    target=channel,
+                    delivery_key=delivery_key,
+                    attempt_count=1,
+                    payload=audit_payload,
+                    dry_run=False,
+                    metadata_reason="webhook_send_attempted",
                 )
-                audit_payload = {
-                    "channel": channel,
-                    "message": base_payload,
-                    "channel_payload": channel_payload,
-                }
-                row = {
-                    "incident_id": incident.get("id"),
-                    "channel": channel,
-                    "status": "skipped",
-                    "target": "dry-run",
-                    "delivery_key": delivery_key,
-                    "attempt_count": 0,
-                    "payload": _redact_payload(audit_payload),
-                    "metadata": {
-                        "dry_run": True,
-                        "reason": "dry_run_no_webhook_sent",
-                        "dispatcher": DISPATCHER_NAME,
-                        "dispatcher_version": DISPATCHER_VERSION,
-                    },
-                }
-                supabase_client.create_account_incident_notification(row)
-                existing[delivery_key] = row
+                pending_row["last_attempt_at"] = _utc_now_iso()
+                created = supabase_client.create_account_incident_notification(pending_row)
                 summary["created_count"] += 1
+                notification_id = str(created.get("id") or "").strip()
+                send_result = send_notification_webhook(channel, base_payload)
+                if send_result.get("ok"):
+                    update = {
+                        "status": "sent",
+                        "delivered_at": _utc_now_iso(),
+                        "response_status": send_result.get("response_status"),
+                        "response_body_preview": _truncate_redact(
+                            send_result.get("response_body_preview")
+                        ),
+                        "last_error": None,
+                    }
+                    summary["sent_count"] += 1
+                else:
+                    update = _failure_update(send_result)
+                    summary["failed_count"] += 1
+                if notification_id:
+                    supabase_client.update_account_incident_notification(notification_id, update)
+                existing[delivery_key] = {**pending_row, **update}
         summary["dispatched"] = True
         return summary
     except Exception as exc:

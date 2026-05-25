@@ -459,6 +459,68 @@ stop or resume sends per channel only; they must not delete incidents, must not
 delete `account_incident_notifications` history, and must never expose webhook
 URLs in Supabase, dashboards, logs, payloads, or metadata.
 
+## ORF-4C Real Slack/Discord Incident Delivery
+
+ORF-4C extends `incident_notifications.py` with real Slack/Discord webhook
+delivery behind explicit environment configuration. Runtime flows still must not
+call Slack/Discord directly; `incident_notifications.py` is the only module that
+may perform webhook HTTP POSTs.
+
+Additional environment variables:
+
+- `SLACK_WEBHOOK_URL`
+- `DISCORD_WEBHOOK_URL`
+- `INCIDENT_NOTIFICATIONS_HTTP_TIMEOUT_SECONDS=10`
+
+Webhook URLs are env-only. They must never be stored in Supabase, dashboards,
+logs, notification payloads, metadata, `last_error`, or response previews. Docs
+must mention only variable names, never example webhook values.
+
+Real delivery requires:
+
+- `INCIDENT_NOTIFICATIONS_ENABLED=true`;
+- `INCIDENT_NOTIFICATIONS_DRY_RUN=false`;
+- `INCIDENT_NOTIFICATIONS_CHANNELS=slack` or `discord`;
+- matching webhook URL configured in the process environment.
+
+Delivery state V1:
+
+- duplicate `delivery_key={channel}:{incident_id}:opened` rows are skipped;
+- missing webhook configuration creates a `failed` notification row without
+  making an HTTP request;
+- configured real sends create a `pending` row before POST, then update it to
+  `sent` for any Slack/Discord 2xx response, including Discord 204;
+- non-2xx responses and request exceptions update the row to `failed`;
+- `attempt_count=1`, `last_attempt_at` is set before send, and successful sends
+  set `delivered_at`;
+- response previews and errors are redacted and truncated;
+- webhook POSTs send `Content-Type: application/json` and a fixed safe
+  `User-Agent: PhoneFarmIncidentNotifier/1.0 (+https://localhost)` (no secrets
+  or account data in headers).
+
+ORF-4C does not add retry loops. In V1, any existing delivery row for a key,
+including `failed`, blocks another send. Retry/cooldown, manual resend, and
+renotify-on-occurrence-count are ORF-4D/V2 concerns.
+
+Controlled real smoke plan:
+
+1. Create a dedicated incident channel, for example Slack or Discord
+   `phone-farm-incidents`.
+2. Configure the webhook URL only in local environment variables.
+3. Set `INCIDENT_NOTIFICATIONS_ENABLED=true`,
+   `INCIDENT_NOTIFICATIONS_DRY_RUN=false`, and a single channel.
+4. Create a controlled open test incident.
+5. Run the dispatcher manually.
+6. Verify one message in the dedicated channel.
+7. Verify `account_incident_notifications.status='sent'` or `failed` with safe
+   delivery metadata.
+8. Cleanup the test notification row and mark the smoke incident `ignored`.
+
+Future admin controls remain out of ORF-4C minimal scope. ORF-4D/dashboard work
+should add Slack and Discord ON/OFF toggles in the admin web dashboard and in
+the local Mac backend/admin app. Toggles control sending only: incidents keep
+being created, delivery history remains, and webhook URLs are never exposed.
+
 ## ORF-2 Runtime Integration
 
 ORF-2 adds opt-in, best-effort Python runtime helpers for low-volume worker

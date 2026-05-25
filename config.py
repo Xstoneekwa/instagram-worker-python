@@ -96,6 +96,12 @@ INCIDENT_NOTIFICATIONS_COOLDOWN_MINUTES = _env_int(
     "INCIDENT_NOTIFICATIONS_COOLDOWN_MINUTES",
     60,
 )
+SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL", "").strip()
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
+INCIDENT_NOTIFICATIONS_HTTP_TIMEOUT_SECONDS = _env_int(
+    "INCIDENT_NOTIFICATIONS_HTTP_TIMEOUT_SECONDS",
+    10,
+)
 
 # ADBKeyboard (optional). Low-latency ADB_INPUT_TEXT broadcast when installed.
 FAST_IME = "com.android.adbkeyboard/.AdbIME"
