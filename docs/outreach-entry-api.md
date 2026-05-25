@@ -470,6 +470,89 @@ Future safe incident types may include `credentials_updated`, `reauth_required`,
 `credentials_invalid`, and `credential_rotation_failed`. Incident metadata must
 remain safe and must never include passwords or raw secret references.
 
+## Entry 2D-2B Instagram Credentials Edge API
+
+Entry 2D-2B adds the server-side boundary for initial Instagram credential
+submission and password updates:
+`supabase/functions/instagram-credentials`.
+
+The function accepts a password as a **write-only** request field. It validates
+the producer, writes the secret payload to Supabase Vault, and stores only safe
+metadata in `public.account_credentials`.
+
+Request shape:
+
+```json
+{
+  "action": "submit",
+  "account_id": "00000000-0000-4000-8000-000000000000",
+  "username": "optional_username_snapshot",
+  "password": "write-only",
+  "external_request_id": "optional-safe-idempotency-key"
+}
+```
+
+`action` may be `submit` or `update_password`.
+
+Authentication:
+
+- client dashboard calls use a Supabase Auth JWT;
+- internal/admin producers may use `INSTAGRAM_CREDENTIALS_INTERNAL_API_TOKEN`;
+- client JWT requests must pass `client_can_manage_instagram_account`;
+- the function uses the service-role key only server-side.
+
+Vault behavior:
+
+- Supabase Vault is the V1 backend;
+- one new Vault secret is created per `credentials_version`;
+- the Vault secret name is
+  `phonefarm/instagram/{account_id}/credentials/v{version}`;
+- `account_credentials.secret_provider='supabase_vault'`;
+- `account_credentials.secret_ref='supabase_vault://{vault_secret_id}'`;
+- old Vault secrets are not read, returned, or neutralized in 2D-2B.
+
+Rotation behavior:
+
+- the function reads the current max `credentials_version`;
+- it writes the new Vault secret first;
+- `rotate_instagram_account_credentials` supersedes existing active metadata
+  rows and inserts one new active row;
+- `reauth_required=true` and
+  `reauth_reason='awaiting_login_verification'` until Entry 2E verifies login;
+- `last_rotated_at` is set for `update_password`.
+
+Safe response:
+
+```json
+{
+  "ok": true,
+  "account_id": "00000000-0000-4000-8000-000000000000",
+  "provider": "instagram",
+  "credentials_version": 1,
+  "status": "active",
+  "reauth_required": true,
+  "next_action": "awaiting_login_verification"
+}
+```
+
+The response never includes the password, Vault payload, Vault secret value, or
+full `secret_ref`.
+
+Entry 2D-2B deliberately does not add dashboard UI, dashboard actions,
+provisioning/login workers, secret reads for workers, or credential incidents.
+Entry 2D-3 should add safe status APIs, and Entry 2D-4 should add the dashboard
+action model and pending-action count.
+
+Security NO-GO for this API:
+
+- no password in Supabase app tables;
+- no password in `account_incidents`, `runtime_events`, Slack/Discord, or
+  notification payload audits;
+- no password or full request body in logs;
+- no direct PostgREST client write to `account_credentials`;
+- no client-readable `account_credentials`;
+- no full `secret_ref` in client responses.
+
 ## Remote Secrets
 
 Remote Edge Function secrets must be configured on the Supabase project before
