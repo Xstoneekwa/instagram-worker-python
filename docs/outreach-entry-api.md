@@ -1348,6 +1348,131 @@ Securite NO-GO :
 - aucun patch runtime ou automatisation login tant que le contrat DB/RPC 2E
   n'est pas stabilise.
 
+## Entry 2E-2A RPC status -> dashboard actions
+
+Entry 2E-2A ajoute deux RPC service-role pour centraliser le contrat entre les
+futurs resultats login/provisioning et les actions dashboard :
+
+- `public.update_client_instagram_account_status(...)`;
+- `public.sync_account_dashboard_actions_from_status(...)`.
+
+Cette etape reste schema-only cote application : aucun endpoint Edge, aucun
+worker Python, aucun runner, aucun webhook, aucun run device et aucune lecture
+Vault ne sont ajoutes.
+
+`update_client_instagram_account_status(...)` :
+
+- met a jour uniquement les statuts non nuls de
+  `public.client_instagram_accounts` : `login_status`,
+  `provisioning_status`, `onboarding_status`;
+- laisse les CHECK constraints 2E-1 valider les valeurs;
+- accepte `actor_type` parmi `client`, `admin`, `assistant`, `ops`,
+  `internal`, `system`, `worker`, `provisioner`;
+- accepte une `reason` optionnelle bornee a 500 caracteres;
+- accepte uniquement une metadata JSON objet et rejette les cles sensibles;
+- peut mettre a jour l'active `account_credentials` Instagram si
+  `p_reauth_required` est fourni;
+- si `p_login_status='connected'` et `p_reauth_required` est absent, la RPC
+  nettoie l'active credential avec `reauth_required=false` et
+  `reauth_reason=null`;
+- ne lit jamais Vault et ne touche jamais `secret_ref`;
+- appelle ensuite `sync_account_dashboard_actions_from_status(...)`.
+
+`sync_account_dashboard_actions_from_status(...)` :
+
+- lit `client_instagram_accounts` par `account_id`;
+- lit l'active `account_credentials` Instagram sans exposer `secret_ref`;
+- derive `credentials_configured`, `reauth_required`, `reauth_reason`,
+  `login_status`, `provisioning_status`, `onboarding_status`;
+- cree ou synchronise les actions via `upsert_account_dashboard_action(...)`;
+- resout les actions actives via `transition_account_dashboard_action(...)`;
+- retourne un JSON safe avec `actions_upserted` et `actions_resolved`.
+
+Mapping V1 :
+
+- pas d'active credentials -> action `submit_instagram_credentials`, client,
+  requise et bloquante;
+- `reauth_required=true` -> action `update_instagram_password`, client, requise
+  et bloquante;
+- priorite explicite des statuts login avant les statuts generiques de
+  verification : `needs_2fa`, `checkpoint`, `failed`, `mismatch`, `logged_out`,
+  puis `connected`; seulement ensuite les cas generiques
+  `verification_pending` / `login_verification_pending`;
+- `login_status='needs_2fa'` -> action `complete_two_factor`, meme si
+  `provisioning_status='login_verification_pending'`;
+- `login_status='checkpoint'` -> action `resolve_checkpoint`, meme si
+  `provisioning_status='login_verification_pending'`;
+- `login_status='verification_pending'` ou
+  `provisioning_status='login_verification_pending'` sans statut login explicite
+  ci-dessus -> pas de nouvelle action 2FA/checkpoint; les actions credentials
+  existantes restent en attente de verification;
+- `login_status='failed'` -> action `review_login_failure`;
+- `login_status='mismatch'` -> action `review_account_mismatch` pour
+  `audience='admin'`, sans action client directe;
+- `login_status='logged_out'` -> action `reconnect_instagram`;
+- `login_status='connected'` et `reauth_required=false` -> resolution des
+  actions actives `submit_instagram_credentials`, `update_instagram_password`,
+  `reconnect_instagram`, `complete_two_factor`, `resolve_checkpoint` et
+  `review_login_failure`.
+
+Les actions `review_account_mismatch` ne sont pas resolues automatiquement en
+2E-2A : la revue admin/assistant reste separee et pourra etre reliee aux
+incidents en Entry 2F.
+
+Metadata safe envoyee aux actions :
+
+```json
+{
+  "source": "status_sync",
+  "actor_type": "worker",
+  "reason": "login_connected",
+  "external_request_id": "optional-safe-id",
+  "login_status": "connected",
+  "provisioning_status": "ready",
+  "onboarding_status": "ready"
+}
+```
+
+Les cles sensibles top-level sont rejetees : password, secret, `secret_ref`,
+`raw_secret`, token, cookie, webhook, `webhook_url`, vault, `service_role`,
+authorization, bearer, XML brut, screenshot brut, `device_udid` et
+`adb_serial`.
+
+Retour safe :
+
+```json
+{
+  "ok": true,
+  "account_id": "00000000-0000-4000-8000-000000000000",
+  "login_status": "connected",
+  "provisioning_status": "ready",
+  "onboarding_status": "ready",
+  "credentials_configured": true,
+  "reauth_required": false,
+  "reauth_reason": null,
+  "actions_upserted": [],
+  "actions_resolved": [
+    {
+      "id": "00000000-0000-4000-8000-000000000000",
+      "action_type": "submit_instagram_credentials",
+      "status": "resolved"
+    }
+  ]
+}
+```
+
+Ce JSON ne contient jamais password, `secret_ref`, payload Vault, token, cookie,
+webhook, body brut, metadata sensible ou identifiant device.
+
+Phases suivantes :
+
+- Entry 2E-3 : endpoint internal ou contrat provisioner/admin qui appelle
+  `update_client_instagram_account_status(...)`;
+- Entry 2E-4 : wrappers `supabase_client` et integration worker/provisioner
+  derriere feature flag;
+- Entry 2F : incidents -> dashboard actions avec lien `incident_id` lorsque le
+  mapping est stable.
+
 ## Remote Secrets
 
 Remote Edge Function secrets must be configured on the Supabase project before
