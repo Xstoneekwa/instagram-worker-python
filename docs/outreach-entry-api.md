@@ -1005,6 +1005,106 @@ Resolution future :
 - les mappings `credentials_configured=false`, `needs_2fa`, `checkpoint`,
   `failed` et `mismatch` restent reserves a un sync dedie ou aux workers futurs.
 
+## Entry 2D-4D-1 RPC `transition_account_dashboard_action`
+
+Entry 2D-4D-1 ajoute la RPC schema-only
+`public.transition_account_dashboard_action(...)`.
+
+Cette RPC est le point atomique de transition de statut pour les rows
+`public.account_dashboard_actions`. Elle prepare les mutations dashboard futures
+`acknowledge`, `dismiss` et `resolve`, sans encore exposer de mutation dans
+`supabase/functions/dashboard-actions`.
+
+Pourquoi une RPC :
+
+- les transitions doivent verrouiller la row avec `select ... for update`;
+- les statuts terminaux doivent liberer le `dedupe_key` actif de facon
+  coherente;
+- les timestamps `acknowledged_at`, `dismissed_at` et `resolved_at` doivent
+  etre poses dans la meme transaction que le changement de statut;
+- les workers futurs 2E/2F pourront resoudre des actions sans dupliquer les
+  regles metier cote Edge ou Python.
+
+Signature :
+
+```sql
+public.transition_account_dashboard_action(
+  p_action_id uuid,
+  p_new_status text,
+  p_actor_type text,
+  p_actor_id uuid default null,
+  p_reason text default null,
+  p_metadata jsonb default '{}'::jsonb
+)
+```
+
+Transitions autorisees V1 :
+
+| Statut source | `acknowledged` | `dismissed` | `resolved` | `ignored` |
+|---------------|----------------|-------------|------------|-----------|
+| `pending` | oui | oui | oui | oui |
+| `acknowledged` | oui, idempotent | oui | oui | oui |
+| `pending_verification` | oui | oui | oui | oui |
+| `resolved` | non | non | non | non |
+| `dismissed` | non | non | non | non |
+| `ignored` | non | non | non | non |
+
+Les statuts `pending` et `pending_verification` restent crees uniquement par les
+producteurs comme `upsert_account_dashboard_action`. La RPC de transition ne
+sert jamais a rouvrir une action active depuis un statut terminal.
+
+Timestamps :
+
+- `acknowledged` pose `acknowledged_at = coalesce(acknowledged_at, now())`;
+- `dismissed` pose `dismissed_at = now()`;
+- `resolved` pose `resolved_at = now()`;
+- `ignored` pose seulement `updated_at` et la metadata de transition, sans
+  forcer `resolved_at` ou `dismissed_at`;
+- `updated_at` est rafraichi sur toute transition reussie;
+- les timestamps historiques ne sont pas effaces, par exemple
+  `acknowledged_at` reste present si une action acknowledged devient resolved.
+
+Metadata de transition :
+
+```json
+{
+  "last_transition": "resolved",
+  "actor_type": "internal",
+  "actor_id": "optional-uuid",
+  "reason": "optional safe text",
+  "transition_at": "2026-05-25T21:00:00Z"
+}
+```
+
+La fusion est volontairement shallow :
+
+```text
+existing.metadata || p_metadata || transition_metadata
+```
+
+`p_metadata` doit etre un objet JSON et ne doit jamais contenir en cle
+top-level : password, secret, `secret_ref`, `raw_secret`, token, cookie,
+webhook, `webhook_url`, vault, `service_role`, authorization, bearer, XML brut
+ou screenshot. `p_reason` est optionnel et borne a 500 caracteres.
+
+Securite :
+
+- la RPC est `SECURITY DEFINER` avec `search_path = public`;
+- execute est revoke pour `public`, `anon` et `authenticated`;
+- execute est grant uniquement a `service_role` (le role owner/postgres conserve
+  son acces);
+- aucun client dashboard ne doit appeler cette RPC directement;
+- la RPC ne gere pas l'ownership client : ce controle appartient a l'Edge
+  Function `dashboard-actions` en Entry 2D-4D-2;
+- elle ne lit jamais Vault et ne stocke jamais password, `secret_ref`, payload
+  Vault, webhook URL, token ou cookie.
+
+Entry 2D-4D-2 utilisera cette RPC depuis `dashboard-actions` pour exposer
+`action='acknowledge'`, `action='dismiss'` et `action='resolve'`. Le chemin
+client JWT devra appliquer l'ownership, l'audience client et les restrictions UI
+avant appel RPC. Le chemin internal token pourra resoudre
+`pending_verification` apres verification worker ou support.
+
 ## Remote Secrets
 
 Remote Edge Function secrets must be configured on the Supabase project before
