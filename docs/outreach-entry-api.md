@@ -1811,6 +1811,78 @@ Prochaine etape :
   `account_identity_guard` pour `login_status='mismatch'`, ou un futur vrai
   provisioner login si disponible.
 
+## Entry 2E-4C-1 Runtime ciblé account mismatch status
+
+Entry 2E-4C-1 branche le premier point runtime cible sur le helper Python de
+publication de statut : `account_identity_guard.py` publie maintenant un statut
+dashboard quand un mismatch actif Instagram est confirme.
+
+Point exact :
+
+- `verify_active_instagram_account_matches_expected`;
+- uniquement lorsque `result.failure_reason == active_instagram_account_mismatch`;
+- juste apres la publication observationnelle ORF
+  `runtime_incidents.publish_account_incident`;
+- sans changement dans `runner.py`, sender, orchestrators, account sessions,
+  Edge Functions, migrations ou dashboard UI.
+
+Payload status publie :
+
+```text
+login_status=mismatch
+provisioning_status=blocked
+onboarding_status=support_required
+reason=account_identity_mismatch
+external_request_id=identity_guard:<run_id|unknown>:<account_id|unknown>:mismatch
+```
+
+Metadata minimale :
+
+```json
+{
+  "source": "account_identity_guard",
+  "run_id": "<run id>",
+  "run_type": "<run type>",
+  "stage": "<guard stage>",
+  "expected_account_username": "<expected handle>",
+  "actual_username": "<actual handle>",
+  "guard_reason": "active_instagram_account_mismatch",
+  "verification_method": "<method>",
+  "identity_evidence": "username_mismatch_stable_id_unavailable"
+}
+```
+
+La publication de statut est complementaire aux incidents ORF. Les incidents
+`account_incidents` restent la verite ops durable; le status
+`client_instagram_accounts` sert le dashboard et la synchronisation d'actions
+admin.
+
+Comportement fail-open :
+
+- flag `INSTAGRAM_ACCOUNT_STATUS_PUBLISH_ENABLED=false` -> aucun HTTP, retour
+  helper `disabled`, guard inchange;
+- URL/token absents -> retour helper `not_configured`, guard inchange;
+- erreur HTTP/timeout/reseau -> retour helper `published=false` si fail-open,
+  guard inchange;
+- meme si `INSTAGRAM_ACCOUNT_STATUS_FAIL_OPEN=false`, le hook du guard capture
+  l'exception et journalise un resume safe.
+
+Le guard ne publie pas de status mismatch pour :
+
+- `actual_logged_in_username_not_detected`;
+- `own_profile_open_failed`;
+- `expected_account_username_missing`;
+- match OK;
+- toute autre `failure_reason`.
+
+Securite metadata :
+
+- aucun password, `secret_ref`, payload/ref Vault, token, cookie, Authorization
+  ou body HTTP complet;
+- aucun XML brut, chemin screenshot, `adb_serial`, `device_udid` ou session
+  cookie;
+- aucun run device, webhook reel ou appel HTTP reel dans les tests.
+
 ## Remote Secrets
 
 Remote Edge Function secrets must be configured on the Supabase project before

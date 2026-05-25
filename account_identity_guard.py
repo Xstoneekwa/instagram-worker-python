@@ -157,6 +157,84 @@ def _publish_identity_mismatch_incident(
         )
 
 
+def _publish_identity_mismatch_status(
+    result: AccountIdentityCheckResult,
+    *,
+    account_id: str | None,
+    run_type: str | None,
+    run_id: str | None,
+    stage: str,
+) -> None:
+    """Publish dashboard mismatch status as best-effort; never affect safe-stop."""
+    if result.failure_reason != ACCOUNT_IDENTITY_MISMATCH_REASON:
+        return
+
+    external_request_id = f"identity_guard:{run_id or 'unknown'}:{account_id or 'unknown'}:mismatch"
+    metadata = {
+        key: value
+        for key, value in {
+            "source": "account_identity_guard",
+            "run_id": run_id,
+            "run_type": run_type,
+            "stage": stage,
+            "expected_account_username": result.expected_account_username,
+            "actual_username": result.actual_logged_in_username,
+            "guard_reason": result.failure_reason,
+            "verification_method": result.verification_method,
+            "identity_evidence": result.identity_evidence,
+        }.items()
+        if value is not None and str(value).strip() != ""
+    }
+
+    try:
+        from instagram_account_status_publisher import publish_instagram_account_status
+
+        outcome = publish_instagram_account_status(
+            account_id=str(account_id or ""),
+            login_status="mismatch",
+            provisioning_status="blocked",
+            onboarding_status="support_required",
+            reason="account_identity_mismatch",
+            external_request_id=external_request_id,
+            metadata=metadata,
+        )
+        published = bool(outcome.get("published"))
+        reason = str(outcome.get("reason") or ("published" if published else "unknown"))
+        status_code = outcome.get("status_code")
+        if published:
+            event = "identity_mismatch_status_publish_succeeded"
+            level = "info"
+        elif reason in {"disabled", "not_configured"}:
+            event = "identity_mismatch_status_publish_skipped"
+            level = "info"
+        else:
+            event = "identity_mismatch_status_publish_failed"
+            level = "warning"
+        log(
+            level,
+            event,
+            account_id=account_id,
+            run_type=run_type,
+            run_id=run_id,
+            stage=stage,
+            published=published,
+            reason=reason,
+            status_code=status_code,
+            external_request_id=external_request_id,
+        )
+    except Exception as exc:
+        log(
+            "warning",
+            "identity_mismatch_status_publish_failed",
+            account_id=account_id,
+            run_type=run_type,
+            run_id=run_id,
+            stage=stage,
+            error=str(exc)[:500],
+            external_request_id=external_request_id,
+        )
+
+
 def verify_active_instagram_account_matches_expected(
     d: u2.Device,
     *,
@@ -300,6 +378,13 @@ def verify_active_instagram_account_matches_expected(
     )
     if result.failure_reason == ACCOUNT_IDENTITY_MISMATCH_REASON:
         _publish_identity_mismatch_incident(
+            result,
+            account_id=account_id,
+            run_type=run_type,
+            run_id=run_id,
+            stage=stage,
+        )
+        _publish_identity_mismatch_status(
             result,
             account_id=account_id,
             run_type=run_type,
