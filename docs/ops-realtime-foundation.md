@@ -341,6 +341,51 @@ such as `own_profile_open_failed` or
 `actual_logged_in_username_not_detected`, may become separate incident types in
 a later patch; ORF-3C intentionally leaves them as logs/results only.
 
+## ORF-4A Account Incident Notification Delivery Audit
+
+ORF-4A adds the schema-only delivery audit table
+`account_incident_notifications` for future Slack/Discord incident
+notifications. The source of truth remains `account_incidents`; notification
+dispatchers must consume durable incident rows, not raw logs and not runtime
+flows. Runtime flows must never call Slack/Discord directly.
+
+`account_incident_notifications` records delivery attempts and outcomes for
+future dispatchers. It is service-role only in ORF-4A, with no direct
+authenticated/client access and no dashboard views/RPCs. Client dashboards
+should not expose notification payloads or delivery internals; future client
+views should continue to use sanitized incident fields such as
+`safe_client_message`.
+
+Delivery dedupe V1:
+
+- `delivery_key` pattern: `{channel}:{incident_id}:opened`.
+- Send at most one notification per incident when it first opens.
+- Ignore `ignored` and `resolved` incidents in the future dispatcher.
+- Keep `acknowledged` incidents visible but do not repeat notifications in V1.
+- Do not renotify on `occurrence_count` increases until cooldown support exists.
+
+Secrets and payload safety:
+
+- Webhook URLs are env-only in future dispatcher phases.
+- Never store webhook URLs in Supabase, dashboards, logs, payloads, or metadata.
+- Notification payloads must be redacted: no service-role keys, tokens,
+  cookies, raw XML, raw stack traces, `device_udid`, credentials, or full
+  secrets.
+
+ORF-4A does not add Python dispatchers, `supabase_client.py` helpers,
+`config.py` flags, runtime incident changes, runner/sender/orchestrator hooks,
+Edge Functions, Redis, dashboard views, real webhooks, Slack/Discord sends, or
+device runs.
+
+Planned follow-ups:
+
+- ORF-4B: add a Python dispatcher helper in dry-run mode with payload builders,
+  load/query helpers, delivery recording, and tests; no real webhook by default.
+- ORF-4C: enable real Slack/Discord sends only behind explicit env flags and
+  `DRY_RUN=false`, with delivery tracking and fail-open behavior.
+- ORF-4D: add scheduled execution through cron, Edge Function scheduling, or a
+  separate supervisor; dashboard/admin controls can come later.
+
 ## ORF-2 Runtime Integration
 
 ORF-2 adds opt-in, best-effort Python runtime helpers for low-volume worker
@@ -424,8 +469,9 @@ runtime flows.
   `runner.py` events behind flags/no-op fallbacks.
 - ORF-3B/3C: add incident helpers/RPCs, then persist selected reliability
   snapshot / escalation output behind runtime flags.
-- ORF-4: add Slack/Discord dispatcher with dedupe, rate limits, and delivery
-  status. Do not send webhooks directly from flows.
+- ORF-4A/4B/4C/4D: add notification delivery audit schema first, then a dry-run
+  dispatcher, then real Slack/Discord behind explicit flags, then scheduled
+  execution. Do not send webhooks directly from flows.
 - ORF-5: add admin, assistant-safe, and client-safe views/RPCs plus Realtime
   subscription guidance.
 - ORF-6: add Redis backend for locks, high-frequency heartbeats, short rate
