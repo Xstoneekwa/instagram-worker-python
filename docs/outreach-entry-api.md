@@ -847,6 +847,90 @@ Securite :
 - aucun compte hors ownership ne doit etre visible au client;
 - aucune mutation d'action n'est incluse dans Entry 2D-4B.
 
+## Entry 2D-4C-1 RPC `upsert_account_dashboard_action`
+
+Entry 2D-4C-1 ajoute une RPC schema-level :
+`public.upsert_account_dashboard_action(...)`.
+
+Cette RPC est le point d'ecriture atomique pour creer ou synchroniser les rows
+`public.account_dashboard_actions`. Elle reste volontairement bas niveau et
+service-role only : elle ne branche pas encore les Edge Functions, les workers,
+les incidents runtime, les runners, les senders ou le dashboard UI.
+
+Pourquoi une RPC :
+
+- `account_dashboard_actions` utilise un index unique partiel sur le
+  `dedupe_key` des actions actives;
+- PostgREST upsert ne porte pas bien la logique de conflit active-only;
+- la RPC peut faire un `select ... for update`, appliquer les regles metier,
+  puis inserer ou mettre a jour dans une transaction;
+- le meme helper pourra etre appele plus tard par les Edge Functions, les
+  workers de login/provisioning et les publishers incidents.
+
+Statuts actifs :
+
+```text
+pending, acknowledged, pending_verification
+```
+
+Comportement de dedupe :
+
+- si aucune action active n'existe pour `dedupe_key`, la RPC insere une nouvelle
+  action;
+- si une action active existe, la RPC verrouille la row et met a jour les champs
+  safe;
+- si une action `resolved`, `dismissed` ou `ignored` existe avec le meme
+  `dedupe_key`, elle reste historique et une nouvelle action active peut etre
+  creee;
+- en cas de course concurrente sur l'insert, la RPC retente et met a jour la row
+  active nouvellement creee.
+
+Regles de mise a jour active :
+
+- `updated_at` est rafraichi;
+- `status` ne peut rester ou devenir qu'un statut actif pendant l'upsert d'une
+  action deja active; un upsert ne sert pas a resoudre ou masquer l'action;
+- `severity` utilise le max metier :
+  `info < warning < error < critical`;
+- `client_id`, `incident_id`, audience, messages safe, label, deep-link et flags
+  peuvent etre rafraichis par les producteurs service-role;
+- `metadata` est fusionne en shallow merge :
+  `existing.metadata || incoming_metadata`;
+- il n'y a pas d'`occurrence_count` dans cette table, contrairement a
+  `account_incidents`.
+
+Validation et securite :
+
+- `account_id`, `action_type`, `title` et `dedupe_key` sont obligatoires;
+- `status`, `severity` et `audience` doivent respecter les enums de la table;
+- `metadata` doit etre un objet JSON;
+- les cles metadata sensibles top-level sont rejetees, notamment `password`,
+  `secret`, `secret_ref`, `raw_secret`, `token`, `cookie`, `webhook`,
+  `webhook_url`, `vault`, `service_role`, `authorization` et `bearer`;
+- aucun password, payload Vault, URL webhook, token/cookie, XML brut ou
+  screenshot brut ne doit etre stocke dans `account_dashboard_actions`;
+- execute est revoke pour `public`, `anon` et `authenticated`, puis grant
+  uniquement a `service_role` (le role owner/postgres conserve son acces);
+- aucun client dashboard ne doit appeler cette RPC directement.
+
+Mappings futurs prepares :
+
+- `credentials_configured=false` -> `submit_instagram_credentials`;
+- `reauth_required=true` -> `update_instagram_password`;
+- `login_status='needs_2fa'` -> `complete_two_factor`;
+- `login_status='checkpoint'` -> `resolve_checkpoint`;
+- `login_status='mismatch'` -> `review_account_mismatch`;
+- incident `active_instagram_account_mismatch` ->
+  `review_account_mismatch` pour `admin` ou `assistant`.
+
+Etapes futures :
+
+- Entry 2D-4C-2 : wiring depuis credentials/status ou helpers internal;
+- Entry 2D-4D : mutations `acknowledge`, `dismiss`, `resolve`;
+- Entry 2E : worker login/provisioning qui cree et resout les actions selon
+  `login_status`;
+- Entry 2F : publishers `account_incidents` -> `account_dashboard_actions`.
+
 ## Remote Secrets
 
 Remote Edge Function secrets must be configured on the Supabase project before
