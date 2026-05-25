@@ -1,9 +1,12 @@
 import {
+  deriveNextAction,
   handleRequest,
   normalizeUsername,
   parseVaultSecretRef,
+  safeClientMessageForNextAction,
   validateForbiddenTopLevelFields,
   validatePayload,
+  validateStatusForbiddenFields,
 } from "./index.ts";
 
 const ACCOUNT_ID = "42c625c2-e761-4100-8a9d-7ae1373de97d";
@@ -68,6 +71,8 @@ function json(data: unknown, status = 200) {
 function makeFetch(options: {
   clientAccess?: boolean;
   clientId?: string | null;
+  accountStatus?: Record<string, unknown> | null;
+  activeCredential?: Record<string, unknown> | null;
   maxVersion?: number;
   rotateStatus?: number;
   rotateRow?: Record<string, unknown>;
@@ -90,7 +95,30 @@ function makeFetch(options: {
     if (href.includes("/rest/v1/rpc/client_id_for_instagram_account")) {
       return json(options.clientId === undefined ? CLIENT_ID : options.clientId);
     }
+    if (href.includes("/rest/v1/client_instagram_accounts?")) {
+      if (options.accountStatus === null) return json([]);
+      return json([options.accountStatus ?? {
+        client_id: CLIENT_ID,
+        onboarding_status: "configured",
+        provisioning_status: "pending",
+        login_status: "pending",
+      }]);
+    }
     if (href.includes("/rest/v1/account_credentials?")) {
+      if (href.includes("status=eq.active")) {
+        if (options.activeCredential === null) return json([]);
+        return json([options.activeCredential ?? {
+          provider: "instagram",
+          credentials_version: options.maxVersion ?? 1,
+          status: "active",
+          reauth_required: true,
+          reauth_reason: "awaiting_login_verification",
+          last_submitted_at: "2026-05-25T18:00:00Z",
+          last_rotated_at: null,
+          metadata: { password: "must-not-return" },
+          secret_ref: `supabase_vault://${VAULT_ID}`,
+        }]);
+      }
       const max = options.maxVersion ?? 0;
       return json(max > 0 ? [{ credentials_version: max }] : []);
     }
@@ -108,6 +136,14 @@ function makeFetch(options: {
       });
     }
     return json({ error: `unexpected ${href}` }, 500);
+  };
+}
+
+function statusBody(overrides: Record<string, unknown> = {}) {
+  return {
+    action: "status",
+    account_id: ACCOUNT_ID,
+    ...overrides,
   };
 }
 
@@ -138,9 +174,27 @@ Deno.test("rejects missing auth", withEnv(async () => {
   }
 }));
 
+Deno.test("status rejects unauthenticated request", withEnv(async () => {
+  const res = await handleRequest(new Request("https://example.test", {
+    method: "POST",
+    body: JSON.stringify(statusBody()),
+  }));
+  const body = await res.json();
+  if (res.status !== 401 || body.error !== "unauthorized") {
+    throw new Error("status missing auth was not rejected");
+  }
+}));
+
 Deno.test("rejects invalid action", withEnv(() => {
   const result = validatePayload(validBody({ action: "rotate" }));
   if (result.ok || result.error !== "invalid_action") throw new Error("invalid action accepted");
+}));
+
+Deno.test("status rejects invalid account_id", withEnv(() => {
+  const result = validatePayload(statusBody({ account_id: "not-a-uuid" }));
+  if (result.ok || result.error !== "account_id_invalid") {
+    throw new Error("status invalid account_id accepted");
+  }
 }));
 
 Deno.test("rejects missing password", withEnv(() => {
@@ -155,6 +209,15 @@ Deno.test("rejects forbidden fields", withEnv(() => {
   if (nested !== "metadata.password") throw new Error("metadata.password was not rejected");
 }));
 
+Deno.test("status rejects forbidden password and secret fields", withEnv(() => {
+  const password = validateStatusForbiddenFields(statusBody({ password: FAKE_PASSWORD }));
+  if (password !== "password") throw new Error("status password was not rejected");
+  const metadata = validateStatusForbiddenFields(statusBody({ metadata: { safe: "nope" } }));
+  if (metadata !== "metadata") throw new Error("status metadata was not rejected");
+  const secretRef = validateStatusForbiddenFields(statusBody({ secret_ref: `supabase_vault://${VAULT_ID}` }));
+  if (secretRef !== "secret_ref") throw new Error("status secret_ref was not rejected");
+}));
+
 Deno.test("client JWT ownership false returns 403", withEnv(async () => {
   const res = await handleRequest(request(validBody()), {
     fetch: makeFetch({ clientAccess: false }),
@@ -166,6 +229,128 @@ Deno.test("client JWT ownership false returns 403", withEnv(async () => {
     throw new Error("ownership false did not return account_not_allowed");
   }
 }));
+
+Deno.test("status ownership false returns 403", withEnv(async () => {
+  const res = await handleRequest(request(statusBody()), {
+    fetch: makeFetch({ clientAccess: false }),
+    vaultAdapter: mockVault(),
+    log: () => {},
+  });
+  const body = await res.json();
+  if (res.status !== 403 || body.error !== "account_not_allowed") {
+    throw new Error("status ownership false did not return account_not_allowed");
+  }
+}));
+
+Deno.test("status no active credentials returns submit_credentials", withEnv(async () => {
+  const res = await handleRequest(request(statusBody()), {
+    fetch: makeFetch({ activeCredential: null }),
+    vaultAdapter: mockVault(),
+    log: () => {},
+  });
+  const body = await res.json();
+  if (res.status !== 200 || body.credentials_configured !== false) {
+    throw new Error("status without active credentials did not return configured=false");
+  }
+  if (body.next_action !== "submit_credentials" || body.safe_client_message !== "Instagram credentials are required.") {
+    throw new Error("status without credentials did not request submit_credentials");
+  }
+}));
+
+Deno.test("status active credentials returns safe version status and timestamps", withEnv(async () => {
+  const res = await handleRequest(request(statusBody()), {
+    fetch: makeFetch({
+      activeCredential: {
+        provider: "instagram",
+        credentials_version: 2,
+        status: "active",
+        reauth_required: true,
+        reauth_reason: "awaiting_login_verification",
+        last_submitted_at: "2026-05-25T18:00:00Z",
+        last_rotated_at: "2026-05-25T18:05:00Z",
+        secret_ref: `supabase_vault://${VAULT_ID}`,
+        metadata: { password: "must-not-return" },
+      },
+    }),
+    vaultAdapter: mockVault(),
+    log: () => {},
+  });
+  const body = await res.json();
+  if (body.credentials_configured !== true || body.credentials_version !== 2 || body.credentials_status !== "active") {
+    throw new Error("active credential status fields missing");
+  }
+  if (body.last_submitted_at !== "2026-05-25T18:00:00Z" || body.last_rotated_at !== "2026-05-25T18:05:00Z") {
+    throw new Error("credential timestamps missing");
+  }
+}));
+
+Deno.test("status joins onboarding provisioning and login status", withEnv(async () => {
+  const res = await handleRequest(request(statusBody()), {
+    fetch: makeFetch({
+      accountStatus: {
+        client_id: CLIENT_ID,
+        onboarding_status: "ready",
+        provisioning_status: "provisioning",
+        login_status: "needs_2fa",
+      },
+    }),
+    vaultAdapter: mockVault(),
+    log: () => {},
+  });
+  const body = await res.json();
+  if (body.onboarding_status !== "ready" || body.provisioning_status !== "provisioning") {
+    throw new Error("account status fields were not joined");
+  }
+  if (body.login_status !== "needs_2fa" || body.next_action !== "complete_2fa") {
+    throw new Error("login_status was not mapped to complete_2fa");
+  }
+}));
+
+for (
+  const [name, input, expected] of [
+    ["needs_2fa", { credentialsConfigured: true, reauthRequired: false, reauthReason: null, loginStatus: "needs_2fa" }, "complete_2fa"],
+    ["checkpoint", { credentialsConfigured: true, reauthRequired: false, reauthReason: null, loginStatus: "checkpoint" }, "resolve_checkpoint"],
+    ["failed", { credentialsConfigured: true, reauthRequired: false, reauthReason: null, loginStatus: "failed" }, "update_password"],
+    ["mismatch", { credentialsConfigured: true, reauthRequired: false, reauthReason: null, loginStatus: "mismatch" }, "contact_support"],
+    ["connected", { credentialsConfigured: true, reauthRequired: false, reauthReason: null, loginStatus: "connected" }, "none"],
+    ["reauth_awaiting", { credentialsConfigured: true, reauthRequired: true, reauthReason: "awaiting_login_verification", loginStatus: "pending" }, "awaiting_login_verification"],
+  ] as const
+) {
+  Deno.test(`next_action maps ${name}`, () => {
+    const actual = deriveNextAction(input);
+    if (actual !== expected) throw new Error(`${name} mapped to ${actual}`);
+    if (!safeClientMessageForNextAction(actual)) throw new Error("safe message missing");
+  });
+}
+
+Deno.test("status response excludes password secret_ref and raw metadata", withEnv(async () => {
+  const res = await handleRequest(request(statusBody()), {
+    fetch: makeFetch(),
+    vaultAdapter: mockVault(),
+    log: () => {},
+  });
+  const text = await res.text();
+  if (text.includes(FAKE_PASSWORD) || text.includes("supabase_vault://") || text.includes("metadata")) {
+    throw new Error("status response leaked password, secret_ref, or metadata");
+  }
+}));
+
+Deno.test("internal token status path works", withEnv(async () => {
+  const calls: FetchCall[] = [];
+  const res = await handleRequest(request(statusBody(), "internal-token-not-real"), {
+    fetch: makeFetch({ calls }),
+    vaultAdapter: mockVault(),
+    log: () => {},
+  });
+  const body = await res.json();
+  if (res.status !== 200 || body.ok !== true || body.provider !== "instagram") {
+    throw new Error("internal status path failed");
+  }
+  if (calls.some((c) => c.url.endsWith("/auth/v1/user"))) {
+    throw new Error("internal status path should not verify client JWT");
+  }
+}));
+
 
 Deno.test("submit success creates Vault secret and account_credentials v1", withEnv(async () => {
   const fetchCalls: FetchCall[] = [];

@@ -6,7 +6,7 @@
  * Vault through a service-role RPC, and never returned or stored in app tables.
  */
 
-type CredentialsAction = "submit" | "update_password";
+type CredentialsAction = "submit" | "update_password" | "status";
 type ProducerAuth =
   | { ok: true; mode: "internal"; authUserId: null }
   | { ok: true; mode: "client"; authUserId: string }
@@ -30,11 +30,31 @@ type Dependencies = {
   requestId?: () => string;
 };
 type ValidPayload = {
-  action: CredentialsAction;
+  action: "submit" | "update_password";
   accountId: string;
   username: string | null;
   password: string;
   externalRequestId: string | null;
+};
+type StatusPayload = {
+  action: "status";
+  accountId: string;
+};
+type ParsedPayload = ValidPayload | StatusPayload;
+type AccountStatusRow = {
+  client_id: string | null;
+  onboarding_status: string | null;
+  provisioning_status: string | null;
+  login_status: string | null;
+};
+type CredentialStatusRow = {
+  provider: string;
+  credentials_version: number;
+  status: string;
+  reauth_required: boolean;
+  reauth_reason: string | null;
+  last_submitted_at: string | null;
+  last_rotated_at: string | null;
 };
 
 const UUID_RE =
@@ -47,6 +67,22 @@ const FORBIDDEN_TOP_LEVEL_FIELDS = new Set([
   "credentials_version",
   "status",
   "raw_secret",
+  "token",
+  "cookie",
+  "webhook_url",
+  "service_role",
+  "password_confirm",
+  "encrypted_password",
+]);
+const STATUS_FORBIDDEN_TOP_LEVEL_FIELDS = new Set([
+  "password",
+  "secret_ref",
+  "secret_provider",
+  "credentials_version",
+  "status",
+  "metadata",
+  "raw_secret",
+  "secret",
   "token",
   "cookie",
   "webhook_url",
@@ -92,19 +128,39 @@ export function validateForbiddenTopLevelFields(payload: Record<string, unknown>
   return null;
 }
 
-export function validatePayload(payload: Record<string, unknown>): { ok: true; payload: ValidPayload } | {
+export function validateStatusForbiddenFields(payload: Record<string, unknown>): string | null {
+  for (const key of Object.keys(payload || {})) {
+    if (STATUS_FORBIDDEN_TOP_LEVEL_FIELDS.has(key)) return key;
+  }
+  return null;
+}
+
+export function validatePayload(payload: Record<string, unknown>): { ok: true; payload: ParsedPayload } | {
   ok: false;
   error: string;
   status?: number;
 } {
-  const forbidden = validateForbiddenTopLevelFields(payload);
-  if (forbidden) return { ok: false, error: `field_forbidden:${forbidden}`, status: 400 };
-
   const action = String(payload.action || "").trim();
-  if (action !== "submit" && action !== "update_password") {
+  if (action !== "submit" && action !== "update_password" && action !== "status") {
     return { ok: false, error: "invalid_action", status: 400 };
   }
   if (!isUuid(payload.account_id)) return { ok: false, error: "account_id_invalid", status: 400 };
+  const accountId = String(payload.account_id).trim();
+
+  if (action === "status") {
+    const forbidden = validateStatusForbiddenFields(payload);
+    if (forbidden) return { ok: false, error: `field_forbidden:${forbidden}`, status: 400 };
+    return {
+      ok: true,
+      payload: {
+        action,
+        accountId,
+      },
+    };
+  }
+
+  const forbidden = validateForbiddenTopLevelFields(payload);
+  if (forbidden) return { ok: false, error: `field_forbidden:${forbidden}`, status: 400 };
 
   const rawPassword = payload.password;
   if (typeof rawPassword !== "string" || rawPassword.length < 6 || rawPassword.trim().length < 6) {
@@ -125,7 +181,7 @@ export function validatePayload(payload: Record<string, unknown>): { ok: true; p
     ok: true,
     payload: {
       action,
-      accountId: String(payload.account_id).trim(),
+      accountId,
       username: usernameResult.username,
       password: rawPassword,
       externalRequestId: rawExternal || null,
@@ -258,6 +314,41 @@ async function getClientIdForAccount(accountId: string, deps: Dependencies): Pro
   return isUuid(result) ? result : null;
 }
 
+async function getClientAccountStatus(accountId: string, deps: Dependencies): Promise<AccountStatusRow | null> {
+  const rows = await supabaseJson(
+    `/rest/v1/client_instagram_accounts?account_id=eq.${encodeURIComponent(accountId)}&select=client_id,onboarding_status,provisioning_status,login_status&limit=1`,
+    { method: "GET" },
+    deps,
+  );
+  if (!Array.isArray(rows) || !rows[0]) return null;
+  const row = rows[0];
+  return {
+    client_id: isUuid(row.client_id) ? row.client_id : null,
+    onboarding_status: typeof row.onboarding_status === "string" ? row.onboarding_status : null,
+    provisioning_status: typeof row.provisioning_status === "string" ? row.provisioning_status : null,
+    login_status: typeof row.login_status === "string" ? row.login_status : null,
+  };
+}
+
+async function getActiveCredentialStatus(accountId: string, deps: Dependencies): Promise<CredentialStatusRow | null> {
+  const rows = await supabaseJson(
+    `/rest/v1/account_credentials?account_id=eq.${encodeURIComponent(accountId)}&provider=eq.instagram&status=eq.active&select=provider,credentials_version,status,reauth_required,reauth_reason,last_submitted_at,last_rotated_at&limit=1`,
+    { method: "GET" },
+    deps,
+  );
+  if (!Array.isArray(rows) || !rows[0]) return null;
+  const row = rows[0];
+  return {
+    provider: "instagram",
+    credentials_version: Number(row.credentials_version),
+    status: typeof row.status === "string" ? row.status : "active",
+    reauth_required: row.reauth_required === true,
+    reauth_reason: typeof row.reauth_reason === "string" ? row.reauth_reason : null,
+    last_submitted_at: typeof row.last_submitted_at === "string" ? row.last_submitted_at : null,
+    last_rotated_at: typeof row.last_rotated_at === "string" ? row.last_rotated_at : null,
+  };
+}
+
 async function maxCredentialsVersion(accountId: string, deps: Dependencies): Promise<number> {
   const rows = await supabaseJson(
     `/rest/v1/account_credentials?account_id=eq.${encodeURIComponent(accountId)}&provider=eq.instagram&select=credentials_version&order=credentials_version.desc&limit=1`,
@@ -266,6 +357,46 @@ async function maxCredentialsVersion(accountId: string, deps: Dependencies): Pro
   );
   const raw = Array.isArray(rows) && rows[0] ? Number(rows[0].credentials_version) : 0;
   return Number.isFinite(raw) && raw > 0 ? Math.trunc(raw) : 0;
+}
+
+export function deriveNextAction(input: {
+  credentialsConfigured: boolean;
+  reauthRequired: boolean;
+  reauthReason: string | null;
+  loginStatus: string | null;
+}): string {
+  if (!input.credentialsConfigured) return "submit_credentials";
+  if (input.loginStatus === "needs_2fa") return "complete_2fa";
+  if (input.loginStatus === "checkpoint") return "resolve_checkpoint";
+  if (input.loginStatus === "mismatch") return "contact_support";
+  if (input.loginStatus === "failed") return "update_password";
+  if (input.reauthRequired && input.reauthReason === "awaiting_login_verification") {
+    return "awaiting_login_verification";
+  }
+  if (input.reauthRequired) return "update_password";
+  if (input.loginStatus === "connected") return "none";
+  return "awaiting_login_verification";
+}
+
+export function safeClientMessageForNextAction(nextAction: string): string {
+  switch (nextAction) {
+    case "submit_credentials":
+      return "Instagram credentials are required.";
+    case "awaiting_login_verification":
+      return "Credentials saved. Login verification is pending.";
+    case "update_password":
+      return "Please update your Instagram password.";
+    case "complete_2fa":
+      return "Two-factor authentication is required.";
+    case "resolve_checkpoint":
+      return "Instagram requires a checkpoint verification.";
+    case "contact_support":
+      return "Your account requires review by support.";
+    case "none":
+      return "Instagram connection is active.";
+    default:
+      return "Credentials saved. Login verification is pending.";
+  }
 }
 
 async function rotateMetadata(input: {
@@ -328,7 +459,7 @@ function defaultVaultAdapter(deps: Dependencies): VaultAdapter {
 }
 
 async function validateAccess(
-  payload: ValidPayload,
+  payload: { accountId: string },
   auth: Extract<ProducerAuth, { ok: true }>,
   deps: Dependencies,
 ): Promise<{ ok: true; clientId: string | null } | { ok: false; status: number; error: string }> {
@@ -343,6 +474,62 @@ async function validateAccess(
   } catch {
     return { ok: false, status: 503, error: "account_ownership_check_failed" };
   }
+}
+
+async function handleCredentialsStatus(
+  req: Request,
+  payload: StatusPayload,
+  auth: Extract<ProducerAuth, { ok: true }>,
+  deps: Dependencies,
+) {
+  const headers = corsHeaders(req);
+  const rid = requestId(req, deps);
+  const access = await validateAccess(payload, auth, deps);
+  if (!access.ok) {
+    logEvent(deps, "instagram_credentials_status_rejected", {
+      request_id: rid,
+      account_id: payload.accountId,
+      action: payload.action,
+      error: access.error,
+    });
+    return jsonResponse(access.status, { ok: false, error: access.error, request_id: rid }, headers);
+  }
+
+  let accountStatus: AccountStatusRow | null;
+  let credentialStatus: CredentialStatusRow | null;
+  try {
+    accountStatus = await getClientAccountStatus(payload.accountId, deps);
+    credentialStatus = await getActiveCredentialStatus(payload.accountId, deps);
+  } catch {
+    return jsonResponse(500, { ok: false, error: "credentials_status_read_failed", request_id: rid }, headers);
+  }
+
+  const credentialsConfigured = credentialStatus !== null;
+  const nextAction = deriveNextAction({
+    credentialsConfigured,
+    reauthRequired: credentialStatus?.reauth_required === true,
+    reauthReason: credentialStatus?.reauth_reason ?? null,
+    loginStatus: accountStatus?.login_status ?? null,
+  });
+
+  return jsonResponse(200, {
+    ok: true,
+    request_id: rid,
+    account_id: payload.accountId,
+    provider: "instagram",
+    credentials_configured: credentialsConfigured,
+    credentials_version: credentialStatus?.credentials_version ?? null,
+    credentials_status: credentialStatus?.status ?? null,
+    reauth_required: credentialStatus?.reauth_required ?? false,
+    reauth_reason: credentialStatus?.reauth_reason ?? null,
+    last_submitted_at: credentialStatus?.last_submitted_at ?? null,
+    last_rotated_at: credentialStatus?.last_rotated_at ?? null,
+    onboarding_status: accountStatus?.onboarding_status ?? null,
+    provisioning_status: accountStatus?.provisioning_status ?? null,
+    login_status: accountStatus?.login_status ?? null,
+    next_action: nextAction,
+    safe_client_message: safeClientMessageForNextAction(nextAction),
+  }, headers);
 }
 
 async function handleCredentialsSubmit(
@@ -461,6 +648,9 @@ export async function handleRequest(req: Request, deps: Dependencies = {}): Prom
   }
 
   try {
+    if (payloadResult.payload.action === "status") {
+      return await handleCredentialsStatus(req, payloadResult.payload, auth, deps);
+    }
     return await handleCredentialsSubmit(req, payloadResult.payload, auth, deps);
   } catch {
     logEvent(deps, "instagram_credentials_unhandled_error", {

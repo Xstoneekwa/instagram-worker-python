@@ -553,6 +553,97 @@ Security NO-GO for this API:
 - no client-readable `account_credentials`;
 - no full `secret_ref` in client responses.
 
+## Entry 2D-3A Safe Credential Status API
+
+Entry 2D-3A extends `supabase/functions/instagram-credentials` with a safe
+status read action for dashboards:
+
+```json
+{
+  "action": "status",
+  "account_id": "00000000-0000-4000-8000-000000000000"
+}
+```
+
+The status action uses the same authentication boundary as submit/update:
+
+- client dashboard calls use a Supabase Auth JWT;
+- internal/admin producers may use `INSTAGRAM_CREDENTIALS_INTERNAL_API_TOKEN`;
+- client JWT requests must pass `client_can_manage_instagram_account`;
+- the Edge Function uses the service-role key server-side.
+
+The status action does **not** require or accept a password. It rejects secret
+or write-only fields such as `password`, `secret_ref`, `secret_provider`,
+`metadata`, `token`, `cookie`, `raw_secret`, `webhook_url`, and
+`service_role`.
+
+Data sources:
+
+- `public.client_instagram_accounts` for `onboarding_status`,
+  `provisioning_status`, and `login_status`;
+- active `public.account_credentials` metadata for `credentials_version`,
+  `status`, `reauth_required`, `reauth_reason`, `last_submitted_at`, and
+  `last_rotated_at`.
+
+The status action deliberately does not read Supabase Vault, decrypt secrets,
+read `account_incidents`, or read dashboard actions.
+
+Safe response:
+
+```json
+{
+  "ok": true,
+  "account_id": "00000000-0000-4000-8000-000000000000",
+  "provider": "instagram",
+  "credentials_configured": true,
+  "credentials_version": 2,
+  "credentials_status": "active",
+  "reauth_required": true,
+  "reauth_reason": "awaiting_login_verification",
+  "last_submitted_at": "2026-05-25T18:00:00Z",
+  "last_rotated_at": null,
+  "onboarding_status": "configured",
+  "provisioning_status": "pending",
+  "login_status": "pending",
+  "next_action": "awaiting_login_verification",
+  "safe_client_message": "Credentials saved. Login verification is pending."
+}
+```
+
+When no active credentials exist, `credentials_configured=false`,
+`credentials_version=null`, `credentials_status=null`, `reauth_required=false`,
+and `next_action='submit_credentials'`.
+
+`next_action` V1 mapping:
+
+- no active credentials → `submit_credentials`;
+- `login_status='needs_2fa'` → `complete_2fa`;
+- `login_status='checkpoint'` → `resolve_checkpoint`;
+- `login_status='mismatch'` → `contact_support`;
+- `login_status='failed'` → `update_password`;
+- active credentials with
+  `reauth_reason='awaiting_login_verification'` → `awaiting_login_verification`;
+- other `reauth_required=true` → `update_password`;
+- `login_status='connected'` and `reauth_required=false` → `none`;
+- fallback with configured credentials → `awaiting_login_verification`.
+
+Dashboard relationship:
+
+- the credentials form uses Entry 2D-2B submit/update;
+- the status widget can use Entry 2D-3A status;
+- dashboard badge, popup, pending action count, and deep links are reserved for
+  Entry 2D-4 dashboard actions;
+- Slack/Discord remains operator alerting, not dashboard state.
+
+Security NO-GO for status:
+
+- no password in the response;
+- no Vault payload or Vault read;
+- no `secret_ref` or full secret reference;
+- no raw `metadata`;
+- no direct PostgREST client read of `account_credentials`;
+- no direct dashboard read of `account_incidents`.
+
 ## Remote Secrets
 
 Remote Edge Function secrets must be configured on the Supabase project before
