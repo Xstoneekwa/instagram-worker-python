@@ -322,6 +322,25 @@ Pure builders (no DB):
 ORF-3C is next: integrate only identity mismatch from
 `account_identity_guard.py` behind `RUNTIME_INCIDENTS_ENABLED`.
 
+## ORF-3C Identity Mismatch Incidents
+
+ORF-3C wires only `active_instagram_account_mismatch` from
+`account_identity_guard.py` into `runtime_incidents.py`. The integration is
+observation-only: it persists an incident when the logged-in Instagram username
+does not match the expected account username, but it does not change the guard
+result, `failure_reason`, existing logs, or the runner-owned safe-stop path.
+Exit code `75` remains owned by `runner.py`.
+
+Incident publishing stays behind `RUNTIME_INCIDENTS_ENABLED` and remains
+fail-open. If the RPC/helper path fails, the identity guard still returns the
+same mismatch result and the existing safe-stop behavior proceeds unchanged.
+
+ORF-3C does not add Slack/Discord, Redis, dashboard views, Edge Functions,
+migrations, device runs, or runner changes. Other account identity failures,
+such as `own_profile_open_failed` or
+`actual_logged_in_username_not_detected`, may become separate incident types in
+a later patch; ORF-3C intentionally leaves them as logs/results only.
+
 ## ORF-2 Runtime Integration
 
 ORF-2 adds opt-in, best-effort Python runtime helpers for low-volume worker

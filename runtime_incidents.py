@@ -145,29 +145,38 @@ def publish_account_incident(
 
 def build_identity_mismatch_incident(
     *,
-    account_id: str,
+    account_id: str | None,
     expected_username: str,
     actual_username: str | None,
     run_id: str | None = None,
     run_type: str | None = None,
+    stage: str | None = None,
+    expected_instagram_user_id: str | None = None,
+    actual_instagram_user_id: str | None = None,
     verification_method: str | None = None,
     identity_evidence: Any = None,
     rename_disambiguation_status: str | None = None,
+    future_possible_failure_reason: str | None = None,
     metadata: dict | None = None,
 ) -> dict[str, Any]:
     """Pure builder for active_instagram_account_mismatch (no DB side effects)."""
-    aid = str(account_id or "").strip()
+    aid = str(account_id or "").strip() or "unknown"
     expected = str(expected_username or "").strip().lstrip("@")
     actual = str(actual_username or "").strip().lstrip("@") or "unknown"
     meta: dict[str, Any] = dict(metadata or {})
     meta.update(
         {
-            "expected_username": expected or None,
-            "actual_username": actual,
+            "expected_account_username": expected or None,
+            "actual_logged_in_username": actual,
+            "expected_instagram_user_id": expected_instagram_user_id,
+            "actual_instagram_user_id": actual_instagram_user_id,
             "run_type": run_type,
+            "run_id": run_id,
+            "stage": stage,
             "verification_method": verification_method,
             "identity_evidence": identity_evidence,
             "rename_disambiguation_status": rename_disambiguation_status,
+            "future_possible_failure_reason": future_possible_failure_reason,
         }
     )
     meta = {k: v for k, v in meta.items() if v is not None}
@@ -189,7 +198,7 @@ def build_identity_mismatch_incident(
             "Account identity mismatch detected. Verify active Instagram account."
         ),
         "admin_message": (
-            f"Expected {expected_label} but detected {actual} during preflight."
+            f"Expected {expected_label} but detected {actual} during account identity preflight."
         ),
         "metadata": meta,
     }

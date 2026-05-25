@@ -112,6 +112,51 @@ def _extract_own_profile_username_from_hierarchy(hierarchy_xml: str) -> tuple[st
     return "", "own_profile_username_not_found", meta
 
 
+def _publish_identity_mismatch_incident(
+    result: AccountIdentityCheckResult,
+    *,
+    account_id: str | None,
+    run_type: str | None,
+    run_id: str | None,
+    stage: str,
+) -> None:
+    """Persist identity mismatch as an observation only; never affect safe-stop."""
+    try:
+        import runtime_incidents
+
+        safe_meta = {
+            "action_bar_title": result.meta.get("action_bar_title"),
+            "candidate_texts": result.meta.get("candidate_texts"),
+            "hierarchy_xml_len": result.meta.get("hierarchy_xml_len"),
+        }
+        payload = runtime_incidents.build_identity_mismatch_incident(
+            account_id=account_id,
+            expected_username=result.expected_account_username,
+            actual_username=result.actual_logged_in_username,
+            run_id=run_id,
+            run_type=run_type,
+            stage=stage,
+            expected_instagram_user_id=result.expected_instagram_user_id,
+            actual_instagram_user_id=result.actual_instagram_user_id,
+            verification_method=result.verification_method,
+            identity_evidence=result.identity_evidence,
+            rename_disambiguation_status=result.rename_disambiguation_status,
+            future_possible_failure_reason=POSSIBLE_USERNAME_RENAME_REASON,
+            metadata=safe_meta,
+        )
+        runtime_incidents.publish_account_incident(**payload)
+    except Exception as exc:
+        log(
+            "warning",
+            "identity_mismatch_incident_publish_failed",
+            account_id=account_id,
+            run_type=run_type,
+            run_id=run_id,
+            stage=stage,
+            error=str(exc)[:500],
+        )
+
+
 def verify_active_instagram_account_matches_expected(
     d: u2.Device,
     *,
@@ -253,4 +298,12 @@ def verify_active_instagram_account_matches_expected(
         verification_method=result.verification_method,
         meta=meta,
     )
+    if result.failure_reason == ACCOUNT_IDENTITY_MISMATCH_REASON:
+        _publish_identity_mismatch_incident(
+            result,
+            account_id=account_id,
+            run_type=run_type,
+            run_id=run_id,
+            stage=stage,
+        )
     return result
