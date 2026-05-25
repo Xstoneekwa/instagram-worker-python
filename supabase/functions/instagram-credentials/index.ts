@@ -427,6 +427,52 @@ async function rotateMetadata(input: {
   return row;
 }
 
+async function syncCredentialDashboardAction(input: {
+  payload: ValidPayload;
+  clientId: string | null;
+  credentialsVersion: number;
+  requestId: string;
+}, deps: Dependencies): Promise<void> {
+  const isPasswordUpdate = input.payload.action === "update_password";
+  const actionType = isPasswordUpdate ? "update_instagram_password" : "submit_instagram_credentials";
+  const metadata: Record<string, unknown> = {
+    source: "instagram_credentials",
+    action: input.payload.action,
+    credentials_version: input.credentialsVersion,
+    request_id: input.requestId,
+  };
+  if (input.payload.externalRequestId) {
+    metadata.external_request_id = input.payload.externalRequestId;
+  }
+
+  await supabaseJson("/rest/v1/rpc/upsert_account_dashboard_action", {
+    method: "POST",
+    body: JSON.stringify({
+      p_account_id: input.payload.accountId,
+      p_client_id: input.clientId,
+      p_incident_id: null,
+      p_action_type: actionType,
+      p_status: "pending_verification",
+      p_severity: "info",
+      p_audience: "client",
+      p_requires_client_action: false,
+      p_blocking_campaign: true,
+      p_title: isPasswordUpdate ? "Mot de passe Instagram en vérification" : "Connexion Instagram en vérification",
+      p_safe_client_message: isPasswordUpdate
+        ? "Votre mot de passe a été mis à jour. Nous vérifions maintenant la connexion."
+        : "Vos identifiants Instagram ont été enregistrés. Nous vérifions maintenant la connexion.",
+      p_assistant_message: null,
+      p_admin_message: null,
+      p_action_label: "Voir le statut",
+      p_action_deep_link: isPasswordUpdate
+        ? `/accounts/${input.payload.accountId}/credentials#password`
+        : `/accounts/${input.payload.accountId}/connect-instagram`,
+      p_dedupe_key: `account:${input.payload.accountId}:dashboard_action:${actionType}`,
+      p_metadata: metadata,
+    }),
+  }, deps);
+}
+
 function defaultVaultAdapter(deps: Dependencies): VaultAdapter {
   return {
     async writeInstagramCredentialsSecret(input: VaultWriteInput): Promise<VaultWriteResult> {
@@ -612,6 +658,22 @@ async function handleCredentialsSubmit(
     submitted_via: row.submitted_via,
     ok: true,
   });
+  try {
+    await syncCredentialDashboardAction({
+      payload,
+      clientId: access.clientId,
+      credentialsVersion: Number(row.credentials_version),
+      requestId: rid,
+    }, deps);
+  } catch {
+    logEvent(deps, "instagram_credentials_dashboard_action_sync_failed", {
+      request_id: rid,
+      account_id: payload.accountId,
+      action: payload.action,
+      credentials_version: row.credentials_version,
+      error: "dashboard_action_sync_failed",
+    });
+  }
   return jsonResponse(200, {
     ok: true,
     request_id: rid,

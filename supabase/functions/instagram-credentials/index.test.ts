@@ -76,6 +76,8 @@ function makeFetch(options: {
   maxVersion?: number;
   rotateStatus?: number;
   rotateRow?: Record<string, unknown>;
+  dashboardActionStatus?: number;
+  dashboardActionRow?: Record<string, unknown>;
   calls?: FetchCall[];
 } = {}) {
   const calls = options.calls ?? [];
@@ -133,6 +135,17 @@ function makeFetch(options: {
         status: "active",
         reauth_required: true,
         submitted_via: body?.p_submitted_via ?? "client_dashboard",
+      });
+    }
+    if (href.includes("/rest/v1/rpc/upsert_account_dashboard_action")) {
+      if (options.dashboardActionStatus && options.dashboardActionStatus >= 400) {
+        return json({ error: "dashboard action failed" }, options.dashboardActionStatus);
+      }
+      return json(options.dashboardActionRow ?? {
+        id: "33333333-3333-4333-8333-333333333333",
+        account_id: body?.p_account_id ?? ACCOUNT_ID,
+        action_type: body?.p_action_type,
+        status: body?.p_status,
       });
     }
     return json({ error: `unexpected ${href}` }, 500);
@@ -373,6 +386,43 @@ Deno.test("submit success creates Vault secret and account_credentials v1", with
   }
 }));
 
+Deno.test("submit success syncs dashboard action pending_verification with safe metadata", withEnv(async () => {
+  const fetchCalls: FetchCall[] = [];
+  const res = await handleRequest(request(validBody()), {
+    fetch: makeFetch({ calls: fetchCalls, maxVersion: 0 }),
+    vaultAdapter: mockVault(),
+    log: () => {},
+  });
+  const body = await res.json();
+  if (res.status !== 200 || body.ok !== true) throw new Error("submit failed");
+
+  const action = fetchCalls.find((c) => c.url.includes("upsert_account_dashboard_action"));
+  if (!action) throw new Error("dashboard action RPC was not called");
+  if (action.body?.p_action_type !== "submit_instagram_credentials") throw new Error("submit action_type incorrect");
+  if (action.body?.p_status !== "pending_verification") throw new Error("submit status incorrect");
+  if (action.body?.p_requires_client_action !== false || action.body?.p_blocking_campaign !== true) {
+    throw new Error("submit action flags incorrect");
+  }
+  if (action.body?.p_dedupe_key !== `account:${ACCOUNT_ID}:dashboard_action:submit_instagram_credentials`) {
+    throw new Error("submit dedupe_key incorrect");
+  }
+
+  const metadata = action.body?.p_metadata as Record<string, unknown>;
+  if (
+    metadata?.source !== "instagram_credentials" ||
+    metadata?.action !== "submit" ||
+    metadata?.credentials_version !== 1 ||
+    metadata?.request_id !== "req-test-1" ||
+    metadata?.external_request_id !== "entry2d2b-test"
+  ) {
+    throw new Error(`submit metadata incorrect: ${JSON.stringify(metadata)}`);
+  }
+  const rpcText = JSON.stringify(action.body);
+  if (rpcText.includes(FAKE_PASSWORD) || rpcText.includes("secret_ref") || rpcText.includes("supabase_vault://") || rpcText.includes(VAULT_ID)) {
+    throw new Error("dashboard action RPC leaked password or vault reference");
+  }
+}));
+
 Deno.test("update_password success supersedes via rotation RPC and inserts v2", withEnv(async () => {
   const fetchCalls: FetchCall[] = [];
   const vaultCalls: VaultWriteInput[] = [];
@@ -388,6 +438,68 @@ Deno.test("update_password success supersedes via rotation RPC and inserts v2", 
   const rotate = fetchCalls.find((c) => c.url.includes("rotate_instagram_account_credentials"));
   if (!rotate || rotate.body?.p_action !== "update_password") {
     throw new Error("rotation RPC did not receive update_password");
+  }
+}));
+
+Deno.test("update_password success syncs dashboard action pending_verification", withEnv(async () => {
+  const fetchCalls: FetchCall[] = [];
+  const res = await handleRequest(request(validBody({ action: "update_password" })), {
+    fetch: makeFetch({ calls: fetchCalls, maxVersion: 1 }),
+    vaultAdapter: mockVault(),
+    log: () => {},
+  });
+  const body = await res.json();
+  if (res.status !== 200 || body.credentials_version !== 2) throw new Error("update_password failed");
+
+  const action = fetchCalls.find((c) => c.url.includes("upsert_account_dashboard_action"));
+  if (!action) throw new Error("dashboard action RPC was not called");
+  if (action.body?.p_action_type !== "update_instagram_password") throw new Error("update action_type incorrect");
+  if (action.body?.p_status !== "pending_verification") throw new Error("update status incorrect");
+  if (action.body?.p_action_deep_link !== `/accounts/${ACCOUNT_ID}/credentials#password`) {
+    throw new Error("update deep link incorrect");
+  }
+
+  const metadata = action.body?.p_metadata as Record<string, unknown>;
+  if (metadata?.action !== "update_password" || metadata?.credentials_version !== 2) {
+    throw new Error("update metadata incorrect");
+  }
+  const rpcText = JSON.stringify(action.body);
+  if (rpcText.includes(FAKE_PASSWORD) || rpcText.includes("secret_ref") || rpcText.includes("supabase_vault://") || rpcText.includes(VAULT_ID)) {
+    throw new Error("dashboard action RPC leaked password or vault reference");
+  }
+}));
+
+Deno.test("dashboard action sync failure is fail-open for submit", withEnv(async () => {
+  const logs: string[] = [];
+  const res = await handleRequest(request(validBody()), {
+    fetch: makeFetch({ maxVersion: 0, dashboardActionStatus: 500 }),
+    vaultAdapter: mockVault(),
+    log: (event, payload) => logs.push(JSON.stringify({ event, ...payload })),
+  });
+  const text = await res.text();
+  if (res.status !== 200 || !text.includes('"ok":true')) {
+    throw new Error("dashboard sync failure should not fail submit");
+  }
+  const combined = `${text}\n${logs.join("\n")}`;
+  if (!combined.includes("instagram_credentials_dashboard_action_sync_failed")) {
+    throw new Error("dashboard sync failure was not logged");
+  }
+  if (combined.includes(FAKE_PASSWORD) || combined.includes("supabase_vault://") || combined.includes("secret_ref")) {
+    throw new Error("dashboard sync failure leaked sensitive data");
+  }
+}));
+
+Deno.test("status action remains read-only and does not sync dashboard action", withEnv(async () => {
+  const calls: FetchCall[] = [];
+  const res = await handleRequest(request(statusBody()), {
+    fetch: makeFetch({ calls }),
+    vaultAdapter: mockVault(),
+    log: () => {},
+  });
+  const body = await res.json();
+  if (res.status !== 200 || body.ok !== true) throw new Error("status failed");
+  if (calls.some((c) => c.url.includes("upsert_account_dashboard_action"))) {
+    throw new Error("status should not write dashboard actions");
   }
 }));
 

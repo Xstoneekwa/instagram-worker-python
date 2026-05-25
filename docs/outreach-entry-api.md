@@ -931,6 +931,80 @@ Etapes futures :
   `login_status`;
 - Entry 2F : publishers `account_incidents` -> `account_dashboard_actions`.
 
+## Entry 2D-4C-2A Sync credentials vers actions dashboard
+
+Entry 2D-4C-2A branche uniquement les succes `submit` et `update_password` de
+`supabase/functions/instagram-credentials` vers
+`public.upsert_account_dashboard_action(...)`.
+
+Le branchement est volontairement limite :
+
+- il s'execute apres creation du secret Vault et apres ecriture reussie de la
+  metadata `account_credentials`;
+- il cree ou synchronise une action dashboard en `pending_verification`;
+- il ne lit jamais Vault;
+- il ne touche pas aux workers, runners, senders, orchestrators ou publishers
+  incidents;
+- `action=status` reste read-only et ne cree aucune action dashboard.
+
+Mapping `submit` :
+
+- `action_type='submit_instagram_credentials'`;
+- `status='pending_verification'`;
+- `severity='info'`;
+- `audience='client'`;
+- `requires_client_action=false`;
+- `blocking_campaign=true`;
+- `title='Connexion Instagram en vérification'`;
+- `safe_client_message='Vos identifiants Instagram ont été enregistrés. Nous vérifions maintenant la connexion.'`;
+- `action_label='Voir le statut'`;
+- `action_deep_link='/accounts/{account_id}/connect-instagram'`;
+- `dedupe_key='account:{account_id}:dashboard_action:submit_instagram_credentials'`.
+
+Mapping `update_password` :
+
+- `action_type='update_instagram_password'`;
+- `status='pending_verification'`;
+- `severity='info'`;
+- `audience='client'`;
+- `requires_client_action=false`;
+- `blocking_campaign=true`;
+- `title='Mot de passe Instagram en vérification'`;
+- `safe_client_message='Votre mot de passe a été mis à jour. Nous vérifions maintenant la connexion.'`;
+- `action_label='Voir le statut'`;
+- `action_deep_link='/accounts/{account_id}/credentials#password'`;
+- `dedupe_key='account:{account_id}:dashboard_action:update_instagram_password'`.
+
+Metadata envoyee a la RPC :
+
+```json
+{
+  "source": "instagram_credentials",
+  "action": "submit",
+  "credentials_version": 1,
+  "request_id": "safe-request-id",
+  "external_request_id": "optional-safe-id"
+}
+```
+
+Cette metadata ne doit jamais contenir password, `secret_ref`, identifiant Vault,
+payload Vault, token, cookie, webhook URL ou body brut de requete.
+
+Fail-open :
+
+- si la synchronisation dashboard action echoue, `submit` / `update_password`
+  restent OK lorsque Vault et `account_credentials` ont deja reussi;
+- l'erreur est journalisee avec un log safe
+  `instagram_credentials_dashboard_action_sync_failed`;
+- la reponse client V1 reste inchangée et ne contient pas de metadata dashboard.
+
+Resolution future :
+
+- 2D-4C-2A ne resout aucune action;
+- `connected + reauth_required=false` sera traite plus tard via 2D-4D/2E;
+- les mappings `credentials_configured=false`, `needs_2fa`, `checkpoint`,
+  `failed` et `mismatch` restent reserves a un sync dedie ou aux workers futurs.
+
 ## Remote Secrets
 
 Remote Edge Function secrets must be configured on the Supabase project before
