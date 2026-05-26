@@ -109,6 +109,34 @@ def extract_login_screen_signals_from_hierarchy(
     has_create_new_account = _has_phrase(text, "create new account")
     has_forgot_password = _has_phrase(text, "forgot password")
     has_meta = _has_phrase(text, "meta")
+    has_edit_profile = _has_phrase(text, "edit profile")
+    has_share_profile = _has_phrase(text, "share profile")
+    has_profile_stats = all(_has_phrase(text, phrase) for phrase in ("posts", "followers", "following"))
+    has_add_instagram_account = _contains_any(
+        text,
+        (
+            "add instagram account",
+            "add profile",
+            "ajouter un compte instagram",
+            "ajouter un profil",
+        ),
+    )
+    has_accounts_center = _has_phrase(text, "go to accounts center")
+    has_add_account_title = _has_phrase(text, "add account")
+    has_log_into_existing_account = _contains_any(
+        text,
+        (
+            "log into existing account",
+            "se connecter à un compte existant",
+            "se connecter a un compte existant",
+            "ajouter un compte existant",
+        ),
+    )
+    has_home_feed_markers = (
+        _has_phrase(text, "your story")
+        or _has_phrase(text, "suggested for you")
+        or ("instagram" in text and _has_phrase(text, "follow"))
+    )
     has_username_field = "username, email or mobile number" in text or (
         "username" in text and ("email" in text or "mobile" in text)
     )
@@ -120,11 +148,20 @@ def extract_login_screen_signals_from_hierarchy(
     expected_username_matches = [
         username for username in available_usernames if username == normalized_expected_username
     ]
+    actual_logged_in_username = _extract_profile_username(text, available_usernames)
     overlay_type = _password_overlay_type(text)
     overlay_present = bool(overlay_type)
     transition_loading = _has_phrase(text, "loading")
 
-    if len(available_usernames) >= 2 and has_use_another_profile and has_create_new_account:
+    if has_add_account_title and has_log_into_existing_account and has_create_new_account:
+        screen_type = "add_account_sheet"
+    elif has_add_instagram_account and has_accounts_center:
+        screen_type = "account_switcher_sheet"
+    elif actual_logged_in_username and has_edit_profile and has_share_profile and has_profile_stats:
+        screen_type = "active_account_profile"
+    elif has_home_feed_markers:
+        screen_type = "active_account_home"
+    elif len(available_usernames) >= 2 and has_use_another_profile and has_create_new_account:
         screen_type = "account_picker"
     elif has_continue_button and has_use_another_profile and suggested_username:
         screen_type = "continue_as_candidate"
@@ -140,6 +177,7 @@ def extract_login_screen_signals_from_hierarchy(
         "continue_as_candidate": screen_type == "continue_as_candidate",
         "suggested_username": suggested_username,
         "available_usernames": available_usernames,
+        "actual_logged_in_username": actual_logged_in_username,
         "expected_username_present": bool(expected_username_matches) if expected_username else None,
         "expected_username_match_count": len(expected_username_matches) if expected_username else None,
         "account_picker": screen_type == "account_picker",
@@ -155,6 +193,13 @@ def extract_login_screen_signals_from_hierarchy(
         and has_password_field,
         "forgot_password_present": has_forgot_password,
         "meta_present": has_meta,
+        "has_add_instagram_account_button": has_add_instagram_account,
+        "has_accounts_center_button": has_accounts_center,
+        "has_log_into_existing_account_button": has_log_into_existing_account,
+        "active_account_home": screen_type == "active_account_home",
+        "active_account_profile": screen_type == "active_account_profile",
+        "account_switcher_sheet": screen_type == "account_switcher_sheet",
+        "add_account_sheet": screen_type == "add_account_sheet",
         "continue_password_only": screen_type == "continue_password_only",
         "overlay_present": overlay_present,
         "overlay_type": overlay_type,
@@ -358,6 +403,14 @@ def _extract_available_usernames(text: str) -> list[str]:
         if candidate and ("_" in candidate or "." in candidate) and candidate not in usernames:
             usernames.append(candidate)
     return usernames
+
+
+def _extract_profile_username(text: str, available_usernames: list[str]) -> str:
+    if not available_usernames:
+        return ""
+    if _has_phrase(text, "edit profile") and _has_phrase(text, "share profile"):
+        return available_usernames[0]
+    return ""
 
 
 def _normalize_username_candidate(value: str) -> str:

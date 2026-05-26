@@ -3234,6 +3234,88 @@ Validation reelle no-password 2026-05-26 :
 - aucun submit dans cette validation. Le vrai submit futur reste limite au flow
   Vault/`SecretValue`.
 
+## Entry 2E-5N Old Logged-In Account Recovery
+
+Entry 2E-5N couvre le Cas F : Instagram peut s'ouvrir sur le home/feed ou le
+profil d'un ancien compte encore connecte dans l'app, alors que le compte attendu
+est different.
+
+Detection UI :
+
+- `screen_type=active_account_home` quand les marqueurs home/feed Instagram sont
+  visibles et que le compte actif n'est pas encore confirme;
+- `screen_type=active_account_profile` quand le profil actif affiche le username,
+  `Edit profile`, `Share profile` et les stats posts/followers/following;
+- `screen_type=account_switcher_sheet` pour le sheet contenant le compte actif,
+  `Add Instagram account` / `Add profile` et `Go to Accounts Center`;
+- `screen_type=add_account_sheet` pour le sheet `Add account` contenant
+  `Log into existing account` et `Create new account`;
+- `actual_logged_in_username` est extrait dynamiquement depuis le profil actif.
+
+Gate lifecycle obligatoire :
+
+- si `actual_logged_in_username == expected_username`, le flow termine en
+  `connected` sans recovery;
+- si le compte actif est different, le recovery n'est autorise que si
+  `previous_account_lifecycle_lookup(actual_logged_in_username, context)` confirme
+  `lifecycle_status in canceled/stopped/archived` et
+  `clone_reuse_allowed=true`;
+- pour le smoke reel courant, la source autorisee est
+  `operator_smoke_override`. Elle est temporaire, explicite, non hardcodee par
+  username, et ne vaut que pour cette validation;
+- sinon le flow stoppe safe avec `router_decision=block_wrong_active_account` et
+  `dashboard_action_type=review_logged_in_account_mismatch`, sans clic.
+
+Recovery V1 no-password :
+
+- depuis home/feed connecte, un seul tap sur le profil bottom nav pour identifier
+  le compte actif;
+- depuis le profil actif reusable/canceled, tap sur le username/fleche pour
+  ouvrir l'account switcher;
+- tap `Add Instagram account` / `Add profile`;
+- tap `Log into existing account`;
+- re-observation apres chaque etape, puis retour attendu vers un cas deja couvert :
+  `continue_as_candidate`, `account_picker`, `login_form_empty`,
+  `continue_password_only` ou `connected`;
+- si l'ecran final est `unknown`, une seule re-observation courte est autorisee,
+  puis stop safe.
+
+Garde-fous :
+
+- aucun logout automatique V1;
+- aucun tap sur un compte non attendu;
+- aucun password, aucun tap `Log in`, aucun Vault read, aucun credential reel;
+- aucune coordonnee fixe : les cibles sont resolues par hierarchy XML/bounds,
+  libelle exact normalise et dedup de bounds;
+- aliases EN couverts dans le patch : `Add Instagram account`, `Add profile`,
+  `Log into existing account`;
+- aliases FR documentes pour extension : `Ajouter un compte Instagram`,
+  `Ajouter un profil`, `Se connecter a un compte existant`,
+  `Ajouter un compte existant`.
+
+Validation reelle no-password 2026-05-26 :
+
+- pre-check device OK sur `emulator-5554` : device unique, aucun `runner.py`,
+  aucun sender/follow/unfollow/outreach projet actif;
+- observation initiale apres `app_start` : `screen_type=active_account_home`,
+  classifier `connected`;
+- smoke depuis profil actif : `actual_logged_in_username=i_m_your_traker`,
+  `expected_username=cinema_catchup`;
+- lifecycle gate operator confirme :
+  `lifecycle_status=canceled`, `clone_reuse_allowed=true`,
+  `source=operator_smoke_override`;
+- actions executees : tap username/fleche pour account switcher, tap
+  `Add Instagram account`, tap `Log into existing account`;
+- le premier ecran obtenu apres `Log into existing account` etait transitoire,
+  puis re-observation vers `continue_as_candidate`;
+- le flow existant a ensuite tap `Continue` et s'est arrete sur
+  `continue_password_only` avec `credentials_missing`;
+- signaux finaux : `ready_for_password_submit=true`,
+  `ready_for_credentials_flow=false`, `would_submit_password=false`,
+  `would_publish=false`;
+- aucun logout automatique, aucun password saisi, aucun tap `Log in`, aucun
+  Vault read, aucun credential reel, aucun publish.
+
 ## Entry 2E-5J-2B-1 Previous Account Lifecycle Gate Source
 
 Entry 2E-5J-2B-1 audite la source fiable a utiliser avant d'autoriser

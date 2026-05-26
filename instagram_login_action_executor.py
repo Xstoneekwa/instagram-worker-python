@@ -20,18 +20,29 @@ from instagram_login_ui_probe import extract_login_screen_signals_from_hierarchy
 ACTION_CONTINUE = "tap_continue"
 ACTION_USE_ANOTHER_PROFILE = "tap_use_another_profile"
 ACTION_SELECT_EXPECTED_ACCOUNT = "tap_expected_account"
+ACTION_OPEN_PROFILE_FROM_HOME = "tap_profile_bottom_nav"
+ACTION_OPEN_ACCOUNT_SWITCHER = "tap_account_switcher"
+ACTION_ADD_INSTAGRAM_ACCOUNT = "tap_add_instagram_account"
+ACTION_LOG_INTO_EXISTING_ACCOUNT = "tap_log_into_existing_account"
 NO_ACTION = "no_action"
 
 ALLOWED_DECISION_ACTIONS = {
+    "open_profile_from_home": ("Profile", ACTION_OPEN_PROFILE_FROM_HOME),
+    "open_account_switcher": ("", ACTION_OPEN_ACCOUNT_SWITCHER),
+    "tap_add_instagram_account": ("Add Instagram account", ACTION_ADD_INSTAGRAM_ACCOUNT),
+    "tap_log_into_existing_account": ("Log into existing account", ACTION_LOG_INTO_EXISTING_ACCOUNT),
     "continue_expected_account": ("Continue", ACTION_CONTINUE),
     "use_another_profile_previous_account_stopped": ("Use another profile", ACTION_USE_ANOTHER_PROFILE),
     "select_expected_account_from_picker": ("", ACTION_SELECT_EXPECTED_ACCOUNT),
 }
 NO_ACTION_DECISIONS = {
     "ambiguous_expected_account_row",
+    "block_wrong_active_account",
     "block_wrong_suggested_account",
+    "connected_expected_account",
     "expected_account_not_listed",
     "expected_username_missing",
+    "recover_old_logged_in_account",
     "start_login_form_flow",
     "unknown_no_action",
 }
@@ -147,12 +158,16 @@ def execute_login_screen_decision(
         )
 
     target_text, action = ALLOWED_DECISION_ACTIONS[decision_value]
-    if action == ACTION_SELECT_EXPECTED_ACCOUNT:
+    if action in {ACTION_SELECT_EXPECTED_ACCOUNT, ACTION_OPEN_ACCOUNT_SWITCHER}:
         target_text = _decision_target_username(decision)
     start = timer()
     selector_result = (
         _find_account_picker_target(d, target_text)
         if action == ACTION_SELECT_EXPECTED_ACCOUNT
+        else _find_account_switcher_target(d, target_text)
+        if action == ACTION_OPEN_ACCOUNT_SWITCHER
+        else _find_first_exact_target(d, _target_aliases_for_action(action, target_text))
+        if action in {ACTION_ADD_INSTAGRAM_ACCOUNT, ACTION_LOG_INTO_EXISTING_ACCOUNT}
         else _find_exact_accessibility_target(d, target_text)
     )
     timings["target_lookup_ms"] = _elapsed_ms(start, timer())
@@ -259,6 +274,34 @@ def _find_exact_accessibility_target(d: Any, target_text: str) -> dict[str, Any]
     return _resolve_target_from_selectors(d, target_text)
 
 
+def _find_first_exact_target(d: Any, target_texts: tuple[str, ...]) -> dict[str, Any]:
+    last_result = {"target": None, "failure_reason": "target_button_not_found", "resolution": "alias_not_found"}
+    for target_text in target_texts:
+        result = _find_exact_accessibility_target(d, target_text)
+        if result.get("target") or result.get("failure_reason") == "ambiguous_target_button":
+            return result
+        last_result = result
+    return last_result
+
+
+def _target_aliases_for_action(action: str, target_text: str) -> tuple[str, ...]:
+    if action == ACTION_ADD_INSTAGRAM_ACCOUNT:
+        return (
+            "Add Instagram account",
+            "Add profile",
+            "Ajouter un compte Instagram",
+            "Ajouter un profil",
+        )
+    if action == ACTION_LOG_INTO_EXISTING_ACCOUNT:
+        return (
+            "Log into existing account",
+            "Se connecter à un compte existant",
+            "Se connecter a un compte existant",
+            "Ajouter un compte existant",
+        )
+    return (target_text,)
+
+
 def _find_account_picker_target(d: Any, target_username: str) -> dict[str, Any]:
     normalized_target = _normalize_username(target_username)
     if not normalized_target:
@@ -280,6 +323,33 @@ def _find_account_picker_target(d: Any, target_username: str) -> dict[str, Any]:
         "target": None,
         "failure_reason": "target_account_row_not_found",
         "resolution": "account_picker_not_found",
+    }
+
+
+def _find_account_switcher_target(d: Any, target_username: str) -> dict[str, Any]:
+    normalized_target = _normalize_username(target_username)
+    if not normalized_target:
+        return {"target": None, "failure_reason": "target_button_not_found", "resolution": "account_switcher_empty_target"}
+    try:
+        hierarchy_xml = _dump_hierarchy_once(d)
+    except Exception:
+        hierarchy_xml = ""
+    candidates = [
+        candidate
+        for candidate in _collect_label_candidates(hierarchy_xml, normalized_target)
+        if candidate.enabled and candidate.visible and candidate.bounds.area > 0
+    ]
+    if not candidates:
+        return {"target": None, "failure_reason": "target_button_not_found", "resolution": "account_switcher_not_found"}
+    deduped = _dedupe_candidates_by_bounds(candidates)
+    zones = _distinct_visual_zones(deduped)
+    if len(zones) > 1:
+        return {"target": None, "failure_reason": "ambiguous_target_button", "resolution": "account_switcher_multiple_zones"}
+    winner = _choose_best_candidate(deduped)
+    return {
+        "target": {"kind": "bounds", "center": (winner.bounds.center_x, winner.bounds.center_y), "label": winner.label},
+        "failure_reason": "",
+        "resolution": "account_switcher_username_bounds_center",
     }
 
 
@@ -305,7 +375,7 @@ def _resolve_target_from_hierarchy(hierarchy_xml: str, target_text: str) -> dict
     if not filtered:
         return {"target": None, "failure_reason": "target_button_not_found", "resolution": "hierarchy_no_candidate"}
 
-    deduped = _dedupe_candidates_by_bounds(filtered)
+    deduped = _dedupe_candidates_by_bounds(_collapse_contained_label_candidates(filtered))
     if not deduped:
         return {"target": None, "failure_reason": "target_button_not_found", "resolution": "hierarchy_deduped_empty"}
 
@@ -427,7 +497,7 @@ def _parse_bounds(raw: str) -> _BoundsRect | None:
 
 
 def _parse_node_attributes(raw_attrs: str) -> dict[str, str]:
-    return dict(re.findall(r'(\w+)="([^"]*)"', raw_attrs))
+    return dict(re.findall(r'([\w-]+)="([^"]*)"', raw_attrs))
 
 
 def _node_is_visible(attrs: dict[str, str]) -> bool:
@@ -553,6 +623,24 @@ def _dedupe_candidates_by_bounds(candidates: list[_AccessibilityCandidate]) -> l
         if not placed:
             grouped.append([candidate])
     return [_choose_best_candidate(group) for group in grouped]
+
+
+def _collapse_contained_label_candidates(candidates: list[_AccessibilityCandidate]) -> list[_AccessibilityCandidate]:
+    clickable_containers = [candidate for candidate in candidates if candidate.clickable]
+    collapsed: list[_AccessibilityCandidate] = []
+    for candidate in candidates:
+        if (
+            not candidate.clickable
+            and any(
+                container.label == candidate.label
+                and container.bounds.area > candidate.bounds.area
+                and _bounds_contain(container.bounds, candidate.bounds.center_x, candidate.bounds.center_y)
+                for container in clickable_containers
+            )
+        ):
+            continue
+        collapsed.append(candidate)
+    return collapsed
 
 
 def _bounds_are_near(left: _BoundsRect, right: _BoundsRect) -> bool:

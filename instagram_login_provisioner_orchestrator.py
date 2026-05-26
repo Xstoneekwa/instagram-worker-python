@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any, Callable
 
 from instagram_credentials_runtime_access import SecretValue, redact_credentials_payload
@@ -120,6 +121,244 @@ def run_login_provisioning_flow(
         signals = _observe_login_signals(d, expected_username=safe_expected_username)
         timings["observe_ms"] += _elapsed_ms(start, timer())
 
+    old_logged_in_metadata: dict[str, Any] = {}
+    if signals.get("screen_type") in {"active_account_home", "active_account_profile"}:
+        if dry_run and signals.get("screen_type") == "active_account_home":
+            timings["total_ms"] = _elapsed_ms(total_start, timer())
+            return LoginProvisioningFlowResult(
+                ok=True,
+                completed=False,
+                final_outcome="dry_run",
+                final_login_status=None,
+                final_provisioning_status=None,
+                final_onboarding_status=None,
+                reason="dry_run_active_home_needs_profile_identification",
+                failure_reason=None,
+                retry_attempted=False,
+                retry_count=0,
+                actions_taken=[*actions_taken, "route:open_profile_from_home"],
+                dashboard_action_type=None,
+                should_publish_status=False,
+                publish_payload=None,
+                published=False,
+                publish_reason="disabled",
+                timings=dict(timings),
+                warnings=list(warnings),
+                safe_metadata=clean_login_probe_metadata(
+                    redact_credentials_payload(
+                        {
+                            "dry_run": True,
+                            "screen_type": "active_account_home",
+                            "router_decision": "open_profile_from_home",
+                            "would_tap_profile_bottom_nav": True,
+                            "would_submit_password": False,
+                            "would_publish": False,
+                            "logout_attempted": False,
+                        }
+                    )
+                ),
+            )
+        if signals.get("screen_type") == "active_account_home":
+            start = timer()
+            action_result = execute_login_screen_decision(
+                d,
+                SimpleNamespace(decision="open_profile_from_home"),
+                post_action_wait_ms=500,
+            )
+            timings["action_ms"] += _elapsed_ms(start, timer())
+            actions_taken.append(action_result.action)
+            if not action_result.ok:
+                return _finalize(
+                    ok=False,
+                    completed=False,
+                    final_outcome="action_failed",
+                    reason=action_result.failure_reason or action_result.reason,
+                    failure_reason=action_result.failure_reason or action_result.reason,
+                    account_id=safe_account_id,
+                    expected_username=safe_expected_username,
+                    actions_taken=actions_taken,
+                    timings=timings,
+                    warnings=[*warnings, *action_result.warnings],
+                    extra_metadata=old_logged_in_metadata,
+                    total_start=total_start,
+                    timer=timer,
+                    publisher=publisher,
+                    publish_enabled=publish_enabled,
+                )
+            start = timer()
+            signals = _observe_login_signals(d, expected_username=safe_expected_username)
+            timings["observe_ms"] += _elapsed_ms(start, timer())
+
+        if signals.get("screen_type") == "active_account_profile":
+            actual_username = _safe_public_text(signals.get("actual_logged_in_username"))
+            old_logged_in_metadata = {
+                "actual_logged_in_username": actual_username,
+                "old_logged_in_recovery_attempted": False,
+                "logout_attempted": False,
+                "would_submit_password": False,
+            }
+            if actual_username and actual_username.strip().lstrip("@").lower() == safe_expected_username.strip().lstrip("@").lower():
+                classification = classify_login_probe_outcome(LoginProbeOutcome.CONNECTED.value)
+                return _finalize(
+                    ok=True,
+                    completed=True,
+                    final_outcome=LoginProbeOutcome.CONNECTED.value,
+                    reason="active_profile_matches_expected",
+                    failure_reason=None,
+                    final_login_status=classification.login_status,
+                    final_provisioning_status=classification.provisioning_status,
+                    final_onboarding_status=classification.onboarding_status,
+                    should_publish_status=False,
+                    account_id=safe_account_id,
+                    expected_username=safe_expected_username,
+                    actions_taken=actions_taken,
+                    timings=timings,
+                    warnings=warnings,
+                    extra_metadata={
+                        **old_logged_in_metadata,
+                        "password_required": False,
+                        "ready_for_password_submit": False,
+                    },
+                    total_start=total_start,
+                    timer=timer,
+                    publisher=publisher,
+                    publish_enabled=publish_enabled,
+                )
+
+            previous_account_lifecycle = _resolve_previous_account_lifecycle(
+                suggested_username=actual_username,
+                screen_type=signals.get("screen_type"),
+                account_id=safe_account_id,
+                expected_username=safe_expected_username,
+                previous_account_lifecycle_lookup=previous_account_lifecycle_lookup,
+                legacy_lifecycle_lookup=lifecycle_lookup,
+                legacy_clone_reuse_allowed=clone_reuse_allowed,
+            )
+            recovery_route = route_login_screen(
+                expected_username=safe_expected_username,
+                suggested_username=actual_username,
+                screen_type="active_account_profile",
+                account_lifecycle_lookup=_router_lifecycle_lookup(previous_account_lifecycle),
+                clone_reuse_allowed=bool(previous_account_lifecycle.get("clone_reuse_allowed")),
+                account_id=safe_account_id,
+            )
+            actions_taken.append(f"route:{recovery_route.decision}")
+            if dry_run:
+                return _dry_run_result(
+                    route=recovery_route,
+                    signals={**signals, "suggested_username": actual_username},
+                    account_id=safe_account_id,
+                    expected_username=safe_expected_username,
+                    actions_taken=actions_taken,
+                    timings=timings,
+                    warnings=warnings,
+                    previous_account_lifecycle=previous_account_lifecycle,
+                    total_start=total_start,
+                    timer=timer,
+                )
+            old_logged_in_metadata = {
+                **old_logged_in_metadata,
+                **_flow_metadata(previous_account_lifecycle),
+                "lifecycle_gate_result": recovery_route.decision,
+                "old_logged_in_recovery_allowed": recovery_route.decision == "recover_old_logged_in_account",
+            }
+            if recovery_route.decision != "recover_old_logged_in_account":
+                return _finalize(
+                    ok=False,
+                    completed=True,
+                    final_outcome="mismatch",
+                    reason=recovery_route.reason or "block_wrong_active_account",
+                    failure_reason="mismatch",
+                    final_login_status="mismatch",
+                    final_provisioning_status="blocked",
+                    final_onboarding_status="support_required",
+                    dashboard_action_type=recovery_route.dashboard_action_type or "review_logged_in_account_mismatch",
+                    should_publish_status=False,
+                    account_id=safe_account_id,
+                    expected_username=safe_expected_username,
+                    actions_taken=actions_taken,
+                    timings=timings,
+                    warnings=warnings,
+                    extra_metadata=old_logged_in_metadata,
+                    total_start=total_start,
+                    timer=timer,
+                    publisher=publisher,
+                    publish_enabled=publish_enabled,
+                )
+
+            old_logged_in_metadata["old_logged_in_recovery_attempted"] = True
+            recovery_steps = (
+                SimpleNamespace(decision="open_account_switcher", target_username=actual_username),
+                SimpleNamespace(decision="tap_add_instagram_account"),
+                SimpleNamespace(decision="tap_log_into_existing_account"),
+            )
+            expected_step_screens = ("account_switcher_sheet", "add_account_sheet", "")
+            for index, step_decision in enumerate(recovery_steps):
+                start = timer()
+                action_result = execute_login_screen_decision(
+                    d,
+                    step_decision,
+                    post_action_wait_ms=500,
+                )
+                timings["action_ms"] += _elapsed_ms(start, timer())
+                actions_taken.append(action_result.action)
+                if not action_result.ok:
+                    return _finalize(
+                        ok=False,
+                        completed=False,
+                        final_outcome="action_failed",
+                        reason=action_result.failure_reason or action_result.reason,
+                        failure_reason=action_result.failure_reason or action_result.reason,
+                        account_id=safe_account_id,
+                        expected_username=safe_expected_username,
+                        actions_taken=actions_taken,
+                        timings=timings,
+                        warnings=[*warnings, *action_result.warnings],
+                        extra_metadata=old_logged_in_metadata,
+                        total_start=total_start,
+                        timer=timer,
+                        publisher=publisher,
+                        publish_enabled=publish_enabled,
+                    )
+                start = timer()
+                signals = _observe_login_signals(d, expected_username=safe_expected_username)
+                timings["observe_ms"] += _elapsed_ms(start, timer())
+                expected_screen = expected_step_screens[index]
+                if expected_screen and signals.get("screen_type") != expected_screen:
+                    return _finalize(
+                        ok=False,
+                        completed=False,
+                        final_outcome="unknown",
+                        reason=f"{expected_screen}_not_validated",
+                        failure_reason=f"{expected_screen}_not_validated",
+                        account_id=safe_account_id,
+                        expected_username=safe_expected_username,
+                        actions_taken=actions_taken,
+                        timings=timings,
+                        warnings=warnings,
+                        extra_metadata=old_logged_in_metadata,
+                        total_start=total_start,
+                        timer=timer,
+                        publisher=publisher,
+                        publish_enabled=publish_enabled,
+                    )
+
+            if signals.get("screen_type") == "unknown":
+                old_logged_in_metadata.update(
+                    {
+                        "post_old_logged_in_recovery_initial_screen": "transition_unknown",
+                        "post_old_logged_in_recovery_reobserve": True,
+                        "post_old_logged_in_recovery_reobserve_count": 1,
+                    }
+                )
+                time.sleep(POST_CONTINUE_REOBSERVE_WAIT_MS / 1000.0)
+                start = timer()
+                signals = _observe_login_signals(d, expected_username=safe_expected_username)
+                timings["observe_ms"] += _elapsed_ms(start, timer())
+                old_logged_in_metadata["post_old_logged_in_recovery_final_screen_type"] = _safe_screen_type_value(
+                    signals.get("screen_type") or "unknown"
+                )
+
     previous_account_lifecycle = _resolve_previous_account_lifecycle(
         suggested_username=signals.get("suggested_username"),
         screen_type=signals.get("screen_type"),
@@ -171,7 +410,7 @@ def run_login_provisioning_flow(
             actions_taken=actions_taken,
             timings=timings,
             warnings=warnings,
-            extra_metadata=_flow_metadata(previous_account_lifecycle),
+            extra_metadata={**_flow_metadata(previous_account_lifecycle), **old_logged_in_metadata},
             total_start=total_start,
             timer=timer,
             publisher=publisher,
@@ -190,7 +429,7 @@ def run_login_provisioning_flow(
             actions_taken=actions_taken,
             timings=timings,
             warnings=warnings,
-            extra_metadata=_flow_metadata(previous_account_lifecycle),
+            extra_metadata={**_flow_metadata(previous_account_lifecycle), **old_logged_in_metadata},
             total_start=total_start,
             timer=timer,
             publisher=publisher,
@@ -218,7 +457,7 @@ def run_login_provisioning_flow(
                 actions_taken=actions_taken,
                 timings=timings,
                 warnings=[*warnings, *action_result.warnings],
-                extra_metadata=_flow_metadata(previous_account_lifecycle),
+                extra_metadata={**_flow_metadata(previous_account_lifecycle), **old_logged_in_metadata},
                 total_start=total_start,
                 timer=timer,
                 publisher=publisher,
@@ -299,6 +538,7 @@ def run_login_provisioning_flow(
                 warnings=warnings,
                 extra_metadata={
                     **_flow_metadata(previous_account_lifecycle),
+                    **old_logged_in_metadata,
                     **post_continue_metadata,
                     "post_action_status_candidate": post_action_outcome,
                     "password_required": False,
@@ -321,7 +561,7 @@ def run_login_provisioning_flow(
             actions_taken=actions_taken,
             timings=timings,
             warnings=warnings,
-            extra_metadata={**_flow_metadata(previous_account_lifecycle), **post_continue_metadata},
+            extra_metadata={**_flow_metadata(previous_account_lifecycle), **old_logged_in_metadata, **post_continue_metadata},
             total_start=total_start,
             timer=timer,
             publisher=publisher,
@@ -339,6 +579,7 @@ def run_login_provisioning_flow(
             warnings=warnings,
             extra_metadata={
                 **_flow_metadata(previous_account_lifecycle),
+                **old_logged_in_metadata,
                 **post_continue_metadata,
                 **_pre_submit_observation_metadata(signals),
             },
@@ -398,7 +639,7 @@ def run_login_provisioning_flow(
             actions_taken=actions_taken,
             timings=_merge_timings(timings, password_result.timings),
             warnings=[*warnings, *password_result.warnings],
-            extra_metadata={**_flow_metadata(previous_account_lifecycle), **post_continue_metadata},
+            extra_metadata={**_flow_metadata(previous_account_lifecycle), **old_logged_in_metadata, **post_continue_metadata},
             total_start=total_start,
             timer=timer,
             publisher=publisher,
@@ -430,7 +671,7 @@ def run_login_provisioning_flow(
         actions_taken=actions_taken,
         timings=_merge_timings(timings, password_result.timings),
         warnings=[*warnings, *password_result.warnings],
-        extra_metadata={**_flow_metadata(previous_account_lifecycle), **post_continue_metadata},
+        extra_metadata={**_flow_metadata(previous_account_lifecycle), **old_logged_in_metadata, **post_continue_metadata},
         total_start=total_start,
         timer=timer,
         publisher=publisher,
@@ -521,7 +762,7 @@ def _resolve_previous_account_lifecycle(
         "reason": "",
         "lookup_failed": False,
     }
-    if not normalized_username or str(screen_type or "") != "continue_as_candidate":
+    if not normalized_username or str(screen_type or "") not in {"continue_as_candidate", "active_account_profile"}:
         return metadata
 
     context = clean_login_probe_metadata(
@@ -605,8 +846,9 @@ def _dry_run_result(
     would_tap_continue = decision == "continue_expected_account"
     would_tap_expected_account = decision == "select_expected_account_from_picker"
     would_tap_use_another_profile = decision == "use_another_profile_previous_account_stopped"
+    would_recover_old_logged_in_account = decision == "recover_old_logged_in_account"
     would_request_credentials = decision == "start_login_form_flow"
-    would_block_mismatch = decision == "block_wrong_suggested_account"
+    would_block_mismatch = decision in {"block_wrong_suggested_account", "block_wrong_active_account"}
     ready_for_password_smoke = screen_type in {"login_form_empty", "continue_password_only"} and would_request_credentials
     password_required = screen_type in {"login_form_empty", "continue_password_only"} and would_request_credentials
     ready_for_credentials_flow = screen_type == "login_form_empty" and would_request_credentials
@@ -615,6 +857,7 @@ def _dry_run_result(
         or would_tap_continue
         or would_tap_expected_account
         or would_tap_use_another_profile
+        or would_recover_old_logged_in_account
     )
     reason = "dry_run_ready" if smoke_ready else (getattr(route, "reason", "") or "dry_run_not_ready")
     dry_metadata = {
@@ -626,6 +869,8 @@ def _dry_run_result(
         "would_tap_continue": would_tap_continue,
         "would_tap_expected_account": would_tap_expected_account,
         "would_tap_use_another_profile": would_tap_use_another_profile,
+        "would_recover_old_logged_in_account": would_recover_old_logged_in_account,
+        "actual_logged_in_username": _safe_public_text(signals.get("actual_logged_in_username")),
         "would_request_credentials": would_request_credentials,
         "would_submit_password": False,
         "would_publish": False,
@@ -658,7 +903,13 @@ def _dry_run_result(
         retry_attempted=False,
         retry_count=0,
         actions_taken=list(actions_taken),
-        dashboard_action_type="review_account_mismatch" if would_block_mismatch else None,
+        dashboard_action_type=(
+            "review_logged_in_account_mismatch"
+            if decision == "block_wrong_active_account"
+            else "review_account_mismatch"
+            if would_block_mismatch
+            else None
+        ),
         should_publish_status=False,
         publish_payload=None,
         published=False,

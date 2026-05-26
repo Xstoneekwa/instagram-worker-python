@@ -15,6 +15,7 @@ from instagram_login_status_classifier import clean_login_probe_metadata
 CONTINUE_AS_CANDIDATE = "continue_as_candidate"
 CONTINUE_PASSWORD_ONLY = "continue_password_only"
 ACCOUNT_PICKER = "account_picker"
+ACTIVE_ACCOUNT_PROFILE = "active_account_profile"
 LOGIN_FORM_EMPTY = "login_form_empty"
 UNKNOWN_SCREEN = "unknown"
 
@@ -40,6 +41,7 @@ class LoginScreenRouteDecision:
     should_tap_continue: bool = False
     should_tap_use_another_profile: bool = False
     should_tap_expected_account: bool = False
+    should_recover_old_logged_in_account: bool = False
     should_start_login_form_flow: bool = False
     publish_login_status: str | None = None
     provisioning_status: str | None = None
@@ -176,6 +178,64 @@ def route_login_screen(
             clone_reuse_allowed=clone_reuse_allowed,
         )
 
+    if safe_screen_type == ACTIVE_ACCOUNT_PROFILE:
+        if normalized_suggested and normalized_suggested == normalized_expected:
+            return _decision(
+                ok=True,
+                screen_type=safe_screen_type,
+                decision="connected_expected_account",
+                expected_username=expected_username,
+                suggested_username=suggested_username or "",
+                normalized_expected_username=normalized_expected,
+                normalized_suggested_username=normalized_suggested,
+                reason="active_profile_matches_expected",
+                clone_reuse_allowed=clone_reuse_allowed,
+            )
+        lifecycle_status, lookup_error = _lookup_lifecycle_status(
+            normalized_suggested,
+            account_lifecycle_lookup,
+        )
+        if lifecycle_status in STOPPED_LIFECYCLE_STATUSES and clone_reuse_allowed:
+            return _decision(
+                ok=True,
+                screen_type=safe_screen_type,
+                decision="recover_old_logged_in_account",
+                expected_username=expected_username,
+                suggested_username=suggested_username or "",
+                normalized_expected_username=normalized_expected,
+                normalized_suggested_username=normalized_suggested,
+                target_username=normalized_suggested,
+                next_action="open_account_switcher_then_login_existing",
+                reason="old_logged_in_account_reusable",
+                should_recover_old_logged_in_account=True,
+                audit_reason="old_logged_in_account_recovery",
+                clone_reuse_allowed=clone_reuse_allowed,
+                lifecycle_status=lifecycle_status,
+            )
+        reason = (
+            "lifecycle_lookup_failed_wrong_active_account_requires_admin_review"
+            if lookup_error
+            else "wrong_active_account_requires_admin_review"
+        )
+        return _decision(
+            ok=False,
+            screen_type=safe_screen_type,
+            decision="block_wrong_active_account",
+            expected_username=expected_username,
+            suggested_username=suggested_username or "",
+            normalized_expected_username=normalized_expected,
+            normalized_suggested_username=normalized_suggested,
+            target_username=normalized_suggested,
+            reason=reason,
+            should_escalate=True,
+            publish_login_status="mismatch",
+            provisioning_status="blocked",
+            onboarding_status="support_required",
+            dashboard_action_type="review_logged_in_account_mismatch",
+            clone_reuse_allowed=clone_reuse_allowed,
+            lifecycle_status=lifecycle_status,
+        )
+
     if safe_screen_type != CONTINUE_AS_CANDIDATE:
         return _decision(
             ok=False,
@@ -284,6 +344,7 @@ def _decision(
     should_tap_continue: bool = False,
     should_tap_use_another_profile: bool = False,
     should_tap_expected_account: bool = False,
+    should_recover_old_logged_in_account: bool = False,
     should_start_login_form_flow: bool = False,
     publish_login_status: str | None = None,
     provisioning_status: str | None = None,
@@ -322,6 +383,7 @@ def _decision(
         should_tap_continue=should_tap_continue,
         should_tap_use_another_profile=should_tap_use_another_profile,
         should_tap_expected_account=should_tap_expected_account,
+        should_recover_old_logged_in_account=should_recover_old_logged_in_account,
         should_start_login_form_flow=should_start_login_form_flow,
         publish_login_status=publish_login_status,
         provisioning_status=provisioning_status,

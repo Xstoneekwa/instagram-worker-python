@@ -204,6 +204,55 @@ class InstagramLoginUiProbeTest(unittest.TestCase):
         self.assertTrue(signals["has_create_new_account_button"])
         self.assertTrue(signals["meta_present"])
 
+    def test_detects_active_account_home_markers(self) -> None:
+        xml = (
+            '<node text="Instagram" />'
+            '<node text="Your story" />'
+            '<node text="Suggested for you" />'
+            '<node content-desc="Profile" />'
+        )
+
+        signals = extract_login_screen_signals_from_hierarchy(xml)
+
+        self.assertEqual(signals["screen_type"], "active_account_home")
+        self.assertTrue(signals["active_account_home"])
+
+    def test_detects_active_account_profile_username(self) -> None:
+        xml = (
+            '<node text="random_old_profile" />'
+            '<node text="Edit profile" />'
+            '<node text="Share profile" />'
+            '<node text="0 posts" />'
+            '<node text="0 followers" />'
+            '<node text="2 following" />'
+        )
+
+        signals = extract_login_screen_signals_from_hierarchy(xml, expected_username="random_expected")
+
+        self.assertEqual(signals["screen_type"], "active_account_profile")
+        self.assertTrue(signals["active_account_profile"])
+        self.assertEqual(signals["actual_logged_in_username"], "random_old_profile")
+
+    def test_detects_account_switcher_and_add_account_sheets(self) -> None:
+        switcher_xml = (
+            '<node text="random_old_profile" />'
+            '<node text="Add Instagram account" />'
+            '<node text="Go to Accounts Center" />'
+        )
+        add_xml = (
+            '<node text="Add account" />'
+            '<node text="Log into existing account" />'
+            '<node text="Create new account" />'
+        )
+
+        switcher = extract_login_screen_signals_from_hierarchy(switcher_xml)
+        add = extract_login_screen_signals_from_hierarchy(add_xml)
+
+        self.assertEqual(switcher["screen_type"], "account_switcher_sheet")
+        self.assertTrue(switcher["has_add_instagram_account_button"])
+        self.assertEqual(add["screen_type"], "add_account_sheet")
+        self.assertTrue(add["has_log_into_existing_account_button"])
+
     def test_extracts_login_form_empty_signals(self) -> None:
         xml = (
             '<node text="Username, email or mobile number" />'

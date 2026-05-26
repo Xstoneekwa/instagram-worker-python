@@ -178,6 +178,43 @@ class InstagramLoginScreenRouterTest(unittest.TestCase):
         self.assertFalse(decision.ok)
         self.assertEqual(decision.decision, "expected_username_missing")
 
+    def test_active_profile_expected_account_is_connected(self) -> None:
+        decision = route_login_screen(
+            expected_username="random_expected",
+            suggested_username="random_expected",
+            screen_type="active_account_profile",
+        )
+
+        self.assertTrue(decision.ok)
+        self.assertEqual(decision.decision, "connected_expected_account")
+        self.assertFalse(decision.should_recover_old_logged_in_account)
+
+    def test_active_profile_canceled_reusable_allows_recovery(self) -> None:
+        decision = route_login_screen(
+            expected_username="random_expected",
+            suggested_username="random_old_profile",
+            screen_type="active_account_profile",
+            account_lifecycle_lookup=lambda _username: {"lifecycle_status": "canceled"},
+            clone_reuse_allowed=True,
+        )
+
+        self.assertTrue(decision.ok)
+        self.assertEqual(decision.decision, "recover_old_logged_in_account")
+        self.assertTrue(decision.should_recover_old_logged_in_account)
+
+    def test_active_profile_active_blocks_recovery(self) -> None:
+        decision = route_login_screen(
+            expected_username="random_expected",
+            suggested_username="random_old_profile",
+            screen_type="active_account_profile",
+            account_lifecycle_lookup=lambda _username: {"lifecycle_status": "active"},
+            clone_reuse_allowed=True,
+        )
+
+        self.assertFalse(decision.ok)
+        self.assertEqual(decision.decision, "block_wrong_active_account")
+        self.assertEqual(decision.dashboard_action_type, "review_logged_in_account_mismatch")
+
     def test_unknown_screen_has_no_action(self) -> None:
         decision = route_login_screen(
             expected_username="new_account",

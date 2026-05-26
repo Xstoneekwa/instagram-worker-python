@@ -243,6 +243,35 @@ Post-submit policy future :
   transitoire, puis stabilisation vers `continue_password_only` avec
   `ready_for_password_submit=true`; le vrai submit reste futur via
   Vault/`SecretValue` uniquement.
+- Entry 2E-5N : Cas F old logged-in account recovery. Instagram peut ouvrir sur
+  le home/feed ou le profil d'un ancien compte encore connecte. Le probe expose
+  `active_account_home`, `active_account_profile`, `account_switcher_sheet`,
+  `add_account_sheet` et `actual_logged_in_username`. Si le compte actif est le
+  compte attendu, le flow finalise `connected` sans recovery. Si le compte actif
+  est different, le recovery n'est autorise que par lifecycle gate explicite :
+  `lifecycle_status in canceled/stopped/archived` et
+  `clone_reuse_allowed=true`, avec source temporaire
+  `operator_smoke_override` pour le smoke. Sinon stop safe
+  `block_wrong_active_account`, dashboard
+  `review_logged_in_account_mismatch`, aucun clic. Le recovery V1 suit le chemin
+  Instagram sans logout automatique : home -> profil -> account switcher via
+  username/fleche -> `Add Instagram account` / `Add profile` ->
+  `Log into existing account`, puis retour vers les cas deja couverts
+  (`continue_as_candidate`, `account_picker`, `login_form_empty`,
+  `continue_password_only`, `connected`). Toujours no-password : aucun `Log in`,
+  aucun password, aucun Vault read, aucun publish par defaut. Les aliases EN sont
+  couverts dans le patch; les aliases FR (`Ajouter un compte Instagram`,
+  `Ajouter un profil`, `Se connecter a un compte existant`,
+  `Ajouter un compte existant`) restent documentes pour extension. Smoke reel
+  2026-05-26 : depart `active_account_home`/profil
+  `actual_logged_in_username=i_m_your_traker`,
+  `expected_username=cinema_catchup`, lifecycle override
+  `canceled + clone_reuse_allowed=true`, recovery autorise. Navigation
+  account switcher -> `Add Instagram account` -> `Log into existing account`,
+  puis re-observation vers `continue_as_candidate`; le flow existant a tape
+  `Continue` et stoppe sur `continue_password_only` en `credentials_missing`,
+  `ready_for_password_submit=true`, sans password, sans `Log in`, sans Vault,
+  sans logout et sans publish.
 - Entry 2E-5J-2B-1 : audit lifecycle read-only. Les statuts existants couvrent
   `client_instagram_accounts` login/provisioning/onboarding,
   `client_subscriptions` active/paused/cancelled/expired,

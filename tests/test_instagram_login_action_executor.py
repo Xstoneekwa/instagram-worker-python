@@ -33,6 +33,30 @@ ACCOUNT_PICKER_DUPLICATE_EXPECTED_XML = (
     '<node text="Use another profile" clickable="true" bounds="[100,780][980,900]" />'
     '<node text="Create new account" clickable="true" bounds="[100,1900][980,2020]" />'
 )
+PROFILE_XML = (
+    '<node content-desc="Profile" clickable="true" bounds="[880,2100][1020,2240]" />'
+)
+ACTIVE_PROFILE_XML = (
+    '<node text="random_old_profile" clickable="true" bounds="[70,120][360,190]" />'
+    '<node text="Edit profile" />'
+    '<node text="Share profile" />'
+)
+ACCOUNT_SWITCHER_XML = (
+    '<node text="random_old_profile" />'
+    '<node text="Add Instagram account" clickable="true" bounds="[150,1850][930,1960]" />'
+    '<node text="Go to Accounts Center" />'
+)
+ADD_ACCOUNT_SHEET_XML = (
+    '<node text="Add account" />'
+    '<node text="Log into existing account" clickable="true" bounds="[100,1700][980,1820]" />'
+    '<node text="Create new account" clickable="true" bounds="[100,1880][980,2000]" />'
+)
+ACCOUNT_SWITCHER_NESTED_ADD_XML = (
+    '<node text="random_old_profile" />'
+    '<node content-desc="Add Instagram account" clickable="true" bounds="[53,1978][1027,2147]" />'
+    '<node text="Add Instagram account" clickable="false" bounds="[232,2035][678,2090]" />'
+    '<node text="Go to Accounts Center" />'
+)
 USE_ANOTHER_DUPLICATE_XML = (
     '<node text="Continue" clickable="true" bounds="[100,1000][980,1120]" />'
     '<node text="Use another profile" clickable="false" bounds="[371,1215][710,1280]" />'
@@ -386,6 +410,36 @@ class InstagramLoginActionExecutorTest(unittest.TestCase):
         self.assertFalse(result.executed)
         self.assertEqual(result.failure_reason, "ambiguous_target_account_row")
         self.assertEqual(device.bounds_clicks, [])
+
+    def test_old_logged_in_recovery_targets_are_single_tap(self) -> None:
+        cases = (
+            ("open_profile_from_home", PROFILE_XML, (950, 2170)),
+            ("open_account_switcher", ACTIVE_PROFILE_XML, (215, 155)),
+            ("tap_add_instagram_account", ACCOUNT_SWITCHER_XML, (540, 1905)),
+            ("tap_log_into_existing_account", ADD_ACCOUNT_SHEET_XML, (540, 1760)),
+        )
+        for decision, xml, expected_tap in cases:
+            with self.subTest(decision=decision):
+                device = FakeDevice(hierarchy=xml)
+                decision_obj = type(
+                    "Decision",
+                    (),
+                    {"decision": decision, "target_username": "random_old_profile"},
+                )()
+
+                result = execute_login_screen_decision(device, decision_obj, sleeper=Mock())
+
+                self.assertTrue(result.executed)
+                self.assertEqual(device.bounds_clicks, [expected_tap])
+
+    def test_add_instagram_account_prefers_clickable_container_for_nested_label(self) -> None:
+        device = FakeDevice(hierarchy=ACCOUNT_SWITCHER_NESTED_ADD_XML)
+        decision_obj = type("Decision", (), {"decision": "tap_add_instagram_account"})()
+
+        result = execute_login_screen_decision(device, decision_obj, sleeper=Mock())
+
+        self.assertTrue(result.executed)
+        self.assertEqual(device.bounds_clicks, [(540, 2062)])
 
     def test_output_is_safe_without_raw_xml_or_sensitive_values(self) -> None:
         device = FakeDevice(hierarchy=SENSITIVE_XML)
