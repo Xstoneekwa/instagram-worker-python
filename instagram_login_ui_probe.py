@@ -103,6 +103,8 @@ def extract_login_screen_signals_from_hierarchy(hierarchy_xml: str | None) -> di
     has_continue_button = _has_phrase(text, "continue")
     has_use_another_profile = _has_phrase(text, "use another profile")
     has_create_new_account = _has_phrase(text, "create new account")
+    has_forgot_password = _has_phrase(text, "forgot password")
+    has_meta = _has_phrase(text, "meta")
     has_username_field = "username, email or mobile number" in text or (
         "username" in text and ("email" in text or "mobile" in text)
     )
@@ -133,11 +135,20 @@ def extract_login_screen_signals_from_hierarchy(hierarchy_xml: str | None) -> di
         "has_username_field": has_username_field,
         "has_password_field": has_password_field,
         "has_login_button": has_login_button,
+        "username_editable_present": screen_type == "login_form_empty" and has_username_field,
+        "password_field_editable_present": screen_type in {"login_form_empty", "continue_password_only"}
+        and has_password_field,
+        "forgot_password_present": has_forgot_password,
+        "meta_present": has_meta,
         "continue_password_only": screen_type == "continue_password_only",
         "overlay_present": overlay_present,
         "overlay_type": overlay_type,
         "overlay_blocking_business": False,
-        "password_required": screen_type == "continue_password_only",
+        "password_required": screen_type in {"login_form_empty", "continue_password_only"},
+        "ready_for_credentials_flow": screen_type == "login_form_empty"
+        and has_username_field
+        and has_password_field
+        and has_login_button,
         "ready_for_password_submit": screen_type == "continue_password_only" and has_password_field and has_login_button,
         "transition_loading": transition_loading,
     }

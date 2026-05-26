@@ -21,6 +21,13 @@ LOGIN_FORM_SIGNALS = {
     "has_username_field": True,
     "has_password_field": True,
     "has_login_button": True,
+    "username_editable_present": True,
+    "password_field_editable_present": True,
+    "forgot_password_present": True,
+    "has_create_new_account_button": True,
+    "meta_present": True,
+    "password_required": True,
+    "ready_for_credentials_flow": True,
 }
 CONTINUE_SIGNALS = {
     "screen_type": "continue_as_candidate",
@@ -739,6 +746,8 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertEqual(result.final_outcome, "dry_run")
         self.assertTrue(result.safe_metadata["would_request_credentials"])
         self.assertFalse(result.safe_metadata["would_submit_password"])
+        self.assertFalse(result.safe_metadata["would_publish"])
+        self.assertTrue(result.safe_metadata["ready_for_credentials_flow"])
         self.assertTrue(result.safe_metadata["ready_for_password_smoke"])
         getter.assert_not_called()
         self.assertEqual(selectors["login"].click_calls, 0)

@@ -570,6 +570,7 @@ def _dry_run_result(
     would_block_mismatch = decision == "block_wrong_suggested_account"
     ready_for_password_smoke = screen_type in {"login_form_empty", "continue_password_only"} and would_request_credentials
     password_required = screen_type in {"login_form_empty", "continue_password_only"} and would_request_credentials
+    ready_for_credentials_flow = screen_type == "login_form_empty" and would_request_credentials
     smoke_ready = ready_for_password_smoke or would_tap_continue or would_tap_use_another_profile
     reason = "dry_run_ready" if smoke_ready else (getattr(route, "reason", "") or "dry_run_not_ready")
     dry_metadata = {
@@ -587,6 +588,7 @@ def _dry_run_result(
         "smoke_ready_for_real_login": smoke_ready,
         "ready_for_password_smoke": ready_for_password_smoke,
         "password_required": password_required,
+        "ready_for_credentials_flow": ready_for_credentials_flow,
         "overlay_present": bool(signals.get("overlay_present")),
         "overlay_type": str(signals.get("overlay_type") or ""),
         "overlay_blocking_business": bool(signals.get("overlay_blocking_business")),

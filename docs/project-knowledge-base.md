@@ -215,6 +215,18 @@ Post-submit policy future :
   `password_required=true`, `ready_for_password_submit=true`. Aucun password,
   aucun tap `Log in`, aucun Vault read, aucun publish. Le vrai submit reste
   futur via Vault/`SecretValue` uniquement.
+- Entry 2E-5L : Cas D direct `login_form_empty` sur `app_start`. Instagram peut
+  ouvrir directement le formulaire vide complet avec champ
+  `Username, email or mobile number`, champ `Password`, bouton `Log in`,
+  `Forgot password?`, `Create new account` et `Meta`. Le probe expose
+  `username_editable_present=true`, `password_field_editable_present=true`,
+  `password_required=true`, `ready_for_credentials_flow=true`. Le routeur donne
+  `start_login_form_flow`; le dry-run no-password donne
+  `would_request_credentials=true`, `would_submit_password=false`,
+  `would_publish=false`. Validation reelle faite sans saisie username/password,
+  sans tap `Log in`, sans Vault read et sans publish. Le vrai submit reste futur
+  via Vault/`SecretValue` uniquement. Le patch couvre l'ecran observe EN; des
+  aliases FR/EN pourront etre ajoutes plus tard.
 - Entry 2E-5J-2B-1 : audit lifecycle read-only. Les statuts existants couvrent
   `client_instagram_accounts` login/provisioning/onboarding,
   `client_subscriptions` active/paused/cancelled/expired,

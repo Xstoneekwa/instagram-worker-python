@@ -187,6 +187,8 @@ class InstagramLoginUiProbeTest(unittest.TestCase):
             '<node text="Password" />'
             '<node text="Log in" />'
             '<node text="Forgot password?" />'
+            '<node text="Create new account" />'
+            '<node text="Meta" />'
         )
 
         signals = extract_login_screen_signals_from_hierarchy(xml)
@@ -195,6 +197,32 @@ class InstagramLoginUiProbeTest(unittest.TestCase):
         self.assertTrue(signals["has_username_field"])
         self.assertTrue(signals["has_password_field"])
         self.assertTrue(signals["has_login_button"])
+        self.assertTrue(signals["username_editable_present"])
+        self.assertTrue(signals["password_field_editable_present"])
+        self.assertTrue(signals["forgot_password_present"])
+        self.assertTrue(signals["has_create_new_account_button"])
+        self.assertTrue(signals["meta_present"])
+        self.assertTrue(signals["password_required"])
+        self.assertTrue(signals["ready_for_credentials_flow"])
+        self.assertFalse(signals["continue_password_only"])
+
+    def test_login_form_empty_with_secondary_signals_stays_login_form(self) -> None:
+        xml = (
+            '<node text="English (US)" />'
+            '<node text="Username, email or mobile number" />'
+            '<node text="Password" />'
+            '<node text="Log in" />'
+            '<node text="Forgot password?" />'
+            '<node text="Create new account" />'
+            '<node content-desc="Meta logo" />'
+        )
+
+        signals = extract_login_screen_signals_from_hierarchy(xml)
+
+        self.assertEqual(signals["screen_type"], "login_form_empty")
+        self.assertTrue(signals["ready_for_credentials_flow"])
+        self.assertTrue(signals["forgot_password_present"])
+        self.assertTrue(signals["meta_present"])
 
     def test_extracts_continue_password_only_signals(self) -> None:
         xml = (
@@ -214,6 +242,7 @@ class InstagramLoginUiProbeTest(unittest.TestCase):
         self.assertFalse(signals["has_username_field"])
         self.assertTrue(signals["password_required"])
         self.assertTrue(signals["ready_for_password_submit"])
+        self.assertFalse(signals["ready_for_credentials_flow"])
 
     def test_continue_password_only_tolerates_password_manager_overlay(self) -> None:
         xml = (

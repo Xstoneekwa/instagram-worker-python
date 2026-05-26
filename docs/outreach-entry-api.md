@@ -3124,6 +3124,49 @@ Validation reelle no-password 2026-05-26 :
 - le vrai submit reste hors scope de cette validation et devra passer plus tard
   uniquement par Vault/`SecretValue`.
 
+## Entry 2E-5L Direct Login Form Empty
+
+Entry 2E-5L couvre le Cas D : `app_start` Instagram peut ouvrir directement
+l'ecran de login complet vide, sans etape `Continue` ni `Use another profile`.
+
+Detection UI :
+
+- `screen_type=login_form_empty`;
+- signaux principaux : champ `Username, email or mobile number`, champ
+  `Password`, bouton `Log in`;
+- signaux secondaires : `Forgot password?`, `Create new account`, `Meta`;
+- signaux exposes : `username_editable_present=true`,
+  `password_field_editable_present=true`, `password_required=true`,
+  `ready_for_credentials_flow=true`;
+- le cas reste distinct de `continue_password_only`, qui affiche deja un
+  username et n'a pas de champ username editable;
+- le patch couvre l'ecran observe en anglais. Des aliases EN/FR supplementaires
+  pourront etre ajoutes plus tard sans changer le contrat de routage.
+
+Routage / orchestrateur :
+
+- `login_form_empty -> start_login_form_flow`;
+- en dry-run/no-password :
+  `would_request_credentials=true`, `would_submit_password=false`,
+  `would_publish=false`;
+- le vrai submit futur devra passer uniquement par
+  `instagram-credentials`/Vault/`SecretValue`, jamais par un password en clair.
+
+Validation reelle no-password 2026-05-26 :
+
+- pre-check device OK sur `emulator-5554` : device unique, aucun `runner.py`,
+  aucun sender/follow/unfollow/outreach projet actif;
+- `app_start` Instagram OK avec package `com.instagram.android`;
+- ecran reel detecte : `screen_type=login_form_empty`, classifier `logged_out`;
+- champs/signaux : username field present, password field present, bouton
+  `Log in` present, `Forgot password?`, `Create new account`, `Meta`,
+  `overlay_present=false`, `ready_for_credentials_flow=true`;
+- router/dry-run : `router_decision=start_login_form_flow`,
+  `would_request_credentials=true`, `would_submit_password=false`,
+  `would_publish=false`;
+- aucun username saisi, aucun password saisi, aucun tap `Log in`, aucun Vault
+  read, aucun credential reel, aucun publish et aucun runner hook.
+
 ## Entry 2E-5J-2B-1 Previous Account Lifecycle Gate Source
 
 Entry 2E-5J-2B-1 audite la source fiable a utiliser avant d'autoriser
