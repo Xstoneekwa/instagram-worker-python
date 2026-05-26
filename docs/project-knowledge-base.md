@@ -33,8 +33,10 @@ Checkpoints recents valides :
 - Entry 2E-5H : Supabase Vault Reader Helper checkpointe.
 - Entry 2E-5H-2 : real Supabase Vault read RPC + fake secret smoke valide,
   sans vrai credential client.
-- Entry 2E-5I : Controlled Password Form Executor en cours de validation
-  mocks-only, sans smoke reel.
+- Entry 2E-5I : Controlled Password Form Executor valide mocks-only,
+  sans smoke reel.
+- Entry 2E-5J : Provisioner Orchestrator Skeleton en cours de validation
+  mocks-only, sans run device ni vrai login.
 
 Le runtime principal n'est pas encore branche au login/provisioning complet :
 pas de vrai login, pas de password tap, pas de runner hook, pas de run device
@@ -54,6 +56,9 @@ provisioning.
 - 2E-5H-2 :
   - SHA `1d3ced61d813139bdc4f3f3c202127dd35f40e8a`
   - tag `checkpoint-entry2e5h2-real-vault-read-rpc-20260526`
+- 2E-5I :
+  - SHA `349587f816dae843bca2b37d38f15cc76d425bcf`
+  - tag `checkpoint-entry2e5i-password-form-executor-20260526`
 
 ## 4. Architecture Actuelle
 
@@ -86,13 +91,16 @@ Deja pose :
 - Secure Credential Runtime Access;
 - Supabase Vault Reader Helper;
 - real Vault read RPC service-role only;
-- Controlled Password Form Executor mocks-only en cours.
+- Controlled Password Form Executor mocks-only valide;
+- Provisioner Orchestrator Skeleton mocks-only en cours.
 
 Etapes suivantes :
 
 - 2E-5H-2 : RPC service-role only de lecture Vault + smoke fake secret valide;
-- finaliser 2E-5I tests/mock : password form executor controle, sans smoke reel;
-- 2E-5I-2 : smoke reel `cinema_catchup` via flow securise
+- finaliser 2E-5J : orchestrateur isole probe/router/action/credentials/password
+  executor/classifier/publisher injectable;
+- 2E-5J-2 smoke orchestrator controle ou 2E-5I-2 smoke reel `cinema_catchup`
+  via flow securise
   `instagram-credentials` -> Vault apres validation explicite;
 - integration provisioner runtime derriere flags;
 - status publish connected/2FA/checkpoint/failed via orchestrateur futur;
@@ -109,6 +117,8 @@ Contraintes permanentes :
   aucune ecriture Supabase.
 - Le futur provisioner orchestrator decidera retry/escalation/status publish et
   dashboard actions a partir de `failure_reason` et `post_submit_outcome`.
+- 2E-5J centralise cette policy dans un module isole, avec `publish_enabled=false`
+  par defaut et publisher injectable/mocke.
 
 Retry policy future :
 
@@ -132,6 +142,8 @@ Post-submit policy future :
   le meme password;
 - `unknown` -> re-observe possible 1 fois, puis `retry_later` ou
   `support_required`.
+- 2E-5J ne lance aucun smoke reel; toute execution device future exige une
+  fenetre device idle, un lock UI exclusif et un compte test dedie.
 
 ## 6. Dashboard / Backend / BotApp Registry
 
@@ -147,7 +159,8 @@ statuts safe :
 - `provisioning_status`;
 - `onboarding_status`;
 - actions `submit_instagram_credentials`, `update_instagram_password`,
-  `complete_two_factor`, `resolve_checkpoint`, `review_account_mismatch`;
+  `complete_two_factor`, `resolve_checkpoint`, `review_login_failure`,
+  `review_account_mismatch`;
 - lifecycle compte : active, paused, canceled, onboarding;
 - audit `previous_account_stopped_override`;
 - retry provisioning et relance verification credentials.
@@ -171,6 +184,7 @@ ne devra jamais lire ni afficher le secret.
 Regles device a respecter avant orchestration multi-clone :
 
 - 1 phone = 1 action UI active a la fois;
+- smoke reel login seulement sur fenetre device idle;
 - pas de visible preflight sur clone B pendant que clone A tourne;
 - lock UI exclusif au niveau device;
 - buffer technique entre clones;
@@ -226,8 +240,9 @@ controle device, pas a contourner la state machine Instagram.
 
 Ordre recommande :
 
-1. Finaliser 2E-5I : tests/mock du password form executor controle.
-2. 2E-5I-2 : smoke reel `cinema_catchup` via flow securise, jamais via chat/prompt/shell
+1. Finaliser 2E-5J : orchestrateur isole mocks-only.
+2. 2E-5J-2 smoke orchestrator controle ou 2E-5I-2 smoke reel
+   `cinema_catchup` via flow securise, jamais via chat/prompt/shell
    history visible.
 3. Integration provisioner runtime derriere flags.
 4. Status publish connected/2FA/checkpoint/failed via provisioner orchestrator.

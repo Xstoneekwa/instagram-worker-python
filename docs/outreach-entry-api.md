@@ -2709,6 +2709,84 @@ Prochaine etape apres 2E-5I :
   logs, screenshots ou XML;
 - apres smoke, changer le password.
 
+## Entry 2E-5J Provisioner Orchestrator Skeleton
+
+Entry 2E-5J ajoute `instagram_login_provisioner_orchestrator.py`, un
+orchestrateur isole qui assemble les briques login/provisioning validees sans
+brancher le runtime principal. Cette etape reste mocks-only : aucun vrai login,
+aucun smoke device, aucun compte client reel, aucun runner hook, aucun
+sender/follow/outreach hook, aucun `app_start`, aucun `app_stop`.
+
+Role de l'orchestrateur :
+
+- observer l'ecran courant via signaux injectes ou dump UI mockable;
+- router avec `route_login_screen(...)`;
+- executer `Continue` ou `Use another profile` via
+  `execute_login_screen_decision(...)` si la decision l'autorise;
+- re-observer apres action et revalider `login_form_empty`;
+- charger credentials via `credentials_getter(account_id)` injecte;
+- appeler `execute_login_form_credentials(...)` uniquement avec
+  `SecretValue`;
+- classifier `post_submit_outcome` via le classifier login existant;
+- retourner un resultat safe pret a etre publie plus tard;
+- publier uniquement si `publish_enabled=true` et `publisher` injecte.
+
+Decisions V1 supportees :
+
+- `continue_expected_account` -> tap Continue, re-observe, login form flow;
+- `use_another_profile_previous_account_stopped` -> tap Use another profile,
+  re-observe, login form flow;
+- `block_wrong_suggested_account` -> stop safe, status `mismatch` /
+  `blocked` / `support_required`, action dashboard `review_account_mismatch`;
+- `unknown_no_action` -> stop safe, pas d'escalade directe V1;
+- `start_login_form_flow` -> credentials + password form executor.
+
+Retry / escalation centralises :
+
+- aucun retry dans les executors bas niveau;
+- retry max 1 dans l'orchestrateur;
+- retry seulement pour erreurs UI transitoires :
+  `username_field_not_found`, `password_field_not_found`,
+  `login_button_not_found`, `ambiguous_login_form`, `post_submit_dump_failed`,
+  `input_failed`, `submit_failed`, ou `unknown` post-submit re-observable;
+- retry uniquement apres nouveau dump et revalidation claire
+  `login_form_empty`;
+- aucun retry pour credentials missing/invalid, `login_failed`, `needs_2fa`,
+  `checkpoint`, mismatch/wrong account ou `block_wrong_suggested_account`;
+- pas de boucle infinie;
+- apres retry echoue : stop safe, reason stable, dashboard action future selon
+  contexte.
+
+Mapping status/dashboard futur :
+
+- `connected` -> `connected` / `ready` / `ready`;
+- `needs_2fa` -> `needs_2fa` / `login_verification_pending` /
+  `verification_pending`, action dashboard `complete_two_factor`;
+- `checkpoint` -> `checkpoint` / `login_verification_pending` /
+  `verification_pending`, action dashboard `resolve_checkpoint`;
+- `login_failed` -> `failed` / `failed` / `support_required`, action dashboard
+  `update_instagram_password`;
+- `unknown` -> stop safe, re-observe possible une fois, puis `retry_later` ou
+  `support_required` selon orchestrateur futur.
+
+Publish V1 :
+
+- `publish_enabled=false` par defaut;
+- `publisher` injectable et mocke en tests;
+- aucun HTTP reel en 2E-5J;
+- payload publish safe uniquement : account/status/reason/metadata safe;
+- jamais password, `secret_ref`, Vault UUID, token, service-role key,
+  Authorization header, XML brut, screenshot path, `adb_serial`,
+  `device_udid`, cookies/sessionid ou raw RPC response.
+
+Prochaine etape apres 2E-5J :
+
+- 2E-5J-2 smoke orchestrator controle ou 2E-5I-2 smoke `cinema_catchup`, selon
+  validation explicite;
+- smoke reel seulement sur device idle, avec lock device, compte test dedie et
+  credentials fournis via `instagram-credentials` -> Supabase Vault;
+- aucun password dans chat, Cursor, logs, git, XML ou screenshots.
+
 Procedure future `cinema_catchup` :
 
 - l'utilisateur changera le mot de passe du compte test;
