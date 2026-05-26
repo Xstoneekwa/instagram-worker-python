@@ -3167,6 +3167,73 @@ Validation reelle no-password 2026-05-26 :
 - aucun username saisi, aucun password saisi, aucun tap `Log in`, aucun Vault
   read, aucun credential reel, aucun publish et aucun runner hook.
 
+## Entry 2E-5M Account Picker / Profile Chooser
+
+Entry 2E-5M couvre le Cas E : `app_start` Instagram peut ouvrir un ecran de
+selection de comptes, avec plusieurs lignes de profils et les actions
+`Use another profile`, `Create new account` et `Meta`.
+
+Detection UI :
+
+- nouveau `screen_type=account_picker`;
+- `available_usernames` liste les handles visibles de facon generique;
+- `expected_username_present` et `expected_username_match_count` sont calcules
+  quand un `expected_username` est fourni;
+- signaux secondaires : `has_use_another_profile_button=true`,
+  `has_create_new_account_button=true`, `meta_present=true`;
+- aucune logique applicative ne hardcode `cinema_catchup` ou
+  `i_m_your_traker`; ces usernames restent des fixtures de smoke/docs.
+
+Routage :
+
+- si `expected_username` est present une seule fois :
+  `select_expected_account_from_picker`,
+  `would_tap_expected_account=true`;
+- si le compte attendu est absent : `expected_account_not_listed`, no tap,
+  action dashboard future possible `review_account_picker_missing_expected`;
+- si plusieurs lignes correspondent : `ambiguous_expected_account_row`, no tap;
+- si `expected_username` manque : `expected_username_missing`, no tap.
+
+Action executor :
+
+- `select_expected_account_from_picker` resout uniquement la ligne du
+  `expected_username`;
+- resolution par hierarchy XML/bounds : texte username exact normalise, puis
+  parent row cliquable contenant la cible si disponible, sinon centre bounds du
+  username;
+- un seul tap, aucune coordonnee fixe, aucun tap sur un autre compte, aucun
+  retry en boucle;
+- erreurs safe : `target_account_row_not_found` ou
+  `ambiguous_target_account_row`.
+
+Post-action :
+
+- outcomes acceptes sans password : `connected`, `continue_password_only`,
+  `login_form_empty`, `needs_2fa`, `checkpoint`, `login_failed`;
+- apres tap de compte attendu, un `unknown` transitoire peut preceder le vrai
+  ecran suivant. L'orchestrateur fait une seule re-observation courte a 1500 ms
+  avec metadata `post_account_picker_*`, sans deuxieme tap;
+- si `continue_password_only` ou `login_form_empty` est atteint dans cette
+  validation no-password, le flow s'arrete avant submit si aucun credential
+  injectable n'est fourni : `would_submit_password=false`.
+
+Validation reelle no-password 2026-05-26 :
+
+- pre-check device OK sur `emulator-5554` : device unique, aucun `runner.py`,
+  aucun sender/follow/unfollow/outreach projet actif;
+- `app_start` Instagram OK avec package `com.instagram.android`;
+- ecran reel detecte : `screen_type=account_picker`,
+  `available_usernames=[cinema_catchup, i_m_your_traker]`,
+  `expected_username_present=true`, router
+  `select_expected_account_from_picker`, `would_tap_expected_account=true`;
+- action autorisee executee : un seul tap sur la ligne `cinema_catchup`;
+- aucun tap `i_m_your_traker`, aucun tap `Use another profile`, aucun tap
+  `Log in`, aucun username/password saisi, aucun Vault read;
+- premier post-action observe `unknown` transitoire, puis stabilisation passive
+  vers `continue_password_only` avec `ready_for_password_submit=true`;
+- aucun submit dans cette validation. Le vrai submit futur reste limite au flow
+  Vault/`SecretValue`.
+
 ## Entry 2E-5J-2B-1 Previous Account Lifecycle Gate Source
 
 Entry 2E-5J-2B-1 audite la source fiable a utiliser avant d'autoriser

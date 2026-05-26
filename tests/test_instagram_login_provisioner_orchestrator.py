@@ -41,6 +41,15 @@ WRONG_CONTINUE_SIGNALS = {
     "has_continue_button": True,
     "has_use_another_profile": True,
 }
+ACCOUNT_PICKER_SIGNALS = {
+    "screen_type": "account_picker",
+    "available_usernames": ["random_expected", "random_old_profile"],
+    "expected_username_present": True,
+    "expected_username_match_count": 1,
+    "has_use_another_profile_button": True,
+    "has_create_new_account_button": True,
+    "meta_present": True,
+}
 LOGIN_FORM_XML = (
     '<node text="Username, email or mobile number" />'
     '<node text="Password" />'
@@ -50,6 +59,15 @@ CONTINUE_AS_XML = (
     '<node text="Continue" clickable="true" bounds="[100,1000][980,1120]" />'
     '<node text="Use another profile" clickable="false" bounds="[371,1215][710,1280]" />'
     '<node text="Create new account" clickable="true" bounds="[100,2000][980,2190]" />'
+)
+ACCOUNT_PICKER_XML = (
+    '<node clickable="true" bounds="[100,300][980,500]" class="android.view.ViewGroup" />'
+    '<node text="random_expected" clickable="false" bounds="[260,350][560,400]" />'
+    '<node clickable="true" bounds="[100,540][980,740]" class="android.view.ViewGroup" />'
+    '<node text="random_old_profile" clickable="false" bounds="[260,590][620,640]" />'
+    '<node text="Use another profile" clickable="true" bounds="[100,780][980,900]" />'
+    '<node text="Create new account" clickable="true" bounds="[100,1900][980,2020]" />'
+    '<node content-desc="Meta logo" />'
 )
 PASSWORD_ONLY_XML = (
     '<node text="random_expected" />'
@@ -65,6 +83,7 @@ PASSWORD_ONLY_OVERLAY_XML = (
     '<node text="And save to your Google account" />'
 )
 LOADING_XML = '<node text="Loading..." />'
+UNKNOWN_XML = '<node text="Instagram" />'
 CONNECTED_XML = (
     '<node content-desc="Home" />'
     '<node content-desc="Search" />'
@@ -770,6 +789,107 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertTrue(result.safe_metadata["smoke_ready_for_real_login"])
         getter.assert_not_called()
         self.assertEqual(selectors["continue"].click_calls, 0)
+
+    def test_dry_run_account_picker_previews_expected_account_only(self) -> None:
+        device, _selectors = configured_device()
+        getter = Mock(return_value=credentials())
+
+        result = run_login_provisioning_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username="random_expected",
+            credentials_getter=getter,
+            initial_signals=ACCOUNT_PICKER_SIGNALS,
+            dry_run=True,
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.safe_metadata["router_decision"], "select_expected_account_from_picker")
+        self.assertTrue(result.safe_metadata["would_tap_expected_account"])
+        self.assertFalse(result.safe_metadata["would_submit_password"])
+        self.assertFalse(result.safe_metadata["would_publish"])
+        getter.assert_not_called()
+
+    def test_account_picker_tap_expected_then_connected_finalizes_without_password(self) -> None:
+        device, _selectors = configured_device()
+        getter = Mock(return_value=credentials())
+        device.hierarchies = [ACCOUNT_PICKER_XML, CONNECTED_XML, CONNECTED_XML]
+
+        result = run_login_provisioning_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username="random_expected",
+            credentials_getter=getter,
+            initial_signals=ACCOUNT_PICKER_SIGNALS,
+        )
+
+        self.assertEqual(result.final_outcome, "connected")
+        self.assertIn("tap_expected_account", result.actions_taken)
+        self.assertFalse(result.safe_metadata["password_required"])
+        self.assertFalse(result.safe_metadata["would_submit_password"])
+        getter.assert_not_called()
+
+    def test_account_picker_tap_expected_then_password_only_stops_before_submit_without_credentials(self) -> None:
+        device, _selectors = configured_device()
+        getter = Mock(return_value=None)
+        device.hierarchies = [ACCOUNT_PICKER_XML, PASSWORD_ONLY_XML, PASSWORD_ONLY_XML]
+
+        result = run_login_provisioning_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username="random_expected",
+            credentials_getter=getter,
+            initial_signals=ACCOUNT_PICKER_SIGNALS,
+        )
+
+        self.assertEqual(result.final_outcome, "credentials_missing")
+        self.assertIn("tap_expected_account", result.actions_taken)
+        self.assertTrue(result.safe_metadata["password_required"])
+        self.assertTrue(result.safe_metadata["ready_for_password_submit"])
+        self.assertFalse(result.safe_metadata["would_submit_password"])
+        self.assertNotIn("login_form_submit", result.actions_taken)
+
+    def test_account_picker_loading_reobserves_once_to_password_only(self) -> None:
+        device, _selectors = configured_device()
+        getter = Mock(return_value=None)
+        device.hierarchies = [ACCOUNT_PICKER_XML, LOADING_XML, PASSWORD_ONLY_XML]
+
+        with patch.object(provisioner_orchestrator.time, "sleep") as sleep:
+            result = run_login_provisioning_flow(
+                device,
+                account_id=ACCOUNT_ID,
+                expected_username="random_expected",
+                credentials_getter=getter,
+                initial_signals=ACCOUNT_PICKER_SIGNALS,
+            )
+
+        sleep.assert_called_once_with(1.5)
+        self.assertEqual(result.safe_metadata["post_account_picker_initial_screen"], "transition_loading")
+        self.assertTrue(result.safe_metadata["post_account_picker_reobserve"])
+        self.assertEqual(result.safe_metadata["post_account_picker_reobserve_count"], 1)
+        self.assertEqual(result.safe_metadata["post_account_picker_final_screen_type"], "continue_password_only")
+        self.assertEqual(result.final_outcome, "credentials_missing")
+        self.assertFalse(result.safe_metadata["would_submit_password"])
+
+    def test_account_picker_unknown_transition_reobserves_once_to_password_only(self) -> None:
+        device, _selectors = configured_device()
+        getter = Mock(return_value=None)
+        device.hierarchies = [ACCOUNT_PICKER_XML, UNKNOWN_XML, PASSWORD_ONLY_XML]
+
+        with patch.object(provisioner_orchestrator.time, "sleep") as sleep:
+            result = run_login_provisioning_flow(
+                device,
+                account_id=ACCOUNT_ID,
+                expected_username="random_expected",
+                credentials_getter=getter,
+                initial_signals=ACCOUNT_PICKER_SIGNALS,
+            )
+
+        sleep.assert_called_once_with(1.5)
+        self.assertEqual(result.safe_metadata["post_account_picker_initial_screen"], "transition_unknown")
+        self.assertEqual(result.safe_metadata["post_account_picker_reobserve_count"], 1)
+        self.assertEqual(result.safe_metadata["post_account_picker_final_screen_type"], "continue_password_only")
+        self.assertEqual(result.final_outcome, "credentials_missing")
 
     def test_dry_run_wrong_candidate_blocks_mismatch_without_db_assumption(self) -> None:
         getter = Mock(return_value=credentials())

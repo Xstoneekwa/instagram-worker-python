@@ -14,6 +14,7 @@ from instagram_login_status_classifier import clean_login_probe_metadata
 
 CONTINUE_AS_CANDIDATE = "continue_as_candidate"
 CONTINUE_PASSWORD_ONLY = "continue_password_only"
+ACCOUNT_PICKER = "account_picker"
 LOGIN_FORM_EMPTY = "login_form_empty"
 UNKNOWN_SCREEN = "unknown"
 
@@ -32,11 +33,13 @@ class LoginScreenRouteDecision:
     expected_username: str = ""
     normalized_suggested_username: str = ""
     normalized_expected_username: str = ""
+    target_username: str = ""
     next_action: str = ""
     reason: str = ""
     should_escalate: bool = False
     should_tap_continue: bool = False
     should_tap_use_another_profile: bool = False
+    should_tap_expected_account: bool = False
     should_start_login_form_flow: bool = False
     publish_login_status: str | None = None
     provisioning_status: str | None = None
@@ -55,6 +58,7 @@ def route_login_screen(
     expected_username: str,
     suggested_username: str | None = None,
     screen_type: str,
+    available_usernames: list[str] | tuple[str, ...] | None = None,
     account_lifecycle_lookup: LifecycleLookup | None = None,
     clone_reuse_allowed: bool = False,
     account_id: str | None = None,
@@ -62,6 +66,11 @@ def route_login_screen(
 ) -> LoginScreenRouteDecision:
     normalized_expected = normalize_instagram_username(expected_username)
     normalized_suggested = normalize_instagram_username(suggested_username)
+    normalized_available = [
+        normalize_instagram_username(username)
+        for username in (available_usernames or [])
+        if normalize_instagram_username(username)
+    ]
     safe_screen_type = str(screen_type or UNKNOWN_SCREEN).strip() or UNKNOWN_SCREEN
 
     if safe_screen_type == LOGIN_FORM_EMPTY:
@@ -108,6 +117,62 @@ def route_login_screen(
             provisioning_status="blocked",
             onboarding_status="support_required",
             dashboard_action_type="review_account_mismatch",
+            clone_reuse_allowed=clone_reuse_allowed,
+        )
+
+    if safe_screen_type == ACCOUNT_PICKER:
+        if not normalized_expected:
+            return _decision(
+                ok=False,
+                screen_type=safe_screen_type,
+                decision="expected_username_missing",
+                expected_username=expected_username,
+                suggested_username=suggested_username or "",
+                normalized_expected_username=normalized_expected,
+                normalized_suggested_username=normalized_suggested,
+                reason="expected_username_missing",
+                clone_reuse_allowed=clone_reuse_allowed,
+            )
+        match_count = sum(1 for username in normalized_available if username == normalized_expected)
+        if match_count == 1:
+            return _decision(
+                ok=True,
+                screen_type=safe_screen_type,
+                decision="select_expected_account_from_picker",
+                expected_username=expected_username,
+                suggested_username=suggested_username or "",
+                normalized_expected_username=normalized_expected,
+                normalized_suggested_username=normalized_suggested,
+                target_username=normalized_expected,
+                next_action="tap_expected_account_row_then_observe",
+                reason="expected_account_listed",
+                should_tap_expected_account=True,
+                clone_reuse_allowed=clone_reuse_allowed,
+            )
+        if match_count > 1:
+            return _decision(
+                ok=False,
+                screen_type=safe_screen_type,
+                decision="ambiguous_expected_account_row",
+                expected_username=expected_username,
+                suggested_username=suggested_username or "",
+                normalized_expected_username=normalized_expected,
+                normalized_suggested_username=normalized_suggested,
+                target_username=normalized_expected,
+                reason="ambiguous_expected_account_row",
+                clone_reuse_allowed=clone_reuse_allowed,
+            )
+        return _decision(
+            ok=False,
+            screen_type=safe_screen_type,
+            decision="expected_account_not_listed",
+            expected_username=expected_username,
+            suggested_username=suggested_username or "",
+            normalized_expected_username=normalized_expected,
+            normalized_suggested_username=normalized_suggested,
+            target_username=normalized_expected,
+            reason="expected_account_not_listed",
+            dashboard_action_type="review_account_picker_missing_expected",
             clone_reuse_allowed=clone_reuse_allowed,
         )
 
@@ -218,6 +283,7 @@ def _decision(
     should_escalate: bool = False,
     should_tap_continue: bool = False,
     should_tap_use_another_profile: bool = False,
+    should_tap_expected_account: bool = False,
     should_start_login_form_flow: bool = False,
     publish_login_status: str | None = None,
     provisioning_status: str | None = None,
@@ -225,6 +291,7 @@ def _decision(
     dashboard_action_type: str | None = None,
     audit_reason: str | None = None,
     lifecycle_status: str = "unknown",
+    target_username: str = "",
 ) -> LoginScreenRouteDecision:
     metadata = clean_login_probe_metadata(
         {
@@ -234,6 +301,7 @@ def _decision(
             "reason": reason,
             "suggested_username": normalized_suggested_username,
             "expected_username": normalized_expected_username,
+            "target_username": target_username,
             "lifecycle_status": lifecycle_status,
             "clone_reuse_allowed": bool(clone_reuse_allowed),
             "audit_reason": audit_reason or "",
@@ -247,11 +315,13 @@ def _decision(
         expected_username=expected_username,
         normalized_suggested_username=normalized_suggested_username,
         normalized_expected_username=normalized_expected_username,
+        target_username=target_username,
         next_action=next_action,
         reason=reason,
         should_escalate=should_escalate,
         should_tap_continue=should_tap_continue,
         should_tap_use_another_profile=should_tap_use_another_profile,
+        should_tap_expected_account=should_tap_expected_account,
         should_start_login_form_flow=should_start_login_form_flow,
         publish_login_status=publish_login_status,
         provisioning_status=provisioning_status,

@@ -227,6 +227,22 @@ Post-submit policy future :
   sans tap `Log in`, sans Vault read et sans publish. Le vrai submit reste futur
   via Vault/`SecretValue` uniquement. Le patch couvre l'ecran observe EN; des
   aliases FR/EN pourront etre ajoutes plus tard.
+- Entry 2E-5M : Cas E account picker / profile chooser. Instagram peut ouvrir
+  une liste de comptes (`account_picker`) avec plusieurs usernames visibles,
+  `Use another profile`, `Create new account` et `Meta`. Le probe expose
+  `available_usernames`, `expected_username_present` et
+  `expected_username_match_count`. Si le compte attendu est present une seule
+  fois, le routeur retourne `select_expected_account_from_picker` et l'action
+  executor fait un seul tap sur la ligne du `expected_username`, via hierarchy
+  XML/bounds, sans coordonnees fixes et sans cliquer un autre compte. Si le
+  compte attendu est absent, ambigu ou manquant en input, le flow stoppe safe
+  sans tap. Validation reelle no-password : account picker avec
+  `cinema_catchup` et `i_m_your_traker`, tap unique sur `cinema_catchup`,
+  aucun tap `i_m_your_traker`, aucun `Use another profile`, aucun `Log in`,
+  aucun password/Vault/publish. Le premier post-action a ete `unknown`
+  transitoire, puis stabilisation vers `continue_password_only` avec
+  `ready_for_password_submit=true`; le vrai submit reste futur via
+  Vault/`SecretValue` uniquement.
 - Entry 2E-5J-2B-1 : audit lifecycle read-only. Les statuts existants couvrent
   `client_instagram_accounts` login/provisioning/onboarding,
   `client_subscriptions` active/paused/cancelled/expired,

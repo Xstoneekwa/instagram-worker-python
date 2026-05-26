@@ -181,6 +181,29 @@ class InstagramLoginUiProbeTest(unittest.TestCase):
         self.assertTrue(signals["has_continue_button"])
         self.assertTrue(signals["has_use_another_profile_button"])
 
+    def test_account_picker_detects_multiple_usernames_generically(self) -> None:
+        xml = (
+            '<hierarchy rotation="0">'
+            '<node text="" content-desc="Instagram" />'
+            '<node text="random_expected" />'
+            '<node text="random_old_profile" />'
+            '<node text="Use another profile" />'
+            '<node text="Create new account" />'
+            '<node content-desc="Meta logo" />'
+            '</hierarchy>'
+        )
+
+        signals = extract_login_screen_signals_from_hierarchy(xml, expected_username="random_expected")
+
+        self.assertEqual(signals["screen_type"], "account_picker")
+        self.assertTrue(signals["account_picker"])
+        self.assertEqual(signals["available_usernames"], ["random_expected", "random_old_profile"])
+        self.assertTrue(signals["expected_username_present"])
+        self.assertEqual(signals["expected_username_match_count"], 1)
+        self.assertTrue(signals["has_use_another_profile_button"])
+        self.assertTrue(signals["has_create_new_account_button"])
+        self.assertTrue(signals["meta_present"])
+
     def test_extracts_login_form_empty_signals(self) -> None:
         xml = (
             '<node text="Username, email or mobile number" />'

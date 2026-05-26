@@ -19,6 +19,20 @@ CONTINUE_AS_XML = (
     '<node text="Use another profile" clickable="false" bounds="[371,1215][710,1280]" />'
     '<node text="Create new account" clickable="true" bounds="[100,2000][980,2190]" />'
 )
+ACCOUNT_PICKER_XML = (
+    '<node clickable="true" bounds="[100,300][980,500]" class="android.view.ViewGroup" />'
+    '<node text="random_expected" clickable="false" bounds="[260,350][560,400]" />'
+    '<node clickable="true" bounds="[100,540][980,740]" class="android.view.ViewGroup" />'
+    '<node text="random_old_profile" clickable="false" bounds="[260,590][620,640]" />'
+    '<node text="Use another profile" clickable="true" bounds="[100,780][980,900]" />'
+    '<node text="Create new account" clickable="true" bounds="[100,1900][980,2020]" />'
+)
+ACCOUNT_PICKER_DUPLICATE_EXPECTED_XML = (
+    '<node text="random_expected" clickable="false" bounds="[260,350][560,400]" />'
+    '<node text="random_expected" clickable="false" bounds="[260,590][560,640]" />'
+    '<node text="Use another profile" clickable="true" bounds="[100,780][980,900]" />'
+    '<node text="Create new account" clickable="true" bounds="[100,1900][980,2020]" />'
+)
 USE_ANOTHER_DUPLICATE_XML = (
     '<node text="Continue" clickable="true" bounds="[100,1000][980,1120]" />'
     '<node text="Use another profile" clickable="false" bounds="[371,1215][710,1280]" />'
@@ -108,6 +122,14 @@ def _use_another_decision():
         screen_type="continue_as_candidate",
         account_lifecycle_lookup=lambda _username: {"lifecycle_status": "canceled"},
         clone_reuse_allowed=True,
+    )
+
+
+def _account_picker_decision(expected_username: str = "random_expected"):
+    return route_login_screen(
+        expected_username=expected_username,
+        screen_type="account_picker",
+        available_usernames=["random_expected", "random_old_profile"],
     )
 
 
@@ -323,6 +345,47 @@ class InstagramLoginActionExecutorTest(unittest.TestCase):
 
         self.assertTrue(result.executed)
         self.assertEqual(device.bounds_clicks[0][1], 1247)
+
+    def test_account_picker_taps_expected_account_row_once(self) -> None:
+        device = FakeDevice(hierarchy=ACCOUNT_PICKER_XML)
+
+        result = execute_login_screen_decision(device, _account_picker_decision(), sleeper=Mock())
+
+        self.assertTrue(result.ok)
+        self.assertTrue(result.executed)
+        self.assertEqual(result.action, "tap_expected_account")
+        self.assertEqual(device.bounds_clicks, [(540, 400)])
+
+    def test_account_picker_never_taps_old_profile_for_different_expected(self) -> None:
+        device = FakeDevice(hierarchy=ACCOUNT_PICKER_XML)
+
+        result = execute_login_screen_decision(device, _account_picker_decision("random_expected"), sleeper=Mock())
+
+        self.assertTrue(result.executed)
+        self.assertNotIn((540, 640), device.bounds_clicks)
+
+    def test_account_picker_missing_target_does_not_tap(self) -> None:
+        device = FakeDevice(hierarchy=ACCOUNT_PICKER_XML)
+        decision = route_login_screen(
+            expected_username="missing_expected",
+            screen_type="account_picker",
+            available_usernames=["missing_expected"],
+        )
+
+        result = execute_login_screen_decision(device, decision)
+
+        self.assertFalse(result.executed)
+        self.assertEqual(result.failure_reason, "target_account_row_not_found")
+        self.assertEqual(device.bounds_clicks, [])
+
+    def test_account_picker_duplicate_target_rows_are_ambiguous(self) -> None:
+        device = FakeDevice(hierarchy=ACCOUNT_PICKER_DUPLICATE_EXPECTED_XML)
+
+        result = execute_login_screen_decision(device, _account_picker_decision())
+
+        self.assertFalse(result.executed)
+        self.assertEqual(result.failure_reason, "ambiguous_target_account_row")
+        self.assertEqual(device.bounds_clicks, [])
 
     def test_output_is_safe_without_raw_xml_or_sensitive_values(self) -> None:
         device = FakeDevice(hierarchy=SENSITIVE_XML)

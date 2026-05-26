@@ -133,6 +133,51 @@ class InstagramLoginScreenRouterTest(unittest.TestCase):
         self.assertEqual(decision.decision, "block_wrong_suggested_account")
         self.assertTrue(decision.should_escalate)
 
+    def test_account_picker_expected_present_selects_expected(self) -> None:
+        decision = route_login_screen(
+            expected_username="random_expected",
+            screen_type="account_picker",
+            available_usernames=["random_expected", "random_old_profile"],
+        )
+
+        self.assertTrue(decision.ok)
+        self.assertEqual(decision.decision, "select_expected_account_from_picker")
+        self.assertTrue(decision.should_tap_expected_account)
+        self.assertEqual(decision.target_username, "random_expected")
+
+    def test_account_picker_expected_absent_stops_safe(self) -> None:
+        decision = route_login_screen(
+            expected_username="random_expected",
+            screen_type="account_picker",
+            available_usernames=["random_old_profile"],
+        )
+
+        self.assertFalse(decision.ok)
+        self.assertEqual(decision.decision, "expected_account_not_listed")
+        self.assertFalse(decision.should_tap_expected_account)
+        self.assertEqual(decision.dashboard_action_type, "review_account_picker_missing_expected")
+
+    def test_account_picker_duplicate_expected_rows_are_ambiguous(self) -> None:
+        decision = route_login_screen(
+            expected_username="random_expected",
+            screen_type="account_picker",
+            available_usernames=["random_expected", "random_old_profile", "random_expected"],
+        )
+
+        self.assertFalse(decision.ok)
+        self.assertEqual(decision.decision, "ambiguous_expected_account_row")
+        self.assertFalse(decision.should_tap_expected_account)
+
+    def test_account_picker_missing_expected_username_stops_safe(self) -> None:
+        decision = route_login_screen(
+            expected_username="",
+            screen_type="account_picker",
+            available_usernames=["random_expected"],
+        )
+
+        self.assertFalse(decision.ok)
+        self.assertEqual(decision.decision, "expected_username_missing")
+
     def test_unknown_screen_has_no_action(self) -> None:
         decision = route_login_screen(
             expected_username="new_account",

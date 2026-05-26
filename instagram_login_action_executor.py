@@ -19,14 +19,19 @@ from instagram_login_ui_probe import extract_login_screen_signals_from_hierarchy
 
 ACTION_CONTINUE = "tap_continue"
 ACTION_USE_ANOTHER_PROFILE = "tap_use_another_profile"
+ACTION_SELECT_EXPECTED_ACCOUNT = "tap_expected_account"
 NO_ACTION = "no_action"
 
 ALLOWED_DECISION_ACTIONS = {
     "continue_expected_account": ("Continue", ACTION_CONTINUE),
     "use_another_profile_previous_account_stopped": ("Use another profile", ACTION_USE_ANOTHER_PROFILE),
+    "select_expected_account_from_picker": ("", ACTION_SELECT_EXPECTED_ACCOUNT),
 }
 NO_ACTION_DECISIONS = {
+    "ambiguous_expected_account_row",
     "block_wrong_suggested_account",
+    "expected_account_not_listed",
+    "expected_username_missing",
     "start_login_form_flow",
     "unknown_no_action",
 }
@@ -142,8 +147,14 @@ def execute_login_screen_decision(
         )
 
     target_text, action = ALLOWED_DECISION_ACTIONS[decision_value]
+    if action == ACTION_SELECT_EXPECTED_ACCOUNT:
+        target_text = _decision_target_username(decision)
     start = timer()
-    selector_result = _find_exact_accessibility_target(d, target_text)
+    selector_result = (
+        _find_account_picker_target(d, target_text)
+        if action == ACTION_SELECT_EXPECTED_ACCOUNT
+        else _find_exact_accessibility_target(d, target_text)
+    )
     timings["target_lookup_ms"] = _elapsed_ms(start, timer())
     if selector_result.get("resolution"):
         warnings.append(f"target_resolution_{selector_result['resolution']}")
@@ -224,6 +235,13 @@ def _decision_value(decision: Any) -> str:
     return str(getattr(decision, "decision", decision) or "").strip()
 
 
+def _decision_target_username(decision: Any) -> str:
+    target = str(getattr(decision, "target_username", "") or "").strip()
+    if target:
+        return target
+    return str(getattr(decision, "expected_username", "") or "").strip().lstrip("@").lower()
+
+
 def _find_exact_accessibility_target(d: Any, target_text: str) -> dict[str, Any]:
     hierarchy_xml = ""
     try:
@@ -239,6 +257,30 @@ def _find_exact_accessibility_target(d: Any, target_text: str) -> dict[str, Any]
             return hierarchy_result
 
     return _resolve_target_from_selectors(d, target_text)
+
+
+def _find_account_picker_target(d: Any, target_username: str) -> dict[str, Any]:
+    normalized_target = _normalize_username(target_username)
+    if not normalized_target:
+        return {
+            "target": None,
+            "failure_reason": "target_account_row_not_found",
+            "resolution": "account_picker_empty_target",
+        }
+    hierarchy_xml = ""
+    try:
+        hierarchy_xml = _dump_hierarchy_once(d)
+    except Exception:
+        hierarchy_xml = ""
+    if hierarchy_xml:
+        hierarchy_result = _resolve_account_row_from_hierarchy(hierarchy_xml, normalized_target)
+        if hierarchy_result.get("target") or hierarchy_result.get("failure_reason") == "ambiguous_target_account_row":
+            return hierarchy_result
+    return {
+        "target": None,
+        "failure_reason": "target_account_row_not_found",
+        "resolution": "account_picker_not_found",
+    }
 
 
 def _resolve_target_from_hierarchy(hierarchy_xml: str, target_text: str) -> dict[str, Any]:
@@ -305,6 +347,45 @@ def _resolve_target_from_selectors(d: Any, target_text: str) -> dict[str, Any]:
     return {"target": None, "failure_reason": "target_button_not_found", "resolution": "selector_not_found"}
 
 
+def _resolve_account_row_from_hierarchy(hierarchy_xml: str, normalized_target: str) -> dict[str, Any]:
+    nodes = _collect_accessibility_nodes(hierarchy_xml)
+    username_candidates = [
+        candidate
+        for candidate in _collect_label_candidates(hierarchy_xml, normalized_target)
+        if candidate.enabled
+        and candidate.visible
+        and candidate.bounds.area > 0
+        and candidate.bounds.center_y > STATUS_BAR_MAX_CENTER_Y
+        and _normalize_username(candidate.label) == normalized_target
+    ]
+    if not username_candidates:
+        return {
+            "target": None,
+            "failure_reason": "target_account_row_not_found",
+            "resolution": "account_picker_no_username_candidate",
+        }
+    deduped = _dedupe_candidates_by_bounds(username_candidates)
+    zones = _distinct_visual_zones(deduped)
+    if len(zones) > 1:
+        return {
+            "target": None,
+            "failure_reason": "ambiguous_target_account_row",
+            "resolution": "account_picker_multiple_username_zones",
+        }
+    username_candidate = _choose_best_candidate(deduped)
+    row_candidate = _find_clickable_container_for_candidate(nodes, username_candidate)
+    winner = row_candidate or username_candidate
+    return {
+        "target": {
+            "kind": "bounds",
+            "center": (winner.bounds.center_x, winner.bounds.center_y),
+            "label": username_candidate.label,
+        },
+        "failure_reason": "",
+        "resolution": "account_picker_row_bounds_center" if row_candidate else "account_picker_username_bounds_center",
+    }
+
+
 def _click_resolved_target(d: Any, selector_result: dict[str, Any], *, tap_timeout_ms: int) -> None:
     target = selector_result.get("target") or {}
     kind = str(target.get("kind") or "")
@@ -328,6 +409,11 @@ def _click_resolved_target(d: Any, selector_result: dict[str, Any], *, tap_timeo
 
 def _normalize_label(value: Any) -> str:
     return re.sub(r"\s+", " ", unescape(str(value or "")).strip())
+
+
+def _normalize_username(value: Any) -> str:
+    username = str(value or "").strip().lstrip("@").lower()
+    return username if re.fullmatch(r"[a-z0-9._]{1,30}", username) else ""
 
 
 def _parse_bounds(raw: str) -> _BoundsRect | None:
@@ -383,6 +469,50 @@ def _collect_label_candidates(hierarchy_xml: str, normalized_target: str) -> lis
                 )
             )
     return candidates
+
+
+def _collect_accessibility_nodes(hierarchy_xml: str) -> list[_AccessibilityCandidate]:
+    candidates: list[_AccessibilityCandidate] = []
+    for raw_attrs in re.findall(r"<node\b([^>]*)/?>", hierarchy_xml or ""):
+        attrs = _parse_node_attributes(raw_attrs)
+        bounds = _parse_bounds(attrs.get("bounds", ""))
+        if bounds is None:
+            continue
+        label = _normalize_label(attrs.get("text") or attrs.get("content-desc") or attrs.get("contentDescription") or "")
+        candidates.append(
+            _AccessibilityCandidate(
+                label=label,
+                source_attr="node",
+                bounds=bounds,
+                clickable=_node_is_clickable(attrs),
+                enabled=_node_is_enabled(attrs),
+                visible=_node_is_visible(attrs),
+                class_name=str(attrs.get("class", "")).split(".")[-1],
+            )
+        )
+    return candidates
+
+
+def _find_clickable_container_for_candidate(
+    nodes: list[_AccessibilityCandidate],
+    candidate: _AccessibilityCandidate,
+) -> _AccessibilityCandidate | None:
+    containers = [
+        node
+        for node in nodes
+        if node.enabled
+        and node.visible
+        and node.clickable
+        and node.bounds.area > candidate.bounds.area
+        and _bounds_contain(node.bounds, candidate.bounds.center_x, candidate.bounds.center_y)
+    ]
+    if not containers:
+        return None
+    return sorted(containers, key=lambda node: node.bounds.area)[0]
+
+
+def _bounds_contain(bounds: _BoundsRect, x: int, y: int) -> bool:
+    return bounds.x1 <= x <= bounds.x2 and bounds.y1 <= y <= bounds.y2
 
 
 def _find_anchor_center_y(hierarchy_xml: str, label: str) -> int | None:
@@ -508,6 +638,11 @@ def _safe_login_screen_signals(hierarchy_xml: str | None) -> dict[str, Any]:
     signals.pop("overlay_type", None)
     if signals.get("screen_type") == "continue_password_only":
         signals["screen_type"] = "login_form_ready"
+    signals["available_usernames"] = [
+        username
+        for username in (_safe_signal_text(username) for username in list(signals.get("available_usernames") or []))
+        if username
+    ]
     signals["suggested_username"] = _safe_signal_text(signals.get("suggested_username"))
     return clean_login_probe_metadata(dict(signals))
 

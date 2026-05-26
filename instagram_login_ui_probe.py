@@ -98,7 +98,11 @@ def detect_login_probe_outcome_from_hierarchy(hierarchy_xml: str | None) -> Logi
     return probe_login_ui_from_hierarchy(hierarchy_xml).outcome
 
 
-def extract_login_screen_signals_from_hierarchy(hierarchy_xml: str | None) -> dict[str, Any]:
+def extract_login_screen_signals_from_hierarchy(
+    hierarchy_xml: str | None,
+    *,
+    expected_username: str | None = None,
+) -> dict[str, Any]:
     text = _normalize_hierarchy_text(hierarchy_xml)
     has_continue_button = _has_phrase(text, "continue")
     has_use_another_profile = _has_phrase(text, "use another profile")
@@ -111,11 +115,18 @@ def extract_login_screen_signals_from_hierarchy(hierarchy_xml: str | None) -> di
     has_password_field = "password" in text
     has_login_button = "log in" in text
     suggested_username = _extract_suggested_username(text)
+    available_usernames = _extract_available_usernames(text)
+    normalized_expected_username = _normalize_username_candidate(expected_username or "")
+    expected_username_matches = [
+        username for username in available_usernames if username == normalized_expected_username
+    ]
     overlay_type = _password_overlay_type(text)
     overlay_present = bool(overlay_type)
     transition_loading = _has_phrase(text, "loading")
 
-    if has_continue_button and has_use_another_profile and suggested_username:
+    if len(available_usernames) >= 2 and has_use_another_profile and has_create_new_account:
+        screen_type = "account_picker"
+    elif has_continue_button and has_use_another_profile and suggested_username:
         screen_type = "continue_as_candidate"
     elif suggested_username and has_password_field and has_login_button and not has_username_field:
         screen_type = "continue_password_only"
@@ -128,6 +139,10 @@ def extract_login_screen_signals_from_hierarchy(hierarchy_xml: str | None) -> di
         "screen_type": screen_type,
         "continue_as_candidate": screen_type == "continue_as_candidate",
         "suggested_username": suggested_username,
+        "available_usernames": available_usernames,
+        "expected_username_present": bool(expected_username_matches) if expected_username else None,
+        "expected_username_match_count": len(expected_username_matches) if expected_username else None,
+        "account_picker": screen_type == "account_picker",
         "has_continue_button": has_continue_button,
         "has_use_another_profile": has_use_another_profile,
         "has_use_another_profile_button": has_use_another_profile,
@@ -334,6 +349,15 @@ def _extract_suggested_username(text: str) -> str:
         if candidate and ("_" in candidate or "." in candidate):
             return candidate
     return ""
+
+
+def _extract_available_usernames(text: str) -> list[str]:
+    usernames: list[str] = []
+    for raw in re.findall(r"@?[a-z0-9._]{1,30}", text):
+        candidate = _normalize_username_candidate(raw)
+        if candidate and ("_" in candidate or "." in candidate) and candidate not in usernames:
+            usernames.append(candidate)
+    return usernames
 
 
 def _normalize_username_candidate(value: str) -> str:
