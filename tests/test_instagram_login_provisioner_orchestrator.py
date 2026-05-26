@@ -194,6 +194,7 @@ class FakeDevice:
         self.selector_calls: list[dict] = []
         self.selectors: dict[tuple[str, str], FakeSelector] = {}
         self.bounds_clicks: list[tuple[int, int]] = []
+        self.app_start = Mock()
 
     def add_selector(self, key: str, value: str, selector: FakeSelector) -> FakeSelector:
         self.selectors[(key, value)] = selector
@@ -216,6 +217,16 @@ class FakeDevice:
         self.bounds_clicks.append((int(x), int(y)))
 
 
+class TrackingSecretValue(SecretValue):
+    def __init__(self, value: str) -> None:
+        super().__init__(value)
+        self.revealed = False
+
+    def reveal_for_login_executor(self) -> str:
+        self.revealed = True
+        return super().reveal_for_login_executor()
+
+
 def configured_device(post_xml: str = CONNECTED_XML) -> tuple[FakeDevice, dict[str, FakeSelector]]:
     device = FakeDevice([post_xml])
     selectors = {
@@ -233,6 +244,10 @@ def credentials():
 
 
 class LoginProvisionerOrchestratorTest(unittest.TestCase):
+    def run_flow(self, *args, **kwargs):
+        kwargs.setdefault("observe_current_screen_only", True)
+        return run_login_provisioning_flow(*args, **kwargs)
+
     def _canceled_lifecycle(self) -> Mock:
         return Mock(
             return_value={
@@ -249,10 +264,160 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
             expected_username="random_expected",
         )
 
+    def test_default_flow_app_starts_before_probe(self) -> None:
+        device = FakeDevice([CONNECTED_XML])
+        credentials_getter = Mock(return_value=credentials())
+        sleeper = Mock()
+
+        result = run_login_provisioning_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username=USERNAME,
+            credentials_getter=credentials_getter,
+            sleeper=sleeper,
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.reason, "connected_no_password_needed")
+        device.app_start.assert_called_once_with("com.instagram.android")
+        self.assertEqual(device.dump_calls, 1)
+        sleeper.assert_called_once_with(1.5)
+        credentials_getter.assert_not_called()
+        self.assertTrue(result.safe_metadata["app_start_attempted"])
+        self.assertTrue(result.safe_metadata["app_start_ok"])
+        self.assertEqual(result.safe_metadata["screen_after_app_start"], "connected")
+
+    def test_observe_current_screen_only_skips_app_start(self) -> None:
+        device = FakeDevice([CONNECTED_XML])
+
+        result = run_login_provisioning_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username=USERNAME,
+            credentials_getter=Mock(return_value=credentials()),
+            observe_current_screen_only=True,
+        )
+
+        self.assertEqual(result.reason, "connected_no_password_needed")
+        device.app_start.assert_not_called()
+        self.assertFalse(result.safe_metadata["app_start_attempted"])
+        self.assertTrue(result.safe_metadata["observe_current_screen_only"])
+
+    def test_app_start_failed_stops_before_credentials_and_password_reveal(self) -> None:
+        device = FakeDevice([LOGIN_FORM_XML])
+        device.app_start.side_effect = RuntimeError("boom")
+        secret = TrackingSecretValue(PASSWORD)
+        credentials_getter = Mock(return_value={"username": USERNAME, "password": secret})
+
+        result = run_login_provisioning_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username=USERNAME,
+            credentials_getter=credentials_getter,
+            sleeper=Mock(),
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.reason, "app_start_failed")
+        self.assertFalse(secret.revealed)
+        credentials_getter.assert_not_called()
+        self.assertEqual(device.dump_calls, 0)
+        self.assertFalse(result.safe_metadata["app_start_ok"])
+
+    def test_app_start_unknown_stops_before_credentials_and_password_reveal(self) -> None:
+        device = FakeDevice([UNKNOWN_XML])
+        secret = TrackingSecretValue(PASSWORD)
+        credentials_getter = Mock(return_value={"username": USERNAME, "password": secret})
+
+        result = run_login_provisioning_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username=USERNAME,
+            credentials_getter=credentials_getter,
+            post_start_wait_ms=0,
+            sleeper=Mock(),
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.reason, "screen_preparation_failed")
+        self.assertFalse(secret.revealed)
+        credentials_getter.assert_not_called()
+        self.assertEqual(result.safe_metadata["screen_after_app_start"], "unknown")
+
+    def test_package_name_is_configurable_for_future_clones(self) -> None:
+        device = FakeDevice([CONNECTED_XML])
+
+        result = run_login_provisioning_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username=USERNAME,
+            credentials_getter=Mock(return_value=credentials()),
+            package_name="com.instagram.android.clone1",
+            post_start_wait_ms=0,
+            sleeper=Mock(),
+        )
+
+        self.assertTrue(result.ok)
+        device.app_start.assert_called_once_with("com.instagram.android.clone1")
+        self.assertEqual(result.safe_metadata["package_name"], "com.instagram.android.clone1")
+
+    def test_app_start_account_picker_can_prepare_password_only_then_submit(self) -> None:
+        account_picker = (
+            '<node clickable="true" enabled="true" visible-to-user="true" bounds="[100,300][980,500]" class="android.view.ViewGroup" />'
+            f'<node text="{USERNAME}" enabled="true" visible-to-user="true" clickable="false" bounds="[260,350][560,400]" />'
+            '<node clickable="true" enabled="true" visible-to-user="true" bounds="[100,540][980,740]" class="android.view.ViewGroup" />'
+            '<node text="random_old_profile" enabled="true" visible-to-user="true" clickable="false" bounds="[260,590][620,640]" />'
+            '<node text="Use another profile" clickable="true" enabled="true" visible-to-user="true" bounds="[100,780][980,900]" />'
+            '<node text="Create new account" clickable="true" enabled="true" visible-to-user="true" bounds="[100,1900][980,2020]" />'
+            '<node content-desc="Meta logo" />'
+        )
+        device, selectors = configured_device(CONNECTED_XML)
+        device.hierarchies = [account_picker, account_picker, PASSWORD_ONLY_OVERLAY_XML, PASSWORD_ONLY_OVERLAY_XML, CONNECTED_XML]
+        secret = TrackingSecretValue(PASSWORD)
+
+        result = run_login_provisioning_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username=USERNAME,
+            credentials_getter=Mock(return_value={"username": USERNAME, "password": secret}),
+            post_start_wait_ms=0,
+            sleeper=Mock(),
+        )
+
+        self.assertTrue(result.ok)
+        self.assertIn("tap_expected_account", result.actions_taken)
+        self.assertIn("login_form_submit", result.actions_taken)
+        self.assertTrue(secret.revealed)
+        self.assertTrue(selectors["password"].set_text_calls)
+        self.assertEqual(result.safe_metadata["screen_after_app_start"], "account_picker")
+
+    def test_app_start_continue_expected_can_prepare_password_only_then_submit(self) -> None:
+        continue_xml = CONTINUE_AS_XML.replace("Continue", "Continue").replace("Create new account", "Create new account")
+        continue_xml = f'<node text="{USERNAME}" />' + continue_xml
+        device, selectors = configured_device(CONNECTED_XML)
+        device.hierarchies = [continue_xml, PASSWORD_ONLY_OVERLAY_XML, PASSWORD_ONLY_OVERLAY_XML, PASSWORD_ONLY_OVERLAY_XML, CONNECTED_XML]
+        secret = TrackingSecretValue(PASSWORD)
+
+        result = run_login_provisioning_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username=USERNAME,
+            credentials_getter=Mock(return_value={"username": USERNAME, "password": secret}),
+            post_start_wait_ms=0,
+            sleeper=Mock(),
+        )
+
+        self.assertTrue(result.ok)
+        self.assertIn("tap_continue", result.actions_taken)
+        self.assertIn("login_form_submit", result.actions_taken)
+        self.assertTrue(secret.revealed)
+        self.assertTrue(selectors["password"].set_text_calls)
+        self.assertEqual(result.safe_metadata["screen_after_app_start"], "continue_as_candidate")
+
     def test_login_form_credentials_ok_connected_success(self) -> None:
         device, selectors = configured_device(CONNECTED_XML)
 
-        result = run_login_provisioning_flow(
+        result = self.run_flow(
             device,
             account_id=ACCOUNT_ID,
             expected_username=USERNAME,
@@ -296,7 +461,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         device, selectors = configured_device()
         device.hierarchies = [CONTINUE_AS_XML, LOGIN_FORM_XML, LOGIN_FORM_XML, CONNECTED_XML]
 
-        result = run_login_provisioning_flow(
+        result = self.run_flow(
             device,
             account_id=ACCOUNT_ID,
             expected_username=USERNAME,
@@ -314,7 +479,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         expected_username = "random_expected"
         device.hierarchies = [CONTINUE_AS_XML, CONNECTED_XML, CONNECTED_XML]
 
-        result = run_login_provisioning_flow(
+        result = self.run_flow(
             device,
             account_id=ACCOUNT_ID,
             expected_username=expected_username,
@@ -340,7 +505,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         expected_username = "random_expected"
         device.hierarchies = [CONTINUE_AS_XML, NEEDS_2FA_XML, NEEDS_2FA_XML]
 
-        result = run_login_provisioning_flow(
+        result = self.run_flow(
             device,
             account_id=ACCOUNT_ID,
             expected_username=expected_username,
@@ -360,7 +525,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         expected_username = "random_expected"
         device.hierarchies = [CONTINUE_AS_XML, CHECKPOINT_XML, CHECKPOINT_XML]
 
-        result = run_login_provisioning_flow(
+        result = self.run_flow(
             device,
             account_id=ACCOUNT_ID,
             expected_username=expected_username,
@@ -414,7 +579,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         device.hierarchies = [CONTINUE_AS_XML, LOADING_XML, PASSWORD_ONLY_XML]
 
         with patch.object(provisioner_orchestrator.time, "sleep") as sleep:
-            result = run_login_provisioning_flow(
+            result = self.run_flow(
                 device,
                 account_id=ACCOUNT_ID,
                 expected_username=expected_username,
@@ -439,7 +604,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         device.hierarchies = [CONTINUE_AS_XML, LOADING_XML, LOADING_XML]
 
         with patch.object(provisioner_orchestrator.time, "sleep") as sleep:
-            result = run_login_provisioning_flow(
+            result = self.run_flow(
                 device,
                 account_id=ACCOUNT_ID,
                 expected_username=expected_username,
@@ -459,7 +624,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         device, selectors = configured_device()
         getter = Mock(return_value=credentials())
 
-        result = run_login_provisioning_flow(
+        result = self.run_flow(
             device,
             account_id=ACCOUNT_ID,
             expected_username=USERNAME,
@@ -499,7 +664,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
             }
         )
 
-        result = run_login_provisioning_flow(
+        result = self.run_flow(
             device,
             account_id=ACCOUNT_ID,
             expected_username=USERNAME,
@@ -527,7 +692,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
             }
         )
 
-        result = run_login_provisioning_flow(
+        result = self.run_flow(
             FakeDevice(),
             account_id=ACCOUNT_ID,
             expected_username=USERNAME,
@@ -548,7 +713,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
     def test_previous_canceled_clone_not_reusable_blocks_mismatch(self) -> None:
         getter = Mock(return_value=credentials())
 
-        result = run_login_provisioning_flow(
+        result = self.run_flow(
             FakeDevice(),
             account_id=ACCOUNT_ID,
             expected_username=USERNAME,
@@ -573,7 +738,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
     def test_previous_active_clone_reusable_blocks_mismatch(self) -> None:
         getter = Mock(return_value=credentials())
 
-        result = run_login_provisioning_flow(
+        result = self.run_flow(
             FakeDevice(),
             account_id=ACCOUNT_ID,
             expected_username=USERNAME,
@@ -597,7 +762,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
     def test_previous_lifecycle_lookup_absent_blocks_mismatch(self) -> None:
         getter = Mock(return_value=credentials())
 
-        result = run_login_provisioning_flow(
+        result = self.run_flow(
             FakeDevice(),
             account_id=ACCOUNT_ID,
             expected_username=USERNAME,
@@ -615,7 +780,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         device, selectors = configured_device()
         getter = Mock(return_value=credentials())
 
-        result = run_login_provisioning_flow(
+        result = self.run_flow(
             device,
             account_id=ACCOUNT_ID,
             expected_username=USERNAME,
@@ -635,7 +800,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         device, selectors = configured_device()
         getter = Mock(return_value=credentials())
 
-        result = run_login_provisioning_flow(
+        result = self.run_flow(
             device,
             account_id=ACCOUNT_ID,
             expected_username=USERNAME,
@@ -650,7 +815,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
     def test_missing_credentials_creates_credentials_action_no_executor(self) -> None:
         device, selectors = configured_device()
 
-        result = run_login_provisioning_flow(
+        result = self.run_flow(
             device,
             account_id=ACCOUNT_ID,
             expected_username=USERNAME,
@@ -665,7 +830,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
     def test_invalid_secret_value_creates_update_password_action_no_executor(self) -> None:
         device, selectors = configured_device()
 
-        result = run_login_provisioning_flow(
+        result = self.run_flow(
             device,
             account_id=ACCOUNT_ID,
             expected_username=USERNAME,
@@ -692,7 +857,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
 
         device.dump_hierarchy = dump_with_recovery
 
-        result = run_login_provisioning_flow(
+        result = self.run_flow(
             device,
             account_id=ACCOUNT_ID,
             expected_username=USERNAME,
@@ -708,7 +873,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         device, selectors = configured_device(LOGIN_FORM_XML)
         selectors["username"]._count = 0
 
-        result = run_login_provisioning_flow(
+        result = self.run_flow(
             device,
             account_id=ACCOUNT_ID,
             expected_username=USERNAME,
@@ -724,7 +889,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         device, selectors = configured_device(LOGIN_FORM_XML)
         selectors["username"].set_exc = RuntimeError("input boom")
 
-        result = run_login_provisioning_flow(
+        result = self.run_flow(
             device,
             account_id=ACCOUNT_ID,
             expected_username=USERNAME,
@@ -739,7 +904,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         device, selectors = configured_device(LOGIN_FORM_XML)
         selectors["login"].click_exc = RuntimeError("submit boom")
 
-        result = run_login_provisioning_flow(
+        result = self.run_flow(
             device,
             account_id=ACCOUNT_ID,
             expected_username=USERNAME,
@@ -806,7 +971,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
             self.assertNotIn(forbidden, rendered)
 
     def test_lifecycle_lookup_exception_blocks_safe_mismatch_unknown(self) -> None:
-        result = run_login_provisioning_flow(
+        result = self.run_flow(
             FakeDevice(),
             account_id=ACCOUNT_ID,
             expected_username=USERNAME,
@@ -834,7 +999,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         device, selectors = configured_device()
         getter = Mock(return_value=credentials())
 
-        result = run_login_provisioning_flow(
+        result = self.run_flow(
             device,
             account_id=ACCOUNT_ID,
             expected_username=USERNAME,
@@ -857,7 +1022,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         device, selectors = configured_device()
         getter = Mock(return_value=credentials())
 
-        result = run_login_provisioning_flow(
+        result = self.run_flow(
             device,
             account_id=ACCOUNT_ID,
             expected_username=USERNAME,
@@ -876,7 +1041,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         device, _selectors = configured_device()
         getter = Mock(return_value=credentials())
 
-        result = run_login_provisioning_flow(
+        result = self.run_flow(
             device,
             account_id=ACCOUNT_ID,
             expected_username="random_expected",
@@ -897,7 +1062,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         getter = Mock(return_value=credentials())
         device.hierarchies = [ACCOUNT_PICKER_XML, CONNECTED_XML, CONNECTED_XML]
 
-        result = run_login_provisioning_flow(
+        result = self.run_flow(
             device,
             account_id=ACCOUNT_ID,
             expected_username="random_expected",
@@ -916,7 +1081,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         getter = Mock(return_value=None)
         device.hierarchies = [ACCOUNT_PICKER_XML, PASSWORD_ONLY_XML, PASSWORD_ONLY_XML]
 
-        result = run_login_provisioning_flow(
+        result = self.run_flow(
             device,
             account_id=ACCOUNT_ID,
             expected_username="random_expected",
@@ -937,7 +1102,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         device.hierarchies = [ACCOUNT_PICKER_XML, LOADING_XML, PASSWORD_ONLY_XML]
 
         with patch.object(provisioner_orchestrator.time, "sleep") as sleep:
-            result = run_login_provisioning_flow(
+            result = self.run_flow(
                 device,
                 account_id=ACCOUNT_ID,
                 expected_username="random_expected",
@@ -959,7 +1124,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         device.hierarchies = [ACCOUNT_PICKER_XML, UNKNOWN_XML, PASSWORD_ONLY_XML]
 
         with patch.object(provisioner_orchestrator.time, "sleep") as sleep:
-            result = run_login_provisioning_flow(
+            result = self.run_flow(
                 device,
                 account_id=ACCOUNT_ID,
                 expected_username="random_expected",
@@ -978,7 +1143,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         getter = Mock(return_value=credentials())
         device.hierarchies = [ACTIVE_PROFILE_EXPECTED_XML]
 
-        result = run_login_provisioning_flow(
+        result = self.run_flow(
             device,
             account_id=ACCOUNT_ID,
             expected_username="random_expected",
@@ -994,7 +1159,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         getter = Mock(return_value=credentials())
         device.hierarchies = [ACTIVE_PROFILE_OLD_XML]
 
-        result = run_login_provisioning_flow(
+        result = self.run_flow(
             device,
             account_id=ACCOUNT_ID,
             expected_username="random_expected",
@@ -1014,7 +1179,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         device, _selectors = configured_device()
         device.hierarchies = [ACTIVE_PROFILE_OLD_XML]
 
-        result = run_login_provisioning_flow(
+        result = self.run_flow(
             device,
             account_id=ACCOUNT_ID,
             expected_username="random_expected",
@@ -1029,7 +1194,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         device, _selectors = configured_device()
         device.hierarchies = [ACTIVE_PROFILE_OLD_XML]
 
-        result = run_login_provisioning_flow(
+        result = self.run_flow(
             device,
             account_id=ACCOUNT_ID,
             expected_username="random_expected",
@@ -1060,7 +1225,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
             LOGIN_FORM_XML,
         ]
 
-        result = run_login_provisioning_flow(
+        result = self.run_flow(
             device,
             account_id=ACCOUNT_ID,
             expected_username="random_expected",
@@ -1101,7 +1266,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
             CONTINUE_AS_XML,
         ]
 
-        result = run_login_provisioning_flow(
+        result = self.run_flow(
             device,
             account_id=ACCOUNT_ID,
             expected_username="random_expected",
@@ -1131,7 +1296,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
             ACCOUNT_PICKER_XML,
         ]
 
-        result = run_login_provisioning_flow(
+        result = self.run_flow(
             device,
             account_id=ACCOUNT_ID,
             expected_username="random_expected",
@@ -1403,7 +1568,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
     def test_dry_run_wrong_candidate_blocks_mismatch_without_db_assumption(self) -> None:
         getter = Mock(return_value=credentials())
 
-        result = run_login_provisioning_flow(
+        result = self.run_flow(
             FakeDevice(),
             account_id=ACCOUNT_ID,
             expected_username=USERNAME,
@@ -1420,7 +1585,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         getter.assert_not_called()
 
     def test_previous_lifecycle_metadata_does_not_leak_secret_device_or_raw_ui(self) -> None:
-        result = run_login_provisioning_flow(
+        result = self.run_flow(
             FakeDevice(),
             account_id=ACCOUNT_ID,
             expected_username=USERNAME,
@@ -1448,7 +1613,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertNotIn("i_m_your_traker", source)
 
     def test_dry_run_output_has_no_secret_material_or_raw_ui(self) -> None:
-        result = run_login_provisioning_flow(
+        result = self.run_flow(
             FakeDevice([SENSITIVE_XML]),
             account_id=ACCOUNT_ID,
             expected_username=USERNAME,
@@ -1462,7 +1627,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
 
     def _run_login_form(self, xml: str, *, publisher=None, publish_enabled: bool = False):
         device, _selectors = configured_device(xml)
-        return run_login_provisioning_flow(
+        return self.run_flow(
             device,
             account_id=ACCOUNT_ID,
             expected_username=USERNAME,
@@ -1476,7 +1641,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         device, _selectors = configured_device()
         expected_username = "random_expected"
         device.hierarchies = [CONTINUE_AS_XML, PASSWORD_ONLY_XML, PASSWORD_ONLY_XML, post_submit_xml]
-        return run_login_provisioning_flow(
+        return self.run_flow(
             device,
             account_id=ACCOUNT_ID,
             expected_username=expected_username,

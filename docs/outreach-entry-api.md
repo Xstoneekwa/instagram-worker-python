@@ -3423,6 +3423,20 @@ Entry 2E-5P prepare le premier smoke password reel controle pour
 `instagram-credentials` -> Supabase Vault -> runtime Vault reader ->
 `SecretValue` -> login executor.
 
+Regle de preparation ecran login/provisioning :
+
+- tout flow reel, smoke reel ou onboarding/provisioning par defaut commence par
+  `app_start(package_name)` avant le premier probe;
+- `package_name` vaut `com.instagram.android` par defaut et reste configurable
+  pour les futurs clones;
+- le wait post-start est court et borne (`0..3000 ms`, defaut `1500 ms`);
+- le mode sans `app_start` doit etre explicite :
+  `observe_current_screen_only=True` / `--observe-current-screen-only`, reserve
+  aux tests unitaires et diagnostics manuels;
+- raison : eviter de classifier un launcher Android, home Android, autre app,
+  clone non ouvert, ecran stale ou transition comme `unknown` exploitable;
+- tout routing Cas A-G se fait apres `app_start`, dump et classification.
+
 Regles no-leak :
 
 - ne jamais demander ni coller le password dans Cursor;
@@ -3474,6 +3488,42 @@ Retry 2026-05-26 apres synchronisation du token interne :
   `would_publish=false`;
 - aucune publication HTTP, aucune ecriture Supabase status, aucun runner hook,
   aucun flow business.
+
+Correction architecture 2026-05-27 :
+
+- `run_login_provisioning_flow(...)` tente maintenant `app_start` par defaut
+  avant observation avec metadata safe :
+  `app_start_attempted`, `app_start_ok`, `package_name`,
+  `post_start_wait_ms`, `screen_after_app_start`;
+- `instagram_login_probe_cli.py` demarre aussi le package par defaut; le mode
+  courant sans start est uniquement `--observe-current-screen-only`;
+- si `app_start` echoue : stop safe `reason=app_start_failed`, sans credentials,
+  sans Vault reveal, sans password submit;
+- si `app_start` reussit mais prepare un ecran `unknown` : stop safe
+  `reason=screen_preparation_failed`, sans credentials, sans Vault reveal, sans
+  password submit;
+- si l'app arrive directement connectee : stop success
+  `reason=connected_no_password_needed`, `would_publish=false`;
+- les ecrans `account_picker` et `continue_as_candidate` passent par les routes
+  validees avant tout submit; le password n'est revele que si le routing aboutit
+  a `continue_password_only` ou `login_form_empty`.
+
+Relance 2E-5P 2026-05-27 avec `app_start` obligatoire :
+
+- credentials `cinema_catchup` inchanges et prets; aucune modification
+  credentials;
+- pre-check device OK : device unique et aucun process projet business actif;
+- `app_start_attempted=true`, `app_start_ok=true`,
+  `package_name=com.instagram.android`, `post_start_wait_ms=1500`;
+- `screen_after_app_start=unknown`;
+- resultat : stop safe `reason=screen_preparation_failed`,
+  `final_outcome=unknown`;
+- `preparation_flow_used=none`, `screen_before_submit=unknown`,
+  `submit_executed=false`, `password_submit_result=not_executed`,
+  `would_publish=false`;
+- aucun password, aucun `secret_ref` complet, aucun UUID Vault, aucun bearer
+  token/header, aucun XML brut, aucun screenshot path, aucun publish et aucune
+  ecriture status Supabase.
 
 Prochaine etape :
 

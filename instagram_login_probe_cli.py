@@ -32,8 +32,8 @@ APP_START_WARNING_MS = 2000
 TOTAL_WARNING_MS = 3000
 TOTAL_WARNING_WITH_APP_START_MS = 4000
 DEFAULT_PACKAGE_NAME = "com.instagram.android"
-DEFAULT_POST_START_WAIT_MS = 500
-MAX_POST_START_WAIT_MS = 1500
+DEFAULT_POST_START_WAIT_MS = 1500
+MAX_POST_START_WAIT_MS = 3000
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -47,13 +47,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-publish", action="store_false", dest="publish", help="Force probe-only mode.")
     parser.add_argument("--json", action="store_true", help="Print JSON safe summary.")
     parser.add_argument("--timeout-seconds", type=float, default=5.0, help="Connect timeout hint.")
-    parser.add_argument("--app-start", action="store_true", help="Start Instagram package before probing.")
-    parser.add_argument("--package-name", default=DEFAULT_PACKAGE_NAME, help="Package to start with --app-start.")
+    parser.add_argument("--app-start", action="store_true", default=True, help="Start Instagram package before probing (default).")
+    parser.add_argument(
+        "--observe-current-screen-only",
+        action="store_true",
+        help="Diagnostic/test mode only: skip app_start and probe the current visible screen.",
+    )
+    parser.add_argument("--package-name", default=DEFAULT_PACKAGE_NAME, help="Package to start before probing.")
     parser.add_argument(
         "--post-start-wait-ms",
         type=int,
         default=DEFAULT_POST_START_WAIT_MS,
-        help="Bounded wait after --app-start, clamped to 0..1500 ms.",
+        help="Bounded wait after app_start, clamped to 0..3000 ms.",
     )
     parser.add_argument("--no-app-stop", action="store_true", default=True, help="Documented no-op; app_stop is never called.")
     parser.set_defaults(publish=False)
@@ -260,7 +265,7 @@ def _timeout_seconds(args: argparse.Namespace) -> float:
 
 
 def _app_start_requested(args: argparse.Namespace) -> bool:
-    return bool(getattr(args, "app_start", False))
+    return bool(getattr(args, "app_start", True)) and not bool(getattr(args, "observe_current_screen_only", False))
 
 
 def _package_name(args: argparse.Namespace) -> str:
@@ -327,6 +332,7 @@ def _base_summary(
         "timings_ms": dict(timings),
         "warnings": list(warnings),
         "app_start_requested": _app_start_requested(args),
+        "app_start_attempted": _app_start_requested(args),
         "app_started": app_started,
         "package_name": _package_name(args),
         "device_serial_provided": bool(getattr(args, "device_serial", None)),

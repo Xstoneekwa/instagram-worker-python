@@ -37,6 +37,13 @@ class FakeDevice:
 
 
 def _args(*items: str) -> argparse.Namespace:
+    args = list(items)
+    if "--app-start" not in args and "--observe-current-screen-only" not in args:
+        args.insert(0, "--observe-current-screen-only")
+    return cli.build_parser().parse_args(args)
+
+
+def _real_args(*items: str) -> argparse.Namespace:
     return cli.build_parser().parse_args(list(items))
 
 
@@ -255,7 +262,24 @@ class InstagramLoginProbeCliTest(unittest.TestCase):
         self.assertTrue(summary["app_started"])
         self.assertEqual(summary["package_name"], "com.instagram.android")
         device.app_start.assert_called_once_with("com.instagram.android")
-        sleeper.assert_called_once_with(0.5)
+        sleeper.assert_called_once_with(1.5)
+
+    def test_default_probe_starts_app_before_dump(self) -> None:
+        device = FakeDevice(CONNECTED_XML)
+        sleeper = Mock()
+
+        code, summary = cli.run_probe_command(
+            _real_args("--json"),
+            connect_func=lambda _serial, _timeout: device,
+            sleeper=sleeper,
+        )
+
+        self.assertEqual(code, 0)
+        self.assertTrue(summary["app_start_attempted"])
+        self.assertTrue(summary["app_started"])
+        device.app_start.assert_called_once_with("com.instagram.android")
+        self.assertEqual(device.dump_calls, 1)
+        sleeper.assert_called_once_with(1.5)
 
     def test_app_start_uses_custom_package(self) -> None:
         device = FakeDevice(CONNECTED_XML)
@@ -281,8 +305,8 @@ class InstagramLoginProbeCliTest(unittest.TestCase):
         )
 
         self.assertEqual(code, 0)
-        self.assertEqual(summary["timings_ms"]["post_start_wait_ms"], 1500)
-        sleeper.assert_called_once_with(1.5)
+        self.assertEqual(summary["timings_ms"]["post_start_wait_ms"], 3000)
+        sleeper.assert_called_once_with(3.0)
 
     def test_post_start_wait_is_clamped_to_zero(self) -> None:
         device = FakeDevice(CONNECTED_XML)

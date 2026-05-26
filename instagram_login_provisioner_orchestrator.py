@@ -7,6 +7,7 @@ remain injectable and disabled by default.
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field
 from types import SimpleNamespace
@@ -52,11 +53,15 @@ MAX_RETRY_ATTEMPTS = 1
 POST_CONTINUE_REOBSERVE_WAIT_MS = 1500
 PROFILE_MENU_REOBSERVE_WAIT_MS = 1500
 PROFILE_REFRESH_WAIT_MS = 500
+DEFAULT_INSTAGRAM_PACKAGE_NAME = "com.instagram.android"
+DEFAULT_POST_APP_START_WAIT_MS = 1500
+MAX_POST_APP_START_WAIT_MS = 3000
 
 CredentialsGetter = Callable[[str], Any]
 PreviousAccountLifecycleLookup = Callable[[str, dict[str, Any]], dict[str, Any]]
 Publisher = Callable[..., dict[str, Any]]
 Timer = Callable[[], float]
+Sleeper = Callable[[float], None]
 
 REUSABLE_PREVIOUS_ACCOUNT_LIFECYCLES = {"canceled", "stopped", "archived"}
 POST_LOGOUT_KNOWN_SCREENS = {
@@ -105,16 +110,25 @@ def run_login_provisioning_flow(
     max_retry_attempts: int = MAX_RETRY_ATTEMPTS,
     initial_signals: dict | None = None,
     dry_run: bool = False,
+    start_app_before_probe: bool = True,
+    observe_current_screen_only: bool = False,
+    package_name: str = DEFAULT_INSTAGRAM_PACKAGE_NAME,
+    post_start_wait_ms: int = DEFAULT_POST_APP_START_WAIT_MS,
     timer: Timer | None = None,
+    sleeper: Sleeper | None = None,
 ) -> LoginProvisioningFlowResult:
     """Run one isolated provisioning decision flow.
 
-    No device app lifecycle is managed here. The only UI actions are delegated to
-    already validated executors, and publication remains disabled unless the
-    caller explicitly injects a publisher and enables it.
+    Real/default provisioning starts the targeted Instagram package before
+    probing. Unit tests and manual diagnostics may opt into
+    observe_current_screen_only=True to preserve pure current-screen observation.
+    The only credential UI actions are delegated to already validated executors,
+    and publication remains disabled unless the caller explicitly injects a
+    publisher and enables it.
     """
 
     timer = timer or time.perf_counter
+    sleeper = sleeper or time.sleep
     total_start = timer()
     timings = _empty_timings()
     warnings: list[str] = []
@@ -123,14 +137,139 @@ def run_login_provisioning_flow(
     safe_account_id = str(account_id or "").strip()
     safe_expected_username = str(expected_username or "").strip()
     max_retries = min(MAX_RETRY_ATTEMPTS, max(0, int(max_retry_attempts or 0)))
+    safe_package_name = _safe_package_name(package_name)
+    bounded_post_start_wait_ms = _clamp_post_start_wait_ms(post_start_wait_ms)
+    app_start_attempted = bool(start_app_before_probe) and not bool(observe_current_screen_only)
+    screen_preparation_metadata = {
+        "observe_current_screen_only": bool(observe_current_screen_only),
+        "app_start_attempted": app_start_attempted,
+        "app_start_ok": None,
+        "package_name": safe_package_name,
+        "post_start_wait_ms": bounded_post_start_wait_ms if app_start_attempted else 0,
+        "screen_after_app_start": "",
+        "would_submit_password": False,
+    }
+
+    if app_start_attempted:
+        try:
+            start = timer()
+            d.app_start(safe_package_name)
+            timings["app_start_ms"] += _elapsed_ms(start, timer())
+            screen_preparation_metadata["app_start_ok"] = True
+        except Exception:
+            timings["app_start_ms"] += _elapsed_ms(start, timer())
+            screen_preparation_metadata["app_start_ok"] = False
+            return _finalize(
+                ok=False,
+                completed=False,
+                final_outcome="unknown",
+                reason="app_start_failed",
+                failure_reason="app_start_failed",
+                final_login_status="logged_out",
+                final_provisioning_status="login_pending",
+                final_onboarding_status="credentials_required",
+                should_publish_status=False,
+                account_id=safe_account_id,
+                expected_username=safe_expected_username,
+                actions_taken=actions_taken,
+                timings=timings,
+                warnings=warnings,
+                extra_metadata=screen_preparation_metadata,
+                total_start=total_start,
+                timer=timer,
+                publisher=publisher,
+                publish_enabled=publish_enabled,
+            )
+        timings["post_start_wait_ms"] = bounded_post_start_wait_ms
+        if bounded_post_start_wait_ms > 0:
+            sleeper(bounded_post_start_wait_ms / 1000.0)
 
     signals = dict(initial_signals or {})
     if not signals:
         start = timer()
         signals = _observe_login_signals(d, expected_username=safe_expected_username)
         timings["observe_ms"] += _elapsed_ms(start, timer())
+    if app_start_attempted:
+        screen_preparation_metadata["screen_after_app_start"] = _screen_after_app_start(signals)
+        post_app_start_outcome = _post_action_outcome_from_signals(signals)
+        if post_app_start_outcome == LoginProbeOutcome.CONNECTED.value:
+            classification = classify_login_probe_outcome(LoginProbeOutcome.CONNECTED.value)
+            return _finalize(
+                ok=True,
+                completed=True,
+                final_outcome=LoginProbeOutcome.CONNECTED.value,
+                reason="connected_no_password_needed",
+                failure_reason=None,
+                final_login_status=classification.login_status,
+                final_provisioning_status=classification.provisioning_status,
+                final_onboarding_status=classification.onboarding_status,
+                should_publish_status=False,
+                account_id=safe_account_id,
+                expected_username=safe_expected_username,
+                actions_taken=actions_taken,
+                timings=timings,
+                warnings=warnings,
+                extra_metadata={
+                    **screen_preparation_metadata,
+                    "password_required": False,
+                    "ready_for_password_submit": False,
+                },
+                total_start=total_start,
+                timer=timer,
+                publisher=publisher,
+                publish_enabled=publish_enabled,
+            )
+        if str(signals.get("screen_type") or "unknown") == "unknown":
+            return _finalize(
+                ok=False,
+                completed=False,
+                final_outcome="unknown",
+                reason="screen_preparation_failed",
+                failure_reason="screen_preparation_failed",
+                final_login_status="logged_out",
+                final_provisioning_status="login_pending",
+                final_onboarding_status="credentials_required",
+                should_publish_status=False,
+                account_id=safe_account_id,
+                expected_username=safe_expected_username,
+                actions_taken=actions_taken,
+                timings=timings,
+                warnings=warnings,
+                extra_metadata=screen_preparation_metadata,
+                total_start=total_start,
+                timer=timer,
+                publisher=publisher,
+                publish_enabled=publish_enabled,
+            )
+    elif _post_action_outcome_from_signals(signals) == LoginProbeOutcome.CONNECTED.value:
+        classification = classify_login_probe_outcome(LoginProbeOutcome.CONNECTED.value)
+        return _finalize(
+            ok=True,
+            completed=True,
+            final_outcome=LoginProbeOutcome.CONNECTED.value,
+            reason="connected_no_password_needed",
+            failure_reason=None,
+            final_login_status=classification.login_status,
+            final_provisioning_status=classification.provisioning_status,
+            final_onboarding_status=classification.onboarding_status,
+            should_publish_status=False,
+            account_id=safe_account_id,
+            expected_username=safe_expected_username,
+            actions_taken=actions_taken,
+            timings=timings,
+            warnings=warnings,
+            extra_metadata={
+                **screen_preparation_metadata,
+                "password_required": False,
+                "ready_for_password_submit": False,
+            },
+            total_start=total_start,
+            timer=timer,
+            publisher=publisher,
+            publish_enabled=publish_enabled,
+        )
 
-    old_logged_in_metadata: dict[str, Any] = {}
+    old_logged_in_metadata: dict[str, Any] = dict(screen_preparation_metadata)
     if signals.get("screen_type") in {"active_account_home", "active_account_profile"}:
         if dry_run and signals.get("screen_type") == "active_account_home":
             timings["total_ms"] = _elapsed_ms(total_start, timer())
@@ -1297,6 +1436,39 @@ def _observe_login_signals(d: Any, *, expected_username: str | None = None) -> d
     return signals
 
 
+def _safe_package_name(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return DEFAULT_INSTAGRAM_PACKAGE_NAME
+    if not re.fullmatch(r"[A-Za-z0-9_.]+", text):
+        return DEFAULT_INSTAGRAM_PACKAGE_NAME
+    return text
+
+
+def _clamp_post_start_wait_ms(value: Any) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = DEFAULT_POST_APP_START_WAIT_MS
+    return min(MAX_POST_APP_START_WAIT_MS, max(0, parsed))
+
+
+def _screen_after_app_start(signals: dict[str, Any]) -> str:
+    screen_type = str(signals.get("screen_type") or "unknown").strip() or "unknown"
+    if screen_type != "unknown":
+        return _safe_screen_type_value(screen_type)
+    outcome = str(signals.get("login_probe_outcome") or "unknown").strip() or "unknown"
+    if outcome in {
+        LoginProbeOutcome.CONNECTED.value,
+        LoginProbeOutcome.NEEDS_2FA.value,
+        LoginProbeOutcome.CHECKPOINT.value,
+        LoginProbeOutcome.LOGIN_FAILED.value,
+        LoginProbeOutcome.LOGGED_OUT.value,
+    }:
+        return outcome
+    return "unknown"
+
+
 def _signals_confirm_login_form(signals: dict[str, Any]) -> bool:
     if signals.get("screen_type") == "login_form_empty":
         return signals.get("has_username_field") is True and signals.get("has_login_button") is True
@@ -1814,7 +1986,7 @@ def _merge_timings(base: dict[str, int], extra: dict[str, Any] | None) -> dict[s
 
 
 def _empty_timings() -> dict[str, int]:
-    return {"observe_ms": 0, "action_ms": 0, "total_ms": 0}
+    return {"app_start_ms": 0, "post_start_wait_ms": 0, "observe_ms": 0, "action_ms": 0, "total_ms": 0}
 
 
 def _elapsed_ms(start: float, end: float) -> int:

@@ -324,6 +324,30 @@ Post-submit policy future :
   `final_outcome=unknown`,
   `status_candidate=unknown_stop_safe_initial_screen_not_accepted`,
   `would_publish=false`.
+- Correction architecture login/provisioning 2026-05-27 : les flows reels et
+  smokes reels demarrent maintenant Instagram par defaut avant probe via
+  `app_start(package_name)`, avec `package_name=com.instagram.android`
+  configurable pour futurs clones et wait court borne (`0..3000 ms`, defaut
+  `1500 ms`). Le mode sans start est explicitement
+  `observe_current_screen_only=True` / `--observe-current-screen-only` et reste
+  reserve aux tests/diagnostics. Objectif : ne plus prendre launcher Android,
+  home Android, autre app, clone non ouvert, ecran stale ou transition comme
+  base de routing prod. Apres app_start, le flow dump/probe/classifie puis route
+  vers Cas A-G; aucun password submit ni Vault reveal tant que le routing
+  n'aboutit pas a `continue_password_only` ou `login_form_empty`. Echec start :
+  `app_start_failed`; start OK + ecran `unknown` :
+  `screen_preparation_failed`; connected direct :
+  `connected_no_password_needed`, sans publish.
+- Relance 2E-5P 2026-05-27 avec app_start obligatoire : pre-check device OK,
+  credentials inchanges et prets, `app_start_attempted=true`,
+  `app_start_ok=true`, package `com.instagram.android`, wait `1500 ms`.
+  L'ecran apres start reste `unknown`, donc stop safe
+  `screen_preparation_failed`. Aucun routing Cas A-G exploitable,
+  `preparation_flow_used=none`, `screen_before_submit=unknown`,
+  `submit_executed=false`, `password_submit_result=not_executed`,
+  `final_outcome=unknown`, `would_publish=false`. Aucun password, aucune
+  reference Vault complete, aucun token/header, aucun XML brut et aucune ecriture
+  status Supabase.
 - Entry 2E-5J-2B-1 : audit lifecycle read-only. Les statuts existants couvrent
   `client_instagram_accounts` login/provisioning/onboarding,
   `client_subscriptions` active/paused/cancelled/expired,
