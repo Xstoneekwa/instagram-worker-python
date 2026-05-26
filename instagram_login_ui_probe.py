@@ -8,6 +8,7 @@ data in metadata.
 from __future__ import annotations
 
 import re
+from html import unescape
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -99,8 +100,9 @@ def detect_login_probe_outcome_from_hierarchy(hierarchy_xml: str | None) -> Logi
 
 def extract_login_screen_signals_from_hierarchy(hierarchy_xml: str | None) -> dict[str, Any]:
     text = _normalize_hierarchy_text(hierarchy_xml)
-    has_continue_button = "continue" in text
-    has_use_another_profile = "use another profile" in text
+    has_continue_button = _has_phrase(text, "continue")
+    has_use_another_profile = _has_phrase(text, "use another profile")
+    has_create_new_account = _has_phrase(text, "create new account")
     has_username_field = "username, email or mobile number" in text or (
         "username" in text and ("email" in text or "mobile" in text)
     )
@@ -117,9 +119,12 @@ def extract_login_screen_signals_from_hierarchy(hierarchy_xml: str | None) -> di
 
     return {
         "screen_type": screen_type,
+        "continue_as_candidate": screen_type == "continue_as_candidate",
         "suggested_username": suggested_username,
         "has_continue_button": has_continue_button,
         "has_use_another_profile": has_use_another_profile,
+        "has_use_another_profile_button": has_use_another_profile,
+        "has_create_new_account_button": has_create_new_account,
         "has_username_field": has_username_field,
         "has_password_field": has_password_field,
         "has_login_button": has_login_button,
@@ -240,13 +245,30 @@ def _normalize_hierarchy_text(hierarchy_xml: str | None) -> str:
     raw = str(hierarchy_xml or "")
     if not raw.strip():
         return ""
-    text = re.sub(r"[-]+", " ", raw)
+    visible_values = _extract_visible_text_values(raw)
+    text = " ".join(visible_values) if visible_values else raw
+    text = re.sub(r"[-]+", " ", text)
     text = re.sub(r"\s+", " ", text)
     return text.lower()
 
 
+def _extract_visible_text_values(hierarchy_xml: str) -> list[str]:
+    values: list[str] = []
+    for attr in ("text", "content-desc", "contentDescription"):
+        for match in re.finditer(rf'{attr}="([^"]*)"', hierarchy_xml):
+            value = unescape(match.group(1)).strip()
+            if value:
+                values.append(value)
+    return values
+
+
 def _contains_any(text: str, patterns: tuple[str, ...]) -> bool:
     return any(pattern in text for pattern in patterns)
+
+
+def _has_phrase(text: str, phrase: str) -> bool:
+    normalized = re.escape(phrase.lower()).replace(r"\ ", r"\s+")
+    return bool(re.search(rf"\b{normalized}\b", text))
 
 
 def _count_pattern_hits(text: str, patterns: tuple[str, ...]) -> int:
@@ -256,13 +278,28 @@ def _count_pattern_hits(text: str, patterns: tuple[str, ...]) -> int:
 def _extract_suggested_username(text: str) -> str:
     continue_as_match = re.search(r"\bcontinue as\s+@?([a-z0-9._]{1,30})\b", text)
     if continue_as_match:
-        return continue_as_match.group(1).lstrip("@")
+        candidate = _normalize_username_candidate(continue_as_match.group(1))
+        if candidate:
+            return candidate
 
     candidates = re.findall(r"@?[a-z0-9._]{1,30}", text)
     for raw in candidates:
-        candidate = raw.lstrip("@").strip("._")
-        if not candidate or candidate in COMMON_NON_USERNAME_TEXTS:
-            continue
-        if "_" in candidate or "." in candidate:
+        candidate = _normalize_username_candidate(raw)
+        if candidate and ("_" in candidate or "." in candidate):
             return candidate
     return ""
+
+
+def _normalize_username_candidate(value: str) -> str:
+    candidate = str(value or "").lstrip("@").strip("._").lower()
+    if not candidate or candidate in COMMON_NON_USERNAME_TEXTS:
+        return ""
+    if not re.fullmatch(r"[a-z0-9._]{1,30}", candidate):
+        return ""
+    if not re.search(r"[a-z]", candidate):
+        return ""
+    if re.fullmatch(r"\d+(?:\.\d+)+", candidate):
+        return ""
+    if "." in candidate and "_" not in candidate and candidate.count(".") >= 2:
+        return ""
+    return candidate

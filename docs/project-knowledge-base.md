@@ -37,6 +37,8 @@ Checkpoints recents valides :
   sans smoke reel.
 - Entry 2E-5J : Provisioner Orchestrator Skeleton en cours de validation
   mocks-only, sans run device ni vrai login.
+- Entry 2E-5J-2A : smoke prep no-password en cours, pour verifier device idle,
+  app_start, probe/router/orchestrator dry-run sans credential.
 
 Le runtime principal n'est pas encore branche au login/provisioning complet :
 pas de vrai login, pas de password tap, pas de runner hook, pas de run device
@@ -93,12 +95,15 @@ Deja pose :
 - real Vault read RPC service-role only;
 - Controlled Password Form Executor mocks-only valide;
 - Provisioner Orchestrator Skeleton mocks-only en cours.
+- Orchestrator dry-run/no-submit pour smoke prep no-password.
 
 Etapes suivantes :
 
 - 2E-5H-2 : RPC service-role only de lecture Vault + smoke fake secret valide;
 - finaliser 2E-5J : orchestrateur isole probe/router/action/credentials/password
   executor/classifier/publisher injectable;
+- 2E-5J-2A : smoke prep no-password device idle + app_start + probe/router +
+  orchestrator dry-run;
 - 2E-5J-2 smoke orchestrator controle ou 2E-5I-2 smoke reel `cinema_catchup`
   via flow securise
   `instagram-credentials` -> Vault apres validation explicite;
@@ -144,6 +149,17 @@ Post-submit policy future :
   `support_required`.
 - 2E-5J ne lance aucun smoke reel; toute execution device future exige une
   fenetre device idle, un lock UI exclusif et un compte test dedie.
+- 2E-5J-2A autorise uniquement un smoke prep sans password : app_start,
+  dump/probe/router/orchestrator dry-run; aucun credential, aucun tap `Log in`,
+  aucun publish.
+- Smoke prep 2E-5J-2A execute sur `emulator-5554` : device unique, aucun run
+  business detecte, `app_start` OK, dump UI OK,
+  `screen_type=continue_as_candidate`, `suggested_username=i_m_your_traker`,
+  boutons Continue / Use another profile / Create new account detectes,
+  `would_submit_password=false`, `would_publish=false`.
+- Sans lifecycle confirme, le router bloque en mismatch; avec lifecycle mock
+  `canceled` + `clone_reuse_allowed=true`, le dry-run prevoit
+  `use_another_profile_previous_account_stopped` sans cliquer.
 
 ## 6. Dashboard / Backend / BotApp Registry
 
@@ -185,6 +201,7 @@ Regles device a respecter avant orchestration multi-clone :
 
 - 1 phone = 1 action UI active a la fois;
 - smoke reel login seulement sur fenetre device idle;
+- business window/preflight et smoke login doivent rester separes;
 - pas de visible preflight sur clone B pendant que clone A tourne;
 - lock UI exclusif au niveau device;
 - buffer technique entre clones;
@@ -240,7 +257,8 @@ controle device, pas a contourner la state machine Instagram.
 
 Ordre recommande :
 
-1. Finaliser 2E-5J : orchestrateur isole mocks-only.
+1. Confirmer explicitement le lifecycle de `i_m_your_traker` ou afficher
+   directement `login_form_empty` sur device idle.
 2. 2E-5J-2 smoke orchestrator controle ou 2E-5I-2 smoke reel
    `cinema_catchup` via flow securise, jamais via chat/prompt/shell
    history visible.

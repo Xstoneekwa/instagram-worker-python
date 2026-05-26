@@ -89,6 +89,7 @@ def run_login_provisioning_flow(
     publish_enabled: bool = False,
     max_retry_attempts: int = MAX_RETRY_ATTEMPTS,
     initial_signals: dict | None = None,
+    dry_run: bool = False,
     timer: Timer | None = None,
 ) -> LoginProvisioningFlowResult:
     """Run one isolated provisioning decision flow.
@@ -122,6 +123,19 @@ def run_login_provisioning_flow(
         account_id=safe_account_id,
     )
     actions_taken.append(f"route:{route.decision}")
+
+    if dry_run:
+        return _dry_run_result(
+            route=route,
+            signals=signals,
+            account_id=safe_account_id,
+            expected_username=safe_expected_username,
+            actions_taken=actions_taken,
+            timings=timings,
+            warnings=warnings,
+            total_start=total_start,
+            timer=timer,
+        )
 
     if route.decision == "block_wrong_suggested_account":
         return _finalize(
@@ -337,6 +351,94 @@ def _signals_confirm_login_form(signals: dict[str, Any]) -> bool:
         and signals.get("has_password_field") is True
         and signals.get("has_login_button") is True
     )
+
+
+def _dry_run_result(
+    *,
+    route: Any,
+    signals: dict[str, Any],
+    account_id: str,
+    expected_username: str,
+    actions_taken: list[str],
+    timings: dict[str, int],
+    warnings: list[str],
+    total_start: float,
+    timer: Timer,
+) -> LoginProvisioningFlowResult:
+    screen_type = str(signals.get("screen_type") or "unknown")
+    decision = str(getattr(route, "decision", "") or "unknown_no_action")
+    would_tap_continue = decision == "continue_expected_account"
+    would_tap_use_another_profile = decision == "use_another_profile_previous_account_stopped"
+    would_request_credentials = decision == "start_login_form_flow"
+    would_block_mismatch = decision == "block_wrong_suggested_account"
+    ready_for_password_smoke = screen_type == "login_form_empty" and would_request_credentials
+    smoke_ready = ready_for_password_smoke or would_tap_continue or would_tap_use_another_profile
+    reason = "dry_run_ready" if smoke_ready else (getattr(route, "reason", "") or "dry_run_not_ready")
+    dry_metadata = {
+        "dry_run": True,
+        "screen_type": screen_type,
+        "router_decision": decision,
+        "suggested_username": _safe_public_text(signals.get("suggested_username")),
+        "expected_username": expected_username,
+        "would_tap_continue": would_tap_continue,
+        "would_tap_use_another_profile": would_tap_use_another_profile,
+        "would_request_credentials": would_request_credentials,
+        "would_submit_password": False,
+        "would_publish": False,
+        "would_block_mismatch": would_block_mismatch,
+        "smoke_ready_for_real_login": smoke_ready,
+        "ready_for_password_smoke": ready_for_password_smoke,
+        "reason": reason,
+    }
+    timings["total_ms"] = _elapsed_ms(total_start, timer())
+    safe_metadata = clean_login_probe_metadata(redact_credentials_payload(dry_metadata))
+    return LoginProvisioningFlowResult(
+        ok=smoke_ready,
+        completed=False,
+        final_outcome="dry_run",
+        final_login_status=None,
+        final_provisioning_status=None,
+        final_onboarding_status=None,
+        reason=reason,
+        failure_reason=None if smoke_ready else reason,
+        retry_attempted=False,
+        retry_count=0,
+        actions_taken=list(actions_taken),
+        dashboard_action_type="review_account_mismatch" if would_block_mismatch else None,
+        should_publish_status=False,
+        publish_payload=None,
+        published=False,
+        publish_reason="disabled",
+        timings=dict(timings),
+        warnings=list(warnings),
+        safe_metadata=safe_metadata,
+    )
+
+
+def _safe_public_text(value: Any) -> str:
+    text = str(value or "").strip()
+    lowered = text.lower()
+    if any(
+        token in lowered
+        for token in (
+            "password",
+            "secret",
+            "secret_ref",
+            "vault",
+            "token",
+            "authorization",
+            "bearer",
+            "cookie",
+            "session",
+            "xml",
+            "screenshot",
+            "emulator-",
+            "adb_serial",
+            "device_udid",
+        )
+    ):
+        return ""
+    return text
 
 
 def _load_credentials(credentials_getter: CredentialsGetter, account_id: str) -> dict[str, Any]:

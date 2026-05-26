@@ -413,6 +413,78 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
 
         self.assertEqual(result.actions_taken, ["route:start_login_form_flow", "login_form_submit"])
 
+    def test_dry_run_login_form_does_not_request_credentials_or_submit(self) -> None:
+        device, selectors = configured_device()
+        getter = Mock(return_value=credentials())
+
+        result = run_login_provisioning_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username=USERNAME,
+            credentials_getter=getter,
+            initial_signals=LOGIN_FORM_SIGNALS,
+            dry_run=True,
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.final_outcome, "dry_run")
+        self.assertTrue(result.safe_metadata["would_request_credentials"])
+        self.assertFalse(result.safe_metadata["would_submit_password"])
+        self.assertTrue(result.safe_metadata["ready_for_password_smoke"])
+        getter.assert_not_called()
+        self.assertEqual(selectors["login"].click_calls, 0)
+
+    def test_dry_run_continue_as_expected_previews_continue_only(self) -> None:
+        device, selectors = configured_device()
+        getter = Mock(return_value=credentials())
+
+        result = run_login_provisioning_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username=USERNAME,
+            credentials_getter=getter,
+            initial_signals=CONTINUE_SIGNALS,
+            dry_run=True,
+        )
+
+        self.assertTrue(result.safe_metadata["would_tap_continue"])
+        self.assertFalse(result.safe_metadata["would_submit_password"])
+        self.assertTrue(result.safe_metadata["smoke_ready_for_real_login"])
+        getter.assert_not_called()
+        self.assertEqual(selectors["continue"].click_calls, 0)
+
+    def test_dry_run_wrong_candidate_blocks_mismatch_without_db_assumption(self) -> None:
+        getter = Mock(return_value=credentials())
+
+        result = run_login_provisioning_flow(
+            FakeDevice(),
+            account_id=ACCOUNT_ID,
+            expected_username=USERNAME,
+            credentials_getter=getter,
+            initial_signals={**WRONG_CONTINUE_SIGNALS, "suggested_username": "i_m_your_traker"},
+            dry_run=True,
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.dashboard_action_type, "review_account_mismatch")
+        self.assertTrue(result.safe_metadata["would_block_mismatch"])
+        self.assertEqual(result.safe_metadata["suggested_username"], "i_m_your_traker")
+        self.assertFalse(result.safe_metadata["would_submit_password"])
+        getter.assert_not_called()
+
+    def test_dry_run_output_has_no_secret_material_or_raw_ui(self) -> None:
+        result = run_login_provisioning_flow(
+            FakeDevice([SENSITIVE_XML]),
+            account_id=ACCOUNT_ID,
+            expected_username=USERNAME,
+            credentials_getter=Mock(return_value=credentials()),
+            dry_run=True,
+        )
+        rendered = json.dumps(asdict(result), sort_keys=True)
+
+        for forbidden in (PASSWORD, SECRET_REF, VAULT_ID, "secret_ref", "vault", "Vault", "token", "emulator-5554", "xml", "screenshot"):
+            self.assertNotIn(forbidden, rendered)
+
     def _run_login_form(self, xml: str, *, publisher=None, publish_enabled: bool = False):
         device, _selectors = configured_device(xml)
         return run_login_provisioning_flow(

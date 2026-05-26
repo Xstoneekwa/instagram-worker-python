@@ -133,6 +133,53 @@ class InstagramLoginUiProbeTest(unittest.TestCase):
         self.assertEqual(signals["suggested_username"], "i_m_your_traker")
         self.assertTrue(signals["has_continue_button"])
         self.assertTrue(signals["has_use_another_profile"])
+        self.assertTrue(signals["has_use_another_profile_button"])
+        self.assertTrue(signals["has_create_new_account_button"])
+        self.assertTrue(signals["continue_as_candidate"])
+
+    def test_continue_as_i_m_your_traker_detected_with_realistic_xml_noise(self) -> None:
+        xml = (
+            '<hierarchy rotation="0">'
+            '<node package="com.instagram.android" resource-id="android:id/status" text="1.0" />'
+            '<node text="" content-desc="Instagram" />'
+            '<node text="i_m_your_traker" resource-id="com.instagram.android:id/username" />'
+            '<node text="Continue" clickable="true" />'
+            '<node text="Use another profile" clickable="true" />'
+            '<node text="Create new account" clickable="true" />'
+            '<node text="Meta" />'
+            '</hierarchy>'
+        )
+
+        signals = extract_login_screen_signals_from_hierarchy(xml)
+
+        self.assertEqual(signals["screen_type"], "continue_as_candidate")
+        self.assertEqual(signals["suggested_username"], "i_m_your_traker")
+        self.assertTrue(signals["has_continue_button"])
+        self.assertTrue(signals["has_use_another_profile_button"])
+        self.assertTrue(signals["has_create_new_account_button"])
+        rendered = str(signals)
+        for forbidden in ("secret_ref", "vault", "<hierarchy", "screenshot", "emulator-5554"):
+            self.assertNotIn(forbidden, rendered)
+
+    def test_continue_as_random_old_profile_detected_generically(self) -> None:
+        xml = (
+            '<hierarchy rotation="0">'
+            '<node text="" content-desc="Instagram" />'
+            '<node text="random_old_profile" />'
+            '<node text="Continue" clickable="true" />'
+            '<node text="Use another profile" clickable="true" />'
+            '<node text="Create new account" clickable="true" />'
+            '<node text="Meta" />'
+            '</hierarchy>'
+        )
+
+        signals = extract_login_screen_signals_from_hierarchy(xml)
+
+        self.assertEqual(signals["screen_type"], "continue_as_candidate")
+        self.assertTrue(signals["continue_as_candidate"])
+        self.assertEqual(signals["suggested_username"], "random_old_profile")
+        self.assertTrue(signals["has_continue_button"])
+        self.assertTrue(signals["has_use_another_profile_button"])
 
     def test_extracts_login_form_empty_signals(self) -> None:
         xml = (

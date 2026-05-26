@@ -2787,6 +2787,111 @@ Prochaine etape apres 2E-5J :
   credentials fournis via `instagram-credentials` -> Supabase Vault;
 - aucun password dans chat, Cursor, logs, git, XML ou screenshots.
 
+## Entry 2E-5J-2A Smoke Prep No-Password
+
+Entry 2E-5J-2A prepare le futur smoke reel `cinema_catchup` sans utiliser de
+password. Le but est de verifier le terrain device/runtime et la decision
+probe/router/orchestrator, pas de soumettre un login.
+
+Scope autorise :
+
+- `adb devices -l`;
+- verifier qu'aucun run business n'est actif sur le meme phone;
+- connecter `uiautomator2`;
+- `app_start` Instagram sans `app_stop`;
+- un dump UI;
+- extraction des signaux login;
+- routing;
+- orchestrator `dry_run=True`;
+- aucun credential, aucun Vault read, aucun publish HTTP.
+
+Dry-run orchestrator :
+
+- `run_login_provisioning_flow(..., dry_run=True)` observe et route seulement;
+- ne charge jamais `credentials_getter`;
+- ne lance jamais `execute_login_form_credentials(...)`;
+- ne tappe jamais `Log in`;
+- ne lit jamais Vault;
+- ne publie jamais;
+- retourne uniquement decision safe :
+  `screen_type`, `router_decision`, `would_tap_continue`,
+  `would_tap_use_another_profile`, `would_request_credentials`,
+  `would_submit_password=false`, `would_publish=false`,
+  `smoke_ready_for_real_login`, `ready_for_password_smoke`, reason et timings.
+
+Interpretation :
+
+- `login_form_empty` -> `would_request_credentials=true`,
+  `would_submit_password=false`, `ready_for_password_smoke=true`;
+- `continue_as_candidate` attendu -> `would_tap_continue=true`, mais aucun tap
+  automatique en 2E-5J-2A;
+- `Continue as i_m_your_traker` ou autre mauvais compte -> dry-run seulement,
+  `lifecycle_lookup` necessaire pour decider si `Use another profile` serait
+  autorise;
+- `unknown` -> pas pret pour password smoke; re-observation ou preparation UI
+  requise.
+
+No-leak :
+
+- aucun password;
+- aucun `secret_ref`;
+- aucun Vault UUID;
+- aucun token/service-role/Authorization;
+- aucun XML brut;
+- aucun screenshot path;
+- aucun device id complet dans les outputs safe;
+- aucun cookie/session.
+
+Condition avant vrai smoke password :
+
+- device idle confirme;
+- lock UI disponible;
+- aucun run business actif;
+- ecran `login_form_empty` ou flow Continue/Use another profile explicitement
+  valide;
+- credentials uniquement via flow securise `instagram-credentials` -> Vault;
+- validation humaine explicite avant toute saisie.
+
+Resultat smoke prep 2E-5J-2A :
+
+- device detecte : `emulator-5554`;
+- device count : 1;
+- business run detecte : false;
+- smoke allowed : true;
+- `app_start` Instagram : OK;
+- dump UI unique : OK;
+- `screen_type=continue_as_candidate`;
+- `suggested_username=i_m_your_traker`;
+- `has_continue_button=true`;
+- `has_use_another_profile_button=true`;
+- `has_create_new_account_button=true`;
+- router sans lifecycle/clone reuse : `block_wrong_suggested_account`;
+- router avec lifecycle mock `canceled` + `clone_reuse_allowed=true` :
+  `use_another_profile_previous_account_stopped`;
+- `would_submit_password=false`;
+- `would_publish=false`;
+- `ready_for_password_smoke=false`;
+- `smoke_ready_for_real_login=true` seulement pour le chemin dry-run
+  `Use another profile` controle;
+- aucune action UI automatique n'a ete executee apres observation.
+
+Prochaine condition requise :
+
+- confirmer explicitement le lifecycle de `i_m_your_traker` avant tout tap
+  `Use another profile`;
+- ou afficher directement `login_form_empty`;
+- puis validation humaine explicite avant toute saisie password.
+
+No-leak smoke prep :
+
+- aucun password affiche;
+- aucun `secret_ref` affiche;
+- aucun Vault UUID affiche;
+- aucun token/service-role/Authorization affiche;
+- aucun XML brut affiche;
+- aucun screenshot path affiche;
+- aucun cookie/session affiche.
+
 Procedure future `cinema_catchup` :
 
 - l'utilisateur changera le mot de passe du compte test;
