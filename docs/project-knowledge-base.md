@@ -189,6 +189,32 @@ Post-submit policy future :
   `ready_for_password_smoke=false`, sans credential, sans retry password et sans
   publish par defaut. La meme passerelle couvre `needs_2fa`, `checkpoint` et
   `login_failed` comme status candidates post-action.
+- Entry 2E-5K : ajout du flow `Continue -> continue_password_only -> password`.
+  Le probe reconnait un ecran password-only quand le username attendu est deja
+  visible, que le champ `Password` et le bouton `Log in` sont presents, sans
+  champ username editable. Les overlays Android/Google/password manager sont
+  marques `overlay_present` et ne remplacent pas la
+  classification metier.
+- L'executor password saisit uniquement le password en mode
+  `continue_password_only`, via `SecretValue.reveal_for_login_executor()`, puis
+  tap `Log in`. Si un overlay bloque une fois le submit, une recovery minimale
+  `back` + refocus password + retap est autorisee une seule fois. Aucun password
+  en result/metadata/logs, aucun Vault read en tests, aucun runner hook.
+- Validation reelle 2E-5K no-password 2026-05-26 : pre-check device OK,
+  `app_start` Instagram OK, pre-action
+  `continue_as_candidate/cinema_catchup` avec router
+  `continue_expected_account`, puis un seul tap controle `Continue`.
+  Le premier post-Continue etait `Loading...`; l'orchestrateur fait maintenant
+  une seule re-observation courte a 1500 ms, avec metadata
+  `post_continue_initial_screen=transition_loading`,
+  `post_continue_reobserve=true`, `post_continue_reobserve_count=1`.
+  Observation reelle suivante : `screen_type=continue_password_only`,
+  username `cinema_catchup`, champ `Password`, bouton `Log in`, pas de champ
+  username editable, overlay Google `Suggest strong password` detecte comme
+  parasite (`overlay_present=true`, `overlay_blocking_business=false`),
+  `password_required=true`, `ready_for_password_submit=true`. Aucun password,
+  aucun tap `Log in`, aucun Vault read, aucun publish. Le vrai submit reste
+  futur via Vault/`SecretValue` uniquement.
 - Entry 2E-5J-2B-1 : audit lifecycle read-only. Les statuts existants couvrent
   `client_instagram_accounts` login/provisioning/onboarding,
   `client_subscriptions` active/paused/cancelled/expired,
@@ -309,9 +335,8 @@ Ordre recommande :
 1. Confirmer explicitement le lifecycle canceled/stopped/archived du compte
    suggere actuellement visible via un helper lookup read-only explicite, ou
    afficher directement `login_form_empty` sur device idle.
-2. Capturer/valider un autre cas d'ecran avant password smoke; si `Continue`
-   mene a `connected`, le provisioning pourra passer a connected sans password
-   via un futur publish runtime approuve.
+2. Valider le smoke password-only reel `cinema_catchup` uniquement via le flow
+   securise Vault/SecretValue, sans password dans chat/Cursor/logs/git.
 3. Definir le modele durable lifecycle compte + `clone_reuse_allowed` dans la
    DB/dashboard, sans hardcode username.
 4. Integration provisioner runtime derriere flags.

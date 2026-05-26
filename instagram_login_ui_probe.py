@@ -109,9 +109,14 @@ def extract_login_screen_signals_from_hierarchy(hierarchy_xml: str | None) -> di
     has_password_field = "password" in text
     has_login_button = "log in" in text
     suggested_username = _extract_suggested_username(text)
+    overlay_type = _password_overlay_type(text)
+    overlay_present = bool(overlay_type)
+    transition_loading = _has_phrase(text, "loading")
 
     if has_continue_button and has_use_another_profile and suggested_username:
         screen_type = "continue_as_candidate"
+    elif suggested_username and has_password_field and has_login_button and not has_username_field:
+        screen_type = "continue_password_only"
     elif has_username_field and has_password_field and has_login_button:
         screen_type = "login_form_empty"
     else:
@@ -128,6 +133,13 @@ def extract_login_screen_signals_from_hierarchy(hierarchy_xml: str | None) -> di
         "has_username_field": has_username_field,
         "has_password_field": has_password_field,
         "has_login_button": has_login_button,
+        "continue_password_only": screen_type == "continue_password_only",
+        "overlay_present": overlay_present,
+        "overlay_type": overlay_type,
+        "overlay_blocking_business": False,
+        "password_required": screen_type == "continue_password_only",
+        "ready_for_password_submit": screen_type == "continue_password_only" and has_password_field and has_login_button,
+        "transition_loading": transition_loading,
     }
 
 
@@ -269,6 +281,29 @@ def _contains_any(text: str, patterns: tuple[str, ...]) -> bool:
 def _has_phrase(text: str, phrase: str) -> bool:
     normalized = re.escape(phrase.lower()).replace(r"\ ", r"\s+")
     return bool(re.search(rf"\b{normalized}\b", text))
+
+
+def _password_overlay_type(text: str) -> str:
+    password_manager_phrases = (
+        "suggest strong password",
+        "save to your google account",
+        "saved passwords",
+        "password manager",
+        "generate password",
+        "mots de passe enregistr",
+        "suggérer un mot de passe",
+        "suggerer un mot de passe",
+        "gestionnaire de mots de passe",
+    )
+    autofill_phrases = (
+        "autofill",
+        "saisie automatique",
+    )
+    if any(phrase in text for phrase in password_manager_phrases):
+        return "password_manager_or_autofill"
+    if any(phrase in text for phrase in autofill_phrases):
+        return "password_manager_or_autofill"
+    return ""
 
 
 def _count_pattern_hits(text: str, patterns: tuple[str, ...]) -> int:

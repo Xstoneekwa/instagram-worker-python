@@ -48,6 +48,7 @@ NO_RETRY_FAILURES = {
     "block_wrong_suggested_account",
 }
 MAX_RETRY_ATTEMPTS = 1
+POST_CONTINUE_REOBSERVE_WAIT_MS = 1500
 
 CredentialsGetter = Callable[[str], Any]
 PreviousAccountLifecycleLookup = Callable[[str, dict[str, Any]], dict[str, Any]]
@@ -108,6 +109,7 @@ def run_login_provisioning_flow(
     timings = _empty_timings()
     warnings: list[str] = []
     actions_taken: list[str] = []
+    post_continue_metadata: dict[str, Any] = {}
     safe_account_id = str(account_id or "").strip()
     safe_expected_username = str(expected_username or "").strip()
     max_retries = min(MAX_RETRY_ATTEMPTS, max(0, int(max_retry_attempts or 0)))
@@ -219,9 +221,22 @@ def run_login_provisioning_flow(
             )
         signals = dict(action_result.post_action_signals or {})
         if not _signals_confirm_login_form(signals):
+            if action_result.action == "tap_continue" and _signals_show_loading_transition(signals):
+                post_continue_metadata = {
+                    "post_continue_initial_screen": "transition_loading",
+                    "post_continue_reobserve": True,
+                    "post_continue_reobserve_count": 1,
+                }
+                timings["post_continue_reobserve_wait_ms"] = POST_CONTINUE_REOBSERVE_WAIT_MS
+                time.sleep(POST_CONTINUE_REOBSERVE_WAIT_MS / 1000.0)
+                warnings.append("post_continue_reobserve_after_loading")
             start = timer()
             signals = _observe_login_signals(d)
             timings["observe_ms"] += _elapsed_ms(start, timer())
+            if post_continue_metadata:
+                post_continue_metadata["post_continue_final_screen_type"] = _safe_screen_type_value(
+                    signals.get("screen_type") or "unknown"
+                )
         post_action_lifecycle = _resolve_previous_account_lifecycle(
             suggested_username=signals.get("suggested_username"),
             screen_type=signals.get("screen_type"),
@@ -243,7 +258,7 @@ def run_login_provisioning_flow(
         )
         actions_taken.append(f"route:{route.decision}")
 
-    if route.decision != "start_login_form_flow":
+    if route.decision != "start_login_form_flow" and not _signals_confirm_login_form(signals):
         post_action_outcome = _post_action_outcome_from_signals(signals)
         if post_action_outcome:
             classification = classify_login_probe_outcome(post_action_outcome)
@@ -271,6 +286,7 @@ def run_login_provisioning_flow(
                 warnings=warnings,
                 extra_metadata={
                     **_flow_metadata(previous_account_lifecycle),
+                    **post_continue_metadata,
                     "post_action_status_candidate": post_action_outcome,
                     "password_required": False,
                     "ready_for_password_smoke": False,
@@ -292,7 +308,7 @@ def run_login_provisioning_flow(
             actions_taken=actions_taken,
             timings=timings,
             warnings=warnings,
-            extra_metadata=_flow_metadata(previous_account_lifecycle),
+            extra_metadata={**_flow_metadata(previous_account_lifecycle), **post_continue_metadata},
             total_start=total_start,
             timer=timer,
             publisher=publisher,
@@ -308,7 +324,7 @@ def run_login_provisioning_flow(
             actions_taken=actions_taken,
             timings=timings,
             warnings=warnings,
-            extra_metadata=_flow_metadata(previous_account_lifecycle),
+            extra_metadata={**_flow_metadata(previous_account_lifecycle), **post_continue_metadata},
             total_start=total_start,
             timer=timer,
             publisher=publisher,
@@ -333,7 +349,7 @@ def run_login_provisioning_flow(
         start = timer()
         signals = _observe_login_signals(d)
         timings["observe_ms"] += _elapsed_ms(start, timer())
-        if signals.get("screen_type") != "login_form_empty":
+        if not _signals_confirm_login_form(signals):
             warnings.append("retry_aborted_login_form_not_validated")
             break
         password_result = _execute_password_form(
@@ -365,7 +381,7 @@ def run_login_provisioning_flow(
             actions_taken=actions_taken,
             timings=_merge_timings(timings, password_result.timings),
             warnings=[*warnings, *password_result.warnings],
-            extra_metadata=_flow_metadata(previous_account_lifecycle),
+            extra_metadata={**_flow_metadata(previous_account_lifecycle), **post_continue_metadata},
             total_start=total_start,
             timer=timer,
             publisher=publisher,
@@ -397,7 +413,7 @@ def run_login_provisioning_flow(
         actions_taken=actions_taken,
         timings=_merge_timings(timings, password_result.timings),
         warnings=[*warnings, *password_result.warnings],
-        extra_metadata=_flow_metadata(previous_account_lifecycle),
+        extra_metadata={**_flow_metadata(previous_account_lifecycle), **post_continue_metadata},
         total_start=total_start,
         timer=timer,
         publisher=publisher,
@@ -420,11 +436,19 @@ def _observe_login_signals(d: Any) -> dict[str, Any]:
 
 
 def _signals_confirm_login_form(signals: dict[str, Any]) -> bool:
-    return (
-        signals.get("screen_type") == "login_form_empty"
-        and signals.get("has_username_field") is True
-        and signals.get("has_login_button") is True
-    )
+    if signals.get("screen_type") == "login_form_empty":
+        return signals.get("has_username_field") is True and signals.get("has_login_button") is True
+    if signals.get("screen_type") == "continue_password_only":
+        return (
+            bool(signals.get("suggested_username"))
+            and signals.get("has_password_field") is True
+            and signals.get("has_login_button") is True
+        )
+    return False
+
+
+def _signals_show_loading_transition(signals: dict[str, Any]) -> bool:
+    return str(signals.get("screen_type") or "unknown") == "unknown" and signals.get("transition_loading") is True
 
 
 def _post_action_outcome_from_signals(signals: dict[str, Any]) -> str:
@@ -544,7 +568,8 @@ def _dry_run_result(
     would_tap_use_another_profile = decision == "use_another_profile_previous_account_stopped"
     would_request_credentials = decision == "start_login_form_flow"
     would_block_mismatch = decision == "block_wrong_suggested_account"
-    ready_for_password_smoke = screen_type == "login_form_empty" and would_request_credentials
+    ready_for_password_smoke = screen_type in {"login_form_empty", "continue_password_only"} and would_request_credentials
+    password_required = screen_type in {"login_form_empty", "continue_password_only"} and would_request_credentials
     smoke_ready = ready_for_password_smoke or would_tap_continue or would_tap_use_another_profile
     reason = "dry_run_ready" if smoke_ready else (getattr(route, "reason", "") or "dry_run_not_ready")
     dry_metadata = {
@@ -561,6 +586,10 @@ def _dry_run_result(
         "would_block_mismatch": would_block_mismatch,
         "smoke_ready_for_real_login": smoke_ready,
         "ready_for_password_smoke": ready_for_password_smoke,
+        "password_required": password_required,
+        "overlay_present": bool(signals.get("overlay_present")),
+        "overlay_type": str(signals.get("overlay_type") or ""),
+        "overlay_blocking_business": bool(signals.get("overlay_blocking_business")),
         "reason": reason,
     }
     dry_metadata.update(_flow_metadata(previous_account_lifecycle))
@@ -613,6 +642,18 @@ def _safe_public_text(value: Any) -> str:
     ):
         return ""
     return text
+
+
+def _safe_screen_type_value(value: Any) -> str:
+    text = str(value or "").strip()
+    if text in {
+        "continue_as_candidate",
+        "continue_password_only",
+        "login_form_empty",
+        "unknown",
+    }:
+        return text
+    return _safe_public_text(text)
 
 
 def _load_credentials(credentials_getter: CredentialsGetter, account_id: str) -> dict[str, Any]:

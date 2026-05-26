@@ -500,6 +500,12 @@ def _safe_login_screen_signals(hierarchy_xml: str | None) -> dict[str, Any]:
     # The executor exposes the resulting screen shape, not credential-field
     # details or raw hierarchy content.
     signals.pop("has_password_field", None)
+    signals.pop("continue_password_only", None)
+    signals.pop("password_required", None)
+    signals.pop("ready_for_password_submit", None)
+    signals.pop("overlay_type", None)
+    if signals.get("screen_type") == "continue_password_only":
+        signals["screen_type"] = "login_form_ready"
     signals["suggested_username"] = _safe_signal_text(signals.get("suggested_username"))
     return clean_login_probe_metadata(dict(signals))
 

@@ -3043,6 +3043,87 @@ home/feed connecte sans password. Pour la suite, ne pas publier de status depuis
 ce smoke; le futur publish connected devra passer par le provisioner runtime
 approuve, avec observabilite et recovery.
 
+## Entry 2E-5K Continue Password-Only Flow
+
+Entry 2E-5K ajoute le sous-cas reel observe apres `Continue as
+{expected_username}` : Instagram peut afficher un formulaire password-only avec
+le username deja selectionne, un champ `Password` et un bouton `Log in`.
+
+Detection UI :
+
+- nouveau `screen_type=continue_password_only`;
+- `suggested_username` reste extrait dynamiquement depuis le username visible;
+- criteres : username visible, champ `Password`, bouton `Log in`, pas de champ
+  username editable vide;
+- `overlay_present` signale les overlays
+  parasites sans remplacer la classification metier;
+- overlays couverts : `Suggest strong password`, saved passwords/autofill,
+  variantes Google/password manager et equivalents FR simples.
+
+Execution password-only :
+
+- l'executor password accepte `login_form_empty` et `continue_password_only`;
+- en `continue_password_only`, il ne saisit pas le username : il focus seulement
+  le champ password, revele le secret via `SecretValue.reveal_for_login_executor()`,
+  saisit le password puis tap `Log in`;
+- aucun password n'est loggue ni stocke dans result/metadata;
+- si un overlay bloque une fois le tap `Log in`, l'executor tente une seule
+  recovery minimale : `back` puis refocus password, puis retap `Log in`;
+- pas de boucle infinie, pas de coordonnees fixes, pas d'escalade uniquement a
+  cause de la presence d'un overlay.
+
+Branchement orchestrateur :
+
+- flow explicite :
+  `continue_as_candidate -> Continue -> continue_password_only -> password -> Log in -> classifier`;
+- le chemin reste distinct de `login_form_empty`, `connected` direct et
+  `use_another_profile`;
+- apres `Continue`, si le premier dump post-action retourne `unknown` avec une
+  transition `Loading...`, l'orchestrateur fait une seule re-observation courte
+  a 1500 ms, sans deuxieme tap `Continue`, sans password et sans `Log in`;
+- metadata safe attendue pour ce settling :
+  `post_continue_initial_screen=transition_loading`,
+  `post_continue_reobserve=true`, `post_continue_reobserve_count=1`,
+  `post_continue_final_screen_type=<screen_type>`;
+- outcomes post-submit normalises : `connected`, `needs_2fa`, `checkpoint`,
+  `login_failed`;
+- retries limites a la policy existante de l'orchestrateur, max 1 pour erreurs
+  UI transitoires.
+
+Securite :
+
+- aucun credential en clair dans logs/docs/tests;
+- aucun Vault read dans les tests unitaires;
+- aucun runner hook, aucun flow business, aucun publish HTTP;
+- les tests utilisent des fixtures generiques (`random_expected`), pas de
+  hardcode metier sur `cinema_catchup`.
+
+Validation reelle no-password 2026-05-26 :
+
+- pre-check device OK sur `emulator-5554` : device unique, aucun `runner.py`,
+  aucun sender/follow/unfollow/outreach projet actif;
+- `app_start` Instagram OK avec package `com.instagram.android`;
+- pre-action observe : `screen_type=continue_as_candidate`,
+  `suggested_username=cinema_catchup`, router
+  `continue_expected_account`, `would_tap_continue=true`;
+- action autorisee executee : un seul tap `Continue`, via l'action executor;
+- post-Continue observe : `screen_type=unknown`, classifier `unknown`,
+  libelles safe `cinema_catchup`, `Use another profile`,
+  `Create new account`, `Loading...`; aucun champ `Password`, aucun bouton
+  `Log in`, `overlay_present=false`;
+- correction appliquee : `Loading...` est desormais traite comme transition
+  post-Continue avec une seule re-observation courte;
+- observation reelle suivante no-password : `screen_type=continue_password_only`,
+  `suggested_username=cinema_catchup`, champ `Password` present, bouton
+  `Log in` present, pas de champ username editable, overlay Google
+  `Suggest strong password` detecte comme
+  `overlay_type=password_manager_or_autofill`, `overlay_blocking_business=false`,
+  `password_required=true`, `ready_for_password_submit=true`;
+- aucun password saisi, aucun tap `Log in`, aucun Vault read, aucun credential,
+  aucun publish et aucun runner hook;
+- le vrai submit reste hors scope de cette validation et devra passer plus tard
+  uniquement par Vault/`SecretValue`.
+
 ## Entry 2E-5J-2B-1 Previous Account Lifecycle Gate Source
 
 Entry 2E-5J-2B-1 audite la source fiable a utiliser avant d'autoriser

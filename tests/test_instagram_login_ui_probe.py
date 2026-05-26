@@ -196,6 +196,64 @@ class InstagramLoginUiProbeTest(unittest.TestCase):
         self.assertTrue(signals["has_password_field"])
         self.assertTrue(signals["has_login_button"])
 
+    def test_extracts_continue_password_only_signals(self) -> None:
+        xml = (
+            '<node text="random_expected" />'
+            '<node text="Password" />'
+            '<node text="Log in" />'
+            '<node text="Forgot password?" />'
+        )
+
+        signals = extract_login_screen_signals_from_hierarchy(xml)
+
+        self.assertEqual(signals["screen_type"], "continue_password_only")
+        self.assertEqual(signals["suggested_username"], "random_expected")
+        self.assertTrue(signals["continue_password_only"])
+        self.assertTrue(signals["has_password_field"])
+        self.assertTrue(signals["has_login_button"])
+        self.assertFalse(signals["has_username_field"])
+        self.assertTrue(signals["password_required"])
+        self.assertTrue(signals["ready_for_password_submit"])
+
+    def test_continue_password_only_tolerates_password_manager_overlay(self) -> None:
+        xml = (
+            '<node text="random_expected" />'
+            '<node text="Password" />'
+            '<node text="Suggest strong password" />'
+            '<node text="And save to your Google account" />'
+            '<node text="Log in" />'
+        )
+
+        signals = extract_login_screen_signals_from_hierarchy(xml)
+
+        self.assertEqual(signals["screen_type"], "continue_password_only")
+        self.assertTrue(signals["overlay_present"])
+        self.assertEqual(signals["overlay_type"], "password_manager_or_autofill")
+        self.assertFalse(signals["overlay_blocking_business"])
+        self.assertTrue(signals["ready_for_password_submit"])
+
+    def test_continue_password_only_tolerates_autofill_overlay_with_login_accessible(self) -> None:
+        xml = (
+            '<node text="random_expected" />'
+            '<node text="Password" />'
+            '<node text="Autofill" />'
+            '<node text="Password manager" />'
+            '<node text="Log in" />'
+        )
+
+        signals = extract_login_screen_signals_from_hierarchy(xml)
+
+        self.assertEqual(signals["screen_type"], "continue_password_only")
+        self.assertTrue(signals["overlay_present"])
+        self.assertEqual(signals["overlay_type"], "password_manager_or_autofill")
+        self.assertTrue(signals["ready_for_password_submit"])
+
+    def test_loading_transition_is_unknown_with_transition_signal(self) -> None:
+        signals = extract_login_screen_signals_from_hierarchy('<node text="Loading..." />')
+
+        self.assertEqual(signals["screen_type"], "unknown")
+        self.assertTrue(signals["transition_loading"])
+
     def test_extracts_unknown_for_ambiguous_signals(self) -> None:
         signals = extract_login_screen_signals_from_hierarchy('<node text="Instagram" />')
 

@@ -110,6 +110,29 @@ class InstagramLoginScreenRouterTest(unittest.TestCase):
         self.assertFalse(decision.should_escalate)
         self.assertEqual(decision.next_action, "secure_credentials_required_later")
 
+    def test_continue_password_only_expected_account_starts_login_form_flow(self) -> None:
+        decision = route_login_screen(
+            expected_username="cinema_catchup",
+            suggested_username="cinema_catchup",
+            screen_type="continue_password_only",
+        )
+
+        self.assertTrue(decision.ok)
+        self.assertEqual(decision.decision, "start_login_form_flow")
+        self.assertTrue(decision.should_start_login_form_flow)
+        self.assertEqual(decision.next_action, "secure_password_required_later")
+
+    def test_continue_password_only_wrong_account_blocks(self) -> None:
+        decision = route_login_screen(
+            expected_username="cinema_catchup",
+            suggested_username="other_profile",
+            screen_type="continue_password_only",
+        )
+
+        self.assertFalse(decision.ok)
+        self.assertEqual(decision.decision, "block_wrong_suggested_account")
+        self.assertTrue(decision.should_escalate)
+
     def test_unknown_screen_has_no_action(self) -> None:
         decision = route_login_screen(
             expected_username="new_account",

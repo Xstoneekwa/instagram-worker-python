@@ -44,6 +44,20 @@ CONTINUE_AS_XML = (
     '<node text="Use another profile" clickable="false" bounds="[371,1215][710,1280]" />'
     '<node text="Create new account" clickable="true" bounds="[100,2000][980,2190]" />'
 )
+PASSWORD_ONLY_XML = (
+    '<node text="random_expected" />'
+    '<node text="Password" />'
+    '<node text="Log in" />'
+    '<node text="Forgot password?" />'
+)
+PASSWORD_ONLY_OVERLAY_XML = (
+    '<node text="cinema_catchup" />'
+    '<node text="Password" />'
+    '<node text="Log in" />'
+    '<node text="Suggest strong password" />'
+    '<node text="And save to your Google account" />'
+)
+LOADING_XML = '<node text="Loading..." />'
 CONNECTED_XML = (
     '<node content-desc="Home" />'
     '<node content-desc="Search" />'
@@ -251,6 +265,119 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertFalse(result.retry_attempted)
         self.assertFalse(result.should_publish_status)
         getter.assert_not_called()
+
+    def test_continue_expected_password_only_connected(self) -> None:
+        result = self._run_continue_password_only(CONNECTED_XML)
+
+        self.assertEqual(result.final_outcome, "connected")
+        self.assertEqual(result.final_login_status, "connected")
+        self.assertIn("login_form_submit", result.actions_taken)
+        self.assertFalse(result.retry_attempted)
+        self.assertIsNone(result.dashboard_action_type)
+
+    def test_continue_expected_password_only_needs_2fa(self) -> None:
+        result = self._run_continue_password_only(NEEDS_2FA_XML)
+
+        self.assertEqual(result.final_outcome, "needs_2fa")
+        self.assertEqual(result.final_login_status, "needs_2fa")
+        self.assertEqual(result.dashboard_action_type, "complete_two_factor")
+        self.assertFalse(result.retry_attempted)
+
+    def test_continue_expected_password_only_checkpoint(self) -> None:
+        result = self._run_continue_password_only(CHECKPOINT_XML)
+
+        self.assertEqual(result.final_outcome, "checkpoint")
+        self.assertEqual(result.final_login_status, "checkpoint")
+        self.assertEqual(result.dashboard_action_type, "resolve_checkpoint")
+        self.assertFalse(result.retry_attempted)
+
+    def test_continue_expected_password_only_login_failed(self) -> None:
+        result = self._run_continue_password_only(LOGIN_FAILED_XML)
+
+        self.assertEqual(result.final_outcome, "login_failed")
+        self.assertEqual(result.final_login_status, "failed")
+        self.assertEqual(result.dashboard_action_type, "update_instagram_password")
+        self.assertFalse(result.retry_attempted)
+
+    def test_continue_loading_reobserves_once_to_password_only_without_submit_when_credentials_missing(self) -> None:
+        device, selectors = configured_device()
+        getter = Mock(return_value=None)
+        expected_username = "random_expected"
+        device.hierarchies = [CONTINUE_AS_XML, LOADING_XML, PASSWORD_ONLY_XML]
+
+        with patch.object(provisioner_orchestrator.time, "sleep") as sleep:
+            result = run_login_provisioning_flow(
+                device,
+                account_id=ACCOUNT_ID,
+                expected_username=expected_username,
+                credentials_getter=getter,
+                initial_signals={**CONTINUE_SIGNALS, "suggested_username": expected_username},
+            )
+
+        self.assertTrue(selectors["continue"].click_calls == 1 or device.bounds_clicks)
+        sleep.assert_called_once_with(1.5)
+        self.assertEqual(result.safe_metadata["post_continue_initial_screen"], "transition_loading")
+        self.assertTrue(result.safe_metadata["post_continue_reobserve"])
+        self.assertEqual(result.safe_metadata["post_continue_reobserve_count"], 1)
+        self.assertEqual(result.safe_metadata["post_continue_final_screen_type"], "continue_password_only")
+        self.assertEqual(result.final_outcome, "credentials_missing")
+        self.assertEqual(selectors["password"].set_text_calls, [])
+        self.assertNotIn("login_form_submit", result.actions_taken)
+
+    def test_continue_loading_still_unknown_stops_after_one_reobserve(self) -> None:
+        device, selectors = configured_device()
+        getter = Mock(return_value=credentials())
+        expected_username = "random_expected"
+        device.hierarchies = [CONTINUE_AS_XML, LOADING_XML, LOADING_XML]
+
+        with patch.object(provisioner_orchestrator.time, "sleep") as sleep:
+            result = run_login_provisioning_flow(
+                device,
+                account_id=ACCOUNT_ID,
+                expected_username=expected_username,
+                credentials_getter=getter,
+                initial_signals={**CONTINUE_SIGNALS, "suggested_username": expected_username},
+            )
+
+        self.assertTrue(selectors["continue"].click_calls == 1 or device.bounds_clicks)
+        sleep.assert_called_once_with(1.5)
+        self.assertEqual(result.failure_reason, "unknown_login_screen")
+        self.assertEqual(result.safe_metadata["post_continue_reobserve_count"], 1)
+        self.assertEqual(result.safe_metadata["post_continue_final_screen_type"], "unknown")
+        getter.assert_not_called()
+        self.assertNotIn("login_form_submit", result.actions_taken)
+
+    def test_dry_run_current_password_only_overlay_is_ready_without_submit(self) -> None:
+        device, selectors = configured_device()
+        getter = Mock(return_value=credentials())
+
+        result = run_login_provisioning_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username=USERNAME,
+            credentials_getter=getter,
+            initial_signals={
+                "screen_type": "continue_password_only",
+                "suggested_username": USERNAME,
+                "has_password_field": True,
+                "has_login_button": True,
+                "has_username_field": False,
+                "overlay_present": True,
+                "overlay_type": "password_manager_or_autofill",
+                "overlay_blocking_business": False,
+            },
+            dry_run=True,
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.safe_metadata["router_decision"], "start_login_form_flow")
+        self.assertTrue(result.safe_metadata["password_required"])
+        self.assertTrue(result.safe_metadata["ready_for_password_smoke"])
+        self.assertTrue(result.safe_metadata["overlay_present"])
+        self.assertEqual(result.safe_metadata["overlay_type"], "password_manager_or_autofill")
+        self.assertFalse(result.safe_metadata["would_submit_password"])
+        getter.assert_not_called()
+        self.assertEqual(selectors["login"].click_calls, 0)
 
     def test_previous_canceled_clone_reusable_uses_another_profile_then_login(self) -> None:
         device, selectors = configured_device()
@@ -705,6 +832,18 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
             initial_signals=LOGIN_FORM_SIGNALS,
             publisher=publisher,
             publish_enabled=publish_enabled,
+        )
+
+    def _run_continue_password_only(self, post_submit_xml: str):
+        device, _selectors = configured_device()
+        expected_username = "random_expected"
+        device.hierarchies = [CONTINUE_AS_XML, PASSWORD_ONLY_XML, PASSWORD_ONLY_XML, post_submit_xml]
+        return run_login_provisioning_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username=expected_username,
+            credentials_getter=Mock(return_value={"username": expected_username, "password": SecretValue(PASSWORD)}),
+            initial_signals={**CONTINUE_SIGNALS, "suggested_username": expected_username},
         )
 
 

@@ -17,6 +17,13 @@ LOGIN_FORM_SIGNALS = {
     "has_password_field": True,
     "has_login_button": True,
 }
+PASSWORD_ONLY_SIGNALS = {
+    "screen_type": "continue_password_only",
+    "suggested_username": "cinema_catchup",
+    "has_username_field": False,
+    "has_password_field": True,
+    "has_login_button": True,
+}
 CONNECTED_XML = (
     '<node content-desc="Home" />'
     '<node content-desc="Search" />'
@@ -57,12 +64,16 @@ class FakeSelector:
         self.click_calls = 0
         self.clear_calls = 0
         self.set_text_calls: list[str] = []
+        self.click_failures_remaining = 0
 
     def count(self) -> int:
         return self._count
 
     def click(self) -> None:
         self.click_calls += 1
+        if self.click_failures_remaining > 0:
+            self.click_failures_remaining -= 1
+            raise RuntimeError("temporary click block")
         if self.click_exc:
             raise self.click_exc
 
@@ -82,6 +93,7 @@ class FakeDevice:
         self.dump_calls = 0
         self.selector_calls: list[dict] = []
         self.selectors: dict[tuple[str, str], FakeSelector] = {}
+        self.press_calls: list[str] = []
 
     def add_selector(self, key: str, value: str, selector: FakeSelector) -> FakeSelector:
         self.selectors[(key, value)] = selector
@@ -97,6 +109,9 @@ class FakeDevice:
         if self.dump_exc:
             raise self.dump_exc
         return self.hierarchy
+
+    def press(self, key: str) -> None:
+        self.press_calls.append(str(key))
 
 
 def configured_device(hierarchy: str = CONNECTED_XML) -> tuple[FakeDevice, FakeSelector, FakeSelector, FakeSelector]:
@@ -148,6 +163,100 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
         self.assertEqual(secret.str_calls, 0)
         self.assertEqual(secret.repr_calls, 0)
         self.assertEqual(password_selector.set_text_calls, [PASSWORD])
+
+    def test_password_only_form_enters_password_without_username(self) -> None:
+        device = FakeDevice(CONNECTED_XML)
+        username = device.add_selector("text", "Username, email or mobile number", FakeSelector(0))
+        password_selector = device.add_selector("text", "Password", FakeSelector(1))
+        login = device.add_selector("text", "Log in", FakeSelector(1))
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=PASSWORD_ONLY_SIGNALS,
+            sleeper=Mock(),
+        )
+
+        self.assertTrue(result.ok)
+        self.assertTrue(result.executed)
+        self.assertFalse(result.username_entered)
+        self.assertTrue(result.password_entered)
+        self.assertEqual(username.click_calls, 0)
+        self.assertEqual(password_selector.set_text_calls, [PASSWORD])
+        self.assertEqual(login.click_calls, 1)
+        self.assertTrue(result.safe_metadata["password_only_mode"])
+
+    def test_password_only_strong_password_overlay_still_submits(self) -> None:
+        device = FakeDevice(CONNECTED_XML)
+        device.add_selector("text", "Password", FakeSelector(1))
+        login = device.add_selector("text", "Log in", FakeSelector(1))
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals={**PASSWORD_ONLY_SIGNALS, "overlay_present": True},
+            sleeper=Mock(),
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(login.click_calls, 1)
+
+    def test_password_only_saved_password_overlay_still_submits(self) -> None:
+        device = FakeDevice(CONNECTED_XML)
+        password_selector = device.add_selector("text", "Password", FakeSelector(1))
+        login = device.add_selector("text", "Log in", FakeSelector(1))
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals={**PASSWORD_ONLY_SIGNALS, "password_overlay_present": True},
+            sleeper=Mock(),
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(password_selector.set_text_calls, [PASSWORD])
+        self.assertEqual(login.click_calls, 1)
+
+    def test_password_only_overlay_blocks_login_once_then_recovers(self) -> None:
+        device = FakeDevice(CONNECTED_XML)
+        password_selector = device.add_selector("text", "Password", FakeSelector(1))
+        login = device.add_selector("text", "Log in", FakeSelector(1))
+        login.click_failures_remaining = 1
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals={**PASSWORD_ONLY_SIGNALS, "overlay_present": True},
+            sleeper=Mock(),
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(login.click_calls, 2)
+        self.assertEqual(password_selector.click_calls, 2)
+        self.assertEqual(device.press_calls, ["back"])
+        self.assertIn("overlay_submit_recovery_once", result.warnings)
+
+    def test_password_only_overlay_blocks_login_twice_no_loop(self) -> None:
+        device = FakeDevice(CONNECTED_XML)
+        device.add_selector("text", "Password", FakeSelector(1))
+        login = device.add_selector("text", "Log in", FakeSelector(1))
+        login.click_failures_remaining = 2
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals={**PASSWORD_ONLY_SIGNALS, "overlay_present": True},
+            sleeper=Mock(),
+        )
+
+        self.assertEqual(result.failure_reason, "submit_failed")
+        self.assertEqual(login.click_calls, 2)
+        self.assertFalse(result.submit_tapped)
 
     def test_non_login_form_screen_refuses_without_action(self) -> None:
         device, username, password_selector, login = configured_device()

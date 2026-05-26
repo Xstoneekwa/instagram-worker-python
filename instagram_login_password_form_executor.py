@@ -1,8 +1,9 @@
 """Controlled Instagram login form credential executor.
 
 Entry 2E-5I fills username/password only after the caller has prevalidated the
-screen as `login_form_empty`. It has no runner hook, no Supabase write, no status
-publish, no retry, and never stores or logs the password.
+screen as `login_form_empty` or a controlled password-only continuation screen.
+It has no runner hook, no Supabase write, no status publish, no unbounded retry,
+and never stores or logs the password.
 """
 
 from __future__ import annotations
@@ -55,8 +56,9 @@ def execute_login_form_credentials(
 ) -> LoginPasswordExecutionResult:
     """Fill and submit one prevalidated Instagram login form.
 
-    The password is revealed only after screen/field/button validation and after
-    the username has been entered, immediately before password input.
+    The password is revealed only after screen/field/button validation. On a
+    full login form the username is entered first; on a password-only form the
+    visible username has already been selected by the Continue flow.
     """
 
     timer = timer or time.perf_counter
@@ -100,8 +102,11 @@ def execute_login_form_credentials(
             expected_username=username,
         )
 
+    password_only_mode = _is_password_only_mode(prevalidated_signals)
+    overlay_recovery_allowed = _overlay_recovery_allowed(prevalidated_signals)
+
     start = timer()
-    targets = _resolve_login_form_targets(d)
+    targets = _resolve_login_form_targets(d, password_only_mode=password_only_mode)
     timings["target_lookup_ms"] = _elapsed_ms(start, timer())
     if targets["failure_reason"]:
         return _failure(
@@ -149,8 +154,9 @@ def execute_login_form_credentials(
 
     try:
         start = timer()
-        _focus_clear_and_set_text(targets["username"], username)
-        username_entered = True
+        if not password_only_mode:
+            _focus_clear_and_set_text(targets["username"], username)
+            username_entered = True
         timings["username_input_ms"] = _elapsed_ms(start, timer())
 
         start = timer()
@@ -178,20 +184,44 @@ def execute_login_form_credentials(
         submit_tapped = True
         timings["submit_tap_ms"] = _elapsed_ms(start, timer())
     except Exception:
-        timings["total_ms"] = _elapsed_ms(total_start, timer())
-        return _result(
-            ok=False,
-            executed=False,
-            action=ACTION_LOGIN_FORM_SUBMIT,
-            reason="submit_failed",
-            failure_reason="submit_failed",
-            username_entered=username_entered,
-            password_entered=password_entered,
-            submit_tapped=submit_tapped,
-            timings=timings,
-            warnings=warnings,
-            expected_username=username,
-        )
+        if overlay_recovery_allowed and _safe_overlay_recovery_once(d, targets, warnings):
+            try:
+                start = timer()
+                _click_target(targets["login_button"])
+                submit_tapped = True
+                timings["submit_tap_ms"] += _elapsed_ms(start, timer())
+            except Exception:
+                timings["total_ms"] = _elapsed_ms(total_start, timer())
+                return _result(
+                    ok=False,
+                    executed=False,
+                    action=ACTION_LOGIN_FORM_SUBMIT,
+                    reason="submit_failed",
+                    failure_reason="submit_failed",
+                    username_entered=username_entered,
+                    password_entered=password_entered,
+                    submit_tapped=submit_tapped,
+                    timings=timings,
+                    warnings=warnings,
+                    expected_username=username,
+                    password_only_mode=password_only_mode,
+                )
+        else:
+            timings["total_ms"] = _elapsed_ms(total_start, timer())
+            return _result(
+                ok=False,
+                executed=False,
+                action=ACTION_LOGIN_FORM_SUBMIT,
+                reason="submit_failed",
+                failure_reason="submit_failed",
+                username_entered=username_entered,
+                password_entered=password_entered,
+                submit_tapped=submit_tapped,
+                timings=timings,
+                warnings=warnings,
+                expected_username=username,
+                password_only_mode=password_only_mode,
+            )
 
     timings["post_submit_wait_ms"] = wait_ms
     if wait_ms > 0:
@@ -234,16 +264,19 @@ def execute_login_form_credentials(
         timings=timings,
         warnings=warnings,
         expected_username=username,
+        password_only_mode=password_only_mode,
     )
 
 
 def _prevalidated_signal_failure(signals: dict | None) -> str:
-    if not isinstance(signals, dict) or signals.get("screen_type") != "login_form_empty":
+    if not isinstance(signals, dict) or signals.get("screen_type") not in {"login_form_empty", "continue_password_only"}:
         return "login_form_not_validated"
     if signals.get("ambiguous_login_form") is True or signals.get("ambiguous") is True:
         return "ambiguous_login_form"
-    if signals.get("has_username_field") is not True:
+    if signals.get("screen_type") == "login_form_empty" and signals.get("has_username_field") is not True:
         return "username_field_not_found"
+    if signals.get("screen_type") == "continue_password_only" and not signals.get("suggested_username"):
+        return "expected_username_missing"
     if signals.get("has_password_field") is not True:
         return "password_field_not_found"
     if signals.get("has_login_button") is not True:
@@ -251,7 +284,7 @@ def _prevalidated_signal_failure(signals: dict | None) -> str:
     return ""
 
 
-def _resolve_login_form_targets(d: Any) -> dict[str, Any]:
+def _resolve_login_form_targets(d: Any, *, password_only_mode: bool = False) -> dict[str, Any]:
     username = _find_unique_target(
         d,
         (
@@ -262,7 +295,7 @@ def _resolve_login_form_targets(d: Any) -> dict[str, Any]:
         ),
         missing_reason="username_field_not_found",
     )
-    if username["failure_reason"]:
+    if username["failure_reason"] and not (password_only_mode and username["failure_reason"] == "username_field_not_found"):
         return {"failure_reason": username["failure_reason"]}
 
     password = _find_unique_target(
@@ -369,6 +402,32 @@ def _click_target(target: Any) -> None:
     click()
 
 
+def _is_password_only_mode(signals: dict | None) -> bool:
+    return isinstance(signals, dict) and signals.get("screen_type") == "continue_password_only"
+
+
+def _overlay_recovery_allowed(signals: dict | None) -> bool:
+    return isinstance(signals, dict) and (
+        signals.get("overlay_present") is True or signals.get("password_overlay_present") is True
+    )
+
+
+def _safe_overlay_recovery_once(d: Any, targets: dict[str, Any], warnings: list[str]) -> bool:
+    warnings.append("overlay_submit_recovery_once")
+    press = getattr(d, "press", None)
+    if callable(press):
+        try:
+            press("back")
+        except Exception:
+            warnings.append("overlay_back_failed")
+    try:
+        _click_target(targets["password"])
+    except Exception:
+        warnings.append("overlay_refocus_failed")
+        return False
+    return True
+
+
 def _dump_hierarchy_once(d: Any) -> str:
     try:
         return str(d.dump_hierarchy(compressed=False) or "")
@@ -444,6 +503,7 @@ def _result(
     timings: dict[str, int] | None = None,
     warnings: list[str] | None = None,
     expected_username: str = "",
+    password_only_mode: bool = False,
 ) -> LoginPasswordExecutionResult:
     safe_metadata = clean_login_probe_metadata(
         redact_credentials_payload(
@@ -454,6 +514,7 @@ def _result(
                 "failure_reason": failure_reason,
                 "expected_username": expected_username,
                 "post_submit_outcome": post_submit_outcome,
+                "password_only_mode": password_only_mode,
             }
         )
     )

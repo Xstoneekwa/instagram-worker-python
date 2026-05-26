@@ -13,6 +13,7 @@ from typing import Any, Callable
 from instagram_login_status_classifier import clean_login_probe_metadata
 
 CONTINUE_AS_CANDIDATE = "continue_as_candidate"
+CONTINUE_PASSWORD_ONLY = "continue_password_only"
 LOGIN_FORM_EMPTY = "login_form_empty"
 UNKNOWN_SCREEN = "unknown"
 
@@ -75,6 +76,38 @@ def route_login_screen(
             next_action="secure_credentials_required_later",
             reason="login_form_empty",
             should_start_login_form_flow=True,
+            clone_reuse_allowed=clone_reuse_allowed,
+        )
+
+    if safe_screen_type == CONTINUE_PASSWORD_ONLY:
+        if normalized_suggested and normalized_suggested == normalized_expected:
+            return _decision(
+                ok=True,
+                screen_type=safe_screen_type,
+                decision="start_login_form_flow",
+                expected_username=expected_username,
+                suggested_username=suggested_username or "",
+                normalized_expected_username=normalized_expected,
+                normalized_suggested_username=normalized_suggested,
+                next_action="secure_password_required_later",
+                reason="continue_password_only_expected_account",
+                should_start_login_form_flow=True,
+                clone_reuse_allowed=clone_reuse_allowed,
+            )
+        return _decision(
+            ok=False,
+            screen_type=safe_screen_type,
+            decision="block_wrong_suggested_account",
+            expected_username=expected_username,
+            suggested_username=suggested_username or "",
+            normalized_expected_username=normalized_expected,
+            normalized_suggested_username=normalized_suggested,
+            reason="continue_password_only_username_mismatch",
+            should_escalate=True,
+            publish_login_status="mismatch",
+            provisioning_status="blocked",
+            onboarding_status="support_required",
+            dashboard_action_type="review_account_mismatch",
             clone_reuse_allowed=clone_reuse_allowed,
         )
 
