@@ -165,6 +165,17 @@ Post-submit policy future :
   entree lifecycle exploitable n'a confirme que `i_m_your_traker` est
   canceled/stopped/archived. Action stoppee avant tap avec
   `reason=lifecycle_not_confirmed`.
+- Entry 2E-5J-2B smoke apres lookup operateur : premier essai stoppe avant tap
+  avec `failure_reason=ambiguous_target_button` car `description="Use another profile"`
+  retournait 2 matches UIAutomator2 alors que le dump XML n'avait qu'un seul
+  libelle texte exact non cliquable.
+- Correctif 2E-5J-2B : l'action executor resout maintenant la cible via hierarchy
+  XML (bounds + zone verticale + deduplication), puis tap unique au centre des
+  bounds valides; pas de coordonnees fixes d'ecran.
+- Smoke reel 2E-5J-2B apres correctif : `action_executed=true`,
+  `post_action_screen_type=login_form_empty`, `ready_for_password_smoke=true`,
+  `would_submit_password=false`, `would_publish=false`. Aucun password, aucun
+  login, aucun Vault read, aucun publish.
 - Entry 2E-5J-2B-1 : audit lifecycle read-only. Les statuts existants couvrent
   `client_instagram_accounts` login/provisioning/onboarding,
   `client_subscriptions` active/paused/cancelled/expired,
@@ -285,14 +296,15 @@ Ordre recommande :
 1. Confirmer explicitement le lifecycle canceled/stopped/archived du compte
    suggere actuellement visible via un helper lookup read-only explicite, ou
    afficher directement `login_form_empty` sur device idle.
-2. Definir le modele durable lifecycle compte + `clone_reuse_allowed` dans la
+2. Preparer le smoke password `cinema_catchup` via flow securise
+   `instagram-credentials` -> Vault, jamais via chat/prompt/shell history visible.
+3. Definir le modele durable lifecycle compte + `clone_reuse_allowed` dans la
    DB/dashboard, sans hardcode username.
-3. 2E-5J-2 smoke orchestrator controle ou 2E-5I-2 smoke reel
-   `cinema_catchup` via flow securise, jamais via chat/prompt/shell
-   history visible.
 4. Integration provisioner runtime derriere flags.
 5. Status publish connected/2FA/checkpoint/failed via provisioner orchestrator.
 6. State machine / recovery login plus riche avant tout branchement production.
+7. Rappel device : 1 phone = 1 action UI active; aucun password dans
+   chat/Cursor/logs/git/XML/screenshots.
 
 Le checkpoint 2E-5H est deja pousse :
 `880deef630c8a6217f9fbc4d64b7167fd3e20764`.

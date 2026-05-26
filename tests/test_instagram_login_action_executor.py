@@ -14,6 +14,33 @@ LOGIN_FORM_XML = (
     '<node text="Password" />'
     '<node text="Log in" />'
 )
+CONTINUE_AS_XML = (
+    '<node text="Continue" clickable="true" bounds="[100,1000][980,1120]" />'
+    '<node text="Use another profile" clickable="false" bounds="[371,1215][710,1280]" />'
+    '<node text="Create new account" clickable="true" bounds="[100,2000][980,2190]" />'
+)
+USE_ANOTHER_DUPLICATE_XML = (
+    '<node text="Continue" clickable="true" bounds="[100,1000][980,1120]" />'
+    '<node text="Use another profile" clickable="false" bounds="[371,1215][710,1280]" />'
+    '<node clickable="true" bounds="[360,1200][720,1295]" class="android.view.ViewGroup" />'
+    '<node text="Create new account" clickable="true" bounds="[100,2000][980,2190]" />'
+)
+USE_ANOTHER_TWO_ZONES_XML = (
+    '<node text="Continue" clickable="true" bounds="[100,1000][980,1120]" />'
+    '<node text="Use another profile" clickable="true" bounds="[100,1200][400,1280]" />'
+    '<node text="Use another profile" clickable="true" bounds="[680,1200][980,1280]" />'
+    '<node text="Create new account" clickable="true" bounds="[100,2000][980,2190]" />'
+)
+USE_ANOTHER_OUTSIDE_ZONE_XML = (
+    '<node text="Continue" clickable="true" bounds="[100,1000][980,1120]" />'
+    '<node text="Use another profile" clickable="true" bounds="[100,900][400,980]" />'
+    '<node text="Create new account" clickable="true" bounds="[100,2000][980,2190]" />'
+)
+USE_ANOTHER_DISABLED_XML = (
+    '<node text="Continue" clickable="true" bounds="[100,1000][980,1120]" />'
+    '<node text="Use another profile" clickable="true" enabled="false" bounds="[371,1215][710,1280]" />'
+    '<node text="Create new account" clickable="true" bounds="[100,2000][980,2190]" />'
+)
 UNKNOWN_XML = '<node text="Instagram" />'
 SENSITIVE_XML = '<node text="password secret_ref Vault token emulator-5554" />'
 
@@ -41,6 +68,7 @@ class FakeDevice:
         self.dump_calls = 0
         self.selector_calls: list[dict] = []
         self.selectors: dict[tuple[str, str], FakeSelector] = {}
+        self.bounds_clicks: list[tuple[int, int]] = []
 
     def add_selector(self, key: str, value: str, selector: FakeSelector) -> FakeSelector:
         self.selectors[(key, value)] = selector
@@ -54,6 +82,9 @@ class FakeDevice:
     def dump_hierarchy(self, compressed: bool = False) -> str:
         self.dump_calls += 1
         return self.hierarchy
+
+    def click(self, x: int, y: int) -> None:
+        self.bounds_clicks.append((int(x), int(y)))
 
 
 class DumpFailingDevice(FakeDevice):
@@ -91,18 +122,18 @@ class InstagramLoginActionExecutorTest(unittest.TestCase):
         self.assertTrue(result.executed)
         self.assertEqual(result.action, "tap_continue")
         self.assertEqual(continue_selector.click_calls, 1)
-        self.assertEqual(device.dump_calls, 1)
+        self.assertEqual(device.dump_calls, 2)
 
     def test_use_another_profile_taps_use_another_profile_once(self) -> None:
-        device = FakeDevice()
-        selector = device.add_selector("text", "Use another profile", FakeSelector(1))
+        device = FakeDevice(hierarchy=CONTINUE_AS_XML)
 
         result = execute_login_screen_decision(device, _use_another_decision(), sleeper=Mock())
 
         self.assertTrue(result.ok)
         self.assertTrue(result.executed)
         self.assertEqual(result.action, "tap_use_another_profile")
-        self.assertEqual(selector.click_calls, 1)
+        self.assertEqual(device.bounds_clicks, [(540, 1247)])
+        self.assertEqual(device.dump_calls, 2)
 
     def test_block_wrong_suggested_account_does_not_tap(self) -> None:
         decision = route_login_screen(
@@ -161,7 +192,7 @@ class InstagramLoginActionExecutorTest(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertFalse(result.executed)
         self.assertEqual(result.failure_reason, "target_button_not_found")
-        self.assertEqual(device.dump_calls, 0)
+        self.assertEqual(device.dump_calls, 1)
 
     def test_use_another_profile_button_absent_returns_target_button_not_found(self) -> None:
         device = FakeDevice()
@@ -193,7 +224,7 @@ class InstagramLoginActionExecutorTest(unittest.TestCase):
         self.assertFalse(result.executed)
         self.assertEqual(result.failure_reason, "tap_failed")
         self.assertEqual(selector.click_calls, 1)
-        self.assertEqual(device.dump_calls, 0)
+        self.assertEqual(device.dump_calls, 1)
 
     def test_post_action_wait_ms_clamped_to_zero_and_max(self) -> None:
         for raw_wait, expected_wait, expected_sleep in ((-5, 0, None), (9999, 1500, 1.5)):
@@ -222,11 +253,19 @@ class InstagramLoginActionExecutorTest(unittest.TestCase):
         result = execute_login_screen_decision(device, _continue_decision(), sleeper=Mock())
 
         self.assertTrue(result.executed)
-        self.assertEqual(device.dump_calls, 1)
+        self.assertEqual(device.dump_calls, 2)
 
     def test_post_action_login_form_empty_detected_after_use_another_profile(self) -> None:
-        device = FakeDevice(hierarchy=LOGIN_FORM_XML)
-        device.add_selector("text", "Use another profile", FakeSelector(1))
+        device = FakeDevice(hierarchy=CONTINUE_AS_XML)
+        device.hierarchy = CONTINUE_AS_XML
+
+        def advance_hierarchy(compressed: bool = False) -> str:
+            device.dump_calls += 1
+            if device.dump_calls == 1:
+                return CONTINUE_AS_XML
+            return LOGIN_FORM_XML
+
+        device.dump_hierarchy = advance_hierarchy  # type: ignore[method-assign]
 
         result = execute_login_screen_decision(device, _use_another_decision(), sleeper=Mock())
 
@@ -234,6 +273,56 @@ class InstagramLoginActionExecutorTest(unittest.TestCase):
         self.assertEqual(result.post_action_screen_type, "login_form_empty")
         self.assertEqual(result.post_action_probe_reason, "post_action_observed")
         self.assertTrue(result.post_action_signals["has_login_button"])
+
+    def test_duplicate_child_parent_nodes_deduped_to_single_bounds_tap(self) -> None:
+        device = FakeDevice(hierarchy=USE_ANOTHER_DUPLICATE_XML)
+
+        result = execute_login_screen_decision(device, _use_another_decision(), sleeper=Mock())
+
+        self.assertTrue(result.executed)
+        self.assertEqual(len(device.bounds_clicks), 1)
+        self.assertEqual(device.bounds_clicks[0], (540, 1247))
+
+    def test_exact_text_with_clickable_parent_uses_unique_bounds_center(self) -> None:
+        device = FakeDevice(hierarchy=USE_ANOTHER_DUPLICATE_XML)
+
+        result = execute_login_screen_decision(device, _use_another_decision(), sleeper=Mock())
+
+        self.assertTrue(result.ok)
+        self.assertEqual(device.bounds_clicks, [(540, 1247)])
+
+    def test_two_distinct_use_another_profile_zones_stay_ambiguous(self) -> None:
+        device = FakeDevice(hierarchy=USE_ANOTHER_TWO_ZONES_XML)
+
+        result = execute_login_screen_decision(device, _use_another_decision())
+
+        self.assertFalse(result.executed)
+        self.assertEqual(result.failure_reason, "ambiguous_target_button")
+        self.assertEqual(device.bounds_clicks, [])
+
+    def test_use_another_profile_outside_vertical_zone_not_found(self) -> None:
+        device = FakeDevice(hierarchy=USE_ANOTHER_OUTSIDE_ZONE_XML)
+
+        result = execute_login_screen_decision(device, _use_another_decision())
+
+        self.assertFalse(result.executed)
+        self.assertEqual(result.failure_reason, "target_button_not_found")
+
+    def test_disabled_use_another_profile_candidate_not_tapped(self) -> None:
+        device = FakeDevice(hierarchy=USE_ANOTHER_DISABLED_XML)
+
+        result = execute_login_screen_decision(device, _use_another_decision())
+
+        self.assertFalse(result.executed)
+        self.assertEqual(result.failure_reason, "target_button_not_found")
+
+    def test_target_below_continue_and_above_create_is_accepted(self) -> None:
+        device = FakeDevice(hierarchy=CONTINUE_AS_XML)
+
+        result = execute_login_screen_decision(device, _use_another_decision(), sleeper=Mock())
+
+        self.assertTrue(result.executed)
+        self.assertEqual(device.bounds_clicks[0][1], 1247)
 
     def test_output_is_safe_without_raw_xml_or_sensitive_values(self) -> None:
         device = FakeDevice(hierarchy=SENSITIVE_XML)
@@ -281,7 +370,7 @@ class InstagramLoginActionExecutorTest(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertTrue(result.executed)
         self.assertEqual(result.failure_reason, "post_action_dump_failed")
-        self.assertEqual(device.dump_calls, 1)
+        self.assertEqual(device.dump_calls, 2)
 
 
 if __name__ == "__main__":

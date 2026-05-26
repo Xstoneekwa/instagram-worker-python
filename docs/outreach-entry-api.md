@@ -2349,6 +2349,8 @@ Tap safety :
 - `Continue` ne matche pas `Create new account`;
 - bouton absent -> `failure_reason=target_button_not_found`;
 - plusieurs candidats -> `failure_reason=ambiguous_target_button`;
+- resolution hierarchy XML prioritaire pour dedupliquer texte/parent/enfant et
+  taper au centre des bounds valides; fallback selector `text` seulement;
 - exception tap -> `failure_reason=tap_failed`;
 - un seul tap maximum;
 - pas de retry par defaut;
@@ -2910,7 +2912,7 @@ Gate obligatoire avant tap :
 - lifecycle du `suggested_username` confirme `canceled`, `stopped` ou
   `archived`.
 
-Resultat 2E-5J-2B actuel :
+Resultat 2E-5J-2B initial :
 
 - pre-check device OK;
 - ecran observe `continue_as_candidate`;
@@ -2922,9 +2924,62 @@ Resultat 2E-5J-2B actuel :
 - `would_submit_password=false`;
 - `would_publish=false`.
 
-Conclusion : ne pas cliquer tant que le lifecycle du compte suggere n'est pas
-confirme. La logique reste generique et ne depend jamais de
-`i_m_your_traker` en dur.
+Resultat 2E-5J-2B apres checkpoint lifecycle lookup :
+
+- pre-check device OK : device unique `emulator-5554`, aucun runner/business
+  Python actif detecte;
+- app_start Instagram OK, dump UI OK;
+- ecran observe `continue_as_candidate`;
+- `suggested_username=i_m_your_traker` extrait dynamiquement;
+- override operateur explicite pour ce smoke uniquement :
+  `lifecycle_status=canceled`, `clone_reuse_allowed=true`,
+  `source=operator_smoke_override`;
+- dry-run provisioner OK :
+  `router_decision=use_another_profile_previous_account_stopped`,
+  `would_tap_use_another_profile=true`, `would_submit_password=false`,
+  `would_publish=false`;
+- premier smoke reel stoppe avant tap par l'action executor :
+  `failure_reason=ambiguous_target_button`;
+- cause observee : `d(text="Use another profile")` retournait `count=1`, mais
+  `d(description="Use another profile")` retournait `count=2`, alors que le dump
+  XML ne contenait qu'un seul libelle texte exact non cliquable;
+- le nœud texte exact etait `clickable=false`, avec bounds valides entre
+  `Continue` et `Create new account`.
+
+Correctif 2E-5J-2B target resolution :
+
+- resolution primaire via `dump_hierarchy` et parsing XML safe;
+- match exact normalise sur `text` / `content-desc`;
+- filtre `enabled`, `visible`, bounds valides, hors status bar;
+- zone verticale : sous `Continue`, au-dessus de `Create new account`;
+- deduplication des candidats proches par bounds;
+- tap unique au centre des bounds du candidat retenu;
+- fallback selector `text` uniquement si le parsing hierarchy echoue;
+- ne jamais utiliser de coordonnees fixes d'ecran hors bounds valides.
+
+Resultat smoke reel 2E-5J-2B apres correctif :
+
+- pre-check device OK : `emulator-5554`, `device_count=1`,
+  `business_run_detected=false`;
+- `screen_type=continue_as_candidate`;
+- `suggested_username=i_m_your_traker` extrait dynamiquement;
+- override operateur smoke :
+  `lifecycle_status=canceled`, `clone_reuse_allowed=true`,
+  `source=operator_smoke_override`;
+- `router_decision=use_another_profile_previous_account_stopped`;
+- `action_executed=true`, `action=tap_use_another_profile`;
+- resolution utilisee : `target_resolution_hierarchy_bounds_center`;
+- `post_action_screen_type=login_form_empty`;
+- `ready_for_password_smoke=true`;
+- `would_submit_password=false`;
+- `would_publish=false`;
+- aucun password, aucun credential, aucun Vault read, aucun publish HTTP, aucun
+  runner hook.
+
+Conclusion : le gate lifecycle + la resolution accessibility permettent
+maintenant d'atteindre `login_form_empty` sans hardcode username ni coordonnees
+fixes. La prochaine etape reste un smoke password `cinema_catchup` via flow
+securise Vault, jamais via chat/prompt/shell history visible.
 
 ## Entry 2E-5J-2B-1 Previous Account Lifecycle Gate Source
 

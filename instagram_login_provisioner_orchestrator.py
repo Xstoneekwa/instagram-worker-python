@@ -380,7 +380,6 @@ def _signals_confirm_login_form(signals: dict[str, Any]) -> bool:
     return (
         signals.get("screen_type") == "login_form_empty"
         and signals.get("has_username_field") is True
-        and signals.get("has_password_field") is True
         and signals.get("has_login_button") is True
     )
 

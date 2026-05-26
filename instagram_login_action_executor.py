@@ -8,8 +8,10 @@ business overrides.
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field
+from html import unescape
 from typing import Any, Callable
 
 from instagram_login_status_classifier import FORBIDDEN_METADATA_KEYS, clean_login_probe_metadata
@@ -29,9 +31,43 @@ NO_ACTION_DECISIONS = {
     "unknown_no_action",
 }
 MAX_POST_ACTION_WAIT_MS = 1500
+BOUNDS_DEDUPE_DISTANCE_PX = 24
+STATUS_BAR_MAX_CENTER_Y = 220
 
 Timer = Callable[[], float]
 Sleeper = Callable[[float], None]
+
+
+@dataclass(frozen=True)
+class _BoundsRect:
+    x1: int
+    y1: int
+    x2: int
+    y2: int
+
+    @property
+    def center_x(self) -> int:
+        return (self.x1 + self.x2) // 2
+
+    @property
+    def center_y(self) -> int:
+        return (self.y1 + self.y2) // 2
+
+    @property
+    def area(self) -> int:
+        return max(0, self.x2 - self.x1) * max(0, self.y2 - self.y1)
+
+
+@dataclass(frozen=True)
+class _AccessibilityCandidate:
+    label: str
+    source_attr: str
+    bounds: _BoundsRect
+    clickable: bool
+    enabled: bool
+    visible: bool
+    class_name: str
+    score: int = 0
 
 
 @dataclass(frozen=True)
@@ -109,6 +145,8 @@ def execute_login_screen_decision(
     start = timer()
     selector_result = _find_exact_accessibility_target(d, target_text)
     timings["target_lookup_ms"] = _elapsed_ms(start, timer())
+    if selector_result.get("resolution"):
+        warnings.append(f"target_resolution_{selector_result['resolution']}")
 
     if selector_result["failure_reason"]:
         timings["total_ms"] = _elapsed_ms(total_start, timer())
@@ -123,10 +161,9 @@ def execute_login_screen_decision(
             warnings=warnings,
         )
 
-    target = selector_result["target"]
     try:
         start = timer()
-        _click_target(target, tap_timeout_ms=tap_timeout)
+        _click_resolved_target(d, selector_result, tap_timeout_ms=tap_timeout)
         timings["tap_ms"] = _elapsed_ms(start, timer())
     except Exception:
         timings["tap_ms"] = _elapsed_ms(start, timer())
@@ -188,23 +225,228 @@ def _decision_value(decision: Any) -> str:
 
 
 def _find_exact_accessibility_target(d: Any, target_text: str) -> dict[str, Any]:
-    candidates: list[Any] = []
+    hierarchy_xml = ""
+    try:
+        hierarchy_xml = _dump_hierarchy_once(d)
+    except Exception:
+        hierarchy_xml = ""
+
+    if hierarchy_xml:
+        hierarchy_result = _resolve_target_from_hierarchy(hierarchy_xml, target_text)
+        if hierarchy_result.get("target"):
+            return hierarchy_result
+        if hierarchy_result["failure_reason"] == "ambiguous_target_button":
+            return hierarchy_result
+
+    return _resolve_target_from_selectors(d, target_text)
+
+
+def _resolve_target_from_hierarchy(hierarchy_xml: str, target_text: str) -> dict[str, Any]:
+    normalized_target = _normalize_label(target_text)
+    if not normalized_target:
+        return {"target": None, "failure_reason": "target_button_not_found", "resolution": "hierarchy_empty_label"}
+
+    anchors = {
+        "Continue": _find_anchor_center_y(hierarchy_xml, "Continue"),
+        "Create new account": _find_anchor_center_y(hierarchy_xml, "Create new account"),
+    }
+    raw_candidates = _collect_label_candidates(hierarchy_xml, normalized_target)
+    filtered = [
+        candidate
+        for candidate in raw_candidates
+        if candidate.enabled
+        and candidate.visible
+        and candidate.bounds.area > 0
+        and candidate.bounds.center_y > STATUS_BAR_MAX_CENTER_Y
+        and _candidate_in_vertical_zone(candidate, anchors)
+    ]
+    if not filtered:
+        return {"target": None, "failure_reason": "target_button_not_found", "resolution": "hierarchy_no_candidate"}
+
+    deduped = _dedupe_candidates_by_bounds(filtered)
+    if not deduped:
+        return {"target": None, "failure_reason": "target_button_not_found", "resolution": "hierarchy_deduped_empty"}
+
+    zones = _distinct_visual_zones(deduped)
+    if len(zones) > 1:
+        return {"target": None, "failure_reason": "ambiguous_target_button", "resolution": "hierarchy_multiple_zones"}
+
+    winner = _choose_best_candidate(deduped)
+    return {
+        "target": {
+            "kind": "bounds",
+            "center": (winner.bounds.center_x, winner.bounds.center_y),
+            "label": winner.label,
+        },
+        "failure_reason": "",
+        "resolution": "hierarchy_bounds_center",
+    }
+
+
+def _resolve_target_from_selectors(d: Any, target_text: str) -> dict[str, Any]:
     for selector_kwargs in ({"text": target_text}, {"description": target_text}):
         try:
             selector = d(**selector_kwargs)
         except Exception:
             continue
         count = _selector_count(selector)
-        if count > 1:
-            return {"target": None, "failure_reason": "ambiguous_target_button"}
         if count == 1:
-            candidates.append(selector)
+            return {
+                "target": {"kind": "selector", "selector": selector},
+                "failure_reason": "",
+                "resolution": f"selector_{next(iter(selector_kwargs))}",
+            }
+        if count > 1:
+            return {
+                "target": None,
+                "failure_reason": "ambiguous_target_button",
+                "resolution": f"selector_{next(iter(selector_kwargs))}_ambiguous",
+            }
+    return {"target": None, "failure_reason": "target_button_not_found", "resolution": "selector_not_found"}
 
-    if len(candidates) > 1:
-        return {"target": None, "failure_reason": "ambiguous_target_button"}
-    if not candidates:
-        return {"target": None, "failure_reason": "target_button_not_found"}
-    return {"target": candidates[0], "failure_reason": ""}
+
+def _click_resolved_target(d: Any, selector_result: dict[str, Any], *, tap_timeout_ms: int) -> None:
+    target = selector_result.get("target") or {}
+    kind = str(target.get("kind") or "")
+    if kind == "selector":
+        _click_target(target["selector"], tap_timeout_ms=tap_timeout_ms)
+        return
+    if kind == "bounds":
+        center = target.get("center") or ()
+        if len(center) != 2:
+            raise RuntimeError("bounds_center_invalid")
+        click = getattr(d, "click", None)
+        if not callable(click):
+            raise RuntimeError("bounds_tap_unavailable")
+        try:
+            click(int(center[0]), int(center[1]))
+        except TypeError:
+            click(x=int(center[0]), y=int(center[1]))
+        return
+    raise RuntimeError("target_click_unavailable")
+
+
+def _normalize_label(value: Any) -> str:
+    return re.sub(r"\s+", " ", unescape(str(value or "")).strip())
+
+
+def _parse_bounds(raw: str) -> _BoundsRect | None:
+    match = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", str(raw or "").strip())
+    if not match:
+        return None
+    x1, y1, x2, y2 = (int(match.group(index)) for index in range(1, 5))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return _BoundsRect(x1=x1, y1=y1, x2=x2, y2=y2)
+
+
+def _parse_node_attributes(raw_attrs: str) -> dict[str, str]:
+    return dict(re.findall(r'(\w+)="([^"]*)"', raw_attrs))
+
+
+def _node_is_visible(attrs: dict[str, str]) -> bool:
+    visible = attrs.get("visible-to-user", attrs.get("visible", "true"))
+    return str(visible).lower() != "false"
+
+
+def _node_is_enabled(attrs: dict[str, str]) -> bool:
+    enabled = attrs.get("enabled", "true")
+    return str(enabled).lower() != "false"
+
+
+def _node_is_clickable(attrs: dict[str, str]) -> bool:
+    clickable = attrs.get("clickable", "false")
+    return str(clickable).lower() == "true"
+
+
+def _collect_label_candidates(hierarchy_xml: str, normalized_target: str) -> list[_AccessibilityCandidate]:
+    candidates: list[_AccessibilityCandidate] = []
+    for raw_attrs in re.findall(r"<node\b([^>]*)/?>", hierarchy_xml or ""):
+        attrs = _parse_node_attributes(raw_attrs)
+        text = _normalize_label(attrs.get("text", ""))
+        content_desc = _normalize_label(attrs.get("content-desc", ""))
+        for label, source_attr in ((text, "text"), (content_desc, "content-desc")):
+            if label != normalized_target:
+                continue
+            bounds = _parse_bounds(attrs.get("bounds", ""))
+            if bounds is None:
+                continue
+            candidates.append(
+                _AccessibilityCandidate(
+                    label=label,
+                    source_attr=source_attr,
+                    bounds=bounds,
+                    clickable=_node_is_clickable(attrs),
+                    enabled=_node_is_enabled(attrs),
+                    visible=_node_is_visible(attrs),
+                    class_name=str(attrs.get("class", "")).split(".")[-1],
+                )
+            )
+    return candidates
+
+
+def _find_anchor_center_y(hierarchy_xml: str, label: str) -> int | None:
+    normalized_label = _normalize_label(label)
+    for raw_attrs in re.findall(r"<node\b([^>]*)/?>", hierarchy_xml or ""):
+        attrs = _parse_node_attributes(raw_attrs)
+        text = _normalize_label(attrs.get("text", ""))
+        content_desc = _normalize_label(attrs.get("content-desc", ""))
+        if text != normalized_label and content_desc != normalized_label:
+            continue
+        bounds = _parse_bounds(attrs.get("bounds", ""))
+        if bounds is None or not _node_is_visible(attrs):
+            continue
+        return bounds.center_y
+    return None
+
+
+def _candidate_in_vertical_zone(candidate: _AccessibilityCandidate, anchors: dict[str, int | None]) -> bool:
+    continue_y = anchors.get("Continue")
+    create_y = anchors.get("Create new account")
+    center_y = candidate.bounds.center_y
+    if continue_y is not None and center_y <= continue_y:
+        return False
+    if create_y is not None and center_y >= create_y:
+        return False
+    return True
+
+
+def _dedupe_candidates_by_bounds(candidates: list[_AccessibilityCandidate]) -> list[_AccessibilityCandidate]:
+    grouped: list[list[_AccessibilityCandidate]] = []
+    for candidate in candidates:
+        placed = False
+        for group in grouped:
+            if _bounds_are_near(group[0].bounds, candidate.bounds):
+                group.append(candidate)
+                placed = True
+                break
+        if not placed:
+            grouped.append([candidate])
+    return [_choose_best_candidate(group) for group in grouped]
+
+
+def _bounds_are_near(left: _BoundsRect, right: _BoundsRect) -> bool:
+    return (
+        abs(left.center_x - right.center_x) <= BOUNDS_DEDUPE_DISTANCE_PX
+        and abs(left.center_y - right.center_y) <= BOUNDS_DEDUPE_DISTANCE_PX
+    )
+
+
+def _distinct_visual_zones(candidates: list[_AccessibilityCandidate]) -> list[_AccessibilityCandidate]:
+    zones: list[_AccessibilityCandidate] = []
+    for candidate in candidates:
+        if not any(_bounds_are_near(zone.bounds, candidate.bounds) for zone in zones):
+            zones.append(candidate)
+    return zones
+
+
+def _choose_best_candidate(candidates: list[_AccessibilityCandidate]) -> _AccessibilityCandidate:
+    def sort_key(candidate: _AccessibilityCandidate) -> tuple[int, int, int]:
+        clickable_rank = 0 if candidate.clickable else 1
+        text_rank = 0 if candidate.source_attr == "text" else 1
+        return (clickable_rank, text_rank, candidate.bounds.area)
+
+    return sorted(candidates, key=sort_key)[0]
 
 
 def _selector_count(selector: Any) -> int:

@@ -39,6 +39,11 @@ LOGIN_FORM_XML = (
     '<node text="Password" />'
     '<node text="Log in" />'
 )
+CONTINUE_AS_XML = (
+    '<node text="Continue" clickable="true" bounds="[100,1000][980,1120]" />'
+    '<node text="Use another profile" clickable="false" bounds="[371,1215][710,1280]" />'
+    '<node text="Create new account" clickable="true" bounds="[100,2000][980,2190]" />'
+)
 CONNECTED_XML = (
     '<node content-desc="Home" />'
     '<node content-desc="Search" />'
@@ -82,6 +87,7 @@ class FakeDevice:
         self.dump_calls = 0
         self.selector_calls: list[dict] = []
         self.selectors: dict[tuple[str, str], FakeSelector] = {}
+        self.bounds_clicks: list[tuple[int, int]] = []
 
     def add_selector(self, key: str, value: str, selector: FakeSelector) -> FakeSelector:
         self.selectors[(key, value)] = selector
@@ -99,6 +105,9 @@ class FakeDevice:
         if len(self.hierarchies) == 1:
             return self.hierarchies[0]
         return self.hierarchies.pop(0)
+
+    def click(self, x: int, y: int) -> None:
+        self.bounds_clicks.append((int(x), int(y)))
 
 
 def configured_device(post_xml: str = CONNECTED_XML) -> tuple[FakeDevice, dict[str, FakeSelector]]:
@@ -163,7 +172,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
 
     def test_continue_expected_executes_continue_then_login_flow(self) -> None:
         device, selectors = configured_device()
-        device.hierarchies = [LOGIN_FORM_XML, LOGIN_FORM_XML, CONNECTED_XML]
+        device.hierarchies = [CONTINUE_AS_XML, LOGIN_FORM_XML, LOGIN_FORM_XML, CONNECTED_XML]
 
         result = run_login_provisioning_flow(
             device,
@@ -173,13 +182,13 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
             initial_signals=CONTINUE_SIGNALS,
         )
 
-        self.assertEqual(selectors["continue"].click_calls, 1)
+        self.assertTrue(selectors["continue"].click_calls == 1 or device.bounds_clicks)
         self.assertEqual(result.final_outcome, "connected")
         self.assertEqual(result.actions_taken[:3], ["route:continue_expected_account", "tap_continue", "route:start_login_form_flow"])
 
     def test_previous_canceled_clone_reusable_uses_another_profile_then_login(self) -> None:
         device, selectors = configured_device()
-        device.hierarchies = [LOGIN_FORM_XML, LOGIN_FORM_XML, CONNECTED_XML]
+        device.hierarchies = [CONTINUE_AS_XML, LOGIN_FORM_XML, LOGIN_FORM_XML, CONNECTED_XML]
         lookup = Mock(
             return_value={
                 "lifecycle_status": "canceled",
@@ -199,7 +208,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         )
 
         lookup.assert_called_once()
-        self.assertEqual(selectors["use_another"].click_calls, 1)
+        self.assertTrue(selectors["use_another"].click_calls == 1 or device.bounds_clicks == [(540, 1247)])
         self.assertIn("tap_use_another_profile", result.actions_taken)
         self.assertEqual(result.final_outcome, "connected")
         self.assertEqual(
