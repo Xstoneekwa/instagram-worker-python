@@ -2214,6 +2214,99 @@ Suite prevue :
 - puis integration Device Runtime Control Layer / ATX avec state machine,
   recovery et observabilite avant branchement runtime principal.
 
+## Entry 2E-5E Login Screen Router
+
+Entry 2E-5E ajoute une couche de decision pure avant tout vrai login. Le
+router observe les signaux d'ecran login et decide la prochaine intention, mais
+n'execute aucun tap/click et ne saisit aucun mot de passe.
+
+Nouveaux composants :
+
+- `instagram_login_screen_router.py` : decision layer pure pour les ecrans
+  `Continue as`, `Use another profile`, login form vide et unknown;
+- `instagram_login_ui_probe.extract_login_screen_signals_from_hierarchy(...)` :
+  extraction pure de signaux safe depuis le XML deja disponible.
+
+Screen types V1 :
+
+```text
+continue_as_candidate
+login_form_empty
+unknown
+```
+
+Decisions V1 :
+
+- `continue_as_candidate` + suggested == expected ->
+  `continue_expected_account`, `should_tap_continue=true`,
+  `next_action=continue_then_secure_password_step_later`;
+- `continue_as_candidate` + suggested != expected + lifecycle
+  `canceled|archived|stopped` + `clone_reuse_allowed=true` ->
+  `use_another_profile_previous_account_stopped`,
+  `should_tap_use_another_profile=true`,
+  `audit_reason=previous_account_stopped_override`,
+  sans escalation;
+- `continue_as_candidate` + suggested != expected + lifecycle actif, paused,
+  onboarding, unknown, lookup error ou clone non reusable ->
+  `block_wrong_suggested_account`, `login_status=mismatch`,
+  `provisioning_status=blocked`, `onboarding_status=support_required`,
+  `dashboard_action_type=review_account_mismatch`;
+- `login_form_empty` -> `start_login_form_flow`,
+  `next_action=secure_credentials_required_later`;
+- `unknown` -> `unknown_no_action`.
+
+Lifecycle V1 reconnu :
+
+```text
+active
+paused
+canceled
+onboarding
+archived  # alias stopped/canceled
+stopped   # alias canceled
+unknown
+```
+
+Cas test actuel :
+
+- `suggested_username=i_m_your_traker`;
+- lookup lifecycle -> `canceled`;
+- `clone_reuse_allowed=true`;
+- decision attendue :
+  `use_another_profile_previous_account_stopped`;
+- audit attendu : `previous_account_stopped_override`;
+- pas d'escalade warning inutile.
+
+Pourquoi cette couche existe :
+
+- `Continue as <username>` ne doit jamais etre clique aveuglement;
+- un ancien compte `canceled/stopped/archived` peut etre ignore proprement si le
+  clone est reusable;
+- un compte actif/paused/onboarding/inconnu reste un risque mismatch et doit
+  produire une revue admin;
+- `account_identity_guard.py` garde son role de safe-stop pour compte deja
+  actif; le router prepare seulement la decision avant login.
+
+Securite :
+
+- aucun tap/click en 2E-5E;
+- aucun password;
+- aucun Vault;
+- aucun publish HTTP reel;
+- aucun Supabase reel dans le module;
+- `account_lifecycle_lookup(username)` est injectable/mocke;
+- metadata safe uniquement : source, screen type, decision, reason,
+  usernames normalises, lifecycle, clone reuse, audit reason;
+- aucun XML brut, screenshot, token, `secret_ref`, `adb_serial`, `device_udid`,
+  cookie ou `service_role`.
+
+Suite prevue :
+
+- design d'acces credentials securise;
+- action executor controle pour `Continue` / `Use another profile`;
+- login controle sur clone + compte test dedie;
+- puis seulement integration state machine / recovery avant runtime principal.
+
 ## Entry 2F-1 RPC incidents -> dashboard actions
 
 Entry 2F-1 ajoute la RPC service-role

@@ -5,6 +5,7 @@ import unittest
 from instagram_login_status_classifier import LoginProbeOutcome
 from instagram_login_ui_probe import (
     detect_login_probe_outcome_from_hierarchy,
+    extract_login_screen_signals_from_hierarchy,
     probe_instagram_login_ui,
     probe_login_ui_from_hierarchy,
 )
@@ -116,6 +117,43 @@ class InstagramLoginUiProbeTest(unittest.TestCase):
         for key in ("screenshot", "screenshot_path", "adb_serial", "device_udid"):
             self.assertNotIn(key, result.metadata)
         self.assertTrue(result.metadata["expected_username_present"])
+
+    def test_extracts_continue_as_candidate_signals(self) -> None:
+        xml = (
+            '<node text="Instagram" />'
+            '<node text="i_m_your_traker" />'
+            '<node text="Continue" />'
+            '<node text="Use another profile" />'
+            '<node text="Create new account" />'
+        )
+
+        signals = extract_login_screen_signals_from_hierarchy(xml)
+
+        self.assertEqual(signals["screen_type"], "continue_as_candidate")
+        self.assertEqual(signals["suggested_username"], "i_m_your_traker")
+        self.assertTrue(signals["has_continue_button"])
+        self.assertTrue(signals["has_use_another_profile"])
+
+    def test_extracts_login_form_empty_signals(self) -> None:
+        xml = (
+            '<node text="Username, email or mobile number" />'
+            '<node text="Password" />'
+            '<node text="Log in" />'
+            '<node text="Forgot password?" />'
+        )
+
+        signals = extract_login_screen_signals_from_hierarchy(xml)
+
+        self.assertEqual(signals["screen_type"], "login_form_empty")
+        self.assertTrue(signals["has_username_field"])
+        self.assertTrue(signals["has_password_field"])
+        self.assertTrue(signals["has_login_button"])
+
+    def test_extracts_unknown_for_ambiguous_signals(self) -> None:
+        signals = extract_login_screen_signals_from_hierarchy('<node text="Instagram" />')
+
+        self.assertEqual(signals["screen_type"], "unknown")
+        self.assertEqual(signals["suggested_username"], "")
 
 
 if __name__ == "__main__":

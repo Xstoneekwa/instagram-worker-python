@@ -1,0 +1,201 @@
+from __future__ import annotations
+
+import unittest
+
+from instagram_login_screen_router import route_login_screen
+
+
+class InstagramLoginScreenRouterTest(unittest.TestCase):
+    def test_continue_as_same_username_allows_continue(self) -> None:
+        decision = route_login_screen(
+            expected_username="cinema_catchup",
+            suggested_username="cinema_catchup",
+            screen_type="continue_as_candidate",
+        )
+
+        self.assertTrue(decision.ok)
+        self.assertEqual(decision.decision, "continue_expected_account")
+        self.assertTrue(decision.should_tap_continue)
+        self.assertFalse(decision.should_escalate)
+        self.assertEqual(decision.next_action, "continue_then_secure_password_step_later")
+        self.assertEqual(decision.reason, "suggested_username_matches_expected")
+
+    def test_continue_as_different_active_blocks_for_admin_review(self) -> None:
+        decision = route_login_screen(
+            expected_username="new_account",
+            suggested_username="old_account",
+            screen_type="continue_as_candidate",
+            account_lifecycle_lookup=lambda _username: {"found": True, "lifecycle_status": "active"},
+            clone_reuse_allowed=True,
+        )
+
+        self.assertFalse(decision.ok)
+        self.assertEqual(decision.decision, "block_wrong_suggested_account")
+        self.assertTrue(decision.should_escalate)
+        self.assertEqual(decision.publish_login_status, "mismatch")
+        self.assertEqual(decision.provisioning_status, "blocked")
+        self.assertEqual(decision.onboarding_status, "support_required")
+        self.assertEqual(decision.dashboard_action_type, "review_account_mismatch")
+        self.assertFalse(decision.should_tap_continue)
+        self.assertFalse(decision.should_tap_use_another_profile)
+
+    def test_continue_as_different_unknown_blocks_for_admin_review(self) -> None:
+        decision = route_login_screen(
+            expected_username="new_account",
+            suggested_username="unknown_account",
+            screen_type="continue_as_candidate",
+            account_lifecycle_lookup=lambda _username: {"found": False, "lifecycle_status": "unknown"},
+            clone_reuse_allowed=True,
+        )
+
+        self.assertEqual(decision.decision, "block_wrong_suggested_account")
+        self.assertTrue(decision.should_escalate)
+        self.assertEqual(decision.reason, "wrong_suggested_account_requires_admin_review")
+
+    def test_canceled_with_clone_reuse_allows_use_another_profile_override(self) -> None:
+        decision = route_login_screen(
+            expected_username="new_account",
+            suggested_username="old_account",
+            screen_type="continue_as_candidate",
+            account_lifecycle_lookup=lambda _username: {"found": True, "lifecycle_status": "canceled"},
+            clone_reuse_allowed=True,
+        )
+
+        self.assertTrue(decision.ok)
+        self.assertEqual(decision.decision, "use_another_profile_previous_account_stopped")
+        self.assertTrue(decision.should_tap_use_another_profile)
+        self.assertFalse(decision.should_escalate)
+        self.assertEqual(decision.audit_reason, "previous_account_stopped_override")
+        self.assertEqual(decision.reason, "previous_account_canceled_clone_reusable")
+
+    def test_canceled_without_clone_reuse_blocks(self) -> None:
+        decision = route_login_screen(
+            expected_username="new_account",
+            suggested_username="old_account",
+            screen_type="continue_as_candidate",
+            account_lifecycle_lookup=lambda _username: {"found": True, "lifecycle_status": "canceled"},
+            clone_reuse_allowed=False,
+        )
+
+        self.assertEqual(decision.decision, "block_wrong_suggested_account")
+        self.assertTrue(decision.should_escalate)
+        self.assertFalse(decision.should_tap_use_another_profile)
+
+    def test_archived_and_stopped_aliases_are_treated_as_canceled(self) -> None:
+        for status in ("archived", "stopped"):
+            with self.subTest(status=status):
+                decision = route_login_screen(
+                    expected_username="new_account",
+                    suggested_username="old_account",
+                    screen_type="continue_as_candidate",
+                    account_lifecycle_lookup=lambda _username, s=status: {
+                        "found": True,
+                        "lifecycle_status": s,
+                    },
+                    clone_reuse_allowed=True,
+                )
+
+                self.assertEqual(decision.decision, "use_another_profile_previous_account_stopped")
+                self.assertEqual(decision.audit_reason, "previous_account_stopped_override")
+
+    def test_login_form_empty_starts_login_form_flow(self) -> None:
+        decision = route_login_screen(
+            expected_username="new_account",
+            screen_type="login_form_empty",
+        )
+
+        self.assertTrue(decision.ok)
+        self.assertEqual(decision.decision, "start_login_form_flow")
+        self.assertTrue(decision.should_start_login_form_flow)
+        self.assertFalse(decision.should_escalate)
+        self.assertEqual(decision.next_action, "secure_credentials_required_later")
+
+    def test_unknown_screen_has_no_action(self) -> None:
+        decision = route_login_screen(
+            expected_username="new_account",
+            screen_type="unknown",
+        )
+
+        self.assertFalse(decision.ok)
+        self.assertEqual(decision.decision, "unknown_no_action")
+        self.assertFalse(decision.should_tap_continue)
+        self.assertFalse(decision.should_tap_use_another_profile)
+        self.assertFalse(decision.should_start_login_form_flow)
+        self.assertFalse(decision.should_escalate)
+
+    def test_username_normalization_is_case_insensitive_and_strips_at(self) -> None:
+        decision = route_login_screen(
+            expected_username="@Cinema_Catchup",
+            suggested_username="cinema_catchup",
+            screen_type="continue_as_candidate",
+        )
+
+        self.assertEqual(decision.normalized_expected_username, "cinema_catchup")
+        self.assertEqual(decision.normalized_suggested_username, "cinema_catchup")
+        self.assertTrue(decision.should_tap_continue)
+
+    def test_metadata_is_safe(self) -> None:
+        decision = route_login_screen(
+            expected_username="new_account",
+            suggested_username="old_account",
+            screen_type="continue_as_candidate",
+            account_lifecycle_lookup=lambda _username: {"found": True, "lifecycle_status": "active"},
+            clone_reuse_allowed=True,
+        )
+
+        self.assertEqual(decision.metadata["source"], "login_screen_router")
+        self.assertEqual(decision.metadata["screen_type"], "continue_as_candidate")
+        self.assertEqual(decision.metadata["decision"], "block_wrong_suggested_account")
+        for key in (
+            "password",
+            "secret_ref",
+            "vault",
+            "xml",
+            "screenshot",
+            "adb_serial",
+            "device_udid",
+            "service_role",
+            "cookie",
+        ):
+            self.assertNotIn(key, decision.metadata)
+
+    def test_lookup_exception_fails_safe_to_admin_review(self) -> None:
+        def raise_lookup(_username: str) -> dict:
+            raise RuntimeError("db down")
+
+        decision = route_login_screen(
+            expected_username="new_account",
+            suggested_username="old_account",
+            screen_type="continue_as_candidate",
+            account_lifecycle_lookup=raise_lookup,
+            clone_reuse_allowed=True,
+        )
+
+        self.assertEqual(decision.decision, "block_wrong_suggested_account")
+        self.assertTrue(decision.should_escalate)
+        self.assertEqual(
+            decision.reason,
+            "lifecycle_lookup_failed_wrong_suggested_account_requires_admin_review",
+        )
+
+    def test_i_m_your_traker_canceled_case_allows_use_another_profile(self) -> None:
+        decision = route_login_screen(
+            expected_username="new_account",
+            suggested_username="i_m_your_traker",
+            screen_type="continue_as_candidate",
+            account_lifecycle_lookup=lambda username: {
+                "found": username == "i_m_your_traker",
+                "lifecycle_status": "canceled",
+                "account_id": "old-account-id",
+            },
+            clone_reuse_allowed=True,
+        )
+
+        self.assertEqual(decision.normalized_suggested_username, "i_m_your_traker")
+        self.assertEqual(decision.decision, "use_another_profile_previous_account_stopped")
+        self.assertEqual(decision.audit_reason, "previous_account_stopped_override")
+        self.assertFalse(decision.should_escalate)
+
+
+if __name__ == "__main__":
+    unittest.main()

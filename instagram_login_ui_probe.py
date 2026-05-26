@@ -61,6 +61,27 @@ CONNECTED_PATTERNS = (
     "direct",
     "new post",
 )
+COMMON_NON_USERNAME_TEXTS = {
+    "continue",
+    "use",
+    "another",
+    "profile",
+    "create",
+    "new",
+    "account",
+    "instagram",
+    "meta",
+    "english",
+    "us",
+    "username",
+    "email",
+    "mobile",
+    "number",
+    "password",
+    "log",
+    "in",
+    "forgot",
+}
 
 
 @dataclass(frozen=True)
@@ -74,6 +95,35 @@ class LoginUiProbeResult:
 
 def detect_login_probe_outcome_from_hierarchy(hierarchy_xml: str | None) -> LoginProbeOutcome:
     return probe_login_ui_from_hierarchy(hierarchy_xml).outcome
+
+
+def extract_login_screen_signals_from_hierarchy(hierarchy_xml: str | None) -> dict[str, Any]:
+    text = _normalize_hierarchy_text(hierarchy_xml)
+    has_continue_button = "continue" in text
+    has_use_another_profile = "use another profile" in text
+    has_username_field = "username, email or mobile number" in text or (
+        "username" in text and ("email" in text or "mobile" in text)
+    )
+    has_password_field = "password" in text
+    has_login_button = "log in" in text
+    suggested_username = _extract_suggested_username(text)
+
+    if has_continue_button and has_use_another_profile and suggested_username:
+        screen_type = "continue_as_candidate"
+    elif has_username_field and has_password_field and has_login_button:
+        screen_type = "login_form_empty"
+    else:
+        screen_type = "unknown"
+
+    return {
+        "screen_type": screen_type,
+        "suggested_username": suggested_username,
+        "has_continue_button": has_continue_button,
+        "has_use_another_profile": has_use_another_profile,
+        "has_username_field": has_username_field,
+        "has_password_field": has_password_field,
+        "has_login_button": has_login_button,
+    }
 
 
 def probe_login_ui_from_hierarchy(
@@ -190,7 +240,7 @@ def _normalize_hierarchy_text(hierarchy_xml: str | None) -> str:
     raw = str(hierarchy_xml or "")
     if not raw.strip():
         return ""
-    text = re.sub(r"[_\\-]+", " ", raw)
+    text = re.sub(r"[-]+", " ", raw)
     text = re.sub(r"\s+", " ", text)
     return text.lower()
 
@@ -201,3 +251,18 @@ def _contains_any(text: str, patterns: tuple[str, ...]) -> bool:
 
 def _count_pattern_hits(text: str, patterns: tuple[str, ...]) -> int:
     return sum(1 for pattern in patterns if pattern in text)
+
+
+def _extract_suggested_username(text: str) -> str:
+    continue_as_match = re.search(r"\bcontinue as\s+@?([a-z0-9._]{1,30})\b", text)
+    if continue_as_match:
+        return continue_as_match.group(1).lstrip("@")
+
+    candidates = re.findall(r"@?[a-z0-9._]{1,30}", text)
+    for raw in candidates:
+        candidate = raw.lstrip("@").strip("._")
+        if not candidate or candidate in COMMON_NON_USERNAME_TEXTS:
+            continue
+        if "_" in candidate or "." in candidate:
+            return candidate
+    return ""
