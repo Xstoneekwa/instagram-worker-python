@@ -300,6 +300,19 @@ Post-submit policy future :
   `Log out`. L'orchestrateur a stoppe safe sur `post_logout_unknown_screen` apres
   reobserve unique; inspection passive juste apres : stabilisation vers
   `account_picker`.
+- Entry 2E-5P : premier smoke password reel controle via Vault/`SecretValue`.
+  Le seul chemin autorise est `instagram-credentials` -> Supabase Vault ->
+  runtime Vault reader -> `SecretValue` -> password executor. Aucun password,
+  `secret_ref` complet, UUID Vault, service-role key, bearer token, XML brut ou
+  screenshot path ne doit etre affiche. Le smoke ne peut partir que de
+  `continue_password_only` ou `login_form_empty`, avec username attendu
+  `cinema_catchup` confirme. Validation 2026-05-26 : tests pre-smoke OK et
+  device idle, mais stop safe avant saisie car aucune credential row active ne
+  satisfait simultanement username attendu, `secret_provider=supabase_vault` et
+  `secret_ref` Vault valide; l'ecran observe etait aussi `unknown`, donc non
+  accepte. Aucun Vault password read runtime local, aucun password saisi, aucun
+  tap `Log in`, aucun publish. Prochaine action : soumettre/mettre a jour les
+  credentials via le flow securise `instagram-credentials`, jamais dans Cursor.
 - Entry 2E-5J-2B-1 : audit lifecycle read-only. Les statuts existants couvrent
   `client_instagram_accounts` login/provisioning/onboarding,
   `client_subscriptions` active/paused/cancelled/expired,

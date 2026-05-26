@@ -3416,6 +3416,54 @@ Validation reelle no-password 2026-05-26 :
 - aucun password, aucune saisie, aucun tap `Log in`, aucun Vault read, aucun
   credential reel, aucun publish HTTP, aucune ecriture Supabase.
 
+## Entry 2E-5P Secure Password Login Smoke
+
+Entry 2E-5P prepare le premier smoke password reel controle pour
+`expected_username=cinema_catchup`, exclusivement via le chemin securise :
+`instagram-credentials` -> Supabase Vault -> runtime Vault reader ->
+`SecretValue` -> login executor.
+
+Regles no-leak :
+
+- ne jamais demander ni coller le password dans Cursor;
+- ne jamais afficher password, `SecretValue` utile, `secret_ref` complet, UUID
+  Vault, service-role key, bearer token, XML brut ou screenshot path;
+- le password ne peut etre revele que via
+  `SecretValue.reveal_for_login_executor()` dans
+  `instagram_login_password_form_executor.py`, apres validation de l'ecran;
+- aucun publish HTTP ni ecriture Supabase par defaut.
+
+Preconditions avant submit :
+
+- device unique et idle (`emulator-5554`, aucun runner/sender/follow/outreach);
+- ecran initial strictement `continue_password_only` ou `login_form_empty`;
+- si username visible, il doit matcher `cinema_catchup`;
+- credentials actifs avec username attendu, `secret_provider=supabase_vault`,
+  `secret_ref` Vault valide, Vault read OK et `SecretValue` cree;
+- sinon stop safe avant tout tap password.
+
+Validation 2026-05-26 :
+
+- tests pre-smoke OK sur runtime credentials, Vault reader, password executor,
+  orchestrateur, probe, routeur et action executor;
+- pre-check device OK : `emulator-5554` unique, aucun process business actif;
+- verification credentials safe via Supabase : metadata presente, mais aucune
+  row active ne satisfait simultanement `username=cinema_catchup`,
+  `secret_provider=supabase_vault` et `secret_ref` Vault valide;
+- Vault read runtime local non execute car les preconditions metadata ont echoue;
+- observation passive device : ecran initial non accepte (`unknown`), pas
+  `continue_password_only` ni `login_form_empty`;
+- resultat : stop safe avant saisie password, aucun tap `Log in`, aucun Vault
+  password expose, aucun publish.
+
+Prochaine etape :
+
+- l'operateur doit soumettre/mettre a jour les credentials via le flow securise
+  `instagram-credentials`;
+- ne jamais fournir le password dans Cursor;
+- relancer 2E-5P seulement quand une row active `supabase_vault` valide existe
+  et que l'ecran initial est `continue_password_only` ou `login_form_empty`.
+
 ## Entry 2E-5J-2B-1 Previous Account Lifecycle Gate Source
 
 Entry 2E-5J-2B-1 audite la source fiable a utiliser avant d'autoriser
