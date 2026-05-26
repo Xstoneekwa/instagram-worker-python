@@ -647,6 +647,85 @@ payloads, metadata, `last_error`, response previews, or logs.
 Future dashboard/admin toggles may use a non-secret `ops_settings` table and
 override env flags later. Webhook URLs remain env-only.
 
+## Entry 2F-1 Incident Dashboard Action Sync
+
+Entry 2F-1 ajoute une projection SQL explicite entre les incidents ORF et les
+actions dashboard :
+
+```sql
+public.sync_account_incident_dashboard_action(
+  p_incident_id uuid,
+  p_actor_type text default 'system',
+  p_reason text default null,
+  p_metadata jsonb default '{}'::jsonb
+) returns jsonb
+```
+
+Cette etape est schema-only :
+
+- aucun appel depuis `runtime_incidents.py`;
+- aucun changement dans `account_identity_guard.py`;
+- aucun changement dans `incident_notifications.py`;
+- aucun runner, sender/orchestrator, Edge Function, dashboard UI, webhook ou
+  run device.
+
+Separation des responsabilites :
+
+- `account_incidents` est la verite ops durable;
+- `account_incident_notifications` est l'audit Slack/Discord;
+- `account_dashboard_actions` est la projection UI actionnable;
+- `client_instagram_accounts` est le status dashboard safe.
+
+Mapping V1 :
+
+- seul `active_instagram_account_mismatch` est supporte;
+- il cree ou synchronise `review_account_mismatch`;
+- l'action est `audience='admin'`, `severity='critical'`,
+  `requires_client_action=false`, `blocking_campaign=true`;
+- les autres incident types retournent `unsupported_incident_type`.
+
+Deduplication avec le status pipeline :
+
+Le mismatch peut deja creer une action via
+`client_instagram_accounts.login_status='mismatch'`. La projection incident
+utilise donc le meme `dedupe_key` action-level :
+
+```text
+account:{account_id}:dashboard_action:review_account_mismatch
+```
+
+Il ne faut pas utiliser un `dedupe_key` base sur `incident_id` pour ce type
+d'action account-level, sinon une action status et une action incident peuvent
+rester actives en double.
+
+Lifecycle V1 :
+
+- incident `open` / `acknowledged` -> upsert action active;
+- incident `resolved` -> transition action `resolved` seulement si l'action est
+  clairement liee par `incident_id` ou `metadata.incident_id`;
+- incident `ignored` -> transition action `ignored` avec le meme critere;
+- si le status reste `login_status='mismatch'`, la transition mismatch est
+  skippee avec `status_still_mismatch`.
+
+Metadata :
+
+La RPC ne copie jamais `incident.metadata` en bloc. Elle whiteliste seulement le
+contexte safe : `run_id`, `stage`, `run_type`, usernames attendus/detectes,
+`verification_method`, `identity_evidence`, `guard_reason`, `incident_id`,
+`incident_type`, `incident_status`, `incident_severity` et
+`occurrence_count`.
+
+Les cles sensibles top-level dans `p_metadata` sont rejetees : password,
+`secret_ref`, payload/ref Vault, token, cookie, webhook, `service_role`,
+Authorization, XML brut, screenshot, `adb_serial`, `device_udid` et session
+cookies.
+
+Suites prevues :
+
+- 2F-2 : dispatcher/job de reconciliation des incidents ouverts;
+- 2F-3 : wiring optionnel derriere flag apres validation dedupe;
+- credentials/checkpoint/2FA/device/jobs restent des mappings futurs.
+
 ## ORF-2 Runtime Integration
 
 ORF-2 adds opt-in, best-effort Python runtime helpers for low-volume worker

@@ -1883,6 +1883,108 @@ Securite metadata :
   cookie;
 - aucun run device, webhook reel ou appel HTTP reel dans les tests.
 
+## Entry 2F-1 RPC incidents -> dashboard actions
+
+Entry 2F-1 ajoute la RPC service-role
+`public.sync_account_incident_dashboard_action(...)`. Elle projette un incident
+ORF durable vers une action dashboard actionnable, sans brancher le runtime
+Python.
+
+Separation des sources :
+
+- `account_incidents` reste la verite ops durable avec dedupe, lifecycle et
+  `occurrence_count`;
+- `account_incident_notifications` reste l'audit d'alerting Slack/Discord;
+- `account_dashboard_actions` reste la projection UI actionnable;
+- `client_instagram_accounts` reste la verite status dashboard safe.
+
+Scope volontaire :
+
+- nouvelle migration SQL uniquement;
+- aucun changement `runtime_incidents.py`, `account_identity_guard.py`,
+  `incident_notifications.py`, runner, sender/orchestrators, Edge Functions ou
+  dashboard UI;
+- aucun webhook, aucun run device, aucun deploy Edge.
+
+Signature :
+
+```sql
+public.sync_account_incident_dashboard_action(
+  p_incident_id uuid,
+  p_actor_type text default 'system',
+  p_reason text default null,
+  p_metadata jsonb default '{}'::jsonb
+) returns jsonb
+```
+
+La fonction est `SECURITY DEFINER`, fixe `search_path=public`, revoke
+`public`, `anon` et `authenticated`, puis grant execute uniquement a
+`service_role`.
+
+Mapping V1 :
+
+- `incident_type='active_instagram_account_mismatch'`;
+- `action_type='review_account_mismatch'`;
+- `audience='admin'`;
+- `severity='critical'`;
+- `requires_client_action=false`;
+- `blocking_campaign=true`;
+- `title='Compte Instagram incohérent'`;
+- `action_label='Examiner le compte'`;
+- `action_deep_link='/admin/accounts/{account_id}/identity'`.
+
+Deduplication :
+
+La projection incident utilise le meme `dedupe_key` que le status pipeline :
+
+```text
+account:{account_id}:dashboard_action:review_account_mismatch
+```
+
+Ainsi, si `sync_account_dashboard_actions_from_status(...)` a deja cree une
+action `review_account_mismatch` via `login_status='mismatch'`, la projection
+incident upsert la meme action active au lieu d'en creer une deuxieme. Elle
+passe `p_incident_id` a `upsert_account_dashboard_action(...)`; si une action
+active existe deja avec un autre `incident_id`, le comportement actuel de
+`upsert_account_dashboard_action(...)` conserve le premier lien
+`incident_id` via `coalesce(p_incident_id, ada.incident_id)` et fusionne la
+metadata safe.
+
+Lifecycle :
+
+- incident `open` ou `acknowledged` -> upsert action active;
+- incident `resolved` -> transition `resolved` uniquement si l'action est
+  clairement liee par `incident_id` ou `metadata.incident_id`;
+- incident `ignored` -> transition `ignored` avec le meme critere de lien;
+- pour `active_instagram_account_mismatch`, si
+  `client_instagram_accounts.login_status='mismatch'`, la resolution est
+  ignoree avec `reason='status_still_mismatch'`.
+
+Metadata copiee :
+
+La RPC ne copie jamais `incident.metadata` en bloc. Elle whiteliste seulement :
+
+- `run_id`, `stage`, `run_type`;
+- `expected_account_username`;
+- `actual_username` ou `actual_logged_in_username` normalise en
+  `actual_username`;
+- `verification_method`;
+- `identity_evidence`;
+- `guard_reason`;
+- contexte incident safe : `incident_id`, `incident_type`, `incident_status`,
+  `incident_severity`, `occurrence_count`.
+
+Clés interdites top-level dans `p_metadata` :
+
+```text
+password, secret, secret_ref, raw_secret, token, cookie, webhook, webhook_url,
+vault, service_role, authorization, bearer, adb_serial, device_udid, xml,
+screenshot, session_cookie
+```
+
+Les incidents credentials/checkpoint/2FA/device/jobs restent non supportes en
+V1 et retournent `unsupported_incident_type` sans creer d'action.
+
 ## Remote Secrets
 
 Remote Edge Function secrets must be configured on the Supabase project before
