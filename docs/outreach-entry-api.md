@@ -1883,6 +1883,100 @@ Securite metadata :
   cookie;
 - aucun run device, webhook reel ou appel HTTP reel dans les tests.
 
+## Entry 2E-5A Login status classifier + provisioner skeleton
+
+Entry 2E-5A ajoute une couche Python isolee pour preparer le futur
+provisioner/login sans brancher le runtime principal. Elle ne fait aucun vrai
+login Instagram et ne pilote aucun device.
+
+Nouveaux modules :
+
+- `instagram_login_status_classifier.py` : classifier pur, sans HTTP, Vault,
+  device ou dependance runtime. Il transforme un outcome abstrait de probe login
+  en status pret pour `publish_instagram_account_status(...)`;
+- `instagram_login_provisioner.py` : skeleton optionnel qui orchestre
+  classifier -> publisher injectable, uniquement derriere le flag
+  `INSTAGRAM_LOGIN_PROVISIONER_ENABLED`.
+
+Scope volontaire :
+
+- aucun read Vault et aucun password reel manipule;
+- aucun `connect_device`, `app_start`, tap UI, dump XML ou screenshot;
+- aucun hook dans `runner.py`, sender/orchestrators, `account_session*`,
+  `instagram_navigation.py` ou `follow_action_engine.py`;
+- aucun changement Edge Functions, migrations, dashboard UI, `config.py` ou
+  `supabase_client.py`;
+- aucun HTTP reel dans les tests : le publisher est mocke/injecte.
+
+Flag :
+
+```text
+INSTAGRAM_LOGIN_PROVISIONER_ENABLED=false
+```
+
+Le flag est lu directement depuis l'environnement dans
+`instagram_login_provisioner.py`, afin de ne pas elargir `config.py` pour ce
+skeleton. Flag off -> aucun publish et retour `published=false,
+reason=disabled`.
+
+Mapping classifier :
+
+```text
+connected -> login_status=connected, provisioning_status=ready,
+  onboarding_status=ready, reauth_required=false, reason=login_connected
+
+needs_2fa -> login_status=needs_2fa,
+  provisioning_status=login_verification_pending,
+  onboarding_status=verification_pending, reason=two_factor_required
+
+checkpoint -> login_status=checkpoint,
+  provisioning_status=login_verification_pending,
+  onboarding_status=verification_pending, reason=checkpoint_required
+
+login_failed -> login_status=failed, provisioning_status=failed,
+  onboarding_status=support_required, reauth_required=true,
+  reauth_reason=credentials_invalid, reason=login_failed
+
+logged_out -> login_status=logged_out, provisioning_status=login_pending,
+  onboarding_status=credentials_submitted, reason=session_expired
+
+skipped_not_implemented -> should_publish=false, reason=probe_not_implemented
+unknown -> should_publish=false, reason=unknown_login_probe_outcome
+```
+
+Metadata safe par defaut :
+
+```json
+{
+  "source": "provisioner",
+  "stage": "login_probe",
+  "probe_version": "v1"
+}
+```
+
+Le classifier nettoie les cles interdites, y compris dans les objets imbriques :
+
+```text
+password, secret, secret_ref, raw_secret, token, cookie, vault, webhook,
+webhook_url, service_role, authorization, bearer, xml, screenshot, adb_serial,
+device_udid, session_cookie
+```
+
+Comportement du skeleton :
+
+- `probe_device_login(...)` retourne `skipped_not_implemented` en 2E-5A;
+- `publish_classified_login_status(...)` ne publie que si le flag est actif et
+  si la classification est publishable;
+- le publisher est injectable pour tests;
+- exception publisher -> fail-open par defaut avec `reason=publisher_exception`;
+- mismatch n'est pas traite ici : il reste couvert par `account_identity_guard`.
+
+Suite prevue :
+
+- Entry 2E-5B : probe UI minimale et/ou CLI isole, toujours derriere flag;
+- Device Runtime Control Layer / ATX plus tard, apres validation du contrat de
+  classification et sans brancher sender/follow/outreach.
+
 ## Entry 2F-1 RPC incidents -> dashboard actions
 
 Entry 2F-1 ajoute la RPC service-role
