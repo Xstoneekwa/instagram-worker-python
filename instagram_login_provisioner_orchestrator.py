@@ -768,6 +768,7 @@ def run_login_provisioning_flow(
         actions_taken.append("login_form_submit_retry")
 
     outcome = _password_result_outcome(password_result)
+    password_result_metadata = {"password_result": _safe_password_result_metadata(password_result)}
     if outcome in {"password_input_missing_or_not_accepted", "password_input_failed"}:
         return _finalize(
             ok=False,
@@ -787,7 +788,12 @@ def run_login_provisioning_flow(
             actions_taken=actions_taken,
             timings=_merge_timings(timings, password_result.timings),
             warnings=[*warnings, *password_result.warnings],
-            extra_metadata={**_flow_metadata(previous_account_lifecycle), **old_logged_in_metadata, **post_continue_metadata},
+            extra_metadata={
+                **_flow_metadata(previous_account_lifecycle),
+                **old_logged_in_metadata,
+                **post_continue_metadata,
+                **password_result_metadata,
+            },
             total_start=total_start,
             timer=timer,
             publisher=publisher,
@@ -813,7 +819,12 @@ def run_login_provisioning_flow(
             actions_taken=actions_taken,
             timings=_merge_timings(timings, password_result.timings),
             warnings=[*warnings, *password_result.warnings],
-            extra_metadata={**_flow_metadata(previous_account_lifecycle), **old_logged_in_metadata, **post_continue_metadata},
+            extra_metadata={
+                **_flow_metadata(previous_account_lifecycle),
+                **old_logged_in_metadata,
+                **post_continue_metadata,
+                **password_result_metadata,
+            },
             total_start=total_start,
             timer=timer,
             publisher=publisher,
@@ -845,7 +856,12 @@ def run_login_provisioning_flow(
         actions_taken=actions_taken,
         timings=_merge_timings(timings, password_result.timings),
         warnings=[*warnings, *password_result.warnings],
-        extra_metadata={**_flow_metadata(previous_account_lifecycle), **old_logged_in_metadata, **post_continue_metadata},
+        extra_metadata={
+            **_flow_metadata(previous_account_lifecycle),
+            **old_logged_in_metadata,
+            **post_continue_metadata,
+            **password_result_metadata,
+        },
         total_start=total_start,
         timer=timer,
         publisher=publisher,
@@ -1843,6 +1859,34 @@ def _execute_password_form(
     )
     result.timings["orchestrator_password_executor_ms"] = _elapsed_ms(start, timer())
     return result
+
+
+def _safe_password_result_metadata(result: Any) -> dict[str, Any]:
+    safe = {
+        "executed": bool(getattr(result, "executed", False)),
+        "submit_tapped": bool(getattr(result, "submit_tapped", False)),
+        "reason": str(getattr(result, "reason", "") or ""),
+        "failure_reason": str(getattr(result, "failure_reason", "") or ""),
+        "post_submit_outcome": str(getattr(result, "post_submit_outcome", "") or ""),
+        "post_submit_screen_type": str(getattr(result, "post_submit_screen_type", "") or ""),
+    }
+    metadata = getattr(result, "safe_metadata", None)
+    if isinstance(metadata, dict):
+        for key in (
+            "password_only_mode",
+            "input_method_used",
+            "password_field_focused_before_input",
+            "input_action_reported_success",
+            "password_field_non_empty_confirmed",
+            "password_required_dialog_detected",
+            "password_required_retry_attempted",
+            "password_required_retry_count",
+            "password_refill_attempted",
+            "second_submit_executed",
+        ):
+            if key in metadata:
+                safe[key] = metadata.get(key)
+    return redact_credentials_payload(safe)
 
 
 def _should_retry_password_result(result: Any, retry_count: int, max_retries: int) -> bool:

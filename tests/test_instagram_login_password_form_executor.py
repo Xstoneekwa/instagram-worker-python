@@ -4,8 +4,10 @@ import json
 import unittest
 from dataclasses import asdict
 from unittest.mock import Mock
+from unittest.mock import patch
 
 from instagram_credentials_runtime_access import SecretValue
+import instagram_login_password_form_executor as password_executor
 from instagram_login_password_form_executor import execute_login_form_credentials
 
 
@@ -101,6 +103,7 @@ class FakeDevice:
         self.selectors: dict[tuple[str, str], FakeSelector] = {}
         self.press_calls: list[str] = []
         self.hierarchies: list[str] | None = None
+        self.serial: str | None = None
 
     def add_selector(self, key: str, value: str, selector: FakeSelector) -> FakeSelector:
         self.selectors[(key, value)] = selector
@@ -197,6 +200,26 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
         self.assertEqual(password_selector.set_text_calls, [PASSWORD])
         self.assertEqual(login.click_calls, 1)
         self.assertTrue(result.safe_metadata["password_only_mode"])
+
+    def test_password_only_prefers_unique_edittext_over_password_label(self) -> None:
+        device = FakeDevice(CONNECTED_XML)
+        password_label = device.add_selector("text", "Password", FakeSelector(1))
+        password_edit_text = device.add_selector("className", "android.widget.EditText", FakeSelector(1))
+        password_edit_text.info = {"text": "••••••••", "focused": True}
+        login = device.add_selector("text", "Log in", FakeSelector(1))
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=PASSWORD_ONLY_SIGNALS,
+            sleeper=Mock(),
+        )
+
+        self.assertTrue(result.executed)
+        self.assertEqual(password_label.set_text_calls, [])
+        self.assertEqual(password_edit_text.set_text_calls, [PASSWORD])
+        self.assertEqual(login.click_calls, 1)
 
     def test_password_only_strong_password_overlay_still_submits(self) -> None:
         device = FakeDevice(CONNECTED_XML)
@@ -461,7 +484,7 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
             prevalidated_signals=LOGIN_FORM_SIGNALS,
         )
 
-        self.assertEqual(result.failure_reason, "input_failed")
+        self.assertEqual(result.failure_reason, "password_input_failed")
         self.assertFalse(result.executed)
         self.assertTrue(result.username_entered)
         self.assertEqual(login.click_calls, 0)
@@ -607,6 +630,55 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
 
         self.assertTrue(result.executed)
         self.assertEqual(login.click_calls, 1)
+
+    def test_adb_keyboard_input_success_allows_submit_without_set_text(self) -> None:
+        device, _username, password_selector, login = configured_device(CONNECTED_XML)
+        device.serial = "emulator-5554"
+        password_selector.info = {"text": "••••••••", "focused": True}
+
+        with patch.object(password_executor, "is_fast_ime_available", return_value=True), patch.object(
+            password_executor,
+            "_run_adb_keyboard_b64_input",
+            return_value=(True, "adb_keyboard_b64", True, True),
+        ) as fast_input:
+            result = execute_login_form_credentials(
+                device,
+                expected_username=USERNAME,
+                password=SecretValue(PASSWORD),
+                prevalidated_signals=PASSWORD_ONLY_SIGNALS,
+                sleeper=Mock(),
+            )
+
+        self.assertTrue(result.executed)
+        self.assertEqual(result.safe_metadata["input_method_used"], "adb_keyboard_b64")
+        self.assertTrue(result.safe_metadata["input_action_reported_success"])
+        self.assertEqual(result.safe_metadata["password_field_non_empty_confirmed"], "true")
+        self.assertEqual(password_selector.set_text_calls, [])
+        self.assertEqual(login.click_calls, 1)
+        fast_input.assert_called_once()
+
+    def test_adb_keyboard_unavailable_falls_back_to_set_text(self) -> None:
+        device, _username, password_selector, login = configured_device(CONNECTED_XML)
+        device.serial = "emulator-5554"
+        password_selector.info = {"text": "••••••••"}
+
+        with patch.object(password_executor, "is_fast_ime_available", return_value=False), patch.object(
+            password_executor,
+            "_run_adb_keyboard_b64_input",
+        ) as fast_input:
+            result = execute_login_form_credentials(
+                device,
+                expected_username=USERNAME,
+                password=SecretValue(PASSWORD),
+                prevalidated_signals=PASSWORD_ONLY_SIGNALS,
+                sleeper=Mock(),
+            )
+
+        self.assertTrue(result.executed)
+        self.assertEqual(result.safe_metadata["input_method_used"], "set_text")
+        self.assertEqual(password_selector.set_text_calls, [PASSWORD])
+        self.assertEqual(login.click_calls, 1)
+        fast_input.assert_not_called()
 
     def test_result_safe_dict_contains_no_password(self) -> None:
         device, _username, _password_selector, _login = configured_device(SENSITIVE_XML)

@@ -391,6 +391,21 @@ Post-submit policy future :
   `continue_as_candidate`; une relance a tape `Continue` une seule fois et a
   stoppe safe sur `unknown_login_screen` pendant transition. Aucun submit
   supplementaire, aucun publish/status write.
+- Entry 2E-5P-3 Password input injection : cause racine identifiee. En mode
+  `continue_password_only`, l'ancien target `text="Password"` pointait vers un
+  label `android.view.View`, pas vers le vrai `android.widget.EditText`. Le
+  diagnostic reel a montre `adb_keyboard_b64` success mais
+  `password_field_non_empty_confirmed=false`, donc le guard a bloque `Log in`
+  avec `password_input_not_confirmed`. Patch : preferer l'`EditText` unique en
+  password-only, focus accessibilite + fallback bounds, ADB Keyboard
+  `ADB_INPUT_B64` via stdin en priorite, `set_text` fallback, guard non-empty
+  avant `Log in`. Smoke reel apres patch : `input_method_used=adb_keyboard_b64`,
+  `password_field_focused_before_input=true`,
+  `password_field_non_empty_confirmed=true`, `submit_tapped=true`, aucune popup
+  `Password required`, `retry_count=0`; resultat post-submit
+  `logged_out/session_expired`, sans publish/status write. No-leak confirme :
+  aucun password, longueur/hash, `secret_ref` complet, UUID Vault complet,
+  token/header, XML brut ou screenshot path.
 - Entry 2E-5J-2B-1 : audit lifecycle read-only. Les statuts existants couvrent
   `client_instagram_accounts` login/provisioning/onboarding,
   `client_subscriptions` active/paused/cancelled/expired,

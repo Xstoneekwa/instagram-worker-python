@@ -8,10 +8,15 @@ and never stores or logs the password.
 
 from __future__ import annotations
 
+import base64
+import shlex
+import subprocess
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+import config
+from device import get_current_ime, is_fast_ime_available, set_ime
 from instagram_credentials_runtime_access import SecretValue, redact_credentials_payload
 from instagram_login_status_classifier import clean_login_probe_metadata
 from instagram_login_ui_probe import extract_login_screen_signals_from_hierarchy, probe_login_ui_from_hierarchy
@@ -111,6 +116,11 @@ def execute_login_form_credentials(
     password_required_retry_attempted = False
     password_refill_attempted = False
     second_submit_executed = False
+    password_input_method_used = ""
+    password_field_focused_before_input: bool | None = None
+    input_call_reported_success = False
+    password_field_non_empty_confirmed = "unknown"
+    password_input_failure_reason = ""
 
     start = timer()
     targets = _resolve_login_form_targets(d, password_only_mode=password_only_mode)
@@ -167,25 +177,36 @@ def execute_login_form_credentials(
         timings["username_input_ms"] = _elapsed_ms(start, timer())
 
         start = timer()
-        _focus_clear_and_set_text(targets["password"], revealed_password)
-        password_entered = True
+        input_result = _input_password_robust(d, targets["password"], revealed_password, warnings)
+        password_input_method_used = input_result["input_method_used"]
+        password_field_focused_before_input = input_result["password_field_focused_before_input"]
+        input_call_reported_success = input_result["input_call_reported_success"]
+        password_field_non_empty_confirmed = input_result["password_field_non_empty_confirmed"]
+        password_input_failure_reason = input_result["reason"]
+        password_entered = bool(input_call_reported_success)
         timings["password_input_ms"] = _elapsed_ms(start, timer())
+        if not input_call_reported_success:
+            raise RuntimeError("password_input_failed")
     except Exception:
         timings["total_ms"] = _elapsed_ms(total_start, timer())
         return _result(
             ok=False,
             executed=False,
             action=ACTION_LOGIN_FORM_SUBMIT,
-            reason="input_failed",
-            failure_reason="input_failed",
+            reason=password_input_failure_reason or "input_failed",
+            failure_reason=password_input_failure_reason or "input_failed",
             username_entered=username_entered,
             password_entered=password_entered,
             timings=timings,
             warnings=warnings,
             expected_username=username,
+            input_method_used=password_input_method_used,
+            password_field_focused_before_input=password_field_focused_before_input,
+            input_action_reported_success=input_call_reported_success,
+            password_field_non_empty_confirmed=password_field_non_empty_confirmed,
         )
 
-    if _password_field_reads_empty(targets["password"]):
+    if password_field_non_empty_confirmed == "false":
         timings["total_ms"] = _elapsed_ms(total_start, timer())
         return _result(
             ok=False,
@@ -199,7 +220,10 @@ def execute_login_form_credentials(
             warnings=warnings,
             expected_username=username,
             password_only_mode=password_only_mode,
-            input_action_reported_success=password_entered,
+            input_method_used=password_input_method_used,
+            password_field_focused_before_input=password_field_focused_before_input,
+            input_action_reported_success=input_call_reported_success,
+            password_field_non_empty_confirmed=password_field_non_empty_confirmed,
         )
 
     try:
@@ -271,13 +295,18 @@ def execute_login_form_credentials(
                     try:
                         password_refill_attempted = True
                         start = timer()
-                        _focus_clear_and_set_text(targets["password"], revealed_password)
+                        input_result = _input_password_robust(d, targets["password"], revealed_password, warnings)
+                        password_input_method_used = input_result["input_method_used"]
+                        password_field_focused_before_input = input_result["password_field_focused_before_input"]
+                        input_call_reported_success = input_result["input_call_reported_success"]
+                        password_field_non_empty_confirmed = input_result["password_field_non_empty_confirmed"]
+                        password_input_failure_reason = input_result["reason"]
                         timings["password_input_ms"] += _elapsed_ms(start, timer())
-                        if _password_field_reads_empty(targets["password"]):
+                        if not input_call_reported_success or password_field_non_empty_confirmed == "false":
                             failure_reason = "password_input_not_confirmed"
                             post_submit_outcome = "password_input_failed"
                             post_submit_screen_type = "password_input_failed"
-                            post_submit_probe_reason = "password_input_not_confirmed"
+                            post_submit_probe_reason = password_input_failure_reason or "password_input_not_confirmed"
                         else:
                             start = timer()
                             _click_target(targets["login_button"])
@@ -340,7 +369,10 @@ def execute_login_form_credentials(
         warnings=warnings,
         expected_username=username,
         password_only_mode=password_only_mode,
-        input_action_reported_success=password_entered,
+        input_method_used=password_input_method_used,
+        password_field_focused_before_input=password_field_focused_before_input,
+        input_action_reported_success=input_call_reported_success,
+        password_field_non_empty_confirmed=password_field_non_empty_confirmed,
         password_required_dialog_detected=password_required_dialog_detected,
         password_required_retry_attempted=password_required_retry_attempted,
         password_required_retry_count=password_required_retry_count,
@@ -379,14 +411,7 @@ def _resolve_login_form_targets(d: Any, *, password_only_mode: bool = False) -> 
     if username["failure_reason"] and not (password_only_mode and username["failure_reason"] == "username_field_not_found"):
         return {"failure_reason": username["failure_reason"]}
 
-    password = _find_unique_target(
-        d,
-        (
-            {"text": "Password"},
-            {"description": "Password"},
-        ),
-        missing_reason="password_field_not_found",
-    )
+    password = _find_password_target(d, password_only_mode=password_only_mode)
     if password["failure_reason"]:
         return {"failure_reason": password["failure_reason"]}
 
@@ -431,6 +456,27 @@ def _find_unique_target(
     if not matches:
         return {"target": None, "failure_reason": missing_reason}
     return {"target": matches[0], "failure_reason": ""}
+
+
+def _find_password_target(d: Any, *, password_only_mode: bool) -> dict[str, Any]:
+    if password_only_mode:
+        edit_text = _find_unique_target(
+            d,
+            ({"className": "android.widget.EditText"},),
+            missing_reason="password_field_not_found",
+        )
+        if not edit_text["failure_reason"]:
+            return edit_text
+        if edit_text["failure_reason"] == "ambiguous_login_form":
+            return edit_text
+    return _find_unique_target(
+        d,
+        (
+            {"text": "Password"},
+            {"description": "Password"},
+        ),
+        missing_reason="password_field_not_found",
+    )
 
 
 def _selector_count(selector: Any) -> int:
@@ -483,20 +529,174 @@ def _click_target(target: Any) -> None:
     click()
 
 
-def _password_field_reads_empty(target: Any) -> bool:
+def _input_password_robust(d: Any, target: Any, value: str, warnings: list[str]) -> dict[str, Any]:
+    focused_before = _focus_password_target(d, target, warnings)
+    _clear_target_text(target)
+    time.sleep(0.1)
+    serial = _direct_device_serial(d)
+    fast_ime_id = str(getattr(config, "FAST_IME", "") or "").strip()
+    if serial and fast_ime_id and is_fast_ime_available(serial):
+        try:
+            command_ok, method_tag, switch_ok, broadcast_ok = _run_adb_keyboard_b64_input(
+                serial, value, fast_ime_id=fast_ime_id
+            )
+        except Exception:
+            command_ok, method_tag, switch_ok, broadcast_ok = False, "", False, False
+        if command_ok and broadcast_ok:
+            return _password_input_result(
+                method_tag or "fast_ime",
+                focused_before,
+                True,
+                _password_field_non_empty_state(target),
+                "",
+            )
+        warnings.append("fast_ime_password_input_failed")
+        if not switch_ok:
+            warnings.append("fast_ime_switch_failed")
+
+    set_text = getattr(target, "set_text", None)
+    if callable(set_text):
+        try:
+            set_text(value)
+            return _password_input_result(
+                "set_text",
+                focused_before,
+                True,
+                _password_field_non_empty_state(target),
+                "",
+            )
+        except Exception:
+            warnings.append("set_text_password_input_failed")
+    return _password_input_result("", focused_before, False, "unknown", "password_input_failed")
+
+
+def _focus_password_target(d: Any, target: Any, warnings: list[str]) -> bool | None:
+    try:
+        _click_target(target)
+    except Exception:
+        warnings.append("password_field_accessibility_focus_failed")
+    time.sleep(0.1)
+    focused = _target_focused(target)
+    if focused is True:
+        return True
+    if _tap_target_bounds(d, target):
+        time.sleep(0.1)
+        focused_after_bounds = _target_focused(target)
+        if focused_after_bounds is not None:
+            return focused_after_bounds
+        return True
+    return focused
+
+
+def _tap_target_bounds(d: Any, target: Any) -> bool:
+    info = _selector_info(target)
+    bounds = info.get("bounds") if isinstance(info, dict) else None
+    if not isinstance(bounds, dict):
+        return False
+    try:
+        left = int(bounds.get("left"))
+        right = int(bounds.get("right"))
+        top = int(bounds.get("top"))
+        bottom = int(bounds.get("bottom"))
+    except Exception:
+        return False
+    if right <= left or bottom <= top:
+        return False
+    click = getattr(d, "click", None)
+    if not callable(click):
+        return False
+    try:
+        click((left + right) // 2, (top + bottom) // 2)
+        return True
+    except Exception:
+        return False
+
+
+def _direct_device_serial(d: Any) -> str:
+    serial = getattr(d, "serial", None)
+    return str(serial).strip() if serial else ""
+
+
+def _run_adb_keyboard_b64_input(
+    serial: str,
+    value: str,
+    *,
+    fast_ime_id: str,
+) -> tuple[bool, str, bool, bool]:
+    fast_ime_id = str(fast_ime_id or "").strip()
+    if not serial or not fast_ime_id:
+        return False, "", False, False
+    current_ime = get_current_ime(serial).strip()
+    switch_ok = current_ime == fast_ime_id or set_ime(serial, fast_ime_id)
+    if not switch_ok:
+        return False, "", False, False
+    encoded = base64.b64encode(str(value or "").encode("utf-8")).decode("ascii")
+    # Send via stdin so the secret-derived payload is not exposed in host argv.
+    shell_line = f"am broadcast -a ADB_INPUT_B64 --es msg {shlex.quote(encoded)}\n"
+    proc = subprocess.run(
+        ["adb", "-s", serial, "shell"],
+        input=shell_line,
+        text=True,
+        capture_output=True,
+        timeout=10,
+    )
+    return proc.returncode == 0, "adb_keyboard_b64", True, proc.returncode == 0
+
+
+def _password_input_result(
+    method: str,
+    focused_before: bool | None,
+    call_success: bool,
+    non_empty_state: str,
+    reason: str,
+) -> dict[str, Any]:
+    return {
+        "input_method_used": method,
+        "password_field_focused_before_input": focused_before,
+        "input_call_reported_success": call_success,
+        "password_field_non_empty_confirmed": non_empty_state,
+        "reason": reason,
+    }
+
+
+def _target_focused(target: Any) -> bool | None:
     info = _selector_info(target)
     if not info:
-        return False
+        return None
+    focused = info.get("focused")
+    return bool(focused) if focused is not None else None
+
+
+def _clear_target_text(target: Any) -> None:
+    clear_text = getattr(target, "clear_text", None)
+    if callable(clear_text):
+        try:
+            clear_text()
+            return
+        except Exception:
+            pass
+    clear = getattr(target, "clear", None)
+    if callable(clear):
+        try:
+            clear()
+        except Exception:
+            pass
+
+
+def _password_field_non_empty_state(target: Any) -> str:
+    info = _selector_info(target)
+    if not info:
+        return "unknown"
     for key in ("text", "contentDescription", "content-desc"):
         if key not in info:
             continue
         value = str(info.get(key) or "").strip()
         if value == "":
-            return True
+            return "false"
         if value.lower() in {"password", "mot de passe"}:
-            return True
-        return False
-    return False
+            return "false"
+        return "true"
+    return "unknown"
 
 
 def _selector_info(target: Any) -> dict[str, Any]:
@@ -640,7 +840,10 @@ def _result(
     warnings: list[str] | None = None,
     expected_username: str = "",
     password_only_mode: bool = False,
+    input_method_used: str = "",
+    password_field_focused_before_input: bool | None = None,
     input_action_reported_success: bool = False,
+    password_field_non_empty_confirmed: str = "unknown",
     password_required_dialog_detected: bool = False,
     password_required_retry_attempted: bool = False,
     password_required_retry_count: int = 0,
@@ -657,7 +860,10 @@ def _result(
                 "expected_username": expected_username,
                 "post_submit_outcome": post_submit_outcome,
                 "password_only_mode": password_only_mode,
+                "input_method_used": input_method_used,
+                "password_field_focused_before_input": password_field_focused_before_input,
                 "input_action_reported_success": input_action_reported_success,
+                "password_field_non_empty_confirmed": password_field_non_empty_confirmed,
                 "password_required_dialog_detected": password_required_dialog_detected,
                 "password_required_retry_attempted": password_required_retry_attempted,
                 "password_required_retry_count": password_required_retry_count,

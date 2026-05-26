@@ -3642,6 +3642,58 @@ Prochaine etape :
 - relancer 2E-5P seulement quand une row active `supabase_vault` valide existe
   et que l'ecran initial est `continue_password_only` ou `login_form_empty`.
 
+## Entry 2E-5P-3 Password Input Injection
+
+Entry 2E-5P-3 corrige la cause racine observee apres 2E-5P-2 : le routing
+atteignait bien `continue_password_only`, mais le password n'etait pas injecte
+dans la vraie cible avant `Log in`.
+
+Cause trouvee :
+
+- l'ancien executor ciblait `text="Password"` / `content-desc="Password"`;
+- sur l'ecran reel password-only, cette cible correspondait a un label
+  `android.view.View`, pas a l'`android.widget.EditText`;
+- l'appel input pouvait donc rapporter success alors que le readback du label
+  restait vide/placeholder;
+- le guard a correctement bloque `Log in` avec
+  `password_input_not_confirmed` pendant le diagnostic.
+
+Correction :
+
+- en mode `continue_password_only`, l'executor prefere maintenant l'`EditText`
+  unique avant les labels `Password`;
+- focus robuste : clic accessibilite, fallback bounds/tap centre si disponible,
+  puis stabilisation courte;
+- injection password via ADB Keyboard `ADB_INPUT_B64` en priorite, envoyee via
+  stdin adb shell pour eviter d'exposer la charge utile dans les argv host;
+- `set_text` reste un fallback controle si ADB Keyboard est indisponible;
+- verification post-input : `password_field_non_empty_confirmed=true/false/unknown`;
+- si la lecture prouve `false`, aucun tap `Log in`.
+
+Smoke reel 2026-05-27 :
+
+- pre-check device OK : device unique, ADB Keyboard enabled/current, aucun
+  runner/sender/follow/unfollow/outreach actif;
+- credentials `cinema_catchup` actifs, version 1000, provider Vault, secret lu
+  uniquement via `SecretValue`;
+- premier diagnostic : `adb_keyboard_b64` rapportait success, mais l'ancienne
+  cible label restait `password_field_non_empty_confirmed=false`, donc
+  `submit_tapped=false`;
+- apres correction cible `EditText` :
+  `input_method_used=adb_keyboard_b64`,
+  `password_field_focused_before_input=true`,
+  `password_field_non_empty_confirmed=true`,
+  `submit_tapped=true`;
+- aucune popup `Password required` detectee, `retry_count=0`;
+- post-submit observe `logged_out/session_expired`, sans connected/2FA/checkpoint
+  ni publish/status write. L'injection password n'est plus le blocage.
+
+No-leak :
+
+- aucun password en clair, aucune longueur/hash, aucun `secret_ref` complet,
+  aucun UUID Vault complet, aucun token/header, aucun XML brut, aucun screenshot
+  path et aucune ecriture Supabase status.
+
 ## Entry 2E-5J-2B-1 Previous Account Lifecycle Gate Source
 
 Entry 2E-5J-2B-1 audite la source fiable a utiliser avant d'autoriser
