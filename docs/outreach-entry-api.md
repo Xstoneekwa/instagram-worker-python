@@ -2497,13 +2497,82 @@ Regles no-leak :
 - le secret brut n'est accessible que via
   `SecretValue.reveal_for_login_executor()`, pour le futur executor controle.
 
-Entry 2E-5H-2 futur :
+## Entry 2E-5H-2 Real Supabase Vault Read RPC
 
-- ajouter ou confirmer le transport reel de lecture Vault cote service-role;
-- lancer un smoke avec fake credential uniquement;
-- conserver le flag OFF par defaut;
-- ne jamais afficher le payload Vault, le `secret_ref`, le Vault UUID, les
-  headers auth ou la reponse brute.
+Entry 2E-5H-2 ajoute le transport reel de lecture Supabase Vault cote
+service-role pour le futur provisioner login. Cette etape reste strictement
+limitee au reader : aucun login Instagram, aucun tap password, aucun run device,
+aucun `app_start`, aucun `app_stop`, aucun runner hook et aucune modification
+dashboard UI.
+
+Audit Supabase/Vault :
+
+- `vault.create_secret(...)` est disponible cote remote;
+- `vault.update_secret(...)` est disponible cote remote;
+- `vault.secrets` et `vault.decrypted_secrets` sont disponibles;
+- `vault.decrypted_secrets.decrypted_secret` fournit la lecture decrypt cote SQL;
+- aucun RPC versionne de lecture `read_instagram_credentials_vault_secret(...)`
+  n'existait avant 2E-5H-2;
+- `create_instagram_credentials_vault_secret(...)` reste service-role only.
+
+RPC ajoutee :
+
+- nom : `public.read_instagram_credentials_vault_secret(p_secret_ref text)`;
+- retour : `jsonb`;
+- scope accepte : uniquement `supabase_vault://{uuid}`;
+- provider non supporte : `unsupported_secret_ref_provider`;
+- UUID invalide : `vault_secret_id_invalid`;
+- secret absent : `vault_secret_not_found`;
+- secret vide : `vault_secret_empty`;
+- erreur interne : `vault_read_failed`;
+- succes : enveloppe minimale avec `ok=true`, `secret_value`,
+  `secret_provider='supabase_vault'` et
+  `safe_ref_label='supabase_vault://[REDACTED]'`.
+
+Securite SQL :
+
+- `SECURITY DEFINER`;
+- `search_path = public, vault`;
+- lecture limitee a `vault.decrypted_secrets` par `id`;
+- `revoke execute` pour `public`, `anon`, `authenticated`;
+- `grant execute` uniquement a `service_role`;
+- aucune policy client, aucune exposition dashboard, aucun grant anon/auth.
+
+Transport Python :
+
+- `SupabaseVaultClient.read_secret(...)` accepte un UUID Vault ou un
+  `supabase_vault://{uuid}` valide;
+- le call RPC envoie uniquement `p_secret_ref`;
+- le reader parse uniquement `ok=true` et `secret_value`;
+- `ok=false`, shape inattendue, exception ou timeout deviennent des erreurs
+  safe (`vault_read_failed`, `vault_timeout`, etc.);
+- les reponses RPC brutes ne sont jamais loggees ni reprises dans les erreurs
+  safe;
+- le resultat public reste un `SecretValue` redige par `str(...)`, `repr(...)`
+  et les dicts safe.
+
+Smoke remote fake secret valide :
+
+- secret fake uniquement, jamais `cinema_catchup`;
+- aucun vrai credential client;
+- migration remote appliquee;
+- verification par egalite interne, longueur et prefix SHA-256 court;
+- `secret_matches_expected=true`;
+- `safe_ref_label=supabase_vault://[REDACTED]`;
+- refus confirme pour provider non supporte et UUID invalide;
+- grants confirmes : `service_role` peut executer, `anon` et `authenticated`
+  ne peuvent pas executer;
+- cleanup par neutralisation via `vault.update_secret(...)`;
+- aucun password, `secret_ref`, Vault UUID, service-role key, Authorization
+  header ou reponse RPC brute dans les outputs.
+
+Prochaine etape apres validation 2E-5H-2 :
+
+- Entry 2E-5I : password form executor controle;
+- smoke `cinema_catchup` seulement plus tard via le flow securise
+  `instagram-credentials` -> Supabase Vault;
+- aucun password `cinema_catchup` dans chat, prompt, shell history visible,
+  git, logs, screenshots ou XML.
 
 Registre dashboard/backend/BotApp futur :
 

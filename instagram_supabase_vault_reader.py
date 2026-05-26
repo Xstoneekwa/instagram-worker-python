@@ -1,8 +1,8 @@
 """Supabase Vault secret reader boundary for future Instagram login.
 
 Entry 2E-5H adds a safe reader helper but does not wire real login, devices, or
-password entry. The default transport is fail-closed until a service-role Vault
-read RPC is explicitly supplied.
+password entry. Entry 2E-5H-2 wires the service-role RPC transport while keeping
+the default path fail-closed unless a caller explicitly supplies the transport.
 """
 
 from __future__ import annotations
@@ -68,8 +68,8 @@ class SupabaseVaultReadError(Exception):
 class SupabaseVaultClient:
     """Minimal service-role Vault read adapter.
 
-    `rpc_caller` must be supplied explicitly in 2E-5H because the repository has
-    a Vault write RPC, but no committed read/decrypt RPC yet.
+    `rpc_caller` is intentionally injectable so unit tests never hit Supabase and
+    production can use the existing service-role PostgREST RPC boundary.
     """
 
     def __init__(
@@ -91,21 +91,18 @@ class SupabaseVaultClient:
 
         return cls(rpc_caller=call_rpc, rpc_function_name=rpc_function_name)
 
-    def read_secret(self, secret_id: str) -> str:
-        safe_secret_id = str(secret_id or "").strip()
-        if not _is_uuid(safe_secret_id):
-            raise _safe_error("vault_secret_id_invalid")
+    def read_secret(self, secret_ref_or_id: str) -> str:
+        parsed = _parse_secret_ref_or_id(secret_ref_or_id)
+        if not parsed.ok:
+            raise _safe_error(parsed.reason)
         if self.rpc_caller is None:
             raise _safe_error("vault_transport_not_configured")
 
         result = self.rpc_caller(
             self.rpc_function_name,
-            {"p_secret_id": safe_secret_id},
+            {"p_secret_ref": f"{SUPABASE_VAULT_PREFIX}{parsed.secret_id}"},
         )
-        secret = _extract_secret_string(result)
-        if secret is None:
-            raise _safe_error("vault_secret_not_string")
-        return secret
+        return _extract_secret_string(result)
 
 
 def parse_supabase_vault_secret_ref(secret_ref: str) -> ParsedVaultSecretRef:
@@ -197,18 +194,23 @@ def _read_with_timeout_guard(
     return secret
 
 
-def _extract_secret_string(result: Any) -> str | None:
+def _extract_secret_string(result: Any) -> str:
     if isinstance(result, str):
         return result
     if isinstance(result, dict):
-        for key in ("secret", "decrypted_secret", "secret_value", "value"):
-            value = result.get(key)
-            if isinstance(value, str):
-                return value
-        return None
+        if result.get("ok") is False:
+            raise _safe_error(_safe_rpc_reason(result.get("reason")))
+        if result.get("ok") is not True:
+            raise _safe_error("vault_read_failed")
+        value = result.get("secret_value")
+        if not isinstance(value, str):
+            raise _safe_error("vault_read_failed")
+        if not value:
+            raise _safe_error("vault_secret_empty")
+        return value
     if isinstance(result, list) and len(result) == 1:
         return _extract_secret_string(result[0])
-    return None
+    raise _safe_error("vault_read_failed")
 
 
 def _safe_timeout(value: float) -> float:
@@ -217,6 +219,31 @@ def _safe_timeout(value: float) -> float:
     except (TypeError, ValueError):
         parsed = DEFAULT_TIMEOUT_SECONDS
     return max(0.1, min(parsed, 30.0))
+
+
+def _parse_secret_ref_or_id(value: str) -> ParsedVaultSecretRef:
+    raw = str(value or "").strip()
+    if _is_uuid(raw):
+        return ParsedVaultSecretRef(
+            ok=True,
+            provider=SUPABASE_VAULT_PROVIDER,
+            secret_id=raw,
+            reason="valid_secret_ref",
+        )
+    return parse_supabase_vault_secret_ref(raw)
+
+
+def _safe_rpc_reason(value: Any) -> str:
+    reason = str(value or "").strip()
+    allowed = {
+        "invalid_secret_ref",
+        "unsupported_secret_ref_provider",
+        "vault_secret_id_invalid",
+        "vault_secret_not_found",
+        "vault_secret_empty",
+        "vault_read_failed",
+    }
+    return reason if reason in allowed else "vault_read_failed"
 
 
 def _elapsed_ms(started: float) -> int:

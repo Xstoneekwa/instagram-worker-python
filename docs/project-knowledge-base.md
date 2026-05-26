@@ -30,7 +30,9 @@ Checkpoints recents valides :
 - Entry 2E-5E : Login Screen Router;
 - Entry 2E-5F : Controlled Action Executor;
 - Entry 2E-5G : Secure Credential Runtime Access Design;
-- Entry 2E-5H : Supabase Vault Reader Helper checkpointé.
+- Entry 2E-5H : Supabase Vault Reader Helper checkpointe.
+- Entry 2E-5H-2 : real Supabase Vault read RPC + fake secret smoke valide,
+  sans vrai credential client.
 
 Le runtime principal n'est pas encore branche au login/provisioning complet :
 pas de vrai login, pas de password tap, pas de runner hook, pas de run device
@@ -81,8 +83,8 @@ Deja pose :
 
 Etapes suivantes :
 
-- 2E-5H-2 : RPC ou transport reel de lecture Vault + smoke fake secret;
-- password form executor controle;
+- 2E-5H-2 : RPC service-role only de lecture Vault + smoke fake secret valide;
+- 2E-5I : password form executor controle;
 - smoke `cinema_catchup` via flow securise `instagram-credentials` -> Vault;
 - integration provisioner runtime derriere flags;
 - state machine login + recovery avant branchement runtime principal.
@@ -100,7 +102,9 @@ Le dashboard, le backend et BotApp devront exposer plus tard uniquement des
 statuts safe :
 
 - credentials configured/missing;
-- Vault reader status;
+- Vault reader status operational/pending;
+- credentials verification pending;
+- retry provisioning;
 - `login_status`;
 - `provisioning_status`;
 - `onboarding_status`;
@@ -175,21 +179,23 @@ controle device, pas a contourner la state machine Instagram.
 - No parameter dashboard si le runtime ne l'applique pas reellement.
 - No Supabase service-role ou Authorization header dans logs/errors.
 - No app/device action irreversible sans etat, reason et recovery explicites.
+- No fake secret output complet pendant les smokes; uniquement longueur,
+  hash prefix court et labels rediges.
 
 ## 11. Prochaine Etape Logique
 
 Ordre recommande :
 
-1. 2E-5H-2 : ajouter/confirmer RPC ou transport reel Vault read, puis smoke fake
-   secret uniquement.
-2. Password form executor controle.
-3. Smoke `cinema_catchup` via flow securise, jamais via chat/prompt/shell
+1. 2E-5I : password form executor controle.
+2. Smoke `cinema_catchup` via flow securise, jamais via chat/prompt/shell
    history visible.
-4. Integration provisioner runtime derriere flags.
-5. State machine / recovery login plus riche avant tout branchement production.
+3. Integration provisioner runtime derriere flags.
+4. State machine / recovery login plus riche avant tout branchement production.
 
 Le checkpoint 2E-5H est deja pousse :
 `880deef630c8a6217f9fbc4d64b7167fd3e20764`.
+Le checkpoint 2E-5H-2 est valide localement et remote, mais pas encore commite
+au moment de cette mise a jour.
 
 ## 12. Source Docs
 

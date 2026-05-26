@@ -27,6 +27,12 @@ ACCOUNT_ID = "42c625c2-e761-4100-8a9d-7ae1373de97d"
 VAULT_ID = "11111111-2222-4333-8444-555555555555"
 SECRET_REF = f"supabase_vault://{VAULT_ID}"
 FAKE_PASSWORD = "fake-password-for-unit-tests"
+RPC_SUCCESS = {
+    "ok": True,
+    "secret_value": FAKE_PASSWORD,
+    "secret_provider": "supabase_vault",
+    "safe_ref_label": "supabase_vault://[REDACTED]",
+}
 
 
 def _active_credentials():
@@ -77,14 +83,14 @@ class InstagramSupabaseVaultReaderTest(unittest.TestCase):
         self.assertNotIn(VAULT_ID, parsed.safe_ref_label)
 
     def test_read_secret_success_returns_secret_value(self) -> None:
-        client = SupabaseVaultClient(rpc_caller=Mock(return_value=FAKE_PASSWORD))
+        client = SupabaseVaultClient(rpc_caller=Mock(return_value=RPC_SUCCESS))
 
         secret = read_supabase_vault_secret(SECRET_REF, vault_client=client)
 
         self.assertIsInstance(secret, SecretValue)
 
     def test_secret_value_str_and_repr_remain_redacted(self) -> None:
-        client = SupabaseVaultClient(rpc_caller=Mock(return_value=FAKE_PASSWORD))
+        client = SupabaseVaultClient(rpc_caller=Mock(return_value=RPC_SUCCESS))
 
         secret = read_supabase_vault_secret(SECRET_REF, vault_client=client)
 
@@ -92,22 +98,30 @@ class InstagramSupabaseVaultReaderTest(unittest.TestCase):
         self.assertEqual(repr(secret), REDACTED)
 
     def test_secret_value_reveal_only_explicit(self) -> None:
-        client = SupabaseVaultClient(rpc_caller=Mock(return_value=FAKE_PASSWORD))
+        client = SupabaseVaultClient(rpc_caller=Mock(return_value=RPC_SUCCESS))
 
         secret = read_supabase_vault_secret(SECRET_REF, vault_client=client)
 
         self.assertEqual(secret.reveal_for_login_executor(), FAKE_PASSWORD)
 
     def test_vault_client_called_with_uuid_only_after_validation(self) -> None:
-        rpc = Mock(return_value=FAKE_PASSWORD)
+        rpc = Mock(return_value=RPC_SUCCESS)
         client = SupabaseVaultClient(rpc_caller=rpc)
 
         read_supabase_vault_secret(SECRET_REF, vault_client=client)
 
         rpc.assert_called_once_with(
             "read_instagram_credentials_vault_secret",
-            {"p_secret_id": VAULT_ID},
+            {"p_secret_ref": SECRET_REF},
         )
+
+    def test_vault_client_accepts_secret_ref_or_uuid(self) -> None:
+        rpc = Mock(return_value=RPC_SUCCESS)
+        client = SupabaseVaultClient(rpc_caller=rpc)
+
+        self.assertEqual(client.read_secret(SECRET_REF), FAKE_PASSWORD)
+        self.assertEqual(client.read_secret(VAULT_ID), FAKE_PASSWORD)
+        self.assertEqual(rpc.call_count, 2)
 
     def test_vault_client_not_called_on_invalid_ref(self) -> None:
         rpc = Mock(return_value=FAKE_PASSWORD)
@@ -145,13 +159,47 @@ class InstagramSupabaseVaultReaderTest(unittest.TestCase):
 
         self.assertEqual(ctx.exception.failure_reason, "vault_secret_empty")
 
-    def test_non_string_secret_rejected(self) -> None:
+    def test_rpc_response_without_secret_value_rejected(self) -> None:
         client = SupabaseVaultClient(rpc_caller=Mock(return_value={"unexpected": "shape"}))
 
         with self.assertRaises(SupabaseVaultReadError) as ctx:
             read_supabase_vault_secret(SECRET_REF, vault_client=client)
 
-        self.assertEqual(ctx.exception.failure_reason, "vault_secret_not_string")
+        self.assertEqual(ctx.exception.failure_reason, "vault_read_failed")
+
+    def test_rpc_ok_false_maps_safe_failure(self) -> None:
+        client = SupabaseVaultClient(
+            rpc_caller=Mock(return_value={"ok": False, "reason": "vault_secret_not_found"})
+        )
+
+        with self.assertRaises(SupabaseVaultReadError) as ctx:
+            read_supabase_vault_secret(SECRET_REF, vault_client=client)
+
+        self.assertEqual(ctx.exception.failure_reason, "vault_secret_not_found")
+
+    def test_raw_rpc_response_not_in_safe_error(self) -> None:
+        client = SupabaseVaultClient(
+            rpc_caller=Mock(
+                return_value={
+                    "ok": False,
+                    "reason": FAKE_PASSWORD,
+                    "secret_value": FAKE_PASSWORD,
+                    "secret_ref": SECRET_REF,
+                    "authorization": "Bearer service_role_key",
+                }
+            )
+        )
+
+        with self.assertRaises(SupabaseVaultReadError) as ctx:
+            read_supabase_vault_secret(SECRET_REF, vault_client=client)
+
+        rendered = json.dumps(ctx.exception.safe_dict(), sort_keys=True)
+        self.assertEqual(ctx.exception.failure_reason, "vault_read_failed")
+        self.assertNotIn(FAKE_PASSWORD, rendered)
+        self.assertNotIn(SECRET_REF, rendered)
+        self.assertNotIn(VAULT_ID, rendered)
+        self.assertNotIn("Authorization", rendered)
+        self.assertNotIn("service_role", rendered)
 
     def test_no_password_in_safe_error(self) -> None:
         client = SupabaseVaultClient(rpc_caller=Mock(side_effect=RuntimeError(FAKE_PASSWORD)))
@@ -191,7 +239,7 @@ class InstagramSupabaseVaultReaderTest(unittest.TestCase):
         self.assertNotIn("service_role", rendered)
 
     def test_integrates_with_get_instagram_credentials_for_login(self) -> None:
-        client = SupabaseVaultClient(rpc_caller=Mock(return_value=FAKE_PASSWORD))
+        client = SupabaseVaultClient(rpc_caller=Mock(return_value=RPC_SUCCESS))
         reader = build_supabase_vault_secret_reader(vault_client=client)
 
         result = get_instagram_credentials_for_login(
@@ -205,7 +253,7 @@ class InstagramSupabaseVaultReaderTest(unittest.TestCase):
         self.assertEqual(result.password.reveal_for_login_executor(), FAKE_PASSWORD)
 
     def test_credential_result_safe_dict_no_leak_with_reader(self) -> None:
-        client = SupabaseVaultClient(rpc_caller=Mock(return_value=FAKE_PASSWORD))
+        client = SupabaseVaultClient(rpc_caller=Mock(return_value=RPC_SUCCESS))
         reader = build_supabase_vault_secret_reader(vault_client=client)
 
         result = get_instagram_credentials_for_login(
@@ -221,7 +269,7 @@ class InstagramSupabaseVaultReaderTest(unittest.TestCase):
         self.assertNotIn("supabase_vault", rendered)
 
     def test_reader_does_not_print_or_log_raw_secret(self) -> None:
-        client = SupabaseVaultClient(rpc_caller=Mock(return_value=FAKE_PASSWORD))
+        client = SupabaseVaultClient(rpc_caller=Mock(return_value=RPC_SUCCESS))
         stdout = io.StringIO()
         stderr = io.StringIO()
 
