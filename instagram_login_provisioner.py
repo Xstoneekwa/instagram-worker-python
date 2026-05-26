@@ -1,8 +1,9 @@
 """Isolated skeleton for future Instagram login provisioning checks.
 
-Entry 2E-5A does not automate device login, read Vault secrets, or hook into
-runner/sender flows. It only wires an abstract login outcome through the pure
-classifier and, when explicitly enabled, the injectable status publisher.
+Entry 2E-5A/2E-5B does not automate device login, read Vault secrets, or hook
+into runner/sender flows. It only wires an abstract or observed login outcome
+through the pure classifier and, when explicitly enabled, the injectable status
+publisher.
 """
 
 from __future__ import annotations
@@ -97,6 +98,59 @@ def run_login_provisioning_check(
         publisher=publisher,
     )
     return {"classification": classification, "publish_result": publish_result}
+
+
+def run_login_ui_probe_check(
+    d: Any,
+    *,
+    account_id: str,
+    expected_username: str | None = None,
+    publisher: Publisher | None = None,
+    external_request_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    fail_open: bool = True,
+) -> dict:
+    if not is_login_provisioner_enabled():
+        return {"published": False, "reason": "disabled"}
+
+    try:
+        from instagram_login_ui_probe import probe_instagram_login_ui
+
+        probe_result = probe_instagram_login_ui(
+            d,
+            account_id=account_id,
+            expected_username=expected_username,
+            stage="login_ui_probe",
+        )
+    except Exception as exc:
+        log(
+            "warning",
+            "instagram_login_provisioner_probe_failed",
+            account_id=account_id,
+            reason="probe_exception",
+            error_type=type(exc).__name__,
+        )
+        if fail_open:
+            return {"published": False, "reason": "probe_exception"}
+        raise
+
+    classification = classify_login_probe_outcome(
+        probe_result.outcome,
+        metadata={**probe_result.metadata, **(metadata or {})},
+    )
+    publish_result = publish_classified_login_status(
+        account_id=account_id,
+        classification=classification,
+        external_request_id=external_request_id,
+        metadata=metadata,
+        publisher=publisher,
+        fail_open=fail_open,
+    )
+    return {
+        "probe_result": probe_result,
+        "classification": classification,
+        "publish_result": publish_result,
+    }
 
 
 def _default_publisher(**kwargs: Any) -> dict:

@@ -1977,6 +1977,86 @@ Suite prevue :
 - Device Runtime Control Layer / ATX plus tard, apres validation du contrat de
   classification et sans brancher sender/follow/outreach.
 
+## Entry 2E-5B Login UI probe minimale
+
+Entry 2E-5B ajoute une premiere probe UI d'observation pour le futur
+provisioner/login Instagram complet. Elle reste volontairement isolee et
+read-only cote device : elle lit uniquement une hierarchie UI deja disponible
+via un objet `uiautomator2`-like injecte ou mocke.
+
+Nouveau module :
+
+- `instagram_login_ui_probe.py` : detection texte/XML minimale qui retourne un
+  `LoginProbeOutcome` compatible avec le classifier 2E-5A.
+
+Integration minimale :
+
+- `instagram_login_provisioner.run_login_ui_probe_check(...)` verifie d'abord
+  `INSTAGRAM_LOGIN_PROVISIONER_ENABLED`;
+- flag off -> aucun `dump_hierarchy`, aucun publish, retour `disabled`;
+- flag on -> `probe_instagram_login_ui(...)` -> classifier 2E-5A -> publisher
+  injectable;
+- exception probe/publisher -> fail-open avec reason stable
+  `probe_exception` ou `publisher_exception`.
+
+Ce que 2E-5B ne fait pas :
+
+- aucune saisie username/password;
+- aucun read Vault ou acces credentials reels;
+- aucun `app_start`, `app_stop`, tap/click ou navigation;
+- aucun hook `runner.py`, sender/follow/outreach ou `account_session*`;
+- aucun changement Edge Functions, migrations, dashboard UI, `config.py` ou
+  `supabase_client.py`;
+- aucun XML brut, chemin screenshot, `adb_serial`, `device_udid`, password,
+  `secret_ref`, token ou cookie dans les metadata publiees.
+
+Detections V1 :
+
+```text
+login screen / logged_out:
+  Log in to Instagram, Username, Password, Forgot password, Continue as
+
+needs_2fa:
+  two-factor, 2FA, authentication code, security code, Enter code,
+  confirmation code
+
+checkpoint:
+  checkpoint, challenge, Help us confirm, Confirm it's you,
+  Suspicious login attempt, Verify your account
+
+login_failed:
+  incorrect password, wrong password, couldn't log in, invalid username,
+  Sorry, your password was incorrect
+
+connected:
+  signaux connectes multiples comme Home, Search, Reels, Profile, Activity,
+  Feed, Direct, New post
+```
+
+Principe de prudence :
+
+- les signaux bloquants (`login_failed`, `needs_2fa`, `checkpoint`) gagnent sur
+  les signaux generiques;
+- `logged_out` requiert plusieurs indices login;
+- `connected` requiert plusieurs indices connectes et aucune evidence login;
+- en cas d'ambiguite, la probe retourne `unknown` et ne publie pas de status.
+
+Limites connues :
+
+- detection initiale texte/XML uniquement;
+- pas encore de vision layer, navigation state machine ou recovery engine;
+- pas encore de controle runtime device centralise;
+- pas encore de design d'acces credentials securise cote worker.
+
+Suite prevue :
+
+- Entry 2E-5C : CLI isole optionnel avec device reel de test, toujours derriere
+  flag et sans runner hook;
+- ou audit/design dedie pour l'acces credentials securise;
+- Device Runtime Control Layer / ATX plus tard. Le flow complet
+  login/provisioning reste obligatoire roadmap, mais doit continuer a avancer
+  par couches testables et observables.
+
 ## Entry 2F-1 RPC incidents -> dashboard actions
 
 Entry 2F-1 ajoute la RPC service-role

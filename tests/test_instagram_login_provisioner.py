@@ -214,6 +214,182 @@ class InstagramLoginProvisionerTest(unittest.TestCase):
             with patch.dict(os.environ, {"INSTAGRAM_LOGIN_PROVISIONER_ENABLED": value}):
                 self.assertFalse(provisioner.is_login_provisioner_enabled())
 
+    def test_ui_probe_flag_off_does_not_dump_or_publish(self) -> None:
+        device = Mock()
+        publisher = Mock()
+
+        with patch.dict(os.environ, {"INSTAGRAM_LOGIN_PROVISIONER_ENABLED": "false"}):
+            result = provisioner.run_login_ui_probe_check(
+                device,
+                account_id=ACCOUNT_ID,
+                publisher=publisher,
+            )
+
+        self.assertFalse(result["published"])
+        self.assertEqual(result["reason"], "disabled")
+        device.dump_hierarchy.assert_not_called()
+        publisher.assert_not_called()
+
+    def test_ui_probe_needs_2fa_publishes_needs_2fa(self) -> None:
+        publisher = Mock(return_value={"published": True})
+        device = _device_with_xml('<node text="Enter code" /><node text="authentication code" />')
+
+        with patch.dict(os.environ, {"INSTAGRAM_LOGIN_PROVISIONER_ENABLED": "true"}):
+            result = provisioner.run_login_ui_probe_check(
+                device,
+                account_id=ACCOUNT_ID,
+                publisher=publisher,
+            )
+
+        self.assertEqual(result["classification"].login_status, "needs_2fa")
+        kwargs = publisher.call_args.kwargs
+        self.assertEqual(kwargs["login_status"], "needs_2fa")
+        self.assertEqual(kwargs["provisioning_status"], "login_verification_pending")
+        self.assertEqual(kwargs["onboarding_status"], "verification_pending")
+
+    def test_ui_probe_checkpoint_publishes_checkpoint(self) -> None:
+        publisher = Mock(return_value={"published": True})
+        device = _device_with_xml('<node text="Suspicious login attempt" /><node text="Verify your account" />')
+
+        with patch.dict(os.environ, {"INSTAGRAM_LOGIN_PROVISIONER_ENABLED": "true"}):
+            provisioner.run_login_ui_probe_check(
+                device,
+                account_id=ACCOUNT_ID,
+                publisher=publisher,
+            )
+
+        kwargs = publisher.call_args.kwargs
+        self.assertEqual(kwargs["login_status"], "checkpoint")
+        self.assertEqual(kwargs["reason"], "checkpoint_required")
+
+    def test_ui_probe_login_failed_publishes_failed_reauth_required(self) -> None:
+        publisher = Mock(return_value={"published": True})
+        device = _device_with_xml('<node text="Sorry, your password was incorrect" />')
+
+        with patch.dict(os.environ, {"INSTAGRAM_LOGIN_PROVISIONER_ENABLED": "true"}):
+            provisioner.run_login_ui_probe_check(
+                device,
+                account_id=ACCOUNT_ID,
+                publisher=publisher,
+            )
+
+        kwargs = publisher.call_args.kwargs
+        self.assertEqual(kwargs["login_status"], "failed")
+        self.assertTrue(kwargs["reauth_required"])
+        self.assertEqual(kwargs["reauth_reason"], "credentials_invalid")
+
+    def test_ui_probe_unknown_does_not_publish(self) -> None:
+        publisher = Mock()
+        device = _device_with_xml('<node text="Instagram" />')
+
+        with patch.dict(os.environ, {"INSTAGRAM_LOGIN_PROVISIONER_ENABLED": "true"}):
+            result = provisioner.run_login_ui_probe_check(
+                device,
+                account_id=ACCOUNT_ID,
+                publisher=publisher,
+            )
+
+        self.assertEqual(result["classification"].reason, "unknown_login_probe_outcome")
+        self.assertFalse(result["publish_result"]["published"])
+        publisher.assert_not_called()
+
+    def test_ui_probe_exception_is_fail_open(self) -> None:
+        device = Mock()
+        device.dump_hierarchy.side_effect = RuntimeError("dump failed")
+        publisher = Mock()
+
+        with patch.dict(os.environ, {"INSTAGRAM_LOGIN_PROVISIONER_ENABLED": "true"}):
+            result = provisioner.run_login_ui_probe_check(
+                device,
+                account_id=ACCOUNT_ID,
+                publisher=publisher,
+            )
+
+        self.assertEqual(result["classification"].reason, "unknown_login_probe_outcome")
+        self.assertFalse(result["publish_result"]["published"])
+        publisher.assert_not_called()
+
+    def test_ui_probe_import_exception_is_fail_open(self) -> None:
+        publisher = Mock()
+
+        with (
+            patch.dict(os.environ, {"INSTAGRAM_LOGIN_PROVISIONER_ENABLED": "true"}),
+            patch("instagram_login_ui_probe.probe_instagram_login_ui", side_effect=RuntimeError("probe boom")),
+        ):
+            result = provisioner.run_login_ui_probe_check(
+                Mock(),
+                account_id=ACCOUNT_ID,
+                publisher=publisher,
+            )
+
+        self.assertFalse(result["published"])
+        self.assertEqual(result["reason"], "probe_exception")
+        publisher.assert_not_called()
+
+    def test_ui_probe_publisher_exception_is_fail_open(self) -> None:
+        publisher = Mock(side_effect=RuntimeError("publish boom"))
+        device = _device_with_xml(
+            '<node content-desc="Home" /><node content-desc="Search" />'
+            '<node content-desc="Reels" /><node content-desc="Profile" />'
+        )
+
+        with patch.dict(os.environ, {"INSTAGRAM_LOGIN_PROVISIONER_ENABLED": "true"}):
+            result = provisioner.run_login_ui_probe_check(
+                device,
+                account_id=ACCOUNT_ID,
+                publisher=publisher,
+            )
+
+        self.assertFalse(result["publish_result"]["published"])
+        self.assertEqual(result["publish_result"]["reason"], "publisher_exception")
+
+    def test_ui_probe_metadata_sent_is_safe(self) -> None:
+        publisher = Mock(return_value={"published": True})
+        device = _device_with_xml(
+            '<node content-desc="Home" /><node content-desc="Search" />'
+            '<node content-desc="Reels" /><node content-desc="Profile" />'
+        )
+
+        with patch.dict(os.environ, {"INSTAGRAM_LOGIN_PROVISIONER_ENABLED": "true"}):
+            provisioner.run_login_ui_probe_check(
+                device,
+                account_id=ACCOUNT_ID,
+                metadata={
+                    "password": "secret",
+                    "secret_ref": "vault://x",
+                    "vault": "raw",
+                    "xml": "<node />",
+                    "screenshot": "base64",
+                    "adb_serial": "serial",
+                    "device_udid": "udid",
+                    "safe": "ok",
+                },
+                publisher=publisher,
+            )
+
+        metadata = publisher.call_args.kwargs["metadata"]
+        self.assertEqual(metadata["source"], "provisioner")
+        self.assertEqual(metadata["stage"], "login_ui_probe")
+        self.assertEqual(metadata["probe_version"], "v1")
+        self.assertEqual(metadata["probe_type"], "login_ui")
+        self.assertEqual(metadata["safe"], "ok")
+        for key in (
+            "password",
+            "secret_ref",
+            "vault",
+            "xml",
+            "screenshot",
+            "adb_serial",
+            "device_udid",
+        ):
+            self.assertNotIn(key, metadata)
+
+
+def _device_with_xml(xml: str) -> Mock:
+    device = Mock()
+    device.dump_hierarchy.return_value = xml
+    return device
+
 
 if __name__ == "__main__":
     unittest.main()
