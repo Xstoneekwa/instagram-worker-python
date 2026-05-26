@@ -2382,6 +2382,89 @@ Prochaines etapes :
 - puis password form executor controle, uniquement sur clone + compte test
   dedie, avec etat/recovery avant tout branchement runtime principal.
 
+## Entry 2E-5G Secure Credential Runtime Access Design
+
+Entry 2E-5G ajoute `instagram_credentials_runtime_access.py`, une abstraction
+testable pour le futur acces runtime aux credentials Instagram. Cette etape ne
+lit pas encore Supabase Vault, ne tape aucun mot de passe et ne branche aucun
+runner : elle definit seulement le contrat Python, la redaction et les erreurs
+controlees.
+
+Contrat V1 :
+
+- `credentials_lookup(account_id, provider)` retourne uniquement la metadata
+  active depuis `account_credentials` ou un mock equivalent;
+- `secret_reader(secret_ref)` est injectable et mocke en tests;
+- `get_instagram_credentials_for_login(...)` valide le payload avant toute
+  lecture de secret;
+- `provider='instagram'` est le seul provider accepte;
+- `status='active'`, username present et `secret_ref` present sont obligatoires;
+- `secret_reader` doit retourner une string non vide.
+
+`SecretValue` :
+
+- garde le secret en memoire uniquement;
+- `str(secret)` et `repr(secret)` retournent toujours `[REDACTED]`;
+- le secret brut n'est accessible que via
+  `reveal_for_login_executor()`, appel explicite reserve au futur executor;
+- aucun helper safe ne serialize le password;
+- `credential_result_safe_dict(...)` exclut password, `secret_ref`, Vault UUID,
+  token, service-role, cookie, XML/screenshot et identifiants device.
+
+Erreurs stables V1 :
+
+- `invalid_account_id`;
+- `unsupported_provider`;
+- `credentials_lookup_missing`;
+- `credentials_not_found`;
+- `credentials_payload_forbidden`;
+- `credentials_provider_mismatch`;
+- `credentials_username_missing`;
+- `credentials_not_active`;
+- `credentials_secret_ref_missing`;
+- `secret_reader_missing`;
+- `secret_reader_failed`;
+- `secret_value_empty`.
+
+NO-GO securite :
+
+- le provisioner ne doit jamais recevoir un password via ChatGPT, prompt Cursor,
+  fichier local durable, logs, JSON visible, `.env`, screenshot, XML, dashboard,
+  incident ou reponse API;
+- aucun password dans `account_incidents`, `runtime_events`, Slack/Discord,
+  dashboard actions ou logs worker;
+- aucun `secret_ref` complet, Vault UUID, token, service-role key, cookie,
+  `adb_serial` ou `device_udid` dans les outputs safe;
+- aucun vrai read Vault, aucun run device et aucun publish HTTP en 2E-5G.
+
+Entry 2E-5H futur :
+
+- implementer le vrai reader Supabase Vault cote worker/service-role;
+- garder le flag OFF par defaut;
+- lire le secret temporairement en memoire uniquement;
+- verifier d'abord avec un smoke fake secret, sans compte client reel;
+- ne jamais logger le payload Vault, `secret_ref`, headers auth ou body brut.
+
+Entry 2E-5I futur :
+
+- ajouter un password form executor controle;
+- taper username/password uniquement sur `login_form_empty` valide par
+  observation d'etat;
+- limiter le premier smoke au compte test `cinema_catchup`;
+- aucun compte client reel;
+- apres test, changer le password.
+
+Procedure future `cinema_catchup` :
+
+- l'utilisateur changera le mot de passe du compte test;
+- le nouveau mot de passe sera soumis uniquement via le flow securise
+  `instagram-credentials` -> Supabase Vault;
+- jamais dans ChatGPT;
+- jamais dans un prompt Cursor;
+- jamais dans l'historique shell visible;
+- jamais dans git, logs, screenshots ou XML;
+- apres smoke, le password sera change a nouveau.
+
 ## Entry 2F-1 RPC incidents -> dashboard actions
 
 Entry 2F-1 ajoute la RPC service-role
