@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import inspect
 import unittest
 from dataclasses import asdict
 from unittest.mock import Mock, patch
 
 from instagram_credentials_runtime_access import SecretValue
+import instagram_login_provisioner_orchestrator as provisioner_orchestrator
 from instagram_login_provisioner_orchestrator import run_login_provisioning_flow
 
 
@@ -28,7 +30,7 @@ CONTINUE_SIGNALS = {
 }
 WRONG_CONTINUE_SIGNALS = {
     "screen_type": "continue_as_candidate",
-    "suggested_username": "previous_account",
+    "suggested_username": "random_old_profile",
     "has_continue_button": True,
     "has_use_another_profile": True,
 }
@@ -178,20 +180,126 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
     def test_previous_canceled_clone_reusable_uses_another_profile_then_login(self) -> None:
         device, selectors = configured_device()
         device.hierarchies = [LOGIN_FORM_XML, LOGIN_FORM_XML, CONNECTED_XML]
+        lookup = Mock(
+            return_value={
+                "lifecycle_status": "canceled",
+                "clone_reuse_allowed": True,
+                "source": "operator_smoke_override",
+                "reason": "previous account stopped; clone reusable",
+            }
+        )
 
         result = run_login_provisioning_flow(
             device,
             account_id=ACCOUNT_ID,
             expected_username=USERNAME,
             credentials_getter=Mock(return_value=credentials()),
-            lifecycle_lookup=Mock(return_value={"lifecycle_status": "canceled"}),
-            clone_reuse_allowed=True,
+            previous_account_lifecycle_lookup=lookup,
             initial_signals=WRONG_CONTINUE_SIGNALS,
         )
 
+        lookup.assert_called_once()
         self.assertEqual(selectors["use_another"].click_calls, 1)
         self.assertIn("tap_use_another_profile", result.actions_taken)
         self.assertEqual(result.final_outcome, "connected")
+        self.assertEqual(
+            result.safe_metadata["previous_account_lifecycle"]["source"],
+            "operator_smoke_override",
+        )
+
+    def test_previous_canceled_clone_reusable_dry_run_routes_use_another_profile(self) -> None:
+        lookup = Mock(
+            return_value={
+                "lifecycle_status": "canceled",
+                "clone_reuse_allowed": True,
+                "source": "operator_smoke_override",
+                "reason": "previous account stopped; clone reusable",
+            }
+        )
+
+        result = run_login_provisioning_flow(
+            FakeDevice(),
+            account_id=ACCOUNT_ID,
+            expected_username=USERNAME,
+            credentials_getter=Mock(return_value=credentials()),
+            previous_account_lifecycle_lookup=lookup,
+            initial_signals=WRONG_CONTINUE_SIGNALS,
+            dry_run=True,
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.safe_metadata["router_decision"], "use_another_profile_previous_account_stopped")
+        self.assertTrue(result.safe_metadata["would_tap_use_another_profile"])
+        self.assertEqual(result.safe_metadata["previous_account_lifecycle"]["username"], "random_old_profile")
+        self.assertEqual(result.safe_metadata["previous_account_lifecycle"]["lifecycle_status"], "canceled")
+        self.assertTrue(result.safe_metadata["previous_account_lifecycle"]["clone_reuse_allowed"])
+        self.assertEqual(result.safe_metadata["previous_account_lifecycle"]["source"], "operator_smoke_override")
+
+    def test_previous_canceled_clone_not_reusable_blocks_mismatch(self) -> None:
+        getter = Mock(return_value=credentials())
+
+        result = run_login_provisioning_flow(
+            FakeDevice(),
+            account_id=ACCOUNT_ID,
+            expected_username=USERNAME,
+            credentials_getter=getter,
+            previous_account_lifecycle_lookup=Mock(
+                return_value={
+                    "lifecycle_status": "canceled",
+                    "clone_reuse_allowed": False,
+                    "source": "operator_smoke_override",
+                }
+            ),
+            initial_signals=WRONG_CONTINUE_SIGNALS,
+            dry_run=True,
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.safe_metadata["router_decision"], "block_wrong_suggested_account")
+        self.assertEqual(result.dashboard_action_type, "review_account_mismatch")
+        self.assertTrue(result.safe_metadata["would_block_mismatch"])
+        getter.assert_not_called()
+
+    def test_previous_active_clone_reusable_blocks_mismatch(self) -> None:
+        getter = Mock(return_value=credentials())
+
+        result = run_login_provisioning_flow(
+            FakeDevice(),
+            account_id=ACCOUNT_ID,
+            expected_username=USERNAME,
+            credentials_getter=getter,
+            previous_account_lifecycle_lookup=Mock(
+                return_value={
+                    "lifecycle_status": "active",
+                    "clone_reuse_allowed": True,
+                    "source": "operator_smoke_override",
+                }
+            ),
+            initial_signals=WRONG_CONTINUE_SIGNALS,
+            dry_run=True,
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.safe_metadata["router_decision"], "block_wrong_suggested_account")
+        self.assertEqual(result.safe_metadata["previous_account_lifecycle"]["lifecycle_status"], "active")
+        getter.assert_not_called()
+
+    def test_previous_lifecycle_lookup_absent_blocks_mismatch(self) -> None:
+        getter = Mock(return_value=credentials())
+
+        result = run_login_provisioning_flow(
+            FakeDevice(),
+            account_id=ACCOUNT_ID,
+            expected_username=USERNAME,
+            credentials_getter=getter,
+            initial_signals=WRONG_CONTINUE_SIGNALS,
+            dry_run=True,
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.safe_metadata["router_decision"], "block_wrong_suggested_account")
+        self.assertEqual(result.dashboard_action_type, "review_account_mismatch")
+        getter.assert_not_called()
 
     def test_wrong_suggested_active_account_blocks_mismatch_no_password(self) -> None:
         device, selectors = configured_device()
@@ -393,8 +501,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
             account_id=ACCOUNT_ID,
             expected_username=USERNAME,
             credentials_getter=Mock(return_value=credentials()),
-            lifecycle_lookup=Mock(side_effect=RuntimeError("lookup down")),
-            clone_reuse_allowed=True,
+            previous_account_lifecycle_lookup=Mock(side_effect=RuntimeError("lookup down")),
             initial_signals=WRONG_CONTINUE_SIGNALS,
         )
 
@@ -461,16 +568,44 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
             account_id=ACCOUNT_ID,
             expected_username=USERNAME,
             credentials_getter=getter,
-            initial_signals={**WRONG_CONTINUE_SIGNALS, "suggested_username": "i_m_your_traker"},
+            initial_signals=WRONG_CONTINUE_SIGNALS,
             dry_run=True,
         )
 
         self.assertFalse(result.ok)
         self.assertEqual(result.dashboard_action_type, "review_account_mismatch")
         self.assertTrue(result.safe_metadata["would_block_mismatch"])
-        self.assertEqual(result.safe_metadata["suggested_username"], "i_m_your_traker")
+        self.assertEqual(result.safe_metadata["suggested_username"], "random_old_profile")
         self.assertFalse(result.safe_metadata["would_submit_password"])
         getter.assert_not_called()
+
+    def test_previous_lifecycle_metadata_does_not_leak_secret_device_or_raw_ui(self) -> None:
+        result = run_login_provisioning_flow(
+            FakeDevice(),
+            account_id=ACCOUNT_ID,
+            expected_username=USERNAME,
+            credentials_getter=Mock(return_value=credentials()),
+            previous_account_lifecycle_lookup=Mock(
+                return_value={
+                    "lifecycle_status": "canceled",
+                    "clone_reuse_allowed": True,
+                    "source": "operator_smoke_override",
+                    "reason": "password secret_ref Vault token emulator-5554 xml screenshot",
+                }
+            ),
+            initial_signals=WRONG_CONTINUE_SIGNALS,
+            dry_run=True,
+        )
+        rendered = json.dumps(asdict(result), sort_keys=True)
+
+        self.assertEqual(result.safe_metadata["previous_account_lifecycle"]["reason"], "")
+        for forbidden in (PASSWORD, SECRET_REF, VAULT_ID, "secret_ref", "vault", "Vault", "token", "emulator-5554", "device_udid", "adb_serial", "xml", "screenshot"):
+            self.assertNotIn(forbidden, rendered)
+
+    def test_no_observed_username_hardcoded_in_application_logic(self) -> None:
+        source = inspect.getsource(provisioner_orchestrator)
+
+        self.assertNotIn("i_m_your_traker", source)
 
     def test_dry_run_output_has_no_secret_material_or_raw_ui(self) -> None:
         result = run_login_provisioning_flow(

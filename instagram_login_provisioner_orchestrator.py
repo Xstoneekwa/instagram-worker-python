@@ -50,8 +50,11 @@ NO_RETRY_FAILURES = {
 MAX_RETRY_ATTEMPTS = 1
 
 CredentialsGetter = Callable[[str], Any]
+PreviousAccountLifecycleLookup = Callable[[str, dict[str, Any]], dict[str, Any]]
 Publisher = Callable[..., dict[str, Any]]
 Timer = Callable[[], float]
+
+REUSABLE_PREVIOUS_ACCOUNT_LIFECYCLES = {"canceled", "stopped", "archived"}
 
 
 @dataclass(frozen=True)
@@ -84,6 +87,7 @@ def run_login_provisioning_flow(
     expected_username: str,
     credentials_getter: CredentialsGetter,
     lifecycle_lookup: Callable[[str], dict[str, Any]] | None = None,
+    previous_account_lifecycle_lookup: PreviousAccountLifecycleLookup | None = None,
     clone_reuse_allowed: bool = False,
     publisher: Publisher | None = None,
     publish_enabled: bool = False,
@@ -114,12 +118,21 @@ def run_login_provisioning_flow(
         signals = _observe_login_signals(d)
         timings["observe_ms"] += _elapsed_ms(start, timer())
 
+    previous_account_lifecycle = _resolve_previous_account_lifecycle(
+        suggested_username=signals.get("suggested_username"),
+        screen_type=signals.get("screen_type"),
+        account_id=safe_account_id,
+        expected_username=safe_expected_username,
+        previous_account_lifecycle_lookup=previous_account_lifecycle_lookup,
+        legacy_lifecycle_lookup=lifecycle_lookup,
+        legacy_clone_reuse_allowed=clone_reuse_allowed,
+    )
     route = route_login_screen(
         expected_username=safe_expected_username,
         suggested_username=str(signals.get("suggested_username") or ""),
         screen_type=str(signals.get("screen_type") or "unknown"),
-        account_lifecycle_lookup=lifecycle_lookup,
-        clone_reuse_allowed=clone_reuse_allowed,
+        account_lifecycle_lookup=_router_lifecycle_lookup(previous_account_lifecycle),
+        clone_reuse_allowed=bool(previous_account_lifecycle.get("clone_reuse_allowed")),
         account_id=safe_account_id,
     )
     actions_taken.append(f"route:{route.decision}")
@@ -133,6 +146,7 @@ def run_login_provisioning_flow(
             actions_taken=actions_taken,
             timings=timings,
             warnings=warnings,
+            previous_account_lifecycle=previous_account_lifecycle,
             total_start=total_start,
             timer=timer,
         )
@@ -154,6 +168,7 @@ def run_login_provisioning_flow(
             actions_taken=actions_taken,
             timings=timings,
             warnings=warnings,
+            extra_metadata=_flow_metadata(previous_account_lifecycle),
             total_start=total_start,
             timer=timer,
             publisher=publisher,
@@ -172,6 +187,7 @@ def run_login_provisioning_flow(
             actions_taken=actions_taken,
             timings=timings,
             warnings=warnings,
+            extra_metadata=_flow_metadata(previous_account_lifecycle),
             total_start=total_start,
             timer=timer,
             publisher=publisher,
@@ -195,6 +211,7 @@ def run_login_provisioning_flow(
                 actions_taken=actions_taken,
                 timings=timings,
                 warnings=[*warnings, *action_result.warnings],
+                extra_metadata=_flow_metadata(previous_account_lifecycle),
                 total_start=total_start,
                 timer=timer,
                 publisher=publisher,
@@ -205,12 +222,23 @@ def run_login_provisioning_flow(
             start = timer()
             signals = _observe_login_signals(d)
             timings["observe_ms"] += _elapsed_ms(start, timer())
+        post_action_lifecycle = _resolve_previous_account_lifecycle(
+            suggested_username=signals.get("suggested_username"),
+            screen_type=signals.get("screen_type"),
+            account_id=safe_account_id,
+            expected_username=safe_expected_username,
+            previous_account_lifecycle_lookup=previous_account_lifecycle_lookup,
+            legacy_lifecycle_lookup=lifecycle_lookup,
+            legacy_clone_reuse_allowed=clone_reuse_allowed,
+        )
+        if post_action_lifecycle.get("username"):
+            previous_account_lifecycle = post_action_lifecycle
         route = route_login_screen(
             expected_username=safe_expected_username,
             suggested_username=str(signals.get("suggested_username") or ""),
             screen_type=str(signals.get("screen_type") or "unknown"),
-            account_lifecycle_lookup=lifecycle_lookup,
-            clone_reuse_allowed=clone_reuse_allowed,
+            account_lifecycle_lookup=_router_lifecycle_lookup(post_action_lifecycle),
+            clone_reuse_allowed=bool(post_action_lifecycle.get("clone_reuse_allowed")),
             account_id=safe_account_id,
         )
         actions_taken.append(f"route:{route.decision}")
@@ -227,6 +255,7 @@ def run_login_provisioning_flow(
             actions_taken=actions_taken,
             timings=timings,
             warnings=warnings,
+            extra_metadata=_flow_metadata(previous_account_lifecycle),
             total_start=total_start,
             timer=timer,
             publisher=publisher,
@@ -242,6 +271,7 @@ def run_login_provisioning_flow(
             actions_taken=actions_taken,
             timings=timings,
             warnings=warnings,
+            extra_metadata=_flow_metadata(previous_account_lifecycle),
             total_start=total_start,
             timer=timer,
             publisher=publisher,
@@ -298,6 +328,7 @@ def run_login_provisioning_flow(
             actions_taken=actions_taken,
             timings=_merge_timings(timings, password_result.timings),
             warnings=[*warnings, *password_result.warnings],
+            extra_metadata=_flow_metadata(previous_account_lifecycle),
             total_start=total_start,
             timer=timer,
             publisher=publisher,
@@ -329,6 +360,7 @@ def run_login_provisioning_flow(
         actions_taken=actions_taken,
         timings=_merge_timings(timings, password_result.timings),
         warnings=[*warnings, *password_result.warnings],
+        extra_metadata=_flow_metadata(previous_account_lifecycle),
         total_start=total_start,
         timer=timer,
         publisher=publisher,
@@ -353,6 +385,92 @@ def _signals_confirm_login_form(signals: dict[str, Any]) -> bool:
     )
 
 
+def _resolve_previous_account_lifecycle(
+    *,
+    suggested_username: Any,
+    screen_type: Any,
+    account_id: str,
+    expected_username: str,
+    previous_account_lifecycle_lookup: PreviousAccountLifecycleLookup | None,
+    legacy_lifecycle_lookup: Callable[[str], dict[str, Any]] | None,
+    legacy_clone_reuse_allowed: bool,
+) -> dict[str, Any]:
+    username = _safe_public_text(suggested_username)
+    normalized_username = username.strip().lstrip("@").lower()
+    metadata = {
+        "username": normalized_username,
+        "lifecycle_status": "unknown",
+        "clone_reuse_allowed": False,
+        "source": "",
+        "reason": "",
+        "lookup_failed": False,
+    }
+    if not normalized_username or str(screen_type or "") != "continue_as_candidate":
+        return metadata
+
+    context = clean_login_probe_metadata(
+        redact_credentials_payload(
+            {
+                "account_id": account_id,
+                "expected_username": expected_username,
+                "screen_type": _safe_public_text(screen_type),
+            }
+        )
+    )
+    try:
+        if previous_account_lifecycle_lookup is not None:
+            raw = previous_account_lifecycle_lookup(normalized_username, context) or {}
+        elif legacy_lifecycle_lookup is not None:
+            raw = legacy_lifecycle_lookup(normalized_username) or {}
+        else:
+            raw = {}
+    except Exception:
+        return {**metadata, "lookup_failed": True, "reason": "lifecycle_lookup_failed"}
+
+    lifecycle_status = str(raw.get("lifecycle_status") or "unknown").strip().lower()
+    if lifecycle_status not in {"active", "paused", "canceled", "onboarding", "archived", "stopped", "unknown"}:
+        lifecycle_status = "unknown"
+    clone_reuse_from_lookup = raw.get("clone_reuse_allowed")
+    clone_reuse = bool(clone_reuse_from_lookup) if "clone_reuse_allowed" in raw else bool(legacy_clone_reuse_allowed)
+    return {
+        "username": normalized_username,
+        "lifecycle_status": lifecycle_status,
+        "clone_reuse_allowed": clone_reuse,
+        "source": _safe_public_text(raw.get("source")),
+        "reason": _safe_public_text(raw.get("reason")),
+        "lookup_failed": False,
+    }
+
+
+def _router_lifecycle_lookup(previous_account_lifecycle: dict[str, Any]) -> Callable[[str], dict[str, Any]] | None:
+    if not previous_account_lifecycle.get("username"):
+        return None
+    if previous_account_lifecycle.get("lookup_failed"):
+        def _failed_lookup(_username: str) -> dict[str, Any]:
+            raise RuntimeError("lifecycle_lookup_failed")
+
+        return _failed_lookup
+
+    def _lookup(_username: str) -> dict[str, Any]:
+        return {"lifecycle_status": previous_account_lifecycle.get("lifecycle_status") or "unknown"}
+
+    return _lookup
+
+
+def _flow_metadata(previous_account_lifecycle: dict[str, Any]) -> dict[str, Any]:
+    if not previous_account_lifecycle.get("username"):
+        return {}
+    return {
+        "previous_account_lifecycle": {
+            "username": _safe_public_text(previous_account_lifecycle.get("username")),
+            "lifecycle_status": _safe_public_text(previous_account_lifecycle.get("lifecycle_status")),
+            "clone_reuse_allowed": bool(previous_account_lifecycle.get("clone_reuse_allowed")),
+            "source": _safe_public_text(previous_account_lifecycle.get("source")),
+            "reason": _safe_public_text(previous_account_lifecycle.get("reason")),
+        }
+    }
+
+
 def _dry_run_result(
     *,
     route: Any,
@@ -362,6 +480,7 @@ def _dry_run_result(
     actions_taken: list[str],
     timings: dict[str, int],
     warnings: list[str],
+    previous_account_lifecycle: dict[str, Any],
     total_start: float,
     timer: Timer,
 ) -> LoginProvisioningFlowResult:
@@ -390,6 +509,7 @@ def _dry_run_result(
         "ready_for_password_smoke": ready_for_password_smoke,
         "reason": reason,
     }
+    dry_metadata.update(_flow_metadata(previous_account_lifecycle))
     timings["total_ms"] = _elapsed_ms(total_start, timer())
     safe_metadata = clean_login_probe_metadata(redact_credentials_payload(dry_metadata))
     return LoginProvisioningFlowResult(
@@ -470,6 +590,7 @@ def _credentials_failure_result(
     actions_taken: list[str],
     timings: dict[str, int],
     warnings: list[str],
+    extra_metadata: dict[str, Any] | None,
     total_start: float,
     timer: Timer,
     publisher: Publisher | None,
@@ -497,6 +618,7 @@ def _credentials_failure_result(
         actions_taken=actions_taken,
         timings=timings,
         warnings=warnings,
+        extra_metadata=extra_metadata,
         total_start=total_start,
         timer=timer,
         publisher=publisher,
@@ -571,6 +693,7 @@ def _finalize(
     actions_taken: list[str],
     timings: dict[str, int],
     warnings: list[str],
+    extra_metadata: dict[str, Any] | None = None,
     total_start: float,
     timer: Timer,
     publisher: Publisher | None,
@@ -622,6 +745,7 @@ def _finalize(
                 "retry_count": retry_count,
                 "dashboard_action_type": dashboard_action_type,
                 "actions_taken": actions_taken,
+                **(extra_metadata or {}),
             }
         )
     )

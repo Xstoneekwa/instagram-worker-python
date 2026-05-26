@@ -160,6 +160,27 @@ Post-submit policy future :
 - Sans lifecycle confirme, le router bloque en mismatch; avec lifecycle mock
   `canceled` + `clone_reuse_allowed=true`, le dry-run prevoit
   `use_another_profile_previous_account_stopped` sans cliquer.
+- Entry 2E-5J-2B : tentative de gate pour smoke controle `Use another profile`
+  no-password. Pre-check device OK et ecran `continue_as_candidate`, mais aucune
+  entree lifecycle exploitable n'a confirme que `i_m_your_traker` est
+  canceled/stopped/archived. Action stoppee avant tap avec
+  `reason=lifecycle_not_confirmed`.
+- Entry 2E-5J-2B-1 : audit lifecycle read-only. Les statuts existants couvrent
+  `client_instagram_accounts` login/provisioning/onboarding,
+  `client_subscriptions` active/paused/cancelled/expired,
+  `account_assignments` pending/reserved/active/paused/failed/released et
+  `phone_clones` available/reserved/active/maintenance/disabled, mais aucun row
+  n'etablit le lifecycle du compte Instagram suggere par username. Solution
+  recommandee avant migration : helper lookup read-only injectable, source
+  explicite operateur, mockable en tests, qui retourne uniquement
+  `lifecycle_status` et `clone_reuse_allowed`.
+- Patch 2E-5J-2B-1 : l'orchestrator accepte
+  `previous_account_lifecycle_lookup(username, context)`. Ce lookup temporaire
+  sert uniquement au smoke operator-approved, reste generique, ne hardcode aucun
+  username et n'autorise `Use another profile` que si le lifecycle est
+  `canceled/stopped/archived` avec `clone_reuse_allowed=true`. Le cas observe
+  `i_m_your_traker` reste une fixture de terrain/documentation, pas une logique
+  metier.
 
 ## 6. Dashboard / Backend / BotApp Registry
 
@@ -178,6 +199,10 @@ statuts safe :
   `complete_two_factor`, `resolve_checkpoint`, `review_login_failure`,
   `review_account_mismatch`;
 - lifecycle compte : active, paused, canceled, onboarding;
+- vraie source lifecycle account active/paused/canceled/onboarding a creer plus
+  tard cote DB/dashboard;
+- policy `clone_reuse_allowed` explicite a connecter aux assignments/clones et
+  aux actions admin/client;
 - audit `previous_account_stopped_override`;
 - retry provisioning et relance verification credentials.
 - Le dashboard/backend/BotApp ne doit jamais exposer password, `secret_ref`,
@@ -257,14 +282,17 @@ controle device, pas a contourner la state machine Instagram.
 
 Ordre recommande :
 
-1. Confirmer explicitement le lifecycle de `i_m_your_traker` ou afficher
-   directement `login_form_empty` sur device idle.
-2. 2E-5J-2 smoke orchestrator controle ou 2E-5I-2 smoke reel
+1. Confirmer explicitement le lifecycle canceled/stopped/archived du compte
+   suggere actuellement visible via un helper lookup read-only explicite, ou
+   afficher directement `login_form_empty` sur device idle.
+2. Definir le modele durable lifecycle compte + `clone_reuse_allowed` dans la
+   DB/dashboard, sans hardcode username.
+3. 2E-5J-2 smoke orchestrator controle ou 2E-5I-2 smoke reel
    `cinema_catchup` via flow securise, jamais via chat/prompt/shell
    history visible.
-3. Integration provisioner runtime derriere flags.
-4. Status publish connected/2FA/checkpoint/failed via provisioner orchestrator.
-5. State machine / recovery login plus riche avant tout branchement production.
+4. Integration provisioner runtime derriere flags.
+5. Status publish connected/2FA/checkpoint/failed via provisioner orchestrator.
+6. State machine / recovery login plus riche avant tout branchement production.
 
 Le checkpoint 2E-5H est deja pousse :
 `880deef630c8a6217f9fbc4d64b7167fd3e20764`.

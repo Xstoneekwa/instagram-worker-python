@@ -2892,6 +2892,125 @@ No-leak smoke prep :
 - aucun screenshot path affiche;
 - aucun cookie/session affiche.
 
+## Entry 2E-5J-2B Use Another Profile Gate
+
+Entry 2E-5J-2B vise un smoke controle ou l'unique action UI autorisee serait
+`Use another profile`, afin de quitter un ancien compte suggere et d'arriver a
+`login_form_empty`. Le smoke reste no-password : aucun credential, aucun Vault
+read, aucun tap `Log in`, aucun publish HTTP et aucun runner hook.
+
+Gate obligatoire avant tap :
+
+- device unique `emulator-5554`;
+- aucun run business actif;
+- ecran observe `continue_as_candidate`;
+- `suggested_username` extrait dynamiquement;
+- `router_decision=use_another_profile_previous_account_stopped`;
+- `clone_reuse_allowed=true`;
+- lifecycle du `suggested_username` confirme `canceled`, `stopped` ou
+  `archived`.
+
+Resultat 2E-5J-2B actuel :
+
+- pre-check device OK;
+- ecran observe `continue_as_candidate`;
+- `suggested_username=i_m_your_traker`;
+- recherche metadata non secrete : aucune entree lifecycle exploitable trouvee
+  pour confirmer `canceled/stopped/archived`;
+- action stoppee avant tap;
+- `reason=lifecycle_not_confirmed`;
+- `would_submit_password=false`;
+- `would_publish=false`.
+
+Conclusion : ne pas cliquer tant que le lifecycle du compte suggere n'est pas
+confirme. La logique reste generique et ne depend jamais de
+`i_m_your_traker` en dur.
+
+## Entry 2E-5J-2B-1 Previous Account Lifecycle Gate Source
+
+Entry 2E-5J-2B-1 audite la source fiable a utiliser avant d'autoriser
+`Use another profile` lorsque l'ecran Instagram propose un compte different du
+compte attendu.
+
+Audit read-only :
+
+- `client_instagram_accounts` porte les statuts dashboard-safe
+  `login_status`, `provisioning_status`, `onboarding_status`, mais pas un champ
+  lifecycle produit `active/paused/canceled/onboarding`;
+- `client_subscription_accounts.status` existe avec
+  `active/paused/removed`;
+- `client_subscriptions.status` existe avec
+  `active/paused/cancelled/expired`;
+- `account_assignments.status` existe avec
+  `pending/reserved/active/paused/failed/released`;
+- `phone_clones.status` existe avec
+  `available/reserved/active/maintenance/disabled`;
+- `ig_accounts.status` et `ig_account_settings.account_status` existent dans le
+  schema legacy/runtime, mais aucun row exploitable n'a ete trouve pour le
+  `suggested_username` observe `i_m_your_traker`;
+- `phone_devices.adb_serial='emulator-5554'` est `available`, avec un clone
+  `reserved` pour l'account cible courant, mais cela ne prouve pas que le
+  compte Instagram suggere est canceled/stopped/archived.
+
+Conclusion audit :
+
+- il existe des statuts utiles, mais aucune source unique actuelle ne couvre
+  proprement le lifecycle du compte Instagram suggere par username;
+- `i_m_your_traker` ne peut pas etre marque canceled proprement maintenant sans
+  creer/mettre a jour une source de donnees explicite;
+- `clone_reuse_allowed` n'est pas un fait deduit automatiquement du simple ecran
+  Instagram : il doit venir d'une policy/assignment explicite;
+- le gate 2E-5J-2B reste correct : sans lifecycle confirme,
+  `block_wrong_suggested_account` / no tap.
+
+Source recommandee pour la prochaine etape :
+
+- Option B temporaire : helper lookup read-only injectable pour le smoke,
+  retournant `{lifecycle_status, clone_reuse_allowed}` depuis une source
+  explicite approuvee par l'operateur;
+- utiliser ce helper seulement pour autoriser le tap quand
+  `lifecycle_status in ('canceled','stopped','archived')` et
+  `clone_reuse_allowed=true`;
+- ne pas migrer tant que le mapping produit lifecycle/BotApp n'est pas valide;
+- plus tard, si aucune source existante n'est retenue, prevoir une migration
+  dediee au lifecycle compte / clone reuse apres validation explicite.
+
+Patch 2E-5J-2B-1 :
+
+- `run_login_provisioning_flow(...)` accepte maintenant
+  `previous_account_lifecycle_lookup(username, context)`;
+- le `username` vient toujours du `suggested_username` extrait dynamiquement;
+- le `context` est metadata-only et safe : `account_id`, `expected_username`,
+  `screen_type`;
+- la sortie acceptee est limitee a `lifecycle_status`,
+  `clone_reuse_allowed`, `source`, `reason`;
+- le lookup est injectable et mockable; aucune lecture DB directe, aucune
+  ecriture DB, aucune migration, aucun hook runtime;
+- le patch ne fait aucun password read, aucun login et aucun tap device.
+
+Decision :
+
+- si `lifecycle_status in ('canceled','stopped','archived')` et
+  `clone_reuse_allowed=true`, le router recoit
+  `use_another_profile_previous_account_stopped` avec
+  `audit_reason=previous_account_stopped_override`;
+- sinon, ou si le lookup manque/echoue, le provisioner conserve
+  `block_wrong_suggested_account` et l'action dashboard future
+  `review_account_mismatch`;
+- `source='operator_smoke_override'` peut etre exposee dans
+  `safe_metadata.previous_account_lifecycle.source` pour prouver que la
+  decision vient d'une validation operateur explicite;
+- les champs contenant password, secret, Vault, token, XML, screenshot ou device
+  brut sont vides dans la metadata publique.
+
+Regle generique maintenue :
+
+- `suggested_username` est extrait dynamiquement;
+- aucune comparaison a `i_m_your_traker` dans la logique;
+- `previous_account_lifecycle_lookup(suggested_username, context)` doit
+  fonctionner pour tout handle valide;
+- en absence de preuve : stop safe, `reason=lifecycle_not_confirmed`.
+
 Procedure future `cinema_catchup` :
 
 - l'utilisateur changera le mot de passe du compte test;
