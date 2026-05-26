@@ -21,7 +21,7 @@ from instagram_login_status_classifier import (
     clean_login_probe_metadata,
     normalize_login_probe_outcome,
 )
-from instagram_login_ui_probe import extract_login_screen_signals_from_hierarchy
+from instagram_login_ui_probe import detect_login_probe_outcome_from_hierarchy, extract_login_screen_signals_from_hierarchy
 
 
 TRANSIENT_RETRY_FAILURES = {
@@ -244,6 +244,43 @@ def run_login_provisioning_flow(
         actions_taken.append(f"route:{route.decision}")
 
     if route.decision != "start_login_form_flow":
+        post_action_outcome = _post_action_outcome_from_signals(signals)
+        if post_action_outcome:
+            classification = classify_login_probe_outcome(post_action_outcome)
+            return _finalize(
+                ok=post_action_outcome == LoginProbeOutcome.CONNECTED.value,
+                completed=post_action_outcome
+                in {
+                    LoginProbeOutcome.CONNECTED.value,
+                    LoginProbeOutcome.NEEDS_2FA.value,
+                    LoginProbeOutcome.CHECKPOINT.value,
+                    LoginProbeOutcome.LOGIN_FAILED.value,
+                },
+                final_outcome=post_action_outcome,
+                reason=f"post_action_{classification.reason}",
+                failure_reason=None if post_action_outcome == LoginProbeOutcome.CONNECTED.value else post_action_outcome,
+                final_login_status=classification.login_status,
+                final_provisioning_status=classification.provisioning_status,
+                final_onboarding_status=classification.onboarding_status,
+                dashboard_action_type=_dashboard_action_for_outcome(post_action_outcome),
+                should_publish_status=False,
+                account_id=safe_account_id,
+                expected_username=safe_expected_username,
+                actions_taken=actions_taken,
+                timings=timings,
+                warnings=warnings,
+                extra_metadata={
+                    **_flow_metadata(previous_account_lifecycle),
+                    "post_action_status_candidate": post_action_outcome,
+                    "password_required": False,
+                    "ready_for_password_smoke": False,
+                    "would_submit_password": False,
+                },
+                total_start=total_start,
+                timer=timer,
+                publisher=publisher,
+                publish_enabled=publish_enabled,
+            )
         return _finalize(
             ok=False,
             completed=False,
@@ -373,7 +410,13 @@ def _observe_login_signals(d: Any) -> dict[str, Any]:
         hierarchy_xml = d.dump_hierarchy(compressed=False)
     except TypeError:
         hierarchy_xml = d.dump_hierarchy()
-    return extract_login_screen_signals_from_hierarchy(str(hierarchy_xml or ""))
+    hierarchy_text = str(hierarchy_xml or "")
+    signals = extract_login_screen_signals_from_hierarchy(hierarchy_text)
+    try:
+        signals["login_probe_outcome"] = str(detect_login_probe_outcome_from_hierarchy(hierarchy_text).value)
+    except Exception:
+        signals["login_probe_outcome"] = "unknown"
+    return signals
 
 
 def _signals_confirm_login_form(signals: dict[str, Any]) -> bool:
@@ -382,6 +425,18 @@ def _signals_confirm_login_form(signals: dict[str, Any]) -> bool:
         and signals.get("has_username_field") is True
         and signals.get("has_login_button") is True
     )
+
+
+def _post_action_outcome_from_signals(signals: dict[str, Any]) -> str:
+    outcome = str(signals.get("login_probe_outcome") or "unknown").strip()
+    if outcome in {
+        LoginProbeOutcome.CONNECTED.value,
+        LoginProbeOutcome.NEEDS_2FA.value,
+        LoginProbeOutcome.CHECKPOINT.value,
+        LoginProbeOutcome.LOGIN_FAILED.value,
+    }:
+        return outcome
+    return ""
 
 
 def _resolve_previous_account_lifecycle(

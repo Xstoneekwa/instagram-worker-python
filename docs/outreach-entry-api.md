@@ -2981,6 +2981,68 @@ maintenant d'atteindre `login_form_empty` sans hardcode username ni coordonnees
 fixes. La prochaine etape reste un smoke password `cinema_catchup` via flow
 securise Vault, jamais via chat/prompt/shell history visible.
 
+## Entry 2E-5J-2C Continue Expected Account Smoke
+
+Entry 2E-5J-2C valide le Cas B no-password : Instagram affiche
+`Continue as {expected_username}` et le compte suggere correspond exactement au
+compte attendu.
+
+Pre-check :
+
+- device unique `emulator-5554`;
+- aucun runner/business Python actif detecte;
+- aucun credential, aucun Vault read, aucun publish HTTP;
+- aucun tap `Log in`.
+
+Observation avant action :
+
+- `expected_username=cinema_catchup`;
+- `screen_type=continue_as_candidate`;
+- `suggested_username=cinema_catchup`, extrait dynamiquement;
+- `router_decision=continue_expected_account`;
+- `would_tap_continue=true`;
+- `would_tap_use_another_profile=false`;
+- `would_submit_password=false`;
+- `would_publish=false`.
+
+Action controlee :
+
+- un seul tap `Continue`;
+- resolution utilisee : `selector_text`;
+- aucun retry en boucle;
+- aucun tap `Use another profile`;
+- aucun tap `Log in`;
+- aucune saisie username/password.
+
+Resultat post-action :
+
+- `action_executed=true`;
+- `post_action_screen_type=unknown` cote pre-login screen probe;
+- classification login UI post-action : `connected`;
+- libelles safe observes : feed/home Instagram, sans afficher XML brut;
+- `ready_for_password_smoke=false`, car aucun formulaire password n'est demande;
+- `status_candidate=connected`;
+- `would_submit_password=false`;
+- `would_publish=false`.
+
+Mini patch 2E-5J-2C :
+
+- l'orchestrateur ajoute maintenant `login_probe_outcome` lors des re-observes;
+- si apres `Continue` le pre-login screen probe reste `unknown` mais le
+  classifier login detecte `connected`, `needs_2fa`, `checkpoint` ou
+  `login_failed`, ce classifier prime;
+- pour le cas smoke reel connected :
+  `final_outcome=connected`, `status_candidate=connected`,
+  `password_required=false`, `ready_for_password_smoke=false`;
+- aucun credential n'est demande, aucun password executor n'est appele, aucun
+  retry password n'est lance, aucun publish n'est active par defaut;
+- la logique reste generique et ne depend pas de `cinema_catchup` en dur.
+
+Conclusion : le chemin `continue_expected_account` peut amener directement au
+home/feed connecte sans password. Pour la suite, ne pas publier de status depuis
+ce smoke; le futur publish connected devra passer par le provisioner runtime
+approuve, avec observabilite et recovery.
+
 ## Entry 2E-5J-2B-1 Previous Account Lifecycle Gate Source
 
 Entry 2E-5J-2B-1 audite la source fiable a utiliser avant d'autoriser

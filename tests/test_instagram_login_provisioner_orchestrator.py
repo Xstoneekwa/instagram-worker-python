@@ -186,6 +186,72 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertEqual(result.final_outcome, "connected")
         self.assertEqual(result.actions_taken[:3], ["route:continue_expected_account", "tap_continue", "route:start_login_form_flow"])
 
+    def test_continue_expected_connected_home_finalizes_without_password(self) -> None:
+        device, selectors = configured_device()
+        getter = Mock(return_value=credentials())
+        expected_username = "random_expected"
+        device.hierarchies = [CONTINUE_AS_XML, CONNECTED_XML, CONNECTED_XML]
+
+        result = run_login_provisioning_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username=expected_username,
+            credentials_getter=getter,
+            initial_signals={**CONTINUE_SIGNALS, "suggested_username": expected_username},
+        )
+
+        self.assertTrue(selectors["continue"].click_calls == 1 or device.bounds_clicks)
+        self.assertEqual(result.final_outcome, "connected")
+        self.assertEqual(result.final_login_status, "connected")
+        self.assertIsNone(result.dashboard_action_type)
+        self.assertFalse(result.retry_attempted)
+        self.assertFalse(result.should_publish_status)
+        self.assertEqual(result.safe_metadata["post_action_status_candidate"], "connected")
+        self.assertFalse(result.safe_metadata["password_required"])
+        self.assertFalse(result.safe_metadata["ready_for_password_smoke"])
+        self.assertFalse(result.safe_metadata["would_submit_password"])
+        getter.assert_not_called()
+
+    def test_continue_expected_needs_2fa_finalizes_without_password(self) -> None:
+        device, _selectors = configured_device()
+        getter = Mock(return_value=credentials())
+        expected_username = "random_expected"
+        device.hierarchies = [CONTINUE_AS_XML, NEEDS_2FA_XML, NEEDS_2FA_XML]
+
+        result = run_login_provisioning_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username=expected_username,
+            credentials_getter=getter,
+            initial_signals={**CONTINUE_SIGNALS, "suggested_username": expected_username},
+        )
+
+        self.assertEqual(result.final_outcome, "needs_2fa")
+        self.assertEqual(result.dashboard_action_type, "complete_two_factor")
+        self.assertFalse(result.retry_attempted)
+        self.assertFalse(result.should_publish_status)
+        getter.assert_not_called()
+
+    def test_continue_expected_checkpoint_finalizes_without_password(self) -> None:
+        device, _selectors = configured_device()
+        getter = Mock(return_value=credentials())
+        expected_username = "random_expected"
+        device.hierarchies = [CONTINUE_AS_XML, CHECKPOINT_XML, CHECKPOINT_XML]
+
+        result = run_login_provisioning_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username=expected_username,
+            credentials_getter=getter,
+            initial_signals={**CONTINUE_SIGNALS, "suggested_username": expected_username},
+        )
+
+        self.assertEqual(result.final_outcome, "checkpoint")
+        self.assertEqual(result.dashboard_action_type, "resolve_checkpoint")
+        self.assertFalse(result.retry_attempted)
+        self.assertFalse(result.should_publish_status)
+        getter.assert_not_called()
+
     def test_previous_canceled_clone_reusable_uses_another_profile_then_login(self) -> None:
         device, selectors = configured_device()
         device.hierarchies = [CONTINUE_AS_XML, LOGIN_FORM_XML, LOGIN_FORM_XML, CONNECTED_XML]

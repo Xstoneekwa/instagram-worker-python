@@ -176,6 +176,19 @@ Post-submit policy future :
   `post_action_screen_type=login_form_empty`, `ready_for_password_smoke=true`,
   `would_submit_password=false`, `would_publish=false`. Aucun password, aucun
   login, aucun Vault read, aucun publish.
+- Entry 2E-5J-2C : smoke no-password Cas B `Continue as expected account`.
+  Pre-check device OK, `expected_username=cinema_catchup`,
+  `suggested_username=cinema_catchup`, router
+  `continue_expected_account`. Tap controle `Continue` execute une seule fois,
+  resolution `selector_text`; post-action pre-login probe `unknown`, mais
+  classification UI login `connected` / home feed. Aucun password, aucun tap
+  `Log in`, aucun credential, aucun Vault read, aucun publish.
+- Mini patch 2E-5J-2C : apres `Continue`, l'orchestrator normalise le cas
+  pre-login probe `unknown` + classifier `connected` en
+  `final_outcome=connected`, `password_required=false`,
+  `ready_for_password_smoke=false`, sans credential, sans retry password et sans
+  publish par defaut. La meme passerelle couvre `needs_2fa`, `checkpoint` et
+  `login_failed` comme status candidates post-action.
 - Entry 2E-5J-2B-1 : audit lifecycle read-only. Les statuts existants couvrent
   `client_instagram_accounts` login/provisioning/onboarding,
   `client_subscriptions` active/paused/cancelled/expired,
@@ -296,8 +309,9 @@ Ordre recommande :
 1. Confirmer explicitement le lifecycle canceled/stopped/archived du compte
    suggere actuellement visible via un helper lookup read-only explicite, ou
    afficher directement `login_form_empty` sur device idle.
-2. Preparer le smoke password `cinema_catchup` via flow securise
-   `instagram-credentials` -> Vault, jamais via chat/prompt/shell history visible.
+2. Capturer/valider un autre cas d'ecran avant password smoke; si `Continue`
+   mene a `connected`, le provisioning pourra passer a connected sans password
+   via un futur publish runtime approuve.
 3. Definir le modele durable lifecycle compte + `clone_reuse_allowed` dans la
    DB/dashboard, sans hardcode username.
 4. Integration provisioner runtime derriere flags.
