@@ -1985,6 +1985,54 @@ screenshot, session_cookie
 Les incidents credentials/checkpoint/2FA/device/jobs restent non supportes en
 V1 et retournent `unsupported_incident_type` sans creer d'action.
 
+## Entry 2F-2 CLI reconciliation incidents -> actions
+
+Entry 2F-2 ajoute `incident_dashboard_action_sync.py`, un CLI/job local de
+reconciliation. Il selectionne les incidents `account_incidents` en
+`open`/`acknowledged` puis appelle la RPC 2F-1
+`sync_account_incident_dashboard_action(...)`.
+
+Flags :
+
+```text
+INCIDENT_DASHBOARD_SYNC_ENABLED=false
+INCIDENT_DASHBOARD_SYNC_LIMIT=50
+INCIDENT_DASHBOARD_SYNC_FAIL_OPEN=true
+```
+
+Commandes :
+
+```bash
+python3 incident_dashboard_action_sync.py --limit 50
+python3 incident_dashboard_action_sync.py --dry-run --limit 50
+python3 incident_dashboard_action_sync.py --force --dry-run
+```
+
+Garanties :
+
+- flag off -> aucun HTTP, summary `disabled`;
+- `--dry-run` ne modifie pas la DB et n'appelle pas la RPC;
+- `--force` sert aux executions manuelles controlees;
+- aucun runtime runner/sender/orchestrator n'est appele;
+- aucun webhook Slack/Discord n'est appele;
+- la limite est clampée entre `1` et `200`;
+- les erreurs par incident restent fail-open par defaut.
+
+Le CLI ne copie pas de metadata incident brute. Il transmet seulement a la RPC
+une metadata minimale :
+
+```json
+{
+  "source": "incident_dashboard_action_sync",
+  "run_id": "incident-dashboard-sync:<uuid>"
+}
+```
+
+La RPC SQL garde la responsabilite du mapping, du dedupe account-level et de la
+whitelist metadata. Les secrets, passwords, `secret_ref`, payload Vault, tokens,
+cookies, webhooks, XML brut, screenshots et identifiants device ne doivent
+jamais apparaitre dans les logs ou summaries.
+
 ## Remote Secrets
 
 Remote Edge Function secrets must be configured on the Supabase project before

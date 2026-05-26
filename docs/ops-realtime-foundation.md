@@ -726,6 +726,64 @@ Suites prevues :
 - 2F-3 : wiring optionnel derriere flag apres validation dedupe;
 - credentials/checkpoint/2FA/device/jobs restent des mappings futurs.
 
+## Entry 2F-2 Incident Dashboard Action Reconciliation CLI
+
+Entry 2F-2 ajoute le job local `incident_dashboard_action_sync.py`. Il lit les
+incidents ORF actifs (`open`, `acknowledged`) et appelle la RPC 2F-1
+`sync_account_incident_dashboard_action(...)` pour projeter les incidents
+supportes vers `account_dashboard_actions`.
+
+Ce job reste hors hot path runtime :
+
+- aucun appel depuis `runner.py`;
+- aucun changement `account_identity_guard.py` ou `runtime_incidents.py`;
+- aucun sender/orchestrator, Edge Function, dashboard UI, webhook ou run device.
+
+Flags :
+
+```text
+INCIDENT_DASHBOARD_SYNC_ENABLED=false
+INCIDENT_DASHBOARD_SYNC_LIMIT=50
+INCIDENT_DASHBOARD_SYNC_FAIL_OPEN=true
+```
+
+Utilisation manuelle :
+
+```bash
+python3 incident_dashboard_action_sync.py --limit 50
+python3 incident_dashboard_action_sync.py --dry-run --limit 50
+python3 incident_dashboard_action_sync.py --force --dry-run
+```
+
+Comportement :
+
+- flag off -> summary `disabled`, aucun HTTP;
+- `--force` permet une execution manuelle meme si le flag est off;
+- `--dry-run` liste les candidats sans appeler la RPC;
+- la limite est clampée entre `1` et `200`;
+- les erreurs RPC par incident sont fail-open par defaut et n'arretent pas les
+  incidents suivants.
+
+Securite :
+
+- le job utilise `SUPABASE_URL` et `SUPABASE_SERVICE_ROLE_KEY`, mais ne log jamais
+  la cle service-role;
+- il ne copie jamais `incident.metadata` cote Python;
+- la RPC SQL reste responsable du mapping, du dedupe et de la whitelist metadata;
+- aucun password, `secret_ref`, payload Vault, token, cookie, webhook, XML brut,
+  screenshot ou identifiant device ne doit apparaitre dans les summaries/logs.
+
+Relation Slack/Discord :
+
+`incident_dashboard_action_sync.py` est independant de
+`incident_notifications.py`. Le premier cree/synchronise des actions dashboard;
+le second gere l'alerting Slack/Discord et l'audit
+`account_incident_notifications`.
+
+Un futur 2F-2B/2F-3 pourra ajouter un template `launchd`/cron ou un wiring
+optionnel derriere flag. Entry 2F-2 ne l'installe pas et ne le lance pas en
+continu.
+
 ## ORF-2 Runtime Integration
 
 ORF-2 adds opt-in, best-effort Python runtime helpers for low-volume worker

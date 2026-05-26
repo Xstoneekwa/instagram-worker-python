@@ -82,6 +82,11 @@ RUNTIME_INCIDENTS_INCLUDE_DEBUG_METADATA = _env_bool(
     False,
 )
 
+# Entry 2F-2 incident -> dashboard action reconciliation is opt-in.
+INCIDENT_DASHBOARD_SYNC_ENABLED = _env_bool("INCIDENT_DASHBOARD_SYNC_ENABLED", False)
+INCIDENT_DASHBOARD_SYNC_LIMIT = _env_int("INCIDENT_DASHBOARD_SYNC_LIMIT", 50)
+INCIDENT_DASHBOARD_SYNC_FAIL_OPEN = _env_bool("INCIDENT_DASHBOARD_SYNC_FAIL_OPEN", True)
+
 # Entry 2E-4A Instagram account status publisher is isolated and opt-in.
 INSTAGRAM_ACCOUNT_STATUS_PUBLISH_ENABLED = _env_bool(
     "INSTAGRAM_ACCOUNT_STATUS_PUBLISH_ENABLED",
