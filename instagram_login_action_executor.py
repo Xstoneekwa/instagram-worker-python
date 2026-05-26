@@ -821,6 +821,7 @@ def _safe_login_screen_signals(hierarchy_xml: str | None) -> dict[str, Any]:
     signals.pop("has_password_field", None)
     signals.pop("continue_password_only", None)
     signals.pop("password_required", None)
+    signals.pop("password_required_dialog_present", None)
     signals.pop("password_field_editable_present", None)
     signals.pop("forgot_password_present", None)
     signals.pop("ready_for_password_submit", None)

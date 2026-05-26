@@ -374,6 +374,23 @@ Post-submit policy future :
   Le post-submit a montre un etat non classable avec seulement un label safe
   `OK`, sans signal connected/2FA/checkpoint/login_failed exploitable. No-leak
   confirme; aucune ecriture status Supabase.
+- Entry 2E-5P-2 Password required dialog : la popup Instagram
+  `Password required` / `Enter your password to continue.` / `OK` est maintenant
+  un cas explicite `password_required_dialog`, avec aliases FR documentes
+  (`Mot de passe requis`, `Saisissez votre mot de passe pour continuer`, `OK`).
+  L'executor password stoppe avant submit si une lecture accessible prouve que le
+  champ password est vide (`password_input_not_confirmed`). Si la popup apparait
+  apres submit, recovery bornee : tap `OK` une fois, refocus, refill via
+  `SecretValue.reveal_for_login_executor()` dans l'executor, second `Log in`
+  unique. Si la popup reapparait :
+  `final_outcome=password_input_failed`, aucun retry supplementaire. Le mapping
+  orchestrateur conserve `password_input_missing_or_not_accepted` /
+  `password_input_failed` sans les replier en `unknown`, sans publish par
+  defaut. Smoke reel post-patch : la popup n'etait plus visible; app_start a
+  d'abord stoppe safe sur preparation `unknown`, puis l'ecran s'est stabilise en
+  `continue_as_candidate`; une relance a tape `Continue` une seule fois et a
+  stoppe safe sur `unknown_login_screen` pendant transition. Aucun submit
+  supplementaire, aucun publish/status write.
 - Entry 2E-5J-2B-1 : audit lifecycle read-only. Les statuts existants couvrent
   `client_instagram_accounts` login/provisioning/onboarding,
   `client_subscriptions` active/paused/cancelled/expired,

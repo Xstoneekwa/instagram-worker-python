@@ -768,6 +768,32 @@ def run_login_provisioning_flow(
         actions_taken.append("login_form_submit_retry")
 
     outcome = _password_result_outcome(password_result)
+    if outcome in {"password_input_missing_or_not_accepted", "password_input_failed"}:
+        return _finalize(
+            ok=False,
+            completed=True,
+            final_outcome=outcome,
+            reason=getattr(password_result, "post_submit_probe_reason", None) or outcome,
+            failure_reason=outcome,
+            final_login_status="logged_out",
+            final_provisioning_status="login_pending",
+            final_onboarding_status="credentials_submitted",
+            retry_attempted=retry_attempted,
+            retry_count=retry_count,
+            dashboard_action_type="retry_provisioning",
+            should_publish_status=False,
+            account_id=safe_account_id,
+            expected_username=safe_expected_username,
+            actions_taken=actions_taken,
+            timings=_merge_timings(timings, password_result.timings),
+            warnings=[*warnings, *password_result.warnings],
+            extra_metadata={**_flow_metadata(previous_account_lifecycle), **old_logged_in_metadata, **post_continue_metadata},
+            total_start=total_start,
+            timer=timer,
+            publisher=publisher,
+            publish_enabled=publish_enabled,
+        )
+
     if password_result.failure_reason and outcome == "unknown":
         return _finalize(
             ok=False,
@@ -1833,6 +1859,8 @@ def _should_retry_password_result(result: Any, retry_count: int, max_retries: in
 
 def _password_result_outcome(result: Any) -> str:
     raw = str(getattr(result, "post_submit_outcome", "") or "unknown")
+    if raw in {"password_input_missing_or_not_accepted", "password_input_failed"}:
+        return raw
     normalized = normalize_login_probe_outcome(raw)
     return str(normalized.value)
 

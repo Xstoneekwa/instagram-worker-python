@@ -3575,6 +3575,65 @@ Relance 2E-5P 2026-05-27 avec preparation `continue_as_candidate` :
   token/header, aucun XML brut, aucun screenshot path et aucune ecriture status
   Supabase.
 
+## Entry 2E-5P-2 Password Required Dialog
+
+Entry 2E-5P-2 traite explicitement la popup Instagram post-submit :
+`Password required` / `Enter your password to continue.` / `OK`.
+
+Detection :
+
+- `extract_login_screen_signals_from_hierarchy(...)` expose
+  `screen_type=password_required_dialog`,
+  `password_required_dialog_present=true` et `has_ok_button=true`;
+- `probe_login_ui_from_hierarchy(...)` retourne
+  `reason=password_required_dialog` avec outcome `unknown`, afin de ne pas
+  classer ce cas en connected/2FA/checkpoint/login_failed;
+- aliases documentes : `Mot de passe requis`,
+  `Saisissez votre mot de passe pour continuer`, `OK`.
+
+Pre-submit guard :
+
+- l'executor password continue a reveler le secret uniquement via
+  `SecretValue.reveal_for_login_executor()`;
+- si l'accessibilite expose clairement un champ password vide apres injection,
+  l'executor stoppe avant `Log in` avec
+  `password_input_not_confirmed`;
+- si la valeur masquee n'est pas lisible, le signal safe reste
+  `input_action_reported_success=true` tant qu'aucune erreur input n'est levee.
+
+Recovery bornee :
+
+- si la popup `password_required_dialog` apparait apres submit :
+  tap `OK` une seule fois;
+- refocus password, clear/refill via `SecretValue` uniquement dans l'executor;
+- second tap `Log in` unique;
+- `max_password_required_retry=1`;
+- si la popup reapparait : `final_outcome=password_input_failed`, aucun retry
+  supplementaire.
+
+Metadata safe :
+
+- `password_required_dialog_detected`;
+- `password_required_retry_attempted`;
+- `password_required_retry_count`;
+- `password_refill_attempted`;
+- `second_submit_executed`;
+- jamais password, `secret_ref` complet, UUID Vault, token/header, XML brut ou
+  screenshot path.
+
+Smoke reel 2026-05-27 :
+
+- la popup visuelle observee precedemment a ete identifiee comme
+  `password_required_dialog`;
+- apres patch, le premier smoke est reparti par `app_start`, mais l'observation
+  immediate a stoppe safe en `screen_preparation_failed`; l'ecran s'est ensuite
+  stabilise passivement en `continue_as_candidate`;
+- une relance depuis `continue_as_candidate` stabilise a execute un seul tap
+  `Continue`, puis a stoppe safe en `unknown_login_screen` pendant la transition;
+- aucune popup password-required n'etait visible au moment du smoke patch, donc
+  la recovery OK/refill/retry n'a pas ete exercee en reel;
+- aucun password en clair, aucun publish et aucune ecriture status Supabase.
+
 Prochaine etape :
 
 - l'operateur doit soumettre/mettre a jour les credentials via le flow securise

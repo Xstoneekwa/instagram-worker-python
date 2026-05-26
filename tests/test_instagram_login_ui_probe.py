@@ -54,6 +54,23 @@ class InstagramLoginUiProbeTest(unittest.TestCase):
 
         self.assertEqual(outcome, LoginProbeOutcome.LOGIN_FAILED)
 
+    def test_detects_password_required_dialog_signals(self) -> None:
+        xml = (
+            '<node text="Password required" />'
+            '<node text="Enter your password to continue." />'
+            '<node text="OK" />'
+        )
+
+        result = probe_login_ui_from_hierarchy(xml)
+        signals = extract_login_screen_signals_from_hierarchy(xml)
+
+        self.assertEqual(result.outcome, LoginProbeOutcome.UNKNOWN)
+        self.assertEqual(result.reason, "password_required_dialog")
+        self.assertTrue(result.metadata["password_required_dialog_present"])
+        self.assertEqual(signals["screen_type"], "password_required_dialog")
+        self.assertTrue(signals["password_required_dialog_present"])
+        self.assertTrue(signals["has_ok_button"])
+
     def test_detects_connected_with_sufficient_connected_signals(self) -> None:
         xml = (
             '<node content-desc="Home" />'

@@ -14,12 +14,13 @@ from typing import Any, Callable
 
 from instagram_credentials_runtime_access import SecretValue, redact_credentials_payload
 from instagram_login_status_classifier import clean_login_probe_metadata
-from instagram_login_ui_probe import probe_login_ui_from_hierarchy
+from instagram_login_ui_probe import extract_login_screen_signals_from_hierarchy, probe_login_ui_from_hierarchy
 
 
 ACTION_LOGIN_FORM_SUBMIT = "login_form_submit"
 NO_ACTION = "no_action"
 MAX_POST_SUBMIT_WAIT_MS = 3000
+MAX_PASSWORD_REQUIRED_RETRY = 1
 
 Timer = Callable[[], float]
 Sleeper = Callable[[float], None]
@@ -51,6 +52,7 @@ def execute_login_form_credentials(
     prevalidated_signals: dict | None = None,
     post_submit_wait_ms: int = 1000,
     dump_after_submit: bool = True,
+    max_password_required_retry: int = MAX_PASSWORD_REQUIRED_RETRY,
     timer: Timer | None = None,
     sleeper: Sleeper | None = None,
 ) -> LoginPasswordExecutionResult:
@@ -104,6 +106,11 @@ def execute_login_form_credentials(
 
     password_only_mode = _is_password_only_mode(prevalidated_signals)
     overlay_recovery_allowed = _overlay_recovery_allowed(prevalidated_signals)
+    password_required_retry_count = 0
+    password_required_dialog_detected = False
+    password_required_retry_attempted = False
+    password_refill_attempted = False
+    second_submit_executed = False
 
     start = timer()
     targets = _resolve_login_form_targets(d, password_only_mode=password_only_mode)
@@ -178,6 +185,23 @@ def execute_login_form_credentials(
             expected_username=username,
         )
 
+    if _password_field_reads_empty(targets["password"]):
+        timings["total_ms"] = _elapsed_ms(total_start, timer())
+        return _result(
+            ok=False,
+            executed=False,
+            action=ACTION_LOGIN_FORM_SUBMIT,
+            reason="password_input_not_confirmed",
+            failure_reason="password_input_not_confirmed",
+            username_entered=username_entered,
+            password_entered=password_entered,
+            timings=timings,
+            warnings=warnings,
+            expected_username=username,
+            password_only_mode=password_only_mode,
+            input_action_reported_success=password_entered,
+        )
+
     try:
         start = timer()
         _click_target(targets["login_button"])
@@ -237,10 +261,61 @@ def execute_login_form_credentials(
             start = timer()
             hierarchy_xml = _dump_hierarchy_once(d)
             timings["post_submit_dump_ms"] = _elapsed_ms(start, timer())
-            probe = probe_login_ui_from_hierarchy(hierarchy_xml, stage="login_password_form_executor")
-            post_submit_outcome = str(probe.outcome.value)
-            post_submit_screen_type = post_submit_outcome
-            post_submit_probe_reason = str(probe.reason or "post_submit_observed")
+            observed = _classify_post_submit_hierarchy(hierarchy_xml)
+            password_required_dialog_detected = observed["password_required_dialog_present"]
+            if password_required_dialog_detected and max(0, int(max_password_required_retry or 0)) > 0:
+                password_required_retry_attempted = True
+                password_required_retry_count = 1
+                warnings.append("password_required_dialog_retry_once")
+                if _tap_ok_once(d):
+                    try:
+                        password_refill_attempted = True
+                        start = timer()
+                        _focus_clear_and_set_text(targets["password"], revealed_password)
+                        timings["password_input_ms"] += _elapsed_ms(start, timer())
+                        if _password_field_reads_empty(targets["password"]):
+                            failure_reason = "password_input_not_confirmed"
+                            post_submit_outcome = "password_input_failed"
+                            post_submit_screen_type = "password_input_failed"
+                            post_submit_probe_reason = "password_input_not_confirmed"
+                        else:
+                            start = timer()
+                            _click_target(targets["login_button"])
+                            second_submit_executed = True
+                            submit_tapped = True
+                            timings["submit_tap_ms"] += _elapsed_ms(start, timer())
+                            start = timer()
+                            hierarchy_xml = _dump_hierarchy_once(d)
+                            timings["post_submit_dump_ms"] += _elapsed_ms(start, timer())
+                            observed = _classify_post_submit_hierarchy(hierarchy_xml)
+                            if observed["password_required_dialog_present"]:
+                                failure_reason = "password_input_failed"
+                                post_submit_outcome = "password_input_failed"
+                                post_submit_screen_type = "password_required_dialog"
+                                post_submit_probe_reason = "password_required_dialog_reappeared"
+                            else:
+                                post_submit_outcome = observed["outcome"]
+                                post_submit_screen_type = observed["screen_type"]
+                                post_submit_probe_reason = observed["reason"]
+                    except Exception:
+                        failure_reason = "password_input_failed"
+                        post_submit_outcome = "password_input_failed"
+                        post_submit_screen_type = "password_input_failed"
+                        post_submit_probe_reason = "password_required_retry_failed"
+                else:
+                    failure_reason = "password_input_failed"
+                    post_submit_outcome = "password_input_failed"
+                    post_submit_screen_type = "password_required_dialog"
+                    post_submit_probe_reason = "password_required_ok_not_found"
+            elif password_required_dialog_detected:
+                failure_reason = "password_input_missing_or_not_accepted"
+                post_submit_outcome = "password_input_missing_or_not_accepted"
+                post_submit_screen_type = "password_required_dialog"
+                post_submit_probe_reason = "password_required_dialog"
+            else:
+                post_submit_outcome = observed["outcome"]
+                post_submit_screen_type = observed["screen_type"]
+                post_submit_probe_reason = observed["reason"]
         except Exception:
             timings["post_submit_dump_ms"] = _elapsed_ms(start, timer())
             post_submit_probe_reason = "post_submit_dump_failed"
@@ -265,6 +340,12 @@ def execute_login_form_credentials(
         warnings=warnings,
         expected_username=username,
         password_only_mode=password_only_mode,
+        input_action_reported_success=password_entered,
+        password_required_dialog_detected=password_required_dialog_detected,
+        password_required_retry_attempted=password_required_retry_attempted,
+        password_required_retry_count=password_required_retry_count,
+        password_refill_attempted=password_refill_attempted,
+        second_submit_executed=second_submit_executed,
     )
 
 
@@ -402,6 +483,61 @@ def _click_target(target: Any) -> None:
     click()
 
 
+def _password_field_reads_empty(target: Any) -> bool:
+    info = _selector_info(target)
+    if not info:
+        return False
+    for key in ("text", "contentDescription", "content-desc"):
+        if key not in info:
+            continue
+        value = str(info.get(key) or "").strip()
+        if value == "":
+            return True
+        if value.lower() in {"password", "mot de passe"}:
+            return True
+        return False
+    return False
+
+
+def _selector_info(target: Any) -> dict[str, Any]:
+    try:
+        info = getattr(target, "info", None)
+        if callable(info):
+            info = info()
+    except Exception:
+        return {}
+    return dict(info) if isinstance(info, dict) else {}
+
+
+def _classify_post_submit_hierarchy(hierarchy_xml: str) -> dict[str, Any]:
+    probe = probe_login_ui_from_hierarchy(hierarchy_xml, stage="login_password_form_executor")
+    signals = extract_login_screen_signals_from_hierarchy(hierarchy_xml)
+    if signals.get("password_required_dialog_present") is True:
+        return {
+            "outcome": "password_input_missing_or_not_accepted",
+            "screen_type": "password_required_dialog",
+            "reason": "password_required_dialog",
+            "password_required_dialog_present": True,
+        }
+    return {
+        "outcome": str(probe.outcome.value),
+        "screen_type": str(probe.outcome.value),
+        "reason": str(probe.reason or "post_submit_observed"),
+        "password_required_dialog_present": False,
+    }
+
+
+def _tap_ok_once(d: Any) -> bool:
+    target = _find_unique_target(d, ({"text": "OK"}, {"description": "OK"}), missing_reason="ok_button_not_found")
+    if target["failure_reason"]:
+        return False
+    try:
+        _click_target(target["target"])
+        return True
+    except Exception:
+        return False
+
+
 def _is_password_only_mode(signals: dict | None) -> bool:
     return isinstance(signals, dict) and signals.get("screen_type") == "continue_password_only"
 
@@ -504,6 +640,12 @@ def _result(
     warnings: list[str] | None = None,
     expected_username: str = "",
     password_only_mode: bool = False,
+    input_action_reported_success: bool = False,
+    password_required_dialog_detected: bool = False,
+    password_required_retry_attempted: bool = False,
+    password_required_retry_count: int = 0,
+    password_refill_attempted: bool = False,
+    second_submit_executed: bool = False,
 ) -> LoginPasswordExecutionResult:
     safe_metadata = clean_login_probe_metadata(
         redact_credentials_payload(
@@ -515,6 +657,12 @@ def _result(
                 "expected_username": expected_username,
                 "post_submit_outcome": post_submit_outcome,
                 "password_only_mode": password_only_mode,
+                "input_action_reported_success": input_action_reported_success,
+                "password_required_dialog_detected": password_required_dialog_detected,
+                "password_required_retry_attempted": password_required_retry_attempted,
+                "password_required_retry_count": password_required_retry_count,
+                "password_refill_attempted": password_refill_attempted,
+                "second_submit_executed": second_submit_executed,
             }
         )
     )

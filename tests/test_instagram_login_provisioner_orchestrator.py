@@ -432,6 +432,34 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertEqual(result.final_provisioning_status, "ready")
         self.assertEqual(selectors["login"].click_calls, 1)
 
+    def test_password_required_outcome_does_not_collapse_to_unknown(self) -> None:
+        device, _selectors = configured_device(CONNECTED_XML)
+        password_result = type(
+            "PasswordResult",
+            (),
+            {
+                "failure_reason": "password_input_missing_or_not_accepted",
+                "post_submit_outcome": "password_input_missing_or_not_accepted",
+                "post_submit_probe_reason": "password_required_dialog",
+                "timings": {},
+                "warnings": [],
+            },
+        )()
+
+        with patch.object(provisioner_orchestrator, "execute_login_form_credentials", return_value=password_result):
+            result = self.run_flow(
+                device,
+                account_id=ACCOUNT_ID,
+                expected_username=USERNAME,
+                credentials_getter=Mock(return_value=credentials()),
+                initial_signals=LOGIN_FORM_SIGNALS,
+            )
+
+        self.assertEqual(result.final_outcome, "password_input_missing_or_not_accepted")
+        self.assertEqual(result.failure_reason, "password_input_missing_or_not_accepted")
+        self.assertEqual(result.reason, "password_required_dialog")
+        self.assertFalse(result.should_publish_status)
+
     def test_login_form_needs_2fa_status_no_retry(self) -> None:
         result = self._run_login_form(NEEDS_2FA_XML)
 

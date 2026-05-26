@@ -34,6 +34,11 @@ NEEDS_2FA_XML = '<node text="Enter code" /><node text="authentication code" />'
 CHECKPOINT_XML = '<node text="Help us confirm it’s you" /><node text="Verify your account" />'
 LOGIN_FAILED_XML = '<node text="Sorry, your password was incorrect. Please try again." />'
 SENSITIVE_XML = '<node text="password secret_ref Vault token emulator-5554 screenshot" />'
+PASSWORD_REQUIRED_XML = (
+    '<node text="Password required" />'
+    '<node text="Enter your password to continue." />'
+    '<node text="OK" />'
+)
 
 
 class TrackingSecretValue(SecretValue):
@@ -95,6 +100,7 @@ class FakeDevice:
         self.selector_calls: list[dict] = []
         self.selectors: dict[tuple[str, str], FakeSelector] = {}
         self.press_calls: list[str] = []
+        self.hierarchies: list[str] | None = None
 
     def add_selector(self, key: str, value: str, selector: FakeSelector) -> FakeSelector:
         self.selectors[(key, value)] = selector
@@ -109,6 +115,10 @@ class FakeDevice:
         self.dump_calls += 1
         if self.dump_exc:
             raise self.dump_exc
+        if self.hierarchies is not None:
+            if len(self.hierarchies) == 1:
+                return self.hierarchies[0]
+            return self.hierarchies.pop(0)
         return self.hierarchy
 
     def press(self, key: str) -> None:
@@ -505,6 +515,98 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
         result = self._execute_with_post_xml(LOGIN_FAILED_XML)
 
         self.assertEqual(result.post_submit_outcome, "login_failed")
+
+    def test_post_submit_password_required_dialog_detected_without_retry(self) -> None:
+        device, _username, _password_selector, _login = configured_device(PASSWORD_REQUIRED_XML)
+        device.add_selector("text", "OK", FakeSelector(1))
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=LOGIN_FORM_SIGNALS,
+            max_password_required_retry=0,
+            sleeper=Mock(),
+        )
+
+        self.assertEqual(result.post_submit_outcome, "password_input_missing_or_not_accepted")
+        self.assertEqual(result.post_submit_screen_type, "password_required_dialog")
+        self.assertEqual(result.failure_reason, "password_input_missing_or_not_accepted")
+        self.assertTrue(result.safe_metadata["password_required_dialog_detected"])
+        self.assertFalse(result.safe_metadata["password_required_retry_attempted"])
+
+    def test_password_required_dialog_retries_once_after_ok_refill(self) -> None:
+        device, _username, password_selector, login = configured_device(PASSWORD_REQUIRED_XML)
+        ok = device.add_selector("text", "OK", FakeSelector(1))
+        device.hierarchies = [PASSWORD_REQUIRED_XML, CONNECTED_XML]
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=PASSWORD_ONLY_SIGNALS,
+            sleeper=Mock(),
+        )
+
+        self.assertEqual(result.post_submit_outcome, "connected")
+        self.assertEqual(login.click_calls, 2)
+        self.assertEqual(ok.click_calls, 1)
+        self.assertEqual(password_selector.set_text_calls, [PASSWORD, PASSWORD])
+        self.assertTrue(result.safe_metadata["password_required_retry_attempted"])
+        self.assertEqual(result.safe_metadata["password_required_retry_count"], 1)
+        self.assertTrue(result.safe_metadata["password_refill_attempted"])
+        self.assertTrue(result.safe_metadata["second_submit_executed"])
+
+    def test_password_required_dialog_reappears_after_retry_no_second_retry(self) -> None:
+        device, _username, _password_selector, login = configured_device(PASSWORD_REQUIRED_XML)
+        ok = device.add_selector("text", "OK", FakeSelector(1))
+        device.hierarchies = [PASSWORD_REQUIRED_XML, PASSWORD_REQUIRED_XML]
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=PASSWORD_ONLY_SIGNALS,
+            sleeper=Mock(),
+        )
+
+        self.assertEqual(result.post_submit_outcome, "password_input_failed")
+        self.assertEqual(result.failure_reason, "password_input_failed")
+        self.assertEqual(login.click_calls, 2)
+        self.assertEqual(ok.click_calls, 1)
+        self.assertEqual(result.safe_metadata["password_required_retry_count"], 1)
+
+    def test_empty_password_field_readback_blocks_submit(self) -> None:
+        device, _username, password_selector, login = configured_device()
+        password_selector.info = {"text": ""}
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=LOGIN_FORM_SIGNALS,
+            sleeper=Mock(),
+        )
+
+        self.assertEqual(result.failure_reason, "password_input_not_confirmed")
+        self.assertFalse(result.executed)
+        self.assertEqual(login.click_calls, 0)
+        self.assertTrue(result.safe_metadata["input_action_reported_success"])
+
+    def test_masked_password_field_readback_allows_submit(self) -> None:
+        device, _username, password_selector, login = configured_device(CONNECTED_XML)
+        password_selector.info = {"text": "••••••••"}
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=LOGIN_FORM_SIGNALS,
+            sleeper=Mock(),
+        )
+
+        self.assertTrue(result.executed)
+        self.assertEqual(login.click_calls, 1)
 
     def test_result_safe_dict_contains_no_password(self) -> None:
         device, _username, _password_selector, _login = configured_device(SENSITIVE_XML)

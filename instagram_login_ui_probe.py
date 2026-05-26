@@ -45,6 +45,12 @@ CHECKPOINT_PATTERNS = (
     "suspicious login attempt",
     "verify your account",
 )
+PASSWORD_REQUIRED_DIALOG_PATTERNS = (
+    "password required",
+    "enter your password to continue",
+    "mot de passe requis",
+    "saisissez votre mot de passe pour continuer",
+)
 LOGGED_OUT_PATTERNS = (
     "log in to instagram",
     "username",
@@ -186,6 +192,8 @@ def extract_login_screen_signals_from_hierarchy(
     )
     has_password_field = "password" in text
     has_login_button = "log in" in text
+    has_ok_button = _has_phrase(text, "ok")
+    has_password_required_dialog = _contains_any(text, PASSWORD_REQUIRED_DIALOG_PATTERNS) and has_ok_button
     suggested_username = _extract_suggested_username(text)
     available_usernames = _extract_available_usernames(text)
     normalized_expected_username = _normalize_username_candidate(expected_username or "")
@@ -197,7 +205,9 @@ def extract_login_screen_signals_from_hierarchy(
     overlay_present = bool(overlay_type)
     transition_loading = _has_phrase(text, "loading")
 
-    if has_logout_confirmation_prompt and has_log_out and has_cancel:
+    if has_password_required_dialog:
+        screen_type = "password_required_dialog"
+    elif has_logout_confirmation_prompt and has_log_out and has_cancel:
         screen_type = "logout_confirmation_prompt"
     elif has_save_login_info_prompt and has_not_now and has_save_button:
         screen_type = "save_login_info_prompt"
@@ -248,6 +258,8 @@ def extract_login_screen_signals_from_hierarchy(
         "has_username_field": has_username_field,
         "has_password_field": has_password_field,
         "has_login_button": has_login_button,
+        "has_ok_button": has_ok_button,
+        "password_required_dialog_present": has_password_required_dialog,
         "username_editable_present": screen_type == "login_form_empty" and has_username_field,
         "password_field_editable_present": screen_type in {"login_form_empty", "continue_password_only"}
         and has_password_field,
@@ -300,6 +312,14 @@ def probe_login_ui_from_hierarchy(
             ok=False,
             reason="empty_hierarchy",
             metadata=metadata,
+        )
+
+    if _contains_any(text, PASSWORD_REQUIRED_DIALOG_PATTERNS):
+        return LoginUiProbeResult(
+            outcome=LoginProbeOutcome.UNKNOWN,
+            ok=False,
+            reason="password_required_dialog",
+            metadata={**metadata, "detection_reason": "password_required_dialog", "password_required_dialog_present": True},
         )
 
     for outcome, reason, patterns in (
