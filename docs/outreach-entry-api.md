@@ -3525,6 +3525,56 @@ Relance 2E-5P 2026-05-27 avec `app_start` obligatoire :
   token/header, aucun XML brut, aucun screenshot path, aucun publish et aucune
   ecriture status Supabase.
 
+Inspection 2E-5Q-1 2026-05-27 apres `screen_preparation_failed` :
+
+- pre-check OK : device unique, aucun process projet business actif;
+- inspection passive uniquement : `app_start`, wait `1500 ms`, dump/probe en
+  memoire, aucun tap, aucune saisie, aucun credential, aucun Vault read;
+- `app_start_attempted=true`, `app_start_ok=true`,
+  `package_name=com.instagram.android`, top activity Instagram modal;
+- l'ecran observe n'est pas `unknown` pendant cette inspection :
+  `screen_after_app_start=continue_as_candidate`;
+- labels safe visibles : compte attendu `cinema_catchup`, `Continue`,
+  `Use another profile`, `Create new account`, signaux Meta/Instagram;
+- grands signaux absents : password field, `Log in`, home/feed, profile,
+  checkpoint/2FA/error, loading/progress;
+- `classifier_outcome=unknown` reste attendu pour un ecran pre-login non final :
+  le routing screen type est reconnu, mais le classifier de statut login ne doit
+  pas le publier comme connected/2FA/checkpoint/failed;
+- cause probable du `unknown` precedent : etat transitoire/stale ou timing de
+  preparation lors de la relance 2E-5P, pas evidence d'un ecran connu mal classe;
+- patch code non applique. 2E-5P reste sans submit tant qu'un flow controle ne
+  confirme pas `continue_password_only` ou `login_form_empty`.
+
+Relance 2E-5P 2026-05-27 avec preparation `continue_as_candidate` :
+
+- pre-check OK : device unique, aucun runner/sender/follow/unfollow/outreach
+  projet actif;
+- credentials `cinema_catchup` inchanges et prets : metadata active,
+  provider Vault attendu, username confirme, secret chargeable;
+- `app_start_attempted=true`, `app_start_ok=true`,
+  `screen_after_app_start=continue_as_candidate`,
+  `preparation_flow_used=continue_as_candidate`;
+- action autorisee executee : un seul tap `Continue`;
+- reobserve passif post-Continue : `continue_password_only` avec username attendu
+  confirme, champ password et bouton `Log in`;
+- patch minimal executor : si une cible primaire unique (`text`) existe, une
+  strategie secondaire (`content-desc`) ambigue du meme libelle ne bloque plus
+  le submit. Les vrais doublons d'une meme strategie (`count > 1`) restent
+  refuses;
+- submit unique execute depuis `continue_password_only` : password saisi via
+  `SecretValue.reveal_for_login_executor()` dans l'executor uniquement, tap
+  `Log in` unique, aucun retry password;
+- resultat post-submit : `final_outcome=unknown`, `status_candidate=unknown`.
+  Le premier dump etait `logged_out`/session expired; un reobserve passif court
+  a ensuite donne un ecran `unknown` avec seulement un libelle safe `OK`, sans
+  signal connected, 2FA, checkpoint ou login_failed exploitable;
+- `submit_executed=true`, `password_submit_result=submitted_not_connected`,
+  `would_publish=false`, `published=false`;
+- aucun password, aucun `secret_ref` complet, aucun UUID Vault, aucun bearer
+  token/header, aucun XML brut, aucun screenshot path et aucune ecriture status
+  Supabase.
+
 Prochaine etape :
 
 - l'operateur doit soumettre/mettre a jour les credentials via le flow securise

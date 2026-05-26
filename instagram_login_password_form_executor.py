@@ -342,11 +342,11 @@ def _find_unique_target(
             continue
         count = _selector_count(selector)
         if count > 1:
+            if matches:
+                continue
             return {"target": None, "failure_reason": "ambiguous_login_form"}
         if count == 1:
             matches.append(selector)
-    if len(matches) > 1:
-        return {"target": None, "failure_reason": "ambiguous_login_form"}
     if not matches:
         return {"target": None, "failure_reason": missing_reason}
     return {"target": matches[0], "failure_reason": ""}

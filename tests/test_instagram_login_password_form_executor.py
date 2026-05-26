@@ -65,6 +65,7 @@ class FakeSelector:
         self.clear_calls = 0
         self.set_text_calls: list[str] = []
         self.click_failures_remaining = 0
+        self.info: dict | None = None
 
     def count(self) -> int:
         return self._count
@@ -371,6 +372,58 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
 
         self.assertEqual(result.failure_reason, "ambiguous_login_form")
         self.assertFalse(result.executed)
+
+    def test_text_and_description_for_same_target_are_deduped(self) -> None:
+        device = FakeDevice(CONNECTED_XML)
+        password_selector = device.add_selector("text", "Password", FakeSelector(1))
+        password_selector.info = {
+            "resourceName": "password",
+            "className": "android.widget.EditText",
+            "bounds": {"left": 100, "top": 900, "right": 980, "bottom": 1020},
+        }
+        password_description = device.add_selector("description", "Password", FakeSelector(1))
+        password_description.info = dict(password_selector.info)
+        login = device.add_selector("text", "Log in", FakeSelector(1))
+        login.info = {
+            "resourceName": "login",
+            "className": "android.widget.Button",
+            "bounds": {"left": 100, "top": 1100, "right": 980, "bottom": 1220},
+        }
+        login_description = device.add_selector("description", "Log in", FakeSelector(1))
+        login_description.info = dict(login.info)
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=PASSWORD_ONLY_SIGNALS,
+            sleeper=Mock(),
+        )
+
+        self.assertTrue(result.executed)
+        self.assertEqual(result.failure_reason, None)
+        self.assertEqual(password_selector.set_text_calls, [PASSWORD])
+        self.assertEqual(login.click_calls, 1)
+
+    def test_unique_primary_selector_ignores_ambiguous_secondary_selector(self) -> None:
+        device = FakeDevice(CONNECTED_XML)
+        password_selector = device.add_selector("text", "Password", FakeSelector(1))
+        device.add_selector("description", "Password", FakeSelector(1))
+        login = device.add_selector("text", "Log in", FakeSelector(1))
+        device.add_selector("description", "Log in", FakeSelector(2))
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=PASSWORD_ONLY_SIGNALS,
+            sleeper=Mock(),
+        )
+
+        self.assertTrue(result.executed)
+        self.assertEqual(result.failure_reason, None)
+        self.assertEqual(password_selector.set_text_calls, [PASSWORD])
+        self.assertEqual(login.click_calls, 1)
 
     def test_username_input_exception_returns_input_failed(self) -> None:
         device, username, _password_selector, login = configured_device()

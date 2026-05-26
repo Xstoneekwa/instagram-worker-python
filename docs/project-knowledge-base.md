@@ -348,6 +348,32 @@ Post-submit policy future :
   `final_outcome=unknown`, `would_publish=false`. Aucun password, aucune
   reference Vault complete, aucun token/header, aucun XML brut et aucune ecriture
   status Supabase.
+- Entry 2E-5Q-1 inspection safe 2026-05-27 : apres le `unknown` de preparation,
+  inspection passive app_start + wait `1500 ms` + dump/probe sans tap ni
+  credential. L'ecran observe est `continue_as_candidate`, top activity
+  Instagram modal, avec labels safe `cinema_catchup`, `Continue`,
+  `Use another profile`, `Create new account`, Meta/Instagram. Aucun signal
+  password, `Log in`, home/feed, profil, loading, checkpoint ou 2FA. Le
+  `classifier_outcome=unknown` est acceptable pour cet ecran pre-login non final:
+  le screen type de routing est reconnu, mais le classifier status ne doit pas
+  publier de connected/2FA/checkpoint/failed. Cause probable du `unknown`
+  precedent : etat transitoire/stale ou timing de preparation. Pas de patch code;
+  2E-5P reste bloque sans submit tant que le flow controle n'atteint pas
+  `continue_password_only` ou `login_form_empty`.
+- Entry 2E-5P relance screen-prep 2026-05-27 : le flow part de
+  `continue_as_candidate` attendu apres app_start, tape `Continue` une seule
+  fois, puis stabilise vers `continue_password_only`. Le submit est autorise
+  uniquement apres verification username attendu + champ password + bouton
+  `Log in`. Un patch minimal de `instagram_login_password_form_executor.py`
+  deduplique les strategies selector uniques (`text` puis `content-desc`) quand
+  la primaire est unique, tout en conservant le refus si une meme strategie
+  retourne plusieurs cibles. Submit reel execute une seule fois via
+  `SecretValue.reveal_for_login_executor()` dans l'executor; aucun retry
+  password, aucun publish. Resultat : `final_outcome=unknown`,
+  `status_candidate=unknown`, `password_submit_result=submitted_not_connected`.
+  Le post-submit a montre un etat non classable avec seulement un label safe
+  `OK`, sans signal connected/2FA/checkpoint/login_failed exploitable. No-leak
+  confirme; aucune ecriture status Supabase.
 - Entry 2E-5J-2B-1 : audit lifecycle read-only. Les statuts existants couvrent
   `client_instagram_accounts` login/provisioning/onboarding,
   `client_subscriptions` active/paused/cancelled/expired,
