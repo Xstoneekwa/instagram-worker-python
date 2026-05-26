@@ -313,6 +313,17 @@ Post-submit policy future :
   accepte. Aucun Vault password read runtime local, aucun password saisi, aucun
   tap `Log in`, aucun publish. Prochaine action : soumettre/mettre a jour les
   credentials via le flow securise `instagram-credentials`, jamais dans Cursor.
+- Entry 2E-5P retry 2026-05-26 : apres setup du token interne, credentials
+  `cinema_catchup` prets (`active`, version 1000, `reauth_required=true`,
+  provider Vault, reference de forme valide, username attendu confirme,
+  secret charge en memoire). Pre-check device OK (`emulator-5554` unique, aucun
+  runner/sender/follow/unfollow/outreach projet actif). Observation passive :
+  ecran initial `unknown`, donc non accepte. Stop safe avant
+  `SecretValue.reveal_for_login_executor()`, aucune saisie password, aucun tap
+  `Log in`, aucune publication HTTP et aucune ecriture de statut Supabase.
+  `final_outcome=unknown`,
+  `status_candidate=unknown_stop_safe_initial_screen_not_accepted`,
+  `would_publish=false`.
 - Entry 2E-5J-2B-1 : audit lifecycle read-only. Les statuts existants couvrent
   `client_instagram_accounts` login/provisioning/onboarding,
   `client_subscriptions` active/paused/cancelled/expired,

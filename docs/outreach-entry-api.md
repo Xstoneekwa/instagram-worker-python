@@ -3456,6 +3456,25 @@ Validation 2026-05-26 :
 - resultat : stop safe avant saisie password, aucun tap `Log in`, aucun Vault
   password expose, aucun publish.
 
+Retry 2026-05-26 apres synchronisation du token interne :
+
+- pre-check device OK : `emulator-5554` unique, aucun runner/sender/follow/
+  unfollow/outreach detecte dans les processus projet;
+- credentials safe check OK : metadata active pour `cinema_catchup`,
+  `credentials_version=1000`, `reauth_required=true`,
+  `secret_provider=supabase_vault`, forme de reference valide, username attendu
+  confirme et lecture Vault reussie en memoire uniquement;
+- observation passive device : ecran initial `unknown`, donc non accepte pour le
+  smoke password reel;
+- action executee : aucune. Le flow stoppe avant
+  `SecretValue.reveal_for_login_executor()`, avant saisie password et avant tap
+  `Log in`;
+- classification : `final_outcome=unknown`,
+  `status_candidate=unknown_stop_safe_initial_screen_not_accepted`,
+  `would_publish=false`;
+- aucune publication HTTP, aucune ecriture Supabase status, aucun runner hook,
+  aucun flow business.
+
 Prochaine etape :
 
 - l'operateur doit soumettre/mettre a jour les credentials via le flow securise
