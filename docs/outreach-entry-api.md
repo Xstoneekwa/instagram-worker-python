@@ -2585,17 +2585,129 @@ Registre dashboard/backend/BotApp futur :
   mais pas lire ni afficher le secret;
 - 2E-5H documente ce contrat seulement : aucun dashboard n'est construit ici.
 
-Entry 2E-5I futur :
+## Entry 2E-5I Controlled Password Form Executor
 
-- password form executor controle;
-- saisie username/password uniquement sur `login_form_empty` valide par
-  observation d'etat;
-- premier smoke limite a `cinema_catchup`;
-- aucun compte client reel;
-- mot de passe stocke seulement via `instagram-credentials` -> Supabase Vault;
-- jamais dans ChatGPT, prompt Cursor, shell history visible, git, logs,
-  screenshots ou XML.
-- apres test, changer le password.
+Entry 2E-5I ajoute `instagram_login_password_form_executor.py`, un executor
+controle capable de remplir username/password et de tapper `Log in` uniquement
+sur un formulaire deja valide comme `login_form_empty`. Cette etape reste
+mocks-only : aucun smoke reel, aucun login Instagram, aucun runner hook, aucun
+flow business, aucun run device, aucun HTTP publish et aucune ecriture Supabase.
+
+Conditions obligatoires avant saisie :
+
+- `prevalidated_signals.screen_type == login_form_empty`;
+- `has_username_field == true`;
+- `has_password_field == true`;
+- `has_login_button == true`;
+- aucun signal `ambiguous_login_form`;
+- `expected_username` non vide;
+- `password` est une instance `SecretValue`;
+- champs username/password et bouton `Log in` resolus comme cibles uniques.
+
+Reasons de refus 2E-5I :
+
+- `login_form_not_validated`;
+- `username_field_not_found`;
+- `password_field_not_found`;
+- `login_button_not_found`;
+- `ambiguous_login_form`;
+- `expected_username_missing`;
+- `password_secret_missing`;
+- `password_secret_invalid`;
+- `input_failed`;
+- `submit_failed`;
+- `post_submit_dump_failed`.
+
+Securite password/no-leak :
+
+- le password n'est jamais converti via `str(...)` ou `repr(...)`;
+- le password est obtenu uniquement via
+  `SecretValue.reveal_for_login_executor()`;
+- le password n'est pas stocke dans le resultat, `safe_metadata`, exception,
+  log, XML, screenshot ou doc;
+- aucun `secret_ref`, Vault UUID, token, cookie, service-role key, Authorization
+  header, XML brut, screenshot ou device id n'est expose par le resultat;
+- la sortie safe contient seulement action, reason/failure_reason,
+  `expected_username`, timings et outcome post-submit.
+
+Interaction UI :
+
+- validation des signaux prealables;
+- focus/clear/set_text username;
+- focus/clear/set_text password;
+- tap `Log in`;
+- attente post-submit clampee `0..3000 ms`;
+- dump post-submit optionnel;
+- classification observationnelle uniquement.
+
+Observation post-submit :
+
+- outcomes observes : `connected`, `needs_2fa`, `checkpoint`,
+  `login_failed`, `unknown`;
+- aucune publication status dans 2E-5I;
+- aucune gestion 2FA/checkpoint ici;
+- aucun retry par defaut;
+- aucune recovery complexe dans cet executor.
+
+Retry / escalation policy :
+
+- `instagram_login_password_form_executor.py` est un executor bas niveau;
+- il ne fait aucun retry par defaut;
+- il n'escalade pas directement;
+- il ne publie pas de status;
+- il n'ecrit pas Supabase;
+- il retourne seulement `ok`, `executed`, `failure_reason`,
+  `post_submit_outcome` et metadata safe;
+- le futur provisioner orchestrator decidera retry, escalation, status publish
+  et dashboard actions.
+
+Aucun retry futur pour :
+
+- `login_form_not_validated`;
+- `expected_username_missing`;
+- `password_secret_missing`;
+- `password_secret_invalid`;
+- `login_failed` confirme;
+- `needs_2fa` confirme;
+- `checkpoint` confirme;
+- mismatch / wrong account.
+
+Mini retry possible plus tard cote orchestrateur, jamais cote executor, pour
+erreurs UI transitoires :
+
+- `username_field_not_found`;
+- `password_field_not_found`;
+- `login_button_not_found`;
+- `ambiguous_login_form`;
+- `post_submit_dump_failed`;
+- `input_failed`;
+- `submit_failed`.
+
+Regles retry futures :
+
+- max 1 retry;
+- retry seulement apres revalidation de l'ecran `login_form_empty`;
+- aucune boucle infinie;
+- si encore failure apres retry : stop safe, status provisioning/login selon
+  contexte, dashboard action si necessaire.
+
+Post-submit policy future :
+
+- `connected` -> succes;
+- `needs_2fa` -> action dashboard `complete_two_factor`, pas retry;
+- `checkpoint` -> action dashboard `resolve_checkpoint`, pas retry;
+- `login_failed` -> `update_password` ou `review_login_failure`, pas retry avec
+  le meme password;
+- `unknown` -> re-observe possible 1 fois, puis `retry_later` ou
+  `support_required` selon contexte.
+
+Prochaine etape apres 2E-5I :
+
+- smoke controle `cinema_catchup` seulement apres procedure securisee explicite;
+- credentials fournis uniquement via `instagram-credentials` -> Supabase Vault;
+- jamais de password dans ChatGPT, prompt Cursor, shell history visible, git,
+  logs, screenshots ou XML;
+- apres smoke, changer le password.
 
 Procedure future `cinema_catchup` :
 

@@ -33,6 +33,8 @@ Checkpoints recents valides :
 - Entry 2E-5H : Supabase Vault Reader Helper checkpointe.
 - Entry 2E-5H-2 : real Supabase Vault read RPC + fake secret smoke valide,
   sans vrai credential client.
+- Entry 2E-5I : Controlled Password Form Executor en cours de validation
+  mocks-only, sans smoke reel.
 
 Le runtime principal n'est pas encore branche au login/provisioning complet :
 pas de vrai login, pas de password tap, pas de runner hook, pas de run device
@@ -49,6 +51,9 @@ provisioning.
 - 2E-5H :
   - SHA `880deef630c8a6217f9fbc4d64b7167fd3e20764`
   - tag `checkpoint-entry2e5h-supabase-vault-reader-helper-20260526`
+- 2E-5H-2 :
+  - SHA `1d3ced61d813139bdc4f3f3c202127dd35f40e8a`
+  - tag `checkpoint-entry2e5h2-real-vault-read-rpc-20260526`
 
 ## 4. Architecture Actuelle
 
@@ -79,14 +84,18 @@ Deja pose :
 - Login Screen Router;
 - Controlled Action Executor;
 - Secure Credential Runtime Access;
-- Supabase Vault Reader Helper.
+- Supabase Vault Reader Helper;
+- real Vault read RPC service-role only;
+- Controlled Password Form Executor mocks-only en cours.
 
 Etapes suivantes :
 
 - 2E-5H-2 : RPC service-role only de lecture Vault + smoke fake secret valide;
-- 2E-5I : password form executor controle;
-- smoke `cinema_catchup` via flow securise `instagram-credentials` -> Vault;
+- finaliser 2E-5I tests/mock : password form executor controle, sans smoke reel;
+- 2E-5I-2 : smoke reel `cinema_catchup` via flow securise
+  `instagram-credentials` -> Vault apres validation explicite;
 - integration provisioner runtime derriere flags;
+- status publish connected/2FA/checkpoint/failed via orchestrateur futur;
 - state machine login + recovery avant branchement runtime principal.
 
 Contraintes permanentes :
@@ -95,6 +104,34 @@ Contraintes permanentes :
 - pas de password dans logs, prompts, fichiers locaux ou dashboards;
 - pas de tap password avant ecran `login_form_empty` valide et contexte test
   dedie.
+- `instagram_login_password_form_executor.py` reste un executor bas niveau :
+  aucun retry par defaut, aucune escalation directe, aucun status publish,
+  aucune ecriture Supabase.
+- Le futur provisioner orchestrator decidera retry/escalation/status publish et
+  dashboard actions a partir de `failure_reason` et `post_submit_outcome`.
+
+Retry policy future :
+
+- aucun retry pour `login_form_not_validated`, `expected_username_missing`,
+  `password_secret_missing`, `password_secret_invalid`, `login_failed`,
+  `needs_2fa`, `checkpoint`, mismatch / wrong account;
+- mini retry possible cote orchestrateur seulement pour
+  `username_field_not_found`, `password_field_not_found`,
+  `login_button_not_found`, `ambiguous_login_form`, `post_submit_dump_failed`,
+  `input_failed`, `submit_failed`;
+- retry max 1, uniquement apres revalidation `login_form_empty`;
+- pas de boucle infinie; si encore failure apres retry : stop safe, status
+  provisioning/login selon contexte, dashboard action si necessaire.
+
+Post-submit policy future :
+
+- `connected` -> succes;
+- `needs_2fa` -> action dashboard `complete_two_factor`;
+- `checkpoint` -> action dashboard `resolve_checkpoint`;
+- `login_failed` -> `update_password` ou `review_login_failure`, sans retry avec
+  le meme password;
+- `unknown` -> re-observe possible 1 fois, puis `retry_later` ou
+  `support_required`.
 
 ## 6. Dashboard / Backend / BotApp Registry
 
@@ -104,6 +141,7 @@ statuts safe :
 - credentials configured/missing;
 - Vault reader status operational/pending;
 - credentials verification pending;
+- login attempt status futur;
 - retry provisioning;
 - `login_status`;
 - `provisioning_status`;
@@ -113,6 +151,8 @@ statuts safe :
 - lifecycle compte : active, paused, canceled, onboarding;
 - audit `previous_account_stopped_override`;
 - retry provisioning et relance verification credentials.
+- Le dashboard/backend/BotApp ne doit jamais exposer password, `secret_ref`,
+  Vault UUID, XML/screenshot, device id, token ou service-role key.
 
 Interdits cote dashboard/backend/BotApp :
 
@@ -186,16 +226,17 @@ controle device, pas a contourner la state machine Instagram.
 
 Ordre recommande :
 
-1. 2E-5I : password form executor controle.
-2. Smoke `cinema_catchup` via flow securise, jamais via chat/prompt/shell
+1. Finaliser 2E-5I : tests/mock du password form executor controle.
+2. 2E-5I-2 : smoke reel `cinema_catchup` via flow securise, jamais via chat/prompt/shell
    history visible.
 3. Integration provisioner runtime derriere flags.
-4. State machine / recovery login plus riche avant tout branchement production.
+4. Status publish connected/2FA/checkpoint/failed via provisioner orchestrator.
+5. State machine / recovery login plus riche avant tout branchement production.
 
 Le checkpoint 2E-5H est deja pousse :
 `880deef630c8a6217f9fbc4d64b7167fd3e20764`.
-Le checkpoint 2E-5H-2 est valide localement et remote, mais pas encore commite
-au moment de cette mise a jour.
+Le checkpoint 2E-5H-2 est deja pousse :
+`1d3ced61d813139bdc4f3f3c202127dd35f40e8a`.
 
 ## 12. Source Docs
 
