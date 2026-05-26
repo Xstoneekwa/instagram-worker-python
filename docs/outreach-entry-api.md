@@ -2,6 +2,9 @@
 
 Secure server-side entrypoint for dashboard, n8n, CSV import, or internal API producers.
 
+Pour l'etat global du projet et la roadmap complete, voir
+`docs/project-knowledge-base.md`.
+
 Flow:
 
 ```text
