@@ -2057,6 +2057,90 @@ Suite prevue :
   login/provisioning reste obligatoire roadmap, mais doit continuer a avancer
   par couches testables et observables.
 
+## Entry 2E-5C CLI probe UI reelle isolee
+
+Entry 2E-5C ajoute `instagram_login_probe_cli.py`, un CLI isole pour lancer la
+probe UI login sur un device reel ou mocke et mesurer les timings. Il reste
+probe-only : il ne fait aucun login et ne modifie pas l'etat Instagram.
+
+Commande probe-only :
+
+```bash
+python3 instagram_login_probe_cli.py --device-serial emulator-5554 --json --no-publish
+```
+
+Commande avec contexte compte, toujours sans publish par defaut :
+
+```bash
+python3 instagram_login_probe_cli.py \
+  --device-serial emulator-5554 \
+  --account-id <uuid> \
+  --expected-username <username> \
+  --json
+```
+
+Publication optionnelle :
+
+```bash
+INSTAGRAM_LOGIN_PROVISIONER_ENABLED=true \
+python3 instagram_login_probe_cli.py \
+  --device-serial emulator-5554 \
+  --account-id <uuid> \
+  --publish \
+  --json
+```
+
+Comportement :
+
+- connexion `uiautomator2.connect(...)` uniquement;
+- un seul `dump_hierarchy`;
+- classification via `instagram_login_ui_probe.probe_login_ui_from_hierarchy`;
+- mapping status via le classifier 2E-5A;
+- aucun publish par defaut, meme si `should_publish=true`;
+- `--publish` exige `--account-id` et respecte
+  `INSTAGRAM_LOGIN_PROVISIONER_ENABLED`;
+- flag off -> `published=false`, `publish_reason=disabled`, sans erreur fatale;
+- sortie JSON/humaine safe, sans XML brut, screenshot, password, token,
+  `secret_ref`, Vault, service role ou metadata device publiee.
+
+Timings exposes :
+
+```text
+connect_ms
+dump_hierarchy_ms
+classify_ms
+total_ms
+```
+
+Warnings V1 :
+
+- `dump_hierarchy_ms > 2000` -> `slow_dump_hierarchy`;
+- `total_ms > 3000` -> `slow_total_probe`.
+
+Regle de vitesse :
+
+- pas de sleep arbitraire;
+- pas de retry par defaut;
+- pas de dump redondant;
+- pas de `app_start`, `app_stop`, tap/click ou saisie;
+- les futurs tests reels devront conserver les fast paths, mesurer la cadence
+  et eviter toute action inutile sur compte/device.
+
+Contraintes device actuelles :
+
+- une probe simple peut se faire sur le phone/emulateur unique si Instagram est
+  deja dans un etat observable;
+- l'absence de clone limite la representativite production;
+- un vrai test login/provisioning prod necessitera un clone et un compte test
+  dedie avant toute saisie credentials ou recovery.
+
+Suite prevue :
+
+- Entry 2E-5D : design d'acces credentials securise cote worker;
+- ou CLI login controle compte test, seulement apres decision explicite;
+- integration Device Runtime Control Layer / ATX plus tard, avec etat, recovery
+  et observabilite avant tout branchement runtime principal.
+
 ## Entry 2F-1 RPC incidents -> dashboard actions
 
 Entry 2F-1 ajoute la RPC service-role
