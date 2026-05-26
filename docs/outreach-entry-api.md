@@ -2141,6 +2141,79 @@ Suite prevue :
 - integration Device Runtime Control Layer / ATX plus tard, avec etat, recovery
   et observabilite avant tout branchement runtime principal.
 
+## Entry 2E-5D Probe visible avec app_start controle
+
+Entry 2E-5D etend `instagram_login_probe_cli.py` avec une option explicite
+`--app-start`. Elle sert a positionner visiblement l'emulateur sur Instagram
+avant la probe, sans effectuer de login ni d'action interactive. Cette etape
+repond au smoke 2E-5C qui validait la chaine device mais retournait `unknown`,
+probablement parce que l'ecran courant n'etait pas positionne sur Instagram.
+
+Commande smoke controlee :
+
+```bash
+python3 instagram_login_probe_cli.py \
+  --device-serial emulator-5554 \
+  --app-start \
+  --package-name com.instagram.android \
+  --post-start-wait-ms 500 \
+  --json \
+  --no-publish
+```
+
+Options :
+
+- `--app-start` : appelle `d.app_start(package_name)` apres la connexion device;
+- `--package-name` : package a ouvrir, par defaut `com.instagram.android`, et
+  configurable pour de futurs clones;
+- `--post-start-wait-ms` : attente courte apres start, clamp 0..1500 ms;
+- `--no-app-stop` : documente le comportement V1; aucun `app_stop` automatique
+  n'est execute.
+
+Garanties 2E-5D :
+
+- aucun tap/click;
+- aucune saisie username/password;
+- aucun read Vault ou acces credentials;
+- aucun publish par defaut;
+- aucun hook `runner.py`, sender/follow/outreach ou `account_session*`;
+- un seul `dump_hierarchy` apres `app_start`;
+- pas de retry par defaut;
+- pas de sleep hors `post_start_wait_ms` clampé;
+- pas d'XML brut, screenshot, password, token, `secret_ref`, Vault ou
+  `service_role` dans la sortie.
+
+Timings exposes :
+
+```text
+app_start_ms
+post_start_wait_ms
+connect_ms
+dump_hierarchy_ms
+classify_ms
+total_ms
+```
+
+Warnings V1 :
+
+- `app_start_ms > 2000` -> `slow_app_start`;
+- `dump_hierarchy_ms > 2000` -> `slow_dump_hierarchy`;
+- `total_ms > 4000` avec `--app-start` -> `slow_total_probe`.
+
+Limites :
+
+- le test reste single phone / no clone;
+- il valide une probe visible controlee, pas une situation prod multi-clone;
+- un vrai login/provisioning necessitera clone + compte test dedie, puis design
+  d'acces credentials securise cote worker avant toute saisie.
+
+Suite prevue :
+
+- Entry 2E-5E/2E-5D suivant selon decision : design d'acces credentials securise;
+- puis CLI login controle compte test;
+- puis integration Device Runtime Control Layer / ATX avec state machine,
+  recovery et observabilite avant branchement runtime principal.
+
 ## Entry 2F-1 RPC incidents -> dashboard actions
 
 Entry 2F-1 ajoute la RPC service-role

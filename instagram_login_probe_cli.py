@@ -1,8 +1,9 @@
 """Isolated real-device Instagram login UI probe CLI.
 
-Entry 2E-5C is probe-only: connect, perform one hierarchy dump, classify the
-screen, and print a safe summary with timings. It does not start/stop apps,
-tap, type credentials, read Vault secrets, or publish unless explicitly asked.
+Entry 2E-5C/2E-5D is probe-only: connect, optionally start Instagram, perform
+one hierarchy dump, classify the screen, and print a safe summary with timings.
+It does not stop apps, tap, type credentials, read Vault secrets, or publish
+unless explicitly asked.
 """
 
 from __future__ import annotations
@@ -24,9 +25,15 @@ from instagram_login_ui_probe import probe_login_ui_from_hierarchy
 ConnectFunc = Callable[[Optional[str], float], Any]
 Publisher = Callable[..., dict]
 Timer = Callable[[], float]
+Sleeper = Callable[[float], None]
 
 DUMP_WARNING_MS = 2000
+APP_START_WARNING_MS = 2000
 TOTAL_WARNING_MS = 3000
+TOTAL_WARNING_WITH_APP_START_MS = 4000
+DEFAULT_PACKAGE_NAME = "com.instagram.android"
+DEFAULT_POST_START_WAIT_MS = 500
+MAX_POST_START_WAIT_MS = 1500
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -40,6 +47,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-publish", action="store_false", dest="publish", help="Force probe-only mode.")
     parser.add_argument("--json", action="store_true", help="Print JSON safe summary.")
     parser.add_argument("--timeout-seconds", type=float, default=5.0, help="Connect timeout hint.")
+    parser.add_argument("--app-start", action="store_true", help="Start Instagram package before probing.")
+    parser.add_argument("--package-name", default=DEFAULT_PACKAGE_NAME, help="Package to start with --app-start.")
+    parser.add_argument(
+        "--post-start-wait-ms",
+        type=int,
+        default=DEFAULT_POST_START_WAIT_MS,
+        help="Bounded wait after --app-start, clamped to 0..1500 ms.",
+    )
+    parser.add_argument("--no-app-stop", action="store_true", default=True, help="Documented no-op; app_stop is never called.")
     parser.set_defaults(publish=False)
     return parser
 
@@ -50,15 +66,20 @@ def run_probe_command(
     connect_func: ConnectFunc | None = None,
     publisher: Publisher | None = None,
     timer: Timer | None = None,
+    sleeper: Sleeper | None = None,
 ) -> tuple[int, dict[str, Any]]:
     timer = timer or time.perf_counter
+    sleeper = sleeper or time.sleep
     timings: dict[str, int] = {
+        "app_start_ms": 0,
+        "post_start_wait_ms": 0,
         "connect_ms": 0,
         "dump_hierarchy_ms": 0,
         "classify_ms": 0,
         "total_ms": 0,
     }
     warnings: list[str] = []
+    app_started = False
     total_start = timer()
 
     if bool(getattr(args, "publish", False)) and not str(getattr(args, "account_id", "") or "").strip():
@@ -71,6 +92,7 @@ def run_probe_command(
             timings=timings,
             warnings=warnings,
             args=args,
+            app_started=app_started,
         )
         summary["ok"] = False
         summary["error"] = "account_id_required"
@@ -85,6 +107,7 @@ def run_probe_command(
         timings["connect_ms"] = _elapsed_ms(start, timer())
     except Exception as exc:
         timings["total_ms"] = _elapsed_ms(total_start, timer())
+        _add_timing_warnings(timings, warnings, app_start_requested=_app_start_requested(args))
         summary = _base_summary(
             outcome=LoginProbeOutcome.UNKNOWN,
             probe_reason="connect_failed",
@@ -94,12 +117,44 @@ def run_probe_command(
             timings=timings,
             warnings=warnings,
             args=args,
+            app_started=app_started,
         )
         summary["ok"] = False
         summary["error"] = "connect_failed"
         summary["error_type"] = type(exc).__name__
-        _add_timing_warnings(summary["timings_ms"], warnings)
         return 1, summary
+
+    if _app_start_requested(args):
+        package_name = _package_name(args)
+        try:
+            start = timer()
+            device.app_start(package_name)
+            timings["app_start_ms"] = _elapsed_ms(start, timer())
+            app_started = True
+        except Exception as exc:
+            timings["app_start_ms"] = _elapsed_ms(start, timer())
+            timings["total_ms"] = _elapsed_ms(total_start, timer())
+            _add_timing_warnings(timings, warnings, app_start_requested=True)
+            summary = _base_summary(
+                outcome=LoginProbeOutcome.UNKNOWN,
+                probe_reason="app_start_failed",
+                should_publish=False,
+                published=False,
+                publish_reason="not_requested",
+                timings=timings,
+                warnings=warnings,
+                args=args,
+                app_started=app_started,
+            )
+            summary["ok"] = False
+            summary["error"] = "app_start_failed"
+            summary["error_type"] = type(exc).__name__
+            return 1, summary
+
+        wait_ms = _post_start_wait_ms(args)
+        timings["post_start_wait_ms"] = wait_ms
+        if wait_ms > 0:
+            sleeper(wait_ms / 1000.0)
 
     try:
         start = timer()
@@ -110,7 +165,7 @@ def run_probe_command(
         timings["dump_hierarchy_ms"] = _elapsed_ms(start, timer())
     except Exception as exc:
         timings["total_ms"] = _elapsed_ms(total_start, timer())
-        _add_timing_warnings(timings, warnings)
+        _add_timing_warnings(timings, warnings, app_start_requested=_app_start_requested(args))
         summary = _base_summary(
             outcome=LoginProbeOutcome.UNKNOWN,
             probe_reason="dump_hierarchy_failed",
@@ -120,6 +175,7 @@ def run_probe_command(
             timings=timings,
             warnings=warnings,
             args=args,
+            app_started=app_started,
         )
         summary["ok"] = False
         summary["error"] = "dump_hierarchy_failed"
@@ -138,7 +194,7 @@ def run_probe_command(
     )
     timings["classify_ms"] = _elapsed_ms(start, timer())
     timings["total_ms"] = _elapsed_ms(total_start, timer())
-    _add_timing_warnings(timings, warnings)
+    _add_timing_warnings(timings, warnings, app_start_requested=_app_start_requested(args))
 
     publish_result = {"published": False, "reason": "not_requested"}
     if bool(getattr(args, "publish", False)):
@@ -159,6 +215,7 @@ def run_probe_command(
         timings=timings,
         warnings=warnings,
         args=args,
+        app_started=app_started,
     )
     summary.update(
         {
@@ -202,14 +259,39 @@ def _timeout_seconds(args: argparse.Namespace) -> float:
         return 5.0
 
 
+def _app_start_requested(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "app_start", False))
+
+
+def _package_name(args: argparse.Namespace) -> str:
+    value = str(getattr(args, "package_name", "") or "").strip()
+    return value or DEFAULT_PACKAGE_NAME
+
+
+def _post_start_wait_ms(args: argparse.Namespace) -> int:
+    try:
+        value = int(getattr(args, "post_start_wait_ms", DEFAULT_POST_START_WAIT_MS))
+    except (TypeError, ValueError):
+        value = DEFAULT_POST_START_WAIT_MS
+    return min(MAX_POST_START_WAIT_MS, max(0, value))
+
+
 def _elapsed_ms(start: float, end: float) -> int:
     return max(0, int(round((end - start) * 1000)))
 
 
-def _add_timing_warnings(timings: dict[str, int], warnings: list[str]) -> None:
+def _add_timing_warnings(
+    timings: dict[str, int],
+    warnings: list[str],
+    *,
+    app_start_requested: bool,
+) -> None:
+    if int(timings.get("app_start_ms", 0)) > APP_START_WARNING_MS:
+        warnings.append("slow_app_start")
     if int(timings.get("dump_hierarchy_ms", 0)) > DUMP_WARNING_MS:
         warnings.append("slow_dump_hierarchy")
-    if int(timings.get("total_ms", 0)) > TOTAL_WARNING_MS:
+    total_limit = TOTAL_WARNING_WITH_APP_START_MS if app_start_requested else TOTAL_WARNING_MS
+    if int(timings.get("total_ms", 0)) > total_limit:
         warnings.append("slow_total_probe")
 
 
@@ -232,6 +314,7 @@ def _base_summary(
     timings: dict[str, int],
     warnings: list[str],
     args: argparse.Namespace,
+    app_started: bool,
 ) -> dict[str, Any]:
     return {
         "ok": False,
@@ -243,6 +326,9 @@ def _base_summary(
         "publish_reason": publish_reason,
         "timings_ms": dict(timings),
         "warnings": list(warnings),
+        "app_start_requested": _app_start_requested(args),
+        "app_started": app_started,
+        "package_name": _package_name(args),
         "device_serial_provided": bool(getattr(args, "device_serial", None)),
         "expected_username_present": bool(getattr(args, "expected_username", None)),
         "safe_message": "probe completed without login actions",
@@ -264,6 +350,8 @@ def _print_human_summary(summary: dict[str, Any]) -> None:
     timings = summary.get("timings_ms") or {}
     print(
         "timings_ms="
+        f"app_start:{timings.get('app_start_ms', 0)} "
+        f"post_wait:{timings.get('post_start_wait_ms', 0)} "
         f"connect:{timings.get('connect_ms', 0)} "
         f"dump:{timings.get('dump_hierarchy_ms', 0)} "
         f"classify:{timings.get('classify_ms', 0)} "

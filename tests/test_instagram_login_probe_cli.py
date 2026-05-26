@@ -55,6 +55,8 @@ class InstagramLoginProbeCliTest(unittest.TestCase):
         self.assertEqual(summary["outcome"], "connected")
         self.assertEqual(summary["login_status"], "connected")
         self.assertIn("connect_ms", summary["timings_ms"])
+        self.assertIn("app_start_ms", summary["timings_ms"])
+        self.assertIn("post_start_wait_ms", summary["timings_ms"])
         self.assertIn("dump_hierarchy_ms", summary["timings_ms"])
         self.assertIn("classify_ms", summary["timings_ms"])
         self.assertIn("total_ms", summary["timings_ms"])
@@ -160,6 +162,8 @@ class InstagramLoginProbeCliTest(unittest.TestCase):
 
         self.assertEqual(code, 0)
         self.assertEqual(set(summary["timings_ms"].keys()), {
+            "app_start_ms",
+            "post_start_wait_ms",
             "connect_ms",
             "dump_hierarchy_ms",
             "classify_ms",
@@ -232,6 +236,126 @@ class InstagramLoginProbeCliTest(unittest.TestCase):
 
         self.assertEqual(code, 0)
         device.app_start.assert_not_called()
+        device.app_stop.assert_not_called()
+        device.click.assert_not_called()
+        device.tap.assert_not_called()
+
+    def test_app_start_calls_default_package(self) -> None:
+        device = FakeDevice(CONNECTED_XML)
+        sleeper = Mock()
+
+        code, summary = cli.run_probe_command(
+            _args("--json", "--app-start"),
+            connect_func=lambda _serial, _timeout: device,
+            sleeper=sleeper,
+        )
+
+        self.assertEqual(code, 0)
+        self.assertTrue(summary["app_start_requested"])
+        self.assertTrue(summary["app_started"])
+        self.assertEqual(summary["package_name"], "com.instagram.android")
+        device.app_start.assert_called_once_with("com.instagram.android")
+        sleeper.assert_called_once_with(0.5)
+
+    def test_app_start_uses_custom_package(self) -> None:
+        device = FakeDevice(CONNECTED_XML)
+
+        code, summary = cli.run_probe_command(
+            _args("--json", "--app-start", "--package-name", "com.instagram.android.clone1"),
+            connect_func=lambda _serial, _timeout: device,
+            sleeper=Mock(),
+        )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(summary["package_name"], "com.instagram.android.clone1")
+        device.app_start.assert_called_once_with("com.instagram.android.clone1")
+
+    def test_post_start_wait_is_clamped_to_max(self) -> None:
+        device = FakeDevice(CONNECTED_XML)
+        sleeper = Mock()
+
+        code, summary = cli.run_probe_command(
+            _args("--json", "--app-start", "--post-start-wait-ms", "9999"),
+            connect_func=lambda _serial, _timeout: device,
+            sleeper=sleeper,
+        )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(summary["timings_ms"]["post_start_wait_ms"], 1500)
+        sleeper.assert_called_once_with(1.5)
+
+    def test_post_start_wait_is_clamped_to_zero(self) -> None:
+        device = FakeDevice(CONNECTED_XML)
+        sleeper = Mock()
+
+        code, summary = cli.run_probe_command(
+            _args("--json", "--app-start", "--post-start-wait-ms", "-10"),
+            connect_func=lambda _serial, _timeout: device,
+            sleeper=sleeper,
+        )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(summary["timings_ms"]["post_start_wait_ms"], 0)
+        sleeper.assert_not_called()
+
+    def test_app_start_exception_returns_safe_error_without_dump(self) -> None:
+        device = FakeDevice(CONNECTED_XML)
+        device.app_start.side_effect = RuntimeError("package missing")
+
+        code, summary = cli.run_probe_command(
+            _args("--json", "--app-start"),
+            connect_func=lambda _serial, _timeout: device,
+            sleeper=Mock(),
+        )
+
+        self.assertEqual(code, 1)
+        self.assertEqual(summary["outcome"], "unknown")
+        self.assertEqual(summary["error"], "app_start_failed")
+        self.assertEqual(summary["probe_reason"], "app_start_failed")
+        self.assertFalse(summary["app_started"])
+        self.assertEqual(device.dump_calls, 0)
+        self.assertNotIn("package missing", json.dumps(summary))
+
+    def test_app_start_timing_is_present(self) -> None:
+        device = FakeDevice(CONNECTED_XML)
+
+        code, summary = cli.run_probe_command(
+            _args("--json", "--app-start", "--post-start-wait-ms", "0"),
+            connect_func=lambda _serial, _timeout: device,
+            sleeper=Mock(),
+        )
+
+        self.assertEqual(code, 0)
+        self.assertIn("app_start_ms", summary["timings_ms"])
+        self.assertIn("post_start_wait_ms", summary["timings_ms"])
+
+    def test_slow_app_start_adds_warning(self) -> None:
+        device = FakeDevice(CONNECTED_XML)
+        ticks = iter([0.0, 0.0, 0.01, 0.01, 2.5, 2.5, 2.51, 2.51, 2.52, 2.52])
+
+        code, summary = cli.run_probe_command(
+            _args("--json", "--app-start", "--post-start-wait-ms", "0"),
+            connect_func=lambda _serial, _timeout: device,
+            timer=lambda: next(ticks),
+            sleeper=Mock(),
+        )
+
+        self.assertEqual(code, 0)
+        self.assertGreater(summary["timings_ms"]["app_start_ms"], 2000)
+        self.assertIn("slow_app_start", summary["warnings"])
+
+    def test_app_start_does_not_call_app_stop_or_input_actions(self) -> None:
+        device = FakeDevice(CONNECTED_XML)
+
+        code, summary = cli.run_probe_command(
+            _args("--json", "--app-start", "--post-start-wait-ms", "0", "--no-publish"),
+            connect_func=lambda _serial, _timeout: device,
+            sleeper=Mock(),
+        )
+
+        self.assertEqual(code, 0)
+        self.assertFalse(summary["published"])
+        device.app_start.assert_called_once()
         device.app_stop.assert_not_called()
         device.click.assert_not_called()
         device.tap.assert_not_called()
