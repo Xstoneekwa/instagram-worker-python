@@ -41,6 +41,30 @@ ACTIVE_PROFILE_XML = (
     '<node text="Edit profile" />'
     '<node text="Share profile" />'
 )
+ACTIVE_PROFILE_MENU_XML = (
+    '<node text="random_old_profile" clickable="true" bounds="[70,120][360,190]" />'
+    '<node text="Edit profile" />'
+    '<node text="Share profile" />'
+    '<node resource-id="com.instagram.android:id/action_bar_button_action" clickable="true" bounds="[930,150][1020,240]" />'
+)
+SETTINGS_AND_ACTIVITY_XML = (
+    '<node text="Settings and activity" clickable="true" bounds="[80,300][900,420]" />'
+)
+SETTINGS_LOGOUT_XML = (
+    '<node text="Settings and activity" />'
+    '<node text="Add account" />'
+    '<node text="Log out" clickable="true" bounds="[100,1900][980,2020]" />'
+)
+SAVE_LOGIN_PROMPT_XML = (
+    '<node text="Save your login info?" />'
+    '<node text="Save" clickable="true" bounds="[100,1600][980,1720]" />'
+    '<node text="Not now" clickable="true" bounds="[100,1760][980,1880]" />'
+)
+LOGOUT_CONFIRM_XML = (
+    '<node text="Log out of your account?" />'
+    '<node text="Cancel" clickable="true" bounds="[100,1600][980,1720]" />'
+    '<node text="Log out" clickable="true" bounds="[100,1760][980,1880]" />'
+)
 ACCOUNT_SWITCHER_XML = (
     '<node text="random_old_profile" />'
     '<node text="Add Instagram account" clickable="true" bounds="[150,1850][930,1960]" />'
@@ -440,6 +464,34 @@ class InstagramLoginActionExecutorTest(unittest.TestCase):
 
         self.assertTrue(result.executed)
         self.assertEqual(device.bounds_clicks, [(540, 2062)])
+
+    def test_logout_fallback_targets_are_resolved_without_fixed_coordinates(self) -> None:
+        cases = (
+            ("open_profile_menu", ACTIVE_PROFILE_MENU_XML, (975, 195)),
+            ("tap_settings_and_activity", SETTINGS_AND_ACTIVITY_XML, (490, 360)),
+            ("tap_logout", SETTINGS_LOGOUT_XML, (540, 1960)),
+            ("tap_not_now", SAVE_LOGIN_PROMPT_XML, (540, 1820)),
+            ("tap_confirm_logout", LOGOUT_CONFIRM_XML, (540, 1820)),
+        )
+        for decision, xml, expected_tap in cases:
+            with self.subTest(decision=decision):
+                device = FakeDevice(hierarchy=xml)
+                decision_obj = type("Decision", (), {"decision": decision})()
+
+                result = execute_login_screen_decision(device, decision_obj, sleeper=Mock())
+
+                self.assertTrue(result.executed)
+                self.assertEqual(device.bounds_clicks, [expected_tap])
+
+    def test_profile_menu_missing_stops_without_tap(self) -> None:
+        device = FakeDevice(hierarchy=ACTIVE_PROFILE_XML)
+        decision_obj = type("Decision", (), {"decision": "open_profile_menu"})()
+
+        result = execute_login_screen_decision(device, decision_obj, sleeper=Mock())
+
+        self.assertFalse(result.executed)
+        self.assertEqual(result.failure_reason, "profile_menu_not_found")
+        self.assertEqual(device.bounds_clicks, [])
 
     def test_output_is_safe_without_raw_xml_or_sensitive_values(self) -> None:
         device = FakeDevice(hierarchy=SENSITIVE_XML)

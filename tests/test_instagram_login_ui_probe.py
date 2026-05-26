@@ -225,6 +225,7 @@ class InstagramLoginUiProbeTest(unittest.TestCase):
             '<node text="0 posts" />'
             '<node text="0 followers" />'
             '<node text="2 following" />'
+            '<node resource-id="com.instagram.android:id/action_bar_button_action" clickable="true" bounds="[930,150][1020,240]" />'
         )
 
         signals = extract_login_screen_signals_from_hierarchy(xml, expected_username="random_expected")
@@ -232,6 +233,22 @@ class InstagramLoginUiProbeTest(unittest.TestCase):
         self.assertEqual(signals["screen_type"], "active_account_profile")
         self.assertTrue(signals["active_account_profile"])
         self.assertEqual(signals["actual_logged_in_username"], "random_old_profile")
+        self.assertTrue(signals["profile_menu_ready"])
+
+    def test_active_account_profile_marks_menu_missing_transient(self) -> None:
+        xml = (
+            '<node text="random_old_profile" />'
+            '<node text="Edit profile" />'
+            '<node text="Share profile" />'
+            '<node text="0 posts" />'
+            '<node text="0 followers" />'
+            '<node text="2 following" />'
+        )
+
+        signals = extract_login_screen_signals_from_hierarchy(xml, expected_username="random_expected")
+
+        self.assertEqual(signals["screen_type"], "active_account_profile")
+        self.assertTrue(signals["profile_menu_missing_transient"])
 
     def test_detects_account_switcher_and_add_account_sheets(self) -> None:
         switcher_xml = (
@@ -252,6 +269,36 @@ class InstagramLoginUiProbeTest(unittest.TestCase):
         self.assertTrue(switcher["has_add_instagram_account_button"])
         self.assertEqual(add["screen_type"], "add_account_sheet")
         self.assertTrue(add["has_log_into_existing_account_button"])
+
+    def test_detects_logout_fallback_screens(self) -> None:
+        settings_xml = (
+            '<node text="Settings and activity" />'
+            '<node text="More info and support" />'
+            '<node text="Login" />'
+            '<node text="Add account" />'
+            '<node text="Log out" />'
+        )
+        save_xml = (
+            '<node text="Save your login info?" />'
+            '<node text="Save" />'
+            '<node text="Not now" />'
+        )
+        confirm_xml = (
+            '<node text="Log out of your account?" />'
+            '<node text="Cancel" />'
+            '<node text="Log out" />'
+        )
+
+        settings = extract_login_screen_signals_from_hierarchy(settings_xml)
+        save = extract_login_screen_signals_from_hierarchy(save_xml)
+        confirm = extract_login_screen_signals_from_hierarchy(confirm_xml)
+
+        self.assertEqual(settings["screen_type"], "settings_and_activity")
+        self.assertTrue(settings["has_log_out_button"])
+        self.assertEqual(save["screen_type"], "save_login_info_prompt")
+        self.assertTrue(save["has_not_now_button"])
+        self.assertEqual(confirm["screen_type"], "logout_confirmation_prompt")
+        self.assertTrue(confirm["has_cancel_button"])
 
     def test_extracts_login_form_empty_signals(self) -> None:
         xml = (

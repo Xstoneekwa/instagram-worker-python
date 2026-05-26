@@ -8,7 +8,7 @@ from unittest.mock import Mock, patch
 
 from instagram_credentials_runtime_access import SecretValue
 import instagram_login_provisioner_orchestrator as provisioner_orchestrator
-from instagram_login_provisioner_orchestrator import run_login_provisioning_flow
+from instagram_login_provisioner_orchestrator import run_login_provisioning_flow, run_old_account_logout_fallback_flow
 
 
 ACCOUNT_ID = "42c625c2-e761-4100-8a9d-7ae1373de97d"
@@ -98,6 +98,7 @@ ACTIVE_HOME_XML = (
     '<node text="Instagram" />'
     '<node text="Your story" />'
     '<node text="Suggested for you" />'
+    '<node content-desc="Home" clickable="true" bounds="[40,2100][160,2240]" />'
     '<node content-desc="Profile" clickable="true" bounds="[880,2100][1020,2240]" />'
 )
 ACTIVE_PROFILE_OLD_XML = (
@@ -107,8 +108,22 @@ ACTIVE_PROFILE_OLD_XML = (
     '<node text="0 posts" />'
     '<node text="0 followers" />'
     '<node text="2 following" />'
+    '<node content-desc="Home" clickable="true" bounds="[40,2100][160,2240]" />'
+    '<node content-desc="Profile" clickable="true" bounds="[880,2100][1020,2240]" />'
+)
+ACTIVE_PROFILE_OLD_MENU_XML = (
+    '<node text="random_old_profile" clickable="true" bounds="[70,120][360,190]" />'
+    '<node text="Edit profile" />'
+    '<node text="Share profile" />'
+    '<node text="0 posts" />'
+    '<node text="0 followers" />'
+    '<node text="2 following" />'
+    '<node content-desc="Home" clickable="true" bounds="[40,2100][160,2240]" />'
+    '<node content-desc="Profile" clickable="true" bounds="[880,2100][1020,2240]" />'
+    '<node resource-id="com.instagram.android:id/action_bar_button_action" clickable="true" bounds="[930,150][1020,240]" />'
 )
 ACTIVE_PROFILE_EXPECTED_XML = ACTIVE_PROFILE_OLD_XML.replace("random_old_profile", "random_expected")
+ACTIVE_PROFILE_EXPECTED_MENU_XML = ACTIVE_PROFILE_OLD_MENU_XML.replace("random_old_profile", "random_expected")
 ACCOUNT_SWITCHER_XML = (
     '<node text="random_old_profile" />'
     '<node text="Add Instagram account" clickable="true" bounds="[150,1850][930,1960]" />'
@@ -118,6 +133,32 @@ ADD_ACCOUNT_SHEET_XML = (
     '<node text="Add account" />'
     '<node text="Log into existing account" clickable="true" bounds="[100,1700][980,1820]" />'
     '<node text="Create new account" clickable="true" bounds="[100,1880][980,2000]" />'
+)
+PROFILE_MENU_SHEET_XML = (
+    '<node text="Settings and activity" clickable="true" bounds="[80,300][900,420]" />'
+)
+SETTINGS_AND_ACTIVITY_XML = (
+    '<node text="Settings and activity" />'
+    '<node text="More info and support" />'
+    '<node text="Login" />'
+    '<node text="Add account" />'
+    '<node text="Log out" clickable="true" bounds="[100,1900][980,2020]" />'
+)
+SAVE_LOGIN_INFO_PROMPT_XML = (
+    '<node text="Save your login info?" />'
+    '<node text="Save" clickable="true" bounds="[100,1600][980,1720]" />'
+    '<node text="Not now" clickable="true" bounds="[100,1760][980,1880]" />'
+)
+LOGOUT_CONFIRMATION_PROMPT_XML = (
+    '<node text="Log out of your account?" />'
+    '<node text="Cancel" clickable="true" bounds="[100,1600][980,1720]" />'
+    '<node text="Log out" clickable="true" bounds="[100,1760][980,1880]" />'
+)
+LOGOUT_CONTINUE_AS_XML = (
+    '<node text="random_expected" />'
+    '<node text="Continue" clickable="true" bounds="[100,1000][980,1120]" />'
+    '<node text="Use another profile" clickable="false" bounds="[371,1215][710,1280]" />'
+    '<node text="Create new account" clickable="true" bounds="[100,2000][980,2190]" />'
 )
 
 
@@ -192,6 +233,22 @@ def credentials():
 
 
 class LoginProvisionerOrchestratorTest(unittest.TestCase):
+    def _canceled_lifecycle(self) -> Mock:
+        return Mock(
+            return_value={
+                "lifecycle_status": "canceled",
+                "clone_reuse_allowed": True,
+                "source": "operator_smoke_override",
+                "reason": "old canceled account logout fallback",
+            }
+        )
+
+    def _logout_initial_signals(self, xml: str = ACTIVE_PROFILE_OLD_MENU_XML) -> dict:
+        return provisioner_orchestrator._observe_login_signals(
+            FakeDevice([xml]),
+            expected_username="random_expected",
+        )
+
     def test_login_form_credentials_ok_connected_success(self) -> None:
         device, selectors = configured_device(CONNECTED_XML)
 
@@ -1086,6 +1143,262 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
 
         self.assertIn("route:select_expected_account_from_picker", result.actions_taken)
         getter.assert_not_called()
+
+    def test_logout_fallback_profile_menu_visible_full_no_password(self) -> None:
+        device = FakeDevice(
+            [
+                ACTIVE_PROFILE_OLD_MENU_XML,
+                PROFILE_MENU_SHEET_XML,
+                PROFILE_MENU_SHEET_XML,
+                PROFILE_MENU_SHEET_XML,
+                SETTINGS_AND_ACTIVITY_XML,
+                SETTINGS_AND_ACTIVITY_XML,
+                SETTINGS_AND_ACTIVITY_XML,
+                SAVE_LOGIN_INFO_PROMPT_XML,
+                SAVE_LOGIN_INFO_PROMPT_XML,
+                SAVE_LOGIN_INFO_PROMPT_XML,
+                LOGOUT_CONFIRMATION_PROMPT_XML,
+                LOGOUT_CONFIRMATION_PROMPT_XML,
+                LOGOUT_CONFIRMATION_PROMPT_XML,
+                LOGIN_FORM_XML,
+                LOGIN_FORM_XML,
+            ]
+        )
+
+        result = run_old_account_logout_fallback_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username="random_expected",
+            previous_account_lifecycle_lookup=self._canceled_lifecycle(),
+            initial_signals=self._logout_initial_signals(),
+            sleeper=Mock(),
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.final_outcome, "login_form_empty")
+        self.assertEqual(result.safe_metadata["actual_logged_in_username"], "random_old_profile")
+        self.assertEqual(result.safe_metadata["lifecycle_gate_result"], "allow_logout_fallback")
+        self.assertFalse(result.safe_metadata["profile_menu_initially_missing"])
+        self.assertTrue(result.safe_metadata["profile_menu_final_found"])
+        self.assertTrue(result.safe_metadata["save_login_prompt_handled"])
+        self.assertTrue(result.safe_metadata["logout_confirmation_handled"])
+        self.assertFalse(result.safe_metadata["would_submit_password"])
+        self.assertFalse(result.safe_metadata["would_publish"])
+        self.assertIn("tap_not_now", result.actions_taken)
+        self.assertIn("tap_confirm_logout", result.actions_taken)
+        self.assertNotIn("login_form_submit", result.actions_taken)
+
+    def test_logout_fallback_profile_menu_appears_after_wait(self) -> None:
+        device = FakeDevice(
+            [
+                ACTIVE_PROFILE_OLD_MENU_XML,
+                ACTIVE_PROFILE_OLD_MENU_XML,
+                PROFILE_MENU_SHEET_XML,
+                PROFILE_MENU_SHEET_XML,
+                PROFILE_MENU_SHEET_XML,
+                SETTINGS_AND_ACTIVITY_XML,
+                SETTINGS_AND_ACTIVITY_XML,
+                SETTINGS_AND_ACTIVITY_XML,
+                LOGOUT_CONFIRMATION_PROMPT_XML,
+                LOGOUT_CONFIRMATION_PROMPT_XML,
+                LOGOUT_CONFIRMATION_PROMPT_XML,
+                LOGOUT_CONTINUE_AS_XML,
+                LOGOUT_CONTINUE_AS_XML,
+            ]
+        )
+
+        result = run_old_account_logout_fallback_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username="random_expected",
+            previous_account_lifecycle_lookup=self._canceled_lifecycle(),
+            initial_signals=self._logout_initial_signals(ACTIVE_PROFILE_OLD_XML),
+            sleeper=Mock(),
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.final_outcome, "continue_as_candidate")
+        self.assertTrue(result.safe_metadata["profile_menu_initially_missing"])
+        self.assertTrue(result.safe_metadata["profile_menu_wait_reobserve"])
+        self.assertFalse(result.safe_metadata["profile_menu_home_profile_refresh_attempted"])
+
+    def test_logout_fallback_profile_menu_appears_after_home_profile_refresh(self) -> None:
+        device = FakeDevice(
+            [
+                ACTIVE_PROFILE_OLD_XML,
+                ACTIVE_HOME_XML,
+                ACTIVE_HOME_XML,
+                ACTIVE_PROFILE_OLD_MENU_XML,
+                ACTIVE_PROFILE_OLD_MENU_XML,
+                ACTIVE_PROFILE_OLD_MENU_XML,
+                ACTIVE_PROFILE_OLD_MENU_XML,
+                PROFILE_MENU_SHEET_XML,
+                PROFILE_MENU_SHEET_XML,
+                PROFILE_MENU_SHEET_XML,
+                SETTINGS_AND_ACTIVITY_XML,
+                SETTINGS_AND_ACTIVITY_XML,
+                SETTINGS_AND_ACTIVITY_XML,
+                LOGOUT_CONFIRMATION_PROMPT_XML,
+                LOGOUT_CONFIRMATION_PROMPT_XML,
+                LOGOUT_CONFIRMATION_PROMPT_XML,
+                ACCOUNT_PICKER_XML,
+                ACCOUNT_PICKER_XML,
+            ]
+        )
+
+        result = run_old_account_logout_fallback_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username="random_expected",
+            previous_account_lifecycle_lookup=self._canceled_lifecycle(),
+            initial_signals=self._logout_initial_signals(ACTIVE_PROFILE_OLD_XML),
+            sleeper=Mock(),
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.final_outcome, "account_picker")
+        self.assertTrue(result.safe_metadata["profile_menu_home_profile_refresh_attempted"])
+        self.assertIn("tap_home_bottom_nav", result.actions_taken)
+        self.assertIn("tap_profile_bottom_nav", result.actions_taken)
+
+    def test_logout_fallback_menu_still_missing_stops_safe(self) -> None:
+        device = FakeDevice([ACTIVE_PROFILE_OLD_XML, ACTIVE_HOME_XML, ACTIVE_HOME_XML, ACTIVE_PROFILE_OLD_XML])
+
+        result = run_old_account_logout_fallback_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username="random_expected",
+            previous_account_lifecycle_lookup=self._canceled_lifecycle(),
+            initial_signals=self._logout_initial_signals(ACTIVE_PROFILE_OLD_XML),
+            sleeper=Mock(),
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.failure_reason, "profile_menu_not_found")
+        self.assertFalse(result.safe_metadata["profile_menu_final_found"])
+        self.assertNotIn("tap_logout", result.actions_taken)
+
+    def test_logout_fallback_username_change_during_refresh_stops_safe(self) -> None:
+        device = FakeDevice([ACTIVE_PROFILE_EXPECTED_MENU_XML])
+
+        result = run_old_account_logout_fallback_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username="random_expected",
+            previous_account_lifecycle_lookup=self._canceled_lifecycle(),
+            initial_signals=self._logout_initial_signals(ACTIVE_PROFILE_OLD_XML),
+            sleeper=Mock(),
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.failure_reason, "username_changed")
+        self.assertNotIn("tap_logout", result.actions_taken)
+
+    def test_logout_fallback_active_lifecycle_blocks_without_logout(self) -> None:
+        device = FakeDevice([ACTIVE_PROFILE_OLD_MENU_XML])
+
+        result = run_old_account_logout_fallback_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username="random_expected",
+            previous_account_lifecycle_lookup=Mock(
+                return_value={"lifecycle_status": "active", "clone_reuse_allowed": True}
+            ),
+            initial_signals=self._logout_initial_signals(),
+            sleeper=Mock(),
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.safe_metadata["lifecycle_gate_result"], "block_wrong_active_account")
+        self.assertEqual(result.dashboard_action_type, "review_logged_in_account_mismatch")
+        self.assertNotIn("tap_logout", result.actions_taken)
+
+    def test_logout_fallback_missing_or_exception_lifecycle_blocks(self) -> None:
+        for lookup in (None, Mock(side_effect=RuntimeError("lookup down"))):
+            with self.subTest(lookup=lookup):
+                device = FakeDevice([ACTIVE_PROFILE_OLD_MENU_XML])
+                result = run_old_account_logout_fallback_flow(
+                    device,
+                    account_id=ACCOUNT_ID,
+                    expected_username="random_expected",
+                    previous_account_lifecycle_lookup=lookup,
+                    initial_signals=self._logout_initial_signals(),
+                    sleeper=Mock(),
+                )
+
+                self.assertFalse(result.ok)
+                self.assertEqual(result.safe_metadata["lifecycle_gate_result"], "block_wrong_active_account")
+                self.assertNotIn("tap_logout", result.actions_taken)
+
+    def test_logout_fallback_never_logs_out_expected_username(self) -> None:
+        device = FakeDevice([ACTIVE_PROFILE_EXPECTED_MENU_XML])
+
+        result = run_old_account_logout_fallback_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username="random_expected",
+            previous_account_lifecycle_lookup=self._canceled_lifecycle(),
+            initial_signals=self._logout_initial_signals(ACTIVE_PROFILE_EXPECTED_MENU_XML),
+            sleeper=Mock(),
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.failure_reason, "no_logout_expected_username")
+        self.assertNotIn("tap_logout", result.actions_taken)
+
+    def test_logout_fallback_final_unknown_after_reobserve_stops_safe(self) -> None:
+        device = FakeDevice(
+            [
+                ACTIVE_PROFILE_OLD_MENU_XML,
+                PROFILE_MENU_SHEET_XML,
+                PROFILE_MENU_SHEET_XML,
+                PROFILE_MENU_SHEET_XML,
+                SETTINGS_AND_ACTIVITY_XML,
+                SETTINGS_AND_ACTIVITY_XML,
+                SETTINGS_AND_ACTIVITY_XML,
+                LOGOUT_CONFIRMATION_PROMPT_XML,
+                LOGOUT_CONFIRMATION_PROMPT_XML,
+                LOGOUT_CONFIRMATION_PROMPT_XML,
+                UNKNOWN_XML,
+                UNKNOWN_XML,
+                UNKNOWN_XML,
+            ]
+        )
+
+        result = run_old_account_logout_fallback_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username="random_expected",
+            previous_account_lifecycle_lookup=self._canceled_lifecycle(),
+            initial_signals=self._logout_initial_signals(),
+            sleeper=Mock(),
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.failure_reason, "post_logout_unknown_screen")
+        self.assertTrue(result.safe_metadata["post_logout_reobserve"])
+
+    def test_logout_fallback_no_leak_metadata(self) -> None:
+        device = FakeDevice([ACTIVE_PROFILE_OLD_MENU_XML])
+
+        result = run_old_account_logout_fallback_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username="random_expected",
+            previous_account_lifecycle_lookup=Mock(
+                return_value={
+                    "lifecycle_status": "active",
+                    "clone_reuse_allowed": True,
+                    "reason": "password secret_ref Vault token emulator-5554 screenshot",
+                }
+            ),
+            initial_signals=self._logout_initial_signals(),
+            sleeper=Mock(),
+        )
+
+        payload = json.dumps(result.safe_metadata)
+        for forbidden in ("secret_ref", "Vault", VAULT_ID, "token", "emulator-5554", "screenshot"):
+            self.assertNotIn(forbidden, payload)
 
     def test_dry_run_wrong_candidate_blocks_mismatch_without_db_assumption(self) -> None:
         getter = Mock(return_value=credentials())

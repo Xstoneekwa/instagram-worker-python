@@ -50,6 +50,8 @@ NO_RETRY_FAILURES = {
 }
 MAX_RETRY_ATTEMPTS = 1
 POST_CONTINUE_REOBSERVE_WAIT_MS = 1500
+PROFILE_MENU_REOBSERVE_WAIT_MS = 1500
+PROFILE_REFRESH_WAIT_MS = 500
 
 CredentialsGetter = Callable[[str], Any]
 PreviousAccountLifecycleLookup = Callable[[str, dict[str, Any]], dict[str, Any]]
@@ -57,6 +59,13 @@ Publisher = Callable[..., dict[str, Any]]
 Timer = Callable[[], float]
 
 REUSABLE_PREVIOUS_ACCOUNT_LIFECYCLES = {"canceled", "stopped", "archived"}
+POST_LOGOUT_KNOWN_SCREENS = {
+    "login_form_empty",
+    "continue_as_candidate",
+    "account_picker",
+    "continue_password_only",
+    "connected",
+}
 
 
 @dataclass(frozen=True)
@@ -672,6 +681,601 @@ def run_login_provisioning_flow(
         timings=_merge_timings(timings, password_result.timings),
         warnings=[*warnings, *password_result.warnings],
         extra_metadata={**_flow_metadata(previous_account_lifecycle), **old_logged_in_metadata, **post_continue_metadata},
+        total_start=total_start,
+        timer=timer,
+        publisher=publisher,
+        publish_enabled=publish_enabled,
+    )
+
+
+def run_old_account_logout_fallback_flow(
+    d: Any,
+    *,
+    account_id: str,
+    expected_username: str,
+    previous_account_lifecycle_lookup: PreviousAccountLifecycleLookup | None = None,
+    publisher: Publisher | None = None,
+    publish_enabled: bool = False,
+    initial_signals: dict | None = None,
+    timer: Timer | None = None,
+    sleeper: Callable[[float], None] | None = None,
+) -> LoginProvisioningFlowResult:
+    """Explicit no-password fallback for logging out a reusable old account.
+
+    This is intentionally separate from the normal provisioning flow: callers
+    must opt in after deciding that the Cas F path is unavailable.
+    """
+
+    timer = timer or time.perf_counter
+    sleeper = sleeper or time.sleep
+    total_start = timer()
+    timings = _empty_timings()
+    warnings: list[str] = []
+    actions_taken: list[str] = []
+    safe_account_id = str(account_id or "").strip()
+    safe_expected_username = str(expected_username or "").strip()
+    metadata: dict[str, Any] = {
+        "logout_fallback_attempted": False,
+        "logout_attempted": False,
+        "logout_scroll_attempted": False,
+        "logout_scroll_attempt_count": 0,
+        "settings_reobserve_after_menu": False,
+        "save_login_prompt_handled": False,
+        "logout_confirmation_handled": False,
+        "would_submit_password": False,
+        "would_publish": False,
+    }
+
+    signals = dict(initial_signals or {})
+    if not signals:
+        start = timer()
+        signals = _observe_login_signals(d, expected_username=safe_expected_username)
+        timings["observe_ms"] += _elapsed_ms(start, timer())
+
+    if signals.get("screen_type") == "active_account_home":
+        action_result = _execute_logout_step(
+            d,
+            SimpleNamespace(decision="open_profile_from_home"),
+            timings=timings,
+            actions_taken=actions_taken,
+        )
+        if not action_result.ok:
+            return _logout_fallback_finalize(
+                ok=False,
+                final_outcome="action_failed",
+                reason=action_result.failure_reason or action_result.reason,
+                failure_reason=action_result.failure_reason or action_result.reason,
+                account_id=safe_account_id,
+                expected_username=safe_expected_username,
+                actions_taken=actions_taken,
+                timings=timings,
+                warnings=[*warnings, *action_result.warnings],
+                metadata=metadata,
+                total_start=total_start,
+                timer=timer,
+                publisher=publisher,
+                publish_enabled=publish_enabled,
+            )
+        start = timer()
+        signals = _observe_login_signals(d, expected_username=safe_expected_username)
+        timings["observe_ms"] += _elapsed_ms(start, timer())
+
+    if signals.get("screen_type") != "active_account_profile":
+        return _logout_fallback_finalize(
+            ok=False,
+            final_outcome="unknown",
+            reason="active_profile_not_confirmed",
+            failure_reason="active_profile_not_confirmed",
+            account_id=safe_account_id,
+            expected_username=safe_expected_username,
+            actions_taken=actions_taken,
+            timings=timings,
+            warnings=warnings,
+            metadata=metadata,
+            total_start=total_start,
+            timer=timer,
+            publisher=publisher,
+            publish_enabled=publish_enabled,
+        )
+
+    actual_username = _safe_public_text(signals.get("actual_logged_in_username"))
+    metadata["actual_logged_in_username"] = actual_username
+    if not actual_username:
+        return _logout_fallback_finalize(
+            ok=False,
+            final_outcome="mismatch",
+            reason="active_username_missing",
+            failure_reason="active_username_missing",
+            account_id=safe_account_id,
+            expected_username=safe_expected_username,
+            actions_taken=actions_taken,
+            timings=timings,
+            warnings=warnings,
+            metadata=metadata,
+            dashboard_action_type="review_logged_in_account_mismatch",
+            total_start=total_start,
+            timer=timer,
+            publisher=publisher,
+            publish_enabled=publish_enabled,
+        )
+
+    normalized_actual = actual_username.strip().lstrip("@").lower()
+    normalized_expected = safe_expected_username.strip().lstrip("@").lower()
+    if normalized_actual == normalized_expected:
+        return _logout_fallback_finalize(
+            ok=False,
+            final_outcome="connected",
+            reason="no_logout_expected_username",
+            failure_reason="no_logout_expected_username",
+            account_id=safe_account_id,
+            expected_username=safe_expected_username,
+            actions_taken=actions_taken,
+            timings=timings,
+            warnings=warnings,
+            metadata=metadata,
+            total_start=total_start,
+            timer=timer,
+            publisher=publisher,
+            publish_enabled=publish_enabled,
+        )
+
+    previous_account_lifecycle = _resolve_previous_account_lifecycle(
+        suggested_username=actual_username,
+        screen_type="active_account_profile",
+        account_id=safe_account_id,
+        expected_username=safe_expected_username,
+        previous_account_lifecycle_lookup=previous_account_lifecycle_lookup,
+        legacy_lifecycle_lookup=None,
+        legacy_clone_reuse_allowed=False,
+    )
+    metadata.update(_flow_metadata(previous_account_lifecycle))
+    lifecycle_ok = (
+        previous_account_lifecycle.get("lifecycle_status") in REUSABLE_PREVIOUS_ACCOUNT_LIFECYCLES
+        and bool(previous_account_lifecycle.get("clone_reuse_allowed"))
+    )
+    metadata["lifecycle_gate_result"] = "allow_logout_fallback" if lifecycle_ok else "block_wrong_active_account"
+    if not lifecycle_ok:
+        return _logout_fallback_finalize(
+            ok=False,
+            final_outcome="mismatch",
+            reason="wrong_active_account_requires_admin_review",
+            failure_reason="mismatch",
+            account_id=safe_account_id,
+            expected_username=safe_expected_username,
+            actions_taken=actions_taken,
+            timings=timings,
+            warnings=warnings,
+            metadata=metadata,
+            dashboard_action_type="review_logged_in_account_mismatch",
+            total_start=total_start,
+            timer=timer,
+            publisher=publisher,
+            publish_enabled=publish_enabled,
+        )
+
+    signals, menu_ok, menu_metadata = _stabilize_profile_menu(
+        d,
+        signals=signals,
+        actual_username=actual_username,
+        expected_username=safe_expected_username,
+        timings=timings,
+        actions_taken=actions_taken,
+        sleeper=sleeper,
+    )
+    metadata.update(menu_metadata)
+    if not menu_ok:
+        return _logout_fallback_finalize(
+            ok=False,
+            final_outcome="unknown",
+            reason=metadata.get("profile_menu_failure_reason") or "profile_menu_not_found",
+            failure_reason=metadata.get("profile_menu_failure_reason") or "profile_menu_not_found",
+            account_id=safe_account_id,
+            expected_username=safe_expected_username,
+            actions_taken=actions_taken,
+            timings=timings,
+            warnings=warnings,
+            metadata=metadata,
+            total_start=total_start,
+            timer=timer,
+            publisher=publisher,
+            publish_enabled=publish_enabled,
+        )
+
+    metadata["logout_fallback_attempted"] = True
+    for decision in (SimpleNamespace(decision="open_profile_menu"),):
+        action_result = _execute_logout_step(
+            d,
+            decision,
+            timings=timings,
+            actions_taken=actions_taken,
+        )
+        if not action_result.ok:
+            return _logout_fallback_finalize(
+                ok=False,
+                final_outcome="action_failed",
+                reason=action_result.failure_reason or action_result.reason,
+                failure_reason=action_result.failure_reason or action_result.reason,
+                account_id=safe_account_id,
+                expected_username=safe_expected_username,
+                actions_taken=actions_taken,
+                timings=timings,
+                warnings=[*warnings, *action_result.warnings],
+                metadata=metadata,
+                total_start=total_start,
+                timer=timer,
+                publisher=publisher,
+                publish_enabled=publish_enabled,
+            )
+        start = timer()
+        signals = _observe_login_signals(d, expected_username=safe_expected_username)
+        timings["observe_ms"] += _elapsed_ms(start, timer())
+    if signals.get("screen_type") not in {"profile_menu_sheet", "settings_and_activity"}:
+        metadata["settings_reobserve_after_menu"] = True
+        sleeper(POST_CONTINUE_REOBSERVE_WAIT_MS / 1000.0)
+        start = timer()
+        signals = _observe_login_signals(d, expected_username=safe_expected_username)
+        timings["observe_ms"] += _elapsed_ms(start, timer())
+    if signals.get("screen_type") == "profile_menu_sheet":
+        action_result = _execute_logout_step(
+            d,
+            SimpleNamespace(decision="tap_settings_and_activity"),
+            timings=timings,
+            actions_taken=actions_taken,
+        )
+        if not action_result.ok:
+            return _logout_fallback_finalize(
+                ok=False,
+                final_outcome="action_failed",
+                reason=action_result.failure_reason or action_result.reason,
+                failure_reason=action_result.failure_reason or action_result.reason,
+                account_id=safe_account_id,
+                expected_username=safe_expected_username,
+                actions_taken=actions_taken,
+                timings=timings,
+                warnings=[*warnings, *action_result.warnings],
+                metadata=metadata,
+                total_start=total_start,
+                timer=timer,
+                publisher=publisher,
+                publish_enabled=publish_enabled,
+            )
+        start = timer()
+        signals = _observe_login_signals(d, expected_username=safe_expected_username)
+        timings["observe_ms"] += _elapsed_ms(start, timer())
+
+    if signals.get("screen_type") != "settings_and_activity":
+        return _logout_fallback_finalize(
+            ok=False,
+            final_outcome="unknown",
+            reason="settings_and_activity_not_validated",
+            failure_reason="settings_and_activity_not_validated",
+            account_id=safe_account_id,
+            expected_username=safe_expected_username,
+            actions_taken=actions_taken,
+            timings=timings,
+            warnings=warnings,
+            metadata=metadata,
+            total_start=total_start,
+            timer=timer,
+            publisher=publisher,
+            publish_enabled=publish_enabled,
+        )
+
+    if not signals.get("has_log_out_button"):
+        metadata["logout_scroll_attempted"] = True
+        for _attempt in range(3):
+            metadata["logout_scroll_attempt_count"] = int(metadata["logout_scroll_attempt_count"]) + 1
+            if not _scroll_settings_to_logout_once(d):
+                break
+            start = timer()
+            signals = _observe_login_signals(d, expected_username=safe_expected_username)
+            timings["observe_ms"] += _elapsed_ms(start, timer())
+            if signals.get("screen_type") == "settings_and_activity" and signals.get("has_log_out_button"):
+                break
+        if signals.get("screen_type") != "settings_and_activity" or not signals.get("has_log_out_button"):
+            return _logout_fallback_finalize(
+                ok=False,
+                final_outcome="unknown",
+                reason="logout_not_visible",
+                failure_reason="logout_not_visible",
+                account_id=safe_account_id,
+                expected_username=safe_expected_username,
+                actions_taken=actions_taken,
+                timings=timings,
+                warnings=warnings,
+                metadata=metadata,
+                total_start=total_start,
+                timer=timer,
+                publisher=publisher,
+                publish_enabled=publish_enabled,
+            )
+
+    action_result = _execute_logout_step(
+        d,
+        SimpleNamespace(decision="tap_logout"),
+        timings=timings,
+        actions_taken=actions_taken,
+    )
+    if not action_result.ok:
+        return _logout_fallback_finalize(
+            ok=False,
+            final_outcome="action_failed",
+            reason=action_result.failure_reason or action_result.reason,
+            failure_reason=action_result.failure_reason or action_result.reason,
+            account_id=safe_account_id,
+            expected_username=safe_expected_username,
+            actions_taken=actions_taken,
+            timings=timings,
+            warnings=[*warnings, *action_result.warnings],
+            metadata=metadata,
+            total_start=total_start,
+            timer=timer,
+            publisher=publisher,
+            publish_enabled=publish_enabled,
+        )
+    metadata["logout_attempted"] = True
+    start = timer()
+    signals = _observe_login_signals(d, expected_username=safe_expected_username)
+    timings["observe_ms"] += _elapsed_ms(start, timer())
+
+    if signals.get("screen_type") == "save_login_info_prompt":
+        action_result = _execute_logout_step(
+            d,
+            SimpleNamespace(decision="tap_not_now"),
+            timings=timings,
+            actions_taken=actions_taken,
+        )
+        if not action_result.ok:
+            return _logout_fallback_finalize(
+                ok=False,
+                final_outcome="action_failed",
+                reason=action_result.failure_reason or action_result.reason,
+                failure_reason=action_result.failure_reason or action_result.reason,
+                account_id=safe_account_id,
+                expected_username=safe_expected_username,
+                actions_taken=actions_taken,
+                timings=timings,
+                warnings=[*warnings, *action_result.warnings],
+                metadata=metadata,
+                total_start=total_start,
+                timer=timer,
+                publisher=publisher,
+                publish_enabled=publish_enabled,
+            )
+        metadata["save_login_prompt_handled"] = True
+        start = timer()
+        signals = _observe_login_signals(d, expected_username=safe_expected_username)
+        timings["observe_ms"] += _elapsed_ms(start, timer())
+
+    if signals.get("screen_type") == "logout_confirmation_prompt":
+        action_result = _execute_logout_step(
+            d,
+            SimpleNamespace(decision="tap_confirm_logout"),
+            timings=timings,
+            actions_taken=actions_taken,
+        )
+        if not action_result.ok:
+            return _logout_fallback_finalize(
+                ok=False,
+                final_outcome="action_failed",
+                reason=action_result.failure_reason or action_result.reason,
+                failure_reason=action_result.failure_reason or action_result.reason,
+                account_id=safe_account_id,
+                expected_username=safe_expected_username,
+                actions_taken=actions_taken,
+                timings=timings,
+                warnings=[*warnings, *action_result.warnings],
+                metadata=metadata,
+                total_start=total_start,
+                timer=timer,
+                publisher=publisher,
+                publish_enabled=publish_enabled,
+            )
+        metadata["logout_confirmation_handled"] = True
+        start = timer()
+        signals = _observe_login_signals(d, expected_username=safe_expected_username)
+        timings["observe_ms"] += _elapsed_ms(start, timer())
+
+    if signals.get("screen_type") == "unknown":
+        metadata["post_logout_reobserve"] = True
+        metadata["post_logout_reobserve_count"] = 1
+        sleeper(POST_CONTINUE_REOBSERVE_WAIT_MS / 1000.0)
+        start = timer()
+        signals = _observe_login_signals(d, expected_username=safe_expected_username)
+        timings["observe_ms"] += _elapsed_ms(start, timer())
+
+    final_screen_type = _post_logout_screen_type(signals)
+    metadata["final_screen_type"] = final_screen_type
+    metadata["post_logout_known_screen"] = final_screen_type in POST_LOGOUT_KNOWN_SCREENS
+    if final_screen_type not in POST_LOGOUT_KNOWN_SCREENS:
+        return _logout_fallback_finalize(
+            ok=False,
+            final_outcome="unknown",
+            reason="post_logout_unknown_screen",
+            failure_reason="post_logout_unknown_screen",
+            account_id=safe_account_id,
+            expected_username=safe_expected_username,
+            actions_taken=actions_taken,
+            timings=timings,
+            warnings=warnings,
+            metadata=metadata,
+            total_start=total_start,
+            timer=timer,
+            publisher=publisher,
+            publish_enabled=publish_enabled,
+        )
+
+    return _logout_fallback_finalize(
+        ok=True,
+        final_outcome=final_screen_type,
+        reason="post_logout_known_screen",
+        failure_reason=None,
+        account_id=safe_account_id,
+        expected_username=safe_expected_username,
+        actions_taken=actions_taken,
+        timings=timings,
+        warnings=warnings,
+        metadata=metadata,
+        total_start=total_start,
+        timer=timer,
+        publisher=publisher,
+        publish_enabled=publish_enabled,
+    )
+
+
+def _execute_logout_step(
+    d: Any,
+    decision: Any,
+    *,
+    timings: dict[str, int],
+    actions_taken: list[str],
+) -> Any:
+    start = time.perf_counter()
+    action_result = execute_login_screen_decision(d, decision, post_action_wait_ms=500)
+    timings["action_ms"] += _elapsed_ms(start, time.perf_counter())
+    actions_taken.append(action_result.action)
+    return action_result
+
+
+def _stabilize_profile_menu(
+    d: Any,
+    *,
+    signals: dict[str, Any],
+    actual_username: str,
+    expected_username: str,
+    timings: dict[str, int],
+    actions_taken: list[str],
+    sleeper: Callable[[float], None],
+) -> tuple[dict[str, Any], bool, dict[str, Any]]:
+    metadata: dict[str, Any] = {
+        "profile_menu_initially_missing": not bool(signals.get("profile_menu_ready")),
+        "profile_menu_wait_reobserve": False,
+        "profile_menu_home_profile_refresh_attempted": False,
+        "profile_menu_final_found": bool(signals.get("profile_menu_ready")),
+        "profile_menu_failure_reason": "",
+    }
+    if signals.get("profile_menu_ready"):
+        return signals, True, metadata
+
+    metadata["profile_menu_wait_reobserve"] = True
+    sleeper(PROFILE_MENU_REOBSERVE_WAIT_MS / 1000.0)
+    start = time.perf_counter()
+    signals = _observe_login_signals(d, expected_username=expected_username)
+    timings["observe_ms"] += _elapsed_ms(start, time.perf_counter())
+    if not _same_active_profile(signals, actual_username):
+        metadata["profile_menu_failure_reason"] = "username_changed"
+        return signals, False, metadata
+    if signals.get("profile_menu_ready"):
+        metadata["profile_menu_final_found"] = True
+        return signals, True, metadata
+
+    metadata["profile_menu_home_profile_refresh_attempted"] = True
+    home_result = _execute_logout_step(
+        d,
+        SimpleNamespace(decision="open_home_from_profile"),
+        timings=timings,
+        actions_taken=actions_taken,
+    )
+    if not home_result.ok:
+        metadata["profile_menu_failure_reason"] = home_result.failure_reason or home_result.reason
+        return signals, False, metadata
+    sleeper(PROFILE_REFRESH_WAIT_MS / 1000.0)
+    profile_result = _execute_logout_step(
+        d,
+        SimpleNamespace(decision="open_profile_from_home"),
+        timings=timings,
+        actions_taken=actions_taken,
+    )
+    if not profile_result.ok:
+        metadata["profile_menu_failure_reason"] = profile_result.failure_reason or profile_result.reason
+        return signals, False, metadata
+    sleeper(PROFILE_REFRESH_WAIT_MS / 1000.0)
+    start = time.perf_counter()
+    signals = _observe_login_signals(d, expected_username=expected_username)
+    timings["observe_ms"] += _elapsed_ms(start, time.perf_counter())
+    if not _same_active_profile(signals, actual_username):
+        metadata["profile_menu_failure_reason"] = "username_changed"
+        return signals, False, metadata
+    if not signals.get("profile_menu_ready"):
+        metadata["profile_menu_failure_reason"] = "profile_menu_not_found"
+        return signals, False, metadata
+    metadata["profile_menu_final_found"] = True
+    return signals, True, metadata
+
+
+def _same_active_profile(signals: dict[str, Any], actual_username: str) -> bool:
+    return (
+        signals.get("screen_type") == "active_account_profile"
+        and _safe_public_text(signals.get("actual_logged_in_username")).strip().lstrip("@").lower()
+        == str(actual_username or "").strip().lstrip("@").lower()
+    )
+
+
+def _post_logout_screen_type(signals: dict[str, Any]) -> str:
+    screen_type = str(signals.get("screen_type") or "unknown")
+    if screen_type in {"login_form_empty", "continue_as_candidate", "account_picker", "continue_password_only"}:
+        return screen_type
+    if str(signals.get("login_probe_outcome") or "") == LoginProbeOutcome.CONNECTED.value:
+        return "connected"
+    return screen_type
+
+
+def _scroll_settings_to_logout_once(d: Any) -> bool:
+    try:
+        selector = d(scrollable=True)
+        scroll = getattr(selector, "scroll", None)
+        to = getattr(scroll, "to", None)
+        if callable(to):
+            if bool(to(text="Log out")):
+                return True
+        fling = getattr(selector, "fling", None)
+        to_end = getattr(fling, "toEnd", None)
+        if callable(to_end):
+            return bool(to_end(max_swipes=5))
+    except Exception:
+        return False
+    return False
+
+
+def _logout_fallback_finalize(
+    *,
+    ok: bool,
+    final_outcome: str,
+    reason: str,
+    failure_reason: str | None,
+    account_id: str,
+    expected_username: str,
+    actions_taken: list[str],
+    timings: dict[str, int],
+    warnings: list[str],
+    metadata: dict[str, Any],
+    total_start: float,
+    timer: Timer,
+    publisher: Publisher | None,
+    publish_enabled: bool,
+    dashboard_action_type: str | None = None,
+) -> LoginProvisioningFlowResult:
+    return _finalize(
+        ok=ok,
+        completed=ok,
+        final_outcome=final_outcome,
+        reason=reason,
+        failure_reason=failure_reason,
+        account_id=account_id,
+        expected_username=expected_username,
+        actions_taken=actions_taken,
+        timings=timings,
+        warnings=warnings,
+        extra_metadata={
+            **metadata,
+            "password_required": False,
+            "ready_for_password_submit": False,
+            "ready_for_credentials_flow": False,
+            "would_submit_password": False,
+            "would_publish": False,
+        },
+        dashboard_action_type=dashboard_action_type,
+        should_publish_status=False,
         total_start=total_start,
         timer=timer,
         publisher=publisher,

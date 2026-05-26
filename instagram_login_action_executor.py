@@ -21,16 +21,28 @@ ACTION_CONTINUE = "tap_continue"
 ACTION_USE_ANOTHER_PROFILE = "tap_use_another_profile"
 ACTION_SELECT_EXPECTED_ACCOUNT = "tap_expected_account"
 ACTION_OPEN_PROFILE_FROM_HOME = "tap_profile_bottom_nav"
+ACTION_OPEN_HOME_FROM_PROFILE = "tap_home_bottom_nav"
 ACTION_OPEN_ACCOUNT_SWITCHER = "tap_account_switcher"
 ACTION_ADD_INSTAGRAM_ACCOUNT = "tap_add_instagram_account"
 ACTION_LOG_INTO_EXISTING_ACCOUNT = "tap_log_into_existing_account"
+ACTION_OPEN_PROFILE_MENU = "tap_profile_menu"
+ACTION_OPEN_SETTINGS_AND_ACTIVITY = "tap_settings_and_activity"
+ACTION_TAP_LOGOUT = "tap_logout"
+ACTION_TAP_NOT_NOW = "tap_not_now"
+ACTION_CONFIRM_LOGOUT = "tap_confirm_logout"
 NO_ACTION = "no_action"
 
 ALLOWED_DECISION_ACTIONS = {
     "open_profile_from_home": ("Profile", ACTION_OPEN_PROFILE_FROM_HOME),
+    "open_home_from_profile": ("Home", ACTION_OPEN_HOME_FROM_PROFILE),
     "open_account_switcher": ("", ACTION_OPEN_ACCOUNT_SWITCHER),
     "tap_add_instagram_account": ("Add Instagram account", ACTION_ADD_INSTAGRAM_ACCOUNT),
     "tap_log_into_existing_account": ("Log into existing account", ACTION_LOG_INTO_EXISTING_ACCOUNT),
+    "open_profile_menu": ("", ACTION_OPEN_PROFILE_MENU),
+    "tap_settings_and_activity": ("Settings and activity", ACTION_OPEN_SETTINGS_AND_ACTIVITY),
+    "tap_logout": ("Log out", ACTION_TAP_LOGOUT),
+    "tap_not_now": ("Not now", ACTION_TAP_NOT_NOW),
+    "tap_confirm_logout": ("Log out", ACTION_CONFIRM_LOGOUT),
     "continue_expected_account": ("Continue", ACTION_CONTINUE),
     "use_another_profile_previous_account_stopped": ("Use another profile", ACTION_USE_ANOTHER_PROFILE),
     "select_expected_account_from_picker": ("", ACTION_SELECT_EXPECTED_ACCOUNT),
@@ -166,8 +178,18 @@ def execute_login_screen_decision(
         if action == ACTION_SELECT_EXPECTED_ACCOUNT
         else _find_account_switcher_target(d, target_text)
         if action == ACTION_OPEN_ACCOUNT_SWITCHER
+        else _find_profile_menu_target(d)
+        if action == ACTION_OPEN_PROFILE_MENU
         else _find_first_exact_target(d, _target_aliases_for_action(action, target_text))
-        if action in {ACTION_ADD_INSTAGRAM_ACCOUNT, ACTION_LOG_INTO_EXISTING_ACCOUNT}
+        if action
+        in {
+            ACTION_ADD_INSTAGRAM_ACCOUNT,
+            ACTION_LOG_INTO_EXISTING_ACCOUNT,
+            ACTION_OPEN_SETTINGS_AND_ACTIVITY,
+            ACTION_TAP_LOGOUT,
+            ACTION_TAP_NOT_NOW,
+            ACTION_CONFIRM_LOGOUT,
+        }
         else _find_exact_accessibility_target(d, target_text)
     )
     timings["target_lookup_ms"] = _elapsed_ms(start, timer())
@@ -299,6 +321,26 @@ def _target_aliases_for_action(action: str, target_text: str) -> tuple[str, ...]
             "Se connecter a un compte existant",
             "Ajouter un compte existant",
         )
+    if action == ACTION_OPEN_SETTINGS_AND_ACTIVITY:
+        return (
+            "Settings and activity",
+            "Paramètres et activité",
+            "Parametres et activite",
+        )
+    if action == ACTION_TAP_LOGOUT or action == ACTION_CONFIRM_LOGOUT:
+        return (
+            "Log out",
+            "Se déconnecter",
+            "Se deconnecter",
+            "Déconnexion",
+            "Deconnexion",
+        )
+    if action == ACTION_TAP_NOT_NOW:
+        return (
+            "Not now",
+            "Pas maintenant",
+            "Plus tard",
+        )
     return (target_text,)
 
 
@@ -350,6 +392,65 @@ def _find_account_switcher_target(d: Any, target_username: str) -> dict[str, Any
         "target": {"kind": "bounds", "center": (winner.bounds.center_x, winner.bounds.center_y), "label": winner.label},
         "failure_reason": "",
         "resolution": "account_switcher_username_bounds_center",
+    }
+
+
+def _find_profile_menu_target(d: Any) -> dict[str, Any]:
+    try:
+        hierarchy_xml = _dump_hierarchy_once(d)
+    except Exception:
+        hierarchy_xml = ""
+    candidates: list[_AccessibilityCandidate] = []
+    for raw_attrs in re.findall(r"<node\b([^>]*)/?>", hierarchy_xml or ""):
+        attrs = _parse_node_attributes(raw_attrs)
+        bounds = _parse_bounds(attrs.get("bounds", ""))
+        if bounds is None:
+            continue
+        label = _normalize_label(attrs.get("text") or attrs.get("content-desc") or attrs.get("contentDescription") or "")
+        resource_id = str(attrs.get("resource-id") or "").lower()
+        lowered_label = label.lower()
+        looks_like_menu = (
+            any(token in lowered_label for token in ("options", "menu", "settings and activity"))
+            or any(
+                token in resource_id
+                for token in (
+                    "action_bar_button",
+                    "action_bar_action",
+                    "overflow",
+                    "hamburger",
+                    "profile_menu",
+                )
+            )
+        )
+        if not looks_like_menu:
+            continue
+        if not (_node_is_enabled(attrs) and _node_is_visible(attrs) and _node_is_clickable(attrs)):
+            continue
+        # Logical profile action-bar zone: top-right controls, not an absolute tap.
+        if bounds.center_y > 360 or bounds.center_x < 650:
+            continue
+        candidates.append(
+            _AccessibilityCandidate(
+                label=label or resource_id,
+                source_attr="profile-menu",
+                bounds=bounds,
+                clickable=True,
+                enabled=True,
+                visible=True,
+                class_name=str(attrs.get("class", "")).split(".")[-1],
+            )
+        )
+    if not candidates:
+        return {"target": None, "failure_reason": "profile_menu_not_found", "resolution": "profile_menu_not_found"}
+    deduped = _dedupe_candidates_by_bounds(candidates)
+    zones = _distinct_visual_zones(deduped)
+    if len(zones) > 1:
+        return {"target": None, "failure_reason": "ambiguous_profile_menu", "resolution": "profile_menu_multiple_zones"}
+    winner = _choose_best_candidate(deduped)
+    return {
+        "target": {"kind": "bounds", "center": (winner.bounds.center_x, winner.bounds.center_y), "label": winner.label},
+        "failure_reason": "",
+        "resolution": "profile_menu_bounds_center",
     }
 
 

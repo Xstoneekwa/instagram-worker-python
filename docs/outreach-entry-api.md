@@ -3316,6 +3316,106 @@ Validation reelle no-password 2026-05-26 :
 - aucun logout automatique, aucun password saisi, aucun tap `Log in`, aucun
   Vault read, aucun credential reel, aucun publish.
 
+## Entry 2E-5O Logout Fallback Old Canceled Account
+
+Entry 2E-5O couvre le Cas G : fallback de logout controle pour un ancien compte
+encore connecte, uniquement si le chemin Cas F (`Add Instagram account` ->
+`Log into existing account`) echoue ou n'est pas disponible.
+
+Ce fallback est separe du flow login principal : il est expose comme chemin
+explicite, opt-in, et ne doit jamais etre declenche automatiquement par le
+runner ou un flow business.
+
+Gate de securite :
+
+- `actual_logged_in_username` doit etre detecte dynamiquement sur le profil actif;
+- `actual_logged_in_username != expected_username`;
+- le username doit rester confirme avant les actions critiques;
+- `previous_account_lifecycle_lookup(actual_logged_in_username, context)` doit
+  confirmer `lifecycle_status in canceled/stopped/archived` et
+  `clone_reuse_allowed=true`;
+- source autorisee pour le smoke : `operator_smoke_override`, temporaire et non
+  hardcodee par username;
+- sinon stop safe : aucun logout, dashboard futur
+  `review_logged_in_account_mismatch`.
+
+Stabilisation profil / hamburger :
+
+- le probe expose `profile_menu_ready` et
+  `profile_menu_missing_transient` sur `active_account_profile`;
+- si le hamburger/menu n'est pas disponible, l'orchestrateur attend courtement
+  puis re-observe une fois;
+- si toujours absent, il tente un seul aller-retour safe `Home` -> `Profile`;
+- si le username change, devient incertain, ou si le menu reste absent :
+  stop safe avec reason stable (`username_changed` ou `profile_menu_not_found`);
+- metadata exposee :
+  `profile_menu_initially_missing`, `profile_menu_wait_reobserve`,
+  `profile_menu_home_profile_refresh_attempted`, `profile_menu_final_found`,
+  `profile_menu_failure_reason`.
+
+Screens / prompts ajoutes :
+
+- `profile_menu_sheet` : entree `Settings and activity`;
+- `settings_and_activity` : titre `Settings and activity`, section `Login`,
+  lignes `Add account` et `Log out`;
+- `save_login_info_prompt` : `Save your login info?`, boutons `Save` et
+  `Not now`;
+- `logout_confirmation_prompt` : `Log out of your account?`, boutons
+  `Log out` et `Cancel`;
+- `post_logout_known_screen` est vrai si l'ecran final retombe sur
+  `login_form_empty`, `continue_as_candidate`, `account_picker`,
+  `continue_password_only` ou `connected`.
+
+Actions autorisees :
+
+- ouvrir hamburger/menu profil par XML/bounds et zone logique action-bar;
+- tap `Settings and activity` si necessaire;
+- si `Log out` n'est pas visible sur la page settings, scroll controle borne vers
+  la fin de la page settings, puis re-observation;
+- tap `Log out` seulement apres gate lifecycle valide;
+- sur `Save your login info?`, tap uniquement `Not now`, jamais `Save`;
+- sur `Log out of your account?`, tap `Log out` seulement si le contexte reste
+  confirme;
+- une seule re-observation post-logout si l'ecran final est `unknown`, puis stop
+  safe.
+
+Aliases :
+
+- EN couverts : `Settings and activity`, `Log out`, `Not now`;
+- FR documentes : `Parametres et activite`, `Se deconnecter`, `Deconnexion`,
+  `Pas maintenant`, `Plus tard`, `Annuler`, `Enregistrer`.
+
+No-password / no-leak :
+
+- aucune saisie, aucun password, aucun tap `Log in`, aucun Vault read, aucun
+  credential reel, aucun publish HTTP, aucune ecriture Supabase;
+- aucun logout du `expected_username`;
+- aucune coordonnee fixe : les taps utilisent hierarchy XML/bounds, libelles ou
+  resource-id, et dedup de bounds.
+
+Validation reelle no-password 2026-05-26 :
+
+- pre-check device OK sur `emulator-5554` : device unique, aucun `runner.py`,
+  aucun sender/follow/unfollow/outreach projet actif;
+- depart profile : `actual_logged_in_username=i_m_your_traker`,
+  `expected_username=cinema_catchup`;
+- lifecycle gate operator confirme :
+  `lifecycle_status=canceled`, `clone_reuse_allowed=true`,
+  `source=operator_smoke_override`;
+- hamburger initialement disponible apres stabilisation profile;
+- action executee : tap hamburger/profile menu;
+- page `Settings and activity` confirmee, `Log out` non visible initialement;
+- scroll controle vers la fin settings : `Log out` visible;
+- action executee : tap `Log out`;
+- prompt `Save your login info?` gere avec `Not now`, jamais `Save`;
+- prompt `Log out of your account?` gere avec `Log out`;
+- l'orchestrateur strict a stoppe safe sur `post_logout_unknown_screen` apres
+  une re-observation unique;
+- inspection passive juste apres le stop safe : stabilisation vers
+  `screen_type=account_picker` avec `cinema_catchup` et `i_m_your_traker`;
+- aucun password, aucune saisie, aucun tap `Log in`, aucun Vault read, aucun
+  credential reel, aucun publish HTTP, aucune ecriture Supabase.
+
 ## Entry 2E-5J-2B-1 Previous Account Lifecycle Gate Source
 
 Entry 2E-5J-2B-1 audite la source fiable a utiliser avant d'autoriser

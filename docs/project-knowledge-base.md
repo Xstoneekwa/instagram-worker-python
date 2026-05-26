@@ -272,6 +272,34 @@ Post-submit policy future :
   `Continue` et stoppe sur `continue_password_only` en `credentials_missing`,
   `ready_for_password_submit=true`, sans password, sans `Log in`, sans Vault,
   sans logout et sans publish.
+- Entry 2E-5O : Cas G logout fallback old canceled account. Ce chemin est
+  separe du Cas F et ne sert que si `Add Instagram account` ->
+  `Log into existing account` echoue ou n'est pas disponible. Il est opt-in :
+  le flow login principal ne declenche pas de logout automatiquement. Le gate
+  impose `actual_logged_in_username` detecte dynamiquement sur profil,
+  different de `expected_username`, puis lifecycle explicite
+  `canceled/stopped/archived + clone_reuse_allowed=true` via
+  `operator_smoke_override` temporaire ou future DB lifecycle. Sinon stop safe
+  `review_logged_in_account_mismatch`, aucun logout. Le patch ajoute
+  `profile_menu_ready`, `profile_menu_missing_transient`,
+  `profile_menu_sheet`, `settings_and_activity`, `save_login_info_prompt` et
+  `logout_confirmation_prompt`. Avant menu, l'orchestrateur attend/reobserve une
+  fois puis tente au plus un refresh safe `Home` -> `Profile`; si le hamburger
+  reste absent ou si le username change, stop safe. Sur `Save your login info?`,
+  il tape uniquement `Not now`; sur `Log out of your account?`, il tape `Log out`
+  uniquement apres gate confirme. Ecran final attendu : cas deja couverts
+  (`login_form_empty`, `continue_as_candidate`, `account_picker`,
+  `continue_password_only`, `connected`) ou stop safe apres reobserve unique.
+  Si `Log out` n'est pas visible dans settings, un scroll controle borne tente
+  de rejoindre la section `Login` avant de stopper safe. Toujours
+  no-password/no-leak : aucune saisie, aucun `Log in`, aucun Vault, aucun
+  publish, aucune ecriture Supabase, aucune coordonnee fixe. Smoke reel
+  2026-05-26 : profil `i_m_your_traker`, lifecycle override `canceled +
+  clone_reuse_allowed=true`, hamburger OK, scroll settings vers `Log out`, prompt
+  `Save your login info?` gere par `Not now`, confirmation logout geree par
+  `Log out`. L'orchestrateur a stoppe safe sur `post_logout_unknown_screen` apres
+  reobserve unique; inspection passive juste apres : stabilisation vers
+  `account_picker`.
 - Entry 2E-5J-2B-1 : audit lifecycle read-only. Les statuts existants couvrent
   `client_instagram_accounts` login/provisioning/onboarding,
   `client_subscriptions` active/paused/cancelled/expired,

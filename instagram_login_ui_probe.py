@@ -103,6 +103,7 @@ def extract_login_screen_signals_from_hierarchy(
     *,
     expected_username: str | None = None,
 ) -> dict[str, Any]:
+    raw_hierarchy = str(hierarchy_xml or "")
     text = _normalize_hierarchy_text(hierarchy_xml)
     has_continue_button = _has_phrase(text, "continue")
     has_use_another_profile = _has_phrase(text, "use another profile")
@@ -132,6 +133,49 @@ def extract_login_screen_signals_from_hierarchy(
             "ajouter un compte existant",
         ),
     )
+    has_profile_menu = _has_profile_menu_signal(raw_hierarchy, text)
+    has_settings_and_activity = _contains_any(
+        text,
+        (
+            "settings and activity",
+            "paramètres et activité",
+            "parametres et activite",
+        ),
+    )
+    has_accounts_center = _has_phrase(text, "accounts center")
+    has_how_you_use_instagram = _has_phrase(text, "how you use instagram")
+    has_settings_page_sections = _contains_any(
+        text,
+        (
+            "how others can interact with you",
+            "what you see",
+            "follow and invite friends",
+            "also from meta",
+        ),
+    )
+    has_more_info_support = _has_phrase(text, "more info and support")
+    has_login_section = _has_phrase(text, "login")
+    has_add_account = _contains_any(text, ("add account", "ajouter un compte"))
+    has_log_out = _contains_any(text, ("log out", "se déconnecter", "se deconnecter", "déconnexion", "deconnexion"))
+    has_save_login_info_prompt = _contains_any(
+        text,
+        (
+            "save your login info",
+            "enregistrer vos informations de connexion",
+            "enregistrer les informations de connexion",
+        ),
+    )
+    has_not_now = _contains_any(text, ("not now", "pas maintenant", "plus tard"))
+    has_save_button = _contains_any(text, ("save", "enregistrer"))
+    has_logout_confirmation_prompt = _contains_any(
+        text,
+        (
+            "log out of your account",
+            "se déconnecter de votre compte",
+            "se deconnecter de votre compte",
+        ),
+    )
+    has_cancel = _contains_any(text, ("cancel", "annuler"))
     has_home_feed_markers = (
         _has_phrase(text, "your story")
         or _has_phrase(text, "suggested for you")
@@ -153,7 +197,23 @@ def extract_login_screen_signals_from_hierarchy(
     overlay_present = bool(overlay_type)
     transition_loading = _has_phrase(text, "loading")
 
-    if has_add_account_title and has_log_into_existing_account and has_create_new_account:
+    if has_logout_confirmation_prompt and has_log_out and has_cancel:
+        screen_type = "logout_confirmation_prompt"
+    elif has_save_login_info_prompt and has_not_now and has_save_button:
+        screen_type = "save_login_info_prompt"
+    elif has_settings_and_activity and (
+        has_log_out
+        or has_add_account
+        or has_login_section
+        or has_accounts_center
+        or has_how_you_use_instagram
+        or has_settings_page_sections
+        or has_more_info_support
+    ):
+        screen_type = "settings_and_activity"
+    elif has_settings_and_activity:
+        screen_type = "profile_menu_sheet"
+    elif has_add_account_title and has_log_into_existing_account and has_create_new_account:
         screen_type = "add_account_sheet"
     elif has_add_instagram_account and has_accounts_center:
         screen_type = "account_switcher_sheet"
@@ -196,6 +256,18 @@ def extract_login_screen_signals_from_hierarchy(
         "has_add_instagram_account_button": has_add_instagram_account,
         "has_accounts_center_button": has_accounts_center,
         "has_log_into_existing_account_button": has_log_into_existing_account,
+        "profile_menu_ready": screen_type == "active_account_profile" and has_profile_menu,
+        "profile_menu_missing_transient": screen_type == "active_account_profile" and not has_profile_menu,
+        "settings_and_activity": screen_type == "settings_and_activity",
+        "profile_menu_sheet": screen_type == "profile_menu_sheet",
+        "has_settings_and_activity_button": has_settings_and_activity,
+        "has_add_account_button": has_add_account,
+        "has_log_out_button": has_log_out,
+        "save_login_info_prompt": screen_type == "save_login_info_prompt",
+        "has_not_now_button": has_not_now,
+        "has_save_button": has_save_button,
+        "logout_confirmation_prompt": screen_type == "logout_confirmation_prompt",
+        "has_cancel_button": has_cancel,
         "active_account_home": screen_type == "active_account_home",
         "active_account_profile": screen_type == "active_account_profile",
         "account_switcher_sheet": screen_type == "account_switcher_sheet",
@@ -411,6 +483,31 @@ def _extract_profile_username(text: str, available_usernames: list[str]) -> str:
     if _has_phrase(text, "edit profile") and _has_phrase(text, "share profile"):
         return available_usernames[0]
     return ""
+
+
+def _has_profile_menu_signal(raw_hierarchy: str, text: str) -> bool:
+    if _contains_any(
+        text,
+        (
+            "options",
+            "menu",
+            "settings and activity",
+            "paramètres et activité",
+            "parametres et activite",
+        ),
+    ):
+        return True
+    lowered = str(raw_hierarchy or "").lower()
+    return any(
+        fragment in lowered
+        for fragment in (
+            "action_bar_button",
+            "action_bar_action",
+            "overflow",
+            "hamburger",
+            "profile_menu",
+        )
+    )
 
 
 def _normalize_username_candidate(value: str) -> str:
