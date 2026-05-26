@@ -2307,6 +2307,81 @@ Suite prevue :
 - login controle sur clone + compte test dedie;
 - puis seulement integration state machine / recovery avant runtime principal.
 
+## Entry 2E-5F Controlled Action Executor
+
+Entry 2E-5F ajoute `instagram_login_action_executor.py`, un executor controle
+qui applique uniquement une decision deja produite par le Login Screen Router
+2E-5E. Il ne decide pas le metier, ne relit pas le lifecycle et ne fait aucun
+override : il transforme seulement une decision sure en un tap UI minimal.
+
+Actions autorisees V1 :
+
+- `continue_expected_account` -> tap exact sur `Continue`;
+- `use_another_profile_previous_account_stopped` -> tap exact sur
+  `Use another profile`.
+
+Toutes les autres decisions restent no-action :
+
+- `block_wrong_suggested_account`;
+- `start_login_form_flow`;
+- `unknown_no_action`;
+- toute decision inconnue, avec `failure_reason=unsupported_decision`.
+
+Securite :
+
+- aucun password;
+- aucune saisie username/password;
+- aucun read Vault ou acces credentials;
+- aucun vrai login complet;
+- aucun Supabase reel;
+- aucun publish HTTP;
+- aucun hook `runner.py`, sender/follow/outreach ou `account_session*`;
+- aucun `app_stop` automatique;
+- aucun XML brut, screenshot path, token, `secret_ref`, Vault, `adb_serial` ou
+  `device_udid` dans le resultat.
+
+Tap safety :
+
+- recherche accessibility exacte sur le bouton cible;
+- `Continue` ne matche pas `Create new account`;
+- bouton absent -> `failure_reason=target_button_not_found`;
+- plusieurs candidats -> `failure_reason=ambiguous_target_button`;
+- exception tap -> `failure_reason=tap_failed`;
+- un seul tap maximum;
+- pas de retry par defaut;
+- `post_action_wait_ms` est borne entre `0` et `1500`.
+
+Observation post-action :
+
+- apres un tap reussi, l'executor attend court puis fait au plus un
+  `dump_hierarchy`;
+- il appelle `extract_login_screen_signals_from_hierarchy(...)`;
+- apres `Use another profile`, l'ecran ideal est `login_form_empty`;
+- apres `Continue`, l'ecran suivant peut etre un formulaire password, une
+  validation, un etat connecte ou `unknown`; l'executor observe seulement et ne
+  saisit rien.
+
+Pourquoi :
+
+- 2E-5E validait la decision sans action;
+- 2E-5F ajoute le passage decision -> action UI minimale, avec reasons stables,
+  anti-boucle, fast path et observation post-action;
+- cette etape reste volontairement avant tout acces credentials.
+
+Limites :
+
+- pas encore de credentials cote worker;
+- pas encore de login complet;
+- pas encore de stable Instagram ID pour distinguer rename et mismatch;
+- pas encore de clone prod/test complet;
+- pas encore de state machine login dediee ni de recovery riche.
+
+Prochaines etapes :
+
+- secure credential access design;
+- puis password form executor controle, uniquement sur clone + compte test
+  dedie, avec etat/recovery avant tout branchement runtime principal.
+
 ## Entry 2F-1 RPC incidents -> dashboard actions
 
 Entry 2F-1 ajoute la RPC service-role
