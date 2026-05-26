@@ -2437,21 +2437,92 @@ NO-GO securite :
   `adb_serial` ou `device_udid` dans les outputs safe;
 - aucun vrai read Vault, aucun run device et aucun publish HTTP en 2E-5G.
 
-Entry 2E-5H futur :
+## Entry 2E-5H Supabase Vault Reader Helper
 
-- implementer le vrai reader Supabase Vault cote worker/service-role;
-- garder le flag OFF par defaut;
-- lire le secret temporairement en memoire uniquement;
-- verifier d'abord avec un smoke fake secret, sans compte client reel;
-- ne jamais logger le payload Vault, `secret_ref`, headers auth ou body brut.
+Entry 2E-5H ajoute `instagram_supabase_vault_reader.py`, le helper de lecture
+Vault cote worker pour le futur provisioner login. Cette etape ne fait toujours
+aucun login Instagram, aucun tap password, aucun run device, aucun `app_start`,
+aucun `app_stop`, aucun hook runner et aucune modification dashboard.
+
+Audit prealable :
+
+- `supabase_client.py` utilise deja `SUPABASE_URL` et
+  `SUPABASE_SERVICE_ROLE_KEY` pour PostgREST/RPC via service-role;
+- le repo contient un wrapper d'ecriture Vault
+  `public.create_instagram_credentials_vault_secret(...)`;
+- aucun wrapper SQL/RPC de lecture/decrypt Vault n'est encore versionne;
+- le format V1 confirme reste `supabase_vault://{vault_secret_id}`.
+
+Transport choisi en 2E-5H :
+
+- adapter RPC injectable `SupabaseVaultClient`;
+- `parse_supabase_vault_secret_ref(...)` accepte uniquement
+  `supabase_vault://{uuid}`;
+- `read_supabase_vault_secret(...)` retourne un `SecretValue`;
+- `build_supabase_vault_secret_reader(...)` produit un `secret_reader`
+  compatible avec `get_instagram_credentials_for_login(...)`;
+- par defaut, sans `rpc_caller` explicite, le transport est fail-closed avec
+  `vault_transport_not_configured`.
+
+Limitation technique actuelle :
+
+- le helper est pret pour une lecture service-role via RPC, mais le schema actuel
+  ne contient pas encore de RPC publique/service-role de lecture Vault;
+- le smoke reel devra donc attendre 2E-5H-2 avec un RPC de lecture/decrypt valide
+  ou un transport worker equivalent confirme;
+- aucun secret client reel n'est lu dans 2E-5H.
+
+Erreurs safe V1 :
+
+- `invalid_secret_ref`;
+- `unsupported_secret_ref_provider`;
+- `vault_secret_id_invalid`;
+- `vault_transport_not_configured`;
+- `vault_read_failed`;
+- `vault_secret_empty`;
+- `vault_secret_not_string`;
+- `vault_timeout`.
+
+Regles no-leak :
+
+- `safe_ref_label` vaut toujours `supabase_vault://[REDACTED]`;
+- aucun Vault UUID complet dans les erreurs safe;
+- aucun `secret_ref` complet dans les erreurs safe;
+- aucun password dans `str`, `repr`, dict safe, exception ou log;
+- aucun header Authorization, service-role key, token, cookie, XML/screenshot ou
+  identifiant device dans les sorties safe;
+- le secret brut n'est accessible que via
+  `SecretValue.reveal_for_login_executor()`, pour le futur executor controle.
+
+Entry 2E-5H-2 futur :
+
+- ajouter ou confirmer le transport reel de lecture Vault cote service-role;
+- lancer un smoke avec fake credential uniquement;
+- conserver le flag OFF par defaut;
+- ne jamais afficher le payload Vault, le `secret_ref`, le Vault UUID, les
+  headers auth ou la reponse brute.
+
+Registre dashboard/backend/BotApp futur :
+
+- le dashboard, le backend et BotApp devront afficher uniquement des statuts
+  safe : credentials configured/missing, Vault reader status,
+  login/provisioning status et action retry provisioning;
+- aucun password, `secret_ref`, Vault UUID, token, cookie, service-role key,
+  XML/screenshot ou identifiant device ne doit etre expose;
+- un futur bouton/admin action pourra relancer une verification credentials,
+  mais pas lire ni afficher le secret;
+- 2E-5H documente ce contrat seulement : aucun dashboard n'est construit ici.
 
 Entry 2E-5I futur :
 
-- ajouter un password form executor controle;
-- taper username/password uniquement sur `login_form_empty` valide par
+- password form executor controle;
+- saisie username/password uniquement sur `login_form_empty` valide par
   observation d'etat;
-- limiter le premier smoke au compte test `cinema_catchup`;
+- premier smoke limite a `cinema_catchup`;
 - aucun compte client reel;
+- mot de passe stocke seulement via `instagram-credentials` -> Supabase Vault;
+- jamais dans ChatGPT, prompt Cursor, shell history visible, git, logs,
+  screenshots ou XML.
 - apres test, changer le password.
 
 Procedure future `cinema_catchup` :

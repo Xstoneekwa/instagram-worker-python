@@ -36,7 +36,7 @@ FORBIDDEN_CREDENTIAL_KEYS = {
 SECRET_REF_ALLOWED_KEYS = {"secret_ref"}
 
 CredentialsLookup = Callable[[str, str], Optional[dict[str, Any]]]
-SecretReader = Callable[[str], str]
+SecretReader = Callable[[str], Any]
 
 
 class SecretValue:
@@ -184,7 +184,12 @@ def get_instagram_credentials_for_login(
             failure_reason="secret_reader_failed",
         )
 
-    password_text = str(raw_password or "")
+    if isinstance(raw_password, SecretValue):
+        password_text = raw_password.reveal_for_login_executor()
+        password_value = raw_password
+    else:
+        password_text = str(raw_password or "")
+        password_value = SecretValue(password_text) if password_text else None
     if not password_text:
         return _failure_from_row(
             row,
@@ -199,7 +204,7 @@ def get_instagram_credentials_for_login(
         account_id=safe_account_id,
         provider=safe_provider,
         username=username,
-        password=SecretValue(password_text),
+        password=password_value,
         credentials_version=_safe_int(row.get("credentials_version")),
         credentials_status=status,
         reauth_required=_safe_bool_or_none(row.get("reauth_required")),
