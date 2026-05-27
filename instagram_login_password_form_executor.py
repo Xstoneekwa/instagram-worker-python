@@ -30,6 +30,10 @@ ACTION_LOGIN_FORM_SUBMIT = "login_form_submit"
 NO_ACTION = "no_action"
 MAX_POST_SUBMIT_WAIT_MS = 3000
 MAX_PASSWORD_REQUIRED_RETRY = 1
+DEFAULT_POST_SUBMIT_OBSERVATIONS = 4
+DEFAULT_POST_SUBMIT_INTERVAL_MS = 1000
+MAX_POST_SUBMIT_OBSERVATIONS = 6
+MAX_POST_SUBMIT_INTERVAL_MS = 1500
 
 Timer = Callable[[], float]
 Sleeper = Callable[[float], None]
@@ -62,6 +66,8 @@ def execute_login_form_credentials(
     post_submit_wait_ms: int = 1000,
     dump_after_submit: bool = True,
     max_password_required_retry: int = MAX_PASSWORD_REQUIRED_RETRY,
+    max_post_submit_observations: int = DEFAULT_POST_SUBMIT_OBSERVATIONS,
+    post_submit_observation_interval_ms: int = DEFAULT_POST_SUBMIT_INTERVAL_MS,
     timer: Timer | None = None,
     sleeper: Sleeper | None = None,
 ) -> LoginPasswordExecutionResult:
@@ -80,6 +86,8 @@ def execute_login_form_credentials(
     wait_ms = _clamp_ms(post_submit_wait_ms, MAX_POST_SUBMIT_WAIT_MS)
     if wait_ms != post_submit_wait_ms:
         warnings.append("post_submit_wait_ms_clamped")
+    observation_limit = _clamp_count(max_post_submit_observations, MAX_POST_SUBMIT_OBSERVATIONS)
+    observation_interval_ms = _clamp_ms(post_submit_observation_interval_ms, MAX_POST_SUBMIT_INTERVAL_MS)
 
     username = str(expected_username or "").strip()
     if not username:
@@ -292,20 +300,32 @@ def execute_login_form_credentials(
             )
 
     timings["post_submit_wait_ms"] = wait_ms
-    if wait_ms > 0:
-        sleeper(wait_ms / 1000.0)
 
     post_submit_screen_type = "unknown"
     post_submit_probe_reason = "post_submit_dump_skipped"
     post_submit_outcome = "unknown"
+    post_submit_observation_count = 0
+    post_submit_wait_total_ms = 0
+    post_submit_screens: list[str] = []
+    final_terminal_screen = ""
     failure_reason: str | None = None
 
     if dump_after_submit:
         try:
-            start = timer()
-            hierarchy_xml = _dump_hierarchy_once(d)
-            timings["post_submit_dump_ms"] = _elapsed_ms(start, timer())
-            observed = _classify_post_submit_hierarchy(hierarchy_xml)
+            observed = _observe_post_submit_settled(
+                d,
+                timings=timings,
+                warnings=warnings,
+                timer=timer,
+                sleeper=sleeper,
+                initial_wait_ms=wait_ms,
+                interval_ms=observation_interval_ms,
+                max_observations=observation_limit,
+            )
+            post_submit_observation_count = int(observed.get("observation_count") or 0)
+            post_submit_wait_total_ms = int(observed.get("wait_total_ms") or 0)
+            post_submit_screens = list(observed.get("screens") or [])
+            final_terminal_screen = str(observed.get("final_terminal_screen") or "")
             password_required_dialog_detected = observed["password_required_dialog_present"]
             if password_required_dialog_detected and max(0, int(max_password_required_retry or 0)) > 0:
                 password_required_retry_attempted = True
@@ -333,10 +353,20 @@ def execute_login_form_credentials(
                             second_submit_executed = True
                             submit_tapped = True
                             timings["submit_tap_ms"] += _elapsed_ms(start, timer())
-                            start = timer()
-                            hierarchy_xml = _dump_hierarchy_once(d)
-                            timings["post_submit_dump_ms"] += _elapsed_ms(start, timer())
-                            observed = _classify_post_submit_hierarchy(hierarchy_xml)
+                            observed = _observe_post_submit_settled(
+                                d,
+                                timings=timings,
+                                warnings=warnings,
+                                timer=timer,
+                                sleeper=sleeper,
+                                initial_wait_ms=observation_interval_ms,
+                                interval_ms=observation_interval_ms,
+                                max_observations=observation_limit,
+                            )
+                            post_submit_observation_count += int(observed.get("observation_count") or 0)
+                            post_submit_wait_total_ms += int(observed.get("wait_total_ms") or 0)
+                            post_submit_screens.extend(list(observed.get("screens") or []))
+                            final_terminal_screen = str(observed.get("final_terminal_screen") or final_terminal_screen)
                             if observed["password_required_dialog_present"]:
                                 failure_reason = "password_input_failed"
                                 post_submit_outcome = "password_input_failed"
@@ -398,6 +428,10 @@ def execute_login_form_credentials(
         password_required_retry_count=password_required_retry_count,
         password_refill_attempted=password_refill_attempted,
         second_submit_executed=second_submit_executed,
+        post_submit_observation_count=post_submit_observation_count,
+        post_submit_wait_total_ms=post_submit_wait_total_ms,
+        post_submit_screens=post_submit_screens,
+        final_terminal_screen=final_terminal_screen,
     )
 
 
@@ -738,12 +772,108 @@ def _classify_post_submit_hierarchy(hierarchy_xml: str) -> dict[str, Any]:
             "screen_type": "password_required_dialog",
             "reason": "password_required_dialog",
             "password_required_dialog_present": True,
+            "terminal": True,
+            "screen_label": "password_required_dialog",
         }
+    if signals.get("transition_loading") is True:
+        return {
+            "outcome": "unknown",
+            "screen_type": "loading",
+            "reason": "loading_transition",
+            "password_required_dialog_present": False,
+            "terminal": False,
+            "screen_label": "loading",
+        }
+    if signals.get("active_account_home") is True:
+        return {
+            "outcome": "connected",
+            "screen_type": "connected_home",
+            "reason": "connected_home_signal",
+            "password_required_dialog_present": False,
+            "terminal": True,
+            "screen_label": "connected_home",
+        }
+    if signals.get("active_account_profile") is True:
+        return {
+            "outcome": "connected",
+            "screen_type": "connected_profile",
+            "reason": "connected_profile_signal",
+            "password_required_dialog_present": False,
+            "terminal": True,
+            "screen_label": "connected_profile",
+        }
+    outcome = str(probe.outcome.value)
+    terminal = outcome in {"connected", "needs_2fa", "checkpoint", "login_failed"}
+    screen_label = outcome if outcome != "unknown" else str(signals.get("screen_type") or "unknown")
     return {
-        "outcome": str(probe.outcome.value),
-        "screen_type": str(probe.outcome.value),
+        "outcome": outcome,
+        "screen_type": screen_label,
         "reason": str(probe.reason or "post_submit_observed"),
         "password_required_dialog_present": False,
+        "terminal": terminal,
+        "screen_label": screen_label,
+    }
+
+
+def _observe_post_submit_settled(
+    d: Any,
+    *,
+    timings: dict[str, int],
+    warnings: list[str],
+    timer: Timer,
+    sleeper: Sleeper,
+    initial_wait_ms: int,
+    interval_ms: int,
+    max_observations: int,
+) -> dict[str, Any]:
+    screens: list[str] = []
+    wait_total_ms = 0
+    last_observed: dict[str, Any] = {
+        "outcome": "unknown",
+        "screen_type": "unknown",
+        "reason": "post_submit_unknown_after_settling",
+        "password_required_dialog_present": False,
+        "terminal": False,
+        "screen_label": "unknown",
+    }
+    observations = max(1, int(max_observations or 1))
+    for index in range(observations):
+        delay_ms = int(initial_wait_ms if index == 0 and initial_wait_ms > 0 else interval_ms)
+        if delay_ms > 0:
+            sleeper(delay_ms / 1000.0)
+            wait_total_ms += delay_ms
+        start = timer()
+        hierarchy_xml = _dump_hierarchy_once(d)
+        timings["post_submit_dump_ms"] += _elapsed_ms(start, timer())
+        observed = _classify_post_submit_hierarchy(hierarchy_xml)
+        last_observed = observed
+        screens.append(str(observed.get("screen_label") or observed.get("screen_type") or "unknown"))
+        if observed.get("password_required_dialog_present") is True:
+            break
+        if bool(observed.get("terminal")):
+            break
+    outcome = str(last_observed.get("outcome") or "unknown")
+    if outcome == "logged_out":
+        last_observed = {
+            **last_observed,
+            "reason": "session_expired_after_settling",
+            "terminal": True,
+        }
+        warnings.append("post_submit_logged_out_after_settling")
+    elif outcome == "unknown":
+        last_observed = {
+            **last_observed,
+            "reason": "post_submit_unknown_after_settling",
+        }
+        warnings.append("post_submit_unknown_after_settling")
+    timings["post_submit_wait_total_ms"] += wait_total_ms
+    timings["post_submit_observation_count"] += len(screens)
+    return {
+        **last_observed,
+        "observation_count": len(screens),
+        "wait_total_ms": wait_total_ms,
+        "screens": screens,
+        "final_terminal_screen": screens[-1] if screens else "",
     }
 
 
@@ -798,6 +928,8 @@ def _empty_timings() -> dict[str, int]:
         "password_input_ms": 0,
         "submit_tap_ms": 0,
         "post_submit_wait_ms": 0,
+        "post_submit_wait_total_ms": 0,
+        "post_submit_observation_count": 0,
         "post_submit_dump_ms": 0,
         "total_ms": 0,
     }
@@ -809,6 +941,14 @@ def _clamp_ms(value: int, maximum: int) -> int:
     except (TypeError, ValueError):
         parsed = 0
     return min(maximum, max(0, parsed))
+
+
+def _clamp_count(value: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = 1
+    return min(maximum, max(1, parsed))
 
 
 def _elapsed_ms(start: float, end: float) -> int:
@@ -870,6 +1010,10 @@ def _result(
     password_refill_attempted: bool = False,
     second_submit_executed: bool = False,
     password_submit_result: str | None = None,
+    post_submit_observation_count: int = 0,
+    post_submit_wait_total_ms: int = 0,
+    post_submit_screens: list[str] | None = None,
+    final_terminal_screen: str = "",
 ) -> LoginPasswordExecutionResult:
     safe_metadata = clean_login_probe_metadata(
         redact_credentials_payload(
@@ -891,6 +1035,10 @@ def _result(
                 "password_required_retry_count": password_required_retry_count,
                 "password_refill_attempted": password_refill_attempted,
                 "second_submit_executed": second_submit_executed,
+                "post_submit_observation_count": post_submit_observation_count,
+                "post_submit_wait_total_ms": post_submit_wait_total_ms,
+                "post_submit_screens": list(post_submit_screens or []),
+                "final_terminal_screen": final_terminal_screen,
             }
         )
     )

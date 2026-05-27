@@ -414,14 +414,28 @@ Post-submit policy future :
   validees, session Instagram a traiter separement. `would_publish=false`.
   No-leak confirme. Tag
   `checkpoint-entry2e5p5-password-only-secure-login-smoke-20260526`.
+  Correction 2E-5P-7 : ce resultat venait d'un dump post-submit immediat
+  (`post_submit_wait_ms=0`) et ne doit plus etre considere comme final fiable
+  sans settling borne.
   CLI reproductible ajoute : `instagram_login_provisioner_cli.py` lance un flow
   isole avec `--device-serial`, `--expected-username`, `--account-id`,
   `--package-name`, app_start par defaut, `--no-publish` par defaut et JSON
   safe. Le CLI genere un `run_id` safe et append un log JSONL safe dans
   `logs/instagram_login_provisioner.jsonl`; les commandes post-run doivent
-  filtrer par `run_id` et ne re-sortir que les champs autorises.
+  filtrer par `run_id` et ne re-sortir que les champs autorises, dont
+  `post_submit_observation_count`, `post_submit_wait_total_ms`,
+  `post_submit_screens` et `final_terminal_screen`.
   `--dry-run` / `--no-submit` ne charge pas Vault et ne submit pas.
   `--observe-current-screen-only` est reserve diagnostic.
+- Entry 2E-5P-7 Post-submit settling : apres `submit_tapped=true`, l'executor
+  password observe maintenant plusieurs fois de maniere bornee avant de
+  classifier. `connected`, `needs_2fa`, `checkpoint`, `login_failed` et
+  `password_required_dialog` sont terminaux; `Password required` garde la
+  recovery OK/refocus/refill/un seul second submit. `logged_out` devient final
+  seulement apres settling complet avec `reason=session_expired_after_settling`;
+  `unknown` devient `post_submit_unknown_after_settling`. Aucun publish/status
+  write par defaut, aucun retry password hors recovery bornee, logs JSONL safe
+  uniquement.
 - Standard futur provisioning/login : chaque flow doit fournir une commande
   terminal reproductible ou un CLI dedie. Les options minimales sont
   `--device-serial`, `--expected-username`, `--account-id` si credentials

@@ -864,6 +864,7 @@ def run_login_provisioning_flow(
 
     classification = classify_login_probe_outcome(outcome)
     dashboard_action_type = _dashboard_action_for_outcome(outcome)
+    final_reason = _final_reason_for_password_outcome(outcome, password_result, classification.reason)
     return _finalize(
         ok=outcome == LoginProbeOutcome.CONNECTED.value,
         completed=outcome in {
@@ -873,7 +874,7 @@ def run_login_provisioning_flow(
             LoginProbeOutcome.LOGIN_FAILED.value,
         },
         final_outcome=outcome,
-        reason=classification.reason if outcome != "unknown" else "unknown_post_submit_outcome",
+        reason=final_reason,
         failure_reason=None if outcome == LoginProbeOutcome.CONNECTED.value else outcome,
         final_login_status=classification.login_status,
         final_provisioning_status=classification.provisioning_status,
@@ -1915,6 +1916,10 @@ def _safe_password_result_metadata(result: Any) -> dict[str, Any]:
             "password_refill_attempted",
             "second_submit_executed",
             "password_submit_result",
+            "post_submit_observation_count",
+            "post_submit_wait_total_ms",
+            "post_submit_screens",
+            "final_terminal_screen",
         ):
             if key in metadata:
                 safe[key] = metadata.get(key)
@@ -1925,6 +1930,9 @@ def _should_retry_password_result(result: Any, retry_count: int, max_retries: in
     if retry_count >= max_retries:
         return False
     failure = str(getattr(result, "failure_reason", "") or "")
+    probe_reason = str(getattr(result, "post_submit_probe_reason", "") or "")
+    if probe_reason in {"post_submit_unknown_after_settling", "session_expired_after_settling"}:
+        return False
     outcome = _password_result_outcome(result)
     if failure in NO_RETRY_FAILURES or outcome in {"login_failed", "needs_2fa", "checkpoint", "connected"}:
         return False
@@ -1950,6 +1958,17 @@ def _dashboard_action_for_outcome(outcome: str) -> str | None:
         "checkpoint": "resolve_checkpoint",
         "login_failed": "update_instagram_password",
     }.get(outcome)
+
+
+def _final_reason_for_password_outcome(outcome: str, password_result: Any, classification_reason: str) -> str:
+    probe_reason = str(getattr(password_result, "post_submit_probe_reason", "") or "")
+    if outcome == "logged_out" and probe_reason == "session_expired_after_settling":
+        return "session_expired_after_settling"
+    if outcome == "unknown" and probe_reason == "post_submit_unknown_after_settling":
+        return "post_submit_unknown_after_settling"
+    if outcome == "unknown":
+        return "unknown_post_submit_outcome"
+    return str(classification_reason or "")
 
 
 def _dashboard_action_for_failure(failure_reason: str | None) -> str | None:

@@ -515,6 +515,78 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertEqual(result.dashboard_action_type, "update_instagram_password")
         self.assertFalse(result.retry_attempted)
 
+    def test_logged_out_after_settling_reason_is_preserved(self) -> None:
+        device, _selectors = configured_device(CONNECTED_XML)
+        password_result = type(
+            "PasswordResult",
+            (),
+            {
+                "failure_reason": None,
+                "post_submit_outcome": "logged_out",
+                "post_submit_probe_reason": "session_expired_after_settling",
+                "executed": True,
+                "submit_tapped": True,
+                "timings": {},
+                "warnings": [],
+                "safe_metadata": {
+                    "post_submit_observation_count": 4,
+                    "post_submit_wait_total_ms": 2250,
+                    "post_submit_screens": ["logged_out", "logged_out", "logged_out", "logged_out"],
+                    "final_terminal_screen": "logged_out",
+                },
+            },
+        )()
+
+        with patch.object(provisioner_orchestrator, "execute_login_form_credentials", return_value=password_result):
+            result = self.run_flow(
+                device,
+                account_id=ACCOUNT_ID,
+                expected_username=USERNAME,
+                credentials_getter=Mock(return_value=credentials()),
+                initial_signals=LOGIN_FORM_SIGNALS,
+            )
+
+        self.assertEqual(result.final_outcome, "logged_out")
+        self.assertEqual(result.reason, "session_expired_after_settling")
+        self.assertEqual(result.safe_metadata["password_result"]["post_submit_observation_count"], 4)
+
+    def test_unknown_after_settling_does_not_retry_password(self) -> None:
+        device, _selectors = configured_device(CONNECTED_XML)
+        password_result = type(
+            "PasswordResult",
+            (),
+            {
+                "failure_reason": None,
+                "post_submit_outcome": "unknown",
+                "post_submit_probe_reason": "post_submit_unknown_after_settling",
+                "executed": True,
+                "submit_tapped": True,
+                "timings": {},
+                "warnings": ["post_submit_unknown_after_settling"],
+                "safe_metadata": {
+                    "post_submit_observation_count": 4,
+                    "post_submit_wait_total_ms": 4000,
+                    "post_submit_screens": ["loading", "loading", "loading", "loading"],
+                    "final_terminal_screen": "loading",
+                },
+            },
+        )()
+
+        with patch.object(provisioner_orchestrator, "execute_login_form_credentials", return_value=password_result) as patched:
+            result = self.run_flow(
+                device,
+                account_id=ACCOUNT_ID,
+                expected_username=USERNAME,
+                credentials_getter=Mock(return_value=credentials()),
+                initial_signals=LOGIN_FORM_SIGNALS,
+            )
+
+        self.assertEqual(result.final_outcome, "unknown")
+        self.assertEqual(result.reason, "post_submit_unknown_after_settling")
+        self.assertFalse(result.retry_attempted)
+        self.assertEqual(result.retry_count, 0)
+        patched.assert_called_once()
+
     def test_continue_expected_executes_continue_then_login_flow(self) -> None:
         device, selectors = configured_device()
         device.hierarchies = [CONTINUE_AS_XML, LOGIN_FORM_XML, LOGIN_FORM_XML, CONNECTED_XML]

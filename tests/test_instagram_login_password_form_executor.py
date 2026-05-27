@@ -35,6 +35,8 @@ CONNECTED_XML = (
 NEEDS_2FA_XML = '<node text="Enter code" /><node text="authentication code" />'
 CHECKPOINT_XML = '<node text="Help us confirm it’s you" /><node text="Verify your account" />'
 LOGIN_FAILED_XML = '<node text="Sorry, your password was incorrect. Please try again." />'
+LOGGED_OUT_XML = '<node text="Log in to Instagram" /><node text="Username" /><node text="Password" />'
+LOADING_XML = '<node text="Loading..." />'
 SENSITIVE_XML = '<node text="password secret_ref Vault token emulator-5554 screenshot" />'
 PASSWORD_REQUIRED_XML = (
     '<node text="Password required" />'
@@ -291,6 +293,165 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
         self.assertEqual(result.failure_reason, "submit_failed")
         self.assertEqual(login.click_calls, 2)
         self.assertFalse(result.submit_tapped)
+
+    def test_post_submit_logged_out_then_connected_settles_to_connected(self) -> None:
+        device, _username, _password_selector, _login = configured_device()
+        device.hierarchies = [LOGGED_OUT_XML, CONNECTED_XML]
+        sleeper = Mock()
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=LOGIN_FORM_SIGNALS,
+            post_submit_wait_ms=0,
+            post_submit_observation_interval_ms=1,
+            max_post_submit_observations=4,
+            sleeper=sleeper,
+        )
+
+        self.assertEqual(result.post_submit_outcome, "connected")
+        self.assertEqual(result.post_submit_probe_reason, "connected_ui_signal")
+        self.assertEqual(result.safe_metadata["post_submit_observation_count"], 2)
+        self.assertEqual(result.safe_metadata["post_submit_wait_total_ms"], 2)
+        self.assertEqual(result.safe_metadata["post_submit_screens"], ["logged_out", "connected"])
+        self.assertEqual(sleeper.call_count, 2)
+
+    def test_post_submit_loading_then_connected_settles_to_connected(self) -> None:
+        device, _username, _password_selector, _login = configured_device()
+        device.hierarchies = [LOADING_XML, CONNECTED_XML]
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=LOGIN_FORM_SIGNALS,
+            post_submit_wait_ms=0,
+            post_submit_observation_interval_ms=1,
+            max_post_submit_observations=4,
+            sleeper=Mock(),
+        )
+
+        self.assertEqual(result.post_submit_outcome, "connected")
+        self.assertEqual(result.safe_metadata["post_submit_screens"], ["loading", "connected"])
+
+    def test_post_submit_password_required_uses_bounded_recovery(self) -> None:
+        device, _username, password_selector, login = configured_device()
+        ok = device.add_selector("text", "OK", FakeSelector(1))
+        device.hierarchies = [PASSWORD_REQUIRED_XML, CONNECTED_XML]
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=LOGIN_FORM_SIGNALS,
+            post_submit_wait_ms=0,
+            post_submit_observation_interval_ms=1,
+            max_post_submit_observations=2,
+            sleeper=Mock(),
+        )
+
+        self.assertTrue(result.safe_metadata["password_required_dialog_detected"])
+        self.assertTrue(result.safe_metadata["password_required_retry_attempted"])
+        self.assertEqual(result.safe_metadata["password_required_retry_count"], 1)
+        self.assertEqual(ok.click_calls, 1)
+        self.assertEqual(login.click_calls, 2)
+        self.assertGreaterEqual(len(password_selector.set_text_calls), 2)
+        self.assertEqual(result.post_submit_outcome, "connected")
+
+    def test_post_submit_needs_2fa_is_terminal(self) -> None:
+        device, _username, _password_selector, _login = configured_device()
+        device.hierarchies = [NEEDS_2FA_XML, CONNECTED_XML]
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=LOGIN_FORM_SIGNALS,
+            post_submit_wait_ms=0,
+            post_submit_observation_interval_ms=1,
+            max_post_submit_observations=4,
+            sleeper=Mock(),
+        )
+
+        self.assertEqual(result.post_submit_outcome, "needs_2fa")
+        self.assertEqual(result.safe_metadata["post_submit_observation_count"], 1)
+
+    def test_post_submit_checkpoint_is_terminal(self) -> None:
+        device, _username, _password_selector, _login = configured_device()
+        device.hierarchies = [CHECKPOINT_XML, CONNECTED_XML]
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=LOGIN_FORM_SIGNALS,
+            post_submit_wait_ms=0,
+            post_submit_observation_interval_ms=1,
+            max_post_submit_observations=4,
+            sleeper=Mock(),
+        )
+
+        self.assertEqual(result.post_submit_outcome, "checkpoint")
+        self.assertEqual(result.safe_metadata["post_submit_observation_count"], 1)
+
+    def test_post_submit_login_failed_is_terminal_no_retry(self) -> None:
+        device, _username, _password_selector, login = configured_device()
+        device.hierarchies = [LOGIN_FAILED_XML, CONNECTED_XML]
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=LOGIN_FORM_SIGNALS,
+            post_submit_wait_ms=0,
+            post_submit_observation_interval_ms=1,
+            max_post_submit_observations=4,
+            sleeper=Mock(),
+        )
+
+        self.assertEqual(result.post_submit_outcome, "login_failed")
+        self.assertEqual(result.safe_metadata["post_submit_observation_count"], 1)
+        self.assertEqual(login.click_calls, 1)
+
+    def test_post_submit_session_expired_stable_after_settling(self) -> None:
+        device, _username, _password_selector, _login = configured_device()
+        device.hierarchies = [LOGGED_OUT_XML, LOGGED_OUT_XML, LOGGED_OUT_XML, LOGGED_OUT_XML]
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=LOGIN_FORM_SIGNALS,
+            post_submit_wait_ms=0,
+            post_submit_observation_interval_ms=1,
+            max_post_submit_observations=4,
+            sleeper=Mock(),
+        )
+
+        self.assertEqual(result.post_submit_outcome, "logged_out")
+        self.assertEqual(result.post_submit_probe_reason, "session_expired_after_settling")
+        self.assertEqual(result.safe_metadata["post_submit_observation_count"], 4)
+        self.assertEqual(result.safe_metadata["post_submit_wait_total_ms"], 4)
+        self.assertEqual(result.safe_metadata["final_terminal_screen"], "logged_out")
+
+    def test_post_submit_timing_metadata_present(self) -> None:
+        device, _username, _password_selector, _login = configured_device()
+        device.hierarchies = [CONNECTED_XML]
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=LOGIN_FORM_SIGNALS,
+            post_submit_wait_ms=0,
+            sleeper=Mock(),
+        )
+
+        self.assertIn("post_submit_wait_total_ms", result.timings)
+        self.assertIn("post_submit_observation_count", result.timings)
+        self.assertIn("post_submit_screens", result.safe_metadata)
+        self.assertIn("final_terminal_screen", result.safe_metadata)
 
     def test_non_login_form_screen_refuses_without_action(self) -> None:
         device, username, password_selector, login = configured_device()
@@ -747,7 +908,7 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
             self.assertNotIn(forbidden, rendered)
 
     def test_post_submit_wait_ms_clamped_0_to_3000(self) -> None:
-        for raw_wait, expected_wait, expected_sleep in ((-5, 0, None), (9999, 3000, 3.0)):
+        for raw_wait, expected_wait, expected_sleep in ((-5, 0, 1.0), (9999, 3000, 3.0)):
             with self.subTest(raw_wait=raw_wait):
                 device, _username, _password_selector, _login = configured_device()
                 sleeper = Mock()
@@ -762,10 +923,7 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
                 )
 
                 self.assertEqual(result.timings["post_submit_wait_ms"], expected_wait)
-                if expected_sleep is None:
-                    sleeper.assert_not_called()
-                else:
-                    sleeper.assert_called_once_with(expected_sleep)
+                sleeper.assert_called_once_with(expected_sleep)
 
     def test_no_retry_by_default(self) -> None:
         device, username, password_selector, login = configured_device()

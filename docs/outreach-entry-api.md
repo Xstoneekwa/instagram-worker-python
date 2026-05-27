@@ -3791,6 +3791,11 @@ Post-submit :
   `password_input_failed`;
 - aucun retry password automatique.
 
+Note 2E-5P-7 : ce resultat etait base sur un dump immediat
+`post_submit_wait_ms=0` et n'est pas une conclusion finale fiable. Un flow
+login ne doit plus conclure `session_expired` juste apres `Log in` sans settling
+post-submit borne.
+
 Conclusion smoke :
 
 - objectif 2E-5P-4/5 atteint : valeur injectable password-only, guard anti-payload
@@ -3842,6 +3847,10 @@ allowed = {
     "input_method_used",
     "password_field_non_empty_confirmed",
     "submit_executed",
+    "post_submit_observation_count",
+    "post_submit_wait_total_ms",
+    "post_submit_screens",
+    "final_terminal_screen",
     "final_outcome",
     "reason",
     "would_publish",
@@ -3879,6 +3888,10 @@ for payload in rows[-20:]:
         "reason": payload.get("reason"),
         "screen_before_submit": payload.get("screen_before_submit"),
         "submit_executed": payload.get("submit_executed"),
+        "post_submit_observation_count": payload.get("post_submit_observation_count"),
+        "post_submit_wait_total_ms": payload.get("post_submit_wait_total_ms"),
+        "post_submit_screens": payload.get("post_submit_screens"),
+        "final_terminal_screen": payload.get("final_terminal_screen"),
         "would_publish": payload.get("would_publish"),
         "timings": payload.get("timings"),
     }, sort_keys=True))
@@ -3897,13 +3910,57 @@ Notes CLI :
 - la sortie JSON est safe : `app_start_attempted`, `app_start_ok`,
   `screen_after_app_start`, `preparation_flow_used`, `screen_before_submit`,
   `input_method_used`, `password_field_non_empty_confirmed`,
-  `submit_executed`, `final_outcome`, `reason`, `would_publish=false`,
-  timings, warnings et resume no-leak;
+  `submit_executed`, `post_submit_observation_count`,
+  `post_submit_wait_total_ms`, `post_submit_screens`,
+  `final_terminal_screen`, `final_outcome`, `reason`,
+  `would_publish=false`, timings, warnings et resume no-leak;
 - le CLI genere un `run_id` safe et append une ligne JSONL safe dans
   `logs/instagram_login_provisioner.jsonl`;
 - l'orchestrateur doit traiter `unknown` juste apres `app_start` comme un etat
   potentiellement transitoire : le flow reel fait une preparation/reobserve
   bornee avant de conclure `screen_preparation_failed`.
+
+## Entry 2E-5P-7 Post-submit Settling
+
+Entry 2E-5P-7 corrige la classification trop precoce apres le tap `Log in`.
+Avant ce patch, l'orchestrateur appelait l'executor avec
+`post_submit_wait_ms=0`; un dump a ~100 ms pouvait encore voir l'ancien ecran
+login et produire `logged_out/session_expired`, alors que l'app pouvait basculer
+vers le home feed juste apres.
+
+Comportement obligatoire apres `submit_tapped=true` :
+
+- boucle bornee de settling post-submit dans l'executor password;
+- observations rapides et limitees (`max_post_submit_observations=4`,
+  intervalle par defaut 1000 ms, soit ~4 s max);
+- arret immediat sur etat terminal clair :
+  `connected`, `needs_2fa`, `checkpoint`, `login_failed`,
+  `password_required_dialog`;
+- `password_required_dialog` conserve la recovery existante bornee :
+  OK -> refocus/refill -> un seul second submit maximum;
+- `logged_out/session_expired` n'est retenu qu'apres settling complet :
+  `reason=session_expired_after_settling`;
+- `unknown` apres timeout devient
+  `reason=post_submit_unknown_after_settling`;
+- pas de retry password automatique hors recovery `Password required`, pas de
+  publish HTTP, pas de status write Supabase.
+
+Connected detection post-login :
+
+- le classifieur continue d'utiliser les signaux `connected_ui_signal`;
+- l'executor considere aussi les signaux safe `active_account_home` et
+  `active_account_profile` comme `connected` apres submit;
+- aucun XML brut, screenshot path, password, token, `secret_ref` complet ou UUID
+  Vault n'est expose dans les metadata/logs.
+
+Nouveaux champs JSON/JSONL safe :
+
+- `post_submit_observation_count`;
+- `post_submit_wait_total_ms`;
+- `post_submit_screens` (labels safe, ex. `loading`, `connected_home`);
+- `final_terminal_screen`;
+- `final_outcome`;
+- `reason`.
 
 Standard CLI provisioning/login :
 

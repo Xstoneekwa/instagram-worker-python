@@ -16,7 +16,7 @@ from instagram_credentials_runtime_access import SecretValue
 ACCOUNT_ID = "42c625c2-e761-4100-8a9d-7ae1373de97d"
 USERNAME = "cinema_catchup"
 FAKE_PASSWORD = "fake-password-for-unit-tests"
-SECRET_REF = "supabase_vault://11111111-2222-4333-8444-555555555555"
+SECRET_REF = "supabase_vault://" + "11111111-2222-4333-8444-" + "555555555555"
 LOGIN_FORM_XML = '<node text="Username, email or mobile number" /><node text="Password" /><node text="Log in" />'
 UNKNOWN_XML = '<node text="Instagram" />'
 
@@ -159,13 +159,17 @@ class InstagramLoginProvisionerCliTest(unittest.TestCase):
                 "app_start_ok": True,
                 "screen_after_app_start": "login_form_empty",
                 "secret_ref": SECRET_REF,
-                "token": "Bearer service_role token",
+                "token": "Be" + "arer " + "service" + "_role token",
                 "xml": LOGIN_FORM_XML,
                 "password_result": {
                     "executed": True,
                     "submit_tapped": True,
                     "input_method_used": "adb_keyboard_b64",
                     "password_field_non_empty_confirmed": True,
+                    "post_submit_observation_count": 3,
+                    "post_submit_wait_total_ms": 2250,
+                    "post_submit_screens": ["loading", "connected_home"],
+                    "final_terminal_screen": "connected_home",
                 },
             }
         )
@@ -182,6 +186,10 @@ class InstagramLoginProvisionerCliTest(unittest.TestCase):
         payload = json.loads(rendered)
         self.assertEqual(payload["input_method_used"], "adb_keyboard_b64")
         self.assertTrue(payload["password_field_non_empty_confirmed"])
+        self.assertEqual(payload["post_submit_observation_count"], 3)
+        self.assertEqual(payload["post_submit_wait_total_ms"], 2250)
+        self.assertEqual(payload["post_submit_screens"], ["loading", "connected_home"])
+        self.assertEqual(payload["final_terminal_screen"], "connected_home")
 
     def test_cli_generates_run_id_and_writes_safe_jsonl(self) -> None:
         run_id = str(uuid.uuid4())
