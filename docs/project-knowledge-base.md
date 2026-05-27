@@ -243,11 +243,16 @@ Post-submit policy future :
   transitoire, puis stabilisation vers `continue_password_only` avec
   `ready_for_password_submit=true`; le vrai submit reste futur via
   Vault/`SecretValue` uniquement.
-- Entry 2E-5N : Cas F old logged-in account recovery. Instagram peut ouvrir sur
-  le home/feed ou le profil d'un ancien compte encore connecte. Le probe expose
-  `active_account_home`, `active_account_profile`, `account_switcher_sheet`,
-  `add_account_sheet` et `actual_logged_in_username`. Si le compte actif est le
-  compte attendu, le flow finalise `connected` sans recovery. Si le compte actif
+- Entry 2E-5N / 2E-5P-17 : Cas E/F old logged-in account recovery. Instagram peut
+  ouvrir sur le home/feed ou le profil d'un ancien compte encore connecte. Le
+  probe expose `active_account_home`, `active_account_profile`,
+  `account_switcher_sheet`, `add_account_sheet` et `actual_logged_in_username`.
+  **Un feed connecte seul ne suffit pas** : `active_account_home` ne doit pas
+  conclure `connected_no_password_needed` sans identite verifiee ; sinon stop safe
+  `identity_unknown_on_connected_home` ou recovery add-existing selon lifecycle.
+  Smoke : `--operator-smoke-active-account-username` pour le gate Cas E quand le
+  XML feed n'expose pas le username. Si le compte actif est le compte attendu, le
+  flow finalise `connected` sans recovery. Si le compte actif
   est different, le recovery n'est autorise que par lifecycle gate explicite :
   `lifecycle_status in canceled/stopped/archived` et
   `clone_reuse_allowed=true`, avec source temporaire
@@ -542,6 +547,20 @@ Post-submit policy future :
   `Continue`. Metadata safe : `displayed_username`, `password_only_username`,
   `username_match`. Un demarrage direct sur `continue_password_only` reste un cas
   futur separe. Smokes toujours `--no-publish`.
+- Entry 2E-5P-17 / 2E-5P-17B Active account home add-existing-account path : si
+  Instagram ouvre sur le home/profil d'un ancien compte connecte different de
+  `expected_username`, le flow principal n'est autorise que si lifecycle old
+  account est `canceled`/`stopped`/`archived`, `clone_reuse_allowed=true`, avec
+  source explicite (`operator_smoke_override` en smoke). Le chemin ouvre profil,
+  account switcher, `Add Instagram account`, puis settling post-add. Deux chemins
+  valides : sheet `Log into existing account` (E1) ou ecran deja couvert direct
+  (E2, ex. `login_form_empty`). La sheet n'est pas obligatoire ;
+  `add_account_sheet_opened=false` + `log_into_existing_account_tapped=false`
+  sont OK sur E2. Stop safe `post_add_existing_unknown` si l'ecran reste inconnu
+  apres settling. Ce n'est pas le logout fallback : aucun `Log out`,
+  pas de Settings logout, pas de `Create new account`, pas de Accounts Center.
+  Metadata safe : `actual_logged_in_username`, `active_account_username`,
+  `recovery_path=add_existing_account`, et les booleans d'etapes add-existing.
 - Entry 2E-5P-11 Login form username prefilled : apres `Use another profile`,
   Instagram peut afficher un formulaire login avec l'ancien username deja rempli.
   Nouveau `screen_type=login_form_prefilled_username`. Si le champ username est

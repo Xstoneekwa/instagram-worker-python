@@ -4316,6 +4316,79 @@ Un `logged_out` transitoire pendant le settling post-submit n'est pas terminal s
 les observations suivantes atteignent un etat clair comme
 `google_password_manager_save_prompt` puis `connected_home`.
 
+## Entry 2E-5P-17 Active Account Home Add Existing Account Path
+
+Entry 2E-5P-17 couvre le Cas E : Instagram ouvre sur le feed/home d'un ancien
+compte encore connecte, different de `expected_username`. Ce n'est pas un succes
+et ce n'est pas un compte pret.
+
+Regle critique identite :
+
+- `active_account_home` / `connected_home` ne declenche **jamais**
+  `final_outcome=connected` via `connected_no_password_needed` tant que
+  `actual_logged_in_username` (ou `active_account_username` / `profile_username`)
+  n'est pas confirme et compare a `expected_username` ;
+- si l'identite reste inconnue apres tentative profil : stop safe
+  `identity_unknown_on_connected_home` (pas de password, pas de publish) ;
+- smoke Cas E : `--operator-smoke-active-account-username` alimente
+  `active_account_username` avec `active_account_lifecycle_source=operator_smoke_override`
+  quand le feed ne permet pas l'extraction XML.
+
+Garde obligatoire :
+
+- `actual_logged_in_username != expected_username` ;
+- lifecycle de l'ancien compte `canceled`, `stopped` ou `archived` ;
+- `clone_reuse_allowed=true` ;
+- source lifecycle explicite (`operator_smoke_override` pendant smoke, ou lookup
+  safe equivalent).
+
+Si la garde n'est pas confirmee : stop safe review, pas de tap Add account, pas
+de logout, pas de reveal `SecretValue`, pas de submit.
+
+Chemin principal Cas E :
+
+1. `active_account_home` -> tap profile bottom nav ;
+2. verifier `active_account_profile` et `actual_logged_in_username` ;
+3. ouvrir l'account switcher depuis le username / chevron ;
+4. tap `Add Instagram account` ;
+5. settling borne post add-existing ;
+6. reprendre un cas deja valide :
+   `continue_as_candidate`, `account_picker`, `login_form_empty`,
+   `login_form_prefilled_username` ou `continue_password_only`.
+
+Deux chemins valides apres `Add Instagram account` (Entry 2E-5P-17B) :
+
+- **E1 sheet intermediaire** : `add_account_sheet` -> tap `Log into existing account`
+  -> settling -> cas deja couvert ;
+- **E2 formulaire direct** : `login_form_empty` (ou autre cas deja couvert) sans sheet
+  intermediaire. Dans ce cas `add_account_sheet_opened=false` et
+  `log_into_existing_account_tapped=false` sont attendus et valides.
+
+La sheet `Log into existing account` n'est **pas** obligatoire. Ne pas stopper avec
+`add_account_sheet_not_validated` si l'ecran post-add est deja routable. Si l'ecran
+reste `unknown` apres settling complet : `reason=post_add_existing_unknown`.
+
+Distinction stricte : Cas E **n'est pas** le logout fallback. Le chemin principal
+ne clique jamais `Log out`, ne passe pas par Settings logout, et ne clique pas
+`Create new account` ni `Go to Accounts Center`.
+
+Metadata safe Cas E :
+
+- `actual_logged_in_username`, `active_account_username`,
+  `account_mismatch_detected` ;
+- `active_account_lifecycle_source`, `active_account_lifecycle_status`,
+  `clone_reuse_allowed` ;
+- `recovery_path=add_existing_account` ;
+- `profile_opened`, `profile_username`, `profile_menu_initially_missing`,
+  `profile_refresh_attempted` ;
+- `account_switcher_opened`, `add_instagram_account_tapped`,
+  `add_account_sheet_opened`, `log_into_existing_account_tapped` ;
+- `post_add_existing_observation_count`, `post_add_existing_screens`,
+  `screen_after_add_existing_final`.
+
+Smoke Cas E : `--no-publish`, aucun status backend, aucun dashboard write,
+aucun runner/social flow.
+
 ## Entry 2E-5P-15B Login Form Empty Username Confirmation
 
 Entry 2E-5P-15B corrige la confirmation username sur `login_form_empty` direct.

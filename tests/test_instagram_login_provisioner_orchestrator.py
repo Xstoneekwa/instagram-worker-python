@@ -1848,6 +1848,135 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertEqual(result.safe_metadata["screen_after_account_picker_final"], "continue_password_only")
         self.assertEqual(result.final_outcome, "credentials_missing")
 
+    def _active_home_connected_signals(self) -> dict:
+        return provisioner_orchestrator._observe_login_signals(
+            FakeDevice([ACTIVE_HOME_XML]),
+            expected_username=USERNAME,
+        )
+
+    def test_active_account_home_connected_probe_without_identity_stops_safe(self) -> None:
+        getter = Mock(return_value=credentials())
+        result = self.run_flow(
+            FakeDevice([ACTIVE_HOME_XML, ACTIVE_HOME_XML]),
+            account_id=ACCOUNT_ID,
+            expected_username=USERNAME,
+            credentials_getter=getter,
+            initial_signals=self._active_home_connected_signals(),
+        )
+
+        self.assertEqual(result.reason, "identity_unknown_on_connected_home")
+        self.assertNotEqual(result.reason, "connected_no_password_needed")
+        self.assertFalse(result.safe_metadata.get("would_submit_password"))
+        self.assertFalse(result.published)
+        getter.assert_not_called()
+
+    def test_active_account_home_operator_smoke_mismatch_starts_add_existing_recovery(self) -> None:
+        device, _selectors = configured_device()
+        getter = Mock(return_value=None)
+        device.hierarchies = [
+            ACTIVE_HOME_XML,
+            ACTIVE_HOME_XML,
+            ACTIVE_HOME_XML,
+            ACTIVE_PROFILE_OLD_XML,
+            ACTIVE_PROFILE_OLD_XML,
+            ACTIVE_PROFILE_OLD_XML,
+            ACCOUNT_SWITCHER_XML,
+            ACCOUNT_SWITCHER_XML,
+            ACCOUNT_SWITCHER_XML,
+            ADD_ACCOUNT_SHEET_XML,
+            ADD_ACCOUNT_SHEET_XML,
+            ADD_ACCOUNT_SHEET_XML,
+            LOGIN_FORM_XML,
+            LOGIN_FORM_XML,
+        ]
+
+        result = self.run_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username=USERNAME,
+            credentials_getter=getter,
+            initial_signals=self._active_home_connected_signals(),
+            operator_smoke_active_account_username="random_old_profile",
+            previous_account_lifecycle_lookup=self._canceled_lifecycle(),
+        )
+
+        self.assertNotEqual(result.reason, "connected_no_password_needed")
+        self.assertTrue(result.safe_metadata["account_mismatch_detected"])
+        self.assertEqual(result.safe_metadata["active_account_username"], "random_old_profile")
+        self.assertEqual(result.safe_metadata["actual_logged_in_username"], "random_old_profile")
+        self.assertEqual(result.safe_metadata["active_account_lifecycle_source"], "operator_smoke_override")
+        self.assertEqual(result.safe_metadata["active_account_lifecycle_status"], "canceled")
+        self.assertTrue(result.safe_metadata["clone_reuse_allowed"])
+        self.assertEqual(result.safe_metadata["recovery_path"], "add_existing_account")
+        self.assertIn("tap_profile_bottom_nav", result.actions_taken)
+        getter.assert_not_called()
+
+    def test_active_account_home_expected_profile_connected_without_password(self) -> None:
+        device, _selectors = configured_device()
+        getter = Mock(return_value=credentials())
+        device.hierarchies = [ACTIVE_HOME_XML, ACTIVE_PROFILE_EXPECTED_XML]
+
+        result = self.run_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username="random_expected",
+            credentials_getter=getter,
+            initial_signals=self._active_home_connected_signals(),
+        )
+
+        self.assertEqual(result.final_outcome, "connected")
+        self.assertEqual(result.reason, "active_profile_matches_expected")
+        self.assertNotEqual(result.reason, "connected_no_password_needed")
+        self.assertFalse(result.safe_metadata.get("recovery_path"))
+        getter.assert_not_called()
+
+    def test_active_account_home_mismatch_unknown_lifecycle_blocks_without_add_account(self) -> None:
+        device, _selectors = configured_device()
+        getter = Mock(return_value=credentials())
+        device.hierarchies = [ACTIVE_HOME_XML, ACTIVE_PROFILE_OLD_XML]
+
+        result = self.run_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username=USERNAME,
+            credentials_getter=getter,
+            initial_signals=self._active_home_connected_signals(),
+        )
+
+        self.assertEqual(result.final_outcome, "mismatch")
+        self.assertEqual(result.safe_metadata["lifecycle_gate_result"], "block_wrong_active_account")
+        self.assertFalse(result.safe_metadata.get("recovery_path"))
+        self.assertNotIn("tap_add_instagram_account", result.actions_taken)
+        getter.assert_not_called()
+
+    def test_active_account_home_identity_unknown_jsonl_safe(self) -> None:
+        result = self.run_flow(
+            FakeDevice([ACTIVE_HOME_XML, ACTIVE_HOME_XML]),
+            account_id=ACCOUNT_ID,
+            expected_username=USERNAME,
+            credentials_getter=Mock(return_value=credentials()),
+            initial_signals=self._active_home_connected_signals(),
+        )
+        payload = json.dumps(result.safe_metadata)
+
+        for forbidden in (PASSWORD, SECRET_REF, VAULT_ID, "secret_ref", "vault", "Vault", "token", "emulator-5554", "screenshot"):
+            self.assertNotIn(forbidden, payload)
+
+    def test_defer_connected_no_password_when_startup_home_without_identity(self) -> None:
+        signals = self._active_home_connected_signals()
+        preparation = {
+            "screen_after_app_start_final": "active_account_home",
+            "startup_final_screen_type": "active_account_home",
+        }
+
+        self.assertTrue(
+            provisioner_orchestrator._defer_connected_no_password_early_exit(
+                signals,
+                preparation,
+                expected_username=USERNAME,
+            )
+        )
+
     def test_old_logged_in_expected_account_profile_finalizes_connected(self) -> None:
         device, _selectors = configured_device()
         getter = Mock(return_value=credentials())
@@ -1922,15 +2051,21 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         device.hierarchies = [
             ACTIVE_HOME_XML,
             ACTIVE_HOME_XML,
+            ACTIVE_HOME_XML,
             ACTIVE_PROFILE_OLD_XML,
             ACTIVE_PROFILE_OLD_XML,
             ACTIVE_PROFILE_OLD_XML,
             ACCOUNT_SWITCHER_XML,
             ACCOUNT_SWITCHER_XML,
             ACCOUNT_SWITCHER_XML,
+            ACCOUNT_SWITCHER_XML,
             ADD_ACCOUNT_SHEET_XML,
             ADD_ACCOUNT_SHEET_XML,
             ADD_ACCOUNT_SHEET_XML,
+            ADD_ACCOUNT_SHEET_XML,
+            LOGIN_FORM_XML,
+            LOGIN_FORM_XML,
+            LOGIN_FORM_XML,
             LOGIN_FORM_XML,
             LOGIN_FORM_XML,
         ]
@@ -1958,11 +2093,256 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertTrue(result.safe_metadata["old_logged_in_recovery_attempted"])
         self.assertFalse(result.safe_metadata["logout_attempted"])
         self.assertFalse(result.safe_metadata["would_submit_password"])
+        self.assertEqual(result.safe_metadata["recovery_path"], "add_existing_account")
+        self.assertEqual(result.safe_metadata["actual_logged_in_username"], "random_old_profile")
+        self.assertEqual(result.safe_metadata["active_account_username"], "random_old_profile")
+        self.assertEqual(result.safe_metadata["profile_username"], "random_old_profile")
+        self.assertTrue(result.safe_metadata["account_mismatch_detected"])
+        self.assertTrue(result.safe_metadata["profile_opened"])
+        self.assertTrue(result.safe_metadata["profile_menu_initially_missing"])
+        self.assertFalse(result.safe_metadata["profile_refresh_attempted"])
+        self.assertEqual(result.safe_metadata["active_account_lifecycle_source"], "operator_smoke_override")
+        self.assertEqual(result.safe_metadata["active_account_lifecycle_status"], "canceled")
+        self.assertTrue(result.safe_metadata["clone_reuse_allowed"])
+        self.assertTrue(result.safe_metadata["account_switcher_opened"])
+        self.assertTrue(result.safe_metadata["add_instagram_account_tapped"])
+        self.assertTrue(result.safe_metadata["add_account_sheet_opened"])
+        self.assertTrue(result.safe_metadata["log_into_existing_account_tapped"])
+        self.assertEqual(result.safe_metadata["screen_after_add_existing_final"], "login_form_empty")
         self.assertNotIn("login_form_submit", result.actions_taken)
+
+    def test_add_existing_direct_login_form_empty_skips_log_into_existing_sheet(self) -> None:
+        device, _selectors = configured_device()
+        getter = Mock(return_value=credentials())
+        device.hierarchies = [
+            ACTIVE_HOME_XML,
+            ACTIVE_HOME_XML,
+            ACTIVE_HOME_XML,
+            ACTIVE_PROFILE_OLD_XML,
+            ACTIVE_PROFILE_OLD_XML,
+            ACTIVE_PROFILE_OLD_XML,
+            ACCOUNT_SWITCHER_XML,
+            ACCOUNT_SWITCHER_XML,
+            ACCOUNT_SWITCHER_XML,
+            ACCOUNT_SWITCHER_XML,
+            LOGIN_FORM_XML,
+            LOGIN_FORM_XML,
+            LOGIN_FORM_XML,
+            LOGIN_FORM_XML,
+            LOGIN_FORM_XML,
+        ]
+
+        result = self.run_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username="random_expected",
+            credentials_getter=getter,
+            previous_account_lifecycle_lookup=Mock(
+                return_value={"lifecycle_status": "canceled", "clone_reuse_allowed": True}
+            ),
+        )
+
+        self.assertNotEqual(result.reason, "add_account_sheet_not_validated")
+        self.assertNotIn("tap_log_into_existing_account", result.actions_taken)
+        self.assertTrue(result.safe_metadata.get("add_instagram_account_tapped"))
+        self.assertFalse(result.safe_metadata["add_account_sheet_opened"])
+        self.assertFalse(result.safe_metadata["log_into_existing_account_tapped"])
+        self.assertGreater(result.safe_metadata["post_add_existing_observation_count"], 0)
+        self.assertEqual(result.safe_metadata["screen_after_add_existing_final"], "login_form_empty")
+        self.assertIn("route:start_login_form_flow", result.actions_taken)
+
+    def test_add_existing_direct_login_form_prefilled_username(self) -> None:
+        device, _selectors = configured_device()
+        getter = Mock(return_value=credentials())
+        device.hierarchies = [
+            ACTIVE_PROFILE_OLD_XML,
+            ACTIVE_PROFILE_OLD_XML,
+            ACCOUNT_SWITCHER_XML,
+            ACCOUNT_SWITCHER_XML,
+            ACCOUNT_SWITCHER_XML,
+            PREFILLED_LOGIN_FORM_XML,
+            PREFILLED_LOGIN_FORM_XML,
+            PREFILLED_LOGIN_FORM_XML,
+            PREFILLED_LOGIN_FORM_XML,
+            PREFILLED_LOGIN_FORM_XML,
+        ]
+
+        result = self.run_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username="random_expected",
+            credentials_getter=getter,
+            previous_account_lifecycle_lookup=Mock(
+                return_value={"lifecycle_status": "canceled", "clone_reuse_allowed": True}
+            ),
+        )
+
+        self.assertNotEqual(result.reason, "add_account_sheet_not_validated")
+        self.assertNotIn("tap_log_into_existing_account", result.actions_taken)
+        self.assertEqual(result.safe_metadata["screen_after_add_existing_final"], "login_form_prefilled_username")
+        self.assertIn("route:start_login_form_flow_replace_username", result.actions_taken)
+
+    def test_add_existing_direct_account_picker(self) -> None:
+        device, _selectors = configured_device()
+        getter = Mock(return_value=credentials())
+        device.hierarchies = [
+            ACTIVE_PROFILE_OLD_XML,
+            ACTIVE_PROFILE_OLD_XML,
+            ACCOUNT_SWITCHER_XML,
+            ACCOUNT_SWITCHER_XML,
+            ACCOUNT_SWITCHER_XML,
+            ACCOUNT_PICKER_XML,
+            ACCOUNT_PICKER_XML,
+            ACCOUNT_PICKER_XML,
+            ACCOUNT_PICKER_XML,
+            ACCOUNT_PICKER_XML,
+            ACCOUNT_PICKER_XML,
+        ]
+
+        result = self.run_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username="random_expected",
+            credentials_getter=getter,
+            previous_account_lifecycle_lookup=Mock(
+                return_value={"lifecycle_status": "canceled", "clone_reuse_allowed": True}
+            ),
+        )
+
+        self.assertNotEqual(result.reason, "add_account_sheet_not_validated")
+        self.assertNotIn("tap_log_into_existing_account", result.actions_taken)
+        self.assertEqual(result.safe_metadata.get("screen_after_add_existing_final"), "account_picker")
+        self.assertIn("route:select_expected_account_from_picker", result.actions_taken)
+
+    def test_add_existing_direct_continue_as_candidate(self) -> None:
+        device, _selectors = configured_device()
+        getter = Mock(return_value=credentials())
+        continue_xml = f'<node text="{USERNAME}" />' + CONTINUE_AS_XML
+        device.hierarchies = [
+            ACTIVE_PROFILE_OLD_XML,
+            ACTIVE_PROFILE_OLD_XML,
+            ACCOUNT_SWITCHER_XML,
+            ACCOUNT_SWITCHER_XML,
+            ACCOUNT_SWITCHER_XML,
+            continue_xml,
+            continue_xml,
+            continue_xml,
+            continue_xml,
+            continue_xml,
+            continue_xml,
+            continue_xml,
+            continue_xml,
+        ]
+
+        result = self.run_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username="random_expected",
+            credentials_getter=getter,
+            previous_account_lifecycle_lookup=Mock(
+                return_value={"lifecycle_status": "canceled", "clone_reuse_allowed": True}
+            ),
+        )
+
+        self.assertNotEqual(result.reason, "add_account_sheet_not_validated")
+        self.assertNotIn("tap_log_into_existing_account", result.actions_taken)
+        self.assertEqual(result.safe_metadata.get("screen_after_add_existing_final"), "continue_as_candidate")
+
+    def test_add_existing_direct_continue_password_only(self) -> None:
+        device, _selectors = configured_device()
+        getter = Mock(return_value=credentials())
+        device.hierarchies = [
+            ACTIVE_PROFILE_OLD_XML,
+            ACTIVE_PROFILE_OLD_XML,
+            ACCOUNT_SWITCHER_XML,
+            ACCOUNT_SWITCHER_XML,
+            ACCOUNT_SWITCHER_XML,
+            PASSWORD_ONLY_XML,
+            PASSWORD_ONLY_XML,
+            PASSWORD_ONLY_XML,
+            PASSWORD_ONLY_XML,
+            PASSWORD_ONLY_XML,
+        ]
+
+        result = self.run_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username="random_expected",
+            credentials_getter=getter,
+            previous_account_lifecycle_lookup=Mock(
+                return_value={"lifecycle_status": "canceled", "clone_reuse_allowed": True}
+            ),
+        )
+
+        self.assertNotEqual(result.reason, "add_account_sheet_not_validated")
+        self.assertNotIn("tap_log_into_existing_account", result.actions_taken)
+        self.assertEqual(result.safe_metadata["screen_after_add_existing_final"], "continue_password_only")
+
+    def test_add_existing_unknown_stable_stops_post_add_existing_unknown(self) -> None:
+        device, _selectors = configured_device()
+        getter = Mock(return_value=credentials())
+        device.hierarchies = [
+            ACTIVE_PROFILE_OLD_XML,
+            ACTIVE_PROFILE_OLD_XML,
+            ACCOUNT_SWITCHER_XML,
+            ACCOUNT_SWITCHER_XML,
+            ACCOUNT_SWITCHER_XML,
+            UNKNOWN_XML,
+            UNKNOWN_XML,
+            UNKNOWN_XML,
+            UNKNOWN_XML,
+            UNKNOWN_XML,
+            UNKNOWN_XML,
+            UNKNOWN_XML,
+            UNKNOWN_XML,
+        ]
+
+        result = self.run_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username="random_expected",
+            credentials_getter=getter,
+            previous_account_lifecycle_lookup=Mock(
+                return_value={"lifecycle_status": "canceled", "clone_reuse_allowed": True}
+            ),
+        )
+
+        self.assertEqual(result.reason, "post_add_existing_unknown")
+        self.assertTrue(result.safe_metadata["add_instagram_account_tapped"])
+        self.assertGreater(result.safe_metadata["post_add_existing_observation_count"], 0)
+        getter.assert_not_called()
+
+    def test_add_existing_metadata_jsonl_safe(self) -> None:
+        device, _selectors = configured_device()
+        device.hierarchies = [
+            ACTIVE_PROFILE_OLD_XML,
+            ACTIVE_PROFILE_OLD_XML,
+            ACCOUNT_SWITCHER_XML,
+            ACCOUNT_SWITCHER_XML,
+            ACCOUNT_SWITCHER_XML,
+            LOGIN_FORM_XML,
+            LOGIN_FORM_XML,
+            LOGIN_FORM_XML,
+            LOGIN_FORM_XML,
+            LOGIN_FORM_XML,
+        ]
+        result = self.run_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username="random_expected",
+            credentials_getter=Mock(return_value=credentials()),
+            previous_account_lifecycle_lookup=Mock(
+                return_value={"lifecycle_status": "canceled", "clone_reuse_allowed": True}
+            ),
+        )
+        payload = json.dumps(result.safe_metadata)
+        for forbidden in (PASSWORD, SECRET_REF, VAULT_ID, "secret_ref", "vault", "Vault", "token", "emulator-5554", "screenshot"):
+            self.assertNotIn(forbidden, payload)
 
     def test_old_logged_in_recovery_can_return_continue_as_candidate(self) -> None:
         device, _selectors = configured_device()
         getter = Mock(return_value=credentials())
+        continue_xml = f'<node text="random_old_profile" />' + CONTINUE_AS_XML
         device.hierarchies = [
             ACTIVE_PROFILE_OLD_XML,
             ACTIVE_PROFILE_OLD_XML,
@@ -1972,8 +2352,12 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
             ADD_ACCOUNT_SHEET_XML,
             ADD_ACCOUNT_SHEET_XML,
             ADD_ACCOUNT_SHEET_XML,
-            CONTINUE_AS_XML,
-            CONTINUE_AS_XML,
+            ADD_ACCOUNT_SHEET_XML,
+            continue_xml,
+            continue_xml,
+            continue_xml,
+            continue_xml,
+            continue_xml,
         ]
 
         result = self.run_flow(
@@ -1987,7 +2371,9 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         )
 
         self.assertEqual(result.final_outcome, "unknown")
-        self.assertIn("route:unknown_no_action", result.actions_taken)
+        self.assertIn("tap_log_into_existing_account", result.actions_taken)
+        self.assertIn("route:use_another_profile_previous_account_stopped", result.actions_taken)
+        self.assertEqual(result.safe_metadata.get("screen_after_add_existing_final"), "continue_as_candidate")
         getter.assert_not_called()
 
     def test_old_logged_in_recovery_can_return_account_picker(self) -> None:
@@ -2002,6 +2388,10 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
             ADD_ACCOUNT_SHEET_XML,
             ADD_ACCOUNT_SHEET_XML,
             ADD_ACCOUNT_SHEET_XML,
+            ADD_ACCOUNT_SHEET_XML,
+            ACCOUNT_PICKER_XML,
+            ACCOUNT_PICKER_XML,
+            ACCOUNT_PICKER_XML,
             ACCOUNT_PICKER_XML,
             ACCOUNT_PICKER_XML,
         ]
@@ -2017,6 +2407,8 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         )
 
         self.assertIn("route:select_expected_account_from_picker", result.actions_taken)
+        self.assertEqual(result.safe_metadata["recovery_path"], "add_existing_account")
+        self.assertEqual(result.safe_metadata["screen_after_add_existing_final"], "account_picker")
         getter.assert_not_called()
 
     def test_logout_fallback_profile_menu_visible_full_no_password(self) -> None:

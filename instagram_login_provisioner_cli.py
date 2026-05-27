@@ -83,6 +83,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Smoke-only suggested/old username override for previous account lifecycle lookup.",
     )
     parser.add_argument(
+        "--operator-smoke-active-account-username",
+        default="",
+        help="Smoke-only active logged-in username override; alias for the previous-account lifecycle gate.",
+    )
+    parser.add_argument(
         "--operator-smoke-lifecycle-status",
         choices=OPERATOR_SMOKE_LIFECYCLE_STATUSES,
         default="unknown",
@@ -126,12 +131,17 @@ def run_cli_command(
     )
     flow = run_flow_func or run_login_provisioning_flow
     previous_account_lifecycle_lookup = _build_operator_smoke_previous_account_lifecycle_lookup(args)
+    operator_smoke_active_username = _normalize_public_username(
+        getattr(args, "operator_smoke_active_account_username", "")
+        or getattr(args, "operator_smoke_previous_account_username", "")
+    )
     result = flow(
         device,
         account_id=str(args.account_id or ""),
         expected_username=str(args.expected_username or ""),
         credentials_getter=getter,
         previous_account_lifecycle_lookup=previous_account_lifecycle_lookup,
+        operator_smoke_active_account_username=operator_smoke_active_username or None,
         publish_enabled=False,
         publisher=None,
         dry_run=bool(args.dry_run or args.no_submit),
@@ -236,7 +246,10 @@ def _credentials_fields_from_metadata(metadata: dict[str, Any]) -> dict[str, Any
 
 
 def _build_operator_smoke_previous_account_lifecycle_lookup(args: argparse.Namespace) -> Callable[[str, dict[str, Any]], dict[str, Any]] | None:
-    username = _normalize_public_username(getattr(args, "operator_smoke_previous_account_username", ""))
+    username = _normalize_public_username(
+        getattr(args, "operator_smoke_active_account_username", "")
+        or getattr(args, "operator_smoke_previous_account_username", "")
+    )
     if not username:
         return None
     lifecycle_status = str(getattr(args, "operator_smoke_lifecycle_status", "") or "unknown").strip().lower()
@@ -367,6 +380,23 @@ def _safe_summary_from_result(result: Any, *, args: argparse.Namespace, run_id: 
         "displayed_username": str(metadata.get("displayed_username") or ""),
         "password_only_username": str(metadata.get("password_only_username") or ""),
         "username_match": metadata.get("username_match"),
+        "actual_logged_in_username": str(metadata.get("actual_logged_in_username") or ""),
+        "active_account_username": str(metadata.get("active_account_username") or ""),
+        "account_mismatch_detected": bool(metadata.get("account_mismatch_detected")),
+        "active_account_lifecycle_source": str(metadata.get("active_account_lifecycle_source") or ""),
+        "active_account_lifecycle_status": str(metadata.get("active_account_lifecycle_status") or ""),
+        "recovery_path": str(metadata.get("recovery_path") or ""),
+        "profile_opened": bool(metadata.get("profile_opened")),
+        "profile_username": str(metadata.get("profile_username") or ""),
+        "profile_menu_initially_missing": bool(metadata.get("profile_menu_initially_missing")),
+        "profile_refresh_attempted": bool(metadata.get("profile_refresh_attempted")),
+        "account_switcher_opened": bool(metadata.get("account_switcher_opened")),
+        "add_instagram_account_tapped": bool(metadata.get("add_instagram_account_tapped")),
+        "add_account_sheet_opened": bool(metadata.get("add_account_sheet_opened")),
+        "log_into_existing_account_tapped": bool(metadata.get("log_into_existing_account_tapped")),
+        "post_add_existing_observation_count": int(metadata.get("post_add_existing_observation_count") or 0),
+        "post_add_existing_screens": list(metadata.get("post_add_existing_screens") or []),
+        "screen_after_add_existing_final": str(metadata.get("screen_after_add_existing_final") or ""),
         "available_usernames": list(metadata.get("available_usernames") or []),
         "expected_username_present": bool(metadata.get("expected_username_present")),
         "selected_account_username": str(metadata.get("selected_account_username") or ""),
@@ -436,6 +466,10 @@ def _safe_summary_from_result(result: Any, *, args: argparse.Namespace, run_id: 
 
 def _preparation_flow_used(metadata: dict[str, Any], actions_taken: list[Any]) -> str:
     actions = [str(item) for item in actions_taken]
+    recovery_path = str(metadata.get("recovery_path") or "")
+    screen_after_add_existing = str(metadata.get("screen_after_add_existing_final") or "")
+    if recovery_path == "add_existing_account" and screen_after_add_existing:
+        return f"add_existing_account_to_{screen_after_add_existing}"
     if "tap_use_another_profile" in actions:
         return "use_another_profile_previous_account_stopped"
     if "tap_continue" in actions:
@@ -488,6 +522,15 @@ def _password_non_empty_confirmed(password_result: dict[str, Any]) -> bool | str
 
 
 def _screen_before_submit(metadata: dict[str, Any], *, submit_executed: bool) -> str:
+    screen_after_add_existing = str(metadata.get("screen_after_add_existing_final") or "")
+    if screen_after_add_existing in {
+        "continue_password_only",
+        "login_form_empty",
+        "login_form_prefilled_username",
+        "continue_as_candidate",
+        "account_picker",
+    }:
+        return screen_after_add_existing
     screen_after_use_another = str(metadata.get("screen_after_use_another_profile_final") or "")
     if screen_after_use_another in {
         "continue_password_only",

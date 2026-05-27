@@ -216,6 +216,25 @@ class InstagramLoginProvisionerCliTest(unittest.TestCase):
         self.assertEqual(payload["lifecycle_status"], "canceled")
         self.assertIs(payload["clone_reuse_allowed"], True)
 
+    def test_operator_smoke_active_account_username_alias_builds_lifecycle_lookup(self) -> None:
+        lookup = cli._build_operator_smoke_previous_account_lifecycle_lookup(
+            _args(
+                "--operator-smoke-active-account-username",
+                "Old_Profile",
+                "--operator-smoke-lifecycle-status",
+                "canceled",
+                "--operator-smoke-clone-reuse-allowed",
+                "true",
+            )
+        )
+
+        self.assertIsNotNone(lookup)
+        payload = lookup("old_profile", {"screen_type": "active_account_profile"})
+
+        self.assertEqual(payload["lifecycle_status"], "canceled")
+        self.assertIs(payload["clone_reuse_allowed"], True)
+        self.assertEqual(payload["source"], "operator_smoke_override")
+
     def test_preparation_flow_used_maps_use_another_profile_action(self) -> None:
         summary = cli._safe_summary_from_result(
             _fake_result(
@@ -227,6 +246,22 @@ class InstagramLoginProvisionerCliTest(unittest.TestCase):
         )
 
         self.assertEqual(summary["preparation_flow_used"], "use_another_profile_previous_account_stopped")
+
+    def test_preparation_flow_used_maps_add_existing_direct_login_form_empty(self) -> None:
+        summary = cli._safe_summary_from_result(
+            _fake_result(
+                actions_taken=["tap_add_instagram_account", "route:start_login_form_flow"],
+                safe_metadata={
+                    "recovery_path": "add_existing_account",
+                    "screen_after_add_existing_final": "login_form_empty",
+                },
+            ),
+            args=_args(),
+            run_id="run-1",
+        )
+
+        self.assertEqual(summary["preparation_flow_used"], "add_existing_account_to_login_form_empty")
+        self.assertEqual(summary["screen_before_submit"], "login_form_empty")
 
     def test_operator_smoke_previous_account_override_username_mismatch_blocks_reuse(self) -> None:
         args = _args(

@@ -87,6 +87,14 @@ Timer = Callable[[], float]
 Sleeper = Callable[[float], None]
 
 REUSABLE_PREVIOUS_ACCOUNT_LIFECYCLES = {"canceled", "stopped", "archived"}
+CONNECTED_HOME_IDENTITY_SCREENS = frozenset(
+    {
+        "active_account_home",
+        "active_account_profile",
+        "connected_home",
+        "connected_profile",
+    }
+)
 POST_LOGOUT_KNOWN_SCREENS = {
     "login_form_empty",
     "login_form_prefilled_username",
@@ -95,6 +103,18 @@ POST_LOGOUT_KNOWN_SCREENS = {
     "continue_password_only",
     "connected",
 }
+POST_ADD_EXISTING_RESUME_SCREENS = frozenset(
+    {
+        "login_form_empty",
+        "login_form_prefilled_username",
+        "continue_as_candidate",
+        "account_picker",
+        "continue_password_only",
+        "checkpoint",
+        "needs_2fa",
+        "login_failed",
+    }
+)
 ROUTING_SCREEN_TYPES = {
     "continue_as_candidate",
     "account_picker",
@@ -148,6 +168,7 @@ def run_login_provisioning_flow(
     package_name: str = DEFAULT_INSTAGRAM_PACKAGE_NAME,
     post_start_wait_ms: int = DEFAULT_POST_APP_START_WAIT_MS,
     post_submit_timeout_ms: Optional[int] = None,
+    operator_smoke_active_account_username: str | None = None,
     timer: Timer | None = None,
     sleeper: Sleeper | None = None,
 ) -> LoginProvisioningFlowResult:
@@ -170,6 +191,7 @@ def run_login_provisioning_flow(
     post_continue_metadata: dict[str, Any] = {}
     safe_account_id = str(account_id or "").strip()
     safe_expected_username = str(expected_username or "").strip()
+    safe_operator_smoke_active_username = _normalize_identity_username(operator_smoke_active_account_username)
     max_retries = min(MAX_RETRY_ATTEMPTS, max(0, int(max_retry_attempts or 0)))
     safe_package_name = _safe_package_name(package_name)
     bounded_post_start_wait_ms = _clamp_post_start_wait_ms(post_start_wait_ms)
@@ -264,7 +286,14 @@ def run_login_provisioning_flow(
             screen_preparation_metadata["startup_screens"] = [screen_type]
             screen_preparation_metadata["startup_final_screen_type"] = screen_type
         post_app_start_outcome = _post_action_outcome_from_signals(signals)
-        if post_app_start_outcome == LoginProbeOutcome.CONNECTED.value:
+        if (
+            post_app_start_outcome == LoginProbeOutcome.CONNECTED.value
+            and not _defer_connected_no_password_early_exit(
+                signals,
+                screen_preparation_metadata,
+                expected_username=safe_expected_username,
+            )
+        ):
             classification = classify_login_probe_outcome(LoginProbeOutcome.CONNECTED.value)
             return _finalize(
                 ok=True,
@@ -313,7 +342,14 @@ def run_login_provisioning_flow(
                 publisher=publisher,
                 publish_enabled=publish_enabled,
             )
-    elif _post_action_outcome_from_signals(signals) == LoginProbeOutcome.CONNECTED.value:
+    elif (
+        _post_action_outcome_from_signals(signals) == LoginProbeOutcome.CONNECTED.value
+        and not _defer_connected_no_password_early_exit(
+            signals,
+            screen_preparation_metadata,
+            expected_username=safe_expected_username,
+        )
+    ):
         classification = classify_login_probe_outcome(LoginProbeOutcome.CONNECTED.value)
         return _finalize(
             ok=True,
@@ -408,11 +444,95 @@ def run_login_provisioning_flow(
             start = timer()
             signals = _observe_login_signals(d, expected_username=safe_expected_username)
             timings["observe_ms"] += _elapsed_ms(start, timer())
+            old_logged_in_metadata["profile_opened"] = signals.get("screen_type") == "active_account_profile"
+            if signals.get("screen_type") == "active_account_home":
+                operator_username = _safe_public_text(safe_operator_smoke_active_username)
+                if operator_username:
+                    signals = {
+                        **signals,
+                        "screen_type": "active_account_profile",
+                        "actual_logged_in_username": operator_username,
+                    }
+                    old_logged_in_metadata["active_account_identity_source"] = "operator_smoke_override"
+                else:
+                    return _finalize(
+                        ok=False,
+                        completed=True,
+                        final_outcome="unknown",
+                        reason="identity_unknown_on_connected_home",
+                        failure_reason="identity_unknown_on_connected_home",
+                        final_login_status="logged_out",
+                        final_provisioning_status="login_pending",
+                        final_onboarding_status="credentials_required",
+                        should_publish_status=False,
+                        account_id=safe_account_id,
+                        expected_username=safe_expected_username,
+                        actions_taken=actions_taken,
+                        timings=timings,
+                        warnings=warnings,
+                        extra_metadata={
+                            **old_logged_in_metadata,
+                            "screen_after_app_start_final": screen_preparation_metadata.get(
+                                "screen_after_app_start_final"
+                            )
+                            or "active_account_home",
+                            "password_required": False,
+                            "ready_for_password_submit": False,
+                            "would_submit_password": False,
+                        },
+                        total_start=total_start,
+                        timer=timer,
+                        publisher=publisher,
+                        publish_enabled=publish_enabled,
+                    )
 
         if signals.get("screen_type") == "active_account_profile":
             actual_username = _safe_public_text(signals.get("actual_logged_in_username"))
+            if not actual_username and safe_operator_smoke_active_username:
+                actual_username = safe_operator_smoke_active_username
+                signals = {**signals, "actual_logged_in_username": actual_username}
+                old_logged_in_metadata["active_account_identity_source"] = "operator_smoke_override"
+            if not actual_username:
+                return _finalize(
+                    ok=False,
+                    completed=True,
+                    final_outcome="unknown",
+                    reason="identity_unknown_on_connected_home",
+                    failure_reason="identity_unknown_on_connected_home",
+                    final_login_status="logged_out",
+                    final_provisioning_status="login_pending",
+                    final_onboarding_status="credentials_required",
+                    should_publish_status=False,
+                    account_id=safe_account_id,
+                    expected_username=safe_expected_username,
+                    actions_taken=actions_taken,
+                    timings=timings,
+                    warnings=warnings,
+                    extra_metadata={
+                        **old_logged_in_metadata,
+                        "profile_opened": True,
+                        "password_required": False,
+                        "ready_for_password_submit": False,
+                        "would_submit_password": False,
+                    },
+                    total_start=total_start,
+                    timer=timer,
+                    publisher=publisher,
+                    publish_enabled=publish_enabled,
+                )
             old_logged_in_metadata = {
+                **old_logged_in_metadata,
                 "actual_logged_in_username": actual_username,
+                "active_account_username": actual_username,
+                "account_mismatch_detected": bool(
+                    actual_username
+                    and actual_username.strip().lstrip("@").lower()
+                    != safe_expected_username.strip().lstrip("@").lower()
+                ),
+                "profile_opened": True,
+                "profile_username": actual_username,
+                "profile_menu_initially_missing": bool(signals.get("profile_menu_missing_transient")),
+                "profile_refresh_attempted": False,
                 "old_logged_in_recovery_attempted": False,
                 "logout_attempted": False,
                 "would_submit_password": False,
@@ -479,6 +599,9 @@ def run_login_provisioning_flow(
             old_logged_in_metadata = {
                 **old_logged_in_metadata,
                 **_flow_metadata(previous_account_lifecycle),
+                "active_account_lifecycle_source": _safe_public_text(previous_account_lifecycle.get("source")),
+                "active_account_lifecycle_status": _safe_public_text(previous_account_lifecycle.get("lifecycle_status")),
+                "clone_reuse_allowed": bool(previous_account_lifecycle.get("clone_reuse_allowed")),
                 "lifecycle_gate_result": recovery_route.decision,
                 "old_logged_in_recovery_allowed": recovery_route.decision == "recover_old_logged_in_account",
             }
@@ -507,13 +630,17 @@ def run_login_provisioning_flow(
                 )
 
             old_logged_in_metadata["old_logged_in_recovery_attempted"] = True
-            recovery_steps = (
-                SimpleNamespace(decision="open_account_switcher", target_username=actual_username),
-                SimpleNamespace(decision="tap_add_instagram_account"),
-                SimpleNamespace(decision="tap_log_into_existing_account"),
+            old_logged_in_metadata["recovery_path"] = "add_existing_account"
+            old_logged_in_metadata["add_account_sheet_opened"] = False
+            old_logged_in_metadata["log_into_existing_account_tapped"] = False
+            add_existing_prefix_steps = (
+                (
+                    SimpleNamespace(decision="open_account_switcher", target_username=actual_username),
+                    "account_switcher_sheet",
+                ),
+                (SimpleNamespace(decision="tap_add_instagram_account"), ""),
             )
-            expected_step_screens = ("account_switcher_sheet", "add_account_sheet", "")
-            for index, step_decision in enumerate(recovery_steps):
+            for step_decision, expected_screen in add_existing_prefix_steps:
                 start = timer()
                 action_result = execute_login_screen_decision(
                     d,
@@ -540,43 +667,126 @@ def run_login_provisioning_flow(
                         publisher=publisher,
                         publish_enabled=publish_enabled,
                     )
+                post_action_signals = dict(action_result.post_action_signals or {})
+                if step_decision.decision == "tap_add_instagram_account":
+                    old_logged_in_metadata["add_instagram_account_tapped"] = True
+                    if _post_add_existing_screen_is_routable(post_action_signals):
+                        signals = post_action_signals
+                    continue
                 start = timer()
                 signals = _observe_login_signals(d, expected_username=safe_expected_username)
                 timings["observe_ms"] += _elapsed_ms(start, timer())
-                expected_screen = expected_step_screens[index]
-                if expected_screen and signals.get("screen_type") != expected_screen:
+                if step_decision.decision == "open_account_switcher":
+                    old_logged_in_metadata["account_switcher_opened"] = signals.get("screen_type") == "account_switcher_sheet"
+                    if expected_screen and signals.get("screen_type") != expected_screen:
+                        return _finalize(
+                            ok=False,
+                            completed=False,
+                            final_outcome="unknown",
+                            reason=f"{expected_screen}_not_validated",
+                            failure_reason=f"{expected_screen}_not_validated",
+                            account_id=safe_account_id,
+                            expected_username=safe_expected_username,
+                            actions_taken=actions_taken,
+                            timings=timings,
+                            warnings=warnings,
+                            extra_metadata=old_logged_in_metadata,
+                            total_start=total_start,
+                            timer=timer,
+                            publisher=publisher,
+                            publish_enabled=publish_enabled,
+                        )
+
+            if not _post_add_existing_screen_is_routable(signals):
+                post_add_settled = _observe_post_add_existing_settled(
+                    d,
+                    expected_username=safe_expected_username,
+                    timings=timings,
+                    timer=timer,
+                    sleeper=sleeper,
+                )
+                signals = dict(post_add_settled.get("signals") or {})
+                _merge_post_add_existing_settled_metadata(old_logged_in_metadata, post_add_settled)
+                timings["post_add_existing_wait_total_ms"] = int(post_add_settled.get("wait_total_ms") or 0)
+            else:
+                post_add_settled = _post_add_existing_settled_from_signals(signals)
+                _merge_post_add_existing_settled_metadata(old_logged_in_metadata, post_add_settled)
+
+            if str(signals.get("screen_type") or "") == "add_account_sheet":
+                old_logged_in_metadata["add_account_sheet_opened"] = True
+                start = timer()
+                log_into_result = execute_login_screen_decision(
+                    d,
+                    SimpleNamespace(decision="tap_log_into_existing_account"),
+                    post_action_wait_ms=500,
+                )
+                timings["action_ms"] += _elapsed_ms(start, timer())
+                actions_taken.append(log_into_result.action)
+                if not log_into_result.ok:
                     return _finalize(
                         ok=False,
                         completed=False,
-                        final_outcome="unknown",
-                        reason=f"{expected_screen}_not_validated",
-                        failure_reason=f"{expected_screen}_not_validated",
+                        final_outcome="action_failed",
+                        reason=log_into_result.failure_reason or log_into_result.reason,
+                        failure_reason=log_into_result.failure_reason or log_into_result.reason,
                         account_id=safe_account_id,
                         expected_username=safe_expected_username,
                         actions_taken=actions_taken,
                         timings=timings,
-                        warnings=warnings,
+                        warnings=[*warnings, *log_into_result.warnings],
                         extra_metadata=old_logged_in_metadata,
                         total_start=total_start,
                         timer=timer,
                         publisher=publisher,
                         publish_enabled=publish_enabled,
                     )
-
-            if signals.get("screen_type") == "unknown":
-                old_logged_in_metadata.update(
-                    {
-                        "post_old_logged_in_recovery_initial_screen": "transition_unknown",
-                        "post_old_logged_in_recovery_reobserve": True,
-                        "post_old_logged_in_recovery_reobserve_count": 1,
-                    }
+                old_logged_in_metadata["log_into_existing_account_tapped"] = True
+                post_log_into_settled = _observe_post_add_existing_settled(
+                    d,
+                    expected_username=safe_expected_username,
+                    timings=timings,
+                    timer=timer,
+                    sleeper=sleeper,
                 )
-                time.sleep(POST_CONTINUE_REOBSERVE_WAIT_MS / 1000.0)
+                signals = dict(post_log_into_settled.get("signals") or {})
+                _merge_post_add_existing_settled_metadata(
+                    old_logged_in_metadata,
+                    post_log_into_settled,
+                    append=True,
+                )
+                timings["post_add_existing_wait_total_ms"] = int(
+                    timings.get("post_add_existing_wait_total_ms") or 0
+                ) + int(post_log_into_settled.get("wait_total_ms") or 0)
+
+            if not _post_add_existing_screen_is_routable(signals):
+                sleeper(POST_CONTINUE_REOBSERVE_WAIT_MS / 1000.0)
                 start = timer()
                 signals = _observe_login_signals(d, expected_username=safe_expected_username)
                 timings["observe_ms"] += _elapsed_ms(start, timer())
-                old_logged_in_metadata["post_old_logged_in_recovery_final_screen_type"] = _safe_screen_type_value(
-                    signals.get("screen_type") or "unknown"
+                final_screen = _preparation_screen_label(signals)
+                old_logged_in_metadata["post_add_existing_observation_count"] = int(
+                    old_logged_in_metadata.get("post_add_existing_observation_count") or 0
+                ) + 1
+                old_logged_in_metadata.setdefault("post_add_existing_screens", []).append(final_screen)
+                old_logged_in_metadata["screen_after_add_existing_final"] = final_screen
+
+            if not _post_add_existing_screen_is_routable(signals):
+                return _finalize(
+                    ok=False,
+                    completed=False,
+                    final_outcome="unknown",
+                    reason="post_add_existing_unknown",
+                    failure_reason="post_add_existing_unknown",
+                    account_id=safe_account_id,
+                    expected_username=safe_expected_username,
+                    actions_taken=actions_taken,
+                    timings=timings,
+                    warnings=warnings,
+                    extra_metadata=old_logged_in_metadata,
+                    total_start=total_start,
+                    timer=timer,
+                    publisher=publisher,
+                    publish_enabled=publish_enabled,
                 )
 
     routing_signals = _routing_signals(
@@ -1847,6 +2057,76 @@ def _observe_startup_screen_settled(
     }
 
 
+def _post_add_existing_settled_from_signals(signals: dict[str, Any]) -> dict[str, Any]:
+    final_screen = _preparation_screen_label(signals)
+    return {
+        "signals": dict(signals),
+        "observation_count": 1,
+        "wait_total_ms": 0,
+        "screens": ["transition_unknown", final_screen],
+        "final_screen_type": final_screen,
+    }
+
+
+def _observe_post_add_existing_settled(
+    d: Any,
+    *,
+    expected_username: str,
+    timings: dict[str, int],
+    timer: Timer,
+    sleeper: Sleeper,
+) -> dict[str, Any]:
+    return _observe_preparation_screen_settled(
+        d,
+        expected_username=expected_username,
+        timings=timings,
+        timer=timer,
+        sleeper=sleeper,
+        initial_screen="transition_unknown",
+        interval_ms=DEFAULT_STARTUP_INTERVAL_MS,
+        max_observations=DEFAULT_STARTUP_OBSERVATIONS,
+    )
+
+
+def _merge_post_add_existing_settled_metadata(
+    metadata: dict[str, Any],
+    settled: dict[str, Any],
+    *,
+    append: bool = False,
+) -> None:
+    screens = [str(screen) for screen in list(settled.get("screens") or [])]
+    observation_screens = screens[1:] if screens and screens[0] == "transition_unknown" else screens
+    signals = dict(settled.get("signals") or {})
+    final_screen = _preparation_screen_label(signals)
+    if append:
+        merged_screens = list(metadata.get("post_add_existing_screens") or [])
+        merged_screens.extend(observation_screens)
+        metadata["post_add_existing_screens"] = merged_screens
+        metadata["post_add_existing_observation_count"] = int(
+            metadata.get("post_add_existing_observation_count") or 0
+        ) + int(settled.get("observation_count") or 0)
+    else:
+        metadata["post_add_existing_screens"] = observation_screens
+        metadata["post_add_existing_observation_count"] = int(settled.get("observation_count") or 0)
+    metadata["screen_after_add_existing_final"] = final_screen
+    metadata["add_account_sheet_opened"] = bool(metadata.get("add_account_sheet_opened")) or (
+        "add_account_sheet" in screens
+        or str(signals.get("screen_type") or "") == "add_account_sheet"
+    )
+
+
+def _post_add_existing_screen_is_routable(signals: dict[str, Any]) -> bool:
+    screen_type = str(signals.get("screen_type") or "unknown").strip() or "unknown"
+    if screen_type in POST_ADD_EXISTING_RESUME_SCREENS:
+        return True
+    outcome = str(signals.get("login_probe_outcome") or "").strip()
+    return outcome in {
+        LoginProbeOutcome.NEEDS_2FA.value,
+        LoginProbeOutcome.CHECKPOINT.value,
+        LoginProbeOutcome.LOGIN_FAILED.value,
+    }
+
+
 def _observe_preparation_screen_settled(
     d: Any,
     *,
@@ -1886,9 +2166,45 @@ def _observe_preparation_screen_settled(
     }
 
 
+def _normalize_identity_username(value: Any) -> str:
+    return _safe_public_text(value).strip().lstrip("@").lower()
+
+
+def _effective_connected_home_screen(
+    signals: dict[str, Any],
+    screen_preparation_metadata: dict[str, Any],
+) -> str:
+    screen_type = _safe_screen_type_value(str(signals.get("screen_type") or "unknown"))
+    if screen_type in CONNECTED_HOME_IDENTITY_SCREENS:
+        return screen_type
+    for key in ("screen_after_app_start_final", "startup_final_screen_type", "screen_after_app_start"):
+        startup_final = _safe_screen_type_value(str(screen_preparation_metadata.get(key) or ""))
+        if startup_final in CONNECTED_HOME_IDENTITY_SCREENS:
+            return startup_final
+    return ""
+
+
+def _connected_home_identity_proven(signals: dict[str, Any], *, expected_username: str) -> bool:
+    actual_username = _normalize_identity_username(signals.get("actual_logged_in_username"))
+    expected = _normalize_identity_username(expected_username)
+    return bool(actual_username) and bool(expected) and actual_username == expected
+
+
+def _defer_connected_no_password_early_exit(
+    signals: dict[str, Any],
+    screen_preparation_metadata: dict[str, Any],
+    *,
+    expected_username: str,
+) -> bool:
+    if not _effective_connected_home_screen(signals, screen_preparation_metadata):
+        return False
+    return not _connected_home_identity_proven(signals, expected_username=expected_username)
+
+
 def _startup_screen_is_exploitable(signals: dict[str, Any]) -> bool:
     screen_type = str(signals.get("screen_type") or "unknown")
     if screen_type in {
+        "add_account_sheet",
         "continue_as_candidate",
         "account_picker",
         "login_form_empty",
@@ -2188,7 +2504,10 @@ def _resolve_previous_account_lifecycle(
         "reason": "",
         "lookup_failed": False,
     }
-    if not normalized_username or str(screen_type or "") not in {"continue_as_candidate", "active_account_profile"}:
+    allowed_screen_types = {"continue_as_candidate", "active_account_profile"}
+    if normalized_username and str(screen_type or "") == "active_account_home":
+        allowed_screen_types = {*allowed_screen_types, "active_account_home"}
+    if not normalized_username or str(screen_type or "") not in allowed_screen_types:
         return metadata
 
     context = clean_login_probe_metadata(
