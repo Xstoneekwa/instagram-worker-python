@@ -432,6 +432,36 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertEqual(result.final_provisioning_status, "ready")
         self.assertEqual(selectors["login"].click_calls, 1)
 
+    def test_blocked_secret_payload_shape_maps_to_secret_payload_not_password(self) -> None:
+        device, _selectors = configured_device(CONNECTED_XML)
+        password_result = type(
+            "PasswordResult",
+            (),
+            {
+                "ok": False,
+                "executed": False,
+                "failure_reason": "blocked_secret_payload_shape",
+                "post_submit_outcome": None,
+                "post_submit_probe_reason": None,
+                "timings": {},
+                "warnings": ["blocked_secret_payload_shape"],
+                "safe_metadata": {"password_submit_result": "blocked_secret_payload_shape"},
+            },
+        )()
+
+        with patch.object(provisioner_orchestrator, "execute_login_form_credentials", return_value=password_result):
+            result = self.run_flow(
+                device,
+                account_id=ACCOUNT_ID,
+                expected_username=USERNAME,
+                credentials_getter=Mock(return_value=credentials()),
+                initial_signals=LOGIN_FORM_SIGNALS,
+            )
+
+        self.assertEqual(result.final_outcome, "secret_payload_not_password")
+        self.assertEqual(result.failure_reason, "blocked_secret_payload_shape")
+        self.assertFalse(result.should_publish_status)
+
     def test_password_required_outcome_does_not_collapse_to_unknown(self) -> None:
         device, _selectors = configured_device(CONNECTED_XML)
         password_result = type(

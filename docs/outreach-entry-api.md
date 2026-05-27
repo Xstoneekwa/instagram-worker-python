@@ -3694,6 +3694,55 @@ No-leak :
   aucun UUID Vault complet, aucun token/header, aucun XML brut, aucun screenshot
   path et aucune ecriture Supabase status.
 
+## Entry 2E-5P-4 Vault Password Extraction
+
+Entry 2E-5P-4 corrige un bug critique post-2E-5P-3 : l'injection ADB Keyboard
+fonctionnait, mais le champ Instagram recevait parfois un payload JSON/metadata
+Vault complet au lieu du mot de passe seul.
+
+Cause :
+
+- l'Edge Function `instagram-credentials` stocke dans Vault un JSON
+  `{password, account_id, credentials_version, created_at, ...}`;
+- `read_supabase_vault_secret(...)` enveloppait ce JSON brut dans `SecretValue`
+  sans extraction;
+- l'executor revelait donc une chaine de type
+  `password":"[REDACTED]","account_id":"...","credentials_version":1000,...`.
+
+Correction :
+
+- `parse_vault_secret_for_login(...)` dans
+  `instagram_credentials_runtime_access.py` :
+  - si JSON : extraire uniquement `payload["password"]` (string non vide);
+  - si legacy plain string : accepter seulement si la valeur ne ressemble pas a
+    un payload metadata/JSON;
+- `instagram_supabase_vault_reader.py` normalise avant `SecretValue`;
+- `get_instagram_credentials_for_login(...)` re-normalise defensivenement;
+- guard final dans `instagram_login_password_form_executor.py` :
+  `blocked_secret_payload_shape` -> pas de tap `Log in`, pas d'injection.
+
+Erreurs safe :
+
+- `vault_secret_payload_missing_password`;
+- `vault_secret_password_invalid`;
+- `blocked_secret_payload_shape` (executor);
+- `final_outcome=secret_payload_not_password` (orchestrateur).
+
+Dry-run no-device 2026-05-27 (cinema_catchup, sans afficher secret/password) :
+
+- `vault_secret_is_json=true`;
+- `vault_secret_has_password_key=true`;
+- `vault_secret_contains_metadata_keys=true` (attendu dans le secret Vault brut);
+- `extracted_password_valid=true`;
+- `secret_value_safe_for_injection=true`;
+- `credentials_ok=true`, `secret_loaded=true`, provider Vault;
+- guard anti-payload : `guard_would_block_revealed_value=false`.
+
+Prochaine etape :
+
+- smoke device 2E-5P-4 separe uniquement apres validation operateur du dry-run;
+- aucun submit Instagram dans ce patch.
+
 ## Entry 2E-5J-2B-1 Previous Account Lifecycle Gate Source
 
 Entry 2E-5J-2B-1 audite la source fiable a utiliser avant d'autoriser

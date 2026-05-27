@@ -11,7 +11,10 @@ from instagram_credentials_runtime_access import (
     contains_forbidden_secret_keys,
     credential_result_safe_dict,
     get_instagram_credentials_for_login,
+    parse_vault_secret_for_login,
     redact_credentials_payload,
+    revealed_value_blocked_for_injection,
+    vault_secret_shape_audit,
 )
 
 
@@ -173,7 +176,105 @@ class InstagramCredentialsRuntimeAccessTest(unittest.TestCase):
         )
 
         self.assertFalse(result.ok)
-        self.assertEqual(result.failure_reason, "secret_value_empty")
+        self.assertEqual(result.failure_reason, "vault_secret_empty")
+
+    def test_vault_json_secret_extracts_password_only(self) -> None:
+        payload = json.dumps(
+            {
+                "password": "secret-only",
+                "account_id": ACCOUNT_ID,
+                "credentials_version": 1000,
+                "created_at": "2026-05-27T00:00:00Z",
+            }
+        )
+
+        parsed = parse_vault_secret_for_login(payload)
+
+        self.assertTrue(parsed.ok)
+        self.assertEqual(parsed.password, "secret-only")
+        self.assertTrue(parsed.vault_secret_is_json)
+        self.assertTrue(parsed.vault_secret_has_password_key)
+        self.assertTrue(parsed.extracted_password_valid)
+        self.assertTrue(parsed.secret_value_safe_for_injection)
+
+    def test_vault_json_without_password_rejected(self) -> None:
+        payload = json.dumps(
+            {
+                "account_id": ACCOUNT_ID,
+                "credentials_version": 1000,
+                "created_at": "2026-05-27T00:00:00Z",
+            }
+        )
+
+        parsed = parse_vault_secret_for_login(payload)
+
+        self.assertFalse(parsed.ok)
+        self.assertEqual(parsed.failure_reason, "vault_secret_payload_missing_password")
+
+    def test_vault_json_invalid_password_rejected(self) -> None:
+        payload = json.dumps(
+            {
+                "password": "",
+                "account_id": ACCOUNT_ID,
+                "credentials_version": 1000,
+            }
+        )
+
+        parsed = parse_vault_secret_for_login(payload)
+
+        self.assertFalse(parsed.ok)
+        self.assertEqual(parsed.failure_reason, "vault_secret_password_invalid")
+
+    def test_legacy_plain_password_accepted_when_not_payload_shaped(self) -> None:
+        parsed = parse_vault_secret_for_login("fake-password-for-unit-tests")
+
+        self.assertTrue(parsed.ok)
+        self.assertEqual(parsed.password, "fake-password-for-unit-tests")
+        self.assertFalse(parsed.vault_secret_is_json)
+
+    def test_json_vault_secret_via_get_instagram_credentials(self) -> None:
+        payload = json.dumps(
+            {
+                "password": "secret-only",
+                "account_id": ACCOUNT_ID,
+                "credentials_version": 1000,
+                "created_at": "2026-05-27T00:00:00Z",
+            }
+        )
+
+        result = get_instagram_credentials_for_login(
+            account_id=ACCOUNT_ID,
+            credentials_lookup=Mock(return_value=_active_credentials()),
+            secret_reader=Mock(return_value=payload),
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.password.reveal_for_login_executor(), "secret-only")
+
+    def test_vault_shape_audit_never_returns_secret_value(self) -> None:
+        payload = json.dumps(
+            {
+                "password": "secret-only",
+                "account_id": ACCOUNT_ID,
+                "credentials_version": 1000,
+            }
+        )
+        audit = vault_secret_shape_audit(payload)
+        rendered = json.dumps(audit, sort_keys=True)
+
+        self.assertTrue(audit["vault_secret_is_json"])
+        self.assertTrue(audit["vault_secret_has_password_key"])
+        self.assertTrue(audit["extracted_password_valid"])
+        self.assertTrue(audit["secret_value_safe_for_injection"])
+        self.assertNotIn("secret-only", rendered)
+
+    def test_revealed_value_blocked_for_payload_markers(self) -> None:
+        payload = (
+            '{"password":"[REDACTED]","account_id":"00000000-0000-4000-8000-000000000000",'
+            '"credentials_version":1000}'
+        )
+
+        self.assertTrue(revealed_value_blocked_for_injection(payload))
 
     def test_provider_unsupported_rejected_before_lookup(self) -> None:
         lookup = Mock()

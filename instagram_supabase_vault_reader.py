@@ -15,6 +15,7 @@ from typing import Any, Callable
 from instagram_credentials_runtime_access import (
     REDACTED,
     SecretValue,
+    parse_vault_secret_for_login,
     redact_credentials_payload,
 )
 
@@ -164,7 +165,10 @@ def read_supabase_vault_secret(
         raise _safe_error("vault_secret_not_string", duration_ms=_elapsed_ms(started))
     if not secret:
         raise _safe_error("vault_secret_empty", duration_ms=_elapsed_ms(started))
-    return SecretValue(secret)
+    parsed = parse_vault_secret_for_login(secret)
+    if not parsed.ok:
+        raise _safe_error(parsed.failure_reason, duration_ms=_elapsed_ms(started))
+    return SecretValue(parsed.password)
 
 
 def build_supabase_vault_secret_reader(
@@ -241,6 +245,8 @@ def _safe_rpc_reason(value: Any) -> str:
         "vault_secret_id_invalid",
         "vault_secret_not_found",
         "vault_secret_empty",
+        "vault_secret_payload_missing_password",
+        "vault_secret_password_invalid",
         "vault_read_failed",
     }
     return reason if reason in allowed else "vault_read_failed"

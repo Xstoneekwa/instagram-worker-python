@@ -391,6 +391,17 @@ Post-submit policy future :
   `continue_as_candidate`; une relance a tape `Continue` une seule fois et a
   stoppe safe sur `unknown_login_screen` pendant transition. Aucun submit
   supplementaire, aucun publish/status write.
+- Entry 2E-5P-4 Vault password extraction : bug critique identifie apres 2E-5P-3.
+  L'ADB Keyboard injectait correctement, mais la valeur etait parfois le JSON
+  Vault complet (`password`, `account_id`, `credentials_version`, `created_at`,
+  etc.) car `SecretValue` recevait le secret brut sans extraction. Patch :
+  `parse_vault_secret_for_login` extrait uniquement `password`, le Vault reader
+  et le runtime credentials normalisent avant `SecretValue`, l'executor garde
+  `blocked_secret_payload_shape` avant toute injection. Dry-run no-device OK :
+  `vault_secret_is_json=true`, `vault_secret_has_password_key=true`,
+  `extracted_password_valid=true`, `secret_value_safe_for_injection=true`,
+  `injectable_password_only=true`, sans afficher password/payload. Aucun submit
+  device dans ce patch ; smoke 2E-5P-4 separe apres validation operateur.
 - Entry 2E-5P-3 Password input injection : cause racine identifiee. En mode
   `continue_password_only`, l'ancien target `text="Password"` pointait vers un
   label `android.view.View`, pas vers le vrai `android.widget.EditText`. Le

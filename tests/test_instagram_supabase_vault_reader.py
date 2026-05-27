@@ -33,6 +33,19 @@ RPC_SUCCESS = {
     "secret_provider": "supabase_vault",
     "safe_ref_label": "supabase_vault://[REDACTED]",
 }
+RPC_SUCCESS_JSON = {
+    "ok": True,
+    "secret_value": json.dumps(
+        {
+            "password": FAKE_PASSWORD,
+            "account_id": ACCOUNT_ID,
+            "credentials_version": 1000,
+            "created_at": "2026-05-27T00:00:00Z",
+        }
+    ),
+    "secret_provider": "supabase_vault",
+    "safe_ref_label": "supabase_vault://[REDACTED]",
+}
 
 
 def _active_credentials():
@@ -237,6 +250,33 @@ class InstagramSupabaseVaultReaderTest(unittest.TestCase):
         rendered = json.dumps(ctx.exception.safe_dict(), sort_keys=True)
         self.assertNotIn("Authorization", rendered)
         self.assertNotIn("service_role", rendered)
+
+    def test_read_json_vault_secret_extracts_password_only(self) -> None:
+        client = SupabaseVaultClient(rpc_caller=Mock(return_value=RPC_SUCCESS_JSON))
+
+        secret = read_supabase_vault_secret(SECRET_REF, vault_client=client)
+
+        self.assertEqual(secret.reveal_for_login_executor(), FAKE_PASSWORD)
+
+    def test_read_json_vault_secret_without_password_rejected(self) -> None:
+        client = SupabaseVaultClient(
+            rpc_caller=Mock(
+                return_value={
+                    "ok": True,
+                    "secret_value": json.dumps(
+                        {
+                            "account_id": ACCOUNT_ID,
+                            "credentials_version": 1000,
+                        }
+                    ),
+                }
+            )
+        )
+
+        with self.assertRaises(SupabaseVaultReadError) as ctx:
+            read_supabase_vault_secret(SECRET_REF, vault_client=client)
+
+        self.assertEqual(ctx.exception.failure_reason, "vault_secret_payload_missing_password")
 
     def test_integrates_with_get_instagram_credentials_for_login(self) -> None:
         client = SupabaseVaultClient(rpc_caller=Mock(return_value=RPC_SUCCESS))

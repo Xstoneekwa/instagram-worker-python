@@ -7,6 +7,7 @@ fully injectable for tests and later service-role wiring.
 
 from __future__ import annotations
 
+import json
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
@@ -35,8 +36,42 @@ FORBIDDEN_CREDENTIAL_KEYS = {
 }
 SECRET_REF_ALLOWED_KEYS = {"secret_ref"}
 
+VAULT_PAYLOAD_METADATA_MARKERS = (
+    "account_id",
+    "credentials_version",
+    "created_at",
+    "secret_ref",
+    "supabase_vault",
+    '"username"',
+    '"provider"',
+    '"metadata"',
+)
+INJECTION_PAYLOAD_MARKERS = (
+    '"password":',
+    "account_id",
+    "credentials_version",
+    "created_at",
+    "secret_ref",
+    "supabase_vault",
+    '"username":',
+    '"provider":',
+    '"metadata":',
+)
+
 CredentialsLookup = Callable[[str, str], Optional[dict[str, Any]]]
 SecretReader = Callable[[str], Any]
+
+
+@dataclass(frozen=True)
+class VaultPasswordParseResult:
+    ok: bool
+    password: str = ""
+    failure_reason: str = ""
+    vault_secret_is_json: bool = False
+    vault_secret_has_password_key: bool = False
+    vault_secret_contains_metadata_keys: bool = False
+    extracted_password_valid: bool = False
+    secret_value_safe_for_injection: bool = False
 
 
 class SecretValue:
@@ -55,6 +90,114 @@ class SecretValue:
 
     def reveal_for_login_executor(self) -> str:
         return self._value
+
+
+def parse_vault_secret_for_login(raw_secret: str) -> VaultPasswordParseResult:
+    """Normalize a Vault secret into a password-only string safe for login injection."""
+
+    text = str(raw_secret or "").strip()
+    contains_metadata = _contains_vault_metadata_markers(text)
+    if not text:
+        return VaultPasswordParseResult(
+            ok=False,
+            failure_reason="vault_secret_empty",
+            vault_secret_contains_metadata_keys=contains_metadata,
+        )
+
+    if _looks_like_json_object(text):
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            return VaultPasswordParseResult(
+                ok=False,
+                failure_reason="vault_secret_password_invalid",
+                vault_secret_is_json=True,
+                vault_secret_contains_metadata_keys=contains_metadata,
+            )
+        if not isinstance(payload, dict):
+            return VaultPasswordParseResult(
+                ok=False,
+                failure_reason="vault_secret_password_invalid",
+                vault_secret_is_json=True,
+                vault_secret_contains_metadata_keys=contains_metadata,
+            )
+        has_password_key = "password" in payload
+        password_value = payload.get("password")
+        if password_value is None:
+            return VaultPasswordParseResult(
+                ok=False,
+                failure_reason="vault_secret_payload_missing_password",
+                vault_secret_is_json=True,
+                vault_secret_has_password_key=False,
+                vault_secret_contains_metadata_keys=contains_metadata,
+            )
+        if not isinstance(password_value, str) or not password_value.strip():
+            return VaultPasswordParseResult(
+                ok=False,
+                failure_reason="vault_secret_password_invalid",
+                vault_secret_is_json=True,
+                vault_secret_has_password_key=has_password_key,
+                vault_secret_contains_metadata_keys=contains_metadata,
+            )
+        extracted = password_value.strip()
+        if revealed_value_blocked_for_injection(extracted):
+            return VaultPasswordParseResult(
+                ok=False,
+                failure_reason="vault_secret_password_invalid",
+                vault_secret_is_json=True,
+                vault_secret_has_password_key=True,
+                vault_secret_contains_metadata_keys=contains_metadata,
+            )
+        return VaultPasswordParseResult(
+            ok=True,
+            password=extracted,
+            vault_secret_is_json=True,
+            vault_secret_has_password_key=True,
+            vault_secret_contains_metadata_keys=contains_metadata,
+            extracted_password_valid=True,
+            secret_value_safe_for_injection=True,
+        )
+
+    if revealed_value_blocked_for_injection(text):
+        return VaultPasswordParseResult(
+            ok=False,
+            failure_reason="vault_secret_password_invalid",
+            vault_secret_contains_metadata_keys=contains_metadata,
+        )
+
+    return VaultPasswordParseResult(
+        ok=True,
+        password=text,
+        vault_secret_is_json=False,
+        vault_secret_has_password_key=False,
+        vault_secret_contains_metadata_keys=contains_metadata,
+        extracted_password_valid=True,
+        secret_value_safe_for_injection=True,
+    )
+
+
+def vault_secret_shape_audit(raw_secret: str) -> dict[str, bool]:
+    """Return safe shape flags for Vault secrets without exposing secret values."""
+
+    parsed = parse_vault_secret_for_login(raw_secret)
+    return {
+        "vault_secret_is_json": parsed.vault_secret_is_json,
+        "vault_secret_has_password_key": parsed.vault_secret_has_password_key,
+        "vault_secret_contains_metadata_keys": parsed.vault_secret_contains_metadata_keys,
+        "extracted_password_valid": parsed.extracted_password_valid,
+        "secret_value_safe_for_injection": parsed.secret_value_safe_for_injection,
+        "parse_ok": parsed.ok,
+    }
+
+
+def revealed_value_blocked_for_injection(value: str) -> bool:
+    text = str(value or "")
+    if not text:
+        return True
+    lowered = text.lower()
+    if "{" in text and "}" in text:
+        return True
+    return any(marker in lowered for marker in INJECTION_PAYLOAD_MARKERS)
 
 
 @dataclass(frozen=True)
@@ -185,19 +328,21 @@ def get_instagram_credentials_for_login(
         )
 
     if isinstance(raw_password, SecretValue):
-        password_text = raw_password.reveal_for_login_executor()
-        password_value = raw_password
+        raw_secret_text = raw_password.reveal_for_login_executor()
     else:
-        password_text = str(raw_password or "")
-        password_value = SecretValue(password_text) if password_text else None
-    if not password_text:
+        raw_secret_text = str(raw_password or "")
+
+    parsed_secret = parse_vault_secret_for_login(raw_secret_text)
+    if not parsed_secret.ok:
         return _failure_from_row(
             row,
             account_id=safe_account_id,
             provider=safe_provider,
-            reason="secret_value_empty",
-            failure_reason="secret_value_empty",
+            reason=parsed_secret.failure_reason,
+            failure_reason=parsed_secret.failure_reason,
         )
+
+    password_value = SecretValue(parsed_secret.password)
 
     return InstagramLoginCredentialsResult(
         ok=True,
@@ -362,6 +507,16 @@ def _safe_bool_or_none(value: Any) -> bool | None:
 
 def _normalized_key(key: str) -> str:
     return str(key or "").strip().lower()
+
+
+def _looks_like_json_object(value: str) -> bool:
+    text = str(value or "").strip()
+    return text.startswith("{") and text.endswith("}")
+
+
+def _contains_vault_metadata_markers(value: str) -> bool:
+    lowered = str(value or "").lower()
+    return any(marker in lowered for marker in VAULT_PAYLOAD_METADATA_MARKERS)
 
 
 def _redact_sensitive_string(value: str) -> str:

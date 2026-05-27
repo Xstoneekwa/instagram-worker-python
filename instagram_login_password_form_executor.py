@@ -17,7 +17,11 @@ from typing import Any, Callable
 
 import config
 from device import get_current_ime, is_fast_ime_available, set_ime
-from instagram_credentials_runtime_access import SecretValue, redact_credentials_payload
+from instagram_credentials_runtime_access import (
+    SecretValue,
+    redact_credentials_payload,
+    revealed_value_blocked_for_injection,
+)
 from instagram_login_status_classifier import clean_login_probe_metadata
 from instagram_login_ui_probe import extract_login_screen_signals_from_hierarchy, probe_login_ui_from_hierarchy
 
@@ -163,6 +167,22 @@ def execute_login_form_credentials(
             total_start=total_start,
             timer=timer,
             expected_username=username,
+        )
+    if revealed_value_blocked_for_injection(revealed_password):
+        timings["total_ms"] = _elapsed_ms(total_start, timer())
+        return _result(
+            ok=False,
+            executed=False,
+            action=ACTION_LOGIN_FORM_SUBMIT,
+            reason="blocked_secret_payload_shape",
+            failure_reason="blocked_secret_payload_shape",
+            username_entered=False,
+            password_entered=False,
+            timings=timings,
+            warnings=[*warnings, "blocked_secret_payload_shape"],
+            expected_username=username,
+            password_only_mode=password_only_mode,
+            password_submit_result="blocked_secret_payload_shape",
         )
 
     username_entered = False
@@ -849,6 +869,7 @@ def _result(
     password_required_retry_count: int = 0,
     password_refill_attempted: bool = False,
     second_submit_executed: bool = False,
+    password_submit_result: str | None = None,
 ) -> LoginPasswordExecutionResult:
     safe_metadata = clean_login_probe_metadata(
         redact_credentials_payload(
@@ -857,6 +878,7 @@ def _result(
                 "action": action,
                 "reason": reason,
                 "failure_reason": failure_reason,
+                "password_submit_result": password_submit_result,
                 "expected_username": expected_username,
                 "post_submit_outcome": post_submit_outcome,
                 "password_only_mode": password_only_mode,

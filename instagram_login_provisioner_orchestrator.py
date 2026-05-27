@@ -40,6 +40,9 @@ NO_RETRY_FAILURES = {
     "expected_username_missing",
     "password_secret_missing",
     "password_secret_invalid",
+    "vault_secret_payload_missing_password",
+    "vault_secret_password_invalid",
+    "blocked_secret_payload_shape",
     "credentials_missing",
     "credentials_invalid",
     "login_failed",
@@ -769,6 +772,34 @@ def run_login_provisioning_flow(
 
     outcome = _password_result_outcome(password_result)
     password_result_metadata = {"password_result": _safe_password_result_metadata(password_result)}
+    if str(getattr(password_result, "failure_reason", "") or "") == "blocked_secret_payload_shape":
+        return _finalize(
+            ok=False,
+            completed=True,
+            final_outcome="secret_payload_not_password",
+            reason="blocked_secret_payload_shape",
+            failure_reason="blocked_secret_payload_shape",
+            final_login_status="logged_out",
+            final_provisioning_status="login_pending",
+            final_onboarding_status="credentials_submitted",
+            should_publish_status=False,
+            account_id=safe_account_id,
+            expected_username=safe_expected_username,
+            actions_taken=actions_taken,
+            timings=_merge_timings(timings, password_result.timings),
+            warnings=[*warnings, *password_result.warnings],
+            extra_metadata={
+                **_flow_metadata(previous_account_lifecycle),
+                **old_logged_in_metadata,
+                **post_continue_metadata,
+                **password_result_metadata,
+                "password_submit_result": "blocked_secret_payload_shape",
+            },
+            total_start=total_start,
+            timer=timer,
+            publisher=publisher,
+            publish_enabled=publish_enabled,
+        )
     if outcome in {"password_input_missing_or_not_accepted", "password_input_failed"}:
         return _finalize(
             ok=False,
@@ -1883,6 +1914,7 @@ def _safe_password_result_metadata(result: Any) -> dict[str, Any]:
             "password_required_retry_count",
             "password_refill_attempted",
             "second_submit_executed",
+            "password_submit_result",
         ):
             if key in metadata:
                 safe[key] = metadata.get(key)
@@ -1902,6 +1934,9 @@ def _should_retry_password_result(result: Any, retry_count: int, max_retries: in
 
 
 def _password_result_outcome(result: Any) -> str:
+    failure = str(getattr(result, "failure_reason", "") or "")
+    if failure == "blocked_secret_payload_shape":
+        return "secret_payload_not_password"
     raw = str(getattr(result, "post_submit_outcome", "") or "unknown")
     if raw in {"password_input_missing_or_not_accepted", "password_input_failed"}:
         return raw
@@ -1920,7 +1955,14 @@ def _dashboard_action_for_outcome(outcome: str) -> str | None:
 def _dashboard_action_for_failure(failure_reason: str | None) -> str | None:
     if failure_reason in {"credentials_missing", "credentials_not_found"}:
         return "submit_instagram_credentials"
-    if failure_reason in {"credentials_invalid", "password_secret_missing", "password_secret_invalid"}:
+    if failure_reason in {
+        "credentials_invalid",
+        "password_secret_missing",
+        "password_secret_invalid",
+        "vault_secret_payload_missing_password",
+        "vault_secret_password_invalid",
+        "blocked_secret_payload_shape",
+    }:
         return "update_instagram_password"
     if failure_reason in TRANSIENT_RETRY_FAILURES:
         return "retry_provisioning"

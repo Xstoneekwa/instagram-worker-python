@@ -657,6 +657,31 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
         self.assertEqual(login.click_calls, 1)
         fast_input.assert_called_once()
 
+    def test_blocked_secret_payload_shape_prevents_login_submit(self) -> None:
+        device, _username, password_selector, login = configured_device()
+        payload = json.dumps(
+            {
+                "password": PASSWORD,
+                "account_id": "00000000-0000-4000-8000-000000000000",
+                "credentials_version": 1000,
+                "created_at": "2026-05-27T00:00:00Z",
+            }
+        )
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(payload),
+            prevalidated_signals=PASSWORD_ONLY_SIGNALS,
+            sleeper=Mock(),
+        )
+
+        self.assertEqual(result.failure_reason, "blocked_secret_payload_shape")
+        self.assertFalse(result.executed)
+        self.assertEqual(login.click_calls, 0)
+        self.assertEqual(password_selector.set_text_calls, [])
+        self.assertEqual(result.safe_metadata["password_submit_result"], "blocked_secret_payload_shape")
+
     def test_adb_keyboard_unavailable_falls_back_to_set_text(self) -> None:
         device, _username, password_selector, login = configured_device(CONNECTED_XML)
         device.serial = "emulator-5554"
