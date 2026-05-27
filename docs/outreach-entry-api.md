@@ -4205,6 +4205,93 @@ Finalisation metadata 2E-5P-13 :
   `clone_reuse_allowed=true`, et `suggested_username` dynamique du compte
   precedent.
 
+## Entry 2E-5P-15 Direct Empty Login Form Full Provisioning Flow
+
+Entry 2E-5P-15 valide le Cas C : Instagram ouvre directement sur
+`login_form_empty` avec username vide, password vide, `Log in`,
+`Forgot password?`, `Create new account` et Meta.
+
+Le CLI generique supporte ce chemin sans flag special :
+
+- `screen_type=login_form_empty` ;
+- `router_decision=start_login_form_flow` ;
+- `preparation_flow_used=start_login_form_flow` ;
+- saisie de `expected_username` dans le vrai champ username ;
+- revelation du password uniquement via `SecretValue` / Vault apres validation
+  du formulaire et de l'etape username ;
+- injection password par la strategie robuste existante ;
+- tap `Log in` ;
+- post-submit settling ;
+- dismiss Google Password Manager si present sans cliquer `Continue` ;
+- `would_publish=false` pendant le smoke `--no-publish`.
+
+Cas C ne doit pas etre confondu avec
+`login_form_prefilled_username` :
+
+- `login_form_empty` saisit username + password ;
+- `login_form_prefilled_username` couvre le remplacement username du Cas A ;
+- `username_replaced=false` sur Cas C ;
+- `username_input_result=username_input_confirmed` quand la confirmation
+  accessibilite est possible.
+
+Etats post-submit acceptes :
+
+- `connected_home` / feed ;
+- `google_password_manager_save_prompt` puis connected apres dismiss ;
+- `needs_2fa` ;
+- `checkpoint` ;
+- `login_failed` ;
+- `password_required_dialog` avec recovery bornee existante ;
+- `login_submit_still_loading` ;
+- `unknown` seulement apres settling complet.
+
+Metadata JSONL safe attendue :
+
+- `screen_type`, `router_decision`, `preparation_flow_used` ;
+- `screen_before_submit` ;
+- `username_field_focused_before_input`, `username_clear_method`,
+  `username_input_method`, `username_replaced`, `username_input_confirmed`,
+  `username_input_result`, `username_input_ms` ;
+- `password_field_target_kind`, `password_input_method`,
+  `password_input_result`, `password_confirm_method`,
+  `password_field_non_empty_confirmed` ;
+- `submit_executed`, `post_submit_screens`, `final_terminal_screen` ;
+- `save_password_prompt_detected`,
+  `save_password_prompt_dismiss_attempt_count`,
+  `save_password_prompt_dismissed`, `dismiss_method`,
+  `post_dismiss_screen_type` ;
+- `no_leak_summary`.
+
+Le smoke Cas C reste local terminal, sans publish, sans dashboard action et sans
+runner/social flow.
+
+## Entry 2E-5P-15B Login Form Empty Username Confirmation
+
+Entry 2E-5P-15B corrige la confirmation username sur `login_form_empty` direct.
+
+Cause racine :
+
+- le resolver pouvait cibler un label/hint `Username, email or mobile number`
+  au lieu du vrai `EditText` ;
+- apres `set_text`, l'accessibilite peut conserver le placeholder ;
+- l'executor comparait alors `before == after == placeholder` et retournait a tort
+  `username_still_prefilled_after_input` (logique Cas A).
+
+Correctifs :
+
+- preferer le premier `android.widget.EditText` username sur formulaire vide ;
+- ignorer les placeholders username (`Username, email or mobile number`, etc.) ;
+- ne jamais retourner `username_still_prefilled_after_input` si seul un placeholder
+  etait present ;
+- confirmer via hierarchy EditText ou `username_input_assumed` apres `set_text`
+  reussi si le placeholder reste visible ;
+- conserver la logique Cas A `login_form_prefilled_username` pour un vrai ancien
+  username encore present apres input.
+
+Metadata safe ajoutee :
+
+- `username_placeholder_ignored`.
+
 ## Entry 2E-5P-14 Account Picker Full Provisioning Flow
 
 Entry 2E-5P-14 valide le Cas B : Instagram affiche un `account_picker` avec

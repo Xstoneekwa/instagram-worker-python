@@ -48,6 +48,16 @@ USERNAME_INPUT_FAILURE_REASONS = {
     "username_prefilled_not_editable",
 }
 USERNAME_POST_INPUT_SETTLE_MS = 150
+_USERNAME_PLACEHOLDER_PHRASES = {
+    "username, email or mobile number",
+    "phone number, username or email",
+    "username",
+    "email or mobile number",
+    "nom d'utilisateur, e-mail ou numéro de mobile",
+    "nom d'utilisateur, e-mail ou numero de mobile",
+    "numéro de téléphone, nom d'utilisateur ou e-mail",
+    "numero de telephone, nom d'utilisateur ou e-mail",
+}
 
 Timer = Callable[[], float]
 Sleeper = Callable[[float], None]
@@ -162,6 +172,7 @@ def execute_login_form_credentials(
     username_field_focused_before_input: bool | None = None
     username_clear_method = ""
     username_input_method = ""
+    username_placeholder_ignored = False
 
     start = timer()
     targets = _resolve_login_form_targets(
@@ -202,6 +213,7 @@ def execute_login_form_credentials(
             username_field_focused_before_input = username_result.get("username_field_focused_before_input")
             username_clear_method = str(username_result.get("username_clear_method") or "")
             username_input_method = str(username_result.get("username_input_method") or "")
+            username_placeholder_ignored = bool(username_result.get("username_placeholder_ignored"))
             username_entered = username_input_result in {"username_input_confirmed", "username_input_assumed"}
             if not username_entered:
                 raise RuntimeError(username_input_result or "username_input_failed")
@@ -268,6 +280,7 @@ def execute_login_form_credentials(
             username_field_focused_before_input=username_field_focused_before_input,
             username_clear_method=username_clear_method,
             username_input_method=username_input_method,
+            username_placeholder_ignored=username_placeholder_ignored,
             password_submit_result="blocked_secret_payload_shape" if failure_reason == "blocked_secret_payload_shape" else None,
         )
     finally:
@@ -535,6 +548,7 @@ def execute_login_form_credentials(
         username_field_focused_before_input=username_field_focused_before_input,
         username_clear_method=username_clear_method,
         username_input_method=username_input_method,
+        username_placeholder_ignored=username_placeholder_ignored,
     )
 
 
@@ -599,6 +613,11 @@ def _resolve_login_form_targets(
 def _find_username_target(d: Any, *, prefilled_username: str = "") -> dict[str, Any]:
     safe_prefilled = str(prefilled_username or "").strip()
     if safe_prefilled:
+        edit_text = _find_username_edit_text_target(d)
+        if edit_text["target"] is not None:
+            return edit_text
+
+    if not safe_prefilled:
         edit_text = _find_username_edit_text_target(d)
         if edit_text["target"] is not None:
             return edit_text
@@ -778,14 +797,21 @@ def _focus_clear_set_and_confirm_username(
     warnings: list[str],
 ) -> dict[str, Any]:
     failure_result = "username_input_failed" if prefilled_username_mode else "input_failed"
-    before = _read_username_field_value(
+    before_raw = _read_username_field_value(
         d,
         target,
         prefilled_username=prefilled_username,
         prefer_hierarchy=prefilled_username_mode,
     )
-    before_normalized = _normalize_username(before)
+    before_effective = _effective_username_field_text(before_raw)
+    before_normalized = _normalize_username(before_effective)
     expected_normalized = _normalize_username(expected_username)
+    username_replaced = bool(
+        prefilled_username_mode
+        and before_normalized
+        and before_normalized != expected_normalized
+    )
+    placeholder_ignored = _is_username_placeholder_text(before_raw)
     if before_normalized == expected_normalized:
         return _username_input_success(
             username_replaced=False,
@@ -794,32 +820,37 @@ def _focus_clear_set_and_confirm_username(
             focused_before=_focus_username_target(d, target, warnings),
             clear_method="already_expected",
             input_method="skipped",
+            username_placeholder_ignored=placeholder_ignored,
         )
 
     focused_before = _focus_username_target(d, target, warnings)
     clear_method = ""
     input_method = ""
 
-    clear_method = _clear_username_field(target, warnings)
-    if clear_method == "clear_failed":
-        warnings.append("username_clear_text_failed_trying_set_text")
+    if before_effective:
+        clear_method = _clear_username_field(target, warnings)
+        if clear_method == "clear_failed":
+            warnings.append("username_clear_text_failed_trying_set_text")
+    else:
+        clear_method = "skipped_empty_field"
 
     sleeper(USERNAME_POST_INPUT_SETTLE_MS / 1000.0)
-    after_clear = _read_username_field_value(
+    after_clear_raw = _read_username_field_value(
         d,
         target,
         prefilled_username=prefilled_username,
         prefer_hierarchy=prefilled_username_mode,
     )
-    after_clear_normalized = _normalize_username(after_clear)
+    after_clear_normalized = _normalize_username(_effective_username_field_text(after_clear_raw))
     if after_clear_normalized == expected_normalized:
         return _username_input_success(
-            username_replaced=before_normalized != expected_normalized,
+            username_replaced=username_replaced,
             confirmed="true",
             result="username_input_confirmed",
             focused_before=focused_before,
             clear_method=clear_method or "clear_only",
             input_method="clear_only",
+            username_placeholder_ignored=placeholder_ignored or _is_username_placeholder_text(after_clear_raw),
         )
 
     input_method = _set_username_field_value(d, target, expected_username, warnings)
@@ -835,32 +866,38 @@ def _focus_clear_set_and_confirm_username(
         )
 
     sleeper(USERNAME_POST_INPUT_SETTLE_MS / 1000.0)
-    after_set_direct = _target_public_text(target)
-    after_set_direct_normalized = _normalize_username(after_set_direct)
+    after_set_direct_raw = _target_public_text(target)
+    after_set_direct_normalized = _normalize_username(_effective_username_field_text(after_set_direct_raw))
     if after_set_direct_normalized == expected_normalized:
         return _username_input_success(
-            username_replaced=before_normalized != expected_normalized,
+            username_replaced=username_replaced,
             confirmed="true",
             result="username_input_confirmed",
             focused_before=focused_before,
             clear_method=clear_method,
             input_method=input_method,
+            username_placeholder_ignored=placeholder_ignored or _is_username_placeholder_text(after_set_direct_raw),
         )
 
-    if prefilled_username_mode:
+    if prefilled_username_mode or _is_username_placeholder_text(after_set_direct_raw):
         after_set_hierarchy = _normalize_username(_username_value_from_hierarchy(d))
         if after_set_hierarchy == expected_normalized:
             return _username_input_success(
-                username_replaced=before_normalized != expected_normalized,
+                username_replaced=username_replaced,
                 confirmed="true",
                 result="username_input_confirmed",
                 focused_before=focused_before,
                 clear_method=clear_method,
                 input_method=input_method,
+                username_placeholder_ignored=placeholder_ignored or _is_username_placeholder_text(after_set_direct_raw),
             )
 
+    before_is_real_username = _is_valid_instagram_username(before_effective) or (
+        prefilled_username_mode and _is_valid_instagram_username(prefilled_username)
+    )
     if (
-        after_set_direct
+        after_set_direct_raw
+        and before_is_real_username
         and after_set_direct_normalized == before_normalized
         and before_normalized != expected_normalized
     ):
@@ -872,13 +909,15 @@ def _focus_clear_set_and_confirm_username(
         )
 
     if input_method:
+        placeholder_sticky = _is_username_placeholder_text(after_set_direct_raw)
         return _username_input_success(
-            username_replaced=before_normalized != expected_normalized or prefilled_username_mode,
+            username_replaced=username_replaced,
             confirmed="unknown",
             result="username_input_assumed",
             focused_before=focused_before,
             clear_method=clear_method,
             input_method=input_method,
+            username_placeholder_ignored=placeholder_ignored or placeholder_sticky,
         )
 
     return _username_input_failure(
@@ -897,6 +936,7 @@ def _username_input_success(
     focused_before: bool | None,
     clear_method: str,
     input_method: str,
+    username_placeholder_ignored: bool = False,
 ) -> dict[str, Any]:
     return {
         "username_replaced": username_replaced,
@@ -905,6 +945,7 @@ def _username_input_success(
         "username_field_focused_before_input": focused_before,
         "username_clear_method": clear_method,
         "username_input_method": input_method,
+        "username_placeholder_ignored": username_placeholder_ignored,
     }
 
 
@@ -990,7 +1031,7 @@ def _read_username_field_value(
     prefilled_username: str = "",
     prefer_hierarchy: bool = False,
 ) -> str:
-    direct = _target_public_text(target)
+    direct = _effective_username_field_text(_target_public_text(target))
     if direct:
         return direct
     if prefer_hierarchy:
@@ -1370,6 +1411,41 @@ def _target_public_text(target: Any) -> str:
 
 def _normalize_username(value: Any) -> str:
     return str(value or "").strip().lstrip("@").lower()
+
+
+def _normalize_labelish(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+
+def _is_username_placeholder_text(value: Any) -> bool:
+    normalized = _normalize_labelish(value)
+    if not normalized:
+        return False
+    if normalized in _USERNAME_PLACEHOLDER_PHRASES:
+        return True
+    return (
+        "username" in normalized
+        and (
+            "email" in normalized
+            or "mobile" in normalized
+            or "phone" in normalized
+            or "e-mail" in normalized
+            or "telephone" in normalized
+            or "téléphone" in normalized
+        )
+    )
+
+
+def _effective_username_field_text(value: Any) -> str:
+    raw = str(value or "").strip()
+    if _is_username_placeholder_text(raw):
+        return ""
+    return raw
+
+
+def _is_valid_instagram_username(value: Any) -> bool:
+    candidate = _normalize_username(value)
+    return bool(candidate) and bool(re.fullmatch(r"[a-z0-9._]{1,30}", candidate))
 
 
 def _password_field_non_empty_state(target: Any) -> str:
@@ -1756,6 +1832,7 @@ def _result(
     username_field_focused_before_input: bool | None = None,
     username_clear_method: str = "",
     username_input_method: str = "",
+    username_placeholder_ignored: bool = False,
     password_field_target_kind: str = "",
     password_input_method: str = "",
     password_input_result: str = "",
@@ -1800,9 +1877,11 @@ def _result(
                 "username_replaced": username_replaced,
                 "username_input_confirmed": username_input_confirmed,
                 "username_input_result": username_input_result,
+                "username_input_ms": int((timings or {}).get("username_input_ms") or 0),
                 "username_field_focused_before_input": username_field_focused_before_input,
                 "username_clear_method": username_clear_method,
                 "username_input_method": username_input_method,
+                "username_placeholder_ignored": username_placeholder_ignored,
             }
         )
     )

@@ -387,6 +387,8 @@ def _safe_summary_from_result(result: Any, *, args: argparse.Namespace, run_id: 
         "username_replaced": bool(password_result.get("username_replaced")),
         "username_input_confirmed": str(password_result.get("username_input_confirmed") or "unknown"),
         "username_input_result": str(password_result.get("username_input_result") or ""),
+        "username_input_ms": int(password_result.get("username_input_ms") or 0),
+        "username_placeholder_ignored": bool(password_result.get("username_placeholder_ignored")),
         "router_decision": _router_decision(metadata, actions_taken),
         "previous_account_lifecycle_source": str(previous_account_lifecycle.get("source") or ""),
         "previous_account_lifecycle_status": str(previous_account_lifecycle.get("lifecycle_status") or ""),

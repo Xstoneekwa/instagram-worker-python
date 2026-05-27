@@ -2682,6 +2682,8 @@ def _safe_password_result_metadata(result: Any) -> dict[str, Any]:
             "username_replaced",
             "username_input_confirmed",
             "username_input_result",
+            "username_input_ms",
+            "username_placeholder_ignored",
             "username_field_focused_before_input",
             "username_clear_method",
             "username_input_method",

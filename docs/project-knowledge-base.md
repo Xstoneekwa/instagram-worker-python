@@ -517,6 +517,21 @@ Post-submit policy future :
   Selection par username exact + bounds, jamais par index fixe.
   `account_picker_selected_row_index_if_known` est diagnostic seulement. Scroll
   picker si compte hors viewport : complement futur documente.
+- Entry 2E-5P-15 Direct empty login form full flow : le CLI generique supporte
+  Cas C sans flag special. Si `screen_type=login_form_empty`, le router choisit
+  `start_login_form_flow`, l'executor saisit `expected_username` puis revele le
+  password via `SecretValue` uniquement apres validation username/formulaire,
+  submit `Log in`, post-submit settling et dismiss Google Password Manager si
+  present sans cliquer `Continue`. Cas C reste distinct de
+  `login_form_prefilled_username` : `username_replaced=false`,
+  `username_input_result=username_input_confirmed` quand confirme. Metadata safe
+  ajoutee/fiabilisee : `username_input_ms`. Smokes toujours `--no-publish`.
+- Entry 2E-5P-15B Login form empty username confirmation : sur `login_form_empty`
+  direct, le placeholder username n'est plus traite comme un username pre-rempli.
+  L'executor prefere l'EditText username, ignore les hints, confirme via hierarchy
+  ou `username_input_assumed` apres `set_text` reussi, et reserve
+  `username_still_prefilled_after_input` au Cas A avec un vrai ancien username.
+  Metadata safe : `username_placeholder_ignored`.
 - Entry 2E-5P-11 Login form username prefilled : apres `Use another profile`,
   Instagram peut afficher un formulaire login avec l'ancien username deja rempli.
   Nouveau `screen_type=login_form_prefilled_username`. Si le champ username est

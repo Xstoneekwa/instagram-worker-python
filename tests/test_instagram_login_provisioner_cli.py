@@ -287,6 +287,7 @@ class InstagramLoginProvisionerCliTest(unittest.TestCase):
                     "username_replaced": True,
                     "username_input_confirmed": "true",
                     "username_input_result": "username_input_confirmed",
+                    "username_input_ms": 123,
                     "input_method_used": "adb_keyboard_b64",
                     "password_field_non_empty_confirmed": True,
                     "post_submit_observation_count": 3,
@@ -332,6 +333,7 @@ class InstagramLoginProvisionerCliTest(unittest.TestCase):
         self.assertTrue(payload["username_replaced"])
         self.assertEqual(payload["username_input_confirmed"], "true")
         self.assertEqual(payload["username_input_result"], "username_input_confirmed")
+        self.assertEqual(payload["username_input_ms"], 123)
         self.assertEqual(payload["input_method_used"], "adb_keyboard_b64")
         self.assertTrue(payload["password_field_non_empty_confirmed"])
         self.assertEqual(payload["post_submit_observation_count"], 3)

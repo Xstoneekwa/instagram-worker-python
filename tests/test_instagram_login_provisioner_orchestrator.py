@@ -194,6 +194,22 @@ class FakeSelector:
             raise self.set_exc
 
 
+class ConfirmingTextSelector(FakeSelector):
+    def __init__(self) -> None:
+        super().__init__(1)
+        self.text = ""
+
+    def clear_text(self) -> None:
+        self.text = ""
+
+    def set_text(self, value: str) -> None:
+        super().set_text(value)
+        self.text = value
+
+    def info(self) -> dict[str, str]:
+        return {"text": self.text}
+
+
 class FakeDevice:
     def __init__(self, hierarchies: list[str] | None = None) -> None:
         self.hierarchies = list(hierarchies or [CONNECTED_XML])
@@ -502,6 +518,11 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
 
     def test_login_form_credentials_ok_connected_success(self) -> None:
         device, selectors = configured_device(CONNECTED_XML)
+        selectors["username"] = device.add_selector(
+            "text",
+            "Username, email or mobile number",
+            ConfirmingTextSelector(),
+        )
 
         result = self.run_flow(
             device,
@@ -517,6 +538,18 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertEqual(result.final_login_status, "connected")
         self.assertEqual(result.final_provisioning_status, "ready")
         self.assertEqual(selectors["login"].click_calls, 1)
+        self.assertEqual(result.safe_metadata["screen_type"], "login_form_empty")
+        self.assertEqual(result.safe_metadata["router_decision"], "start_login_form_flow")
+        self.assertTrue(selectors["username"].set_text_calls)
+        self.assertTrue(selectors["password"].set_text_calls)
+        self.assertTrue(result.safe_metadata["password_result"]["executed"])
+        self.assertTrue(result.safe_metadata["password_result"]["submit_tapped"])
+        self.assertFalse(result.safe_metadata["password_result"]["username_replaced"])
+        self.assertEqual(
+            result.safe_metadata["password_result"]["username_input_result"],
+            "username_input_confirmed",
+        )
+        self.assertGreaterEqual(result.safe_metadata["password_result"]["username_input_ms"], 0)
 
     def test_blocked_secret_payload_shape_maps_to_secret_payload_not_password(self) -> None:
         device, _selectors = configured_device(CONNECTED_XML)
