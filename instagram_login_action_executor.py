@@ -825,6 +825,9 @@ def _safe_login_screen_signals(hierarchy_xml: str | None) -> dict[str, Any]:
     signals.pop("password_field_editable_present", None)
     signals.pop("forgot_password_present", None)
     signals.pop("ready_for_password_submit", None)
+    signals.pop("save_password_prompt_present", None)
+    signals.pop("google_password_manager_save_prompt", None)
+    signals.pop("save_password_prompt", None)
     signals.pop("overlay_type", None)
     if signals.get("screen_type") == "continue_password_only":
         signals["screen_type"] = "login_form_ready"

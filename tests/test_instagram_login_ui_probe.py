@@ -71,6 +71,26 @@ class InstagramLoginUiProbeTest(unittest.TestCase):
         self.assertTrue(signals["password_required_dialog_present"])
         self.assertTrue(signals["has_ok_button"])
 
+    def test_detects_google_password_manager_save_prompt(self) -> None:
+        xml = (
+            '<node text="Google Password Manager" />'
+            '<node text="Save password for Instagram?" />'
+            '<node text="cinema_catchup" />'
+            '<node text="••••••••••" />'
+            '<node text="Continue" clickable="true" />'
+        )
+
+        result = probe_login_ui_from_hierarchy(xml)
+        signals = extract_login_screen_signals_from_hierarchy(xml, expected_username="cinema_catchup")
+
+        self.assertEqual(result.outcome, LoginProbeOutcome.UNKNOWN)
+        self.assertEqual(result.reason, "google_password_manager_save_prompt")
+        self.assertTrue(result.metadata["save_password_prompt_present"])
+        self.assertEqual(signals["screen_type"], "google_password_manager_save_prompt")
+        self.assertTrue(signals["save_password_prompt_present"])
+        self.assertTrue(signals["google_password_manager_save_prompt"])
+        self.assertTrue(signals["save_password_prompt"])
+
     def test_detects_connected_with_sufficient_connected_signals(self) -> None:
         xml = (
             '<node content-desc="Home" />'

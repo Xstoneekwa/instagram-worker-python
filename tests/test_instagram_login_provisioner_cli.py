@@ -117,7 +117,14 @@ class InstagramLoginProvisionerCliTest(unittest.TestCase):
                 safe_metadata={
                     "app_start_attempted": True,
                     "app_start_ok": True,
-                    "screen_after_app_start": "unknown",
+                    "screen_after_app_start": "continue_as_candidate",
+                    "screen_after_app_start_initial": "unknown",
+                    "screen_after_app_start_final": "continue_as_candidate",
+                    "startup_observation_count": 2,
+                    "startup_wait_total_ms": 1000,
+                    "startup_screens": ["unknown", "continue_as_candidate"],
+                    "startup_final_screen_type": "continue_as_candidate",
+                    "startup_settling_used": True,
                 }
             )
 
@@ -131,7 +138,14 @@ class InstagramLoginProvisionerCliTest(unittest.TestCase):
         self.assertTrue(captured["start_app_before_probe"])
         self.assertFalse(captured["observe_current_screen_only"])
         self.assertEqual(captured["package_name"], "com.instagram.android")
+        self.assertEqual(captured["post_submit_timeout_ms"], 10000)
         self.assertTrue(summary["app_start_attempted"])
+        self.assertEqual(summary["screen_after_app_start_initial"], "unknown")
+        self.assertEqual(summary["screen_after_app_start_final"], "continue_as_candidate")
+        self.assertEqual(summary["startup_observation_count"], 2)
+        self.assertEqual(summary["startup_wait_total_ms"], 1000)
+        self.assertEqual(summary["startup_screens"], ["unknown", "continue_as_candidate"])
+        self.assertTrue(summary["startup_settling_used"])
 
     def test_no_publish_is_default(self) -> None:
         captured: dict = {}
@@ -168,9 +182,29 @@ class InstagramLoginProvisionerCliTest(unittest.TestCase):
                     "password_field_non_empty_confirmed": True,
                     "post_submit_observation_count": 3,
                     "post_submit_wait_total_ms": 2250,
+                    "post_submit_timeout_ms": 10000,
+                    "post_submit_interval_ms": 1000,
+                    "post_submit_loading_timeout": False,
                     "post_submit_screens": ["loading", "connected_home"],
                     "final_terminal_screen": "connected_home",
+                    "save_password_prompt_detected": True,
+                    "save_password_prompt_dismissed": True,
+                    "save_password_prompt_dismiss_attempt_count": 1,
+                    "dismiss_method": "back",
+                    "post_dismiss_screen_type": "connected_home",
                 },
+                "credentials_error_code": "",
+                "credentials_invalid_reason": "",
+                "credentials_stage": "",
+                "credential_metadata_found": True,
+                "credentials_status": "active",
+                "credentials_version": 1000,
+                "secret_provider": "supabase_vault",
+                "username_matches_expected": True,
+                "secret_loaded": True,
+                "injectable_password_only": True,
+                "secret_value_safe_for_injection": True,
+                "guard_would_block_revealed_value": False,
             }
         )
 
@@ -188,30 +222,47 @@ class InstagramLoginProvisionerCliTest(unittest.TestCase):
         self.assertTrue(payload["password_field_non_empty_confirmed"])
         self.assertEqual(payload["post_submit_observation_count"], 3)
         self.assertEqual(payload["post_submit_wait_total_ms"], 2250)
+        self.assertEqual(payload["post_submit_timeout_ms"], 10000)
+        self.assertEqual(payload["post_submit_interval_ms"], 1000)
+        self.assertFalse(payload["post_submit_loading_timeout"])
         self.assertEqual(payload["post_submit_screens"], ["loading", "connected_home"])
         self.assertEqual(payload["final_terminal_screen"], "connected_home")
+        self.assertTrue(payload["save_password_prompt_detected"])
+        self.assertTrue(payload["save_password_prompt_dismissed"])
+        self.assertEqual(payload["save_password_prompt_dismiss_attempt_count"], 1)
+        self.assertEqual(payload["dismiss_method"], "back")
+        self.assertEqual(payload["post_dismiss_screen_type"], "connected_home")
+        self.assertEqual(payload["credentials_status"], "active")
+        self.assertTrue(payload["secret_loaded"])
+        self.assertTrue(payload["injectable_password_only"])
 
     def test_cli_generates_run_id_and_writes_safe_jsonl(self) -> None:
         run_id = str(uuid.uuid4())
+        captured: dict = {}
+
+        def fake_flow(_d, **kwargs):
+            captured.update(kwargs)
+            return _fake_result(
+                final_outcome="logged_out",
+                reason="session_expired",
+                safe_metadata={
+                    "app_start_attempted": True,
+                    "app_start_ok": True,
+                    "screen_after_app_start": "continue_as_candidate",
+                },
+            )
 
         with tempfile.TemporaryDirectory() as tmp:
             log_path = Path(tmp) / "login.jsonl"
 
             code, summary = cli.run_cli_command(
-                _args_with_log(str(log_path), "--run-id", run_id, "--json"),
+                _args_with_log(str(log_path), "--run-id", run_id, "--post-submit-timeout-ms", "9000", "--json"),
                 connect_func=lambda _serial: FakeDevice(),
-                run_flow_func=lambda _d, **_kwargs: _fake_result(
-                    final_outcome="logged_out",
-                    reason="session_expired",
-                    safe_metadata={
-                        "app_start_attempted": True,
-                        "app_start_ok": True,
-                        "screen_after_app_start": "continue_as_candidate",
-                    },
-                ),
+                run_flow_func=fake_flow,
             )
 
             self.assertEqual(code, 1)
+            self.assertEqual(captured["post_submit_timeout_ms"], 9000)
             self.assertEqual(summary["run_id"], run_id)
             lines = log_path.read_text(encoding="utf-8").splitlines()
             self.assertEqual(len(lines), 1)
@@ -219,6 +270,7 @@ class InstagramLoginProvisionerCliTest(unittest.TestCase):
             self.assertEqual(payload["run_id"], run_id)
             self.assertEqual(payload["final_outcome"], "logged_out")
             self.assertEqual(payload["reason"], "session_expired")
+            self.assertEqual(summary["post_submit_timeout_ms"], 0)
             self.assertFalse(payload["would_publish"])
             self.assertNotIn(SECRET_REF, lines[0])
             self.assertNotIn("<node", lines[0])

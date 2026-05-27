@@ -3962,6 +3962,106 @@ Nouveaux champs JSON/JSONL safe :
 - `final_outcome`;
 - `reason`.
 
+## Entry 2E-5P-8 Google Password Manager Save Prompt
+
+Entry 2E-5P-8 traite l'overlay systeme post-login Google Password Manager qui
+peut apparaitre apres le tap `Log in`, au-dessus d'Instagram. Il ne doit pas
+etre classe comme `login_failed` ni comme `unknown` final tant qu'un dismiss
+borne n'a pas ete tente.
+
+Detection ajoutee :
+
+- `screen_type=google_password_manager_save_prompt`;
+- signaux EN observes : `Google Password Manager`,
+  `Save password for Instagram?`, bouton `Continue`;
+- alias documentes pour variantes futures : `Gestionnaire de mots de passe
+  Google`, `Enregistrer le mot de passe pour Instagram ?`, `Continuer`;
+- la popup peut etre absente ou varier selon device/ROM.
+
+Regle d'action :
+
+- ne jamais cliquer `Continue`;
+- ne jamais sauvegarder le mot de passe;
+- ne jamais extraire ni logger le contenu de la popup;
+- dismiss unique par `back` (`dismiss_method=back`), puis reobserve pendant le
+  settling post-submit;
+- si la popup reste visible apres le dismiss unique :
+  `final_outcome=save_password_prompt_blocking`, no retry infini, no publish.
+
+Champs JSON/JSONL safe ajoutes :
+
+- `save_password_prompt_detected`;
+- `save_password_prompt_dismissed`;
+- `dismiss_method`;
+- `post_dismiss_screen_type`.
+
+## Entry 2E-5P-9 Startup Screen Settling
+
+Entry 2E-5P-9 corrige le stop trop precoce juste apres `app_start`. Certains
+runs voyaient `screen_after_app_start=unknown` a ~1.5 s, alors que l'ecran
+reel devenait ensuite `continue_as_candidate` (`cinema_catchup`, `Continue`,
+`Use another profile`, `Create new account`).
+
+Comportement obligatoire apres `app_start_ok=true` :
+
+- premiere observation apres le wait post-start existant;
+- fast path si l'ecran est deja exploitable, sans reobserve inutile;
+- si la premiere observation est `unknown` ou transitoire, reobserve borne
+  (`max_startup_observations=4`, intervalle par defaut 1000 ms);
+- arret immediat des qu'un ecran routable est detecte :
+  `continue_as_candidate`, `account_picker`, `login_form_empty`,
+  `continue_password_only`, `active_account_home`, `active_account_profile`,
+  `connected`, `password_required_dialog`, `google_password_manager_save_prompt`
+  ou etat terminal 2FA/checkpoint/login_failed;
+- si l'ecran reste `unknown` apres settling complet :
+  `reason=screen_preparation_failed_after_startup_settling`;
+- aucun credential/Vault n'est charge et aucun submit n'est autorise tant que
+  l'ecran n'est pas routable ou accepte.
+
+Champs JSON/JSONL safe ajoutes :
+
+- `startup_observation_count`;
+- `startup_wait_total_ms`;
+- `startup_screens` (labels safe, ex. `unknown`, `continue_as_candidate`);
+- `startup_final_screen_type`;
+- `startup_settling_used`;
+- `screen_after_app_start_initial`;
+- `screen_after_app_start_final`.
+
+## Entry 2E-5P-10 Long Post-submit Loading
+
+Entry 2E-5P-10 distingue un vrai `unknown` post-submit d'un submit encore en
+cours. Si toutes les observations post-submit restent sur un loading clair,
+l'executor retourne :
+
+- `final_outcome=login_submit_still_loading`;
+- `reason=post_submit_loading_timeout`;
+- `post_submit_loading_timeout=true`;
+- `would_publish=false`.
+
+Le CLI expose `--post-submit-timeout-ms` pour les smokes operateur. Le defaut
+CLI est 10000 ms, avec intervalle court, et le settling garde le fast path :
+arret immediat sur `connected`, 2FA, checkpoint, login_failed,
+`password_required_dialog` ou `google_password_manager_save_prompt`.
+
+Google Password Manager :
+
+- la popup `google_password_manager_save_prompt` reste detectee via
+  `Google Password Manager` / `Save password for Instagram?` / `Continue` et
+  alias FR (`Gestionnaire de mots de passe Google`, `Enregistrer le mot de
+  passe pour Instagram ?`, `Continuer`);
+- le flow ne clique jamais `Continue` et ne sauvegarde jamais le mot de passe;
+- dismiss safe par `back`, maximum 2 tentatives;
+- si la popup reste visible apres 2 tentatives :
+  `final_outcome=save_password_prompt_blocking`,
+  `reason=save_password_prompt_not_dismissed_after_2_attempts`;
+- logs safe ajoutes : `save_password_prompt_dismiss_attempt_count`,
+  `dismiss_method`, `post_dismiss_screen_type`.
+
+Depuis Entry 2E-5P-10, Cursor ne lance plus de smoke device reel par defaut :
+Cursor fournit patch, tests, docs et commandes; l'operateur lance le run terminal
+et rapporte l'observation visuelle.
+
 Standard CLI provisioning/login :
 
 - tout flow provisioning/login doit avoir une commande terminal reproductible

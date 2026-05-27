@@ -43,6 +43,13 @@ PASSWORD_REQUIRED_XML = (
     '<node text="Enter your password to continue." />'
     '<node text="OK" />'
 )
+GOOGLE_SAVE_PASSWORD_PROMPT_XML = (
+    '<node text="Google Password Manager" />'
+    '<node text="Save password for Instagram?" />'
+    '<node text="cinema_catchup" />'
+    '<node text="••••••••••" />'
+    '<node text="Continue" clickable="true" />'
+)
 
 
 class TrackingSecretValue(SecretValue):
@@ -335,6 +342,48 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
         self.assertEqual(result.post_submit_outcome, "connected")
         self.assertEqual(result.safe_metadata["post_submit_screens"], ["loading", "connected"])
 
+    def test_post_submit_all_loading_returns_still_loading_timeout(self) -> None:
+        device, _username, _password_selector, _login = configured_device()
+        device.hierarchies = [LOADING_XML, LOADING_XML, LOADING_XML]
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=LOGIN_FORM_SIGNALS,
+            post_submit_wait_ms=0,
+            post_submit_observation_interval_ms=1,
+            post_submit_timeout_ms=3,
+            sleeper=Mock(),
+        )
+
+        self.assertEqual(result.post_submit_outcome, "login_submit_still_loading")
+        self.assertEqual(result.post_submit_probe_reason, "post_submit_loading_timeout")
+        self.assertTrue(result.safe_metadata["post_submit_loading_timeout"])
+        self.assertEqual(result.safe_metadata["post_submit_timeout_ms"], 3)
+        self.assertEqual(result.safe_metadata["post_submit_interval_ms"], 1)
+        self.assertEqual(result.safe_metadata["final_terminal_screen"], "loading")
+
+    def test_post_submit_unknown_non_loading_remains_unknown_after_settling(self) -> None:
+        device, _username, _password_selector, _login = configured_device()
+        unknown_xml = '<node text="Instagram" />'
+        device.hierarchies = [unknown_xml, unknown_xml]
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=LOGIN_FORM_SIGNALS,
+            post_submit_wait_ms=0,
+            post_submit_observation_interval_ms=1,
+            max_post_submit_observations=2,
+            sleeper=Mock(),
+        )
+
+        self.assertEqual(result.post_submit_outcome, "unknown")
+        self.assertEqual(result.post_submit_probe_reason, "post_submit_unknown_after_settling")
+        self.assertFalse(result.safe_metadata["post_submit_loading_timeout"])
+
     def test_post_submit_password_required_uses_bounded_recovery(self) -> None:
         device, _username, password_selector, login = configured_device()
         ok = device.add_selector("text", "OK", FakeSelector(1))
@@ -358,6 +407,165 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
         self.assertEqual(login.click_calls, 2)
         self.assertGreaterEqual(len(password_selector.set_text_calls), 2)
         self.assertEqual(result.post_submit_outcome, "connected")
+
+    def test_save_password_prompt_post_submit_dismisses_without_continue(self) -> None:
+        device, _username, _password_selector, login = configured_device()
+        continue_button = device.add_selector("text", "Continue", FakeSelector(1))
+        device.hierarchies = [GOOGLE_SAVE_PASSWORD_PROMPT_XML, CONNECTED_XML]
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=LOGIN_FORM_SIGNALS,
+            post_submit_wait_ms=0,
+            post_submit_observation_interval_ms=1,
+            max_post_submit_observations=4,
+            sleeper=Mock(),
+        )
+
+        self.assertEqual(result.post_submit_outcome, "connected")
+        self.assertEqual(result.safe_metadata["post_submit_screens"], ["google_password_manager_save_prompt", "connected"])
+        self.assertTrue(result.safe_metadata["save_password_prompt_detected"])
+        self.assertTrue(result.safe_metadata["save_password_prompt_dismissed"])
+        self.assertEqual(result.safe_metadata["save_password_prompt_dismiss_attempt_count"], 1)
+        self.assertEqual(result.safe_metadata["dismiss_method"], "back")
+        self.assertEqual(result.safe_metadata["post_dismiss_screen_type"], "connected")
+        self.assertEqual(device.press_calls, ["back"])
+        self.assertEqual(continue_button.click_calls, 0)
+        self.assertEqual(login.click_calls, 1)
+
+    def test_post_submit_loading_then_save_password_prompt_uses_dismiss_path(self) -> None:
+        device, _username, _password_selector, _login = configured_device()
+        continue_button = device.add_selector("text", "Continue", FakeSelector(1))
+        device.hierarchies = [LOADING_XML, GOOGLE_SAVE_PASSWORD_PROMPT_XML, CONNECTED_XML]
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=LOGIN_FORM_SIGNALS,
+            post_submit_wait_ms=0,
+            post_submit_observation_interval_ms=1,
+            max_post_submit_observations=4,
+            sleeper=Mock(),
+        )
+
+        self.assertEqual(result.post_submit_outcome, "connected")
+        self.assertEqual(
+            result.safe_metadata["post_submit_screens"],
+            ["loading", "google_password_manager_save_prompt", "connected"],
+        )
+        self.assertTrue(result.safe_metadata["save_password_prompt_detected"])
+        self.assertEqual(result.safe_metadata["save_password_prompt_dismiss_attempt_count"], 1)
+        self.assertEqual(continue_button.click_calls, 0)
+
+    def test_save_password_prompt_after_dismiss_connected_home(self) -> None:
+        device, _username, _password_selector, _login = configured_device()
+        device.hierarchies = [GOOGLE_SAVE_PASSWORD_PROMPT_XML, CONNECTED_XML]
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=LOGIN_FORM_SIGNALS,
+            post_submit_wait_ms=0,
+            post_submit_observation_interval_ms=1,
+            max_post_submit_observations=4,
+            sleeper=Mock(),
+        )
+
+        self.assertEqual(result.post_submit_outcome, "connected")
+        self.assertTrue(result.safe_metadata["save_password_prompt_dismissed"])
+
+    def test_save_password_prompt_after_dismiss_needs_2fa(self) -> None:
+        device, _username, _password_selector, _login = configured_device()
+        device.hierarchies = [GOOGLE_SAVE_PASSWORD_PROMPT_XML, NEEDS_2FA_XML]
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=LOGIN_FORM_SIGNALS,
+            post_submit_wait_ms=0,
+            post_submit_observation_interval_ms=1,
+            max_post_submit_observations=4,
+            sleeper=Mock(),
+        )
+
+        self.assertEqual(result.post_submit_outcome, "needs_2fa")
+        self.assertEqual(result.safe_metadata["post_dismiss_screen_type"], "needs_2fa")
+
+    def test_save_password_prompt_after_dismiss_checkpoint(self) -> None:
+        device, _username, _password_selector, _login = configured_device()
+        device.hierarchies = [GOOGLE_SAVE_PASSWORD_PROMPT_XML, CHECKPOINT_XML]
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=LOGIN_FORM_SIGNALS,
+            post_submit_wait_ms=0,
+            post_submit_observation_interval_ms=1,
+            max_post_submit_observations=4,
+            sleeper=Mock(),
+        )
+
+        self.assertEqual(result.post_submit_outcome, "checkpoint")
+        self.assertEqual(result.safe_metadata["post_dismiss_screen_type"], "checkpoint")
+
+    def test_save_password_prompt_still_visible_once_then_dismissed_after_second_attempt(self) -> None:
+        device, _username, _password_selector, _login = configured_device()
+        device.hierarchies = [
+            GOOGLE_SAVE_PASSWORD_PROMPT_XML,
+            GOOGLE_SAVE_PASSWORD_PROMPT_XML,
+            CONNECTED_XML,
+        ]
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=LOGIN_FORM_SIGNALS,
+            post_submit_wait_ms=0,
+            post_submit_observation_interval_ms=1,
+            max_post_submit_observations=4,
+            sleeper=Mock(),
+        )
+
+        self.assertEqual(result.post_submit_outcome, "connected")
+        self.assertTrue(result.safe_metadata["save_password_prompt_detected"])
+        self.assertTrue(result.safe_metadata["save_password_prompt_dismissed"])
+        self.assertEqual(result.safe_metadata["save_password_prompt_dismiss_attempt_count"], 2)
+        self.assertEqual(device.press_calls, ["back", "back"])
+
+    def test_save_password_prompt_still_visible_after_two_dismiss_attempts_blocks(self) -> None:
+        device, _username, _password_selector, _login = configured_device()
+        continue_button = device.add_selector("text", "Continue", FakeSelector(1))
+        device.hierarchies = [
+            GOOGLE_SAVE_PASSWORD_PROMPT_XML,
+            GOOGLE_SAVE_PASSWORD_PROMPT_XML,
+            GOOGLE_SAVE_PASSWORD_PROMPT_XML,
+        ]
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=LOGIN_FORM_SIGNALS,
+            post_submit_wait_ms=0,
+            post_submit_observation_interval_ms=1,
+            max_post_submit_observations=4,
+            sleeper=Mock(),
+        )
+
+        self.assertEqual(result.post_submit_outcome, "save_password_prompt_blocking")
+        self.assertEqual(result.post_submit_probe_reason, "save_password_prompt_not_dismissed_after_2_attempts")
+        self.assertTrue(result.safe_metadata["save_password_prompt_detected"])
+        self.assertFalse(result.safe_metadata["save_password_prompt_dismissed"])
+        self.assertEqual(result.safe_metadata["save_password_prompt_dismiss_attempt_count"], 2)
+        self.assertEqual(device.press_calls, ["back", "back"])
+        self.assertEqual(continue_button.click_calls, 0)
 
     def test_post_submit_needs_2fa_is_terminal(self) -> None:
         device, _username, _password_selector, _login = configured_device()

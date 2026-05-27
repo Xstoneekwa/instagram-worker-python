@@ -11,9 +11,14 @@ import re
 import time
 from dataclasses import dataclass, field
 from types import SimpleNamespace
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
-from instagram_credentials_runtime_access import SecretValue, redact_credentials_payload
+from instagram_credentials_runtime_access import (
+    InstagramLoginCredentialsResult,
+    SecretValue,
+    credential_result_safe_dict,
+    redact_credentials_payload,
+)
 from instagram_login_action_executor import execute_login_screen_decision
 from instagram_login_password_form_executor import execute_login_form_credentials
 from instagram_login_screen_router import route_login_screen
@@ -35,6 +40,14 @@ TRANSIENT_RETRY_FAILURES = {
     "input_failed",
     "submit_failed",
 }
+CREDENTIALS_MISSING_REASONS = {
+    "credentials_missing",
+    "credentials_not_found",
+    "credentials_lookup_missing",
+    "metadata_not_found",
+    "no_active_credentials",
+}
+CREDENTIALS_MISSING_ERROR_CODES = CREDENTIALS_MISSING_REASONS
 NO_RETRY_FAILURES = {
     "login_form_not_validated",
     "expected_username_missing",
@@ -51,6 +64,7 @@ NO_RETRY_FAILURES = {
     "mismatch",
     "wrong_account",
     "block_wrong_suggested_account",
+    "save_password_prompt_blocking",
 }
 MAX_RETRY_ATTEMPTS = 1
 POST_CONTINUE_REOBSERVE_WAIT_MS = 1500
@@ -59,6 +73,10 @@ PROFILE_REFRESH_WAIT_MS = 500
 DEFAULT_INSTAGRAM_PACKAGE_NAME = "com.instagram.android"
 DEFAULT_POST_APP_START_WAIT_MS = 1500
 MAX_POST_APP_START_WAIT_MS = 3000
+DEFAULT_STARTUP_OBSERVATIONS = 4
+DEFAULT_STARTUP_INTERVAL_MS = 1000
+MAX_STARTUP_OBSERVATIONS = 6
+MAX_STARTUP_INTERVAL_MS = 1500
 
 CredentialsGetter = Callable[[str], Any]
 PreviousAccountLifecycleLookup = Callable[[str, dict[str, Any]], dict[str, Any]]
@@ -117,6 +135,7 @@ def run_login_provisioning_flow(
     observe_current_screen_only: bool = False,
     package_name: str = DEFAULT_INSTAGRAM_PACKAGE_NAME,
     post_start_wait_ms: int = DEFAULT_POST_APP_START_WAIT_MS,
+    post_submit_timeout_ms: Optional[int] = None,
     timer: Timer | None = None,
     sleeper: Sleeper | None = None,
 ) -> LoginProvisioningFlowResult:
@@ -150,6 +169,13 @@ def run_login_provisioning_flow(
         "package_name": safe_package_name,
         "post_start_wait_ms": bounded_post_start_wait_ms if app_start_attempted else 0,
         "screen_after_app_start": "",
+        "screen_after_app_start_initial": "",
+        "screen_after_app_start_final": "",
+        "startup_observation_count": 0,
+        "startup_wait_total_ms": 0,
+        "startup_screens": [],
+        "startup_final_screen_type": "",
+        "startup_settling_used": False,
         "would_submit_password": False,
     }
 
@@ -188,12 +214,42 @@ def run_login_provisioning_flow(
             sleeper(bounded_post_start_wait_ms / 1000.0)
 
     signals = dict(initial_signals or {})
-    if not signals:
+    if not signals and app_start_attempted:
+        startup_observation = _observe_startup_screen_settled(
+            d,
+            expected_username=safe_expected_username,
+            timings=timings,
+            timer=timer,
+            sleeper=sleeper,
+            interval_ms=DEFAULT_STARTUP_INTERVAL_MS,
+            max_observations=DEFAULT_STARTUP_OBSERVATIONS,
+        )
+        signals = dict(startup_observation.get("signals") or {})
+        screen_preparation_metadata.update(
+            {
+                "screen_after_app_start": startup_observation["final_screen_type"],
+                "screen_after_app_start_initial": startup_observation["initial_screen_type"],
+                "screen_after_app_start_final": startup_observation["final_screen_type"],
+                "startup_observation_count": startup_observation["observation_count"],
+                "startup_wait_total_ms": startup_observation["wait_total_ms"],
+                "startup_screens": startup_observation["screens"],
+                "startup_final_screen_type": startup_observation["final_screen_type"],
+                "startup_settling_used": bool(startup_observation["observation_count"] > 1),
+            }
+        )
+    elif not signals:
         start = timer()
         signals = _observe_login_signals(d, expected_username=safe_expected_username)
         timings["observe_ms"] += _elapsed_ms(start, timer())
     if app_start_attempted:
-        screen_preparation_metadata["screen_after_app_start"] = _screen_after_app_start(signals)
+        if not screen_preparation_metadata["screen_after_app_start"]:
+            screen_type = _screen_after_app_start(signals)
+            screen_preparation_metadata["screen_after_app_start"] = screen_type
+            screen_preparation_metadata["screen_after_app_start_initial"] = screen_type
+            screen_preparation_metadata["screen_after_app_start_final"] = screen_type
+            screen_preparation_metadata["startup_observation_count"] = 1
+            screen_preparation_metadata["startup_screens"] = [screen_type]
+            screen_preparation_metadata["startup_final_screen_type"] = screen_type
         post_app_start_outcome = _post_action_outcome_from_signals(signals)
         if post_app_start_outcome == LoginProbeOutcome.CONNECTED.value:
             classification = classify_login_probe_outcome(LoginProbeOutcome.CONNECTED.value)
@@ -227,8 +283,8 @@ def run_login_provisioning_flow(
                 ok=False,
                 completed=False,
                 final_outcome="unknown",
-                reason="screen_preparation_failed",
-                failure_reason="screen_preparation_failed",
+                reason="screen_preparation_failed_after_startup_settling",
+                failure_reason="screen_preparation_failed_after_startup_settling",
                 final_login_status="logged_out",
                 final_provisioning_status="login_pending",
                 final_onboarding_status="credentials_required",
@@ -623,22 +679,36 @@ def run_login_provisioning_flow(
                     if _signals_show_loading_transition(signals)
                     else "transition_unknown"
                 )
+                warnings.append(f"{metadata_prefix}_reobserve_after_loading")
+                settled = _observe_preparation_screen_settled(
+                    d,
+                    expected_username=safe_expected_username,
+                    timings=timings,
+                    timer=timer,
+                    sleeper=sleeper,
+                    initial_screen=initial_screen,
+                    interval_ms=DEFAULT_STARTUP_INTERVAL_MS,
+                    max_observations=DEFAULT_STARTUP_OBSERVATIONS,
+                )
+                signals = dict(settled.get("signals") or {})
                 post_continue_metadata = {
                     f"{metadata_prefix}_initial_screen": initial_screen,
                     f"{metadata_prefix}_reobserve": True,
-                    f"{metadata_prefix}_reobserve_count": 1,
+                    f"{metadata_prefix}_reobserve_count": settled["observation_count"],
+                    f"{metadata_prefix}_screens": settled["screens"],
+                    f"{metadata_prefix}_wait_total_ms": settled["wait_total_ms"],
+                    f"{metadata_prefix}_final_screen_type": settled["final_screen_type"],
                 }
-                timings["post_continue_reobserve_wait_ms"] = POST_CONTINUE_REOBSERVE_WAIT_MS
-                time.sleep(POST_CONTINUE_REOBSERVE_WAIT_MS / 1000.0)
-                warnings.append(f"{metadata_prefix}_reobserve_after_loading")
-            start = timer()
-            signals = _observe_login_signals(d, expected_username=safe_expected_username)
-            timings["observe_ms"] += _elapsed_ms(start, timer())
-            if post_continue_metadata:
-                metadata_prefix = "post_continue" if action_result.action == "tap_continue" else "post_account_picker"
-                post_continue_metadata[f"{metadata_prefix}_final_screen_type"] = _safe_screen_type_value(
-                    signals.get("screen_type") or "unknown"
-                )
+                timings["post_continue_reobserve_wait_ms"] = settled["wait_total_ms"]
+            else:
+                start = timer()
+                signals = _observe_login_signals(d, expected_username=safe_expected_username)
+                timings["observe_ms"] += _elapsed_ms(start, timer())
+                if post_continue_metadata:
+                    metadata_prefix = "post_continue" if action_result.action == "tap_continue" else "post_account_picker"
+                    post_continue_metadata[f"{metadata_prefix}_final_screen_type"] = _safe_screen_type_value(
+                        signals.get("screen_type") or "unknown"
+                    )
         post_action_lifecycle = _resolve_previous_account_lifecycle(
             suggested_username=signals.get("suggested_username"),
             screen_type=signals.get("screen_type"),
@@ -719,7 +789,11 @@ def run_login_provisioning_flow(
             publish_enabled=publish_enabled,
         )
 
-    credentials = _load_credentials(credentials_getter, safe_account_id)
+    credentials = _load_credentials(
+        credentials_getter,
+        safe_account_id,
+        expected_username=safe_expected_username,
+    )
     if not credentials["ok"]:
         return _credentials_failure_result(
             credentials,
@@ -747,6 +821,7 @@ def run_login_provisioning_flow(
         expected_username=safe_expected_username,
         password=credentials["password"],
         signals=signals,
+        post_submit_timeout_ms=post_submit_timeout_ms,
         timer=timer,
     )
     actions_taken.append("login_form_submit")
@@ -766,6 +841,7 @@ def run_login_provisioning_flow(
             expected_username=safe_expected_username,
             password=credentials["password"],
             signals=signals,
+            post_submit_timeout_ms=post_submit_timeout_ms,
             timer=timer,
         )
         actions_taken.append("login_form_submit_retry")
@@ -1510,6 +1586,111 @@ def _observe_login_signals(d: Any, *, expected_username: str | None = None) -> d
     return signals
 
 
+def _observe_startup_screen_settled(
+    d: Any,
+    *,
+    expected_username: str,
+    timings: dict[str, int],
+    timer: Timer,
+    sleeper: Sleeper,
+    interval_ms: int,
+    max_observations: int,
+) -> dict[str, Any]:
+    observations = _clamp_count(max_observations, MAX_STARTUP_OBSERVATIONS)
+    interval = _clamp_ms(interval_ms, MAX_STARTUP_INTERVAL_MS)
+    screens: list[str] = []
+    wait_total_ms = 0
+    last_signals: dict[str, Any] = {}
+
+    for index in range(observations):
+        if index > 0 and interval > 0:
+            sleeper(interval / 1000.0)
+            wait_total_ms += interval
+        start = timer()
+        last_signals = _observe_login_signals(d, expected_username=expected_username)
+        timings["observe_ms"] += _elapsed_ms(start, timer())
+        screen_type = _screen_after_app_start(last_signals)
+        screens.append(screen_type)
+        if _startup_screen_is_exploitable(last_signals):
+            break
+
+    final_screen_type = screens[-1] if screens else "unknown"
+    timings["startup_observation_count"] += len(screens)
+    timings["startup_wait_total_ms"] += wait_total_ms
+    return {
+        "signals": last_signals,
+        "observation_count": len(screens),
+        "wait_total_ms": wait_total_ms,
+        "screens": screens,
+        "initial_screen_type": screens[0] if screens else "unknown",
+        "final_screen_type": final_screen_type,
+    }
+
+
+def _observe_preparation_screen_settled(
+    d: Any,
+    *,
+    expected_username: str,
+    timings: dict[str, int],
+    timer: Timer,
+    sleeper: Sleeper,
+    initial_screen: str,
+    interval_ms: int,
+    max_observations: int,
+) -> dict[str, Any]:
+    observations = _clamp_count(max_observations, MAX_STARTUP_OBSERVATIONS)
+    interval = _clamp_ms(interval_ms, MAX_STARTUP_INTERVAL_MS)
+    screens: list[str] = [str(initial_screen or "transition_unknown")]
+    wait_total_ms = 0
+    last_signals: dict[str, Any] = {}
+
+    for _index in range(observations):
+        if interval > 0:
+            sleeper(interval / 1000.0)
+            wait_total_ms += interval
+        start = timer()
+        last_signals = _observe_login_signals(d, expected_username=expected_username)
+        timings["observe_ms"] += _elapsed_ms(start, timer())
+        screen_type = _screen_after_app_start(last_signals)
+        screens.append(screen_type)
+        if _startup_screen_is_exploitable(last_signals):
+            break
+
+    final_screen_type = screens[-1] if screens else "unknown"
+    return {
+        "signals": last_signals,
+        "observation_count": max(0, len(screens) - 1),
+        "wait_total_ms": wait_total_ms,
+        "screens": screens,
+        "final_screen_type": final_screen_type,
+    }
+
+
+def _startup_screen_is_exploitable(signals: dict[str, Any]) -> bool:
+    screen_type = str(signals.get("screen_type") or "unknown")
+    if screen_type in {
+        "continue_as_candidate",
+        "account_picker",
+        "login_form_empty",
+        "continue_password_only",
+        "active_account_home",
+        "active_account_profile",
+        "connected_home",
+        "connected_profile",
+        "password_required_dialog",
+        "google_password_manager_save_prompt",
+        "save_login_info_prompt",
+    }:
+        return True
+    outcome = str(signals.get("login_probe_outcome") or "unknown")
+    return outcome in {
+        LoginProbeOutcome.CONNECTED.value,
+        LoginProbeOutcome.NEEDS_2FA.value,
+        LoginProbeOutcome.CHECKPOINT.value,
+        LoginProbeOutcome.LOGIN_FAILED.value,
+    }
+
+
 def _safe_package_name(value: Any) -> str:
     text = str(value or "").strip()
     if not text:
@@ -1525,6 +1706,22 @@ def _clamp_post_start_wait_ms(value: Any) -> int:
     except (TypeError, ValueError):
         parsed = DEFAULT_POST_APP_START_WAIT_MS
     return min(MAX_POST_APP_START_WAIT_MS, max(0, parsed))
+
+
+def _clamp_ms(value: Any, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = 0
+    return min(maximum, max(0, parsed))
+
+
+def _clamp_count(value: Any, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = 1
+    return min(maximum, max(1, parsed))
 
 
 def _screen_after_app_start(signals: dict[str, Any]) -> str:
@@ -1808,19 +2005,172 @@ def _safe_screen_type_value(value: Any) -> str:
     return _safe_public_text(text)
 
 
-def _load_credentials(credentials_getter: CredentialsGetter, account_id: str) -> dict[str, Any]:
+def _load_credentials(
+    credentials_getter: CredentialsGetter,
+    account_id: str,
+    *,
+    expected_username: str = "",
+) -> dict[str, Any]:
+    diagnostic = _empty_credentials_diagnostic(expected_username=expected_username)
+    diagnostic["credentials_stage"] = "credentials_getter"
     try:
         raw = credentials_getter(account_id)
-    except Exception:
-        return {"ok": False, "reason": "credentials_invalid"}
+    except Exception as exc:
+        error_code = _map_credentials_exception(exc)
+        diagnostic.update(
+            {
+                "credentials_error_code": error_code,
+                "credentials_invalid_reason": error_code,
+                "credentials_stage": "credentials_getter",
+            }
+        )
+        return {
+            "ok": False,
+            "reason": "credentials_invalid",
+            **diagnostic,
+        }
+
+    diagnostic.update(_safe_credentials_diagnostic(raw, expected_username=expected_username))
+
+    if raw is None:
+        diagnostic.update(
+            {
+                "credentials_error_code": "credentials_not_found",
+                "credentials_invalid_reason": "credentials_not_found",
+                "credentials_stage": "credentials_lookup",
+            }
+        )
+        return {"ok": False, "reason": "credentials_not_found", **diagnostic}
+
     username = _extract_attr(raw, "username")
     password = _extract_attr(raw, "password")
-    ok = bool(_extract_attr(raw, "ok", default=True))
-    if not raw or not ok:
-        return {"ok": False, "reason": "credentials_missing"}
-    if not username or not isinstance(password, SecretValue):
-        return {"ok": False, "reason": "credentials_invalid"}
-    return {"ok": True, "username": str(username), "password": password}
+    ok_attr = _extract_attr(raw, "ok", default=None)
+
+    if ok_attr is None and not isinstance(raw, InstagramLoginCredentialsResult):
+        if not username:
+            diagnostic.update(
+                {
+                    "credentials_error_code": "credentials_username_missing",
+                    "credentials_invalid_reason": "credentials_username_missing",
+                    "credentials_stage": "runtime_access",
+                }
+            )
+            return {"ok": False, "reason": "credentials_username_missing", **diagnostic}
+        if not isinstance(password, SecretValue):
+            diagnostic.update(
+                {
+                    "credentials_error_code": "password_secret_invalid",
+                    "credentials_invalid_reason": "password_secret_invalid",
+                    "credentials_stage": "runtime_access",
+                }
+            )
+            return {"ok": False, "reason": "password_secret_invalid", **diagnostic}
+        diagnostic["secret_loaded"] = True
+        return {"ok": True, "username": str(username), "password": password, **diagnostic}
+
+    ok = bool(ok_attr) if ok_attr is not None else False
+
+    if not ok:
+        error_code = str(
+            _extract_attr(raw, "failure_reason")
+            or _extract_attr(raw, "reason")
+            or "credentials_not_found"
+        )
+        diagnostic.update(
+            {
+                "credentials_error_code": error_code,
+                "credentials_invalid_reason": error_code,
+                "credentials_stage": "runtime_access",
+            }
+        )
+        return {"ok": False, "reason": error_code, **diagnostic}
+
+    if not username:
+        diagnostic.update(
+            {
+                "credentials_error_code": "credentials_username_missing",
+                "credentials_invalid_reason": "credentials_username_missing",
+                "credentials_stage": "runtime_access",
+            }
+        )
+        return {"ok": False, "reason": "credentials_username_missing", **diagnostic}
+
+    if not isinstance(password, SecretValue):
+        diagnostic.update(
+            {
+                "credentials_error_code": "password_secret_invalid",
+                "credentials_invalid_reason": "password_secret_invalid",
+                "credentials_stage": "runtime_access",
+            }
+        )
+        return {"ok": False, "reason": "password_secret_invalid", **diagnostic}
+
+    diagnostic["secret_loaded"] = True
+    return {"ok": True, "username": str(username), "password": password, **diagnostic}
+
+
+def _empty_credentials_diagnostic(*, expected_username: str = "") -> dict[str, Any]:
+    return {
+        "credentials_error_code": "",
+        "credentials_invalid_reason": "",
+        "credentials_stage": "",
+        "credential_metadata_found": False,
+        "credentials_status": None,
+        "credentials_version": None,
+        "secret_provider": "",
+        "username_matches_expected": None,
+        "secret_loaded": False,
+        "injectable_password_only": None,
+        "secret_value_safe_for_injection": None,
+        "guard_would_block_revealed_value": None,
+        "expected_username": str(expected_username or "").strip(),
+    }
+
+
+def _safe_credentials_diagnostic(raw: Any, *, expected_username: str = "") -> dict[str, Any]:
+    diagnostic = _empty_credentials_diagnostic(expected_username=expected_username)
+    if isinstance(raw, InstagramLoginCredentialsResult):
+        safe = credential_result_safe_dict(raw)
+    elif isinstance(raw, dict):
+        safe = redact_credentials_payload(dict(raw))
+    else:
+        return diagnostic
+
+    meta = dict(safe.get("safe_metadata") or {})
+    username = str(safe.get("username") or meta.get("username") or "").strip()
+    normalized_expected = str(expected_username or "").strip().lstrip("@").lower()
+    normalized_username = username.strip().lstrip("@").lower()
+    diagnostic.update(
+        {
+            "credential_metadata_found": bool(meta or safe.get("credentials_status") or safe.get("credentials_version")),
+            "credentials_status": safe.get("credentials_status"),
+            "credentials_version": safe.get("credentials_version"),
+            "secret_provider": str(meta.get("secret_provider") or safe.get("secret_provider") or "supabase_vault"),
+            "username_matches_expected": (
+                normalized_username == normalized_expected if normalized_expected and normalized_username else None
+            ),
+            "secret_loaded": bool(safe.get("ok")),
+        }
+    )
+    for key in (
+        "injectable_password_only",
+        "secret_value_safe_for_injection",
+        "guard_would_block_revealed_value",
+    ):
+        if key in meta:
+            diagnostic[key] = meta.get(key)
+    return diagnostic
+
+
+def _map_credentials_exception(exc: Exception) -> str:
+    message = str(exc or "").strip().lower()
+    if "supabase_url is not set" in message:
+        return "supabase_env_missing"
+    if "supabase_service_role_key is not set" in message:
+        return "supabase_service_role_missing"
+    if message.startswith("supabase "):
+        return "supabase_request_failed"
+    return "credentials_getter_exception"
 
 
 def _extract_attr(value: Any, name: str, *, default: Any = None) -> Any:
@@ -1844,15 +2194,38 @@ def _credentials_failure_result(
     publish_enabled: bool,
 ) -> LoginProvisioningFlowResult:
     reason = str(credentials.get("reason") or "credentials_missing")
+    error_code = str(credentials.get("credentials_error_code") or reason)
+    invalid_reason = str(credentials.get("credentials_invalid_reason") or error_code or reason)
+    credentials_stage = str(credentials.get("credentials_stage") or "")
+    is_missing = reason in CREDENTIALS_MISSING_REASONS or error_code in CREDENTIALS_MISSING_ERROR_CODES
     dashboard_action_type = (
         "update_instagram_password"
         if reason in {"credentials_invalid", "password_secret_invalid", "password_secret_missing"}
+        or error_code in {"password_secret_invalid", "vault_secret_password_invalid", "vault_read_failed", "secret_reader_failed"}
         else "submit_instagram_credentials"
     )
+    credentials_metadata = {
+        key: credentials.get(key)
+        for key in (
+            "credentials_error_code",
+            "credentials_invalid_reason",
+            "credentials_stage",
+            "credential_metadata_found",
+            "credentials_status",
+            "credentials_version",
+            "secret_provider",
+            "username_matches_expected",
+            "secret_loaded",
+            "injectable_password_only",
+            "secret_value_safe_for_injection",
+            "guard_would_block_revealed_value",
+        )
+        if key in credentials
+    }
     return _finalize(
         ok=False,
         completed=False,
-        final_outcome="credentials_missing" if reason == "credentials_missing" else "credentials_invalid",
+        final_outcome="credentials_missing" if is_missing else "credentials_invalid",
         reason=reason,
         failure_reason=reason,
         final_login_status="logged_out",
@@ -1865,7 +2238,13 @@ def _credentials_failure_result(
         actions_taken=actions_taken,
         timings=timings,
         warnings=warnings,
-        extra_metadata=extra_metadata,
+        extra_metadata={
+            **(extra_metadata or {}),
+            **credentials_metadata,
+            "credentials_error_code": error_code,
+            "credentials_invalid_reason": invalid_reason,
+            "credentials_stage": credentials_stage,
+        },
         total_start=total_start,
         timer=timer,
         publisher=publisher,
@@ -1879,6 +2258,7 @@ def _execute_password_form(
     expected_username: str,
     password: SecretValue,
     signals: dict[str, Any],
+    post_submit_timeout_ms: Optional[int],
     timer: Timer,
 ) -> Any:
     start = timer()
@@ -1888,6 +2268,7 @@ def _execute_password_form(
         password=password,
         prevalidated_signals=signals,
         post_submit_wait_ms=0,
+        post_submit_timeout_ms=post_submit_timeout_ms,
     )
     result.timings["orchestrator_password_executor_ms"] = _elapsed_ms(start, timer())
     return result
@@ -1918,8 +2299,16 @@ def _safe_password_result_metadata(result: Any) -> dict[str, Any]:
             "password_submit_result",
             "post_submit_observation_count",
             "post_submit_wait_total_ms",
+            "post_submit_timeout_ms",
+            "post_submit_interval_ms",
+            "post_submit_loading_timeout",
             "post_submit_screens",
             "final_terminal_screen",
+            "save_password_prompt_detected",
+            "save_password_prompt_dismissed",
+            "save_password_prompt_dismiss_attempt_count",
+            "dismiss_method",
+            "post_dismiss_screen_type",
         ):
             if key in metadata:
                 safe[key] = metadata.get(key)
@@ -1934,7 +2323,14 @@ def _should_retry_password_result(result: Any, retry_count: int, max_retries: in
     if probe_reason in {"post_submit_unknown_after_settling", "session_expired_after_settling"}:
         return False
     outcome = _password_result_outcome(result)
-    if failure in NO_RETRY_FAILURES or outcome in {"login_failed", "needs_2fa", "checkpoint", "connected"}:
+    if failure in NO_RETRY_FAILURES or outcome in {
+        "login_failed",
+        "needs_2fa",
+        "checkpoint",
+        "connected",
+        "login_submit_still_loading",
+        "save_password_prompt_blocking",
+    }:
         return False
     if failure in TRANSIENT_RETRY_FAILURES:
         return True
@@ -1946,7 +2342,12 @@ def _password_result_outcome(result: Any) -> str:
     if failure == "blocked_secret_payload_shape":
         return "secret_payload_not_password"
     raw = str(getattr(result, "post_submit_outcome", "") or "unknown")
-    if raw in {"password_input_missing_or_not_accepted", "password_input_failed"}:
+    if raw in {
+        "password_input_missing_or_not_accepted",
+        "password_input_failed",
+        "save_password_prompt_blocking",
+        "login_submit_still_loading",
+    }:
         return raw
     normalized = normalize_login_probe_outcome(raw)
     return str(normalized.value)
@@ -1966,6 +2367,10 @@ def _final_reason_for_password_outcome(outcome: str, password_result: Any, class
         return "session_expired_after_settling"
     if outcome == "unknown" and probe_reason == "post_submit_unknown_after_settling":
         return "post_submit_unknown_after_settling"
+    if outcome == "save_password_prompt_blocking":
+        return "save_password_prompt_blocking"
+    if outcome == "login_submit_still_loading":
+        return "post_submit_loading_timeout"
     if outcome == "unknown":
         return "unknown_post_submit_outcome"
     return str(classification_reason or "")
@@ -2119,7 +2524,15 @@ def _merge_timings(base: dict[str, int], extra: dict[str, Any] | None) -> dict[s
 
 
 def _empty_timings() -> dict[str, int]:
-    return {"app_start_ms": 0, "post_start_wait_ms": 0, "observe_ms": 0, "action_ms": 0, "total_ms": 0}
+    return {
+        "app_start_ms": 0,
+        "post_start_wait_ms": 0,
+        "startup_wait_total_ms": 0,
+        "startup_observation_count": 0,
+        "observe_ms": 0,
+        "action_ms": 0,
+        "total_ms": 0,
+    }
 
 
 def _elapsed_ms(start: float, end: float) -> int:

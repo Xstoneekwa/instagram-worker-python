@@ -306,7 +306,7 @@ class InstagramSupabaseVaultReaderTest(unittest.TestCase):
         self.assertNotIn(FAKE_PASSWORD, rendered)
         self.assertNotIn(SECRET_REF, rendered)
         self.assertNotIn(VAULT_ID, rendered)
-        self.assertNotIn("supabase_vault", rendered)
+        self.assertEqual(result.safe_metadata.get("secret_provider"), "supabase_vault")
 
     def test_reader_does_not_print_or_log_raw_secret(self) -> None:
         client = SupabaseVaultClient(rpc_caller=Mock(return_value=RPC_SUCCESS))

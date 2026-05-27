@@ -361,6 +361,7 @@ def get_instagram_credentials_for_login(
             row=row,
             reason="credentials_loaded_for_login",
             failure_reason=None,
+            parsed_secret=parsed_secret,
         ),
     )
 
@@ -464,19 +465,31 @@ def _safe_metadata(
     row: dict[str, Any],
     reason: str,
     failure_reason: str | None,
+    parsed_secret: VaultPasswordParseResult | None = None,
 ) -> dict[str, Any]:
-    return redact_credentials_payload(
-        {
-            "source": "instagram_credentials_runtime_access",
-            "account_id": account_id,
-            "provider": provider,
-            "credentials_version": _safe_int(row.get("credentials_version")),
-            "credentials_status": str(row.get("status") or "") or None,
-            "reauth_required": _safe_bool_or_none(row.get("reauth_required")),
-            "reason": reason,
-            "failure_reason": failure_reason,
-        }
-    )
+    metadata: dict[str, Any] = {
+        "source": "instagram_credentials_runtime_access",
+        "account_id": account_id,
+        "provider": provider,
+        "credentials_version": _safe_int(row.get("credentials_version")),
+        "credentials_status": str(row.get("status") or "") or None,
+        "reauth_required": _safe_bool_or_none(row.get("reauth_required")),
+        "secret_provider": str(row.get("secret_provider") or "supabase_vault"),
+        "reason": reason,
+        "failure_reason": failure_reason,
+    }
+    if parsed_secret is not None:
+        metadata.update(
+            {
+                "injectable_password_only": bool(parsed_secret.ok and parsed_secret.extracted_password_valid),
+                "secret_value_safe_for_injection": bool(parsed_secret.secret_value_safe_for_injection),
+                "guard_would_block_revealed_value": bool(
+                    parsed_secret.extracted_password_valid
+                    and not parsed_secret.secret_value_safe_for_injection
+                ),
+            }
+        )
+    return redact_credentials_payload(metadata)
 
 
 def _extract_username(row: dict[str, Any]) -> str:

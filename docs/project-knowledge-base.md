@@ -436,6 +436,35 @@ Post-submit policy future :
   `unknown` devient `post_submit_unknown_after_settling`. Aucun publish/status
   write par defaut, aucun retry password hors recovery bornee, logs JSONL safe
   uniquement.
+- Entry 2E-5P-8 Google Password Manager save prompt : le settling post-submit
+  detecte maintenant `screen_type=google_password_manager_save_prompt` via les
+  signaux safe `Google Password Manager` / `Save password for Instagram?` /
+  `Continue` et alias FR documentes. Le flow ne clique jamais `Continue`, ne
+  sauvegarde jamais le mot de passe, dismiss une seule fois par `back`, puis
+  reobserve Instagram. Si la popup reste visible :
+  `final_outcome=save_password_prompt_blocking`, no retry infini, no publish.
+  Les logs safe exposent seulement `save_password_prompt_detected`,
+  `save_password_prompt_dismissed`, `dismiss_method` et
+  `post_dismiss_screen_type`.
+- Entry 2E-5P-9 Startup settling : apres `app_start_ok=true`, l'orchestrateur
+  ne conclut plus `unknown` sur un seul dump trop precoce. Il observe jusqu'a
+  quatre fois de maniere bornee, avec fast path si le premier ecran est clair,
+  et route des que `continue_as_candidate`, `account_picker`,
+  `login_form_empty`, `continue_password_only`, `active_account_home/profile`
+  ou un etat terminal exploitable apparait. Si tout reste `unknown` :
+  `reason=screen_preparation_failed_after_startup_settling`. Logs safe :
+  `startup_observation_count`, `startup_wait_total_ms`, `startup_screens`,
+  `startup_final_screen_type`, `screen_after_app_start_initial/final`.
+- Entry 2E-5P-10 Long post-submit loading : si toutes les observations apres
+  `Log in` restent sur `loading`, l'executor retourne maintenant
+  `final_outcome=login_submit_still_loading` avec
+  `reason=post_submit_loading_timeout`, au lieu d'un `unknown` final. Le CLI
+  expose `--post-submit-timeout-ms` (defaut 10000 ms) et logge
+  `post_submit_timeout_ms`, `post_submit_interval_ms` et
+  `post_submit_loading_timeout`. La popup Google Password Manager reste
+  interdite au bouton `Continue`; dismiss safe par `back`, 2 tentatives max,
+  puis `save_password_prompt_blocking` si encore visible. Les smokes device
+  reels sont lances par l'operateur depuis son terminal sauf demande explicite.
 - Standard futur provisioning/login : chaque flow doit fournir une commande
   terminal reproductible ou un CLI dedie. Les options minimales sont
   `--device-serial`, `--expected-username`, `--account-id` si credentials

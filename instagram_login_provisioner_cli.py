@@ -29,6 +29,20 @@ CredentialsLookup = Callable[[str, str], Optional[dict[str, Any]]]
 SecretReader = Callable[[str], Any]
 RunFlowFunc = Callable[..., Any]
 DEFAULT_LOG_JSONL = "logs/instagram_login_provisioner.jsonl"
+CREDENTIALS_DIAGNOSTIC_KEYS = (
+    "credentials_error_code",
+    "credentials_invalid_reason",
+    "credentials_stage",
+    "credential_metadata_found",
+    "credentials_status",
+    "credentials_version",
+    "secret_provider",
+    "username_matches_expected",
+    "secret_loaded",
+    "injectable_password_only",
+    "secret_value_safe_for_injection",
+    "guard_would_block_revealed_value",
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -56,6 +70,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_POST_APP_START_WAIT_MS,
         help="Bounded wait after app_start; orchestrator clamps the value.",
     )
+    parser.add_argument(
+        "--post-submit-timeout-ms",
+        type=int,
+        default=10000,
+        help="Bounded post-submit settling timeout in milliseconds.",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Route/prepare only; do not load Vault or submit.")
     parser.add_argument("--no-submit", action="store_true", help="Alias for --dry-run.")
     parser.add_argument("--no-publish", action="store_true", default=True, help="Keep status publishing disabled.")
@@ -74,6 +94,7 @@ def run_cli_command(
     run_flow_func: RunFlowFunc | None = None,
 ) -> tuple[int, dict[str, Any]]:
     run_id = _safe_run_id(getattr(args, "run_id", "") or str(uuid.uuid4()))
+    _load_dotenv_if_present()
     try:
         device = (connect_func or _connect_uiautomator2)(str(args.device_serial or "") or None)
     except Exception:
@@ -98,6 +119,7 @@ def run_cli_command(
         observe_current_screen_only=bool(args.observe_current_screen_only),
         package_name=str(args.package_name or DEFAULT_INSTAGRAM_PACKAGE_NAME),
         post_start_wait_ms=int(args.post_start_wait_ms or DEFAULT_POST_APP_START_WAIT_MS),
+        post_submit_timeout_ms=int(args.post_submit_timeout_ms or 0),
     )
     summary = _safe_summary_from_result(result, args=args, run_id=run_id)
     _append_safe_jsonl(summary, args=args)
@@ -168,6 +190,31 @@ def _read_vault_secret_string(secret_ref: str) -> str:
     return SupabaseVaultClient.from_supabase_client().read_secret(secret_ref)
 
 
+def _load_dotenv_if_present() -> None:
+    candidates = [
+        Path(os.getcwd()) / ".env",
+        Path(__file__).resolve().parent / ".env",
+    ]
+    seen: set[str] = set()
+    for path in candidates:
+        if not path.exists():
+            continue
+        for raw_line in path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            os.environ.setdefault(key, value.strip().strip('"').strip("'"))
+
+
+def _credentials_fields_from_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    return {key: metadata.get(key) for key in CREDENTIALS_DIAGNOSTIC_KEYS if key in metadata}
+
+
 def _safe_summary_from_error(reason: str, *, args: argparse.Namespace, run_id: str) -> dict[str, Any]:
     return _clean_summary(
         {
@@ -182,6 +229,13 @@ def _safe_summary_from_error(reason: str, *, args: argparse.Namespace, run_id: s
             "app_start_attempted": False,
             "app_start_ok": None,
             "screen_after_app_start": "",
+            "screen_after_app_start_initial": "",
+            "screen_after_app_start_final": "",
+            "startup_observation_count": 0,
+            "startup_wait_total_ms": 0,
+            "startup_screens": [],
+            "startup_final_screen_type": "",
+            "startup_settling_used": False,
             "preparation_flow_used": "none",
             "screen_before_submit": "",
             "input_method_used": "",
@@ -189,8 +243,17 @@ def _safe_summary_from_error(reason: str, *, args: argparse.Namespace, run_id: s
             "submit_executed": False,
             "post_submit_observation_count": 0,
             "post_submit_wait_total_ms": 0,
+            "post_submit_timeout_ms": int(getattr(args, "post_submit_timeout_ms", 0) or 0),
+            "post_submit_interval_ms": 0,
+            "post_submit_loading_timeout": False,
             "post_submit_screens": [],
             "final_terminal_screen": "",
+            "save_password_prompt_detected": False,
+            "save_password_prompt_dismiss_attempt_count": 0,
+            "save_password_prompt_dismissed": False,
+            "dismiss_method": "",
+            "post_dismiss_screen_type": "",
+            **_empty_credentials_summary_fields(),
             "would_publish": False,
             "timings": {},
             "warnings": [],
@@ -219,6 +282,13 @@ def _safe_summary_from_result(result: Any, *, args: argparse.Namespace, run_id: 
         "app_start_attempted": bool(metadata.get("app_start_attempted")),
         "app_start_ok": metadata.get("app_start_ok"),
         "screen_after_app_start": str(metadata.get("screen_after_app_start") or ""),
+        "screen_after_app_start_initial": str(metadata.get("screen_after_app_start_initial") or ""),
+        "screen_after_app_start_final": str(metadata.get("screen_after_app_start_final") or ""),
+        "startup_observation_count": int(metadata.get("startup_observation_count") or 0),
+        "startup_wait_total_ms": int(metadata.get("startup_wait_total_ms") or 0),
+        "startup_screens": list(metadata.get("startup_screens") or []),
+        "startup_final_screen_type": str(metadata.get("startup_final_screen_type") or ""),
+        "startup_settling_used": bool(metadata.get("startup_settling_used")),
         "preparation_flow_used": _preparation_flow_used(metadata, getattr(result, "actions_taken", []) or []),
         "screen_before_submit": screen_before_submit,
         "input_method_used": str(password_result.get("input_method_used") or ""),
@@ -228,8 +298,19 @@ def _safe_summary_from_result(result: Any, *, args: argparse.Namespace, run_id: 
         "password_required_dialog_detected": bool(password_result.get("password_required_dialog_detected")),
         "post_submit_observation_count": int(password_result.get("post_submit_observation_count") or 0),
         "post_submit_wait_total_ms": int(password_result.get("post_submit_wait_total_ms") or 0),
+        "post_submit_timeout_ms": int(password_result.get("post_submit_timeout_ms") or 0),
+        "post_submit_interval_ms": int(password_result.get("post_submit_interval_ms") or 0),
+        "post_submit_loading_timeout": bool(password_result.get("post_submit_loading_timeout")),
         "post_submit_screens": list(password_result.get("post_submit_screens") or []),
         "final_terminal_screen": str(password_result.get("final_terminal_screen") or ""),
+        "save_password_prompt_detected": bool(password_result.get("save_password_prompt_detected")),
+        "save_password_prompt_dismissed": bool(password_result.get("save_password_prompt_dismissed")),
+        "save_password_prompt_dismiss_attempt_count": int(
+            password_result.get("save_password_prompt_dismiss_attempt_count") or 0
+        ),
+        "dismiss_method": str(password_result.get("dismiss_method") or ""),
+        "post_dismiss_screen_type": str(password_result.get("post_dismiss_screen_type") or ""),
+        **_credentials_fields_from_metadata(metadata),
         "retry_count": int(getattr(result, "retry_count", 0) or 0),
         "would_publish": False,
         "published": bool(getattr(result, "published", False)),
@@ -264,6 +345,23 @@ def _screen_before_submit(metadata: dict[str, Any], *, submit_executed: bool) ->
     if screen in {"continue_password_only", "login_form_empty"}:
         return screen
     return "" if not submit_executed else "accepted_login_screen"
+
+
+def _empty_credentials_summary_fields() -> dict[str, Any]:
+    return {
+        "credentials_error_code": "",
+        "credentials_invalid_reason": "",
+        "credentials_stage": "",
+        "credential_metadata_found": False,
+        "credentials_status": None,
+        "credentials_version": None,
+        "secret_provider": "",
+        "username_matches_expected": None,
+        "secret_loaded": False,
+        "injectable_password_only": None,
+        "secret_value_safe_for_injection": None,
+        "guard_would_block_revealed_value": None,
+    }
 
 
 def _no_leak_summary() -> dict[str, bool]:

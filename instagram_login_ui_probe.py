@@ -51,6 +51,15 @@ PASSWORD_REQUIRED_DIALOG_PATTERNS = (
     "mot de passe requis",
     "saisissez votre mot de passe pour continuer",
 )
+GOOGLE_PASSWORD_MANAGER_PATTERNS = (
+    "google password manager",
+    "gestionnaire de mots de passe google",
+)
+SAVE_PASSWORD_FOR_INSTAGRAM_PATTERNS = (
+    "save password for instagram",
+    "enregistrer le mot de passe pour instagram",
+    "enregistrer votre mot de passe pour instagram",
+)
 LOGGED_OUT_PATTERNS = (
     "log in to instagram",
     "username",
@@ -194,6 +203,9 @@ def extract_login_screen_signals_from_hierarchy(
     has_login_button = "log in" in text
     has_ok_button = _has_phrase(text, "ok")
     has_password_required_dialog = _contains_any(text, PASSWORD_REQUIRED_DIALOG_PATTERNS) and has_ok_button
+    has_google_password_manager = _contains_any(text, GOOGLE_PASSWORD_MANAGER_PATTERNS)
+    has_save_password_for_instagram = _contains_any(text, SAVE_PASSWORD_FOR_INSTAGRAM_PATTERNS)
+    has_google_save_password_prompt = has_google_password_manager and has_save_password_for_instagram and has_continue_button
     suggested_username = _extract_suggested_username(text)
     available_usernames = _extract_available_usernames(text)
     normalized_expected_username = _normalize_username_candidate(expected_username or "")
@@ -205,7 +217,9 @@ def extract_login_screen_signals_from_hierarchy(
     overlay_present = bool(overlay_type)
     transition_loading = _has_phrase(text, "loading")
 
-    if has_password_required_dialog:
+    if has_google_save_password_prompt:
+        screen_type = "google_password_manager_save_prompt"
+    elif has_password_required_dialog:
         screen_type = "password_required_dialog"
     elif has_logout_confirmation_prompt and has_log_out and has_cancel:
         screen_type = "logout_confirmation_prompt"
@@ -260,6 +274,9 @@ def extract_login_screen_signals_from_hierarchy(
         "has_login_button": has_login_button,
         "has_ok_button": has_ok_button,
         "password_required_dialog_present": has_password_required_dialog,
+        "save_password_prompt_present": has_google_save_password_prompt,
+        "google_password_manager_save_prompt": screen_type == "google_password_manager_save_prompt",
+        "save_password_prompt": screen_type == "google_password_manager_save_prompt",
         "username_editable_present": screen_type == "login_form_empty" and has_username_field,
         "password_field_editable_present": screen_type in {"login_form_empty", "continue_password_only"}
         and has_password_field,
@@ -320,6 +337,18 @@ def probe_login_ui_from_hierarchy(
             ok=False,
             reason="password_required_dialog",
             metadata={**metadata, "detection_reason": "password_required_dialog", "password_required_dialog_present": True},
+        )
+
+    if _contains_any(text, GOOGLE_PASSWORD_MANAGER_PATTERNS) and _contains_any(text, SAVE_PASSWORD_FOR_INSTAGRAM_PATTERNS):
+        return LoginUiProbeResult(
+            outcome=LoginProbeOutcome.UNKNOWN,
+            ok=False,
+            reason="google_password_manager_save_prompt",
+            metadata={
+                **metadata,
+                "detection_reason": "google_password_manager_save_prompt",
+                "save_password_prompt_present": True,
+            },
         )
 
     for outcome, reason, patterns in (

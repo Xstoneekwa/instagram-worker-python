@@ -6,7 +6,7 @@ import unittest
 from dataclasses import asdict
 from unittest.mock import Mock, patch
 
-from instagram_credentials_runtime_access import SecretValue
+from instagram_credentials_runtime_access import InstagramLoginCredentialsResult, SecretValue
 import instagram_login_provisioner_orchestrator as provisioner_orchestrator
 from instagram_login_provisioner_orchestrator import run_login_provisioning_flow, run_old_account_logout_fallback_flow
 
@@ -324,7 +324,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertEqual(device.dump_calls, 0)
         self.assertFalse(result.safe_metadata["app_start_ok"])
 
-    def test_app_start_unknown_stops_before_credentials_and_password_reveal(self) -> None:
+    def test_app_start_unknown_stable_stops_after_startup_settling(self) -> None:
         device = FakeDevice([UNKNOWN_XML])
         secret = TrackingSecretValue(PASSWORD)
         credentials_getter = Mock(return_value={"username": USERNAME, "password": secret})
@@ -339,10 +339,89 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         )
 
         self.assertFalse(result.ok)
-        self.assertEqual(result.reason, "screen_preparation_failed")
+        self.assertEqual(result.reason, "screen_preparation_failed_after_startup_settling")
         self.assertFalse(secret.revealed)
         credentials_getter.assert_not_called()
         self.assertEqual(result.safe_metadata["screen_after_app_start"], "unknown")
+        self.assertEqual(result.safe_metadata["startup_observation_count"], 4)
+        self.assertEqual(result.safe_metadata["startup_screens"], ["unknown", "unknown", "unknown", "unknown"])
+        self.assertTrue(result.safe_metadata["startup_settling_used"])
+
+    def test_app_start_unknown_then_continue_as_candidate_routes_continue(self) -> None:
+        continue_xml = f'<node text="{USERNAME}" />' + CONTINUE_AS_XML
+        device, selectors = configured_device(CONNECTED_XML)
+        device.hierarchies = [UNKNOWN_XML, continue_xml, PASSWORD_ONLY_OVERLAY_XML, PASSWORD_ONLY_OVERLAY_XML, CONNECTED_XML]
+
+        result = run_login_provisioning_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username=USERNAME,
+            credentials_getter=Mock(return_value=credentials()),
+            post_start_wait_ms=0,
+            sleeper=Mock(),
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.safe_metadata["screen_after_app_start_initial"], "unknown")
+        self.assertEqual(result.safe_metadata["screen_after_app_start_final"], "continue_as_candidate")
+        self.assertEqual(result.safe_metadata["startup_screens"], ["unknown", "continue_as_candidate"])
+        self.assertEqual(result.safe_metadata["startup_observation_count"], 2)
+        self.assertTrue(result.safe_metadata["startup_settling_used"])
+        self.assertEqual(selectors["continue"].click_calls, 1)
+
+    def test_app_start_unknown_then_login_form_empty_is_accepted(self) -> None:
+        device, selectors = configured_device(CONNECTED_XML)
+        device.hierarchies = [UNKNOWN_XML, LOGIN_FORM_XML, CONNECTED_XML]
+
+        result = run_login_provisioning_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username=USERNAME,
+            credentials_getter=Mock(return_value=credentials()),
+            post_start_wait_ms=0,
+            sleeper=Mock(),
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.safe_metadata["screen_after_app_start_final"], "login_form_empty")
+        self.assertEqual(selectors["login"].click_calls, 1)
+
+    def test_app_start_unknown_then_continue_password_only_is_accepted(self) -> None:
+        device, selectors = configured_device(CONNECTED_XML)
+        device.hierarchies = [UNKNOWN_XML, PASSWORD_ONLY_OVERLAY_XML, CONNECTED_XML]
+
+        result = run_login_provisioning_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username=USERNAME,
+            credentials_getter=Mock(return_value=credentials()),
+            post_start_wait_ms=0,
+            sleeper=Mock(),
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.safe_metadata["screen_after_app_start_final"], "continue_password_only")
+        self.assertEqual(selectors["login"].click_calls, 1)
+
+    def test_app_start_continue_as_candidate_fast_path_no_startup_reobserve(self) -> None:
+        continue_xml = f'<node text="{USERNAME}" />' + CONTINUE_AS_XML
+        device, selectors = configured_device(CONNECTED_XML)
+        device.hierarchies = [continue_xml, PASSWORD_ONLY_OVERLAY_XML, PASSWORD_ONLY_OVERLAY_XML, CONNECTED_XML]
+
+        result = run_login_provisioning_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username=USERNAME,
+            credentials_getter=Mock(return_value=credentials()),
+            post_start_wait_ms=0,
+            sleeper=Mock(),
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.safe_metadata["startup_observation_count"], 1)
+        self.assertEqual(result.safe_metadata["startup_wait_total_ms"], 0)
+        self.assertFalse(result.safe_metadata["startup_settling_used"])
+        self.assertEqual(selectors["continue"].click_calls, 1)
 
     def test_package_name_is_configurable_for_future_clones(self) -> None:
         device = FakeDevice([CONNECTED_XML])
@@ -566,8 +645,8 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
                 "safe_metadata": {
                     "post_submit_observation_count": 4,
                     "post_submit_wait_total_ms": 4000,
-                    "post_submit_screens": ["loading", "loading", "loading", "loading"],
-                    "final_terminal_screen": "loading",
+                    "post_submit_screens": ["unknown", "unknown", "unknown", "unknown"],
+                    "final_terminal_screen": "unknown",
                 },
             },
         )()
@@ -585,6 +664,91 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertEqual(result.reason, "post_submit_unknown_after_settling")
         self.assertFalse(result.retry_attempted)
         self.assertEqual(result.retry_count, 0)
+        patched.assert_called_once()
+
+    def test_loading_timeout_final_outcome_no_retry(self) -> None:
+        device, _selectors = configured_device(CONNECTED_XML)
+        password_result = type(
+            "PasswordResult",
+            (),
+            {
+                "failure_reason": None,
+                "post_submit_outcome": "login_submit_still_loading",
+                "post_submit_probe_reason": "post_submit_loading_timeout",
+                "executed": True,
+                "submit_tapped": True,
+                "timings": {},
+                "warnings": ["post_submit_loading_timeout"],
+                "safe_metadata": {
+                    "post_submit_observation_count": 10,
+                    "post_submit_wait_total_ms": 10000,
+                    "post_submit_timeout_ms": 10000,
+                    "post_submit_interval_ms": 1000,
+                    "post_submit_loading_timeout": True,
+                    "post_submit_screens": ["loading"] * 10,
+                    "final_terminal_screen": "loading",
+                },
+            },
+        )()
+
+        with patch.object(provisioner_orchestrator, "execute_login_form_credentials", return_value=password_result) as patched:
+            result = self.run_flow(
+                device,
+                account_id=ACCOUNT_ID,
+                expected_username=USERNAME,
+                credentials_getter=Mock(return_value=credentials()),
+                initial_signals=LOGIN_FORM_SIGNALS,
+                post_submit_timeout_ms=10000,
+            )
+
+        self.assertEqual(result.final_outcome, "login_submit_still_loading")
+        self.assertEqual(result.reason, "post_submit_loading_timeout")
+        self.assertFalse(result.retry_attempted)
+        self.assertFalse(result.should_publish_status)
+        self.assertTrue(result.safe_metadata["password_result"]["post_submit_loading_timeout"])
+        patched.assert_called_once()
+
+    def test_save_password_prompt_blocking_final_outcome_no_retry(self) -> None:
+        device, _selectors = configured_device(CONNECTED_XML)
+        password_result = type(
+            "PasswordResult",
+            (),
+            {
+                "failure_reason": None,
+                "post_submit_outcome": "save_password_prompt_blocking",
+                "post_submit_probe_reason": "save_password_prompt_not_dismissed_after_2_attempts",
+                "executed": True,
+                "submit_tapped": True,
+                "timings": {},
+                "warnings": ["save_password_prompt_blocking"],
+                "safe_metadata": {
+                    "save_password_prompt_detected": True,
+                    "save_password_prompt_dismissed": False,
+                    "save_password_prompt_dismiss_attempt_count": 2,
+                    "dismiss_method": "back",
+                    "post_submit_observation_count": 2,
+                    "post_submit_wait_total_ms": 2000,
+                    "post_submit_screens": [
+                        "google_password_manager_save_prompt",
+                        "google_password_manager_save_prompt",
+                    ],
+                    "final_terminal_screen": "google_password_manager_save_prompt",
+                },
+            },
+        )()
+
+        with patch.object(provisioner_orchestrator, "execute_login_form_credentials", return_value=password_result) as patched:
+            result = self.run_flow(
+                device,
+                account_id=ACCOUNT_ID,
+                expected_username=USERNAME,
+                credentials_getter=Mock(return_value=credentials()),
+                initial_signals=LOGIN_FORM_SIGNALS,
+            )
+
+        self.assertEqual(result.final_outcome, "save_password_prompt_blocking")
+        self.assertEqual(result.reason, "save_password_prompt_blocking")
+        self.assertFalse(result.retry_attempted)
         patched.assert_called_once()
 
     def test_continue_expected_executes_continue_then_login_flow(self) -> None:
@@ -718,7 +882,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
             )
 
         self.assertTrue(selectors["continue"].click_calls == 1 or device.bounds_clicks)
-        sleep.assert_called_once_with(1.5)
+        sleep.assert_called_once_with(1.0)
         self.assertEqual(result.safe_metadata["post_continue_initial_screen"], "transition_loading")
         self.assertTrue(result.safe_metadata["post_continue_reobserve"])
         self.assertEqual(result.safe_metadata["post_continue_reobserve_count"], 1)
@@ -743,9 +907,10 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
             )
 
         self.assertTrue(selectors["continue"].click_calls == 1 or device.bounds_clicks)
-        sleep.assert_called_once_with(1.5)
+        self.assertEqual(sleep.call_count, 4)
+        sleep.assert_called_with(1.0)
         self.assertEqual(result.failure_reason, "unknown_login_screen")
-        self.assertEqual(result.safe_metadata["post_continue_reobserve_count"], 1)
+        self.assertEqual(result.safe_metadata["post_continue_reobserve_count"], 4)
         self.assertEqual(result.safe_metadata["post_continue_final_screen_type"], "unknown")
         getter.assert_not_called()
         self.assertNotIn("login_form_submit", result.actions_taken)
@@ -970,6 +1135,53 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
 
         self.assertEqual(result.final_outcome, "credentials_invalid")
         self.assertEqual(result.dashboard_action_type, "update_instagram_password")
+        self.assertEqual(result.safe_metadata["credentials_error_code"], "password_secret_invalid")
+        self.assertEqual(result.safe_metadata["credentials_invalid_reason"], "password_secret_invalid")
+        self.assertEqual(selectors["password"].set_text_calls, [])
+
+    def test_credentials_getter_exception_exposes_safe_error_code(self) -> None:
+        device, selectors = configured_device()
+
+        def failing_getter(_account_id: str):
+            raise RuntimeError("SUPABASE_URL is not set")
+
+        result = self.run_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username=USERNAME,
+            credentials_getter=failing_getter,
+            initial_signals=LOGIN_FORM_SIGNALS,
+        )
+
+        self.assertEqual(result.final_outcome, "credentials_invalid")
+        self.assertEqual(result.safe_metadata["credentials_error_code"], "supabase_env_missing")
+        self.assertEqual(result.safe_metadata["credentials_invalid_reason"], "supabase_env_missing")
+        self.assertEqual(result.safe_metadata["credentials_stage"], "credentials_getter")
+        self.assertEqual(selectors["password"].set_text_calls, [])
+
+    def test_runtime_secret_reader_failure_preserves_error_code(self) -> None:
+        device, selectors = configured_device()
+        credentials_result = InstagramLoginCredentialsResult(
+            ok=False,
+            account_id=ACCOUNT_ID,
+            provider="instagram",
+            reason="secret_reader_failed",
+            failure_reason="secret_reader_failed",
+            credentials_status="active",
+            credentials_version=1000,
+        )
+
+        result = self.run_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username=USERNAME,
+            credentials_getter=Mock(return_value=credentials_result),
+            initial_signals=LOGIN_FORM_SIGNALS,
+        )
+
+        self.assertEqual(result.final_outcome, "credentials_invalid")
+        self.assertEqual(result.reason, "secret_reader_failed")
+        self.assertEqual(result.safe_metadata["credentials_error_code"], "secret_reader_failed")
         self.assertEqual(selectors["password"].set_text_calls, [])
 
     def test_transient_username_field_not_found_retries_once_after_revalidation(self) -> None:
@@ -1240,7 +1452,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
                 initial_signals=ACCOUNT_PICKER_SIGNALS,
             )
 
-        sleep.assert_called_once_with(1.5)
+        sleep.assert_called_once_with(1.0)
         self.assertEqual(result.safe_metadata["post_account_picker_initial_screen"], "transition_loading")
         self.assertTrue(result.safe_metadata["post_account_picker_reobserve"])
         self.assertEqual(result.safe_metadata["post_account_picker_reobserve_count"], 1)
@@ -1262,7 +1474,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
                 initial_signals=ACCOUNT_PICKER_SIGNALS,
             )
 
-        sleep.assert_called_once_with(1.5)
+        sleep.assert_called_once_with(1.0)
         self.assertEqual(result.safe_metadata["post_account_picker_initial_screen"], "transition_unknown")
         self.assertEqual(result.safe_metadata["post_account_picker_reobserve_count"], 1)
         self.assertEqual(result.safe_metadata["post_account_picker_final_screen_type"], "continue_password_only")
