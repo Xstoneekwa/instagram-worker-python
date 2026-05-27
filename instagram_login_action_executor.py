@@ -64,6 +64,7 @@ NO_ACTION_DECISIONS = {
 MAX_POST_ACTION_WAIT_MS = 1500
 BOUNDS_DEDUPE_DISTANCE_PX = 24
 STATUS_BAR_MAX_CENTER_Y = 220
+ACCOUNT_PICKER_FAILURE_AMBIGUOUS_DUPLICATE_ROWS = "account_picker_ambiguous_duplicate_username_rows"
 
 Timer = Callable[[], float]
 Sleeper = Callable[[float], None]
@@ -198,6 +199,7 @@ def execute_login_screen_decision(
     timings["target_lookup_ms"] = _elapsed_ms(start, timer())
     if selector_result.get("resolution"):
         warnings.append(f"target_resolution_{selector_result['resolution']}")
+    action_metadata = dict(selector_result.get("metadata") or {})
 
     if selector_result["failure_reason"]:
         timings["total_ms"] = _elapsed_ms(total_start, timer())
@@ -210,6 +212,7 @@ def execute_login_screen_decision(
             failure_reason=selector_result["failure_reason"],
             timings=timings,
             warnings=warnings,
+            metadata=action_metadata,
         )
 
     try:
@@ -219,6 +222,11 @@ def execute_login_screen_decision(
     except Exception:
         timings["tap_ms"] = _elapsed_ms(start, timer())
         timings["total_ms"] = _elapsed_ms(total_start, timer())
+        if action == ACTION_SELECT_EXPECTED_ACCOUNT:
+            action_metadata = {
+                **action_metadata,
+                "account_picker_action_result": "row_tap_failed",
+            }
         return _result(
             ok=False,
             executed=False,
@@ -228,6 +236,7 @@ def execute_login_screen_decision(
             failure_reason="tap_failed",
             timings=timings,
             warnings=warnings,
+            metadata=action_metadata,
         )
 
     timings["post_action_wait_ms"] = wait_ms
@@ -255,6 +264,11 @@ def execute_login_screen_decision(
     if action == ACTION_USE_ANOTHER_PROFILE and post_action_screen_type == "unknown":
         warnings.append("post_action_screen_unknown")
 
+    if action == ACTION_SELECT_EXPECTED_ACCOUNT and not failure_reason:
+        action_metadata = {
+            **action_metadata,
+            "account_picker_action_result": "row_tap_executed",
+        }
     timings["total_ms"] = _elapsed_ms(total_start, timer())
     return _result(
         ok=not failure_reason,
@@ -268,6 +282,7 @@ def execute_login_screen_decision(
         post_action_signals=post_action_signals,
         timings=timings,
         warnings=warnings,
+        metadata=action_metadata,
     )
 
 
@@ -362,7 +377,7 @@ def _find_account_picker_target(d: Any, target_username: str) -> dict[str, Any]:
         hierarchy_xml = ""
     if hierarchy_xml:
         hierarchy_result = _resolve_account_row_from_hierarchy(hierarchy_xml, normalized_target)
-        if hierarchy_result.get("target") or hierarchy_result.get("failure_reason") == "ambiguous_target_account_row":
+        if hierarchy_result.get("target") or hierarchy_result.get("failure_reason"):
             return hierarchy_result
     return {
         "target": None,
@@ -523,6 +538,10 @@ def _resolve_target_from_selectors(d: Any, target_text: str) -> dict[str, Any]:
 
 def _resolve_account_row_from_hierarchy(hierarchy_xml: str, normalized_target: str) -> dict[str, Any]:
     nodes = _collect_accessibility_nodes(hierarchy_xml)
+    anchors = {
+        "Use another profile": _find_anchor_center_y(hierarchy_xml, "Use another profile"),
+        "Create new account": _find_anchor_center_y(hierarchy_xml, "Create new account"),
+    }
     username_candidates = [
         candidate
         for candidate in _collect_label_candidates(hierarchy_xml, normalized_target)
@@ -531,32 +550,79 @@ def _resolve_account_row_from_hierarchy(hierarchy_xml: str, normalized_target: s
         and candidate.bounds.area > 0
         and candidate.bounds.center_y > STATUS_BAR_MAX_CENTER_Y
         and _normalize_username(candidate.label) == normalized_target
+        and _candidate_in_account_picker_zone(candidate, anchors)
     ]
+    visible_usernames = _list_visible_account_picker_usernames(hierarchy_xml, anchors)
+    base_metadata = {
+        "account_picker_visible_usernames_count": len(visible_usernames),
+        "account_picker_target_node_count": len(username_candidates),
+    }
     if not username_candidates:
         return {
             "target": None,
             "failure_reason": "target_account_row_not_found",
             "resolution": "account_picker_no_username_candidate",
+            "metadata": {
+                **base_metadata,
+                "account_picker_target_resolution_method": "account_picker_no_username_candidate",
+                "account_picker_target_row_count": 0,
+                "account_picker_action_result": "expected_username_not_visible",
+            },
         }
-    deduped = _dedupe_candidates_by_bounds(username_candidates)
-    zones = _distinct_visual_zones(deduped)
-    if len(zones) > 1:
+    username_rows = _cluster_username_candidates_into_rows(username_candidates)
+    base_metadata["account_picker_target_row_count"] = len(username_rows)
+    if len(username_rows) > 1:
         return {
             "target": None,
-            "failure_reason": "ambiguous_target_account_row",
-            "resolution": "account_picker_multiple_username_zones",
+            "failure_reason": ACCOUNT_PICKER_FAILURE_AMBIGUOUS_DUPLICATE_ROWS,
+            "resolution": "account_picker_duplicate_username_rows",
+            "metadata": {
+                **base_metadata,
+                "account_picker_target_resolution_method": "account_picker_duplicate_username_rows",
+                "account_picker_action_result": "duplicate_username_rows",
+                "account_picker_selected_row_index_if_known": _account_picker_row_index(
+                    visible_usernames, normalized_target
+                ),
+            },
         }
-    username_candidate = _choose_best_candidate(deduped)
+    row_nodes = username_rows[0]
+    username_candidate = _choose_best_candidate(row_nodes)
+    row_bounds = _union_bounds([node.bounds for node in row_nodes])
     row_candidate = _find_clickable_container_for_candidate(nodes, username_candidate)
-    winner = row_candidate or username_candidate
+    if row_candidate is None:
+        row_center_x, row_center_y = row_bounds.center_x, row_bounds.center_y
+        for node in nodes:
+            if not node.enabled or not node.visible or not node.clickable:
+                continue
+            if node.bounds.area <= row_bounds.area:
+                continue
+            if not _bounds_contain(node.bounds, row_center_x, row_center_y):
+                continue
+            if _bounds_vertical_overlap(node.bounds, row_bounds):
+                row_candidate = node
+                break
+    tap_bounds = row_candidate.bounds if row_candidate else row_bounds
+    resolution_method = (
+        "account_picker_row_container_bounds_center"
+        if row_candidate
+        else "account_picker_username_row_union_bounds_center"
+    )
     return {
         "target": {
             "kind": "bounds",
-            "center": (winner.bounds.center_x, winner.bounds.center_y),
+            "center": (tap_bounds.center_x, tap_bounds.center_y),
             "label": username_candidate.label,
         },
         "failure_reason": "",
-        "resolution": "account_picker_row_bounds_center" if row_candidate else "account_picker_username_bounds_center",
+        "resolution": resolution_method,
+        "metadata": {
+            **base_metadata,
+            "account_picker_target_resolution_method": resolution_method,
+            "account_picker_action_result": "row_tap_ready",
+            "account_picker_selected_row_index_if_known": _account_picker_row_index(
+                visible_usernames, normalized_target
+            ),
+        },
     }
 
 
@@ -713,6 +779,100 @@ def _candidate_in_vertical_zone(candidate: _AccessibilityCandidate, anchors: dic
     if create_y is not None and center_y >= create_y:
         return False
     return True
+
+
+def _candidate_in_account_picker_zone(candidate: _AccessibilityCandidate, anchors: dict[str, int | None]) -> bool:
+    use_another_y = anchors.get("Use another profile")
+    create_y = anchors.get("Create new account")
+    center_y = candidate.bounds.center_y
+    if use_another_y is not None and center_y >= use_another_y:
+        return False
+    if create_y is not None and center_y >= create_y:
+        return False
+    return True
+
+
+def _bounds_vertical_overlap(left: _BoundsRect, right: _BoundsRect) -> bool:
+    return not (left.y2 < right.y1 or right.y2 < left.y1)
+
+
+def _union_bounds(bounds_list: list[_BoundsRect]) -> _BoundsRect:
+    return _BoundsRect(
+        x1=min(bounds.x1 for bounds in bounds_list),
+        y1=min(bounds.y1 for bounds in bounds_list),
+        x2=max(bounds.x2 for bounds in bounds_list),
+        y2=max(bounds.y2 for bounds in bounds_list),
+    )
+
+
+def _cluster_username_candidates_into_rows(
+    candidates: list[_AccessibilityCandidate],
+) -> list[list[_AccessibilityCandidate]]:
+    if not candidates:
+        return []
+    ordered = sorted(candidates, key=lambda candidate: candidate.bounds.center_y)
+    rows: list[list[_AccessibilityCandidate]] = []
+    for candidate in ordered:
+        placed = False
+        for row in rows:
+            if any(_bounds_vertical_overlap(candidate.bounds, other.bounds) for other in row):
+                row.append(candidate)
+                placed = True
+                break
+        if not placed:
+            rows.append([candidate])
+    return rows
+
+
+def _list_visible_account_picker_usernames(
+    hierarchy_xml: str,
+    anchors: dict[str, int | None],
+) -> list[str]:
+    row_candidates: list[_AccessibilityCandidate] = []
+    for raw_attrs in re.findall(r"<node\b([^>]*)/?>", hierarchy_xml or ""):
+        attrs = _parse_node_attributes(raw_attrs)
+        text = _normalize_label(attrs.get("text", ""))
+        content_desc = _normalize_label(attrs.get("content-desc", ""))
+        for label, source_attr in ((text, "text"), (content_desc, "content-desc")):
+            normalized = _normalize_username(label)
+            if not normalized:
+                continue
+            bounds = _parse_bounds(attrs.get("bounds", ""))
+            if bounds is None:
+                continue
+            candidate = _AccessibilityCandidate(
+                label=label,
+                source_attr=source_attr,
+                bounds=bounds,
+                clickable=_node_is_clickable(attrs),
+                enabled=_node_is_enabled(attrs),
+                visible=_node_is_visible(attrs),
+                class_name=str(attrs.get("class", "")).split(".")[-1],
+            )
+            if not (
+                candidate.enabled
+                and candidate.visible
+                and candidate.bounds.area > 0
+                and candidate.bounds.center_y > STATUS_BAR_MAX_CENTER_Y
+                and _candidate_in_account_picker_zone(candidate, anchors)
+            ):
+                continue
+            row_candidates.append(candidate)
+    rows = _cluster_username_candidates_into_rows(row_candidates)
+    usernames: list[str] = []
+    for row in sorted(rows, key=lambda nodes: min(node.bounds.center_y for node in nodes)):
+        winner = _choose_best_candidate(row)
+        normalized = _normalize_username(winner.label)
+        if normalized and normalized not in usernames:
+            usernames.append(normalized)
+    return usernames
+
+
+def _account_picker_row_index(visible_usernames: list[str], normalized_target: str) -> int | None:
+    try:
+        return visible_usernames.index(normalized_target)
+    except ValueError:
+        return None
 
 
 def _dedupe_candidates_by_bounds(candidates: list[_AccessibilityCandidate]) -> list[_AccessibilityCandidate]:
@@ -889,6 +1049,7 @@ def _result(
     post_action_signals: dict[str, Any] | None = None,
     timings: dict[str, int] | None = None,
     warnings: list[str] | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> LoginActionExecutionResult:
     metadata = clean_login_probe_metadata(
         {
@@ -898,6 +1059,7 @@ def _result(
             "reason": reason,
             "failure_reason": failure_reason,
             "post_action_screen_type": post_action_screen_type,
+            **dict(metadata or {}),
         }
     )
     return LoginActionExecutionResult(

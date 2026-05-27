@@ -4205,6 +4205,91 @@ Finalisation metadata 2E-5P-13 :
   `clone_reuse_allowed=true`, et `suggested_username` dynamique du compte
   precedent.
 
+## Entry 2E-5P-14 Account Picker Full Provisioning Flow
+
+Entry 2E-5P-14 valide le Cas B : Instagram affiche un `account_picker` avec
+plusieurs comptes visibles.
+
+Comportement attendu :
+
+- extraire `available_usernames`;
+- verifier que `expected_username` est present;
+- selectionner uniquement `expected_username`;
+- ne jamais selectionner l'ancien compte visible;
+- ne pas cliquer `Use another profile` dans ce chemin;
+- reobserver apres tap avec settling borne.
+
+Deux sorties normales :
+
+1. `account_picker` -> tap expected -> `connected_home` :
+   `final_outcome=connected`, `submit_executed=false`,
+   `would_publish=false`.
+2. `account_picker` -> tap expected -> `continue_password_only` ou formulaire
+   login :
+   credentials via `SecretValue` / Vault, submit password, post-submit settling,
+   dismiss Google Password Manager par chemin safe si present, puis
+   `final_outcome=connected`.
+
+Metadata safe :
+
+- `available_usernames`;
+- `expected_username_present`;
+- `selected_account_username`;
+- `account_picker_selection_executed`;
+- `post_account_picker_observation_count`;
+- `post_account_picker_screens`;
+- `screen_after_account_picker_final`;
+- `preparation_flow_used=select_expected_account_from_picker`.
+
+Si `expected_username` est absent du picker :
+
+- `router_decision=expected_account_not_listed`;
+- no tap, no credential, no submit;
+- stop safe avec action dashboard future
+  `review_account_picker_missing_expected`.
+
+Le smoke Cas B utilise le CLI generique, sans override operateur, et reste
+`--no-publish`.
+
+## Entry 2E-5P-14B Account Picker Target Resolution (multi-compte)
+
+Entry 2E-5P-14B corrige la resolution de cible sur `account_picker` lorsque
+plusieurs nœuds accessibility (texte username, content-desc, chevron, row
+cliquable) representent **une seule** row visuelle pour le meme compte.
+
+Regles :
+
+- le compte attendu peut etre en **premiere**, **milieu** ou **derniere** ligne
+  visible ; il peut y avoir **2, 4, 6 comptes ou plus** dans le picker ;
+- **ne jamais** selectionner par index fixe ni supposer que le compte attendu
+  est le premier ;
+- selection par **username exact** + **bounds** de la row (cluster vertical) ;
+- plusieurs nœuds accessibility sur la meme row **ne sont pas** ambigus ;
+- deux rows distinctes avec le meme username → stop safe
+  `account_picker_ambiguous_duplicate_username_rows` ;
+- `expected_username` absent du dump courant → stop safe
+  `expected_account_not_listed` (router), pas de tap ni credentials ;
+- ne pas cliquer `Use another profile` ni `Create new account` si le compte
+  attendu est present.
+
+Metadata safe supplementaires :
+
+- `account_picker_target_resolution_method` ;
+- `account_picker_target_row_count` ;
+- `account_picker_target_node_count` ;
+- `account_picker_visible_usernames_count` ;
+- `account_picker_selected_row_index_if_known` (diagnostic uniquement, **pas**
+  utilise pour choisir la cible) ;
+- `account_picker_action_result`.
+
+Sorties normales apres tap (inchangées Cas B) :
+
+1. `connected_home` direct → `final_outcome=connected`, `submit_executed=false` ;
+2. `continue_password_only` ou formulaire login → password Vault puis submit.
+
+Scroll account picker : **non** implemente en V1 si le compte attendu est hors
+viewport ; a documenter comme complement futur si la liste depasse l'ecran.
+
 ## Entry 2E-5P-11 Login Form Username Prefilled
 
 Entry 2E-5P-11 traite le cas observe pendant le Cas A complet : apres

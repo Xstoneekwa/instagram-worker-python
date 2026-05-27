@@ -500,6 +500,23 @@ Post-submit policy future :
   re-observation `login_form_prefilled_username` ne doit plus remplacer
   `operator_smoke_override/canceled/clone_reuse_allowed=true` par des valeurs
   par defaut `unknown/false`.
+- Entry 2E-5P-14 Account picker full flow : le CLI generique supporte Cas B
+  sans flag operateur. Si `screen_type=account_picker`, le router selectionne
+  uniquement `expected_username` present dans `available_usernames`; si absent :
+  `expected_account_not_listed`, no tap/no credentials/no submit. Apres tap,
+  settling borne `post_account_picker_*`. Sorties normales : direct
+  `connected_home` sans submit, ou `continue_password_only` / formulaire login
+  puis password submit via `SecretValue`. Logs safe ajoutes :
+  `available_usernames`, `expected_username_present`,
+  `selected_account_username`, `account_picker_selection_executed`,
+  `screen_after_account_picker_final`. Smokes toujours `--no-publish`.
+- Entry 2E-5P-14B Account picker target resolution : le compte attendu peut etre
+  n'importe ou dans la liste visible (2–6+ comptes). L'executor regroupe les
+  nœuds accessibility d'une meme row par chevauchement vertical ; plusieurs
+  zones pour un seul username sur une row ne sont plus traitees comme ambigues.
+  Selection par username exact + bounds, jamais par index fixe.
+  `account_picker_selected_row_index_if_known` est diagnostic seulement. Scroll
+  picker si compte hors viewport : complement futur documente.
 - Entry 2E-5P-11 Login form username prefilled : apres `Use another profile`,
   Instagram peut afficher un formulaire login avec l'ancien username deja rempli.
   Nouveau `screen_type=login_form_prefilled_username`. Si le champ username est

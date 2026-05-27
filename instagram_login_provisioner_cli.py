@@ -363,7 +363,22 @@ def _safe_summary_from_result(result: Any, *, args: argparse.Namespace, run_id: 
             metadata.get("screen_after_use_another_profile_final") or ""
         ),
         "preparation_flow_used": _preparation_flow_used(metadata, actions_taken),
-        "screen_type": str(metadata.get("screen_type") or ""),
+        "screen_type": _summary_screen_type(metadata, actions_taken),
+        "available_usernames": list(metadata.get("available_usernames") or []),
+        "expected_username_present": bool(metadata.get("expected_username_present")),
+        "selected_account_username": str(metadata.get("selected_account_username") or ""),
+        "account_picker_selection_executed": bool(metadata.get("account_picker_selection_executed")),
+        "account_picker_target_resolution_method": str(
+            metadata.get("account_picker_target_resolution_method") or ""
+        ),
+        "account_picker_target_row_count": int(metadata.get("account_picker_target_row_count") or 0),
+        "account_picker_target_node_count": int(metadata.get("account_picker_target_node_count") or 0),
+        "account_picker_visible_usernames_count": int(metadata.get("account_picker_visible_usernames_count") or 0),
+        "account_picker_selected_row_index_if_known": metadata.get("account_picker_selected_row_index_if_known"),
+        "account_picker_action_result": str(metadata.get("account_picker_action_result") or ""),
+        "post_account_picker_observation_count": int(metadata.get("post_account_picker_observation_count") or 0),
+        "post_account_picker_screens": list(metadata.get("post_account_picker_screens") or []),
+        "screen_after_account_picker_final": str(metadata.get("screen_after_account_picker_final") or ""),
         "suggested_username": _summary_suggested_username(metadata, previous_account_lifecycle),
         "prefilled_username": str(metadata.get("prefilled_username") or ""),
         "username_field_focused_before_input": password_result.get("username_field_focused_before_input"),
@@ -420,12 +435,19 @@ def _preparation_flow_used(metadata: dict[str, Any], actions_taken: list[Any]) -
         return "use_another_profile_previous_account_stopped"
     if "tap_continue" in actions:
         return "continue_as_candidate"
-    if any("select_expected_account" in action for action in actions):
-        return "account_picker"
+    if "tap_expected_account" in actions or any("select_expected_account" in action for action in actions):
+        return "select_expected_account_from_picker"
     screen = str(metadata.get("screen_after_app_start") or "")
     if screen in {"login_form_empty", "login_form_prefilled_username", "continue_password_only", "connected", "unknown"}:
         return screen
     return "none"
+
+
+def _summary_screen_type(metadata: dict[str, Any], actions_taken: list[Any]) -> str:
+    actions = [str(item) for item in actions_taken]
+    if "tap_expected_account" in actions and str(metadata.get("screen_after_app_start") or "") == "account_picker":
+        return "account_picker"
+    return str(metadata.get("screen_type") or "")
 
 
 def _summary_suggested_username(

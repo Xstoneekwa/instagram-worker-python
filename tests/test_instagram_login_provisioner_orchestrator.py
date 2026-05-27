@@ -1550,6 +1550,24 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertFalse(result.safe_metadata["would_publish"])
         getter.assert_not_called()
 
+    def test_account_picker_expected_absent_stops_without_submit(self) -> None:
+        getter = Mock(return_value=credentials())
+
+        result = self.run_flow(
+            FakeDevice(),
+            account_id=ACCOUNT_ID,
+            expected_username="missing_expected",
+            credentials_getter=getter,
+            initial_signals=ACCOUNT_PICKER_SIGNALS,
+        )
+
+        self.assertEqual(result.final_outcome, "mismatch")
+        self.assertIn("route:expected_account_not_listed", result.actions_taken)
+        self.assertNotIn("tap_expected_account", result.actions_taken)
+        self.assertNotIn("login_form_submit", result.actions_taken)
+        self.assertFalse(result.safe_metadata["account_picker_selection_executed"])
+        getter.assert_not_called()
+
     def test_account_picker_tap_expected_then_connected_finalizes_without_password(self) -> None:
         device, _selectors = configured_device()
         getter = Mock(return_value=credentials())
@@ -1565,6 +1583,13 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
 
         self.assertEqual(result.final_outcome, "connected")
         self.assertIn("tap_expected_account", result.actions_taken)
+        self.assertEqual(result.safe_metadata["available_usernames"], ["random_expected", "random_old_profile"])
+        self.assertTrue(result.safe_metadata["expected_username_present"])
+        self.assertEqual(result.safe_metadata["selected_account_username"], "random_expected")
+        self.assertTrue(result.safe_metadata["account_picker_selection_executed"])
+        self.assertGreaterEqual(result.safe_metadata["post_account_picker_observation_count"], 1)
+        self.assertIn("connected", result.safe_metadata["post_account_picker_screens"])
+        self.assertEqual(result.safe_metadata["screen_after_account_picker_final"], "connected")
         self.assertFalse(result.safe_metadata["password_required"])
         self.assertFalse(result.safe_metadata["would_submit_password"])
         getter.assert_not_called()
@@ -1584,10 +1609,73 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
 
         self.assertEqual(result.final_outcome, "credentials_missing")
         self.assertIn("tap_expected_account", result.actions_taken)
+        self.assertEqual(result.safe_metadata["selected_account_username"], "random_expected")
+        self.assertTrue(result.safe_metadata["account_picker_selection_executed"])
         self.assertTrue(result.safe_metadata["password_required"])
         self.assertTrue(result.safe_metadata["ready_for_password_submit"])
         self.assertFalse(result.safe_metadata["would_submit_password"])
         self.assertNotIn("login_form_submit", result.actions_taken)
+
+    def test_account_picker_tap_expected_then_password_only_submits_credentials(self) -> None:
+        device, selectors = configured_device()
+        getter = Mock(return_value=credentials())
+        device.hierarchies = [ACCOUNT_PICKER_XML, PASSWORD_ONLY_XML, PASSWORD_ONLY_XML, CONNECTED_XML]
+
+        result = self.run_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username="random_expected",
+            credentials_getter=getter,
+            initial_signals=ACCOUNT_PICKER_SIGNALS,
+        )
+
+        self.assertEqual(result.final_outcome, "connected")
+        self.assertIn("tap_expected_account", result.actions_taken)
+        self.assertIn("login_form_submit", result.actions_taken)
+        self.assertEqual(result.safe_metadata["screen_after_account_picker_final"], "continue_password_only")
+        self.assertEqual(result.safe_metadata["selected_account_username"], "random_expected")
+        self.assertTrue(selectors["password"].set_text_calls)
+
+    def test_account_picker_tap_expected_then_login_form_empty_submits_credentials(self) -> None:
+        device, selectors = configured_device()
+        getter = Mock(return_value=credentials())
+        device.hierarchies = [ACCOUNT_PICKER_XML, LOGIN_FORM_XML, LOGIN_FORM_XML, CONNECTED_XML]
+
+        result = self.run_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username="random_expected",
+            credentials_getter=getter,
+            initial_signals=ACCOUNT_PICKER_SIGNALS,
+        )
+
+        self.assertEqual(result.final_outcome, "connected")
+        self.assertIn("tap_expected_account", result.actions_taken)
+        self.assertIn("login_form_submit", result.actions_taken)
+        self.assertEqual(result.safe_metadata["screen_after_account_picker_final"], "login_form_empty")
+        self.assertEqual(selectors["username"].set_text_calls, ["random_expected"])
+        self.assertEqual(selectors["password"].set_text_calls, [PASSWORD])
+
+    def test_account_picker_tap_expected_then_prefilled_form_replaces_username(self) -> None:
+        device, selectors = configured_device()
+        selectors["username"]._count = 0
+        prefilled_username = device.add_selector("text", "random_old_profile", FakeSelector(1))
+        getter = Mock(return_value=credentials())
+        device.hierarchies = [ACCOUNT_PICKER_XML, PREFILLED_LOGIN_FORM_XML, PREFILLED_LOGIN_FORM_XML, CONNECTED_XML]
+
+        result = self.run_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username="random_expected",
+            credentials_getter=getter,
+            initial_signals=ACCOUNT_PICKER_SIGNALS,
+        )
+
+        self.assertEqual(result.final_outcome, "connected")
+        self.assertIn("tap_expected_account", result.actions_taken)
+        self.assertEqual(result.safe_metadata["screen_after_account_picker_final"], "login_form_prefilled_username")
+        self.assertEqual(prefilled_username.set_text_calls, ["random_expected"])
+        self.assertTrue(result.safe_metadata["password_result"]["username_replaced"])
 
     def test_account_picker_loading_reobserves_once_to_password_only(self) -> None:
         device, _selectors = configured_device()
@@ -1608,6 +1696,12 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertTrue(result.safe_metadata["post_account_picker_reobserve"])
         self.assertEqual(result.safe_metadata["post_account_picker_reobserve_count"], 1)
         self.assertEqual(result.safe_metadata["post_account_picker_final_screen_type"], "continue_password_only")
+        self.assertEqual(result.safe_metadata["post_account_picker_observation_count"], 1)
+        self.assertEqual(
+            result.safe_metadata["post_account_picker_screens"],
+            ["transition_loading", "continue_password_only"],
+        )
+        self.assertEqual(result.safe_metadata["screen_after_account_picker_final"], "continue_password_only")
         self.assertEqual(result.final_outcome, "credentials_missing")
         self.assertFalse(result.safe_metadata["would_submit_password"])
 
@@ -1629,6 +1723,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertEqual(result.safe_metadata["post_account_picker_initial_screen"], "transition_unknown")
         self.assertEqual(result.safe_metadata["post_account_picker_reobserve_count"], 1)
         self.assertEqual(result.safe_metadata["post_account_picker_final_screen_type"], "continue_password_only")
+        self.assertEqual(result.safe_metadata["screen_after_account_picker_final"], "continue_password_only")
         self.assertEqual(result.final_outcome, "credentials_missing")
 
     def test_old_logged_in_expected_account_profile_finalizes_connected(self) -> None:

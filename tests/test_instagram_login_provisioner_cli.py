@@ -350,6 +350,54 @@ class InstagramLoginProvisionerCliTest(unittest.TestCase):
         self.assertTrue(payload["secret_loaded"])
         self.assertTrue(payload["injectable_password_only"])
 
+    def test_account_picker_metadata_is_exposed_in_safe_summary(self) -> None:
+        result = _fake_result(
+            ok=True,
+            completed=True,
+            final_outcome="connected",
+            final_login_status="connected",
+            reason="login_connected",
+            actions_taken=["route:select_expected_account_from_picker", "tap_expected_account"],
+            safe_metadata={
+                "screen_after_app_start": "account_picker",
+                "screen_after_app_start_final": "account_picker",
+                "screen_type": "connected",
+                "available_usernames": ["cinema_catchup", "i_m_your_traker"],
+                "expected_username_present": True,
+                "selected_account_username": "cinema_catchup",
+                "account_picker_selection_executed": True,
+                "account_picker_target_resolution_method": "account_picker_row_container_bounds_center",
+                "account_picker_target_row_count": 1,
+                "account_picker_target_node_count": 1,
+                "account_picker_visible_usernames_count": 2,
+                "account_picker_selected_row_index_if_known": 0,
+                "account_picker_action_result": "row_tap_executed",
+                "post_account_picker_observation_count": 2,
+                "post_account_picker_screens": ["transition_unknown", "connected"],
+                "screen_after_account_picker_final": "connected",
+                "password_result": {"executed": False, "submit_tapped": False},
+            },
+        )
+
+        summary = cli._safe_summary_from_result(result, args=_args("--json"), run_id="run-1")
+
+        self.assertEqual(summary["screen_type"], "account_picker")
+        self.assertEqual(summary["available_usernames"], ["cinema_catchup", "i_m_your_traker"])
+        self.assertTrue(summary["expected_username_present"])
+        self.assertEqual(summary["selected_account_username"], "cinema_catchup")
+        self.assertTrue(summary["account_picker_selection_executed"])
+        self.assertEqual(
+            summary["account_picker_target_resolution_method"],
+            "account_picker_row_container_bounds_center",
+        )
+        self.assertEqual(summary["account_picker_target_row_count"], 1)
+        self.assertEqual(summary["account_picker_visible_usernames_count"], 2)
+        self.assertEqual(summary["account_picker_action_result"], "row_tap_executed")
+        self.assertEqual(summary["post_account_picker_observation_count"], 2)
+        self.assertEqual(summary["post_account_picker_screens"], ["transition_unknown", "connected"])
+        self.assertEqual(summary["screen_after_account_picker_final"], "connected")
+        self.assertEqual(summary["preparation_flow_used"], "select_expected_account_from_picker")
+
     def test_cli_generates_run_id_and_writes_safe_jsonl(self) -> None:
         run_id = str(uuid.uuid4())
         captured: dict = {}

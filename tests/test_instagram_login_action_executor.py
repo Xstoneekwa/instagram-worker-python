@@ -33,6 +33,46 @@ ACCOUNT_PICKER_DUPLICATE_EXPECTED_XML = (
     '<node text="Use another profile" clickable="true" bounds="[100,780][980,900]" />'
     '<node text="Create new account" clickable="true" bounds="[100,1900][980,2020]" />'
 )
+ACCOUNT_PICKER_MULTI_ACCESSIBILITY_ROW_XML = (
+    '<node clickable="true" bounds="[100,300][980,500]" class="android.view.ViewGroup" />'
+    '<node text="random_expected" clickable="false" bounds="[260,350][560,400]" />'
+    '<node content-desc="random_expected" clickable="false" bounds="[850,350][940,400]" />'
+    '<node clickable="true" bounds="[100,540][980,740]" class="android.view.ViewGroup" />'
+    '<node text="random_old_profile" clickable="false" bounds="[260,590][620,640]" />'
+    '<node text="Use another profile" clickable="true" bounds="[100,780][980,900]" />'
+    '<node text="Create new account" clickable="true" bounds="[100,1900][980,2020]" />'
+)
+ACCOUNT_PICKER_FIVE_ACCOUNTS_XML = (
+    '<node clickable="true" bounds="[100,300][980,500]" class="android.view.ViewGroup" />'
+    '<node text="old_account_1" clickable="false" bounds="[260,350][560,400]" />'
+    '<node clickable="true" bounds="[100,540][980,740]" class="android.view.ViewGroup" />'
+    '<node text="old_account_2" clickable="false" bounds="[260,590][560,640]" />'
+    '<node clickable="true" bounds="[100,780][980,980]" class="android.view.ViewGroup" />'
+    '<node text="cinema_catchup" clickable="false" bounds="[260,830][560,880]" />'
+    '<node content-desc="cinema_catchup" clickable="false" bounds="[850,830][940,880]" />'
+    '<node clickable="true" bounds="[100,1020][980,1220]" class="android.view.ViewGroup" />'
+    '<node text="old_account_3" clickable="false" bounds="[260,1070][560,1120]" />'
+    '<node clickable="true" bounds="[100,1260][980,1460]" class="android.view.ViewGroup" />'
+    '<node text="old_account_4" clickable="false" bounds="[260,1310][560,1360]" />'
+    '<node text="Use another profile" clickable="true" bounds="[100,1600][980,1720]" />'
+    '<node text="Create new account" clickable="true" bounds="[100,2500][980,2620]" />'
+)
+ACCOUNT_PICKER_SIX_ACCOUNTS_XML = (
+    '<node clickable="true" bounds="[100,300][980,500]" class="android.view.ViewGroup" />'
+    '<node text="old_account_1" clickable="false" bounds="[260,350][560,400]" />'
+    '<node clickable="true" bounds="[100,540][980,740]" class="android.view.ViewGroup" />'
+    '<node text="old_account_2" clickable="false" bounds="[260,590][560,640]" />'
+    '<node clickable="true" bounds="[100,780][980,980]" class="android.view.ViewGroup" />'
+    '<node text="old_account_3" clickable="false" bounds="[260,830][560,880]" />'
+    '<node clickable="true" bounds="[100,1020][980,1220]" class="android.view.ViewGroup" />'
+    '<node text="old_account_4" clickable="false" bounds="[260,1070][560,1120]" />'
+    '<node clickable="true" bounds="[100,1260][980,1460]" class="android.view.ViewGroup" />'
+    '<node text="cinema_catchup" clickable="false" bounds="[260,1310][560,1360]" />'
+    '<node clickable="true" bounds="[100,1500][980,1700]" class="android.view.ViewGroup" />'
+    '<node text="old_account_5" clickable="false" bounds="[260,1550][560,1600]" />'
+    '<node text="Use another profile" clickable="true" bounds="[100,1900][980,2020]" />'
+    '<node text="Create new account" clickable="true" bounds="[100,2500][980,2620]" />'
+)
 PROFILE_XML = (
     '<node content-desc="Profile" clickable="true" bounds="[880,2100][1020,2240]" />'
 )
@@ -173,11 +213,16 @@ def _use_another_decision():
     )
 
 
-def _account_picker_decision(expected_username: str = "random_expected"):
+def _account_picker_decision(
+    expected_username: str = "random_expected",
+    *,
+    available_usernames: list[str] | None = None,
+):
     return route_login_screen(
         expected_username=expected_username,
         screen_type="account_picker",
-        available_usernames=["random_expected", "random_old_profile"],
+        available_usernames=available_usernames
+        or ["random_expected", "random_old_profile"],
     )
 
 
@@ -432,8 +477,68 @@ class InstagramLoginActionExecutorTest(unittest.TestCase):
         result = execute_login_screen_decision(device, _account_picker_decision())
 
         self.assertFalse(result.executed)
-        self.assertEqual(result.failure_reason, "ambiguous_target_account_row")
+        self.assertEqual(result.failure_reason, "account_picker_ambiguous_duplicate_username_rows")
         self.assertEqual(device.bounds_clicks, [])
+        self.assertEqual(result.metadata.get("account_picker_target_row_count"), 2)
+
+    def test_account_picker_multiple_accessibility_nodes_same_row_taps_once(self) -> None:
+        device = FakeDevice(hierarchy=ACCOUNT_PICKER_MULTI_ACCESSIBILITY_ROW_XML)
+
+        result = execute_login_screen_decision(device, _account_picker_decision(), sleeper=Mock())
+
+        self.assertTrue(result.executed)
+        self.assertEqual(result.metadata.get("account_picker_target_node_count"), 2)
+        self.assertEqual(result.metadata.get("account_picker_target_row_count"), 1)
+        self.assertEqual(device.bounds_clicks, [(540, 400)])
+
+    def test_account_picker_expected_in_middle_of_five_accounts(self) -> None:
+        device = FakeDevice(hierarchy=ACCOUNT_PICKER_FIVE_ACCOUNTS_XML)
+        decision = _account_picker_decision(
+            "cinema_catchup",
+            available_usernames=[
+                "old_account_1",
+                "old_account_2",
+                "cinema_catchup",
+                "old_account_3",
+                "old_account_4",
+            ],
+        )
+
+        result = execute_login_screen_decision(device, decision, sleeper=Mock())
+
+        self.assertTrue(result.executed)
+        self.assertEqual(device.bounds_clicks, [(540, 880)])
+        self.assertNotIn((540, 400), device.bounds_clicks)
+        self.assertEqual(result.metadata.get("account_picker_selected_row_index_if_known"), 2)
+
+    def test_account_picker_expected_last_visible_row_of_six_accounts(self) -> None:
+        device = FakeDevice(hierarchy=ACCOUNT_PICKER_SIX_ACCOUNTS_XML)
+        decision = _account_picker_decision(
+            "cinema_catchup",
+            available_usernames=[
+                "old_account_1",
+                "old_account_2",
+                "old_account_3",
+                "old_account_4",
+                "cinema_catchup",
+                "old_account_5",
+            ],
+        )
+
+        result = execute_login_screen_decision(device, decision, sleeper=Mock())
+
+        self.assertTrue(result.executed)
+        self.assertEqual(device.bounds_clicks, [(540, 1360)])
+        self.assertEqual(result.metadata.get("account_picker_selected_row_index_if_known"), 4)
+
+    def test_account_picker_never_taps_use_another_profile_or_create_new_account(self) -> None:
+        device = FakeDevice(hierarchy=ACCOUNT_PICKER_XML)
+
+        result = execute_login_screen_decision(device, _account_picker_decision(), sleeper=Mock())
+
+        self.assertTrue(result.executed)
+        self.assertNotIn((540, 840), device.bounds_clicks)
+        self.assertNotIn((540, 1960), device.bounds_clicks)
 
     def test_old_logged_in_recovery_targets_are_single_tap(self) -> None:
         cases = (

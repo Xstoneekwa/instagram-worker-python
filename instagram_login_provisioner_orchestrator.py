@@ -611,6 +611,20 @@ def run_login_provisioning_flow(
         "screen_type": routing_signals.get("screen_type"),
         "suggested_username": _safe_public_text(routing_signals.get("suggested_username")),
     }
+    if routing_signals.get("screen_type") == "account_picker":
+        route_metadata.update(
+            {
+                "available_usernames": [
+                    _safe_public_text(username) for username in list(routing_signals.get("available_usernames") or [])
+                ],
+                "expected_username_present": bool(routing_signals.get("expected_username_present")),
+                "account_picker_selection_executed": False,
+            }
+        )
+    if route.decision == "select_expected_account_from_picker":
+        route_metadata["selected_account_username"] = _safe_public_text(
+            getattr(route, "target_username", "") or safe_expected_username
+        )
     old_logged_in_metadata.update(route_metadata)
 
     if dry_run:
@@ -651,6 +665,30 @@ def run_login_provisioning_flow(
             publish_enabled=publish_enabled,
         )
 
+    if route.decision == "expected_account_not_listed":
+        return _finalize(
+            ok=False,
+            completed=True,
+            final_outcome="mismatch",
+            reason=route.reason or "expected_account_not_listed",
+            failure_reason="mismatch",
+            final_login_status="mismatch",
+            final_provisioning_status="blocked",
+            final_onboarding_status="support_required",
+            dashboard_action_type=route.dashboard_action_type or "review_account_picker_missing_expected",
+            should_publish_status=False,
+            account_id=safe_account_id,
+            expected_username=safe_expected_username,
+            actions_taken=actions_taken,
+            timings=timings,
+            warnings=warnings,
+            extra_metadata={**_flow_metadata(previous_account_lifecycle), **old_logged_in_metadata, **route_metadata},
+            total_start=total_start,
+            timer=timer,
+            publisher=publisher,
+            publish_enabled=publish_enabled,
+        )
+
     if route.decision == "unknown_no_action":
         return _finalize(
             ok=False,
@@ -683,6 +721,25 @@ def run_login_provisioning_flow(
         action_result = execute_login_screen_decision(d, route, post_action_wait_ms=0)
         timings["action_ms"] += _elapsed_ms(start, timer())
         actions_taken.append(action_result.action)
+        if action_result.action == "tap_expected_account":
+            old_logged_in_metadata.update(
+                {
+                    "selected_account_username": _safe_public_text(getattr(route, "target_username", "") or safe_expected_username),
+                    "account_picker_selection_executed": bool(action_result.executed),
+                    **{
+                        key: action_result.metadata[key]
+                        for key in (
+                            "account_picker_target_resolution_method",
+                            "account_picker_target_row_count",
+                            "account_picker_target_node_count",
+                            "account_picker_action_result",
+                            "account_picker_visible_usernames_count",
+                            "account_picker_selected_row_index_if_known",
+                        )
+                        if key in action_result.metadata
+                    },
+                }
+            )
         if not action_result.ok:
             return _finalize(
                 ok=False,
@@ -749,6 +806,14 @@ def run_login_provisioning_flow(
                         f"{metadata_prefix}_wait_total_ms": settled["wait_total_ms"],
                         f"{metadata_prefix}_final_screen_type": settled["final_screen_type"],
                     }
+                    if action_result.action == "tap_expected_account":
+                        post_continue_metadata.update(
+                            {
+                                "post_account_picker_observation_count": settled["observation_count"],
+                                "post_account_picker_screens": settled["screens"],
+                                "screen_after_account_picker_final": settled["final_screen_type"],
+                            }
+                        )
                 timings["post_continue_reobserve_wait_ms"] = settled["wait_total_ms"]
             else:
                 start = timer()
@@ -762,6 +827,24 @@ def run_login_provisioning_flow(
                         else f"{metadata_prefix}_final_screen_type"
                     )
                     post_continue_metadata[final_key] = _preparation_screen_label(signals)
+                    if action_result.action == "tap_expected_account":
+                        final_screen = _preparation_screen_label(signals)
+                        post_continue_metadata.update(
+                            {
+                                "post_account_picker_observation_count": 1,
+                                "post_account_picker_screens": [final_screen],
+                                "screen_after_account_picker_final": final_screen,
+                            }
+                        )
+        if action_result.action == "tap_expected_account" and "screen_after_account_picker_final" not in post_continue_metadata:
+            final_screen = _preparation_screen_label(signals)
+            post_continue_metadata.update(
+                {
+                    "post_account_picker_observation_count": 1,
+                    "post_account_picker_screens": [final_screen],
+                    "screen_after_account_picker_final": final_screen,
+                }
+            )
         post_action_lifecycle = _resolve_previous_account_lifecycle(
             suggested_username=signals.get("suggested_username"),
             screen_type=signals.get("screen_type"),
