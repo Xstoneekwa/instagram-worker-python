@@ -1,0 +1,220 @@
+from __future__ import annotations
+
+import argparse
+import json
+import tempfile
+import unittest
+import uuid
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
+
+import instagram_login_provisioner_cli as cli
+from instagram_credentials_runtime_access import SecretValue
+
+
+ACCOUNT_ID = "42c625c2-e761-4100-8a9d-7ae1373de97d"
+USERNAME = "cinema_catchup"
+FAKE_PASSWORD = "fake-password-for-unit-tests"
+SECRET_REF = "supabase_vault://11111111-2222-4333-8444-555555555555"
+LOGIN_FORM_XML = '<node text="Username, email or mobile number" /><node text="Password" /><node text="Log in" />'
+UNKNOWN_XML = '<node text="Instagram" />'
+
+
+class FakeDevice:
+    def __init__(self, hierarchy: str = UNKNOWN_XML) -> None:
+        self.hierarchy = hierarchy
+        self.app_start = Mock()
+        self.dump_calls = 0
+
+    def dump_hierarchy(self, compressed: bool = False) -> str:
+        self.dump_calls += 1
+        return self.hierarchy
+
+
+def _args(*items: str) -> argparse.Namespace:
+    return cli.build_parser().parse_args(
+        [
+            "--account-id",
+            ACCOUNT_ID,
+            "--expected-username",
+            USERNAME,
+            *items,
+        ]
+    )
+
+
+def _args_with_log(log_path: str, *items: str) -> argparse.Namespace:
+    return _args("--log-jsonl", log_path, *items)
+
+
+def _fake_result(**overrides):
+    base = {
+        "ok": False,
+        "completed": False,
+        "final_outcome": "unknown",
+        "final_login_status": "logged_out",
+        "reason": "unknown_login_screen",
+        "retry_count": 0,
+        "actions_taken": [],
+        "published": False,
+        "publish_reason": "disabled",
+        "timings": {"total_ms": 1},
+        "warnings": [],
+        "safe_metadata": {},
+    }
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+class InstagramLoginProvisionerCliTest(unittest.TestCase):
+    def test_no_submit_does_not_read_vault_when_login_form_is_observed(self) -> None:
+        device = FakeDevice(LOGIN_FORM_XML)
+        credentials_lookup = Mock(return_value={"unexpected": "should_not_be_used"})
+        secret_reader = Mock(side_effect=AssertionError("vault read should not happen"))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            code, summary = cli.run_cli_command(
+                _args_with_log(f"{tmp}/login.jsonl", "--observe-current-screen-only", "--no-submit", "--json"),
+                connect_func=lambda _serial: device,
+                credentials_lookup=credentials_lookup,
+                secret_reader=secret_reader,
+            )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(summary["final_outcome"], "dry_run")
+        self.assertFalse(summary["submit_executed"])
+        credentials_lookup.assert_not_called()
+        secret_reader.assert_not_called()
+
+    def test_submit_refuses_unknown_screen_without_loading_credentials(self) -> None:
+        device = FakeDevice(UNKNOWN_XML)
+        credentials_lookup = Mock(return_value={"username": USERNAME, "password": SecretValue(FAKE_PASSWORD)})
+        secret_reader = Mock(side_effect=AssertionError("vault read should not happen"))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            code, summary = cli.run_cli_command(
+                _args_with_log(f"{tmp}/login.jsonl", "--observe-current-screen-only", "--json"),
+                connect_func=lambda _serial: device,
+                credentials_lookup=credentials_lookup,
+                secret_reader=secret_reader,
+            )
+
+        self.assertEqual(code, 1)
+        self.assertEqual(summary["final_outcome"], "unknown")
+        self.assertFalse(summary["submit_executed"])
+        self.assertEqual(summary["screen_before_submit"], "")
+        credentials_lookup.assert_not_called()
+        secret_reader.assert_not_called()
+
+    def test_submit_uses_app_start_by_default(self) -> None:
+        device = FakeDevice()
+        captured: dict = {}
+
+        def fake_flow(d, **kwargs):
+            captured.update(kwargs)
+            return _fake_result(
+                safe_metadata={
+                    "app_start_attempted": True,
+                    "app_start_ok": True,
+                    "screen_after_app_start": "unknown",
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _code, summary = cli.run_cli_command(
+                _args_with_log(f"{tmp}/login.jsonl", "--json"),
+                connect_func=lambda _serial: device,
+                run_flow_func=fake_flow,
+            )
+
+        self.assertTrue(captured["start_app_before_probe"])
+        self.assertFalse(captured["observe_current_screen_only"])
+        self.assertEqual(captured["package_name"], "com.instagram.android")
+        self.assertTrue(summary["app_start_attempted"])
+
+    def test_no_publish_is_default(self) -> None:
+        captured: dict = {}
+
+        def fake_flow(_d, **kwargs):
+            captured.update(kwargs)
+            return _fake_result()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _code, summary = cli.run_cli_command(
+                _args_with_log(f"{tmp}/login.jsonl", "--json"),
+                connect_func=lambda _serial: FakeDevice(),
+                run_flow_func=fake_flow,
+            )
+
+        self.assertFalse(captured["publish_enabled"])
+        self.assertIsNone(captured["publisher"])
+        self.assertFalse(summary["would_publish"])
+        self.assertFalse(summary["published"])
+
+    def test_json_output_is_safe_without_secret_ref_token_or_xml(self) -> None:
+        result = _fake_result(
+            safe_metadata={
+                "app_start_attempted": True,
+                "app_start_ok": True,
+                "screen_after_app_start": "login_form_empty",
+                "secret_ref": SECRET_REF,
+                "token": "Bearer service_role token",
+                "xml": LOGIN_FORM_XML,
+                "password_result": {
+                    "executed": True,
+                    "submit_tapped": True,
+                    "input_method_used": "adb_keyboard_b64",
+                    "password_field_non_empty_confirmed": True,
+                },
+            }
+        )
+
+        summary = cli._safe_summary_from_result(result, args=_args("--json"), run_id=str(uuid.uuid4()))
+        rendered = cli._render_safe_json(summary)
+
+        self.assertNotIn(FAKE_PASSWORD, rendered)
+        self.assertNotIn(SECRET_REF, rendered)
+        self.assertNotIn("11111111-2222-4333-8444-555555555555", rendered)
+        self.assertNotIn("service_role", rendered)
+        self.assertNotIn("Bearer", rendered)
+        self.assertNotIn("<node", rendered)
+        payload = json.loads(rendered)
+        self.assertEqual(payload["input_method_used"], "adb_keyboard_b64")
+        self.assertTrue(payload["password_field_non_empty_confirmed"])
+
+    def test_cli_generates_run_id_and_writes_safe_jsonl(self) -> None:
+        run_id = str(uuid.uuid4())
+
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "login.jsonl"
+
+            code, summary = cli.run_cli_command(
+                _args_with_log(str(log_path), "--run-id", run_id, "--json"),
+                connect_func=lambda _serial: FakeDevice(),
+                run_flow_func=lambda _d, **_kwargs: _fake_result(
+                    final_outcome="logged_out",
+                    reason="session_expired",
+                    safe_metadata={
+                        "app_start_attempted": True,
+                        "app_start_ok": True,
+                        "screen_after_app_start": "continue_as_candidate",
+                    },
+                ),
+            )
+
+            self.assertEqual(code, 1)
+            self.assertEqual(summary["run_id"], run_id)
+            lines = log_path.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(lines), 1)
+            payload = json.loads(lines[0])
+            self.assertEqual(payload["run_id"], run_id)
+            self.assertEqual(payload["final_outcome"], "logged_out")
+            self.assertEqual(payload["reason"], "session_expired")
+            self.assertFalse(payload["would_publish"])
+            self.assertNotIn(SECRET_REF, lines[0])
+            self.assertNotIn("<node", lines[0])
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -3808,6 +3808,118 @@ Checkpoint :
 - SHA base `0af5258` (2E-5P-4) + docs smoke 2E-5P-5;
 - tag `checkpoint-entry2e5p5-password-only-secure-login-smoke-20260526`.
 
+CLI reproductible 2E-5P-5 :
+
+```bash
+python3 instagram_login_provisioner_cli.py \
+  --device-serial emulator-5554 \
+  --expected-username cinema_catchup \
+  --account-id "$INSTAGRAM_ACCOUNT_ID" \
+  --package-name com.instagram.android \
+  --start-app-before-probe \
+  --no-publish \
+  --json
+```
+
+Commande logs apres run :
+
+```bash
+RUN_ID="<run_id_from_cli_json>" python3 - <<'PY'
+import json
+import os
+
+run_id = os.environ["RUN_ID"]
+path = "logs/instagram_login_provisioner.jsonl"
+allowed = {
+    "run_id",
+    "expected_username",
+    "device_serial",
+    "flow_name",
+    "app_start_ok",
+    "screen_after_app_start",
+    "preparation_flow_used",
+    "screen_before_submit",
+    "input_method_used",
+    "password_field_non_empty_confirmed",
+    "submit_executed",
+    "final_outcome",
+    "reason",
+    "would_publish",
+    "timings",
+    "warnings",
+    "no_leak_summary",
+}
+
+with open(path, "r", encoding="utf-8") as handle:
+    for raw in handle:
+        if f'"run_id":"{run_id}"' not in raw:
+            continue
+        payload = json.loads(raw)
+        print(json.dumps({k: payload.get(k) for k in sorted(allowed)}, sort_keys=True))
+PY
+```
+
+Fallback diagnostic par username (dernieres lignes safe du JSONL dedie) :
+
+```bash
+python3 - <<'PY'
+import json
+
+path = "logs/instagram_login_provisioner.jsonl"
+rows = []
+with open(path, "r", encoding="utf-8") as handle:
+    for raw in handle:
+        payload = json.loads(raw)
+        if payload.get("expected_username") == "cinema_catchup":
+            rows.append(payload)
+for payload in rows[-20:]:
+    print(json.dumps({
+        "run_id": payload.get("run_id"),
+        "final_outcome": payload.get("final_outcome"),
+        "reason": payload.get("reason"),
+        "screen_before_submit": payload.get("screen_before_submit"),
+        "submit_executed": payload.get("submit_executed"),
+        "would_publish": payload.get("would_publish"),
+        "timings": payload.get("timings"),
+    }, sort_keys=True))
+PY
+```
+
+Notes CLI :
+
+- `--account-id` est requis pour charger les credentials actifs via le runtime
+  access + Supabase Vault; la valeur peut venir d'une variable shell locale et
+  ne doit pas etre imprimee dans les logs applicatifs;
+- aucun password ni `secret_ref` n'est accepte en argument;
+- `--start-app-before-probe` est le comportement par defaut; utiliser
+  `--observe-current-screen-only` uniquement en diagnostic;
+- `--dry-run` ou `--no-submit` route/preparer sans charger Vault et sans submit;
+- la sortie JSON est safe : `app_start_attempted`, `app_start_ok`,
+  `screen_after_app_start`, `preparation_flow_used`, `screen_before_submit`,
+  `input_method_used`, `password_field_non_empty_confirmed`,
+  `submit_executed`, `final_outcome`, `reason`, `would_publish=false`,
+  timings, warnings et resume no-leak;
+- le CLI genere un `run_id` safe et append une ligne JSONL safe dans
+  `logs/instagram_login_provisioner.jsonl`;
+- l'orchestrateur doit traiter `unknown` juste apres `app_start` comme un etat
+  potentiellement transitoire : le flow reel fait une preparation/reobserve
+  bornee avant de conclure `screen_preparation_failed`.
+
+Standard CLI provisioning/login :
+
+- tout flow provisioning/login doit avoir une commande terminal reproductible
+  ou un CLI dedie;
+- options minimales : `--device-serial`, `--expected-username`,
+  `--account-id` quand des credentials compte sont necessaires,
+  `--package-name`, `--start-app-before-probe` par defaut,
+  `--observe-current-screen-only` reserve diagnostic, `--dry-run` /
+  `--no-submit` quand applicable, `--no-publish` par defaut et `--json`;
+- sortie obligatoire : JSON safe, timings, warnings, no-leak summary,
+  `would_publish=false` par defaut;
+- forbidden scope : pas de hook runner, sender, follow/unfollow/outreach
+  business, dashboard, migration ou status write Supabase sauf demande
+  explicite.
+
 ## Entry 2E-5J-2B-1 Previous Account Lifecycle Gate Source
 
 Entry 2E-5J-2B-1 audite la source fiable a utiliser avant d'autoriser

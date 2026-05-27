@@ -414,6 +414,23 @@ Post-submit policy future :
   validees, session Instagram a traiter separement. `would_publish=false`.
   No-leak confirme. Tag
   `checkpoint-entry2e5p5-password-only-secure-login-smoke-20260526`.
+  CLI reproductible ajoute : `instagram_login_provisioner_cli.py` lance un flow
+  isole avec `--device-serial`, `--expected-username`, `--account-id`,
+  `--package-name`, app_start par defaut, `--no-publish` par defaut et JSON
+  safe. Le CLI genere un `run_id` safe et append un log JSONL safe dans
+  `logs/instagram_login_provisioner.jsonl`; les commandes post-run doivent
+  filtrer par `run_id` et ne re-sortir que les champs autorises.
+  `--dry-run` / `--no-submit` ne charge pas Vault et ne submit pas.
+  `--observe-current-screen-only` est reserve diagnostic.
+- Standard futur provisioning/login : chaque flow doit fournir une commande
+  terminal reproductible ou un CLI dedie. Les options minimales sont
+  `--device-serial`, `--expected-username`, `--account-id` si credentials
+  requis, `--package-name`, app_start par defaut, `--observe-current-screen-only`
+  diagnostic, `--dry-run` / `--no-submit` quand applicable, `--no-publish` par
+  defaut et sortie JSON safe avec timings, no-leak et forbidden scope explicite.
+  Les CLIs ne doivent pas accepter password/`secret_ref` en argument, ne doivent
+  pas publier ni ecrire status Supabase par defaut, et ne doivent pas hooker
+  runner/sender/follow/outreach business.
 - Entry 2E-5P-3 Password input injection : cause racine identifiee. En mode
   `continue_password_only`, l'ancien target `text="Password"` pointait vers un
   label `android.view.View`, pas vers le vrai `android.widget.EditText`. Le
