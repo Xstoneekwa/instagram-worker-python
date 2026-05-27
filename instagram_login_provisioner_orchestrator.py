@@ -621,6 +621,18 @@ def run_login_provisioning_flow(
                 "account_picker_selection_executed": False,
             }
         )
+    if routing_signals.get("screen_type") == "continue_password_only":
+        displayed_username = _safe_public_text(routing_signals.get("suggested_username"))
+        route_metadata.update(
+            {
+                "displayed_username": displayed_username,
+                "password_only_username": displayed_username,
+                "username_match": bool(
+                    displayed_username
+                    and displayed_username.strip().lstrip("@").lower() == safe_expected_username.strip().lstrip("@").lower()
+                ),
+            }
+        )
     if route.decision == "select_expected_account_from_picker":
         route_metadata["selected_account_username"] = _safe_public_text(
             getattr(route, "target_username", "") or safe_expected_username
@@ -2124,6 +2136,8 @@ def _pre_submit_observation_metadata(signals: dict[str, Any]) -> dict[str, Any]:
     return {
         "screen_type": _safe_screen_type_value(screen_type),
         "prefilled_username": _safe_public_text(signals.get("prefilled_username")),
+        "displayed_username": _safe_public_text(signals.get("suggested_username")) if screen_type == "continue_password_only" else "",
+        "password_only_username": _safe_public_text(signals.get("suggested_username")) if screen_type == "continue_password_only" else "",
         "username_prefilled_present": bool(signals.get("username_prefilled_present")),
         "username_field_present": bool(signals.get("username_field_present") or signals.get("has_username_field")),
         "username_field_editable_present": bool(

@@ -532,6 +532,16 @@ Post-submit policy future :
   ou `username_input_assumed` apres `set_text` reussi, et reserve
   `username_still_prefilled_after_input` au Cas A avec un vrai ancien username.
   Metadata safe : `username_placeholder_ignored`.
+- Entry 2E-5P-16 Continue-as expected login flow : le CLI generique supporte Cas
+  D sans flag special. Le demarrage stabilise sur `continue_as_candidate` avec
+  `suggested_username=expected_username`, tape `Continue`, observe
+  `continue_password_only`, verifie le username affiche, puis revele le password
+  via `SecretValue`. Le flow ne saisit jamais le username
+  (`username_input_result=not_required`), injecte seulement le password, submit,
+  post-submit settling et dismiss Google Password Manager si present sans cliquer
+  `Continue`. Metadata safe : `displayed_username`, `password_only_username`,
+  `username_match`. Un demarrage direct sur `continue_password_only` reste un cas
+  futur separe. Smokes toujours `--no-publish`.
 - Entry 2E-5P-11 Login form username prefilled : apres `Use another profile`,
   Instagram peut afficher un formulaire login avec l'ancien username deja rempli.
   Nouveau `screen_type=login_form_prefilled_username`. Si le champ username est

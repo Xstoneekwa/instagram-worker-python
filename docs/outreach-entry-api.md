@@ -4265,6 +4265,57 @@ Metadata JSONL safe attendue :
 Le smoke Cas C reste local terminal, sans publish, sans dashboard action et sans
 runner/social flow.
 
+## Entry 2E-5P-16 Continue-As Expected Login Flow
+
+Entry 2E-5P-16 valide le Cas D reel : Instagram ouvre sur
+`continue_as_candidate` avec `suggested_username=expected_username`, puis le
+flow tape `Continue`, observe `continue_password_only`, saisit uniquement le
+password et atteint `connected_home`.
+
+Le CLI generique supporte ce chemin sans flag special :
+
+- `screen_type=continue_as_candidate` au demarrage stabilise ;
+- `router_decision=continue_expected_account` ;
+- `preparation_flow_used=continue_as_candidate` ;
+- tap `Continue`, puis settling vers `continue_password_only` ;
+- verification du username affiche avant tout acces credentials sur l'ecran
+  password-only ;
+- aucune saisie username (`username_input_result=not_required`) ;
+- revelation du password uniquement via `SecretValue` / Vault apres validation
+  de l'identite affichee ;
+- injection password par la strategie robuste existante ;
+- tap `Log in`, puis post-submit settling ;
+- dismiss Google Password Manager si present sans cliquer `Continue` ;
+- `would_publish=false` pendant le smoke `--no-publish`.
+
+Securite mismatch :
+
+- si le username affiche ne correspond pas a `expected_username` sur le
+  password-only, stop safe `continue_password_only_username_mismatch` ;
+- pas de reveal `SecretValue`, pas de saisie password, pas de submit ;
+- si le username affiche est absent ou illisible, meme garde : pas de password
+  tant que l'identite n'est pas confirmee.
+
+Metadata JSONL safe Cas D :
+
+- `displayed_username` ;
+- `password_only_username` ;
+- `username_match` ;
+- `username_input_result=not_required` ;
+- `username_replaced=false` ;
+- champs password/post-submit habituels (`password_field_target_kind`,
+  `password_input_method`, `password_input_result`, `password_confirm_method`,
+  `post_submit_screens`, `final_terminal_screen`, prompt Google Password
+  Manager).
+
+Le cas ou l'app demarre **directement** sur `continue_password_only` reste une
+couverture/futur smoke separe : il reutilise la meme garde `username_match`, mais
+ce n'est pas le scope du checkpoint 2E-5P-16.
+
+Un `logged_out` transitoire pendant le settling post-submit n'est pas terminal si
+les observations suivantes atteignent un etat clair comme
+`google_password_manager_save_prompt` puis `connected_home`.
+
 ## Entry 2E-5P-15B Login Form Empty Username Confirmation
 
 Entry 2E-5P-15B corrige la confirmation username sur `login_form_empty` direct.

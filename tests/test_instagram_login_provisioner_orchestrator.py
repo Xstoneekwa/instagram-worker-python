@@ -879,8 +879,97 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertEqual(result.final_outcome, "connected")
         self.assertEqual(result.final_login_status, "connected")
         self.assertIn("login_form_submit", result.actions_taken)
+        self.assertIn("tap_continue", result.actions_taken)
+        self.assertIn("route:continue_expected_account", result.actions_taken)
+        self.assertEqual(result.safe_metadata["post_continue_final_screen_type"], "continue_password_only")
+        self.assertEqual(result.safe_metadata["displayed_username"], "random_expected")
+        self.assertEqual(result.safe_metadata["password_only_username"], "random_expected")
+        self.assertEqual(result.safe_metadata["password_result"]["username_input_result"], "not_required")
         self.assertFalse(result.retry_attempted)
         self.assertIsNone(result.dashboard_action_type)
+
+    def test_direct_continue_password_only_connected_without_username_input(self) -> None:
+        device, selectors = configured_device(CONNECTED_XML)
+        secret = TrackingSecretValue(PASSWORD)
+
+        result = self.run_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username=USERNAME,
+            credentials_getter=Mock(return_value={"username": USERNAME, "password": secret}),
+            initial_signals={
+                "screen_type": "continue_password_only",
+                "suggested_username": USERNAME,
+                "has_password_field": True,
+                "has_login_button": True,
+                "has_username_field": False,
+                "ready_for_password_submit": True,
+            },
+        )
+
+        self.assertEqual(result.final_outcome, "connected")
+        self.assertEqual(result.safe_metadata["screen_type"], "continue_password_only")
+        self.assertEqual(result.safe_metadata["displayed_username"], USERNAME)
+        self.assertEqual(result.safe_metadata["password_only_username"], USERNAME)
+        self.assertTrue(result.safe_metadata["username_match"])
+        self.assertEqual(result.safe_metadata["router_decision"], "start_login_form_flow")
+        self.assertEqual(result.safe_metadata["password_result"]["username_input_result"], "not_required")
+        self.assertFalse(result.safe_metadata["password_result"]["username_replaced"])
+        self.assertEqual(selectors["username"].set_text_calls, [])
+        self.assertTrue(secret.revealed)
+        self.assertIn("login_form_submit", result.actions_taken)
+
+    def test_direct_continue_password_only_wrong_username_blocks_without_secret_reveal(self) -> None:
+        device, selectors = configured_device(CONNECTED_XML)
+        secret = TrackingSecretValue(PASSWORD)
+        getter = Mock(return_value={"username": USERNAME, "password": secret})
+
+        result = self.run_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username=USERNAME,
+            credentials_getter=getter,
+            initial_signals={
+                "screen_type": "continue_password_only",
+                "suggested_username": "i_m_your_traker",
+                "has_password_field": True,
+                "has_login_button": True,
+                "has_username_field": False,
+            },
+        )
+
+        self.assertEqual(result.final_outcome, "mismatch")
+        self.assertEqual(result.reason, "continue_password_only_username_mismatch")
+        self.assertFalse(result.safe_metadata["username_match"])
+        self.assertEqual(result.safe_metadata["displayed_username"], "i_m_your_traker")
+        getter.assert_not_called()
+        self.assertFalse(secret.revealed)
+        self.assertEqual(selectors["password"].set_text_calls, [])
+        self.assertNotIn("login_form_submit", result.actions_taken)
+
+    def test_direct_continue_password_only_missing_username_blocks_without_secret_reveal(self) -> None:
+        device, selectors = configured_device(CONNECTED_XML)
+        getter = Mock(return_value=credentials())
+
+        result = self.run_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username=USERNAME,
+            credentials_getter=getter,
+            initial_signals={
+                "screen_type": "continue_password_only",
+                "suggested_username": "",
+                "has_password_field": True,
+                "has_login_button": True,
+                "has_username_field": False,
+            },
+        )
+
+        self.assertEqual(result.reason, "continue_password_only_username_mismatch")
+        self.assertFalse(result.safe_metadata["username_match"])
+        getter.assert_not_called()
+        self.assertEqual(selectors["password"].set_text_calls, [])
+        self.assertNotIn("login_form_submit", result.actions_taken)
 
     def test_continue_expected_password_only_needs_2fa(self) -> None:
         result = self._run_continue_password_only(NEEDS_2FA_XML)

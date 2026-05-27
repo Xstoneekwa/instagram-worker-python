@@ -278,6 +278,9 @@ class InstagramLoginProvisionerCliTest(unittest.TestCase):
                 "screen_after_app_start": "login_form_empty",
                 "screen_type": "login_form_prefilled_username",
                 "prefilled_username": "i_m_your_traker",
+                "displayed_username": "cinema_catchup",
+                "password_only_username": "cinema_catchup",
+                "username_match": True,
                 "secret_ref": SECRET_REF,
                 "token": "Be" + "arer " + "service" + "_role token",
                 "xml": LOGIN_FORM_XML,
@@ -330,6 +333,9 @@ class InstagramLoginProvisionerCliTest(unittest.TestCase):
         payload = json.loads(rendered)
         self.assertEqual(payload["screen_type"], "login_form_prefilled_username")
         self.assertEqual(payload["prefilled_username"], "i_m_your_traker")
+        self.assertEqual(payload["displayed_username"], "cinema_catchup")
+        self.assertEqual(payload["password_only_username"], "cinema_catchup")
+        self.assertTrue(payload["username_match"])
         self.assertTrue(payload["username_replaced"])
         self.assertEqual(payload["username_input_confirmed"], "true")
         self.assertEqual(payload["username_input_result"], "username_input_confirmed")
