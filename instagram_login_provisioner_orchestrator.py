@@ -21,7 +21,7 @@ from instagram_credentials_runtime_access import (
 )
 from instagram_login_action_executor import execute_login_screen_decision
 from instagram_login_password_form_executor import execute_login_form_credentials
-from instagram_login_screen_router import route_login_screen
+from instagram_login_screen_router import normalize_instagram_username, route_login_screen
 from instagram_login_status_classifier import (
     LoginProbeOutcome,
     classify_login_probe_outcome,
@@ -65,6 +65,8 @@ NO_RETRY_FAILURES = {
     "wrong_account",
     "block_wrong_suggested_account",
     "save_password_prompt_blocking",
+    "username_prefilled_not_editable",
+    "username_input_failed",
 }
 MAX_RETRY_ATTEMPTS = 1
 POST_CONTINUE_REOBSERVE_WAIT_MS = 1500
@@ -87,11 +89,21 @@ Sleeper = Callable[[float], None]
 REUSABLE_PREVIOUS_ACCOUNT_LIFECYCLES = {"canceled", "stopped", "archived"}
 POST_LOGOUT_KNOWN_SCREENS = {
     "login_form_empty",
+    "login_form_prefilled_username",
     "continue_as_candidate",
     "account_picker",
     "continue_password_only",
     "connected",
 }
+ROUTING_SCREEN_TYPES = {
+    "continue_as_candidate",
+    "account_picker",
+    "login_form_empty",
+    "login_form_prefilled_username",
+    "continue_password_only",
+    "active_account_profile",
+}
+DEFAULT_USE_ANOTHER_PROFILE_INTERVAL_MS = 1000
 
 
 @dataclass(frozen=True)
@@ -163,6 +175,7 @@ def run_login_provisioning_flow(
     bounded_post_start_wait_ms = _clamp_post_start_wait_ms(post_start_wait_ms)
     app_start_attempted = bool(start_app_before_probe) and not bool(observe_current_screen_only)
     screen_preparation_metadata = {
+        "expected_username": safe_expected_username,
         "observe_current_screen_only": bool(observe_current_screen_only),
         "app_start_attempted": app_start_attempted,
         "app_start_ok": None,
@@ -566,25 +579,39 @@ def run_login_provisioning_flow(
                     signals.get("screen_type") or "unknown"
                 )
 
+    routing_signals = _routing_signals(
+        signals,
+        screen_preparation_metadata,
+        previous_account_lifecycle=None,
+    )
     previous_account_lifecycle = _resolve_previous_account_lifecycle(
-        suggested_username=signals.get("suggested_username"),
-        screen_type=signals.get("screen_type"),
+        suggested_username=routing_signals.get("suggested_username"),
+        screen_type=routing_signals.get("screen_type"),
         account_id=safe_account_id,
         expected_username=safe_expected_username,
         previous_account_lifecycle_lookup=previous_account_lifecycle_lookup,
         legacy_lifecycle_lookup=lifecycle_lookup,
         legacy_clone_reuse_allowed=clone_reuse_allowed,
     )
-    route = route_login_screen(
+    routing_signals = _routing_signals(
+        signals,
+        screen_preparation_metadata,
+        previous_account_lifecycle=previous_account_lifecycle,
+    )
+    route = _route_provisioning_screen(
         expected_username=safe_expected_username,
-        suggested_username=str(signals.get("suggested_username") or ""),
-        screen_type=str(signals.get("screen_type") or "unknown"),
-        available_usernames=list(signals.get("available_usernames") or []),
-        account_lifecycle_lookup=_router_lifecycle_lookup(previous_account_lifecycle),
-        clone_reuse_allowed=bool(previous_account_lifecycle.get("clone_reuse_allowed")),
+        routing_signals=routing_signals,
+        previous_account_lifecycle=previous_account_lifecycle,
         account_id=safe_account_id,
     )
     actions_taken.append(f"route:{route.decision}")
+    route_metadata = {
+        "router_decision": route.decision,
+        "routing_screen_type": routing_signals.get("screen_type"),
+        "screen_type": routing_signals.get("screen_type"),
+        "suggested_username": _safe_public_text(routing_signals.get("suggested_username")),
+    }
+    old_logged_in_metadata.update(route_metadata)
 
     if dry_run:
         return _dry_run_result(
@@ -636,7 +663,11 @@ def run_login_provisioning_flow(
             actions_taken=actions_taken,
             timings=timings,
             warnings=warnings,
-            extra_metadata={**_flow_metadata(previous_account_lifecycle), **old_logged_in_metadata},
+            extra_metadata={
+                **_flow_metadata(previous_account_lifecycle),
+                **old_logged_in_metadata,
+                **route_metadata,
+            },
             total_start=total_start,
             timer=timer,
             publisher=publisher,
@@ -672,14 +703,23 @@ def run_login_provisioning_flow(
             )
         signals = dict(action_result.post_action_signals or {})
         if not _signals_confirm_login_form(signals):
-            if _should_reobserve_post_action_transition(action_result.action, signals):
-                metadata_prefix = "post_continue" if action_result.action == "tap_continue" else "post_account_picker"
+            metadata_prefix = _post_action_metadata_prefix(action_result.action)
+            should_settle = bool(metadata_prefix) and (
+                action_result.action == "tap_use_another_profile"
+                or _should_reobserve_post_action_transition(action_result.action, signals)
+            )
+            if should_settle:
                 initial_screen = (
                     "transition_loading"
                     if _signals_show_loading_transition(signals)
                     else "transition_unknown"
                 )
-                warnings.append(f"{metadata_prefix}_reobserve_after_loading")
+                warnings.append(f"{metadata_prefix}_reobserve_after_transition")
+                interval_ms = (
+                    DEFAULT_USE_ANOTHER_PROFILE_INTERVAL_MS
+                    if action_result.action == "tap_use_another_profile"
+                    else DEFAULT_STARTUP_INTERVAL_MS
+                )
                 settled = _observe_preparation_screen_settled(
                     d,
                     expected_username=safe_expected_username,
@@ -687,28 +727,41 @@ def run_login_provisioning_flow(
                     timer=timer,
                     sleeper=sleeper,
                     initial_screen=initial_screen,
-                    interval_ms=DEFAULT_STARTUP_INTERVAL_MS,
+                    interval_ms=interval_ms,
                     max_observations=DEFAULT_STARTUP_OBSERVATIONS,
                 )
                 signals = dict(settled.get("signals") or {})
-                post_continue_metadata = {
-                    f"{metadata_prefix}_initial_screen": initial_screen,
-                    f"{metadata_prefix}_reobserve": True,
-                    f"{metadata_prefix}_reobserve_count": settled["observation_count"],
-                    f"{metadata_prefix}_screens": settled["screens"],
-                    f"{metadata_prefix}_wait_total_ms": settled["wait_total_ms"],
-                    f"{metadata_prefix}_final_screen_type": settled["final_screen_type"],
-                }
+                if action_result.action == "tap_use_another_profile":
+                    post_continue_metadata = {
+                        "post_use_another_profile_initial_screen": initial_screen,
+                        "post_use_another_profile_reobserve": True,
+                        "post_use_another_profile_observation_count": settled["observation_count"],
+                        "post_use_another_profile_screens": settled["screens"],
+                        "post_use_another_profile_wait_total_ms": settled["wait_total_ms"],
+                        "screen_after_use_another_profile_final": settled["final_screen_type"],
+                    }
+                else:
+                    post_continue_metadata = {
+                        f"{metadata_prefix}_initial_screen": initial_screen,
+                        f"{metadata_prefix}_reobserve": True,
+                        f"{metadata_prefix}_reobserve_count": settled["observation_count"],
+                        f"{metadata_prefix}_screens": settled["screens"],
+                        f"{metadata_prefix}_wait_total_ms": settled["wait_total_ms"],
+                        f"{metadata_prefix}_final_screen_type": settled["final_screen_type"],
+                    }
                 timings["post_continue_reobserve_wait_ms"] = settled["wait_total_ms"]
             else:
                 start = timer()
                 signals = _observe_login_signals(d, expected_username=safe_expected_username)
                 timings["observe_ms"] += _elapsed_ms(start, timer())
-                if post_continue_metadata:
-                    metadata_prefix = "post_continue" if action_result.action == "tap_continue" else "post_account_picker"
-                    post_continue_metadata[f"{metadata_prefix}_final_screen_type"] = _safe_screen_type_value(
-                        signals.get("screen_type") or "unknown"
+                metadata_prefix = _post_action_metadata_prefix(action_result.action)
+                if metadata_prefix:
+                    final_key = (
+                        "screen_after_use_another_profile_final"
+                        if action_result.action == "tap_use_another_profile"
+                        else f"{metadata_prefix}_final_screen_type"
                     )
+                    post_continue_metadata[final_key] = _preparation_screen_label(signals)
         post_action_lifecycle = _resolve_previous_account_lifecycle(
             suggested_username=signals.get("suggested_username"),
             screen_type=signals.get("screen_type"),
@@ -718,20 +771,57 @@ def run_login_provisioning_flow(
             legacy_lifecycle_lookup=lifecycle_lookup,
             legacy_clone_reuse_allowed=clone_reuse_allowed,
         )
-        if post_action_lifecycle.get("username"):
+        if _previous_account_lifecycle_has_gate_metadata(post_action_lifecycle):
             previous_account_lifecycle = post_action_lifecycle
-        route = route_login_screen(
+        post_routing_signals = _routing_signals(
+            signals,
+            old_logged_in_metadata,
+            previous_account_lifecycle=previous_account_lifecycle,
+        )
+        route = _route_provisioning_screen(
             expected_username=safe_expected_username,
-            suggested_username=str(signals.get("suggested_username") or ""),
-            screen_type=str(signals.get("screen_type") or "unknown"),
-            available_usernames=list(signals.get("available_usernames") or []),
-            account_lifecycle_lookup=_router_lifecycle_lookup(post_action_lifecycle),
-            clone_reuse_allowed=bool(post_action_lifecycle.get("clone_reuse_allowed")),
+            routing_signals=post_routing_signals,
+            previous_account_lifecycle=previous_account_lifecycle,
             account_id=safe_account_id,
         )
         actions_taken.append(f"route:{route.decision}")
+        route_metadata = {
+            "router_decision": route.decision,
+            "routing_screen_type": post_routing_signals.get("screen_type"),
+            "screen_type": post_routing_signals.get("screen_type"),
+            "suggested_username": _safe_public_text(post_routing_signals.get("suggested_username")),
+        }
+        old_logged_in_metadata.update(route_metadata)
 
-    if route.decision != "start_login_form_flow" and not _signals_confirm_login_form(signals):
+    if route.decision == "username_prefilled_not_editable":
+        return _finalize(
+            ok=False,
+            completed=True,
+            final_outcome="username_prefilled_not_editable",
+            reason="username_prefilled_not_editable",
+            failure_reason="username_prefilled_not_editable",
+            final_login_status="logged_out",
+            final_provisioning_status="login_pending",
+            final_onboarding_status="credentials_required",
+            should_publish_status=False,
+            account_id=safe_account_id,
+            expected_username=safe_expected_username,
+            actions_taken=actions_taken,
+            timings=timings,
+            warnings=warnings,
+            extra_metadata={
+                **_flow_metadata(previous_account_lifecycle),
+                **old_logged_in_metadata,
+                **post_continue_metadata,
+                **_pre_submit_observation_metadata(signals),
+            },
+            total_start=total_start,
+            timer=timer,
+            publisher=publisher,
+            publish_enabled=publish_enabled,
+        )
+
+    if not _route_starts_login_form_flow(route.decision) and not _signals_confirm_login_form(signals):
         post_action_outcome = _post_action_outcome_from_signals(signals)
         if post_action_outcome:
             classification = classify_login_probe_outcome(post_action_outcome)
@@ -868,6 +958,7 @@ def run_login_provisioning_flow(
                 **_flow_metadata(previous_account_lifecycle),
                 **old_logged_in_metadata,
                 **post_continue_metadata,
+                **_pre_submit_observation_metadata(signals),
                 **password_result_metadata,
                 "password_submit_result": "blocked_secret_payload_shape",
             },
@@ -899,6 +990,38 @@ def run_login_provisioning_flow(
                 **_flow_metadata(previous_account_lifecycle),
                 **old_logged_in_metadata,
                 **post_continue_metadata,
+                **_pre_submit_observation_metadata(signals),
+                **password_result_metadata,
+            },
+            total_start=total_start,
+            timer=timer,
+            publisher=publisher,
+            publish_enabled=publish_enabled,
+        )
+
+    if outcome in {"username_input_failed", "username_prefilled_not_editable"}:
+        return _finalize(
+            ok=False,
+            completed=True,
+            final_outcome=outcome,
+            reason=getattr(password_result, "failure_reason", None) or outcome,
+            failure_reason=outcome,
+            final_login_status="logged_out",
+            final_provisioning_status="login_pending",
+            final_onboarding_status="credentials_required",
+            retry_attempted=retry_attempted,
+            retry_count=retry_count,
+            should_publish_status=False,
+            account_id=safe_account_id,
+            expected_username=safe_expected_username,
+            actions_taken=actions_taken,
+            timings=_merge_timings(timings, password_result.timings),
+            warnings=[*warnings, *password_result.warnings],
+            extra_metadata={
+                **_flow_metadata(previous_account_lifecycle),
+                **old_logged_in_metadata,
+                **post_continue_metadata,
+                **_pre_submit_observation_metadata(signals),
                 **password_result_metadata,
             },
             total_start=total_start,
@@ -930,6 +1053,7 @@ def run_login_provisioning_flow(
                 **_flow_metadata(previous_account_lifecycle),
                 **old_logged_in_metadata,
                 **post_continue_metadata,
+                **_pre_submit_observation_metadata(signals),
                 **password_result_metadata,
             },
             total_start=total_start,
@@ -968,6 +1092,7 @@ def run_login_provisioning_flow(
             **_flow_metadata(previous_account_lifecycle),
             **old_logged_in_metadata,
             **post_continue_metadata,
+            **_pre_submit_observation_metadata(signals),
             **password_result_metadata,
         },
         total_start=total_start,
@@ -1651,7 +1776,7 @@ def _observe_preparation_screen_settled(
         start = timer()
         last_signals = _observe_login_signals(d, expected_username=expected_username)
         timings["observe_ms"] += _elapsed_ms(start, timer())
-        screen_type = _screen_after_app_start(last_signals)
+        screen_type = _preparation_screen_label(last_signals)
         screens.append(screen_type)
         if _startup_screen_is_exploitable(last_signals):
             break
@@ -1672,6 +1797,7 @@ def _startup_screen_is_exploitable(signals: dict[str, Any]) -> bool:
         "continue_as_candidate",
         "account_picker",
         "login_form_empty",
+        "login_form_prefilled_username",
         "continue_password_only",
         "active_account_home",
         "active_account_profile",
@@ -1724,6 +1850,132 @@ def _clamp_count(value: Any, maximum: int) -> int:
     return min(maximum, max(1, parsed))
 
 
+def _routing_signals(
+    signals: dict[str, Any],
+    screen_preparation_metadata: dict[str, Any],
+    *,
+    previous_account_lifecycle: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    routing = dict(signals)
+    routing["screen_type"] = _routing_screen_type(
+        signals,
+        screen_preparation_metadata,
+        previous_account_lifecycle=previous_account_lifecycle,
+    )
+    suggested_username = _safe_public_text(signals.get("suggested_username"))
+    if not suggested_username and previous_account_lifecycle:
+        suggested_username = _safe_public_text(previous_account_lifecycle.get("username"))
+    if suggested_username:
+        routing["suggested_username"] = suggested_username
+    return routing
+
+
+def _routing_screen_type(
+    signals: dict[str, Any],
+    screen_preparation_metadata: dict[str, Any],
+    *,
+    previous_account_lifecycle: dict[str, Any] | None = None,
+) -> str:
+    screen_type = str(signals.get("screen_type") or "unknown").strip() or "unknown"
+    if screen_type in ROUTING_SCREEN_TYPES:
+        return _safe_screen_type_value(screen_type)
+
+    for key in ("startup_final_screen_type", "screen_after_app_start_final", "screen_after_app_start"):
+        startup_final = str(screen_preparation_metadata.get(key) or "").strip()
+        if startup_final in ROUTING_SCREEN_TYPES:
+            return _safe_screen_type_value(startup_final)
+
+    if (
+        signals.get("has_continue_button")
+        and signals.get("has_use_another_profile")
+        and signals.get("suggested_username")
+    ):
+        return "continue_as_candidate"
+
+    if _cas_a_reuse_route_allowed(
+        expected_username=str(screen_preparation_metadata.get("expected_username") or ""),
+        suggested_username=str(signals.get("suggested_username") or ""),
+        previous_account_lifecycle=previous_account_lifecycle or {},
+    ):
+        return "continue_as_candidate"
+
+    return _safe_screen_type_value(screen_type)
+
+
+def _cas_a_reuse_route_allowed(
+    *,
+    expected_username: str,
+    suggested_username: str,
+    previous_account_lifecycle: dict[str, Any],
+) -> bool:
+    normalized_expected = normalize_instagram_username(expected_username)
+    normalized_suggested = normalize_instagram_username(suggested_username)
+    if not normalized_suggested or normalized_suggested == normalized_expected:
+        return False
+    lifecycle_username = normalize_instagram_username(previous_account_lifecycle.get("username"))
+    if lifecycle_username and lifecycle_username != normalized_suggested:
+        return False
+    lifecycle_status = str(previous_account_lifecycle.get("lifecycle_status") or "unknown").strip().lower()
+    if lifecycle_status not in REUSABLE_PREVIOUS_ACCOUNT_LIFECYCLES:
+        return False
+    return bool(previous_account_lifecycle.get("clone_reuse_allowed"))
+
+
+def _route_provisioning_screen(
+    *,
+    expected_username: str,
+    routing_signals: dict[str, Any],
+    previous_account_lifecycle: dict[str, Any],
+    account_id: str,
+) -> Any:
+    screen_type = str(routing_signals.get("screen_type") or "unknown")
+    suggested_username = str(routing_signals.get("suggested_username") or "")
+    clone_reuse_allowed = bool(previous_account_lifecycle.get("clone_reuse_allowed"))
+    route = route_login_screen(
+        expected_username=expected_username,
+        suggested_username=suggested_username,
+        screen_type=screen_type,
+        available_usernames=list(routing_signals.get("available_usernames") or []),
+        account_lifecycle_lookup=_router_lifecycle_lookup(previous_account_lifecycle),
+        clone_reuse_allowed=clone_reuse_allowed,
+        account_id=account_id,
+    )
+    if route.decision != "unknown_no_action":
+        return route
+    if not _cas_a_reuse_route_allowed(
+        expected_username=expected_username,
+        suggested_username=suggested_username,
+        previous_account_lifecycle=previous_account_lifecycle,
+    ):
+        return route
+    return route_login_screen(
+        expected_username=expected_username,
+        suggested_username=suggested_username,
+        screen_type="continue_as_candidate",
+        available_usernames=list(routing_signals.get("available_usernames") or []),
+        account_lifecycle_lookup=_router_lifecycle_lookup(previous_account_lifecycle),
+        clone_reuse_allowed=clone_reuse_allowed,
+        account_id=account_id,
+    )
+
+
+def _preparation_screen_label(signals: dict[str, Any]) -> str:
+    screen_type = str(signals.get("screen_type") or "unknown").strip() or "unknown"
+    if screen_type != "unknown":
+        return _safe_screen_type_value(screen_type)
+    return _screen_after_app_start(signals)
+
+
+def _post_action_metadata_prefix(action: str) -> str:
+    if action == "tap_continue":
+        return "post_continue"
+    if action == "tap_expected_account":
+        return "post_account_picker"
+    if action == "tap_use_another_profile":
+        return "post_use_another_profile"
+    return ""
+
+
 def _screen_after_app_start(signals: dict[str, Any]) -> str:
     screen_type = str(signals.get("screen_type") or "unknown").strip() or "unknown"
     if screen_type != "unknown":
@@ -1743,6 +1995,13 @@ def _screen_after_app_start(signals: dict[str, Any]) -> str:
 def _signals_confirm_login_form(signals: dict[str, Any]) -> bool:
     if signals.get("screen_type") == "login_form_empty":
         return signals.get("has_username_field") is True and signals.get("has_login_button") is True
+    if signals.get("screen_type") == "login_form_prefilled_username":
+        return (
+            signals.get("username_prefilled_present") is True
+            and signals.get("username_field_editable_present") is True
+            and signals.get("has_password_field") is True
+            and signals.get("has_login_button") is True
+        )
     if signals.get("screen_type") == "continue_password_only":
         return (
             bool(signals.get("suggested_username"))
@@ -1752,11 +2011,21 @@ def _signals_confirm_login_form(signals: dict[str, Any]) -> bool:
     return False
 
 
+def _route_starts_login_form_flow(decision: Any) -> bool:
+    return str(decision or "") in {
+        "start_login_form_flow",
+        "start_login_form_flow_prefilled_expected",
+        "start_login_form_flow_replace_username",
+    }
+
+
 def _signals_show_loading_transition(signals: dict[str, Any]) -> bool:
     return str(signals.get("screen_type") or "unknown") == "unknown" and signals.get("transition_loading") is True
 
 
 def _should_reobserve_post_action_transition(action: str, signals: dict[str, Any]) -> bool:
+    if action == "tap_use_another_profile":
+        return not _signals_confirm_login_form(signals)
     screen_type = str(signals.get("screen_type") or "unknown")
     if screen_type != "unknown":
         return False
@@ -1770,7 +2039,20 @@ def _should_reobserve_post_action_transition(action: str, signals: dict[str, Any
 def _pre_submit_observation_metadata(signals: dict[str, Any]) -> dict[str, Any]:
     screen_type = str(signals.get("screen_type") or "unknown")
     return {
-        "password_required": screen_type in {"login_form_empty", "continue_password_only"},
+        "screen_type": _safe_screen_type_value(screen_type),
+        "prefilled_username": _safe_public_text(signals.get("prefilled_username")),
+        "username_prefilled_present": bool(signals.get("username_prefilled_present")),
+        "username_field_present": bool(signals.get("username_field_present") or signals.get("has_username_field")),
+        "username_field_editable_present": bool(
+            signals.get("username_field_editable_present") or signals.get("username_editable_present")
+        ),
+        "password_field_present": bool(signals.get("password_field_present") or signals.get("has_password_field")),
+        "login_button_present": bool(signals.get("login_button_present") or signals.get("has_login_button")),
+        "password_required": screen_type in {
+            "login_form_empty",
+            "login_form_prefilled_username",
+            "continue_password_only",
+        },
         "ready_for_password_submit": bool(signals.get("ready_for_password_submit")),
         "ready_for_credentials_flow": bool(signals.get("ready_for_credentials_flow")),
         "would_submit_password": False,
@@ -1846,6 +2128,18 @@ def _resolve_previous_account_lifecycle(
     }
 
 
+def _previous_account_lifecycle_has_gate_metadata(previous_account_lifecycle: dict[str, Any]) -> bool:
+    if not previous_account_lifecycle.get("username"):
+        return False
+    lifecycle_status = str(previous_account_lifecycle.get("lifecycle_status") or "unknown").strip().lower()
+    return (
+        lifecycle_status in REUSABLE_PREVIOUS_ACCOUNT_LIFECYCLES
+        or bool(previous_account_lifecycle.get("clone_reuse_allowed"))
+        or bool(previous_account_lifecycle.get("source"))
+        or bool(previous_account_lifecycle.get("lookup_failed"))
+    )
+
+
 def _router_lifecycle_lookup(previous_account_lifecycle: dict[str, Any]) -> Callable[[str], dict[str, Any]] | None:
     if not previous_account_lifecycle.get("username"):
         return None
@@ -1894,11 +2188,17 @@ def _dry_run_result(
     would_tap_expected_account = decision == "select_expected_account_from_picker"
     would_tap_use_another_profile = decision == "use_another_profile_previous_account_stopped"
     would_recover_old_logged_in_account = decision == "recover_old_logged_in_account"
-    would_request_credentials = decision == "start_login_form_flow"
+    would_request_credentials = _route_starts_login_form_flow(decision)
     would_block_mismatch = decision in {"block_wrong_suggested_account", "block_wrong_active_account"}
-    ready_for_password_smoke = screen_type in {"login_form_empty", "continue_password_only"} and would_request_credentials
-    password_required = screen_type in {"login_form_empty", "continue_password_only"} and would_request_credentials
-    ready_for_credentials_flow = screen_type == "login_form_empty" and would_request_credentials
+    ready_for_password_smoke = (
+        screen_type in {"login_form_empty", "login_form_prefilled_username", "continue_password_only"}
+        and would_request_credentials
+    )
+    password_required = (
+        screen_type in {"login_form_empty", "login_form_prefilled_username", "continue_password_only"}
+        and would_request_credentials
+    )
+    ready_for_credentials_flow = screen_type in {"login_form_empty", "login_form_prefilled_username"} and would_request_credentials
     smoke_ready = (
         ready_for_password_smoke
         or would_tap_continue
@@ -1999,6 +2299,7 @@ def _safe_screen_type_value(value: Any) -> str:
         "continue_as_candidate",
         "continue_password_only",
         "login_form_empty",
+        "login_form_prefilled_username",
         "unknown",
     }:
         return text
@@ -2288,9 +2589,19 @@ def _safe_password_result_metadata(result: Any) -> dict[str, Any]:
         for key in (
             "password_only_mode",
             "input_method_used",
+            "password_field_target_kind",
+            "password_input_method",
+            "password_input_result",
+            "password_confirm_method",
             "password_field_focused_before_input",
             "input_action_reported_success",
             "password_field_non_empty_confirmed",
+            "username_replaced",
+            "username_input_confirmed",
+            "username_input_result",
+            "username_field_focused_before_input",
+            "username_clear_method",
+            "username_input_method",
             "password_required_dialog_detected",
             "password_required_retry_attempted",
             "password_required_retry_count",
@@ -2341,10 +2652,14 @@ def _password_result_outcome(result: Any) -> str:
     failure = str(getattr(result, "failure_reason", "") or "")
     if failure == "blocked_secret_payload_shape":
         return "secret_payload_not_password"
+    if failure in {"username_input_failed", "username_prefilled_not_editable"}:
+        return failure
     raw = str(getattr(result, "post_submit_outcome", "") or "unknown")
     if raw in {
         "password_input_missing_or_not_accepted",
         "password_input_failed",
+        "username_input_failed",
+        "username_prefilled_not_editable",
         "save_password_prompt_blocking",
         "login_submit_still_loading",
     }:

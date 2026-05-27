@@ -146,6 +146,110 @@ class InstagramLoginProvisionerCliTest(unittest.TestCase):
         self.assertEqual(summary["startup_wait_total_ms"], 1000)
         self.assertEqual(summary["startup_screens"], ["unknown", "continue_as_candidate"])
         self.assertTrue(summary["startup_settling_used"])
+        self.assertIsNone(captured["previous_account_lifecycle_lookup"])
+
+    def test_operator_smoke_previous_account_override_is_passed_to_flow(self) -> None:
+        captured: dict = {}
+
+        def fake_flow(_d, **kwargs):
+            captured.update(kwargs)
+            return _fake_result(
+                safe_metadata={
+                    "previous_account_lifecycle": {
+                        "username": "old_profile",
+                        "lifecycle_status": "canceled",
+                        "clone_reuse_allowed": True,
+                        "source": "operator_smoke_override",
+                    },
+                },
+                actions_taken=["route:use_another_profile_previous_account_stopped"],
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _code, summary = cli.run_cli_command(
+                _args_with_log(
+                    f"{tmp}/login.jsonl",
+                    "--operator-smoke-previous-account-username",
+                    "old_profile",
+                    "--operator-smoke-lifecycle-status",
+                    "canceled",
+                    "--operator-smoke-clone-reuse-allowed",
+                    "true",
+                    "--json",
+                ),
+                connect_func=lambda _serial: FakeDevice(),
+                run_flow_func=fake_flow,
+            )
+
+        lookup = captured["previous_account_lifecycle_lookup"]
+        self.assertIsNotNone(lookup)
+        self.assertEqual(
+            lookup("old_profile", {"screen_type": "continue_as_candidate"}),
+            {
+                "lifecycle_status": "canceled",
+                "clone_reuse_allowed": True,
+                "source": "operator_smoke_override",
+                "reason": "operator_smoke_override",
+            },
+        )
+        self.assertEqual(summary["suggested_username"], "old_profile")
+        self.assertEqual(summary["previous_account_lifecycle_source"], "operator_smoke_override")
+        self.assertEqual(summary["previous_account_lifecycle_status"], "canceled")
+        self.assertTrue(summary["clone_reuse_allowed"])
+        self.assertEqual(summary["router_decision"], "use_another_profile_previous_account_stopped")
+
+    def test_operator_smoke_lifecycle_status_is_normalized_to_lowercase(self) -> None:
+        lookup = cli._build_operator_smoke_previous_account_lifecycle_lookup(
+            _args(
+                "--operator-smoke-previous-account-username",
+                "Old_Profile",
+                "--operator-smoke-lifecycle-status",
+                "canceled",
+                "--operator-smoke-clone-reuse-allowed",
+                "true",
+            )
+        )
+
+        self.assertIsNotNone(lookup)
+        payload = lookup("old_profile", {"screen_type": "continue_as_candidate"})
+
+        self.assertEqual(payload["lifecycle_status"], "canceled")
+        self.assertIs(payload["clone_reuse_allowed"], True)
+
+    def test_preparation_flow_used_maps_use_another_profile_action(self) -> None:
+        summary = cli._safe_summary_from_result(
+            _fake_result(
+                actions_taken=["tap_use_another_profile", "route:start_login_form_flow_replace_username"],
+                safe_metadata={"router_decision": "start_login_form_flow_replace_username"},
+            ),
+            args=_args(),
+            run_id="run-1",
+        )
+
+        self.assertEqual(summary["preparation_flow_used"], "use_another_profile_previous_account_stopped")
+
+    def test_operator_smoke_previous_account_override_username_mismatch_blocks_reuse(self) -> None:
+        args = _args(
+            "--operator-smoke-previous-account-username",
+            "old_profile",
+            "--operator-smoke-lifecycle-status",
+            "canceled",
+            "--operator-smoke-clone-reuse-allowed",
+            "true",
+        )
+
+        lookup = cli._build_operator_smoke_previous_account_lifecycle_lookup(args)
+
+        self.assertIsNotNone(lookup)
+        self.assertEqual(
+            lookup("different_profile", {"screen_type": "continue_as_candidate"}),
+            {
+                "lifecycle_status": "unknown",
+                "clone_reuse_allowed": False,
+                "source": "operator_smoke_override",
+                "reason": "operator_smoke_override_username_mismatch",
+            },
+        )
 
     def test_no_publish_is_default(self) -> None:
         captured: dict = {}
@@ -172,12 +276,17 @@ class InstagramLoginProvisionerCliTest(unittest.TestCase):
                 "app_start_attempted": True,
                 "app_start_ok": True,
                 "screen_after_app_start": "login_form_empty",
+                "screen_type": "login_form_prefilled_username",
+                "prefilled_username": "i_m_your_traker",
                 "secret_ref": SECRET_REF,
                 "token": "Be" + "arer " + "service" + "_role token",
                 "xml": LOGIN_FORM_XML,
                 "password_result": {
                     "executed": True,
                     "submit_tapped": True,
+                    "username_replaced": True,
+                    "username_input_confirmed": "true",
+                    "username_input_result": "username_input_confirmed",
                     "input_method_used": "adb_keyboard_b64",
                     "password_field_non_empty_confirmed": True,
                     "post_submit_observation_count": 3,
@@ -218,6 +327,11 @@ class InstagramLoginProvisionerCliTest(unittest.TestCase):
         self.assertNotIn("Bearer", rendered)
         self.assertNotIn("<node", rendered)
         payload = json.loads(rendered)
+        self.assertEqual(payload["screen_type"], "login_form_prefilled_username")
+        self.assertEqual(payload["prefilled_username"], "i_m_your_traker")
+        self.assertTrue(payload["username_replaced"])
+        self.assertEqual(payload["username_input_confirmed"], "true")
+        self.assertEqual(payload["username_input_result"], "username_input_confirmed")
         self.assertEqual(payload["input_method_used"], "adb_keyboard_b64")
         self.assertTrue(payload["password_field_non_empty_confirmed"])
         self.assertEqual(payload["post_submit_observation_count"], 3)

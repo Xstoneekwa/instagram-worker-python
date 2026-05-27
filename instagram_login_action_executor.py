@@ -56,7 +56,10 @@ NO_ACTION_DECISIONS = {
     "expected_username_missing",
     "recover_old_logged_in_account",
     "start_login_form_flow",
+    "start_login_form_flow_prefilled_expected",
+    "start_login_form_flow_replace_username",
     "unknown_no_action",
+    "username_prefilled_not_editable",
 }
 MAX_POST_ACTION_WAIT_MS = 1500
 BOUNDS_DEDUPE_DISTANCE_PX = 24
@@ -823,6 +826,7 @@ def _safe_login_screen_signals(hierarchy_xml: str | None) -> dict[str, Any]:
     signals.pop("password_required", None)
     signals.pop("password_required_dialog_present", None)
     signals.pop("password_field_editable_present", None)
+    signals.pop("password_field_present", None)
     signals.pop("forgot_password_present", None)
     signals.pop("ready_for_password_submit", None)
     signals.pop("save_password_prompt_present", None)

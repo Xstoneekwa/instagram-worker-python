@@ -43,6 +43,7 @@ CREDENTIALS_DIAGNOSTIC_KEYS = (
     "secret_value_safe_for_injection",
     "guard_would_block_revealed_value",
 )
+OPERATOR_SMOKE_LIFECYCLE_STATUSES = ("active", "paused", "canceled", "onboarding", "archived", "stopped", "unknown")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -76,6 +77,23 @@ def build_parser() -> argparse.ArgumentParser:
         default=10000,
         help="Bounded post-submit settling timeout in milliseconds.",
     )
+    parser.add_argument(
+        "--operator-smoke-previous-account-username",
+        default="",
+        help="Smoke-only suggested/old username override for previous account lifecycle lookup.",
+    )
+    parser.add_argument(
+        "--operator-smoke-lifecycle-status",
+        choices=OPERATOR_SMOKE_LIFECYCLE_STATUSES,
+        default="unknown",
+        help="Smoke-only lifecycle status for the suggested/old username override.",
+    )
+    parser.add_argument(
+        "--operator-smoke-clone-reuse-allowed",
+        choices=("true", "false"),
+        default="false",
+        help="Smoke-only clone reuse gate for the suggested/old username override.",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Route/prepare only; do not load Vault or submit.")
     parser.add_argument("--no-submit", action="store_true", help="Alias for --dry-run.")
     parser.add_argument("--no-publish", action="store_true", default=True, help="Keep status publishing disabled.")
@@ -107,11 +125,13 @@ def run_cli_command(
         secret_reader=secret_reader,
     )
     flow = run_flow_func or run_login_provisioning_flow
+    previous_account_lifecycle_lookup = _build_operator_smoke_previous_account_lifecycle_lookup(args)
     result = flow(
         device,
         account_id=str(args.account_id or ""),
         expected_username=str(args.expected_username or ""),
         credentials_getter=getter,
+        previous_account_lifecycle_lookup=previous_account_lifecycle_lookup,
         publish_enabled=False,
         publisher=None,
         dry_run=bool(args.dry_run or args.no_submit),
@@ -215,6 +235,40 @@ def _credentials_fields_from_metadata(metadata: dict[str, Any]) -> dict[str, Any
     return {key: metadata.get(key) for key in CREDENTIALS_DIAGNOSTIC_KEYS if key in metadata}
 
 
+def _build_operator_smoke_previous_account_lifecycle_lookup(args: argparse.Namespace) -> Callable[[str, dict[str, Any]], dict[str, Any]] | None:
+    username = _normalize_public_username(getattr(args, "operator_smoke_previous_account_username", ""))
+    if not username:
+        return None
+    lifecycle_status = str(getattr(args, "operator_smoke_lifecycle_status", "") or "unknown").strip().lower()
+    if lifecycle_status not in OPERATOR_SMOKE_LIFECYCLE_STATUSES:
+        lifecycle_status = "unknown"
+    clone_reuse_allowed = str(
+        getattr(args, "operator_smoke_clone_reuse_allowed", "false") or "false"
+    ).strip().lower() == "true"
+
+    def _lookup(candidate_username: str, _context: dict[str, Any]) -> dict[str, Any]:
+        candidate = _normalize_public_username(candidate_username)
+        if candidate != username:
+            return {
+                "lifecycle_status": "unknown",
+                "clone_reuse_allowed": False,
+                "source": "operator_smoke_override",
+                "reason": "operator_smoke_override_username_mismatch",
+            }
+        return {
+            "lifecycle_status": lifecycle_status,
+            "clone_reuse_allowed": clone_reuse_allowed,
+            "source": "operator_smoke_override",
+            "reason": "operator_smoke_override",
+        }
+
+    return _lookup
+
+
+def _normalize_public_username(value: Any) -> str:
+    return str(value or "").strip().lstrip("@").lower()
+
+
 def _safe_summary_from_error(reason: str, *, args: argparse.Namespace, run_id: str) -> dict[str, Any]:
     return _clean_summary(
         {
@@ -237,6 +291,16 @@ def _safe_summary_from_error(reason: str, *, args: argparse.Namespace, run_id: s
             "startup_final_screen_type": "",
             "startup_settling_used": False,
             "preparation_flow_used": "none",
+            "screen_type": "",
+            "suggested_username": "",
+            "prefilled_username": "",
+            "username_replaced": False,
+            "username_input_confirmed": "unknown",
+            "username_input_result": "",
+            "router_decision": "",
+            "previous_account_lifecycle_source": "",
+            "previous_account_lifecycle_status": "",
+            "clone_reuse_allowed": False,
             "screen_before_submit": "",
             "input_method_used": "",
             "password_field_non_empty_confirmed": False,
@@ -267,6 +331,8 @@ def _safe_summary_from_error(reason: str, *, args: argparse.Namespace, run_id: s
 def _safe_summary_from_result(result: Any, *, args: argparse.Namespace, run_id: str) -> dict[str, Any]:
     metadata = dict(getattr(result, "safe_metadata", {}) or {})
     password_result = dict(metadata.get("password_result") or {})
+    actions_taken = list(getattr(result, "actions_taken", []) or [])
+    previous_account_lifecycle = dict(metadata.get("previous_account_lifecycle") or {})
     submit_executed = bool(password_result.get("executed") or password_result.get("submit_tapped"))
     screen_before_submit = _screen_before_submit(metadata, submit_executed=submit_executed)
     summary = {
@@ -289,11 +355,35 @@ def _safe_summary_from_result(result: Any, *, args: argparse.Namespace, run_id: 
         "startup_screens": list(metadata.get("startup_screens") or []),
         "startup_final_screen_type": str(metadata.get("startup_final_screen_type") or ""),
         "startup_settling_used": bool(metadata.get("startup_settling_used")),
-        "preparation_flow_used": _preparation_flow_used(metadata, getattr(result, "actions_taken", []) or []),
+        "post_use_another_profile_observation_count": int(
+            metadata.get("post_use_another_profile_observation_count") or 0
+        ),
+        "post_use_another_profile_screens": list(metadata.get("post_use_another_profile_screens") or []),
+        "screen_after_use_another_profile_final": str(
+            metadata.get("screen_after_use_another_profile_final") or ""
+        ),
+        "preparation_flow_used": _preparation_flow_used(metadata, actions_taken),
+        "screen_type": str(metadata.get("screen_type") or ""),
+        "suggested_username": _summary_suggested_username(metadata, previous_account_lifecycle),
+        "prefilled_username": str(metadata.get("prefilled_username") or ""),
+        "username_field_focused_before_input": password_result.get("username_field_focused_before_input"),
+        "username_clear_method": str(password_result.get("username_clear_method") or ""),
+        "username_input_method": str(password_result.get("username_input_method") or ""),
+        "username_replaced": bool(password_result.get("username_replaced")),
+        "username_input_confirmed": str(password_result.get("username_input_confirmed") or "unknown"),
+        "username_input_result": str(password_result.get("username_input_result") or ""),
+        "router_decision": _router_decision(metadata, actions_taken),
+        "previous_account_lifecycle_source": str(previous_account_lifecycle.get("source") or ""),
+        "previous_account_lifecycle_status": str(previous_account_lifecycle.get("lifecycle_status") or ""),
+        "clone_reuse_allowed": bool(previous_account_lifecycle.get("clone_reuse_allowed")),
         "screen_before_submit": screen_before_submit,
+        "password_field_target_kind": str(password_result.get("password_field_target_kind") or ""),
+        "password_input_method": str(password_result.get("password_input_method") or ""),
+        "password_input_result": str(password_result.get("password_input_result") or ""),
+        "password_confirm_method": str(password_result.get("password_confirm_method") or ""),
         "input_method_used": str(password_result.get("input_method_used") or ""),
         "password_field_focused_before_input": bool(password_result.get("password_field_focused_before_input")),
-        "password_field_non_empty_confirmed": bool(password_result.get("password_field_non_empty_confirmed")),
+        "password_field_non_empty_confirmed": _password_non_empty_confirmed(password_result),
         "submit_executed": submit_executed,
         "password_required_dialog_detected": bool(password_result.get("password_required_dialog_detected")),
         "post_submit_observation_count": int(password_result.get("post_submit_observation_count") or 0),
@@ -326,23 +416,64 @@ def _safe_summary_from_result(result: Any, *, args: argparse.Namespace, run_id: 
 
 def _preparation_flow_used(metadata: dict[str, Any], actions_taken: list[Any]) -> str:
     actions = [str(item) for item in actions_taken]
+    if "tap_use_another_profile" in actions:
+        return "use_another_profile_previous_account_stopped"
     if "tap_continue" in actions:
         return "continue_as_candidate"
     if any("select_expected_account" in action for action in actions):
         return "account_picker"
     screen = str(metadata.get("screen_after_app_start") or "")
-    if screen in {"login_form_empty", "continue_password_only", "connected", "unknown"}:
+    if screen in {"login_form_empty", "login_form_prefilled_username", "continue_password_only", "connected", "unknown"}:
         return screen
     return "none"
 
 
+def _summary_suggested_username(
+    metadata: dict[str, Any],
+    previous_account_lifecycle: dict[str, Any],
+) -> str:
+    suggested_username = str(metadata.get("suggested_username") or "").strip()
+    if suggested_username:
+        return suggested_username
+    return str(previous_account_lifecycle.get("username") or "").strip()
+
+
+def _router_decision(metadata: dict[str, Any], actions_taken: list[Any]) -> str:
+    router_decision = str(metadata.get("router_decision") or "").strip()
+    if router_decision:
+        return router_decision
+    route_actions = [str(action) for action in actions_taken if str(action).startswith("route:")]
+    if route_actions:
+        return route_actions[-1].split(":", 1)[1]
+    return ""
+
+
+def _password_non_empty_confirmed(password_result: dict[str, Any]) -> bool | str:
+    value = password_result.get("password_field_non_empty_confirmed")
+    if isinstance(value, bool):
+        return value
+    text = str(value or "").strip().lower()
+    if text == "true":
+        return True
+    if text == "false":
+        return False
+    return text
+
+
 def _screen_before_submit(metadata: dict[str, Any], *, submit_executed: bool) -> str:
+    screen_after_use_another = str(metadata.get("screen_after_use_another_profile_final") or "")
+    if screen_after_use_another in {
+        "continue_password_only",
+        "login_form_empty",
+        "login_form_prefilled_username",
+    }:
+        return screen_after_use_another
     for key in ("post_continue_final_screen_type", "post_account_picker_final_screen_type"):
         value = str(metadata.get(key) or "")
-        if value in {"continue_password_only", "login_form_empty"}:
+        if value in {"continue_password_only", "login_form_empty", "login_form_prefilled_username"}:
             return value
     screen = str(metadata.get("screen_after_app_start") or "")
-    if screen in {"continue_password_only", "login_form_empty"}:
+    if screen in {"continue_password_only", "login_form_empty", "login_form_prefilled_username"}:
         return screen
     return "" if not submit_executed else "accepted_login_screen"
 

@@ -52,6 +52,17 @@ class InstagramLoginScreenRouterTest(unittest.TestCase):
         self.assertTrue(decision.should_escalate)
         self.assertEqual(decision.reason, "wrong_suggested_account_requires_admin_review")
 
+    def test_lifecycle_status_canceled_uppercase_is_normalized(self) -> None:
+        decision = route_login_screen(
+            expected_username="cinema_catchup",
+            suggested_username="random_old_profile",
+            screen_type="continue_as_candidate",
+            account_lifecycle_lookup=lambda _username: {"lifecycle_status": "CANCELED"},
+            clone_reuse_allowed=True,
+        )
+
+        self.assertEqual(decision.decision, "use_another_profile_previous_account_stopped")
+
     def test_canceled_with_clone_reuse_allows_use_another_profile_override(self) -> None:
         decision = route_login_screen(
             expected_username="new_account",
@@ -109,6 +120,29 @@ class InstagramLoginScreenRouterTest(unittest.TestCase):
         self.assertTrue(decision.should_start_login_form_flow)
         self.assertFalse(decision.should_escalate)
         self.assertEqual(decision.next_action, "secure_credentials_required_later")
+
+    def test_prefilled_wrong_username_starts_replace_username_flow(self) -> None:
+        decision = route_login_screen(
+            expected_username="cinema_catchup",
+            suggested_username="i_m_your_traker",
+            screen_type="login_form_prefilled_username",
+        )
+
+        self.assertTrue(decision.ok)
+        self.assertEqual(decision.decision, "start_login_form_flow_replace_username")
+        self.assertTrue(decision.should_start_login_form_flow)
+        self.assertEqual(decision.reason, "prefilled_username_editable_replace")
+
+    def test_prefilled_expected_username_starts_password_flow(self) -> None:
+        decision = route_login_screen(
+            expected_username="cinema_catchup",
+            suggested_username="cinema_catchup",
+            screen_type="login_form_prefilled_username",
+        )
+
+        self.assertTrue(decision.ok)
+        self.assertEqual(decision.decision, "start_login_form_flow_prefilled_expected")
+        self.assertTrue(decision.should_start_login_form_flow)
 
     def test_continue_password_only_expected_account_starts_login_form_flow(self) -> None:
         decision = route_login_screen(

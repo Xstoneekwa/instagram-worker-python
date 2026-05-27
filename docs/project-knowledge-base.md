@@ -465,6 +465,55 @@ Post-submit policy future :
   interdite au bouton `Continue`; dismiss safe par `back`, 2 tentatives max,
   puis `save_password_prompt_blocking` si encore visible. Les smokes device
   reels sont lances par l'operateur depuis son terminal sauf demande explicite.
+- Entry 2E-5P-11 Cas A router wiring : bug observe avec override operateur visible
+  (`operator_smoke_override`, `canceled`, `clone_reuse_allowed=true`) mais
+  `router_decision=unknown_no_action`. Cause : mismatch entre
+  `screen_after_app_start_final=continue_as_candidate` et le `screen_type` passe
+  au routeur (`active_account_home` / `unknown`). Correctifs : priorite probe
+  Continue-as, `_routing_screen_type` avec fallback startup, filet
+  `_route_provisioning_screen`, settling post `tap_use_another_profile`
+  (`post_use_another_profile_*`, `screen_after_use_another_profile_final`),
+  `preparation_flow_used=use_another_profile_previous_account_stopped`. Le
+  formulaire prefilled reste la etape suivante, pas le premier correctif.
+- Entry 2E-5P-12 Username replace prefilled : apres Cas A, l'ecran
+  `login_form_prefilled_username` doit remplacer l'ancien username editable avant
+  tout reveal password. Correctifs : cible EditText prioritaire, clear cascade
+  (`clear_text`, `set_text("")`, `set_text(expected)`, `adb_keyboard_b64`),
+  confirmation hierarchy, reasons `username_clear_failed` /
+  `username_still_prefilled_after_input`, logs
+  `username_field_focused_before_input`, `username_clear_method`,
+  `username_input_method`, `username_input_ms`. Smokes `--no-publish`.
+- Entry 2E-5P-13 Password masked confirmation : apres username replacement
+  valide, le password injecte via `adb_keyboard_b64` peut apparaitre masque
+  visuellement alors que la cible accessibilite reste au placeholder `Password`.
+  L'executor confirme maintenant le non-empty par cible password EditText,
+  bullets/masked chars dans le hierarchy, ou `unknown_but_input_success` si ADB
+  B64 a reussi sans preuve de champ vide. Si un signal safe prouve vide :
+  `password_input_not_confirmed`, no submit. Logs safe :
+  `password_field_target_kind`, `password_input_method`,
+  `password_input_result`, `password_confirm_method`. Recovery
+  `Password required` bornee conservee; smoke toujours `--no-publish`.
+- Finalisation 2E-5P-13 : Cas A full flow valide en run operateur
+  (`connected`, username remplace, password masque confirme, save-password
+  prompt dismiss par `back`, `would_publish=false`). Correctif metadata :
+  conserver l'override lifecycle initial apres `Use another profile`; la
+  re-observation `login_form_prefilled_username` ne doit plus remplacer
+  `operator_smoke_override/canceled/clone_reuse_allowed=true` par des valeurs
+  par defaut `unknown/false`.
+- Entry 2E-5P-11 Login form username prefilled : apres `Use another profile`,
+  Instagram peut afficher un formulaire login avec l'ancien username deja rempli.
+  Nouveau `screen_type=login_form_prefilled_username`. Si le champ username est
+  editable et different de `expected_username`, le router choisit
+  `start_login_form_flow_replace_username`, l'executor clear/remplace par
+  `expected_username`, puis seulement ensuite revele le password `SecretValue` et
+  submit. Si le prefilled username est deja correct :
+  `start_login_form_flow_prefilled_expected`, sans ressaisie inutile du username.
+  Si le champ n'est pas editable : `username_prefilled_not_editable`, no submit.
+  Si clear/input echoue : `username_input_failed`, no password submit si possible.
+  Logs safe ajoutes : `screen_type`, `prefilled_username`, `username_replaced`,
+  `username_input_confirmed`, `username_input_result`, `router_decision`,
+  `preparation_flow_used`, `screen_before_submit`. Ce cas ne doit pas etre
+  confondu avec un mismatch compte bloquant; les smokes restent `--no-publish`.
 - Standard futur provisioning/login : chaque flow doit fournir une commande
   terminal reproductible ou un CLI dedie. Les options minimales sont
   `--device-serial`, `--expected-username`, `--account-id` si credentials

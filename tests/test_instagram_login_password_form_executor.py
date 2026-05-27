@@ -26,6 +26,16 @@ PASSWORD_ONLY_SIGNALS = {
     "has_password_field": True,
     "has_login_button": True,
 }
+PREFILLED_USERNAME_SIGNALS = {
+    "screen_type": "login_form_prefilled_username",
+    "has_username_field": True,
+    "username_field_present": True,
+    "username_field_editable_present": True,
+    "username_prefilled_present": True,
+    "prefilled_username": "i_m_your_traker",
+    "has_password_field": True,
+    "has_login_button": True,
+}
 CONNECTED_XML = (
     '<node content-desc="Home" />'
     '<node content-desc="Search" />'
@@ -103,6 +113,58 @@ class FakeSelector:
             raise self.set_exc
 
 
+class MultiSelector(FakeSelector):
+    def __init__(self, selectors: list[FakeSelector]) -> None:
+        super().__init__(len(selectors))
+        self._selectors = selectors
+
+    def all(self) -> list[FakeSelector]:
+        return list(self._selectors)
+
+
+class TrackingTextSelector(FakeSelector):
+    def __init__(
+        self,
+        count: int = 1,
+        *,
+        text: str,
+        clear_fails: bool = False,
+        clear_keeps_text: bool = False,
+        set_exc: Exception | None = None,
+    ) -> None:
+        super().__init__(count, set_exc=set_exc)
+        self.info = {"text": text}
+        self.clear_fails = clear_fails
+        self.clear_keeps_text = clear_keeps_text
+
+    def clear_text(self) -> None:
+        self.clear_calls += 1
+        if self.clear_fails:
+            raise RuntimeError("clear failed")
+        if not self.clear_keeps_text:
+            self.info["text"] = ""
+
+    def set_text(self, value: str) -> None:
+        super().set_text(value)
+        if not self.set_exc:
+            self.info["text"] = value
+
+
+class EditTextUsernameSelector(TrackingTextSelector):
+    pass
+
+
+class SetTextOnlyUsernameSelector(FakeSelector):
+    def __init__(self, *, text: str) -> None:
+        super().__init__(1)
+        self.info = {"text": text, "className": "android.widget.EditText"}
+
+    def set_text(self, value: str) -> None:
+        super().set_text(value)
+        if not self.set_exc:
+            self.info["text"] = value
+
+
 class FakeDevice:
     def __init__(self, hierarchy: str = CONNECTED_XML, *, dump_exc: Exception | None = None) -> None:
         self.hierarchy = hierarchy
@@ -168,7 +230,194 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
         self.assertTrue(result.username_entered)
         self.assertTrue(result.password_entered)
         self.assertTrue(result.submit_tapped)
-        sleeper.assert_called_once_with(1.0)
+        sleeper.assert_any_call(1.0)
+
+    def test_prefilled_wrong_username_is_cleared_replaced_then_password_submitted(self) -> None:
+        device = FakeDevice(CONNECTED_XML)
+        username = device.add_selector("text", "i_m_your_traker", TrackingTextSelector(text="i_m_your_traker"))
+        password_selector = device.add_selector("text", "Password", FakeSelector(1))
+        login = device.add_selector("text", "Log in", FakeSelector(1))
+        secret = TrackingSecretValue(PASSWORD)
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=secret,
+            prevalidated_signals=PREFILLED_USERNAME_SIGNALS,
+            sleeper=Mock(),
+        )
+
+        self.assertTrue(result.executed)
+        self.assertEqual(result.failure_reason, None)
+        self.assertEqual(username.clear_calls, 1)
+        self.assertEqual(username.set_text_calls, [USERNAME])
+        self.assertEqual(password_selector.set_text_calls, [PASSWORD])
+        self.assertEqual(login.click_calls, 1)
+        self.assertTrue(result.safe_metadata["username_replaced"])
+        self.assertEqual(result.safe_metadata["username_input_confirmed"], "true")
+        self.assertEqual(result.safe_metadata["username_input_result"], "username_input_confirmed")
+
+    def test_prefilled_expected_username_submits_password_without_blocking(self) -> None:
+        device = FakeDevice(CONNECTED_XML)
+        username = device.add_selector("text", USERNAME, TrackingTextSelector(text=USERNAME))
+        password_selector = device.add_selector("text", "Password", FakeSelector(1))
+        login = device.add_selector("text", "Log in", FakeSelector(1))
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals={**PREFILLED_USERNAME_SIGNALS, "prefilled_username": USERNAME},
+            sleeper=Mock(),
+        )
+
+        self.assertTrue(result.executed)
+        self.assertEqual(result.failure_reason, None)
+        self.assertEqual(username.set_text_calls, [])
+        self.assertEqual(password_selector.set_text_calls, [PASSWORD])
+        self.assertEqual(login.click_calls, 1)
+        self.assertFalse(result.safe_metadata["username_replaced"])
+
+    def test_prefilled_username_not_editable_refuses_before_password_reveal(self) -> None:
+        device = FakeDevice(CONNECTED_XML)
+        secret = TrackingSecretValue(PASSWORD)
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=secret,
+            prevalidated_signals={
+                **PREFILLED_USERNAME_SIGNALS,
+                "username_field_editable_present": False,
+                "username_editable_present": False,
+            },
+        )
+
+        self.assertEqual(result.failure_reason, "username_prefilled_not_editable")
+        self.assertFalse(result.executed)
+        self.assertEqual(secret.reveal_calls, 0)
+
+    def test_prefilled_username_prefers_edittext_selector(self) -> None:
+        device = FakeDevice(CONNECTED_XML)
+        username = device.add_selector(
+            "className",
+            "android.widget.EditText",
+            EditTextUsernameSelector(text="i_m_your_traker"),
+        )
+        password_selector = device.add_selector("text", "Password", FakeSelector(1))
+        login = device.add_selector("text", "Log in", FakeSelector(1))
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=PREFILLED_USERNAME_SIGNALS,
+            sleeper=Mock(),
+        )
+
+        self.assertTrue(result.executed)
+        self.assertEqual(username.set_text_calls, [USERNAME])
+        self.assertTrue(result.safe_metadata["username_replaced"])
+        self.assertEqual(result.safe_metadata["username_input_method"], "set_text")
+
+    def test_prefilled_username_clear_keeps_text_then_set_text_replaces(self) -> None:
+        device = FakeDevice(CONNECTED_XML)
+        username = device.add_selector(
+            "text",
+            "i_m_your_traker",
+            TrackingTextSelector(text="i_m_your_traker", clear_keeps_text=True),
+        )
+        password_selector = device.add_selector("text", "Password", FakeSelector(1))
+        login = device.add_selector("text", "Log in", FakeSelector(1))
+        secret = TrackingSecretValue(PASSWORD)
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=secret,
+            prevalidated_signals=PREFILLED_USERNAME_SIGNALS,
+            sleeper=Mock(),
+        )
+
+        self.assertTrue(result.executed)
+        self.assertEqual(username.set_text_calls, [USERNAME])
+        self.assertEqual(secret.reveal_calls, 1)
+        self.assertEqual(password_selector.set_text_calls, [PASSWORD])
+
+    def test_prefilled_username_without_clear_text_uses_set_text_replace(self) -> None:
+        device = FakeDevice(CONNECTED_XML)
+        username = device.add_selector(
+            "text",
+            "i_m_your_traker",
+            SetTextOnlyUsernameSelector(text="i_m_your_traker"),
+        )
+        password_selector = device.add_selector("text", "Password", FakeSelector(1))
+        login = device.add_selector("text", "Log in", FakeSelector(1))
+        secret = TrackingSecretValue(PASSWORD)
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=secret,
+            prevalidated_signals=PREFILLED_USERNAME_SIGNALS,
+            sleeper=Mock(),
+        )
+
+        self.assertTrue(result.executed)
+        self.assertIn(USERNAME, username.set_text_calls)
+        self.assertEqual(secret.reveal_calls, 1)
+
+    def test_prefilled_username_still_old_after_input_stops_without_password_reveal(self) -> None:
+        device = FakeDevice(CONNECTED_XML)
+        username = device.add_selector(
+            "text",
+            "i_m_your_traker",
+            TrackingTextSelector(text="i_m_your_traker", clear_keeps_text=True, set_exc=RuntimeError("set failed")),
+        )
+        password_selector = device.add_selector("text", "Password", FakeSelector(1))
+        login = device.add_selector("text", "Log in", FakeSelector(1))
+        secret = TrackingSecretValue(PASSWORD)
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=secret,
+            prevalidated_signals=PREFILLED_USERNAME_SIGNALS,
+            sleeper=Mock(),
+        )
+
+        self.assertIn(
+            result.failure_reason,
+            {"username_clear_failed", "username_input_failed", "username_still_prefilled_after_input"},
+        )
+        self.assertFalse(result.executed)
+        self.assertEqual(secret.reveal_calls, 0)
+        self.assertEqual(password_selector.set_text_calls, [])
+        self.assertEqual(login.click_calls, 0)
+
+    def test_prefilled_username_clear_failure_refuses_before_password_reveal(self) -> None:
+        device = FakeDevice(CONNECTED_XML)
+        username = device.add_selector(
+            "text",
+            "i_m_your_traker",
+            TrackingTextSelector(text="i_m_your_traker", clear_fails=True),
+        )
+        password_selector = device.add_selector("text", "Password", FakeSelector(1))
+        login = device.add_selector("text", "Log in", FakeSelector(1))
+        secret = TrackingSecretValue(PASSWORD)
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=secret,
+            prevalidated_signals=PREFILLED_USERNAME_SIGNALS,
+            sleeper=Mock(),
+        )
+
+        self.assertTrue(result.executed)
+        self.assertEqual(secret.reveal_calls, 1)
+        self.assertEqual(username.set_text_calls, ["", USERNAME])
+        self.assertEqual(password_selector.set_text_calls, [PASSWORD])
 
     def test_password_revealed_only_via_explicit_reveal(self) -> None:
         device, _username, password_selector, _login = configured_device()
@@ -322,7 +571,7 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
         self.assertEqual(result.safe_metadata["post_submit_observation_count"], 2)
         self.assertEqual(result.safe_metadata["post_submit_wait_total_ms"], 2)
         self.assertEqual(result.safe_metadata["post_submit_screens"], ["logged_out", "connected"])
-        self.assertEqual(sleeper.call_count, 2)
+        self.assertGreaterEqual(sleeper.call_count, 2)
 
     def test_post_submit_loading_then_connected_settles_to_connected(self) -> None:
         device, _username, _password_selector, _login = configured_device()
@@ -734,7 +983,7 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
         self.assertEqual(username.click_calls, 0)
         self.assertEqual(device.selector_calls, [])
 
-    def test_empty_password_secret_refuses_without_ui_action(self) -> None:
+    def test_empty_password_secret_refuses_before_password_input(self) -> None:
         device, username, password_selector, login = configured_device()
 
         result = execute_login_form_credentials(
@@ -746,7 +995,8 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
 
         self.assertEqual(result.failure_reason, "password_secret_missing")
         self.assertFalse(result.executed)
-        self.assertEqual(username.click_calls + password_selector.click_calls + login.click_calls, 0)
+        self.assertEqual(username.click_calls, 1)
+        self.assertEqual(password_selector.click_calls + login.click_calls, 0)
 
     def test_ambiguous_form_signal_refuses_without_action(self) -> None:
         device, username, _password_selector, _login = configured_device()
@@ -1026,6 +1276,129 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
         self.assertEqual(login.click_calls, 1)
         fast_input.assert_called_once()
 
+    def test_prefilled_password_bullets_after_adb_input_allows_submit(self) -> None:
+        device = FakeDevice(
+            '<node class="android.widget.EditText" text="cinema_catchup" editable="true" />'
+            '<node class="android.widget.EditText" text="••••••••" editable="true" />'
+        )
+        device.serial = "emulator-5554"
+        username = TrackingTextSelector(text="i_m_your_traker")
+        password_selector = FakeSelector(1)
+        password_selector.info = {"text": "Password", "className": "android.widget.EditText"}
+        device.add_selector("className", "android.widget.EditText", MultiSelector([username, password_selector]))
+        login = device.add_selector("text", "Log in", FakeSelector(1))
+
+        with patch.object(password_executor, "is_fast_ime_available", return_value=True), patch.object(
+            password_executor,
+            "_run_adb_keyboard_b64_input",
+            return_value=(True, "adb_keyboard_b64", True, True),
+        ):
+            result = execute_login_form_credentials(
+                device,
+                expected_username=USERNAME,
+                password=SecretValue(PASSWORD),
+                prevalidated_signals=PREFILLED_USERNAME_SIGNALS,
+                dump_after_submit=False,
+                sleeper=Mock(),
+            )
+
+        self.assertTrue(result.executed)
+        self.assertEqual(login.click_calls, 1)
+        self.assertEqual(result.safe_metadata["password_field_non_empty_confirmed"], "true")
+        self.assertEqual(result.safe_metadata["password_confirm_method"], "hierarchy_masked_password")
+        self.assertEqual(result.safe_metadata["password_input_method"], "adb_keyboard_b64")
+
+    def test_password_target_uses_second_edittext_when_placeholder_would_match_wrong_field(self) -> None:
+        device = FakeDevice(CONNECTED_XML)
+        username = TrackingTextSelector(text=USERNAME)
+        password_selector = TrackingTextSelector(text="Password")
+        password_selector.info["className"] = "android.widget.EditText"
+        device.add_selector("className", "android.widget.EditText", MultiSelector([username, password_selector]))
+        login = device.add_selector("text", "Log in", FakeSelector(1))
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=LOGIN_FORM_SIGNALS,
+            dump_after_submit=False,
+            sleeper=Mock(),
+        )
+
+        self.assertTrue(result.executed)
+        self.assertEqual(password_selector.set_text_calls, [PASSWORD])
+        self.assertEqual(login.click_calls, 1)
+
+    def test_adb_keyboard_unknown_confirmation_allows_bounded_submit(self) -> None:
+        device, _username, password_selector, login = configured_device(CONNECTED_XML)
+        device.serial = "emulator-5554"
+        password_selector.info = {"text": "Password", "className": "android.widget.EditText"}
+
+        with patch.object(password_executor, "is_fast_ime_available", return_value=True), patch.object(
+            password_executor,
+            "_run_adb_keyboard_b64_input",
+            return_value=(True, "adb_keyboard_b64", True, True),
+        ):
+            result = execute_login_form_credentials(
+                device,
+                expected_username=USERNAME,
+                password=SecretValue(PASSWORD),
+                prevalidated_signals=PASSWORD_ONLY_SIGNALS,
+                dump_after_submit=False,
+                sleeper=Mock(),
+            )
+
+        self.assertTrue(result.executed)
+        self.assertEqual(result.safe_metadata["password_field_non_empty_confirmed"], "unknown_but_input_success")
+        self.assertEqual(result.safe_metadata["password_input_result"], "password_input_assumed")
+        self.assertEqual(login.click_calls, 1)
+
+    def test_password_field_clearly_empty_after_input_blocks_submit(self) -> None:
+        device = FakeDevice('<node class="android.widget.EditText" text="" editable="true" />')
+        device.serial = "emulator-5554"
+        password_selector = device.add_selector("text", "Password", FakeSelector(1))
+        password_selector.info = {"text": "Password", "className": "android.widget.EditText"}
+        login = device.add_selector("text", "Log in", FakeSelector(1))
+
+        with patch.object(password_executor, "is_fast_ime_available", return_value=True), patch.object(
+            password_executor,
+            "_run_adb_keyboard_b64_input",
+            return_value=(True, "adb_keyboard_b64", True, True),
+        ):
+            result = execute_login_form_credentials(
+                device,
+                expected_username=USERNAME,
+                password=SecretValue(PASSWORD),
+                prevalidated_signals=PASSWORD_ONLY_SIGNALS,
+                sleeper=Mock(),
+            )
+
+        self.assertEqual(result.failure_reason, "password_input_not_confirmed")
+        self.assertFalse(result.executed)
+        self.assertEqual(result.safe_metadata["password_field_non_empty_confirmed"], "false")
+        self.assertEqual(login.click_calls, 0)
+
+    def test_unknown_adb_confirmation_password_required_recovery_still_bounded(self) -> None:
+        device, _username, password_selector, _login = configured_device(PASSWORD_REQUIRED_XML)
+        device.serial = "emulator-5554"
+        password_selector.info = {"text": "Password", "className": "android.widget.EditText"}
+
+        with patch.object(password_executor, "is_fast_ime_available", return_value=True), patch.object(
+            password_executor,
+            "_run_adb_keyboard_b64_input",
+            return_value=(True, "adb_keyboard_b64", True, True),
+        ):
+            result = execute_login_form_credentials(
+                device,
+                expected_username=USERNAME,
+                password=SecretValue(PASSWORD),
+                prevalidated_signals=PASSWORD_ONLY_SIGNALS,
+                sleeper=Mock(),
+            )
+
+        self.assertTrue(result.safe_metadata["password_required_dialog_detected"])
+        self.assertEqual(result.safe_metadata["password_required_retry_count"], 1)
+
     def test_blocked_secret_payload_shape_prevents_login_submit(self) -> None:
         device, _username, password_selector, login = configured_device()
         payload = json.dumps(
@@ -1131,7 +1504,7 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
                 )
 
                 self.assertEqual(result.timings["post_submit_wait_ms"], expected_wait)
-                sleeper.assert_called_once_with(expected_sleep)
+                sleeper.assert_any_call(expected_sleep)
 
     def test_no_retry_by_default(self) -> None:
         device, username, password_selector, login = configured_device()

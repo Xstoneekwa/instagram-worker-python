@@ -254,6 +254,22 @@ class InstagramLoginUiProbeTest(unittest.TestCase):
         self.assertEqual(signals["screen_type"], "active_account_home")
         self.assertTrue(signals["active_account_home"])
 
+    def test_continue_as_wins_over_active_home_when_both_markers_present(self) -> None:
+        xml = (
+            '<node text="Instagram" />'
+            '<node text="Your story" />'
+            '<node text="Suggested for you" />'
+            '<node text="random_old_profile" />'
+            '<node text="Continue" clickable="true" />'
+            '<node text="Use another profile" />'
+            '<node text="Create new account" />'
+        )
+
+        signals = extract_login_screen_signals_from_hierarchy(xml, expected_username="random_expected")
+
+        self.assertEqual(signals["screen_type"], "continue_as_candidate")
+        self.assertTrue(signals["continue_as_candidate"])
+
     def test_detects_active_account_profile_username(self) -> None:
         xml = (
             '<node text="random_old_profile" />'
@@ -379,6 +395,26 @@ class InstagramLoginUiProbeTest(unittest.TestCase):
         self.assertTrue(signals["ready_for_credentials_flow"])
         self.assertTrue(signals["forgot_password_present"])
         self.assertTrue(signals["meta_present"])
+
+    def test_extracts_login_form_prefilled_username_signals(self) -> None:
+        xml = (
+            '<node class="android.widget.EditText" text="i_m_your_traker" editable="true" />'
+            '<node class="android.widget.EditText" text="Password" editable="true" />'
+            '<node text="Log in" />'
+            '<node text="Create new account" />'
+            '<node text="Meta" />'
+        )
+
+        signals = extract_login_screen_signals_from_hierarchy(xml, expected_username="cinema_catchup")
+
+        self.assertEqual(signals["screen_type"], "login_form_prefilled_username")
+        self.assertTrue(signals["username_field_present"])
+        self.assertTrue(signals["username_field_editable_present"])
+        self.assertTrue(signals["username_prefilled_present"])
+        self.assertEqual(signals["prefilled_username"], "i_m_your_traker")
+        self.assertTrue(signals["password_field_present"])
+        self.assertTrue(signals["login_button_present"])
+        self.assertTrue(signals["ready_for_credentials_flow"])
 
     def test_extracts_continue_password_only_signals(self) -> None:
         xml = (

@@ -216,6 +216,10 @@ def extract_login_screen_signals_from_hierarchy(
     overlay_type = _password_overlay_type(text)
     overlay_present = bool(overlay_type)
     transition_loading = _has_phrase(text, "loading")
+    edit_text_values = _extract_edit_text_values(raw_hierarchy)
+    prefilled_username = _extract_prefilled_username(edit_text_values)
+    username_prefilled_present = bool(prefilled_username)
+    username_field_editable_present = has_username_field or bool(edit_text_values)
 
     if has_google_save_password_prompt:
         screen_type = "google_password_manager_save_prompt"
@@ -243,12 +247,14 @@ def extract_login_screen_signals_from_hierarchy(
         screen_type = "account_switcher_sheet"
     elif actual_logged_in_username and has_edit_profile and has_share_profile and has_profile_stats:
         screen_type = "active_account_profile"
+    elif has_continue_button and has_use_another_profile and suggested_username:
+        screen_type = "continue_as_candidate"
     elif has_home_feed_markers:
         screen_type = "active_account_home"
     elif len(available_usernames) >= 2 and has_use_another_profile and has_create_new_account:
         screen_type = "account_picker"
-    elif has_continue_button and has_use_another_profile and suggested_username:
-        screen_type = "continue_as_candidate"
+    elif username_prefilled_present and has_password_field and has_login_button:
+        screen_type = "login_form_prefilled_username"
     elif suggested_username and has_password_field and has_login_button and not has_username_field:
         screen_type = "continue_password_only"
     elif has_username_field and has_password_field and has_login_button:
@@ -269,16 +275,27 @@ def extract_login_screen_signals_from_hierarchy(
         "has_use_another_profile": has_use_another_profile,
         "has_use_another_profile_button": has_use_another_profile,
         "has_create_new_account_button": has_create_new_account,
-        "has_username_field": has_username_field,
+        "has_username_field": has_username_field or screen_type == "login_form_prefilled_username",
+        "username_field_present": has_username_field or screen_type == "login_form_prefilled_username",
+        "username_field_editable_present": username_field_editable_present,
+        "username_prefilled_present": username_prefilled_present,
+        "prefilled_username": prefilled_username,
         "has_password_field": has_password_field,
+        "password_field_present": has_password_field,
         "has_login_button": has_login_button,
+        "login_button_present": has_login_button,
         "has_ok_button": has_ok_button,
         "password_required_dialog_present": has_password_required_dialog,
         "save_password_prompt_present": has_google_save_password_prompt,
         "google_password_manager_save_prompt": screen_type == "google_password_manager_save_prompt",
         "save_password_prompt": screen_type == "google_password_manager_save_prompt",
-        "username_editable_present": screen_type == "login_form_empty" and has_username_field,
-        "password_field_editable_present": screen_type in {"login_form_empty", "continue_password_only"}
+        "username_editable_present": screen_type in {"login_form_empty", "login_form_prefilled_username"}
+        and username_field_editable_present,
+        "password_field_editable_present": screen_type in {
+            "login_form_empty",
+            "login_form_prefilled_username",
+            "continue_password_only",
+        }
         and has_password_field,
         "forgot_password_present": has_forgot_password,
         "meta_present": has_meta,
@@ -305,9 +322,13 @@ def extract_login_screen_signals_from_hierarchy(
         "overlay_present": overlay_present,
         "overlay_type": overlay_type,
         "overlay_blocking_business": False,
-        "password_required": screen_type in {"login_form_empty", "continue_password_only"},
-        "ready_for_credentials_flow": screen_type == "login_form_empty"
-        and has_username_field
+        "password_required": screen_type in {
+            "login_form_empty",
+            "login_form_prefilled_username",
+            "continue_password_only",
+        },
+        "ready_for_credentials_flow": screen_type in {"login_form_empty", "login_form_prefilled_username"}
+        and (has_username_field or username_prefilled_present)
         and has_password_field
         and has_login_button,
         "ready_for_password_submit": screen_type == "continue_password_only" and has_password_field and has_login_button,
@@ -464,6 +485,40 @@ def _extract_visible_text_values(hierarchy_xml: str) -> list[str]:
             if value:
                 values.append(value)
     return values
+
+
+def _extract_edit_text_values(hierarchy_xml: str) -> list[str]:
+    values: list[str] = []
+    for match in re.finditer(r"<node\b[^>]*>", str(hierarchy_xml or "")):
+        node = match.group(0)
+        if "EditText" not in node and 'editable="true"' not in node:
+            continue
+        text_match = re.search(r'text="([^"]*)"', node)
+        value = unescape(text_match.group(1)).strip() if text_match else ""
+        if value:
+            values.append(value)
+    return values
+
+
+def _extract_prefilled_username(values: list[str]) -> str:
+    for value in values:
+        candidate = _normalize_username_candidate(value)
+        if not candidate:
+            continue
+        lowered = candidate.lower()
+        if lowered in {
+            "username",
+            "email",
+            "mobile",
+            "number",
+            "password",
+            "log",
+            "login",
+        }:
+            continue
+        if re.fullmatch(r"[a-z0-9._]{1,30}", candidate):
+            return candidate
+    return ""
 
 
 def _contains_any(text: str, patterns: tuple[str, ...]) -> bool:

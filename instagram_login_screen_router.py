@@ -17,6 +17,7 @@ CONTINUE_PASSWORD_ONLY = "continue_password_only"
 ACCOUNT_PICKER = "account_picker"
 ACTIVE_ACCOUNT_PROFILE = "active_account_profile"
 LOGIN_FORM_EMPTY = "login_form_empty"
+LOGIN_FORM_PREFILLED_USERNAME = "login_form_prefilled_username"
 UNKNOWN_SCREEN = "unknown"
 
 STOPPED_LIFECYCLE_STATUSES = {"canceled", "archived", "stopped"}
@@ -86,6 +87,47 @@ def route_login_screen(
             normalized_suggested_username=normalized_suggested,
             next_action="secure_credentials_required_later",
             reason="login_form_empty",
+            should_start_login_form_flow=True,
+            clone_reuse_allowed=clone_reuse_allowed,
+        )
+
+    if safe_screen_type == LOGIN_FORM_PREFILLED_USERNAME:
+        if not normalized_suggested:
+            return _decision(
+                ok=False,
+                screen_type=safe_screen_type,
+                decision="username_prefilled_not_editable",
+                expected_username=expected_username,
+                suggested_username=suggested_username or "",
+                normalized_expected_username=normalized_expected,
+                normalized_suggested_username=normalized_suggested,
+                reason="username_prefilled_not_editable",
+                clone_reuse_allowed=clone_reuse_allowed,
+            )
+        if normalized_suggested == normalized_expected:
+            return _decision(
+                ok=True,
+                screen_type=safe_screen_type,
+                decision="start_login_form_flow_prefilled_expected",
+                expected_username=expected_username,
+                suggested_username=suggested_username or "",
+                normalized_expected_username=normalized_expected,
+                normalized_suggested_username=normalized_suggested,
+                next_action="secure_password_required_later",
+                reason="prefilled_username_matches_expected",
+                should_start_login_form_flow=True,
+                clone_reuse_allowed=clone_reuse_allowed,
+            )
+        return _decision(
+            ok=True,
+            screen_type=safe_screen_type,
+            decision="start_login_form_flow_replace_username",
+            expected_username=expected_username,
+            suggested_username=suggested_username or "",
+            normalized_expected_username=normalized_expected,
+            normalized_suggested_username=normalized_suggested,
+            next_action="replace_prefilled_username_then_secure_password",
+            reason="prefilled_username_editable_replace",
             should_start_login_form_flow=True,
             clone_reuse_allowed=clone_reuse_allowed,
         )

@@ -55,6 +55,13 @@ LOGIN_FORM_XML = (
     '<node text="Password" />'
     '<node text="Log in" />'
 )
+PREFILLED_LOGIN_FORM_XML = (
+    '<node class="android.widget.EditText" text="random_old_profile" editable="true" />'
+    '<node class="android.widget.EditText" text="Password" editable="true" />'
+    '<node text="Log in" />'
+    '<node text="Create new account" />'
+    '<node text="Meta" />'
+)
 CONTINUE_AS_XML = (
     '<node text="Continue" clickable="true" bounds="[100,1000][980,1120]" />'
     '<node text="Use another profile" clickable="false" bounds="[371,1215][710,1280]" />'
@@ -975,6 +982,150 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertEqual(
             result.safe_metadata["previous_account_lifecycle"]["source"],
             "operator_smoke_override",
+        )
+
+    def test_previous_canceled_reusable_prefilled_wrong_username_is_replaced_then_submitted(self) -> None:
+        device, selectors = configured_device()
+        selectors["username"]._count = 0
+        prefilled_username = device.add_selector("text", "random_old_profile", FakeSelector(1))
+        device.hierarchies = [
+            CONTINUE_AS_XML,
+            PREFILLED_LOGIN_FORM_XML,
+            PREFILLED_LOGIN_FORM_XML,
+            CONNECTED_XML,
+        ]
+        lookup = Mock(
+            return_value={
+                "lifecycle_status": "canceled",
+                "clone_reuse_allowed": True,
+                "source": "operator_smoke_override",
+                "reason": "previous account stopped; clone reusable",
+            }
+        )
+
+        result = self.run_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username=USERNAME,
+            credentials_getter=Mock(return_value=credentials()),
+            previous_account_lifecycle_lookup=lookup,
+            initial_signals=WRONG_CONTINUE_SIGNALS,
+        )
+
+        self.assertEqual(result.final_outcome, "connected")
+        self.assertIn("tap_use_another_profile", result.actions_taken)
+        self.assertIn("route:start_login_form_flow_replace_username", result.actions_taken)
+        self.assertEqual(prefilled_username.set_text_calls, [USERNAME])
+        self.assertEqual(selectors["password"].set_text_calls, [PASSWORD])
+        self.assertEqual(result.safe_metadata["screen_type"], "login_form_prefilled_username")
+        self.assertEqual(result.safe_metadata["prefilled_username"], "random_old_profile")
+        self.assertEqual(result.safe_metadata["previous_account_lifecycle"]["source"], "operator_smoke_override")
+        self.assertEqual(result.safe_metadata["previous_account_lifecycle"]["lifecycle_status"], "canceled")
+        self.assertTrue(result.safe_metadata["previous_account_lifecycle"]["clone_reuse_allowed"])
+        self.assertTrue(result.safe_metadata["password_result"]["username_replaced"])
+        self.assertEqual(result.safe_metadata["password_result"]["username_input_result"], "username_input_assumed")
+
+    def test_prefilled_username_not_editable_stops_without_submit(self) -> None:
+        getter = Mock(return_value=credentials())
+
+        result = self.run_flow(
+            FakeDevice(),
+            account_id=ACCOUNT_ID,
+            expected_username=USERNAME,
+            credentials_getter=getter,
+            initial_signals={
+                "screen_type": "login_form_prefilled_username",
+                "prefilled_username": "random_old_profile",
+                "username_prefilled_present": True,
+                "username_field_present": True,
+                "username_field_editable_present": False,
+                "has_password_field": True,
+                "has_login_button": True,
+            },
+        )
+
+        self.assertEqual(result.final_outcome, "username_prefilled_not_editable")
+        self.assertFalse(result.safe_metadata["would_submit_password"])
+        getter.assert_not_called()
+
+    def test_routing_screen_type_uses_startup_continue_when_probe_misclassified_home(self) -> None:
+        signals = {
+            "screen_type": "active_account_home",
+            "suggested_username": "random_old_profile",
+            "has_continue_button": True,
+            "has_use_another_profile": True,
+        }
+        preparation = {
+            "expected_username": USERNAME,
+            "startup_final_screen_type": "continue_as_candidate",
+            "screen_after_app_start_final": "continue_as_candidate",
+        }
+
+        self.assertEqual(
+            provisioner_orchestrator._routing_screen_type(signals, preparation),
+            "continue_as_candidate",
+        )
+
+    def test_route_provisioning_screen_cas_a_fallback_when_probe_unknown(self) -> None:
+        routing_signals = {
+            "screen_type": "unknown",
+            "suggested_username": "random_old_profile",
+            "available_usernames": [],
+        }
+        previous_account_lifecycle = {
+            "username": "random_old_profile",
+            "lifecycle_status": "canceled",
+            "clone_reuse_allowed": True,
+            "source": "operator_smoke_override",
+        }
+
+        route = provisioner_orchestrator._route_provisioning_screen(
+            expected_username=USERNAME,
+            routing_signals=provisioner_orchestrator._routing_signals(
+                routing_signals,
+                {
+                    "expected_username": USERNAME,
+                    "startup_final_screen_type": "continue_as_candidate",
+                },
+                previous_account_lifecycle=previous_account_lifecycle,
+            ),
+            previous_account_lifecycle=previous_account_lifecycle,
+            account_id=ACCOUNT_ID,
+        )
+
+        self.assertEqual(route.decision, "use_another_profile_previous_account_stopped")
+
+    def test_use_another_profile_unknown_then_prefilled_settles_without_early_stop(self) -> None:
+        device, selectors = configured_device()
+        selectors["username"]._count = 0
+        device.add_selector("text", "random_old_profile", FakeSelector(1))
+        device.hierarchies = [
+            CONTINUE_AS_XML,
+            UNKNOWN_XML,
+            PREFILLED_LOGIN_FORM_XML,
+            PREFILLED_LOGIN_FORM_XML,
+            CONNECTED_XML,
+        ]
+
+        result = self.run_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username=USERNAME,
+            credentials_getter=Mock(return_value=credentials()),
+            previous_account_lifecycle_lookup=self._canceled_lifecycle(),
+            initial_signals=WRONG_CONTINUE_SIGNALS,
+        )
+
+        self.assertEqual(result.final_outcome, "connected")
+        self.assertGreaterEqual(result.safe_metadata.get("post_use_another_profile_observation_count", 0), 1)
+        post_screens = result.safe_metadata.get("post_use_another_profile_screens", [])
+        self.assertTrue(
+            any(screen in post_screens for screen in ("unknown", "transition_unknown")),
+            post_screens,
+        )
+        self.assertEqual(
+            result.safe_metadata.get("screen_after_use_another_profile_final"),
+            "login_form_prefilled_username",
         )
 
     def test_previous_canceled_clone_reusable_dry_run_routes_use_another_profile(self) -> None:

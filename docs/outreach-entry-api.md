@@ -4062,6 +4062,200 @@ Depuis Entry 2E-5P-10, Cursor ne lance plus de smoke device reel par defaut :
 Cursor fournit patch, tests, docs et commandes; l'operateur lance le run terminal
 et rapporte l'observation visuelle.
 
+## Entry 2E-5P-11 Cas A Router Wiring + Post Use Another Profile Settling
+
+Patch 2E-5P-11 corrige d'abord le wiring Cas A avant le formulaire prefilled.
+
+Bug observe :
+
+- `previous_account_lifecycle_source=operator_smoke_override` et
+  `clone_reuse_allowed=true` etaient visibles dans le JSON safe;
+- mais `router_decision=unknown_no_action` et `preparation_flow_used=none`
+  alors que `screen_after_app_start_final=continue_as_candidate`,
+  `suggested_username != expected_username` et lifecycle `canceled` reusable.
+
+Cause racine :
+
+- le routeur recevait parfois un `screen_type` different de
+  `continue_as_candidate` (ex. `active_account_home` ou `unknown`) alors que le
+  settling startup avait deja stabilise `continue_as_candidate`;
+- l'override operateur etait bien resolu pour la metadata lifecycle, mais la
+  decision finale utilisait encore le mauvais `screen_type` de routage.
+
+Correctifs :
+
+- priorite probe : `continue_as_candidate` avant `active_account_home` quand
+  Continue + Use another profile + suggested username sont presents;
+- `_routing_screen_type(...)` reutilise `startup_final_screen_type` /
+  `screen_after_app_start_final` et les marqueurs Continue-as avant de router;
+- filet de securite `_route_provisioning_screen(...)` : si lifecycle
+  `canceled/stopped/archived` + `clone_reuse_allowed=true` et suggested !=
+  expected, ne jamais rester sur `unknown_no_action`;
+- apres `tap_use_another_profile`, settling borne (jusqu'a 4 observations,
+  intervalle ~1000 ms) avant stop sur `unknown`;
+- ecrans acceptes apres le tap :
+  `login_form_empty`, `login_form_prefilled_username`, `account_picker`,
+  `continue_as_candidate`, `continue_password_only`.
+
+Logs JSONL safe ajoutes :
+
+- `post_use_another_profile_observation_count`;
+- `post_use_another_profile_screens`;
+- `screen_after_use_another_profile_final`;
+- `preparation_flow_used=use_another_profile_previous_account_stopped` quand
+  l'action `tap_use_another_profile` a ete executee.
+
+Route attendue Cas A :
+
+- `router_decision=use_another_profile_previous_account_stopped`;
+- `action=tap_use_another_profile`;
+- puis, si besoin, branche 2E-5P-11 prefilled username ci-dessous.
+
+## Entry 2E-5P-12 Username Replace On Prefilled Login Form
+
+Entry 2E-5P-12 corrige l'executor quand Cas A aboutit a
+`login_form_prefilled_username` avec un ancien username editable.
+
+Bug observe (`run_id` operateur) :
+
+- routing OK : `use_another_profile_previous_account_stopped` puis
+  `start_login_form_flow_replace_username`;
+- ecran reel : username `i_m_your_traker` focus, password vide, bouton Log in;
+- echec : `username_input_failed`, `username_input_ms=0`, `username_replaced=false`
+  alors que le curseur etait dans le champ.
+
+Cause racine :
+
+- cible username parfois non-EditText ou clear juge obligatoire trop tot;
+- `_clear_target_text_checked` retournait `False` sans fallback `set_text`;
+- si le texte restait apres clear, l'executor stoppait avant toute saisie reelle;
+- `username_input_ms` restait a 0 car l'echec arrivait avant la fin du bloc username.
+
+Correctifs :
+
+- preferer `android.widget.EditText` (premier champ) avant le match texte du prefilled;
+- focus username (click + bounds tap) avant clear/input;
+- clear en cascade : `clear_text` -> `set_text("")` -> `set_text(expected)` ->
+  fallback `adb_keyboard_b64` si disponible;
+- confirmation par readback selector + re-dump hierarchy (`prefilled_username`);
+- reasons explicites :
+  `username_clear_failed`, `username_still_prefilled_after_input`,
+  `username_field_not_found`, `username_field_not_focusable`;
+- pas de reveal password tant que username non confirme/assume;
+- logs safe :
+  `username_field_focused_before_input`, `username_clear_method`,
+  `username_input_method`, `username_input_ms`.
+
+## Entry 2E-5P-13 Masked Password Confirmation After Username Replace
+
+Entry 2E-5P-13 traite la suite directe du Cas A :
+
+- `login_form_prefilled_username` atteint apres `Use another profile`;
+- ancien username remplace et confirme (`username_replaced=true`,
+  `username_input_confirmed=true`);
+- password injecte via methode robuste, mais submit bloque par
+  `password_input_not_confirmed` alors que le champ affichait des bullets.
+
+Cause racine :
+
+- la confirmation password relisait surtout la cible accessibilite initiale
+  `Password`;
+- apres `adb_keyboard_b64`, cette cible peut rester au placeholder accessible
+  meme si le vrai champ EditText affiche un contenu masque;
+- l'executor interpretait alors `password_field_non_empty_confirmed=false` et
+  stoppait avant `tap Log in`.
+
+Correctifs :
+
+- cible password : preferer le deuxieme `android.widget.EditText` lorsque le
+  formulaire contient username + password;
+- confirmation safe apres input :
+  - `target_accessibility_non_empty`;
+  - `hierarchy_masked_password` si le champ EditText contient uniquement des
+    bullets / caracteres masques;
+  - `unknown_but_input_success` si `adb_keyboard_b64` reussit, que la cible
+    password est plausible et qu'aucun signal safe ne prouve un champ vide;
+- si le hierarchy ou l'accessibilite prouve un champ vide :
+  `password_input_not_confirmed`, no submit;
+- la recovery `Password required` reste bornee : OK/refocus/refill, un retry
+  maximum.
+
+Logs JSONL safe ajoutes :
+
+- `password_field_target_kind`;
+- `password_input_method`;
+- `password_input_result`;
+- `password_confirm_method`;
+- `password_field_non_empty_confirmed` peut valoir `true`, `false` ou
+  `unknown_but_input_success`.
+
+Le smoke reste `--no-publish`; aucun password, longueur/hash, `secret_ref`,
+Vault UUID, token/header, XML brut ou screenshot path ne doit etre logge.
+
+Finalisation metadata 2E-5P-13 :
+
+- le run operateur Cas A complet a valide `final_outcome=connected`, username
+  remplace, password confirme via `hierarchy_masked_password`, dismiss Google
+  Password Manager par `back`, et `would_publish=false`;
+- bug restant corrige : apres `Use another profile`, la re-resolution lifecycle
+  sur `login_form_prefilled_username` ne doit plus ecraser l'override initial
+  avec `{lifecycle_status=unknown, clone_reuse_allowed=false, source=""}`;
+- les metadata finales conservent donc
+  `source=operator_smoke_override`, `lifecycle_status=canceled`,
+  `clone_reuse_allowed=true`, et `suggested_username` dynamique du compte
+  precedent.
+
+## Entry 2E-5P-11 Login Form Username Prefilled
+
+Entry 2E-5P-11 traite le cas observe pendant le Cas A complet : apres
+`Use another profile`, Instagram peut afficher un formulaire login avec le
+username de l'ancien compte deja renseigne, au lieu d'un `login_form_empty`
+strict.
+
+Detection :
+
+- nouveau `screen_type=login_form_prefilled_username`;
+- signaux safe : `username_field_present`, `username_field_editable_present`,
+  `username_prefilled_present`, `prefilled_username`,
+  `password_field_present`, `login_button_present`;
+- aucun XML brut, screenshot path, password, `secret_ref`, UUID Vault complet ou
+  token/header dans les logs.
+
+Routing :
+
+- si `prefilled_username != expected_username` et le champ username est editable :
+  `router_decision=start_login_form_flow_replace_username`;
+- si `prefilled_username == expected_username` :
+  `router_decision=start_login_form_flow_prefilled_expected`;
+- si le champ username n'est pas editable :
+  `final_outcome=username_prefilled_not_editable`, no submit;
+- un username pre-rempli different sur un ecran login editable n'est pas un
+  mismatch compte : le flow remplace le champ par `expected_username`.
+
+Executor :
+
+- focus username, clear, saisie `expected_username`, confirmation si le readback
+  accessibilite le permet;
+- le password `SecretValue` n'est revele qu'apres succes/confirmation suffisante
+  de l'etape username;
+- si clear/input username echoue :
+  `final_outcome=username_input_failed`, aucun submit password si possible;
+- post-submit settling et Google Password Manager restent ceux de 2E-5P-10.
+
+Logs JSONL safe ajoutes :
+
+- `screen_type`;
+- `prefilled_username`;
+- `username_replaced`;
+- `username_input_confirmed`;
+- `username_input_result`;
+- `router_decision`;
+- `preparation_flow_used`;
+- `screen_before_submit`.
+
+Les smokes restent `--no-publish` : aucun publish backend, aucune ecriture status
+Supabase, aucun runner hook et aucun flow social/business.
+
 Standard CLI provisioning/login :
 
 - tout flow provisioning/login doit avoir une commande terminal reproductible
