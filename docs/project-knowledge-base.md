@@ -402,6 +402,18 @@ Post-submit policy future :
   `extracted_password_valid=true`, `secret_value_safe_for_injection=true`,
   `injectable_password_only=true`, sans afficher password/payload. Aucun submit
   device dans ce patch ; smoke 2E-5P-4 separe apres validation operateur.
+- Entry 2E-5P-5 Password-only secure login smoke (device, post-2E-5P-4) :
+  pre-check OK (`emulator-5554`, pas de runner/business). Credentials safe :
+  `active` v1000, Vault, `injectable_password_only=true`,
+  `guard_would_block_revealed_value=false`. Preparation :
+  `continue_as_candidate` -> tap `Continue` une fois ->
+  `continue_password_only`. Submit : `adb_keyboard_b64`,
+  `password_field_non_empty_confirmed=true`, `submit_executed=true`, aucune
+  popup `Password required`, `retry_count=0`. Post-submit :
+  `logged_out/session_expired` (pas `connected`); injection/extraction Vault
+  validees, session Instagram a traiter separement. `would_publish=false`.
+  No-leak confirme. Tag
+  `checkpoint-entry2e5p5-password-only-secure-login-smoke-20260526`.
 - Entry 2E-5P-3 Password input injection : cause racine identifiee. En mode
   `continue_password_only`, l'ancien target `text="Password"` pointait vers un
   label `android.view.View`, pas vers le vrai `android.widget.EditText`. Le

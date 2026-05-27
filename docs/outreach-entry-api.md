@@ -3743,6 +3743,71 @@ Prochaine etape :
 - smoke device 2E-5P-4 separe uniquement apres validation operateur du dry-run;
 - aucun submit Instagram dans ce patch.
 
+## Entry 2E-5P-5 Password-Only Secure Login Smoke (device)
+
+Entry 2E-5P-5 valide sur device reel (`emulator-5554`, compte `cinema_catchup`)
+que l'extraction Vault password-only (2E-5P-4) et l'injection robuste (2E-5P-3)
+fonctionnent ensemble : plus de payload JSON dans le champ password, plus de
+popup `Password required` apres submit.
+
+Pre-check :
+
+- `device_count=1`, `device_serial=emulator-5554`;
+- `business_run_detected=false`, `runner.py` inactif;
+- flows sender/follow/unfollow/outreach projet inactifs.
+
+Credentials safe (metadata only, no-leak) :
+
+- `username=cinema_catchup`, `credentials_status=active`,
+  `credentials_version=1000`, `secret_provider=supabase_vault`;
+- `secret_ref` shape valide (redacted), `username_matches_expected=true`;
+- `secret_loaded=true`, `injectable_password_only=true`,
+  `secret_value_safe_for_injection=true`,
+  `guard_would_block_revealed_value=false`.
+
+Preparation ecran :
+
+- `app_start_ok=true` sur `com.instagram.android`;
+- juste apres `app_start`, le probe peut encore classer `unknown` transitoire
+  (orchestrateur : `screen_preparation_failed` si stop immediat);
+- apres stabilisation (~1–2 s) : `continue_as_candidate` avec
+  `suggested_username=cinema_catchup` -> tap `Continue` une fois ->
+  `continue_password_only`, username affiche conforme.
+
+Submit controle (`screen_before_submit=continue_password_only`) :
+
+- `submit_executed=true`;
+- `input_method_used=adb_keyboard_b64`;
+- `password_field_focused_before_input=true`;
+- `password_field_non_empty_confirmed=true`;
+- `password_required_dialog_detected=false`, `retry_count=0`;
+- injection uniquement via `SecretValue` dans l'executor, pas de publish HTTP,
+  pas de status write Supabase, `would_publish=false`.
+
+Post-submit :
+
+- `final_outcome=logged_out`, `reason=session_expired` (classifieur safe);
+- pas `connected`, pas `needs_2fa`, pas `checkpoint`, pas
+  `password_input_failed`;
+- aucun retry password automatique.
+
+Conclusion smoke :
+
+- objectif 2E-5P-4/5 atteint : valeur injectable password-only, guard anti-payload
+  inactif sur secret valide, champ password confirme non vide avant `Log in`;
+- blocage restant = etat session Instagram post-login (`session_expired`), pas
+  l'injection ni l'extraction Vault.
+
+No-leak :
+
+- aucun password, longueur/hash, `secret_ref` complet, UUID Vault complet,
+  raw Vault payload, token/header, XML brut, screenshot path.
+
+Checkpoint :
+
+- SHA base `0af5258` (2E-5P-4) + docs smoke 2E-5P-5;
+- tag `checkpoint-entry2e5p5-password-only-secure-login-smoke-20260526`.
+
 ## Entry 2E-5J-2B-1 Previous Account Lifecycle Gate Source
 
 Entry 2E-5J-2B-1 audite la source fiable a utiliser avant d'autoriser
