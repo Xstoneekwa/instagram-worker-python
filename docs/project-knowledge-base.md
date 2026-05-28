@@ -802,3 +802,54 @@ Le checkpoint 2E-5H-2 est deja pousse :
 Regle de maintenance : toute evolution majeure doit mettre a jour cette base de
 connaissance quand elle modifie l'etat global, la roadmap, les limites runtime,
 les garanties de securite ou les checkpoints.
+
+## 13. Dashboard Foundation 1A
+
+Dashboard Foundation 1A est le premier socle backend read-only pour les futures
+vues admin/client :
+
+- Admin Manage ;
+- Admin Radar / Server Check ;
+- projection client-safe ;
+- compatibilite future BotApp / Mac app.
+
+Objets ajoutes :
+
+- `public.get_admin_account_overview(...)` ;
+- `public.get_admin_radar_overview(...)`.
+
+Ces RPC sont volontairement internes/admin-safe en V1 :
+
+- `SECURITY DEFINER` ;
+- `service_role` uniquement ;
+- pas de grant `anon` ou `authenticated` ;
+- pas encore d'Edge Function admin dashboard ;
+- pas encore de JWT admin/assistant/client.
+
+La projection Manage expose uniquement des champs safe et stables : compte,
+client, username, email masque, statuts dashboard, subscription/package,
+entitlements, status credentials safe, status login/provisioning/onboarding,
+actions dashboard pending, blocking campaign, dernier incident, timestamps safe.
+
+La projection Radar expose une premiere classification `health_status` et
+`health_reason`, plus les champs stables necessaires aux futures KPI cards et
+quick rules. Les metriques absentes restent `null`, `unknown`, `false` ou `[]` :
+le backend ne fabrique pas de faux chiffres.
+
+Regles no-leak maintenues :
+
+- jamais de password, hash ou longueur password ;
+- jamais de `secret_ref`, Vault id, token, Authorization header, service-role ;
+- jamais de webhook Slack/Discord ;
+- jamais de XML brut, screenshot path, raw logs ou metadata sensible ;
+- jamais d'`adb_serial`, `device_udid`, USB/hub port dans une projection client.
+
+Roadmap apres 1A :
+
+- 1B/1C : Edge/JWT admin et projection client-safe avec ownership explicite ;
+- groupe admin : activity log, special care, phone notes, phone display order,
+  mutation status dropdown avec audit ;
+- groupe business critique separe : Source Quality Control / FBR CT et sync
+  Target Accounts ;
+- groupe BotApp ops plus tard : operations, webhooks, gateway, phone controls
+  reels, AI log analysis.

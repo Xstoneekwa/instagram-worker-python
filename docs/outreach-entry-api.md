@@ -2310,6 +2310,77 @@ Suite prevue :
 - login controle sur clone + compte test dedie;
 - puis seulement integration state machine / recovery avant runtime principal.
 
+## Dashboard Foundation 1A — Admin Account Overview / Radar Base
+
+Dashboard Foundation 1A ajoute une fondation backend **read-only** pour les
+futures surfaces admin Manage, Radar / Server Check, projection client-safe et
+compatibilite BotApp/Mac app. Cette entree ne modifie pas l'UI, ne cree aucune
+mutation dashboard et ne branche aucun runtime device.
+
+RPC ajoutees :
+
+- `public.get_admin_account_overview(p_limit, p_offset, p_search, p_status)` ;
+- `public.get_admin_radar_overview(p_limit, p_offset, p_search, p_status,
+  p_health)`.
+
+Contrat V1 :
+
+- `SECURITY DEFINER` ;
+- `grant execute` uniquement a `service_role` ;
+- aucun grant `anon` ;
+- aucun grant `authenticated` ;
+- pas d'Edge Function dashboard admin en 1A ;
+- pas de JWT admin/client en 1A.
+
+Projection Manage admin :
+
+- identifiants compte/client, nom client, username, email masque ;
+- statuts dashboard derives (`admin_status`, `customer_status`,
+  `subscription_status`) ;
+- package / entitlements ;
+- credentials status safe (`credentials_configured`, `credentials_status`,
+  `reauth_required`, `password_display`) ;
+- statuts login/provisioning/onboarding ;
+- compteur actions dashboard pending, blocage campagne, derniere severite
+  incident ;
+- champs futurs stables (`tags`, `invoice_status`, `last_7d_growth`) meme
+  lorsqu'ils retournent `[]`, `null` ou `unknown` en V1.
+
+Projection Radar / Server Check admin :
+
+- `health_status` dans `ok`, `monitor`, `problem`, `unknown` ;
+- `health_reason` explicite ;
+- actions 2j / 7j / 30j depuis logs safe lorsque disponibles ;
+- FBR agrégé depuis `ig_interacted_users` quand un denominateur fiable existe ;
+- champs futurs stables pour growth, posts, live-feed, special care et quick
+  rules, sans inventer de metriques absentes.
+
+No-leak contract :
+
+- aucune sortie password, hash/longueur password, `secret_ref`, Vault id,
+  token, Authorization header, `service_role`, webhook Slack/Discord, XML brut,
+  screenshot path, raw logs, metadata incident brute sensible, `adb_serial`,
+  `device_udid`, USB/hub port ;
+- l'email est masque (`x***@domain`) ;
+- `password_display` est limite a `configured`, `missing` ou `unknown`.
+
+Compatibilite future :
+
+- Propulse sert de reference UX Manage/Radar, sans copie UI dans ce patch ;
+- BotApp sert de reference conceptuelle pour profiles/devices/settings/targets/
+  stats/interactions/audit/scopes, sans creation d'API `/v1` ;
+- la projection client-safe sera derivee plus tard (1B/1C) depuis ces contrats
+  safe, avec ownership/JWT dedies.
+
+Hors scope 1A :
+
+- mutation status dropdown ;
+- phone controls, restart/stop-all reels ;
+- special care write, notes, phone sorting, activity log table ;
+- Source Quality Control / CT auto-disable ;
+- IA log analysis, customer import/webhooks ;
+- publish backend connected, runner hook, smoke Instagram, Slack/Discord.
+
 ## Entry 2E-5F Controlled Action Executor
 
 Entry 2E-5F ajoute `instagram_login_action_executor.py`, un executor controle
