@@ -853,3 +853,41 @@ Roadmap apres 1A :
   Target Accounts ;
 - groupe BotApp ops plus tard : operations, webhooks, gateway, phone controls
   reels, AI log analysis.
+
+## 14. Dashboard Settings Registry
+
+`docs/dashboard-settings-registry.md` est la source de verite documentaire pour
+rebrancher l'UI admin Codex `/instagram-dashboard` sur le backend Phone Farm.
+
+Synthese :
+
+- l'UI existante est un prototype admin riche mais legacy GramBot/Appium ;
+- elle ne doit pas etre jetee, mais ne doit pas etre exposee client telle
+  quelle ;
+- `ig_account_settings` ne doit pas rester la source principale des settings ;
+- les reads admin doivent passer par une future API/Edge admin-dashboard puis
+  par les RPC 1A et les projections safe ;
+- les writes admin doivent passer par des APIs de domaine avec validation role,
+  entitlement, support runtime et audit log ;
+- le dashboard client futur sera separe et client-safe uniquement.
+
+Points critiques conserves :
+
+- `password` en clair dans `ig_account_settings` est legacy et a deprecier ;
+- credentials via `account_credentials` + `instagram-credentials` + Vault ;
+- `device_udid`, device internals, raw logs, raw metadata, XML, screenshot
+  paths, `secret_ref`, Vault id, tokens, webhooks et `service_role` sont
+  interdits client ;
+- `account_status` monolithique doit etre remplace par `admin_status`,
+  `login_status`, `provisioning_status`, `subscription_status` et
+  `automation_health`.
+
+Ordre recommande apres ce registre :
+
+1. DF-1B admin-dashboard Edge/API over RPC 1A pour Manage/Radar read-only.
+2. Credentials via API dediee.
+3. DM vers `ig_account_dm_settings` + `ig_dm_templates`.
+4. Targets/CT vers `ig_targets`.
+5. Unfollow/Follow vers les tables runtime verifiees.
+6. Filters apres reconciliation runtime.
+7. Safety/Device en admin/ops-only avec audit obligatoire.

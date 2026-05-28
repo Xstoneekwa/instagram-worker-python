@@ -2381,6 +2381,43 @@ Hors scope 1A :
 - IA log analysis, customer import/webhooks ;
 - publish backend connected, runner hook, smoke Instagram, Slack/Discord.
 
+## Dashboard Settings Registry — DF-1B-prep
+
+`docs/dashboard-settings-registry.md` documente le mapping officiel entre l'UI
+admin Codex `/instagram-dashboard` et le backend Phone Farm cible. Ce registre
+est documentaire uniquement : aucun patch runtime, aucune migration, aucune Edge
+Function, aucun run device, aucun publish backend et aucun patch UI.
+
+Le registre acte que l'UI existante est un prototype admin legacy
+GramBot/Appium a conserver puis migrer progressivement. Elle lit/ecrit surtout
+`ig_account_settings`, `ig_account_filters`, `ig_accounts`, `ig_runs`,
+`ig_action_logs`, `ig_account_templates`, `ig_devices` et `ig_targets`, alors
+que Phone Farm runtime s'appuie deja ou cible plutot `client_instagram_accounts`,
+`account_credentials`, `ig_account_dm_settings`, `ig_dm_templates`,
+`ig_account_unfollow_settings`, `ig_account_follow_settings`, `ig_targets`,
+`ig_interacted_users`, `account_dashboard_actions`, `account_incidents`,
+`runtime_events`, `phone_devices`, `phone_clones` et `account_assignments`.
+
+Regles principales :
+
+- ne pas brancher le dashboard client sur cette UI ni sur les tables legacy ;
+- remplacer les reads admin par une future API/Edge admin-dashboard au-dessus
+  des RPC 1A ;
+- faire passer les writes par des APIs de domaine avec validation role,
+  entitlement, support runtime et audit log ;
+- deprecier `ig_account_settings.password` et utiliser
+  `account_credentials` + `instagram-credentials` + Vault ;
+- garder `device_udid`, device internals, raw logs, raw metadata, XML,
+  screenshot paths, `secret_ref`, Vault id, tokens, webhooks et `service_role`
+  hors de toute surface client ;
+- separer `account_status` en `admin_status`, `login_status`,
+  `provisioning_status`, `subscription_status` et `automation_health`.
+
+Prochaine etape recommandee apres ce document : DF-1B admin-dashboard Edge/API
+over RPC 1A, read-only, sans mutation settings, sans device controls, sans
+Source Quality Control, sans client dashboard et sans branchement complet du
+drawer Settings.
+
 ## Entry 2E-5F Controlled Action Executor
 
 Entry 2E-5F ajoute `instagram_login_action_executor.py`, un executor controle
