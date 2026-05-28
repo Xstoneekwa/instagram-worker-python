@@ -2418,6 +2418,74 @@ over RPC 1A, read-only, sans mutation settings, sans device controls, sans
 Source Quality Control, sans client dashboard et sans branchement complet du
 drawer Settings.
 
+## Dashboard Foundation 1B — Admin Dashboard Edge/API over RPC 1A
+
+Dashboard Foundation 1B ajoute l'Edge Function read-only
+`supabase/functions/admin-dashboard/index.ts`. Elle expose une premiere API
+interne/admin au-dessus des RPC 1A, sans lire directement les tables dashboard
+et sans mutation.
+
+Actions V1 :
+
+- `health` : retourne `{ ok: true, service: "admin-dashboard", version:
+  "df-1b" }` ;
+- `manage_overview` : appelle `public.get_admin_account_overview(...)` ;
+- `radar_overview` : appelle `public.get_admin_radar_overview(...)`.
+
+Auth V1 :
+
+- POST uniquement pour les actions ;
+- header `Authorization: Bearer <ADMIN_DASHBOARD_INTERNAL_API_TOKEN>` ;
+- secret Edge attendu : `ADMIN_DASHBOARD_INTERNAL_API_TOKEN` ;
+- aucun accès `anon` ;
+- aucun accès `authenticated` direct ;
+- aucun JWT client/admin dans ce patch.
+
+Contrat request :
+
+- `action` obligatoire ;
+- `limit` optionnel, clampe entre `1` et `200` ;
+- `offset` optionnel, normalise a `0` minimum ;
+- `search`, `status` optionnels ;
+- `health` optionnel uniquement pour `radar_overview`.
+
+Contrat response :
+
+- success : `{ ok: true, action, count, items }` pour Manage/Radar ;
+- erreur : `{ ok: false, error: { code, message } }` avec code safe dans
+  `unauthorized`, `validation_error`, `unsupported_action`, `rpc_failed`,
+  `internal_error`.
+
+Note UI future : DF-1B ne modifie pas le repo Next.js et ne suppose pas que
+`/instagram-dashboard` restera une seule grande page. L'API doit pouvoir
+alimenter progressivement des vues admin separees : Admin Manage, Admin Radar /
+Server Check, Account Detail, Settings / Growth Settings, Devices / Phones,
+Activity Log, Target Accounts / CT, DM Templates, Credentials / Dashboard
+Actions.
+
+No-leak :
+
+- l'API ne retourne pas password reel, hash/longueur password, `secret_ref`,
+  Vault id, token, Authorization header, service-role, webhook Slack/Discord,
+  XML brut, screenshot path, raw logs, raw metadata, `adb_serial`, `usb_port`,
+  `hub_port` ou `device_udid` ;
+- `password_display` reste autorise seulement comme valeur safe
+  `configured`, `missing` ou `unknown` issue des RPC ;
+- les logs Edge restent limites a `request_id`, `action`, `limit`, `offset`,
+  `count`, status code et error code safe.
+
+Hors scope 1B :
+
+- deploy remote ;
+- configuration du secret remote ;
+- smoke HTTP reel ;
+- UI Codex / repo `boost-ai-frontend` ;
+- settings mutations ;
+- status dropdown write ;
+- device controls ;
+- Source Quality Control / CT auto-disable ;
+- publish backend connected, device run, smoke Instagram, Slack/Discord.
+
 ## Entry 2E-5F Controlled Action Executor
 
 Entry 2E-5F ajoute `instagram_login_action_executor.py`, un executor controle

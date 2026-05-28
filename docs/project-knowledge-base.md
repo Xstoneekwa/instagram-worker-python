@@ -891,3 +891,45 @@ Ordre recommande apres ce registre :
 5. Unfollow/Follow vers les tables runtime verifiees.
 6. Filters apres reconciliation runtime.
 7. Safety/Device en admin/ops-only avec audit obligatoire.
+
+## 15. Dashboard Foundation 1B
+
+Dashboard Foundation 1B ajoute l'Edge Function read-only
+`admin-dashboard` au-dessus des RPC 1A.
+
+Actions exposees :
+
+- `health` ;
+- `manage_overview` -> `public.get_admin_account_overview(...)` ;
+- `radar_overview` -> `public.get_admin_radar_overview(...)`.
+
+Garanties :
+
+- auth interne uniquement par `ADMIN_DASHBOARD_INTERNAL_API_TOKEN` ;
+- POST only pour les actions ;
+- service-role utilise cote Edge pour appeler les RPC ;
+- aucune lecture directe des tables legacy ;
+- aucun acces `anon`, `authenticated`, JWT client ou JWT admin dans ce patch ;
+- aucune mutation settings, lifecycle, device, Source Quality Control ou status
+  dropdown ;
+- aucun changement UI Codex / `boost-ai-frontend`.
+
+Relation avec les checkpoints precedents :
+
+- DF-1A fournit les RPC service-role-only et le contrat no-leak ;
+- DF-1B-prep documente le mapping Settings Registry et l'ordre de migration ;
+- DF-1B cree la couche API interne qui pourra alimenter plus tard des vues admin
+  separees cote UI, pas seulement une page unique `/instagram-dashboard`.
+
+Vues admin futures a prevoir progressivement : Admin Manage, Admin Radar /
+Server Check, Account Detail, Settings / Growth Settings, Devices / Phones,
+Activity Log, Target Accounts / CT, DM Templates, Credentials / Dashboard
+Actions.
+
+Suite possible :
+
+1. Validation operateur du patch local.
+2. GO explicite deploy + secret remote + smoke HTTP read-only.
+3. Plus tard seulement : consommation UI Codex de `admin-dashboard`.
+4. Les settings, device controls, client dashboard et mutations restent hors
+   scope tant que les APIs de domaine et audits ne sont pas prets.

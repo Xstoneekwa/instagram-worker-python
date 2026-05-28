@@ -526,6 +526,23 @@ DF-1B should:
 - avoid direct UI `select *`;
 - preserve service-role isolation server-side.
 
+DF-1B implementation note:
+
+- Edge Function: `supabase/functions/admin-dashboard/index.ts`;
+- actions: `health`, `manage_overview`, `radar_overview`;
+- auth: `Authorization: Bearer <ADMIN_DASHBOARD_INTERNAL_API_TOKEN>`;
+- `manage_overview` calls `get_admin_account_overview`;
+- `radar_overview` calls `get_admin_radar_overview`;
+- no UI consumption, settings mutation, client JWT, device control or deploy is
+  included without a later explicit GO.
+
+Future UI note: the current Next.js `/instagram-dashboard` is mostly one large
+admin page with drawers and row controls. DF-1B must not assume this remains the
+long-term shape. The API and follow-up docs should be able to feed separate
+admin views over time: Admin Manage, Admin Radar / Server Check, Account Detail,
+Settings / Growth Settings, Devices / Phones, Activity Log, Target Accounts /
+CT, DM Templates, and Credentials / Dashboard Actions.
+
 DF-1B should not yet:
 
 - mutate settings;
