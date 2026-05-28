@@ -933,3 +933,13 @@ Suite possible :
 3. Plus tard seulement : consommation UI Codex de `admin-dashboard`.
 4. Les settings, device controls, client dashboard et mutations restent hors
    scope tant que les APIs de domaine et audits ne sont pas prets.
+
+Remote deploy/smoke 2026-05-28 :
+
+- `admin-dashboard` deployed on project `zgafnshkjywfltxgbtzg`;
+- remote secret `ADMIN_DASHBOARD_INTERNAL_API_TOKEN` configured without
+  recording or displaying its value;
+- smoke HTTP covered missing auth, bad token, `health`, `manage_overview`,
+  `radar_overview`, unsupported action and clamp validation;
+- remote responses confirmed no-leak. No UI, migration, settings mutation,
+  device control or backend publish was executed.

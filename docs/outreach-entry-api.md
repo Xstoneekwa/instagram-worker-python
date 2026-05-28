@@ -2486,6 +2486,16 @@ Hors scope 1B :
 - Source Quality Control / CT auto-disable ;
 - publish backend connected, device run, smoke Instagram, Slack/Discord.
 
+Remote deploy/smoke 2026-05-28 :
+
+- `admin-dashboard` deployed on project `zgafnshkjywfltxgbtzg`;
+- `ADMIN_DASHBOARD_INTERNAL_API_TOKEN` configured remotely without storing or
+  displaying the value;
+- smoke HTTP passed for missing auth, bad token, `health`, `manage_overview`,
+  `radar_overview`, unsupported action and clamp validation;
+- no-leak confirmed on remote responses; no UI, migration, settings mutation,
+  device control or backend publish was performed.
+
 ## Entry 2E-5F Controlled Action Executor
 
 Entry 2E-5F ajoute `instagram_login_action_executor.py`, un executor controle
