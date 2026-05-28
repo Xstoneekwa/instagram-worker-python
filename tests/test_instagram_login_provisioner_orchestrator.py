@@ -151,6 +151,27 @@ SETTINGS_AND_ACTIVITY_XML = (
     '<node text="Add account" />'
     '<node text="Log out" clickable="true" bounds="[100,1900][980,2020]" />'
 )
+SETTINGS_AND_ACTIVITY_TOP_XML = (
+    '<node text="Settings and activity" />'
+    '<node text="Account type and tools" clickable="true" bounds="[80,520][980,640]" />'
+    '<node text="Fundraisers" clickable="true" bounds="[80,780][980,900]" />'
+    '<node text="Orders and payments" clickable="true" bounds="[80,900][980,1020]" />'
+    '<node text="More info and support" />'
+    '<node text="Help" clickable="true" bounds="[80,1120][980,1240]" />'
+    '<node text="Privacy Center" clickable="true" bounds="[80,1240][980,1360]" />'
+    '<node text="Account Status" clickable="true" bounds="[80,1360][980,1480]" />'
+    '<node text="About" clickable="true" bounds="[80,1480][980,1600]" />'
+    '<node text="Also from Meta" />'
+    '<node text="WhatsApp" clickable="true" bounds="[80,1720][980,1840]" />'
+    '<node text="Threads" clickable="true" bounds="[80,1960][980,2080]" />'
+    '<node text="Facebook" clickable="true" bounds="[80,2080][980,2200]" />'
+)
+SETTINGS_AND_ACTIVITY_FRENCH_LOGOUT_XML = (
+    '<node text="Settings and activity" />'
+    '<node text="More info and support" />'
+    '<node text="Login" />'
+    '<node text="Déconnexion" clickable="true" bounds="[100,1900][980,2020]" />'
+)
 SAVE_LOGIN_INFO_PROMPT_XML = (
     '<node text="Save your login info?" />'
     '<node text="Save" clickable="true" bounds="[100,1600][980,1720]" />'
@@ -165,6 +186,12 @@ LOGOUT_CONTINUE_AS_XML = (
     '<node text="random_expected" />'
     '<node text="Continue" clickable="true" bounds="[100,1000][980,1120]" />'
     '<node text="Use another profile" clickable="false" bounds="[371,1215][710,1280]" />'
+    '<node text="Create new account" clickable="true" bounds="[100,2000][980,2190]" />'
+)
+LOGOUT_CONTINUE_AS_OLD_XML = (
+    '<node text="random_old_profile" />'
+    '<node text="Continue" clickable="true" bounds="[100,1000][980,1120]" />'
+    '<node text="Use another profile" clickable="true" bounds="[371,1215][710,1280]" />'
     '<node text="Create new account" clickable="true" bounds="[100,2000][980,2190]" />'
 )
 
@@ -208,6 +235,37 @@ class ConfirmingTextSelector(FakeSelector):
 
     def info(self) -> dict[str, str]:
         return {"text": self.text}
+
+
+class FakeScroll:
+    def __init__(self, result: bool = True) -> None:
+        self.result = result
+        self.forward_calls = 0
+        self.to_calls: list[dict] = []
+
+    def forward(self, **_kwargs) -> bool:
+        self.forward_calls += 1
+        return self.result
+
+    def to(self, **kwargs) -> bool:
+        self.to_calls.append(dict(kwargs))
+        return False
+
+
+class FakeFling:
+    def __init__(self) -> None:
+        self.to_end_calls = 0
+
+    def toEnd(self, **_kwargs) -> bool:
+        self.to_end_calls += 1
+        return True
+
+
+class FakeScrollableSelector(FakeSelector):
+    def __init__(self, result: bool = True) -> None:
+        super().__init__(1)
+        self.scroll = FakeScroll(result=result)
+        self.fling = FakeFling()
 
 
 class FakeDevice:
@@ -1914,7 +1972,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
     def test_active_account_home_expected_profile_connected_without_password(self) -> None:
         device, _selectors = configured_device()
         getter = Mock(return_value=credentials())
-        device.hierarchies = [ACTIVE_HOME_XML, ACTIVE_PROFILE_EXPECTED_XML]
+        device.hierarchies = [ACTIVE_HOME_XML, ACTIVE_PROFILE_EXPECTED_XML, ACTIVE_PROFILE_EXPECTED_XML]
 
         result = self.run_flow(
             device,
@@ -1933,7 +1991,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
     def test_active_account_home_mismatch_unknown_lifecycle_blocks_without_add_account(self) -> None:
         device, _selectors = configured_device()
         getter = Mock(return_value=credentials())
-        device.hierarchies = [ACTIVE_HOME_XML, ACTIVE_PROFILE_OLD_XML]
+        device.hierarchies = [ACTIVE_HOME_XML, ACTIVE_PROFILE_OLD_XML, ACTIVE_PROFILE_OLD_XML]
 
         result = self.run_flow(
             device,
@@ -2054,7 +2112,6 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
             ACTIVE_HOME_XML,
             ACTIVE_PROFILE_OLD_XML,
             ACTIVE_PROFILE_OLD_XML,
-            ACTIVE_PROFILE_OLD_XML,
             ACCOUNT_SWITCHER_XML,
             ACCOUNT_SWITCHER_XML,
             ACCOUNT_SWITCHER_XML,
@@ -2121,6 +2178,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
             ACTIVE_PROFILE_OLD_XML,
             ACTIVE_PROFILE_OLD_XML,
             ACTIVE_PROFILE_OLD_XML,
+            ACCOUNT_SWITCHER_XML,
             ACCOUNT_SWITCHER_XML,
             ACCOUNT_SWITCHER_XML,
             ACCOUNT_SWITCHER_XML,
@@ -2454,6 +2512,129 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertIn("tap_not_now", result.actions_taken)
         self.assertIn("tap_confirm_logout", result.actions_taken)
         self.assertNotIn("login_form_submit", result.actions_taken)
+        self.assertEqual(result.safe_metadata["recovery_path"], "logout_fallback")
+        self.assertTrue(result.safe_metadata["logout_fallback_allowed"])
+        self.assertTrue(result.safe_metadata["profile_menu_opened"])
+        self.assertTrue(result.safe_metadata["settings_opened"])
+        self.assertFalse(result.safe_metadata["logout_settings_scroll_attempted"])
+        self.assertEqual(result.safe_metadata["logout_settings_scroll_count"], 0)
+        self.assertTrue(result.safe_metadata["logout_button_visible_before_scroll"])
+        self.assertTrue(result.safe_metadata["logout_button_tapped"])
+        self.assertEqual(result.safe_metadata["logout_button_target_text"], "Log out")
+        self.assertTrue(result.safe_metadata["save_login_info_prompt_detected"])
+        self.assertTrue(result.safe_metadata["save_login_info_not_now_tapped"])
+        self.assertTrue(result.safe_metadata["logout_confirmation_detected"])
+        self.assertTrue(result.safe_metadata["logout_confirmation_tapped"])
+        self.assertEqual(result.safe_metadata["screen_after_logout_final"], "login_form_empty")
+
+    def test_logout_fallback_scrolls_settings_until_logout_visible(self) -> None:
+        device = FakeDevice(
+            [
+                ACTIVE_PROFILE_OLD_MENU_XML,
+                PROFILE_MENU_SHEET_XML,
+                PROFILE_MENU_SHEET_XML,
+                PROFILE_MENU_SHEET_XML,
+                SETTINGS_AND_ACTIVITY_TOP_XML,
+                SETTINGS_AND_ACTIVITY_TOP_XML,
+                SETTINGS_AND_ACTIVITY_XML,
+                SETTINGS_AND_ACTIVITY_XML,
+                SAVE_LOGIN_INFO_PROMPT_XML,
+                SAVE_LOGIN_INFO_PROMPT_XML,
+                SAVE_LOGIN_INFO_PROMPT_XML,
+                LOGOUT_CONFIRMATION_PROMPT_XML,
+                LOGOUT_CONFIRMATION_PROMPT_XML,
+                LOGOUT_CONFIRMATION_PROMPT_XML,
+                LOGIN_FORM_XML,
+                LOGIN_FORM_XML,
+            ]
+        )
+        scrollable = FakeScrollableSelector()
+        device.add_selector("scrollable", True, scrollable)
+
+        result = run_old_account_logout_fallback_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username="random_expected",
+            previous_account_lifecycle_lookup=self._canceled_lifecycle(),
+            initial_signals=self._logout_initial_signals(),
+            sleeper=Mock(),
+        )
+
+        self.assertTrue(result.ok)
+        self.assertTrue(result.safe_metadata["settings_opened"])
+        self.assertTrue(result.safe_metadata["logout_settings_scroll_attempted"])
+        self.assertGreater(result.safe_metadata["logout_settings_scroll_count"], 0)
+        self.assertFalse(result.safe_metadata["logout_button_visible_before_scroll"])
+        self.assertTrue(result.safe_metadata["logout_button_visible_after_scroll"])
+        self.assertTrue(result.safe_metadata["logout_button_tapped"])
+        self.assertEqual(result.safe_metadata["logout_button_target_text"], "Log out")
+        self.assertEqual(result.safe_metadata["screen_after_logout_final"], "login_form_empty")
+        self.assertGreater(scrollable.scroll.forward_calls, 0)
+
+    def test_logout_fallback_settings_without_logout_stops_after_bounded_scrolls(self) -> None:
+        device = FakeDevice(
+            [
+                ACTIVE_PROFILE_OLD_MENU_XML,
+                PROFILE_MENU_SHEET_XML,
+                PROFILE_MENU_SHEET_XML,
+                PROFILE_MENU_SHEET_XML,
+                *([SETTINGS_AND_ACTIVITY_TOP_XML] * 10),
+            ]
+        )
+        device.add_selector("scrollable", True, FakeScrollableSelector())
+
+        result = run_old_account_logout_fallback_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username="random_expected",
+            previous_account_lifecycle_lookup=self._canceled_lifecycle(),
+            initial_signals=self._logout_initial_signals(),
+            sleeper=Mock(),
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.failure_reason, "logout_not_visible_after_scrolls")
+        self.assertEqual(result.safe_metadata["logout_settings_scroll_count"], 5)
+        self.assertFalse(result.safe_metadata["logout_button_tapped"])
+        self.assertNotIn("tap_logout", result.actions_taken)
+        self.assertNotIn((540, 1180), device.bounds_clicks)
+        self.assertNotIn((540, 1300), device.bounds_clicks)
+        self.assertNotIn((540, 1420), device.bounds_clicks)
+        self.assertNotIn((540, 2020), device.bounds_clicks)
+
+    def test_logout_fallback_detects_french_logout_label(self) -> None:
+        device = FakeDevice(
+            [
+                ACTIVE_PROFILE_OLD_MENU_XML,
+                PROFILE_MENU_SHEET_XML,
+                PROFILE_MENU_SHEET_XML,
+                PROFILE_MENU_SHEET_XML,
+                SETTINGS_AND_ACTIVITY_FRENCH_LOGOUT_XML,
+                SETTINGS_AND_ACTIVITY_FRENCH_LOGOUT_XML,
+                SETTINGS_AND_ACTIVITY_FRENCH_LOGOUT_XML,
+                SAVE_LOGIN_INFO_PROMPT_XML,
+                SAVE_LOGIN_INFO_PROMPT_XML,
+                SAVE_LOGIN_INFO_PROMPT_XML,
+                LOGOUT_CONFIRMATION_PROMPT_XML,
+                LOGOUT_CONFIRMATION_PROMPT_XML,
+                LOGOUT_CONFIRMATION_PROMPT_XML,
+                LOGIN_FORM_XML,
+                LOGIN_FORM_XML,
+            ]
+        )
+
+        result = run_old_account_logout_fallback_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username="random_expected",
+            previous_account_lifecycle_lookup=self._canceled_lifecycle(),
+            initial_signals=self._logout_initial_signals(),
+            sleeper=Mock(),
+        )
+
+        self.assertTrue(result.ok)
+        self.assertTrue(result.safe_metadata["logout_button_tapped"])
+        self.assertEqual(result.safe_metadata["logout_button_target_text"], "Déconnexion")
 
     def test_logout_fallback_profile_menu_appears_after_wait(self) -> None:
         device = FakeDevice(
@@ -2613,7 +2794,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertEqual(result.failure_reason, "no_logout_expected_username")
         self.assertNotIn("tap_logout", result.actions_taken)
 
-    def test_logout_fallback_final_unknown_after_reobserve_stops_safe(self) -> None:
+    def test_logout_fallback_final_unknown_after_settling_stops_safe(self) -> None:
         device = FakeDevice(
             [
                 ACTIVE_PROFILE_OLD_MENU_XML,
@@ -2626,6 +2807,10 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
                 LOGOUT_CONFIRMATION_PROMPT_XML,
                 LOGOUT_CONFIRMATION_PROMPT_XML,
                 LOGOUT_CONFIRMATION_PROMPT_XML,
+                UNKNOWN_XML,
+                UNKNOWN_XML,
+                UNKNOWN_XML,
+                UNKNOWN_XML,
                 UNKNOWN_XML,
                 UNKNOWN_XML,
                 UNKNOWN_XML,
@@ -2643,7 +2828,41 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
 
         self.assertFalse(result.ok)
         self.assertEqual(result.failure_reason, "post_logout_unknown_screen")
-        self.assertTrue(result.safe_metadata["post_logout_reobserve"])
+        self.assertGreaterEqual(int(result.safe_metadata["post_logout_observation_count"] or 0), 4)
+
+    def test_logout_fallback_post_logout_unknown_then_continue_as_old_account(self) -> None:
+        device = FakeDevice(
+            [
+                ACTIVE_PROFILE_OLD_MENU_XML,
+                PROFILE_MENU_SHEET_XML,
+                PROFILE_MENU_SHEET_XML,
+                PROFILE_MENU_SHEET_XML,
+                SETTINGS_AND_ACTIVITY_XML,
+                SETTINGS_AND_ACTIVITY_XML,
+                SETTINGS_AND_ACTIVITY_XML,
+                LOGOUT_CONFIRMATION_PROMPT_XML,
+                LOGOUT_CONFIRMATION_PROMPT_XML,
+                LOGOUT_CONFIRMATION_PROMPT_XML,
+                UNKNOWN_XML,
+                UNKNOWN_XML,
+                LOGOUT_CONTINUE_AS_OLD_XML,
+                LOGOUT_CONTINUE_AS_OLD_XML,
+            ]
+        )
+
+        result = run_old_account_logout_fallback_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username="random_expected",
+            previous_account_lifecycle_lookup=self._canceled_lifecycle(),
+            initial_signals=self._logout_initial_signals(),
+            sleeper=Mock(),
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.final_outcome, "continue_as_candidate")
+        self.assertEqual(result.safe_metadata["screen_after_logout_final"], "continue_as_candidate")
+        self.assertEqual(result.safe_metadata["post_logout_final_suggested_username"], "random_old_profile")
 
     def test_logout_fallback_no_leak_metadata(self) -> None:
         device = FakeDevice([ACTIVE_PROFILE_OLD_MENU_XML])
@@ -2666,6 +2885,298 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         payload = json.dumps(result.safe_metadata)
         for forbidden in ("secret_ref", "Vault", VAULT_ID, "token", "emulator-5554", "screenshot"):
             self.assertNotIn(forbidden, payload)
+
+    def test_login_flow_expected_active_account_never_uses_logout_fallback(self) -> None:
+        device, _selectors = configured_device()
+        getter = Mock(return_value=credentials())
+        device.hierarchies = [ACTIVE_HOME_XML, ACTIVE_PROFILE_EXPECTED_XML]
+
+        result = self.run_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username="random_expected",
+            credentials_getter=getter,
+            initial_signals=self._active_home_connected_signals(),
+            operator_smoke_allow_logout_fallback=True,
+        )
+
+        self.assertEqual(result.final_outcome, "connected")
+        self.assertEqual(result.reason, "active_profile_matches_expected")
+        self.assertNotIn("tap_logout", result.actions_taken)
+        getter.assert_not_called()
+
+    def test_login_flow_mismatch_unknown_lifecycle_does_not_logout_with_flag(self) -> None:
+        device, _selectors = configured_device()
+        getter = Mock(return_value=credentials())
+        device.hierarchies = [ACTIVE_HOME_XML, ACTIVE_PROFILE_OLD_XML]
+
+        result = self.run_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username="random_expected",
+            credentials_getter=getter,
+            initial_signals=self._active_home_connected_signals(),
+            operator_smoke_allow_logout_fallback=True,
+        )
+
+        self.assertEqual(result.final_outcome, "mismatch")
+        self.assertNotIn("tap_logout", result.actions_taken)
+        getter.assert_not_called()
+
+    def test_login_flow_canceled_without_logout_flag_prefers_add_existing(self) -> None:
+        device, _selectors = configured_device()
+        getter = Mock(return_value=None)
+        device.hierarchies = [
+            ACTIVE_HOME_XML,
+            ACTIVE_PROFILE_OLD_XML,
+            ACTIVE_PROFILE_OLD_XML,
+            ACCOUNT_SWITCHER_XML,
+            ACCOUNT_SWITCHER_XML,
+            ACCOUNT_SWITCHER_XML,
+            ACCOUNT_SWITCHER_XML,
+            ACCOUNT_SWITCHER_XML,
+            LOGIN_FORM_XML,
+            LOGIN_FORM_XML,
+        ]
+
+        result = self.run_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username="random_expected",
+            credentials_getter=getter,
+            initial_signals=self._active_home_connected_signals(),
+            previous_account_lifecycle_lookup=self._canceled_lifecycle(),
+        )
+
+        self.assertEqual(result.safe_metadata["recovery_path"], "add_existing_account")
+        self.assertFalse(result.safe_metadata["logout_fallback_allowed"])
+        self.assertTrue(result.safe_metadata["add_existing_attempted"])
+        self.assertNotIn("tap_logout", result.actions_taken)
+
+    def test_login_flow_logout_fallback_flag_resumes_login_form_empty(self) -> None:
+        device, _selectors = configured_device()
+        getter = Mock(return_value=None)
+        device.hierarchies = [
+            ACTIVE_PROFILE_OLD_MENU_XML,
+            PROFILE_MENU_SHEET_XML,
+            PROFILE_MENU_SHEET_XML,
+            PROFILE_MENU_SHEET_XML,
+            SETTINGS_AND_ACTIVITY_XML,
+            SETTINGS_AND_ACTIVITY_XML,
+            SETTINGS_AND_ACTIVITY_XML,
+            SETTINGS_AND_ACTIVITY_XML,
+            SAVE_LOGIN_INFO_PROMPT_XML,
+            SAVE_LOGIN_INFO_PROMPT_XML,
+            LOGOUT_CONFIRMATION_PROMPT_XML,
+            LOGOUT_CONFIRMATION_PROMPT_XML,
+            LOGOUT_CONFIRMATION_PROMPT_XML,
+            LOGIN_FORM_XML,
+            LOGIN_FORM_XML,
+            LOGIN_FORM_XML,
+        ]
+
+        result = self.run_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username="random_expected",
+            credentials_getter=getter,
+            initial_signals=self._logout_initial_signals(ACTIVE_PROFILE_OLD_MENU_XML),
+            previous_account_lifecycle_lookup=self._canceled_lifecycle(),
+            operator_smoke_allow_logout_fallback=True,
+        )
+
+        self.assertEqual(result.final_outcome, "credentials_missing")
+        self.assertEqual(result.safe_metadata["recovery_path"], "logout_fallback")
+        self.assertTrue(result.safe_metadata["logout_fallback_allowed"])
+        self.assertFalse(result.safe_metadata["add_existing_attempted"])
+        self.assertEqual(result.safe_metadata["screen_after_logout_final"], "login_form_empty")
+        self.assertIn("tap_logout", result.actions_taken)
+        self.assertIn("tap_not_now", result.actions_taken)
+        self.assertIn("tap_confirm_logout", result.actions_taken)
+        self.assertNotIn("tap_add_instagram_account", result.actions_taken)
+
+    def test_login_flow_logout_fallback_resumes_account_picker(self) -> None:
+        device, _selectors = configured_device()
+        getter = Mock(return_value=credentials())
+        device.hierarchies = [
+            ACTIVE_PROFILE_OLD_MENU_XML,
+            PROFILE_MENU_SHEET_XML,
+            PROFILE_MENU_SHEET_XML,
+            PROFILE_MENU_SHEET_XML,
+            SETTINGS_AND_ACTIVITY_XML,
+            SETTINGS_AND_ACTIVITY_XML,
+            SETTINGS_AND_ACTIVITY_XML,
+            LOGOUT_CONFIRMATION_PROMPT_XML,
+            LOGOUT_CONFIRMATION_PROMPT_XML,
+            LOGOUT_CONFIRMATION_PROMPT_XML,
+            ACCOUNT_PICKER_XML,
+            ACCOUNT_PICKER_XML,
+            ACCOUNT_PICKER_XML,
+        ]
+
+        result = self.run_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username="random_expected",
+            credentials_getter=getter,
+            initial_signals=self._logout_initial_signals(ACTIVE_PROFILE_OLD_MENU_XML),
+            previous_account_lifecycle_lookup=self._canceled_lifecycle(),
+            operator_smoke_allow_logout_fallback=True,
+        )
+
+        self.assertEqual(result.safe_metadata["recovery_path"], "logout_fallback")
+        self.assertEqual(result.safe_metadata["screen_after_logout_final"], "account_picker")
+        self.assertIn("route:select_expected_account_from_picker", result.actions_taken)
+        getter.assert_not_called()
+
+    def test_login_flow_logout_fallback_resumes_continue_as_expected_username(self) -> None:
+        device, _selectors = configured_device()
+        getter = Mock(return_value=credentials())
+        device.hierarchies = [
+            ACTIVE_PROFILE_OLD_MENU_XML,
+            PROFILE_MENU_SHEET_XML,
+            PROFILE_MENU_SHEET_XML,
+            PROFILE_MENU_SHEET_XML,
+            SETTINGS_AND_ACTIVITY_XML,
+            SETTINGS_AND_ACTIVITY_XML,
+            SETTINGS_AND_ACTIVITY_XML,
+            LOGOUT_CONFIRMATION_PROMPT_XML,
+            LOGOUT_CONFIRMATION_PROMPT_XML,
+            LOGOUT_CONFIRMATION_PROMPT_XML,
+            LOGOUT_CONTINUE_AS_XML,
+            LOGOUT_CONTINUE_AS_XML,
+            LOGOUT_CONTINUE_AS_XML,
+        ]
+
+        result = self.run_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username="random_expected",
+            credentials_getter=getter,
+            initial_signals=self._logout_initial_signals(ACTIVE_PROFILE_OLD_MENU_XML),
+            previous_account_lifecycle_lookup=self._canceled_lifecycle(),
+            operator_smoke_allow_logout_fallback=True,
+        )
+
+        self.assertEqual(result.safe_metadata["recovery_path"], "logout_fallback")
+        self.assertEqual(result.safe_metadata["screen_after_logout_final"], "continue_as_candidate")
+        self.assertIn("route:continue_expected_account", result.actions_taken)
+        getter.assert_not_called()
+
+    def test_login_flow_logout_fallback_old_continue_as_use_another_profile(self) -> None:
+        device, _selectors = configured_device()
+        getter = Mock(return_value=None)
+        device.hierarchies = [
+            ACTIVE_PROFILE_OLD_MENU_XML,
+            PROFILE_MENU_SHEET_XML,
+            PROFILE_MENU_SHEET_XML,
+            PROFILE_MENU_SHEET_XML,
+            SETTINGS_AND_ACTIVITY_XML,
+            SETTINGS_AND_ACTIVITY_XML,
+            SETTINGS_AND_ACTIVITY_XML,
+            LOGOUT_CONFIRMATION_PROMPT_XML,
+            LOGOUT_CONFIRMATION_PROMPT_XML,
+            LOGOUT_CONFIRMATION_PROMPT_XML,
+            UNKNOWN_XML,
+            UNKNOWN_XML,
+            LOGOUT_CONTINUE_AS_OLD_XML,
+            LOGOUT_CONTINUE_AS_OLD_XML,
+            LOGIN_FORM_XML,
+            LOGIN_FORM_XML,
+            LOGIN_FORM_XML,
+        ]
+
+        result = self.run_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username="random_expected",
+            credentials_getter=getter,
+            initial_signals=self._logout_initial_signals(ACTIVE_PROFILE_OLD_MENU_XML),
+            previous_account_lifecycle_lookup=self._canceled_lifecycle(),
+            operator_smoke_allow_logout_fallback=True,
+        )
+
+        self.assertEqual(result.safe_metadata["recovery_path"], "logout_fallback")
+        self.assertEqual(result.safe_metadata["screen_after_logout_final"], "continue_as_candidate")
+        self.assertEqual(result.safe_metadata["post_logout_final_suggested_username"], "random_old_profile")
+        self.assertIn("tap_use_another_profile", result.actions_taken)
+        self.assertEqual(result.safe_metadata["screen_after_use_another_profile_final"], "login_form_empty")
+        self.assertEqual(result.final_outcome, "credentials_missing")
+        getter.assert_called_once()
+
+    def test_login_flow_logout_fallback_preserves_parent_app_start_metadata(self) -> None:
+        device = FakeDevice(
+            [
+                ACTIVE_PROFILE_OLD_MENU_XML,
+                PROFILE_MENU_SHEET_XML,
+                PROFILE_MENU_SHEET_XML,
+                PROFILE_MENU_SHEET_XML,
+                SETTINGS_AND_ACTIVITY_XML,
+                SETTINGS_AND_ACTIVITY_XML,
+                SETTINGS_AND_ACTIVITY_XML,
+                LOGOUT_CONFIRMATION_PROMPT_XML,
+                LOGOUT_CONFIRMATION_PROMPT_XML,
+                LOGOUT_CONFIRMATION_PROMPT_XML,
+                LOGOUT_CONTINUE_AS_OLD_XML,
+                LOGOUT_CONTINUE_AS_OLD_XML,
+                LOGIN_FORM_XML,
+                LOGIN_FORM_XML,
+                LOGIN_FORM_XML,
+            ]
+        )
+        getter = Mock(return_value=None)
+
+        result = run_login_provisioning_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username="random_expected",
+            credentials_getter=getter,
+            initial_signals=self._logout_initial_signals(ACTIVE_PROFILE_OLD_MENU_XML),
+            previous_account_lifecycle_lookup=self._canceled_lifecycle(),
+            operator_smoke_allow_logout_fallback=True,
+            start_app_before_probe=True,
+            observe_current_screen_only=False,
+            sleeper=Mock(),
+        )
+
+        device.app_start.assert_called_once_with("com.instagram.android")
+        self.assertTrue(result.safe_metadata["app_start_attempted"])
+        self.assertTrue(result.safe_metadata["app_start_ok"])
+        self.assertTrue(result.safe_metadata["post_logout_resume_observe_only"])
+        self.assertEqual(result.safe_metadata["recovery_path"], "logout_fallback")
+
+    def test_login_flow_logout_fallback_resumes_prefilled_login_form(self) -> None:
+        device, _selectors = configured_device()
+        getter = Mock(return_value=credentials())
+        device.hierarchies = [
+            ACTIVE_PROFILE_OLD_MENU_XML,
+            PROFILE_MENU_SHEET_XML,
+            PROFILE_MENU_SHEET_XML,
+            PROFILE_MENU_SHEET_XML,
+            SETTINGS_AND_ACTIVITY_XML,
+            SETTINGS_AND_ACTIVITY_XML,
+            SETTINGS_AND_ACTIVITY_XML,
+            LOGOUT_CONFIRMATION_PROMPT_XML,
+            LOGOUT_CONFIRMATION_PROMPT_XML,
+            LOGOUT_CONFIRMATION_PROMPT_XML,
+            PREFILLED_LOGIN_FORM_XML,
+            PREFILLED_LOGIN_FORM_XML,
+            PREFILLED_LOGIN_FORM_XML,
+        ]
+
+        result = self.run_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username="random_expected",
+            credentials_getter=getter,
+            initial_signals=self._logout_initial_signals(ACTIVE_PROFILE_OLD_MENU_XML),
+            previous_account_lifecycle_lookup=self._canceled_lifecycle(),
+            operator_smoke_allow_logout_fallback=True,
+        )
+
+        self.assertEqual(result.safe_metadata["recovery_path"], "logout_fallback")
+        self.assertEqual(result.safe_metadata["screen_after_logout_final"], "login_form_prefilled_username")
+        self.assertIn("route:start_login_form_flow_replace_username", result.actions_taken)
 
     def test_dry_run_wrong_candidate_blocks_mismatch_without_db_assumption(self) -> None:
         getter = Mock(return_value=credentials())

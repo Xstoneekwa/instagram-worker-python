@@ -198,6 +198,80 @@ class InstagramLoginProvisionerCliTest(unittest.TestCase):
         self.assertTrue(summary["clone_reuse_allowed"])
         self.assertEqual(summary["router_decision"], "use_another_profile_previous_account_stopped")
 
+    def test_operator_smoke_logout_fallback_flag_is_passed_to_flow(self) -> None:
+        captured: dict = {}
+
+        def fake_flow(_d, **kwargs):
+            captured.update(kwargs)
+            return _fake_result(
+                safe_metadata={
+                    "recovery_path": "logout_fallback",
+                    "logout_fallback_allowed": True,
+                    "logout_fallback_reason": "operator_smoke_logout_fallback_allowed",
+                    "screen_after_logout_final": "login_form_empty",
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _code, summary = cli.run_cli_command(
+                _args_with_log(
+                    f"{tmp}/login.jsonl",
+                    "--operator-smoke-active-account-username",
+                    "old_profile",
+                    "--operator-smoke-lifecycle-status",
+                    "canceled",
+                    "--operator-smoke-clone-reuse-allowed",
+                    "true",
+                    "--operator-smoke-allow-logout-fallback",
+                    "true",
+                    "--json",
+                ),
+                connect_func=lambda _serial: FakeDevice(),
+                run_flow_func=fake_flow,
+            )
+
+        self.assertTrue(captured["operator_smoke_allow_logout_fallback"])
+        self.assertEqual(summary["recovery_path"], "logout_fallback")
+        self.assertTrue(summary["logout_fallback_allowed"])
+        self.assertEqual(summary["preparation_flow_used"], "logout_fallback_to_login_form_empty")
+
+    def test_logout_fallback_summary_fields_are_safe(self) -> None:
+        summary = cli._safe_summary_from_result(
+            _fake_result(
+                actions_taken=["tap_logout", "tap_not_now", "tap_confirm_logout"],
+                safe_metadata={
+                    "recovery_path": "logout_fallback",
+                    "logout_fallback_allowed": True,
+                    "logout_fallback_reason": "operator_smoke_logout_fallback_allowed",
+                    "add_existing_attempted": False,
+                    "add_existing_failed_reason": "operator_smoke_logout_fallback_requested",
+                    "profile_menu_opened": True,
+                    "settings_opened": True,
+                    "logout_button_tapped": True,
+                    "save_login_info_prompt_detected": True,
+                    "save_login_info_not_now_tapped": True,
+                    "logout_confirmation_detected": True,
+                    "logout_confirmation_tapped": True,
+                    "post_logout_observation_count": 3,
+                    "post_logout_screens": [
+                        "save_login_info_prompt",
+                        "logout_confirmation_prompt",
+                        "login_form_empty",
+                    ],
+                    "screen_after_logout_final": "login_form_empty",
+                },
+            ),
+            args=_args(),
+            run_id="run-1",
+        )
+
+        self.assertEqual(summary["recovery_path"], "logout_fallback")
+        self.assertTrue(summary["logout_button_tapped"])
+        self.assertTrue(summary["save_login_info_not_now_tapped"])
+        self.assertTrue(summary["logout_confirmation_tapped"])
+        self.assertEqual(summary["screen_after_logout_final"], "login_form_empty")
+        self.assertEqual(summary["screen_before_submit"], "login_form_empty")
+
     def test_operator_smoke_lifecycle_status_is_normalized_to_lowercase(self) -> None:
         lookup = cli._build_operator_smoke_previous_account_lifecycle_lookup(
             _args(

@@ -4389,6 +4389,84 @@ Metadata safe Cas E :
 Smoke Cas E : `--no-publish`, aucun status backend, aucun dashboard write,
 aucun runner/social flow.
 
+## Entry 2E-5P-18 Controlled Logout Fallback For Old Active Account
+
+Entry 2E-5P-18 introduit le Cas F : un **logout fallback controle** pour un
+ancien compte actif deja connecte. Ce chemin n'est jamais le chemin principal :
+Cas E (`Add Instagram account` -> cas deja couvert) reste prioritaire par
+defaut.
+
+Le fallback logout n'est autorise que si toutes les conditions suivantes sont
+vraies :
+
+- `actual_logged_in_username != expected_username` ;
+- lifecycle ancien compte `canceled`, `stopped` ou `archived` ;
+- `clone_reuse_allowed=true` ;
+- source lifecycle sure : `operator_smoke_override` ou `lifecycle_lookup_safe` ;
+- autorisation explicite `--operator-smoke-allow-logout-fallback true`.
+
+Sans flag explicite, le flow tente/privilegie toujours Cas E. Si l'identite est
+inconnue, si le compte actif est deja le compte attendu, si le lifecycle/source
+n'est pas fiable, ou si `clone_reuse_allowed=false`, aucun logout n'est tente.
+
+Flow Cas F :
+
+1. confirmer le profil de l'ancien compte actif ;
+2. ouvrir le menu profil puis `Settings and activity` si necessaire ;
+3. chercher `Log out` / `Deconnexion` dans `Settings and activity` ;
+4. si le bouton n'est pas dans le viewport, scroller vers le bas de facon
+   bornee, re-observer, puis ne taper que quand la cible texte/accessibilite est
+   visible et non ambigue ;
+5. si `Save your login info?` apparait : taper `Not now` (jamais `Save`) ;
+6. si confirmation logout apparait : taper `Log out` (jamais `Cancel`) ;
+7. settling borne post-logout (ne pas stopper sur `unknown` transitoire) ;
+8. accepter `account_picker`, `continue_as_candidate`, `login_form_empty`,
+   `login_form_prefilled_username` ou `continue_password_only` ;
+9. reprendre le sous-flow login deja valide jusqu'a `connected` si possible.
+
+Entry 2E-5P-18C : `Settings and activity` peut s'ouvrir en haut de page
+(`Help`, `Privacy Center`, `Account Status`, `Threads`, `Facebook`, etc.) alors
+que `Log out` est plus bas. Le flow doit scroller de facon bornee, sans
+coordonnees fixes ni tap exploratoire, et s'arreter avec
+`logout_not_visible_after_scrolls` si la cible reste absente.
+
+Entry 2E-5P-18B : apres logout, Instagram peut re-afficher un ecran
+`continue_as_candidate` pour l'**ancien** compte (avatar + `Continue` +
+`Use another profile`). Ce n'est pas un echec : si `suggested_username` est
+l'ancien compte actif, lifecycle `canceled`/`stopped`/`archived` et
+`clone_reuse_allowed=true`, ne pas taper `Continue` — utiliser
+`Use another profile`, puis reprendre les cas couverts (login form, picker,
+password-only). Si `suggested_username == expected_username`, taper `Continue`
+puis le flow password-only deja valide.
+
+Metadata safe Cas F :
+
+- `recovery_path=logout_fallback` ;
+- `logout_fallback_allowed`, `logout_fallback_reason` ;
+- `add_existing_attempted`, `add_existing_failed_reason` ;
+- `profile_menu_opened`, `settings_opened` ;
+- `logout_settings_scroll_attempted`, `logout_settings_scroll_count`,
+  `logout_button_visible_before_scroll`, `logout_button_visible_after_scroll`,
+  `logout_button_tapped`, `logout_button_target_text`,
+  `logout_button_target_method`, `logout_not_visible_reason` ;
+- `save_login_info_prompt_detected`, `save_login_info_not_now_tapped` ;
+- `logout_confirmation_detected`, `logout_confirmation_tapped` ;
+- `post_logout_observation_count`, `post_logout_screens`,
+  `post_logout_wait_total_ms`, `screen_after_logout_final`,
+  `post_logout_final_suggested_username` ;
+- apres `Use another profile` : `post_use_another_profile_observation_count`,
+  `post_use_another_profile_screens`, `screen_after_use_another_profile_final` ;
+- `preparation_flow_used=logout_fallback_to_use_another_profile` quand le
+  resume passe par cet ecran.
+- `post_logout_resume_observe_only=true` : la reprise login apres logout ne
+  relance pas `app_start` (observe-only interne). Les champs `app_start_*` du
+  JSONL final conservent le demarrage initial du run CLI
+  (`--start-app-before-probe` par defaut).
+
+Smoke Cas F : `--no-publish`, aucun status backend, aucun dashboard write,
+aucun runner/social flow. Les logs restent no-leak : pas de password,
+`secret_ref`, Vault UUID, token/header, XML brut ni screenshot path.
+
 ## Entry 2E-5P-15B Login Form Empty Username Confirmation
 
 Entry 2E-5P-15B corrige la confirmation username sur `login_form_empty` direct.

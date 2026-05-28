@@ -171,7 +171,10 @@ def extract_login_screen_signals_from_hierarchy(
     has_more_info_support = _has_phrase(text, "more info and support")
     has_login_section = _has_phrase(text, "login")
     has_add_account = _contains_any(text, ("add account", "ajouter un compte"))
-    has_log_out = _contains_any(text, ("log out", "se déconnecter", "se deconnecter", "déconnexion", "deconnexion"))
+    has_log_out = _contains_any(
+        text,
+        ("log out", "logout", "se déconnecter", "se deconnecter", "déconnexion", "deconnexion"),
+    )
     has_save_login_info_prompt = _contains_any(
         text,
         (

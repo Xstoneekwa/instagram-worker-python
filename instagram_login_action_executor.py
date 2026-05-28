@@ -184,13 +184,14 @@ def execute_login_screen_decision(
         if action == ACTION_OPEN_ACCOUNT_SWITCHER
         else _find_profile_menu_target(d)
         if action == ACTION_OPEN_PROFILE_MENU
+        else _find_logout_target(d)
+        if action == ACTION_TAP_LOGOUT
         else _find_first_exact_target(d, _target_aliases_for_action(action, target_text))
         if action
         in {
             ACTION_ADD_INSTAGRAM_ACCOUNT,
             ACTION_LOG_INTO_EXISTING_ACCOUNT,
             ACTION_OPEN_SETTINGS_AND_ACTIVITY,
-            ACTION_TAP_LOGOUT,
             ACTION_TAP_NOT_NOW,
             ACTION_CONFIRM_LOGOUT,
         }
@@ -348,6 +349,7 @@ def _target_aliases_for_action(action: str, target_text: str) -> tuple[str, ...]
     if action == ACTION_TAP_LOGOUT or action == ACTION_CONFIRM_LOGOUT:
         return (
             "Log out",
+            "Logout",
             "Se déconnecter",
             "Se deconnecter",
             "Déconnexion",
@@ -469,6 +471,42 @@ def _find_profile_menu_target(d: Any) -> dict[str, Any]:
         "target": {"kind": "bounds", "center": (winner.bounds.center_x, winner.bounds.center_y), "label": winner.label},
         "failure_reason": "",
         "resolution": "profile_menu_bounds_center",
+    }
+
+
+def _find_logout_target(d: Any) -> dict[str, Any]:
+    try:
+        hierarchy_xml = _dump_hierarchy_once(d)
+    except Exception:
+        hierarchy_xml = ""
+    candidates = [
+        candidate
+        for candidate in _collect_accessibility_nodes(hierarchy_xml)
+        if candidate.enabled
+        and candidate.visible
+        and candidate.bounds.area > 0
+        and candidate.bounds.center_y > STATUS_BAR_MAX_CENTER_Y
+        and _is_logout_action_label(candidate.label)
+    ]
+    if not candidates:
+        return {"target": None, "failure_reason": "target_button_not_found", "resolution": "logout_not_found"}
+    deduped = _dedupe_candidates_by_bounds(candidates)
+    zones = _distinct_visual_zones(deduped)
+    if len(zones) > 1:
+        return {"target": None, "failure_reason": "ambiguous_target_button", "resolution": "logout_multiple_zones"}
+    winner = _choose_best_candidate(deduped)
+    return {
+        "target": {
+            "kind": "bounds",
+            "center": (winner.bounds.center_x, winner.bounds.center_y),
+            "label": winner.label,
+        },
+        "failure_reason": "",
+        "resolution": "logout_hierarchy_bounds_center",
+        "metadata": {
+            "logout_button_target_text": winner.label,
+            "logout_button_target_method": "logout_hierarchy_bounds_center",
+        },
     }
 
 
@@ -654,6 +692,24 @@ def _normalize_label(value: Any) -> str:
 def _normalize_username(value: Any) -> str:
     username = str(value or "").strip().lstrip("@").lower()
     return username if re.fullmatch(r"[a-z0-9._]{1,30}", username) else ""
+
+
+def _is_logout_action_label(value: Any) -> bool:
+    label = _normalize_label(value).lower()
+    if label in {
+        "log out",
+        "logout",
+        "se déconnecter",
+        "se deconnecter",
+        "déconnexion",
+        "deconnexion",
+    }:
+        return True
+    if label.startswith("log out of ") and "your account" not in label and "?" not in label:
+        return True
+    if label.startswith("se déconnecter de ") or label.startswith("se deconnecter de "):
+        return "?" not in label
+    return False
 
 
 def _parse_bounds(raw: str) -> _BoundsRect | None:

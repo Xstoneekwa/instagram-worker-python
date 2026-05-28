@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 from typing import Any, Callable, Optional
 
@@ -79,6 +79,16 @@ DEFAULT_STARTUP_OBSERVATIONS = 4
 DEFAULT_STARTUP_INTERVAL_MS = 1000
 MAX_STARTUP_OBSERVATIONS = 6
 MAX_STARTUP_INTERVAL_MS = 1500
+MAX_LOGOUT_SETTINGS_SCROLLS = 5
+LOGOUT_SETTINGS_SCROLL_WAIT_MS = 500
+LOGOUT_BUTTON_LABELS = (
+    "log out",
+    "logout",
+    "se déconnecter",
+    "se deconnecter",
+    "déconnexion",
+    "deconnexion",
+)
 
 CredentialsGetter = Callable[[str], Any]
 PreviousAccountLifecycleLookup = Callable[[str, dict[str, Any]], dict[str, Any]]
@@ -87,6 +97,7 @@ Timer = Callable[[], float]
 Sleeper = Callable[[float], None]
 
 REUSABLE_PREVIOUS_ACCOUNT_LIFECYCLES = {"canceled", "stopped", "archived"}
+LOGOUT_FALLBACK_LIFECYCLE_SOURCES = {"operator_smoke_override", "lifecycle_lookup_safe"}
 CONNECTED_HOME_IDENTITY_SCREENS = frozenset(
     {
         "active_account_home",
@@ -103,6 +114,23 @@ POST_LOGOUT_KNOWN_SCREENS = {
     "continue_password_only",
     "connected",
 }
+POST_LOGOUT_SETTLING_OBSERVATIONS = 6
+POST_LOGOUT_SETTLING_INTERVAL_MS = DEFAULT_STARTUP_INTERVAL_MS
+PARENT_APP_START_METADATA_KEYS = (
+    "app_start_attempted",
+    "app_start_ok",
+    "observe_current_screen_only",
+    "package_name",
+    "post_start_wait_ms",
+    "screen_after_app_start",
+    "screen_after_app_start_initial",
+    "screen_after_app_start_final",
+    "startup_observation_count",
+    "startup_wait_total_ms",
+    "startup_screens",
+    "startup_final_screen_type",
+    "startup_settling_used",
+)
 POST_ADD_EXISTING_RESUME_SCREENS = frozenset(
     {
         "login_form_empty",
@@ -169,6 +197,7 @@ def run_login_provisioning_flow(
     post_start_wait_ms: int = DEFAULT_POST_APP_START_WAIT_MS,
     post_submit_timeout_ms: Optional[int] = None,
     operator_smoke_active_account_username: str | None = None,
+    operator_smoke_allow_logout_fallback: bool = False,
     timer: Timer | None = None,
     sleeper: Sleeper | None = None,
 ) -> LoginProvisioningFlowResult:
@@ -629,8 +658,105 @@ def run_login_provisioning_flow(
                     publish_enabled=publish_enabled,
                 )
 
+            logout_fallback_allowed, logout_fallback_reason = _logout_fallback_gate(
+                actual_username=actual_username,
+                expected_username=safe_expected_username,
+                previous_account_lifecycle=previous_account_lifecycle,
+                explicitly_allowed=bool(operator_smoke_allow_logout_fallback),
+            )
+            old_logged_in_metadata.update(
+                {
+                    "logout_fallback_allowed": logout_fallback_allowed,
+                    "logout_fallback_reason": logout_fallback_reason,
+                    "add_existing_attempted": False,
+                    "add_existing_failed_reason": "",
+                }
+            )
+            if logout_fallback_allowed:
+                logout_result = run_old_account_logout_fallback_flow(
+                    d,
+                    account_id=safe_account_id,
+                    expected_username=safe_expected_username,
+                    previous_account_lifecycle_lookup=previous_account_lifecycle_lookup,
+                    publisher=publisher,
+                    publish_enabled=False,
+                    initial_signals=signals,
+                    timer=timer,
+                    sleeper=sleeper,
+                )
+                post_logout_signals = dict(
+                    logout_result.safe_metadata.get("post_logout_final_signals") or {}
+                )
+                if not post_logout_signals:
+                    post_logout_settled = _observe_post_logout_settled(
+                        d,
+                        expected_username=safe_expected_username,
+                        timings=timings,
+                        timer=timer,
+                        sleeper=sleeper,
+                    )
+                    post_logout_signals = dict(post_logout_settled.get("signals") or {})
+                merged_logout_metadata = {
+                    **old_logged_in_metadata,
+                    **dict(logout_result.safe_metadata or {}),
+                    "recovery_path": "logout_fallback",
+                    "logout_fallback_allowed": True,
+                    "logout_fallback_reason": logout_fallback_reason,
+                    "add_existing_attempted": False,
+                    "add_existing_failed_reason": "operator_smoke_logout_fallback_requested",
+                    "post_logout_final_suggested_username": _safe_public_text(
+                        post_logout_signals.get("suggested_username")
+                        or logout_result.safe_metadata.get("post_logout_final_suggested_username")
+                    ),
+                }
+                if not logout_result.ok:
+                    return replace(
+                        logout_result,
+                        actions_taken=[*actions_taken, *logout_result.actions_taken],
+                        timings=_merge_timings(timings, logout_result.timings),
+                        safe_metadata=clean_login_probe_metadata(redact_credentials_payload(merged_logout_metadata)),
+                    )
+                resume_result = run_login_provisioning_flow(
+                    d,
+                    account_id=safe_account_id,
+                    expected_username=safe_expected_username,
+                    credentials_getter=credentials_getter,
+                    lifecycle_lookup=lifecycle_lookup,
+                    previous_account_lifecycle_lookup=previous_account_lifecycle_lookup,
+                    clone_reuse_allowed=clone_reuse_allowed,
+                    publisher=publisher,
+                    publish_enabled=publish_enabled,
+                    max_retry_attempts=max_retries,
+                    initial_signals=post_logout_signals,
+                    dry_run=dry_run,
+                    start_app_before_probe=False,
+                    observe_current_screen_only=True,
+                    package_name=safe_package_name,
+                    post_start_wait_ms=0,
+                    post_submit_timeout_ms=post_submit_timeout_ms,
+                    operator_smoke_active_account_username=None,
+                    operator_smoke_allow_logout_fallback=False,
+                    timer=timer,
+                    sleeper=sleeper,
+                )
+                return replace(
+                    resume_result,
+                    actions_taken=[*actions_taken, *logout_result.actions_taken, *resume_result.actions_taken],
+                    timings=_merge_timings(_merge_timings(timings, logout_result.timings), resume_result.timings),
+                    safe_metadata=clean_login_probe_metadata(
+                        redact_credentials_payload(
+                            _merge_logout_resume_metadata(
+                                merged_logout_metadata,
+                                dict(resume_result.safe_metadata or {}),
+                                logout_fallback_reason=logout_fallback_reason,
+                            )
+                        )
+                    ),
+                )
+
             old_logged_in_metadata["old_logged_in_recovery_attempted"] = True
             old_logged_in_metadata["recovery_path"] = "add_existing_account"
+            old_logged_in_metadata["add_existing_attempted"] = True
             old_logged_in_metadata["add_account_sheet_opened"] = False
             old_logged_in_metadata["log_into_existing_account_tapped"] = False
             add_existing_prefix_steps = (
@@ -981,6 +1107,16 @@ def run_login_provisioning_flow(
                 publish_enabled=publish_enabled,
             )
         signals = dict(action_result.post_action_signals or {})
+        if _signals_confirm_login_form(signals) and action_result.action == "tap_use_another_profile":
+            final_screen = _preparation_screen_label(signals)
+            post_continue_metadata.update(
+                {
+                    "post_use_another_profile_observation_count": 1,
+                    "post_use_another_profile_screens": [final_screen],
+                    "post_use_another_profile_wait_total_ms": 0,
+                    "screen_after_use_another_profile_final": final_screen,
+                }
+            )
         if not _signals_confirm_login_form(signals):
             metadata_prefix = _post_action_metadata_prefix(action_result.action)
             should_settle = bool(metadata_prefix) and (
@@ -1434,13 +1570,37 @@ def run_old_account_logout_fallback_flow(
     safe_account_id = str(account_id or "").strip()
     safe_expected_username = str(expected_username or "").strip()
     metadata: dict[str, Any] = {
+        "recovery_path": "logout_fallback",
+        "logout_fallback_allowed": False,
+        "logout_fallback_reason": "",
+        "add_existing_attempted": False,
+        "add_existing_failed_reason": "",
         "logout_fallback_attempted": False,
         "logout_attempted": False,
         "logout_scroll_attempted": False,
         "logout_scroll_attempt_count": 0,
+        "logout_settings_scroll_attempted": False,
+        "logout_settings_scroll_count": 0,
+        "logout_button_visible_before_scroll": False,
+        "logout_button_visible_after_scroll": False,
+        "logout_button_target_text": "",
+        "logout_button_target_method": "",
+        "logout_not_visible_reason": "",
         "settings_reobserve_after_menu": False,
         "save_login_prompt_handled": False,
+        "save_login_info_prompt_detected": False,
+        "save_login_info_not_now_tapped": False,
         "logout_confirmation_handled": False,
+        "logout_confirmation_detected": False,
+        "logout_confirmation_tapped": False,
+        "profile_opened": False,
+        "profile_username": "",
+        "profile_menu_opened": False,
+        "settings_opened": False,
+        "logout_button_tapped": False,
+        "post_logout_observation_count": 0,
+        "post_logout_screens": [],
+        "screen_after_logout_final": "",
         "would_submit_password": False,
         "would_publish": False,
     }
@@ -1478,6 +1638,7 @@ def run_old_account_logout_fallback_flow(
         start = timer()
         signals = _observe_login_signals(d, expected_username=safe_expected_username)
         timings["observe_ms"] += _elapsed_ms(start, timer())
+        metadata["profile_opened"] = signals.get("screen_type") == "active_account_profile"
 
     if signals.get("screen_type") != "active_account_profile":
         return _logout_fallback_finalize(
@@ -1499,6 +1660,13 @@ def run_old_account_logout_fallback_flow(
 
     actual_username = _safe_public_text(signals.get("actual_logged_in_username"))
     metadata["actual_logged_in_username"] = actual_username
+    metadata["active_account_username"] = actual_username
+    metadata["profile_username"] = actual_username
+    metadata["profile_opened"] = True
+    metadata["account_mismatch_detected"] = bool(
+        actual_username
+        and actual_username.strip().lstrip("@").lower() != safe_expected_username.strip().lstrip("@").lower()
+    )
     if not actual_username:
         return _logout_fallback_finalize(
             ok=False,
@@ -1548,11 +1716,19 @@ def run_old_account_logout_fallback_flow(
         legacy_clone_reuse_allowed=False,
     )
     metadata.update(_flow_metadata(previous_account_lifecycle))
+    metadata["active_account_lifecycle_source"] = _safe_public_text(previous_account_lifecycle.get("source"))
+    metadata["active_account_lifecycle_status"] = _safe_public_text(
+        previous_account_lifecycle.get("lifecycle_status")
+    )
+    metadata["clone_reuse_allowed"] = bool(previous_account_lifecycle.get("clone_reuse_allowed"))
     lifecycle_ok = (
         previous_account_lifecycle.get("lifecycle_status") in REUSABLE_PREVIOUS_ACCOUNT_LIFECYCLES
         and bool(previous_account_lifecycle.get("clone_reuse_allowed"))
+        and str(previous_account_lifecycle.get("source") or "").strip() in LOGOUT_FALLBACK_LIFECYCLE_SOURCES
     )
     metadata["lifecycle_gate_result"] = "allow_logout_fallback" if lifecycle_ok else "block_wrong_active_account"
+    metadata["logout_fallback_allowed"] = bool(lifecycle_ok)
+    metadata["logout_fallback_reason"] = metadata["lifecycle_gate_result"]
     if not lifecycle_ok:
         return _logout_fallback_finalize(
             ok=False,
@@ -1628,12 +1804,14 @@ def run_old_account_logout_fallback_flow(
         start = timer()
         signals = _observe_login_signals(d, expected_username=safe_expected_username)
         timings["observe_ms"] += _elapsed_ms(start, timer())
+        metadata["profile_menu_opened"] = signals.get("screen_type") in {"profile_menu_sheet", "settings_and_activity"}
     if signals.get("screen_type") not in {"profile_menu_sheet", "settings_and_activity"}:
         metadata["settings_reobserve_after_menu"] = True
         sleeper(POST_CONTINUE_REOBSERVE_WAIT_MS / 1000.0)
         start = timer()
         signals = _observe_login_signals(d, expected_username=safe_expected_username)
         timings["observe_ms"] += _elapsed_ms(start, timer())
+        metadata["profile_menu_opened"] = signals.get("screen_type") in {"profile_menu_sheet", "settings_and_activity"}
     if signals.get("screen_type") == "profile_menu_sheet":
         action_result = _execute_logout_step(
             d,
@@ -1661,6 +1839,7 @@ def run_old_account_logout_fallback_flow(
         start = timer()
         signals = _observe_login_signals(d, expected_username=safe_expected_username)
         timings["observe_ms"] += _elapsed_ms(start, timer())
+        metadata["settings_opened"] = signals.get("screen_type") == "settings_and_activity"
 
     if signals.get("screen_type") != "settings_and_activity":
         return _logout_fallback_finalize(
@@ -1679,24 +1858,66 @@ def run_old_account_logout_fallback_flow(
             publisher=publisher,
             publish_enabled=publish_enabled,
         )
+    metadata["settings_opened"] = True
 
-    if not signals.get("has_log_out_button"):
-        metadata["logout_scroll_attempted"] = True
-        for _attempt in range(3):
-            metadata["logout_scroll_attempt_count"] = int(metadata["logout_scroll_attempt_count"]) + 1
-            if not _scroll_settings_to_logout_once(d):
-                break
-            start = timer()
-            signals = _observe_login_signals(d, expected_username=safe_expected_username)
-            timings["observe_ms"] += _elapsed_ms(start, timer())
-            if signals.get("screen_type") == "settings_and_activity" and signals.get("has_log_out_button"):
-                break
-        if signals.get("screen_type") != "settings_and_activity" or not signals.get("has_log_out_button"):
+    logout_target = _logout_button_target_from_signals(signals)
+    metadata["logout_button_visible_before_scroll"] = bool(logout_target.get("visible"))
+    _update_logout_target_metadata(metadata, logout_target)
+    if logout_target.get("ambiguous"):
+        metadata["logout_not_visible_reason"] = "logout_ambiguous"
+        return _logout_fallback_finalize(
+            ok=False,
+            final_outcome="unknown",
+            reason="logout_ambiguous",
+            failure_reason="logout_ambiguous",
+            account_id=safe_account_id,
+            expected_username=safe_expected_username,
+            actions_taken=actions_taken,
+            timings=timings,
+            warnings=warnings,
+            metadata=metadata,
+            total_start=total_start,
+            timer=timer,
+            publisher=publisher,
+            publish_enabled=publish_enabled,
+        )
+
+    if not logout_target.get("visible"):
+        signals, logout_target = _settle_settings_logout_button(
+            d,
+            expected_username=safe_expected_username,
+            signals=signals,
+            metadata=metadata,
+            timings=timings,
+            timer=timer,
+            sleeper=sleeper,
+        )
+        _update_logout_target_metadata(metadata, logout_target)
+        if logout_target.get("ambiguous"):
+            metadata["logout_not_visible_reason"] = "logout_ambiguous"
             return _logout_fallback_finalize(
                 ok=False,
                 final_outcome="unknown",
-                reason="logout_not_visible",
-                failure_reason="logout_not_visible",
+                reason="logout_ambiguous",
+                failure_reason="logout_ambiguous",
+                account_id=safe_account_id,
+                expected_username=safe_expected_username,
+                actions_taken=actions_taken,
+                timings=timings,
+                warnings=warnings,
+                metadata=metadata,
+                total_start=total_start,
+                timer=timer,
+                publisher=publisher,
+                publish_enabled=publish_enabled,
+            )
+        if signals.get("screen_type") != "settings_and_activity" or not logout_target.get("visible"):
+            metadata["logout_not_visible_reason"] = "logout_not_visible_after_scrolls"
+            return _logout_fallback_finalize(
+                ok=False,
+                final_outcome="unknown",
+                reason="logout_not_visible_after_scrolls",
+                failure_reason="logout_not_visible_after_scrolls",
                 account_id=safe_account_id,
                 expected_username=safe_expected_username,
                 actions_taken=actions_taken,
@@ -1733,11 +1954,14 @@ def run_old_account_logout_fallback_flow(
             publish_enabled=publish_enabled,
         )
     metadata["logout_attempted"] = True
+    metadata["logout_button_tapped"] = True
     start = timer()
     signals = _observe_login_signals(d, expected_username=safe_expected_username)
     timings["observe_ms"] += _elapsed_ms(start, timer())
+    _append_post_logout_observation(metadata, signals)
 
     if signals.get("screen_type") == "save_login_info_prompt":
+        metadata["save_login_info_prompt_detected"] = True
         action_result = _execute_logout_step(
             d,
             SimpleNamespace(decision="tap_not_now"),
@@ -1762,11 +1986,14 @@ def run_old_account_logout_fallback_flow(
                 publish_enabled=publish_enabled,
             )
         metadata["save_login_prompt_handled"] = True
+        metadata["save_login_info_not_now_tapped"] = True
         start = timer()
         signals = _observe_login_signals(d, expected_username=safe_expected_username)
         timings["observe_ms"] += _elapsed_ms(start, timer())
+        _append_post_logout_observation(metadata, signals)
 
     if signals.get("screen_type") == "logout_confirmation_prompt":
+        metadata["logout_confirmation_detected"] = True
         action_result = _execute_logout_step(
             d,
             SimpleNamespace(decision="tap_confirm_logout"),
@@ -1791,20 +2018,31 @@ def run_old_account_logout_fallback_flow(
                 publish_enabled=publish_enabled,
             )
         metadata["logout_confirmation_handled"] = True
+        metadata["logout_confirmation_tapped"] = True
         start = timer()
         signals = _observe_login_signals(d, expected_username=safe_expected_username)
         timings["observe_ms"] += _elapsed_ms(start, timer())
+        _append_post_logout_observation(metadata, signals)
 
-    if signals.get("screen_type") == "unknown":
-        metadata["post_logout_reobserve"] = True
-        metadata["post_logout_reobserve_count"] = 1
-        sleeper(POST_CONTINUE_REOBSERVE_WAIT_MS / 1000.0)
-        start = timer()
-        signals = _observe_login_signals(d, expected_username=safe_expected_username)
-        timings["observe_ms"] += _elapsed_ms(start, timer())
-
+    post_logout_settled = _observe_post_logout_settled(
+        d,
+        expected_username=safe_expected_username,
+        timings=timings,
+        timer=timer,
+        sleeper=sleeper,
+    )
+    signals = dict(post_logout_settled.get("signals") or {})
+    timings["post_logout_wait_total_ms"] = int(post_logout_settled.get("wait_total_ms") or 0)
+    metadata["post_logout_wait_total_ms"] = int(post_logout_settled.get("wait_total_ms") or 0)
+    for screen in list(post_logout_settled.get("screens") or []):
+        _append_post_logout_observation(metadata, {"screen_type": screen})
     final_screen_type = _post_logout_screen_type(signals)
+    metadata["post_logout_final_signals"] = dict(signals)
     metadata["final_screen_type"] = final_screen_type
+    metadata["screen_after_logout_final"] = final_screen_type
+    suggested_username = _safe_public_text(signals.get("suggested_username"))
+    if suggested_username:
+        metadata["post_logout_final_suggested_username"] = suggested_username
     metadata["post_logout_known_screen"] = final_screen_type in POST_LOGOUT_KNOWN_SCREENS
     if final_screen_type not in POST_LOGOUT_KNOWN_SCREENS:
         return _logout_fallback_finalize(
@@ -1930,30 +2168,241 @@ def _same_active_profile(signals: dict[str, Any], actual_username: str) -> bool:
     )
 
 
+def _classify_post_logout_unknown(signals: dict[str, Any]) -> str | None:
+    if signals.get("has_continue_button") and signals.get("has_use_another_profile"):
+        return "continue_as_candidate"
+    preparation_screen = _preparation_screen_label(signals)
+    if preparation_screen in POST_LOGOUT_KNOWN_SCREENS:
+        return preparation_screen
+    suggested_username = str(signals.get("suggested_username") or "").strip()
+    if (
+        suggested_username
+        and not signals.get("has_password_field")
+        and not signals.get("has_login_button")
+        and not signals.get("active_account_profile")
+        and not signals.get("active_account_home")
+    ):
+        return "continue_as_candidate"
+    return None
+
+
 def _post_logout_screen_type(signals: dict[str, Any]) -> str:
     screen_type = str(signals.get("screen_type") or "unknown")
-    if screen_type in {"login_form_empty", "continue_as_candidate", "account_picker", "continue_password_only"}:
+    if screen_type in {
+        "login_form_empty",
+        "login_form_prefilled_username",
+        "continue_as_candidate",
+        "account_picker",
+        "continue_password_only",
+        "save_login_info_prompt",
+        "logout_confirmation_prompt",
+    }:
         return screen_type
+    if screen_type == "unknown":
+        classified = _classify_post_logout_unknown(signals)
+        if classified:
+            return classified
     if str(signals.get("login_probe_outcome") or "") == LoginProbeOutcome.CONNECTED.value:
         return "connected"
     return screen_type
 
 
+def _post_logout_screen_is_exploitable(signals: dict[str, Any]) -> bool:
+    screen_type = str(signals.get("screen_type") or "unknown")
+    if screen_type in POST_LOGOUT_KNOWN_SCREENS:
+        return True
+    if screen_type in {"save_login_info_prompt", "logout_confirmation_prompt"}:
+        return False
+    if screen_type != "unknown":
+        return False
+    if _classify_post_logout_unknown(signals):
+        return True
+    return bool(str(signals.get("suggested_username") or "").strip())
+
+
+def _observe_post_logout_settled(
+    d: Any,
+    *,
+    expected_username: str,
+    timings: dict[str, int],
+    timer: Timer,
+    sleeper: Sleeper,
+    max_observations: int = POST_LOGOUT_SETTLING_OBSERVATIONS,
+    interval_ms: int = POST_LOGOUT_SETTLING_INTERVAL_MS,
+) -> dict[str, Any]:
+    observations = _clamp_count(max_observations, MAX_STARTUP_OBSERVATIONS)
+    interval = _clamp_ms(interval_ms, MAX_STARTUP_INTERVAL_MS)
+    screens: list[str] = []
+    wait_total_ms = 0
+    last_signals: dict[str, Any] = {}
+
+    for index in range(observations):
+        if index > 0 and interval > 0:
+            sleeper(interval / 1000.0)
+            wait_total_ms += interval
+        start = timer()
+        last_signals = _observe_login_signals(d, expected_username=expected_username)
+        timings["observe_ms"] += _elapsed_ms(start, timer())
+        screen_type = _post_logout_screen_type(last_signals)
+        screens.append(screen_type)
+        if _post_logout_screen_is_exploitable(last_signals):
+            break
+
+    final_screen_type = screens[-1] if screens else "unknown"
+    timings["post_logout_settling_observation_count"] = len(screens)
+    return {
+        "signals": last_signals,
+        "observation_count": len(screens),
+        "wait_total_ms": wait_total_ms,
+        "screens": screens,
+        "final_screen_type": final_screen_type,
+    }
+
+
+def _append_post_logout_observation(metadata: dict[str, Any], signals: dict[str, Any]) -> None:
+    screen = _post_logout_screen_type(signals)
+    metadata["post_logout_observation_count"] = int(metadata.get("post_logout_observation_count") or 0) + 1
+    metadata.setdefault("post_logout_screens", []).append(screen)
+    metadata["screen_after_logout_final"] = screen
+    suggested_username = _safe_public_text(signals.get("suggested_username"))
+    if suggested_username:
+        metadata["post_logout_final_suggested_username"] = suggested_username
+
+
+def _merge_logout_resume_metadata(
+    parent_metadata: dict[str, Any],
+    resume_metadata: dict[str, Any],
+    *,
+    logout_fallback_reason: str,
+) -> dict[str, Any]:
+    merged = {
+        **parent_metadata,
+        **resume_metadata,
+        "recovery_path": "logout_fallback",
+        "logout_fallback_allowed": True,
+        "logout_fallback_reason": logout_fallback_reason,
+        "post_logout_resume_observe_only": True,
+    }
+    for key in PARENT_APP_START_METADATA_KEYS:
+        if key in parent_metadata:
+            merged[key] = parent_metadata[key]
+    return merged
+
+
 def _scroll_settings_to_logout_once(d: Any) -> bool:
     try:
         selector = d(scrollable=True)
+    except Exception:
+        selector = None
+    if selector is not None:
         scroll = getattr(selector, "scroll", None)
+        forward = getattr(scroll, "forward", None)
+        if callable(forward):
+            try:
+                return bool(forward(steps=30))
+            except TypeError:
+                try:
+                    return bool(forward())
+                except Exception:
+                    pass
+            except Exception:
+                pass
         to = getattr(scroll, "to", None)
         if callable(to):
-            if bool(to(text="Log out")):
-                return True
+            for label in LOGOUT_BUTTON_LABELS:
+                try:
+                    if bool(to(text=label)):
+                        return True
+                except Exception:
+                    continue
         fling = getattr(selector, "fling", None)
+        forward_fling = getattr(fling, "forward", None)
+        if callable(forward_fling):
+            try:
+                return bool(forward_fling())
+            except Exception:
+                pass
         to_end = getattr(fling, "toEnd", None)
         if callable(to_end):
-            return bool(to_end(max_swipes=5))
-    except Exception:
-        return False
+            try:
+                return bool(to_end(max_swipes=1))
+            except TypeError:
+                try:
+                    return bool(to_end())
+                except Exception:
+                    pass
+            except Exception:
+                pass
+    swipe_ext = getattr(d, "swipe_ext", None)
+    if callable(swipe_ext):
+        try:
+            swipe_ext("up", scale=0.75)
+            return True
+        except Exception:
+            pass
     return False
+
+
+def _settle_settings_logout_button(
+    d: Any,
+    *,
+    expected_username: str,
+    signals: dict[str, Any],
+    metadata: dict[str, Any],
+    timings: dict[str, int],
+    timer: Timer,
+    sleeper: Sleeper,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    latest_signals = dict(signals)
+    latest_target = _logout_button_target_from_signals(latest_signals)
+    metadata["logout_scroll_attempted"] = True
+    metadata["logout_settings_scroll_attempted"] = True
+    for _ in range(MAX_LOGOUT_SETTINGS_SCROLLS):
+        metadata["logout_scroll_attempt_count"] = int(metadata.get("logout_scroll_attempt_count") or 0) + 1
+        metadata["logout_settings_scroll_count"] = int(metadata.get("logout_settings_scroll_count") or 0) + 1
+        scrolled = _scroll_settings_to_logout_once(d)
+        if LOGOUT_SETTINGS_SCROLL_WAIT_MS > 0:
+            sleeper(LOGOUT_SETTINGS_SCROLL_WAIT_MS / 1000.0)
+        start = timer()
+        latest_signals = _observe_login_signals(d, expected_username=expected_username)
+        timings["observe_ms"] += _elapsed_ms(start, timer())
+        latest_target = _logout_button_target_from_signals(latest_signals)
+        metadata["logout_button_visible_after_scroll"] = bool(latest_target.get("visible"))
+        if latest_target.get("visible") or latest_target.get("ambiguous"):
+            break
+        if latest_signals.get("screen_type") != "settings_and_activity":
+            metadata["logout_not_visible_reason"] = "settings_screen_lost_after_scroll"
+            break
+        if not scrolled:
+            metadata["logout_not_visible_reason"] = "settings_scroll_unavailable"
+    if latest_target.get("visible"):
+        metadata["logout_not_visible_reason"] = ""
+    elif not metadata.get("logout_not_visible_reason"):
+        metadata["logout_not_visible_reason"] = "logout_not_visible_after_scrolls"
+    return latest_signals, latest_target
+
+
+def _logout_button_target_from_signals(signals: dict[str, Any]) -> dict[str, Any]:
+    count = int(signals.get("logout_button_candidate_count") or 0)
+    visible = bool(signals.get("has_log_out_button")) and count > 0
+    return {
+        "visible": visible,
+        "ambiguous": count > 1,
+        "text": _safe_public_text(signals.get("logout_button_target_text")),
+        "method": _safe_public_text(signals.get("logout_button_target_method")),
+        "candidate_count": count,
+    }
+
+
+def _update_logout_target_metadata(metadata: dict[str, Any], target: dict[str, Any]) -> None:
+    if target.get("visible"):
+        metadata["logout_button_visible_after_scroll"] = True
+    text = _safe_public_text(target.get("text"))
+    method = _safe_public_text(target.get("method"))
+    if text:
+        metadata["logout_button_target_text"] = text
+    if method:
+        metadata["logout_button_target_method"] = method
 
 
 def _logout_fallback_finalize(
@@ -2009,11 +2458,71 @@ def _observe_login_signals(d: Any, *, expected_username: str | None = None) -> d
         hierarchy_xml = d.dump_hierarchy()
     hierarchy_text = str(hierarchy_xml or "")
     signals = extract_login_screen_signals_from_hierarchy(hierarchy_text, expected_username=expected_username)
+    signals.update(_extract_logout_button_signal_metadata(hierarchy_text))
     try:
         signals["login_probe_outcome"] = str(detect_login_probe_outcome_from_hierarchy(hierarchy_text).value)
     except Exception:
         signals["login_probe_outcome"] = "unknown"
     return signals
+
+
+def _extract_logout_button_signal_metadata(hierarchy_text: str) -> dict[str, Any]:
+    candidates = _collect_logout_button_candidates(hierarchy_text)
+    if not candidates:
+        return {
+            "logout_button_candidate_count": 0,
+            "logout_button_target_text": "",
+            "logout_button_target_method": "",
+        }
+    if len(candidates) > 1:
+        return {
+            "logout_button_candidate_count": len(candidates),
+            "logout_button_target_text": "",
+            "logout_button_target_method": "ambiguous_hierarchy",
+        }
+    candidate = candidates[0]
+    return {
+        "logout_button_candidate_count": 1,
+        "logout_button_target_text": candidate["label"],
+        "logout_button_target_method": candidate["method"],
+    }
+
+
+def _collect_logout_button_candidates(hierarchy_text: str) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for raw_attrs in re.findall(r"<node\b([^>]*)/?>", str(hierarchy_text or "")):
+        attrs = dict(re.findall(r'([\w-]+)="([^"]*)"', raw_attrs))
+        if str(attrs.get("visible-to-user", attrs.get("visible", "true"))).lower() == "false":
+            continue
+        if str(attrs.get("enabled", "true")).lower() == "false":
+            continue
+        label = _safe_public_text(attrs.get("text") or attrs.get("content-desc") or attrs.get("contentDescription"))
+        if not _is_logout_button_label(label):
+            continue
+        bounds = str(attrs.get("bounds") or "")
+        if not bounds:
+            continue
+        method = "hierarchy_clickable_text" if str(attrs.get("clickable", "false")).lower() == "true" else "hierarchy_text"
+        key = (label.lower(), bounds)
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append({"label": label, "method": method, "bounds": bounds})
+    return candidates
+
+
+def _is_logout_button_label(label: str) -> bool:
+    normalized = re.sub(r"\s+", " ", str(label or "").strip()).lower()
+    if not normalized:
+        return False
+    if normalized in LOGOUT_BUTTON_LABELS:
+        return True
+    if normalized.startswith("log out of ") and "your account" not in normalized and "?" not in normalized:
+        return True
+    if normalized.startswith("se déconnecter de ") or normalized.startswith("se deconnecter de "):
+        return "?" not in normalized
+    return False
 
 
 def _observe_startup_screen_settled(
@@ -2368,6 +2877,32 @@ def _route_provisioning_screen(
         clone_reuse_allowed=clone_reuse_allowed,
         account_id=account_id,
     )
+
+
+def _logout_fallback_gate(
+    *,
+    actual_username: str,
+    expected_username: str,
+    previous_account_lifecycle: dict[str, Any],
+    explicitly_allowed: bool,
+) -> tuple[bool, str]:
+    if not explicitly_allowed:
+        return False, "logout_fallback_not_explicitly_allowed"
+    normalized_actual = _normalize_identity_username(actual_username)
+    normalized_expected = _normalize_identity_username(expected_username)
+    if not normalized_actual:
+        return False, "active_username_missing"
+    if normalized_actual == normalized_expected:
+        return False, "active_username_matches_expected"
+    lifecycle_status = str(previous_account_lifecycle.get("lifecycle_status") or "unknown").strip().lower()
+    if lifecycle_status not in REUSABLE_PREVIOUS_ACCOUNT_LIFECYCLES:
+        return False, "active_account_lifecycle_not_reusable"
+    if not bool(previous_account_lifecycle.get("clone_reuse_allowed")):
+        return False, "clone_reuse_not_allowed"
+    source = str(previous_account_lifecycle.get("source") or "").strip()
+    if source not in LOGOUT_FALLBACK_LIFECYCLE_SOURCES:
+        return False, "lifecycle_source_not_safe_for_logout"
+    return True, "operator_smoke_logout_fallback_allowed"
 
 
 def _preparation_screen_label(signals: dict[str, Any]) -> str:

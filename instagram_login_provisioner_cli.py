@@ -99,6 +99,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="false",
         help="Smoke-only clone reuse gate for the suggested/old username override.",
     )
+    parser.add_argument(
+        "--operator-smoke-allow-logout-fallback",
+        choices=("true", "false"),
+        default="false",
+        help="Smoke-only explicit gate for controlled logout fallback after old active account validation.",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Route/prepare only; do not load Vault or submit.")
     parser.add_argument("--no-submit", action="store_true", help="Alias for --dry-run.")
     parser.add_argument("--no-publish", action="store_true", default=True, help="Keep status publishing disabled.")
@@ -150,6 +156,9 @@ def run_cli_command(
         package_name=str(args.package_name or DEFAULT_INSTAGRAM_PACKAGE_NAME),
         post_start_wait_ms=int(args.post_start_wait_ms or DEFAULT_POST_APP_START_WAIT_MS),
         post_submit_timeout_ms=int(args.post_submit_timeout_ms or 0),
+        operator_smoke_allow_logout_fallback=_parse_bool_choice(
+            getattr(args, "operator_smoke_allow_logout_fallback", "false")
+        ),
     )
     summary = _safe_summary_from_result(result, args=args, run_id=run_id)
     _append_safe_jsonl(summary, args=args)
@@ -282,6 +291,10 @@ def _normalize_public_username(value: Any) -> str:
     return str(value or "").strip().lstrip("@").lower()
 
 
+def _parse_bool_choice(value: Any) -> bool:
+    return str(value or "").strip().lower() == "true"
+
+
 def _safe_summary_from_error(reason: str, *, args: argparse.Namespace, run_id: str) -> dict[str, Any]:
     return _clean_summary(
         {
@@ -360,6 +373,7 @@ def _safe_summary_from_result(result: Any, *, args: argparse.Namespace, run_id: 
         "status_candidate": str(getattr(result, "final_login_status", "") or ""),
         "app_start_attempted": bool(metadata.get("app_start_attempted")),
         "app_start_ok": metadata.get("app_start_ok"),
+        "post_logout_resume_observe_only": bool(metadata.get("post_logout_resume_observe_only")),
         "screen_after_app_start": str(metadata.get("screen_after_app_start") or ""),
         "screen_after_app_start_initial": str(metadata.get("screen_after_app_start_initial") or ""),
         "screen_after_app_start_final": str(metadata.get("screen_after_app_start_final") or ""),
@@ -386,10 +400,35 @@ def _safe_summary_from_result(result: Any, *, args: argparse.Namespace, run_id: 
         "active_account_lifecycle_source": str(metadata.get("active_account_lifecycle_source") or ""),
         "active_account_lifecycle_status": str(metadata.get("active_account_lifecycle_status") or ""),
         "recovery_path": str(metadata.get("recovery_path") or ""),
+        "logout_fallback_allowed": bool(metadata.get("logout_fallback_allowed")),
+        "logout_fallback_reason": str(metadata.get("logout_fallback_reason") or ""),
+        "add_existing_attempted": bool(metadata.get("add_existing_attempted")),
+        "add_existing_failed_reason": str(metadata.get("add_existing_failed_reason") or ""),
         "profile_opened": bool(metadata.get("profile_opened")),
         "profile_username": str(metadata.get("profile_username") or ""),
         "profile_menu_initially_missing": bool(metadata.get("profile_menu_initially_missing")),
         "profile_refresh_attempted": bool(metadata.get("profile_refresh_attempted")),
+        "profile_menu_opened": bool(metadata.get("profile_menu_opened")),
+        "settings_opened": bool(metadata.get("settings_opened")),
+        "logout_settings_scroll_attempted": bool(metadata.get("logout_settings_scroll_attempted")),
+        "logout_settings_scroll_count": int(metadata.get("logout_settings_scroll_count") or 0),
+        "logout_button_visible_before_scroll": bool(metadata.get("logout_button_visible_before_scroll")),
+        "logout_button_visible_after_scroll": bool(metadata.get("logout_button_visible_after_scroll")),
+        "logout_button_tapped": bool(metadata.get("logout_button_tapped")),
+        "logout_button_target_text": str(metadata.get("logout_button_target_text") or ""),
+        "logout_button_target_method": str(metadata.get("logout_button_target_method") or ""),
+        "logout_not_visible_reason": str(metadata.get("logout_not_visible_reason") or ""),
+        "save_login_info_prompt_detected": bool(metadata.get("save_login_info_prompt_detected")),
+        "save_login_info_not_now_tapped": bool(metadata.get("save_login_info_not_now_tapped")),
+        "logout_confirmation_detected": bool(metadata.get("logout_confirmation_detected")),
+        "logout_confirmation_tapped": bool(metadata.get("logout_confirmation_tapped")),
+        "post_logout_observation_count": int(metadata.get("post_logout_observation_count") or 0),
+        "post_logout_screens": list(metadata.get("post_logout_screens") or []),
+        "post_logout_wait_total_ms": int(metadata.get("post_logout_wait_total_ms") or 0),
+        "screen_after_logout_final": str(metadata.get("screen_after_logout_final") or ""),
+        "post_logout_final_suggested_username": str(
+            metadata.get("post_logout_final_suggested_username") or ""
+        ),
         "account_switcher_opened": bool(metadata.get("account_switcher_opened")),
         "add_instagram_account_tapped": bool(metadata.get("add_instagram_account_tapped")),
         "add_account_sheet_opened": bool(metadata.get("add_account_sheet_opened")),
@@ -467,6 +506,12 @@ def _safe_summary_from_result(result: Any, *, args: argparse.Namespace, run_id: 
 def _preparation_flow_used(metadata: dict[str, Any], actions_taken: list[Any]) -> str:
     actions = [str(item) for item in actions_taken]
     recovery_path = str(metadata.get("recovery_path") or "")
+    screen_after_logout = str(metadata.get("screen_after_logout_final") or "")
+    if recovery_path == "logout_fallback":
+        if "tap_use_another_profile" in actions:
+            return "logout_fallback_to_use_another_profile"
+        if screen_after_logout:
+            return f"logout_fallback_to_{screen_after_logout}"
     screen_after_add_existing = str(metadata.get("screen_after_add_existing_final") or "")
     if recovery_path == "add_existing_account" and screen_after_add_existing:
         return f"add_existing_account_to_{screen_after_add_existing}"
@@ -522,6 +567,15 @@ def _password_non_empty_confirmed(password_result: dict[str, Any]) -> bool | str
 
 
 def _screen_before_submit(metadata: dict[str, Any], *, submit_executed: bool) -> str:
+    screen_after_logout = str(metadata.get("screen_after_logout_final") or "")
+    if screen_after_logout in {
+        "continue_password_only",
+        "login_form_empty",
+        "login_form_prefilled_username",
+        "continue_as_candidate",
+        "account_picker",
+    }:
+        return screen_after_logout
     screen_after_add_existing = str(metadata.get("screen_after_add_existing_final") or "")
     if screen_after_add_existing in {
         "continue_password_only",

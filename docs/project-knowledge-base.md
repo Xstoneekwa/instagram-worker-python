@@ -561,6 +561,26 @@ Post-submit policy future :
   pas de Settings logout, pas de `Create new account`, pas de Accounts Center.
   Metadata safe : `actual_logged_in_username`, `active_account_username`,
   `recovery_path=add_existing_account`, et les booleans d'etapes add-existing.
+- Entry 2E-5P-18 Controlled logout fallback : Cas F est un fallback explicite,
+  jamais le chemin principal. Cas E add-existing reste prioritaire sans flag.
+  Logout n'est autorise que si `actual_logged_in_username != expected_username`,
+  lifecycle old account `canceled`/`stopped`/`archived`,
+  `clone_reuse_allowed=true`, source sure (`operator_smoke_override` ou
+  `lifecycle_lookup_safe`) et `--operator-smoke-allow-logout-fallback true`.
+  Le flow ouvre le menu profil/settings, cherche `Log out` dans
+  `Settings and activity`, scrolle vers le bas de facon bornee si le bouton est
+  hors viewport, puis tape uniquement une cible texte/accessibilite visible et
+  non ambigue. Pas de coordonnees fixes; si absent apres les scrolls :
+  `logout_not_visible_after_scrolls`. Il choisit `Not now` sur
+  `Save your login info?`, confirme `Log out`, settling post-logout borne (ne pas
+  conclure `unknown` trop tot), puis reprend `account_picker`,
+  `continue_as_candidate`, `login_form_empty`, `login_form_prefilled_username` ou
+  `continue_password_only`. Entry 2E-5P-18B : post-logout peut etre un
+  `continue_as_candidate` de l'ancien compte — dans ce cas `Use another profile`,
+  pas `Continue`, puis reprise des cas couverts. La reprise post-logout interne
+  est observe-only et ne relance pas Instagram ; le JSONL conserve
+  `app_start_attempted/app_start_ok` du demarrage initial CLI. Smokes toujours
+  `--no-publish`, sans runner ni flow business.
 - Entry 2E-5P-11 Login form username prefilled : apres `Use another profile`,
   Instagram peut afficher un formulaire login avec l'ancien username deja rempli.
   Nouveau `screen_type=login_form_prefilled_username`. Si le champ username est
