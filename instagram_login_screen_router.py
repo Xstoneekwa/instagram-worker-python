@@ -118,18 +118,46 @@ def route_login_screen(
                 should_start_login_form_flow=True,
                 clone_reuse_allowed=clone_reuse_allowed,
             )
+        lifecycle_status, lookup_error = _lookup_lifecycle_status(
+            normalized_suggested,
+            account_lifecycle_lookup,
+        )
+        if lifecycle_status in STOPPED_LIFECYCLE_STATUSES and clone_reuse_allowed:
+            return _decision(
+                ok=True,
+                screen_type=safe_screen_type,
+                decision="start_login_form_flow_replace_username",
+                expected_username=expected_username,
+                suggested_username=suggested_username or "",
+                normalized_expected_username=normalized_expected,
+                normalized_suggested_username=normalized_suggested,
+                next_action="replace_prefilled_username_then_secure_password",
+                reason="prefilled_old_username_reusable_replace",
+                should_start_login_form_flow=True,
+                clone_reuse_allowed=clone_reuse_allowed,
+                lifecycle_status=lifecycle_status,
+            )
+        reason = (
+            "lifecycle_lookup_failed_username_prefilled_mismatch_requires_review"
+            if lookup_error
+            else "username_prefilled_mismatch_requires_review"
+        )
         return _decision(
-            ok=True,
+            ok=False,
             screen_type=safe_screen_type,
-            decision="start_login_form_flow_replace_username",
+            decision="block_wrong_suggested_account",
             expected_username=expected_username,
             suggested_username=suggested_username or "",
             normalized_expected_username=normalized_expected,
             normalized_suggested_username=normalized_suggested,
-            next_action="replace_prefilled_username_then_secure_password",
-            reason="prefilled_username_editable_replace",
-            should_start_login_form_flow=True,
+            reason=reason,
+            should_escalate=True,
+            publish_login_status="mismatch",
+            provisioning_status="blocked",
+            onboarding_status="support_required",
+            dashboard_action_type="review_account_mismatch",
             clone_reuse_allowed=clone_reuse_allowed,
+            lifecycle_status=lifecycle_status,
         )
 
     if safe_screen_type == CONTINUE_PASSWORD_ONLY:

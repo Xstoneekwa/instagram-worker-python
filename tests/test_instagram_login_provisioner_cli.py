@@ -205,6 +205,10 @@ class InstagramLoginProvisionerCliTest(unittest.TestCase):
             captured.update(kwargs)
             return _fake_result(
                 safe_metadata={
+                    "central_orchestrator_used": True,
+                    "central_orchestrator_version": "entry2e5p19-central-v1",
+                    "selected_route": "logout_fallback",
+                    "selected_route_reason": "operator_smoke_logout_fallback_allowed",
                     "recovery_path": "logout_fallback",
                     "logout_fallback_allowed": True,
                     "logout_fallback_reason": "operator_smoke_logout_fallback_allowed",
@@ -240,6 +244,10 @@ class InstagramLoginProvisionerCliTest(unittest.TestCase):
             _fake_result(
                 actions_taken=["tap_logout", "tap_not_now", "tap_confirm_logout"],
                 safe_metadata={
+                    "central_orchestrator_used": True,
+                    "central_orchestrator_version": "entry2e5p19-central-v1",
+                    "selected_route": "logout_fallback",
+                    "selected_route_reason": "operator_smoke_logout_fallback_allowed",
                     "recovery_path": "logout_fallback",
                     "logout_fallback_allowed": True,
                     "logout_fallback_reason": "operator_smoke_logout_fallback_allowed",
@@ -266,6 +274,9 @@ class InstagramLoginProvisionerCliTest(unittest.TestCase):
         )
 
         self.assertEqual(summary["recovery_path"], "logout_fallback")
+        self.assertTrue(summary["central_orchestrator_used"])
+        self.assertEqual(summary["central_orchestrator_version"], "entry2e5p19-central-v1")
+        self.assertEqual(summary["selected_route"], "logout_fallback")
         self.assertTrue(summary["logout_button_tapped"])
         self.assertTrue(summary["save_login_info_not_now_tapped"])
         self.assertTrue(summary["logout_confirmation_tapped"])

@@ -69,6 +69,7 @@ NO_RETRY_FAILURES = {
     "username_input_failed",
 }
 MAX_RETRY_ATTEMPTS = 1
+CENTRAL_ORCHESTRATOR_VERSION = "entry2e5p19-central-v1"
 POST_CONTINUE_REOBSERVE_WAIT_MS = 1500
 PROFILE_MENU_REOBSERVE_WAIT_MS = 1500
 PROFILE_REFRESH_WAIT_MS = 500
@@ -117,6 +118,10 @@ POST_LOGOUT_KNOWN_SCREENS = {
 POST_LOGOUT_SETTLING_OBSERVATIONS = 6
 POST_LOGOUT_SETTLING_INTERVAL_MS = DEFAULT_STARTUP_INTERVAL_MS
 PARENT_APP_START_METADATA_KEYS = (
+    "central_orchestrator_used",
+    "central_orchestrator_version",
+    "selected_route",
+    "selected_route_reason",
     "app_start_attempted",
     "app_start_ok",
     "observe_current_screen_only",
@@ -226,6 +231,10 @@ def run_login_provisioning_flow(
     bounded_post_start_wait_ms = _clamp_post_start_wait_ms(post_start_wait_ms)
     app_start_attempted = bool(start_app_before_probe) and not bool(observe_current_screen_only)
     screen_preparation_metadata = {
+        "central_orchestrator_used": True,
+        "central_orchestrator_version": CENTRAL_ORCHESTRATOR_VERSION,
+        "selected_route": "",
+        "selected_route_reason": "",
         "expected_username": safe_expected_username,
         "observe_current_screen_only": bool(observe_current_screen_only),
         "app_start_attempted": app_start_attempted,
@@ -341,6 +350,8 @@ def run_login_provisioning_flow(
                 warnings=warnings,
                 extra_metadata={
                     **screen_preparation_metadata,
+                    "selected_route": "already_connected_expected",
+                    "selected_route_reason": "connected_probe_identity_confirmed",
                     "password_required": False,
                     "ready_for_password_submit": False,
                 },
@@ -397,6 +408,8 @@ def run_login_provisioning_flow(
             warnings=warnings,
             extra_metadata={
                 **screen_preparation_metadata,
+                "selected_route": "already_connected_expected",
+                "selected_route_reason": "connected_probe_identity_confirmed",
                 "password_required": False,
                 "ready_for_password_submit": False,
             },
@@ -501,6 +514,8 @@ def run_login_provisioning_flow(
                         warnings=warnings,
                         extra_metadata={
                             **old_logged_in_metadata,
+                            "selected_route": "identity_unknown_on_connected_home",
+                            "selected_route_reason": "active_home_profile_identity_missing",
                             "screen_after_app_start_final": screen_preparation_metadata.get(
                                 "screen_after_app_start_final"
                             )
@@ -539,6 +554,8 @@ def run_login_provisioning_flow(
                     warnings=warnings,
                     extra_metadata={
                         **old_logged_in_metadata,
+                        "selected_route": "identity_unknown_on_connected_home",
+                        "selected_route_reason": "active_profile_identity_missing",
                         "profile_opened": True,
                         "password_required": False,
                         "ready_for_password_submit": False,
@@ -585,6 +602,8 @@ def run_login_provisioning_flow(
                     warnings=warnings,
                     extra_metadata={
                         **old_logged_in_metadata,
+                        "selected_route": "already_connected_expected",
+                        "selected_route_reason": "active_profile_matches_expected",
                         "password_required": False,
                         "ready_for_password_submit": False,
                     },
@@ -633,6 +652,12 @@ def run_login_provisioning_flow(
                 "clone_reuse_allowed": bool(previous_account_lifecycle.get("clone_reuse_allowed")),
                 "lifecycle_gate_result": recovery_route.decision,
                 "old_logged_in_recovery_allowed": recovery_route.decision == "recover_old_logged_in_account",
+                "selected_route": _central_selected_route(
+                    recovery_route.decision,
+                    {"screen_type": "active_account_profile"},
+                ),
+                "selected_route_reason": recovery_route.reason
+                or _central_selected_route(recovery_route.decision, {"screen_type": "active_account_profile"}),
             }
             if recovery_route.decision != "recover_old_logged_in_account":
                 return _finalize(
@@ -670,6 +695,12 @@ def run_login_provisioning_flow(
                     "logout_fallback_reason": logout_fallback_reason,
                     "add_existing_attempted": False,
                     "add_existing_failed_reason": "",
+                    "selected_route": "logout_fallback" if logout_fallback_allowed else "add_existing_account",
+                    "selected_route_reason": (
+                        "operator_smoke_logout_fallback_allowed"
+                        if logout_fallback_allowed
+                        else "old_active_account_reusable_add_existing_default"
+                    ),
                 }
             )
             if logout_fallback_allowed:
@@ -921,7 +952,7 @@ def run_login_provisioning_flow(
         previous_account_lifecycle=None,
     )
     previous_account_lifecycle = _resolve_previous_account_lifecycle(
-        suggested_username=routing_signals.get("suggested_username"),
+        suggested_username=routing_signals.get("suggested_username") or routing_signals.get("prefilled_username"),
         screen_type=routing_signals.get("screen_type"),
         account_id=safe_account_id,
         expected_username=safe_expected_username,
@@ -943,9 +974,13 @@ def run_login_provisioning_flow(
     actions_taken.append(f"route:{route.decision}")
     route_metadata = {
         "router_decision": route.decision,
+        "selected_route": _central_selected_route(route.decision, routing_signals),
+        "selected_route_reason": route.reason or _central_selected_route(route.decision, routing_signals),
         "routing_screen_type": routing_signals.get("screen_type"),
         "screen_type": routing_signals.get("screen_type"),
-        "suggested_username": _safe_public_text(routing_signals.get("suggested_username")),
+        "suggested_username": _safe_public_text(
+            routing_signals.get("suggested_username") or routing_signals.get("prefilled_username")
+        ),
     }
     if routing_signals.get("screen_type") == "account_picker":
         route_metadata.update(
@@ -1204,7 +1239,7 @@ def run_login_provisioning_flow(
                 }
             )
         post_action_lifecycle = _resolve_previous_account_lifecycle(
-            suggested_username=signals.get("suggested_username"),
+            suggested_username=signals.get("suggested_username") or signals.get("prefilled_username"),
             screen_type=signals.get("screen_type"),
             account_id=safe_account_id,
             expected_username=safe_expected_username,
@@ -1228,9 +1263,16 @@ def run_login_provisioning_flow(
         actions_taken.append(f"route:{route.decision}")
         route_metadata = {
             "router_decision": route.decision,
+            "selected_route": old_logged_in_metadata.get("selected_route")
+            or _central_selected_route(route.decision, post_routing_signals),
+            "selected_route_reason": old_logged_in_metadata.get("selected_route_reason")
+            or route.reason
+            or _central_selected_route(route.decision, post_routing_signals),
             "routing_screen_type": post_routing_signals.get("screen_type"),
             "screen_type": post_routing_signals.get("screen_type"),
-            "suggested_username": _safe_public_text(post_routing_signals.get("suggested_username")),
+            "suggested_username": _safe_public_text(
+                post_routing_signals.get("suggested_username") or post_routing_signals.get("prefilled_username")
+            ),
         }
         old_logged_in_metadata.update(route_metadata)
 
@@ -2040,7 +2082,9 @@ def run_old_account_logout_fallback_flow(
     metadata["post_logout_final_signals"] = dict(signals)
     metadata["final_screen_type"] = final_screen_type
     metadata["screen_after_logout_final"] = final_screen_type
-    suggested_username = _safe_public_text(signals.get("suggested_username"))
+    suggested_username = _safe_public_text(
+        signals.get("suggested_username") or signals.get("prefilled_username")
+    )
     if suggested_username:
         metadata["post_logout_final_suggested_username"] = suggested_username
     metadata["post_logout_known_screen"] = final_screen_type in POST_LOGOUT_KNOWN_SCREENS
@@ -2287,6 +2331,44 @@ def _merge_logout_resume_metadata(
         if key in parent_metadata:
             merged[key] = parent_metadata[key]
     return merged
+
+
+def _central_selected_route(decision: str, signals: dict[str, Any]) -> str:
+    safe_decision = str(decision or "")
+    screen_type = str(signals.get("screen_type") or "")
+    if safe_decision == "continue_expected_account":
+        return "continue_as_expected"
+    if safe_decision == "use_another_profile_previous_account_stopped":
+        return "use_another_profile"
+    if safe_decision == "select_expected_account_from_picker":
+        return "account_picker"
+    if safe_decision == "start_login_form_flow_prefilled_expected":
+        return "login_form_prefilled_expected"
+    if safe_decision == "start_login_form_flow_replace_username":
+        return "replace_prefilled_username"
+    if safe_decision == "start_login_form_flow":
+        if screen_type == "continue_password_only":
+            return "continue_password_only"
+        if screen_type == "login_form_empty":
+            return "login_form_empty"
+        return "login_form"
+    if safe_decision == "connected_expected_account":
+        return "already_connected_expected"
+    if safe_decision == "recover_old_logged_in_account":
+        return "add_existing_account"
+    if safe_decision == "expected_account_not_listed":
+        return "expected_account_not_listed"
+    if safe_decision == "block_wrong_active_account":
+        return "requires_review"
+    if safe_decision == "block_wrong_suggested_account":
+        if screen_type == "login_form_prefilled_username":
+            return "username_prefilled_mismatch_requires_review"
+        if screen_type == "continue_password_only":
+            return "continue_password_only_username_mismatch"
+        return "suggested_account_mismatch_requires_review"
+    if safe_decision == "username_prefilled_not_editable":
+        return "username_prefilled_mismatch_requires_review"
+    return safe_decision or "unknown"
 
 
 def _scroll_settings_to_logout_once(d: Any) -> bool:
@@ -2849,7 +2931,18 @@ def _route_provisioning_screen(
     account_id: str,
 ) -> Any:
     screen_type = str(routing_signals.get("screen_type") or "unknown")
-    suggested_username = str(routing_signals.get("suggested_username") or "")
+    suggested_username = str(routing_signals.get("suggested_username") or routing_signals.get("prefilled_username") or "")
+    if (
+        screen_type == "login_form_prefilled_username"
+        and suggested_username.strip().lstrip("@").lower()
+        != str(expected_username or "").strip().lstrip("@").lower()
+        and not bool(routing_signals.get("username_field_editable_present", True))
+    ):
+        return SimpleNamespace(
+            decision="username_prefilled_not_editable",
+            reason="username_prefilled_not_editable",
+            dashboard_action_type=None,
+        )
     clone_reuse_allowed = bool(previous_account_lifecycle.get("clone_reuse_allowed"))
     route = route_login_screen(
         expected_username=expected_username,
@@ -3039,7 +3132,7 @@ def _resolve_previous_account_lifecycle(
         "reason": "",
         "lookup_failed": False,
     }
-    allowed_screen_types = {"continue_as_candidate", "active_account_profile"}
+    allowed_screen_types = {"continue_as_candidate", "active_account_profile", "login_form_prefilled_username"}
     if normalized_username and str(screen_type or "") == "active_account_home":
         allowed_screen_types = {*allowed_screen_types, "active_account_home"}
     if not normalized_username or str(screen_type or "") not in allowed_screen_types:

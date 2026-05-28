@@ -448,6 +448,8 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertEqual(result.safe_metadata["startup_screens"], ["unknown", "continue_as_candidate"])
         self.assertEqual(result.safe_metadata["startup_observation_count"], 2)
         self.assertTrue(result.safe_metadata["startup_settling_used"])
+        self.assertTrue(result.safe_metadata["central_orchestrator_used"])
+        self.assertEqual(result.safe_metadata["selected_route"], "continue_as_expected")
         self.assertEqual(selectors["continue"].click_calls, 1)
 
     def test_app_start_unknown_then_login_form_empty_is_accepted(self) -> None:
@@ -465,6 +467,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
 
         self.assertTrue(result.ok)
         self.assertEqual(result.safe_metadata["screen_after_app_start_final"], "login_form_empty")
+        self.assertEqual(result.safe_metadata["selected_route"], "login_form_empty")
         self.assertEqual(selectors["login"].click_calls, 1)
 
     def test_app_start_unknown_then_continue_password_only_is_accepted(self) -> None:
@@ -482,6 +485,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
 
         self.assertTrue(result.ok)
         self.assertEqual(result.safe_metadata["screen_after_app_start_final"], "continue_password_only")
+        self.assertEqual(result.safe_metadata["selected_route"], "continue_password_only")
         self.assertEqual(selectors["login"].click_calls, 1)
 
     def test_app_start_continue_as_candidate_fast_path_no_startup_reobserve(self) -> None:
@@ -547,6 +551,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertIn("tap_expected_account", result.actions_taken)
         self.assertIn("login_form_submit", result.actions_taken)
+        self.assertEqual(result.safe_metadata["selected_route"], "account_picker")
         self.assertTrue(secret.revealed)
         self.assertTrue(selectors["password"].set_text_calls)
         self.assertEqual(result.safe_metadata["screen_after_app_start"], "account_picker")
@@ -570,6 +575,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertIn("tap_continue", result.actions_taken)
         self.assertIn("login_form_submit", result.actions_taken)
+        self.assertEqual(result.safe_metadata["selected_route"], "continue_as_expected")
         self.assertTrue(secret.revealed)
         self.assertTrue(selectors["password"].set_text_calls)
         self.assertEqual(result.safe_metadata["screen_after_app_start"], "continue_as_candidate")
@@ -598,6 +604,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertEqual(selectors["login"].click_calls, 1)
         self.assertEqual(result.safe_metadata["screen_type"], "login_form_empty")
         self.assertEqual(result.safe_metadata["router_decision"], "start_login_form_flow")
+        self.assertEqual(result.safe_metadata["selected_route"], "login_form_empty")
         self.assertTrue(selectors["username"].set_text_calls)
         self.assertTrue(selectors["password"].set_text_calls)
         self.assertTrue(result.safe_metadata["password_result"]["executed"])
@@ -971,6 +978,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertEqual(result.safe_metadata["password_only_username"], USERNAME)
         self.assertTrue(result.safe_metadata["username_match"])
         self.assertEqual(result.safe_metadata["router_decision"], "start_login_form_flow")
+        self.assertEqual(result.safe_metadata["selected_route"], "continue_password_only")
         self.assertEqual(result.safe_metadata["password_result"]["username_input_result"], "not_required")
         self.assertFalse(result.safe_metadata["password_result"]["username_replaced"])
         self.assertEqual(selectors["username"].set_text_calls, [])
@@ -998,6 +1006,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
 
         self.assertEqual(result.final_outcome, "mismatch")
         self.assertEqual(result.reason, "continue_password_only_username_mismatch")
+        self.assertEqual(result.safe_metadata["selected_route"], "continue_password_only_username_mismatch")
         self.assertFalse(result.safe_metadata["username_match"])
         self.assertEqual(result.safe_metadata["displayed_username"], "i_m_your_traker")
         getter.assert_not_called()
@@ -1158,6 +1167,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         lookup.assert_called_once()
         self.assertTrue(selectors["use_another"].click_calls == 1 or device.bounds_clicks == [(540, 1247)])
         self.assertIn("tap_use_another_profile", result.actions_taken)
+        self.assertEqual(result.safe_metadata["selected_route"], "use_another_profile")
         self.assertEqual(result.final_outcome, "connected")
         self.assertEqual(
             result.safe_metadata["previous_account_lifecycle"]["source"],
@@ -1195,6 +1205,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertEqual(result.final_outcome, "connected")
         self.assertIn("tap_use_another_profile", result.actions_taken)
         self.assertIn("route:start_login_form_flow_replace_username", result.actions_taken)
+        self.assertEqual(result.safe_metadata["selected_route"], "use_another_profile")
         self.assertEqual(prefilled_username.set_text_calls, [USERNAME])
         self.assertEqual(selectors["password"].set_text_calls, [PASSWORD])
         self.assertEqual(result.safe_metadata["screen_type"], "login_form_prefilled_username")
@@ -1204,6 +1215,99 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertTrue(result.safe_metadata["previous_account_lifecycle"]["clone_reuse_allowed"])
         self.assertTrue(result.safe_metadata["password_result"]["username_replaced"])
         self.assertEqual(result.safe_metadata["password_result"]["username_input_result"], "username_input_assumed")
+
+    def test_direct_prefilled_expected_username_submits_without_username_replace(self) -> None:
+        device, selectors = configured_device(CONNECTED_XML)
+        selectors["username"]._count = 0
+        device.add_selector("text", USERNAME, FakeSelector(1))
+        expected_prefilled_xml = PREFILLED_LOGIN_FORM_XML.replace("random_old_profile", USERNAME)
+        device.hierarchies = [expected_prefilled_xml, CONNECTED_XML]
+        secret = TrackingSecretValue(PASSWORD)
+
+        result = self.run_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username=USERNAME,
+            credentials_getter=Mock(return_value={"username": USERNAME, "password": secret}),
+            initial_signals={
+                "screen_type": "login_form_prefilled_username",
+                "suggested_username": USERNAME,
+                "prefilled_username": USERNAME,
+                "username_prefilled_present": True,
+                "username_field_present": True,
+                "username_field_editable_present": True,
+                "has_password_field": True,
+                "has_login_button": True,
+            },
+        )
+
+        self.assertEqual(result.final_outcome, "connected")
+        self.assertEqual(result.safe_metadata["selected_route"], "login_form_prefilled_expected")
+        self.assertFalse(result.safe_metadata["password_result"]["username_replaced"])
+        self.assertTrue(selectors["password"].set_text_calls)
+        self.assertTrue(secret.revealed)
+
+    def test_direct_prefilled_old_reusable_username_is_replaced_then_submitted(self) -> None:
+        device, selectors = configured_device(CONNECTED_XML)
+        selectors["username"]._count = 0
+        prefilled_username = device.add_selector("text", "random_old_profile", FakeSelector(1))
+        device.hierarchies = [PREFILLED_LOGIN_FORM_XML, CONNECTED_XML]
+        lookup = self._canceled_lifecycle()
+
+        result = self.run_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username=USERNAME,
+            credentials_getter=Mock(return_value=credentials()),
+            previous_account_lifecycle_lookup=lookup,
+            initial_signals={
+                "screen_type": "login_form_prefilled_username",
+                "suggested_username": "random_old_profile",
+                "prefilled_username": "random_old_profile",
+                "username_prefilled_present": True,
+                "username_field_present": True,
+                "username_field_editable_present": True,
+                "has_password_field": True,
+                "has_login_button": True,
+            },
+        )
+
+        self.assertEqual(result.final_outcome, "connected")
+        self.assertEqual(result.safe_metadata["selected_route"], "replace_prefilled_username")
+        self.assertEqual(prefilled_username.set_text_calls, [USERNAME])
+        self.assertTrue(result.safe_metadata["password_result"]["username_replaced"])
+
+    def test_direct_prefilled_unknown_lifecycle_blocks_without_secret_reveal(self) -> None:
+        device, selectors = configured_device(CONNECTED_XML)
+        secret = TrackingSecretValue(PASSWORD)
+        getter = Mock(return_value={"username": USERNAME, "password": secret})
+
+        result = self.run_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username=USERNAME,
+            credentials_getter=getter,
+            previous_account_lifecycle_lookup=Mock(
+                return_value={"lifecycle_status": "unknown", "clone_reuse_allowed": False}
+            ),
+            initial_signals={
+                "screen_type": "login_form_prefilled_username",
+                "suggested_username": "random_old_profile",
+                "prefilled_username": "random_old_profile",
+                "username_prefilled_present": True,
+                "username_field_present": True,
+                "username_field_editable_present": True,
+                "has_password_field": True,
+                "has_login_button": True,
+            },
+        )
+
+        self.assertEqual(result.final_outcome, "mismatch")
+        self.assertEqual(result.reason, "username_prefilled_mismatch_requires_review")
+        self.assertEqual(result.safe_metadata["selected_route"], "username_prefilled_mismatch_requires_review")
+        getter.assert_not_called()
+        self.assertFalse(secret.revealed)
+        self.assertEqual(selectors["password"].set_text_calls, [])
 
     def test_prefilled_username_not_editable_stops_without_submit(self) -> None:
         getter = Mock(return_value=credentials())
@@ -1225,6 +1329,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         )
 
         self.assertEqual(result.final_outcome, "username_prefilled_not_editable")
+        self.assertEqual(result.safe_metadata["selected_route"], "username_prefilled_mismatch_requires_review")
         self.assertFalse(result.safe_metadata["would_submit_password"])
         getter.assert_not_called()
 
@@ -1743,6 +1848,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
 
         self.assertEqual(result.final_outcome, "mismatch")
         self.assertIn("route:expected_account_not_listed", result.actions_taken)
+        self.assertEqual(result.safe_metadata["selected_route"], "expected_account_not_listed")
         self.assertNotIn("tap_expected_account", result.actions_taken)
         self.assertNotIn("login_form_submit", result.actions_taken)
         self.assertFalse(result.safe_metadata["account_picker_selection_executed"])
@@ -1763,6 +1869,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
 
         self.assertEqual(result.final_outcome, "connected")
         self.assertIn("tap_expected_account", result.actions_taken)
+        self.assertEqual(result.safe_metadata["selected_route"], "account_picker")
         self.assertEqual(result.safe_metadata["available_usernames"], ["random_expected", "random_old_profile"])
         self.assertTrue(result.safe_metadata["expected_username_present"])
         self.assertEqual(result.safe_metadata["selected_account_username"], "random_expected")
@@ -1789,6 +1896,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
 
         self.assertEqual(result.final_outcome, "credentials_missing")
         self.assertIn("tap_expected_account", result.actions_taken)
+        self.assertEqual(result.safe_metadata["selected_route"], "account_picker")
         self.assertEqual(result.safe_metadata["selected_account_username"], "random_expected")
         self.assertTrue(result.safe_metadata["account_picker_selection_executed"])
         self.assertTrue(result.safe_metadata["password_required"])
@@ -1812,6 +1920,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertEqual(result.final_outcome, "connected")
         self.assertIn("tap_expected_account", result.actions_taken)
         self.assertIn("login_form_submit", result.actions_taken)
+        self.assertEqual(result.safe_metadata["selected_route"], "account_picker")
         self.assertEqual(result.safe_metadata["screen_after_account_picker_final"], "continue_password_only")
         self.assertEqual(result.safe_metadata["selected_account_username"], "random_expected")
         self.assertTrue(selectors["password"].set_text_calls)
@@ -1923,6 +2032,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         )
 
         self.assertEqual(result.reason, "identity_unknown_on_connected_home")
+        self.assertEqual(result.safe_metadata["selected_route"], "identity_unknown_on_connected_home")
         self.assertNotEqual(result.reason, "connected_no_password_needed")
         self.assertFalse(result.safe_metadata.get("would_submit_password"))
         self.assertFalse(result.published)
@@ -1966,6 +2076,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertEqual(result.safe_metadata["active_account_lifecycle_status"], "canceled")
         self.assertTrue(result.safe_metadata["clone_reuse_allowed"])
         self.assertEqual(result.safe_metadata["recovery_path"], "add_existing_account")
+        self.assertEqual(result.safe_metadata["selected_route"], "add_existing_account")
         self.assertIn("tap_profile_bottom_nav", result.actions_taken)
         getter.assert_not_called()
 
@@ -1984,6 +2095,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
 
         self.assertEqual(result.final_outcome, "connected")
         self.assertEqual(result.reason, "active_profile_matches_expected")
+        self.assertEqual(result.safe_metadata["selected_route"], "already_connected_expected")
         self.assertNotEqual(result.reason, "connected_no_password_needed")
         self.assertFalse(result.safe_metadata.get("recovery_path"))
         getter.assert_not_called()
@@ -2002,6 +2114,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         )
 
         self.assertEqual(result.final_outcome, "mismatch")
+        self.assertEqual(result.safe_metadata["selected_route"], "requires_review")
         self.assertEqual(result.safe_metadata["lifecycle_gate_result"], "block_wrong_active_account")
         self.assertFalse(result.safe_metadata.get("recovery_path"))
         self.assertNotIn("tap_add_instagram_account", result.actions_taken)
@@ -3059,6 +3172,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         )
 
         self.assertEqual(result.safe_metadata["recovery_path"], "logout_fallback")
+        self.assertEqual(result.safe_metadata["selected_route"], "logout_fallback")
         self.assertEqual(result.safe_metadata["screen_after_logout_final"], "continue_as_candidate")
         self.assertIn("route:continue_expected_account", result.actions_taken)
         getter.assert_not_called()
@@ -3097,6 +3211,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         )
 
         self.assertEqual(result.safe_metadata["recovery_path"], "logout_fallback")
+        self.assertEqual(result.safe_metadata["selected_route"], "logout_fallback")
         self.assertEqual(result.safe_metadata["screen_after_logout_final"], "continue_as_candidate")
         self.assertEqual(result.safe_metadata["post_logout_final_suggested_username"], "random_old_profile")
         self.assertIn("tap_use_another_profile", result.actions_taken)
@@ -3144,6 +3259,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertTrue(result.safe_metadata["app_start_ok"])
         self.assertTrue(result.safe_metadata["post_logout_resume_observe_only"])
         self.assertEqual(result.safe_metadata["recovery_path"], "logout_fallback")
+        self.assertEqual(result.safe_metadata["selected_route"], "logout_fallback")
 
     def test_login_flow_logout_fallback_resumes_prefilled_login_form(self) -> None:
         device, _selectors = configured_device()

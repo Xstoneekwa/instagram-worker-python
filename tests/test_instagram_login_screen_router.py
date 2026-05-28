@@ -126,12 +126,28 @@ class InstagramLoginScreenRouterTest(unittest.TestCase):
             expected_username="cinema_catchup",
             suggested_username="i_m_your_traker",
             screen_type="login_form_prefilled_username",
+            account_lifecycle_lookup=lambda _username: {"lifecycle_status": "canceled"},
+            clone_reuse_allowed=True,
         )
 
         self.assertTrue(decision.ok)
         self.assertEqual(decision.decision, "start_login_form_flow_replace_username")
         self.assertTrue(decision.should_start_login_form_flow)
-        self.assertEqual(decision.reason, "prefilled_username_editable_replace")
+        self.assertEqual(decision.reason, "prefilled_old_username_reusable_replace")
+
+    def test_prefilled_wrong_username_without_reusable_lifecycle_blocks(self) -> None:
+        decision = route_login_screen(
+            expected_username="cinema_catchup",
+            suggested_username="i_m_your_traker",
+            screen_type="login_form_prefilled_username",
+            account_lifecycle_lookup=lambda _username: {"lifecycle_status": "unknown"},
+            clone_reuse_allowed=True,
+        )
+
+        self.assertFalse(decision.ok)
+        self.assertEqual(decision.decision, "block_wrong_suggested_account")
+        self.assertEqual(decision.reason, "username_prefilled_mismatch_requires_review")
+        self.assertTrue(decision.should_escalate)
 
     def test_prefilled_expected_username_starts_password_flow(self) -> None:
         decision = route_login_screen(

@@ -581,6 +581,19 @@ Post-submit policy future :
   est observe-only et ne relance pas Instagram ; le JSONL conserve
   `app_start_attempted/app_start_ok` du demarrage initial CLI. Smokes toujours
   `--no-publish`, sans runner ni flow business.
+- Entry 2E-5P-19 Central provisioning/login orchestrator :
+  `run_login_provisioning_flow(...)` est la fonction centrale appelee par le CLI.
+  Elle fait `app_start` par defaut, startup settling, classification, routage
+  vers les sous-flows valides, reprise post-action, submit credentials seulement
+  apres identite confirmee, et JSONL no-leak/no-publish. Metadata :
+  `central_orchestrator_used=true`, `central_orchestrator_version`,
+  `selected_route`, `selected_route_reason`. Routes : `continue_as_expected`,
+  `use_another_profile`, `account_picker`, `login_form_empty`,
+  `login_form_prefilled_expected`, `replace_prefilled_username`,
+  `continue_password_only`, `already_connected_expected`, `add_existing_account`,
+  `logout_fallback`. Cas E reste prioritaire; Cas F seulement avec flag explicite.
+  Cas G/H (bad password, password-required, 2FA/checkpoint) sont reportes apres
+  dashboard client/admin hors detection terminale safe deja existante.
 - Entry 2E-5P-11 Login form username prefilled : apres `Use another profile`,
   Instagram peut afficher un formulaire login avec l'ancien username deja rempli.
   Nouveau `screen_type=login_form_prefilled_username`. Si le champ username est

@@ -4389,6 +4389,62 @@ Metadata safe Cas E :
 Smoke Cas E : `--no-publish`, aucun status backend, aucun dashboard write,
 aucun runner/social flow.
 
+## Entry 2E-5P-19 Central Provisioning/Login Orchestrator
+
+Entry 2E-5P-19 confirme que `run_login_provisioning_flow(...)` est
+l'orchestrateur central provisioning/login appele par
+`instagram_login_provisioner_cli.py`. Il ne cree pas de nouveau flow business :
+il orchestre les sous-flows deja valides.
+
+Responsabilites centrales :
+
+1. `app_start` par defaut, sauf `--observe-current-screen-only` diagnostic ou
+   reprise interne maitrisee post-logout ;
+2. settling startup borne ;
+3. classification safe de l'ecran courant ;
+4. routage vers les chemins valides ;
+5. reprise post-action quand Instagram affiche une transition ;
+6. submit credentials uniquement quand l'identite est validee ;
+7. JSONL safe, `--no-publish`, aucun runner/social/outreach hook.
+
+Routes supportees :
+
+- `continue_as_expected` : `continue_as_candidate` attendu -> `Continue` ;
+- `use_another_profile` : ancien compte propose `canceled`/`stopped`/`archived`
+  et clone reusable -> `Use another profile` ;
+- `account_picker` : selection de la ligne expected sans index fixe ;
+- `login_form_empty` : username + password ;
+- `login_form_prefilled_expected` : password seulement, username deja correct ;
+- `replace_prefilled_username` : prefilled ancien compte reusable -> remplacer
+  username avant password ;
+- `continue_password_only` : password-only si username == expected ;
+- `already_connected_expected` : compte actif identifie comme expected ;
+- `add_existing_account` : Cas E prioritaire par defaut pour ancien compte actif
+  reusable ;
+- `logout_fallback` : Cas F uniquement avec
+  `--operator-smoke-allow-logout-fallback true`.
+
+Stops safe centraux :
+
+- `suggested_account_mismatch_requires_review` ;
+- `username_prefilled_mismatch_requires_review` ;
+- `continue_password_only_username_mismatch` ;
+- `identity_unknown_on_connected_home` ;
+- `expected_account_not_listed` ;
+- `requires_review` pour lifecycle/source non confirme.
+
+Metadata centrale :
+
+- `central_orchestrator_used=true` ;
+- `central_orchestrator_version=entry2e5p19-central-v1` ;
+- `selected_route`, `selected_route_reason` ;
+- conservation des metadata startup, route, sous-flow, password, logout et
+  account-picker existantes.
+
+Cas G/H (`login_failed`, bad password, password-required dialog, 2FA,
+checkpoint) restent seulement detectes en terminal safe existant et sont
+reportes apres dashboard client/admin.
+
 ## Entry 2E-5P-18 Controlled Logout Fallback For Old Active Account
 
 Entry 2E-5P-18 introduit le Cas F : un **logout fallback controle** pour un
