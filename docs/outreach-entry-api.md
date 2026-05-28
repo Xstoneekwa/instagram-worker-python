@@ -4445,6 +4445,83 @@ Cas G/H (`login_failed`, bad password, password-required dialog, 2FA,
 checkpoint) restent seulement detectes en terminal safe existant et sont
 reportes apres dashboard client/admin.
 
+## Entry 2E-5P-20 Controlled Backend Status Publish
+
+Entry 2E-5P-20 branche le provisioner central au publisher status backend
+existant, sans BotApp frontend, sans dashboard UI, sans runner hook et sans flow
+business. Le helper reutilise est `instagram_account_status_publisher.py`, qui
+appelle l'API interne status/RPC existante et reste injectable en tests.
+
+Slack/Discord inchanges :
+
+- 2E-5P-20 ne cree aucun nouveau type de notification Slack/Discord ;
+- le provisioner n'envoie jamais directement vers Slack/Discord ;
+- aucun webhook, token, contenu, frequence, canal ou regle d'envoi Slack/Discord
+  existant n'est modifie ;
+- un succes normal `connected` publie seulement un status backend si le publish
+  est autorise, sans Slack/Discord.
+
+Activation :
+
+- `LOGIN_PROVISIONER_PUBLISH_ENABLED=false` par defaut ;
+- `--publish` est obligatoire pour autoriser un publish depuis le CLI ;
+- `--no-publish` a priorite absolue et force `published=false` ;
+- le publisher backend reste fail-open et ne doit jamais casser le resultat local
+  du login.
+
+Mapping V1 :
+
+- publier uniquement un succes sur : `ok=true`, `completed=true`,
+  `final_outcome=connected`, `status_candidate=connected`, `account_id` present,
+  route centrale sure ;
+- payload status : `login_status=connected`,
+  `provisioning_status=ready`, `onboarding_status=ready`,
+  `reauth_required=false` selon le modele status existant ;
+- metadata safe : `source=login_provisioner`, `flow_name`, `run_id`,
+  `central_orchestrator_version`, `selected_route`, `final_outcome`, ecrans
+  terminaux publics utiles ;
+- ne pas publier maintenant : bad password, login failed, password-required
+  avance, 2FA, checkpoint, mismatch/requires-review, unknown/logged-out ambigu,
+  identity unknown, post-submit unknown.
+
+Contrat miroir backend/dashboard futur :
+
+- tout evenement operationnel deja notifie aujourd'hui vers Slack/Discord doit
+  aussi avoir une trace backend safe et etre visible cote dashboard admin quand
+  necessaire ;
+- si l'evenement demande une action client, il doit aussi etre projetable en
+  dashboard client via `account_dashboard_actions` ou sync status/action existant ;
+- si l'evenement est interne ou admin-only, il reste dashboard admin only ;
+- `account_incident_notifications` reste l'audit de livraison Slack/Discord, pas
+  le payload UI dashboard ;
+- aucun payload Slack/Discord brut, webhook, token, XML, screenshot path ou secret
+  ne doit etre reutilise comme payload backend/dashboard.
+
+Ce contrat ne deplace pas les canaux Slack/Discord dans le provisioner : le chemin
+attendu reste evenement operationnel existant -> backend incident/action/status
+safe -> dashboard admin -> dashboard client seulement si une action client est
+necessaire.
+
+JSONL expose :
+
+- `would_publish`, `published`, `publish_enabled`, `publish_attempted` ;
+- `publish_reason`, `publish_result`, `publish_error_code` ;
+- `publish_reason=published_connected` en succes connected ;
+- `publish_reason=deferred_until_dashboard` pour les cas G/H reportes ;
+- `publish_reason=missing_account_id` si l'identifiant compte manque.
+- avec `--no-publish`, aucun publish backend/status/action n'est tente depuis ce
+  flow : `would_publish=false`, `published=false`, `publish_attempted=false`.
+
+No-leak :
+
+- aucun password, password length/hash, `secret_ref`, UUID Vault complet, token,
+  header, cle Supabase, XML brut, screenshot path ou payload Vault brut ;
+- en erreur publish, seul un code safe est conserve (`rpc_failed`,
+  `publisher_exception`, `publisher_missing`, etc.) ;
+- si le publish echoue apres login connecte, `final_outcome` reste `connected`,
+  `ok` reste true, `published=false`, `publish_result=failed` et warning
+  `publish_failed_safe`.
+
 ## Entry 2E-5P-18 Controlled Logout Fallback For Old Active Account
 
 Entry 2E-5P-18 introduit le Cas F : un **logout fallback controle** pour un

@@ -15,6 +15,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from instagram_account_status_publisher import publish_instagram_account_status
 from instagram_credentials_runtime_access import get_instagram_credentials_for_login, redact_credentials_payload
 from instagram_login_provisioner_orchestrator import (
     DEFAULT_INSTAGRAM_PACKAGE_NAME,
@@ -28,6 +29,7 @@ ConnectFunc = Callable[[Optional[str]], Any]
 CredentialsLookup = Callable[[str, str], Optional[dict[str, Any]]]
 SecretReader = Callable[[str], Any]
 RunFlowFunc = Callable[..., Any]
+StatusPublisher = Callable[..., dict[str, Any]]
 DEFAULT_LOG_JSONL = "logs/instagram_login_provisioner.jsonl"
 CREDENTIALS_DIAGNOSTIC_KEYS = (
     "credentials_error_code",
@@ -107,7 +109,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--dry-run", action="store_true", help="Route/prepare only; do not load Vault or submit.")
     parser.add_argument("--no-submit", action="store_true", help="Alias for --dry-run.")
-    parser.add_argument("--no-publish", action="store_true", default=True, help="Keep status publishing disabled.")
+    parser.add_argument("--publish", action="store_true", help="Explicitly allow controlled backend status publish.")
+    parser.add_argument("--no-publish", action="store_true", help="Force status publishing disabled.")
     parser.add_argument("--run-id", default="", help="Optional safe run id. Defaults to a generated UUID.")
     parser.add_argument("--log-jsonl", default=DEFAULT_LOG_JSONL, help="Safe JSONL log path.")
     parser.add_argument("--json", action="store_true", help="Print machine-readable safe JSON.")
@@ -121,6 +124,7 @@ def run_cli_command(
     credentials_lookup: CredentialsLookup | None = None,
     secret_reader: SecretReader | None = None,
     run_flow_func: RunFlowFunc | None = None,
+    status_publisher: StatusPublisher | None = None,
 ) -> tuple[int, dict[str, Any]]:
     run_id = _safe_run_id(getattr(args, "run_id", "") or str(uuid.uuid4()))
     _load_dotenv_if_present()
@@ -141,6 +145,12 @@ def run_cli_command(
         getattr(args, "operator_smoke_active_account_username", "")
         or getattr(args, "operator_smoke_previous_account_username", "")
     )
+    publish_enabled = _publish_enabled_from_args_env(args)
+    publisher = _build_status_publisher(
+        args=args,
+        run_id=run_id,
+        status_publisher=status_publisher or publish_instagram_account_status,
+    ) if publish_enabled else None
     result = flow(
         device,
         account_id=str(args.account_id or ""),
@@ -148,8 +158,8 @@ def run_cli_command(
         credentials_getter=getter,
         previous_account_lifecycle_lookup=previous_account_lifecycle_lookup,
         operator_smoke_active_account_username=operator_smoke_active_username or None,
-        publish_enabled=False,
-        publisher=None,
+        publish_enabled=publish_enabled,
+        publisher=publisher,
         dry_run=bool(args.dry_run or args.no_submit),
         start_app_before_probe=bool(args.start_app_before_probe),
         observe_current_screen_only=bool(args.observe_current_screen_only),
@@ -295,6 +305,43 @@ def _parse_bool_choice(value: Any) -> bool:
     return str(value or "").strip().lower() == "true"
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return bool(default)
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _publish_enabled_from_args_env(args: argparse.Namespace) -> bool:
+    if bool(getattr(args, "no_publish", False)):
+        return False
+    return bool(getattr(args, "publish", False)) and _env_bool("LOGIN_PROVISIONER_PUBLISH_ENABLED", False)
+
+
+def _build_status_publisher(
+    *,
+    args: argparse.Namespace,
+    run_id: str,
+    status_publisher: StatusPublisher,
+) -> StatusPublisher:
+    def _publisher(**payload: Any) -> dict[str, Any]:
+        metadata = dict(payload.get("metadata") or {})
+        metadata.update(
+            {
+                "source": "login_provisioner",
+                "flow_name": "entry2e5p5_login_provisioner",
+                "run_id": _safe_run_id(run_id),
+            }
+        )
+        safe_payload = {
+            **payload,
+            "metadata": metadata,
+        }
+        return status_publisher(**redact_credentials_payload(safe_payload))
+
+    return _publisher
+
+
 def _safe_summary_from_error(reason: str, *, args: argparse.Namespace, run_id: str) -> dict[str, Any]:
     return _clean_summary(
         {
@@ -306,6 +353,10 @@ def _safe_summary_from_error(reason: str, *, args: argparse.Namespace, run_id: s
             "completed": False,
             "final_outcome": "unknown",
             "reason": reason,
+            "publish_enabled": _publish_enabled_from_args_env(args),
+            "publish_attempted": False,
+            "publish_result": "skipped",
+            "publish_error_code": "",
             "central_orchestrator_used": False,
             "central_orchestrator_version": "",
             "selected_route": "",
@@ -375,6 +426,10 @@ def _safe_summary_from_result(result: Any, *, args: argparse.Namespace, run_id: 
         "final_outcome": str(getattr(result, "final_outcome", "") or "unknown"),
         "reason": str(getattr(result, "reason", "") or ""),
         "status_candidate": str(getattr(result, "final_login_status", "") or ""),
+        "publish_enabled": bool(metadata.get("publish_enabled")),
+        "publish_attempted": bool(metadata.get("publish_attempted")),
+        "publish_result": str(metadata.get("publish_result") or ""),
+        "publish_error_code": str(metadata.get("publish_error_code") or ""),
         "central_orchestrator_used": bool(metadata.get("central_orchestrator_used")),
         "central_orchestrator_version": str(metadata.get("central_orchestrator_version") or ""),
         "selected_route": str(metadata.get("selected_route") or ""),
@@ -499,7 +554,7 @@ def _safe_summary_from_result(result: Any, *, args: argparse.Namespace, run_id: 
         "post_dismiss_screen_type": str(password_result.get("post_dismiss_screen_type") or ""),
         **_credentials_fields_from_metadata(metadata),
         "retry_count": int(getattr(result, "retry_count", 0) or 0),
-        "would_publish": False,
+        "would_publish": bool(getattr(result, "should_publish_status", False)) and bool(metadata.get("publish_enabled")),
         "published": bool(getattr(result, "published", False)),
         "publish_reason": str(getattr(result, "publish_reason", "") or ""),
         "timings": dict(getattr(result, "timings", {}) or {}),

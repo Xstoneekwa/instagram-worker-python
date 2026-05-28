@@ -594,6 +594,29 @@ Post-submit policy future :
   `logout_fallback`. Cas E reste prioritaire; Cas F seulement avec flag explicite.
   Cas G/H (bad password, password-required, 2FA/checkpoint) sont reportes apres
   dashboard client/admin hors detection terminale safe deja existante.
+- Entry 2E-5P-20 Controlled backend status publish :
+  le CLI central peut maintenant injecter le publisher status backend existant
+  (`instagram_account_status_publisher.py`) mais seulement si
+  `LOGIN_PROVISIONER_PUBLISH_ENABLED=true` **et** `--publish` sont presents.
+  `--no-publish` garde la priorite absolue. V1 publie uniquement un succes sur
+  `connected` sur, avec `ok=true`, `completed=true`, `status_candidate=connected`,
+  `account_id` present et route centrale sure. Les cas G/H, mismatch/review,
+  unknown/logged-out ambigu et identity unknown restent non publies
+  (`not_publishable` ou `deferred_until_dashboard`). Le publish est fail-open :
+  un echec backend laisse le resultat login local en `connected` et ajoute
+  seulement `publish_result=failed`, `publish_error_code` safe et
+  `publish_failed_safe`. JSONL safe expose `would_publish`, `published`,
+  `publish_enabled`, `publish_attempted`, `publish_reason`, `publish_result`,
+  `publish_error_code`; aucune fuite password, `secret_ref`, UUID Vault, token,
+  XML brut ou screenshot path. Slack/Discord restent inchanges : aucun nouveau
+  type de notification, aucun nouveau webhook, aucun changement de contenu,
+  frequence ou canal, et aucun envoi direct depuis le provisioner. Un succes
+  normal `connected` est backend status only, sans Slack/Discord. Contrat futur :
+  tout evenement deja notifie Slack/Discord doit aussi avoir une trace backend
+  safe et pouvoir apparaitre en dashboard admin; s'il exige une action client, il
+  doit aussi etre projetable en dashboard client via dashboard action/status sync.
+  Les evenements internes restent admin-only. `--no-publish` bloque tout publish
+  backend/status/action dans ce flow.
 - Entry 2E-5P-11 Login form username prefilled : apres `Use another profile`,
   Instagram peut afficher un formulaire login avec l'ancien username deja rempli.
   Nouveau `screen_type=login_form_prefilled_username`. Si le champ username est

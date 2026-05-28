@@ -7,7 +7,7 @@ import unittest
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import instagram_login_provisioner_cli as cli
 from instagram_credentials_runtime_access import SecretValue
@@ -59,6 +59,7 @@ def _fake_result(**overrides):
         "actions_taken": [],
         "published": False,
         "publish_reason": "disabled",
+        "should_publish_status": False,
         "timings": {"total_ms": 1},
         "warnings": [],
         "safe_metadata": {},
@@ -389,6 +390,134 @@ class InstagramLoginProvisionerCliTest(unittest.TestCase):
         self.assertIsNone(captured["publisher"])
         self.assertFalse(summary["would_publish"])
         self.assertFalse(summary["published"])
+
+    def test_no_publish_flag_overrides_enabled_env_and_publish_flag(self) -> None:
+        captured: dict = {}
+        status_publisher = Mock(return_value={"published": True, "reason": "published"})
+
+        def fake_flow(_d, **kwargs):
+            captured.update(kwargs)
+            return _fake_result(
+                ok=True,
+                completed=True,
+                final_outcome="connected",
+                final_login_status="connected",
+                should_publish_status=True,
+                safe_metadata={
+                    "publish_enabled": False,
+                    "publish_attempted": False,
+                    "publish_result": "skipped",
+                },
+            )
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            cli.os.environ,
+            {"LOGIN_PROVISIONER_PUBLISH_ENABLED": "true"},
+            clear=False,
+        ):
+            _code, summary = cli.run_cli_command(
+                _args_with_log(f"{tmp}/login.jsonl", "--publish", "--no-publish", "--json"),
+                connect_func=lambda _serial: FakeDevice(),
+                run_flow_func=fake_flow,
+                status_publisher=status_publisher,
+            )
+
+        self.assertFalse(captured["publish_enabled"])
+        self.assertIsNone(captured["publisher"])
+        self.assertFalse(summary["publish_enabled"])
+        self.assertFalse(summary["would_publish"])
+        self.assertFalse(summary["publish_attempted"])
+        self.assertFalse(summary["published"])
+        status_publisher.assert_not_called()
+
+    def test_publish_flag_requires_enabled_env(self) -> None:
+        captured: dict = {}
+
+        def fake_flow(_d, **kwargs):
+            captured.update(kwargs)
+            return _fake_result(ok=True, completed=True, final_outcome="connected", final_login_status="connected")
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            cli.os.environ,
+            {"LOGIN_PROVISIONER_PUBLISH_ENABLED": "false"},
+            clear=False,
+        ):
+            _code, summary = cli.run_cli_command(
+                _args_with_log(f"{tmp}/login.jsonl", "--publish", "--json"),
+                connect_func=lambda _serial: FakeDevice(),
+                run_flow_func=fake_flow,
+            )
+
+        self.assertFalse(captured["publish_enabled"])
+        self.assertFalse(summary["publish_enabled"])
+
+    def test_publish_enabled_env_and_flag_injects_safe_publisher(self) -> None:
+        captured: dict = {}
+        status_publisher = Mock(return_value={"published": True, "reason": "published"})
+
+        def fake_flow(_d, **kwargs):
+            captured.update(kwargs)
+            kwargs["publisher"](
+                account_id=ACCOUNT_ID,
+                login_status="connected",
+                provisioning_status="ready",
+                onboarding_status="ready",
+                reauth_required=False,
+                reason="login_connected",
+                metadata={
+                    "central_orchestrator_version": "entry2e5p19-central-v1",
+                    "selected_route": "login_form_empty",
+                },
+            )
+            return _fake_result(
+                ok=True,
+                completed=True,
+                final_outcome="connected",
+                final_login_status="connected",
+                should_publish_status=True,
+                published=True,
+                publish_reason="published_connected",
+                safe_metadata={
+                    "publish_enabled": True,
+                    "publish_attempted": True,
+                    "publish_result": "published",
+                    "central_orchestrator_used": True,
+                    "central_orchestrator_version": "entry2e5p19-central-v1",
+                    "selected_route": "login_form_empty",
+                },
+            )
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            cli.os.environ,
+            {"LOGIN_PROVISIONER_PUBLISH_ENABLED": "true"},
+            clear=False,
+        ):
+            _code, summary = cli.run_cli_command(
+                _args_with_log(
+                    f"{tmp}/login.jsonl",
+                    "--publish",
+                    "--json",
+                    "--run-id",
+                    "00000000-0000-4000-8000-000000000001",
+                ),
+                connect_func=lambda _serial: FakeDevice(),
+                run_flow_func=fake_flow,
+                status_publisher=status_publisher,
+            )
+
+        self.assertTrue(captured["publish_enabled"])
+        self.assertIsNotNone(captured["publisher"])
+        status_publisher.assert_called_once()
+        payload = status_publisher.call_args.kwargs
+        self.assertEqual(payload["metadata"]["source"], "login_provisioner")
+        self.assertEqual(payload["metadata"]["run_id"], "00000000-0000-4000-8000-000000000001")
+        rendered = json.dumps(payload, sort_keys=True)
+        for forbidden in (FAKE_PASSWORD, SECRET_REF, "secret_ref", "Vault", "token", "xml", "screenshot"):
+            self.assertNotIn(forbidden, rendered)
+        self.assertTrue(summary["publish_enabled"])
+        self.assertTrue(summary["publish_attempted"])
+        self.assertTrue(summary["would_publish"])
+        self.assertTrue(summary["published"])
 
     def test_json_output_is_safe_without_secret_ref_token_or_xml(self) -> None:
         result = _fake_result(

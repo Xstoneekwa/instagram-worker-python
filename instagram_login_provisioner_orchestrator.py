@@ -3789,21 +3789,50 @@ def _finalize(
         final_outcome=final_outcome,
         retry_count=retry_count,
         dashboard_action_type=dashboard_action_type,
+        extra_metadata=extra_metadata or {},
     )
     published = False
-    publish_reason = "disabled"
-    if publish_enabled and should_publish_status and publisher is not None:
+    publish_attempted = False
+    publish_result_label = "skipped"
+    publish_error_code = ""
+    publish_allowed = _connected_status_publishable(
+        ok=ok,
+        completed=completed,
+        final_outcome=final_outcome,
+        final_login_status=final_login_status,
+        account_id=account_id,
+        extra_metadata=extra_metadata or {},
+    )
+    effective_should_publish = bool(should_publish_status) and publish_allowed
+    publish_reason = _publish_skip_reason(
+        publish_enabled=publish_enabled,
+        should_publish_status=should_publish_status,
+        publish_allowed=publish_allowed,
+        account_id=account_id,
+        final_outcome=final_outcome,
+    )
+    publish_warnings = list(warnings)
+    if publish_enabled and effective_should_publish and publisher is not None:
         try:
+            publish_attempted = True
             publish_result = publisher(**publish_payload)
             published = bool((publish_result or {}).get("published", True))
-            publish_reason = str((publish_result or {}).get("reason") or "published")
+            publish_result_label = "published" if published else "failed"
+            publish_reason = "published_connected" if published else str((publish_result or {}).get("reason") or "publish_failed")
+            if not published:
+                publish_error_code = str((publish_result or {}).get("reason") or "publish_failed")
+                publish_warnings.append("publish_failed_safe")
         except Exception:
             published = False
+            publish_attempted = True
+            publish_result_label = "failed"
             publish_reason = "publisher_exception"
-    elif publish_enabled and should_publish_status:
+            publish_error_code = "publisher_exception"
+            publish_warnings.append("publish_failed_safe")
+    elif publish_enabled and effective_should_publish:
+        publish_result_label = "failed"
         publish_reason = "publisher_missing"
-    elif not should_publish_status:
-        publish_reason = "not_publishable"
+        publish_error_code = "publisher_missing"
 
     safe_metadata = clean_login_probe_metadata(
         redact_credentials_payload(
@@ -3817,6 +3846,10 @@ def _finalize(
                 "retry_count": retry_count,
                 "dashboard_action_type": dashboard_action_type,
                 "actions_taken": actions_taken,
+                "publish_enabled": bool(publish_enabled),
+                "publish_attempted": bool(publish_attempted),
+                "publish_result": publish_result_label,
+                "publish_error_code": publish_error_code,
                 **(extra_metadata or {}),
             }
         )
@@ -3834,12 +3867,12 @@ def _finalize(
         retry_count=retry_count,
         actions_taken=list(actions_taken),
         dashboard_action_type=dashboard_action_type,
-        should_publish_status=should_publish_status,
-        publish_payload=publish_payload if should_publish_status else None,
+        should_publish_status=effective_should_publish,
+        publish_payload=publish_payload if effective_should_publish else None,
         published=published,
         publish_reason=publish_reason,
         timings=dict(timings),
-        warnings=list(warnings),
+        warnings=publish_warnings,
         safe_metadata=safe_metadata,
     )
 
@@ -3854,7 +3887,9 @@ def _publish_payload(
     final_outcome: str,
     retry_count: int,
     dashboard_action_type: str | None,
+    extra_metadata: dict[str, Any],
 ) -> dict[str, Any]:
+    publish_metadata = _publish_safe_metadata(extra_metadata)
     return clean_login_probe_metadata(
         redact_credentials_payload(
             {
@@ -3865,6 +3900,7 @@ def _publish_payload(
                 "reason": reason,
                 "metadata": {
                     "source": "login_provisioner_orchestrator",
+                    **publish_metadata,
                     "final_outcome": final_outcome,
                     "retry_count": retry_count,
                     "dashboard_action_type": dashboard_action_type,
@@ -3872,6 +3908,77 @@ def _publish_payload(
             }
         )
     )
+
+
+def _connected_status_publishable(
+    *,
+    ok: bool,
+    completed: bool,
+    final_outcome: str,
+    final_login_status: str | None,
+    account_id: str,
+    extra_metadata: dict[str, Any],
+) -> bool:
+    if not str(account_id or "").strip():
+        return False
+    if not (ok and completed):
+        return False
+    if str(final_outcome or "") != LoginProbeOutcome.CONNECTED.value:
+        return False
+    if str(final_login_status or "") != "connected":
+        return False
+    selected_route = str(extra_metadata.get("selected_route") or "")
+    router_decision = str(extra_metadata.get("router_decision") or "")
+    safe_routes = {
+        "continue_as_expected",
+        "use_another_profile",
+        "account_picker",
+        "login_form_empty",
+        "login_form_prefilled_expected",
+        "replace_prefilled_username",
+        "continue_password_only",
+        "already_connected_expected",
+        "add_existing_account",
+        "logout_fallback",
+    }
+    return bool(selected_route in safe_routes or router_decision or extra_metadata.get("central_orchestrator_used"))
+
+
+def _publish_skip_reason(
+    *,
+    publish_enabled: bool,
+    should_publish_status: bool,
+    publish_allowed: bool,
+    account_id: str,
+    final_outcome: str,
+) -> str:
+    if not publish_enabled:
+        return "disabled"
+    if not str(account_id or "").strip():
+        return "missing_account_id"
+    if not should_publish_status or not publish_allowed:
+        if str(final_outcome or "") in {"needs_2fa", "checkpoint", "login_failed", "password_required_dialog"}:
+            return "deferred_until_dashboard"
+        return "not_publishable"
+    return "publisher_missing"
+
+
+def _publish_safe_metadata(extra_metadata: dict[str, Any]) -> dict[str, Any]:
+    allowed_keys = (
+        "central_orchestrator_version",
+        "selected_route",
+        "final_terminal_screen",
+        "screen_type",
+        "screen_before_submit",
+    )
+    safe: dict[str, Any] = {}
+    for key in allowed_keys:
+        value = extra_metadata.get(key)
+        if value not in (None, ""):
+            safe[key] = value
+    if "central_orchestrator_used" in extra_metadata:
+        safe["central_orchestrator_used"] = bool(extra_metadata.get("central_orchestrator_used"))
+    return safe
 
 
 def _merge_timings(base: dict[str, int], extra: dict[str, Any] | None) -> dict[str, int]:

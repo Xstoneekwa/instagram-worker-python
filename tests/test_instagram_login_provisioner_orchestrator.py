@@ -1720,7 +1720,9 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         result = self._run_login_form(CONNECTED_XML, publisher=publisher, publish_enabled=True)
 
         self.assertTrue(result.published)
-        self.assertEqual(result.publish_reason, "published")
+        self.assertEqual(result.publish_reason, "published_connected")
+        self.assertTrue(result.safe_metadata["publish_attempted"])
+        self.assertEqual(result.safe_metadata["publish_result"], "published")
         publisher.assert_called_once()
 
     def test_publish_payload_safe(self) -> None:
@@ -1732,6 +1734,65 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertNotIn(PASSWORD, rendered)
         self.assertNotIn(SECRET_REF, rendered)
         self.assertNotIn(VAULT_ID, rendered)
+
+    def test_connected_publish_failure_is_fail_open(self) -> None:
+        publisher = Mock(return_value={"published": False, "reason": "rpc_failed"})
+
+        result = self._run_login_form(CONNECTED_XML, publisher=publisher, publish_enabled=True)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.final_outcome, "connected")
+        self.assertFalse(result.published)
+        self.assertEqual(result.publish_reason, "rpc_failed")
+        self.assertEqual(result.safe_metadata["publish_result"], "failed")
+        self.assertEqual(result.safe_metadata["publish_error_code"], "rpc_failed")
+        self.assertIn("publish_failed_safe", result.warnings)
+
+    def test_non_connected_outcomes_deferred_from_publish_v1(self) -> None:
+        publisher = Mock(return_value={"published": True})
+
+        for xml, expected_reason in (
+            (NEEDS_2FA_XML, "deferred_until_dashboard"),
+            (CHECKPOINT_XML, "deferred_until_dashboard"),
+            (LOGIN_FAILED_XML, "deferred_until_dashboard"),
+        ):
+            with self.subTest(xml=xml):
+                result = self._run_login_form(xml, publisher=publisher, publish_enabled=True)
+                self.assertFalse(result.published)
+                self.assertEqual(result.publish_reason, expected_reason)
+
+        publisher.assert_not_called()
+
+    def test_publish_missing_account_id_skips_publisher(self) -> None:
+        publisher = Mock(return_value={"published": True})
+        result = provisioner_orchestrator._finalize(
+            ok=True,
+            completed=True,
+            final_outcome="connected",
+            reason="login_connected",
+            account_id="",
+            expected_username=USERNAME,
+            actions_taken=["login_form_submit"],
+            timings={},
+            warnings=[],
+            extra_metadata={
+                "central_orchestrator_used": True,
+                "selected_route": "login_form_empty",
+            },
+            total_start=provisioner_orchestrator.time.perf_counter(),
+            timer=provisioner_orchestrator.time.perf_counter,
+            final_login_status="connected",
+            final_provisioning_status="ready",
+            final_onboarding_status="ready",
+            should_publish_status=True,
+            publisher=publisher,
+            publish_enabled=True,
+        )
+
+        self.assertEqual(result.final_outcome, "connected")
+        self.assertFalse(result.published)
+        self.assertEqual(result.publish_reason, "missing_account_id")
+        publisher.assert_not_called()
 
     def test_result_safe_dict_no_password(self) -> None:
         result = self._run_login_form(SENSITIVE_XML)
