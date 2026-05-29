@@ -1229,6 +1229,46 @@ Supabase; production `accounts/create` happy path, duplicate username guard and
 `cleanup_instagram_smoke_account` cleanup verified on smoke username
 `smoke_add_profile_2c3_e2e` without leaking secrets in logs or docs.
 
+## 21. Credential Secure Pipeline Patch 2C-4
+
+Patch 2C-4 adds safe Add Profile audit and dashboard action reconciliation
+without changing Instagram runtime, login/provisioner, runner, Edge credential
+ingestion, lifecycle archive/trash/delete, or global cleanup/revoke behavior.
+
+Audit contract:
+
+- `add_profile_audit_events` records Add Profile outcomes with safe username,
+  optional account id, truncated request ids, `source_surface='admin_dashboard'`,
+  `operation='add_profile'`, actor id/type when available, result status and
+  safe failure reason;
+- result status mapping is `success`, `failed`, `compensated`, and `duplicate`;
+- compensated settings/filter failures keep audit after the account row is
+  deleted via `account_id on delete set null`;
+- audit metadata is `metadata_safe` only and uses the existing forbidden-key
+  guard.
+
+Dashboard action mapping:
+
+- success resolves open `submit_instagram_credentials` / `review_credentials`
+  actions after credentials and account/settings are active;
+- credential ingestion failure creates or updates a deduped admin
+  `review_credentials` action with `pending`, `warning`,
+  `requires_client_action=false`, `blocking_campaign=true`;
+- settings/filter failure with successful compensation is audit-only;
+- settings/filter failure with failed compensation creates an admin manual-review
+  action;
+- duplicate username records audit `duplicate` and returns
+  `account_already_exists` without creating an action.
+
+Frontend scope is minimal: the Credentials Actions page can merge open
+`account_dashboard_actions` with existing derived read-only signals. It renders
+only safe columns and keeps mutations disabled.
+
+No-leak rule: audit rows, dashboard action metadata, UI and docs must never
+contain passwords, tokens, Authorization headers, service-role keys,
+cookies/sessions, full `secret_ref`, Vault UUIDs/payloads, raw request bodies,
+raw logs, XML or screenshot paths.
+
 Full Add Profile direction:
 
 - future Patch 2B keeps the frontend password field write-only;

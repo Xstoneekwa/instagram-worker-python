@@ -895,6 +895,50 @@ Production validation checkpoint (2026-05-29):
   vault neutralized. No token, password, service-role key, cookie/session,
   full `secret_ref` or Vault id was logged in the checkpoint.
 
+## Backend Patch 2C-4 — Add Profile Audit And Dashboard Actions
+
+Patch 2C-4 adds safe Add Profile audit and dashboard action reconciliation
+around the existing 2C-3 flow. It does not change worker Python, runner,
+login/provisioner runtime, `instagram-credentials`, archive/trash/delete
+lifecycle, or credential cleanup/revoke policy.
+
+Audit behavior:
+
+- migration `20260529203144_patch2c4_add_profile_audit.sql` creates
+  `add_profile_audit_events` for durable Add Profile outcome audit;
+- each audited row stores safe `account_id` when available, normalized username,
+  truncated request ids, `source_surface='admin_dashboard'`,
+  `operation='add_profile'`, actor type/id when available, result status and a
+  safe failure reason;
+- result statuses are `success`, `failed`, `compensated`, and `duplicate`;
+- compensated settings/filter setup failures keep an audit row even when the
+  account row is deleted.
+
+Dashboard action mapping:
+
+- success: no new blocking action. Open `submit_instagram_credentials` or
+  `review_credentials` dashboard actions for the account are resolved after
+  credentials are active and account/settings finalization succeeds;
+- credential ingestion failure or non-active credential response:
+  `review_credentials`, `pending`, `warning`, `audience='admin'`,
+  `requires_client_action=false`, `blocking_campaign=true`, deduped by
+  `account:{account_id}:dashboard_action:review_credentials`;
+- settings/filter failure with successful compensation: audit only, no action
+  attached to the deleted account;
+- settings/filter failure with failed compensation: `review_credentials` admin
+  action for manual review;
+- duplicate username: audit `duplicate`, API remains `account_already_exists`,
+  no persistent action.
+
+The Credentials Actions page may merge open `account_dashboard_actions` with its
+derived read-only signals. It renders safe action fields only and does not expose
+metadata or enable acknowledge/dismiss/resolve mutations.
+
+Patch 2C-4 no-leak policy: never store or render passwords, tokens,
+Authorization headers, service-role keys, cookies/sessions, full `secret_ref`,
+Vault UUIDs/payloads, raw request bodies, raw logs, XML or screenshot paths in
+audit rows, dashboard actions, UI, docs, or route errors.
+
 Entry 2D-2B deliberately does not add dashboard UI, dashboard actions,
 provisioning/login workers, secret reads for workers, or credential incidents.
 Entry 2D-3 should add safe status APIs, and Entry 2D-4 should add the dashboard
