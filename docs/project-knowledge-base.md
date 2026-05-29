@@ -1392,6 +1392,63 @@ Next operator step: extended SearchApi staging tests across more handles,
 latency samples, and rate-limit observation before any production enablement
 decision.
 
+SearchApi recommendation update after the extended soak:
+
+- SearchApi is GO for staging and remains a credible Add Profile provider
+  candidate.
+- The `rate_limited` event observed on the third soak pass is attributed to the
+  free / initial plan quota being reached. After limits were renewed/upgraded,
+  the same style of test passed again without `rate_limited`.
+- Production Add Profile is still NO-GO until the upgraded SearchApi plan's
+  quota, burst limit and cost at expected volume are verified. The production
+  path must preserve fail-open behavior for `rate_limited`, `unavailable` and
+  `provider_error`; only clear `not_found` can block account creation.
+- CT bulk remains a separate scaling problem: do not call SearchApi directly per
+  submitted CT row. Use queue/batch execution, cache, throttling/spacing, quota
+  tracking, decision audit and explicit dashboard states (`pending_verification`,
+  `valid`, `rejected`, `review`).
+- Throttle/cache/rate-limit guards are recommended as production/scaling
+  safeguards, not because SearchApi was proven technically unstable.
+
+## 25. Credential Secure Pipeline Patch 2C-7D — Lookup Cache / Throttle Guardrails
+
+Patch 2C-7D adds lightweight guardrails to the frontend public profile lookup
+provider without changing production env or adding a DB migration.
+
+Chosen minimal design:
+
+- in-memory cache in `lib/instagram-public-profile-lookup.ts`;
+- in-memory SearchApi throttle / spacing and serialized external calls;
+- configurable server env with safe defaults:
+  `INSTAGRAM_PUBLIC_PROFILE_LOOKUP_MIN_INTERVAL_MS`,
+  `INSTAGRAM_PUBLIC_PROFILE_LOOKUP_MAX_PER_MINUTE`,
+  `INSTAGRAM_PUBLIC_PROFILE_LOOKUP_CACHE_TTL_FOUND_SECONDS`,
+  `INSTAGRAM_PUBLIC_PROFILE_LOOKUP_CACHE_TTL_NOT_FOUND_SECONDS`,
+  `INSTAGRAM_PUBLIC_PROFILE_LOOKUP_CACHE_TTL_ERROR_SECONDS`;
+- no DB cache table yet. Existing `ig_accounts` fields are enough to persist
+  verified Add Profile metadata after account creation, but not enough for a
+  durable pre-create or CT bulk cache.
+
+Safety behavior:
+
+- cache `found` longer than `not_found`;
+- cache transient `rate_limited`, `unavailable` and `provider_error` only
+  briefly;
+- never turn `rate_limited` / `unavailable` / `provider_error` into
+  `not_found`;
+- Add Profile continues to block only clear `not_found` and fail-open on
+  provider limits/errors;
+- safe metadata can include `cache_hit`, `throttle_hit`, `rate_limited` and
+  `latency_ms`, never raw provider payloads, URLs with keys, headers, cookies,
+  sessions, tokens or secrets.
+
+CT bulk still requires a future durable architecture: normalize/dedupe, queue,
+batch, cache, throttle, quota tracking, decision audit and dashboard states
+(`pending_verification`, `valid`, `rejected_not_found`,
+`rejected_low_followers`, `rejected_verified`, `rejected_private`,
+`review_provider_unavailable`, `review_username_changed`, `duplicate`,
+`archived`). Do not call SearchApi directly once per submitted CT row.
+
 Full Add Profile direction:
 
 - future Patch 2B keeps the frontend password field write-only;

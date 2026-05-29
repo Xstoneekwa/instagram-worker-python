@@ -1082,6 +1082,65 @@ Patch 2C-7C records the real-key staging smoke fixes only. It does not make the
 provider production-ready, does not modify Vercel production env, and does not
 enable SearchApi outside explicit local/staging configuration.
 
+Extended soak recommendation:
+
+- SearchApi remains GO for staging and is a credible Add Profile candidate for
+  public username existence, safe avatar, follower count, verified status and
+  clear `not_found` checks.
+- The `rate_limited` burst observed during the initial extended soak is now
+  classified as the free / initial plan quota being reached, not as proof of
+  provider instability. After the operator renewed/upgraded limits, the same
+  style of test passed again without `rate_limited`.
+- Production Add Profile remains NO-GO until the upgraded plan's quota, burst
+  limit and expected cost are documented, then a short found / not_found /
+  fail-open smoke is repeated. `rate_limited`, `unavailable` and
+  `provider_error` must remain fail-open and must never be treated as
+  `not_found`.
+- CT bulk validation must not call SearchApi once per client form row. Any CT
+  use needs queue/batch processing, cache, throttling/spacing, quota tracking,
+  decision audit, and dashboard states such as `pending_verification`, `valid`,
+  `rejected` and `review`.
+- A future throttle/cache/rate-limit guard patch is still recommended as a
+  production and scaling guardrail, not as an urgent fix for a bad provider.
+
+## Backend Patch 2C-7D — Public Profile Lookup Guardrails
+
+Patch 2C-7D adds frontend/server-side guardrails around the SearchApi public
+profile lookup adapter. It is still staging/local only and does not activate
+SearchApi in production.
+
+Design choice:
+
+- in-memory server-side cache and throttle for the current Next.js runtime;
+- no DB migration and no dedicated cache table in this patch;
+- `ig_accounts` public profile columns remain useful after account creation, but
+  they are not sufficient for pre-create `not_found` caching or CT bulk
+  verification;
+- CT bulk still requires a future queue/cache table or equivalent durable cache.
+
+Guardrails:
+
+- cache TTL defaults: `found` 24h, `not_found` 1h, `rate_limited` /
+  `unavailable` / `provider_error` 10m;
+- `provider_not_configured` is not cached long-term;
+- repeated usernames can hit cache without another SearchApi call;
+- internal throttle defaults are conservative and configurable with
+  `INSTAGRAM_PUBLIC_PROFILE_LOOKUP_MIN_INTERVAL_MS` and
+  `INSTAGRAM_PUBLIC_PROFILE_LOOKUP_MAX_PER_MINUTE`;
+- throttle hits map to `rate_limited` with reason `provider_throttled`, and Add
+  Profile keeps fail-open behavior;
+- metadata stays bounded and safe: `cache_hit`, `throttle_hit`, `rate_limited`,
+  `latency_ms`, provider mode/status/reason. No raw response, full URL, API key,
+  headers, cookies, sessions or secrets are logged or stored.
+
+Future CT bulk direction remains unchanged: normalize/dedupe input, batch into a
+queue, run provider lookup through cache/throttle, persist auditable statuses
+(`pending_verification`, `valid`, `rejected_not_found`,
+`rejected_low_followers`, `rejected_verified`, `rejected_private`,
+`review_provider_unavailable`, `review_username_changed`, `duplicate`,
+`archived`) and never archive/reject permanently on `rate_limited` or transient
+provider failures.
+
 Entry 2D-2B deliberately does not add dashboard UI, dashboard actions,
 provisioning/login workers, secret reads for workers, or credential incidents.
 Entry 2D-3 should add safe status APIs, and Entry 2D-4 should add the dashboard
