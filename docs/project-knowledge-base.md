@@ -1379,8 +1379,18 @@ Scope:
 
 Mapping aligns with the 2C-6 contract (`found`, `not_found`, `rate_limited`,
 `unavailable`, `provider_error`, safe avatar/metadata). Missing URL/key remains
-`provider_not_configured`. Next operator step: configure a real SearchApi key in
-staging and run Add Profile smokes before any production enablement decision.
+`provider_not_configured`.
+
+Patch 2C-7C follows the real-key local/staging smoke. It keeps production
+disabled / NO-GO and records two adapter hardening fixes:
+
+- SearchApi `avatar` / `avatar_hd` fields map to safe `avatar_url`;
+- SearchApi uses a 7s staging timeout because 3s was too aggressive for Add
+  Profile while direct provider responses were commonly around 1-5s.
+
+Next operator step: extended SearchApi staging tests across more handles,
+latency samples, and rate-limit observation before any production enablement
+decision.
 
 Full Add Profile direction:
 

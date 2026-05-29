@@ -1051,7 +1051,8 @@ and future FBR rules.
 Patch 2C-7B adds an optional `searchapi` provider mode in the frontend lookup
 library. It is a staging/local evaluation adapter only. It is not production
 activation and must not be enabled on Vercel production without explicit
-operator approval and a successful real-key staging smoke.
+operator approval, extended staging tests, and a successful production go/no-go
+review.
 
 Server-only env (never `NEXT_PUBLIC_*`):
 
@@ -1062,17 +1063,24 @@ Server-only env (never `NEXT_PUBLIC_*`):
 Behavior:
 
 - missing URL or API key → `provider_not_configured`, no external call;
-- short timeout (default 3s), no retries, no raw provider response stored;
+- SearchApi uses a short staging timeout of 7s after the real-key smoke showed
+  3s was too aggressive for Add Profile; no retries and no raw provider response
+  stored;
 - HTTP `404` / explicit not-found → `not_found`;
 - HTTP `429` → `rate_limited`;
 - HTTP `5xx` / timeout → `unavailable`;
 - other non-OK / malformed body → `provider_error`;
 - exploitable profile maps to `found` with safe avatar, followers, privacy,
   verified flags and bounded metadata (`provider_mode`, `provider_status`,
-  `provider_engine`).
+  `provider_engine`). SearchApi avatar fields `avatar` / `avatar_hd` are mapped
+  to the 2C-6 `avatar_url` contract after URL safety filtering.
 
 Add Profile fail-open rules from 2C-6 are unchanged. Modes `disabled`, `mock`
 and generic `http` remain available and unchanged.
+
+Patch 2C-7C records the real-key staging smoke fixes only. It does not make the
+provider production-ready, does not modify Vercel production env, and does not
+enable SearchApi outside explicit local/staging configuration.
 
 Entry 2D-2B deliberately does not add dashboard UI, dashboard actions,
 provisioning/login workers, secret reads for workers, or credential incidents.
