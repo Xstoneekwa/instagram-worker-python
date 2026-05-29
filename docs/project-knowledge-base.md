@@ -1269,6 +1269,62 @@ contain passwords, tokens, Authorization headers, service-role keys,
 cookies/sessions, full `secret_ref`, Vault UUIDs/payloads, raw request bodies,
 raw logs, XML or screenshot paths.
 
+## 22. Credential Secure Pipeline Patch 2C-5
+
+Patch 2C-5 adds safe public profile metadata for Add Profile without changing
+worker Python, runner, login/provisioner, Edge credential ingestion, device/app
+start, lifecycle archive/trash/delete, or global cleanup/revoke behavior.
+
+Schema:
+
+- `ig_accounts` now has safe public profile fields:
+  `username_verification_status`, `username_verified_at`,
+  `username_verification_reason`, `instagram_user_id`,
+  `external_profile_id`, `is_private`, `is_verified`, `followers_count`,
+  `avatar_url`, `avatar_checked_at`, and `public_profile_metadata`;
+- `avatar_url` is optional and must be HTTP(S), bounded, and free of
+  token/signature/secret/service-role/Vault markers;
+- `public_profile_metadata` is guarded by the shared safe-metadata denylist.
+
+Status mapping:
+
+- `verified`: safe source confirmed username;
+- `not_found`: safe source clearly confirmed missing username;
+- `username_changed`: safe source observed canonical username change/redirect;
+- `private_or_limited` / `inaccessible`: public access is limited;
+- `verification_unavailable`: no stable public lookup provider is configured;
+- `provider_error`: provider failed without a clear verdict;
+- `invalid_format`: local syntax check failed;
+- `pending` / `unknown`: no final verdict.
+
+V1 implementation:
+
+- Add Profile performs local username normalization and syntax validation before
+  account creation;
+- invalid syntax returns safe `username_verification_failed` and creates no
+  account;
+- no public Instagram scraping is performed in Patch 2C-5. New accounts are
+  stored as `verification_unavailable/public_lookup_not_configured`, which does
+  not block credentials or active finalization;
+- no `review_username` action is created for normal provider-unavailable state;
+- dashboard views render safe avatar/status fields only and never raw metadata.
+
+Future roadmap — Target Account Quality / CT Filtering Engine:
+
+- CT introuvable;
+- username changed;
+- avatar missing/suspicious where useful;
+- followers below a configured threshold, e.g. `<500`;
+- verified / blue badge;
+- private or non-exploitable;
+- no posts;
+- FBR `<= 8%` after at least `100` follows;
+- no followable profiles after `X` scrolls;
+- archive/suppression CT synchronized frontend/backend.
+
+These CT filtering rules, mass avatar enrichment, comments/AI ranking, MCP
+integration and automatic target archive/delete are out of scope for Patch 2C-5.
+
 Full Add Profile direction:
 
 - future Patch 2B keeps the frontend password field write-only;

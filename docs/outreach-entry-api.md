@@ -939,6 +939,78 @@ Authorization headers, service-role keys, cookies/sessions, full `secret_ref`,
 Vault UUIDs/payloads, raw request bodies, raw logs, XML or screenshot paths in
 audit rows, dashboard actions, UI, docs, or route errors.
 
+## Backend Patch 2C-5 — Add Profile Username Verification Metadata
+
+Patch 2C-5 adds a safe structure for public Instagram profile metadata around
+Add Profile. It deliberately does not implement the target-account quality
+filtering engine, mass avatar enrichment, comments/AI ranking, worker runtime,
+runner, login/provisioner, device/app start, scraping, MCP integration, or
+lifecycle archive/trash/delete behavior.
+
+Schema:
+
+- migration `20260529205443_patch2c5_add_profile_public_metadata.sql` extends
+  `ig_accounts` with safe public fields:
+  `username_verification_status`, `username_verified_at`,
+  `username_verification_reason`, `instagram_user_id`,
+  `external_profile_id`, `is_private`, `is_verified`, `followers_count`,
+  `avatar_url`, `avatar_checked_at`, and `public_profile_metadata`;
+- `public_profile_metadata` uses the existing forbidden-key guard and must not
+  contain secrets, raw request bodies, raw provider responses, XML, screenshots,
+  cookies, tokens, service-role data or Vault references;
+- `avatar_url` is optional and must be HTTP(S), bounded in length, and free of
+  token/signature/secret/service-role/Vault markers.
+
+Verification status mapping:
+
+- `verified`: a future safe source confirms the submitted username;
+- `not_found`: a future safe source clearly confirms the username does not
+  exist;
+- `username_changed`: a future safe source observes a canonical username
+  redirect/change;
+- `private_or_limited` / `inaccessible`: public access is limited but the
+  account may exist;
+- `verification_unavailable`: no stable public lookup provider is configured;
+- `provider_error`: provider call failed without a clear account verdict;
+- `invalid_format`: username failed local syntax checks;
+- `pending` / `unknown`: no final public profile verdict yet.
+
+Patch 2C-5 Add Profile behavior:
+
+- Add Profile now normalizes the submitted username by trimming `@` and lower
+  casing it before creation;
+- syntactically invalid usernames are rejected before account creation with a
+  safe `username_verification_failed` response;
+- because no stable public lookup source exists in-repo, created accounts are
+  marked `username_verification_status='verification_unavailable'` with
+  `username_verification_reason='public_lookup_not_configured'`;
+- this status does not block credential ingestion or active finalization;
+- no `review_username` action is created for normal provider-unavailable state,
+  avoiding dashboard noise.
+
+Dashboard behavior:
+
+- Manage and Client Accounts load the safe `ig_accounts` public profile fields
+  server-side and display username verification status;
+- Client Accounts uses `avatar_url` when present and falls back to initials when
+  absent;
+- Account Detail includes a read-only public profile card.
+
+Future roadmap — Target Account Quality / CT Filtering Engine:
+
+- CT introuvable;
+- username changed;
+- avatar missing/suspicious where useful;
+- followers below a configured threshold, e.g. `<500`;
+- verified / blue badge;
+- private or non-exploitable;
+- no posts;
+- FBR `<= 8%` after at least `100` follows;
+- no followable profiles after `X` scrolls;
+- archive/suppression CT synchronized frontend/backend.
+
+These CT rules are not implemented by Patch 2C-5.
+
 Entry 2D-2B deliberately does not add dashboard UI, dashboard actions,
 provisioning/login workers, secret reads for workers, or credential incidents.
 Entry 2D-3 should add safe status APIs, and Entry 2D-4 should add the dashboard
