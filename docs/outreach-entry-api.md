@@ -1011,6 +1011,41 @@ Future roadmap — Target Account Quality / CT Filtering Engine:
 
 These CT rules are not implemented by Patch 2C-5.
 
+## Backend Patch 2C-6 — Instagram Public Profile Lookup Provider
+
+Patch 2C-6 adds a reusable, server-side public profile lookup contract for Add
+Profile and future CT validation. It does not use Instagram credentials,
+cookies, sessions, device/app startup, ADB, uiautomator, worker runtime, or
+aggressive scraping.
+
+Provider contract:
+
+- `lookupInstagramPublicProfile(username, options)` returns a safe result with
+  `status`, `canonical_username`, optional public ids, avatar URL, privacy /
+  verified flags, follower count, safe reason, checked timestamp and bounded
+  metadata;
+- default mode is disabled / not configured and performs no network call;
+- mock mode is for local/tests only;
+- HTTP mode is opt-in by server-only env and must sanitize responses before
+  storage. Raw provider responses, headers, cookies, tokens, HTML, IP/session
+  details and secrets are never stored.
+
+Add Profile integration:
+
+- invalid syntax blocks before lookup with `username_verification_failed`;
+- clear public `not_found` blocks before account creation with
+  `username_not_found`;
+- `found` persists verified public metadata on `ig_accounts` and continues the
+  secure credentials flow;
+- `provider_not_configured`, `unavailable`, `rate_limited` and
+  `provider_error` remain fail-open for admin Add Profile and persist safe
+  reason metadata rather than creating a blocking dashboard action.
+
+CT Quality Filtering remains out of scope for 2C-6. The provider is prepared for
+later CT existence checks, avatar/follower/private/verified enrichment,
+canonical username change detection, follower threshold rules such as `<500`,
+and future FBR rules.
+
 Entry 2D-2B deliberately does not add dashboard UI, dashboard actions,
 provisioning/login workers, secret reads for workers, or credential incidents.
 Entry 2D-3 should add safe status APIs, and Entry 2D-4 should add the dashboard

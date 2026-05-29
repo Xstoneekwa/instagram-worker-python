@@ -1325,6 +1325,44 @@ Future roadmap — Target Account Quality / CT Filtering Engine:
 These CT filtering rules, mass avatar enrichment, comments/AI ranking, MCP
 integration and automatic target archive/delete are out of scope for Patch 2C-5.
 
+## 23. Credential Secure Pipeline Patch 2C-6
+
+Patch 2C-6 introduces a safe Instagram public profile lookup provider contract
+for Add Profile and future Target Account / CT Quality checks. The provider is
+server-side only and must never use Instagram passwords, cookies, sessions,
+device/app startup, ADB, uiautomator, worker runtime, or aggressive scraping.
+
+Provider modes:
+
+- `disabled` / not configured: no external call, returns
+  `provider_not_configured`, and Add Profile keeps the Patch 2C-5 fail-open
+  behavior;
+- `mock`: local/test-only deterministic statuses for `found`, `not_found`,
+  `unavailable`, avatar, follower count and privacy/verified flags;
+- `http`: opt-in server-side endpoint via env. It has a short timeout and stores
+  only sanitized fields, never raw responses, headers, cookies, tokens, HTML, IP
+  or session details.
+
+Add Profile behavior:
+
+- invalid local syntax still returns `username_verification_failed` before any
+  lookup;
+- `found` stores `username_verification_status='verified'`, safe canonical
+  username metadata, avatar URL, follower count, privacy/verified flags and
+  public ids when available, then continues credential ingestion;
+- clear `not_found` returns a safe `username_not_found` error before account
+  creation;
+- `provider_not_configured`, `unavailable`, `rate_limited` and `provider_error`
+  remain fail-open for admin Add Profile and persist safe status/reason metadata.
+
+Future CT reuse:
+
+- verify whether a CT exists;
+- detect canonical username changes;
+- reuse avatar, `followers_count`, `is_verified` and `is_private`;
+- support future followers threshold checks such as `<500`;
+- feed later FBR and quality rules without implementing CT filtering in 2C-6.
+
 Full Add Profile direction:
 
 - future Patch 2B keeps the frontend password field write-only;
