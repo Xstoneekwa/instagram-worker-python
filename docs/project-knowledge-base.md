@@ -1043,10 +1043,135 @@ Retry/orphan-secret status:
 - A duplicate successful submit rotates credentials to the next version and
   supersedes the previous active metadata.
 - If Vault write succeeds but metadata rotation fails, the Edge Function returns
-  a safe `credentials_metadata_write_failed` error. No cleanup/revoke helper for
-  Vault secrets exists in this repo yet, so an orphan secret is possible in that
-  narrow failure window and must be closed by a future cleanup/idempotency patch
-  before aggressive automatic retries.
+  a safe `credentials_metadata_write_failed` error. Patch 2C-1 adds cleanup /
+  revoke foundations to reduce smoke and retry debt; strict end-to-end
+  idempotency is still future work.
+
+## 18. Credential Secure Pipeline Patch 2C-1
+
+Patch 2C-1 adds backend-only cleanup/revoke foundations required before running
+an authenticated full Add Profile production smoke:
+
+- `revoke_instagram_credentials_vault_secret(...)` is service-role only, accepts
+  only `supabase_vault://{uuid}`, and neutralizes the Vault value via
+  `vault.update_secret(...)`. The current remote Vault API exposes
+  `create_secret` and `update_secret`, not physical delete, so cleanup is
+  neutralization rather than deletion.
+- `revoke_instagram_account_credentials(...)` is service-role only, marks
+  Instagram credentials `revoked`, sets safe revoke metadata and attempts Vault
+  neutralization for linked refs. It is idempotent for already revoked or
+  missing credentials.
+- `cleanup_instagram_smoke_account(...)` is service-role only and intentionally
+  narrow: username must match `smoke_*` and the request id must match related
+  safe metadata before it removes smoke account/settings/filters/credential
+  rows, dashboard actions, credential update requests and smoke client links.
+
+All responses are safe counts/status booleans only. They never return password,
+token, Authorization header, service-role key, full `secret_ref`, Vault id,
+secret value, raw request body, raw metadata, device ids, XML, screenshots or raw
+logs.
+
+Patch 2C-1 does not change frontend code, does not run full Add Profile UI smoke,
+does not launch device/provisioner/login, does not activate Request Password
+Update, does not create secure links, and does not migrate legacy
+`ig_account_settings.password`.
+
+Account lifecycle vs credential cleanup:
+
+- Archive does not revoke credentials. It may later suspend campaigns,
+  provisioning and runtime, but restore must remain simple.
+- Trash during retention does not revoke credentials by default because the
+  account remains restorable.
+- Restore must not fail because credentials were neutralized automatically by
+  archive/trash.
+- Permanent delete after retention may call credential cleanup/revoke and Vault
+  neutralization.
+- Explicit credential revoke is a separate operation from account deletion.
+- Smoke cleanup, failed ingestion cleanup, security revoke and permanent delete
+  cleanup are allowed only through strict backend guards.
+
+Allowed cleanup reasons:
+
+- `smoke_cleanup`
+- `failed_ingestion_cleanup`
+- `explicit_credential_revoke`
+- `security_revoke`
+- `permanent_account_delete`
+
+Reasons that must not trigger automatic credential cleanup:
+
+- `archive`
+- `trash`
+- `trash_pending_retention`
+- `pause`
+- `paused`
+- `cancelled_without_final_delete`
+- `archived_pending_retention`
+
+Patch 2C-1 SQL guards reject reasons outside the allowed cleanup list. No route
+or automation should call these helpers for archive, trash, scheduled trash,
+restore or any restorable lifecycle transition.
+
+Restoration safety:
+
+- archived/trashed credentials stay intact unless explicitly revoked;
+- restore later checks `credentials_status` before runtime resumes;
+- if credentials were explicitly revoked while trashed, restore should ask for a
+  credential update before provisioning/runtime.
+
+Future lifecycle sync must coordinate admin dashboard, BotApp/backend, future
+client dashboard and automation/runtime. Recommended future fields:
+`source_surface`, `actor_type`, `actor_id`, `reason`, `lifecycle_status`,
+`archived_at`, `trashed_at`, `scheduled_trash_at`, `scheduled_delete_at` /
+`purge_after`, `permanently_deleted_at`, `sync_status`, `botapp_sync_status`,
+`client_dashboard_sync_status`, `admin_dashboard_sync_status`,
+`audit_event_id`, `credential_cleanup_status`. Patch 2C-1 does not implement
+this multi-surface sync.
+
+## 19. Credential Secure Pipeline Patch 2C-2
+
+Patch 2C-2 is the production checkpoint for the authenticated Add Profile E2E
+path after fixing the Vercel Production credential-token environment variable.
+
+Validated runtime alignment:
+
+- Vercel Production
+  `INSTAGRAM_CREDENTIALS_INTERNAL_API_TOKEN` now matches the token accepted by
+  Supabase Edge.
+- Safe Vercel Production runtime fingerprint: `present=true`, `len=64`,
+  `sha12=4c74d75cb9fd`.
+- Edge reprobe to `instagram-credentials` with the Vercel Production token no
+  longer returned `401 unauthorized`; the fake account probe authenticated
+  internally and failed at the expected business layer with `account_not_found`.
+
+Validated Add Profile production UI flow:
+
+- authenticated admin UI on `/instagram-dashboard`;
+- Add Profile wizard completed through Create Profile confirmation;
+- `ig_accounts` created;
+- `ig_account_settings` created;
+- `ig_account_filters` created;
+- `ig_account_settings.password = ''`;
+- `submit_add_profile_credentials` succeeded;
+- `account_credentials` row created;
+- `account_credentials.status = 'active'`;
+- `ig_accounts.status = 'active'`;
+- no `credentials_ingestion_failed` UI result.
+
+Cleanup:
+
+- `cleanup_instagram_smoke_account(...)` succeeded for the smoke account using
+  the matching safe request id;
+- cleanup removed the smoke account, settings, filters, credential metadata and
+  related dashboard action, and neutralized the linked Vault secret;
+- post-cleanup counts for smoke accounts/settings/filters/credentials were all
+  zero.
+
+Patch 2C-2 was reprobe/smoke/checkpoint only: no runtime patch, no Edge Function
+patch, no dashboard UI patch and no migration change. The checkpoint remains
+no-leak: no token, Authorization header, service-role key, password, full
+`secret_ref`, Vault id, cookies/session, raw logs, XML or screenshot path was
+recorded.
 
 Full Add Profile direction:
 
