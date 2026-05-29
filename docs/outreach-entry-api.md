@@ -550,7 +550,8 @@ Request shape:
 }
 ```
 
-`action` may be `submit` or `update_password`.
+`action` may be `submit`, `update_password`, or the internal-only
+`submit_add_profile_credentials` added by Backend Patch 2A.
 
 Authentication:
 
@@ -595,6 +596,121 @@ Safe response:
 
 The response never includes the password, Vault payload, Vault secret value, or
 full `secret_ref`.
+
+## Backend Patch 2A — Add Profile Credential Orchestration
+
+Backend Patch 2A extends `supabase/functions/instagram-credentials` without
+creating a parallel credential pipeline. The new internal action is:
+
+```json
+{
+  "action": "submit_add_profile_credentials",
+  "account_id": "00000000-0000-4000-8000-000000000000",
+  "expected_username": "instagram_username",
+  "password": "write-only",
+  "actor_type": "admin",
+  "actor_id": "optional-safe-actor-id",
+  "metadata_safe": {
+    "flow": "add_profile"
+  },
+  "external_request_id": "optional-safe-id"
+}
+```
+
+Contract:
+
+- authentication is internal-token only via
+  `INSTAGRAM_CREDENTIALS_INTERNAL_API_TOKEN`;
+- `instagram-credentials` must remain deployed with `--no-verify-jwt`; gateway
+  JWT verification rejects the opaque internal bearer token before the function
+  can run its own auth check;
+- remote HTTP smokes must source a temporary `.env.smoke.local` whose
+  `INSTAGRAM_CREDENTIALS_INTERNAL_API_TOKEN` matches the remote Edge secret, and
+  that file must be deleted immediately after the smoke;
+- the function validates that the `ig_accounts` row exists;
+- when `ig_accounts.username` is available, `expected_username` must match it
+  before any Vault write; mismatch returns `expected_username_mismatch`;
+- the password is accepted only as a write-only POST body field;
+- the existing Vault adapter writes one new Supabase Vault secret for the next
+  `credentials_version`;
+- the existing `rotate_instagram_account_credentials` RPC is called with
+  `p_action='submit'` and `p_submitted_via='add_profile'`;
+- Patch 2A updates that rotation RPC to populate safe current-state metadata
+  (`source`, `metadata_safe`, `updated_by_actor_type`) without accepting or
+  returning the password;
+- `account_credentials.status` remains `active`, which is the status consumed by
+  the Python provisioner;
+- if a `client_instagram_accounts` row already exists, status sync is attempted
+  to `onboarding_status='credentials_submitted'`,
+  `provisioning_status='login_pending'`, and
+  `login_status='verification_pending'`; this sync is fail-open after credentials
+  have been stored;
+- dashboard action sync remains safe and fail-open.
+
+Failure and retry behavior:
+
+- invalid input, missing password, account not found, auth failure and username
+  mismatch are rejected before Vault write;
+- Vault write failure returns `secret_write_failed` and creates no active
+  `account_credentials`;
+- metadata rotation failure after Vault write returns
+  `credentials_metadata_write_failed` without returning or logging the secret
+  reference;
+- no Vault cleanup helper exists in this repo yet, so an orphan secret remains
+  possible only in that failure window; TODO Patch 2B/2C: add an explicit
+  service-role cleanup/revoke helper or idempotent claim table before making
+  Add Profile retry automation aggressive;
+- duplicate successful submits are currently rotations: the next
+  `credentials_version` is created and previous active metadata is superseded;
+- `external_request_id` / request id are recorded as safe metadata but do not yet
+  provide full idempotency. Patch 2B should avoid blind client retries and should
+  treat timeouts as “check status first, then retry if needed”.
+
+Safe response shape:
+
+```json
+{
+  "ok": true,
+  "account_id": "00000000-0000-4000-8000-000000000000",
+  "provider": "instagram",
+  "credentials_version": 2,
+  "credentials_status": "active",
+  "status": "active",
+  "reauth_required": true,
+  "next_action": "awaiting_login_verification",
+  "password_status": "write_only"
+}
+```
+
+No response, log, dashboard action metadata, status metadata, or doc example may
+include the password, full request body, `secret_ref`, Vault id/value, raw token,
+Authorization header, service-role key, raw XML/logs/screenshots, or device
+internals.
+
+Frontend Patch 2B should call this internal action from the server-side
+`accounts/create` route after creating `ig_accounts`, then stop writing
+`body.password` into `ig_account_settings.password` for new Add Profile flows.
+Patch 2A does not modify the frontend, does not activate Request Password
+Update, does not create secure links, does not migrate legacy passwords, and
+does not touch runner/provisioner/device flows.
+
+Future full Add Profile direction:
+
+```text
+Add Profile frontend
+  -> accounts/create server-side
+  -> create account/settings/filters/status safely
+  -> submit_add_profile_credentials (write-only password)
+  -> Vault secret
+  -> account_credentials active
+  -> onboarding/provisioning/login statuses ready for login probe
+  -> dashboard/account response with safe credential status only
+```
+
+Patch 2A intentionally prepares only the credential orchestration boundary. A
+future transactional create-account RPC/API may fold account, settings, filters,
+ownership/status and credential orchestration into one backend unit, but it must
+still reuse this single Vault + `account_credentials` pipeline.
 
 Entry 2D-2B deliberately does not add dashboard UI, dashboard actions,
 provisioning/login workers, secret reads for workers, or credential incidents.
