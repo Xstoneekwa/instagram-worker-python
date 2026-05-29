@@ -1173,6 +1173,62 @@ no-leak: no token, Authorization header, service-role key, password, full
 `secret_ref`, Vault id, cookies/session, raw logs, XML or screenshot path was
 recorded.
 
+## 20. Credential Secure Pipeline Patch 2C-3
+
+Patch 2C-3 hardens Add Profile transaction boundaries, compensation and minimal
+idempotency.
+
+Current diagnosis before Patch 2C-3:
+
+- `accounts/create` inserted `ig_accounts.status='active'` before settings,
+  filters and credential ingestion completed;
+- settings and filters were not created inside a database transaction with the
+  account row;
+- credential ingestion failure already marked `ig_accounts.status` as
+  `support_required`, but earlier settings/filter failures could leave partial
+  rows or raw DB error messages;
+- no unique username invariant existed on `ig_accounts`, so a double-submit or
+  retry could create duplicate account rows for the same normalized username.
+
+Patch behavior:
+
+- new Add Profile accounts start as `support_required`;
+- settings start with `account_status='support_required'` and `password=''`;
+- settings/filter failures before credential ingestion trigger targeted
+  compensation by deleting only the newly created account id. Cascading foreign
+  keys clean up just-created settings/filters rows;
+- credential ingestion failure keeps the account/settings in `support_required`,
+  creates a best-effort safe `review_credentials` dashboard action, and returns
+  a safe UI error;
+- credentials success is accepted only when the Edge response reports active
+  credentials;
+- only after active credentials are confirmed does the route finalize
+  `ig_accounts.status='active'` and `ig_account_settings.account_status='active'`;
+- if finalization fails after credentials are active, the route reports a safe
+  failure and leaves the account in `support_required`.
+
+Idempotency:
+
+- migration `20260529220012_patch2c3_add_profile_username_unique.sql` adds
+  `ig_accounts_username_lower_unique` on `lower(btrim(username))` for non-empty
+  usernames;
+- duplicate normalized usernames map to safe `account_already_exists` and do not
+  create a second account/credential path.
+
+Patch 2C-3 does not change worker Python, login/provisioner runtime, runner,
+the `instagram-credentials` Edge Function, archive/trash/restore semantics,
+client dashboard, or global lifecycle cleanup policy. No cleanup/revoke is
+triggered for archived or trashed accounts.
+
+No-leak rule: route errors and support metadata must never include passwords,
+raw request bodies, tokens, Authorization headers, service-role keys, full
+`secret_ref`, Vault ids/values, cookies/session, XML, screenshots or raw logs.
+
+Production validation checkpoint (2026-05-29): migration applied on linked
+Supabase; production `accounts/create` happy path, duplicate username guard and
+`cleanup_instagram_smoke_account` cleanup verified on smoke username
+`smoke_add_profile_2c3_e2e` without leaking secrets in logs or docs.
+
 Full Add Profile direction:
 
 - future Patch 2B keeps the frontend password field write-only;

@@ -832,6 +832,69 @@ migrations. No token, Authorization header, service-role key, password, full
 `secret_ref`, Vault id, cookies/session, raw logs, XML or screenshot path was
 printed or stored in the checkpoint.
 
+## Backend Patch 2C-3 — Add Profile Hardening
+
+Patch 2C-3 hardens Add Profile against partial creation states without changing
+archive/trash/restore lifecycle behavior and without changing the
+`instagram-credentials` Edge Function.
+
+Status contract:
+
+- `active` means the Add Profile flow has completed account, settings, filters
+  and active credential metadata;
+- `support_required` is the safe state for a newly created Add Profile row until
+  credentials are active, and remains the controlled failure state for credential
+  ingestion or final status failures;
+- `ig_account_settings.password` must remain `''` for new Add Profile rows in
+  both success and failure paths.
+
+Route hardening:
+
+- `accounts/create` creates the account initially as `support_required`;
+- settings are inserted with `account_status='support_required'` and
+  `password=''`;
+- settings and filters failures before credential ingestion trigger a targeted
+  compensation delete of the newly created account id. Foreign keys cascade the
+  just-created settings/filters rows. This compensation is only for the current
+  Add Profile account id, before credentials exist;
+- credential ingestion failure keeps the account/settings in
+  `support_required`, creates a best-effort safe credential support action, and
+  returns only safe UI errors such as `credentials_ingestion_failed` or
+  `credentials_ingestion_timeout`;
+- successful credential ingestion is accepted only when the safe credentials
+  response reports active credentials, then the route finalizes `ig_accounts` and
+  `ig_account_settings.account_status` to `active`;
+- if final status activation fails after credentials are active, the route does
+  not report success. It marks the account back to `support_required` and raises
+  a safe support action.
+
+Idempotency guard:
+
+- migration `20260529220012_patch2c3_add_profile_username_unique.sql` adds a
+  unique index on `lower(btrim(username))` for non-empty `ig_accounts.username`;
+- duplicate normalized usernames fail as `account_already_exists` instead of
+  creating a second account or a second incoherent credential path.
+
+No-leak constraints remain unchanged: no password, raw request body, token,
+Authorization header, service-role key, full `secret_ref`, Vault id/value,
+cookies/session, XML, screenshot path or raw logs in UI errors, dashboard action
+metadata or docs.
+
+Production validation checkpoint (2026-05-29):
+
+- remote migration `20260529220012` applied; unique index
+  `ig_accounts_username_lower_unique` present; duplicate username precheck clean;
+- Vercel production deploy active on `www.boostmybusinesses.com` with patched
+  `accounts/create`;
+- authenticated production smoke username `smoke_add_profile_2c3_e2e`: happy path
+  `201` with `ig_accounts.status=active`, settings `account_status=active` and
+  `password=''`, filters row present, `account_credentials.status=active`;
+- duplicate recreate returned `account_already_exists` (`409`) with a single
+  account and credential row;
+- targeted cleanup RPC removed account/settings/filters/credentials/actions;
+  vault neutralized. No token, password, service-role key, cookie/session,
+  full `secret_ref` or Vault id was logged in the checkpoint.
+
 Entry 2D-2B deliberately does not add dashboard UI, dashboard actions,
 provisioning/login workers, secret reads for workers, or credential incidents.
 Entry 2D-3 should add safe status APIs, and Entry 2D-4 should add the dashboard
