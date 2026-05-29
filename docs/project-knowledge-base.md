@@ -1363,6 +1363,25 @@ Future CT reuse:
 - support future followers threshold checks such as `<500`;
 - feed later FBR and quality rules without implementing CT filtering in 2C-6.
 
+## 24. Credential Secure Pipeline Patch 2C-7B — SearchApi Staging Adapter
+
+Patch 2C-7B documents the optional SearchApi staging adapter added in the
+frontend public profile lookup library. It is not a production provider rollout.
+
+Scope:
+
+- `searchapi` mode for local/staging evaluation only;
+- server env: `INSTAGRAM_PUBLIC_PROFILE_LOOKUP_PROVIDER=searchapi`,
+  `INSTAGRAM_PUBLIC_PROFILE_LOOKUP_URL`, `INSTAGRAM_PUBLIC_PROFILE_LOOKUP_API_KEY`;
+- no API key in repo, no `NEXT_PUBLIC_*`, no Vercel prod env change by default;
+- no worker Python, device/ADB, cookies/sessions, CT Quality Engine, MCP, or
+  lifecycle changes.
+
+Mapping aligns with the 2C-6 contract (`found`, `not_found`, `rate_limited`,
+`unavailable`, `provider_error`, safe avatar/metadata). Missing URL/key remains
+`provider_not_configured`. Next operator step: configure a real SearchApi key in
+staging and run Add Profile smokes before any production enablement decision.
+
 Full Add Profile direction:
 
 - future Patch 2B keeps the frontend password field write-only;

@@ -1046,6 +1046,34 @@ later CT existence checks, avatar/follower/private/verified enrichment,
 canonical username change detection, follower threshold rules such as `<500`,
 and future FBR rules.
 
+## Backend Patch 2C-7B — SearchApi Staging Adapter (Not Production)
+
+Patch 2C-7B adds an optional `searchapi` provider mode in the frontend lookup
+library. It is a staging/local evaluation adapter only. It is not production
+activation and must not be enabled on Vercel production without explicit
+operator approval and a successful real-key staging smoke.
+
+Server-only env (never `NEXT_PUBLIC_*`):
+
+- `INSTAGRAM_PUBLIC_PROFILE_LOOKUP_PROVIDER=searchapi`
+- `INSTAGRAM_PUBLIC_PROFILE_LOOKUP_URL` — SearchApi search endpoint
+- `INSTAGRAM_PUBLIC_PROFILE_LOOKUP_API_KEY` — server secret only; never commit
+
+Behavior:
+
+- missing URL or API key → `provider_not_configured`, no external call;
+- short timeout (default 3s), no retries, no raw provider response stored;
+- HTTP `404` / explicit not-found → `not_found`;
+- HTTP `429` → `rate_limited`;
+- HTTP `5xx` / timeout → `unavailable`;
+- other non-OK / malformed body → `provider_error`;
+- exploitable profile maps to `found` with safe avatar, followers, privacy,
+  verified flags and bounded metadata (`provider_mode`, `provider_status`,
+  `provider_engine`).
+
+Add Profile fail-open rules from 2C-6 are unchanged. Modes `disabled`, `mock`
+and generic `http` remain available and unchanged.
+
 Entry 2D-2B deliberately does not add dashboard UI, dashboard actions,
 provisioning/login workers, secret reads for workers, or credential incidents.
 Entry 2D-3 should add safe status APIs, and Entry 2D-4 should add the dashboard
