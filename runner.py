@@ -6,6 +6,7 @@ import argparse
 import os
 import random
 import re
+import socket
 import time
 import uuid
 from pathlib import Path
@@ -398,6 +399,70 @@ def _is_supabase_mode(args: argparse.Namespace) -> bool:
 
 def _parse_run_type(args: argparse.Namespace) -> str:
     return str(getattr(args, "run_type", "") or "").strip().lower()
+
+
+def _parse_run_request_id(args: argparse.Namespace) -> str:
+    return str(getattr(args, "run_request_id", "") or "").strip()
+
+
+def _run_control_dispatcher_worker_id() -> str:
+    configured = str(os.environ.get("RUN_CONTROL_DISPATCHER_WORKER_ID") or "").strip()
+    if configured:
+        return configured
+    return f"run-dispatcher:{socket.gethostname()}"
+
+
+def _run_request_cancel_requested(run_request_id: str | None) -> bool:
+    rid = str(run_request_id or "").strip()
+    if not rid:
+        return False
+    try:
+        from account_run_control import is_account_run_request_cancel_requested
+
+        return bool(is_account_run_request_cancel_requested(rid))
+    except Exception as exc:
+        log("warning", "run_request_cancel_check_failed", run_request_id=rid, error=str(exc)[:200])
+        return False
+
+
+def _abort_if_run_request_canceled(
+    *,
+    run_request_id: str | None,
+    run_id: str | None,
+    account_id: str | None,
+    reason: str = "manual_run_canceled",
+) -> bool:
+    if not _run_request_cancel_requested(run_request_id):
+        return False
+    log("info", "run_request_cancel_detected", run_request_id=run_request_id, run_id=run_id or None)
+    if run_id:
+        _update_run_status_safe(
+            run_id=run_id,
+            status="stopped",
+            totals={"total": 0, "success": 0, "failed": 0},
+            performance_summary={"reason": reason, "run_request_id": run_request_id},
+        )
+    try:
+        from account_run_control import complete_account_run_request, insert_manual_run_audit
+
+        if run_request_id:
+            complete_account_run_request(
+                run_request_id,
+                _run_control_dispatcher_worker_id(),
+                "canceled",
+            )
+        if account_id:
+            insert_manual_run_audit(
+                account_id=account_id,
+                action_type="manual_run_canceled",
+                status="success",
+                message="Manual run canceled during worker execution.",
+                run_id=run_id or None,
+                payload={"run_request_id": run_request_id, "reason": reason},
+            )
+    except Exception as exc:
+        log("warning", "run_request_cancel_finalize_failed", error=str(exc)[:200])
+    return True
 
 
 def _account_assignment_dispatch_run_types() -> set[str]:
@@ -11400,6 +11465,12 @@ def main() -> int:
         default="",
         help="Execution mode: dm_welcome_baseline | dm_welcome_scan | dm_sender_dry_run | dm_welcome_session_send | outreach_session | account_session | unfollow_session | unfollow_outreach_pipeline",
     )
+    parser.add_argument(
+        "--run-request-id",
+        type=str,
+        default="",
+        help="Optional Run Control account_run_requests.id to link and honor cancel/stop semantics.",
+    )
     args = parser.parse_args()
     supabase_mode = _is_supabase_mode(args)
     welcome_baseline_run = _is_welcome_baseline_run(args)
@@ -11432,6 +11503,7 @@ def main() -> int:
     account_id = ""
     account_username = ""
     run_id = ""
+    run_request_id = _parse_run_request_id(args)
     db_targets: list[dict] = []
     if supabase_mode:
         account = _safe_supabase_call(
@@ -11486,6 +11558,45 @@ def main() -> int:
                 return 0
         run = _safe_supabase_call("create_run", account_id=account_id) or {}
         run_id = str(run.get("id") or "").strip()
+        if run_request_id and run_id:
+            try:
+                from account_run_control import insert_manual_run_audit, link_account_run_request_run
+
+                linked = link_account_run_request_run(
+                    run_request_id,
+                    _run_control_dispatcher_worker_id(),
+                    run_id,
+                )
+                if linked:
+                    insert_manual_run_audit(
+                        account_id=account_id,
+                        action_type="manual_run_started",
+                        status="success",
+                        message="Manual run linked to ig_runs.",
+                        run_id=run_id,
+                        payload={"run_request_id": run_request_id},
+                    )
+                else:
+                    log(
+                        "warning",
+                        "run_request_link_failed",
+                        run_request_id=run_request_id,
+                        run_id=run_id,
+                    )
+            except Exception as exc:
+                log(
+                    "warning",
+                    "run_request_link_exception",
+                    run_request_id=run_request_id,
+                    run_id=run_id,
+                    error=str(exc)[:200],
+                )
+        if _abort_if_run_request_canceled(
+            run_request_id=run_request_id,
+            run_id=run_id or None,
+            account_id=account_id or None,
+        ):
+            return 0
         supabase_client.set_log_context(account_id, run_id)
         supabase_client.log_performance_event(
             action_type="performance_test",
@@ -11544,6 +11655,13 @@ def main() -> int:
         run_id=run_id or None,
         run_type=_parse_run_type(args) or None,
     )
+    if _abort_if_run_request_canceled(
+        run_request_id=run_request_id,
+        run_id=run_id or None,
+        account_id=account_id or None,
+        reason="manual_run_canceled_after_run_started",
+    ):
+        return 0
     _orf_set_runtime_context(
         account_id=account_id or None,
         run_id=run_id or None,
@@ -11692,6 +11810,22 @@ def main() -> int:
                             },
                         )
                     return dispatch_exit_code
+
+    if _abort_if_run_request_canceled(
+        run_request_id=run_request_id,
+        run_id=run_id or None,
+        account_id=account_id or None,
+        reason="manual_run_canceled_before_device_connect",
+    ):
+        reset_perf_counters()
+        _emit_performance_summary(
+            t0=t_session,
+            warm_session_used=warm_session_used,
+            force_stop_used=force_stop_used,
+            exit_code=0,
+            target_username=targets[0] if targets else config.TARGET_USERNAME,
+        )
+        return 0
 
     d = connect_device(device_serial)
     t = _phase("connect_device", t)
