@@ -2786,6 +2786,25 @@ def _resolve_dm_sender_real_send_enabled() -> tuple[bool, str]:
     return bool(getattr(config, "DM_SENDER_REAL_SEND_ENABLED", False)), "config"
 
 
+def resolve_dm_sender_real_send_enabled_for_type(dm_type: str | None) -> tuple[bool, str]:
+    """Resolve real-send for a DM domain without cross-enabling products."""
+    dm_type_norm = str(dm_type or "").strip().lower()
+    if dm_type_norm in {"welcome", "dm_welcome", "dm_welcome_session_send", "welcome_session"}:
+        return resolve_welcome_dm_real_send_enabled()
+    if dm_type_norm in {"outreach", "outreach_session"}:
+        return resolve_outreach_dm_real_send_enabled()
+
+    enabled, source = _resolve_dm_sender_real_send_enabled()
+    log(
+        "warning",
+        "dm_sender_legacy_real_send_resolved",
+        dm_type=dm_type_norm or None,
+        enabled=enabled,
+        source=f"legacy:{source}",
+    )
+    return enabled, f"legacy:{source}"
+
+
 def _complete_job_skipped(
     job: dict[str, Any],
     *,
@@ -3605,7 +3624,7 @@ def run_dm_sender_send(
     if using_prepared_jobs:
         max_jobs = min(max_jobs, len(prepared_job_list))
 
-    real_enabled, real_source = _resolve_dm_sender_real_send_enabled()
+    real_enabled, real_source = resolve_dm_sender_real_send_enabled_for_type(dm_type_resolved)
     reserved_by = _resolve_reserved_by(d)
     only_job_id, filter_source = _resolve_dm_sender_only_job_id()
     parent_verified_at = None
