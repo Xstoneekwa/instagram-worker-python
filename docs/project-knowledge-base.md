@@ -1457,6 +1457,20 @@ explicit safe summary counts, `duration_ms`, early stop on provider
 `claim_ct_target_verification_jobs` RPC now reclaims expired `processing` locks
 after the lock window. Cron remains future only.
 
+CT-3 centralizes CT Quality V1 in `lib/instagram-target-quality.ts`. This pure
+decision engine is the single source for current public verification rules:
+clear `not_found`, `followers_count < 500`, verified profile, private profile,
+canonical username mismatch, provider unavailable/rate-limited/error and
+eligible. Missing avatar is warning-only. FBR is explicitly excluded because it
+is future performance after real CT usage, not public profile quality.
+
+Sync contract: `ig_targets` is the shared source for admin/client/BotApp
+`status`, `quality_status`, `verification_status`, safe reasons, actor/source,
+soft archive/delete state and audit linkage. `valid` / `eligible` is usable,
+`rejected_*` carries safe reasons, `review_*` is admin-first with safe optional
+client/BotApp messaging, and archive/delete must not diverge silently across
+surfaces.
+
 ## 26. CT-1 — Target Account Add / Bulk Verification Foundation
 
 CT-1 keeps `ig_targets` as the source of truth for target accounts and adds an
@@ -1500,6 +1514,10 @@ CT-1 behavior:
   `provider_error_count`, `duration_ms`, plus max-duration and rate-limit early
   stop behavior. Already claimed unprocessed jobs are returned to
   `retry_scheduled` instead of being left stuck;
+- CT-3 moves Quality V1 decisions into the central engine and keeps manual add,
+  provider lookup mapping and batch verification aligned. The manual
+  `followers_count > 50,000` check remains an input guard, not a Quality V1
+  rejection rule;
 - archive is soft state, preserving history for backend/frontend sync.
 
 CT smoke cleanup must be id-scoped. `metadata_safe.source` values such as

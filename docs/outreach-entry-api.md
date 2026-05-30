@@ -1187,6 +1187,33 @@ Behavior:
 - bulk/job verification does not activate SearchApi production. Provider mode
   remains controlled by existing safe environment configuration.
 
+CT Quality V1 decision engine:
+
+- CT-3 centralizes Quality V1 in a pure frontend/server helper,
+  `lib/instagram-target-quality.ts`, used by single add and batch verification
+  mappings;
+- source of truth remains `ig_targets` for shared admin/client/BotApp fields:
+  `status`, `quality_status`, `verification_status`, `verification_reason`,
+  `rejected_reason`, `source`, `actor_type`, soft archive/delete state and safe
+  audit correlation;
+- decision priority is explicit: clear `not_found`, followers below 500,
+  verified profile, private profile, canonical username mismatch, provider
+  unavailable/rate-limited/error, then eligible;
+- canonical mismatch is `review_username_changed`, not a destructive rejection;
+- missing avatar is warning-only and does not reject a CT in V1;
+- FBR remains future runtime performance (`followers gained / follows sent from
+  this CT`) and is never part of CT Quality V1.
+
+Surface sync contract:
+
+- `valid` / `eligible` is usable and visible to admin, client and BotApp once
+  those surfaces consume CT rows;
+- `rejected_*` must expose only safe reasons and remain auditable;
+- `review_*` is admin-first and may be shown to client/BotApp only with safe
+  messages;
+- `archived` / `deleted` remain soft states that must not diverge silently
+  across admin, client and BotApp.
+
 Future scheduler readiness:
 
 - a later Vercel Cron, Supabase scheduled function or external scheduler may
