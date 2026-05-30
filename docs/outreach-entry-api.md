@@ -1236,6 +1236,19 @@ CT-4 lifecycle sync contract:
   readers must use `ig_targets` or a safe projection from it, and BotApp must not
   use archived/rejected/pending/review CTs as active runtime targets.
 
+CT-5 target activity visibility:
+
+- admin Activity Log reads a safe projection from `ct_target_audit_events`;
+- displayed CT operations are `target_add_single`, `target_add_bulk`,
+  `target_verify`, `target_archive`, `target_restore` and `target_reset`;
+- raw `metadata_safe` is never displayed. The UI may project only allowlisted
+  safe fields such as `source_surface`, `previous_status` and `next_status`;
+- visible fields are timestamp, actor type, action label, account/target safe
+  labels or short ids, result/status, safe reason, short `batch_id` and source
+  surface;
+- client dashboard and BotApp audit surfaces remain future work and must consume
+  the same safe audit source/projection when implemented.
+
 Future scheduler readiness:
 
 - a later Vercel Cron, Supabase scheduled function or external scheduler may

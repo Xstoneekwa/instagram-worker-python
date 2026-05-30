@@ -1483,6 +1483,14 @@ BotApp CT implementations remain future work; they must consume the same
 `ig_targets` lifecycle or a safe projection and must not treat archived,
 rejected, pending or review CTs as active runtime targets.
 
+CT-5 connects admin Activity Log to a safe projection of
+`ct_target_audit_events`. Admin can see target add, bulk add, verify, archive,
+restore and reset events with timestamp, actor type, safe account/target labels
+or short ids, result, reason, short batch id and source surface. The UI never
+renders raw `metadata_safe`, raw provider payloads, credentials, tokens or logs.
+Client dashboard and BotApp audit views remain future work and must use the same
+safe audit contract.
+
 ## 26. CT-1 — Target Account Add / Bulk Verification Foundation
 
 CT-1 keeps `ig_targets` as the source of truth for target accounts and adds an
