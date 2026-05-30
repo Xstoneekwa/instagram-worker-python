@@ -1528,6 +1528,9 @@ CT-1 behavior:
 - `verify-batch` claims small batches, applies Quality V1, schedules bounded
   retries for transient provider failures and never converts rate limits or
   provider errors into `rejected_not_found`;
+- CT-2C adds `verify-cron`: disabled-by-default, token-protected scheduler entry
+  with expiring DB lock, safe skip reasons and the same batch processor as
+  `verify-batch`. No active repo cron schedule; external schedulers only;
 - CT-2B adds `dry_run=true`, summary fields `claimed_count`, `processed_count`,
   `succeeded_count`, `rejected_count`, `review_count`,
   `retry_scheduled_count`, `skipped_count`, `rate_limited_count`,
@@ -1555,7 +1558,7 @@ real non-smoke targets or jobs deleted/modified. Exact deleted audit row
 identities are not recoverable from the current DB without PITR/logs.
 
 Future CT quality remains out of scope here: durable provider cache/quota
-tracking beyond the current in-runtime guardrails, cron scheduling, FBR <= 8%
+tracking beyond the current in-runtime guardrails, FBR <= 8%
 after enough follows, no-followable-profile signals, canonical mismatch
 reconciliation, auto-archive policy, client dashboard sync and Target Discovery
 IA/MCP.

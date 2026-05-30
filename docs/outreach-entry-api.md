@@ -1251,10 +1251,15 @@ CT-5 target activity visibility:
 
 Future scheduler readiness:
 
-- a later Vercel Cron, Supabase scheduled function or external scheduler may
-  call `verify-batch` with a small `limit`, spacing, no secrets in logs and
-  monitoring on counts/duration/rate limits;
-- CT-2B does not activate cron or SearchApi production and does not touch phones,
+- CT-2C adds `GET|POST /api/instagram-dashboard/targets/verify-cron`, a
+  token-protected internal entrypoint disabled by default
+  (`CT_TARGET_VERIFICATION_CRON_ENABLED=false`, `DRY_RUN=true`, small `limit`).
+  It reuses `processTargetVerificationBatch`, acquires an expiring Supabase
+  scheduler lock, and returns safe skip reasons (`cron_disabled`,
+  `scheduler_lock_busy`) without leaking secrets;
+- no active `vercel.json` cron is shipped. External schedulers may call the route
+  with `Authorization: Bearer` or `x-ct-target-verification-cron-token`;
+- CT-2C does not activate SearchApi production and does not touch phones,
   worker Python, follow runtime, FBR or optimization policy.
 
 CT smoke cleanup guardrail:
