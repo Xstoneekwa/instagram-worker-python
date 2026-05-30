@@ -1141,6 +1141,40 @@ queue, run provider lookup through cache/throttle, persist auditable statuses
 `archived`) and never archive/reject permanently on `rate_limited` or transient
 provider failures.
 
+## Backend Patch CT-1 — Target Account Add / Bulk Verification Foundation
+
+CT-1 prepares target account add/import without connecting CT to worker runtime
+or follow execution.
+
+Data model:
+
+- `ig_targets` remains the source of truth for CT rows per account.
+- CT-1 adds safe verification/quality fields, batch id, source, actor type,
+  soft archive/reject reasons and safe metadata.
+- `ct_target_audit_events` stores safe add/bulk/verify audit events with counts
+  and reasons only.
+- `ig_interacted_users` remains the future interaction/FBR source, not a target
+  import table and not a raw client/admin projection.
+
+Behavior:
+
+- single add normalizes the username, blocks invalid syntax, checks duplicates
+  for the same account, and uses the safe public profile lookup if configured;
+- clear `not_found` rejects with `rejected_not_found`;
+- `found` applies quality V1: `<500` followers, verified and private profiles
+  are rejected; eligible public profiles become `valid`;
+- provider unavailable/rate-limited/error and provider-not-configured paths
+  remain review/pending and never become `not_found`;
+- bulk import classifies every line as pending, invalid syntax,
+  duplicate-in-batch or duplicate-existing and inserts only accepted rows as
+  `pending_verification`;
+- bulk does not call SearchApi per row. Future CT bulk needs durable queue,
+  durable cache, quota tracking and retry/reconciliation states.
+
+Out of scope: worker Python, follow engine, runtime Instagram, SearchApi
+production activation, Vercel prod env, hard-delete CT, FBR optimization,
+Target Discovery IA/MCP and raw provider payload storage.
+
 Entry 2D-2B deliberately does not add dashboard UI, dashboard actions,
 provisioning/login workers, secret reads for workers, or credential incidents.
 Entry 2D-3 should add safe status APIs, and Entry 2D-4 should add the dashboard

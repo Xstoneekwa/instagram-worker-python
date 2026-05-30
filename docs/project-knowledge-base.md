@@ -1449,6 +1449,44 @@ batch, cache, throttle, quota tracking, decision audit and dashboard states
 `review_provider_unavailable`, `review_username_changed`, `duplicate`,
 `archived`). Do not call SearchApi directly once per submitted CT row.
 
+## 26. CT-1 — Target Account Add / Bulk Verification Foundation
+
+CT-1 keeps `ig_targets` as the source of truth for target accounts and adds an
+additive verification/quality foundation. It does not change worker Python,
+follow runtime, Instagram navigation, SearchApi production env, or CT campaign
+optimization.
+
+Current source-of-truth decision:
+
+- `ig_targets` remains the CT table for per-account target usernames.
+- `ig_interacted_users` remains interaction memory and future aggregated FBR
+  source; it is not exposed raw to client/admin CT imports.
+- Account Detail still has a read-only pending CT summary, while the Manage
+  Targets modal owns add/import/reset/archive operations.
+
+CT-1 behavior:
+
+- manual single add normalizes username, blocks invalid syntax, checks duplicate
+  for the same account, then calls the existing public profile lookup only if it
+  is configured in the current safe environment;
+- clear `not_found` becomes `rejected` /
+  `quality_status=rejected_not_found`;
+- `found` applies quality V1: fewer than 500 followers, verified profiles and
+  private profiles are rejected with explicit reasons; eligible public accounts
+  become `valid`;
+- `rate_limited`, `unavailable`, `provider_error` and provider-not-configured
+  paths never become `not_found` and stay review/pending;
+- manual bulk import normalizes line by line, flags invalid syntax,
+  duplicate-in-batch and duplicate-existing rows, then inserts accepted rows as
+  `pending_verification` with a `batch_id`; it intentionally does not fan out
+  provider calls per row;
+- archive is soft state, preserving history for backend/frontend sync.
+
+Future CT quality remains out of scope here: durable queue/cache, quota
+tracking, FBR <= 8% after enough follows, no-followable-profile signals,
+canonical mismatch reconciliation, auto-archive policy, client dashboard sync
+and Target Discovery IA/MCP.
+
 Full Add Profile direction:
 
 - future Patch 2B keeps the frontend password field write-only;
