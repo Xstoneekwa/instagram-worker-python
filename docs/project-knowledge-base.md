@@ -1450,6 +1450,13 @@ durable provider cache/quota tracking, cron/admin scheduling, client dashboard
 sync and performance/FBR policies. Do not call SearchApi directly once per
 submitted CT row during form submission.
 
+CT-2B turns the dashboard batch route into a controlled backend processor while
+staying off phones/runtime: bounded limit, sanitized worker id, dry-run preview,
+explicit safe summary counts, `duration_ms`, early stop on provider
+`rate_limited`, and requeue of already claimed but unprocessed jobs. The
+`claim_ct_target_verification_jobs` RPC now reclaims expired `processing` locks
+after the lock window. Cron remains future only.
+
 ## 26. CT-1 — Target Account Add / Bulk Verification Foundation
 
 CT-1 keeps `ig_targets` as the source of truth for target accounts and adds an
@@ -1487,6 +1494,12 @@ CT-1 behavior:
 - `verify-batch` claims small batches, applies Quality V1, schedules bounded
   retries for transient provider failures and never converts rate limits or
   provider errors into `rejected_not_found`;
+- CT-2B adds `dry_run=true`, summary fields `claimed_count`, `processed_count`,
+  `succeeded_count`, `rejected_count`, `review_count`,
+  `retry_scheduled_count`, `skipped_count`, `rate_limited_count`,
+  `provider_error_count`, `duration_ms`, plus max-duration and rate-limit early
+  stop behavior. Already claimed unprocessed jobs are returned to
+  `retry_scheduled` instead of being left stuck;
 - archive is soft state, preserving history for backend/frontend sync.
 
 CT smoke cleanup must be id-scoped. `metadata_safe.source` values such as

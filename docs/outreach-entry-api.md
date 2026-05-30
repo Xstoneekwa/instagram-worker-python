@@ -1174,8 +1174,26 @@ Behavior:
 - `POST /api/instagram-dashboard/targets/verify-batch` processes a small
   service-role/admin-safe batch, applies Quality V1, schedules bounded retries
   for transient provider failures, and emits safe aggregate results;
+- CT-2B makes that route processor-ready: `limit` remains bounded to 10,
+  `worker_id` is sanitized, `dry_run=true` previews claimable jobs without
+  mutation/provider calls, `duration_ms` and explicit summary counts are
+  returned, and `rate_limited` stops the batch early while requeueing already
+  claimed unprocessed jobs with safe retry metadata;
+- CT-2B updates `claim_ct_target_verification_jobs` so expired `processing`
+  locks can be reclaimed after the 15 minute lock window. `retry_scheduled`
+  still respects `next_attempt_at`, clear `not_found` never retries, and
+  provider-not-configured/rate-limited/unavailable/provider-error paths never
+  become `rejected_not_found`;
 - bulk/job verification does not activate SearchApi production. Provider mode
   remains controlled by existing safe environment configuration.
+
+Future scheduler readiness:
+
+- a later Vercel Cron, Supabase scheduled function or external scheduler may
+  call `verify-batch` with a small `limit`, spacing, no secrets in logs and
+  monitoring on counts/duration/rate limits;
+- CT-2B does not activate cron or SearchApi production and does not touch phones,
+  worker Python, follow runtime, FBR or optimization policy.
 
 CT smoke cleanup guardrail:
 
