@@ -21,7 +21,7 @@ from account_session_reliability_schema import (
 from account_session_resume_engine import build_account_session_resume_plan
 from device import app_start, press_home
 from dm_follow_handoff import HandoffResult, prepare_dm_to_follow_handoff
-from dm_sender_engine import _resolve_dm_sender_real_send_enabled
+from dm_sender_engine import resolve_welcome_dm_real_send_enabled
 from instagram_navigation import verify_app_foreground
 from logs import log
 from own_profile_navigation import open_own_profile_from_bottom_nav, verify_own_profile
@@ -1317,7 +1317,7 @@ def run_account_session(
         log("error", "account_session_settings_load_failed", error=str(e))
 
     welcome_enabled = bool(settings.get("welcome_enabled"))
-    real_send_enabled, real_send_source = _resolve_dm_sender_real_send_enabled()
+    real_send_enabled, real_send_source = resolve_welcome_dm_real_send_enabled()
 
     welcome_phase_executed = False
     welcome_bypass_reason: str | None = None

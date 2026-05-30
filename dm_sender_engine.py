@@ -16,6 +16,10 @@ import uiautomator2 as u2
 import config
 import supabase_client
 from device import app_start, force_stop, get_device_serial
+from dm_real_send_flags import (
+    resolve_outreach_dm_real_send_enabled,
+    resolve_welcome_dm_real_send_enabled,
+)
 from instagram_navigation import (
     _dm_find_focus_composer,
     _wait_search_edittext,

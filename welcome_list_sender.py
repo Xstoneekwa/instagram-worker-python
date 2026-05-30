@@ -24,8 +24,8 @@ from dm_sender_engine import (
     _perform_real_welcome_dm_send,
     _reset_dm_sender_session_abort,
     _resolve_dm_sender_only_job_id,
-    _resolve_dm_sender_real_send_enabled,
     _resolve_reserved_by,
+    resolve_welcome_dm_real_send_enabled,
 )
 from instagram_navigation import (
     detect_followers_list_screen_fresh,
@@ -941,7 +941,7 @@ def run_welcome_list_sender(
         "sender_status": "not_started",
     }
 
-    real_enabled, real_source = _resolve_dm_sender_real_send_enabled()
+    real_enabled, real_source = resolve_welcome_dm_real_send_enabled()
     if not real_enabled:
         summary["sender_status"] = "blocked_disabled"
         summary["real_send_source"] = real_source

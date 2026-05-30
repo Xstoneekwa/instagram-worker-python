@@ -15,9 +15,9 @@ import uiautomator2 as u2
 import config
 import supabase_client
 from dm_sender_engine import (
-    _resolve_dm_sender_real_send_enabled,
     prepare_dm_sender_jobs,
     release_prepared_dm_jobs,
+    resolve_outreach_dm_real_send_enabled,
     run_dm_sender_send,
 )
 from logs import log
@@ -112,7 +112,7 @@ def prepare_outreach_session(
         settings = {}
         log("error", "outreach_prepare_settings_load_failed", account_id=aid, error=str(exc))
 
-    real_enabled, real_source = _resolve_dm_sender_real_send_enabled()
+    real_enabled, real_source = resolve_outreach_dm_real_send_enabled()
     base: dict[str, Any] = {
         "account_id": aid,
         "account_username": uname,
@@ -298,7 +298,7 @@ def run_outreach_session(
             settings = {}
             log("error", "outreach_session_settings_load_failed", account_id=aid, error=str(exc))
 
-    real_enabled, real_source = _resolve_dm_sender_real_send_enabled()
+    real_enabled, real_source = resolve_outreach_dm_real_send_enabled()
     legacy_real_enabled = bool(getattr(config, "ENABLE_REAL_DM_SEND", False))
     log(
         "info",

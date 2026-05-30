@@ -13,7 +13,7 @@ import uiautomator2 as u2
 
 import config
 import supabase_client
-from dm_sender_engine import _resolve_dm_sender_real_send_enabled
+from dm_sender_engine import resolve_welcome_dm_real_send_enabled
 from logs import log
 from runtime_caps import resolve_welcome_send_limits
 from welcome_list_sender import run_welcome_list_sender
@@ -134,7 +134,7 @@ def run_welcome_session_send(
         run_id=run_id,
     )
 
-    real_enabled, real_source = _resolve_dm_sender_real_send_enabled()
+    real_enabled, real_source = resolve_welcome_dm_real_send_enabled()
     if not real_enabled:
         log(
             "error",

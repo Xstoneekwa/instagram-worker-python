@@ -566,8 +566,12 @@ DM_SENDER_FAILED_RETRY_DELAY_SECONDS = 300
 OUTREACH_HARD_MAX_PER_SESSION = max(0, _env_int("OUTREACH_HARD_MAX_PER_SESSION", 5))
 OUTREACH_HARD_MAX_PER_DAY = max(0, _env_int("OUTREACH_HARD_MAX_PER_DAY", 40))
 STALE_OUTREACH_JOB_MINUTES = max(1, _env_int("STALE_OUTREACH_JOB_MINUTES", 30))
-# --- V4.4 Welcome session real send ---
-# Override: DM_SENDER_REAL_SEND_ENABLED=true python3 runner.py --run-type dm_welcome_session_send ...
+# --- V4.4+ DM real send gates ---
+# Domain flags are intentionally isolated: enabling Welcome must not enable Outreach.
+WELCOME_DM_REAL_SEND_ENABLED = _env_bool("WELCOME_DM_REAL_SEND_ENABLED", False)
+OUTREACH_DM_REAL_SEND_ENABLED = _env_bool("OUTREACH_DM_REAL_SEND_ENABLED", False)
+# Legacy generic sender flag. Do not use it as a fallback for domain-scoped
+# Welcome/Outreach flows.
 DM_SENDER_REAL_SEND_ENABLED = os.getenv(
     "DM_SENDER_REAL_SEND_ENABLED",
     "false"
