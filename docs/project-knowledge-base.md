@@ -1471,6 +1471,18 @@ soft archive/delete state and audit linkage. `valid` / `eligible` is usable,
 client/BotApp messaging, and archive/delete must not diverge silently across
 surfaces.
 
+CT-4 clarifies CT lifecycle sync. Admin delete is soft archive only. Restore is
+an explicit unarchive action, separate from reset, and never creates a new CT or
+changes FBR/performance fields. Restore blocks duplicate active usernames for
+the same account. Fresh archived CTs with `eligible` + `found` can return to
+`valid`; stale, unknown or rejected archived CTs return to `pending_verification`
+and queue revalidation. Reset is technical re-verification and must not unarchive
+archived/deleted CTs. Audit events now cover `target_archive`, `target_restore`
+and `target_reset` with safe actor/source-surface metadata. Client dashboard and
+BotApp CT implementations remain future work; they must consume the same
+`ig_targets` lifecycle or a safe projection and must not treat archived,
+rejected, pending or review CTs as active runtime targets.
+
 ## 26. CT-1 — Target Account Add / Bulk Verification Foundation
 
 CT-1 keeps `ig_targets` as the source of truth for target accounts and adds an

@@ -1214,6 +1214,28 @@ Surface sync contract:
 - `archived` / `deleted` remain soft states that must not diverge silently
   across admin, client and BotApp.
 
+CT-4 lifecycle sync contract:
+
+- `ig_targets` remains the source of truth for CT lifecycle and quality state.
+- Delete from the admin CT panel is a soft archive only: `status=archived`,
+  `archived_at` set, `archive_reason=dashboard_archive`; there is no hard delete.
+- Restore/unarchive is explicit and separate from reset. Restore only applies to
+  archived targets, never creates a new CT, never changes FBR/performance fields
+  and must fail with `duplicate_existing_active` if the same account already has
+  an active CT with the same `normalized_username`.
+- Restore may return a CT directly to `valid` only when existing quality is
+  `eligible`, provider status is `found`, and the provider check is recent.
+  Otherwise restore clears archive state and puts the CT back into
+  `pending_verification` for queue-based revalidation.
+- Reset is technical re-verification and must not unarchive. Archived/deleted CTs
+  must be restored before reset.
+- Lifecycle audit events are safe rows in `ct_target_audit_events`:
+  `target_archive`, `target_restore`, `target_reset`, with actor/source surface,
+  previous/next status, reason, account and target identifiers.
+- Client dashboard and BotApp CT surfaces are not implemented by CT-4. Future
+  readers must use `ig_targets` or a safe projection from it, and BotApp must not
+  use archived/rejected/pending/review CTs as active runtime targets.
+
 Future scheduler readiness:
 
 - a later Vercel Cron, Supabase scheduled function or external scheduler may
