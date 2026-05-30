@@ -1442,12 +1442,13 @@ Safety behavior:
   `latency_ms`, never raw provider payloads, URLs with keys, headers, cookies,
   sessions, tokens or secrets.
 
-CT bulk still requires a future durable architecture: normalize/dedupe, queue,
-batch, cache, throttle, quota tracking, decision audit and dashboard states
-(`pending_verification`, `valid`, `rejected_not_found`,
-`rejected_low_followers`, `rejected_verified`, `rejected_private`,
-`review_provider_unavailable`, `review_username_changed`, `duplicate`,
-`archived`). Do not call SearchApi directly once per submitted CT row.
+CT-2 adds the first durable architecture for bulk CT verification:
+normalize/dedupe, insert accepted rows, create `ct_target_verification_jobs`,
+claim small batches, run provider lookup through existing cache/throttle,
+persist Quality V1 decisions and audit safe summaries. Remaining future work is
+durable provider cache/quota tracking, cron/admin scheduling, client dashboard
+sync and performance/FBR policies. Do not call SearchApi directly once per
+submitted CT row during form submission.
 
 ## 26. CT-1 — Target Account Add / Bulk Verification Foundation
 
@@ -1480,12 +1481,33 @@ CT-1 behavior:
   duplicate-in-batch and duplicate-existing rows, then inserts accepted rows as
   `pending_verification` with a `batch_id`; it intentionally does not fan out
   provider calls per row;
+- CT-2 creates one durable verification job per accepted bulk target. Duplicate
+  or invalid rows do not get jobs, and `target_id` uniqueness keeps job creation
+  idempotent;
+- `verify-batch` claims small batches, applies Quality V1, schedules bounded
+  retries for transient provider failures and never converts rate limits or
+  provider errors into `rejected_not_found`;
 - archive is soft state, preserving history for backend/frontend sync.
 
-Future CT quality remains out of scope here: durable queue/cache, quota
-tracking, FBR <= 8% after enough follows, no-followable-profile signals,
-canonical mismatch reconciliation, auto-archive policy, client dashboard sync
-and Target Discovery IA/MCP.
+CT smoke cleanup must be id-scoped. `metadata_safe.source` values such as
+`target_add_bulk` and `target_verify_batch` are shared functional labels, not
+unique smoke identifiers. Collect explicit smoke `account_id`, `target_id`,
+`job_id` and `batch_id` values during the smoke, then clean only those ids plus
+the strict smoke account/username with `created_at` as a secondary guard. If
+audit rows are treated as immutable, leave smoke audit rows behind rather than
+deleting by source alone.
+
+CT-2 staging incident: the first audit cleanup predicate was too broad because
+it used shared `metadata_safe.source` values. Probable impact is audit-only,
+around 25 `ct_target_audit_events` bulk/verify rows. Postchecks did not show
+real non-smoke targets or jobs deleted/modified. Exact deleted audit row
+identities are not recoverable from the current DB without PITR/logs.
+
+Future CT quality remains out of scope here: durable provider cache/quota
+tracking beyond the current in-runtime guardrails, cron scheduling, FBR <= 8%
+after enough follows, no-followable-profile signals, canonical mismatch
+reconciliation, auto-archive policy, client dashboard sync and Target Discovery
+IA/MCP.
 
 Full Add Profile direction:
 

@@ -1133,13 +1133,14 @@ Guardrails:
   `latency_ms`, provider mode/status/reason. No raw response, full URL, API key,
   headers, cookies, sessions or secrets are logged or stored.
 
-Future CT bulk direction remains unchanged: normalize/dedupe input, batch into a
-queue, run provider lookup through cache/throttle, persist auditable statuses
-(`pending_verification`, `valid`, `rejected_not_found`,
-`rejected_low_followers`, `rejected_verified`, `rejected_private`,
-`review_provider_unavailable`, `review_username_changed`, `duplicate`,
-`archived`) and never archive/reject permanently on `rate_limited` or transient
-provider failures.
+CT-2 adds the first durable CT bulk verification queue. Bulk import still does
+not fan out SearchApi/provider calls during form submission; accepted rows are
+inserted as `pending_verification` and receive one
+`ct_target_verification_jobs` row. The dashboard batch route claims a small
+number of jobs, runs provider lookup through the existing cache/throttle layer,
+updates `ig_targets`, and writes safe audit events. Transient
+`rate_limited`/`unavailable`/`provider_error`/provider-not-configured paths are
+retried with bounded backoff and never become `rejected_not_found`.
 
 ## Backend Patch CT-1 — Target Account Add / Bulk Verification Foundation
 
@@ -1168,12 +1169,37 @@ Behavior:
 - bulk import classifies every line as pending, invalid syntax,
   duplicate-in-batch or duplicate-existing and inserts only accepted rows as
   `pending_verification`;
-- bulk does not call SearchApi per row. Future CT bulk needs durable queue,
-  durable cache, quota tracking and retry/reconciliation states.
+- CT-2 creates durable verification jobs for accepted bulk rows only. Invalid
+  syntax and duplicates do not receive jobs;
+- `POST /api/instagram-dashboard/targets/verify-batch` processes a small
+  service-role/admin-safe batch, applies Quality V1, schedules bounded retries
+  for transient provider failures, and emits safe aggregate results;
+- bulk/job verification does not activate SearchApi production. Provider mode
+  remains controlled by existing safe environment configuration.
+
+CT smoke cleanup guardrail:
+
+- never delete `ct_target_audit_events` by `metadata_safe.source` alone. Values
+  such as `target_add_bulk` and `target_verify_batch` identify functional write
+  paths, not a unique smoke run;
+- every CT smoke must collect its explicit smoke `account_id`, inserted
+  `target_id` values, queued `job_id` values and `batch_id` values before
+  cleanup. Also scope to the strict smoke account/username. Use `created_at`
+  only as a secondary guard;
+- audit cleanup may delete only rows matching those explicit smoke ids plus the
+  expected operation/account. If audit immutability is safer, leave smoke audit
+  rows in place instead of broad-deleting shared source values.
+
+CT-2 staging incident: the first audit cleanup used a predicate that was too
+broad because it matched shared `metadata_safe.source` values. Probable impact
+is audit-only: around 25 `ct_target_audit_events` bulk/verify rows were removed.
+Postchecks did not show real non-smoke targets or jobs deleted/modified by that
+predicate. Exact deleted audit row identities are not recoverable from the
+current DB without PITR/logs, so no blind replay should be attempted.
 
 Out of scope: worker Python, follow engine, runtime Instagram, SearchApi
 production activation, Vercel prod env, hard-delete CT, FBR optimization,
-Target Discovery IA/MCP and raw provider payload storage.
+Target Discovery IA/MCP, cron scheduling and raw provider payload storage.
 
 Entry 2D-2B deliberately does not add dashboard UI, dashboard actions,
 provisioning/login workers, secret reads for workers, or credential incidents.
