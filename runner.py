@@ -38,6 +38,7 @@ import config
 import runtime_events
 import runtime_heartbeat
 import supabase_client
+from runtime_caps import resolve_follow_runtime_limits
 from assignment_dispatch_resolver import (
     resolve_account_assignment_runtime_context,
     sensitive_log_fields,
@@ -611,6 +612,11 @@ def _session_follow_quota_exceeded() -> bool:
     if not pos:
         return False
     return _SESSION_COUNTERS["follows"] >= min(pos)
+
+
+def _runtime_follow_cap_exceeded() -> bool:
+    cap = int(getattr(config, "FOLLOW_MAX_PER_RUN", 5) or 0)
+    return cap > 0 and _RUNTIME_FOLLOW_COUNT >= cap
 
 
 def _session_total_interactions_cap_exceeded() -> bool:
@@ -6001,12 +6007,25 @@ def _run_followers_list_engine_session(
             },
         )
 
-    max_iter = int(getattr(config, "FOLLOWERS_LIST_MAX_ITERATIONS_PER_RUN", 35))
-    _follow_max_per_run = int(getattr(config, "FOLLOW_MAX_PER_RUN", 5))
+    follow_limits = resolve_follow_runtime_limits()
+    max_iter = int(follow_limits["effective_iterations_max"])
+    _follow_max_per_run = int(follow_limits["effective_follow_max"])
     _followers_iter_attr = getattr(config, "FOLLOWERS_LIST_MAX_ITERATIONS_PER_RUN", None)
     _publish_followers_session_summary(
         follows_goal_effective=max_iter,
         follow_stop_reason="",
+    )
+    log(
+        "info",
+        "follow_effective_limits_resolved",
+        account_id=str(account_id or ""),
+        run_id=str(run_id or ""),
+        code_default_cap=follow_limits["code_default_follow_max"],
+        code_default_iterations_cap=follow_limits["code_default_iterations_max"],
+        env_config_cap=follow_limits["follow_cap_label"],
+        env_config_iterations_cap=follow_limits["iterations_cap_label"],
+        effective_follow_max=_follow_max_per_run,
+        effective_iterations_max=max_iter,
     )
     log(
         "info",
@@ -9696,23 +9715,26 @@ def _run_followers_list_engine_session(
                             )
                         return 42
                     continue
+                runtime_follow_cap_hit = _runtime_follow_cap_exceeded()
                 if (
-                    _session_follow_quota_exceeded()
+                    runtime_follow_cap_hit
+                    or _session_follow_quota_exceeded()
                     or _session_total_interactions_cap_exceeded()
                     or _session_successful_interactions_cap_exceeded()
                 ):
+                    quota_reason = "follow_max_per_run" if runtime_follow_cap_hit else "session_quota"
                     log(
                         "warning",
                         "social_memory_follow_blocked",
                         follower_username=follower_un,
                         source_profile_username=source_profile_username,
-                        reason="session_quota",
+                        reason=quota_reason,
                     )
                     _eng_log(
                         "social_memory_follow_blocked",
                         "blocked",
-                        "session_quota",
-                        {"follower_username": follower_un, "reason": "session_quota"},
+                        quota_reason,
+                        {"follower_username": follower_un, "reason": quota_reason},
                     )
                     _RUNTIME_INTERACTED_USERNAMES.add(fkey)
                     _RUNTIME_SKIPPED_USERNAMES.add(fkey)

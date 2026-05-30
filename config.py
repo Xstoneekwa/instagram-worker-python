@@ -240,7 +240,7 @@ ENABLE_REAL_FOLLOW = True
 # After a successful follow, open DM from the same profile (True) or return to search and exit (False).
 FOLLOW_THEN_DM = False
 FOLLOW_COOLDOWN_HOURS = 999999
-FOLLOW_MAX_PER_RUN = 2
+FOLLOW_MAX_PER_RUN = max(0, _env_int("FOLLOW_MAX_PER_RUN", 2))
 FOLLOW_VERIFY_TIMEOUT_MS = 4000
 # Max wait to locate a tappable Follow / Suivre control on profile header (seconds).
 FOLLOW_BUTTON_WAIT_S = 4.0
@@ -249,7 +249,7 @@ FOLLOW_BUTTON_WAIT_S = 4.0
 ENABLE_FOLLOWERS_LIST_ENGINE = True
 # Source profile handle to open (empty = first CLI / queue target username is the source profile only for this mode).
 FOLLOWERS_SOURCE_USERNAME = "mythyllus"
-FOLLOWERS_LIST_MAX_ITERATIONS_PER_RUN = 5
+FOLLOWERS_LIST_MAX_ITERATIONS_PER_RUN = max(0, _env_int("FOLLOWERS_LIST_MAX_ITERATIONS_PER_RUN", 5))
 FOLLOWERS_LIST_OPEN_WAIT_S = 4.0
 FOLLOWERS_LIST_RETURN_MAX_RETRIES = 2
 # Followers Entry Engine V2: hybrid followers-stat candidates, no coordinate fallback drift; force-stop on hard failure.
@@ -572,7 +572,7 @@ DM_SENDER_REAL_SEND_ENABLED = os.getenv(
     "DM_SENDER_REAL_SEND_ENABLED",
     "false"
 ).lower() == "true"
-WELCOME_SESSION_SEND_MAX_JOBS = 3
+WELCOME_SESSION_SEND_MAX_JOBS = max(0, _env_int("WELCOME_SESSION_SEND_MAX_JOBS", 3))
 # V4.5 Welcome list-native sender (Followers row → profile → DM, no global Search)
 WELCOME_LIST_SENDER_MAX_SCROLL_FIND = 3
 WELCOME_LIST_SENDER_SCROLL_SETTLE_S = 0.45

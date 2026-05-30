@@ -15,6 +15,7 @@ import config
 import supabase_client
 from dm_sender_engine import _resolve_dm_sender_real_send_enabled
 from logs import log
+from runtime_caps import resolve_welcome_send_limits
 from welcome_list_sender import run_welcome_list_sender
 from welcome_scan_producer import get_last_welcome_scan_summary, run_welcome_scan_producer
 
@@ -63,7 +64,7 @@ def run_welcome_session_send(
     t0 = time.perf_counter()
     aid = str(account_id or "").strip()
     uname = str(account_username or "").strip()
-    env_max_jobs = max(0, int(getattr(config, "WELCOME_SESSION_SEND_MAX_JOBS", 3) or 3))
+    config_max_jobs = max(0, int(getattr(config, "WELCOME_SESSION_SEND_MAX_JOBS", 3)))
     try:
         settings = supabase_client.get_account_dm_settings(aid) or {}
     except Exception as exc:
@@ -73,7 +74,7 @@ def run_welcome_session_send(
     db_max_jobs = (
         _as_nonnegative_int(raw_db_max_jobs)
         if raw_db_max_jobs is not None and str(raw_db_max_jobs).strip() != ""
-        else env_max_jobs
+        else config_max_jobs
     )
     db_welcome_day_limit = _as_nonnegative_int(
         settings.get("welcome_per_day_limit") if settings else None,
@@ -92,27 +93,28 @@ def run_welcome_session_send(
     total_dm_sent_today = _as_nonnegative_int(counter.get("total_dm_sent_count"), 0)
     welcome_day_remaining_today = max(0, db_welcome_day_limit - welcome_sent_today)
     total_dm_day_remaining_today = max(0, db_total_dm_day_limit - total_dm_sent_today)
-    max_jobs = min(
-        db_max_jobs,
-        env_max_jobs,
-        welcome_day_remaining_today,
-        total_dm_day_remaining_today,
+    welcome_limits = resolve_welcome_send_limits(
+        db_welcome_per_session_limit=db_max_jobs,
+        welcome_day_remaining_today=welcome_day_remaining_today,
+        total_dm_day_remaining_today=total_dm_day_remaining_today,
     )
+    max_jobs = int(welcome_limits["effective_welcome_send_max"])
     log(
         "info",
         "welcome_effective_limits_resolved",
         account_id=aid,
         run_id=run_id,
-        db_welcome_per_session_limit=db_max_jobs,
+        db_welcome_per_session_limit=welcome_limits["db_welcome_per_session_limit"],
         db_welcome_per_day_limit=db_welcome_day_limit,
         db_total_dm_per_day_limit=db_total_dm_day_limit,
         welcome_sent_today=welcome_sent_today,
         total_dm_sent_today=total_dm_sent_today,
-        welcome_day_remaining_today=welcome_day_remaining_today,
-        total_dm_day_remaining_today=total_dm_day_remaining_today,
-        env_welcome_send_max_jobs=env_max_jobs,
+        welcome_day_remaining_today=welcome_limits["welcome_day_remaining_today"],
+        total_dm_day_remaining_today=welcome_limits["total_dm_day_remaining_today"],
+        hard_cap_present=welcome_limits["hard_cap_present"],
+        hard_cap_label=welcome_limits["hard_cap_label"],
         effective_welcome_send_max=max_jobs,
-        source="min(db_session,env_hard_cap,db_day_remaining,total_dm_day_remaining)",
+        source=welcome_limits["source"],
     )
 
     log(

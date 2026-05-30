@@ -783,15 +783,15 @@ def _follow_to_unfollow_real_skip_reason(
         return "missing_account_context"
     if not bool(gate.get("follow_exit_code_allowed")):
         return str(gate.get("follow_exit_code_block_reason") or "follow_exit_code_not_allowed_h3_real")
-    if not bool(diagnostic.get("handoff_would_run")):
-        return str(diagnostic.get("handoff_skip_reason") or "handoff_gates_not_met")
     if not bool(diagnostic.get("unfollow_enabled")):
         return "unfollow_disabled"
     mode = str(diagnostic.get("unfollow_mode") or "")
     if mode not in UNFOLLOW_MODES_DB_STRICT:
-        return "unfollow_mode_not_supported_for_h3_real"
+        return "unfollow_skipped_mode_not_supported_for_h3_real"
     if not bool(diagnostic.get("has_pending_unfollow")):
-        return "no_pending_unfollow"
+        return "unfollow_skipped_no_safe_candidate"
+    if not bool(diagnostic.get("handoff_would_run")):
+        return str(diagnostic.get("handoff_skip_reason") or "handoff_gates_not_met")
     if int(real_max_actions_effective) < 1:
         return "real_max_actions_invalid"
     return ""
@@ -839,9 +839,9 @@ def _evaluate_h3_follow_exit_code_gate(
         blockers.append("unfollow_disabled")
     mode = str(diagnostic.get("unfollow_mode") or "")
     if mode not in UNFOLLOW_MODES_DB_STRICT:
-        blockers.append("unfollow_mode_not_supported_for_h3_real")
+        blockers.append("unfollow_skipped_mode_not_supported_for_h3_real")
     if int(diagnostic.get("pending_unfollow_count") or 0) <= 0:
-        blockers.append("no_pending_unfollow")
+        blockers.append("unfollow_skipped_no_safe_candidate")
     if int(real_max_actions_effective) < 1:
         blockers.append("real_max_actions_invalid")
 
