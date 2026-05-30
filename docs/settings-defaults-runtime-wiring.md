@@ -189,6 +189,7 @@ Product defaults to encode in package/preset resolvers:
 | Start run | POST `/runs/start` with `account_session` | yes | keep route; add preset preflight | keep |
 | Stop run | POST `/stop` | yes | keep; audited dashboard action later | keep |
 | Welcome DM enabled | legacy `welcome_dm_enabled` in `ig_account_settings` | no | `ig_account_dm_settings.welcome_enabled` via domain API | wire |
+| Welcome DM message/template | legacy `welcome_dm_message` in `ig_account_settings` | no | `ig_dm_templates` + `welcome_template_id` via shared client/admin template API | editable after domain API |
 | Welcome DM real-send | env only | yes | status from env/health; not normal setting | read-only ops |
 | Welcome cap/session | legacy `max_dm_per_run` conflates DM domains | no direct | `welcome_per_session_limit` + hard cap | wire/split |
 | Follow enabled | legacy `follow_enabled` | no proven worker gate | package entitlement + follow preset | hide until wired |
@@ -199,6 +200,7 @@ Product defaults to encode in package/preset resolvers:
 | Unfollow real handoff | env only | yes | `ACCOUNT_SESSION_FOLLOW_TO_UNFOLLOW_REAL_ENABLED` status/preflight | read-only ops + preflight |
 | Unfollow cap | legacy fields | partial/no | `unfollow_per_session_limit`, `unfollow_per_day_limit`, handoff caps | wire |
 | Outreach enabled | legacy `cold_dm_enabled` | no | `ig_account_dm_settings.outreach_enabled` | wire with entitlement |
+| Outreach DM message/template | legacy `cold_dm_message` in `ig_account_settings` | no | `ig_dm_templates` + `default_outreach_template_id` via shared client/admin template API | editable after entitlement/domain API |
 | Outreach real-send | env only | yes | status from env/health | read-only ops |
 | Outreach standalone | run type exists | yes via dispatcher allowed run types | package/add-on entitlement + allowed run type | preset |
 | Mini-run caps required | frontend env | yes frontend only | keep env preflight | ops-only |
@@ -842,16 +844,27 @@ P0 rule: no action field should appear active unless its env/domain/package gate
 
 | UI field | type | current source / table | route/API | target runtime source | worker consumer | package / entitlement | status | priority | action |
 |---|---|---|---|---|---|---|---|---|---|
-| Welcome DM enabled | toggle | `ig_account_settings.welcome_dm_enabled` | `/settings` | `ig_account_dm_settings.welcome_enabled` | account/welcome orchestrators | Pro/Premium Welcome | replace by preset | P0 | Welcome ON preset; must not touch Outreach. |
-| Welcome DM message | textarea | `ig_account_settings.welcome_dm_message` | `/settings` | `ig_dm_templates` + `welcome_template_id` | DM sender | Pro/Premium Welcome | needs wiring | P0 | Split template API and preflight `welcome_template_missing`. |
-| Cold DM enabled | toggle | `ig_account_settings.cold_dm_enabled` | `/settings` | `ig_account_dm_settings.outreach_enabled` + entitlement | Outreach orchestrator/Edge | Outreach add-on/standalone | replace by preset | P0 | Outreach ON preset; independent from Welcome. |
-| Cold DM message | textarea | `ig_account_settings.cold_dm_message` | `/settings` | `ig_dm_templates` + `default_outreach_template_id` | Outreach Edge/orchestrator | Outreach add-on/standalone | needs wiring | P0 | Split Outreach template API. |
-| Max DMs per run | input | `ig_account_settings.max_dm_per_run` | `/settings` | separate Welcome/Outreach caps | DM sender/orchestrators | Welcome/Outreach | no-go | P0 | Replace with domain-specific effective caps. |
+| Welcome DM enabled | toggle | `ig_account_settings.welcome_dm_enabled` | `/settings` | `ig_account_dm_settings.welcome_enabled` | account/welcome orchestrators | Pro/Premium Welcome | target editable | P0 | Editable through Welcome domain API/preset; must not touch Outreach. |
+| Welcome DM message/template | textarea/template selector | `ig_account_settings.welcome_dm_message` | `/settings` | `ig_dm_templates` + `welcome_template_id` | DM sender | Pro/Premium Welcome | target editable | P0 | Admin/client write same template source; preflight `welcome_template_missing`. |
+| Outreach DM enabled | toggle | `ig_account_settings.cold_dm_enabled` | `/settings` | `ig_account_dm_settings.outreach_enabled` + entitlement | Outreach orchestrator/Edge | Outreach add-on/standalone | target editable | P0 | Editable through Outreach domain API/preset only when entitlement allows; independent from Welcome. |
+| Outreach DM message/template | textarea/template selector | `ig_account_settings.cold_dm_message` | `/settings` | `ig_dm_templates` + `default_outreach_template_id` | Outreach Edge/orchestrator | Outreach add-on/standalone | target editable | P0 | Admin/client write same Outreach template source; reject without entitlement or valid template. |
+| Welcome cap/session | input | legacy shared `ig_account_settings.max_dm_per_run` | `/settings` | `ig_account_dm_settings.welcome_per_session_limit` + effective cap resolver | Welcome orchestrators | Welcome | target editable if admin-configurable | P0 | Split from Outreach; save through domain API and show effective cap. |
+| Outreach session/day caps | inputs | legacy shared `ig_account_settings.max_dm_per_run` | `/settings` | `ig_account_dm_settings.outreach_per_session_limit`, `outreach_per_day_limit` + effective cap resolver | Outreach orchestrator | Outreach add-on/standalone | target editable if admin-configurable | P0 | Split from Welcome; enforce package/add-on caps. |
+| Legacy max DMs per run | input | `ig_account_settings.max_dm_per_run` | `/settings` | none as shared domain control | no valid shared consumer | legacy | no-go | P0 | Keep read-only legacy or hide; never use as common Welcome + Outreach cap. |
 | Max consecutive DMs | input | `ig_account_settings.max_consecutive_dms` | `/settings` | DM pacing policy | not proven as runtime cap | DM packages | db_only | P1 | Keep admin draft until pacing consumer proven. |
 | Check chat before welcoming | toggle | `ig_account_settings.check_chat_before_welcoming` | `/settings` | `ig_account_dm_settings.check_chat_before_welcome` | DM sender | Welcome | needs wiring | P1 | Wire to domain setting. |
 | Safe review mode | toggle | `ig_account_settings.safe_review_mode` | `/settings` | none; ops/status only | no real-send gate | legacy | legacy | P0 | Do not present as real-send protection. |
 
 DM product rule: Welcome and Outreach must remain separate. `WELCOME_DM_REAL_SEND_ENABLED` and `OUTREACH_DM_REAL_SEND_ENABLED` are ops-only status gates; neither dashboard toggle may imply them.
+
+DM drawer target state:
+
+- Current read-only runtime projection is an acceptable DM-1 transitional state only. It is not the final product state for useful DM controls.
+- Final admin dashboard must let an authorized admin see, edit, save and apply the same Welcome/Outreach messages and toggles that the client dashboard uses.
+- Client dashboard, admin dashboard and BotApp must share one source of truth: `ig_account_dm_settings` for toggles/caps and `ig_dm_templates` for Welcome/Outreach message bodies. No divergent admin-only legacy copy is allowed.
+- Save must return only as a real domain save: update `ig_account_dm_settings`, upsert/version the selected `ig_dm_templates` row, audit actor/surface/field/old-new redacted summary, and make the effect visible to the next RunControl preflight and worker run.
+- Save must reject invalid templates, missing Outreach entitlement, package cap violations, or cross-domain writes that would mutate Welcome while editing Outreach or mutate Outreach while editing Welcome.
+- Ops-only/read-only fields can remain visible as projections: Welcome real-send status, Outreach real-send status, legacy `DM_SENDER_REAL_SEND_ENABLED`, legacy shared `max_dm_per_run`, and Outreach entitlement status.
 
 ### 5. Followback
 
@@ -959,6 +972,34 @@ Advanced rule: projections/read-only only. No field here should be a fake runtim
 | Mini-run safety preset | no product writes; ops readiness record/status | mini caps, allowed run types, dispatcher launch | 1 Welcome, 1 Follow, 1 Unfollow when required | relevant active domains | `mini_run_welcome_cap_unproven`, `mini_run_follow_cap_unproven`, `mini_run_unfollow_cap_unproven` |
 | Full Cycle preset | compose Welcome + Follow + Unfollow; never include Outreach unless add-on active | all active domain gates | min(package, domain, env, remaining quota) | follow, unfollow, optional welcome | first failing domain reason |
 
+### P0 DM Domain Presets - Implementation Notes
+
+Welcome and Outreach remain separate product/runtime domains:
+
+- `Welcome DM ON`: requires `ig_account_dm_settings.welcome_enabled=true`, an active Welcome template (`welcome_template_id` or active default `template_type='welcome'`), `WELCOME_DM_REAL_SEND_ENABLED=true` for real manual starts, and an effective Welcome cap >= 1. It never toggles or requires Outreach.
+- `Welcome DM OFF`: `welcome_enabled=false`; account sessions do not require a Welcome template, Welcome real-send, or Welcome caps. It never modifies Outreach.
+- `Outreach ON`: requires active Outreach entitlement, `ig_account_dm_settings.outreach_enabled=true`, an active Outreach template (`default_outreach_template_id` or active default `template_type='outreach'`), `OUTREACH_DM_REAL_SEND_ENABLED=true`, and Outreach session/day caps >= 1. It never depends on Welcome.
+- `Outreach OFF`: `outreach_enabled=false` blocks `outreach_session` starts and sends no Outreach. It must not delete pending jobs unless a separate cleanup policy is explicitly requested, and it never modifies Welcome.
+
+Legacy `max_dm_per_run`, `send_enabled`, `dry_run_enabled`, and `DM_SENDER_REAL_SEND_ENABLED` are not domain controls. Dashboard state should expose them only as read-only legacy/ops signals or hide them after operator validation. Welcome caps resolve from `welcome_per_session_limit` plus worker hard cap; Outreach caps resolve from `outreach_per_session_limit`, `outreach_per_day_limit`, total DM quota, and worker hard caps.
+
+### P0 DM Drawer Delivery Phases
+
+| phase | purpose | expected state |
+|---|---|---|
+| DM-1 read-only projection | expose current runtime truth without pretending legacy fields are live controls | Welcome/Outreach enabled status, template status, effective caps, real-send status, entitlement status shown read-only |
+| DM-2 domain read/write API | replace legacy `/settings` writes with domain writes | admin/client-safe API writes `ig_account_dm_settings` independently for Welcome and Outreach, with entitlement/package validation |
+| DM-3 editable messages/templates + real Save | make the useful DM fields editable again through the domain API | Welcome/Outreach message/template editors write `ig_dm_templates`, maintain selected template ids, audit changes, and avoid cross-domain mutation |
+| DM-4 RunControl preflight on true values | block starts from real runtime sources | `/runs/start` consumes `ig_account_dm_settings`, `ig_dm_templates`, entitlements, real-send env status, and effective caps |
+| DM-5 client/admin sync + audit/versioning | guarantee all surfaces operate on one source of truth | client dashboard, admin dashboard and BotApp read/write the same rows; template edits are versioned or auditable with actor/surface/redacted old-new summaries |
+
+DM Save target contract:
+
+- `Welcome DM enabled`, Welcome message/template and Welcome session cap are editable in the final target state through the Welcome domain API.
+- `Outreach DM enabled`, Outreach message/template and Outreach session/day caps are editable in the final target state through the Outreach domain API when entitlement/package rules allow it.
+- Real-send status, legacy global flags, legacy shared caps and entitlement status remain read-only projections or are hidden.
+- The Save button must not be reintroduced as the legacy draft save for DM. It must commit to the true runtime tables and make the next preflight reflect the saved values.
+
 ## Required APIs / Domain Routes
 
 | API / resolver | purpose | priority |
@@ -994,7 +1035,7 @@ Fields classified by tab:
 - General: 11 fields.
 - Schedule: 7 fields.
 - Actions: 7 fields.
-- DM: 8 fields.
+- DM: 8 legacy fields classified; target state splits them into editable Welcome/Outreach domain controls plus read-only ops projections.
 - Followback: 13 fields.
 - Sources: 5 fields.
 - Filters: 17 fields.
@@ -1005,9 +1046,9 @@ Total: 88 fields.
 
 Fields to keep visible: identity/status projections, package/entitlement summary, RunControl status, effective caps, target readiness, credential/action safe status.
 
-Fields to replace by presets: package selection, Welcome ON, Outreach ON, Follow ON, Unfollow mode, Full Cycle, mini-run safety.
+Fields to replace by presets/domain APIs: package selection, Welcome ON/OFF, editable Welcome template/message, Outreach ON/OFF, editable Outreach template/message, Follow ON, Unfollow mode, Full Cycle, mini-run safety.
 
-Fields to keep read-only: device/clone/app package status, runtime Unfollow state, Advanced projections, dispatcher/real-send/env gate status.
+Fields to keep read-only: device/clone/app package status, runtime Unfollow state until preset API exists, Advanced projections, dispatcher/real-send/env gate status, DM legacy global/shared controls, entitlement status projections.
 
 Hide/remove candidates after operator validation: legacy draft fields that are not consumed, legacy source accounts, isolated destructive toggles, legacy real-send substitutes, duplicate filter fields.
 
