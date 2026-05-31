@@ -703,16 +703,15 @@ For Followback/Unfollow today:
 
 - `Unfollow cap/session` writes `ig_account_unfollow_settings.unfollow_per_session_limit`.
 - `Unfollow cap/day` writes `ig_account_unfollow_settings.unfollow_per_day_limit`.
-- `Effective cap now` is read-only and resolves from `min(unfollow_per_session_limit, remaining day quota, account-session handoff real max, account-session handoff hard max, runtime gates)`.
-- `Runtime safety cap` is read-only ops status in the admin drawer. It is not client-editable.
+- `Effective cap now` is read-only and resolves from `min(unfollow_per_session_limit, remaining day quota, runtime mode cap when active, runtime gates)`.
+- `Runtime cap mode` writes `ig_account_unfollow_settings.runtime_cap_mode` with values `prod_normal`, `mini_run`, or `incident_safety`.
+- `Runtime safety cap` writes `ig_account_unfollow_settings.runtime_safety_cap`; it is used only in `mini_run` or `incident_safety`.
 - `Limiting reason` must be visible when the effective cap is lower than the configured session cap.
 
 Current Unfollow runtime caps:
 
-- Standalone `unfollow_session`: `UNFOLLOW_SESSION_REAL_ACTION_MAX_PER_RUN`, default `1`, clamped to `10` in `config.py`.
-- Account-session H3 handoff: `ACCOUNT_SESSION_FOLLOW_TO_UNFOLLOW_REAL_MAX_ACTIONS`, default `1`.
-- Account-session H3 hard max: `ACCOUNT_SESSION_FOLLOW_TO_UNFOLLOW_REAL_HARD_MAX`, default `3`, clamped to `10` in `config.py`.
-- `/runs/start` and the Followback drawer should mirror these worker defaults when frontend env mirrors are absent, then apply any `INSTAGRAM_RUN_CONTROL_*` override if configured.
+- In `prod_normal`, standalone `unfollow_session`, account-session H3, `/runs/start`, and the Followback drawer align to the Supabase Unfollow domain caps and daily remaining quota. Env mini-run values are not allowed to silently lower production caps.
+- In `mini_run` or `incident_safety`, runtime cap resolution uses `runtime_safety_cap`; when that DB value is missing, env values remain fallback/bootstrap/emergency caps.
 
 | cap | business cap Supabase | package cap | ops hard cap | effective cap / limiting reason | editable by client? | editable by admin? | ops-only? |
 |---|---|---|---|---|---|---|---|
@@ -722,10 +721,10 @@ Current Unfollow runtime caps:
 | Welcome DM cap/day | `ig_account_dm_settings.welcome_per_day_limit` | package Welcome daily allowance | none direct; total DM/runtime gates still apply | min(domain, package, daily remaining, total DM remaining) | no/client later by entitlement | yes via Welcome domain | no |
 | Outreach cap/session | `ig_account_dm_settings.outreach_per_session_limit` | Outreach add-on allowance | `OUTREACH_HARD_MAX_PER_SESSION` | min(domain, package, env, daily remaining, real-send gate) | no/client later by entitlement | yes via Outreach domain | env/status only |
 | Outreach cap/day | `ig_account_dm_settings.outreach_per_day_limit` | Outreach add-on daily allowance | `OUTREACH_HARD_MAX_PER_DAY` | min(domain, package, env, daily remaining) | no/client later by entitlement | yes via Outreach domain | env/status only |
-| Unfollow cap/session | `ig_account_unfollow_settings.unfollow_per_session_limit` | package Unfollow allowance pending resolver | `UNFOLLOW_SESSION_REAL_ACTION_MAX_PER_RUN` for standalone; `ACCOUNT_SESSION_FOLLOW_TO_UNFOLLOW_REAL_MAX_ACTIONS` + `ACCOUNT_SESSION_FOLLOW_TO_UNFOLLOW_REAL_HARD_MAX` for H3 | min(domain, package when wired, remaining day quota, runtime safety cap, handoff/runtime gates) | no/client later by entitlement | yes via Unfollow domain | hard caps ops-only |
+| Unfollow cap/session | `ig_account_unfollow_settings.unfollow_per_session_limit` | package Unfollow allowance pending resolver | `runtime_safety_cap` only in `mini_run`/`incident_safety`; env fallback if DB safety cap missing | min(domain, package when wired, remaining day quota, runtime mode cap when active, handoff/runtime gates) | no/client later by entitlement | yes via Unfollow domain | no hidden prod cap |
 | Unfollow cap/day | `ig_account_unfollow_settings.unfollow_per_day_limit` | package Unfollow daily allowance pending resolver | none direct; runtime safety cap still applies per run | min(domain, package when wired, daily remaining) | no/client later by entitlement | yes via Unfollow domain | no |
 
-Future admin/ops hard-cap editing must use an ops-only surface with permission checks, audit payload, explicit reason, and no raw secret/env exposure. The current patch only exposes sanitized read-only cap status and limiting reason.
+Admin/ops runtime cap editing now starts in the Unfollow domain with sanitized fields and audit payloads. A broader ops-only preset surface can still add actor-scoped reasons, approvals, and incident expiry timestamps later.
 
 ## Unfollow Caps, Hard Caps, Quota Resume
 
@@ -752,21 +751,23 @@ Current resume and quota behavior:
 - `account_session_manual_resume.py` also remains a preview. It explicitly marks quota overrides as planned metadata because runtime flags are not wired yet.
 - Therefore, current protection against doing 120 + 120 on the same UTC day comes from the next worker run recalculating `done_today` from Supabase before acting, not from an active resume override.
 
-Current P0 gap:
+Current production behavior after the ops/admin cap patch:
 
-- H3 is currently capped by `ACCOUNT_SESSION_FOLLOW_TO_UNFOLLOW_REAL_MAX_ACTIONS` default `1` and `ACCOUNT_SESSION_FOLLOW_TO_UNFOLLOW_REAL_HARD_MAX` default `3`, clamped to `10`.
-- Standalone `unfollow_session` is currently capped by `UNFOLLOW_SESSION_REAL_ACTION_MAX_PER_RUN` default `1`, clamped to `10`.
-- These are mini-run/safety defaults. They are not compatible with production packages 80/120 if left as the normal mode.
-- The dashboard must keep showing `limited_by_mini_run_mode` or `limited_by_safety_cap` until an ops/admin control, config profile, or audited runtime settings source raises the runtime safety cap to match package policy.
+- `prod_normal` is the default runtime cap mode.
+- H3 account-session handoff and standalone `unfollow_session` no longer treat `ACCOUNT_SESSION_FOLLOW_TO_UNFOLLOW_REAL_MAX_ACTIONS=1`, `ACCOUNT_SESSION_FOLLOW_TO_UNFOLLOW_REAL_HARD_MAX=3`, or `UNFOLLOW_SESSION_REAL_ACTION_MAX_PER_RUN=1` as production truth.
+- In `prod_normal`, Follow-to-Unfollow handoff is enabled from valid Supabase Unfollow domain settings (`unfollow_enabled=true`, supported mode, positive day/session caps). `ACCOUNT_SESSION_FOLLOW_TO_UNFOLLOW_REAL_ENABLED` remains a mini-run/incident fallback gate, not hidden production truth.
+- `mini_run` intentionally lowers runtime cap using `ig_account_unfollow_settings.runtime_safety_cap` (for example `1`).
+- `incident_safety` uses the same DB safety cap for temporary ops reductions.
+- Env caps remain fallback/bootstrap/emergency when mini/safety mode is active and no DB safety cap is set.
+- The dashboard should show `limited_by_mini_run_mode` or `limited_by_safety_cap` only when the selected runtime mode is explicitly mini/safety or daily remaining is lower.
 
-Prod-ready design target:
+Remaining design target:
 
-1. Add an ops-only runtime-cap profile source, preferably a DB table or RPC-backed settings model rather than raw client-editable env.
-2. Model profiles explicitly: `mini_run`, `prod_normal`, `incident_safety`.
-3. Resolve Unfollow effective cap from `min(account cap/session, package day remaining, ops runtime cap if active, safe candidates, runtime gates)`.
-4. Make `/runs/start` and worker resolve caps through the same helper/source; env becomes bootstrap fallback or emergency override, not hidden business truth.
-5. Audit all admin/ops changes with actor, reason, old value, new value, profile, and timestamp.
-6. Keep client/customer editing limited to business caps allowed by entitlement/package. Clients must not edit ops hard caps.
+1. Move broader ops presets to an ops-only DB table or RPC-backed model if multiple domains need shared profile management.
+2. Add explicit package resolver/preset rows for Growth/Pro/Premium instead of inferring package from runtime subscription profiles.
+3. Include safe candidate availability in `/runs/start` where cheap enough, or report it as a post-start worker limiting reason.
+4. Wire active auto-restart scheduling so resume runs enqueue automatically with `remaining_today` semantics; the worker already recalculates daily remaining before acting.
+5. Keep client/customer editing limited to business caps allowed by entitlement/package.
 
 ## Legacy / DB-Only Fields
 
@@ -777,6 +778,24 @@ Fields that must not be treated as runtime truth:
 - `ig_account_filters.follow_private_profiles`; reconcile with `ig_account_follow_settings.dont_follow_private_accounts`.
 - Dashboard templates under `/templates*`; these replay draft settings and are not runtime package presets.
 - Device raw/internal columns; keep safe labels only.
+
+## Auto Restart Admin Tab V1
+
+The admin dashboard exposes an `Auto Restart` tab as a read-only/dry-run planning surface until the scheduler contract is fully wired.
+
+Current V1 contract:
+
+- `GET /api/instagram-dashboard/auto-restart/overview` reads existing Supabase sources and returns scheduler status, preview rules, candidates, quota remaining, safety gates, and last restart-like runtime events.
+- No `PATCH` route is active yet. Editable controls are disabled and labelled `configuration API pending`.
+- No run or `account_run_requests` row is created by the page or overview API.
+- Candidate planning uses the no-overrun rule: `planned_next_run_quota = min(session cap, day cap - done_today)` per service.
+- Follow and Unfollow daily remaining use account/domain caps plus `ig_interacted_users` daily success markers.
+- Welcome and Outreach preview currently derive daily counts from DM markers in `ig_interacted_users`; a dedicated DM event counter remains recommended before active scheduling.
+- Active mode requires a persisted settings source such as `auto_restart_settings`, a decision/audit sink such as `auto_restart_decisions` or structured `runtime_events`, idempotency keys, max restart counters, phone-rest checks, 6h session-window checks, and dispatcher/run-control gates.
+
+Required active-mode invariant:
+
+- Auto Restart must never restart the full daily quota. For example, if an account has `unfollow_per_day_limit=120` and `50` successful unfollows already counted today, the next planned run can request at most `70` Unfollow actions.
 
 ## `/runs/start` Global Preflight Plan
 
