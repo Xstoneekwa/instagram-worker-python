@@ -30,12 +30,22 @@ from unfollow_session_orchestrator import (
     run_unfollow_session,
 )
 from unfollow_eligibility_engine import plan_unfollow_targets
-from unfollow_settings import UNFOLLOW_MODES_DB_STRICT, load_unfollow_settings
+from unfollow_settings import UNFOLLOW_MODE_ANY, UNFOLLOW_MODES_DB_STRICT, load_unfollow_settings
 from welcome_list_sender import get_last_welcome_list_sender_summary
 from welcome_scan_producer import get_last_welcome_scan_summary
 from welcome_session_orchestrator import dispatch_welcome_session_send
 
 FollowEngineRunner = Callable[..., int]
+
+H3_SUPPORTED_UNFOLLOW_MODES = frozenset({*UNFOLLOW_MODES_DB_STRICT, UNFOLLOW_MODE_ANY})
+
+
+def _is_unfollow_any_mode(mode: str) -> bool:
+    return str(mode or "").strip().lower() == UNFOLLOW_MODE_ANY
+
+
+def _h3_supports_unfollow_mode(mode: str) -> bool:
+    return str(mode or "").strip().lower() in H3_SUPPORTED_UNFOLLOW_MODES
 
 
 def _welcome_session_status_label(
@@ -392,11 +402,23 @@ def _run_follow_to_unfollow_handoff_diagnostic(
         pending_unfollow_count = int(plan.get("candidates_count") or 0)
         plan_reason = str(plan.get("plan_reason") or "")
         mode = str(settings.mode or "")
+        is_unfollow_any = _is_unfollow_any_mode(mode)
+        has_pending_unfollow = (
+            pending_unfollow_count > 0
+            if not is_unfollow_any
+            else bool(settings.enabled)
+        )
+        pending_scope = (
+            "following_ui_safe_candidate_required"
+            if is_unfollow_any
+            else "probe_limit_1"
+        )
 
         summary.update(
             {
                 "pending_unfollow_count": pending_unfollow_count,
-                "has_pending_unfollow": pending_unfollow_count > 0,
+                "pending_unfollow_count_scope": pending_scope,
+                "has_pending_unfollow": has_pending_unfollow,
                 "unfollow_enabled": bool(settings.enabled),
                 "unfollow_mode": mode,
                 "unfollow_sort_mode": str(settings.sort_mode or ""),
@@ -410,13 +432,13 @@ def _run_follow_to_unfollow_handoff_diagnostic(
 
         if not bool(settings.enabled):
             skip_reasons.append("unfollow_disabled")
-        if mode not in UNFOLLOW_MODES_DB_STRICT:
+        if not _h3_supports_unfollow_mode(mode):
             skip_reasons.append(
                 "unfollow_mode_ui_dependent"
                 if mode.startswith("unfollow-any")
                 else "unfollow_mode_not_supported_offline"
             )
-        if pending_unfollow_count <= 0:
+        if not is_unfollow_any and pending_unfollow_count <= 0:
             skip_reasons.append("no_pending_unfollow")
 
         unique_skip_reasons: list[str] = []
@@ -629,6 +651,27 @@ def _real_summary_from_unfollow_summary(
     skip_reason: str = "",
 ) -> dict[str, Any]:
     gate = dict(follow_exit_gate or {})
+    mode = str(unfollow_summary.get("unfollow_mode") or "")
+    status = str(unfollow_summary.get("status") or "")
+    failure_reason = str(unfollow_summary.get("failure_reason") or "")
+    actions_sent = int(unfollow_summary.get("unfollow_actions_sent") or 0)
+    if _is_unfollow_any_mode(mode):
+        if actions_sent > 0:
+            skip_reason = "unfollow_any_executed"
+        elif failure_reason == "active_instagram_account_mismatch":
+            skip_reason = "unfollow_any_identity_guard_failed"
+        elif status in {
+            "no_visible_eligible_unfollow_target",
+            "no_more_following_rows",
+        }:
+            skip_reason = "unfollow_any_no_safe_candidate"
+            failure_reason = failure_reason or "unfollow_any_no_safe_candidate"
+        elif status in {"no_quota"} or failure_reason == "unfollow_day_limit_reached":
+            skip_reason = "unfollow_any_cap_exhausted"
+            failure_reason = failure_reason or "unfollow_any_cap_exhausted"
+        elif status in {"failed_open_following", "failed_surface"}:
+            skip_reason = "unfollow_any_surface_unavailable"
+            failure_reason = failure_reason or "unfollow_any_surface_unavailable"
     return {
         "enabled": bool(enabled),
         "executed": bool(executed),
@@ -644,7 +687,7 @@ def _real_summary_from_unfollow_summary(
         "visible_plan_matches_count": int(
             unfollow_summary.get("visible_plan_matches_count") or 0
         ),
-        "unfollow_actions_sent": int(unfollow_summary.get("unfollow_actions_sent") or 0),
+        "unfollow_actions_sent": actions_sent,
         "unfollow_actions_verified": int(
             unfollow_summary.get("unfollow_actions_verified") or 0
         ),
@@ -654,7 +697,7 @@ def _real_summary_from_unfollow_summary(
         "unfollow_results_persisted_count": int(
             unfollow_summary.get("unfollow_results_persisted_count") or 0
         ),
-        "failure_reason": str(unfollow_summary.get("failure_reason") or ""),
+        "failure_reason": failure_reason,
         "unfollow_total_ms": float(unfollow_summary.get("total_ms") or 0.0),
         "skip_reason": str(skip_reason or ""),
         "follow_exit_code_allowed": bool(gate.get("follow_exit_code_allowed")),
@@ -786,14 +829,15 @@ def _follow_to_unfollow_real_skip_reason(
     if not bool(diagnostic.get("unfollow_enabled")):
         return "unfollow_disabled"
     mode = str(diagnostic.get("unfollow_mode") or "")
-    if mode not in UNFOLLOW_MODES_DB_STRICT:
+    is_unfollow_any = _is_unfollow_any_mode(mode)
+    if not _h3_supports_unfollow_mode(mode):
         return "unfollow_skipped_mode_not_supported_for_h3_real"
-    if not bool(diagnostic.get("has_pending_unfollow")):
+    if int(real_max_actions_effective) < 1:
+        return "unfollow_any_cap_exhausted" if is_unfollow_any else "real_max_actions_invalid"
+    if not is_unfollow_any and not bool(diagnostic.get("has_pending_unfollow")):
         return "unfollow_skipped_no_safe_candidate"
     if not bool(diagnostic.get("handoff_would_run")):
         return str(diagnostic.get("handoff_skip_reason") or "handoff_gates_not_met")
-    if int(real_max_actions_effective) < 1:
-        return "real_max_actions_invalid"
     return ""
 
 
@@ -838,12 +882,13 @@ def _evaluate_h3_follow_exit_code_gate(
     if not bool(diagnostic.get("unfollow_enabled")):
         blockers.append("unfollow_disabled")
     mode = str(diagnostic.get("unfollow_mode") or "")
-    if mode not in UNFOLLOW_MODES_DB_STRICT:
+    is_unfollow_any = _is_unfollow_any_mode(mode)
+    if not _h3_supports_unfollow_mode(mode):
         blockers.append("unfollow_skipped_mode_not_supported_for_h3_real")
-    if int(diagnostic.get("pending_unfollow_count") or 0) <= 0:
+    if not is_unfollow_any and int(diagnostic.get("pending_unfollow_count") or 0) <= 0:
         blockers.append("unfollow_skipped_no_safe_candidate")
     if int(real_max_actions_effective) < 1:
-        blockers.append("real_max_actions_invalid")
+        blockers.append("unfollow_any_cap_exhausted" if is_unfollow_any else "real_max_actions_invalid")
 
     diagnostic_blob = " ".join(str(v).lower() for v in diagnostic.values())
     unsafe_markers = (
@@ -970,12 +1015,17 @@ def _run_follow_to_unfollow_real(
             run_id=run_id,
         )
         if not bool(surface_prep.get("surface_prep_ok")):
+            surface_skip_reason = (
+                "unfollow_any_surface_unavailable"
+                if _is_unfollow_any_mode(mode)
+                else "surface_prep_failed"
+            )
             return _skip_follow_to_unfollow_real(
                 account_id=aid,
                 account_username=uname,
                 run_id=run_id,
                 real_enabled=True,
-                skip_reason="surface_prep_failed",
+                skip_reason=surface_skip_reason,
                 diagnostic=diagnostic,
                 follow_exit_code=follow_exit_code,
                 real_max_actions_requested=real_max_requested,
@@ -1559,12 +1609,19 @@ def run_account_session(
                     diagnostic=follow_to_unfollow_diagnostic,
                 )
             else:
+                real_skip_reason = (
+                    "unfollow_any_handoff_disabled"
+                    if _is_unfollow_any_mode(
+                        str(follow_to_unfollow_diagnostic.get("unfollow_mode") or "")
+                    )
+                    else "real_handoff_disabled"
+                )
                 follow_to_unfollow_real = _skip_follow_to_unfollow_real(
                     account_id=aid,
                     account_username=uname,
                     run_id=run_id,
                     real_enabled=False,
-                    skip_reason="real_handoff_disabled",
+                    skip_reason=real_skip_reason,
                     diagnostic=follow_to_unfollow_diagnostic,
                     follow_exit_code=follow_exit_code,
                     real_max_actions_requested=_follow_to_unfollow_real_max_actions_requested(),
