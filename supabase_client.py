@@ -1870,6 +1870,77 @@ def count_successful_unfollows_today(account_id: str) -> int:
     return total
 
 
+def count_successful_follows_today(account_id: str) -> int:
+    """Count persisted follows for the account in the current UTC day."""
+    aid = str(account_id or "").strip()
+    if not aid:
+        return 0
+    start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    rows = _request_json(
+        "GET",
+        "ig_interacted_users",
+        query={
+            "select": "id,followed_at",
+            "account_id": f"eq.{aid}",
+            "followed_at": f"gte.{start.isoformat()}",
+            "limit": "10000",
+        },
+    )
+    return len(rows or []) if isinstance(rows, list) else 0
+
+
+def get_account_package_summary(account_id: str) -> dict[str, Any] | None:
+    """Load account_package_summary projection row (no insert)."""
+    aid = str(account_id or "").strip()
+    if not aid:
+        return None
+    rows = _request_json(
+        "GET",
+        "account_package_summary",
+        query={"select": "*", "account_id": f"eq.{aid}", "limit": "1"},
+    )
+    if rows and isinstance(rows, list):
+        return rows[0]
+    return None
+
+
+def get_follow_runtime_cap_inputs(account_id: str) -> dict[str, Any]:
+    """Return safe Follow cap inputs from Supabase projections and counters."""
+    aid = str(account_id or "").strip()
+    if not aid:
+        return {}
+    settings = None
+    rows = _request_json(
+        "GET",
+        "ig_account_settings",
+        query={"select": "account_id,follow_limit,max_actions_per_day", "account_id": f"eq.{aid}", "limit": "1"},
+    )
+    if rows and isinstance(rows, list):
+        settings = rows[0]
+    summary = get_account_package_summary(aid) or {}
+    package_caps = summary.get("package_caps") if isinstance(summary.get("package_caps"), dict) else {}
+    preview = summary.get("effective_caps_preview") if isinstance(summary.get("effective_caps_preview"), dict) else {}
+    manual_session = (settings or {}).get("follow_limit")
+    manual_day = (settings or {}).get("max_actions_per_day")
+    package_day = package_caps.get("follow_day")
+    warmup_day_cap = preview.get("warmup_follow_day_cap")
+    effective_day = preview.get("follow_day")
+    follows_done_today = count_successful_follows_today(aid)
+    try:
+        day_cap = int(effective_day if effective_day is not None else manual_day or package_day or 0)
+    except (TypeError, ValueError):
+        day_cap = 0
+    return {
+        "db_follow_per_session_limit": manual_session,
+        "follow_day_remaining_today": max(0, day_cap - follows_done_today),
+        "package_follow_day_cap": package_day,
+        "warmup_follow_day_cap": warmup_day_cap,
+        "follows_done_today": follows_done_today,
+        "warmup_status": summary.get("warmup_status"),
+        "warmup_day": summary.get("warmup_day"),
+    }
+
+
 def requeue_stale_outreach_dm_jobs(
     account_id: str,
     *,

@@ -68,6 +68,23 @@ class RuntimeCapsTest(unittest.TestCase):
         self.assertFalse(out["env_follow_cap_present"])
         self.assertFalse(out["env_iterations_cap_present"])
 
+    def test_follow_uses_minimum_of_db_package_warmup_and_remaining(self) -> None:
+        cfg = types.SimpleNamespace(
+            FOLLOW_MAX_PER_RUN=120,
+            FOLLOWERS_LIST_MAX_ITERATIONS_PER_RUN=120,
+        )
+        out = resolve_follow_runtime_limits(
+            db_follow_per_session_limit=120,
+            follow_day_remaining_today=90,
+            package_follow_day_cap=120,
+            warmup_follow_day_cap=40,
+            config_module=cfg,
+            environ={},
+        )
+
+        self.assertEqual(out["effective_follow_max"], 40)
+        self.assertEqual(out["source"], "min(db_session,package,warmup,day_remaining)")
+
     def test_unfollow_prod_normal_uses_db_session_not_env_mini_cap(self) -> None:
         out = resolve_unfollow_runtime_cap(
             db_unfollow_per_session_limit=120,

@@ -105,11 +105,15 @@ def resolve_welcome_send_limits(
 
 def resolve_follow_runtime_limits(
     *,
+    db_follow_per_session_limit: Any = None,
+    follow_day_remaining_today: Any = None,
+    package_follow_day_cap: Any = None,
+    warmup_follow_day_cap: Any = None,
     config_module: Any = config,
     environ: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Resolve Follow caps used by the followers-list engine."""
-    follow_max = _as_nonnegative_int(
+    config_follow_max = _as_nonnegative_int(
         getattr(config_module, "FOLLOW_MAX_PER_RUN", DEFAULT_FOLLOW_MAX_PER_RUN),
         DEFAULT_FOLLOW_MAX_PER_RUN,
     )
@@ -123,6 +127,27 @@ def resolve_follow_runtime_limits(
     )
     follow_env_present = _env_present("FOLLOW_MAX_PER_RUN", environ)
     iterations_env_present = _env_present("FOLLOWERS_LIST_MAX_ITERATIONS_PER_RUN", environ)
+    db_session = (
+        _as_nonnegative_int(db_follow_per_session_limit, config_follow_max)
+        if db_follow_per_session_limit is not None
+        else config_follow_max
+    )
+    day_remaining = (
+        _as_nonnegative_int(follow_day_remaining_today, db_session)
+        if follow_day_remaining_today is not None
+        else db_session
+    )
+    package_cap = (
+        _as_nonnegative_int(package_follow_day_cap, day_remaining)
+        if package_follow_day_cap is not None
+        else day_remaining
+    )
+    warmup_cap = (
+        _as_nonnegative_int(warmup_follow_day_cap, package_cap)
+        if warmup_follow_day_cap is not None
+        else package_cap
+    )
+    effective_follow_max = min(db_session, day_remaining, package_cap, warmup_cap)
     return {
         "code_default_follow_max": DEFAULT_FOLLOW_MAX_PER_RUN,
         "code_default_iterations_max": DEFAULT_FOLLOWERS_LIST_MAX_ITERATIONS_PER_RUN,
@@ -132,6 +157,11 @@ def resolve_follow_runtime_limits(
         "iterations_cap_label": "env:FOLLOWERS_LIST_MAX_ITERATIONS_PER_RUN"
         if iterations_env_present
         else "config.FOLLOWERS_LIST_MAX_ITERATIONS_PER_RUN",
-        "effective_follow_max": follow_max,
+        "db_follow_per_session_limit": db_session,
+        "follow_day_remaining_today": day_remaining,
+        "package_follow_day_cap": package_cap,
+        "warmup_follow_day_cap": warmup_cap,
+        "effective_follow_max": effective_follow_max,
         "effective_iterations_max": iterations_max,
+        "source": "min(db_session,package,warmup,day_remaining)",
     }

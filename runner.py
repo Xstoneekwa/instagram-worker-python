@@ -6007,7 +6007,25 @@ def _run_followers_list_engine_session(
             },
         )
 
-    follow_limits = resolve_follow_runtime_limits()
+    follow_runtime_inputs: dict[str, Any] = {}
+    if account_id:
+        try:
+            follow_runtime_inputs = supabase_client.get_follow_runtime_cap_inputs(str(account_id))
+        except Exception as e:
+            log(
+                "warning",
+                "follow_runtime_cap_inputs_unavailable",
+                account_id=str(account_id or ""),
+                run_id=str(run_id or ""),
+                reason=str(e)[:240],
+            )
+            follow_runtime_inputs = {}
+    follow_limits = resolve_follow_runtime_limits(
+        db_follow_per_session_limit=follow_runtime_inputs.get("db_follow_per_session_limit"),
+        follow_day_remaining_today=follow_runtime_inputs.get("follow_day_remaining_today"),
+        package_follow_day_cap=follow_runtime_inputs.get("package_follow_day_cap"),
+        warmup_follow_day_cap=follow_runtime_inputs.get("warmup_follow_day_cap"),
+    )
     max_iter = int(follow_limits["effective_iterations_max"])
     _follow_max_per_run = int(follow_limits["effective_follow_max"])
     _followers_iter_attr = getattr(config, "FOLLOWERS_LIST_MAX_ITERATIONS_PER_RUN", None)
@@ -6026,6 +6044,12 @@ def _run_followers_list_engine_session(
         env_config_iterations_cap=follow_limits["iterations_cap_label"],
         effective_follow_max=_follow_max_per_run,
         effective_iterations_max=max_iter,
+        db_follow_per_session_limit=follow_limits.get("db_follow_per_session_limit"),
+        follow_day_remaining_today=follow_limits.get("follow_day_remaining_today"),
+        package_follow_day_cap=follow_limits.get("package_follow_day_cap"),
+        warmup_follow_day_cap=follow_limits.get("warmup_follow_day_cap"),
+        warmup_status=follow_runtime_inputs.get("warmup_status"),
+        warmup_day=follow_runtime_inputs.get("warmup_day"),
     )
     log(
         "info",
