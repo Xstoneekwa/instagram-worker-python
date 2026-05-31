@@ -58,6 +58,7 @@ PACKAGE_DEFAULT_UNFOLLOW_MODE = UNFOLLOW_MODE_UNFOLLOW
 PACKAGE_DEFAULT_UNFOLLOW_AFTER_DAYS = 3
 PACKAGE_DEFAULT_SESSION_LIMIT = 50
 PACKAGE_DEFAULT_DAY_LIMIT = 200
+PACKAGE_DEFAULT_RUNTIME_CAP_MODE = "prod_normal"
 
 
 @dataclass(frozen=True)
@@ -71,6 +72,8 @@ class UnfollowSettings:
     sort_mode: str
     session_limit: int
     day_limit: int
+    runtime_cap_mode: str
+    runtime_safety_cap: int | None
     defaults_used: bool
     package_default_snapshot: dict[str, Any]
 
@@ -85,6 +88,8 @@ class UnfollowSettings:
             "unfollow_sort_mode": self.sort_mode,
             "unfollow_per_session_limit": self.session_limit,
             "unfollow_per_day_limit": self.day_limit,
+            "runtime_cap_mode": self.runtime_cap_mode,
+            "runtime_safety_cap": self.runtime_safety_cap,
             "defaults_used": self.defaults_used,
             "package_default_snapshot": dict(self.package_default_snapshot),
         }
@@ -97,6 +102,8 @@ def _package_default_snapshot() -> dict[str, Any]:
         "unfollow_per_session_limit": PACKAGE_DEFAULT_SESSION_LIMIT,
         "unfollow_per_day_limit": PACKAGE_DEFAULT_DAY_LIMIT,
         "unfollow_sort_mode": UNFOLLOW_SORT_DEFAULT,
+        "runtime_cap_mode": PACKAGE_DEFAULT_RUNTIME_CAP_MODE,
+        "runtime_safety_cap": None,
         "source": "package_default_growth_pro_premium",
     }
 
@@ -119,6 +126,19 @@ def _coerce_nonnegative_int(raw: Any, default: int) -> int:
     if raw is None or str(raw).strip() == "":
         return max(0, int(default))
     return max(0, int(raw))
+
+
+def _coerce_optional_nonnegative_int(raw: Any) -> int | None:
+    if raw is None or str(raw).strip() == "":
+        return None
+    return max(0, int(raw))
+
+
+def _coerce_runtime_cap_mode(raw: Any) -> str:
+    mode = str(raw or PACKAGE_DEFAULT_RUNTIME_CAP_MODE).strip().lower().replace("-", "_")
+    if mode in {"mini_run", "prod_normal", "incident_safety"}:
+        return mode
+    return PACKAGE_DEFAULT_RUNTIME_CAP_MODE
 
 
 def _row_to_settings(account_id: str, row: dict[str, Any], *, defaults_used: bool) -> UnfollowSettings:
@@ -144,6 +164,8 @@ def _row_to_settings(account_id: str, row: dict[str, Any], *, defaults_used: boo
             row.get("unfollow_per_day_limit"),
             PACKAGE_DEFAULT_DAY_LIMIT,
         ),
+        runtime_cap_mode=_coerce_runtime_cap_mode(row.get("runtime_cap_mode")),
+        runtime_safety_cap=_coerce_optional_nonnegative_int(row.get("runtime_safety_cap")),
         defaults_used=defaults_used,
         package_default_snapshot=dict(snap),
     )
@@ -160,6 +182,8 @@ def _defaults_settings(account_id: str) -> UnfollowSettings:
         sort_mode=UNFOLLOW_SORT_DEFAULT,
         session_limit=PACKAGE_DEFAULT_SESSION_LIMIT,
         day_limit=PACKAGE_DEFAULT_DAY_LIMIT,
+        runtime_cap_mode=PACKAGE_DEFAULT_RUNTIME_CAP_MODE,
+        runtime_safety_cap=None,
         defaults_used=True,
         package_default_snapshot=_package_default_snapshot(),
     )

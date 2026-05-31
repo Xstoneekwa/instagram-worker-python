@@ -1,11 +1,29 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 
 import account_session_orchestrator as account_session
 
 
 class AccountSessionUnfollowSkipTest(unittest.TestCase):
+    def test_prod_normal_enables_handoff_from_domain_settings(self) -> None:
+        original_loader = account_session.load_unfollow_settings
+        original_flag = getattr(account_session.config, "ACCOUNT_SESSION_FOLLOW_TO_UNFOLLOW_REAL_ENABLED", False)
+        account_session.config.ACCOUNT_SESSION_FOLLOW_TO_UNFOLLOW_REAL_ENABLED = False
+        account_session.load_unfollow_settings = lambda *_args, **_kwargs: SimpleNamespace(
+            enabled=True,
+            mode="unfollow-any",
+            session_limit=120,
+            day_limit=120,
+            runtime_cap_mode="prod_normal",
+        )
+        try:
+            self.assertTrue(account_session._follow_to_unfollow_real_enabled("account-id"))
+        finally:
+            account_session.load_unfollow_settings = original_loader
+            account_session.config.ACCOUNT_SESSION_FOLLOW_TO_UNFOLLOW_REAL_ENABLED = original_flag
+
     def test_h3_real_allows_unfollow_any_without_db_pending_candidate(self) -> None:
         reason = account_session._follow_to_unfollow_real_skip_reason(
             account_id="00000000-0000-4000-8000-000000000001",

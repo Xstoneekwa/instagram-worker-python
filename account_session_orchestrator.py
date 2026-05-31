@@ -25,6 +25,7 @@ from dm_sender_engine import resolve_welcome_dm_real_send_enabled
 from instagram_navigation import verify_app_foreground
 from logs import log
 from own_profile_navigation import open_own_profile_from_bottom_nav, verify_own_profile
+from runtime_caps import resolve_unfollow_runtime_cap
 from unfollow_session_orchestrator import (
     get_last_unfollow_session_probe_summary,
     run_unfollow_session,
@@ -481,7 +482,21 @@ def _follow_to_unfollow_probe_enabled() -> bool:
     return bool(getattr(config, "ACCOUNT_SESSION_FOLLOW_TO_UNFOLLOW_PROBE_ENABLED", False))
 
 
-def _follow_to_unfollow_real_enabled() -> bool:
+def _follow_to_unfollow_real_enabled(account_id: str | None = None) -> bool:
+    if not account_id:
+        return bool(getattr(config, "ACCOUNT_SESSION_FOLLOW_TO_UNFOLLOW_REAL_ENABLED", False))
+    try:
+        settings = load_unfollow_settings(str(account_id), ensure_row=False)
+    except Exception:
+        return bool(getattr(config, "ACCOUNT_SESSION_FOLLOW_TO_UNFOLLOW_REAL_ENABLED", False))
+
+    if str(getattr(settings, "runtime_cap_mode", "prod_normal") or "prod_normal") == "prod_normal":
+        return bool(
+            getattr(settings, "enabled", False)
+            and str(getattr(settings, "mode", "") or "") in H3_SUPPORTED_UNFOLLOW_MODES
+            and int(getattr(settings, "session_limit", 0) or 0) > 0
+            and int(getattr(settings, "day_limit", 0) or 0) > 0
+        )
     return bool(getattr(config, "ACCOUNT_SESSION_FOLLOW_TO_UNFOLLOW_REAL_ENABLED", False))
 
 
@@ -500,10 +515,30 @@ def _follow_to_unfollow_real_hard_max() -> int:
     return max(0, min(raw, 10))
 
 
-def _follow_to_unfollow_real_max_actions_effective() -> int:
+def _resolve_follow_to_unfollow_runtime_cap(account_id: str | None = None) -> dict[str, Any]:
     requested = _follow_to_unfollow_real_max_actions_requested()
     hard_max = _follow_to_unfollow_real_hard_max()
-    return max(0, min(int(requested), hard_max))
+    env_effective = max(0, min(int(requested), hard_max))
+    if not account_id:
+        return {
+            "runtime_cap": env_effective,
+            "runtime_hard_cap": hard_max,
+            "runtime_cap_mode": "env_fallback",
+            "runtime_cap_source": "env_fallback_unfollow_runtime_cap",
+            "env_fallback_used": True,
+        }
+
+    settings = load_unfollow_settings(str(account_id), ensure_row=False)
+    return resolve_unfollow_runtime_cap(
+        db_unfollow_per_session_limit=getattr(settings, "session_limit", 0),
+        runtime_cap_mode=getattr(settings, "runtime_cap_mode", "prod_normal"),
+        runtime_safety_cap=getattr(settings, "runtime_safety_cap", None),
+        env_real_action_max_per_run=env_effective,
+    )
+
+
+def _follow_to_unfollow_real_max_actions_effective(account_id: str | None = None) -> int:
+    return int(_resolve_follow_to_unfollow_runtime_cap(account_id).get("runtime_cap") or 0)
 
 
 def _current_package(d: u2.Device) -> str:
@@ -938,8 +973,9 @@ def _run_follow_to_unfollow_real(
     mode = str(diagnostic.get("unfollow_mode") or "")
     pending_count = int(diagnostic.get("pending_unfollow_count") or 0)
     real_max_requested = _follow_to_unfollow_real_max_actions_requested()
-    real_hard_max = _follow_to_unfollow_real_hard_max()
-    real_max_effective = _follow_to_unfollow_real_max_actions_effective()
+    runtime_cap_resolution = _resolve_follow_to_unfollow_runtime_cap(aid)
+    real_hard_max = int(runtime_cap_resolution.get("runtime_hard_cap") or _follow_to_unfollow_real_hard_max())
+    real_max_effective = int(runtime_cap_resolution.get("runtime_cap") or 0)
     surface_prep: dict[str, Any] = {}
     follow_exit_gate = _evaluate_h3_follow_exit_code_gate(
         account_id=aid,
@@ -964,6 +1000,8 @@ def _run_follow_to_unfollow_real(
         real_max_actions_requested=int(real_max_requested),
         real_hard_max=int(real_hard_max),
         real_max_actions_effective=int(real_max_effective),
+        runtime_cap_mode=str(runtime_cap_resolution.get("runtime_cap_mode") or ""),
+        runtime_cap_source=str(runtime_cap_resolution.get("runtime_cap_source") or ""),
         surface_prep_required=True,
     )
     log(
@@ -1456,18 +1494,20 @@ def run_account_session(
         "unfollow_actions_sent": 0,
         "unfollow_actions_verified": 0,
     }
+    initial_real_enabled = _follow_to_unfollow_real_enabled(aid)
+    initial_real_max_effective = _follow_to_unfollow_real_max_actions_effective(aid)
     follow_to_unfollow_real: dict[str, Any] = {
-        "enabled": _follow_to_unfollow_real_enabled(),
+        "enabled": initial_real_enabled,
         "executed": False,
         "probe_only": False,
         "skip_reason": "real_handoff_disabled"
-        if not _follow_to_unfollow_real_enabled()
+        if not initial_real_enabled
         else "follow_phase_not_completed",
         "status": "skipped",
-        "real_max_actions": _follow_to_unfollow_real_max_actions_effective(),
+        "real_max_actions": initial_real_max_effective,
         "real_max_actions_requested": _follow_to_unfollow_real_max_actions_requested(),
         "real_hard_max": _follow_to_unfollow_real_hard_max(),
-        "real_max_actions_effective": _follow_to_unfollow_real_max_actions_effective(),
+        "real_max_actions_effective": initial_real_max_effective,
         "follow_exit_code_allowed": False,
         "follow_exit_code_allow_reason": "",
         "follow_exit_code_block_reason": "",
@@ -1587,7 +1627,7 @@ def run_account_session(
                 session_started_at=t0,
             )
             probe_enabled = _follow_to_unfollow_probe_enabled()
-            real_enabled = _follow_to_unfollow_real_enabled()
+            real_enabled = _follow_to_unfollow_real_enabled(aid)
             if real_enabled:
                 if probe_enabled:
                     follow_to_unfollow_probe = _skip_follow_to_unfollow_probe(
@@ -1625,7 +1665,7 @@ def run_account_session(
                     diagnostic=follow_to_unfollow_diagnostic,
                     follow_exit_code=follow_exit_code,
                     real_max_actions_requested=_follow_to_unfollow_real_max_actions_requested(),
-                    real_max_actions_effective=_follow_to_unfollow_real_max_actions_effective(),
+                    real_max_actions_effective=_follow_to_unfollow_real_max_actions_effective(aid),
                     real_hard_max=_follow_to_unfollow_real_hard_max(),
                 )
                 if not probe_enabled:

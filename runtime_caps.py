@@ -10,6 +10,7 @@ import config
 DEFAULT_FOLLOW_MAX_PER_RUN = 2
 DEFAULT_FOLLOWERS_LIST_MAX_ITERATIONS_PER_RUN = 5
 DEFAULT_WELCOME_SESSION_SEND_MAX_JOBS = 3
+UNFOLLOW_RUNTIME_CAP_MODES = {"mini_run", "prod_normal", "incident_safety"}
 
 
 def _as_nonnegative_int(value: Any, default: int = 0) -> int:
@@ -23,6 +24,51 @@ def _env_present(name: str, environ: Mapping[str, str] | None = None) -> bool:
     env = os.environ if environ is None else environ
     raw = env.get(name)
     return raw is not None and str(raw).strip() != ""
+
+
+def normalize_unfollow_runtime_cap_mode(value: Any) -> str:
+    mode = str(value or "prod_normal").strip().lower().replace("-", "_")
+    return mode if mode in UNFOLLOW_RUNTIME_CAP_MODES else "prod_normal"
+
+
+def resolve_unfollow_runtime_cap(
+    *,
+    db_unfollow_per_session_limit: Any,
+    runtime_cap_mode: Any = "prod_normal",
+    runtime_safety_cap: Any = None,
+    env_real_action_max_per_run: Any = None,
+) -> dict[str, Any]:
+    """Resolve Unfollow runtime caps without making env mini-run limits the prod default."""
+    db_session = _as_nonnegative_int(db_unfollow_per_session_limit, 0)
+    mode = normalize_unfollow_runtime_cap_mode(runtime_cap_mode)
+
+    if mode == "prod_normal":
+        return {
+            "runtime_cap_mode": mode,
+            "runtime_cap": db_session,
+            "runtime_hard_cap": db_session,
+            "runtime_cap_source": "supabase_domain_caps",
+            "env_fallback_used": False,
+            "limited_by_runtime_cap": False,
+        }
+
+    db_safety = None
+    if runtime_safety_cap is not None and str(runtime_safety_cap).strip() != "":
+        db_safety = _as_nonnegative_int(runtime_safety_cap, 0)
+
+    env_cap = _as_nonnegative_int(env_real_action_max_per_run, 1)
+    mode_cap = db_safety if db_safety is not None else env_cap
+    runtime_cap = min(db_session, mode_cap)
+    return {
+        "runtime_cap_mode": mode,
+        "runtime_cap": runtime_cap,
+        "runtime_hard_cap": mode_cap,
+        "runtime_cap_source": "ig_account_unfollow_settings.runtime_safety_cap"
+        if db_safety is not None
+        else "env_fallback_unfollow_runtime_cap",
+        "env_fallback_used": db_safety is None,
+        "limited_by_runtime_cap": runtime_cap < db_session,
+    }
 
 
 def resolve_welcome_send_limits(

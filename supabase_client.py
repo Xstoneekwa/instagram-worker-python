@@ -2031,6 +2031,8 @@ def ensure_account_unfollow_settings(account_id: str) -> dict[str, Any]:
         "unfollow_per_session_limit": 50,
         "unfollow_per_day_limit": 200,
         "unfollow_sort_mode": "default",
+        "runtime_cap_mode": "prod_normal",
+        "runtime_safety_cap": None,
         "source": "package_default_growth_pro_premium",
     }
     created = _request_json(
@@ -2046,6 +2048,8 @@ def ensure_account_unfollow_settings(account_id: str) -> dict[str, Any]:
             "unfollow_sort_mode": "default",
             "unfollow_per_session_limit": 50,
             "unfollow_per_day_limit": 200,
+            "runtime_cap_mode": "prod_normal",
+            "runtime_safety_cap": None,
             "package_default_snapshot": snap,
             "created_at": now,
             "updated_at": now,

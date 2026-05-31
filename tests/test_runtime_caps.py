@@ -3,7 +3,11 @@ from __future__ import annotations
 import types
 import unittest
 
-from runtime_caps import resolve_follow_runtime_limits, resolve_welcome_send_limits
+from runtime_caps import (
+    resolve_follow_runtime_limits,
+    resolve_unfollow_runtime_cap,
+    resolve_welcome_send_limits,
+)
 
 
 class RuntimeCapsTest(unittest.TestCase):
@@ -63,6 +67,31 @@ class RuntimeCapsTest(unittest.TestCase):
         self.assertEqual(out["effective_iterations_max"], 5)
         self.assertFalse(out["env_follow_cap_present"])
         self.assertFalse(out["env_iterations_cap_present"])
+
+    def test_unfollow_prod_normal_uses_db_session_not_env_mini_cap(self) -> None:
+        out = resolve_unfollow_runtime_cap(
+            db_unfollow_per_session_limit=120,
+            runtime_cap_mode="prod_normal",
+            runtime_safety_cap=None,
+            env_real_action_max_per_run=1,
+        )
+
+        self.assertEqual(out["runtime_cap"], 120)
+        self.assertEqual(out["runtime_cap_mode"], "prod_normal")
+        self.assertEqual(out["runtime_cap_source"], "supabase_domain_caps")
+        self.assertFalse(out["limited_by_runtime_cap"])
+
+    def test_unfollow_mini_run_can_intentionally_lower_to_one(self) -> None:
+        out = resolve_unfollow_runtime_cap(
+            db_unfollow_per_session_limit=120,
+            runtime_cap_mode="mini_run",
+            runtime_safety_cap=1,
+            env_real_action_max_per_run=120,
+        )
+
+        self.assertEqual(out["runtime_cap"], 1)
+        self.assertEqual(out["runtime_cap_mode"], "mini_run")
+        self.assertTrue(out["limited_by_runtime_cap"])
 
 
 if __name__ == "__main__":

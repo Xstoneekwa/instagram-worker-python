@@ -15,6 +15,7 @@ import config
 import supabase_client
 from account_identity_guard import verify_active_instagram_account_matches_expected
 from logs import log
+from runtime_caps import resolve_unfollow_runtime_cap
 from own_following_navigation import (
     apply_unfollow_following_sort_mode,
     detect_own_following_list_screen,
@@ -163,8 +164,14 @@ def _effective_real_action_max_per_run(
     day_remaining: int | None = None,
 ) -> int:
     db_limit = max(0, int(getattr(settings, "session_limit", 0) or 0))
-    hard_cap = _real_action_max_per_run() if env_hard_cap is None else max(0, int(env_hard_cap))
-    caps = [db_limit, hard_cap]
+    env_cap = _real_action_max_per_run() if env_hard_cap is None else max(0, int(env_hard_cap))
+    runtime_cap = resolve_unfollow_runtime_cap(
+        db_unfollow_per_session_limit=db_limit,
+        runtime_cap_mode=getattr(settings, "runtime_cap_mode", "prod_normal"),
+        runtime_safety_cap=getattr(settings, "runtime_safety_cap", None),
+        env_real_action_max_per_run=env_cap,
+    )
+    caps = [db_limit, int(runtime_cap.get("runtime_cap") or 0)]
     if day_remaining is not None:
         caps.append(max(0, int(day_remaining)))
     return min(caps)
@@ -1833,6 +1840,12 @@ def run_unfollow_session(
             error=str(exc)[:500],
         )
     unfollow_day_remaining_today = max(0, db_unfollow_day_limit - int(unfollows_done_today or 0))
+    runtime_cap_resolution = resolve_unfollow_runtime_cap(
+        db_unfollow_per_session_limit=getattr(settings, "session_limit", 0),
+        runtime_cap_mode=getattr(settings, "runtime_cap_mode", "prod_normal"),
+        runtime_safety_cap=getattr(settings, "runtime_safety_cap", None),
+        env_real_action_max_per_run=env_real_action_max,
+    )
     real_action_max = _effective_real_action_max_per_run(
         settings,
         env_real_action_max,
@@ -1849,9 +1862,12 @@ def run_unfollow_session(
         unfollows_done_today=int(unfollows_done_today or 0),
         unfollow_day_remaining_today=unfollow_day_remaining_today,
         env_real_action_max_per_run=env_real_action_max,
+        runtime_cap_mode=str(runtime_cap_resolution.get("runtime_cap_mode") or ""),
+        runtime_cap_source=str(runtime_cap_resolution.get("runtime_cap_source") or ""),
+        runtime_mode_cap=int(runtime_cap_resolution.get("runtime_cap") or 0),
         effective_real_action_max_per_run=real_action_max,
         source_day_counter="ig_interacted_users.unfollowed_at",
-        source="min(db_session,env_hard_cap,db_day_remaining)",
+        source="min(db_session,runtime_mode_cap,db_day_remaining)",
     )
     plan = plan_unfollow_targets(aid, settings=settings)
     planned_usernames = _planned_username_set(plan)
