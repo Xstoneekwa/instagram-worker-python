@@ -50,14 +50,14 @@ Audited sources:
 | `welcome_enabled` | Welcome | `ig_account_dm_settings` | yes | shown via legacy key | admin domain API target | later entitlement-gated | false | package dependent | Welcome/Full | Welcome preset | high | wire |
 | `welcome_template_id` | Welcome | `ig_account_dm_settings` -> `ig_dm_templates` | yes via settings/templates | message UI legacy | admin template API | client later | null | required if Welcome enabled | Welcome/Full | Welcome preset | high | wire template API |
 | `welcome_per_session_limit` | Welcome/Quotas | `ig_account_dm_settings` | yes | legacy `max_dm_per_run` only | admin domain API | client later read/write if entitled | 10 | package cap | Welcome/Full | Welcome preset | medium | wire |
-| `welcome_per_day_limit` | Welcome/Quotas | `ig_account_dm_settings` | yes | no | admin domain API | client later if entitled | 50 | package cap | Welcome/Full | Welcome preset | medium | expose effective read |
+| `welcome_per_day_limit` | Welcome/Quotas | `ig_account_dm_settings` | yes | no | admin domain API | client later if entitled | 10 | product cap; lower values allowed | Welcome/Full | Welcome preset | high | source of truth; no UI-only clamp |
 | `total_dm_per_day_limit` | Welcome/Outreach | `ig_account_dm_settings` | yes | no | admin domain API | client later read-only | 100 | package cap | DM packages | DM quota preset | medium | expose effective read |
 | `check_chat_before_welcome` | Welcome/Safety | `ig_account_dm_settings` | yes | legacy field | admin domain API | client later | true | true | Welcome/Full | Welcome preset | low | wire |
 | `welcome_skip_if_existing_thread` | Welcome/Safety | `ig_account_dm_settings` | yes | no | admin domain API | no | true | true | Welcome/Full | Welcome preset | low | expose read-only |
 | `outreach_enabled` | Outreach | `ig_account_dm_settings` | yes | legacy `cold_dm_enabled` | admin domain API | client if add-on entitled | false | add-on dependent | Outreach | Outreach preset | critical | wire with entitlement |
 | `default_outreach_template_id` | Outreach | `ig_account_dm_settings` -> `ig_dm_templates` | yes | legacy message | admin template API | client if add-on entitled | null | required if Outreach enabled | Outreach | Outreach preset | high | wire template API |
 | `outreach_per_session_limit` | Outreach/Quotas | `ig_account_dm_settings` | yes | legacy `max_dm_per_run` conflates | admin domain API | client if add-on entitled | 25 | package/add-on cap | Outreach | Outreach preset | high | split from Welcome |
-| `outreach_per_day_limit` | Outreach/Quotas | `ig_account_dm_settings` | yes | no | admin domain API | client later read/write if entitled | 80 | package/add-on cap | Outreach | Outreach preset | high | wire |
+| `outreach_per_day_limit` | Outreach/Quotas | `ig_account_dm_settings` | yes | no | admin domain API | client later read/write if entitled | 30 | product/add-on cap; lower values allowed | Outreach | Outreach preset | high | source of truth; no UI-only clamp |
 | `outreach_skip_if_existing_thread` | Outreach/Safety | `ig_account_dm_settings` | yes | no | admin domain API | no | true | true | Outreach | Outreach preset | low | expose read-only |
 | `OUTREACH_HARD_MAX_PER_SESSION` | Outreach/Safety | worker env/config | yes | no | ops env | no | 5 | n/a | Outreach | Outreach preset | high | ops-only |
 | `OUTREACH_HARD_MAX_PER_DAY` | Outreach/Safety | worker env/config | yes | no | ops env | no | 40 | n/a | Outreach | Outreach preset | high | ops-only |
@@ -695,6 +695,79 @@ Keep these ops-only and expose only sanitized status/readiness:
 - Recovery/observability: `AUTO_RESTART_*`, `RUNTIME_*`.
 - Device internals and clone/package identifiers.
 
+## Cap Ownership And Editability
+
+Caps shown to operators must distinguish business intent from ops safety ceilings. A dashboard/Supabase cap is the account or package setting. A runtime hard cap is an ops guardrail and must not silently keep production traffic at mini-run values. The user-facing effective cap is a computed read-only value: the lowest active limit for the next run.
+
+For Followback/Unfollow today:
+
+- `Unfollow cap/session` writes `ig_account_unfollow_settings.unfollow_per_session_limit`.
+- `Unfollow cap/day` writes `ig_account_unfollow_settings.unfollow_per_day_limit`.
+- `Effective cap now` is read-only and resolves from `min(unfollow_per_session_limit, remaining day quota, account-session handoff real max, account-session handoff hard max, runtime gates)`.
+- `Runtime safety cap` is read-only ops status in the admin drawer. It is not client-editable.
+- `Limiting reason` must be visible when the effective cap is lower than the configured session cap.
+
+Current Unfollow runtime caps:
+
+- Standalone `unfollow_session`: `UNFOLLOW_SESSION_REAL_ACTION_MAX_PER_RUN`, default `1`, clamped to `10` in `config.py`.
+- Account-session H3 handoff: `ACCOUNT_SESSION_FOLLOW_TO_UNFOLLOW_REAL_MAX_ACTIONS`, default `1`.
+- Account-session H3 hard max: `ACCOUNT_SESSION_FOLLOW_TO_UNFOLLOW_REAL_HARD_MAX`, default `3`, clamped to `10` in `config.py`.
+- `/runs/start` and the Followback drawer should mirror these worker defaults when frontend env mirrors are absent, then apply any `INSTAGRAM_RUN_CONTROL_*` override if configured.
+
+| cap | business cap Supabase | package cap | ops hard cap | effective cap / limiting reason | editable by client? | editable by admin? | ops-only? |
+|---|---|---|---|---|---|---|---|
+| Follow cap/session | future Follow domain; legacy `ig_account_settings.follow_limit` is not runtime truth | package/module follow allowance | `FOLLOW_MAX_PER_RUN` | min(package, domain, env, assignment/runtime gates) | no until domain preset | yes via Follow preset later | env/status only today |
+| Follow iterations cap | none | package/runtime profile | `FOLLOWERS_LIST_MAX_ITERATIONS_PER_RUN` | min(runtime profile, env, assignment/runtime gates) | no | read-only status today | yes |
+| Welcome DM cap/session | `ig_account_dm_settings.welcome_per_session_limit` | package Welcome allowance | `WELCOME_SESSION_SEND_MAX_JOBS` | min(domain, package, env, daily remaining, real-send gate) | no/client later by entitlement | yes via Welcome domain | env/status only |
+| Welcome DM cap/day | `ig_account_dm_settings.welcome_per_day_limit` | package Welcome daily allowance | none direct; total DM/runtime gates still apply | min(domain, package, daily remaining, total DM remaining) | no/client later by entitlement | yes via Welcome domain | no |
+| Outreach cap/session | `ig_account_dm_settings.outreach_per_session_limit` | Outreach add-on allowance | `OUTREACH_HARD_MAX_PER_SESSION` | min(domain, package, env, daily remaining, real-send gate) | no/client later by entitlement | yes via Outreach domain | env/status only |
+| Outreach cap/day | `ig_account_dm_settings.outreach_per_day_limit` | Outreach add-on daily allowance | `OUTREACH_HARD_MAX_PER_DAY` | min(domain, package, env, daily remaining) | no/client later by entitlement | yes via Outreach domain | env/status only |
+| Unfollow cap/session | `ig_account_unfollow_settings.unfollow_per_session_limit` | package Unfollow allowance pending resolver | `UNFOLLOW_SESSION_REAL_ACTION_MAX_PER_RUN` for standalone; `ACCOUNT_SESSION_FOLLOW_TO_UNFOLLOW_REAL_MAX_ACTIONS` + `ACCOUNT_SESSION_FOLLOW_TO_UNFOLLOW_REAL_HARD_MAX` for H3 | min(domain, package when wired, remaining day quota, runtime safety cap, handoff/runtime gates) | no/client later by entitlement | yes via Unfollow domain | hard caps ops-only |
+| Unfollow cap/day | `ig_account_unfollow_settings.unfollow_per_day_limit` | package Unfollow daily allowance pending resolver | none direct; runtime safety cap still applies per run | min(domain, package when wired, daily remaining) | no/client later by entitlement | yes via Unfollow domain | no |
+
+Future admin/ops hard-cap editing must use an ops-only surface with permission checks, audit payload, explicit reason, and no raw secret/env exposure. The current patch only exposes sanitized read-only cap status and limiting reason.
+
+## Unfollow Caps, Hard Caps, Quota Resume
+
+Product meaning:
+
+- `Unfollow cap/day` is the maximum Unfollow quota for the account in one UTC day.
+- `Unfollow cap/session` is the maximum Unfollow quota for one run/session.
+- `Effective cap now` is not "already done"; it is the remaining safe amount the next run can attempt after all active limits.
+
+Recommended package defaults:
+
+- Growth: `unfollow_per_day_limit=80`.
+- Pro: `unfollow_per_day_limit=120`.
+- Premium: `unfollow_per_day_limit=120`.
+- For normal production, set `unfollow_per_session_limit` equal to the package day cap unless ops intentionally wants split sessions. The worker still applies daily remaining before each run, so session 2 can only consume `day_cap - done_today`.
+- Use a lower session cap only when the product intentionally wants multiple smaller sessions for phone rest or pacing. That is a business/runtime-profile decision, not a hidden env safety cap.
+
+Current resume and quota behavior:
+
+- Done-today source: `ig_interacted_users.unfollowed_at` with `unfollow_result='success'`, counted by `supabase_client.count_successful_unfollows_today()`.
+- `run_unfollow_session()` loads `ig_account_unfollow_settings`, counts done-today, computes `unfollow_day_remaining_today`, then applies `min(db_session, runtime_action_cap, db_day_remaining)`.
+- H3 account-session handoff passes its effective H3 runtime cap as `real_action_max_override`; `run_unfollow_session()` still applies DB session and daily remaining after that.
+- `account_session_resume_engine.py` is passive. It builds `quota_remaining` metadata from the account-session summary; it does not schedule or execute the next run.
+- `account_session_manual_resume.py` also remains a preview. It explicitly marks quota overrides as planned metadata because runtime flags are not wired yet.
+- Therefore, current protection against doing 120 + 120 on the same UTC day comes from the next worker run recalculating `done_today` from Supabase before acting, not from an active resume override.
+
+Current P0 gap:
+
+- H3 is currently capped by `ACCOUNT_SESSION_FOLLOW_TO_UNFOLLOW_REAL_MAX_ACTIONS` default `1` and `ACCOUNT_SESSION_FOLLOW_TO_UNFOLLOW_REAL_HARD_MAX` default `3`, clamped to `10`.
+- Standalone `unfollow_session` is currently capped by `UNFOLLOW_SESSION_REAL_ACTION_MAX_PER_RUN` default `1`, clamped to `10`.
+- These are mini-run/safety defaults. They are not compatible with production packages 80/120 if left as the normal mode.
+- The dashboard must keep showing `limited_by_mini_run_mode` or `limited_by_safety_cap` until an ops/admin control, config profile, or audited runtime settings source raises the runtime safety cap to match package policy.
+
+Prod-ready design target:
+
+1. Add an ops-only runtime-cap profile source, preferably a DB table or RPC-backed settings model rather than raw client-editable env.
+2. Model profiles explicitly: `mini_run`, `prod_normal`, `incident_safety`.
+3. Resolve Unfollow effective cap from `min(account cap/session, package day remaining, ops runtime cap if active, safe candidates, runtime gates)`.
+4. Make `/runs/start` and worker resolve caps through the same helper/source; env becomes bootstrap fallback or emergency override, not hidden business truth.
+5. Audit all admin/ops changes with actor, reason, old value, new value, profile, and timestamp.
+6. Keep client/customer editing limited to business caps allowed by entitlement/package. Clients must not edit ops hard caps.
+
 ## Legacy / DB-Only Fields
 
 Fields that must not be treated as runtime truth:
@@ -982,6 +1055,26 @@ Welcome and Outreach remain separate product/runtime domains:
 - `Outreach OFF`: `outreach_enabled=false` blocks `outreach_session` starts and sends no Outreach. It must not delete pending jobs unless a separate cleanup policy is explicitly requested, and it never modifies Welcome.
 
 Legacy `max_dm_per_run`, `send_enabled`, `dry_run_enabled`, and `DM_SENDER_REAL_SEND_ENABLED` are not domain controls. Dashboard state should expose them only as read-only legacy/ops signals or hide them after operator validation. Welcome caps resolve from `welcome_per_session_limit` plus worker hard cap; Outreach caps resolve from `outreach_per_session_limit`, `outreach_per_day_limit`, total DM quota, and worker hard caps.
+
+### DM Cap Source-Of-Truth Rule
+
+Frontend, Supabase and runtime gates must stay aligned. The dashboard must not silently clamp an invalid database value for display only: if Supabase stores `welcome_per_day_limit=50`, the UI must either show `50` as invalid/requiring correction or the row must be corrected by an explicit, audited, targeted reset before validation. `/runs/start` must consume the same Supabase values and block invalid caps instead of relying on a frontend projection.
+
+Product daily caps:
+
+- Welcome DM defaults to `welcome_per_day_limit=10`; values lower than 10 are allowed, values above 10 are refused with `welcome_daily_cap_exceeded`.
+- Outreach DM defaults to `outreach_per_day_limit=30`; values lower than 30 are allowed, values above 30 are refused with `outreach_daily_cap_exceeded`.
+- Welcome and Outreach session caps must not exceed their day cap; violations are refused with `session_cap_exceeds_day_cap`.
+- `max_dm_per_run` is never a source for Welcome or Outreach caps.
+
+These defaults must be written into `ig_account_dm_settings` when a relevant service is created or enabled: account creation with a subscribed package, package application/reset, Welcome add-on activation, Outreach standalone/add-on activation, and an explicit admin reset-to-defaults action. Future package/reset APIs should use least-restrictive-preserving writes: insert defaults for missing rows, set `welcome_per_day_limit=10` only when null or above 10, set `outreach_per_day_limit=30` only when null or above 30, and preserve already-lower manual choices.
+
+Existing-account backfill must be a separate operator-approved action. It should be idempotent, scoped to accounts with the relevant entitlement/service, audited, and avoid overwriting lower manual values. Safe pattern:
+
+- `welcome_per_day_limit = 10` only where Welcome is subscribed/enabled and `welcome_per_day_limit is null or welcome_per_day_limit > 10`.
+- `outreach_per_day_limit = 30` only where Outreach is subscribed/enabled and `outreach_per_day_limit is null or outreach_per_day_limit > 30`.
+- Keep `welcome_per_day_limit=5` and `outreach_per_day_limit=20`.
+- Record an audit row per account or per batch with actor, reason, old values and new values, without template bodies or credentials.
 
 ### P0 DM Drawer Delivery Phases
 
