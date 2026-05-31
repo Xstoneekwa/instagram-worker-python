@@ -184,7 +184,7 @@ _RUNTIME_INTERACTED_USERNAMES: set[str] = set()
 _RUNTIME_UNFOLLOWED_USERNAMES: set[str] = set()
 _RUNTIME_SKIPPED_USERNAMES: set[str] = set()
 _VISUAL_FOLLOWERS_OPEN_COUNT_THIS_SESSION: int = 0
-_FOLLOW_SETTINGS_CACHE: dict[str, bool] = {}
+_FOLLOW_SETTINGS_CACHE: dict[str, Any] = {}
 _SESSION_SOCIAL_ID: str = ""
 _SESSION_COUNTERS: dict[str, int] = {
     "follows": 0,
@@ -196,29 +196,36 @@ _SESSION_COUNTERS: dict[str, int] = {
 }
 
 
-def _dont_follow_private_accounts_for_account(account_id: str | None) -> bool:
-    """Account setting, default-safe: private profiles are skipped when settings are missing."""
+def _follow_settings_for_account(account_id: str | None) -> Any | None:
+    """Account Follow settings, cached for this runner session."""
     aid = str(account_id or "").strip()
     if not aid:
-        return True
+        return None
     if aid in _FOLLOW_SETTINGS_CACHE:
-        return bool(_FOLLOW_SETTINGS_CACHE[aid])
+        return _FOLLOW_SETTINGS_CACHE[aid]
     try:
         from follow_settings import load_follow_settings
 
         settings = load_follow_settings(aid, ensure_row=False)
-        value = bool(settings.dont_follow_private_accounts)
     except Exception as exc:
-        value = True
         log(
             "warning",
             "follow_settings_load_failed_defaults_used",
             account_id=aid,
-            dont_follow_private_accounts=value,
+            dont_follow_private_accounts=True,
             error=str(exc)[:300],
         )
-    _FOLLOW_SETTINGS_CACHE[aid] = value
-    return value
+        return None
+    _FOLLOW_SETTINGS_CACHE[aid] = settings
+    return settings
+
+
+def _dont_follow_private_accounts_for_account(account_id: str | None) -> bool:
+    """Account setting, default-safe: private profiles are skipped when settings are missing."""
+    settings = _follow_settings_for_account(account_id)
+    if settings is None:
+        return True
+    return bool(getattr(settings, "dont_follow_private_accounts", True))
 
 
 def _seconds_since_dm_sent_row(row: dict) -> float | None:
@@ -4145,7 +4152,8 @@ def _try_visual_followers_picker_dry_run(
                         ),
                         current_activity=priv_detect_runner.get("current_activity"),
                         current_package=priv_detect_runner.get("current_package"),
-                        reason="private_account_filter_follow_private_disabled",
+                        reason="skip_private_profile",
+                        legacy_reason="private_account_filter_follow_private_disabled",
                     )
                     tgt_sk = str(best.get("resolved_username_hint") or "").strip().lstrip(
                         "@"
@@ -4175,7 +4183,8 @@ def _try_visual_followers_picker_dry_run(
                         run_id=str(run_id or ""),
                         source_account_context=str(source_account_context or ""),
                         metadata={
-                            "skip_reason": "private_account_filter_follow_private_disabled",
+                            "skip_reason": "skip_private_profile",
+                            "legacy_skip_reason": "private_account_filter_follow_private_disabled",
                         },
                     )
                     visual_target_profile_lock_clear()
@@ -4190,7 +4199,8 @@ def _try_visual_followers_picker_dry_run(
                         target_username=tgt_sk,
                         return_ok=ok_priv_back,
                         how=how_priv,
-                        reason="private_account_filter_follow_private_disabled",
+                        reason="skip_private_profile",
+                        legacy_reason="private_account_filter_follow_private_disabled",
                     )
                     _VISUAL_FOLLOWERS_OPEN_COUNT_THIS_SESSION = max(
                         0, _VISUAL_FOLLOWERS_OPEN_COUNT_THIS_SESSION - 1
@@ -4272,11 +4282,33 @@ def _try_visual_followers_picker_dry_run(
                         )
 
             if open_out.get("profile_detected"):
-                if bool(getattr(config, "ENABLE_VISUAL_PROFILE_METRICS_FILTER", False)):
+                follow_settings_runner = _follow_settings_for_account(account_id)
+                account_metrics_filter_enabled = False
+                if follow_settings_runner is not None:
+                    try:
+                        from follow_settings import follow_filter_thresholds_active
+
+                        account_metrics_filter_enabled = follow_filter_thresholds_active(
+                            follow_settings_runner
+                        )
+                    except Exception:
+                        account_metrics_filter_enabled = False
+                if (
+                    account_metrics_filter_enabled
+                    or bool(getattr(config, "ENABLE_VISUAL_PROFILE_METRICS_FILTER", False))
+                ):
                     metrics_pf = visual_extract_profile_metrics(
                         d, source_profile_username=source_profile_username
                     )
-                    pass_m, reason_m = visual_profile_metrics_pass_filter(metrics_pf)
+                    if account_metrics_filter_enabled and follow_settings_runner is not None:
+                        from follow_settings import account_follow_filter_pass
+
+                        pass_m, reason_m = account_follow_filter_pass(
+                            follow_settings_runner,
+                            metrics_pf,
+                        )
+                    else:
+                        pass_m, reason_m = visual_profile_metrics_pass_filter(metrics_pf)
                     if not pass_m:
                         log(
                             "warning",
@@ -6471,6 +6503,7 @@ def _run_followers_list_engine_session(
                 username=str(follower_un_so_far or "") or None,
                 source_profile=source_profile_username,
                 dont_follow_private_accounts=True,
+                reason="skip_private_profile",
             )
         elif _private_profile_detected and not _dont_follow_private_accounts:
             log(
