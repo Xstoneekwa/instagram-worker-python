@@ -1365,11 +1365,13 @@ def run_account_session(
     supabase_mode: bool,
     warm_session_used: bool,
     force_stop_used: bool,
+    target_id: str | None = None,
 ) -> int:
     t0 = time.perf_counter()
     aid = str(account_id or "").strip()
     uname = str(account_username or "").strip()
     src = str(source_profile_username or "").strip()
+    tid = str(target_id or "").strip()
 
     log(
         "info",
@@ -1378,6 +1380,7 @@ def run_account_session(
         account_username=uname,
         run_id=run_id,
         followers_source_username=src or None,
+        target_id=tid or None,
     )
 
     if not src:
@@ -1581,6 +1584,7 @@ def run_account_session(
                 account_id=aid,
                 run_id=run_id,
                 followers_source_username=src,
+                target_id=tid or None,
                 transition_reason=transition_reason,
                 handoff_applied=bool(welcome_phase_executed),
                 handoff_reason=(
@@ -1592,6 +1596,7 @@ def run_account_session(
                 run_followers_list_engine_session(
                     d,
                     source_profile_username=src,
+                    target_id=tid or None,
                     account_id=aid,
                     run_id=str(run_id or ""),
                     supabase_mode=supabase_mode,
@@ -1610,6 +1615,7 @@ def run_account_session(
                 account_id=aid,
                 run_id=run_id,
                 follow_engine_exit_code=follow_exit_code,
+                target_id=tid or None,
                 follows_completed_count=follow_engine_summary.get("follows_completed_count"),
                 follow_processed_count=follow_engine_summary.get("follow_processed_count"),
                 follow_session_outcome=follow_engine_summary.get("follow_session_outcome"),
@@ -2118,6 +2124,7 @@ def dispatch_account_session(
     supabase_mode: bool,
     warm_session_used: bool,
     force_stop_used: bool,
+    target_id: str | None = None,
 ) -> int:
     return run_account_session(
         d,
@@ -2125,6 +2132,7 @@ def dispatch_account_session(
         account_username=account_username,
         run_id=run_id,
         source_profile_username=source_profile_username,
+        target_id=target_id,
         run_followers_list_engine_session=run_followers_list_engine_session,
         supabase_mode=supabase_mode,
         warm_session_used=warm_session_used,

@@ -2526,6 +2526,7 @@ def _run_one_target(
                     follow_status=None,
                     failure_code=fc,
                     failure_reason=_exit_reason_from_code(fc),
+                    target_id=target_id or None,
                 )
                 log(
                     "info",
@@ -2582,6 +2583,7 @@ def _run_one_target(
                 follow_status=follow_status,
                 failure_code=None,
                 failure_reason=None,
+                target_id=target_id or None,
             )
             log(
                 "info",
@@ -5815,6 +5817,7 @@ def _run_followers_list_engine_session(
     supabase_mode: bool,
     warm_session_used: bool,
     force_stop_used: bool,
+    target_id: str | None = None,
 ) -> int:
     """
     Source profile → source followers list → follower profile → FOLLOW SAFE V1 → return to list.
@@ -5831,6 +5834,7 @@ def _run_followers_list_engine_session(
     max_iter: int | None = None
     _followers_session_summary: dict[str, Any] = {
         "source_profile_username": source_profile_username,
+        "target_id": str(target_id or ""),
         "account_id": str(account_id or ""),
         "run_id": str(run_id or ""),
         "follow_processed_count": None,
@@ -5860,6 +5864,7 @@ def _run_followers_list_engine_session(
         "info",
         "visual_followers_ct_source_loaded",
         source_profile_username=source_profile_username,
+        target_id=str(target_id or "") or None,
         target_username=str(getattr(config, "TARGET_USERNAME", "") or ""),
         account_id=str(account_id or ""),
     )
@@ -5869,6 +5874,7 @@ def _run_followers_list_engine_session(
             return
         base = {
             "source_profile_username": source_profile_username,
+            "target_id": str(target_id or ""),
             "source_account_context": account_id,
         }
         _safe_supabase_call(
@@ -5881,6 +5887,21 @@ def _run_followers_list_engine_session(
             message=message,
             payload={**base, **payload},
         )
+
+    log(
+        "info",
+        "follow_target_source_loaded",
+        account_id=str(account_id or ""),
+        run_id=str(run_id or "") or None,
+        target_id=str(target_id or "") or None,
+        source_profile_username=source_profile_username,
+    )
+    _eng_log(
+        "follow_target_source_loaded",
+        "success",
+        "Follow source loaded",
+        {"target_id": str(target_id or "") or None},
+    )
 
     t0 = time.perf_counter()
     enter_follow_ct_search_context()
@@ -10551,12 +10572,14 @@ def _run_followers_list_engine_session(
                                     follow_status=None,
                                     failure_code=fc,
                                     failure_reason=_exit_reason_from_code(fc),
+                                    target_id=target_id or None,
                                 )
                                 log(
                                     "info",
                                     "social_memory_updated",
                                     target_username=follower_un,
                                     kind="follow_failed",
+                                    target_id=str(target_id or "") or None,
                                 )
                             else:
                                 log(
@@ -10721,6 +10744,7 @@ def _run_followers_list_engine_session(
                                 follow_status="already_following",
                                 failure_code=None,
                                 failure_reason=f"already_connected:{_vc_skip_reason}",
+                                target_id=target_id or None,
                             )
                             log(
                                 "info",
@@ -10728,6 +10752,7 @@ def _run_followers_list_engine_session(
                                 target_username=follower_un,
                                 kind="follow_skipped_already_connected",
                                 memory_ok=(mem or {}).get("ok"),
+                                target_id=str(target_id or "") or None,
                             )
                         else:
                             log(
@@ -10950,6 +10975,7 @@ def _run_followers_list_engine_session(
                             follow_status=f_st,
                             failure_code=None,
                             failure_reason=None,
+                            target_id=target_id or None,
                         )
                         log(
                             "info",
@@ -10957,6 +10983,7 @@ def _run_followers_list_engine_session(
                             target_username=follower_un,
                             kind="follow_success",
                             memory_ok=(mem or {}).get("ok"),
+                            target_id=str(target_id or "") or None,
                         )
                         _eng_log(
                             "social_memory_updated",
@@ -11527,6 +11554,46 @@ def _run_followers_list_engine_session(
     return 0
 
 
+def _load_account_session_follow_targets(account_id: str, limit: int) -> tuple[list[dict], str | None]:
+    db_targets = _safe_supabase_call(
+        "load_eligible_follow_targets",
+        account_id=account_id,
+        limit=max(1, int(limit)),
+    ) or []
+    ops_source = (getattr(config, "FOLLOWERS_SOURCE_USERNAME", "") or "").strip()
+    ops_override = bool(getattr(config, "FOLLOWERS_SOURCE_USERNAME_OPS_OVERRIDE", False))
+    if not db_targets and ops_source and ops_override:
+        log(
+            "warning",
+            "follow_target_ops_override_used",
+            account_id=account_id,
+            followers_source_username=ops_source,
+            reason="no_eligible_targets_db_ops_override",
+            selection_source="ops_override",
+        )
+        return [
+            {
+                "id": None,
+                "account_id": account_id,
+                "target_username": ops_source,
+                "source_profile_username": ops_source,
+                "selection_source": "ops_override",
+                "raw": {},
+            }
+        ], None
+    if not db_targets:
+        return [], "no_eligible_targets"
+    if ops_source and not ops_override:
+        log(
+            "warning",
+            "followers_source_username_ignored_without_ops_override",
+            account_id=account_id,
+            followers_source_username=ops_source,
+            reason="db_targets_are_source_of_truth",
+        )
+    return db_targets, None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Instagram safe navigation worker")
     parser.add_argument(
@@ -11598,11 +11665,20 @@ def main() -> int:
             log("error", "run_aborted", reason="supabase_account_missing_id")
             return 10
         account_username = str(account.get("username") or "").strip()
-        db_targets = _safe_supabase_call(
-            "load_pending_targets",
-            account_id=account_id,
-            limit=max(1, int(args.limit)),
-        ) or []
+        if account_session_run:
+            db_targets, target_block_reason = _load_account_session_follow_targets(
+                account_id,
+                max(1, int(args.limit)),
+            )
+            if target_block_reason:
+                log("error", "run_aborted", reason=target_block_reason, account_id=account_id)
+                return 11
+        else:
+            db_targets = _safe_supabase_call(
+                "load_pending_targets",
+                account_id=account_id,
+                limit=max(1, int(args.limit)),
+            ) or []
         targets = [str(t.get("target_username") or "").strip() for t in db_targets if str(t.get("target_username") or "").strip()]
         followers_engine_has_explicit_source = bool(
             bool(getattr(config, "ENABLE_FOLLOWERS_LIST_ENGINE", False))
@@ -13013,20 +13089,58 @@ def main() -> int:
         if not account_username:
             log("error", "run_aborted", reason="account_session_missing_account_username")
             return _return_with_cleanup(d, 1)
+        selected_follow_target = db_targets[0] if db_targets else {}
         source_profile_username = (
-            getattr(config, "FOLLOWERS_SOURCE_USERNAME", "") or ""
+            str(selected_follow_target.get("source_profile_username") or "").strip()
+            or str(selected_follow_target.get("target_username") or "").strip()
+        )
+        target_id = str(selected_follow_target.get("id") or "").strip()
+        target_selection_source = str(
+            selected_follow_target.get("selection_source") or "ig_targets"
         ).strip()
         if not source_profile_username:
-            source_profile_username = (targets[0] if targets else "").strip()
+            log("error", "run_aborted", reason="no_eligible_targets", account_id=account_id)
+            return _return_with_cleanup(d, 11)
         from account_session_orchestrator import dispatch_account_session
 
+        log(
+            "info",
+            "follow_target_selected",
+            account_id=account_id,
+            account_username=account_username,
+            run_id=run_id or None,
+            target_id=target_id or None,
+            followers_source_username=source_profile_username or None,
+            selection_source=target_selection_source,
+            target_index=0,
+            target_count=len(db_targets),
+        )
+        if supabase_mode and run_id:
+            _safe_supabase_call(
+                "insert_action_log",
+                run_id=run_id,
+                account_id=account_id,
+                target_username=source_profile_username,
+                action_type="follow_target_selected",
+                status="warning" if target_selection_source == "ops_override" else "success",
+                message="Selected Follow source target",
+                payload={
+                    "target_id": target_id or None,
+                    "source_profile_username": source_profile_username,
+                    "selection_source": target_selection_source,
+                    "target_index": 0,
+                    "target_count": len(db_targets),
+                },
+            )
         log(
             "info",
             "account_session_run_dispatch",
             account_id=account_id,
             account_username=account_username,
             run_id=run_id or None,
+            target_id=target_id or None,
             followers_source_username=source_profile_username or None,
+            selection_source=target_selection_source,
         )
         asess_code = dispatch_account_session(
             d,
@@ -13034,6 +13148,7 @@ def main() -> int:
             account_username=account_username,
             run_id=run_id or None,
             source_profile_username=source_profile_username,
+            target_id=target_id or None,
             run_followers_list_engine_session=_run_followers_list_engine_session,
             supabase_mode=supabase_mode,
             warm_session_used=warm_session_used,
@@ -13053,6 +13168,8 @@ def main() -> int:
                     "exit_code": asess_code,
                     "account_username": account_username,
                     "followers_source_username": source_profile_username,
+                    "target_id": target_id or None,
+                    "target_selection_source": target_selection_source,
                 },
             )
         reset_perf_counters()
@@ -13123,6 +13240,22 @@ def main() -> int:
 
     if bool(getattr(config, "ENABLE_FOLLOWERS_LIST_ENGINE", False)):
         source_profile_username = (getattr(config, "FOLLOWERS_SOURCE_USERNAME", "") or "").strip()
+        if source_profile_username:
+            if not bool(getattr(config, "FOLLOWERS_SOURCE_USERNAME_OPS_OVERRIDE", False)):
+                log(
+                    "error",
+                    "run_aborted",
+                    reason="followers_source_username_requires_ops_override",
+                    followers_source_username=source_profile_username,
+                )
+                return _return_with_cleanup(d, 11)
+            log(
+                "warning",
+                "follow_target_ops_override_used",
+                followers_source_username=source_profile_username,
+                selection_source="ops_override",
+                reason="direct_followers_engine_source_override",
+            )
         if not source_profile_username:
             source_profile_username = (targets[0] if targets else "").strip()
         if not source_profile_username:

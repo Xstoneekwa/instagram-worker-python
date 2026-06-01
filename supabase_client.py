@@ -250,6 +250,108 @@ def load_pending_targets(account_id: str, limit: int = 25) -> list[dict[str, Any
     return out
 
 
+def _normalize_target_username(row: dict[str, Any]) -> str:
+    return (
+        row.get("normalized_username")
+        or row.get("canonical_username")
+        or row.get("target_username")
+        or row.get("username")
+        or ""
+    ).strip().lstrip("@").lower()
+
+
+def _is_eligible_follow_target_row(row: dict[str, Any]) -> tuple[bool, str]:
+    status = str(row.get("status") or "").strip().lower()
+    if status not in {"valid", "active"}:
+        return False, "status_not_active"
+    if status in {"rejected", "archived", "invalid", "deleted", "poor_performance", "paused"}:
+        return False, "status_blocked"
+
+    if "quality_status" in row:
+        quality_status = str(row.get("quality_status") or "").strip().lower()
+        if quality_status != "eligible":
+            return False, "quality_not_eligible"
+
+    if "verification_status" in row:
+        verification_status = str(row.get("verification_status") or "").strip().lower()
+        if verification_status and verification_status != "found":
+            return False, "verification_not_found"
+
+    if "archived_at" in row and row.get("archived_at"):
+        return False, "archived"
+    if "deleted_at" in row and row.get("deleted_at"):
+        return False, "deleted"
+    if "disabled" in row and bool(row.get("disabled")):
+        return False, "disabled"
+    if "last_exhausted_at" in row and row.get("last_exhausted_at"):
+        # P1a does not implement cooldown windows yet. Treat explicit exhaustion
+        # state as non-eligible so P1b can add a bounded cooldown policy.
+        return False, "exhausted"
+
+    if not _normalize_target_username(row):
+        return False, "missing_username"
+    return True, "eligible"
+
+
+def _eligible_follow_target_sort_key(item: dict[str, Any]) -> tuple[int, str, str]:
+    raw = item.get("raw") if isinstance(item.get("raw"), dict) else {}
+    if "last_used_at" in raw:
+        last_used_at = raw.get("last_used_at")
+        return (0 if not last_used_at else 1, str(last_used_at or ""), str(raw.get("created_at") or ""))
+    return (0, str(raw.get("created_at") or ""), str(item.get("target_username") or ""))
+
+
+def load_eligible_follow_targets(account_id: str, limit: int = 25) -> list[dict[str, Any]]:
+    """
+    P1a Follow source planner.
+
+    Uses ig_targets as the source of truth for account_session Follow sources.
+    Keeps load_pending_targets intact for legacy queue/DM flows.
+    """
+    query = {
+        "select": "*",
+        "account_id": f"eq.{account_id}",
+        "status": "in.(valid,active)",
+        "order": "created_at.asc",
+        "limit": str(max(1, int(limit))),
+    }
+    rows = _request_json("GET", "ig_targets", query=query) or []
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        ok, reason = _is_eligible_follow_target_row(row)
+        if not ok:
+            log(
+                "info",
+                "follow_target_candidate_skipped",
+                account_id=str(account_id or ""),
+                target_id=str(row.get("id") or ""),
+                target_username=_normalize_target_username(row),
+                reason=reason,
+                status=str(row.get("status") or ""),
+                quality_status=str(row.get("quality_status") or ""),
+                verification_status=str(row.get("verification_status") or ""),
+            )
+            continue
+        username = _normalize_target_username(row)
+        out.append(
+            {
+                "id": row.get("id"),
+                "account_id": row.get("account_id") or account_id,
+                "target_username": username,
+                "source_profile_username": username,
+                "status": row.get("status"),
+                "quality_status": row.get("quality_status"),
+                "verification_status": row.get("verification_status"),
+                "selection_source": "ig_targets",
+                "raw": row,
+            }
+        )
+    out.sort(key=_eligible_follow_target_sort_key)
+    return out
+
+
 def load_target_by_id(target_id: str) -> dict[str, Any] | None:
     rows = _request_json(
         "GET",
@@ -1059,6 +1161,7 @@ def record_follow_interaction_outcome(
     follow_status: str | None,
     failure_code: int | None = None,
     failure_reason: str | None = None,
+    target_id: str | None = None,
 ) -> dict[str, Any]:
     u_gate = _canonical_interaction_username(username)
     inv_gate = _invalid_interacted_username_reason(u_gate)
@@ -1082,6 +1185,8 @@ def record_follow_interaction_outcome(
 
     now = _utc_now_iso()
     payload_delta: dict[str, Any] = {}
+    if target_id:
+        payload_delta["target_id"] = str(target_id)
     if follow_state_after is not None:
         payload_delta["follow_state_after"] = follow_state_after
     if skipped_tap:
