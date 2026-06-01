@@ -1077,6 +1077,7 @@ declare
   v_existing record;
   v_old_app_instance_id uuid;
   v_old_clone_id uuid;
+  v_account_app_instance_id uuid;
   v_instance_device_id uuid;
   v_instance_status text;
   v_instance_current_account_id uuid;
@@ -1169,11 +1170,24 @@ begin
   v_old_app_instance_id := v_existing.app_instance_id;
   v_old_clone_id := v_existing.clone_id;
 
+  select pai.id
+  into v_account_app_instance_id
+  from public.phone_app_instances pai
+  where pai.device_id = v_device_id
+    and pai.status = 'occupied'
+    and pai.current_account_id = v_account_id
+    and pai.usable_for_auto_login
+    and pai.is_launchable
+  order by case when pai.instance_type = 'primary_app' then 0 else 1 end, pai.instance_index asc
+  limit 1
+  for update skip locked;
+
   if v_existing.id is not null
      and v_existing.device_id = v_device_id
      and v_existing.starts_at = v_starts_at
      and v_existing.ends_at = v_ends_at
-     and (v_preferred_app_instance_id is null or v_preferred_app_instance_id = v_existing.app_instance_id or v_preferred_app_instance_id = v_existing.clone_id) then
+     and (v_preferred_app_instance_id is null or v_preferred_app_instance_id = v_existing.app_instance_id or v_preferred_app_instance_id = v_existing.clone_id)
+     and (v_account_app_instance_id is null or v_account_app_instance_id = v_existing.app_instance_id) then
     return jsonb_build_object(
       'ok', true,
       'idempotent', true,
@@ -1213,7 +1227,9 @@ begin
     raise exception 'assignment_slot_conflict';
   end if;
 
-  if v_preferred_app_instance_id is not null then
+  v_app_instance_id := v_account_app_instance_id;
+
+  if v_app_instance_id is null and v_preferred_app_instance_id is not null then
     select pai.id
     into v_app_instance_id
     from public.phone_app_instances pai

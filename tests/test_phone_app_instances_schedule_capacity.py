@@ -72,6 +72,16 @@ class PhoneAppInstancesScheduleCapacityTests(unittest.TestCase):
         ):
             self.assertIn(fragment, sql)
 
+    def test_app_instance_availability_counts_inventory_rows_once(self) -> None:
+        sql = self._sql()
+        self.assertIn("'occupied', count(*) filter (where pai.status = 'occupied' or pai.current_account_id is not null)", sql)
+        self.assertIn("'available', count(*) filter (\n      where pai.status = 'available'", sql)
+        availability_block_start = sql.index("select jsonb_build_object(\n    'total', count(*)")
+        availability_block_end = sql.index("v_slot_date := coalesce", availability_block_start)
+        availability_block = sql[availability_block_start:availability_block_end]
+        self.assertIn("from public.phone_app_instances pai", availability_block)
+        self.assertNotIn("join public.account_assignments", availability_block.lower())
+
     def test_assign_slot_writes_app_instance_and_keeps_legacy_clone_id(self) -> None:
         sql = self._sql()
         for fragment in (
@@ -84,6 +94,43 @@ class PhoneAppInstancesScheduleCapacityTests(unittest.TestCase):
             "raise exception 'no_app_instance_available'",
         ):
             self.assertIn(fragment, sql)
+
+    def test_assign_slot_reuses_existing_account_app_instance_before_free_instance(self) -> None:
+        sql = self._sql()
+        assign_start = sql.index("create or replace function public.assign_account_slot(")
+        assign_end = sql.index("create or replace function public.evaluate_account_schedule_gate", assign_start)
+        assign_sql = sql[assign_start:assign_end]
+        self.assertIn("v_account_app_instance_id uuid", sql)
+        self.assertIn("pai.status = 'occupied'", sql)
+        self.assertIn("pai.current_account_id = v_account_id", sql)
+        self.assertIn("order by case when pai.instance_type = 'primary_app' then 0 else 1 end, pai.instance_index asc", sql)
+        self.assertIn("v_app_instance_id := v_account_app_instance_id", sql)
+        self.assertLess(assign_sql.index("v_app_instance_id := v_account_app_instance_id"), assign_sql.index("pai.status = 'available'"))
+
+    def test_assign_slot_relinks_same_slot_when_existing_assignment_uses_other_instance(self) -> None:
+        sql = self._sql()
+        self.assertIn("and (v_account_app_instance_id is null or v_account_app_instance_id = v_existing.app_instance_id) then", sql)
+        self.assertIn("v_old_app_instance_id := v_existing.app_instance_id", sql)
+        self.assertIn("reassignment_release_old_instance", sql)
+
+    def test_assign_slot_falls_back_to_available_instance_without_existing_account_instance(self) -> None:
+        sql = self._sql()
+        self.assertIn("if v_app_instance_id is null then\n    select pai.id", sql)
+        self.assertIn("pai.status = 'available'", sql)
+        self.assertIn("pai.current_account_id is null", sql)
+        self.assertIn("for update skip locked", sql)
+
+    def test_assign_slot_rejects_instance_occupied_by_another_account(self) -> None:
+        sql = self._sql()
+        self.assertIn("v_instance_current_account_id is not null and v_instance_current_account_id <> v_account_id", sql)
+        self.assertIn("raise exception 'preferred_app_instance_incompatible'", sql)
+        self.assertIn("aa.account_id <> v_account_id", sql)
+
+    def test_assign_slot_avoids_double_occupation_for_same_account(self) -> None:
+        sql = self._sql()
+        self.assertIn("v_app_instance_id := v_account_app_instance_id", sql)
+        self.assertIn("if v_old_app_instance_id is not null and v_old_app_instance_id <> v_app_instance_id then", sql)
+        self.assertIn("public.release_app_instance_if_unused", sql)
 
     def test_release_rules_cover_account_and_assignment_terminal_states(self) -> None:
         sql = self._sql()
