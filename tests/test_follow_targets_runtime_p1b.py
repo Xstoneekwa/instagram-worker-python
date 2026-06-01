@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import unittest
 from unittest.mock import patch
 
@@ -340,6 +341,93 @@ class FollowTargetsRuntimeP1bTest(unittest.TestCase):
         serialized = repr(logs).lower()
         for forbidden in ["password", "secret", "token", "<node", "xml", "screenshot", "serial", "udid"]:
             self.assertNotIn(forbidden, serialized)
+
+    def test_follow_source_rotation_settings_default_without_supabase_row(self) -> None:
+        with patch.dict(os.environ, {}, clear=True), patch.object(
+            session.supabase_client,
+            "load_account_follow_source_settings",
+            return_value=None,
+        ):
+            settings = session._resolve_follow_source_rotation_settings("acct")
+
+        self.assertEqual(settings["settings_source"], "default")
+        self.assertEqual(settings["max_follows_per_target_per_run"], 2)
+        self.assertEqual(settings["max_targets_per_run"], 3)
+        self.assertEqual(settings["bounds"]["max_follows_per_target_per_run"]["max"], 50)
+        self.assertEqual(settings["bounds"]["max_targets_per_run"]["max"], 10)
+
+    def test_follow_source_rotation_settings_account_row_overrides_env(self) -> None:
+        with patch.dict(os.environ, {
+            "FOLLOW_TARGET_MAX_FOLLOWS_PER_TARGET_PER_RUN": "7",
+            "FOLLOW_TARGET_ROTATION_MAX_TARGETS_PER_RUN": "2",
+        }, clear=False), patch.object(
+            session.supabase_client,
+            "load_account_follow_source_settings",
+            return_value={
+                "max_follows_per_target_per_run": 30,
+                "max_targets_per_run": 4,
+            },
+        ):
+            settings = session._resolve_follow_source_rotation_settings("acct")
+
+        self.assertEqual(settings["settings_source"], "account")
+        self.assertEqual(settings["max_follows_per_target_per_run"], 30)
+        self.assertEqual(settings["max_targets_per_run"], 4)
+
+    def test_follow_source_rotation_settings_env_fallback_when_no_account_row(self) -> None:
+        with patch.dict(os.environ, {
+            "FOLLOW_TARGET_MAX_FOLLOWS_PER_TARGET_PER_RUN": "8",
+            "FOLLOW_TARGET_ROTATION_MAX_TARGETS_PER_RUN": "4",
+        }, clear=False), patch.object(
+            session.config,
+            "FOLLOW_TARGET_MAX_FOLLOWS_PER_TARGET_PER_RUN",
+            8,
+        ), patch.object(
+            session.config,
+            "FOLLOW_TARGET_ROTATION_MAX_TARGETS_PER_RUN",
+            4,
+        ), patch.object(
+            session.supabase_client,
+            "load_account_follow_source_settings",
+            return_value=None,
+        ):
+            settings = session._resolve_follow_source_rotation_settings("acct")
+
+        self.assertEqual(settings["settings_source"], "env")
+        self.assertEqual(settings["max_follows_per_target_per_run"], 8)
+        self.assertEqual(settings["max_targets_per_run"], 4)
+
+    def test_follow_source_rotation_allows_prod_candidate_budget_without_default_change(self) -> None:
+        engine = FakeFollowersEngine([
+            (0, {
+                "follows_completed_count": 30,
+                "global_follows_goal_effective": 35,
+                "follow_session_outcome": "follows_completed",
+                "follow_stop_reason": "",
+            }),
+            (0, {
+                "follows_completed_count": 5,
+                "global_follows_goal_effective": 35,
+                "follow_session_outcome": "follows_completed",
+                "follow_stop_reason": "",
+            }),
+        ])
+        result = session._run_follow_target_rotation(
+            object(),
+            account_id="acct",
+            account_username="account",
+            run_id="run",
+            follow_targets=[target("t1", "source_one", 0), target("t2", "source_two", 1)],
+            run_followers_list_engine_session=engine,
+            supabase_mode=True,
+            warm_session_used=False,
+            force_stop_used=False,
+            max_targets_per_run=4,
+            max_follows_per_target_per_run=30,
+        )
+
+        self.assertEqual([call["target_follow_budget"] for call in engine.calls], [30, 5])
+        self.assertEqual(result["summary"]["follow_stop_reason"], "global_follow_cap_reached")
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ dm_welcome_session_send remains a standalone diagnostic run type.
 from __future__ import annotations
 
 import time
+import os
 from typing import Any, Callable
 
 import uiautomator2 as u2
@@ -39,6 +40,8 @@ from welcome_session_orchestrator import dispatch_welcome_session_send
 FollowEngineRunner = Callable[..., int]
 
 H3_SUPPORTED_UNFOLLOW_MODES = frozenset({*UNFOLLOW_MODES_DB_STRICT, UNFOLLOW_MODE_ANY})
+FOLLOW_TARGET_MAX_TARGETS_PER_RUN_ENV = "FOLLOW_TARGET_ROTATION_MAX_TARGETS_PER_RUN"
+FOLLOW_TARGET_MAX_FOLLOWS_PER_TARGET_ENV = "FOLLOW_TARGET_MAX_FOLLOWS_PER_TARGET_PER_RUN"
 FOLLOW_TARGET_EXHAUSTION_EXIT_CODES = frozenset({66})
 FOLLOW_TARGET_EXHAUSTION_TOKENS = frozenset(
     {
@@ -175,6 +178,65 @@ def _as_optional_int(value: Any) -> int | None:
         return None
 
 
+def _setting_source_from_env() -> str:
+    if (
+        str(os.getenv(FOLLOW_TARGET_MAX_TARGETS_PER_RUN_ENV) or "").strip()
+        or str(os.getenv(FOLLOW_TARGET_MAX_FOLLOWS_PER_TARGET_ENV) or "").strip()
+    ):
+        return "env"
+    return "default"
+
+
+def _validate_rotation_setting(value: Any, *, field: str, lower: int, upper: int) -> int:
+    parsed = _as_optional_int(value)
+    if parsed is None or parsed < lower or parsed > upper:
+        raise ValueError(f"{field}_out_of_bounds_{lower}_{upper}")
+    return parsed
+
+
+def _resolve_follow_source_rotation_settings(account_id: str) -> dict[str, Any]:
+    max_targets_upper = int(getattr(config, "FOLLOW_TARGET_ROTATION_MAX_TARGETS_PER_RUN_UPPER_BOUND", 10) or 10)
+    max_follows_upper = int(getattr(config, "FOLLOW_TARGET_MAX_FOLLOWS_PER_TARGET_PER_RUN_UPPER_BOUND", 50) or 50)
+    fallback = {
+        "max_targets_per_run": int(getattr(config, "FOLLOW_TARGET_ROTATION_MAX_TARGETS_PER_RUN", 3) or 3),
+        "max_follows_per_target_per_run": int(getattr(config, "FOLLOW_TARGET_MAX_FOLLOWS_PER_TARGET_PER_RUN", 2) or 2),
+        "settings_source": _setting_source_from_env(),
+        "bounds": {
+            "max_targets_per_run": {"min": 1, "max": max_targets_upper},
+            "max_follows_per_target_per_run": {"min": 1, "max": max_follows_upper},
+        },
+    }
+    try:
+        row = supabase_client.load_account_follow_source_settings(account_id)
+    except Exception as exc:
+        log(
+            "warning",
+            "follow_source_rotation_settings_load_failed",
+            account_id=account_id,
+            reason=str(exc),
+            fallback_source=fallback["settings_source"],
+        )
+        return fallback
+    if not row:
+        return fallback
+    return {
+        "max_targets_per_run": _validate_rotation_setting(
+            row.get("max_targets_per_run"),
+            field="max_targets_per_run",
+            lower=1,
+            upper=max_targets_upper,
+        ),
+        "max_follows_per_target_per_run": _validate_rotation_setting(
+            row.get("max_follows_per_target_per_run"),
+            field="max_follows_per_target_per_run",
+            lower=1,
+            upper=max_follows_upper,
+        ),
+        "settings_source": "account",
+        "bounds": fallback["bounds"],
+    }
+
+
 def _last_follow_engine_summary(run_followers_list_engine_session: FollowEngineRunner) -> dict[str, Any]:
     raw = getattr(run_followers_list_engine_session, "last_session_summary", None)
     return dict(raw) if isinstance(raw, dict) else {}
@@ -241,14 +303,16 @@ def _resolve_max_follow_targets_per_run(total_targets: int, configured: int | No
     raw = configured
     if raw is None:
         raw = int(getattr(config, "FOLLOW_TARGET_ROTATION_MAX_TARGETS_PER_RUN", 3) or 3)
-    return max(1, min(int(raw), max(1, int(total_targets or 1)), 10))
+    upper = int(getattr(config, "FOLLOW_TARGET_ROTATION_MAX_TARGETS_PER_RUN_UPPER_BOUND", 10) or 10)
+    return max(1, min(int(raw), max(1, int(total_targets or 1)), upper))
 
 
 def _resolve_max_follows_per_target_per_run(configured: int | None = None) -> int:
     raw = configured
     if raw is None:
         raw = int(getattr(config, "FOLLOW_TARGET_MAX_FOLLOWS_PER_TARGET_PER_RUN", 2) or 2)
-    return max(1, min(int(raw), 10))
+    upper = int(getattr(config, "FOLLOW_TARGET_MAX_FOLLOWS_PER_TARGET_PER_RUN_UPPER_BOUND", 50) or 50)
+    return max(1, min(int(raw), upper))
 
 
 def is_follow_target_exhaustion_outcome(
@@ -2121,6 +2185,17 @@ def run_account_session(
                 fallback_source_profile=src,
                 fallback_target_id=tid or None,
             )
+            rotation_settings = _resolve_follow_source_rotation_settings(aid)
+            log(
+                "info",
+                "follow_source_rotation_settings_loaded",
+                account_id=aid,
+                run_id=run_id,
+                max_follows_per_target_per_run=rotation_settings["max_follows_per_target_per_run"],
+                max_targets_per_run=rotation_settings["max_targets_per_run"],
+                settings_source=rotation_settings["settings_source"],
+                bounds=rotation_settings["bounds"],
+            )
             rotation_result = _run_follow_target_rotation(
                 d,
                 account_id=aid,
@@ -2131,8 +2206,16 @@ def run_account_session(
                 supabase_mode=supabase_mode,
                 warm_session_used=warm_session_used,
                 force_stop_used=force_stop_used,
-                max_targets_per_run=max_follow_targets_per_run,
-                max_follows_per_target_per_run=max_follows_per_target_per_run,
+                max_targets_per_run=(
+                    max_follow_targets_per_run
+                    if max_follow_targets_per_run is not None
+                    else int(rotation_settings["max_targets_per_run"])
+                ),
+                max_follows_per_target_per_run=(
+                    max_follows_per_target_per_run
+                    if max_follows_per_target_per_run is not None
+                    else int(rotation_settings["max_follows_per_target_per_run"])
+                ),
             )
             follow_t1 = time.perf_counter()
             follow_phase_executed = True

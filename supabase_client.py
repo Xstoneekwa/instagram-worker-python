@@ -352,6 +352,28 @@ def load_eligible_follow_targets(account_id: str, limit: int = 25) -> list[dict[
     return out
 
 
+def load_account_follow_source_settings(account_id: str) -> dict[str, Any] | None:
+    aid = str(account_id or "").strip()
+    if not aid:
+        raise ValueError("account_id is required")
+    rows = _request_json(
+        "GET",
+        "account_follow_source_settings",
+        query={
+            "select": (
+                "account_id,max_follows_per_target_per_run,max_targets_per_run,"
+                "updated_at,updated_by,metadata"
+            ),
+            "account_id": f"eq.{aid}",
+            "limit": "1",
+        },
+    ) or []
+    if not rows:
+        return None
+    row = rows[0]
+    return dict(row) if isinstance(row, dict) else None
+
+
 def load_target_by_id(target_id: str) -> dict[str, Any] | None:
     rows = _request_json(
         "GET",

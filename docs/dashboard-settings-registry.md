@@ -179,10 +179,17 @@ Actions:
 
 ### 4.2 Schedule
 
+As of checkpoint 2026-06-01, the Schedule tab is no longer a legacy
+`ig_account_settings` promise. It is wired through the Schedule domain API and
+validated against `phone_app_instances`, `account_assignments`, phone rest and
+runtime gates.
+
 | UI field | Current key | Current table/source | Current write path | Target Phone Farm source | Runtime status | Visibility | Security class | Action |
 |---|---|---|---|---|---|---|---|---|
-| Timeslot start | `timeslot_start` | `ig_account_settings` | PATCH settings | Scheduler / timeslot catalog | planned | admin | safe | hide_until_runtime_verified |
-| Timeslot end | `timeslot_end` | `ig_account_settings` | PATCH settings | Scheduler / timeslot catalog | planned | admin | safe | hide_until_runtime_verified |
+| Slot selection | `starts_at` / `ends_at` | `list_available_assignment_slots` / `account_assignments` | `/api/instagram-dashboard/settings/schedule` | `account_assignments` + `phone_app_instances` | runtime_verified | admin | safe | keep |
+| Runtime profile | `assignment_type` | `resolve_account_schedule_assignment_type` | read-only projection | subscription/package resolver | runtime_verified | admin | safe | keep |
+| Slot kind | `slot_kind` | Schedule RPC projection | read-only projection | `full_cycle_6h` / `outreach_short` | runtime_verified | admin | safe | keep |
+| App instances summary | `app_instance_availability` | `phone_app_instances` summary | read-only projection | assignable app inventory | runtime_verified | admin | ops_summary | keep |
 | Total sessions | `total_sessions` | `ig_account_settings` | PATCH settings | Session policy / package limits | planned | admin | safe | map_to_domain_table |
 | Stop after minutes | `stop_interactions_after_minutes` | `ig_account_settings` | PATCH settings | Session cap / package limit | legacy_unknown | admin | safe | hide_until_runtime_verified |
 | Startup timeout seconds | `timeout_startup_seconds` | `ig_account_settings` | PATCH settings | Provisioner/app-start ops config | legacy_unknown | ops_only | runtime_dangerous | move_to_ops_only |
@@ -194,6 +201,15 @@ Actions:
 Schedule settings must account for one-device-one-active-UI-action, long
 sessions, clone buffers, phone rest windows and package runtime limits before
 they are exposed outside admin.
+
+Validated behavior:
+
+- `full_cycle` accounts show four `full_cycle_6h` slots and no outreach slots;
+- app instance capacity counts inventory rows once;
+- a Schedule slot change reuses an instance already occupied by the same
+  account before choosing a free clone;
+- `no_app_instance_available` blocks only when no compatible free/reusable
+  instance exists.
 
 ### 4.3 Actions
 
@@ -256,6 +272,8 @@ documented separately before this tab is exposed broadly.
 | UI field | Current key | Current table/source | Current write path | Target Phone Farm source | Runtime status | Visibility | Security class | Action |
 |---|---|---|---|---|---|---|---|---|
 | Source accounts | `source_accounts` | `ig_account_settings` textarea | PATCH settings | `ig_targets.target_username` | legacy_unknown | admin | safe | deprecate |
+| Max follows per target per run | `max_follows_per_target_per_run` | `account_follow_source_settings` | PATCH `/api/instagram-dashboard/settings/follow-sources` | Worker P1b target budget | runtime_verified | admin | safe | keep |
+| Max targets per run | `max_targets_per_run` | `account_follow_source_settings` | PATCH `/api/instagram-dashboard/settings/follow-sources` | Worker P1b target rotation bound | runtime_verified | admin | safe | keep |
 | Truncate sources min/max | `truncate_sources_min`, `truncate_sources_max` | `ig_account_settings` | PATCH settings | Target queue policy | legacy_unknown | admin | safe | hide_until_runtime_verified |
 | Delete interacted users | `delete_interacted_users` | `ig_account_settings` | PATCH settings | `ig_interacted_users` maintenance | legacy_unknown | ops_only | runtime_dangerous | move_to_ops_only |
 | Change source if crash | `change_source_if_crash` | `ig_account_settings` | PATCH settings | Recovery / source rotation | legacy_unknown | ops_only | runtime_dangerous | move_to_ops_only |
@@ -264,7 +282,11 @@ documented separately before this tab is exposed broadly.
 
 `source_accounts` is not the Phone Farm source of truth. The runtime source of
 truth is `ig_targets`, later connected to CT / Target Accounts, FBR and Source
-Quality Control.
+Quality Control. P1b source rotation settings are domain settings stored per
+account in `account_follow_source_settings`; they are per-run controls, not
+daily limits, and do not increase global Follow caps. Defaults remain
+conservative (2 follows per target, 3 targets per run) until controlled
+multi-target tests justify production tuning.
 
 ### 4.7 Filters
 
@@ -423,7 +445,6 @@ Only after runtime proof, entitlement checks and safe API projection:
 
 ### Hide until runtime verified
 
-- Schedule tab.
 - follow / like / story percentages.
 - most Followback and Safety toggles.
 - legacy `source_accounts` textarea.
