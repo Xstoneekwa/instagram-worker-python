@@ -1,0 +1,4421 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+2 0 obj
+<< /Length 3086 >>
+stream
+BT
+/F1 9 Tf
+40 790 Td
+11 TL
+(Project Knowledge Base - page 1/33) Tj
+T*
+T*
+(# Project Knowledge Base ? Phone Farm Instagram) Tj
+T*
+() Tj
+T*
+(Ce document est la verite globale de handoff du projet Phone Farm Instagram.) Tj
+T*
+(Il ne remplace pas `docs/outreach-entry-api.md`, qui reste la documentation) Tj
+T*
+(technique detaillee des Entries, APIs, RPC, credentials et provisioning.) Tj
+T*
+() Tj
+T*
+(## 1. Big Picture) Tj
+T*
+() Tj
+T*
+(Le projet construit une Phone Farm Instagram production-grade :) Tj
+T*
+() Tj
+T*
+(- backend Supabase comme source durable des comptes, credentials metadata,) Tj
+T*
+(  statuts, actions dashboard, incidents et jobs;) Tj
+T*
+(- Python worker pour l'execution locale, les probes, le provisioning futur et) Tj
+T*
+(  les sessions business;) Tj
+T*
+(- Edge Functions Supabase pour les boundaries API server-side;) Tj
+T*
+(- dashboard client/admin pour les statuts, actions et workflows operateurs;) Tj
+T*
+(- app locale Mac / BotApp future pour piloter les workers et les devices;) Tj
+T*
+(- phones physiques, clones/app profiles et assignments pour la capacite runtime;) Tj
+T*
+(- architecture hybride obligatoire : XML/accessibility rapide, vision, state) Tj
+T*
+(  machine et recovery pour les actions critiques.) Tj
+T*
+() Tj
+T*
+(## 2. Etat Courant Valide) Tj
+T*
+() Tj
+T*
+(Checkpoints recents valides :) Tj
+T*
+() Tj
+T*
+(- Entry 2E-5A : classifier/provisioner skeleton;) Tj
+T*
+(- Entry 2E-5B : login UI probe;) Tj
+T*
+(- Entry 2E-5C : isolated login probe CLI;) Tj
+T*
+(- Entry 2E-5D : visible `app_start` probe;) Tj
+T*
+(- Entry 2E-5E : Login Screen Router;) Tj
+T*
+(- Entry 2E-5F : Controlled Action Executor;) Tj
+T*
+(- Entry 2E-5G : Secure Credential Runtime Access Design;) Tj
+T*
+(- Entry 2E-5H : Supabase Vault Reader Helper checkpointe.) Tj
+T*
+(- Entry 2E-5H-2 : real Supabase Vault read RPC + fake secret smoke valide,) Tj
+T*
+(  sans vrai credential client.) Tj
+T*
+(- Entry 2E-5I : Controlled Password Form Executor valide mocks-only,) Tj
+T*
+(  sans smoke reel.) Tj
+T*
+(- Entry 2E-5J : Provisioner Orchestrator Skeleton en cours de validation) Tj
+T*
+(  mocks-only, sans run device ni vrai login.) Tj
+T*
+(- Entry 2E-5J-2A : smoke prep no-password en cours, pour verifier device idle,) Tj
+T*
+(  app_start, probe/router/orchestrator dry-run sans credential.) Tj
+T*
+(- P1b Follow target rotation + Sources rotation settings : pousse le) Tj
+T*
+(  2026-06-02, sans run reel ni follow reel. Worker) Tj
+T*
+(  `93717ecc3b7828a01a00ca1ee8c81d077a821109` sur) Tj
+T*
+(  `stable-follow-working-state`; frontend) Tj
+T*
+(  `b9f5fb4c23b745b084bedc831e69e892598e4f60` sur `main`.) Tj
+T*
+() Tj
+T*
+(Le runtime principal n'est pas encore branche au login/provisioning complet :) Tj
+T*
+(pas de vrai login, pas de password tap, pas de runner hook, pas de run device) Tj
+T*
+(provisioning.) Tj
+T*
+() Tj
+T*
+(## 3. Checkpoints SHA / Tags Recents) Tj
+T*
+() Tj
+T*
+(- 2E-5F :) Tj
+T*
+(  - SHA `eb01e002f90e7a870ed8d10df19f1bdb044517e0`) Tj
+T*
+(  - tag `checkpoint-entry2e5f-login-action-executor-20260526`) Tj
+T*
+(- 2E-5G :) Tj
+T*
+(  - SHA `47da05b006e0f3bc9293d8b369bb36a365a746ac`) Tj
+T*
+ET
+endstream
+endobj
+3 0 obj
+<< /Type /Page /Parent 68 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 1 0 R >> >> /Contents 2 0 R >>
+endobj
+4 0 obj
+<< /Length 2956 >>
+stream
+BT
+/F1 9 Tf
+40 790 Td
+11 TL
+(Project Knowledge Base - page 2/33) Tj
+T*
+T*
+(  - tag `checkpoint-entry2e5g-secure-credential-runtime-access-20260526`) Tj
+T*
+(- 2E-5H :) Tj
+T*
+(  - SHA `880deef630c8a6217f9fbc4d64b7167fd3e20764`) Tj
+T*
+(  - tag `checkpoint-entry2e5h-supabase-vault-reader-helper-20260526`) Tj
+T*
+(- 2E-5H-2 :) Tj
+T*
+(  - SHA `1d3ced61d813139bdc4f3f3c202127dd35f40e8a`) Tj
+T*
+(  - tag `checkpoint-entry2e5h2-real-vault-read-rpc-20260526`) Tj
+T*
+(- 2E-5I :) Tj
+T*
+(  - SHA `349587f816dae843bca2b37d38f15cc76d425bcf`) Tj
+T*
+(  - tag `checkpoint-entry2e5i-password-form-executor-20260526`) Tj
+T*
+() Tj
+T*
+(## 4. Architecture Actuelle) Tj
+T*
+() Tj
+T*
+(- Supabase est la source de verite durable.) Tj
+T*
+(- Edge Functions gerent les boundaries API et les controles d'auth/ownership.) Tj
+T*
+(- Les modules Python ajoutes restent isoles et injectables tant que le runtime) Tj
+T*
+(  complet n'est pas approuve.) Tj
+T*
+(- Supabase Vault stocke les secrets; `account_credentials` reste metadata-only.) Tj
+T*
+(- `account_dashboard_actions` est la projection UI actionnable.) Tj
+T*
+(- `account_incidents` est la verite ops durable.) Tj
+T*
+(- `account_incident_notifications` est l'audit de livraison Slack/Discord.) Tj
+T*
+(- `client_instagram_accounts` porte les statuts dashboard-safe :) Tj
+T*
+(  `login_status`, `provisioning_status`, `onboarding_status`.) Tj
+T*
+() Tj
+T*
+(Sources de verite separees :) Tj
+T*
+() Tj
+T*
+(- credentials secret value : Vault uniquement;) Tj
+T*
+(- credentials metadata/status : `account_credentials`;) Tj
+T*
+(- login/provisioning status client/admin : `client_instagram_accounts`;) Tj
+T*
+(- actions dashboard : `account_dashboard_actions`;) Tj
+T*
+(- incidents ops : `account_incidents`.) Tj
+T*
+() Tj
+T*
+(## 5. Roadmap Provisioning / Login) Tj
+T*
+() Tj
+T*
+(Deja pose :) Tj
+T*
+() Tj
+T*
+(- login UI probe;) Tj
+T*
+(- Login Screen Router;) Tj
+T*
+(- Controlled Action Executor;) Tj
+T*
+(- Secure Credential Runtime Access;) Tj
+T*
+(- Supabase Vault Reader Helper;) Tj
+T*
+(- real Vault read RPC service-role only;) Tj
+T*
+(- Controlled Password Form Executor mocks-only valide;) Tj
+T*
+(- Provisioner Orchestrator Skeleton mocks-only en cours.) Tj
+T*
+(- Orchestrator dry-run/no-submit pour smoke prep no-password.) Tj
+T*
+() Tj
+T*
+(Etapes suivantes :) Tj
+T*
+() Tj
+T*
+(- 2E-5H-2 : RPC service-role only de lecture Vault + smoke fake secret valide;) Tj
+T*
+(- finaliser 2E-5J : orchestrateur isole probe/router/action/credentials/password) Tj
+T*
+(  executor/classifier/publisher injectable;) Tj
+T*
+(- 2E-5J-2A : smoke prep no-password device idle + app_start + probe/router +) Tj
+T*
+(  orchestrator dry-run;) Tj
+T*
+(- 2E-5J-2 smoke orchestrator controle ou 2E-5I-2 smoke reel `cinema_catchup`) Tj
+T*
+(  via flow securise) Tj
+T*
+(  `instagram-credentials` -> Vault apres validation explicite;) Tj
+T*
+(- integration provisioner runtime derriere flags;) Tj
+T*
+(- status publish connected/2FA/checkpoint/failed via orchestrateur futur;) Tj
+T*
+ET
+endstream
+endobj
+5 0 obj
+<< /Type /Page /Parent 68 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 1 0 R >> >> /Contents 4 0 R >>
+endobj
+6 0 obj
+<< /Length 3663 >>
+stream
+BT
+/F1 9 Tf
+40 790 Td
+11 TL
+(Project Knowledge Base - page 3/33) Tj
+T*
+T*
+(- state machine login + recovery avant branchement runtime principal.) Tj
+T*
+() Tj
+T*
+(Contraintes permanentes :) Tj
+T*
+() Tj
+T*
+(- pas de login par-dessus un compte actif/inconnu;) Tj
+T*
+(- pas de password dans logs, prompts, fichiers locaux ou dashboards;) Tj
+T*
+(- pas de tap password avant ecran `login_form_empty` valide et contexte test) Tj
+T*
+(  dedie.) Tj
+T*
+(- `instagram_login_password_form_executor.py` reste un executor bas niveau :) Tj
+T*
+(  aucun retry par defaut, aucune escalation directe, aucun status publish,) Tj
+T*
+(  aucune ecriture Supabase.) Tj
+T*
+(- Le futur provisioner orchestrator decidera retry/escalation/status publish et) Tj
+T*
+(  dashboard actions a partir de `failure_reason` et `post_submit_outcome`.) Tj
+T*
+(- 2E-5J centralise cette policy dans un module isole, avec `publish_enabled=false`) Tj
+T*
+(  par defaut et publisher injectable/mocke.) Tj
+T*
+() Tj
+T*
+(Retry policy future :) Tj
+T*
+() Tj
+T*
+(- aucun retry pour `login_form_not_validated`, `expected_username_missing`,) Tj
+T*
+(  `password_secret_missing`, `password_secret_invalid`, `login_failed`,) Tj
+T*
+(  `needs_2fa`, `checkpoint`, mismatch / wrong account;) Tj
+T*
+(- mini retry possible cote orchestrateur seulement pour) Tj
+T*
+(  `username_field_not_found`, `password_field_not_found`,) Tj
+T*
+(  `login_button_not_found`, `ambiguous_login_form`, `post_submit_dump_failed`,) Tj
+T*
+(  `input_failed`, `submit_failed`;) Tj
+T*
+(- retry max 1, uniquement apres revalidation `login_form_empty`;) Tj
+T*
+(- pas de boucle infinie; si encore failure apres retry : stop safe, status) Tj
+T*
+(  provisioning/login selon contexte, dashboard action si necessaire.) Tj
+T*
+() Tj
+T*
+(Post-submit policy future :) Tj
+T*
+() Tj
+T*
+(- `connected` -> succes;) Tj
+T*
+(- `needs_2fa` -> action dashboard `complete_two_factor`;) Tj
+T*
+(- `checkpoint` -> action dashboard `resolve_checkpoint`;) Tj
+T*
+(- `login_failed` -> `update_password` ou `review_login_failure`, sans retry avec) Tj
+T*
+(  le meme password;) Tj
+T*
+(- `unknown` -> re-observe possible 1 fois, puis `retry_later` ou) Tj
+T*
+(  `support_required`.) Tj
+T*
+(- 2E-5J ne lance aucun smoke reel; toute execution device future exige une) Tj
+T*
+(  fenetre device idle, un lock UI exclusif et un compte test dedie.) Tj
+T*
+(- 2E-5J-2A autorise uniquement un smoke prep sans password : app_start,) Tj
+T*
+(  dump/probe/router/orchestrator dry-run; aucun credential, aucun tap `Log in`,) Tj
+T*
+(  aucun publish.) Tj
+T*
+(- Smoke prep 2E-5J-2A execute sur `emulator-5554` : device unique, aucun run) Tj
+T*
+(  business detecte, `app_start` OK, dump UI OK,) Tj
+T*
+(  `screen_type=continue_as_candidate`, `suggested_username=i_m_your_traker`,) Tj
+T*
+(  boutons Continue / Use another profile / Create new account detectes,) Tj
+T*
+(  `would_submit_password=false`, `would_publish=false`.) Tj
+T*
+(- Sans lifecycle confirme, le router bloque en mismatch; avec lifecycle mock) Tj
+T*
+(  `canceled` + `clone_reuse_allowed=true`, le dry-run prevoit) Tj
+T*
+(  `use_another_profile_previous_account_stopped` sans cliquer.) Tj
+T*
+(- Entry 2E-5J-2B : tentative de gate pour smoke controle `Use another profile`) Tj
+T*
+(  no-password. Pre-check device OK et ecran `continue_as_candidate`, mais aucune) Tj
+T*
+(  entree lifecycle exploitable n'a confirme que `i_m_your_traker` est) Tj
+T*
+(  canceled/stopped/archived. Action stoppee avant tap avec) Tj
+T*
+(  `reason=lifecycle_not_confirmed`.) Tj
+T*
+(- Entry 2E-5J-2B smoke apres lookup operateur : premier essai stoppe avant tap) Tj
+T*
+(  avec `failure_reason=ambiguous_target_button` car `description="Use another profile"`) Tj
+T*
+ET
+endstream
+endobj
+7 0 obj
+<< /Type /Page /Parent 68 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 1 0 R >> >> /Contents 6 0 R >>
+endobj
+8 0 obj
+<< /Length 4478 >>
+stream
+BT
+/F1 9 Tf
+40 790 Td
+11 TL
+(Project Knowledge Base - page 4/33) Tj
+T*
+T*
+(  retournait 2 matches UIAutomator2 alors que le dump XML n'avait qu'un seul) Tj
+T*
+(  libelle texte exact non cliquable.) Tj
+T*
+(- Correctif 2E-5J-2B : l'action executor resout maintenant la cible via hierarchy) Tj
+T*
+(  XML \(bounds + zone verticale + deduplication\), puis tap unique au centre des) Tj
+T*
+(  bounds valides; pas de coordonnees fixes d'ecran.) Tj
+T*
+(- Smoke reel 2E-5J-2B apres correctif : `action_executed=true`,) Tj
+T*
+(  `post_action_screen_type=login_form_empty`, `ready_for_password_smoke=true`,) Tj
+T*
+(  `would_submit_password=false`, `would_publish=false`. Aucun password, aucun) Tj
+T*
+(  login, aucun Vault read, aucun publish.) Tj
+T*
+(- Entry 2E-5J-2C : smoke no-password Cas B `Continue as expected account`.) Tj
+T*
+(  Pre-check device OK, `expected_username=cinema_catchup`,) Tj
+T*
+(  `suggested_username=cinema_catchup`, router) Tj
+T*
+(  `continue_expected_account`. Tap controle `Continue` execute une seule fois,) Tj
+T*
+(  resolution `selector_text`; post-action pre-login probe `unknown`, mais) Tj
+T*
+(  classification UI login `connected` / home feed. Aucun password, aucun tap) Tj
+T*
+(  `Log in`, aucun credential, aucun Vault read, aucun publish.) Tj
+T*
+(- Mini patch 2E-5J-2C : apres `Continue`, l'orchestrator normalise le cas) Tj
+T*
+(  pre-login probe `unknown` + classifier `connected` en) Tj
+T*
+(  `final_outcome=connected`, `password_required=false`,) Tj
+T*
+(  `ready_for_password_smoke=false`, sans credential, sans retry password et sans) Tj
+T*
+(  publish par defaut. La meme passerelle couvre `needs_2fa`, `checkpoint` et) Tj
+T*
+(  `login_failed` comme status candidates post-action.) Tj
+T*
+(- Entry 2E-5K : ajout du flow `Continue -> continue_password_only -> password`.) Tj
+T*
+(  Le probe reconnait un ecran password-only quand le username attendu est deja) Tj
+T*
+(  visible, que le champ `Password` et le bouton `Log in` sont presents, sans) Tj
+T*
+(  champ username editable. Les overlays Android/Google/password manager sont) Tj
+T*
+(  marques `overlay_present` et ne remplacent pas la) Tj
+T*
+(  classification metier.) Tj
+T*
+(- L'executor password saisit uniquement le password en mode) Tj
+T*
+(  `continue_password_only`, via `SecretValue.reveal_for_login_executor\(\)`, puis) Tj
+T*
+(  tap `Log in`. Si un overlay bloque une fois le submit, une recovery minimale) Tj
+T*
+(  `back` + refocus password + retap est autorisee une seule fois. Aucun password) Tj
+T*
+(  en result/metadata/logs, aucun Vault read en tests, aucun runner hook.) Tj
+T*
+(- Validation reelle 2E-5K no-password 2026-05-26 : pre-check device OK,) Tj
+T*
+(  `app_start` Instagram OK, pre-action) Tj
+T*
+(  `continue_as_candidate/cinema_catchup` avec router) Tj
+T*
+(  `continue_expected_account`, puis un seul tap controle `Continue`.) Tj
+T*
+(  Le premier post-Continue etait `Loading...`; l'orchestrateur fait maintenant) Tj
+T*
+(  une seule re-observation courte a 1500 ms, avec metadata) Tj
+T*
+(  `post_continue_initial_screen=transition_loading`,) Tj
+T*
+(  `post_continue_reobserve=true`, `post_continue_reobserve_count=1`.) Tj
+T*
+(  Observation reelle suivante : `screen_type=continue_password_only`,) Tj
+T*
+(  username `cinema_catchup`, champ `Password`, bouton `Log in`, pas de champ) Tj
+T*
+(  username editable, overlay Google `Suggest strong password` detecte comme) Tj
+T*
+(  parasite \(`overlay_present=true`, `overlay_blocking_business=false`\),) Tj
+T*
+(  `password_required=true`, `ready_for_password_submit=true`. Aucun password,) Tj
+T*
+(  aucun tap `Log in`, aucun Vault read, aucun publish. Le vrai submit reste) Tj
+T*
+(  futur via Vault/`SecretValue` uniquement.) Tj
+T*
+(- Entry 2E-5L : Cas D direct `login_form_empty` sur `app_start`. Instagram peut) Tj
+T*
+(  ouvrir directement le formulaire vide complet avec champ) Tj
+T*
+(  `Username, email or mobile number`, champ `Password`, bouton `Log in`,) Tj
+T*
+(  `Forgot password?`, `Create new account` et `Meta`. Le probe expose) Tj
+T*
+(  `username_editable_present=true`, `password_field_editable_present=true`,) Tj
+T*
+(  `password_required=true`, `ready_for_credentials_flow=true`. Le routeur donne) Tj
+T*
+(  `start_login_form_flow`; le dry-run no-password donne) Tj
+T*
+(  `would_request_credentials=true`, `would_submit_password=false`,) Tj
+T*
+(  `would_publish=false`. Validation reelle faite sans saisie username/password,) Tj
+T*
+(  sans tap `Log in`, sans Vault read et sans publish. Le vrai submit reste futur) Tj
+T*
+ET
+endstream
+endobj
+9 0 obj
+<< /Type /Page /Parent 68 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 1 0 R >> >> /Contents 8 0 R >>
+endobj
+10 0 obj
+<< /Length 4582 >>
+stream
+BT
+/F1 9 Tf
+40 790 Td
+11 TL
+(Project Knowledge Base - page 5/33) Tj
+T*
+T*
+(  via Vault/`SecretValue` uniquement. Le patch couvre l'ecran observe EN; des) Tj
+T*
+(  aliases FR/EN pourront etre ajoutes plus tard.) Tj
+T*
+(- Entry 2E-5M : Cas E account picker / profile chooser. Instagram peut ouvrir) Tj
+T*
+(  une liste de comptes \(`account_picker`\) avec plusieurs usernames visibles,) Tj
+T*
+(  `Use another profile`, `Create new account` et `Meta`. Le probe expose) Tj
+T*
+(  `available_usernames`, `expected_username_present` et) Tj
+T*
+(  `expected_username_match_count`. Si le compte attendu est present une seule) Tj
+T*
+(  fois, le routeur retourne `select_expected_account_from_picker` et l'action) Tj
+T*
+(  executor fait un seul tap sur la ligne du `expected_username`, via hierarchy) Tj
+T*
+(  XML/bounds, sans coordonnees fixes et sans cliquer un autre compte. Si le) Tj
+T*
+(  compte attendu est absent, ambigu ou manquant en input, le flow stoppe safe) Tj
+T*
+(  sans tap. Validation reelle no-password : account picker avec) Tj
+T*
+(  `cinema_catchup` et `i_m_your_traker`, tap unique sur `cinema_catchup`,) Tj
+T*
+(  aucun tap `i_m_your_traker`, aucun `Use another profile`, aucun `Log in`,) Tj
+T*
+(  aucun password/Vault/publish. Le premier post-action a ete `unknown`) Tj
+T*
+(  transitoire, puis stabilisation vers `continue_password_only` avec) Tj
+T*
+(  `ready_for_password_submit=true`; le vrai submit reste futur via) Tj
+T*
+(  Vault/`SecretValue` uniquement.) Tj
+T*
+(- Entry 2E-5N / 2E-5P-17 : Cas E/F old logged-in account recovery. Instagram peut) Tj
+T*
+(  ouvrir sur le home/feed ou le profil d'un ancien compte encore connecte. Le) Tj
+T*
+(  probe expose `active_account_home`, `active_account_profile`,) Tj
+T*
+(  `account_switcher_sheet`, `add_account_sheet` et `actual_logged_in_username`.) Tj
+T*
+(  **Un feed connecte seul ne suffit pas** : `active_account_home` ne doit pas) Tj
+T*
+(  conclure `connected_no_password_needed` sans identite verifiee ; sinon stop safe) Tj
+T*
+(  `identity_unknown_on_connected_home` ou recovery add-existing selon lifecycle.) Tj
+T*
+(  Smoke : `--operator-smoke-active-account-username` pour le gate Cas E quand le) Tj
+T*
+(  XML feed n'expose pas le username. Si le compte actif est le compte attendu, le) Tj
+T*
+(  flow finalise `connected` sans recovery. Si le compte actif) Tj
+T*
+(  est different, le recovery n'est autorise que par lifecycle gate explicite :) Tj
+T*
+(  `lifecycle_status in canceled/stopped/archived` et) Tj
+T*
+(  `clone_reuse_allowed=true`, avec source temporaire) Tj
+T*
+(  `operator_smoke_override` pour le smoke. Sinon stop safe) Tj
+T*
+(  `block_wrong_active_account`, dashboard) Tj
+T*
+(  `review_logged_in_account_mismatch`, aucun clic. Le recovery V1 suit le chemin) Tj
+T*
+(  Instagram sans logout automatique : home -> profil -> account switcher via) Tj
+T*
+(  username/fleche -> `Add Instagram account` / `Add profile` ->) Tj
+T*
+(  `Log into existing account`, puis retour vers les cas deja couverts) Tj
+T*
+(  \(`continue_as_candidate`, `account_picker`, `login_form_empty`,) Tj
+T*
+(  `continue_password_only`, `connected`\). Toujours no-password : aucun `Log in`,) Tj
+T*
+(  aucun password, aucun Vault read, aucun publish par defaut. Les aliases EN sont) Tj
+T*
+(  couverts dans le patch; les aliases FR \(`Ajouter un compte Instagram`,) Tj
+T*
+(  `Ajouter un profil`, `Se connecter a un compte existant`,) Tj
+T*
+(  `Ajouter un compte existant`\) restent documentes pour extension. Smoke reel) Tj
+T*
+(  2026-05-26 : depart `active_account_home`/profil) Tj
+T*
+(  `actual_logged_in_username=i_m_your_traker`,) Tj
+T*
+(  `expected_username=cinema_catchup`, lifecycle override) Tj
+T*
+(  `canceled + clone_reuse_allowed=true`, recovery autorise. Navigation) Tj
+T*
+(  account switcher -> `Add Instagram account` -> `Log into existing account`,) Tj
+T*
+(  puis re-observation vers `continue_as_candidate`; le flow existant a tape) Tj
+T*
+(  `Continue` et stoppe sur `continue_password_only` en `credentials_missing`,) Tj
+T*
+(  `ready_for_password_submit=true`, sans password, sans `Log in`, sans Vault,) Tj
+T*
+(  sans logout et sans publish.) Tj
+T*
+(- Entry 2E-5O : Cas G logout fallback old canceled account. Ce chemin est) Tj
+T*
+(  separe du Cas F et ne sert que si `Add Instagram account` ->) Tj
+T*
+(  `Log into existing account` echoue ou n'est pas disponible. Il est opt-in :) Tj
+T*
+(  le flow login principal ne declenche pas de logout automatiquement. Le gate) Tj
+T*
+(  impose `actual_logged_in_username` detecte dynamiquement sur profil,) Tj
+T*
+(  different de `expected_username`, puis lifecycle explicite) Tj
+T*
+ET
+endstream
+endobj
+11 0 obj
+<< /Type /Page /Parent 68 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 1 0 R >> >> /Contents 10 0 R >>
+endobj
+12 0 obj
+<< /Length 4718 >>
+stream
+BT
+/F1 9 Tf
+40 790 Td
+11 TL
+(Project Knowledge Base - page 6/33) Tj
+T*
+T*
+(  `canceled/stopped/archived + clone_reuse_allowed=true` via) Tj
+T*
+(  `operator_smoke_override` temporaire ou future DB lifecycle. Sinon stop safe) Tj
+T*
+(  `review_logged_in_account_mismatch`, aucun logout. Le patch ajoute) Tj
+T*
+(  `profile_menu_ready`, `profile_menu_missing_transient`,) Tj
+T*
+(  `profile_menu_sheet`, `settings_and_activity`, `save_login_info_prompt` et) Tj
+T*
+(  `logout_confirmation_prompt`. Avant menu, l'orchestrateur attend/reobserve une) Tj
+T*
+(  fois puis tente au plus un refresh safe `Home` -> `Profile`; si le hamburger) Tj
+T*
+(  reste absent ou si le username change, stop safe. Sur `Save your login info?`,) Tj
+T*
+(  il tape uniquement `Not now`; sur `Log out of your account?`, il tape `Log out`) Tj
+T*
+(  uniquement apres gate confirme. Ecran final attendu : cas deja couverts) Tj
+T*
+(  \(`login_form_empty`, `continue_as_candidate`, `account_picker`,) Tj
+T*
+(  `continue_password_only`, `connected`\) ou stop safe apres reobserve unique.) Tj
+T*
+(  Si `Log out` n'est pas visible dans settings, un scroll controle borne tente) Tj
+T*
+(  de rejoindre la section `Login` avant de stopper safe. Toujours) Tj
+T*
+(  no-password/no-leak : aucune saisie, aucun `Log in`, aucun Vault, aucun) Tj
+T*
+(  publish, aucune ecriture Supabase, aucune coordonnee fixe. Smoke reel) Tj
+T*
+(  2026-05-26 : profil `i_m_your_traker`, lifecycle override `canceled +) Tj
+T*
+(  clone_reuse_allowed=true`, hamburger OK, scroll settings vers `Log out`, prompt) Tj
+T*
+(  `Save your login info?` gere par `Not now`, confirmation logout geree par) Tj
+T*
+(  `Log out`. L'orchestrateur a stoppe safe sur `post_logout_unknown_screen` apres) Tj
+T*
+(  reobserve unique; inspection passive juste apres : stabilisation vers) Tj
+T*
+(  `account_picker`.) Tj
+T*
+(- Entry 2E-5P : premier smoke password reel controle via Vault/`SecretValue`.) Tj
+T*
+(  Le seul chemin autorise est `instagram-credentials` -> Supabase Vault ->) Tj
+T*
+(  runtime Vault reader -> `SecretValue` -> password executor. Aucun password,) Tj
+T*
+(  `secret_ref` complet, UUID Vault, service-role key, bearer token, XML brut ou) Tj
+T*
+(  screenshot path ne doit etre affiche. Le smoke ne peut partir que de) Tj
+T*
+(  `continue_password_only` ou `login_form_empty`, avec username attendu) Tj
+T*
+(  `cinema_catchup` confirme. Validation 2026-05-26 : tests pre-smoke OK et) Tj
+T*
+(  device idle, mais stop safe avant saisie car aucune credential row active ne) Tj
+T*
+(  satisfait simultanement username attendu, `secret_provider=supabase_vault` et) Tj
+T*
+(  `secret_ref` Vault valide; l'ecran observe etait aussi `unknown`, donc non) Tj
+T*
+(  accepte. Aucun Vault password read runtime local, aucun password saisi, aucun) Tj
+T*
+(  tap `Log in`, aucun publish. Prochaine action : soumettre/mettre a jour les) Tj
+T*
+(  credentials via le flow securise `instagram-credentials`, jamais dans Cursor.) Tj
+T*
+(- Entry 2E-5P retry 2026-05-26 : apres setup du token interne, credentials) Tj
+T*
+(  `cinema_catchup` prets \(`active`, version 1000, `reauth_required=true`,) Tj
+T*
+(  provider Vault, reference de forme valide, username attendu confirme,) Tj
+T*
+(  secret charge en memoire\). Pre-check device OK \(`emulator-5554` unique, aucun) Tj
+T*
+(  runner/sender/follow/unfollow/outreach projet actif\). Observation passive :) Tj
+T*
+(  ecran initial `unknown`, donc non accepte. Stop safe avant) Tj
+T*
+(  `SecretValue.reveal_for_login_executor\(\)`, aucune saisie password, aucun tap) Tj
+T*
+(  `Log in`, aucune publication HTTP et aucune ecriture de statut Supabase.) Tj
+T*
+(  `final_outcome=unknown`,) Tj
+T*
+(  `status_candidate=unknown_stop_safe_initial_screen_not_accepted`,) Tj
+T*
+(  `would_publish=false`.) Tj
+T*
+(- Correction architecture login/provisioning 2026-05-27 : les flows reels et) Tj
+T*
+(  smokes reels demarrent maintenant Instagram par defaut avant probe via) Tj
+T*
+(  `app_start\(package_name\)`, avec `package_name=com.instagram.android`) Tj
+T*
+(  configurable pour futurs clones et wait court borne \(`0..3000 ms`, defaut) Tj
+T*
+(  `1500 ms`\). Le mode sans start est explicitement) Tj
+T*
+(  `observe_current_screen_only=True` / `--observe-current-screen-only` et reste) Tj
+T*
+(  reserve aux tests/diagnostics. Objectif : ne plus prendre launcher Android,) Tj
+T*
+(  home Android, autre app, clone non ouvert, ecran stale ou transition comme) Tj
+T*
+(  base de routing prod. Apres app_start, le flow dump/probe/classifie puis route) Tj
+T*
+(  vers Cas A-G; aucun password submit ni Vault reveal tant que le routing) Tj
+T*
+(  n'aboutit pas a `continue_password_only` ou `login_form_empty`. Echec start :) Tj
+T*
+(  `app_start_failed`; start OK + ecran `unknown` :) Tj
+T*
+ET
+endstream
+endobj
+13 0 obj
+<< /Type /Page /Parent 68 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 1 0 R >> >> /Contents 12 0 R >>
+endobj
+14 0 obj
+<< /Length 4634 >>
+stream
+BT
+/F1 9 Tf
+40 790 Td
+11 TL
+(Project Knowledge Base - page 7/33) Tj
+T*
+T*
+(  `screen_preparation_failed`; connected direct :) Tj
+T*
+(  `connected_no_password_needed`, sans publish.) Tj
+T*
+(- Relance 2E-5P 2026-05-27 avec app_start obligatoire : pre-check device OK,) Tj
+T*
+(  credentials inchanges et prets, `app_start_attempted=true`,) Tj
+T*
+(  `app_start_ok=true`, package `com.instagram.android`, wait `1500 ms`.) Tj
+T*
+(  L'ecran apres start reste `unknown`, donc stop safe) Tj
+T*
+(  `screen_preparation_failed`. Aucun routing Cas A-G exploitable,) Tj
+T*
+(  `preparation_flow_used=none`, `screen_before_submit=unknown`,) Tj
+T*
+(  `submit_executed=false`, `password_submit_result=not_executed`,) Tj
+T*
+(  `final_outcome=unknown`, `would_publish=false`. Aucun password, aucune) Tj
+T*
+(  reference Vault complete, aucun token/header, aucun XML brut et aucune ecriture) Tj
+T*
+(  status Supabase.) Tj
+T*
+(- Entry 2E-5Q-1 inspection safe 2026-05-27 : apres le `unknown` de preparation,) Tj
+T*
+(  inspection passive app_start + wait `1500 ms` + dump/probe sans tap ni) Tj
+T*
+(  credential. L'ecran observe est `continue_as_candidate`, top activity) Tj
+T*
+(  Instagram modal, avec labels safe `cinema_catchup`, `Continue`,) Tj
+T*
+(  `Use another profile`, `Create new account`, Meta/Instagram. Aucun signal) Tj
+T*
+(  password, `Log in`, home/feed, profil, loading, checkpoint ou 2FA. Le) Tj
+T*
+(  `classifier_outcome=unknown` est acceptable pour cet ecran pre-login non final:) Tj
+T*
+(  le screen type de routing est reconnu, mais le classifier status ne doit pas) Tj
+T*
+(  publier de connected/2FA/checkpoint/failed. Cause probable du `unknown`) Tj
+T*
+(  precedent : etat transitoire/stale ou timing de preparation. Pas de patch code;) Tj
+T*
+(  2E-5P reste bloque sans submit tant que le flow controle n'atteint pas) Tj
+T*
+(  `continue_password_only` ou `login_form_empty`.) Tj
+T*
+(- Entry 2E-5P relance screen-prep 2026-05-27 : le flow part de) Tj
+T*
+(  `continue_as_candidate` attendu apres app_start, tape `Continue` une seule) Tj
+T*
+(  fois, puis stabilise vers `continue_password_only`. Le submit est autorise) Tj
+T*
+(  uniquement apres verification username attendu + champ password + bouton) Tj
+T*
+(  `Log in`. Un patch minimal de `instagram_login_password_form_executor.py`) Tj
+T*
+(  deduplique les strategies selector uniques \(`text` puis `content-desc`\) quand) Tj
+T*
+(  la primaire est unique, tout en conservant le refus si une meme strategie) Tj
+T*
+(  retourne plusieurs cibles. Submit reel execute une seule fois via) Tj
+T*
+(  `SecretValue.reveal_for_login_executor\(\)` dans l'executor; aucun retry) Tj
+T*
+(  password, aucun publish. Resultat : `final_outcome=unknown`,) Tj
+T*
+(  `status_candidate=unknown`, `password_submit_result=submitted_not_connected`.) Tj
+T*
+(  Le post-submit a montre un etat non classable avec seulement un label safe) Tj
+T*
+(  `OK`, sans signal connected/2FA/checkpoint/login_failed exploitable. No-leak) Tj
+T*
+(  confirme; aucune ecriture status Supabase.) Tj
+T*
+(- Entry 2E-5P-2 Password required dialog : la popup Instagram) Tj
+T*
+(  `Password required` / `Enter your password to continue.` / `OK` est maintenant) Tj
+T*
+(  un cas explicite `password_required_dialog`, avec aliases FR documentes) Tj
+T*
+(  \(`Mot de passe requis`, `Saisissez votre mot de passe pour continuer`, `OK`\).) Tj
+T*
+(  L'executor password stoppe avant submit si une lecture accessible prouve que le) Tj
+T*
+(  champ password est vide \(`password_input_not_confirmed`\). Si la popup apparait) Tj
+T*
+(  apres submit, recovery bornee : tap `OK` une fois, refocus, refill via) Tj
+T*
+(  `SecretValue.reveal_for_login_executor\(\)` dans l'executor, second `Log in`) Tj
+T*
+(  unique. Si la popup reapparait :) Tj
+T*
+(  `final_outcome=password_input_failed`, aucun retry supplementaire. Le mapping) Tj
+T*
+(  orchestrateur conserve `password_input_missing_or_not_accepted` /) Tj
+T*
+(  `password_input_failed` sans les replier en `unknown`, sans publish par) Tj
+T*
+(  defaut. Smoke reel post-patch : la popup n'etait plus visible; app_start a) Tj
+T*
+(  d'abord stoppe safe sur preparation `unknown`, puis l'ecran s'est stabilise en) Tj
+T*
+(  `continue_as_candidate`; une relance a tape `Continue` une seule fois et a) Tj
+T*
+(  stoppe safe sur `unknown_login_screen` pendant transition. Aucun submit) Tj
+T*
+(  supplementaire, aucun publish/status write.) Tj
+T*
+(- Entry 2E-5P-4 Vault password extraction : bug critique identifie apres 2E-5P-3.) Tj
+T*
+(  L'ADB Keyboard injectait correctement, mais la valeur etait parfois le JSON) Tj
+T*
+(  Vault complet \(`password`, `account_id`, `credentials_version`, `created_at`,) Tj
+T*
+ET
+endstream
+endobj
+15 0 obj
+<< /Type /Page /Parent 68 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 1 0 R >> >> /Contents 14 0 R >>
+endobj
+16 0 obj
+<< /Length 4523 >>
+stream
+BT
+/F1 9 Tf
+40 790 Td
+11 TL
+(Project Knowledge Base - page 8/33) Tj
+T*
+T*
+(  etc.\) car `SecretValue` recevait le secret brut sans extraction. Patch :) Tj
+T*
+(  `parse_vault_secret_for_login` extrait uniquement `password`, le Vault reader) Tj
+T*
+(  et le runtime credentials normalisent avant `SecretValue`, l'executor garde) Tj
+T*
+(  `blocked_secret_payload_shape` avant toute injection. Dry-run no-device OK :) Tj
+T*
+(  `vault_secret_is_json=true`, `vault_secret_has_password_key=true`,) Tj
+T*
+(  `extracted_password_valid=true`, `secret_value_safe_for_injection=true`,) Tj
+T*
+(  `injectable_password_only=true`, sans afficher password/payload. Aucun submit) Tj
+T*
+(  device dans ce patch ; smoke 2E-5P-4 separe apres validation operateur.) Tj
+T*
+(- Entry 2E-5P-5 Password-only secure login smoke \(device, post-2E-5P-4\) :) Tj
+T*
+(  pre-check OK \(`emulator-5554`, pas de runner/business\). Credentials safe :) Tj
+T*
+(  `active` v1000, Vault, `injectable_password_only=true`,) Tj
+T*
+(  `guard_would_block_revealed_value=false`. Preparation :) Tj
+T*
+(  `continue_as_candidate` -> tap `Continue` une fois ->) Tj
+T*
+(  `continue_password_only`. Submit : `adb_keyboard_b64`,) Tj
+T*
+(  `password_field_non_empty_confirmed=true`, `submit_executed=true`, aucune) Tj
+T*
+(  popup `Password required`, `retry_count=0`. Post-submit :) Tj
+T*
+(  `logged_out/session_expired` \(pas `connected`\); injection/extraction Vault) Tj
+T*
+(  validees, session Instagram a traiter separement. `would_publish=false`.) Tj
+T*
+(  No-leak confirme. Tag) Tj
+T*
+(  `checkpoint-entry2e5p5-password-only-secure-login-smoke-20260526`.) Tj
+T*
+(  Correction 2E-5P-7 : ce resultat venait d'un dump post-submit immediat) Tj
+T*
+(  \(`post_submit_wait_ms=0`\) et ne doit plus etre considere comme final fiable) Tj
+T*
+(  sans settling borne.) Tj
+T*
+(  CLI reproductible ajoute : `instagram_login_provisioner_cli.py` lance un flow) Tj
+T*
+(  isole avec `--device-serial`, `--expected-username`, `--account-id`,) Tj
+T*
+(  `--package-name`, app_start par defaut, `--no-publish` par defaut et JSON) Tj
+T*
+(  safe. Le CLI genere un `run_id` safe et append un log JSONL safe dans) Tj
+T*
+(  `logs/instagram_login_provisioner.jsonl`; les commandes post-run doivent) Tj
+T*
+(  filtrer par `run_id` et ne re-sortir que les champs autorises, dont) Tj
+T*
+(  `post_submit_observation_count`, `post_submit_wait_total_ms`,) Tj
+T*
+(  `post_submit_screens` et `final_terminal_screen`.) Tj
+T*
+(  `--dry-run` / `--no-submit` ne charge pas Vault et ne submit pas.) Tj
+T*
+(  `--observe-current-screen-only` est reserve diagnostic.) Tj
+T*
+(- Entry 2E-5P-7 Post-submit settling : apres `submit_tapped=true`, l'executor) Tj
+T*
+(  password observe maintenant plusieurs fois de maniere bornee avant de) Tj
+T*
+(  classifier. `connected`, `needs_2fa`, `checkpoint`, `login_failed` et) Tj
+T*
+(  `password_required_dialog` sont terminaux; `Password required` garde la) Tj
+T*
+(  recovery OK/refocus/refill/un seul second submit. `logged_out` devient final) Tj
+T*
+(  seulement apres settling complet avec `reason=session_expired_after_settling`;) Tj
+T*
+(  `unknown` devient `post_submit_unknown_after_settling`. Aucun publish/status) Tj
+T*
+(  write par defaut, aucun retry password hors recovery bornee, logs JSONL safe) Tj
+T*
+(  uniquement.) Tj
+T*
+(- Entry 2E-5P-8 Google Password Manager save prompt : le settling post-submit) Tj
+T*
+(  detecte maintenant `screen_type=google_password_manager_save_prompt` via les) Tj
+T*
+(  signaux safe `Google Password Manager` / `Save password for Instagram?` /) Tj
+T*
+(  `Continue` et alias FR documentes. Le flow ne clique jamais `Continue`, ne) Tj
+T*
+(  sauvegarde jamais le mot de passe, dismiss une seule fois par `back`, puis) Tj
+T*
+(  reobserve Instagram. Si la popup reste visible :) Tj
+T*
+(  `final_outcome=save_password_prompt_blocking`, no retry infini, no publish.) Tj
+T*
+(  Les logs safe exposent seulement `save_password_prompt_detected`,) Tj
+T*
+(  `save_password_prompt_dismissed`, `dismiss_method` et) Tj
+T*
+(  `post_dismiss_screen_type`.) Tj
+T*
+(- Entry 2E-5P-9 Startup settling : apres `app_start_ok=true`, l'orchestrateur) Tj
+T*
+(  ne conclut plus `unknown` sur un seul dump trop precoce. Il observe jusqu'a) Tj
+T*
+(  quatre fois de maniere bornee, avec fast path si le premier ecran est clair,) Tj
+T*
+(  et route des que `continue_as_candidate`, `account_picker`,) Tj
+T*
+(  `login_form_empty`, `continue_password_only`, `active_account_home/profile`) Tj
+T*
+(  ou un etat terminal exploitable apparait. Si tout reste `unknown` :) Tj
+T*
+ET
+endstream
+endobj
+17 0 obj
+<< /Type /Page /Parent 68 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 1 0 R >> >> /Contents 16 0 R >>
+endobj
+18 0 obj
+<< /Length 4651 >>
+stream
+BT
+/F1 9 Tf
+40 790 Td
+11 TL
+(Project Knowledge Base - page 9/33) Tj
+T*
+T*
+(  `reason=screen_preparation_failed_after_startup_settling`. Logs safe :) Tj
+T*
+(  `startup_observation_count`, `startup_wait_total_ms`, `startup_screens`,) Tj
+T*
+(  `startup_final_screen_type`, `screen_after_app_start_initial/final`.) Tj
+T*
+(- Entry 2E-5P-10 Long post-submit loading : si toutes les observations apres) Tj
+T*
+(  `Log in` restent sur `loading`, l'executor retourne maintenant) Tj
+T*
+(  `final_outcome=login_submit_still_loading` avec) Tj
+T*
+(  `reason=post_submit_loading_timeout`, au lieu d'un `unknown` final. Le CLI) Tj
+T*
+(  expose `--post-submit-timeout-ms` \(defaut 10000 ms\) et logge) Tj
+T*
+(  `post_submit_timeout_ms`, `post_submit_interval_ms` et) Tj
+T*
+(  `post_submit_loading_timeout`. La popup Google Password Manager reste) Tj
+T*
+(  interdite au bouton `Continue`; dismiss safe par `back`, 2 tentatives max,) Tj
+T*
+(  puis `save_password_prompt_blocking` si encore visible. Les smokes device) Tj
+T*
+(  reels sont lances par l'operateur depuis son terminal sauf demande explicite.) Tj
+T*
+(- Entry 2E-5P-11 Cas A router wiring : bug observe avec override operateur visible) Tj
+T*
+(  \(`operator_smoke_override`, `canceled`, `clone_reuse_allowed=true`\) mais) Tj
+T*
+(  `router_decision=unknown_no_action`. Cause : mismatch entre) Tj
+T*
+(  `screen_after_app_start_final=continue_as_candidate` et le `screen_type` passe) Tj
+T*
+(  au routeur \(`active_account_home` / `unknown`\). Correctifs : priorite probe) Tj
+T*
+(  Continue-as, `_routing_screen_type` avec fallback startup, filet) Tj
+T*
+(  `_route_provisioning_screen`, settling post `tap_use_another_profile`) Tj
+T*
+(  \(`post_use_another_profile_*`, `screen_after_use_another_profile_final`\),) Tj
+T*
+(  `preparation_flow_used=use_another_profile_previous_account_stopped`. Le) Tj
+T*
+(  formulaire prefilled reste la etape suivante, pas le premier correctif.) Tj
+T*
+(- Entry 2E-5P-12 Username replace prefilled : apres Cas A, l'ecran) Tj
+T*
+(  `login_form_prefilled_username` doit remplacer l'ancien username editable avant) Tj
+T*
+(  tout reveal password. Correctifs : cible EditText prioritaire, clear cascade) Tj
+T*
+(  \(`clear_text`, `set_text\(""\)`, `set_text\(expected\)`, `adb_keyboard_b64`\),) Tj
+T*
+(  confirmation hierarchy, reasons `username_clear_failed` /) Tj
+T*
+(  `username_still_prefilled_after_input`, logs) Tj
+T*
+(  `username_field_focused_before_input`, `username_clear_method`,) Tj
+T*
+(  `username_input_method`, `username_input_ms`. Smokes `--no-publish`.) Tj
+T*
+(- Entry 2E-5P-13 Password masked confirmation : apres username replacement) Tj
+T*
+(  valide, le password injecte via `adb_keyboard_b64` peut apparaitre masque) Tj
+T*
+(  visuellement alors que la cible accessibilite reste au placeholder `Password`.) Tj
+T*
+(  L'executor confirme maintenant le non-empty par cible password EditText,) Tj
+T*
+(  bullets/masked chars dans le hierarchy, ou `unknown_but_input_success` si ADB) Tj
+T*
+(  B64 a reussi sans preuve de champ vide. Si un signal safe prouve vide :) Tj
+T*
+(  `password_input_not_confirmed`, no submit. Logs safe :) Tj
+T*
+(  `password_field_target_kind`, `password_input_method`,) Tj
+T*
+(  `password_input_result`, `password_confirm_method`. Recovery) Tj
+T*
+(  `Password required` bornee conservee; smoke toujours `--no-publish`.) Tj
+T*
+(- Finalisation 2E-5P-13 : Cas A full flow valide en run operateur) Tj
+T*
+(  \(`connected`, username remplace, password masque confirme, save-password) Tj
+T*
+(  prompt dismiss par `back`, `would_publish=false`\). Correctif metadata :) Tj
+T*
+(  conserver l'override lifecycle initial apres `Use another profile`; la) Tj
+T*
+(  re-observation `login_form_prefilled_username` ne doit plus remplacer) Tj
+T*
+(  `operator_smoke_override/canceled/clone_reuse_allowed=true` par des valeurs) Tj
+T*
+(  par defaut `unknown/false`.) Tj
+T*
+(- Entry 2E-5P-14 Account picker full flow : le CLI generique supporte Cas B) Tj
+T*
+(  sans flag operateur. Si `screen_type=account_picker`, le router selectionne) Tj
+T*
+(  uniquement `expected_username` present dans `available_usernames`; si absent :) Tj
+T*
+(  `expected_account_not_listed`, no tap/no credentials/no submit. Apres tap,) Tj
+T*
+(  settling borne `post_account_picker_*`. Sorties normales : direct) Tj
+T*
+(  `connected_home` sans submit, ou `continue_password_only` / formulaire login) Tj
+T*
+(  puis password submit via `SecretValue`. Logs safe ajoutes :) Tj
+T*
+(  `available_usernames`, `expected_username_present`,) Tj
+T*
+(  `selected_account_username`, `account_picker_selection_executed`,) Tj
+T*
+(  `screen_after_account_picker_final`. Smokes toujours `--no-publish`.) Tj
+T*
+ET
+endstream
+endobj
+19 0 obj
+<< /Type /Page /Parent 68 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 1 0 R >> >> /Contents 18 0 R >>
+endobj
+20 0 obj
+<< /Length 4895 >>
+stream
+BT
+/F1 9 Tf
+40 790 Td
+11 TL
+(Project Knowledge Base - page 10/33) Tj
+T*
+T*
+(- Entry 2E-5P-14B Account picker target resolution : le compte attendu peut etre) Tj
+T*
+(  n'importe ou dans la liste visible \(2?6+ comptes\). L'executor regroupe les) Tj
+T*
+(  n?uds accessibility d'une meme row par chevauchement vertical ; plusieurs) Tj
+T*
+(  zones pour un seul username sur une row ne sont plus traitees comme ambigues.) Tj
+T*
+(  Selection par username exact + bounds, jamais par index fixe.) Tj
+T*
+(  `account_picker_selected_row_index_if_known` est diagnostic seulement. Scroll) Tj
+T*
+(  picker si compte hors viewport : complement futur documente.) Tj
+T*
+(- Entry 2E-5P-15 Direct empty login form full flow : le CLI generique supporte) Tj
+T*
+(  Cas C sans flag special. Si `screen_type=login_form_empty`, le router choisit) Tj
+T*
+(  `start_login_form_flow`, l'executor saisit `expected_username` puis revele le) Tj
+T*
+(  password via `SecretValue` uniquement apres validation username/formulaire,) Tj
+T*
+(  submit `Log in`, post-submit settling et dismiss Google Password Manager si) Tj
+T*
+(  present sans cliquer `Continue`. Cas C reste distinct de) Tj
+T*
+(  `login_form_prefilled_username` : `username_replaced=false`,) Tj
+T*
+(  `username_input_result=username_input_confirmed` quand confirme. Metadata safe) Tj
+T*
+(  ajoutee/fiabilisee : `username_input_ms`. Smokes toujours `--no-publish`.) Tj
+T*
+(- Entry 2E-5P-15B Login form empty username confirmation : sur `login_form_empty`) Tj
+T*
+(  direct, le placeholder username n'est plus traite comme un username pre-rempli.) Tj
+T*
+(  L'executor prefere l'EditText username, ignore les hints, confirme via hierarchy) Tj
+T*
+(  ou `username_input_assumed` apres `set_text` reussi, et reserve) Tj
+T*
+(  `username_still_prefilled_after_input` au Cas A avec un vrai ancien username.) Tj
+T*
+(  Metadata safe : `username_placeholder_ignored`.) Tj
+T*
+(- Entry 2E-5P-16 Continue-as expected login flow : le CLI generique supporte Cas) Tj
+T*
+(  D sans flag special. Le demarrage stabilise sur `continue_as_candidate` avec) Tj
+T*
+(  `suggested_username=expected_username`, tape `Continue`, observe) Tj
+T*
+(  `continue_password_only`, verifie le username affiche, puis revele le password) Tj
+T*
+(  via `SecretValue`. Le flow ne saisit jamais le username) Tj
+T*
+(  \(`username_input_result=not_required`\), injecte seulement le password, submit,) Tj
+T*
+(  post-submit settling et dismiss Google Password Manager si present sans cliquer) Tj
+T*
+(  `Continue`. Metadata safe : `displayed_username`, `password_only_username`,) Tj
+T*
+(  `username_match`. Un demarrage direct sur `continue_password_only` reste un cas) Tj
+T*
+(  futur separe. Smokes toujours `--no-publish`.) Tj
+T*
+(- Entry 2E-5P-17 / 2E-5P-17B Active account home add-existing-account path : si) Tj
+T*
+(  Instagram ouvre sur le home/profil d'un ancien compte connecte different de) Tj
+T*
+(  `expected_username`, le flow principal n'est autorise que si lifecycle old) Tj
+T*
+(  account est `canceled`/`stopped`/`archived`, `clone_reuse_allowed=true`, avec) Tj
+T*
+(  source explicite \(`operator_smoke_override` en smoke\). Le chemin ouvre profil,) Tj
+T*
+(  account switcher, `Add Instagram account`, puis settling post-add. Deux chemins) Tj
+T*
+(  valides : sheet `Log into existing account` \(E1\) ou ecran deja couvert direct) Tj
+T*
+(  \(E2, ex. `login_form_empty`\). La sheet n'est pas obligatoire ;) Tj
+T*
+(  `add_account_sheet_opened=false` + `log_into_existing_account_tapped=false`) Tj
+T*
+(  sont OK sur E2. Stop safe `post_add_existing_unknown` si l'ecran reste inconnu) Tj
+T*
+(  apres settling. Ce n'est pas le logout fallback : aucun `Log out`,) Tj
+T*
+(  pas de Settings logout, pas de `Create new account`, pas de Accounts Center.) Tj
+T*
+(  Metadata safe : `actual_logged_in_username`, `active_account_username`,) Tj
+T*
+(  `recovery_path=add_existing_account`, et les booleans d'etapes add-existing.) Tj
+T*
+(- Entry 2E-5P-18 Controlled logout fallback : Cas F est un fallback explicite,) Tj
+T*
+(  jamais le chemin principal. Cas E add-existing reste prioritaire sans flag.) Tj
+T*
+(  Logout n'est autorise que si `actual_logged_in_username != expected_username`,) Tj
+T*
+(  lifecycle old account `canceled`/`stopped`/`archived`,) Tj
+T*
+(  `clone_reuse_allowed=true`, source sure \(`operator_smoke_override` ou) Tj
+T*
+(  `lifecycle_lookup_safe`\) et `--operator-smoke-allow-logout-fallback true`.) Tj
+T*
+(  Le flow ouvre le menu profil/settings, cherche `Log out` dans) Tj
+T*
+(  `Settings and activity`, scrolle vers le bas de facon bornee si le bouton est) Tj
+T*
+(  hors viewport, puis tape uniquement une cible texte/accessibilite visible et) Tj
+T*
+(  non ambigue. Pas de coordonnees fixes; si absent apres les scrolls :) Tj
+T*
+(  `logout_not_visible_after_scrolls`. Il choisit `Not now` sur) Tj
+T*
+(  `Save your login info?`, confirme `Log out`, settling post-logout borne \(ne pas) Tj
+T*
+ET
+endstream
+endobj
+21 0 obj
+<< /Type /Page /Parent 68 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 1 0 R >> >> /Contents 20 0 R >>
+endobj
+22 0 obj
+<< /Length 4858 >>
+stream
+BT
+/F1 9 Tf
+40 790 Td
+11 TL
+(Project Knowledge Base - page 11/33) Tj
+T*
+T*
+(  conclure `unknown` trop tot\), puis reprend `account_picker`,) Tj
+T*
+(  `continue_as_candidate`, `login_form_empty`, `login_form_prefilled_username` ou) Tj
+T*
+(  `continue_password_only`. Entry 2E-5P-18B : post-logout peut etre un) Tj
+T*
+(  `continue_as_candidate` de l'ancien compte ? dans ce cas `Use another profile`,) Tj
+T*
+(  pas `Continue`, puis reprise des cas couverts. La reprise post-logout interne) Tj
+T*
+(  est observe-only et ne relance pas Instagram ; le JSONL conserve) Tj
+T*
+(  `app_start_attempted/app_start_ok` du demarrage initial CLI. Smokes toujours) Tj
+T*
+(  `--no-publish`, sans runner ni flow business.) Tj
+T*
+(- Entry 2E-5P-19 Central provisioning/login orchestrator :) Tj
+T*
+(  `run_login_provisioning_flow\(...\)` est la fonction centrale appelee par le CLI.) Tj
+T*
+(  Elle fait `app_start` par defaut, startup settling, classification, routage) Tj
+T*
+(  vers les sous-flows valides, reprise post-action, submit credentials seulement) Tj
+T*
+(  apres identite confirmee, et JSONL no-leak/no-publish. Metadata :) Tj
+T*
+(  `central_orchestrator_used=true`, `central_orchestrator_version`,) Tj
+T*
+(  `selected_route`, `selected_route_reason`. Routes : `continue_as_expected`,) Tj
+T*
+(  `use_another_profile`, `account_picker`, `login_form_empty`,) Tj
+T*
+(  `login_form_prefilled_expected`, `replace_prefilled_username`,) Tj
+T*
+(  `continue_password_only`, `already_connected_expected`, `add_existing_account`,) Tj
+T*
+(  `logout_fallback`. Cas E reste prioritaire; Cas F seulement avec flag explicite.) Tj
+T*
+(  Cas G/H \(bad password, password-required, 2FA/checkpoint\) sont reportes apres) Tj
+T*
+(  dashboard client/admin hors detection terminale safe deja existante.) Tj
+T*
+(- Entry 2E-5P-20 Controlled backend status publish :) Tj
+T*
+(  le CLI central peut maintenant injecter le publisher status backend existant) Tj
+T*
+(  \(`instagram_account_status_publisher.py`\) mais seulement si) Tj
+T*
+(  `LOGIN_PROVISIONER_PUBLISH_ENABLED=true` **et** `--publish` sont presents.) Tj
+T*
+(  `--no-publish` garde la priorite absolue. V1 publie uniquement un succes sur) Tj
+T*
+(  `connected` sur, avec `ok=true`, `completed=true`, `status_candidate=connected`,) Tj
+T*
+(  `account_id` present et route centrale sure. Les cas G/H, mismatch/review,) Tj
+T*
+(  unknown/logged-out ambigu et identity unknown restent non publies) Tj
+T*
+(  \(`not_publishable` ou `deferred_until_dashboard`\). Le publish est fail-open :) Tj
+T*
+(  un echec backend laisse le resultat login local en `connected` et ajoute) Tj
+T*
+(  seulement `publish_result=failed`, `publish_error_code` safe et) Tj
+T*
+(  `publish_failed_safe`. JSONL safe expose `would_publish`, `published`,) Tj
+T*
+(  `publish_enabled`, `publish_attempted`, `publish_reason`, `publish_result`,) Tj
+T*
+(  `publish_error_code`; aucune fuite password, `secret_ref`, UUID Vault, token,) Tj
+T*
+(  XML brut ou screenshot path. Slack/Discord restent inchanges : aucun nouveau) Tj
+T*
+(  type de notification, aucun nouveau webhook, aucun changement de contenu,) Tj
+T*
+(  frequence ou canal, et aucun envoi direct depuis le provisioner. Un succes) Tj
+T*
+(  normal `connected` est backend status only, sans Slack/Discord. Contrat futur :) Tj
+T*
+(  tout evenement deja notifie Slack/Discord doit aussi avoir une trace backend) Tj
+T*
+(  safe et pouvoir apparaitre en dashboard admin; s'il exige une action client, il) Tj
+T*
+(  doit aussi etre projetable en dashboard client via dashboard action/status sync.) Tj
+T*
+(  Les evenements internes restent admin-only. `--no-publish` bloque tout publish) Tj
+T*
+(  backend/status/action dans ce flow.) Tj
+T*
+(- Entry 2E-5P-11 Login form username prefilled : apres `Use another profile`,) Tj
+T*
+(  Instagram peut afficher un formulaire login avec l'ancien username deja rempli.) Tj
+T*
+(  Nouveau `screen_type=login_form_prefilled_username`. Si le champ username est) Tj
+T*
+(  editable et different de `expected_username`, le router choisit) Tj
+T*
+(  `start_login_form_flow_replace_username`, l'executor clear/remplace par) Tj
+T*
+(  `expected_username`, puis seulement ensuite revele le password `SecretValue` et) Tj
+T*
+(  submit. Si le prefilled username est deja correct :) Tj
+T*
+(  `start_login_form_flow_prefilled_expected`, sans ressaisie inutile du username.) Tj
+T*
+(  Si le champ n'est pas editable : `username_prefilled_not_editable`, no submit.) Tj
+T*
+(  Si clear/input echoue : `username_input_failed`, no password submit si possible.) Tj
+T*
+(  Logs safe ajoutes : `screen_type`, `prefilled_username`, `username_replaced`,) Tj
+T*
+(  `username_input_confirmed`, `username_input_result`, `router_decision`,) Tj
+T*
+(  `preparation_flow_used`, `screen_before_submit`. Ce cas ne doit pas etre) Tj
+T*
+(  confondu avec un mismatch compte bloquant; les smokes restent `--no-publish`.) Tj
+T*
+ET
+endstream
+endobj
+23 0 obj
+<< /Type /Page /Parent 68 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 1 0 R >> >> /Contents 22 0 R >>
+endobj
+24 0 obj
+<< /Length 3922 >>
+stream
+BT
+/F1 9 Tf
+40 790 Td
+11 TL
+(Project Knowledge Base - page 12/33) Tj
+T*
+T*
+(- Standard futur provisioning/login : chaque flow doit fournir une commande) Tj
+T*
+(  terminal reproductible ou un CLI dedie. Les options minimales sont) Tj
+T*
+(  `--device-serial`, `--expected-username`, `--account-id` si credentials) Tj
+T*
+(  requis, `--package-name`, app_start par defaut, `--observe-current-screen-only`) Tj
+T*
+(  diagnostic, `--dry-run` / `--no-submit` quand applicable, `--no-publish` par) Tj
+T*
+(  defaut et sortie JSON safe avec timings, no-leak et forbidden scope explicite.) Tj
+T*
+(  Les CLIs ne doivent pas accepter password/`secret_ref` en argument, ne doivent) Tj
+T*
+(  pas publier ni ecrire status Supabase par defaut, et ne doivent pas hooker) Tj
+T*
+(  runner/sender/follow/outreach business.) Tj
+T*
+(- Entry 2E-5P-3 Password input injection : cause racine identifiee. En mode) Tj
+T*
+(  `continue_password_only`, l'ancien target `text="Password"` pointait vers un) Tj
+T*
+(  label `android.view.View`, pas vers le vrai `android.widget.EditText`. Le) Tj
+T*
+(  diagnostic reel a montre `adb_keyboard_b64` success mais) Tj
+T*
+(  `password_field_non_empty_confirmed=false`, donc le guard a bloque `Log in`) Tj
+T*
+(  avec `password_input_not_confirmed`. Patch : preferer l'`EditText` unique en) Tj
+T*
+(  password-only, focus accessibilite + fallback bounds, ADB Keyboard) Tj
+T*
+(  `ADB_INPUT_B64` via stdin en priorite, `set_text` fallback, guard non-empty) Tj
+T*
+(  avant `Log in`. Smoke reel apres patch : `input_method_used=adb_keyboard_b64`,) Tj
+T*
+(  `password_field_focused_before_input=true`,) Tj
+T*
+(  `password_field_non_empty_confirmed=true`, `submit_tapped=true`, aucune popup) Tj
+T*
+(  `Password required`, `retry_count=0`; resultat post-submit) Tj
+T*
+(  `logged_out/session_expired`, sans publish/status write. No-leak confirme :) Tj
+T*
+(  aucun password, longueur/hash, `secret_ref` complet, UUID Vault complet,) Tj
+T*
+(  token/header, XML brut ou screenshot path.) Tj
+T*
+(- Entry 2E-5J-2B-1 : audit lifecycle read-only. Les statuts existants couvrent) Tj
+T*
+(  `client_instagram_accounts` login/provisioning/onboarding,) Tj
+T*
+(  `client_subscriptions` active/paused/cancelled/expired,) Tj
+T*
+(  `account_assignments` pending/reserved/active/paused/failed/released et) Tj
+T*
+(  `phone_clones` available/reserved/active/maintenance/disabled, mais aucun row) Tj
+T*
+(  n'etablit le lifecycle du compte Instagram suggere par username. Solution) Tj
+T*
+(  recommandee avant migration : helper lookup read-only injectable, source) Tj
+T*
+(  explicite operateur, mockable en tests, qui retourne uniquement) Tj
+T*
+(  `lifecycle_status` et `clone_reuse_allowed`.) Tj
+T*
+(- Patch 2E-5J-2B-1 : l'orchestrator accepte) Tj
+T*
+(  `previous_account_lifecycle_lookup\(username, context\)`. Ce lookup temporaire) Tj
+T*
+(  sert uniquement au smoke operator-approved, reste generique, ne hardcode aucun) Tj
+T*
+(  username et n'autorise `Use another profile` que si le lifecycle est) Tj
+T*
+(  `canceled/stopped/archived` avec `clone_reuse_allowed=true`. Le cas observe) Tj
+T*
+(  `i_m_your_traker` reste une fixture de terrain/documentation, pas une logique) Tj
+T*
+(  metier.) Tj
+T*
+() Tj
+T*
+(## 6. Dashboard / Backend / BotApp Registry) Tj
+T*
+() Tj
+T*
+(Le dashboard, le backend et BotApp devront exposer plus tard uniquement des) Tj
+T*
+(statuts safe :) Tj
+T*
+() Tj
+T*
+(- credentials configured/missing;) Tj
+T*
+(- Vault reader status operational/pending;) Tj
+T*
+(- credentials verification pending;) Tj
+T*
+(- login attempt status futur;) Tj
+T*
+(- retry provisioning;) Tj
+T*
+(- `login_status`;) Tj
+T*
+(- `provisioning_status`;) Tj
+T*
+(- `onboarding_status`;) Tj
+T*
+(- actions `submit_instagram_credentials`, `update_instagram_password`,) Tj
+T*
+(  `complete_two_factor`, `resolve_checkpoint`, `review_login_failure`,) Tj
+T*
+(  `review_account_mismatch`;) Tj
+T*
+(- lifecycle compte : active, paused, canceled, onboarding;) Tj
+T*
+ET
+endstream
+endobj
+25 0 obj
+<< /Type /Page /Parent 68 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 1 0 R >> >> /Contents 24 0 R >>
+endobj
+26 0 obj
+<< /Length 2643 >>
+stream
+BT
+/F1 9 Tf
+40 790 Td
+11 TL
+(Project Knowledge Base - page 13/33) Tj
+T*
+T*
+(- vraie source lifecycle account active/paused/canceled/onboarding a creer plus) Tj
+T*
+(  tard cote DB/dashboard;) Tj
+T*
+(- policy `clone_reuse_allowed` explicite a connecter aux assignments/clones et) Tj
+T*
+(  aux actions admin/client;) Tj
+T*
+(- audit `previous_account_stopped_override`;) Tj
+T*
+(- retry provisioning et relance verification credentials.) Tj
+T*
+(- Le dashboard/backend/BotApp ne doit jamais exposer password, `secret_ref`,) Tj
+T*
+(  Vault UUID, XML/screenshot, device id, token ou service-role key.) Tj
+T*
+() Tj
+T*
+(Interdits cote dashboard/backend/BotApp :) Tj
+T*
+() Tj
+T*
+(- password;) Tj
+T*
+(- `secret_ref`;) Tj
+T*
+(- Vault UUID;) Tj
+T*
+(- token/cookie/service-role;) Tj
+T*
+(- device id client-side;) Tj
+T*
+(- XML/screenshot brut.) Tj
+T*
+() Tj
+T*
+(Un futur bouton/admin action pourra relancer une verification credentials, mais) Tj
+T*
+(ne devra jamais lire ni afficher le secret.) Tj
+T*
+() Tj
+T*
+(## 7. Scheduler / Device Rules) Tj
+T*
+() Tj
+T*
+(Regles device a respecter avant orchestration multi-clone :) Tj
+T*
+() Tj
+T*
+(- 1 phone = 1 action UI active a la fois;) Tj
+T*
+(- smoke reel login seulement sur fenetre device idle;) Tj
+T*
+(- business window/preflight et smoke login doivent rester separes;) Tj
+T*
+(- pas de visible preflight sur clone B pendant que clone A tourne;) Tj
+T*
+(- lock UI exclusif au niveau device;) Tj
+T*
+(- buffer technique entre clones;) Tj
+T*
+(- fenetre device 6h = business effectif environ 5h55 + buffer/preflight;) Tj
+T*
+(- preflight visible seulement quand le phone est idle;) Tj
+T*
+(- a relier plus tard avec phone rest et interdiction de runtime 24h/24.) Tj
+T*
+() Tj
+T*
+(Implication : les probes visibles, `app_start`, login et recovery device doivent) Tj
+T*
+(passer par un scheduler/lock device, pas par des appels concurrents ad hoc.) Tj
+T*
+() Tj
+T*
+(## 8. Phone Rest / Quotas / Session 6h) Tj
+T*
+() Tj
+T*
+(Roadmap runtime :) Tj
+T*
+() Tj
+T*
+(- Phase B day limits;) Tj
+T*
+(- business session 6h window guard;) Tj
+T*
+(- phone rest, cooldown et off-hours;) Tj
+T*
+(- packages 80/80 et 120/120;) Tj
+T*
+(- ne pas creer un double quota system.) Tj
+T*
+() Tj
+T*
+(Les quotas produit et les limites runtime doivent converger vers une source de) Tj
+T*
+(verite claire. Les patchs provisoires ne doivent pas multiplier les compteurs) Tj
+T*
+(ou appliquer des limites non branchees au runtime.) Tj
+T*
+() Tj
+T*
+(## 9. ATX / Device Runtime Control Layer) Tj
+T*
+() Tj
+T*
+(ATX / AtxAgent reste a prevoir pour les phones physiques :) Tj
+T*
+() Tj
+T*
+(- preflight ATX avant session;) Tj
+T*
+(- verification UIAutomator health;) Tj
+T*
+ET
+endstream
+endobj
+27 0 obj
+<< /Type /Page /Parent 68 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 1 0 R >> >> /Contents 26 0 R >>
+endobj
+28 0 obj
+<< /Length 2959 >>
+stream
+BT
+/F1 9 Tf
+40 790 Td
+11 TL
+(Project Knowledge Base - page 14/33) Tj
+T*
+T*
+(- fermer/masquer ATX avant Instagram;) Tj
+T*
+(- relier ATX au lock device et a la recovery;) Tj
+T*
+(- pas encore patché dans ce depot.) Tj
+T*
+() Tj
+T*
+(ATX ne doit pas devenir une navigation parallele non observee. Il sert au) Tj
+T*
+(controle device, pas a contourner la state machine Instagram.) Tj
+T*
+() Tj
+T*
+(## 10. NO-GO Securite) Tj
+T*
+() Tj
+T*
+(- No password in chat, Cursor prompt, logs, git, dashboard, XML ou screenshots.) Tj
+T*
+(- No `secret_ref` / Vault UUID client-side.) Tj
+T*
+(- No direct dashboard PostgREST vers les tables secretes.) Tj
+T*
+(- No runner hook premature.) Tj
+T*
+(- No login over active unknown account.) Tj
+T*
+(- No device id client-side.) Tj
+T*
+(- No parameter dashboard si le runtime ne l'applique pas reellement.) Tj
+T*
+(- No Supabase service-role ou Authorization header dans logs/errors.) Tj
+T*
+(- No app/device action irreversible sans etat, reason et recovery explicites.) Tj
+T*
+(- No fake secret output complet pendant les smokes; uniquement longueur,) Tj
+T*
+(  hash prefix court et labels rediges.) Tj
+T*
+() Tj
+T*
+(## 11. Prochaine Etape Logique) Tj
+T*
+() Tj
+T*
+(Ordre recommande :) Tj
+T*
+() Tj
+T*
+(1. Confirmer explicitement le lifecycle canceled/stopped/archived du compte) Tj
+T*
+(   suggere actuellement visible via un helper lookup read-only explicite, ou) Tj
+T*
+(   afficher directement `login_form_empty` sur device idle.) Tj
+T*
+(2. Valider le smoke password-only reel `cinema_catchup` uniquement via le flow) Tj
+T*
+(   securise Vault/SecretValue, sans password dans chat/Cursor/logs/git.) Tj
+T*
+(3. Definir le modele durable lifecycle compte + `clone_reuse_allowed` dans la) Tj
+T*
+(   DB/dashboard, sans hardcode username.) Tj
+T*
+(4. Integration provisioner runtime derriere flags.) Tj
+T*
+(5. Status publish connected/2FA/checkpoint/failed via provisioner orchestrator.) Tj
+T*
+(6. State machine / recovery login plus riche avant tout branchement production.) Tj
+T*
+(7. Rappel device : 1 phone = 1 action UI active; aucun password dans) Tj
+T*
+(   chat/Cursor/logs/git/XML/screenshots.) Tj
+T*
+() Tj
+T*
+(Le checkpoint 2E-5H est deja pousse :) Tj
+T*
+(`880deef630c8a6217f9fbc4d64b7167fd3e20764`.) Tj
+T*
+(Le checkpoint 2E-5H-2 est deja pousse :) Tj
+T*
+(`1d3ced61d813139bdc4f3f3c202127dd35f40e8a`.) Tj
+T*
+() Tj
+T*
+(## 12. Source Docs) Tj
+T*
+() Tj
+T*
+(- Details Entry/API/RPC/credentials/provisioning :) Tj
+T*
+(  `docs/outreach-entry-api.md`.) Tj
+T*
+(- Architecture officielle :) Tj
+T*
+(  `AGENTS.md` et les documents sous `docs/`.) Tj
+T*
+(- Future dashboard / BotApp :) Tj
+T*
+(  a completer depuis le code Codex et les references BotApp.) Tj
+T*
+() Tj
+T*
+(Regle de maintenance : toute evolution majeure doit mettre a jour cette base de) Tj
+T*
+(connaissance quand elle modifie l'etat global, la roadmap, les limites runtime,) Tj
+T*
+(les garanties de securite ou les checkpoints.) Tj
+T*
+() Tj
+T*
+(## 13. Dashboard Foundation 1A) Tj
+T*
+() Tj
+T*
+ET
+endstream
+endobj
+29 0 obj
+<< /Type /Page /Parent 68 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 1 0 R >> >> /Contents 28 0 R >>
+endobj
+30 0 obj
+<< /Length 2823 >>
+stream
+BT
+/F1 9 Tf
+40 790 Td
+11 TL
+(Project Knowledge Base - page 15/33) Tj
+T*
+T*
+(Dashboard Foundation 1A est le premier socle backend read-only pour les futures) Tj
+T*
+(vues admin/client :) Tj
+T*
+() Tj
+T*
+(- Admin Manage ;) Tj
+T*
+(- Admin Radar / Server Check ;) Tj
+T*
+(- projection client-safe ;) Tj
+T*
+(- compatibilite future BotApp / Mac app.) Tj
+T*
+() Tj
+T*
+(Objets ajoutes :) Tj
+T*
+() Tj
+T*
+(- `public.get_admin_account_overview\(...\)` ;) Tj
+T*
+(- `public.get_admin_radar_overview\(...\)`.) Tj
+T*
+() Tj
+T*
+(Ces RPC sont volontairement internes/admin-safe en V1 :) Tj
+T*
+() Tj
+T*
+(- `SECURITY DEFINER` ;) Tj
+T*
+(- `service_role` uniquement ;) Tj
+T*
+(- pas de grant `anon` ou `authenticated` ;) Tj
+T*
+(- pas encore d'Edge Function admin dashboard ;) Tj
+T*
+(- pas encore de JWT admin/assistant/client.) Tj
+T*
+() Tj
+T*
+(La projection Manage expose uniquement des champs safe et stables : compte,) Tj
+T*
+(client, username, email masque, statuts dashboard, subscription/package,) Tj
+T*
+(entitlements, status credentials safe, status login/provisioning/onboarding,) Tj
+T*
+(actions dashboard pending, blocking campaign, dernier incident, timestamps safe.) Tj
+T*
+() Tj
+T*
+(La projection Radar expose une premiere classification `health_status` et) Tj
+T*
+(`health_reason`, plus les champs stables necessaires aux futures KPI cards et) Tj
+T*
+(quick rules. Les metriques absentes restent `null`, `unknown`, `false` ou `[]` :) Tj
+T*
+(le backend ne fabrique pas de faux chiffres.) Tj
+T*
+() Tj
+T*
+(Regles no-leak maintenues :) Tj
+T*
+() Tj
+T*
+(- jamais de password, hash ou longueur password ;) Tj
+T*
+(- jamais de `secret_ref`, Vault id, token, Authorization header, service-role ;) Tj
+T*
+(- jamais de webhook Slack/Discord ;) Tj
+T*
+(- jamais de XML brut, screenshot path, raw logs ou metadata sensible ;) Tj
+T*
+(- jamais d'`adb_serial`, `device_udid`, USB/hub port dans une projection client.) Tj
+T*
+() Tj
+T*
+(Roadmap apres 1A :) Tj
+T*
+() Tj
+T*
+(- 1B/1C : Edge/JWT admin et projection client-safe avec ownership explicite ;) Tj
+T*
+(- groupe admin : activity log, special care, phone notes, phone display order,) Tj
+T*
+(  mutation status dropdown avec audit ;) Tj
+T*
+(- groupe business critique separe : Source Quality Control / FBR CT et sync) Tj
+T*
+(  Target Accounts ;) Tj
+T*
+(- groupe BotApp ops plus tard : operations, webhooks, gateway, phone controls) Tj
+T*
+(  reels, AI log analysis.) Tj
+T*
+() Tj
+T*
+(## 14. Dashboard Settings Registry) Tj
+T*
+() Tj
+T*
+(`docs/dashboard-settings-registry.md` est la source de verite documentaire pour) Tj
+T*
+(rebrancher l'UI admin Codex `/instagram-dashboard` sur le backend Phone Farm.) Tj
+T*
+() Tj
+T*
+(Synthese :) Tj
+T*
+() Tj
+T*
+(- l'UI existante est un prototype admin riche mais legacy GramBot/Appium ;) Tj
+T*
+(- elle ne doit pas etre jetee, mais ne doit pas etre exposee client telle) Tj
+T*
+ET
+endstream
+endobj
+31 0 obj
+<< /Type /Page /Parent 68 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 1 0 R >> >> /Contents 30 0 R >>
+endobj
+32 0 obj
+<< /Length 2926 >>
+stream
+BT
+/F1 9 Tf
+40 790 Td
+11 TL
+(Project Knowledge Base - page 16/33) Tj
+T*
+T*
+(  quelle ;) Tj
+T*
+(- `ig_account_settings` ne doit pas rester la source principale des settings ;) Tj
+T*
+(- les reads admin doivent passer par une future API/Edge admin-dashboard puis) Tj
+T*
+(  par les RPC 1A et les projections safe ;) Tj
+T*
+(- les writes admin doivent passer par des APIs de domaine avec validation role,) Tj
+T*
+(  entitlement, support runtime et audit log ;) Tj
+T*
+(- le dashboard client futur sera separe et client-safe uniquement.) Tj
+T*
+() Tj
+T*
+(Points critiques conserves :) Tj
+T*
+() Tj
+T*
+(- `password` en clair dans `ig_account_settings` est legacy et a deprecier ;) Tj
+T*
+(- credentials via `account_credentials` + `instagram-credentials` + Vault ;) Tj
+T*
+(- `device_udid`, device internals, raw logs, raw metadata, XML, screenshot) Tj
+T*
+(  paths, `secret_ref`, Vault id, tokens, webhooks et `service_role` sont) Tj
+T*
+(  interdits client ;) Tj
+T*
+(- `account_status` monolithique doit etre remplace par `admin_status`,) Tj
+T*
+(  `login_status`, `provisioning_status`, `subscription_status` et) Tj
+T*
+(  `automation_health`.) Tj
+T*
+() Tj
+T*
+(Ordre recommande apres ce registre :) Tj
+T*
+() Tj
+T*
+(1. DF-1B admin-dashboard Edge/API over RPC 1A pour Manage/Radar read-only.) Tj
+T*
+(2. Credentials via API dediee.) Tj
+T*
+(3. DM vers `ig_account_dm_settings` + `ig_dm_templates`.) Tj
+T*
+(4. Targets/CT vers `ig_targets`.) Tj
+T*
+(5. Unfollow/Follow vers les tables runtime verifiees.) Tj
+T*
+(6. Filters apres reconciliation runtime.) Tj
+T*
+(7. Safety/Device en admin/ops-only avec audit obligatoire.) Tj
+T*
+() Tj
+T*
+(## 15. Dashboard Foundation 1B) Tj
+T*
+() Tj
+T*
+(Dashboard Foundation 1B ajoute l'Edge Function read-only) Tj
+T*
+(`admin-dashboard` au-dessus des RPC 1A.) Tj
+T*
+() Tj
+T*
+(Actions exposees :) Tj
+T*
+() Tj
+T*
+(- `health` ;) Tj
+T*
+(- `manage_overview` -> `public.get_admin_account_overview\(...\)` ;) Tj
+T*
+(- `radar_overview` -> `public.get_admin_radar_overview\(...\)`.) Tj
+T*
+() Tj
+T*
+(Garanties :) Tj
+T*
+() Tj
+T*
+(- auth interne uniquement par `ADMIN_DASHBOARD_INTERNAL_API_TOKEN` ;) Tj
+T*
+(- POST only pour les actions ;) Tj
+T*
+(- service-role utilise cote Edge pour appeler les RPC ;) Tj
+T*
+(- aucune lecture directe des tables legacy ;) Tj
+T*
+(- aucun acces `anon`, `authenticated`, JWT client ou JWT admin dans ce patch ;) Tj
+T*
+(- aucune mutation settings, lifecycle, device, Source Quality Control ou status) Tj
+T*
+(  dropdown ;) Tj
+T*
+(- aucun changement UI Codex / `boost-ai-frontend`.) Tj
+T*
+() Tj
+T*
+(Relation avec les checkpoints precedents :) Tj
+T*
+() Tj
+T*
+(- DF-1A fournit les RPC service-role-only et le contrat no-leak ;) Tj
+T*
+(- DF-1B-prep documente le mapping Settings Registry et l'ordre de migration ;) Tj
+T*
+(- DF-1B cree la couche API interne qui pourra alimenter plus tard des vues admin) Tj
+T*
+(  separees cote UI, pas seulement une page unique `/instagram-dashboard`.) Tj
+T*
+() Tj
+T*
+ET
+endstream
+endobj
+33 0 obj
+<< /Type /Page /Parent 68 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 1 0 R >> >> /Contents 32 0 R >>
+endobj
+34 0 obj
+<< /Length 2856 >>
+stream
+BT
+/F1 9 Tf
+40 790 Td
+11 TL
+(Project Knowledge Base - page 17/33) Tj
+T*
+T*
+(Vues admin futures a prevoir progressivement : Admin Manage, Admin Radar /) Tj
+T*
+(Server Check, Account Detail, Settings / Growth Settings, Devices / Phones,) Tj
+T*
+(Activity Log, Target Accounts / CT, DM Templates, Credentials / Dashboard) Tj
+T*
+(Actions.) Tj
+T*
+() Tj
+T*
+(Suite possible :) Tj
+T*
+() Tj
+T*
+(1. Validation operateur du patch local.) Tj
+T*
+(2. GO explicite deploy + secret remote + smoke HTTP read-only.) Tj
+T*
+(3. Plus tard seulement : consommation UI Codex de `admin-dashboard`.) Tj
+T*
+(4. Les settings, device controls, client dashboard et mutations restent hors) Tj
+T*
+(   scope tant que les APIs de domaine et audits ne sont pas prets.) Tj
+T*
+() Tj
+T*
+(Remote deploy/smoke 2026-05-28 :) Tj
+T*
+() Tj
+T*
+(- `admin-dashboard` deployed on project `zgafnshkjywfltxgbtzg`;) Tj
+T*
+(- remote secret `ADMIN_DASHBOARD_INTERNAL_API_TOKEN` configured without) Tj
+T*
+(  recording or displaying its value;) Tj
+T*
+(- smoke HTTP covered missing auth, bad token, `health`, `manage_overview`,) Tj
+T*
+(  `radar_overview`, unsupported action and clamp validation;) Tj
+T*
+(- remote responses confirmed no-leak. No UI, migration, settings mutation,) Tj
+T*
+(  device control or backend publish was executed.) Tj
+T*
+() Tj
+T*
+(## 16. Credential Secure Pipeline V1 Foundation) Tj
+T*
+() Tj
+T*
+(Backend Patch 1 adds the schema/RPC foundation for a single secure Instagram) Tj
+T*
+(credential pipeline, without activating frontend flows.) Tj
+T*
+() Tj
+T*
+(Migration:) Tj
+T*
+() Tj
+T*
+(- `supabase/migrations/20260529155500_credential_secure_pipeline_v1_foundation.sql`.) Tj
+T*
+() Tj
+T*
+(Scope:) Tj
+T*
+() Tj
+T*
+(- extends existing `account_credentials` with safe current-state metadata fields) Tj
+T*
+(  \(`last_updated_at`, actor/source fields and `metadata_safe`\);) Tj
+T*
+(- extends existing `account_dashboard_actions` with safe actor fields and) Tj
+T*
+(  `metadata_safe`;) Tj
+T*
+(- creates `credential_update_requests` for one-time update-link metadata,) Tj
+T*
+(  storing only `token_hash`, never raw tokens;) Tj
+T*
+(- adds service-role RPC skeletons:) Tj
+T*
+(  `record_instagram_credential_ingestion`,) Tj
+T*
+(  `create_credential_dashboard_action`,) Tj
+T*
+(  `create_credential_update_request_metadata`.) Tj
+T*
+() Tj
+T*
+(No-leak rules:) Tj
+T*
+() Tj
+T*
+(- no password, raw token, raw request body, `secret_ref`, Vault payload, raw) Tj
+T*
+(  logs/XML, screenshot path or device internals in `metadata_safe`;) Tj
+T*
+(- RPC returns are safe and do not return `secret_ref` or `token_hash`;) Tj
+T*
+(- RLS remains conservative: no direct `anon` or `authenticated` table access;) Tj
+T*
+(  service-role/internal backend only.) Tj
+T*
+() Tj
+T*
+(Current status:) Tj
+T*
+() Tj
+T*
+(- schema/skeleton only;) Tj
+T*
+(- no Next.js frontend activation;) Tj
+T*
+(- no Add Profile wiring change yet;) Tj
+T*
+ET
+endstream
+endobj
+35 0 obj
+<< /Type /Page /Parent 68 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 1 0 R >> >> /Contents 34 0 R >>
+endobj
+36 0 obj
+<< /Length 3408 >>
+stream
+BT
+/F1 9 Tf
+40 790 Td
+11 TL
+(Project Knowledge Base - page 18/33) Tj
+T*
+T*
+(- no Request password update UI;) Tj
+T*
+(- no legacy `ig_account_settings.password` read, migration or deletion.) Tj
+T*
+() Tj
+T*
+(Future wiring plan:) Tj
+T*
+() Tj
+T*
+(- Add Profile should call a backend credential ingestion path that writes the) Tj
+T*
+(  secret to Vault and records safe metadata in `account_credentials`, then stop) Tj
+T*
+(  writing `ig_account_settings.password`.) Tj
+T*
+(- Password update links should be generated by a future Edge/API, store only) Tj
+T*
+(  `token_hash` in `credential_update_requests`, and submit the new password as) Tj
+T*
+(  write-only material through the credentials API.) Tj
+T*
+() Tj
+T*
+(## 17. Credential Secure Pipeline Patch 2A) Tj
+T*
+() Tj
+T*
+(Backend Patch 2A adds the backend-only Add Profile credential orchestration on) Tj
+T*
+(the existing `instagram-credentials` Edge Function.) Tj
+T*
+() Tj
+T*
+(Scope:) Tj
+T*
+() Tj
+T*
+(- new internal action `submit_add_profile_credentials`;) Tj
+T*
+(- internal bearer token only, no client/browser token path;) Tj
+T*
+(- `instagram-credentials` must stay deployed with `--no-verify-jwt`, because the) Tj
+T*
+(  internal token is opaque and must be checked inside the function;) Tj
+T*
+(- HTTP smokes use a temporary `.env.smoke.local` whose) Tj
+T*
+(  `INSTAGRAM_CREDENTIALS_INTERNAL_API_TOKEN` must match the remote Edge secret,) Tj
+T*
+(  then delete that file after the smoke;) Tj
+T*
+(- validates the `ig_accounts` row before credential ingestion;) Tj
+T*
+(- accepts the password only as a write-only POST body field;) Tj
+T*
+(- rejects missing account rows and username mismatches before any Vault write) Tj
+T*
+(  when `ig_accounts.username` is available;) Tj
+T*
+(- reuses the existing Supabase Vault writer and) Tj
+T*
+(  `rotate_instagram_account_credentials`;) Tj
+T*
+(- updates the rotation RPC metadata path to populate `source='add_profile'`,) Tj
+T*
+(  `metadata_safe` and safe actor fields when this internal action is used;) Tj
+T*
+(- stores the resulting `account_credentials` row as `status='active'`, matching) Tj
+T*
+(  the Python provisioner lookup contract;) Tj
+T*
+(- attempts safe status sync to `credentials_submitted` / `login_pending` /) Tj
+T*
+(  `verification_pending` only when a `client_instagram_accounts` row exists;) Tj
+T*
+(- returns only safe fields including `credentials_status='active'`,) Tj
+T*
+(  `credentials_version`, `reauth_required`, `next_action` and) Tj
+T*
+(  `password_status='write_only'`.) Tj
+T*
+() Tj
+T*
+(Patch 2A deliberately does not modify `boost-ai-frontend`, does not stop the) Tj
+T*
+(legacy Add Profile route yet, does not write or migrate) Tj
+T*
+(`ig_account_settings.password`, does not activate Request Password Update,) Tj
+T*
+(does not create secure links/client token pages, and does not run devices,) Tj
+T*
+(provisioner, runner, sender, follow or outreach flows.) Tj
+T*
+() Tj
+T*
+(Patch 2B frontend contract:) Tj
+T*
+() Tj
+T*
+(- server-side `accounts/create` should create the account, then call) Tj
+T*
+(  `instagram-credentials` with `action='submit_add_profile_credentials'`;) Tj
+T*
+(- once that call succeeds, new Add Profile flows must stop persisting the) Tj
+T*
+(  password in `ig_account_settings.password`;) Tj
+T*
+(- the frontend/API response must keep the password write-only and must not expose) Tj
+T*
+(  secret references or Vault details.) Tj
+T*
+() Tj
+T*
+(Retry/orphan-secret status:) Tj
+T*
+ET
+endstream
+endobj
+37 0 obj
+<< /Type /Page /Parent 68 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 1 0 R >> >> /Contents 36 0 R >>
+endobj
+38 0 obj
+<< /Length 3441 >>
+stream
+BT
+/F1 9 Tf
+40 790 Td
+11 TL
+(Project Knowledge Base - page 19/33) Tj
+T*
+T*
+() Tj
+T*
+(- `external_request_id` and request ids are safe metadata only in Patch 2A; they) Tj
+T*
+(  do not yet provide full idempotent replay protection.) Tj
+T*
+(- A duplicate successful submit rotates credentials to the next version and) Tj
+T*
+(  supersedes the previous active metadata.) Tj
+T*
+(- If Vault write succeeds but metadata rotation fails, the Edge Function returns) Tj
+T*
+(  a safe `credentials_metadata_write_failed` error. Patch 2C-1 adds cleanup /) Tj
+T*
+(  revoke foundations to reduce smoke and retry debt; strict end-to-end) Tj
+T*
+(  idempotency is still future work.) Tj
+T*
+() Tj
+T*
+(## 18. Credential Secure Pipeline Patch 2C-1) Tj
+T*
+() Tj
+T*
+(Patch 2C-1 adds backend-only cleanup/revoke foundations required before running) Tj
+T*
+(an authenticated full Add Profile production smoke:) Tj
+T*
+() Tj
+T*
+(- `revoke_instagram_credentials_vault_secret\(...\)` is service-role only, accepts) Tj
+T*
+(  only `supabase_vault://{uuid}`, and neutralizes the Vault value via) Tj
+T*
+(  `vault.update_secret\(...\)`. The current remote Vault API exposes) Tj
+T*
+(  `create_secret` and `update_secret`, not physical delete, so cleanup is) Tj
+T*
+(  neutralization rather than deletion.) Tj
+T*
+(- `revoke_instagram_account_credentials\(...\)` is service-role only, marks) Tj
+T*
+(  Instagram credentials `revoked`, sets safe revoke metadata and attempts Vault) Tj
+T*
+(  neutralization for linked refs. It is idempotent for already revoked or) Tj
+T*
+(  missing credentials.) Tj
+T*
+(- `cleanup_instagram_smoke_account\(...\)` is service-role only and intentionally) Tj
+T*
+(  narrow: username must match `smoke_*` and the request id must match related) Tj
+T*
+(  safe metadata before it removes smoke account/settings/filters/credential) Tj
+T*
+(  rows, dashboard actions, credential update requests and smoke client links.) Tj
+T*
+() Tj
+T*
+(All responses are safe counts/status booleans only. They never return password,) Tj
+T*
+(token, Authorization header, service-role key, full `secret_ref`, Vault id,) Tj
+T*
+(secret value, raw request body, raw metadata, device ids, XML, screenshots or raw) Tj
+T*
+(logs.) Tj
+T*
+() Tj
+T*
+(Patch 2C-1 does not change frontend code, does not run full Add Profile UI smoke,) Tj
+T*
+(does not launch device/provisioner/login, does not activate Request Password) Tj
+T*
+(Update, does not create secure links, and does not migrate legacy) Tj
+T*
+(`ig_account_settings.password`.) Tj
+T*
+() Tj
+T*
+(Account lifecycle vs credential cleanup:) Tj
+T*
+() Tj
+T*
+(- Archive does not revoke credentials. It may later suspend campaigns,) Tj
+T*
+(  provisioning and runtime, but restore must remain simple.) Tj
+T*
+(- Trash during retention does not revoke credentials by default because the) Tj
+T*
+(  account remains restorable.) Tj
+T*
+(- Restore must not fail because credentials were neutralized automatically by) Tj
+T*
+(  archive/trash.) Tj
+T*
+(- Permanent delete after retention may call credential cleanup/revoke and Vault) Tj
+T*
+(  neutralization.) Tj
+T*
+(- Explicit credential revoke is a separate operation from account deletion.) Tj
+T*
+(- Smoke cleanup, failed ingestion cleanup, security revoke and permanent delete) Tj
+T*
+(  cleanup are allowed only through strict backend guards.) Tj
+T*
+() Tj
+T*
+(Allowed cleanup reasons:) Tj
+T*
+() Tj
+T*
+(- `smoke_cleanup`) Tj
+T*
+(- `failed_ingestion_cleanup`) Tj
+T*
+(- `explicit_credential_revoke`) Tj
+T*
+ET
+endstream
+endobj
+39 0 obj
+<< /Type /Page /Parent 68 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 1 0 R >> >> /Contents 38 0 R >>
+endobj
+40 0 obj
+<< /Length 2844 >>
+stream
+BT
+/F1 9 Tf
+40 790 Td
+11 TL
+(Project Knowledge Base - page 20/33) Tj
+T*
+T*
+(- `security_revoke`) Tj
+T*
+(- `permanent_account_delete`) Tj
+T*
+() Tj
+T*
+(Reasons that must not trigger automatic credential cleanup:) Tj
+T*
+() Tj
+T*
+(- `archive`) Tj
+T*
+(- `trash`) Tj
+T*
+(- `trash_pending_retention`) Tj
+T*
+(- `pause`) Tj
+T*
+(- `paused`) Tj
+T*
+(- `cancelled_without_final_delete`) Tj
+T*
+(- `archived_pending_retention`) Tj
+T*
+() Tj
+T*
+(Patch 2C-1 SQL guards reject reasons outside the allowed cleanup list. No route) Tj
+T*
+(or automation should call these helpers for archive, trash, scheduled trash,) Tj
+T*
+(restore or any restorable lifecycle transition.) Tj
+T*
+() Tj
+T*
+(Restoration safety:) Tj
+T*
+() Tj
+T*
+(- archived/trashed credentials stay intact unless explicitly revoked;) Tj
+T*
+(- restore later checks `credentials_status` before runtime resumes;) Tj
+T*
+(- if credentials were explicitly revoked while trashed, restore should ask for a) Tj
+T*
+(  credential update before provisioning/runtime.) Tj
+T*
+() Tj
+T*
+(Future lifecycle sync must coordinate admin dashboard, BotApp/backend, future) Tj
+T*
+(client dashboard and automation/runtime. Recommended future fields:) Tj
+T*
+(`source_surface`, `actor_type`, `actor_id`, `reason`, `lifecycle_status`,) Tj
+T*
+(`archived_at`, `trashed_at`, `scheduled_trash_at`, `scheduled_delete_at` /) Tj
+T*
+(`purge_after`, `permanently_deleted_at`, `sync_status`, `botapp_sync_status`,) Tj
+T*
+(`client_dashboard_sync_status`, `admin_dashboard_sync_status`,) Tj
+T*
+(`audit_event_id`, `credential_cleanup_status`. Patch 2C-1 does not implement) Tj
+T*
+(this multi-surface sync.) Tj
+T*
+() Tj
+T*
+(## 19. Credential Secure Pipeline Patch 2C-2) Tj
+T*
+() Tj
+T*
+(Patch 2C-2 is the production checkpoint for the authenticated Add Profile E2E) Tj
+T*
+(path after fixing the Vercel Production credential-token environment variable.) Tj
+T*
+() Tj
+T*
+(Validated runtime alignment:) Tj
+T*
+() Tj
+T*
+(- Vercel Production) Tj
+T*
+(  `INSTAGRAM_CREDENTIALS_INTERNAL_API_TOKEN` now matches the token accepted by) Tj
+T*
+(  Supabase Edge.) Tj
+T*
+(- Safe Vercel Production runtime fingerprint: `present=true`, `len=64`,) Tj
+T*
+(  `sha12=4c74d75cb9fd`.) Tj
+T*
+(- Edge reprobe to `instagram-credentials` with the Vercel Production token no) Tj
+T*
+(  longer returned `401 unauthorized`; the fake account probe authenticated) Tj
+T*
+(  internally and failed at the expected business layer with `account_not_found`.) Tj
+T*
+() Tj
+T*
+(Validated Add Profile production UI flow:) Tj
+T*
+() Tj
+T*
+(- authenticated admin UI on `/instagram-dashboard`;) Tj
+T*
+(- Add Profile wizard completed through Create Profile confirmation;) Tj
+T*
+(- `ig_accounts` created;) Tj
+T*
+(- `ig_account_settings` created;) Tj
+T*
+(- `ig_account_filters` created;) Tj
+T*
+(- `ig_account_settings.password = ''`;) Tj
+T*
+(- `submit_add_profile_credentials` succeeded;) Tj
+T*
+ET
+endstream
+endobj
+41 0 obj
+<< /Type /Page /Parent 68 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 1 0 R >> >> /Contents 40 0 R >>
+endobj
+42 0 obj
+<< /Length 3207 >>
+stream
+BT
+/F1 9 Tf
+40 790 Td
+11 TL
+(Project Knowledge Base - page 21/33) Tj
+T*
+T*
+(- `account_credentials` row created;) Tj
+T*
+(- `account_credentials.status = 'active'`;) Tj
+T*
+(- `ig_accounts.status = 'active'`;) Tj
+T*
+(- no `credentials_ingestion_failed` UI result.) Tj
+T*
+() Tj
+T*
+(Cleanup:) Tj
+T*
+() Tj
+T*
+(- `cleanup_instagram_smoke_account\(...\)` succeeded for the smoke account using) Tj
+T*
+(  the matching safe request id;) Tj
+T*
+(- cleanup removed the smoke account, settings, filters, credential metadata and) Tj
+T*
+(  related dashboard action, and neutralized the linked Vault secret;) Tj
+T*
+(- post-cleanup counts for smoke accounts/settings/filters/credentials were all) Tj
+T*
+(  zero.) Tj
+T*
+() Tj
+T*
+(Patch 2C-2 was reprobe/smoke/checkpoint only: no runtime patch, no Edge Function) Tj
+T*
+(patch, no dashboard UI patch and no migration change. The checkpoint remains) Tj
+T*
+(no-leak: no token, Authorization header, service-role key, password, full) Tj
+T*
+(`secret_ref`, Vault id, cookies/session, raw logs, XML or screenshot path was) Tj
+T*
+(recorded.) Tj
+T*
+() Tj
+T*
+(## 20. Credential Secure Pipeline Patch 2C-3) Tj
+T*
+() Tj
+T*
+(Patch 2C-3 hardens Add Profile transaction boundaries, compensation and minimal) Tj
+T*
+(idempotency.) Tj
+T*
+() Tj
+T*
+(Current diagnosis before Patch 2C-3:) Tj
+T*
+() Tj
+T*
+(- `accounts/create` inserted `ig_accounts.status='active'` before settings,) Tj
+T*
+(  filters and credential ingestion completed;) Tj
+T*
+(- settings and filters were not created inside a database transaction with the) Tj
+T*
+(  account row;) Tj
+T*
+(- credential ingestion failure already marked `ig_accounts.status` as) Tj
+T*
+(  `support_required`, but earlier settings/filter failures could leave partial) Tj
+T*
+(  rows or raw DB error messages;) Tj
+T*
+(- no unique username invariant existed on `ig_accounts`, so a double-submit or) Tj
+T*
+(  retry could create duplicate account rows for the same normalized username.) Tj
+T*
+() Tj
+T*
+(Patch behavior:) Tj
+T*
+() Tj
+T*
+(- new Add Profile accounts start as `support_required`;) Tj
+T*
+(- settings start with `account_status='support_required'` and `password=''`;) Tj
+T*
+(- settings/filter failures before credential ingestion trigger targeted) Tj
+T*
+(  compensation by deleting only the newly created account id. Cascading foreign) Tj
+T*
+(  keys clean up just-created settings/filters rows;) Tj
+T*
+(- credential ingestion failure keeps the account/settings in `support_required`,) Tj
+T*
+(  creates a best-effort safe `review_credentials` dashboard action, and returns) Tj
+T*
+(  a safe UI error;) Tj
+T*
+(- credentials success is accepted only when the Edge response reports active) Tj
+T*
+(  credentials;) Tj
+T*
+(- only after active credentials are confirmed does the route finalize) Tj
+T*
+(  `ig_accounts.status='active'` and `ig_account_settings.account_status='active'`;) Tj
+T*
+(- if finalization fails after credentials are active, the route reports a safe) Tj
+T*
+(  failure and leaves the account in `support_required`.) Tj
+T*
+() Tj
+T*
+(Idempotency:) Tj
+T*
+() Tj
+T*
+(- migration `20260529220012_patch2c3_add_profile_username_unique.sql` adds) Tj
+T*
+(  `ig_accounts_username_lower_unique` on `lower\(btrim\(username\)\)` for non-empty) Tj
+T*
+ET
+endstream
+endobj
+43 0 obj
+<< /Type /Page /Parent 68 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 1 0 R >> >> /Contents 42 0 R >>
+endobj
+44 0 obj
+<< /Length 3412 >>
+stream
+BT
+/F1 9 Tf
+40 790 Td
+11 TL
+(Project Knowledge Base - page 22/33) Tj
+T*
+T*
+(  usernames;) Tj
+T*
+(- duplicate normalized usernames map to safe `account_already_exists` and do not) Tj
+T*
+(  create a second account/credential path.) Tj
+T*
+() Tj
+T*
+(Patch 2C-3 does not change worker Python, login/provisioner runtime, runner,) Tj
+T*
+(the `instagram-credentials` Edge Function, archive/trash/restore semantics,) Tj
+T*
+(client dashboard, or global lifecycle cleanup policy. No cleanup/revoke is) Tj
+T*
+(triggered for archived or trashed accounts.) Tj
+T*
+() Tj
+T*
+(No-leak rule: route errors and support metadata must never include passwords,) Tj
+T*
+(raw request bodies, tokens, Authorization headers, service-role keys, full) Tj
+T*
+(`secret_ref`, Vault ids/values, cookies/session, XML, screenshots or raw logs.) Tj
+T*
+() Tj
+T*
+(Production validation checkpoint \(2026-05-29\): migration applied on linked) Tj
+T*
+(Supabase; production `accounts/create` happy path, duplicate username guard and) Tj
+T*
+(`cleanup_instagram_smoke_account` cleanup verified on smoke username) Tj
+T*
+(`smoke_add_profile_2c3_e2e` without leaking secrets in logs or docs.) Tj
+T*
+() Tj
+T*
+(## 21. Credential Secure Pipeline Patch 2C-4) Tj
+T*
+() Tj
+T*
+(Patch 2C-4 adds safe Add Profile audit and dashboard action reconciliation) Tj
+T*
+(without changing Instagram runtime, login/provisioner, runner, Edge credential) Tj
+T*
+(ingestion, lifecycle archive/trash/delete, or global cleanup/revoke behavior.) Tj
+T*
+() Tj
+T*
+(Audit contract:) Tj
+T*
+() Tj
+T*
+(- `add_profile_audit_events` records Add Profile outcomes with safe username,) Tj
+T*
+(  optional account id, truncated request ids, `source_surface='admin_dashboard'`,) Tj
+T*
+(  `operation='add_profile'`, actor id/type when available, result status and) Tj
+T*
+(  safe failure reason;) Tj
+T*
+(- result status mapping is `success`, `failed`, `compensated`, and `duplicate`;) Tj
+T*
+(- compensated settings/filter failures keep audit after the account row is) Tj
+T*
+(  deleted via `account_id on delete set null`;) Tj
+T*
+(- audit metadata is `metadata_safe` only and uses the existing forbidden-key) Tj
+T*
+(  guard.) Tj
+T*
+() Tj
+T*
+(Dashboard action mapping:) Tj
+T*
+() Tj
+T*
+(- success resolves open `submit_instagram_credentials` / `review_credentials`) Tj
+T*
+(  actions after credentials and account/settings are active;) Tj
+T*
+(- credential ingestion failure creates or updates a deduped admin) Tj
+T*
+(  `review_credentials` action with `pending`, `warning`,) Tj
+T*
+(  `requires_client_action=false`, `blocking_campaign=true`;) Tj
+T*
+(- settings/filter failure with successful compensation is audit-only;) Tj
+T*
+(- settings/filter failure with failed compensation creates an admin manual-review) Tj
+T*
+(  action;) Tj
+T*
+(- duplicate username records audit `duplicate` and returns) Tj
+T*
+(  `account_already_exists` without creating an action.) Tj
+T*
+() Tj
+T*
+(Frontend scope is minimal: the Credentials Actions page can merge open) Tj
+T*
+(`account_dashboard_actions` with existing derived read-only signals. It renders) Tj
+T*
+(only safe columns and keeps mutations disabled.) Tj
+T*
+() Tj
+T*
+(No-leak rule: audit rows, dashboard action metadata, UI and docs must never) Tj
+T*
+(contain passwords, tokens, Authorization headers, service-role keys,) Tj
+T*
+(cookies/sessions, full `secret_ref`, Vault UUIDs/payloads, raw request bodies,) Tj
+T*
+(raw logs, XML or screenshot paths.) Tj
+T*
+() Tj
+T*
+ET
+endstream
+endobj
+45 0 obj
+<< /Type /Page /Parent 68 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 1 0 R >> >> /Contents 44 0 R >>
+endobj
+46 0 obj
+<< /Length 3026 >>
+stream
+BT
+/F1 9 Tf
+40 790 Td
+11 TL
+(Project Knowledge Base - page 23/33) Tj
+T*
+T*
+(## 22. Credential Secure Pipeline Patch 2C-5) Tj
+T*
+() Tj
+T*
+(Patch 2C-5 adds safe public profile metadata for Add Profile without changing) Tj
+T*
+(worker Python, runner, login/provisioner, Edge credential ingestion, device/app) Tj
+T*
+(start, lifecycle archive/trash/delete, or global cleanup/revoke behavior.) Tj
+T*
+() Tj
+T*
+(Schema:) Tj
+T*
+() Tj
+T*
+(- `ig_accounts` now has safe public profile fields:) Tj
+T*
+(  `username_verification_status`, `username_verified_at`,) Tj
+T*
+(  `username_verification_reason`, `instagram_user_id`,) Tj
+T*
+(  `external_profile_id`, `is_private`, `is_verified`, `followers_count`,) Tj
+T*
+(  `avatar_url`, `avatar_checked_at`, and `public_profile_metadata`;) Tj
+T*
+(- `avatar_url` is optional and must be HTTP\(S\), bounded, and free of) Tj
+T*
+(  token/signature/secret/service-role/Vault markers;) Tj
+T*
+(- `public_profile_metadata` is guarded by the shared safe-metadata denylist.) Tj
+T*
+() Tj
+T*
+(Status mapping:) Tj
+T*
+() Tj
+T*
+(- `verified`: safe source confirmed username;) Tj
+T*
+(- `not_found`: safe source clearly confirmed missing username;) Tj
+T*
+(- `username_changed`: safe source observed canonical username change/redirect;) Tj
+T*
+(- `private_or_limited` / `inaccessible`: public access is limited;) Tj
+T*
+(- `verification_unavailable`: no stable public lookup provider is configured;) Tj
+T*
+(- `provider_error`: provider failed without a clear verdict;) Tj
+T*
+(- `invalid_format`: local syntax check failed;) Tj
+T*
+(- `pending` / `unknown`: no final verdict.) Tj
+T*
+() Tj
+T*
+(V1 implementation:) Tj
+T*
+() Tj
+T*
+(- Add Profile performs local username normalization and syntax validation before) Tj
+T*
+(  account creation;) Tj
+T*
+(- invalid syntax returns safe `username_verification_failed` and creates no) Tj
+T*
+(  account;) Tj
+T*
+(- no public Instagram scraping is performed in Patch 2C-5. New accounts are) Tj
+T*
+(  stored as `verification_unavailable/public_lookup_not_configured`, which does) Tj
+T*
+(  not block credentials or active finalization;) Tj
+T*
+(- no `review_username` action is created for normal provider-unavailable state;) Tj
+T*
+(- dashboard views render safe avatar/status fields only and never raw metadata.) Tj
+T*
+() Tj
+T*
+(Future roadmap ? Target Account Quality / CT Filtering Engine:) Tj
+T*
+() Tj
+T*
+(- CT introuvable;) Tj
+T*
+(- username changed;) Tj
+T*
+(- avatar missing/suspicious where useful;) Tj
+T*
+(- followers below a configured threshold, e.g. `<500`;) Tj
+T*
+(- verified / blue badge;) Tj
+T*
+(- private or non-exploitable;) Tj
+T*
+(- no posts;) Tj
+T*
+(- FBR `<= 8%` after at least `100` follows;) Tj
+T*
+(- no followable profiles after `X` scrolls;) Tj
+T*
+(- archive/suppression CT synchronized frontend/backend.) Tj
+T*
+() Tj
+T*
+(These CT filtering rules, mass avatar enrichment, comments/AI ranking, MCP) Tj
+T*
+(integration and automatic target archive/delete are out of scope for Patch 2C-5.) Tj
+T*
+() Tj
+T*
+(## 23. Credential Secure Pipeline Patch 2C-6) Tj
+T*
+() Tj
+T*
+ET
+endstream
+endobj
+47 0 obj
+<< /Type /Page /Parent 68 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 1 0 R >> >> /Contents 46 0 R >>
+endobj
+48 0 obj
+<< /Length 3228 >>
+stream
+BT
+/F1 9 Tf
+40 790 Td
+11 TL
+(Project Knowledge Base - page 24/33) Tj
+T*
+T*
+(Patch 2C-6 introduces a safe Instagram public profile lookup provider contract) Tj
+T*
+(for Add Profile and future Target Account / CT Quality checks. The provider is) Tj
+T*
+(server-side only and must never use Instagram passwords, cookies, sessions,) Tj
+T*
+(device/app startup, ADB, uiautomator, worker runtime, or aggressive scraping.) Tj
+T*
+() Tj
+T*
+(Provider modes:) Tj
+T*
+() Tj
+T*
+(- `disabled` / not configured: no external call, returns) Tj
+T*
+(  `provider_not_configured`, and Add Profile keeps the Patch 2C-5 fail-open) Tj
+T*
+(  behavior;) Tj
+T*
+(- `mock`: local/test-only deterministic statuses for `found`, `not_found`,) Tj
+T*
+(  `unavailable`, avatar, follower count and privacy/verified flags;) Tj
+T*
+(- `http`: opt-in server-side endpoint via env. It has a short timeout and stores) Tj
+T*
+(  only sanitized fields, never raw responses, headers, cookies, tokens, HTML, IP) Tj
+T*
+(  or session details.) Tj
+T*
+() Tj
+T*
+(Add Profile behavior:) Tj
+T*
+() Tj
+T*
+(- invalid local syntax still returns `username_verification_failed` before any) Tj
+T*
+(  lookup;) Tj
+T*
+(- `found` stores `username_verification_status='verified'`, safe canonical) Tj
+T*
+(  username metadata, avatar URL, follower count, privacy/verified flags and) Tj
+T*
+(  public ids when available, then continues credential ingestion;) Tj
+T*
+(- clear `not_found` returns a safe `username_not_found` error before account) Tj
+T*
+(  creation;) Tj
+T*
+(- `provider_not_configured`, `unavailable`, `rate_limited` and `provider_error`) Tj
+T*
+(  remain fail-open for admin Add Profile and persist safe status/reason metadata.) Tj
+T*
+() Tj
+T*
+(Future CT reuse:) Tj
+T*
+() Tj
+T*
+(- verify whether a CT exists;) Tj
+T*
+(- detect canonical username changes;) Tj
+T*
+(- reuse avatar, `followers_count`, `is_verified` and `is_private`;) Tj
+T*
+(- support future followers threshold checks such as `<500`;) Tj
+T*
+(- feed later FBR and quality rules without implementing CT filtering in 2C-6.) Tj
+T*
+() Tj
+T*
+(## 24. Credential Secure Pipeline Patch 2C-7B ? SearchApi Staging Adapter) Tj
+T*
+() Tj
+T*
+(Patch 2C-7B documents the optional SearchApi staging adapter added in the) Tj
+T*
+(frontend public profile lookup library. It is not a production provider rollout.) Tj
+T*
+() Tj
+T*
+(Scope:) Tj
+T*
+() Tj
+T*
+(- `searchapi` mode for local/staging evaluation only;) Tj
+T*
+(- server env: `INSTAGRAM_PUBLIC_PROFILE_LOOKUP_PROVIDER=searchapi`,) Tj
+T*
+(  `INSTAGRAM_PUBLIC_PROFILE_LOOKUP_URL`, `INSTAGRAM_PUBLIC_PROFILE_LOOKUP_API_KEY`;) Tj
+T*
+(- no API key in repo, no `NEXT_PUBLIC_*`, no Vercel prod env change by default;) Tj
+T*
+(- no worker Python, device/ADB, cookies/sessions, CT Quality Engine, MCP, or) Tj
+T*
+(  lifecycle changes.) Tj
+T*
+() Tj
+T*
+(Mapping aligns with the 2C-6 contract \(`found`, `not_found`, `rate_limited`,) Tj
+T*
+(`unavailable`, `provider_error`, safe avatar/metadata\). Missing URL/key remains) Tj
+T*
+(`provider_not_configured`.) Tj
+T*
+() Tj
+T*
+(Patch 2C-7C follows the real-key local/staging smoke. It keeps production) Tj
+T*
+(disabled / NO-GO and records two adapter hardening fixes:) Tj
+T*
+() Tj
+T*
+(- SearchApi `avatar` / `avatar_hd` fields map to safe `avatar_url`;) Tj
+T*
+ET
+endstream
+endobj
+49 0 obj
+<< /Type /Page /Parent 68 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 1 0 R >> >> /Contents 48 0 R >>
+endobj
+50 0 obj
+<< /Length 3441 >>
+stream
+BT
+/F1 9 Tf
+40 790 Td
+11 TL
+(Project Knowledge Base - page 25/33) Tj
+T*
+T*
+(- SearchApi uses a 7s staging timeout because 3s was too aggressive for Add) Tj
+T*
+(  Profile while direct provider responses were commonly around 1-5s.) Tj
+T*
+() Tj
+T*
+(Next operator step: extended SearchApi staging tests across more handles,) Tj
+T*
+(latency samples, and rate-limit observation before any production enablement) Tj
+T*
+(decision.) Tj
+T*
+() Tj
+T*
+(SearchApi recommendation update after the extended soak:) Tj
+T*
+() Tj
+T*
+(- SearchApi is GO for staging and remains a credible Add Profile provider) Tj
+T*
+(  candidate.) Tj
+T*
+(- The `rate_limited` event observed on the third soak pass is attributed to the) Tj
+T*
+(  free / initial plan quota being reached. After limits were renewed/upgraded,) Tj
+T*
+(  the same style of test passed again without `rate_limited`.) Tj
+T*
+(- Production Add Profile is still NO-GO until the upgraded SearchApi plan's) Tj
+T*
+(  quota, burst limit and cost at expected volume are verified. The production) Tj
+T*
+(  path must preserve fail-open behavior for `rate_limited`, `unavailable` and) Tj
+T*
+(  `provider_error`; only clear `not_found` can block account creation.) Tj
+T*
+(- CT bulk remains a separate scaling problem: do not call SearchApi directly per) Tj
+T*
+(  submitted CT row. Use queue/batch execution, cache, throttling/spacing, quota) Tj
+T*
+(  tracking, decision audit and explicit dashboard states \(`pending_verification`,) Tj
+T*
+(  `valid`, `rejected`, `review`\).) Tj
+T*
+(- Throttle/cache/rate-limit guards are recommended as production/scaling) Tj
+T*
+(  safeguards, not because SearchApi was proven technically unstable.) Tj
+T*
+() Tj
+T*
+(## 25. Credential Secure Pipeline Patch 2C-7D ? Lookup Cache / Throttle Guardrails) Tj
+T*
+() Tj
+T*
+(Patch 2C-7D adds lightweight guardrails to the frontend public profile lookup) Tj
+T*
+(provider without changing production env or adding a DB migration.) Tj
+T*
+() Tj
+T*
+(Chosen minimal design:) Tj
+T*
+() Tj
+T*
+(- in-memory cache in `lib/instagram-public-profile-lookup.ts`;) Tj
+T*
+(- in-memory SearchApi throttle / spacing and serialized external calls;) Tj
+T*
+(- configurable server env with safe defaults:) Tj
+T*
+(  `INSTAGRAM_PUBLIC_PROFILE_LOOKUP_MIN_INTERVAL_MS`,) Tj
+T*
+(  `INSTAGRAM_PUBLIC_PROFILE_LOOKUP_MAX_PER_MINUTE`,) Tj
+T*
+(  `INSTAGRAM_PUBLIC_PROFILE_LOOKUP_CACHE_TTL_FOUND_SECONDS`,) Tj
+T*
+(  `INSTAGRAM_PUBLIC_PROFILE_LOOKUP_CACHE_TTL_NOT_FOUND_SECONDS`,) Tj
+T*
+(  `INSTAGRAM_PUBLIC_PROFILE_LOOKUP_CACHE_TTL_ERROR_SECONDS`;) Tj
+T*
+(- no DB cache table yet. Existing `ig_accounts` fields are enough to persist) Tj
+T*
+(  verified Add Profile metadata after account creation, but not enough for a) Tj
+T*
+(  durable pre-create or CT bulk cache.) Tj
+T*
+() Tj
+T*
+(Safety behavior:) Tj
+T*
+() Tj
+T*
+(- cache `found` longer than `not_found`;) Tj
+T*
+(- cache transient `rate_limited`, `unavailable` and `provider_error` only) Tj
+T*
+(  briefly;) Tj
+T*
+(- never turn `rate_limited` / `unavailable` / `provider_error` into) Tj
+T*
+(  `not_found`;) Tj
+T*
+(- Add Profile continues to block only clear `not_found` and fail-open on) Tj
+T*
+(  provider limits/errors;) Tj
+T*
+(- safe metadata can include `cache_hit`, `throttle_hit`, `rate_limited` and) Tj
+T*
+(  `latency_ms`, never raw provider payloads, URLs with keys, headers, cookies,) Tj
+T*
+(  sessions, tokens or secrets.) Tj
+T*
+() Tj
+T*
+(CT-2 adds the first durable architecture for bulk CT verification:) Tj
+T*
+ET
+endstream
+endobj
+51 0 obj
+<< /Type /Page /Parent 68 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 1 0 R >> >> /Contents 50 0 R >>
+endobj
+52 0 obj
+<< /Length 4001 >>
+stream
+BT
+/F1 9 Tf
+40 790 Td
+11 TL
+(Project Knowledge Base - page 26/33) Tj
+T*
+T*
+(normalize/dedupe, insert accepted rows, create `ct_target_verification_jobs`,) Tj
+T*
+(claim small batches, run provider lookup through existing cache/throttle,) Tj
+T*
+(persist Quality V1 decisions and audit safe summaries. Remaining future work is) Tj
+T*
+(durable provider cache/quota tracking, cron/admin scheduling, client dashboard) Tj
+T*
+(sync and performance/FBR policies. Do not call SearchApi directly once per) Tj
+T*
+(submitted CT row during form submission.) Tj
+T*
+() Tj
+T*
+(CT-2B turns the dashboard batch route into a controlled backend processor while) Tj
+T*
+(staying off phones/runtime: bounded limit, sanitized worker id, dry-run preview,) Tj
+T*
+(explicit safe summary counts, `duration_ms`, early stop on provider) Tj
+T*
+(`rate_limited`, and requeue of already claimed but unprocessed jobs. The) Tj
+T*
+(`claim_ct_target_verification_jobs` RPC now reclaims expired `processing` locks) Tj
+T*
+(after the lock window. Cron remains future only.) Tj
+T*
+() Tj
+T*
+(CT-3 centralizes CT Quality V1 in `lib/instagram-target-quality.ts`. This pure) Tj
+T*
+(decision engine is the single source for current public verification rules:) Tj
+T*
+(clear `not_found`, `followers_count < 500`, verified profile, private profile,) Tj
+T*
+(canonical username mismatch, provider unavailable/rate-limited/error and) Tj
+T*
+(eligible. Missing avatar is warning-only. FBR is explicitly excluded because it) Tj
+T*
+(is future performance after real CT usage, not public profile quality.) Tj
+T*
+() Tj
+T*
+(Sync contract: `ig_targets` is the shared source for admin/client/BotApp) Tj
+T*
+(`status`, `quality_status`, `verification_status`, safe reasons, actor/source,) Tj
+T*
+(soft archive/delete state and audit linkage. `valid` / `eligible` is usable,) Tj
+T*
+(`rejected_*` carries safe reasons, `review_*` is admin-first with safe optional) Tj
+T*
+(client/BotApp messaging, and archive/delete must not diverge silently across) Tj
+T*
+(surfaces.) Tj
+T*
+() Tj
+T*
+(CT-4 clarifies CT lifecycle sync. Admin delete is soft archive only. Restore is) Tj
+T*
+(an explicit unarchive action, separate from reset, and never creates a new CT or) Tj
+T*
+(changes FBR/performance fields. Restore blocks duplicate active usernames for) Tj
+T*
+(the same account. Fresh archived CTs with `eligible` + `found` can return to) Tj
+T*
+(`valid`; stale, unknown or rejected archived CTs return to `pending_verification`) Tj
+T*
+(and queue revalidation. Reset is technical re-verification and must not unarchive) Tj
+T*
+(archived/deleted CTs. Audit events now cover `target_archive`, `target_restore`) Tj
+T*
+(and `target_reset` with safe actor/source-surface metadata. Client dashboard and) Tj
+T*
+(BotApp CT implementations remain future work; they must consume the same) Tj
+T*
+(`ig_targets` lifecycle or a safe projection and must not treat archived,) Tj
+T*
+(rejected, pending or review CTs as active runtime targets.) Tj
+T*
+() Tj
+T*
+(CT-5 connects admin Activity Log to a safe projection of) Tj
+T*
+(`ct_target_audit_events`. Admin can see target add, bulk add, verify, archive,) Tj
+T*
+(restore and reset events with timestamp, actor type, safe account/target labels) Tj
+T*
+(or short ids, result, reason, short batch id and source surface. The UI never) Tj
+T*
+(renders raw `metadata_safe`, raw provider payloads, credentials, tokens or logs.) Tj
+T*
+(Client dashboard and BotApp audit views remain future work and must use the same) Tj
+T*
+(safe audit contract.) Tj
+T*
+() Tj
+T*
+(## 26. CT-1 ? Target Account Add / Bulk Verification Foundation) Tj
+T*
+() Tj
+T*
+(CT-1 keeps `ig_targets` as the source of truth for target accounts and adds an) Tj
+T*
+(additive verification/quality foundation. It does not change worker Python,) Tj
+T*
+(follow runtime, Instagram navigation, SearchApi production env, or CT campaign) Tj
+T*
+(optimization.) Tj
+T*
+() Tj
+T*
+(Current source-of-truth decision:) Tj
+T*
+() Tj
+T*
+(- `ig_targets` remains the CT table for per-account target usernames.) Tj
+T*
+ET
+endstream
+endobj
+53 0 obj
+<< /Type /Page /Parent 68 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 1 0 R >> >> /Contents 52 0 R >>
+endobj
+54 0 obj
+<< /Length 4001 >>
+stream
+BT
+/F1 9 Tf
+40 790 Td
+11 TL
+(Project Knowledge Base - page 27/33) Tj
+T*
+T*
+(- `ig_interacted_users` remains interaction memory and future aggregated FBR) Tj
+T*
+(  source; it is not exposed raw to client/admin CT imports.) Tj
+T*
+(- Account Detail still has a read-only pending CT summary, while the Manage) Tj
+T*
+(  Targets modal owns add/import/reset/archive operations.) Tj
+T*
+() Tj
+T*
+(CT-1 behavior:) Tj
+T*
+() Tj
+T*
+(- manual single add normalizes username, blocks invalid syntax, checks duplicate) Tj
+T*
+(  for the same account, then calls the existing public profile lookup only if it) Tj
+T*
+(  is configured in the current safe environment;) Tj
+T*
+(- clear `not_found` becomes `rejected` /) Tj
+T*
+(  `quality_status=rejected_not_found`;) Tj
+T*
+(- `found` applies quality V1: fewer than 500 followers, verified profiles and) Tj
+T*
+(  private profiles are rejected with explicit reasons; eligible public accounts) Tj
+T*
+(  become `valid`;) Tj
+T*
+(- `rate_limited`, `unavailable`, `provider_error` and provider-not-configured) Tj
+T*
+(  paths never become `not_found` and stay review/pending;) Tj
+T*
+(- manual bulk import normalizes line by line, flags invalid syntax,) Tj
+T*
+(  duplicate-in-batch and duplicate-existing rows, then inserts accepted rows as) Tj
+T*
+(  `pending_verification` with a `batch_id`; it intentionally does not fan out) Tj
+T*
+(  provider calls per row;) Tj
+T*
+(- CT-2 creates one durable verification job per accepted bulk target. Duplicate) Tj
+T*
+(  or invalid rows do not get jobs, and `target_id` uniqueness keeps job creation) Tj
+T*
+(  idempotent;) Tj
+T*
+(- `verify-batch` claims small batches, applies Quality V1, schedules bounded) Tj
+T*
+(  retries for transient provider failures and never converts rate limits or) Tj
+T*
+(  provider errors into `rejected_not_found`;) Tj
+T*
+(- CT-2C adds `verify-cron`: disabled-by-default, token-protected scheduler entry) Tj
+T*
+(  with expiring DB lock, safe skip reasons and the same batch processor as) Tj
+T*
+(  `verify-batch`. No active repo cron schedule; external schedulers only;) Tj
+T*
+(- CT-2B adds `dry_run=true`, summary fields `claimed_count`, `processed_count`,) Tj
+T*
+(  `succeeded_count`, `rejected_count`, `review_count`,) Tj
+T*
+(  `retry_scheduled_count`, `skipped_count`, `rate_limited_count`,) Tj
+T*
+(  `provider_error_count`, `duration_ms`, plus max-duration and rate-limit early) Tj
+T*
+(  stop behavior. Already claimed unprocessed jobs are returned to) Tj
+T*
+(  `retry_scheduled` instead of being left stuck;) Tj
+T*
+(- CT-3 moves Quality V1 decisions into the central engine and keeps manual add,) Tj
+T*
+(  provider lookup mapping and batch verification aligned. The manual) Tj
+T*
+(  `followers_count > 50,000` check remains an input guard, not a Quality V1) Tj
+T*
+(  rejection rule;) Tj
+T*
+(- archive is soft state, preserving history for backend/frontend sync.) Tj
+T*
+() Tj
+T*
+(CT smoke cleanup must be id-scoped. `metadata_safe.source` values such as) Tj
+T*
+(`target_add_bulk` and `target_verify_batch` are shared functional labels, not) Tj
+T*
+(unique smoke identifiers. Collect explicit smoke `account_id`, `target_id`,) Tj
+T*
+(`job_id` and `batch_id` values during the smoke, then clean only those ids plus) Tj
+T*
+(the strict smoke account/username with `created_at` as a secondary guard. If) Tj
+T*
+(audit rows are treated as immutable, leave smoke audit rows behind rather than) Tj
+T*
+(deleting by source alone.) Tj
+T*
+() Tj
+T*
+(CT-2 staging incident: the first audit cleanup predicate was too broad because) Tj
+T*
+(it used shared `metadata_safe.source` values. Probable impact is audit-only,) Tj
+T*
+(around 25 `ct_target_audit_events` bulk/verify rows. Postchecks did not show) Tj
+T*
+(real non-smoke targets or jobs deleted/modified. Exact deleted audit row) Tj
+T*
+(identities are not recoverable from the current DB without PITR/logs.) Tj
+T*
+() Tj
+T*
+(Future CT quality remains out of scope here: durable provider cache/quota) Tj
+T*
+(tracking beyond the current in-runtime guardrails, FBR <= 8%) Tj
+T*
+ET
+endstream
+endobj
+55 0 obj
+<< /Type /Page /Parent 68 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 1 0 R >> >> /Contents 54 0 R >>
+endobj
+56 0 obj
+<< /Length 2985 >>
+stream
+BT
+/F1 9 Tf
+40 790 Td
+11 TL
+(Project Knowledge Base - page 28/33) Tj
+T*
+T*
+(after enough follows, no-followable-profile signals, canonical mismatch) Tj
+T*
+(reconciliation, auto-archive policy, client dashboard sync and Target Discovery) Tj
+T*
+(IA/MCP.) Tj
+T*
+() Tj
+T*
+(Full Add Profile direction:) Tj
+T*
+() Tj
+T*
+(- future Patch 2B keeps the frontend password field write-only;) Tj
+T*
+(- `accounts/create` creates account/settings/filters/status, then calls) Tj
+T*
+(  `submit_add_profile_credentials`;) Tj
+T*
+(- new Add Profile flows stop writing passwords to `ig_account_settings.password`;) Tj
+T*
+(- successful responses expose only password/credential/status summaries safe for) Tj
+T*
+(  dashboard use;) Tj
+T*
+(- a later backend transaction/RPC can consolidate account creation, settings,) Tj
+T*
+(  filters, ownership/status and credential orchestration, but must keep the) Tj
+T*
+(  existing single Vault + `account_credentials` pipeline.) Tj
+T*
+() Tj
+T*
+(## 27. Filters P0 etendu ? Follow threshold filters runtime-ready) Tj
+T*
+() Tj
+T*
+(Jalon pousse le 2026-05-31 apres validation visuelle operateur.) Tj
+T*
+() Tj
+T*
+(Frontend:) Tj
+T*
+() Tj
+T*
+(- repo: `boost-ai-frontend`;) Tj
+T*
+(- branch: `main`;) Tj
+T*
+(- SHA: `61b96fde25b0f5560f4b809fed90876a72b8a1a2`;) Tj
+T*
+(- message: `feat\(instagram-dashboard\): wire follow threshold filters`;) Tj
+T*
+(- push status: pousse sur `origin/main`;) Tj
+T*
+(- fichiers commités:) Tj
+T*
+(  - `app/api/instagram-dashboard/settings/follow-filters/route.ts`;) Tj
+T*
+(  - `app/api/instagram-dashboard/runs/start/route.ts`;) Tj
+T*
+(  - `app/instagram-dashboard/InstagramDashboardButtons.tsx`;) Tj
+T*
+(  - `app/instagram-dashboard/auto-restart-data.ts`;) Tj
+T*
+(  - `app/instagram-dashboard/auto-restart/page.tsx`;) Tj
+T*
+(  - `app/instagram-dashboard/run-control-start.test.ts`;) Tj
+T*
+(  - `lib/instagram-dashboard/run-control.ts`.) Tj
+T*
+() Tj
+T*
+(Worker:) Tj
+T*
+() Tj
+T*
+(- repo: `instagram-worker-python`;) Tj
+T*
+(- branch: `stable-follow-working-state`;) Tj
+T*
+(- SHA: `367a2263965a8c68e15bb7c6bb4a8973109306d2`;) Tj
+T*
+(- message: `feat\(runtime\): apply account follow threshold filters`;) Tj
+T*
+(- push status: pousse sur `origin/stable-follow-working-state`;) Tj
+T*
+(- fichiers commités:) Tj
+T*
+(  - `follow_settings.py`;) Tj
+T*
+(  - `runner.py`;) Tj
+T*
+(  - `tests/test_follow_settings_filters.py`;) Tj
+T*
+(  - `supabase/migrations/20260531205355_follow_filter_threshold_settings.sql`.) Tj
+T*
+() Tj
+T*
+(Résumé fonctionnel:) Tj
+T*
+() Tj
+T*
+(- l'onglet Filters expose maintenant un P0 etendu réellement runtime-ready;) Tj
+T*
+(- les filtres actifs sont `skip_private_profiles`, `min_followers`,) Tj
+T*
+(  `max_followers` et `min_posts`;) Tj
+T*
+(- les filtres encore Planned restent non éditables: profile photo, verified,) Tj
+T*
+(  business / creator, blacklist / whitelist, Outreach filters et CT quality;) Tj
+T*
+(- le chemin est branché de bout en bout:) Tj
+T*
+(  Dashboard -> API -> Supabase -> `/runs/start` -> worker runtime.) Tj
+T*
+ET
+endstream
+endobj
+57 0 obj
+<< /Type /Page /Parent 68 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 1 0 R >> >> /Contents 56 0 R >>
+endobj
+58 0 obj
+<< /Length 2549 >>
+stream
+BT
+/F1 9 Tf
+40 790 Td
+11 TL
+(Project Knowledge Base - page 29/33) Tj
+T*
+T*
+() Tj
+T*
+(Architecture:) Tj
+T*
+() Tj
+T*
+(- source Supabase: `ig_account_follow_settings`) Tj
+T*
+(  \(`dont_follow_private_accounts`, `min_followers`, `max_followers`,) Tj
+T*
+(  `min_posts`\);) Tj
+T*
+(- API domaine: `/api/instagram-dashboard/settings/follow-filters`;) Tj
+T*
+(- worker consumer:) Tj
+T*
+(  - `follow_settings.py` charge et normalise les settings;) Tj
+T*
+(  - `runner.py` met en cache les settings par compte;) Tj
+T*
+(  - `visual_extract_profile_metrics` extrait les métriques candidat;) Tj
+T*
+(  - `account_follow_filter_pass` décide le skip/pass avec reasons stables;) Tj
+T*
+(- `/runs/start` bloque les seuils invalides avec) Tj
+T*
+(  `follow_filter_invalid_range`;) Tj
+T*
+(- Auto Restart affiche les filtres actifs et garde) Tj
+T*
+(  `candidate eligibility not precomputed` tant qu'il ne pré-calcule pas les) Tj
+T*
+(  candidats.) Tj
+T*
+() Tj
+T*
+(Sécurité / validation:) Tj
+T*
+() Tj
+T*
+(- aucun run lancé;) Tj
+T*
+(- aucune real action: pas de real follow, real unfollow ou real-send;) Tj
+T*
+(- aucun dispatcher launch;) Tj
+T*
+(- aucun tag;) Tj
+T*
+(- aucune broad update DB;) Tj
+T*
+(- no-leak scoped et staged confirmé;) Tj
+T*
+(- dirty hors scope exclu des commits.) Tj
+T*
+() Tj
+T*
+(Etat final vérifié sur `cinema_catchup`:) Tj
+T*
+() Tj
+T*
+(- `min_followers = null`;) Tj
+T*
+(- `max_followers = null`;) Tj
+T*
+(- `min_posts = null`;) Tj
+T*
+(- `dont_follow_private_accounts = true`;) Tj
+T*
+(- UI reload: les trois champs seuils sont vides et `Save Filters` désactivé;) Tj
+T*
+(- DB postcheck scoped `cinema_catchup`: 0 active `ig_runs` et 0 active) Tj
+T*
+(  `account_run_requests`.) Tj
+T*
+() Tj
+T*
+(Prochaine étape:) Tj
+T*
+() Tj
+T*
+(- P1b Sources rotation settings est pousse; prochaine etape Follow:) Tj
+T*
+(  P1c metrics target \(`follows_sent`, followbacks, FBR, `last_used_at`,) Tj
+T*
+(  cooldown\) puis P2 runs controles avant runtime-ready multi-target.) Tj
+T*
+() Tj
+T*
+(## Checkpoint 2026-06-01 ? Schedule / app instances / lifecycle validés) Tj
+T*
+() Tj
+T*
+(Statut:) Tj
+T*
+() Tj
+T*
+(- migrations remote appliquées et postcheckées:) Tj
+T*
+(  - `20260601152833_schedule_production_ready`;) Tj
+T*
+(  - `20260601153801_schedule_resolve_full_cycle_priority`;) Tj
+T*
+(  - `20260601185000_phone_app_instances_schedule_capacity`;) Tj
+T*
+(  - `20260601193000_admin_lifecycle_status`;) Tj
+T*
+(- worker pushé sur `origin/stable-follow-working-state`;) Tj
+T*
+(- frontend pushé sur `origin/main`;) Tj
+T*
+(- aucun tag créé.) Tj
+T*
+() Tj
+T*
+(Commits importants:) Tj
+T*
+ET
+endstream
+endobj
+59 0 obj
+<< /Type /Page /Parent 68 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 1 0 R >> >> /Contents 58 0 R >>
+endobj
+60 0 obj
+<< /Length 2823 >>
+stream
+BT
+/F1 9 Tf
+40 790 Td
+11 TL
+(Project Knowledge Base - page 30/33) Tj
+T*
+T*
+() Tj
+T*
+(- worker `2a7b6f5a8c5ebe4808c69d352e5f2a7e8ac41c7c`) Tj
+T*
+(  \(`feat\(schedule\): add app instance capacity and lifecycle gates`\);) Tj
+T*
+(- worker `383911ef1a4e21664a441d6e55cc2c2eb92955ae`) Tj
+T*
+(  \(`fix\(schedule\): reuse existing app instance on slot changes`\);) Tj
+T*
+(- frontend `8bfab6f93b2ffe870c8fd74f6c45d3972f06fb78`) Tj
+T*
+(  \(`feat\(instagram-dashboard\): wire schedule app instances and account lifecycle actions`\).) Tj
+T*
+() Tj
+T*
+(### Modèle validé `phone_app_instances`) Tj
+T*
+() Tj
+T*
+(Un phone contient des instances Instagram assignables, pas seulement des clones:) Tj
+T*
+() Tj
+T*
+(- `primary_app`, `instance_index=0`;) Tj
+T*
+(- clone `Instagram 1`, `instance_index=1`;) Tj
+T*
+(- clone `Instagram 2`, `instance_index=2`;) Tj
+T*
+(- clone `Instagram 3`, `instance_index=3`.) Tj
+T*
+() Tj
+T*
+(Règles de capacité:) Tj
+T*
+() Tj
+T*
+(- une instance `available`, launchable et `usable_for_auto_login` est assignable;) Tj
+T*
+(- une instance `occupied` est indisponible pour un autre compte;) Tj
+T*
+(- l'app principale n'est pas exclue par nature: elle est assignable si libre et) Tj
+T*
+(  occupée si un compte est connecté dessus;) Tj
+T*
+(- quand un compte a déjà une instance `occupied` par lui, `assign_account_slot`) Tj
+T*
+(  doit réutiliser cette instance avant de choisir une instance libre;) Tj
+T*
+(- ne pas créer de double occupation du même compte sur primary + clone, sauf) Tj
+T*
+(  futur cas explicitement conçu et testé.) Tj
+T*
+() Tj
+T*
+(Etat validé de l'émulateur `Entry 2C Emulator Full Cycle`:) Tj
+T*
+() Tj
+T*
+(- `primary_app` / `com.instagram.android`: `occupied` par `cinema_catchup`;) Tj
+T*
+(- `Instagram 1` / `com.instagram.androie`: `available`;) Tj
+T*
+(- `Instagram 2` / `com.instagram.androif`: `available`;) Tj
+T*
+(- `Instagram 3` / `com.instagram.androig`: `available`.) Tj
+T*
+() Tj
+T*
+(Les futurs Samsung A16 physiques doivent être inventoriés avec le même modèle:) Tj
+T*
+(`primary_app` + `Instagram 1` + `Instagram 2` + `Instagram 3`. Les 4 instances) Tj
+T*
+(sont assignables si elles sont libres.) Tj
+T*
+() Tj
+T*
+(### Schedule validé pour `cinema_catchup`) Tj
+T*
+() Tj
+T*
+(Etat final vérifié:) Tj
+T*
+() Tj
+T*
+(- account: `cinema_catchup`;) Tj
+T*
+(- package commercial: Pro;) Tj
+T*
+(- add-on: Outreach;) Tj
+T*
+(- runtime principal: `full_cycle`;) Tj
+T*
+(- `slot_kind`: `full_cycle_6h`;) Tj
+T*
+(- slot courant: `18:00 - 00:00`;) Tj
+T*
+(- assignment status: `reserved`;) Tj
+T*
+(- `assignment_source`: `manual_dashboard`;) Tj
+T*
+(- `app_instance_id`: primary app index 0;) Tj
+T*
+(- `clone_id`: `null`;) Tj
+T*
+(- outreach slots affichés: 0;) Tj
+T*
+(- summary app instances: `3 free · 1 occupied · 0 blocked`;) Tj
+T*
+(- `no_app_instance_available`: false.) Tj
+T*
+() Tj
+T*
+(Validation finale:) Tj
+T*
+ET
+endstream
+endobj
+61 0 obj
+<< /Type /Page /Parent 68 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 1 0 R >> >> /Contents 60 0 R >>
+endobj
+62 0 obj
+<< /Length 2178 >>
+stream
+BT
+/F1 9 Tf
+40 790 Td
+11 TL
+(Project Knowledge Base - page 31/33) Tj
+T*
+T*
+() Tj
+T*
+(- active `ig_runs`: 0;) Tj
+T*
+(- active `account_run_requests`: 0;) Tj
+T*
+(- phone-wide conflicts: 0;) Tj
+T*
+(- app-instance conflicts: 0;) Tj
+T*
+(- aucun run lancé;) Tj
+T*
+(- aucune real action;) Tj
+T*
+(- pas de login/logout;) Tj
+T*
+(- credentials/password non touchés;) Tj
+T*
+(- aucun tag.) Tj
+T*
+() Tj
+T*
+(### Lifecycle admin validé) Tj
+T*
+() Tj
+T*
+(Source de vérité admin:) Tj
+T*
+() Tj
+T*
+(- `ig_accounts.admin_lifecycle_status`.) Tj
+T*
+() Tj
+T*
+(Règles validées:) Tj
+T*
+() Tj
+T*
+(- `paused` conserve assignment / slot / app instance;) Tj
+T*
+(- `needs_assistance` conserve assignment / slot / app instance;) Tj
+T*
+(- runtime stopped conserve assignment / slot / app instance;) Tj
+T*
+(- `cancelled` libère la capacité seulement si safe;) Tj
+T*
+(- `archived`, `released` et les reassignment libèrent si safe;) Tj
+T*
+(- `stopped` ne déclenche pas de release automatique.) Tj
+T*
+() Tj
+T*
+(UI Accounts validée:) Tj
+T*
+() Tj
+T*
+(- bouton icône lifecycle/status dans la colonne Actions;) Tj
+T*
+(- menu compact:) Tj
+T*
+(  - Pause account;) Tj
+T*
+(  - Cancel account;) Tj
+T*
+(  - Mark needs assistance;) Tj
+T*
+(  - Reactivate account;) Tj
+T*
+(- pas d'Archived exposé dans cette vue;) Tj
+T*
+(- ancien bouton séparé `Needs assistance` supprimé.) Tj
+T*
+() Tj
+T*
+(## 28. P1b ? Follow target rotation + Sources rotation settings) Tj
+T*
+() Tj
+T*
+(Checkpoint pousse le 2026-06-02.) Tj
+T*
+() Tj
+T*
+(Commits:) Tj
+T*
+() Tj
+T*
+(- worker `93717ecc3b7828a01a00ca1ee8c81d077a821109`) Tj
+T*
+(  \(`feat\(follow\): add account source rotation settings`\) sur) Tj
+T*
+(  `origin/stable-follow-working-state`;) Tj
+T*
+(- frontend `b9f5fb4c23b745b084bedc831e69e892598e4f60`) Tj
+T*
+(  \(`feat\(instagram-dashboard\): edit follow source rotation settings`\) sur) Tj
+T*
+(  `origin/main`;) Tj
+T*
+(- aucun tag.) Tj
+T*
+() Tj
+T*
+(### Rotation multi-target P1b) Tj
+T*
+() Tj
+T*
+(`account_session` peut charger plusieurs targets eligible depuis `ig_targets`.) Tj
+T*
+(Le flow Follow peut changer de target quand une target est epuisee ou quand son) Tj
+T*
+(budget par target est atteint.) Tj
+T*
+() Tj
+T*
+(Regles critiques:) Tj
+T*
+ET
+endstream
+endobj
+63 0 obj
+<< /Type /Page /Parent 68 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 1 0 R >> >> /Contents 62 0 R >>
+endobj
+64 0 obj
+<< /Length 2202 >>
+stream
+BT
+/F1 9 Tf
+40 790 Td
+11 TL
+(Project Knowledge Base - page 32/33) Tj
+T*
+T*
+() Tj
+T*
+(- pas de switch silencieux sur login, checkpoint, credentials, device issue,) Tj
+T*
+(  rate limit, wrong surface ou crash;) Tj
+T*
+(- `target_id` et `source_profile` restent attribues avant/apres switch;) Tj
+T*
+(- `FOLLOW_TARGET_ROTATION_MAX_TARGETS_PER_RUN` configure le nombre maximal de) Tj
+T*
+(  targets essayees par run;) Tj
+T*
+(- default test-safe: 3 targets/run;) Tj
+T*
+(- bounds exposees par DB/UI: 1..10;) Tj
+T*
+(- le cap global Follow reste toujours la limite absolue.) Tj
+T*
+() Tj
+T*
+(Logs safe attendus:) Tj
+T*
+() Tj
+T*
+(- `follow_target_rotation_started`;) Tj
+T*
+(- `follow_target_selected`;) Tj
+T*
+(- `follow_target_source_loaded`;) Tj
+T*
+(- `follow_target_budget_reached`;) Tj
+T*
+(- `follow_target_exhausted`;) Tj
+T*
+(- `follow_target_switched`;) Tj
+T*
+(- `follow_targets_all_exhausted`;) Tj
+T*
+(- `follow_target_rotation_completed`.) Tj
+T*
+() Tj
+T*
+(### Budget par target par run) Tj
+T*
+() Tj
+T*
+(`FOLLOW_TARGET_MAX_FOLLOWS_PER_TARGET_PER_RUN` fixe le budget d'une target pour) Tj
+T*
+(un run/session, pas une limite journaliere.) Tj
+T*
+() Tj
+T*
+(Etat valide:) Tj
+T*
+() Tj
+T*
+(- default test-safe: 2 follows/target/run;) Tj
+T*
+(- bounds DB/UI: 1..50;) Tj
+T*
+(- des valeurs futures comme 30/4 sont possibles techniquement, mais non) Tj
+T*
+(  appliquees par defaut;) Tj
+T*
+(- le budget par target ne multiplie jamais le cap global Follow.) Tj
+T*
+() Tj
+T*
+(### Settings Sources admin) Tj
+T*
+() Tj
+T*
+(Nouvelle table domain:) Tj
+T*
+() Tj
+T*
+(- `account_follow_source_settings`.) Tj
+T*
+() Tj
+T*
+(API dashboard:) Tj
+T*
+() Tj
+T*
+(- `GET /api/instagram-dashboard/settings/follow-sources`;) Tj
+T*
+(- `PATCH /api/instagram-dashboard/settings/follow-sources`.) Tj
+T*
+() Tj
+T*
+(UI Sources:) Tj
+T*
+() Tj
+T*
+(- section `Target rotation settings`;) Tj
+T*
+(- champs editables:) Tj
+T*
+(  `max_follows_per_target_per_run`, `max_targets_per_run`;) Tj
+T*
+(- Save dirty-only;) Tj
+T*
+(- pas de legacy source fields editables;) Tj
+T*
+(- pas de templates;) Tj
+T*
+(- pas de FBR editable;) Tj
+T*
+(- counts Sources/Targets restent read-only.) Tj
+T*
+() Tj
+T*
+(Migrations remote appliquees et alignees localement:) Tj
+T*
+() Tj
+T*
+ET
+endstream
+endobj
+65 0 obj
+<< /Type /Page /Parent 68 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 1 0 R >> >> /Contents 64 0 R >>
+endobj
+66 0 obj
+<< /Length 1759 >>
+stream
+BT
+/F1 9 Tf
+40 790 Td
+11 TL
+(Project Knowledge Base - page 33/33) Tj
+T*
+T*
+(- `20260601224833_follow_source_rotation_settings.sql`;) Tj
+T*
+(- `20260601224935_follow_source_rotation_settings_revoke_public_grants.sql`.) Tj
+T*
+() Tj
+T*
+(L'ancien fichier local fusionne `20260601222500_follow_source_rotation_settings.sql`) Tj
+T*
+(a ete supprime pour que l'historique local corresponde a l'historique remote.) Tj
+T*
+() Tj
+T*
+(### Smoke `cinema_catchup`) Tj
+T*
+() Tj
+T*
+(Compte: `cinema_catchup`.) Tj
+T*
+() Tj
+T*
+(Resultats:) Tj
+T*
+() Tj
+T*
+(- GET final: `max_follows_per_target_per_run=2`,) Tj
+T*
+(  `max_targets_per_run=3`, `save_ready=true`;) Tj
+T*
+(- PATCH `3 / 3` puis restauration `2 / 3` OK;) Tj
+T*
+(- invalides `0`, `51`, `11` refuses en 400 sans clamp silencieux;) Tj
+T*
+(- audit `ig_action_logs.action_type=follow_source_rotation_settings_saved`) Tj
+T*
+(  cree avec `old_summary` / `new_summary` safe.) Tj
+T*
+() Tj
+T*
+(### Limites et suite) Tj
+T*
+() Tj
+T*
+(Warnings:) Tj
+T*
+() Tj
+T*
+(- validation visuelle UI Sources encore pending: navigateur local redirige vers) Tj
+T*
+(  `restaurant-login`; le contrat API/code est valide;) Tj
+T*
+(- aucun run reel;) Tj
+T*
+(- aucun follow reel;) Tj
+T*
+(- pas de 30/4 applique;) Tj
+T*
+(- multi-target pas encore marque runtime-ready production.) Tj
+T*
+() Tj
+T*
+(P1c reste a faire avant runtime-ready:) Tj
+T*
+() Tj
+T*
+(- metrics target;) Tj
+T*
+(- `follows_sent`;) Tj
+T*
+(- followbacks;) Tj
+T*
+(- FBR;) Tj
+T*
+(- `last_used_at` durable;) Tj
+T*
+(- cooldown.) Tj
+T*
+() Tj
+T*
+(P2 exige des runs tests multi-target controles avant activation runtime-ready.) Tj
+T*
+() Tj
+T*
+(No-leak confirme:) Tj
+T*
+() Tj
+T*
+(- aucun credential/password;) Tj
+T*
+(- aucun serial/UDID;) Tj
+T*
+(- aucun raw log/XML;) Tj
+T*
+(- aucun tag.) Tj
+T*
+ET
+endstream
+endobj
+67 0 obj
+<< /Type /Page /Parent 68 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 1 0 R >> >> /Contents 66 0 R >>
+endobj
+68 0 obj
+<< /Type /Pages /Kids [3 0 R 5 0 R 7 0 R 9 0 R 11 0 R 13 0 R 15 0 R 17 0 R 19 0 R 21 0 R 23 0 R 25 0 R 27 0 R 29 0 R 31 0 R 33 0 R 35 0 R 37 0 R 39 0 R 41 0 R 43 0 R 45 0 R 47 0 R 49 0 R 51 0 R 53 0 R 55 0 R 57 0 R 59 0 R 61 0 R 63 0 R 65 0 R 67 0 R] /Count 33 >>
+endobj
+69 0 obj
+<< /Type /Catalog /Pages 68 0 R >>
+endobj
+xref
+0 70
+0000000000 65535 f 
+0000000009 00000 n 
+0000000079 00000 n 
+0000003217 00000 n 
+0000003344 00000 n 
+0000006352 00000 n 
+0000006479 00000 n 
+0000010194 00000 n 
+0000010321 00000 n 
+0000014851 00000 n 
+0000014978 00000 n 
+0000019613 00000 n 
+0000019742 00000 n 
+0000024513 00000 n 
+0000024642 00000 n 
+0000029329 00000 n 
+0000029458 00000 n 
+0000034034 00000 n 
+0000034163 00000 n 
+0000038867 00000 n 
+0000038996 00000 n 
+0000043944 00000 n 
+0000044073 00000 n 
+0000048984 00000 n 
+0000049113 00000 n 
+0000053088 00000 n 
+0000053217 00000 n 
+0000055913 00000 n 
+0000056042 00000 n 
+0000059054 00000 n 
+0000059183 00000 n 
+0000062059 00000 n 
+0000062188 00000 n 
+0000065167 00000 n 
+0000065296 00000 n 
+0000068205 00000 n 
+0000068334 00000 n 
+0000071795 00000 n 
+0000071924 00000 n 
+0000075418 00000 n 
+0000075547 00000 n 
+0000078444 00000 n 
+0000078573 00000 n 
+0000081833 00000 n 
+0000081962 00000 n 
+0000085427 00000 n 
+0000085556 00000 n 
+0000088635 00000 n 
+0000088764 00000 n 
+0000092045 00000 n 
+0000092174 00000 n 
+0000095668 00000 n 
+0000095797 00000 n 
+0000099851 00000 n 
+0000099980 00000 n 
+0000104034 00000 n 
+0000104163 00000 n 
+0000107201 00000 n 
+0000107330 00000 n 
+0000109932 00000 n 
+0000110061 00000 n 
+0000112937 00000 n 
+0000113066 00000 n 
+0000115297 00000 n 
+0000115426 00000 n 
+0000117681 00000 n 
+0000117810 00000 n 
+0000119622 00000 n 
+0000119751 00000 n 
+0000120031 00000 n 
+trailer
+<< /Size 70 /Root 69 0 R >>
+startxref
+120082
+%%EOF

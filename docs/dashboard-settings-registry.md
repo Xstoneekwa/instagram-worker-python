@@ -288,6 +288,33 @@ daily limits, and do not increase global Follow caps. Defaults remain
 conservative (2 follows per target, 3 targets per run) until controlled
 multi-target tests justify production tuning.
 
+Checkpoint 2026-06-02:
+
+- worker `93717ecc3b7828a01a00ca1ee8c81d077a821109` on
+  `stable-follow-working-state`;
+- frontend `b9f5fb4c23b745b084bedc831e69e892598e4f60` on `main`;
+- migrations remote applied and local history aligned:
+  `20260601224833_follow_source_rotation_settings.sql` and
+  `20260601224935_follow_source_rotation_settings_revoke_public_grants.sql`;
+- old local fused migration `20260601222500_follow_source_rotation_settings.sql`
+  removed from the commit scope;
+- API smoke on `cinema_catchup`: GET final returned `2 / 3` with
+  `save_ready=true`; PATCH `3 / 3` then restore `2 / 3` succeeded; invalid
+  values `0`, `51` and `11` were rejected without silent clamp;
+- audit event `follow_source_rotation_settings_saved` was created with safe
+  summaries only;
+- visual UI smoke remains pending because the local browser redirects to
+  `restaurant-login`; API/code contract is validated.
+
+Runtime warnings:
+
+- no real run or real follow was launched for this checkpoint;
+- no 30/4 production tuning was applied;
+- target metrics, `follows_sent`, followbacks, FBR, durable `last_used_at` and
+  cooldown are still P1c/P2 work;
+- multi-target rotation requires controlled P2 runs before being called
+  production runtime-ready.
+
 ### 4.7 Filters
 
 | UI field | Current key | Current table/source | Current write path | Target Phone Farm source | Runtime status | Visibility | Security class | Action |

@@ -39,6 +39,11 @@ Checkpoints recents valides :
   mocks-only, sans run device ni vrai login.
 - Entry 2E-5J-2A : smoke prep no-password en cours, pour verifier device idle,
   app_start, probe/router/orchestrator dry-run sans credential.
+- P1b Follow target rotation + Sources rotation settings : pousse le
+  2026-06-02, sans run reel ni follow reel. Worker
+  `93717ecc3b7828a01a00ca1ee8c81d077a821109` sur
+  `stable-follow-working-state`; frontend
+  `b9f5fb4c23b745b084bedc831e69e892598e4f60` sur `main`.
 
 Le runtime principal n'est pas encore branche au login/provisioning complet :
 pas de vrai login, pas de password tap, pas de runner hook, pas de run device
@@ -1574,3 +1579,325 @@ Full Add Profile direction:
 - a later backend transaction/RPC can consolidate account creation, settings,
   filters, ownership/status and credential orchestration, but must keep the
   existing single Vault + `account_credentials` pipeline.
+
+## 27. Filters P0 etendu — Follow threshold filters runtime-ready
+
+Jalon pousse le 2026-05-31 apres validation visuelle operateur.
+
+Frontend:
+
+- repo: `boost-ai-frontend`;
+- branch: `main`;
+- SHA: `61b96fde25b0f5560f4b809fed90876a72b8a1a2`;
+- message: `feat(instagram-dashboard): wire follow threshold filters`;
+- push status: pousse sur `origin/main`;
+- fichiers commités:
+  - `app/api/instagram-dashboard/settings/follow-filters/route.ts`;
+  - `app/api/instagram-dashboard/runs/start/route.ts`;
+  - `app/instagram-dashboard/InstagramDashboardButtons.tsx`;
+  - `app/instagram-dashboard/auto-restart-data.ts`;
+  - `app/instagram-dashboard/auto-restart/page.tsx`;
+  - `app/instagram-dashboard/run-control-start.test.ts`;
+  - `lib/instagram-dashboard/run-control.ts`.
+
+Worker:
+
+- repo: `instagram-worker-python`;
+- branch: `stable-follow-working-state`;
+- SHA: `367a2263965a8c68e15bb7c6bb4a8973109306d2`;
+- message: `feat(runtime): apply account follow threshold filters`;
+- push status: pousse sur `origin/stable-follow-working-state`;
+- fichiers commités:
+  - `follow_settings.py`;
+  - `runner.py`;
+  - `tests/test_follow_settings_filters.py`;
+  - `supabase/migrations/20260531205355_follow_filter_threshold_settings.sql`.
+
+Résumé fonctionnel:
+
+- l'onglet Filters expose maintenant un P0 etendu réellement runtime-ready;
+- les filtres actifs sont `skip_private_profiles`, `min_followers`,
+  `max_followers` et `min_posts`;
+- les filtres encore Planned restent non éditables: profile photo, verified,
+  business / creator, blacklist / whitelist, Outreach filters et CT quality;
+- le chemin est branché de bout en bout:
+  Dashboard -> API -> Supabase -> `/runs/start` -> worker runtime.
+
+Architecture:
+
+- source Supabase: `ig_account_follow_settings`
+  (`dont_follow_private_accounts`, `min_followers`, `max_followers`,
+  `min_posts`);
+- API domaine: `/api/instagram-dashboard/settings/follow-filters`;
+- worker consumer:
+  - `follow_settings.py` charge et normalise les settings;
+  - `runner.py` met en cache les settings par compte;
+  - `visual_extract_profile_metrics` extrait les métriques candidat;
+  - `account_follow_filter_pass` décide le skip/pass avec reasons stables;
+- `/runs/start` bloque les seuils invalides avec
+  `follow_filter_invalid_range`;
+- Auto Restart affiche les filtres actifs et garde
+  `candidate eligibility not precomputed` tant qu'il ne pré-calcule pas les
+  candidats.
+
+Sécurité / validation:
+
+- aucun run lancé;
+- aucune real action: pas de real follow, real unfollow ou real-send;
+- aucun dispatcher launch;
+- aucun tag;
+- aucune broad update DB;
+- no-leak scoped et staged confirmé;
+- dirty hors scope exclu des commits.
+
+Etat final vérifié sur `cinema_catchup`:
+
+- `min_followers = null`;
+- `max_followers = null`;
+- `min_posts = null`;
+- `dont_follow_private_accounts = true`;
+- UI reload: les trois champs seuils sont vides et `Save Filters` désactivé;
+- DB postcheck scoped `cinema_catchup`: 0 active `ig_runs` et 0 active
+  `account_run_requests`.
+
+Prochaine étape:
+
+- P1b Sources rotation settings est pousse; prochaine etape Follow:
+  P1c metrics target (`follows_sent`, followbacks, FBR, `last_used_at`,
+  cooldown) puis P2 runs controles avant runtime-ready multi-target.
+
+## Checkpoint 2026-06-01 — Schedule / app instances / lifecycle validés
+
+Statut:
+
+- migrations remote appliquées et postcheckées:
+  - `20260601152833_schedule_production_ready`;
+  - `20260601153801_schedule_resolve_full_cycle_priority`;
+  - `20260601185000_phone_app_instances_schedule_capacity`;
+  - `20260601193000_admin_lifecycle_status`;
+- worker pushé sur `origin/stable-follow-working-state`;
+- frontend pushé sur `origin/main`;
+- aucun tag créé.
+
+Commits importants:
+
+- worker `2a7b6f5a8c5ebe4808c69d352e5f2a7e8ac41c7c`
+  (`feat(schedule): add app instance capacity and lifecycle gates`);
+- worker `383911ef1a4e21664a441d6e55cc2c2eb92955ae`
+  (`fix(schedule): reuse existing app instance on slot changes`);
+- frontend `8bfab6f93b2ffe870c8fd74f6c45d3972f06fb78`
+  (`feat(instagram-dashboard): wire schedule app instances and account lifecycle actions`).
+
+### Modèle validé `phone_app_instances`
+
+Un phone contient des instances Instagram assignables, pas seulement des clones:
+
+- `primary_app`, `instance_index=0`;
+- clone `Instagram 1`, `instance_index=1`;
+- clone `Instagram 2`, `instance_index=2`;
+- clone `Instagram 3`, `instance_index=3`.
+
+Règles de capacité:
+
+- une instance `available`, launchable et `usable_for_auto_login` est assignable;
+- une instance `occupied` est indisponible pour un autre compte;
+- l'app principale n'est pas exclue par nature: elle est assignable si libre et
+  occupée si un compte est connecté dessus;
+- quand un compte a déjà une instance `occupied` par lui, `assign_account_slot`
+  doit réutiliser cette instance avant de choisir une instance libre;
+- ne pas créer de double occupation du même compte sur primary + clone, sauf
+  futur cas explicitement conçu et testé.
+
+Etat validé de l'émulateur `Entry 2C Emulator Full Cycle`:
+
+- `primary_app` / `com.instagram.android`: `occupied` par `cinema_catchup`;
+- `Instagram 1` / `com.instagram.androie`: `available`;
+- `Instagram 2` / `com.instagram.androif`: `available`;
+- `Instagram 3` / `com.instagram.androig`: `available`.
+
+Les futurs Samsung A16 physiques doivent être inventoriés avec le même modèle:
+`primary_app` + `Instagram 1` + `Instagram 2` + `Instagram 3`. Les 4 instances
+sont assignables si elles sont libres.
+
+### Schedule validé pour `cinema_catchup`
+
+Etat final vérifié:
+
+- account: `cinema_catchup`;
+- package commercial: Pro;
+- add-on: Outreach;
+- runtime principal: `full_cycle`;
+- `slot_kind`: `full_cycle_6h`;
+- slot courant: `18:00 - 00:00`;
+- assignment status: `reserved`;
+- `assignment_source`: `manual_dashboard`;
+- `app_instance_id`: primary app index 0;
+- `clone_id`: `null`;
+- outreach slots affichés: 0;
+- summary app instances: `3 free · 1 occupied · 0 blocked`;
+- `no_app_instance_available`: false.
+
+Validation finale:
+
+- active `ig_runs`: 0;
+- active `account_run_requests`: 0;
+- phone-wide conflicts: 0;
+- app-instance conflicts: 0;
+- aucun run lancé;
+- aucune real action;
+- pas de login/logout;
+- credentials/password non touchés;
+- aucun tag.
+
+### Lifecycle admin validé
+
+Source de vérité admin:
+
+- `ig_accounts.admin_lifecycle_status`.
+
+Règles validées:
+
+- `paused` conserve assignment / slot / app instance;
+- `needs_assistance` conserve assignment / slot / app instance;
+- runtime stopped conserve assignment / slot / app instance;
+- `cancelled` libère la capacité seulement si safe;
+- `archived`, `released` et les reassignment libèrent si safe;
+- `stopped` ne déclenche pas de release automatique.
+
+UI Accounts validée:
+
+- bouton icône lifecycle/status dans la colonne Actions;
+- menu compact:
+  - Pause account;
+  - Cancel account;
+  - Mark needs assistance;
+  - Reactivate account;
+- pas d'Archived exposé dans cette vue;
+- ancien bouton séparé `Needs assistance` supprimé.
+
+## 28. P1b — Follow target rotation + Sources rotation settings
+
+Checkpoint pousse le 2026-06-02.
+
+Commits:
+
+- worker `93717ecc3b7828a01a00ca1ee8c81d077a821109`
+  (`feat(follow): add account source rotation settings`) sur
+  `origin/stable-follow-working-state`;
+- frontend `b9f5fb4c23b745b084bedc831e69e892598e4f60`
+  (`feat(instagram-dashboard): edit follow source rotation settings`) sur
+  `origin/main`;
+- aucun tag.
+
+### Rotation multi-target P1b
+
+`account_session` peut charger plusieurs targets eligible depuis `ig_targets`.
+Le flow Follow peut changer de target quand une target est epuisee ou quand son
+budget par target est atteint.
+
+Regles critiques:
+
+- pas de switch silencieux sur login, checkpoint, credentials, device issue,
+  rate limit, wrong surface ou crash;
+- `target_id` et `source_profile` restent attribues avant/apres switch;
+- `FOLLOW_TARGET_ROTATION_MAX_TARGETS_PER_RUN` configure le nombre maximal de
+  targets essayees par run;
+- default test-safe: 3 targets/run;
+- bounds exposees par DB/UI: 1..10;
+- le cap global Follow reste toujours la limite absolue.
+
+Logs safe attendus:
+
+- `follow_target_rotation_started`;
+- `follow_target_selected`;
+- `follow_target_source_loaded`;
+- `follow_target_budget_reached`;
+- `follow_target_exhausted`;
+- `follow_target_switched`;
+- `follow_targets_all_exhausted`;
+- `follow_target_rotation_completed`.
+
+### Budget par target par run
+
+`FOLLOW_TARGET_MAX_FOLLOWS_PER_TARGET_PER_RUN` fixe le budget d'une target pour
+un run/session, pas une limite journaliere.
+
+Etat valide:
+
+- default test-safe: 2 follows/target/run;
+- bounds DB/UI: 1..50;
+- des valeurs futures comme 30/4 sont possibles techniquement, mais non
+  appliquees par defaut;
+- le budget par target ne multiplie jamais le cap global Follow.
+
+### Settings Sources admin
+
+Nouvelle table domain:
+
+- `account_follow_source_settings`.
+
+API dashboard:
+
+- `GET /api/instagram-dashboard/settings/follow-sources`;
+- `PATCH /api/instagram-dashboard/settings/follow-sources`.
+
+UI Sources:
+
+- section `Target rotation settings`;
+- champs editables:
+  `max_follows_per_target_per_run`, `max_targets_per_run`;
+- Save dirty-only;
+- pas de legacy source fields editables;
+- pas de templates;
+- pas de FBR editable;
+- counts Sources/Targets restent read-only.
+
+Migrations remote appliquees et alignees localement:
+
+- `20260601224833_follow_source_rotation_settings.sql`;
+- `20260601224935_follow_source_rotation_settings_revoke_public_grants.sql`.
+
+L'ancien fichier local fusionne `20260601222500_follow_source_rotation_settings.sql`
+a ete supprime pour que l'historique local corresponde a l'historique remote.
+
+### Smoke `cinema_catchup`
+
+Compte: `cinema_catchup`.
+
+Resultats:
+
+- GET final: `max_follows_per_target_per_run=2`,
+  `max_targets_per_run=3`, `save_ready=true`;
+- PATCH `3 / 3` puis restauration `2 / 3` OK;
+- invalides `0`, `51`, `11` refuses en 400 sans clamp silencieux;
+- audit `ig_action_logs.action_type=follow_source_rotation_settings_saved`
+  cree avec `old_summary` / `new_summary` safe.
+
+### Limites et suite
+
+Warnings:
+
+- validation visuelle UI Sources encore pending: navigateur local redirige vers
+  `restaurant-login`; le contrat API/code est valide;
+- aucun run reel;
+- aucun follow reel;
+- pas de 30/4 applique;
+- multi-target pas encore marque runtime-ready production.
+
+P1c reste a faire avant runtime-ready:
+
+- metrics target;
+- `follows_sent`;
+- followbacks;
+- FBR;
+- `last_used_at` durable;
+- cooldown.
+
+P2 exige des runs tests multi-target controles avant activation runtime-ready.
+
+No-leak confirme:
+
+- aucun credential/password;
+- aucun serial/UDID;
+- aucun raw log/XML;
+- aucun tag.

@@ -206,12 +206,12 @@ Future dashboard/API surface (not implemented in Entry 2B):
 - Admin: `POST /admin/subscriptions/:id/modules`
 - Admin: `POST /admin/subscriptions/:id/sync-entitlements`
 
-## Entry 2C Device / Clone / Assignment Model
+## Entry 2C Device / App Instance / Assignment Model
 
-Entry 2C adds the capacity and assignment layer for phones, clones/app profiles,
-and account-scoped subscription assignments. It does not change the worker
-runtime, Edge Functions, credentials, auto-login, provisioning, campaigns,
-imports, or session window guards.
+Entry 2C adds the capacity and assignment layer for phones, Instagram app
+instances, and account-scoped subscription assignments. It does not change the
+worker runtime, Edge Functions, credentials, auto-login, provisioning,
+campaigns, imports, or session window guards.
 
 Production target:
 
@@ -229,14 +229,27 @@ Tables:
   - `status in ('available', 'reserved', 'active', 'maintenance', 'offline', 'unauthorized', 'disabled')`;
   - ops fields: `adb_serial`, `device_udid`, `host_machine`, `hub_label`, `hub_port`, `status_reason`;
   - `max_clones` stores capacity; do not assume a global 4-clone limit.
+- `phone_app_instances`
+  - admin-only assignable Instagram app inventory for a device;
+  - includes the primary Instagram app and clone/app-profile packages;
+  - `instance_type in ('primary_app', 'clone')`;
+  - `instance_index=0` is the primary app;
+  - clone/app-profile instances use `instance_index >= 1`;
+  - `status in ('available', 'occupied', 'disabled', 'unknown')`;
+  - an instance is assignable only when `available`, launchable,
+    `usable_for_auto_login`, and not bound to another account;
+  - an instance already `occupied` by the same account must be reused for
+    Schedule slot changes before choosing a free instance.
 - `phone_clones`
-  - admin-only clone/app-profile inventory for a device;
-  - supports emulator clones and real-phone app instances/profiles;
+  - legacy compatibility clone/app-profile inventory for a device;
+  - remains during migration for older worker/resolver paths;
   - `current_account_id` is denormalized/admin-only; the source of truth is
-    `account_assignments`.
+    `phone_app_instances` + `account_assignments`.
 - `account_assignments`
   - links `client_subscriptions` / `client_subscription_accounts` to
-    `phone_devices` / `phone_clones`;
+    `phone_devices` / `phone_app_instances`;
+  - keeps nullable `clone_id` for compatibility;
+  - `app_instance_id` is the app instance source of truth;
   - `assignment_type in ('full_cycle', 'outreach_only')`;
   - `slot_kind in ('full_cycle_6h', 'outreach_short')`;
   - includes `starts_at` / `ends_at` reservation windows but does not enforce
@@ -244,7 +257,8 @@ Tables:
 
 Validation rules:
 
-- `clone.device_id` must match `account_assignments.device_id`;
+- `phone_app_instances.device_id` must match `account_assignments.device_id`;
+- open assignments require `app_instance_id`;
 - `subscription_account.account_id` must match `account_assignments.account_id`;
 - `subscription.client_id` must match `account_assignments.client_id`;
 - `assignment_type` must match `client_subscriptions.subscription_type`;
@@ -252,7 +266,21 @@ Validation rules:
 - `outreach_only` uses `slot_kind='outreach_short'`;
 - device `pool_type` must match the assignment type or be `shared`;
 - one open assignment (`pending`, `reserved`, `active`) per account;
-- a clone cannot have overlapping open assignment windows.
+- an app instance cannot have overlapping open assignment windows;
+- a phone cannot have overlapping open assignment windows for different
+  accounts.
+
+Validated inventory example, `Entry 2C Emulator Full Cycle`:
+
+- `primary_app` / index 0 / `com.instagram.android`: occupied by
+  `cinema_catchup`;
+- `Instagram 1` / index 1 / `com.instagram.androie`: available;
+- `Instagram 2` / index 2 / `com.instagram.androif`: available;
+- `Instagram 3` / index 3 / `com.instagram.androig`: available.
+
+Future physical Samsung A16 inventory must follow the same model. The primary
+app is not excluded by nature; it is assignable if free and occupied if a
+connected account is already using it.
 
 Dashboard visibility:
 
@@ -3162,6 +3190,30 @@ Prochaine etape recommandee apres ce document : DF-1B admin-dashboard Edge/API
 over RPC 1A, read-only, sans mutation settings, sans device controls, sans
 Source Quality Control, sans client dashboard et sans branchement complet du
 drawer Settings.
+
+Checkpoint P1b Sources rotation settings 2026-06-02 :
+
+- worker `93717ecc3b7828a01a00ca1ee8c81d077a821109` pousse sur
+  `stable-follow-working-state`;
+- frontend `b9f5fb4c23b745b084bedc831e69e892598e4f60` pousse sur `main`;
+- `account_session` Follow charge plusieurs targets eligible, conserve
+  l'attribution `target_id` avant/apres switch et change de target uniquement
+  sur exhaustion ou budget par target atteint;
+- pas de switch silencieux sur login, checkpoint, credentials, device issue,
+  rate limit ou crash;
+- settings Sources admin via `account_follow_source_settings` et
+  `GET/PATCH /api/instagram-dashboard/settings/follow-sources`;
+- defaults conservateurs `2 / 3`, bounds `1..50` et `1..10`, budget par
+  target par run/session et jamais multiplicateur du cap global Follow;
+- migrations remote appliquees et alignees localement :
+  `20260601224833_follow_source_rotation_settings.sql` et
+  `20260601224935_follow_source_rotation_settings_revoke_public_grants.sql`;
+- smoke `cinema_catchup` : GET final `2 / 3`, PATCH `3 / 3` puis restore
+  `2 / 3`, invalides `0`, `51`, `11` refuses sans clamp, audit
+  `follow_source_rotation_settings_saved` safe;
+- UI visuel Sources pending a cause redirect `restaurant-login`; aucun run reel,
+  aucun follow reel, aucun 30/4 applique, aucun credential/password touche,
+  aucun tag.
 
 ## Dashboard Foundation 1B — Admin Dashboard Edge/API over RPC 1A
 
