@@ -39,6 +39,33 @@ from welcome_session_orchestrator import dispatch_welcome_session_send
 FollowEngineRunner = Callable[..., int]
 
 H3_SUPPORTED_UNFOLLOW_MODES = frozenset({*UNFOLLOW_MODES_DB_STRICT, UNFOLLOW_MODE_ANY})
+FOLLOW_TARGET_EXHAUSTION_EXIT_CODES = frozenset({66})
+FOLLOW_TARGET_EXHAUSTION_TOKENS = frozenset(
+    {
+        "followers_engine_sparse_exhausted",
+        "no_candidates_after_sparse_scrolls",
+        "list_progressive_exploration_exhausted",
+        "no_followable_candidates_bounded_exploration",
+        "no_followable_candidates_after_bounded_exploration",
+        "bounded_exploration_exhausted",
+    }
+)
+FOLLOW_TARGET_NON_EXHAUSTION_TOKENS = frozenset(
+    {
+        "checkpoint",
+        "credential",
+        "password",
+        "login",
+        "identity",
+        "device",
+        "rate_limit",
+        "wrong_surface",
+        "review_popup",
+        "crash",
+        "exception",
+        "support_required",
+    }
+)
 
 
 def _is_unfollow_any_mode(mode: str) -> bool:
@@ -153,6 +180,497 @@ def _last_follow_engine_summary(run_followers_list_engine_session: FollowEngineR
     return dict(raw) if isinstance(raw, dict) else {}
 
 
+def _as_target_id(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _as_source_profile(value: Any) -> str:
+    return str(value or "").strip().lstrip("@").lower()
+
+
+def _follow_target_key(target: dict[str, Any]) -> str:
+    return _as_target_id(target.get("target_id") or target.get("id")) or _as_source_profile(
+        target.get("source_profile") or target.get("source_profile_username") or target.get("target_username")
+    )
+
+
+def _rotation_target_from_row(row: dict[str, Any], index: int) -> dict[str, Any] | None:
+    source_profile = _as_source_profile(
+        row.get("source_profile") or row.get("source_profile_username") or row.get("target_username") or row.get("username")
+    )
+    if not source_profile:
+        return None
+    return {
+        "target_id": _as_target_id(row.get("target_id") or row.get("id")) or None,
+        "source_profile": source_profile,
+        "target_index": index,
+        "selection_source": str(row.get("selection_source") or "ig_targets").strip() or "ig_targets",
+    }
+
+
+def _build_follow_rotation_targets(
+    *,
+    follow_targets: list[dict[str, Any]] | None,
+    fallback_source_profile: str,
+    fallback_target_id: str | None,
+) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    rows = list(follow_targets or [])
+    if not rows and _as_source_profile(fallback_source_profile):
+        rows = [{
+            "id": fallback_target_id,
+            "source_profile_username": fallback_source_profile,
+            "selection_source": "single_target",
+        }]
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            continue
+        target = _rotation_target_from_row(row, index)
+        if not target:
+            continue
+        key = _follow_target_key(target)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(target)
+    return out
+
+
+def _resolve_max_follow_targets_per_run(total_targets: int, configured: int | None = None) -> int:
+    raw = configured
+    if raw is None:
+        raw = int(getattr(config, "FOLLOW_TARGET_ROTATION_MAX_TARGETS_PER_RUN", 3) or 3)
+    return max(1, min(int(raw), max(1, int(total_targets or 1)), 10))
+
+
+def _resolve_max_follows_per_target_per_run(configured: int | None = None) -> int:
+    raw = configured
+    if raw is None:
+        raw = int(getattr(config, "FOLLOW_TARGET_MAX_FOLLOWS_PER_TARGET_PER_RUN", 2) or 2)
+    return max(1, min(int(raw), 10))
+
+
+def is_follow_target_exhaustion_outcome(
+    *,
+    exit_code: int | None = None,
+    outcome: str | None = None,
+    reason: str | None = None,
+    summary: dict[str, Any] | None = None,
+) -> bool:
+    data = dict(summary or {})
+    code = exit_code if exit_code is not None else _as_optional_int(data.get("exit_code"))
+    if code in FOLLOW_TARGET_EXHAUSTION_EXIT_CODES:
+        return True
+    follows_completed = _as_optional_int(data.get("follows_completed_count"))
+    if follows_completed is not None and follows_completed > 0:
+        return False
+    text = " ".join(
+        str(part or "").strip().lower()
+        for part in (
+            outcome,
+            reason,
+            data.get("follow_session_outcome"),
+            data.get("follow_stop_reason"),
+        )
+        if str(part or "").strip()
+    )
+    if any(token in text for token in FOLLOW_TARGET_NON_EXHAUSTION_TOKENS):
+        return False
+    return any(token in text for token in FOLLOW_TARGET_EXHAUSTION_TOKENS)
+
+
+def is_follow_target_budget_reached(summary: dict[str, Any], target_budget: int) -> bool:
+    follows_completed = _as_optional_int(summary.get("follows_completed_count")) or 0
+    return follows_completed >= max(1, int(target_budget))
+
+
+def _run_follow_target_rotation(
+    d: u2.Device,
+    *,
+    account_id: str,
+    account_username: str,
+    run_id: str | None,
+    follow_targets: list[dict[str, Any]],
+    run_followers_list_engine_session: FollowEngineRunner,
+    supabase_mode: bool,
+    warm_session_used: bool,
+    force_stop_used: bool,
+    max_targets_per_run: int | None = None,
+    max_follows_per_target_per_run: int | None = None,
+) -> dict[str, Any]:
+    total_targets = len(follow_targets)
+    max_targets = _resolve_max_follow_targets_per_run(total_targets, max_targets_per_run)
+    max_follows_per_target = _resolve_max_follows_per_target_per_run(max_follows_per_target_per_run)
+    bounded_targets = follow_targets[:max_targets]
+    exhausted_keys: set[str] = set()
+    budget_reached_keys: set[str] = set()
+    exhausted_targets: list[dict[str, Any]] = []
+    attempts: list[dict[str, Any]] = []
+    global_follows_completed = 0
+    global_follow_goal: int | None = None
+    final_exit_code = 1
+    final_summary: dict[str, Any] = {}
+    final_reason = "no_follow_targets"
+    final_target: dict[str, Any] | None = None
+    t0 = time.perf_counter()
+
+    log(
+        "info",
+        "follow_target_rotation_started",
+        account_id=account_id,
+        account_username=account_username,
+        run_id=run_id,
+        total_targets=total_targets,
+        max_targets_per_run=max_targets,
+        max_follows_per_target_per_run=max_follows_per_target,
+    )
+
+    for attempt_index, target in enumerate(bounded_targets):
+        target_key = _follow_target_key(target)
+        if not target_key or target_key in exhausted_keys or target_key in budget_reached_keys:
+            continue
+        global_remaining = (
+            max(0, global_follow_goal - global_follows_completed)
+            if global_follow_goal is not None
+            else max_follows_per_target
+        )
+        if global_remaining <= 0:
+            final_exit_code = 0
+            final_reason = "global_follow_cap_reached"
+            final_summary.update(
+                {
+                    "exit_code": 0,
+                    "follow_session_outcome": "global_follow_cap_reached",
+                    "follow_stop_reason": "global_follow_cap_reached",
+                    "global_follows_completed": global_follows_completed,
+                    "global_follows_goal_effective": global_follow_goal,
+                    "rotation_attempts": attempts,
+                }
+            )
+            break
+        target_budget = min(max_follows_per_target, global_remaining)
+        target_id = _as_target_id(target.get("target_id")) or None
+        source_profile = _as_source_profile(target.get("source_profile"))
+        target_index = int(target.get("target_index") or attempt_index)
+        log(
+            "info",
+            "follow_target_selected",
+            account_id=account_id,
+            account_username=account_username,
+            run_id=run_id,
+            target_id=target_id,
+            source_profile=source_profile,
+            target_index=target_index,
+            total_targets=total_targets,
+            max_targets_per_run=max_targets,
+            target_budget=target_budget,
+            global_follow_remaining=global_remaining,
+            selection_source=str(target.get("selection_source") or ""),
+        )
+        follow_t0 = time.perf_counter()
+        exit_code = int(
+            run_followers_list_engine_session(
+                d,
+                source_profile_username=source_profile,
+                target_id=target_id,
+                account_id=account_id,
+                run_id=str(run_id or ""),
+                supabase_mode=supabase_mode,
+                warm_session_used=warm_session_used,
+                force_stop_used=force_stop_used,
+                target_follow_budget=target_budget,
+            )
+        )
+        follow_total_ms = round((time.perf_counter() - follow_t0) * 1000.0, 2)
+        summary = _last_follow_engine_summary(run_followers_list_engine_session)
+        summary.update(
+            {
+                "target_id": target_id or "",
+                "source_profile_username": source_profile,
+                "target_index": target_index,
+                "total_targets": total_targets,
+                "max_targets_per_run": max_targets,
+                "target_budget": target_budget,
+                "exit_code": exit_code,
+            }
+        )
+        target_follows_completed = _as_optional_int(summary.get("follows_completed_count")) or 0
+        global_follows_completed += target_follows_completed
+        summary_global_goal = _as_optional_int(summary.get("global_follows_goal_effective"))
+        if summary_global_goal is not None:
+            global_follow_goal = (
+                min(global_follow_goal, summary_global_goal)
+                if global_follow_goal is not None
+                else summary_global_goal
+            )
+        attempts.append(
+            {
+                "target_id": target_id,
+                "source_profile": source_profile,
+                "target_index": target_index,
+                "exit_code": exit_code,
+                "follow_session_outcome": summary.get("follow_session_outcome"),
+                "follow_stop_reason": summary.get("follow_stop_reason"),
+                "follows_completed_count": target_follows_completed,
+                "target_budget": target_budget,
+                "global_follows_completed": global_follows_completed,
+            }
+        )
+        final_exit_code = exit_code
+        final_summary = summary
+        final_target = target
+        log(
+            "info",
+            "account_session_follow_phase_completed",
+            account_id=account_id,
+            run_id=run_id,
+            follow_engine_exit_code=exit_code,
+            target_id=target_id,
+            source_profile=source_profile,
+            target_index=target_index,
+            total_targets=total_targets,
+            follows_completed_count=target_follows_completed,
+            follow_processed_count=summary.get("follow_processed_count"),
+            follow_session_outcome=summary.get("follow_session_outcome"),
+            follow_stop_reason=summary.get("follow_stop_reason"),
+            target_budget=target_budget,
+            global_follows_completed=global_follows_completed,
+            global_follow_goal=global_follow_goal,
+            follow_total_ms=follow_total_ms,
+        )
+        exhausted = is_follow_target_exhaustion_outcome(
+            exit_code=exit_code,
+            outcome=str(summary.get("follow_session_outcome") or ""),
+            reason=str(summary.get("follow_stop_reason") or ""),
+            summary=summary,
+        )
+        global_cap_reached = (
+            global_follow_goal is not None
+            and global_follows_completed >= global_follow_goal
+        )
+        budget_reached = is_follow_target_budget_reached(summary, target_budget)
+        if budget_reached and not exhausted:
+            budget_reached_keys.add(target_key)
+            log(
+                "info",
+                "follow_target_budget_reached",
+                account_id=account_id,
+                run_id=run_id,
+                target_id=target_id,
+                source_profile=source_profile,
+                target_index=target_index,
+                total_targets=total_targets,
+                target_follows_completed=target_follows_completed,
+                target_budget=target_budget,
+                global_follow_remaining=max(0, (global_follow_goal or global_follows_completed) - global_follows_completed),
+                reason="target_budget_reached",
+            )
+            if global_cap_reached:
+                final_reason = "global_follow_cap_reached"
+                final_exit_code = 0
+                final_summary.update(
+                    {
+                        "exit_code": 0,
+                        "follow_session_outcome": "global_follow_cap_reached",
+                        "follow_stop_reason": "global_follow_cap_reached",
+                        "global_follows_completed": global_follows_completed,
+                        "global_follows_goal_effective": global_follow_goal,
+                        "rotation_attempts": attempts,
+                    }
+                )
+                break
+            remaining_budget_targets = [
+                candidate
+                for candidate in bounded_targets[attempt_index + 1 :]
+                if _follow_target_key(candidate) not in exhausted_keys
+                and _follow_target_key(candidate) not in budget_reached_keys
+            ]
+            if remaining_budget_targets:
+                next_target = remaining_budget_targets[0]
+                log(
+                    "info",
+                    "follow_target_switched",
+                    account_id=account_id,
+                    run_id=run_id,
+                    target_id=target_id,
+                    source_profile=source_profile,
+                    next_target_id=_as_target_id(next_target.get("target_id")) or None,
+                    next_source_profile=_as_source_profile(next_target.get("source_profile")),
+                    target_index=target_index,
+                    next_target_index=int(next_target.get("target_index") or 0),
+                    total_targets=total_targets,
+                    reason="target_budget_reached",
+                )
+                continue
+            final_reason = "target_budget_reached"
+            final_exit_code = 0
+            final_summary.update(
+                {
+                    "exit_code": 0,
+                    "follow_session_outcome": "target_budget_reached",
+                    "follow_stop_reason": "target_budget_reached",
+                    "global_follows_completed": global_follows_completed,
+                    "global_follows_goal_effective": global_follow_goal,
+                    "rotation_attempts": attempts,
+                }
+            )
+            break
+        if not exhausted:
+            final_reason = str(summary.get("follow_session_outcome") or "target_completed")
+            break
+        exhausted_keys.add(target_key)
+        exhausted_targets.append(
+            {
+                "target_id": target_id,
+                "source_profile": source_profile,
+                "target_index": target_index,
+                "exit_code": exit_code,
+                "reason": str(summary.get("follow_stop_reason") or summary.get("follow_session_outcome") or "target_exhausted"),
+            }
+        )
+        log(
+            "info",
+            "follow_target_exhausted",
+            account_id=account_id,
+            run_id=run_id,
+            target_id=target_id,
+            source_profile=source_profile,
+            target_index=target_index,
+            total_targets=total_targets,
+            reason=str(summary.get("follow_stop_reason") or ""),
+            outcome=str(summary.get("follow_session_outcome") or ""),
+            exit_code=exit_code,
+        )
+        remaining = [
+            candidate
+            for candidate in bounded_targets[attempt_index + 1 :]
+            if _follow_target_key(candidate) not in exhausted_keys
+        ]
+        if remaining:
+            next_target = remaining[0]
+            log(
+                "info",
+                "follow_target_switched",
+                account_id=account_id,
+                run_id=run_id,
+                target_id=target_id,
+                source_profile=source_profile,
+                next_target_id=_as_target_id(next_target.get("target_id")) or None,
+                next_source_profile=_as_source_profile(next_target.get("source_profile")),
+                target_index=target_index,
+                next_target_index=int(next_target.get("target_index") or 0),
+                total_targets=total_targets,
+                reason="target_exhausted",
+            )
+            continue
+        if total_targets > len(bounded_targets):
+            final_reason = "max_targets_per_run_reached"
+            final_exit_code = 0
+            final_summary.update(
+                {
+                    "exit_code": 0,
+                    "follow_session_outcome": "target_rotation_max_targets_reached",
+                    "follow_stop_reason": "max_targets_per_run_reached",
+                    "all_targets_exhausted": False,
+                    "exhausted_targets_count": len(exhausted_targets),
+                    "rotation_attempts": attempts,
+                }
+            )
+            break
+        final_reason = "all_targets_exhausted"
+        final_exit_code = 0
+        final_summary.update(
+            {
+                "exit_code": 0,
+                "follow_session_outcome": "no_followable_candidates_all_targets",
+                "follow_stop_reason": "all_targets_exhausted",
+                "all_targets_exhausted": True,
+                "exhausted_targets_count": len(exhausted_targets),
+                "rotation_attempts": attempts,
+            }
+        )
+        log(
+            "info",
+            "follow_targets_all_exhausted",
+            account_id=account_id,
+            run_id=run_id,
+            target_id=target_id,
+            source_profile=source_profile,
+            target_index=target_index,
+            total_targets=total_targets,
+            reason="all_targets_exhausted",
+            outcome="no_followable_candidates_all_targets",
+        )
+        break
+
+    if not attempts:
+        final_summary = {
+            "exit_code": 0,
+            "follow_processed_count": 0,
+            "follows_completed_count": 0,
+            "follows_goal_effective": 0,
+            "follow_session_outcome": "no_followable_candidates_all_targets",
+            "follow_stop_reason": "all_targets_exhausted",
+            "all_targets_exhausted": True,
+            "rotation_attempts": [],
+        }
+        final_exit_code = 0
+        final_reason = "all_targets_exhausted"
+        log(
+            "info",
+            "follow_targets_all_exhausted",
+            account_id=account_id,
+            run_id=run_id,
+            target_id=None,
+            source_profile=None,
+            target_index=None,
+            total_targets=total_targets,
+            reason="all_targets_exhausted",
+            outcome="no_followable_candidates_all_targets",
+        )
+
+    if attempts:
+        final_summary["last_target_follows_completed_count"] = attempts[-1].get("follows_completed_count")
+        final_summary["follows_completed_count"] = global_follows_completed
+        final_summary["global_follows_completed"] = global_follows_completed
+        if global_follow_goal is not None:
+            final_summary["follows_goal_effective"] = global_follow_goal
+            final_summary["global_follows_goal_effective"] = global_follow_goal
+
+    log(
+        "info",
+        "follow_target_rotation_completed",
+        account_id=account_id,
+        account_username=account_username,
+        run_id=run_id,
+        target_id=_as_target_id((final_target or {}).get("target_id")) or None,
+        source_profile=_as_source_profile((final_target or {}).get("source_profile")),
+        target_index=(final_target or {}).get("target_index"),
+        total_targets=total_targets,
+        max_targets_per_run=max_targets,
+        max_follows_per_target_per_run=max_follows_per_target,
+        attempts_count=len(attempts),
+        exhausted_targets_count=len(exhausted_targets),
+        global_follows_completed=global_follows_completed,
+        global_follows_goal_effective=global_follow_goal,
+        exit_code=final_exit_code,
+        reason=final_reason,
+        outcome=str(final_summary.get("follow_session_outcome") or ""),
+        total_ms=round((time.perf_counter() - t0) * 1000.0, 2),
+    )
+    return {
+        "exit_code": final_exit_code,
+        "summary": final_summary,
+        "attempts": attempts,
+        "exhausted_targets": exhausted_targets,
+        "all_targets_exhausted": bool(final_summary.get("all_targets_exhausted")),
+            "global_follows_completed": global_follows_completed,
+            "global_follows_goal_effective": global_follow_goal,
+        "reason": final_reason,
+    }
+
+
 def _diagnostic_text(*parts: Any) -> str:
     chunks: list[str] = []
     for part in parts:
@@ -243,6 +761,7 @@ def _session_termination_class(
     follow_to_unfollow_real: dict[str, Any],
     follow_phase_skipped_reason: str | None,
     transition_reason: str,
+    follow_session_outcome: str | None = None,
 ) -> str:
     blocked = _blocked_class_from_markers(
         follow_to_unfollow_diagnostic,
@@ -254,6 +773,8 @@ def _session_termination_class(
         return blocked
     if not follow_phase_executed:
         return "unknown" if session_status != "failed" else "recoverable_failure"
+    if str(follow_session_outcome or "").strip() == "no_followable_candidates_all_targets":
+        return "completed"
     if follow_exit_code == 0:
         if follow_quota_remaining is not None and follow_quota_remaining > 0:
             return "partial_resumable"
@@ -1366,6 +1887,9 @@ def run_account_session(
     warm_session_used: bool,
     force_stop_used: bool,
     target_id: str | None = None,
+    follow_targets: list[dict[str, Any]] | None = None,
+    max_follow_targets_per_run: int | None = None,
+    max_follows_per_target_per_run: int | None = None,
 ) -> int:
     t0 = time.perf_counter()
     aid = str(account_id or "").strip()
@@ -1592,36 +2116,32 @@ def run_account_session(
                 ),
             )
             follow_t0 = time.perf_counter()
-            follow_exit_code = int(
-                run_followers_list_engine_session(
-                    d,
-                    source_profile_username=src,
-                    target_id=tid or None,
-                    account_id=aid,
-                    run_id=str(run_id or ""),
-                    supabase_mode=supabase_mode,
-                    warm_session_used=warm_session_used,
-                    force_stop_used=force_stop_used,
-                )
+            rotation_targets = _build_follow_rotation_targets(
+                follow_targets=follow_targets,
+                fallback_source_profile=src,
+                fallback_target_id=tid or None,
+            )
+            rotation_result = _run_follow_target_rotation(
+                d,
+                account_id=aid,
+                account_username=uname,
+                run_id=run_id,
+                follow_targets=rotation_targets,
+                run_followers_list_engine_session=run_followers_list_engine_session,
+                supabase_mode=supabase_mode,
+                warm_session_used=warm_session_used,
+                force_stop_used=force_stop_used,
+                max_targets_per_run=max_follow_targets_per_run,
+                max_follows_per_target_per_run=max_follows_per_target_per_run,
             )
             follow_t1 = time.perf_counter()
             follow_phase_executed = True
-            follow_engine_summary = _last_follow_engine_summary(
-                run_followers_list_engine_session
-            )
-            log(
-                "info",
-                "account_session_follow_phase_completed",
-                account_id=aid,
-                run_id=run_id,
-                follow_engine_exit_code=follow_exit_code,
-                target_id=tid or None,
-                follows_completed_count=follow_engine_summary.get("follows_completed_count"),
-                follow_processed_count=follow_engine_summary.get("follow_processed_count"),
-                follow_session_outcome=follow_engine_summary.get("follow_session_outcome"),
-                follow_stop_reason=follow_engine_summary.get("follow_stop_reason"),
-                follow_total_ms=round((follow_t1 - follow_t0) * 1000.0, 2),
-            )
+            follow_exit_code = int(rotation_result.get("exit_code") or 0)
+            follow_engine_summary = dict(rotation_result.get("summary") or {})
+            follow_engine_summary["rotation_attempts"] = list(rotation_result.get("attempts") or [])
+            follow_engine_summary["exhausted_targets"] = list(rotation_result.get("exhausted_targets") or [])
+            follow_engine_summary["rotation_reason"] = str(rotation_result.get("reason") or "")
+            follow_engine_summary["follow_total_ms"] = round((follow_t1 - follow_t0) * 1000.0, 2)
             follow_to_unfollow_diagnostic = _run_follow_to_unfollow_handoff_diagnostic(
                 account_id=aid,
                 account_username=uname,
@@ -1755,6 +2275,7 @@ def run_account_session(
         follow_to_unfollow_real=follow_to_unfollow_real,
         follow_phase_skipped_reason=follow_phase_skipped_reason,
         transition_reason=transition_reason,
+        follow_session_outcome=follow_session_outcome,
     )
     restart_eligibility, restart_block_reason = _restart_eligibility(
         session_termination_class=session_termination_class,
@@ -2125,6 +2646,9 @@ def dispatch_account_session(
     warm_session_used: bool,
     force_stop_used: bool,
     target_id: str | None = None,
+    follow_targets: list[dict[str, Any]] | None = None,
+    max_follow_targets_per_run: int | None = None,
+    max_follows_per_target_per_run: int | None = None,
 ) -> int:
     return run_account_session(
         d,
@@ -2133,6 +2657,9 @@ def dispatch_account_session(
         run_id=run_id,
         source_profile_username=source_profile_username,
         target_id=target_id,
+        follow_targets=follow_targets,
+        max_follow_targets_per_run=max_follow_targets_per_run,
+        max_follows_per_target_per_run=max_follows_per_target_per_run,
         run_followers_list_engine_session=run_followers_list_engine_session,
         supabase_mode=supabase_mode,
         warm_session_used=warm_session_used,

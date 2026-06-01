@@ -5818,6 +5818,7 @@ def _run_followers_list_engine_session(
     warm_session_used: bool,
     force_stop_used: bool,
     target_id: str | None = None,
+    target_follow_budget: int | None = None,
 ) -> int:
     """
     Source profile → source followers list → follower profile → FOLLOW SAFE V1 → return to list.
@@ -6079,11 +6080,19 @@ def _run_followers_list_engine_session(
         package_follow_day_cap=follow_runtime_inputs.get("package_follow_day_cap"),
         warmup_follow_day_cap=follow_runtime_inputs.get("warmup_follow_day_cap"),
     )
-    max_iter = int(follow_limits["effective_iterations_max"])
+    global_follow_goal_effective = int(follow_limits["effective_iterations_max"])
+    target_follow_budget_effective = (
+        max(1, int(target_follow_budget))
+        if target_follow_budget is not None and int(target_follow_budget) > 0
+        else None
+    )
+    max_iter = min(global_follow_goal_effective, target_follow_budget_effective) if target_follow_budget_effective else global_follow_goal_effective
     _follow_max_per_run = int(follow_limits["effective_follow_max"])
     _followers_iter_attr = getattr(config, "FOLLOWERS_LIST_MAX_ITERATIONS_PER_RUN", None)
     _publish_followers_session_summary(
         follows_goal_effective=max_iter,
+        global_follows_goal_effective=global_follow_goal_effective,
+        target_follow_budget_effective=target_follow_budget_effective,
         follow_stop_reason="",
     )
     log(
@@ -6097,6 +6106,8 @@ def _run_followers_list_engine_session(
         env_config_iterations_cap=follow_limits["iterations_cap_label"],
         effective_follow_max=_follow_max_per_run,
         effective_iterations_max=max_iter,
+        global_follow_goal_effective=global_follow_goal_effective,
+        target_follow_budget_effective=target_follow_budget_effective,
         db_follow_per_session_limit=follow_limits.get("db_follow_per_session_limit"),
         follow_day_remaining_today=follow_limits.get("follow_day_remaining_today"),
         package_follow_day_cap=follow_limits.get("package_follow_day_cap"),
@@ -6108,6 +6119,8 @@ def _run_followers_list_engine_session(
         "info",
         "followers_engine_goal_resolved",
         follows_goal_effective=max_iter,
+        global_follows_goal_effective=global_follow_goal_effective,
+        target_follow_budget_effective=target_follow_budget_effective,
         follows_goal_source=(
             "config.FOLLOWERS_LIST_MAX_ITERATIONS_PER_RUN"
             if _followers_iter_attr is not None
@@ -11522,6 +11535,8 @@ def _run_followers_list_engine_session(
         follow_processed_count=int(processed),
         follows_completed_count=int(follows_completed_count),
         follows_goal_effective=int(max_iter or 0),
+        global_follows_goal_effective=int(global_follow_goal_effective or 0),
+        target_follow_budget_effective=target_follow_budget_effective,
         follow_session_outcome=_followers_sess_outcome,
         follow_stop_reason=str(stop_final or ""),
     )
@@ -13111,6 +13126,7 @@ def main() -> int:
             run_id=run_id or None,
             target_id=target_id or None,
             followers_source_username=source_profile_username or None,
+            source_profile=source_profile_username or None,
             selection_source=target_selection_source,
             target_index=0,
             target_count=len(db_targets),
@@ -13127,6 +13143,7 @@ def main() -> int:
                 payload={
                     "target_id": target_id or None,
                     "source_profile_username": source_profile_username,
+                    "source_profile": source_profile_username,
                     "selection_source": target_selection_source,
                     "target_index": 0,
                     "target_count": len(db_targets),
@@ -13149,6 +13166,13 @@ def main() -> int:
             run_id=run_id or None,
             source_profile_username=source_profile_username,
             target_id=target_id or None,
+            follow_targets=db_targets,
+            max_follow_targets_per_run=int(
+                getattr(config, "FOLLOW_TARGET_ROTATION_MAX_TARGETS_PER_RUN", 3) or 3
+            ),
+            max_follows_per_target_per_run=int(
+                getattr(config, "FOLLOW_TARGET_MAX_FOLLOWS_PER_TARGET_PER_RUN", 2) or 2
+            ),
             run_followers_list_engine_session=_run_followers_list_engine_session,
             supabase_mode=supabase_mode,
             warm_session_used=warm_session_used,

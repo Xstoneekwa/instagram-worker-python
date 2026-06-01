@@ -253,6 +253,24 @@ FOLLOWERS_SOURCE_USERNAME = "mythyllus"
 # eligible rows so empty DB targets cannot be hidden by a local env fallback.
 FOLLOWERS_SOURCE_USERNAME_OPS_OVERRIDE = _env_bool("FOLLOWERS_SOURCE_USERNAME_OPS_OVERRIDE", False)
 FOLLOWERS_LIST_MAX_ITERATIONS_PER_RUN = max(0, _env_int("FOLLOWERS_LIST_MAX_ITERATIONS_PER_RUN", 5))
+# P1b multi-target rotation — conservative test-safe defaults only.
+# These values validate rotation mechanics (exhaustion switch, per-target budget,
+# global cap respect). They are NOT production-tuned values.
+# TODO(ops): tune production values after controlled multi-target runs (P2) prove
+# selection, switch-on-exhaustion/budget, target_id attribution, and no mono-target regression.
+# Example production reflection (not applied here): per-target budget ~30, max targets ~4,
+# possibly varying by package (Growth / Pro / Premium). Do not raise defaults to 30/4
+# before P2 controlled runs. Override via env for ops/test:
+#   FOLLOW_TARGET_ROTATION_MAX_TARGETS_PER_RUN
+#   FOLLOW_TARGET_MAX_FOLLOWS_PER_TARGET_PER_RUN
+FOLLOW_TARGET_ROTATION_MAX_TARGETS_PER_RUN = max(
+    1,
+    min(_env_int("FOLLOW_TARGET_ROTATION_MAX_TARGETS_PER_RUN", 3), 10),
+)
+FOLLOW_TARGET_MAX_FOLLOWS_PER_TARGET_PER_RUN = max(
+    1,
+    min(_env_int("FOLLOW_TARGET_MAX_FOLLOWS_PER_TARGET_PER_RUN", 2), 10),
+)
 FOLLOWERS_LIST_OPEN_WAIT_S = 4.0
 FOLLOWERS_LIST_RETURN_MAX_RETRIES = 2
 # Followers Entry Engine V2: hybrid followers-stat candidates, no coordinate fallback drift; force-stop on hard failure.
