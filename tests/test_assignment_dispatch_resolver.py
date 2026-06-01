@@ -22,6 +22,7 @@ def _assignment(
         "account_id": "account-1",
         "device_id": "device-1",
         "clone_id": "clone-1",
+        "app_instance_id": "app-instance-1",
         "assignment_type": assignment_type,
         "slot_kind": "outreach_short"
         if assignment_type == "outreach_only"
@@ -46,6 +47,12 @@ def _assignment(
             "clone_index": 1,
             "clone_label": "clone-a",
         },
+        "phone_app_instance": {
+            "id": "app-instance-1",
+            "instance_type": "clone",
+            "instance_index": 1,
+            "visible_label": "Instagram 1",
+        },
     }
 
 
@@ -66,6 +73,8 @@ class AssignmentDispatchResolverTest(unittest.TestCase):
         ctx = self._resolve(_assignment(assignment_type="outreach_only"))
         self.assertTrue(ctx["assignment_found"])
         self.assertEqual(ctx["adb_serial"], "emulator-5554")
+        self.assertEqual(ctx["app_instance_id"], "app-instance-1")
+        self.assertEqual(ctx["app_instance_label"], "Instagram 1")
         self.assertEqual(ctx["reason"], "assignment_resolved")
 
     def test_full_cycle_outreach_session_accepted(self) -> None:
@@ -142,6 +151,7 @@ class SupabaseAssignmentDispatchHelperTest(unittest.TestCase):
                         "account_id": "account-1",
                         "device_id": "device-1",
                         "clone_id": "clone-1",
+                        "app_instance_id": "app-instance-1",
                         "status": "reserved",
                     }
                 ]
@@ -149,6 +159,8 @@ class SupabaseAssignmentDispatchHelperTest(unittest.TestCase):
                 return [{"id": "device-1", "adb_serial": "emulator-5554"}]
             if table == "phone_clones":
                 return [{"id": "clone-1", "clone_index": 1}]
+            if table == "phone_app_instances":
+                return [{"id": "app-instance-1", "instance_index": 1, "visible_label": "Instagram 1"}]
             raise AssertionError(f"unexpected table {table}")
 
         with patch.object(supabase_client, "_request_json", side_effect=fake_request):
@@ -156,11 +168,13 @@ class SupabaseAssignmentDispatchHelperTest(unittest.TestCase):
 
         self.assertEqual(row["phone_device"]["adb_serial"], "emulator-5554")
         self.assertEqual(row["phone_clone"]["clone_index"], 1)
-        self.assertEqual([call[0] for call in calls], ["GET", "GET", "GET"])
+        self.assertEqual(row["phone_app_instance"]["visible_label"], "Instagram 1")
+        self.assertEqual([call[0] for call in calls], ["GET", "GET", "GET", "GET"])
         self.assertEqual([call[1] for call in calls], [
             "account_assignments",
             "phone_devices",
             "phone_clones",
+            "phone_app_instances",
         ])
 
 

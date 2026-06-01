@@ -163,7 +163,7 @@ def load_account(account_id: str | None = None, username: str | None = None) -> 
 
 
 def load_open_account_assignment_for_dispatch(account_id: str) -> dict[str, Any] | None:
-    """Read the latest reserved/active assignment with device and clone context."""
+    """Read the latest reserved/active assignment with device and app instance context."""
     aid = (account_id or "").strip()
     if not aid:
         raise ValueError("account_id is required")
@@ -185,6 +185,7 @@ def load_open_account_assignment_for_dispatch(account_id: str) -> dict[str, Any]
     assignment = dict(assignment_rows[0])
     device_id = str(assignment.get("device_id") or "").strip()
     clone_id = str(assignment.get("clone_id") or "").strip()
+    app_instance_id = str(assignment.get("app_instance_id") or "").strip()
 
     device: dict[str, Any] = {}
     if device_id:
@@ -206,8 +207,19 @@ def load_open_account_assignment_for_dispatch(account_id: str) -> dict[str, Any]
         if clone_rows:
             clone = dict(clone_rows[0])
 
+    app_instance: dict[str, Any] = {}
+    if app_instance_id:
+        app_instance_rows = _request_json(
+            "GET",
+            "phone_app_instances",
+            query={"select": "*", "id": f"eq.{app_instance_id}", "limit": "1"},
+        ) or []
+        if app_instance_rows:
+            app_instance = dict(app_instance_rows[0])
+
     assignment["phone_device"] = device
     assignment["phone_clone"] = clone
+    assignment["phone_app_instance"] = app_instance
     return assignment
 
 

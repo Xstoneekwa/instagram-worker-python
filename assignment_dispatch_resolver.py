@@ -1,7 +1,7 @@
 """Resolve account assignment routing context for worker dispatch.
 
 Entry 2C-3 v1 is intentionally read-only: this module never mutates
-account_assignments, phone_clones, or phone_devices.
+account_assignments, phone_app_instances, phone_clones, or phone_devices.
 """
 
 from __future__ import annotations
@@ -37,6 +37,7 @@ def _empty_context(
         "ends_at": None,
         "device_id": None,
         "clone_id": None,
+        "app_instance_id": None,
         "device_kind": None,
         "adb_serial": None,
         "device_udid": None,
@@ -46,6 +47,9 @@ def _empty_context(
         "pool_type": None,
         "clone_index": None,
         "clone_label": None,
+        "app_instance_type": None,
+        "app_instance_index": None,
+        "app_instance_label": None,
         "source": "account_assignments",
         "fallback_used": (not require_assignment) if fallback_used is None else bool(fallback_used),
         "reason": reason,
@@ -103,6 +107,7 @@ def sensitive_log_fields(
         "assignment_id": context.get("assignment_id"),
         "device_id": context.get("device_id"),
         "clone_id": context.get("clone_id"),
+        "app_instance_id": context.get("app_instance_id"),
         "device_kind": context.get("device_kind"),
         "assignment_type": context.get("assignment_type"),
         "slot_kind": context.get("slot_kind"),
@@ -128,6 +133,20 @@ def sensitive_log_fields(
     return out
 
 
+def _evaluate_schedule_gate(account_id: str, run_type: str) -> dict[str, Any] | None:
+    try:
+        result = supabase_client.call_rpc(
+            "evaluate_account_schedule_gate",
+            {
+                "p_account_id": account_id,
+                "p_requested_run_type": run_type,
+            },
+        )
+    except Exception:
+        return None
+    return result if isinstance(result, dict) else None
+
+
 def resolve_account_assignment_runtime_context(
     account_id: str,
     run_type: str,
@@ -135,7 +154,7 @@ def resolve_account_assignment_runtime_context(
     require_assignment: bool = False,
     enforce_window: bool = False,
 ) -> dict[str, Any]:
-    """Resolve device/clone context for an account run.
+    """Resolve device/app-instance context for an account run.
 
     The returned dict may contain ops-only fields for the worker process. Use
     sensitive_log_fields() before logging it.
@@ -179,6 +198,7 @@ def resolve_account_assignment_runtime_context(
                 "ends_at": assignment.get("ends_at"),
                 "device_id": assignment.get("device_id"),
                 "clone_id": assignment.get("clone_id"),
+                "app_instance_id": assignment.get("app_instance_id"),
             }
         )
         return ctx
@@ -203,12 +223,41 @@ def resolve_account_assignment_runtime_context(
                 "ends_at": assignment.get("ends_at"),
                 "device_id": assignment.get("device_id"),
                 "clone_id": assignment.get("clone_id"),
+                "app_instance_id": assignment.get("app_instance_id"),
             }
         )
         return ctx
 
+    if enforce_window:
+        gate = _evaluate_schedule_gate(aid, rtype)
+        if gate and gate.get("ok") is False:
+            reason = str(gate.get("reason") or "assignment_window_inactive")
+            ctx = _empty_context(
+                account_id=aid,
+                run_type=rtype,
+                reason=reason,
+                require_assignment=True,
+                fallback_used=False,
+            )
+            ctx.update(
+                {
+                    "assignment_id": assignment.get("id"),
+                    "assignment_type": assignment_type or None,
+                    "slot_kind": assignment.get("slot_kind"),
+                    "starts_at": assignment.get("starts_at"),
+                    "ends_at": assignment.get("ends_at"),
+                    "device_id": assignment.get("device_id"),
+                    "clone_id": assignment.get("clone_id"),
+                    "app_instance_id": assignment.get("app_instance_id"),
+                }
+            )
+            return ctx
+
     device = _nested(assignment, "phone_device", "phone_devices", "device")
     clone = _nested(assignment, "phone_clone", "phone_clones", "clone")
+    app_instance = _nested(assignment, "phone_app_instance", "phone_app_instances", "app_instance")
+    instance_index = app_instance.get("instance_index", clone.get("clone_index"))
+    instance_label = app_instance.get("visible_label", clone.get("clone_label"))
     adb_serial = str(device.get("adb_serial") or "").strip()
     if not adb_serial:
         ctx = _empty_context(
@@ -227,10 +276,14 @@ def resolve_account_assignment_runtime_context(
                 "ends_at": assignment.get("ends_at"),
                 "device_id": assignment.get("device_id"),
                 "clone_id": assignment.get("clone_id"),
+                "app_instance_id": assignment.get("app_instance_id"),
                 "device_kind": device.get("device_kind"),
                 "pool_type": device.get("pool_type"),
                 "clone_index": clone.get("clone_index"),
                 "clone_label": clone.get("clone_label"),
+                "app_instance_type": app_instance.get("instance_type"),
+                "app_instance_index": instance_index,
+                "app_instance_label": instance_label,
             }
         )
         return ctx
@@ -245,6 +298,7 @@ def resolve_account_assignment_runtime_context(
         "ends_at": assignment.get("ends_at"),
         "device_id": assignment.get("device_id"),
         "clone_id": assignment.get("clone_id"),
+        "app_instance_id": assignment.get("app_instance_id"),
         "device_kind": device.get("device_kind"),
         "adb_serial": adb_serial,
         "device_udid": device.get("device_udid"),
@@ -254,6 +308,9 @@ def resolve_account_assignment_runtime_context(
         "pool_type": device.get("pool_type"),
         "clone_index": clone.get("clone_index"),
         "clone_label": clone.get("clone_label"),
+        "app_instance_type": app_instance.get("instance_type"),
+        "app_instance_index": instance_index,
+        "app_instance_label": instance_label,
         "source": "account_assignments",
         "fallback_used": False,
         "reason": "assignment_resolved",
