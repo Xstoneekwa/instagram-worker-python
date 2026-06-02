@@ -1724,8 +1724,9 @@ sont assignables si elles sont libres.
 Backend V1 implemente dans `supabase/functions/admin-dashboard/index.ts` via
 l'action interne `add_physical_phone`. Decision produit: integrer le workflow
 dans l'onglet admin `Devices` existant via un bouton `Add phone`, pas creer un
-nouvel onglet top-level. La surface UI dashboard reste a cabler plus tard; la
-documentation admin officielle est `docs/instagram-dashboard-admin.md`.
+nouvel onglet top-level. Le frontend Devices est maintenant cable sur
+`devices_overview`; la documentation admin officielle est
+`docs/instagram-dashboard-admin.md`.
 
 Comportement V1:
 
@@ -1736,6 +1737,13 @@ Comportement V1:
   actuelle ne peut pas inspecter le host ADB local;
 - `Save phone` cree ou met a jour `phone_devices` et cree idempotemment les
   `phone_app_instances` standard deja installées;
+- `devices_overview` expose maintenant une projection live V1 read-only de
+  `phone_devices` + `phone_app_instances`, avec summary capacite, issues par
+  phone, app instances sanitisees et heartbeat best-effort via
+  `device_heartbeats` quand disponible;
+- si aucun heartbeat n'est disponible, l'API retourne
+  `heartbeat_status=unknown` + issue `adb_status_unknown` sans inventer un
+  etat ADB online/offline;
 - apres save, l'UI Devices doit afficher created/existing app instances count,
   warnings et erreurs stables, puis rafraichir la liste Devices;
 - un `adb_serial` deja present met a jour la meme row device; un vrai doublon
@@ -1747,6 +1755,54 @@ Comportement V1:
 - audit best-effort via `runtime_events`: `phone_added` ou
   `phone_app_instances_created`, `source=admin_dashboard`, actor/admin si
   disponible, sans credential ni secret.
+
+Statut reel du chantier:
+
+- OUI: Add Physical Phone V1 est boucle pour l'enregistrement DB et
+  l'inventaire admin live;
+- NON: ce n'est pas encore un onboarding physique 100% automatique de bout en
+  bout.
+
+Process operateur actuel pour ajouter un phone:
+
+1. preparer physiquement le phone: Developer Options ON, USB debugging ON, ADB
+   autorise, stores/updaters verrouilles si necessaire;
+2. installer Instagram version validee;
+3. creer/installer les packages Android attendus si necessaire:
+   `com.instagram.android`, `com.instagram.androie`, `com.instagram.androif`,
+   `com.instagram.androig`;
+4. dans Devices, `Add phone` -> remplir `display_name`, `adb_serial`,
+   model/product/device, pool, `max_clones`, hub label/port et host label ->
+   save;
+5. le backend cree/met a jour `phone_devices` et cree idempotemment les quatre
+   `phone_app_instances` standard;
+6. lancer localement
+   `python3 device_heartbeat_publisher.py --include-battery --serial <SERIAL>`;
+7. verifier Devices: phone visible, 4 app instances, heartbeat online/fresh,
+   issues vides ou explicites;
+8. seulement ensuite: assignment, schedule et run via flows separes.
+
+Device Heartbeat Publisher V1:
+
+- `device_heartbeat_publisher.py` lit uniquement `adb devices -l` et
+  optionnellement `dumpsys battery`;
+- mappe `adb_serial` vers `phone_devices.id`;
+- ecrit uniquement `device_heartbeats` via le chemin ORF existant;
+- smoke valide: `RFGL145VCKE` et `RFGL145LZHE` passent online/fresh dans
+  `devices_overview`;
+- aucun runner, dispatcher launch, run Instagram, login/provisioning,
+  follow/DM/unfollow, assignment ou credential.
+
+Restant V1.1/V2:
+
+- `Detect from ADB`, `Refresh ADB inventory`, auto-fill model/product/device;
+- verification reelle des packages Android installes et signalement
+  missing/setup_required;
+- validation heartbeat depuis UI;
+- archive/delete des placeholders;
+- creation reelle de clones Android si automatisee un jour;
+- preparation schedule/capacity plus complete selon pool;
+- eventuel bouton `Add + verify phone`, toujours sans run Instagram.
 
 Regle runtime confirmee:
 

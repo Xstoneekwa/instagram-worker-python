@@ -74,12 +74,88 @@ V1 backend/API:
 
 - Edge Function: `supabase/functions/admin-dashboard/index.ts`;
 - action: `add_physical_phone`;
-- auth: existing `ADMIN_DASHBOARD_INTERNAL_API_TOKEN` via `Authorization: Bearer …`
-  or `apikey` header (non-JWT secrets should prefer `apikey` on Supabase Edge);
+- action read-only: `devices_overview`;
+- auth: existing internal admin dashboard token, preferably sent with the
+  Supabase Edge API-key header from server-side code only;
 - writes only `phone_devices`, `phone_app_instances`, and best-effort
   `runtime_events` audit;
 - does not read or write credentials, assignments, runs, request queues, package
   settings, or client dashboard state.
+
+Devices Live Inventory V1:
+
+- `devices_overview` returns `phone_devices`, `items` (same list for backwards
+  compatibility), and `phone_inventory_summary`;
+- source tables: `phone_devices`, `phone_app_instances`, and best-effort
+  `device_heartbeats` when available;
+- per phone fields include device id/name, `adb_serial`, kind/status, pool,
+  max clones, host/hub labels, safe model/product/device metadata, timestamps,
+  heartbeat status, app instance counts, standard package completeness, issues,
+  and sanitized app instance rows;
+- if no heartbeat is present, the response uses
+  `heartbeat_status="unknown"` and issue `adb_status_unknown`;
+- the Edge Function still does not read local ADB, does not verify installed
+  packages, does not create Android clones, and does not start runtime actions.
+
+Device Heartbeat Publisher V1:
+
+- local CLI: `python3 device_heartbeat_publisher.py --include-battery --serial <SERIAL>`;
+- reads local `adb devices -l` and optional `adb shell dumpsys battery` only;
+- resolves `adb_serial` to `phone_devices.id`;
+- writes only safe `device_heartbeats` rows through the existing ORF heartbeat
+  path;
+- makes `devices_overview` show fresh `heartbeat_status="online"` for devices
+  whose ADB state is `device`;
+- never starts Instagram, launches a runner/dispatcher, creates assignments, or
+  touches credentials.
+
+Current V1 status:
+
+- yes: Add Physical Phone V1 is complete for DB registration and admin
+  inventory;
+- no: it is not yet a fully automated physical phone onboarding flow.
+
+What an operator can do today:
+
+1. Prepare the phone physically: Developer Options on, USB debugging on, ADB
+   authorization accepted, and app-store/update locks applied where needed.
+2. Install the validated Instagram build and standard clone packages if this
+   phone will use them:
+   `com.instagram.android`, `com.instagram.androie`,
+   `com.instagram.androif`, `com.instagram.androig`.
+3. Open the admin Devices tab, use `Add phone`, and fill `display_name`,
+   `adb_serial`, model/product/device, pool, `max_clones`, hub metadata, and host
+   label.
+4. Save. The backend creates or updates `phone_devices` and creates the four
+   standard `phone_app_instances` idempotently.
+5. Run the local heartbeat publisher for that serial.
+6. Verify the Devices live inventory: phone visible, expected app instances,
+   heartbeat online/fresh, and issues empty or explicit.
+7. Only after that, use separate assignment/schedule/run-control flows.
+
+What Add phone does not do yet:
+
+- no automatic ADB detection from the dashboard;
+- no `adb devices` read from the Edge Function;
+- no Instagram install;
+- no real Android clone creation;
+- no installed-package verification beyond stored metadata;
+- no automatic heartbeat publisher launch;
+- no complete schedule/capacity setup;
+- no account assignment;
+- no run, login, provisioning, credential, password, Vault, follow, DM, or
+  unfollow action.
+
+Planned Add Phone V1.1/V2 improvements:
+
+- `Detect from ADB` and `Refresh ADB inventory`;
+- auto-fill model/product/device from ADB;
+- verify installed Android packages and mark missing/setup-required packages;
+- heartbeat validation action;
+- archive/delete placeholder phones;
+- optional real clone creation if ever automated;
+- richer schedule/capacity preparation by pool;
+- an `Add + verify phone` action that still does not launch Instagram runs.
 
 V1.1 Devices tab surface:
 

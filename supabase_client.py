@@ -814,6 +814,20 @@ def upsert_device_heartbeat(payload: dict[str, Any]) -> dict[str, Any]:
     return row[0]
 
 
+def list_phone_devices_for_heartbeat() -> list[dict[str, Any]]:
+    """Return the small phone_devices projection needed by local heartbeat publishers."""
+    rows = _request_json(
+        "GET",
+        "phone_devices",
+        query={
+            "select": "id,name,device_name,adb_serial,host_machine,status,metadata",
+            "order": "created_at.desc",
+            "limit": "500",
+        },
+    )
+    return rows or []
+
+
 def _parse_rpc_account_incident_row(row: Any) -> dict[str, Any]:
     if isinstance(row, dict):
         return row
