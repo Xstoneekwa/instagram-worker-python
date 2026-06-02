@@ -1719,6 +1719,44 @@ Les futurs Samsung A16 physiques doivent être inventoriés avec le même modèl
 `primary_app` + `Instagram 1` + `Instagram 2` + `Instagram 3`. Les 4 instances
 sont assignables si elles sont libres.
 
+### Admin Devices tab / `Add Physical Phone` V1
+
+Backend V1 implemente dans `supabase/functions/admin-dashboard/index.ts` via
+l'action interne `add_physical_phone`. Decision produit: integrer le workflow
+dans l'onglet admin `Devices` existant via un bouton `Add phone`, pas creer un
+nouvel onglet top-level. La surface UI dashboard reste a cabler plus tard; la
+documentation admin officielle est `docs/instagram-dashboard-admin.md`.
+
+Comportement V1:
+
+- payload formulaire: nom lisible, `adb_serial`, modele, product/device
+  optionnels, pool `full_cycle` ou `outreach_only`, `max_clones` defaut 3,
+  hub label/port et host label optionnels;
+- `Detect from ADB` / `Refresh ADB inventory` restent V1.1 car l'Edge Function
+  actuelle ne peut pas inspecter le host ADB local;
+- `Save phone` cree ou met a jour `phone_devices` et cree idempotemment les
+  `phone_app_instances` standard deja installées;
+- apres save, l'UI Devices doit afficher created/existing app instances count,
+  warnings et erreurs stables, puis rafraichir la liste Devices;
+- un `adb_serial` deja present met a jour la meme row device; un vrai doublon
+  multi-row est bloque;
+- une app instance deja `occupied` ou avec `current_account_id` bloque le save;
+- conflit index/package retourne une erreur stable;
+- aucun `account_assignments`, aucun run, aucun login, aucun compte connecte,
+  aucun credential touche, aucun clone Android reel cree en V1;
+- audit best-effort via `runtime_events`: `phone_added` ou
+  `phone_app_instances_created`, `source=admin_dashboard`, actor/admin si
+  disponible, sans credential ni secret.
+
+Regle runtime confirmee:
+
+- `phone_devices.adb_serial` est la cle stable d'execution;
+- `hub_label`, `hub_port`, USB path et ADB `transport_id` sont seulement des
+  metadata ops/inventaire;
+- changer un phone de port ne doit pas casser l'assignation tant que
+  `adb_serial` reste identique;
+- `transport_id` ne doit jamais etre utilise comme identifiant stable.
+
 ### Schedule validé pour `cinema_catchup`
 
 Etat final vérifié:

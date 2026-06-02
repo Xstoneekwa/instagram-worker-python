@@ -14,6 +14,11 @@ type FetchCall = {
   body: Record<string, unknown> | null;
   authorization: string | null;
 };
+type PhoneDb = {
+  phoneDevices: Array<Record<string, any>>;
+  appInstances: Array<Record<string, any>>;
+  runtimeEvents: Array<Record<string, any>>;
+};
 
 const MANAGE_ROW = {
   account_id: "42c625c2-e761-4100-8a9d-7ae1373de97d",
@@ -177,6 +182,123 @@ function assertNoLeak(value: unknown) {
   }
 }
 
+function assertNoSecretLeakAllowOps(value: unknown) {
+  const text = JSON.stringify(value).toLowerCase();
+  const forbidden = [
+    "must-not-return",
+    SECRET_TOKEN.toLowerCase(),
+    SERVICE_ROLE.toLowerCase(),
+    "authorization",
+    "secret_ref",
+    "supabase_vault",
+    "password",
+    "service_role",
+    "internal_api_token",
+    "vault",
+    "cookie",
+    "token",
+    "logs/screenshots",
+  ];
+  for (const marker of forbidden) {
+    if (text.includes(marker)) {
+      throw new Error(`secret leak detected: ${marker} in ${text}`);
+    }
+  }
+}
+
+function addPhonePayload(overrides: Record<string, unknown> = {}) {
+  return {
+    action: "add_physical_phone",
+    display_name: "Samsung A16-03",
+    adb_serial: "RFGL145TEST",
+    model: "SM-A165F",
+    product: "a16nsxx",
+    device: "a16",
+    pool: "full_cycle",
+    max_clones: 3,
+    hub_label: "local-usb",
+    hub_port: "usb:2-1",
+    host_label: "dev-mac",
+    packages_mode: "standard_instagram_4_packages",
+    ...overrides,
+  };
+}
+
+function makePhoneFetch(db: PhoneDb, calls: FetchCall[] = []) {
+  return async (
+    input: string | URL | Request,
+    init?: RequestInit,
+  ): Promise<Response> => {
+    const href = String(input);
+    const parsed = new URL(href);
+    const table = parsed.pathname.split("/").pop() || "";
+    const headers = new Headers(init?.headers);
+    const body = init?.body ? JSON.parse(String(init.body)) : null;
+    calls.push({
+      url: href,
+      body,
+      authorization: headers.get("authorization"),
+    });
+
+    if (table === "phone_devices") {
+      if ((init?.method || "GET") === "GET") {
+        const adbEq = parsed.searchParams.get("adb_serial") || "";
+        const adbSerial = adbEq.startsWith("eq.") ? adbEq.slice(3) : "";
+        const rows = db.phoneDevices.filter((row) => row.adb_serial === adbSerial);
+        const limit = Number(parsed.searchParams.get("limit") || rows.length);
+        return json(rows.slice(0, limit));
+      }
+      if (init?.method === "POST") {
+        const row = {
+          id: `device-${db.phoneDevices.length + 1}`,
+          created_at: "2026-06-02T00:00:00Z",
+          updated_at: "2026-06-02T00:00:00Z",
+          ...body,
+        };
+        db.phoneDevices.push(row);
+        return json([row], 201);
+      }
+      if (init?.method === "PATCH") {
+        const idEq = parsed.searchParams.get("id") || "";
+        const id = idEq.startsWith("eq.") ? idEq.slice(3) : "";
+        const index = db.phoneDevices.findIndex((row) => row.id === id);
+        if (index < 0) return json([], 200);
+        db.phoneDevices[index] = { ...db.phoneDevices[index], ...body };
+        return json([db.phoneDevices[index]]);
+      }
+    }
+
+    if (table === "phone_app_instances") {
+      if ((init?.method || "GET") === "GET") {
+        const deviceEq = parsed.searchParams.get("device_id") || "";
+        const deviceId = deviceEq.startsWith("eq.") ? deviceEq.slice(3) : "";
+        return json(db.appInstances.filter((row) => row.device_id === deviceId));
+      }
+      if (init?.method === "POST") {
+        const row = {
+          id: `app-${db.appInstances.length + 1}`,
+          created_at: "2026-06-02T00:00:00Z",
+          updated_at: "2026-06-02T00:00:00Z",
+          ...body,
+        };
+        db.appInstances.push(row);
+        return json([row], 201);
+      }
+    }
+
+    if (table === "runtime_events" && init?.method === "POST") {
+      const row = {
+        id: `event-${db.runtimeEvents.length + 1}`,
+        ...body,
+      };
+      db.runtimeEvents.push(row);
+      return json([row], 201);
+    }
+
+    return json({ error: `unexpected ${href}` }, 500);
+  };
+}
+
 Deno.test(
   "health OK avec token interne",
   withEnv(async () => {
@@ -192,6 +314,26 @@ Deno.test(
       throw new Error(`health incorrect: ${JSON.stringify(body)}`);
     }
     assertNoLeak({ body, logs });
+  }),
+);
+
+Deno.test(
+  "health OK avec apikey interne",
+  withEnv(async () => {
+    const res = await handleRequest(
+      new Request("https://example.supabase.co/functions/v1/admin-dashboard", {
+        method: "POST",
+        headers: {
+          "apikey": SECRET_TOKEN,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ action: "health" }),
+      }),
+    );
+    const body = await res.json();
+    if (res.status !== 200 || body.ok !== true) {
+      throw new Error(`health via apikey incorrect: ${JSON.stringify(body)}`);
+    }
   }),
 );
 
@@ -252,7 +394,10 @@ Deno.test("limit trop grand et offset negatif sont clamps", () => {
     offset: -5,
   });
   if (
-    !result.ok || result.payload.limit !== 200 || result.payload.offset !== 0
+    !result.ok ||
+    result.payload.action !== "manage_overview" ||
+    result.payload.limit !== 200 ||
+    result.payload.offset !== 0
   ) {
     throw new Error("payload clamp failed");
   }
@@ -398,4 +543,196 @@ Deno.test("sanitizeForResponse retire champs et valeurs interdits", () => {
     throw new Error("safe fields removed");
   }
   assertNoLeak(sanitized);
+});
+
+Deno.test(
+  "add_physical_phone cree un phone physique avec 4 app instances",
+  withEnv(async () => {
+    const db: PhoneDb = { phoneDevices: [], appInstances: [], runtimeEvents: [] };
+    const res = await handleRequest(request(addPhonePayload()), {
+      fetch: makePhoneFetch(db),
+      log: () => {},
+    });
+    const body = await res.json();
+    if (res.status !== 200 || body.ok !== true) {
+      throw new Error(`add phone failed: ${JSON.stringify(body)}`);
+    }
+    if (db.phoneDevices.length !== 1) throw new Error("phone device not created");
+    const phone = db.phoneDevices[0];
+    if (
+      phone.device_kind !== "physical_phone" ||
+      phone.name !== "Samsung A16-03" ||
+      phone.adb_serial !== "RFGL145TEST" ||
+      phone.pool_type !== "full_cycle" ||
+      phone.max_clones !== 3 ||
+      phone.status !== "available"
+    ) {
+      throw new Error(`phone fields incorrect: ${JSON.stringify(phone)}`);
+    }
+    if (db.appInstances.length !== 4) {
+      throw new Error(`expected 4 app instances, got ${db.appInstances.length}`);
+    }
+    const packages = db.appInstances
+      .sort((a, b) => a.instance_index - b.instance_index)
+      .map((row) => `${row.instance_index}:${row.instance_type}:${row.package_name}`);
+    const expected = [
+      "0:primary_app:com.instagram.android",
+      "1:clone:com.instagram.androie",
+      "2:clone:com.instagram.androif",
+      "3:clone:com.instagram.androig",
+    ];
+    if (JSON.stringify(packages) !== JSON.stringify(expected)) {
+      throw new Error(`packages incorrect: ${JSON.stringify(packages)}`);
+    }
+    for (const app of db.appInstances) {
+      if (app.status !== "available" || app.current_account_id !== null) {
+        throw new Error(`app should be free: ${JSON.stringify(app)}`);
+      }
+    }
+    if (
+      body.app_instances_created_count !== 4 ||
+      body.app_instances_existing_count !== 0
+    ) {
+      throw new Error(`summary incorrect: ${JSON.stringify(body)}`);
+    }
+    if (db.runtimeEvents.length !== 1) throw new Error("audit event not written");
+    assertNoSecretLeakAllowOps({ body, events: db.runtimeEvents });
+  }),
+);
+
+Deno.test(
+  "add_physical_phone est idempotent au second save",
+  withEnv(async () => {
+    const db: PhoneDb = { phoneDevices: [], appInstances: [], runtimeEvents: [] };
+    const fetcher = makePhoneFetch(db);
+    await handleRequest(request(addPhonePayload()), { fetch: fetcher, log: () => {} });
+    const second = await handleRequest(request(addPhonePayload()), {
+      fetch: fetcher,
+      log: () => {},
+    });
+    const body = await second.json();
+    if (
+      second.status !== 200 ||
+      body.app_instances_created_count !== 0 ||
+      body.app_instances_existing_count !== 4
+    ) {
+      throw new Error(`second save not idempotent: ${JSON.stringify(body)}`);
+    }
+    if (db.phoneDevices.length !== 1 || db.appInstances.length !== 4) {
+      throw new Error("idempotent save duplicated rows");
+    }
+  }),
+);
+
+Deno.test(
+  "add_physical_phone update le meme adb_serial sans creer de doublon",
+  withEnv(async () => {
+    const db: PhoneDb = { phoneDevices: [], appInstances: [], runtimeEvents: [] };
+    const fetcher = makePhoneFetch(db);
+    await handleRequest(request(addPhonePayload()), { fetch: fetcher, log: () => {} });
+    const res = await handleRequest(
+      request(addPhonePayload({
+        display_name: "Samsung A16-03 Renamed",
+        pool: "outreach_only",
+        hub_port: "usb:9-1",
+      })),
+      { fetch: fetcher, log: () => {} },
+    );
+    const body = await res.json();
+    if (res.status !== 200 || db.phoneDevices.length !== 1) {
+      throw new Error(`same serial update failed: ${JSON.stringify(body)}`);
+    }
+    if (
+      db.phoneDevices[0].name !== "Samsung A16-03 Renamed" ||
+      db.phoneDevices[0].pool_type !== "outreach_only"
+    ) {
+      throw new Error(`same serial not updated: ${JSON.stringify(db.phoneDevices[0])}`);
+    }
+    if (!body.warnings.includes("hub_port_changed")) {
+      throw new Error(`hub port warning missing: ${JSON.stringify(body)}`);
+    }
+  }),
+);
+
+Deno.test(
+  "add_physical_phone bloque une app_instance occupee",
+  withEnv(async () => {
+    const db: PhoneDb = {
+      phoneDevices: [{
+        id: "device-1",
+        name: "Samsung A16-03",
+        adb_serial: "RFGL145TEST",
+        hub_port: "usb:2-1",
+        metadata: {},
+      }],
+      appInstances: [{
+        id: "app-1",
+        device_id: "device-1",
+        instance_type: "primary_app",
+        instance_index: 0,
+        package_name: "com.instagram.android",
+        status: "occupied",
+        current_account_id: "account-1",
+      }],
+      runtimeEvents: [],
+    };
+    const res = await handleRequest(request(addPhonePayload()), {
+      fetch: makePhoneFetch(db),
+      log: () => {},
+    });
+    const body = await res.json();
+    if (res.status !== 409 || body.error?.message !== "app_instance_occupied") {
+      throw new Error(`occupied conflict not blocked: ${JSON.stringify(body)}`);
+    }
+    if (db.appInstances.length !== 1) {
+      throw new Error("should not create more instances after occupied conflict");
+    }
+  }),
+);
+
+Deno.test("add_physical_phone accepte full_cycle et outreach_only", () => {
+  const full = validatePayload(addPhonePayload({ pool: "full_cycle" }));
+  const outreach = validatePayload(addPhonePayload({ pool: "outreach_only" }));
+  const bad = validatePayload(addPhonePayload({ pool: "shared" }));
+  if (!full.ok || full.payload.action !== "add_physical_phone") {
+    throw new Error("full_cycle rejected");
+  }
+  if (!outreach.ok || outreach.payload.action !== "add_physical_phone") {
+    throw new Error("outreach_only rejected");
+  }
+  if (bad.ok || bad.error !== "pool_invalid") {
+    throw new Error("bad pool accepted");
+  }
+});
+
+Deno.test(
+  "add_physical_phone sauvegarde hub/port sans les utiliser comme cle runtime",
+  withEnv(async () => {
+    const db: PhoneDb = { phoneDevices: [], appInstances: [], runtimeEvents: [] };
+    const res = await handleRequest(
+      request(addPhonePayload({ hub_label: "rack-a", hub_port: "usb:4-2" })),
+      { fetch: makePhoneFetch(db), log: () => {} },
+    );
+    const body = await res.json();
+    if (res.status !== 200) throw new Error(`save failed: ${JSON.stringify(body)}`);
+    if (
+      db.phoneDevices[0].hub_label !== "rack-a" ||
+      db.phoneDevices[0].hub_port !== "usb:4-2" ||
+      db.phoneDevices[0].adb_serial !== "RFGL145TEST"
+    ) {
+      throw new Error(`hub metadata not saved: ${JSON.stringify(db.phoneDevices[0])}`);
+    }
+    if (body.phone.adb_serial !== "RFGL145TEST") {
+      throw new Error("runtime serial missing from response");
+    }
+  }),
+);
+
+Deno.test("add_physical_phone refuse les champs credential/secret", () => {
+  const result = validatePayload(addPhonePayload({
+    password: "must-not-return",
+  }));
+  if (result.ok || !result.error.includes("forbidden_field")) {
+    throw new Error("credential field accepted");
+  }
 });
