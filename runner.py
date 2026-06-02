@@ -10998,6 +10998,16 @@ def _run_followers_list_engine_session(
                             memory_ok=(mem or {}).get("ok"),
                             target_id=str(target_id or "") or None,
                         )
+                        if not bool(follow_out.get("skipped_tap")):
+                            _safe_supabase_call(
+                                "record_follow_source_follow_success",
+                                account_id=account_id,
+                                target_id=target_id or None,
+                                source_profile=source_profile_username,
+                                candidate_username=follower_un,
+                                run_id=run_id or None,
+                                outcome=f_st or fs_af or "follow_verified",
+                            )
                         _eng_log(
                             "social_memory_updated",
                             "success",

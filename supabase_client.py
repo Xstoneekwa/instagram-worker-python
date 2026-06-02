@@ -283,10 +283,8 @@ def _is_eligible_follow_target_row(row: dict[str, Any]) -> tuple[bool, str]:
         return False, "deleted"
     if "disabled" in row and bool(row.get("disabled")):
         return False, "disabled"
-    if "last_exhausted_at" in row and row.get("last_exhausted_at"):
-        # P1a does not implement cooldown windows yet. Treat explicit exhaustion
-        # state as non-eligible so P1b can add a bounded cooldown policy.
-        return False, "exhausted"
+    # P1c records exhaustion/cooldown for observability only. Do not exclude
+    # targets from runtime until a controlled P2 cooldown policy is activated.
 
     if not _normalize_target_username(row):
         return False, "missing_username"
@@ -383,6 +381,376 @@ def load_target_by_id(target_id: str) -> dict[str, Any] | None:
     if not rows:
         return None
     return rows[0]
+
+
+def _safe_metrics_target_id(target_id: str | None) -> str:
+    return str(target_id or "").strip()
+
+
+def _safe_metrics_reason(value: str | None) -> str:
+    return str(value or "").strip()[:500]
+
+
+def classify_follow_source_performance(
+    *,
+    follows_sent_count: int | None,
+    followbacks_count: int | None = None,
+    followback_ratio: float | int | None = None,
+) -> dict[str, Any]:
+    """
+    P1c read-only performance classifier.
+
+    Returns dashboard/API labels only; never changes target status, archive state,
+    or quality flags. Ratio values are expressed as percentages.
+    """
+    try:
+        follows_sent = max(0, int(follows_sent_count or 0))
+    except (TypeError, ValueError):
+        follows_sent = 0
+    try:
+        followbacks = max(0, int(followbacks_count or 0))
+    except (TypeError, ValueError):
+        followbacks = 0
+
+    ratio: float | None
+    if followback_ratio is not None:
+        try:
+            ratio = max(0.0, float(followback_ratio))
+        except (TypeError, ValueError):
+            ratio = None
+    elif follows_sent > 0:
+        ratio = (followbacks / follows_sent) * 100.0
+    else:
+        ratio = None
+
+    if follows_sent <= 0:
+        status = "pending"
+        label = "Pending runtime data"
+    elif follows_sent < 100:
+        status = "insufficient_data"
+        label = "Insufficient data"
+    elif ratio is None:
+        status = "pending"
+        label = "Pending runtime data"
+    elif ratio <= 8:
+        status = "bad"
+        label = "Bad"
+    elif ratio < 15:
+        status = "avg"
+        label = "Avg"
+    else:
+        status = "good"
+        label = "Good"
+
+    return {
+        "status": status,
+        "label": label,
+        "follows_sent_count": follows_sent,
+        "followbacks_count": followbacks,
+        "followback_ratio": ratio,
+        "auto_archive": False,
+        "review_candidate": bool(status == "bad"),
+    }
+
+
+def _patch_follow_source_target_metrics(
+    target_id: str | None,
+    body: dict[str, Any],
+    *,
+    account_id: str | None = None,
+    event: str,
+) -> dict[str, Any]:
+    tid = _safe_metrics_target_id(target_id)
+    if not tid:
+        log(
+            "warning",
+            "missing_target_id_for_metrics",
+            account_id=str(account_id or ""),
+            metrics_event=event,
+        )
+        return {"ok": False, "error": "missing_target_id_for_metrics"}
+    safe_body = {k: v for k, v in body.items() if v is not None}
+    if not safe_body:
+        return {"ok": True, "applied": "empty"}
+    try:
+        _request_json_tolerate_unknown_columns(
+            "PATCH",
+            "ig_targets",
+            query={"id": f"eq.{tid}"},
+            body=safe_body,
+            prefer_representation=False,
+        )
+        return {"ok": True, "applied": "metrics_patch"}
+    except RuntimeError as e:
+        log(
+            "warning",
+            "follow_source_target_metrics_patch_failed",
+            account_id=str(account_id or ""),
+            target_id=tid,
+            metrics_event=event,
+            error=str(e)[:300],
+        )
+        return {"ok": False, "error": str(e)}
+
+
+def _record_follow_source_metric_event(
+    *,
+    account_id: str | None,
+    target_id: str | None,
+    source_profile: str | None,
+    event_type: str,
+    event_status: str = "success",
+    event_reason: str | None = None,
+    run_id: str | None = None,
+    candidate_username: str | None = None,
+    outcome: str | None = None,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    username = str(candidate_username or source_profile or "target_metrics").strip() or "target_metrics"
+    safe_payload: dict[str, Any] = {
+        "target_id": _safe_metrics_target_id(target_id) or None,
+        "source_profile": _canonical_source_profile(source_profile or ""),
+        "outcome": str(outcome or event_status or "")[:120],
+    }
+    if isinstance(payload, dict):
+        safe_payload.update({k: v for k, v in payload.items() if v is not None})
+    return record_interaction_event(
+        str(account_id or ""),
+        username,
+        source_profile or "",
+        run_id=run_id,
+        session_id=None,
+        event_type=event_type,
+        event_status=event_status,
+        event_reason=_safe_metrics_reason(event_reason) or None,
+        target_id=_safe_metrics_target_id(target_id) or None,
+        payload=safe_payload,
+    )
+
+
+def _increment_follow_source_follows_sent_rpc(
+    *,
+    account_id: str | None,
+    target_id: str,
+    occurred_at: str,
+) -> dict[str, Any]:
+    body: dict[str, Any] = {
+        "p_target_id": target_id,
+        "p_last_successful_candidate_at": occurred_at,
+    }
+    if str(account_id or "").strip():
+        body["p_account_id"] = str(account_id).strip()
+    rows = _request_json(
+        "POST",
+        "rpc/increment_ig_target_follows_sent_p1c",
+        body=body,
+        prefer_representation=True,
+    )
+    row = rows[0] if isinstance(rows, list) and rows else {}
+    return {
+        "ok": True,
+        "applied": "rpc_increment",
+        "follows_sent_count": row.get("follows_sent_count") if isinstance(row, dict) else None,
+        "followback_ratio": row.get("followback_ratio") if isinstance(row, dict) else None,
+    }
+
+
+def record_follow_source_target_selected(
+    *,
+    account_id: str,
+    target_id: str | None,
+    source_profile: str | None,
+    run_id: str | None = None,
+) -> dict[str, Any]:
+    now = _utc_now_iso()
+    out = _patch_follow_source_target_metrics(
+        target_id,
+        {
+            "last_selected_at": now,
+            "last_used_at": now,
+            "metrics_updated_at": now,
+            "updated_at": now,
+        },
+        account_id=account_id,
+        event="target_selected",
+    )
+    _record_follow_source_metric_event(
+        account_id=account_id,
+        target_id=target_id,
+        source_profile=source_profile,
+        run_id=run_id,
+        event_type="target_selected",
+        payload={"metrics_patch_ok": bool(out.get("ok"))},
+    )
+    return out
+
+
+def record_follow_source_follow_success(
+    *,
+    account_id: str,
+    target_id: str | None,
+    source_profile: str | None,
+    candidate_username: str | None,
+    run_id: str | None = None,
+    outcome: str | None = None,
+) -> dict[str, Any]:
+    tid = _safe_metrics_target_id(target_id)
+    if not tid:
+        log(
+            "warning",
+            "missing_target_id_for_metrics",
+            account_id=str(account_id or ""),
+            source_profile=str(source_profile or ""),
+            candidate_username=str(candidate_username or ""),
+            metrics_event="follow_success",
+        )
+        return {"ok": False, "error": "missing_target_id_for_metrics"}
+    now = _utc_now_iso()
+    try:
+        out = _increment_follow_source_follows_sent_rpc(
+            account_id=account_id,
+            target_id=tid,
+            occurred_at=now,
+        )
+    except RuntimeError as e:
+        log(
+            "warning",
+            "follow_source_target_metrics_rpc_increment_failed",
+            account_id=str(account_id or ""),
+            target_id=tid,
+            error=str(e)[:300],
+        )
+        current = load_target_by_id(tid) or {}
+        current_count = current.get("follows_sent_count")
+        try:
+            follows_sent_count = max(0, int(current_count or 0)) + 1
+        except (TypeError, ValueError):
+            follows_sent_count = 1
+        out = _patch_follow_source_target_metrics(
+            tid,
+            {
+                "follows_sent_count": follows_sent_count,
+                "last_successful_candidate_at": now,
+                "last_used_at": now,
+                "metrics_updated_at": now,
+                "updated_at": now,
+            },
+            account_id=account_id,
+            event="follow_success",
+        )
+        out["follows_sent_count"] = follows_sent_count
+    follows_sent_count = out.get("follows_sent_count")
+    _record_follow_source_metric_event(
+        account_id=account_id,
+        target_id=tid,
+        source_profile=source_profile,
+        candidate_username=candidate_username,
+        run_id=run_id,
+        event_type="follow_sent",
+        event_status="success",
+        outcome=outcome or "follow_verified",
+        payload={
+            "follows_sent_count": follows_sent_count,
+            "metrics_patch_ok": bool(out.get("ok")),
+            "metrics_applied": out.get("applied"),
+        },
+    )
+    return out
+
+
+def record_follow_source_target_exhausted(
+    *,
+    account_id: str,
+    target_id: str | None,
+    source_profile: str | None,
+    reason: str | None,
+    run_id: str | None = None,
+    outcome: str | None = None,
+) -> dict[str, Any]:
+    now = _utc_now_iso()
+    safe_reason = _safe_metrics_reason(reason) or "target_exhausted"
+    out = _patch_follow_source_target_metrics(
+        target_id,
+        {
+            "last_exhausted_at": now,
+            "exhaustion_reason": safe_reason,
+            "metrics_updated_at": now,
+            "updated_at": now,
+        },
+        account_id=account_id,
+        event="target_exhausted",
+    )
+    _record_follow_source_metric_event(
+        account_id=account_id,
+        target_id=target_id,
+        source_profile=source_profile,
+        run_id=run_id,
+        event_type="target_exhausted",
+        event_status="success",
+        event_reason=safe_reason,
+        outcome=outcome or safe_reason,
+        payload={"metrics_patch_ok": bool(out.get("ok"))},
+    )
+    return out
+
+
+def record_follow_source_target_budget_reached(
+    *,
+    account_id: str,
+    target_id: str | None,
+    source_profile: str | None,
+    run_id: str | None = None,
+    target_follows_completed: int | None = None,
+    target_budget: int | None = None,
+) -> dict[str, Any]:
+    now = _utc_now_iso()
+    out = _patch_follow_source_target_metrics(
+        target_id,
+        {
+            "last_used_at": now,
+            "metrics_updated_at": now,
+            "updated_at": now,
+        },
+        account_id=account_id,
+        event="target_budget_reached",
+    )
+    _record_follow_source_metric_event(
+        account_id=account_id,
+        target_id=target_id,
+        source_profile=source_profile,
+        run_id=run_id,
+        event_type="target_budget_reached",
+        event_status="success",
+        event_reason="target_budget_reached",
+        outcome="target_budget_reached",
+        payload={
+            "target_follows_completed": target_follows_completed,
+            "target_budget": target_budget,
+            "metrics_patch_ok": bool(out.get("ok")),
+        },
+    )
+    return out
+
+
+def record_follow_source_runtime_error_non_exhaustion(
+    *,
+    account_id: str,
+    target_id: str | None,
+    source_profile: str | None,
+    reason: str | None,
+    run_id: str | None = None,
+    outcome: str | None = None,
+) -> dict[str, Any]:
+    return _record_follow_source_metric_event(
+        account_id=account_id,
+        target_id=target_id,
+        source_profile=source_profile,
+        run_id=run_id,
+        event_type="target_runtime_error_non_exhaustion",
+        event_status="failed",
+        event_reason=_safe_metrics_reason(reason) or "non_exhaustion_error",
+        outcome=outcome or "non_exhaustion_error",
+    )
 
 
 def create_run(account_id: str) -> dict[str, Any]:
@@ -1331,6 +1699,7 @@ def record_follow_interaction_outcome(
             source_profile,
             run_id=run_id,
             session_id=session_id,
+            target_id=target_id,
             event_type=_ev,
             event_status="success",
             event_reason=None,
@@ -1608,6 +1977,7 @@ def record_interaction_event(
     *,
     run_id: str | None = None,
     session_id: str | None = None,
+    target_id: str | None = None,
     event_type: str,
     event_status: str = "success",
     event_reason: str | None = None,
@@ -1651,6 +2021,8 @@ def record_interaction_event(
         body["run_id"] = str(run_id).strip()
     if session_id and str(session_id).strip():
         body["session_id"] = str(session_id).strip()
+    if target_id and str(target_id).strip():
+        body["target_id"] = str(target_id).strip()
     if sp:
         body["source_profile"] = sp
     if event_reason:

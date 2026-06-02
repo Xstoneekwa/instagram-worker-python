@@ -250,6 +250,25 @@ def _as_source_profile(value: Any) -> str:
     return str(value or "").strip().lstrip("@").lower()
 
 
+def _record_follow_target_metric(event: str, **kwargs: Any) -> dict[str, Any]:
+    fn = getattr(supabase_client, f"record_follow_source_{event}", None)
+    if fn is None:
+        return {"ok": False, "error": "metrics_helper_missing"}
+    try:
+        out = fn(**kwargs)
+        return dict(out) if isinstance(out, dict) else {"ok": bool(out)}
+    except Exception as exc:
+        log(
+            "warning",
+            "follow_target_metric_persist_failed",
+            metrics_event=event,
+            account_id=str(kwargs.get("account_id") or ""),
+            target_id=str(kwargs.get("target_id") or ""),
+            error=str(exc)[:300],
+        )
+        return {"ok": False, "error": str(exc)}
+
+
 def _follow_target_key(target: dict[str, Any]) -> str:
     return _as_target_id(target.get("target_id") or target.get("id")) or _as_source_profile(
         target.get("source_profile") or target.get("source_profile_username") or target.get("target_username")
@@ -432,6 +451,14 @@ def _run_follow_target_rotation(
             global_follow_remaining=global_remaining,
             selection_source=str(target.get("selection_source") or ""),
         )
+        if supabase_mode:
+            _record_follow_target_metric(
+                "target_selected",
+                account_id=account_id,
+                target_id=target_id,
+                source_profile=source_profile,
+                run_id=run_id,
+            )
         follow_t0 = time.perf_counter()
         exit_code = int(
             run_followers_list_engine_session(
@@ -530,6 +557,16 @@ def _run_follow_target_rotation(
                 global_follow_remaining=max(0, (global_follow_goal or global_follows_completed) - global_follows_completed),
                 reason="target_budget_reached",
             )
+            if supabase_mode:
+                _record_follow_target_metric(
+                    "target_budget_reached",
+                    account_id=account_id,
+                    target_id=target_id,
+                    source_profile=source_profile,
+                    run_id=run_id,
+                    target_follows_completed=target_follows_completed,
+                    target_budget=target_budget,
+                )
             if global_cap_reached:
                 final_reason = "global_follow_cap_reached"
                 final_exit_code = 0
@@ -581,6 +618,16 @@ def _run_follow_target_rotation(
             )
             break
         if not exhausted:
+            if supabase_mode and exit_code not in (0, 97, 98):
+                _record_follow_target_metric(
+                    "runtime_error_non_exhaustion",
+                    account_id=account_id,
+                    target_id=target_id,
+                    source_profile=source_profile,
+                    run_id=run_id,
+                    reason=str(summary.get("follow_stop_reason") or summary.get("follow_session_outcome") or f"exit_code_{exit_code}"),
+                    outcome=str(summary.get("follow_session_outcome") or ""),
+                )
             final_reason = str(summary.get("follow_session_outcome") or "target_completed")
             break
         exhausted_keys.add(target_key)
@@ -606,6 +653,16 @@ def _run_follow_target_rotation(
             outcome=str(summary.get("follow_session_outcome") or ""),
             exit_code=exit_code,
         )
+        if supabase_mode:
+            _record_follow_target_metric(
+                "target_exhausted",
+                account_id=account_id,
+                target_id=target_id,
+                source_profile=source_profile,
+                run_id=run_id,
+                reason=str(summary.get("follow_stop_reason") or summary.get("follow_session_outcome") or "target_exhausted"),
+                outcome=str(summary.get("follow_session_outcome") or ""),
+            )
         remaining = [
             candidate
             for candidate in bounded_targets[attempt_index + 1 :]
