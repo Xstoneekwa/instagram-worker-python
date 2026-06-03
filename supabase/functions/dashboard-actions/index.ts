@@ -7,7 +7,7 @@
  * directly.
  */
 
-type DashboardAction = "count" | "list" | "acknowledge" | "dismiss" | "resolve";
+type DashboardAction = "count" | "list" | "acknowledge" | "dismiss" | "resolve" | "submit_verification_code";
 type Audience = "client" | "admin" | "assistant" | "ops";
 type DashboardMutation = "acknowledge" | "dismiss" | "resolve";
 type ProducerAuth =
@@ -29,6 +29,7 @@ type ParsedPayload = {
   offset: number;
   actionId: string | null;
   reason: string | null;
+  verificationCode: string | null;
 };
 type AccessScope = {
   audience: Audience | null;
@@ -39,11 +40,12 @@ type AccessScope = {
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const ACTIVE_STATUSES = ["pending", "acknowledged", "pending_verification"];
+const ACTIVE_STATUSES = ["pending", "acknowledged", "pending_verification", "code_submitted"];
 const STATUS_ALLOWLIST = new Set([
   "pending",
   "acknowledged",
   "pending_verification",
+  "code_submitted",
   "resolved",
   "dismissed",
   "ignored",
@@ -62,6 +64,7 @@ const FORBIDDEN_TOP_LEVEL_FIELDS = new Set([
   "webhook_url",
   "service_role",
   "vault_payload",
+  "verification_code",
 ]);
 const FORBIDDEN_METADATA_FIELDS = new Set([
   "password",
@@ -72,10 +75,13 @@ const FORBIDDEN_METADATA_FIELDS = new Set([
   "webhook_url",
   "service_role",
   "vault_payload",
+  "verification_code",
 ]);
 
 export function validateForbiddenFields(payload: Record<string, unknown>): string | null {
+  const action = String(payload.action || "").trim();
   for (const [key, value] of Object.entries(payload || {})) {
+    if (key === "verification_code" && action === "submit_verification_code") continue;
     if (FORBIDDEN_TOP_LEVEL_FIELDS.has(key)) return key;
     if (key === "metadata" && value && typeof value === "object" && !Array.isArray(value)) {
       for (const nestedKey of Object.keys(value as Record<string, unknown>)) {
@@ -107,7 +113,12 @@ export function validatePayload(payload: Record<string, unknown>): { ok: true; p
   if (forbidden) return { ok: false, error: `field_forbidden:${forbidden}`, status: 400 };
 
   const action = String(payload.action || "").trim();
-  if (action !== "count" && action !== "list" && !MUTATION_ACTIONS.has(action)) {
+  if (
+    action !== "count"
+    && action !== "list"
+    && action !== "submit_verification_code"
+    && !MUTATION_ACTIONS.has(action)
+  ) {
     return { ok: false, error: "invalid_action", status: 400 };
   }
 
@@ -133,7 +144,8 @@ export function validatePayload(payload: Record<string, unknown>): { ok: true; p
 
   let actionId: string | null = null;
   let reason: string | null = null;
-  if (MUTATION_ACTIONS.has(action)) {
+  let verificationCode: string | null = null;
+  if (MUTATION_ACTIONS.has(action) || action === "submit_verification_code") {
     if (!isUuid(payload.action_id)) return { ok: false, error: "action_id_invalid", status: 400 };
     actionId = String(payload.action_id).trim();
 
@@ -141,6 +153,15 @@ export function validatePayload(payload: Record<string, unknown>): { ok: true; p
       reason = String(payload.reason).trim();
       if (reason.length > 500) return { ok: false, error: "reason_too_long", status: 400 };
     }
+  }
+
+  if (action === "submit_verification_code") {
+    if (!accountId) return { ok: false, error: "account_id_invalid", status: 400 };
+    const rawCode = String(payload.verification_code ?? "").trim();
+    if (!rawCode || rawCode.length > 32 || !/^[A-Za-z0-9-]{4,32}$/.test(rawCode)) {
+      return { ok: false, error: "verification_code_invalid", status: 400 };
+    }
+    verificationCode = rawCode;
   }
 
   return {
@@ -154,6 +175,7 @@ export function validatePayload(payload: Record<string, unknown>): { ok: true; p
       offset: normalizeOffset(payload.offset),
       actionId,
       reason,
+      verificationCode,
     },
   };
 }
@@ -495,13 +517,13 @@ async function assertClientMutationAccess(
   try {
     const clientId = await clientIdForAuthUser(authUserId, deps);
     if (!clientId) return { ok: false, status: 403, error: "account_not_allowed" };
-    if (row.client_id === clientId) return { ok: true, clientId };
-
     if (isUuid(row.account_id)) {
       const hasAccess = await hasClientAccountAccess(authUserId, row.account_id, deps);
-      if (hasAccess) return { ok: true, clientId };
+      if (!hasAccess) return { ok: false, status: 403, error: "account_not_allowed" };
+    } else if (row.client_id !== clientId) {
+      return { ok: false, status: 403, error: "account_not_allowed" };
     }
-    return { ok: false, status: 403, error: "account_not_allowed" };
+    return { ok: true, clientId };
   } catch {
     return { ok: false, status: 503, error: "account_ownership_check_failed" };
   }
@@ -703,6 +725,105 @@ async function handleMutation(
   }, headers);
 }
 
+async function handleSubmitVerificationCode(
+  req: Request,
+  payload: ParsedPayload,
+  auth: Extract<ProducerAuth, { ok: true }>,
+  deps: Dependencies,
+) {
+  const headers = corsHeaders(req);
+  const rid = requestId(req, deps);
+  const actionId = payload.actionId;
+  const accountId = payload.accountId;
+  const verificationCode = payload.verificationCode;
+  if (!actionId || !accountId || !verificationCode) {
+    return jsonResponse(400, { ok: false, error: "invalid_payload", request_id: rid }, headers);
+  }
+
+  let row: Record<string, any> | null;
+  try {
+    row = await loadDashboardAction(actionId, deps);
+  } catch {
+    return jsonResponse(500, { ok: false, error: "internal_error", request_id: rid }, headers);
+  }
+  if (!row) return jsonResponse(404, { ok: false, error: "action_not_found", request_id: rid }, headers);
+  if (String(row.account_id) !== accountId) {
+    return jsonResponse(403, { ok: false, error: "account_not_allowed", request_id: rid }, headers);
+  }
+  if (String(row.action_type) !== "enter_email_verification_code") {
+    return jsonResponse(409, { ok: false, error: "action_type_invalid", request_id: rid }, headers);
+  }
+  if (TERMINAL_STATUSES.has(String(row.status))) {
+    return jsonResponse(409, { ok: false, error: "transition_not_allowed", request_id: rid }, headers);
+  }
+
+  let actorType = "internal";
+  let actorId: string | null = null;
+  if (auth.mode === "client") {
+    const access = await assertClientMutationAccess(auth.authUserId, row, deps);
+    if (!access.ok) {
+      return jsonResponse(access.status, { ok: false, error: access.error, request_id: rid }, headers);
+    }
+    actorType = "client";
+    actorId = auth.authUserId;
+  }
+
+  try {
+    const result = await supabaseJson("/rest/v1/rpc/submit_account_verification_code", {
+      method: "POST",
+      body: JSON.stringify({
+        p_action_id: actionId,
+        p_account_id: accountId,
+        p_verification_code: verificationCode,
+        p_actor_type: actorType,
+        p_actor_id: actorId,
+        p_metadata: {
+          source: "dashboard_actions_edge",
+          request_id: rid,
+        },
+      }),
+    }, deps);
+    logEvent(deps, "dashboard_actions_submit_verification_code_succeeded", {
+      request_id: rid,
+      action_id: actionId,
+      account_id: accountId,
+      actor_type: actorType,
+      status: result?.status ?? "code_submitted",
+    });
+    return jsonResponse(200, {
+      ok: true,
+      request_id: rid,
+      action_id: actionId,
+      account_id: accountId,
+      status: String(result?.status || "code_submitted"),
+      message: "Verification code stored securely and ready for worker resume.",
+    }, headers);
+  } catch (err) {
+    const message = String((err as Error)?.message || "");
+    const error = message.includes("verification_code_invalid")
+      ? "verification_code_invalid"
+      : message.includes("dashboard_action_not_found")
+      ? "action_not_found"
+      : message.includes("dashboard_action_type_invalid")
+      ? "action_type_invalid"
+      : message.includes("dashboard_action_not_active")
+      ? "transition_not_allowed"
+      : "submit_verification_code_failed";
+    logEvent(deps, "dashboard_actions_submit_verification_code_failed", {
+      request_id: rid,
+      action_id: actionId,
+      account_id: accountId,
+      actor_type: actorType,
+      error,
+    });
+    const status = error === "verification_code_invalid" ? 400
+      : error === "action_not_found" ? 404
+      : error === "action_type_invalid" || error === "transition_not_allowed" ? 409
+      : 500;
+    return jsonResponse(status, { ok: false, error, request_id: rid }, headers);
+  }
+}
+
 export async function handleRequest(req: Request, deps: Dependencies = {}): Promise<Response> {
   const headers = corsHeaders(req);
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers });
@@ -729,6 +850,9 @@ export async function handleRequest(req: Request, deps: Dependencies = {}): Prom
   try {
     if (payloadResult.payload.action === "count") return await handleCount(req, payloadResult.payload, auth, deps);
     if (payloadResult.payload.action === "list") return await handleList(req, payloadResult.payload, auth, deps);
+    if (payloadResult.payload.action === "submit_verification_code") {
+      return await handleSubmitVerificationCode(req, payloadResult.payload, auth, deps);
+    }
     return await handleMutation(req, payloadResult.payload, auth, deps);
   } catch {
     logEvent(deps, "dashboard_actions_unhandled_error", {

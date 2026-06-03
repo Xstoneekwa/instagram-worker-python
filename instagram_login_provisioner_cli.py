@@ -20,6 +20,7 @@ from instagram_credentials_runtime_access import get_instagram_credentials_for_l
 from instagram_login_provisioner_orchestrator import (
     DEFAULT_INSTAGRAM_PACKAGE_NAME,
     DEFAULT_POST_APP_START_WAIT_MS,
+    run_email_code_resume_flow,
     run_login_provisioning_flow,
 )
 from instagram_supabase_vault_reader import SupabaseVaultClient
@@ -114,6 +115,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-id", default="", help="Optional safe run id. Defaults to a generated UUID.")
     parser.add_argument("--log-jsonl", default=DEFAULT_LOG_JSONL, help="Safe JSONL log path.")
     parser.add_argument("--json", action="store_true", help="Print machine-readable safe JSON.")
+    parser.add_argument(
+        "--resume-email-code-stdin",
+        action="store_true",
+        help="Resume from email verification screen using one line read from stdin.",
+    )
+    parser.add_argument(
+        "--resume-email-code-from-action",
+        action="store_true",
+        help="Resume by consuming one ephemeral verification code linked to a dashboard action.",
+    )
+    parser.add_argument(
+        "--verification-action-id",
+        default="",
+        help="Optional dashboard action id when resuming from stored verification code.",
+    )
     return parser
 
 
@@ -140,6 +156,7 @@ def run_cli_command(
         secret_reader=secret_reader,
     )
     flow = run_flow_func or run_login_provisioning_flow
+    resume_flow = run_email_code_resume_flow
     previous_account_lifecycle_lookup = _build_operator_smoke_previous_account_lifecycle_lookup(args)
     operator_smoke_active_username = _normalize_public_username(
         getattr(args, "operator_smoke_active_account_username", "")
@@ -151,6 +168,29 @@ def run_cli_command(
         run_id=run_id,
         status_publisher=status_publisher or publish_instagram_account_status,
     ) if publish_enabled else None
+
+    if bool(getattr(args, "resume_email_code_stdin", False)) or bool(getattr(args, "resume_email_code_from_action", False)):
+        from instagram_credentials_runtime_access import SecretValue
+
+        verification_code = SecretValue("")
+        if bool(getattr(args, "resume_email_code_stdin", False)):
+            verification_code = SecretValue(sys.stdin.readline().strip())
+        result = resume_flow(
+            device,
+            account_id=str(args.account_id or ""),
+            expected_username=str(args.expected_username or ""),
+            verification_code=verification_code,
+            action_id=str(getattr(args, "verification_action_id", "") or "").strip() or None,
+            consume_from_action=bool(getattr(args, "resume_email_code_from_action", False)),
+            run_id=run_id,
+            publish_enabled=publish_enabled,
+            publisher=publisher,
+            post_submit_timeout_ms=int(args.post_submit_timeout_ms or 0),
+        )
+        summary = _safe_summary_from_result(result, args=args, run_id=run_id)
+        _append_safe_jsonl(summary, args=args)
+        return (0 if bool(getattr(result, "ok", False)) else 1), summary
+
     result = flow(
         device,
         account_id=str(args.account_id or ""),
@@ -371,6 +411,11 @@ def _safe_summary_from_error(reason: str, *, args: argparse.Namespace, run_id: s
             "startup_screens": [],
             "startup_final_screen_type": "",
             "startup_settling_used": False,
+            "app_start_retry_attempted": False,
+            "app_start_retry_count": 0,
+            "app_start_retry_reason": "",
+            "app_start_retry_result": "",
+            "startup_after_retry_screens": [],
             "preparation_flow_used": "none",
             "screen_type": "",
             "suggested_username": "",
@@ -398,6 +443,11 @@ def _safe_summary_from_error(reason: str, *, args: argparse.Namespace, run_id: s
             "save_password_prompt_dismissed": False,
             "dismiss_method": "",
             "post_dismiss_screen_type": "",
+            "post_dismiss_final_observation_count": 0,
+            "post_dismiss_final_screens": [],
+            "post_dismiss_final_wait_total_ms": 0,
+            "post_dismiss_final_screen_type": "",
+            "connected_detected_after_save_prompt_dismiss": False,
             **_empty_credentials_summary_fields(),
             "would_publish": False,
             "timings": {},
@@ -445,6 +495,11 @@ def _safe_summary_from_result(result: Any, *, args: argparse.Namespace, run_id: 
         "startup_screens": list(metadata.get("startup_screens") or []),
         "startup_final_screen_type": str(metadata.get("startup_final_screen_type") or ""),
         "startup_settling_used": bool(metadata.get("startup_settling_used")),
+        "app_start_retry_attempted": bool(metadata.get("app_start_retry_attempted")),
+        "app_start_retry_count": int(metadata.get("app_start_retry_count") or 0),
+        "app_start_retry_reason": str(metadata.get("app_start_retry_reason") or ""),
+        "app_start_retry_result": str(metadata.get("app_start_retry_result") or ""),
+        "startup_after_retry_screens": list(metadata.get("startup_after_retry_screens") or []),
         "post_use_another_profile_observation_count": int(
             metadata.get("post_use_another_profile_observation_count") or 0
         ),
@@ -552,6 +607,15 @@ def _safe_summary_from_result(result: Any, *, args: argparse.Namespace, run_id: 
         ),
         "dismiss_method": str(password_result.get("dismiss_method") or ""),
         "post_dismiss_screen_type": str(password_result.get("post_dismiss_screen_type") or ""),
+        "post_dismiss_final_observation_count": int(
+            password_result.get("post_dismiss_final_observation_count") or 0
+        ),
+        "post_dismiss_final_screens": list(password_result.get("post_dismiss_final_screens") or []),
+        "post_dismiss_final_wait_total_ms": int(password_result.get("post_dismiss_final_wait_total_ms") or 0),
+        "post_dismiss_final_screen_type": str(password_result.get("post_dismiss_final_screen_type") or ""),
+        "connected_detected_after_save_prompt_dismiss": bool(
+            password_result.get("connected_detected_after_save_prompt_dismiss")
+        ),
         **_credentials_fields_from_metadata(metadata),
         "retry_count": int(getattr(result, "retry_count", 0) or 0),
         "would_publish": bool(getattr(result, "should_publish_status", False)) and bool(metadata.get("publish_enabled")),

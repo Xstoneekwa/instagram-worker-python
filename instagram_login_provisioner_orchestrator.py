@@ -20,6 +20,7 @@ from instagram_credentials_runtime_access import (
     redact_credentials_payload,
 )
 from instagram_login_action_executor import execute_login_screen_decision
+from instagram_login_email_code_executor import execute_email_code_challenge_resume
 from instagram_login_password_form_executor import execute_login_form_credentials
 from instagram_login_screen_router import normalize_instagram_username, route_login_screen
 from instagram_login_status_classifier import (
@@ -29,6 +30,11 @@ from instagram_login_status_classifier import (
     normalize_login_probe_outcome,
 )
 from instagram_login_ui_probe import detect_login_probe_outcome_from_hierarchy, extract_login_screen_signals_from_hierarchy
+from login_challenge_runtime import (
+    consume_verification_code_for_worker,
+    publish_login_challenge_pending_incident,
+    sync_login_challenge_dashboard_action,
+)
 
 
 TRANSIENT_RETRY_FAILURES = {
@@ -80,6 +86,7 @@ DEFAULT_STARTUP_OBSERVATIONS = 4
 DEFAULT_STARTUP_INTERVAL_MS = 1000
 MAX_STARTUP_OBSERVATIONS = 6
 MAX_STARTUP_INTERVAL_MS = 1500
+MAX_APP_START_RETRY_COUNT = 1
 MAX_LOGOUT_SETTINGS_SCROLLS = 5
 LOGOUT_SETTINGS_SCROLL_WAIT_MS = 500
 LOGOUT_BUTTON_LABELS = (
@@ -135,6 +142,11 @@ PARENT_APP_START_METADATA_KEYS = (
     "startup_screens",
     "startup_final_screen_type",
     "startup_settling_used",
+    "app_start_retry_attempted",
+    "app_start_retry_count",
+    "app_start_retry_reason",
+    "app_start_retry_result",
+    "startup_after_retry_screens",
 )
 POST_ADD_EXISTING_RESUME_SCREENS = frozenset(
     {
@@ -249,24 +261,39 @@ def run_login_provisioning_flow(
         "startup_screens": [],
         "startup_final_screen_type": "",
         "startup_settling_used": False,
+        "app_start_retry_attempted": False,
+        "app_start_retry_count": 0,
+        "app_start_retry_reason": "",
+        "app_start_retry_result": "",
+        "startup_after_retry_screens": [],
         "would_submit_password": False,
     }
 
     if app_start_attempted:
-        try:
-            start = timer()
-            d.app_start(safe_package_name)
-            timings["app_start_ms"] += _elapsed_ms(start, timer())
-            screen_preparation_metadata["app_start_ok"] = True
-        except Exception:
-            timings["app_start_ms"] += _elapsed_ms(start, timer())
-            screen_preparation_metadata["app_start_ok"] = False
+        app_start_result = _attempt_app_start(
+            d,
+            package_name=safe_package_name,
+            timings=timings,
+            timer=timer,
+        )
+        screen_preparation_metadata["app_start_ok"] = app_start_result["ok"]
+        if not app_start_result["ok"]:
+            retry_result = _retry_app_start_once(
+                d,
+                package_name=safe_package_name,
+                timings=timings,
+                timer=timer,
+                reason="app_start_failed",
+            )
+            screen_preparation_metadata.update(retry_result["metadata"])
+            screen_preparation_metadata["app_start_ok"] = retry_result["ok"]
+        if not screen_preparation_metadata["app_start_ok"]:
             return _finalize(
                 ok=False,
                 completed=False,
                 final_outcome="unknown",
-                reason="app_start_failed",
-                failure_reason="app_start_failed",
+                reason="app_start_failed_after_retry",
+                failure_reason="app_start_failed_after_retry",
                 final_login_status="logged_out",
                 final_provisioning_status="login_pending",
                 final_onboarding_status="credentials_required",
@@ -288,15 +315,26 @@ def run_login_provisioning_flow(
 
     signals = dict(initial_signals or {})
     if not signals and app_start_attempted:
-        startup_observation = _observe_startup_screen_settled(
-            d,
-            expected_username=safe_expected_username,
-            timings=timings,
-            timer=timer,
-            sleeper=sleeper,
-            interval_ms=DEFAULT_STARTUP_INTERVAL_MS,
-            max_observations=DEFAULT_STARTUP_OBSERVATIONS,
-        )
+        try:
+            startup_observation = _observe_startup_screen_settled(
+                d,
+                expected_username=safe_expected_username,
+                timings=timings,
+                timer=timer,
+                sleeper=sleeper,
+                interval_ms=DEFAULT_STARTUP_INTERVAL_MS,
+                max_observations=DEFAULT_STARTUP_OBSERVATIONS,
+            )
+        except Exception:
+            startup_observation = {
+                "signals": {},
+                "observation_count": 0,
+                "wait_total_ms": 0,
+                "screens": ["unknown"],
+                "initial_screen_type": "unknown",
+                "final_screen_type": "unknown",
+            }
+            screen_preparation_metadata["app_start_retry_reason"] = "startup_observe_failed"
         signals = dict(startup_observation.get("signals") or {})
         screen_preparation_metadata.update(
             {
@@ -310,6 +348,97 @@ def run_login_provisioning_flow(
                 "startup_settling_used": bool(startup_observation["observation_count"] > 1),
             }
         )
+        if _startup_retry_needed(startup_observation):
+            retry_result = _retry_app_start_once(
+                d,
+                package_name=safe_package_name,
+                timings=timings,
+                timer=timer,
+                reason=str(screen_preparation_metadata.get("app_start_retry_reason") or "startup_unknown_or_loading"),
+            )
+            screen_preparation_metadata.update(retry_result["metadata"])
+            screen_preparation_metadata["app_start_ok"] = retry_result["ok"]
+            if not retry_result["ok"]:
+                return _finalize(
+                    ok=False,
+                    completed=False,
+                    final_outcome="unknown",
+                    reason="app_start_failed_after_retry",
+                    failure_reason="app_start_failed_after_retry",
+                    final_login_status="logged_out",
+                    final_provisioning_status="login_pending",
+                    final_onboarding_status="credentials_required",
+                    should_publish_status=False,
+                    account_id=safe_account_id,
+                    expected_username=safe_expected_username,
+                    actions_taken=actions_taken,
+                    timings=timings,
+                    warnings=warnings,
+                    extra_metadata=screen_preparation_metadata,
+                    total_start=total_start,
+                    timer=timer,
+                    publisher=publisher,
+                    publish_enabled=publish_enabled,
+                )
+            try:
+                retry_startup_observation = _observe_startup_screen_settled(
+                    d,
+                    expected_username=safe_expected_username,
+                    timings=timings,
+                    timer=timer,
+                    sleeper=sleeper,
+                    interval_ms=DEFAULT_STARTUP_INTERVAL_MS,
+                    max_observations=DEFAULT_STARTUP_OBSERVATIONS,
+                )
+            except Exception:
+                retry_startup_observation = {
+                    "signals": {},
+                    "observation_count": 0,
+                    "wait_total_ms": 0,
+                    "screens": ["unknown"],
+                    "initial_screen_type": "unknown",
+                    "final_screen_type": "unknown",
+                }
+            signals = dict(retry_startup_observation.get("signals") or {})
+            screen_preparation_metadata.update(
+                {
+                    "screen_after_app_start": retry_startup_observation["final_screen_type"],
+                    "screen_after_app_start_final": retry_startup_observation["final_screen_type"],
+                    "startup_observation_count": retry_startup_observation["observation_count"],
+                    "startup_wait_total_ms": retry_startup_observation["wait_total_ms"],
+                    "startup_screens": retry_startup_observation["screens"],
+                    "startup_final_screen_type": retry_startup_observation["final_screen_type"],
+                    "startup_settling_used": bool(retry_startup_observation["observation_count"] > 1),
+                    "startup_after_retry_screens": retry_startup_observation["screens"],
+                    "app_start_retry_result": (
+                        "routable_after_retry"
+                        if not _startup_retry_needed(retry_startup_observation)
+                        else "startup_unknown_after_retry"
+                    ),
+                }
+            )
+            if _startup_retry_needed(retry_startup_observation):
+                return _finalize(
+                    ok=False,
+                    completed=False,
+                    final_outcome="unknown",
+                    reason="startup_unknown_after_retry",
+                    failure_reason="startup_unknown_after_retry",
+                    final_login_status="logged_out",
+                    final_provisioning_status="login_pending",
+                    final_onboarding_status="credentials_required",
+                    should_publish_status=False,
+                    account_id=safe_account_id,
+                    expected_username=safe_expected_username,
+                    actions_taken=actions_taken,
+                    timings=timings,
+                    warnings=warnings,
+                    extra_metadata=screen_preparation_metadata,
+                    total_start=total_start,
+                    timer=timer,
+                    publisher=publisher,
+                    publish_enabled=publish_enabled,
+                )
     elif not signals:
         start = timer()
         signals = _observe_login_signals(d, expected_username=safe_expected_username)
@@ -1421,6 +1550,7 @@ def run_login_provisioning_flow(
 
     outcome = _password_result_outcome(password_result)
     password_result_metadata = {"password_result": _safe_password_result_metadata(password_result)}
+    password_meta = password_result_metadata["password_result"]
     if str(getattr(password_result, "failure_reason", "") or "") == "blocked_secret_payload_shape":
         return _finalize(
             ok=False,
@@ -1545,8 +1675,18 @@ def run_login_provisioning_flow(
             publish_enabled=publish_enabled,
         )
 
-    classification = classify_login_probe_outcome(outcome)
-    dashboard_action_type = _dashboard_action_for_outcome(outcome)
+    classification = classify_login_probe_outcome(
+        outcome,
+        metadata={
+            **password_meta,
+            "screen_type": password_meta.get("post_submit_screen_type"),
+        },
+    )
+    dashboard_action_type = _dashboard_action_for_outcome(
+        outcome,
+        challenge_type=str(password_meta.get("challenge_type") or ""),
+        post_submit_screen_type=str(password_meta.get("post_submit_screen_type") or ""),
+    )
     final_reason = _final_reason_for_password_outcome(outcome, password_result, classification.reason)
     return _finalize(
         ok=outcome == LoginProbeOutcome.CONNECTED.value,
@@ -1554,6 +1694,8 @@ def run_login_provisioning_flow(
             LoginProbeOutcome.CONNECTED.value,
             LoginProbeOutcome.NEEDS_2FA.value,
             LoginProbeOutcome.CHECKPOINT.value,
+            LoginProbeOutcome.VERIFICATION_PENDING.value,
+            LoginProbeOutcome.UNSUPPORTED_POST_SUBMIT_CHALLENGE.value,
             LoginProbeOutcome.LOGIN_FAILED.value,
         },
         final_outcome=outcome,
@@ -2631,6 +2773,8 @@ def _observe_startup_screen_settled(
         last_signals = _observe_login_signals(d, expected_username=expected_username)
         timings["observe_ms"] += _elapsed_ms(start, timer())
         screen_type = _screen_after_app_start(last_signals)
+        if screen_type == "unknown" and _signals_show_loading_transition(last_signals):
+            screen_type = "loading"
         screens.append(screen_type)
         if _startup_screen_is_exploitable(last_signals):
             break
@@ -2646,6 +2790,50 @@ def _observe_startup_screen_settled(
         "initial_screen_type": screens[0] if screens else "unknown",
         "final_screen_type": final_screen_type,
     }
+
+
+def _attempt_app_start(
+    d: Any,
+    *,
+    package_name: str,
+    timings: dict[str, int],
+    timer: Timer,
+) -> dict[str, Any]:
+    start = timer()
+    try:
+        d.app_start(package_name)
+        timings["app_start_ms"] += _elapsed_ms(start, timer())
+        return {"ok": True}
+    except Exception:
+        timings["app_start_ms"] += _elapsed_ms(start, timer())
+        return {"ok": False}
+
+
+def _retry_app_start_once(
+    d: Any,
+    *,
+    package_name: str,
+    timings: dict[str, int],
+    timer: Timer,
+    reason: str,
+) -> dict[str, Any]:
+    metadata = {
+        "app_start_retry_attempted": True,
+        "app_start_retry_count": 1,
+        "app_start_retry_reason": reason,
+        "app_start_retry_result": "",
+    }
+    retry = _attempt_app_start(d, package_name=package_name, timings=timings, timer=timer)
+    metadata["app_start_retry_result"] = "started_after_retry" if retry["ok"] else "app_start_failed_after_retry"
+    return {"ok": bool(retry["ok"]), "metadata": metadata}
+
+
+def _startup_retry_needed(startup_observation: dict[str, Any]) -> bool:
+    final_screen = str(startup_observation.get("final_screen_type") or "unknown")
+    if final_screen in {"unknown", "loading"}:
+        return True
+    signals = dict(startup_observation.get("signals") or {})
+    return not _startup_screen_is_exploitable(signals)
 
 
 def _post_add_existing_settled_from_signals(signals: dict[str, Any]) -> dict[str, Any]:
@@ -3659,6 +3847,9 @@ def _safe_password_result_metadata(result: Any) -> dict[str, Any]:
             "post_submit_timeout_ms",
             "post_submit_interval_ms",
             "post_submit_loading_timeout",
+            "email_code_challenge_detected",
+            "challenge_type",
+            "masked_email_present",
             "post_submit_screens",
             "final_terminal_screen",
             "save_password_prompt_detected",
@@ -3666,6 +3857,11 @@ def _safe_password_result_metadata(result: Any) -> dict[str, Any]:
             "save_password_prompt_dismiss_attempt_count",
             "dismiss_method",
             "post_dismiss_screen_type",
+            "post_dismiss_final_observation_count",
+            "post_dismiss_final_screens",
+            "post_dismiss_final_wait_total_ms",
+            "post_dismiss_final_screen_type",
+            "connected_detected_after_save_prompt_dismiss",
         ):
             if key in metadata:
                 safe[key] = metadata.get(key)
@@ -3684,6 +3880,8 @@ def _should_retry_password_result(result: Any, retry_count: int, max_retries: in
         "login_failed",
         "needs_2fa",
         "checkpoint",
+        "verification_pending",
+        "unsupported_post_submit_challenge",
         "connected",
         "login_submit_still_loading",
         "save_password_prompt_blocking",
@@ -3714,7 +3912,18 @@ def _password_result_outcome(result: Any) -> str:
     return str(normalized.value)
 
 
-def _dashboard_action_for_outcome(outcome: str) -> str | None:
+def _dashboard_action_for_outcome(
+    outcome: str,
+    *,
+    challenge_type: str = "",
+    post_submit_screen_type: str = "",
+) -> str | None:
+    if outcome == LoginProbeOutcome.VERIFICATION_PENDING.value:
+        if challenge_type == "email" or post_submit_screen_type == "email_code_challenge":
+            return "enter_email_verification_code"
+        return None
+    if outcome == LoginProbeOutcome.UNSUPPORTED_POST_SUBMIT_CHALLENGE.value:
+        return "review_login_challenge"
     return {
         "needs_2fa": "complete_two_factor",
         "checkpoint": "resolve_checkpoint",
@@ -3818,21 +4027,35 @@ def _finalize(
             publish_result = publisher(**publish_payload)
             published = bool((publish_result or {}).get("published", True))
             publish_result_label = "published" if published else "failed"
-            publish_reason = "published_connected" if published else str((publish_result or {}).get("reason") or "publish_failed")
+            publish_error = _publish_result_error_code(publish_result or {})
+            publish_reason = "published_connected" if published else publish_error
             if not published:
-                publish_error_code = str((publish_result or {}).get("reason") or "publish_failed")
+                publish_error_code = publish_error
                 publish_warnings.append("publish_failed_safe")
-        except Exception:
+        except Exception as exc:
+            publish_error = _publish_exception_error_code(exc)
             published = False
             publish_attempted = True
             publish_result_label = "failed"
-            publish_reason = "publisher_exception"
-            publish_error_code = "publisher_exception"
+            publish_reason = publish_error
+            publish_error_code = publish_error
             publish_warnings.append("publish_failed_safe")
     elif publish_enabled and effective_should_publish:
         publish_result_label = "failed"
         publish_reason = "publisher_missing"
         publish_error_code = "publisher_missing"
+
+    challenge_side_effects = _sync_login_challenge_side_effects(
+        account_id=account_id,
+        expected_username=expected_username,
+        dashboard_action_type=dashboard_action_type,
+        final_outcome=final_outcome,
+        reason=reason,
+        extra_metadata=extra_metadata or {},
+        publish_warnings=publish_warnings,
+    )
+    if challenge_side_effects.get("warnings"):
+        publish_warnings.extend(challenge_side_effects["warnings"])
 
     safe_metadata = clean_login_probe_metadata(
         redact_credentials_payload(
@@ -3850,6 +4073,8 @@ def _finalize(
                 "publish_attempted": bool(publish_attempted),
                 "publish_result": publish_result_label,
                 "publish_error_code": publish_error_code,
+                "dashboard_action_sync": challenge_side_effects.get("dashboard_action_sync"),
+                "login_challenge_incident": challenge_side_effects.get("login_challenge_incident"),
                 **(extra_metadata or {}),
             }
         )
@@ -3889,25 +4114,61 @@ def _publish_payload(
     dashboard_action_type: str | None,
     extra_metadata: dict[str, Any],
 ) -> dict[str, Any]:
-    publish_metadata = _publish_safe_metadata(extra_metadata)
-    return clean_login_probe_metadata(
-        redact_credentials_payload(
-            {
-                "account_id": account_id,
-                "login_status": final_login_status,
-                "provisioning_status": final_provisioning_status,
-                "onboarding_status": final_onboarding_status,
-                "reason": reason,
-                "metadata": {
-                    "source": "login_provisioner_orchestrator",
-                    **publish_metadata,
-                    "final_outcome": final_outcome,
-                    "retry_count": retry_count,
-                    "dashboard_action_type": dashboard_action_type,
-                },
-            }
-        )
+    publish_metadata = clean_login_probe_metadata(
+        {
+            "source": "login_provisioner_orchestrator",
+            **_publish_safe_metadata(extra_metadata),
+            "final_outcome": final_outcome,
+            "retry_count": retry_count,
+            "dashboard_action_type": dashboard_action_type,
+        }
     )
+    return redact_credentials_payload(
+        {
+            "account_id": account_id,
+            "login_status": final_login_status,
+            "provisioning_status": final_provisioning_status,
+            "onboarding_status": final_onboarding_status,
+            "reason": reason,
+            "metadata": publish_metadata,
+        }
+    )
+
+
+def _publish_result_error_code(publish_result: dict[str, Any]) -> str:
+    reason = str((publish_result or {}).get("reason") or "").strip()
+    if reason in {"", "published"}:
+        return "publish_failed"
+    mapping = {
+        "url_missing": "publisher_url_missing",
+        "token_missing": "publisher_token_missing",
+        "not_configured": "publisher_not_configured",
+        "http_error": "publisher_http_error",
+        "timeout": "publisher_timeout",
+        "network_error": "publisher_request_exception",
+        "request_build_failed": "publisher_request_exception",
+        "response_not_json": "publisher_response_not_json",
+        "response_not_ok": "publisher_response_not_ok",
+        "account_id_invalid": "publisher_invalid_payload",
+        "no_status_fields": "publisher_invalid_payload",
+        "reason_too_long": "publisher_invalid_payload",
+        "external_request_id_invalid": "publisher_invalid_payload",
+        "metadata_must_be_object": "publisher_invalid_payload",
+        "forbidden_metadata": "publisher_invalid_payload",
+        "rpc_failed": "publisher_rpc_error",
+        "status_update_failed": "publisher_rpc_error",
+        "invalid_status": "publisher_rpc_error",
+        "account_not_found": "publisher_rpc_error",
+    }
+    if reason.startswith("publisher_"):
+        return reason
+    return mapping.get(reason, "publisher_unexpected_exception")
+
+
+def _publish_exception_error_code(exc: Exception) -> str:
+    if isinstance(exc, (TypeError, ValueError)):
+        return "publisher_invalid_payload"
+    return "publisher_unexpected_exception"
 
 
 def _connected_status_publishable(
@@ -3957,7 +4218,14 @@ def _publish_skip_reason(
     if not str(account_id or "").strip():
         return "missing_account_id"
     if not should_publish_status or not publish_allowed:
-        if str(final_outcome or "") in {"needs_2fa", "checkpoint", "login_failed", "password_required_dialog"}:
+        if str(final_outcome or "") in {
+            "needs_2fa",
+            "checkpoint",
+            "verification_pending",
+            "unsupported_post_submit_challenge",
+            "login_failed",
+            "password_required_dialog",
+        }:
             return "deferred_until_dashboard"
         return "not_publishable"
     return "publisher_missing"
@@ -4005,3 +4273,186 @@ def _empty_timings() -> dict[str, int]:
 
 def _elapsed_ms(start: float, end: float) -> int:
     return max(0, int(round((end - start) * 1000)))
+
+
+def _extract_challenge_metadata(extra_metadata: dict[str, Any]) -> dict[str, Any]:
+    password_meta = extra_metadata.get("password_result")
+    if isinstance(password_meta, dict):
+        return password_meta
+    return extra_metadata
+
+
+def _sync_login_challenge_side_effects(
+    *,
+    account_id: str,
+    expected_username: str,
+    dashboard_action_type: str | None,
+    final_outcome: str,
+    reason: str,
+    extra_metadata: dict[str, Any],
+    publish_warnings: list[str],
+) -> dict[str, Any]:
+    if dashboard_action_type not in {"enter_email_verification_code", "review_login_challenge"}:
+        return {}
+
+    challenge_meta = _extract_challenge_metadata(extra_metadata)
+    run_id = str(extra_metadata.get("run_id") or challenge_meta.get("run_id") or "").strip() or None
+    warnings: list[str] = []
+    dashboard_action_sync: dict[str, Any] | None = None
+    login_challenge_incident: dict[str, Any] | None = None
+
+    try:
+        dashboard_action_sync = sync_login_challenge_dashboard_action(
+            account_id=account_id,
+            dashboard_action_type=dashboard_action_type,
+            run_id=run_id,
+            challenge_type=str(challenge_meta.get("challenge_type") or ""),
+            screen_type=str(challenge_meta.get("post_submit_screen_type") or challenge_meta.get("screen_type") or ""),
+            masked_email_present=bool(challenge_meta.get("masked_email_present")),
+            human_review_required=dashboard_action_type == "review_login_challenge",
+        )
+    except Exception:
+        warnings.append("dashboard_action_sync_failed_safe")
+        dashboard_action_sync = {"published": False, "reason": "dashboard_action_sync_failed_safe"}
+
+    try:
+        login_challenge_incident = publish_login_challenge_pending_incident(
+            account_id=account_id,
+            expected_username=expected_username,
+            run_id=run_id,
+            challenge_type=str(challenge_meta.get("challenge_type") or ""),
+            screen_type=str(challenge_meta.get("post_submit_screen_type") or challenge_meta.get("screen_type") or ""),
+            reason=reason or final_outcome,
+            dashboard_action_type=dashboard_action_type,
+            masked_email_present=bool(challenge_meta.get("masked_email_present")),
+        )
+    except Exception:
+        warnings.append("login_challenge_incident_failed_safe")
+        login_challenge_incident = {"published": False, "reason": "login_challenge_incident_failed_safe"}
+
+    if dashboard_action_sync and not dashboard_action_sync.get("published"):
+        warnings.append("dashboard_action_sync_not_published")
+    if login_challenge_incident and not login_challenge_incident.get("published"):
+        warnings.append("login_challenge_incident_not_published")
+
+    return {
+        "dashboard_action_sync": dashboard_action_sync,
+        "login_challenge_incident": login_challenge_incident,
+        "warnings": warnings,
+    }
+
+
+def run_email_code_resume_flow(
+    d: Any,
+    *,
+    account_id: str,
+    expected_username: str,
+    verification_code: SecretValue,
+    action_id: str | None = None,
+    consume_from_action: bool = False,
+    run_id: str | None = None,
+    publisher: Publisher | None = None,
+    publish_enabled: bool = False,
+    post_submit_timeout_ms: Optional[int] = None,
+    timer: Timer | None = None,
+    sleeper: Sleeper | None = None,
+) -> LoginProvisioningFlowResult:
+    """Resume login from the email verification code screen without reloading credentials."""
+
+    timer = timer or time.perf_counter
+    sleeper = sleeper or time.sleep
+    total_start = timer()
+    timings = _empty_timings()
+    warnings: list[str] = []
+    actions_taken = ["route:email_code_resume"]
+    safe_account_id = str(account_id or "").strip()
+    safe_expected_username = str(expected_username or "").strip()
+    code_value = verification_code
+
+    if consume_from_action:
+        consumed = consume_verification_code_for_worker(
+            action_id=action_id,
+            account_id=safe_account_id,
+            run_id=run_id,
+        )
+        if not consumed.get("ok"):
+            return _finalize(
+                ok=False,
+                completed=False,
+                final_outcome="verification_pending",
+                reason=str(consumed.get("reason") or "verification_code_not_available"),
+                failure_reason=str(consumed.get("reason") or "verification_code_not_available"),
+                final_login_status="verification_pending",
+                final_provisioning_status="login_verification_pending",
+                final_onboarding_status="verification_pending",
+                account_id=safe_account_id,
+                expected_username=safe_expected_username,
+                actions_taken=actions_taken,
+                timings=timings,
+                warnings=warnings,
+                extra_metadata={"resume_mode": "consume_action", "run_id": run_id},
+                total_start=total_start,
+                timer=timer,
+                publisher=publisher,
+                publish_enabled=publish_enabled,
+                dashboard_action_type="enter_email_verification_code",
+                should_publish_status=False,
+            )
+        code_value = SecretValue(str(consumed.get("verification_code") or ""))
+
+    resume_result = execute_email_code_challenge_resume(
+        d,
+        verification_code=code_value,
+        post_submit_wait_ms=int(post_submit_timeout_ms or 0),
+        timer=timer,
+        sleeper=sleeper,
+    )
+    actions_taken.append("email_code_submit")
+    outcome = str(resume_result.post_submit_outcome or resume_result.reason or "unknown")
+    if resume_result.failure_reason and not resume_result.post_submit_outcome:
+        outcome = "verification_pending" if resume_result.failure_reason.startswith("verification_code") else "unknown"
+
+    classification = classify_login_probe_outcome(
+        outcome,
+        metadata={
+            **(resume_result.safe_metadata or {}),
+            "screen_type": resume_result.post_submit_screen_type,
+        },
+    )
+    dashboard_action_type = _dashboard_action_for_outcome(
+        outcome,
+        challenge_type=str((resume_result.safe_metadata or {}).get("challenge_type") or ""),
+        post_submit_screen_type=str(resume_result.post_submit_screen_type or ""),
+    )
+    return _finalize(
+        ok=bool(resume_result.ok),
+        completed=bool(resume_result.executed),
+        final_outcome=outcome,
+        reason=resume_result.reason,
+        failure_reason=resume_result.failure_reason,
+        final_login_status=classification.login_status,
+        final_provisioning_status=classification.provisioning_status,
+        final_onboarding_status=classification.onboarding_status,
+        account_id=safe_account_id,
+        expected_username=safe_expected_username,
+        actions_taken=actions_taken,
+        timings=_merge_timings(timings, resume_result.timings),
+        warnings=[*warnings, *resume_result.warnings],
+        extra_metadata={
+            "resume_mode": "consume_action" if consume_from_action else "stdin",
+            "run_id": run_id,
+            "email_code_result": {
+                "executed": resume_result.executed,
+                "code_entered": resume_result.code_entered,
+                "continue_tapped": resume_result.continue_tapped,
+                "post_submit_outcome": resume_result.post_submit_outcome,
+                "post_submit_screen_type": resume_result.post_submit_screen_type,
+            },
+        },
+        total_start=total_start,
+        timer=timer,
+        publisher=publisher,
+        publish_enabled=publish_enabled,
+        dashboard_action_type=dashboard_action_type,
+        should_publish_status=classification.should_publish,
+    )

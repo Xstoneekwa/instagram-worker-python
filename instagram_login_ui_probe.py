@@ -45,6 +45,18 @@ CHECKPOINT_PATTERNS = (
     "suspicious login attempt",
     "verify your account",
 )
+UNSUPPORTED_POST_SUBMIT_CHALLENGE_PATTERNS = (
+    "try another way",
+    "get a new code",
+    "confirm your identity",
+    "security check",
+    "unusual login attempt",
+    "approve this login",
+    "approve login",
+    "was this you",
+    "verify it's you",
+    "verify it’s you",
+)
 PASSWORD_REQUIRED_DIALOG_PATTERNS = (
     "password required",
     "enter your password to continue",
@@ -209,6 +221,8 @@ def extract_login_screen_signals_from_hierarchy(
     has_google_password_manager = _contains_any(text, GOOGLE_PASSWORD_MANAGER_PATTERNS)
     has_save_password_for_instagram = _contains_any(text, SAVE_PASSWORD_FOR_INSTAGRAM_PATTERNS)
     has_google_save_password_prompt = has_google_password_manager and has_save_password_for_instagram and has_continue_button
+    has_email_code_challenge = _is_email_code_challenge_text(text)
+    masked_email_present = _has_masked_email_signal(text)
     suggested_username = _extract_suggested_username(text)
     available_usernames = _extract_available_usernames(text)
     normalized_expected_username = _normalize_username_candidate(expected_username or "")
@@ -224,7 +238,9 @@ def extract_login_screen_signals_from_hierarchy(
     username_prefilled_present = bool(prefilled_username)
     username_field_editable_present = has_username_field or bool(edit_text_values)
 
-    if has_google_save_password_prompt:
+    if has_email_code_challenge:
+        screen_type = "email_code_challenge"
+    elif has_google_save_password_prompt:
         screen_type = "google_password_manager_save_prompt"
     elif has_password_required_dialog:
         screen_type = "password_required_dialog"
@@ -292,6 +308,9 @@ def extract_login_screen_signals_from_hierarchy(
         "save_password_prompt_present": has_google_save_password_prompt,
         "google_password_manager_save_prompt": screen_type == "google_password_manager_save_prompt",
         "save_password_prompt": screen_type == "google_password_manager_save_prompt",
+        "email_code_challenge_present": screen_type == "email_code_challenge",
+        "challenge_type": "email" if screen_type == "email_code_challenge" else "",
+        "masked_email_present": bool(masked_email_present) if screen_type == "email_code_challenge" else False,
         "username_editable_present": screen_type in {"login_form_empty", "login_form_prefilled_username"}
         and username_field_editable_present,
         "password_field_editable_present": screen_type in {
@@ -372,6 +391,34 @@ def probe_login_ui_from_hierarchy(
                 **metadata,
                 "detection_reason": "google_password_manager_save_prompt",
                 "save_password_prompt_present": True,
+            },
+        )
+
+    if _is_email_code_challenge_text(text):
+        return LoginUiProbeResult(
+            outcome=LoginProbeOutcome.VERIFICATION_PENDING,
+            ok=False,
+            reason="email_verification_code_required",
+            metadata={
+                **metadata,
+                "detection_reason": "email_verification_code_required",
+                "screen_type": "email_code_challenge",
+                "challenge_type": "email",
+                "masked_email_present": _has_masked_email_signal(text),
+            },
+        )
+
+    if _is_unsupported_post_submit_challenge_text(text):
+        return LoginUiProbeResult(
+            outcome=LoginProbeOutcome.UNSUPPORTED_POST_SUBMIT_CHALLENGE,
+            ok=False,
+            reason="unsupported_post_submit_challenge",
+            metadata={
+                **metadata,
+                "detection_reason": "unsupported_post_submit_challenge",
+                "screen_type": "unsupported_post_submit_challenge",
+                "challenge_type": "unknown",
+                "human_review_required": True,
             },
         )
 
@@ -531,6 +578,36 @@ def _contains_any(text: str, patterns: tuple[str, ...]) -> bool:
 def _has_phrase(text: str, phrase: str) -> bool:
     normalized = re.escape(phrase.lower()).replace(r"\ ", r"\s+")
     return bool(re.search(rf"\b{normalized}\b", text))
+
+
+def _is_email_code_challenge_text(text: str) -> bool:
+    return (
+        _has_phrase(text, "check your email")
+        and _has_phrase(text, "enter the code we sent")
+        and _has_phrase(text, "enter code")
+        and _has_phrase(text, "try another way")
+    )
+
+
+def _is_unsupported_post_submit_challenge_text(text: str) -> bool:
+    if _is_email_code_challenge_text(text):
+        return False
+    if _contains_any(text, NEEDS_2FA_PATTERNS) and _has_phrase(text, "authentication code"):
+        return False
+    if _contains_any(text, CHECKPOINT_PATTERNS):
+        return False
+    if _contains_any(text, LOGIN_FAILED_PATTERNS):
+        return False
+    if _contains_any(text, LOGGED_OUT_PATTERNS) and _has_phrase(text, "log in"):
+        return False
+    return _contains_any(text, UNSUPPORTED_POST_SUBMIT_CHALLENGE_PATTERNS)
+
+
+def _has_masked_email_signal(text: str) -> bool:
+    normalized = str(text or "").lower()
+    if "@" not in normalized:
+        return False
+    return bool(re.search(r"[a-z0-9._%+-]*[*•]{2,}[a-z0-9._%+-]*@[a-z0-9.-]+\.[a-z]{2,}", normalized))
 
 
 def _password_overlay_type(text: str) -> str:

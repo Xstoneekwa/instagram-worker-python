@@ -16,6 +16,8 @@ class LoginProbeOutcome(str, Enum):
     CONNECTED = "connected"
     NEEDS_2FA = "needs_2fa"
     CHECKPOINT = "checkpoint"
+    VERIFICATION_PENDING = "verification_pending"
+    UNSUPPORTED_POST_SUBMIT_CHALLENGE = "unsupported_post_submit_challenge"
     LOGIN_FAILED = "login_failed"
     LOGGED_OUT = "logged_out"
     SKIPPED_NOT_IMPLEMENTED = "skipped_not_implemented"
@@ -139,6 +141,40 @@ def classify_login_probe_outcome(
             reauth_required=None,
             reauth_reason=None,
             reason="checkpoint_required",
+            should_publish=True,
+            metadata=safe_metadata,
+        )
+
+    if normalized == LoginProbeOutcome.VERIFICATION_PENDING:
+        challenge_type = str(safe_metadata.get("challenge_type") or "").strip().lower()
+        screen_type = str(safe_metadata.get("screen_type") or "").strip().lower()
+        if challenge_type == "email" or screen_type == "email_code_challenge":
+            reason = "email_verification_code_required"
+        else:
+            reason = str(safe_metadata.get("reason") or "verification_pending").strip() or "verification_pending"
+        return LoginStatusClassification(
+            ok=False,
+            outcome=normalized,
+            login_status="verification_pending",
+            provisioning_status="login_verification_pending",
+            onboarding_status="verification_pending",
+            reauth_required=None,
+            reauth_reason=None,
+            reason=reason,
+            should_publish=True,
+            metadata=safe_metadata,
+        )
+
+    if normalized == LoginProbeOutcome.UNSUPPORTED_POST_SUBMIT_CHALLENGE:
+        return LoginStatusClassification(
+            ok=False,
+            outcome=normalized,
+            login_status="verification_pending",
+            provisioning_status="login_verification_pending",
+            onboarding_status="verification_pending",
+            reauth_required=None,
+            reauth_reason=None,
+            reason="unsupported_post_submit_challenge",
             should_publish=True,
             metadata=safe_metadata,
         )

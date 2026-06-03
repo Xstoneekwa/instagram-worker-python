@@ -91,6 +91,13 @@ PASSWORD_ONLY_OVERLAY_XML = (
 )
 LOADING_XML = '<node text="Loading..." />'
 UNKNOWN_XML = '<node text="Instagram" />'
+GOOGLE_SAVE_PASSWORD_PROMPT_XML = (
+    '<node text="Google Password Manager" />'
+    '<node text="Save password for Instagram?" />'
+    '<node text="cinema_catchup" />'
+    '<node text="••••••••••" />'
+    '<node text="Continue" clickable="true" />'
+)
 CONNECTED_XML = (
     '<node content-desc="Home" />'
     '<node content-desc="Search" />'
@@ -100,6 +107,14 @@ CONNECTED_XML = (
 NEEDS_2FA_XML = '<node text="Enter code" /><node text="authentication code" />'
 CHECKPOINT_XML = '<node text="Help us confirm it’s you" /><node text="Verify your account" />'
 LOGIN_FAILED_XML = '<node text="Sorry, your password was incorrect. Please try again." />'
+EMAIL_CODE_CHALLENGE_XML = (
+    '<node text="Check your email" />'
+    '<node text="Enter the code we sent to m*******e@hotmail.com" />'
+    '<node class="android.widget.EditText" text="Enter code" editable="true" />'
+    '<node text="Get a new code" />'
+    '<node text="Continue" />'
+    '<node text="Try another way" />'
+)
 SENSITIVE_XML = '<node text="password secret_ref Vault token emulator-5554 screenshot" />'
 ACTIVE_HOME_XML = (
     '<node text="Instagram" />'
@@ -275,6 +290,7 @@ class FakeDevice:
         self.selector_calls: list[dict] = []
         self.selectors: dict[tuple[str, str], FakeSelector] = {}
         self.bounds_clicks: list[tuple[int, int]] = []
+        self.press_calls: list[str] = []
         self.app_start = Mock()
 
     def add_selector(self, key: str, value: str, selector: FakeSelector) -> FakeSelector:
@@ -296,6 +312,9 @@ class FakeDevice:
 
     def click(self, x: int, y: int) -> None:
         self.bounds_clicks.append((int(x), int(y)))
+
+    def press(self, key: str) -> None:
+        self.press_calls.append(str(key))
 
 
 class TrackingSecretValue(SecretValue):
@@ -384,7 +403,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertFalse(result.safe_metadata["app_start_attempted"])
         self.assertTrue(result.safe_metadata["observe_current_screen_only"])
 
-    def test_app_start_failed_stops_before_credentials_and_password_reveal(self) -> None:
+    def test_app_start_failed_after_retry_stops_before_credentials_and_password_reveal(self) -> None:
         device = FakeDevice([LOGIN_FORM_XML])
         device.app_start.side_effect = RuntimeError("boom")
         secret = TrackingSecretValue(PASSWORD)
@@ -399,11 +418,37 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         )
 
         self.assertFalse(result.ok)
-        self.assertEqual(result.reason, "app_start_failed")
+        self.assertEqual(result.reason, "app_start_failed_after_retry")
         self.assertFalse(secret.revealed)
         credentials_getter.assert_not_called()
         self.assertEqual(device.dump_calls, 0)
         self.assertFalse(result.safe_metadata["app_start_ok"])
+        self.assertTrue(result.safe_metadata["app_start_retry_attempted"])
+        self.assertEqual(result.safe_metadata["app_start_retry_count"], 1)
+        self.assertEqual(result.safe_metadata["app_start_retry_reason"], "app_start_failed")
+        self.assertEqual(result.safe_metadata["app_start_retry_result"], "app_start_failed_after_retry")
+        self.assertEqual(device.app_start.call_count, 2)
+
+    def test_app_start_first_failure_retries_once_then_routes(self) -> None:
+        device, selectors = configured_device(CONNECTED_XML)
+        device.hierarchies = [LOGIN_FORM_XML, CONNECTED_XML]
+        device.app_start.side_effect = [RuntimeError("temporary"), None]
+
+        result = run_login_provisioning_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username=USERNAME,
+            credentials_getter=Mock(return_value=credentials()),
+            post_start_wait_ms=0,
+            sleeper=Mock(),
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.safe_metadata["selected_route"], "login_form_empty")
+        self.assertTrue(result.safe_metadata["app_start_retry_attempted"])
+        self.assertEqual(result.safe_metadata["app_start_retry_result"], "started_after_retry")
+        self.assertEqual(device.app_start.call_count, 2)
+        self.assertEqual(selectors["login"].click_calls, 1)
 
     def test_app_start_unknown_stable_stops_after_startup_settling(self) -> None:
         device = FakeDevice([UNKNOWN_XML])
@@ -420,13 +465,37 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         )
 
         self.assertFalse(result.ok)
-        self.assertEqual(result.reason, "screen_preparation_failed_after_startup_settling")
+        self.assertEqual(result.reason, "startup_unknown_after_retry")
         self.assertFalse(secret.revealed)
         credentials_getter.assert_not_called()
         self.assertEqual(result.safe_metadata["screen_after_app_start"], "unknown")
         self.assertEqual(result.safe_metadata["startup_observation_count"], 4)
         self.assertEqual(result.safe_metadata["startup_screens"], ["unknown", "unknown", "unknown", "unknown"])
         self.assertTrue(result.safe_metadata["startup_settling_used"])
+        self.assertTrue(result.safe_metadata["app_start_retry_attempted"])
+        self.assertEqual(result.safe_metadata["app_start_retry_reason"], "startup_unknown_or_loading")
+        self.assertEqual(result.safe_metadata["app_start_retry_result"], "startup_unknown_after_retry")
+
+    def test_app_start_unknown_stable_retries_once_then_routes(self) -> None:
+        device, selectors = configured_device(CONNECTED_XML)
+        device.hierarchies = [UNKNOWN_XML, UNKNOWN_XML, UNKNOWN_XML, UNKNOWN_XML, LOGIN_FORM_XML, CONNECTED_XML]
+
+        result = run_login_provisioning_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username=USERNAME,
+            credentials_getter=Mock(return_value=credentials()),
+            post_start_wait_ms=0,
+            sleeper=Mock(),
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.safe_metadata["selected_route"], "login_form_empty")
+        self.assertTrue(result.safe_metadata["app_start_retry_attempted"])
+        self.assertEqual(result.safe_metadata["app_start_retry_result"], "routable_after_retry")
+        self.assertEqual(result.safe_metadata["startup_after_retry_screens"], ["login_form_empty"])
+        self.assertEqual(device.app_start.call_count, 2)
+        self.assertEqual(selectors["login"].click_calls, 1)
 
     def test_app_start_unknown_then_continue_as_candidate_routes_continue(self) -> None:
         continue_xml = f'<node text="{USERNAME}" />' + CONTINUE_AS_XML
@@ -690,6 +759,28 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertEqual(result.dashboard_action_type, "resolve_checkpoint")
         self.assertFalse(result.retry_attempted)
 
+    def test_login_form_email_code_challenge_status_no_retry(self) -> None:
+        result = self._run_login_form(EMAIL_CODE_CHALLENGE_XML)
+
+        self.assertEqual(result.final_outcome, "verification_pending")
+        self.assertEqual(result.reason, "email_verification_code_required")
+        self.assertEqual(result.final_login_status, "verification_pending")
+        self.assertEqual(result.final_provisioning_status, "login_verification_pending")
+        self.assertEqual(result.final_onboarding_status, "verification_pending")
+        self.assertFalse(result.retry_attempted)
+        self.assertEqual(result.actions_taken.count("login_form_submit"), 1)
+        self.assertNotIn("login_form_submit_retry", result.actions_taken)
+        password_meta = result.safe_metadata["password_result"]
+        self.assertEqual(password_meta["post_submit_screen_type"], "email_code_challenge")
+        self.assertTrue(password_meta["email_code_challenge_detected"])
+        self.assertEqual(password_meta["challenge_type"], "email")
+        self.assertTrue(password_meta["masked_email_present"])
+        self.assertEqual(result.dashboard_action_type, "enter_email_verification_code")
+        rendered = json.dumps(result.safe_metadata, sort_keys=True)
+        self.assertNotIn("m*******e@hotmail.com", rendered)
+        self.assertNotIn(PASSWORD, rendered)
+        self.assertNotIn(SECRET_REF, rendered)
+
     def test_login_form_login_failed_status_no_retry(self) -> None:
         result = self._run_login_form(LOGIN_FAILED_XML)
 
@@ -770,6 +861,123 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertFalse(result.retry_attempted)
         self.assertEqual(result.retry_count, 0)
         patched.assert_called_once()
+
+    def test_app_start_retry_never_happens_after_submit_unknown(self) -> None:
+        device, _selectors = configured_device(LOGIN_FORM_XML)
+        password_result = type(
+            "PasswordResult",
+            (),
+            {
+                "failure_reason": None,
+                "post_submit_outcome": "unknown",
+                "post_submit_probe_reason": "post_submit_unknown_after_settling",
+                "executed": True,
+                "submit_tapped": True,
+                "timings": {},
+                "warnings": ["post_submit_unknown_after_settling"],
+                "safe_metadata": {
+                    "post_submit_observation_count": 4,
+                    "post_submit_wait_total_ms": 4000,
+                    "post_submit_screens": ["unknown", "unknown", "unknown", "unknown"],
+                    "final_terminal_screen": "unknown",
+                },
+            },
+        )()
+
+        with patch.object(provisioner_orchestrator, "execute_login_form_credentials", return_value=password_result):
+            result = run_login_provisioning_flow(
+                device,
+                account_id=ACCOUNT_ID,
+                expected_username=USERNAME,
+                credentials_getter=Mock(return_value=credentials()),
+                post_start_wait_ms=0,
+                sleeper=Mock(),
+            )
+
+        self.assertEqual(result.final_outcome, "unknown")
+        self.assertEqual(result.reason, "post_submit_unknown_after_settling")
+        self.assertFalse(result.safe_metadata["app_start_retry_attempted"])
+        self.assertEqual(device.app_start.call_count, 1)
+
+    def test_save_password_dismiss_loading_then_connected_final_settling(self) -> None:
+        device, _selectors = configured_device(CONNECTED_XML)
+        device.hierarchies = [
+            GOOGLE_SAVE_PASSWORD_PROMPT_XML,
+            LOADING_XML,
+            CONNECTED_XML,
+        ]
+
+        result = self.run_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username=USERNAME,
+            credentials_getter=Mock(return_value=credentials()),
+            initial_signals=LOGIN_FORM_SIGNALS,
+            post_submit_timeout_ms=2000,
+        )
+
+        password_meta = result.safe_metadata["password_result"]
+        self.assertEqual(result.final_outcome, "connected")
+        self.assertTrue(result.ok)
+        self.assertTrue(password_meta["save_password_prompt_detected"])
+        self.assertTrue(password_meta["save_password_prompt_dismissed"])
+        self.assertEqual(password_meta["post_dismiss_screen_type"], "connected")
+        self.assertEqual(password_meta["post_dismiss_final_screens"], ["connected"])
+        self.assertTrue(password_meta["connected_detected_after_save_prompt_dismiss"])
+
+    def test_save_password_dismiss_unknown_then_connected_final_settling(self) -> None:
+        device, _selectors = configured_device(CONNECTED_XML)
+        device.hierarchies = [
+            GOOGLE_SAVE_PASSWORD_PROMPT_XML,
+            UNKNOWN_XML,
+            CONNECTED_XML,
+        ]
+
+        result = self.run_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username=USERNAME,
+            credentials_getter=Mock(return_value=credentials()),
+            initial_signals=LOGIN_FORM_SIGNALS,
+            post_submit_timeout_ms=2000,
+        )
+
+        password_meta = result.safe_metadata["password_result"]
+        self.assertEqual(result.final_outcome, "connected")
+        self.assertEqual(password_meta["post_dismiss_final_screens"], ["connected"])
+        self.assertTrue(password_meta["connected_detected_after_save_prompt_dismiss"])
+
+    def test_save_password_dismiss_loading_stable_timeout_no_publish(self) -> None:
+        publisher = Mock(return_value={"published": True})
+        device, _selectors = configured_device(CONNECTED_XML)
+        device.hierarchies = [
+            GOOGLE_SAVE_PASSWORD_PROMPT_XML,
+            LOADING_XML,
+            LOADING_XML,
+            LOADING_XML,
+            LOADING_XML,
+            LOADING_XML,
+        ]
+
+        result = self.run_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username=USERNAME,
+            credentials_getter=Mock(return_value=credentials()),
+            initial_signals=LOGIN_FORM_SIGNALS,
+            post_submit_timeout_ms=3000,
+            publisher=publisher,
+            publish_enabled=True,
+        )
+
+        password_meta = result.safe_metadata["password_result"]
+        self.assertEqual(result.final_outcome, "login_submit_still_loading")
+        self.assertEqual(result.reason, "post_submit_loading_timeout")
+        self.assertFalse(result.should_publish_status)
+        self.assertFalse(result.published)
+        publisher.assert_not_called()
+        self.assertEqual(password_meta["post_dismiss_final_screens"], ["loading", "loading", "loading", "loading"])
+        self.assertFalse(password_meta["connected_detected_after_save_prompt_dismiss"])
 
     def test_loading_timeout_final_outcome_no_retry(self) -> None:
         device, _selectors = configured_device(CONNECTED_XML)
@@ -1725,6 +1933,45 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertEqual(result.safe_metadata["publish_result"], "published")
         publisher.assert_called_once()
 
+    def test_publish_payload_matches_real_publisher_signature(self) -> None:
+        calls = []
+
+        def strict_publisher(
+            account_id,
+            login_status=None,
+            provisioning_status=None,
+            onboarding_status=None,
+            reauth_required=None,
+            reauth_reason=None,
+            reason=None,
+            external_request_id=None,
+            metadata=None,
+        ):
+            calls.append(
+                {
+                    "account_id": account_id,
+                    "login_status": login_status,
+                    "provisioning_status": provisioning_status,
+                    "onboarding_status": onboarding_status,
+                    "reauth_required": reauth_required,
+                    "reauth_reason": reauth_reason,
+                    "reason": reason,
+                    "external_request_id": external_request_id,
+                    "metadata": metadata,
+                }
+            )
+            return {"published": True, "reason": "published"}
+
+        result = self._run_login_form(CONNECTED_XML, publisher=strict_publisher, publish_enabled=True)
+
+        self.assertTrue(result.published)
+        self.assertEqual(result.publish_reason, "published_connected")
+        self.assertEqual(calls[0]["login_status"], "connected")
+        rendered_payload = json.dumps(result.publish_payload, sort_keys=True)
+        self.assertNotIn('"stage"', rendered_payload.split('"metadata"')[0])
+        self.assertNotIn('"probe_version"', rendered_payload.split('"metadata"')[0])
+        self.assertNotIn('"source"', rendered_payload.split('"metadata"')[0])
+
     def test_publish_payload_safe(self) -> None:
         publisher = Mock(return_value={"published": True})
 
@@ -1743,9 +1990,22 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(result.final_outcome, "connected")
         self.assertFalse(result.published)
-        self.assertEqual(result.publish_reason, "rpc_failed")
+        self.assertEqual(result.publish_reason, "publisher_rpc_error")
         self.assertEqual(result.safe_metadata["publish_result"], "failed")
-        self.assertEqual(result.safe_metadata["publish_error_code"], "rpc_failed")
+        self.assertEqual(result.safe_metadata["publish_error_code"], "publisher_rpc_error")
+        self.assertIn("publish_failed_safe", result.warnings)
+
+    def test_publisher_type_error_is_safe_invalid_payload(self) -> None:
+        def publisher(**_payload):
+            raise TypeError("unexpected keyword")
+
+        result = self._run_login_form(CONNECTED_XML, publisher=publisher, publish_enabled=True)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.final_outcome, "connected")
+        self.assertFalse(result.published)
+        self.assertEqual(result.publish_reason, "publisher_invalid_payload")
+        self.assertEqual(result.safe_metadata["publish_error_code"], "publisher_invalid_payload")
         self.assertIn("publish_failed_safe", result.warnings)
 
     def test_non_connected_outcomes_deferred_from_publish_v1(self) -> None:

@@ -23,7 +23,7 @@ from instagram_credentials_runtime_access import (
     redact_credentials_payload,
     revealed_value_blocked_for_injection,
 )
-from instagram_login_status_classifier import clean_login_probe_metadata
+from instagram_login_status_classifier import LoginProbeOutcome, clean_login_probe_metadata
 from instagram_login_ui_probe import extract_login_screen_signals_from_hierarchy, probe_login_ui_from_hierarchy
 
 
@@ -38,6 +38,8 @@ MAX_POST_SUBMIT_OBSERVATIONS = 15
 MAX_POST_SUBMIT_INTERVAL_MS = 1500
 MAX_POST_SUBMIT_TIMEOUT_MS = 15000
 MAX_SAVE_PASSWORD_PROMPT_DISMISS_ATTEMPTS = 2
+POST_DISMISS_FINAL_OBSERVATIONS = 4
+POST_DISMISS_FINAL_INTERVAL_MS = 1000
 PASSWORD_CONFIRM_SETTLE_MS = 150
 USERNAME_INPUT_FAILURE_REASONS = {
     "username_input_failed",
@@ -379,7 +381,15 @@ def execute_login_form_credentials(
     save_password_prompt_dismiss_method = ""
     save_password_prompt_dismiss_attempt_count = 0
     post_dismiss_screen_type = ""
+    post_dismiss_final_observation_count = 0
+    post_dismiss_final_screens: list[str] = []
+    post_dismiss_final_wait_total_ms = 0
+    post_dismiss_final_screen_type = ""
+    connected_detected_after_save_prompt_dismiss = False
     post_submit_loading_timeout = False
+    post_submit_challenge_type = ""
+    post_submit_masked_email_present = False
+    email_code_challenge_detected = False
     failure_reason: str | None = None
 
     if dump_after_submit:
@@ -405,7 +415,17 @@ def execute_login_form_credentials(
                 observed.get("save_password_prompt_dismiss_attempt_count") or 0
             )
             post_dismiss_screen_type = str(observed.get("post_dismiss_screen_type") or "")
+            post_dismiss_final_observation_count = int(observed.get("post_dismiss_final_observation_count") or 0)
+            post_dismiss_final_screens = list(observed.get("post_dismiss_final_screens") or [])
+            post_dismiss_final_wait_total_ms = int(observed.get("post_dismiss_final_wait_total_ms") or 0)
+            post_dismiss_final_screen_type = str(observed.get("post_dismiss_final_screen_type") or "")
+            connected_detected_after_save_prompt_dismiss = bool(
+                observed.get("connected_detected_after_save_prompt_dismiss")
+            )
             post_submit_loading_timeout = bool(observed.get("post_submit_loading_timeout"))
+            email_code_challenge_detected = bool(observed.get("email_code_challenge_detected"))
+            post_submit_challenge_type = str(observed.get("challenge_type") or "")
+            post_submit_masked_email_present = bool(observed.get("masked_email_present"))
             password_required_dialog_detected = observed["password_required_dialog_present"]
             if password_required_dialog_detected and max(0, int(max_password_required_retry or 0)) > 0:
                 password_required_retry_attempted = True
@@ -462,8 +482,32 @@ def execute_login_form_credentials(
                             post_dismiss_screen_type = (
                                 str(observed.get("post_dismiss_screen_type") or "") or post_dismiss_screen_type
                             )
+                            post_dismiss_final_observation_count += int(
+                                observed.get("post_dismiss_final_observation_count") or 0
+                            )
+                            post_dismiss_final_screens.extend(list(observed.get("post_dismiss_final_screens") or []))
+                            post_dismiss_final_wait_total_ms += int(
+                                observed.get("post_dismiss_final_wait_total_ms") or 0
+                            )
+                            post_dismiss_final_screen_type = (
+                                str(observed.get("post_dismiss_final_screen_type") or "")
+                                or post_dismiss_final_screen_type
+                            )
+                            connected_detected_after_save_prompt_dismiss = (
+                                connected_detected_after_save_prompt_dismiss
+                                or bool(observed.get("connected_detected_after_save_prompt_dismiss"))
+                            )
                             post_submit_loading_timeout = post_submit_loading_timeout or bool(
                                 observed.get("post_submit_loading_timeout")
+                            )
+                            email_code_challenge_detected = email_code_challenge_detected or bool(
+                                observed.get("email_code_challenge_detected")
+                            )
+                            post_submit_challenge_type = (
+                                str(observed.get("challenge_type") or "") or post_submit_challenge_type
+                            )
+                            post_submit_masked_email_present = post_submit_masked_email_present or bool(
+                                observed.get("masked_email_present")
                             )
                             if observed["password_required_dialog_present"]:
                                 failure_reason = "password_input_failed"
@@ -537,11 +581,19 @@ def execute_login_form_credentials(
         post_submit_timeout_ms=timeout_ms,
         post_submit_interval_ms=observation_interval_ms,
         post_submit_loading_timeout=post_submit_loading_timeout,
+        email_code_challenge_detected=email_code_challenge_detected,
+        challenge_type=post_submit_challenge_type,
+        masked_email_present=post_submit_masked_email_present,
         save_password_prompt_detected=save_password_prompt_detected,
         save_password_prompt_dismissed=save_password_prompt_dismissed,
         save_password_prompt_dismiss_attempt_count=save_password_prompt_dismiss_attempt_count,
         save_password_prompt_dismiss_method=save_password_prompt_dismiss_method,
         post_dismiss_screen_type=post_dismiss_screen_type,
+        post_dismiss_final_observation_count=post_dismiss_final_observation_count,
+        post_dismiss_final_screens=post_dismiss_final_screens,
+        post_dismiss_final_wait_total_ms=post_dismiss_final_wait_total_ms,
+        post_dismiss_final_screen_type=post_dismiss_final_screen_type,
+        connected_detected_after_save_prompt_dismiss=connected_detected_after_save_prompt_dismiss,
         username_replaced=username_replaced,
         username_input_confirmed=username_input_confirmed,
         username_input_result=username_input_result,
@@ -1071,78 +1123,229 @@ def _click_target(target: Any) -> None:
 
 
 def _input_password_robust(d: Any, target: Any, value: str, warnings: list[str]) -> dict[str, Any]:
+    target = _refresh_password_target_if_needed(d, target, warnings)
+    target_kind = _password_target_kind(target)
     focused_before = _focus_password_target(d, target, warnings)
     _clear_target_text(target)
     time.sleep(0.1)
-    target_kind = _password_target_kind(target)
-    serial = _direct_device_serial(d)
-    fast_ime_id = str(getattr(config, "FAST_IME", "") or "").strip()
-    if serial and fast_ime_id and is_fast_ime_available(serial):
-        try:
-            command_ok, method_tag, switch_ok, broadcast_ok = _run_adb_keyboard_b64_input(
-                serial, value, fast_ime_id=fast_ime_id
-            )
-        except Exception:
-            command_ok, method_tag, switch_ok, broadcast_ok = False, "", False, False
-        if command_ok and broadcast_ok:
-            time.sleep(PASSWORD_CONFIRM_SETTLE_MS / 1000.0)
-            confirmation = _confirm_password_non_empty_after_input(
-                d,
-                target,
-                method=method_tag or "adb_keyboard_b64",
-                input_success=True,
-                focused_before=focused_before,
-                target_kind=target_kind,
-            )
-            return _password_input_result(
-                method_tag or "fast_ime",
-                focused_before,
-                True,
-                confirmation["non_empty_state"],
-                "",
-                target_kind=target_kind,
-                input_result=confirmation["password_input_result"],
-                confirm_method=confirmation["password_confirm_method"],
-            )
-        warnings.append("fast_ime_password_input_failed")
-        if not switch_ok:
-            warnings.append("fast_ime_switch_failed")
 
-    set_text = getattr(target, "set_text", None)
-    if callable(set_text):
-        try:
-            set_text(value)
-            time.sleep(PASSWORD_CONFIRM_SETTLE_MS / 1000.0)
-            confirmation = _confirm_password_non_empty_after_input(
-                d,
-                target,
-                method="set_text",
-                input_success=True,
-                focused_before=focused_before,
-                target_kind=target_kind,
-            )
-            return _password_input_result(
-                "set_text",
-                focused_before,
-                True,
-                confirmation["non_empty_state"],
-                "",
-                target_kind=target_kind,
-                input_result=confirmation["password_input_result"],
-                confirm_method=confirmation["password_confirm_method"],
-            )
-        except Exception:
-            warnings.append("set_text_password_input_failed")
+    warnings.append("password_input_method_attempted:set_text")
+    set_text_result = _attempt_password_set_text_injection(
+        d,
+        target,
+        value,
+        focused_before=focused_before,
+        target_kind=target_kind,
+    )
+    if _password_injection_confirmed(set_text_result):
+        warnings.extend(set_text_result.get("injection_trace") or [])
+        return set_text_result
+
+    if set_text_result.get("password_input_result") == "password_input_failed":
+        warnings.extend(set_text_result.get("injection_trace") or [])
+        return set_text_result
+
+    if set_text_result.get("password_input_result") == "password_input_empty":
+        warnings.append("password_input_set_text_empty")
+
+    _focus_password_target(d, target, warnings)
+    _clear_target_text(target)
+    time.sleep(0.1)
+    warnings.append("password_input_fallback_adb_keyboard_b64_attempted")
+    adb_result = _attempt_password_adb_keyboard_injection(
+        d,
+        target,
+        value,
+        focused_before=focused_before,
+        target_kind=target_kind,
+    )
+    if _password_injection_confirmed(adb_result):
+        warnings.append("password_input_confirmed_after_fallback")
+        warnings.extend(adb_result.get("injection_trace") or [])
+        return adb_result
+
+    warnings.append("password_input_fallback_failed")
+    failure_reason = "password_input_missing_or_not_accepted"
+    if adb_result.get("reason"):
+        failure_reason = str(adb_result["reason"])
+    elif set_text_result.get("reason"):
+        failure_reason = str(set_text_result["reason"])
     return _password_input_result(
-        "",
+        str(adb_result.get("password_input_method") or set_text_result.get("password_input_method") or ""),
         focused_before,
         False,
-        "unknown",
-        "password_input_failed",
+        str(adb_result.get("password_field_non_empty_confirmed") or "false"),
+        failure_reason,
         target_kind=target_kind,
-        input_result="password_input_failed",
-        confirm_method="not_attempted",
+        input_result="password_input_empty",
+        confirm_method=str(
+            adb_result.get("password_confirm_method")
+            or set_text_result.get("password_confirm_method")
+            or "not_attempted"
+        ),
+        injection_trace=["password_input_fallback_failed"],
     )
+
+
+def _refresh_password_target_if_needed(d: Any, target: Any, warnings: list[str]) -> Any:
+    if _password_target_kind(target) != "password_placeholder":
+        return target
+    edit_text = _find_password_edit_text_target(d)
+    if edit_text["target"] is not None:
+        warnings.append("password_target_refreshed_from_hierarchy_edittext")
+        return edit_text["target"]
+    if _tap_target_bounds(d, target):
+        time.sleep(0.1)
+        edit_text = _find_password_edit_text_target(d)
+        if edit_text["target"] is not None:
+            warnings.append("password_target_refreshed_after_placeholder_tap")
+            return edit_text["target"]
+    return target
+
+
+def _attempt_password_set_text_injection(
+    d: Any,
+    target: Any,
+    value: str,
+    *,
+    focused_before: bool | None,
+    target_kind: str,
+) -> dict[str, Any]:
+    set_text = getattr(target, "set_text", None)
+    if not callable(set_text):
+        return _password_input_result(
+            "set_text",
+            focused_before,
+            False,
+            "false",
+            "password_input_failed",
+            target_kind=target_kind,
+            input_result="password_input_failed",
+            confirm_method="set_text_unavailable",
+            injection_trace=["password_input_set_text_unavailable"],
+        )
+    try:
+        set_text(value)
+        time.sleep(PASSWORD_CONFIRM_SETTLE_MS / 1000.0)
+        confirmation = _confirm_password_non_empty_after_input(
+            d,
+            target,
+            method="set_text",
+            input_success=True,
+            focused_before=focused_before,
+            target_kind=target_kind,
+        )
+        return _password_input_result(
+            "set_text",
+            focused_before,
+            _password_injection_confirmed_from_parts(
+                confirmation["password_input_result"],
+                confirmation["non_empty_state"],
+            ),
+            confirmation["non_empty_state"],
+            "",
+            target_kind=target_kind,
+            input_result=confirmation["password_input_result"],
+            confirm_method=confirmation["password_confirm_method"],
+            injection_trace=[],
+        )
+    except Exception:
+        return _password_input_result(
+            "set_text",
+            focused_before,
+            False,
+            "false",
+            "password_input_failed",
+            target_kind=target_kind,
+            input_result="password_input_failed",
+            confirm_method="set_text_exception",
+            injection_trace=["set_text_password_input_failed"],
+        )
+
+
+def _attempt_password_adb_keyboard_injection(
+    d: Any,
+    target: Any,
+    value: str,
+    *,
+    focused_before: bool | None,
+    target_kind: str,
+) -> dict[str, Any]:
+    serial = _direct_device_serial(d)
+    fast_ime_id = str(getattr(config, "FAST_IME", "") or "").strip()
+    if not (serial and fast_ime_id and is_fast_ime_available(serial)):
+        return _password_input_result(
+            "",
+            focused_before,
+            False,
+            "false",
+            "password_input_missing_or_not_accepted",
+            target_kind=target_kind,
+            input_result="password_input_empty",
+            confirm_method="adb_keyboard_unavailable",
+            injection_trace=["fast_ime_unavailable"],
+        )
+    try:
+        command_ok, method_tag, switch_ok, broadcast_ok = _run_adb_keyboard_b64_input(
+            serial,
+            value,
+            fast_ime_id=fast_ime_id,
+        )
+    except Exception:
+        command_ok, method_tag, switch_ok, broadcast_ok = False, "", False, False
+    if not (command_ok and broadcast_ok):
+        trace = ["fast_ime_password_input_failed"]
+        if not switch_ok:
+            trace.append("fast_ime_switch_failed")
+        return _password_input_result(
+            method_tag or "adb_keyboard_b64",
+            focused_before,
+            False,
+            "false",
+            "password_input_missing_or_not_accepted",
+            target_kind=target_kind,
+            input_result="password_input_empty",
+            confirm_method="adb_keyboard_broadcast_failed" if command_ok else "adb_keyboard_command_failed",
+            injection_trace=trace,
+        )
+    time.sleep(PASSWORD_CONFIRM_SETTLE_MS / 1000.0)
+    confirmation = _confirm_password_non_empty_after_input(
+        d,
+        target,
+        method=method_tag or "adb_keyboard_b64",
+        input_success=True,
+        focused_before=focused_before,
+        target_kind=target_kind,
+    )
+    return _password_input_result(
+        method_tag or "adb_keyboard_b64",
+        focused_before,
+        _password_injection_confirmed_from_parts(
+            confirmation["password_input_result"],
+            confirmation["non_empty_state"],
+        ),
+        confirmation["non_empty_state"],
+        "",
+        target_kind=target_kind,
+        input_result=confirmation["password_input_result"],
+        confirm_method=confirmation["password_confirm_method"],
+        injection_trace=[],
+    )
+
+
+def _password_injection_confirmed(result: dict[str, Any]) -> bool:
+    return _password_injection_confirmed_from_parts(
+        str(result.get("password_input_result") or ""),
+        str(result.get("password_field_non_empty_confirmed") or ""),
+    )
+
+
+def _password_injection_confirmed_from_parts(input_result: str, non_empty_state: str) -> bool:
+    if input_result in {"password_input_confirmed", "password_input_assumed"}:
+        return True
+    if input_result in {"password_input_empty", "password_input_failed"}:
+        return False
+    return non_empty_state in {"true", "unknown_but_input_success"}
 
 
 def _focus_password_target(d: Any, target: Any, warnings: list[str]) -> bool | None:
@@ -1344,6 +1547,7 @@ def _password_input_result(
     target_kind: str = "",
     input_result: str = "",
     confirm_method: str = "",
+    injection_trace: list[str] | None = None,
 ) -> dict[str, Any]:
     return {
         "input_method_used": method,
@@ -1355,6 +1559,7 @@ def _password_input_result(
         "password_field_non_empty_confirmed": non_empty_state,
         "password_confirm_method": confirm_method,
         "reason": reason,
+        "injection_trace": list(injection_trace or []),
     }
 
 
@@ -1496,6 +1701,32 @@ def _classify_post_submit_hierarchy(hierarchy_xml: str) -> dict[str, Any]:
             "terminal": False,
             "screen_label": "google_password_manager_save_prompt",
         }
+    if signals.get("email_code_challenge_present") is True:
+        return {
+            "outcome": "verification_pending",
+            "screen_type": "email_code_challenge",
+            "reason": "email_verification_code_required",
+            "password_required_dialog_present": False,
+            "save_password_prompt_present": False,
+            "email_code_challenge_detected": True,
+            "challenge_type": "email",
+            "masked_email_present": bool(signals.get("masked_email_present")),
+            "terminal": True,
+            "screen_label": "email_code_challenge",
+        }
+    if probe.outcome == LoginProbeOutcome.UNSUPPORTED_POST_SUBMIT_CHALLENGE:
+        return {
+            "outcome": "unsupported_post_submit_challenge",
+            "screen_type": "unsupported_post_submit_challenge",
+            "reason": "unsupported_post_submit_challenge",
+            "password_required_dialog_present": False,
+            "save_password_prompt_present": False,
+            "email_code_challenge_detected": False,
+            "challenge_type": "unknown",
+            "human_review_required": True,
+            "terminal": True,
+            "screen_label": "unsupported_post_submit_challenge",
+        }
     if signals.get("transition_loading") is True:
         return {
             "outcome": "unknown",
@@ -1503,6 +1734,7 @@ def _classify_post_submit_hierarchy(hierarchy_xml: str) -> dict[str, Any]:
             "reason": "loading_transition",
             "password_required_dialog_present": False,
             "save_password_prompt_present": False,
+            "email_code_challenge_detected": False,
             "terminal": False,
             "screen_label": "loading",
         }
@@ -1527,7 +1759,14 @@ def _classify_post_submit_hierarchy(hierarchy_xml: str) -> dict[str, Any]:
             "screen_label": "connected_profile",
         }
     outcome = str(probe.outcome.value)
-    terminal = outcome in {"connected", "needs_2fa", "checkpoint", "login_failed"}
+    terminal = outcome in {
+        "connected",
+        "needs_2fa",
+        "checkpoint",
+        "verification_pending",
+        "unsupported_post_submit_challenge",
+        "login_failed",
+    }
     screen_label = outcome if outcome != "unknown" else str(signals.get("screen_type") or "unknown")
     return {
         "outcome": outcome,
@@ -1559,6 +1798,9 @@ def _observe_post_submit_settled(
         "reason": "post_submit_unknown_after_settling",
         "password_required_dialog_present": False,
         "save_password_prompt_present": False,
+        "email_code_challenge_detected": False,
+        "challenge_type": "",
+        "masked_email_present": False,
         "terminal": False,
         "screen_label": "unknown",
     }
@@ -1568,6 +1810,11 @@ def _observe_post_submit_settled(
     save_password_prompt_dismiss_attempt_count = 0
     dismiss_method = ""
     post_dismiss_screen_type = ""
+    post_dismiss_final_observation_count = 0
+    post_dismiss_final_screens: list[str] = []
+    post_dismiss_final_wait_total_ms = 0
+    post_dismiss_final_screen_type = ""
+    connected_detected_after_save_prompt_dismiss = False
     for index in range(observations):
         delay_ms = int(initial_wait_ms if index == 0 and initial_wait_ms > 0 else interval_ms)
         if delay_ms > 0:
@@ -1608,6 +1855,32 @@ def _observe_post_submit_settled(
             break
         if bool(observed.get("terminal")):
             break
+    if save_password_prompt_detected and str(last_observed.get("screen_label") or "") != "google_password_manager_save_prompt":
+        save_password_prompt_dismissed = str(last_observed.get("outcome") or "") != "save_password_prompt_blocking"
+    if save_password_prompt_dismissed and screens:
+        for label in reversed(screens):
+            if label != "google_password_manager_save_prompt":
+                post_dismiss_screen_type = label
+                break
+    if save_password_prompt_dismissed and post_dismiss_screen_type in {"", "loading", "unknown"}:
+        final_observed = _observe_post_dismiss_final_settled(
+            d,
+            timings=timings,
+            timer=timer,
+            sleeper=sleeper,
+            interval_ms=POST_DISMISS_FINAL_INTERVAL_MS,
+            max_observations=POST_DISMISS_FINAL_OBSERVATIONS,
+        )
+        post_dismiss_final_observation_count = int(final_observed.get("observation_count") or 0)
+        post_dismiss_final_screens = list(final_observed.get("screens") or [])
+        post_dismiss_final_wait_total_ms = int(final_observed.get("wait_total_ms") or 0)
+        post_dismiss_final_screen_type = str(final_observed.get("final_screen_type") or "")
+        if post_dismiss_final_screens:
+            screens.extend(post_dismiss_final_screens)
+            last_observed = dict(final_observed.get("observed") or last_observed)
+            outcome = str(last_observed.get("outcome") or "unknown")
+            connected_detected_after_save_prompt_dismiss = outcome == "connected"
+            post_dismiss_screen_type = post_dismiss_final_screen_type or post_dismiss_screen_type
     outcome = str(last_observed.get("outcome") or "unknown")
     if outcome == "logged_out":
         last_observed = {
@@ -1617,28 +1890,32 @@ def _observe_post_submit_settled(
         }
         warnings.append("post_submit_logged_out_after_settling")
     elif outcome == "unknown":
-        if screens and all(screen == "loading" for screen in screens):
+        final_loading = bool(
+            post_dismiss_final_observation_count
+            and post_dismiss_final_screens
+            and all(screen == "loading" for screen in post_dismiss_final_screens)
+        )
+        if final_loading or (not post_dismiss_final_observation_count and screens and all(screen == "loading" for screen in screens)):
             last_observed = {
                 **last_observed,
                 "outcome": "login_submit_still_loading",
                 "screen_type": "loading",
+                "screen_label": "loading",
                 "reason": "post_submit_loading_timeout",
                 "terminal": True,
             }
             warnings.append("post_submit_loading_timeout")
         else:
+            reason = (
+                "post_submit_unknown_after_final_settling"
+                if post_dismiss_final_observation_count
+                else "post_submit_unknown_after_settling"
+            )
             last_observed = {
                 **last_observed,
-                "reason": "post_submit_unknown_after_settling",
+                "reason": reason,
             }
-            warnings.append("post_submit_unknown_after_settling")
-    if save_password_prompt_detected and str(last_observed.get("screen_label") or "") != "google_password_manager_save_prompt":
-        save_password_prompt_dismissed = str(last_observed.get("outcome") or "") != "save_password_prompt_blocking"
-    if save_password_prompt_dismissed and screens:
-        for label in reversed(screens):
-            if label != "google_password_manager_save_prompt":
-                post_dismiss_screen_type = label
-                break
+            warnings.append(reason)
     timings["post_submit_wait_total_ms"] += wait_total_ms
     timings["post_submit_observation_count"] += len(screens)
     return {
@@ -1648,11 +1925,60 @@ def _observe_post_submit_settled(
         "screens": screens,
         "final_terminal_screen": screens[-1] if screens else "",
         "post_submit_loading_timeout": str(last_observed.get("reason") or "") == "post_submit_loading_timeout",
+        "email_code_challenge_detected": bool(last_observed.get("email_code_challenge_detected")),
+        "challenge_type": str(last_observed.get("challenge_type") or ""),
+        "masked_email_present": bool(last_observed.get("masked_email_present")),
         "save_password_prompt_detected": save_password_prompt_detected,
         "save_password_prompt_dismissed": save_password_prompt_dismissed,
         "save_password_prompt_dismiss_attempt_count": save_password_prompt_dismiss_attempt_count,
         "dismiss_method": dismiss_method if save_password_prompt_detected else "",
         "post_dismiss_screen_type": post_dismiss_screen_type,
+        "post_dismiss_final_observation_count": post_dismiss_final_observation_count,
+        "post_dismiss_final_screens": post_dismiss_final_screens,
+        "post_dismiss_final_wait_total_ms": post_dismiss_final_wait_total_ms,
+        "post_dismiss_final_screen_type": post_dismiss_final_screen_type,
+        "connected_detected_after_save_prompt_dismiss": connected_detected_after_save_prompt_dismiss,
+    }
+
+
+def _observe_post_dismiss_final_settled(
+    d: Any,
+    *,
+    timings: dict[str, int],
+    timer: Timer,
+    sleeper: Sleeper,
+    interval_ms: int,
+    max_observations: int,
+) -> dict[str, Any]:
+    observations = max(1, min(int(max_observations or 1), MAX_POST_SUBMIT_OBSERVATIONS))
+    interval = _clamp_ms(interval_ms, MAX_POST_SUBMIT_INTERVAL_MS)
+    screens: list[str] = []
+    wait_total_ms = 0
+    last_observed: dict[str, Any] = {
+        "outcome": "unknown",
+        "screen_type": "unknown",
+        "screen_label": "unknown",
+        "reason": "post_submit_unknown_after_final_settling",
+        "terminal": False,
+    }
+    for _index in range(observations):
+        if interval > 0:
+            sleeper(interval / 1000.0)
+            wait_total_ms += interval
+        start = timer()
+        hierarchy_xml = _dump_hierarchy_once(d)
+        timings["post_submit_dump_ms"] += _elapsed_ms(start, timer())
+        last_observed = _classify_post_submit_hierarchy(hierarchy_xml)
+        label = str(last_observed.get("screen_label") or last_observed.get("screen_type") or "unknown")
+        screens.append(label)
+        if last_observed.get("password_required_dialog_present") is True or bool(last_observed.get("terminal")):
+            break
+    return {
+        "observed": last_observed,
+        "observation_count": len(screens),
+        "screens": screens,
+        "wait_total_ms": wait_total_ms,
+        "final_screen_type": screens[-1] if screens else "",
     }
 
 
@@ -1821,11 +2147,19 @@ def _result(
     post_submit_timeout_ms: int = 0,
     post_submit_interval_ms: int = 0,
     post_submit_loading_timeout: bool = False,
+    email_code_challenge_detected: bool = False,
+    challenge_type: str = "",
+    masked_email_present: bool = False,
     save_password_prompt_detected: bool = False,
     save_password_prompt_dismissed: bool = False,
     save_password_prompt_dismiss_attempt_count: int = 0,
     save_password_prompt_dismiss_method: str = "",
     post_dismiss_screen_type: str = "",
+    post_dismiss_final_observation_count: int = 0,
+    post_dismiss_final_screens: list[str] | None = None,
+    post_dismiss_final_wait_total_ms: int = 0,
+    post_dismiss_final_screen_type: str = "",
+    connected_detected_after_save_prompt_dismiss: bool = False,
     username_replaced: bool = False,
     username_input_confirmed: str = "unknown",
     username_input_result: str = "",
@@ -1869,11 +2203,19 @@ def _result(
                 "post_submit_timeout_ms": post_submit_timeout_ms,
                 "post_submit_interval_ms": post_submit_interval_ms,
                 "post_submit_loading_timeout": post_submit_loading_timeout,
+                "email_code_challenge_detected": email_code_challenge_detected,
+                "challenge_type": challenge_type,
+                "masked_email_present": masked_email_present,
                 "save_password_prompt_detected": save_password_prompt_detected,
                 "save_password_prompt_dismissed": save_password_prompt_dismissed,
                 "save_password_prompt_dismiss_attempt_count": save_password_prompt_dismiss_attempt_count,
                 "dismiss_method": save_password_prompt_dismiss_method,
                 "post_dismiss_screen_type": post_dismiss_screen_type,
+                "post_dismiss_final_observation_count": post_dismiss_final_observation_count,
+                "post_dismiss_final_screens": list(post_dismiss_final_screens or []),
+                "post_dismiss_final_wait_total_ms": post_dismiss_final_wait_total_ms,
+                "post_dismiss_final_screen_type": post_dismiss_final_screen_type,
+                "connected_detected_after_save_prompt_dismiss": connected_detected_after_save_prompt_dismiss,
                 "username_replaced": username_replaced,
                 "username_input_confirmed": username_input_confirmed,
                 "username_input_result": username_input_result,

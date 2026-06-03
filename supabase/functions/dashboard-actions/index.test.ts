@@ -18,6 +18,7 @@ const NON_BLOCKING_REQUIRED_ACTION_ID = "10000000-0000-4000-8000-000000000004";
 const OTHER_CLIENT_ACTION_ID = "10000000-0000-4000-8000-000000000005";
 const CLIENT_RESOLVABLE_ACTION_ID = "10000000-0000-4000-8000-000000000006";
 const TERMINAL_ACTION_ID = "10000000-0000-4000-8000-000000000007";
+const EMAIL_VERIFICATION_ACTION_ID = "10000000-0000-4000-8000-000000000008";
 
 type FetchCall = { url: string; body: Record<string, unknown> | null };
 type Row = Record<string, unknown>;
@@ -155,6 +156,24 @@ const FIXTURE_ROWS: Row[] = [
     created_at: "2026-05-25T14:00:00Z",
     updated_at: "2026-05-25T14:05:00Z",
   },
+  {
+    id: EMAIL_VERIFICATION_ACTION_ID,
+    client_id: CLIENT_ID,
+    account_id: ACCOUNT_ID,
+    action_type: "enter_email_verification_code",
+    status: "pending",
+    severity: "warning",
+    audience: "client",
+    requires_client_action: true,
+    blocking_campaign: true,
+    title: "Email verification code required",
+    safe_client_message: "Instagram is waiting for the email verification code.",
+    action_label: "Enter code",
+    action_deep_link: "/instagram-dashboard/credentials-actions",
+    metadata: { safe: "ignored" },
+    created_at: "2026-05-25T13:00:00Z",
+    updated_at: "2026-05-25T13:01:00Z",
+  },
 ];
 
 function withEnv(fn: () => Promise<void> | void) {
@@ -287,6 +306,18 @@ function makeFetch(options: {
     if (href.includes("/rest/v1/rpc/client_can_manage_instagram_account")) {
       return json(options.clientAccess ?? true);
     }
+    if (href.includes("/rest/v1/rpc/submit_account_verification_code")) {
+      const body = bodyOf(init) ?? {};
+      if (body.p_verification_code === FAKE_SECRET) {
+        return json({ message: "verification_code_invalid" }, 400);
+      }
+      return json({
+        ok: true,
+        action_id: body.p_action_id,
+        account_id: body.p_account_id,
+        status: "code_submitted",
+      });
+    }
     if (href.includes("/rest/v1/rpc/transition_account_dashboard_action")) {
       if (options.transitionStatus && options.transitionStatus >= 400) {
         return json({ message: options.transitionError ?? "invalid_dashboard_action_transition" }, options.transitionStatus);
@@ -377,10 +408,10 @@ Deno.test("client count filtre correctement ses actions", withEnv(async () => {
     log: () => {},
   });
   const body = await res.json();
-  if (res.status !== 200 || body.pending_count !== 4 || body.blocking_count !== 1 || body.client_required_count !== 2) {
+  if (res.status !== 200 || body.pending_count !== 5 || body.blocking_count !== 2 || body.client_required_count !== 3) {
     throw new Error(`count client inattendu: ${JSON.stringify(body)}`);
   }
-  if (body.counts_by_severity.info !== 2 || body.counts_by_severity.warning !== 1 || body.counts_by_severity.error !== 1) {
+  if (body.counts_by_severity.info !== 2 || body.counts_by_severity.warning !== 2 || body.counts_by_severity.error !== 1) {
     throw new Error("counts_by_severity client incorrect");
   }
 }));
@@ -418,7 +449,7 @@ Deno.test("list filtre account_id status audience", withEnv(async () => {
     log: () => {},
   });
   const body = await res.json();
-  if (res.status !== 200 || body.actions.length !== 3) throw new Error("filtres list incorrects");
+  if (res.status !== 200 || body.actions.length !== 4) throw new Error("filtres list incorrects");
   if (!body.actions.every((row: Record<string, unknown>) => row.status === "pending" && row.audience === "client")) {
     throw new Error("rows non filtrees");
   }
@@ -637,5 +668,41 @@ Deno.test("mutation terminale et erreur RPC retournent transition_not_allowed sa
   }
   if (rpcError.status !== 409 || rpcErrorBody.error !== "transition_not_allowed") {
     throw new Error("erreur RPC transition pas mappee");
+  }
+}));
+
+Deno.test("submit_verification_code happy path sans fuite", withEnv(async () => {
+  const res = await handleRequest(request({
+    action: "submit_verification_code",
+    action_id: EMAIL_VERIFICATION_ACTION_ID,
+    account_id: ACCOUNT_ID,
+    verification_code: "123456",
+  }), {
+    fetch: makeFetch(),
+    log: () => {},
+  });
+  const body = await res.json();
+  const text = JSON.stringify(body);
+  if (res.status !== 200 || body.ok !== true || body.status !== "code_submitted") {
+    throw new Error("submit_verification_code happy path echoue");
+  }
+  for (const forbidden of ["123456", "verification_code", "secret_ref", "supabase_vault://"]) {
+    if (text.includes(forbidden)) throw new Error(`submit response expose ${forbidden}`);
+  }
+}));
+
+Deno.test("submit_verification_code rejette ownership false", withEnv(async () => {
+  const res = await handleRequest(request({
+    action: "submit_verification_code",
+    action_id: EMAIL_VERIFICATION_ACTION_ID,
+    account_id: ACCOUNT_ID,
+    verification_code: "123456",
+  }), {
+    fetch: makeFetch({ clientAccess: false }),
+    log: () => {},
+  });
+  const body = await res.json();
+  if (res.status !== 403 || body.error !== "account_not_allowed") {
+    throw new Error("submit_verification_code ownership false pas rejete");
   }
 }));

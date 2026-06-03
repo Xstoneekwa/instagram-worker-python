@@ -40,6 +40,38 @@ class InstagramLoginUiProbeTest(unittest.TestCase):
 
         self.assertEqual(outcome, LoginProbeOutcome.NEEDS_2FA)
 
+    def test_detects_email_code_challenge_as_verification_pending(self) -> None:
+        xml = (
+            '<node text="Check your email" />'
+            '<node text="Enter the code we sent to m*******e@hotmail.com" />'
+            '<node class="android.widget.EditText" text="Enter code" editable="true" />'
+            '<node text="Get a new code" />'
+            '<node text="Continue" />'
+            '<node text="Try another way" />'
+        )
+
+        result = probe_login_ui_from_hierarchy(xml, stage="post_submit")
+        signals = extract_login_screen_signals_from_hierarchy(xml)
+
+        self.assertEqual(result.outcome, LoginProbeOutcome.VERIFICATION_PENDING)
+        self.assertEqual(result.reason, "email_verification_code_required")
+        self.assertEqual(result.metadata["screen_type"], "email_code_challenge")
+        self.assertEqual(result.metadata["challenge_type"], "email")
+        self.assertTrue(result.metadata["masked_email_present"])
+        self.assertEqual(signals["screen_type"], "email_code_challenge")
+        self.assertTrue(signals["email_code_challenge_present"])
+
+    def test_detects_unsupported_post_submit_challenge(self) -> None:
+        xml = (
+            '<node text="Was this you?" />'
+            '<node text="Try another way" />'
+            '<node text="Approve this login" />'
+        )
+        result = probe_login_ui_from_hierarchy(xml)
+        self.assertEqual(result.outcome, LoginProbeOutcome.UNSUPPORTED_POST_SUBMIT_CHALLENGE)
+        self.assertEqual(result.reason, "unsupported_post_submit_challenge")
+        self.assertTrue(result.metadata["human_review_required"])
+
     def test_detects_checkpoint(self) -> None:
         xml = '<node text="Help us confirm it’s you" /><node text="Verify your account" />'
 
@@ -395,6 +427,48 @@ class InstagramLoginUiProbeTest(unittest.TestCase):
         self.assertTrue(signals["ready_for_credentials_flow"])
         self.assertTrue(signals["forgot_password_present"])
         self.assertTrue(signals["meta_present"])
+
+    def test_login_form_empty_variant_a_without_instagram_logo(self) -> None:
+        """Samsung clone layout: fields high on screen, no Instagram branding node."""
+        xml = (
+            '<node text="English (US)" />'
+            '<node class="android.widget.EditText" text="Username, email or mobile number" editable="true" />'
+            '<node class="android.widget.EditText" text="Password" editable="true" />'
+            '<node text="Log in" clickable="true" />'
+            '<node text="Forgot password?" />'
+            '<node text="Create new account" clickable="true" />'
+            '<node text="Meta" />'
+        )
+
+        signals = extract_login_screen_signals_from_hierarchy(xml)
+
+        self.assertEqual(signals["screen_type"], "login_form_empty")
+        self.assertTrue(signals["has_username_field"])
+        self.assertTrue(signals["has_password_field"])
+        self.assertTrue(signals["has_login_button"])
+        self.assertTrue(signals["has_create_new_account_button"])
+        self.assertTrue(signals["ready_for_credentials_flow"])
+        self.assertFalse(signals["active_account_home"])
+
+    def test_login_form_empty_variant_b_with_instagram_logo(self) -> None:
+        """Primary-style layout: Instagram logo present; logo is not required for classification."""
+        xml = (
+            '<node text="English (US)" />'
+            '<node content-desc="Instagram" />'
+            '<node text="Instagram" />'
+            '<node class="android.widget.EditText" text="Username, email or mobile number" editable="true" />'
+            '<node class="android.widget.EditText" text="Password" editable="true" />'
+            '<node text="Log in" clickable="true" />'
+            '<node text="Forgot password?" />'
+            '<node text="Create new account" clickable="true" />'
+            '<node text="Meta" />'
+        )
+
+        signals = extract_login_screen_signals_from_hierarchy(xml)
+
+        self.assertEqual(signals["screen_type"], "login_form_empty")
+        self.assertTrue(signals["ready_for_credentials_flow"])
+        self.assertFalse(signals["continue_password_only"])
 
     def test_extracts_login_form_prefilled_username_signals(self) -> None:
         xml = (
