@@ -9,6 +9,12 @@
  * automation.
  */
 
+import {
+  handleLiveViewAction,
+  LiveViewActionError,
+  validateLiveViewPayload,
+} from "./live_view.ts";
+
 type AdminDashboardAction =
   | "health"
   | "manage_overview"
@@ -100,7 +106,12 @@ type ErrorCode =
   | "unsupported_action"
   | "conflict"
   | "rpc_failed"
-  | "internal_error";
+  | "internal_error"
+  | "assignment_not_found"
+  | "device_unavailable"
+  | "session_not_found"
+  | "session_not_active"
+  | "livekit_not_configured";
 
 const MAX_LIMIT = 200;
 const DEFAULT_LIMIT = 100;
@@ -245,7 +256,7 @@ function corsHeaders(req: Request): HeadersInit {
   return {
     ...(allowOrigin ? { "access-control-allow-origin": allowOrigin } : {}),
     "access-control-allow-methods": "POST, OPTIONS",
-    "access-control-allow-headers": "authorization, content-type, x-request-id",
+    "access-control-allow-headers": "authorization, apikey, content-type, x-request-id",
     "vary": "origin",
   };
 }
@@ -1154,13 +1165,74 @@ export async function handleRequest(
     );
   }
 
+  const rid = requestId(req, deps);
+  const rawAction = typeof rawPayload.action === "string"
+    ? rawPayload.action.trim()
+    : "";
+  if (rawAction.startsWith("live_view_")) {
+    const liveParsed = validateLiveViewPayload(rawPayload);
+    if (!liveParsed.ok) {
+      return errorResponse(
+        liveParsed.status,
+        liveParsed.code,
+        liveParsed.error,
+        headers,
+      );
+    }
+    try {
+      const rest = createServiceRoleRestClient(deps);
+      const result = await handleLiveViewAction(liveParsed.payload, rest);
+      const body = result.body as Record<string, unknown>;
+      const errorCode = typeof body.error === "object" && body.error
+        ? String((body.error as Record<string, unknown>).code || "")
+        : "";
+      const status = body.ok === false && errorCode === "livekit_not_configured"
+        ? 503
+        : 200;
+      logEvent(deps, "admin_dashboard_live_view_succeeded", {
+        request_id: rid,
+        action: liveParsed.payload.action,
+        status,
+      });
+      return jsonResponse(status, {
+        action: liveParsed.payload.action,
+        ...body,
+      }, headers);
+    } catch (error) {
+      const actionError = error instanceof LiveViewActionError
+        ? error
+        : new LiveViewActionError(500, "internal_error", "live_view_failed");
+      logEvent(deps, "admin_dashboard_live_view_failed", {
+        request_id: rid,
+        action: liveParsed.payload.action,
+        status: actionError.status,
+        error: actionError.message,
+        code: actionError.code,
+      });
+      if (actionError.code === "livekit_not_configured") {
+        return jsonResponse(503, {
+          ok: false,
+          error: {
+            code: "livekit_not_configured",
+            message: actionError.message,
+          },
+        }, headers);
+      }
+      return errorResponse(
+        actionError.status,
+        actionError.code as ErrorCode,
+        actionError.message,
+        headers,
+      );
+    }
+  }
+
   const parsed = validatePayload(rawPayload);
   if (!parsed.ok) {
     return errorResponse(parsed.status, parsed.code, parsed.error, headers);
   }
 
   const payload = parsed.payload;
-  const rid = requestId(req, deps);
   if (payload.action === "health") {
     logEvent(deps, "admin_dashboard_health", {
       request_id: rid,
