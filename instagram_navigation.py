@@ -2379,6 +2379,146 @@ def _search_edittext_text_strip(ed) -> str:
         return ""
 
 
+def _follow_ct_current_query_text(d: u2.Device) -> str:
+    try:
+        ed = d(className="android.widget.EditText")
+        if not ed.wait(timeout=0.05):
+            return ""
+        return _search_edittext_text_strip(ed)
+    except Exception:
+        return ""
+
+
+def _follow_ct_search_keyboard_visible(d: u2.Device) -> bool:
+    try:
+        ed = d(className="android.widget.EditText")
+        if ed.wait(timeout=0.05) and bool((ed.info or {}).get("focused")):
+            return True
+    except Exception:
+        pass
+    try:
+        if d(textContains="ADB Keyboard").wait(timeout=0.03):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _follow_ct_search_rows_count(d: u2.Device) -> int:
+    try:
+        return len(_collect_raw_row_search_elements(d))
+    except Exception:
+        return 0
+
+
+def _follow_ct_dump_hierarchy_for_refresh(d: u2.Device) -> None:
+    try:
+        try:
+            d.dump_hierarchy(compressed=False)
+        except TypeError:
+            d.dump_hierarchy()
+        _bump_xml_fetch()
+    except Exception:
+        pass
+
+
+def _recover_follow_ct_blank_search_results_once(
+    d: u2.Device,
+    username: str,
+    *,
+    scan_once: Callable[[], object | None],
+) -> object | None:
+    query_text = _follow_ct_current_query_text(d)
+    query_matches = _normalize_handle(query_text) == _normalize_handle(username)
+    rows_before = _follow_ct_search_rows_count(d)
+    keyboard_visible = _follow_ct_search_keyboard_visible(d)
+    recovery_method = "none"
+    final_reason = "search_results_blank_after_query"
+
+    if not query_matches:
+        log(
+            "warning",
+            "follow_ct_search_results_recovery_skipped",
+            target_username=username,
+            query_text_detected=query_text,
+            keyboard_visible=bool(keyboard_visible),
+            recovery_attempted=False,
+            recovery_method=recovery_method,
+            rows_before_recovery=rows_before,
+            rows_after_recovery=rows_before,
+            final_reason="search_query_mismatch_no_recovery",
+        )
+        return None
+
+    if rows_before > 0:
+        log(
+            "warning",
+            "follow_ct_search_results_recovery_skipped",
+            target_username=username,
+            query_text_detected=query_text,
+            keyboard_visible=bool(keyboard_visible),
+            recovery_attempted=False,
+            recovery_method=recovery_method,
+            rows_before_recovery=rows_before,
+            rows_after_recovery=rows_before,
+            final_reason="search_results_ambiguous_no_exact_match",
+        )
+        return None
+
+    log(
+        "warning",
+        "follow_ct_search_results_blank_after_query",
+        target_username=username,
+        query_text_detected=query_text,
+        keyboard_visible=bool(keyboard_visible),
+        recovery_attempted=False,
+        recovery_method=recovery_method,
+        rows_before_recovery=rows_before,
+        rows_after_recovery=rows_before,
+        final_reason=final_reason,
+    )
+
+    methods: list[str] = []
+    try:
+        d.press("enter")
+        methods.append("press_enter")
+    except Exception:
+        methods.append("press_enter_failed")
+    time.sleep(0.18)
+
+    if keyboard_visible or _follow_ct_search_keyboard_visible(d):
+        try:
+            d.press("back")
+            methods.append("hide_keyboard_back")
+        except Exception:
+            methods.append("hide_keyboard_back_failed")
+        time.sleep(0.18)
+
+    recovery_method = "+".join(methods) if methods else "none"
+    time.sleep(0.25)
+    _follow_ct_dump_hierarchy_for_refresh(d)
+    rows_after = _follow_ct_search_rows_count(d)
+    recovered = scan_once()
+    if recovered is not None:
+        final_reason = "search_results_recovered_after_keyboard_hide"
+    else:
+        final_reason = "search_results_still_blank_after_recovery"
+
+    log(
+        "warning" if recovered is None else "info",
+        "follow_ct_search_results_recovery_completed",
+        target_username=username,
+        query_text_detected=query_text,
+        keyboard_visible=bool(keyboard_visible),
+        recovery_attempted=True,
+        recovery_method=recovery_method,
+        rows_before_recovery=rows_before,
+        rows_after_recovery=rows_after,
+        final_reason=final_reason,
+    )
+    return recovered
+
+
 def _current_foreground_package(d: u2.Device) -> str:
     try:
         cur = d.app_current()
@@ -4228,13 +4368,37 @@ def tap_account_result(
 
     _perf["row_detect_ms"] = (time.perf_counter() - t_detect) * 1000
     if el is None:
-        _perf["row_tap_command_ms"] = 0.0
-        _perf["post_tap_settle_ms"] = 0.0
-        _perf["profile_transition_wait_ms"] = 0.0
-        _log_row_evaluation_summary(found=False, selected_path="not_found")
-        _dump_no_real_account_row_debug(d, username)
-        log("error", "tap_account_no_element", username=username)
-        return False
+        if follow_ct_active:
+            el = _recover_follow_ct_blank_search_results_once(
+                d,
+                username,
+                scan_once=scan_once,
+            )
+            if el is not None:
+                fast_accept_used = False
+                hot_el_found = False
+                _log_first_result_seen(el, via="follow_ct_blank_search_recovery")
+                _log_exact_match_ready(el, via="follow_ct_blank_search_recovery")
+                _perf["row_detect_ms"] = (time.perf_counter() - t_detect) * 1000
+        if el is not None:
+            pass
+        else:
+            _perf["row_tap_command_ms"] = 0.0
+            _perf["post_tap_settle_ms"] = 0.0
+            _perf["profile_transition_wait_ms"] = 0.0
+            _log_row_evaluation_summary(found=False, selected_path="not_found")
+            _dump_no_real_account_row_debug(d, username)
+            log(
+                "error",
+                "tap_account_no_element",
+                username=username,
+                final_reason=(
+                    "search_results_still_blank_after_recovery"
+                    if follow_ct_active
+                    else "not_found"
+                ),
+            )
+            return False
     _perf["row_tap_command_ms"] = 0.0
     _perf["post_tap_settle_ms"] = 0.0
     _perf["profile_transition_wait_ms"] = 0.0
@@ -11545,6 +11709,21 @@ def _followers_profile_tabs_visible(d: u2.Device) -> bool:
 
 
 _POST_FOLLOW_PROFILE_TABS_GRID_MARGIN_PX = 12
+_POST_FOLLOW_LIKE_SUGGESTED_MAX_STABILIZATION_SCROLLS = 2
+_POST_FOLLOW_LIKE_HIGHLIGHTS_MAX_STABILIZATION_SCROLLS = 1
+_POST_FOLLOW_LIKE_TAP_SAFE_MAX_Y_RATIO = 0.80
+_POST_FOLLOW_LIKE_TAP_SAFE_MAX_BOTTOM_Y_RATIO = 0.88
+_POST_FOLLOW_LIKE_GRID_TOO_LOW_TOP_RATIO = 0.74
+_POST_FOLLOW_LIKE_HIGHLIGHTS_BLOCKING_Y_MIN_RATIO = 0.68
+_POST_FOLLOW_LIKE_MIN_CELL_HEIGHT_WIDTH_RATIO = 0.50
+_POST_FOLLOW_LIKE_TOP_LEFT_MAX_LEFT_X_RATIO = 0.40
+_POST_FOLLOW_LIKE_TOP_LEFT_MIN_TOP_RATIO = 0.20
+_POST_FOLLOW_LIKE_TOP_LEFT_MAX_TOP_RATIO = 0.58
+_POST_FOLLOW_LIKE_OVERSCROLL_MAX_TOP_RATIO = 0.16
+_POST_FOLLOW_LIKE_TOP_LEFT_XML_PROBE_MAX_ATTEMPTS = 2
+_POST_FOLLOW_LIKE_TOP_LEFT_XML_PROBE_RESERVED_S = 2.8
+_POST_FOLLOW_LIKE_TOP_LEFT_XML_SETTLE_S = 0.06
+_POST_FOLLOW_LIKE_TOP_LEFT_XML_RETRY_SETTLE_S = 0.05
 
 
 def _followers_profile_tabs_bottom_y_px(
@@ -15244,58 +15423,1067 @@ def _post_follow_likes_overlay_hints_suggest_block(ui_hints: dict[str, Any]) -> 
     )
 
 
+def _post_follow_likes_collect_grid_thumbnail_cells(
+    d: u2.Device,
+    *,
+    y_min_px: int,
+    ww: int,
+    wh: int,
+    relaxed_probe: bool = False,
+) -> list[dict[str, int]]:
+    """Collect post-grid thumbnail bounds below profile tabs (left column first)."""
+    cell_w = max(24, int(ww) // 3)
+    min_w_ratio = 0.35 if relaxed_probe else 0.45
+    min_h_ratio = 0.30 if relaxed_probe else 0.35
+    max_scan = 96 if relaxed_probe else 72
+    cells: list[dict[str, int]] = []
+    class_names = (
+        ("android.widget.ImageView", "android.widget.ImageButton")
+        if relaxed_probe
+        else ("android.widget.ImageView",)
+    )
+    left_limit = int(ww * float(_POST_FOLLOW_LIKE_TOP_LEFT_MAX_LEFT_X_RATIO))
+    try:
+        for class_name in class_names:
+            for el in d(className=class_name).all()[:max_scan]:
+                try:
+                    b = el.info.get("bounds") or {}
+                    left, top, right, bottom = (
+                        int(b.get("left", 0)),
+                        int(b.get("top", 0)),
+                        int(b.get("right", 0)),
+                        int(b.get("bottom", 0)),
+                    )
+                except Exception:
+                    continue
+                cy = (top + bottom) // 2
+                if cy < int(y_min_px):
+                    continue
+                w = right - left
+                h = bottom - top
+                if w < int(cell_w * min_w_ratio) or w > int(cell_w * 1.9):
+                    continue
+                if h < int(cell_w * min_h_ratio):
+                    continue
+                if bottom > int(wh * 0.98):
+                    continue
+                cells.append(
+                    {
+                        "left": left,
+                        "top": top,
+                        "right": right,
+                        "bottom": bottom,
+                        "center_x": (left + right) // 2,
+                        "center_y": cy,
+                    }
+                )
+                if relaxed_probe and left < left_limit:
+                    break
+    except Exception:
+        cells = []
+    cells.sort(key=lambda c: (c["top"], c["left"]))
+    return cells
+
+
+def _post_follow_likes_safe_cell_sources() -> set[str]:
+    return {
+        "xml_thumbnail_below_tabs",
+        "xml_thumbnail_top_left",
+        "xml_thumbnail_top_left_relaxed",
+        "vision_thumbnail_top_left",
+    }
+
+
 def _post_follow_likes_xml_grid_thumbnails_below_tabs(
     d: u2.Device,
     *,
     y_min_px: int,
     ww: int,
     wh: int,
+    relaxed_probe: bool = False,
 ) -> dict[str, Any]:
     """Fast XML scan for post-grid thumbnails strictly below profile tabs."""
-    cell_w = max(24, int(ww) // 3)
-    cells: list[dict[str, int]] = []
-    try:
-        for el in d(className="android.widget.ImageView").all()[:72]:
-            try:
-                b = el.info.get("bounds") or {}
-                left, top, right, bottom = (
-                    int(b.get("left", 0)),
-                    int(b.get("top", 0)),
-                    int(b.get("right", 0)),
-                    int(b.get("bottom", 0)),
-                )
-            except Exception:
-                continue
-            cy = (top + bottom) // 2
-            if cy < int(y_min_px):
-                continue
-            w = right - left
-            h = bottom - top
-            if w < int(cell_w * 0.45) or w > int(cell_w * 1.9):
-                continue
-            if h < int(cell_w * 0.35):
-                continue
-            if bottom > int(wh * 0.98):
-                continue
-            cells.append(
-                {
-                    "left": left,
-                    "top": top,
-                    "right": right,
-                    "bottom": bottom,
-                    "center_x": (left + right) // 2,
-                    "center_y": cy,
-                }
-            )
-    except Exception:
-        cells = []
-    cells.sort(key=lambda c: (c["top"], c["left"]))
+    cells = _post_follow_likes_collect_grid_thumbnail_cells(
+        d,
+        y_min_px=int(y_min_px),
+        ww=int(ww),
+        wh=int(wh),
+        relaxed_probe=bool(relaxed_probe),
+    )
     reliable = len(cells) >= 1
     return {
         "reliable": reliable,
         "cell_count": len(cells),
         "cells": cells[:3],
         "y_min_px": int(y_min_px),
+    }
+
+
+def _post_follow_likes_is_top_left_grid_cell(
+    cell: dict[str, Any] | None,
+    *,
+    ww: int,
+) -> bool:
+    if not isinstance(cell, dict):
+        return False
+    try:
+        left = int(cell.get("left") or 0)
+        cx = int(cell.get("center_x") or 0)
+    except (TypeError, ValueError):
+        return False
+    left_limit = int(ww * float(_POST_FOLLOW_LIKE_TOP_LEFT_MAX_LEFT_X_RATIO))
+    return left < left_limit or cx < left_limit
+
+
+def _post_follow_likes_evaluate_top_left_post_target(
+    cell: dict[str, Any] | None,
+    *,
+    reason: str,
+    ww: int,
+    wh: int,
+    y_min_px: int | None = None,
+) -> dict[str, Any]:
+    """Assess whether the top-left / most-recent post cell is visible and tap-safe."""
+    out: dict[str, Any] = {
+        "top_left_post_visible": False,
+        "top_left_post_tap_safe": False,
+        "overscroll_risk": False,
+        "grid_exposure": "unstable",
+        "failure_reason": "top_left_post_not_visible_after_scroll",
+        "is_top_left_target": False,
+    }
+    if not isinstance(cell, dict):
+        out["failure_reason"] = "top_left_post_not_visible_after_scroll"
+        return out
+    src = str(reason or "").strip().lower()
+    if src == "profile_tabs_grid_cell_estimate":
+        out["failure_reason"] = "post_cell_estimate_not_safe_to_tap"
+        return out
+    if src not in _post_follow_likes_safe_cell_sources():
+        out["failure_reason"] = "post_cell_estimate_not_safe_to_tap"
+        return out
+    out["is_top_left_target"] = _post_follow_likes_is_top_left_grid_cell(cell, ww=int(ww))
+    try:
+        top = int(cell.get("top") or 0)
+        bottom = int(cell.get("bottom") or 0)
+        cy = int(cell.get("center_y") or 0)
+    except (TypeError, ValueError):
+        out["failure_reason"] = "top_left_post_not_visible_after_scroll"
+        return out
+    if top <= 0 or bottom <= top:
+        out["failure_reason"] = "top_left_post_not_visible_after_scroll"
+        return out
+    if not out["is_top_left_target"]:
+        out["failure_reason"] = "top_left_post_not_visible_after_scroll"
+        return out
+    out["top_left_post_visible"] = True
+    min_top = int(wh * float(_POST_FOLLOW_LIKE_TOP_LEFT_MIN_TOP_RATIO))
+    max_top = int(wh * float(_POST_FOLLOW_LIKE_TOP_LEFT_MAX_TOP_RATIO))
+    overscroll_top = int(wh * float(_POST_FOLLOW_LIKE_OVERSCROLL_MAX_TOP_RATIO))
+    if top < overscroll_top:
+        out["overscroll_risk"] = True
+        out["failure_reason"] = "grid_reveal_overscrolled_top_left_post"
+        return out
+    if top < min_top:
+        out["overscroll_risk"] = True
+        out["failure_reason"] = "grid_reveal_overscrolled_top_left_post"
+        return out
+    if y_min_px is not None and top < int(y_min_px) + 16:
+        out["failure_reason"] = "top_left_post_not_visible_after_scroll"
+        return out
+    if top > max_top:
+        out["failure_reason"] = "post_cell_too_low_for_safe_tap"
+        return out
+    exposure = _post_follow_likes_grid_exposure_for_cell(
+        cell, reason=reason, ww=ww, wh=wh, y_min_px=y_min_px
+    )
+    out["grid_exposure"] = str(exposure.get("grid_exposure") or "unstable")
+    if str(exposure.get("grid_exposure") or "") != "stable":
+        out["failure_reason"] = str(
+            exposure.get("failure_reason") or "top_left_post_not_safe_to_tap"
+        )
+        return out
+    out["top_left_post_tap_safe"] = True
+    out["failure_reason"] = ""
+    return out
+
+
+def _post_follow_likes_pick_top_left_xml_cell(
+    cells: list[dict[str, Any]],
+    *,
+    ww: int,
+) -> dict[str, Any] | None:
+    if not cells:
+        return None
+    left_limit = int(ww * float(_POST_FOLLOW_LIKE_TOP_LEFT_MAX_LEFT_X_RATIO))
+    left_col = [
+        c
+        for c in cells
+        if int(c.get("left") or 0) < left_limit
+        or int(c.get("center_x") or 0) < left_limit
+    ]
+    if not left_col:
+        return None
+    left_col.sort(key=lambda c: (int(c.get("top") or 0), int(c.get("left") or 0)))
+    return dict(left_col[0])
+
+
+def _post_follow_likes_reveal_scroll_profile_for_attempt(attempt_index: int) -> str:
+    if int(attempt_index) <= 1:
+        return "reveal_moderate"
+    return "reveal_nudge"
+
+
+def _post_follow_likes_grid_cap_remaining_ms(
+    budget_deadline: float | None,
+) -> float | None:
+    if budget_deadline is None:
+        return None
+    return round(max(0.0, (float(budget_deadline) - time.perf_counter()) * 1000.0), 2)
+
+
+def _post_follow_likes_resolve_top_left_xml_probe_deadline(
+    grid_cap_deadline: float | None,
+) -> tuple[float | None, float | None]:
+    """
+    Reserve a short local XML probe window after reveal scroll, even if the global
+    grid cap is nearly exhausted.
+    """
+    reserved_s = float(_POST_FOLLOW_LIKE_TOP_LEFT_XML_PROBE_RESERVED_S)
+    if grid_cap_deadline is None:
+        return time.perf_counter() + reserved_s, round(reserved_s * 1000.0, 2)
+    grid_rem_s = max(0.0, float(grid_cap_deadline) - time.perf_counter())
+    if grid_rem_s <= 0.0:
+        use_s = min(reserved_s, 1.8)
+    else:
+        use_s = min(reserved_s, grid_rem_s)
+    return time.perf_counter() + use_s, round(use_s * 1000.0, 2)
+
+
+def _post_follow_likes_probe_top_left_vision_cell_meta(
+    d: u2.Device,
+    *,
+    ww: int,
+    wh: int,
+    y_min_px: int,
+    budget_deadline: float | None = None,
+) -> dict[str, Any]:
+    """Fast fail-closed screenshot probe for only the top-left grid thumbnail."""
+    out: dict[str, Any] = {
+        "reliable": False,
+        "reason": "vision_thumbnail_top_left_not_found",
+        "cell": None,
+        "y_min_px": int(y_min_px),
+        "target_cell": "top_left",
+        "vision_fallback_attempted": True,
+        "vision_cell_found": False,
+    }
+    if budget_deadline is not None and time.perf_counter() >= float(budget_deadline):
+        out["reason"] = "budget_deadline_before_vision_probe"
+        return out
+    try:
+        from PIL import Image
+    except Exception:
+        out["reason"] = "vision_probe_pil_unavailable"
+        return out
+    _ensure_debug_dirs()
+    shot_path = _SCREENSHOTS_DIR / f"post_follow_like_top_left_probe_{int(time.time() * 1000)}.png"
+    try:
+        screenshot(d, str(shot_path))
+        out["screenshot_path"] = str(shot_path)
+    except Exception as e:
+        out["reason"] = "vision_probe_screenshot_failed"
+        out["vision_error"] = str(e)[:160]
+        return out
+    if budget_deadline is not None and time.perf_counter() >= float(budget_deadline):
+        out["reason"] = "budget_deadline_after_vision_screenshot"
+        return out
+    try:
+        im = Image.open(str(shot_path)).convert("RGB")
+        iw, ih = im.size
+    except Exception as e:
+        out["reason"] = "vision_probe_image_open_failed"
+        out["vision_error"] = str(e)[:160]
+        return out
+    if iw < 120 or ih < 120:
+        out["reason"] = "vision_probe_image_too_small"
+        return out
+    cell_w_i = max(24, int(iw) // 3)
+    top_dev = max(0, int(y_min_px) + 16)
+    top_i = max(0, min(int(ih) - cell_w_i - 1, int(top_dev * int(ih) / max(1, int(wh)))))
+    left_i = 0
+    try:
+        variance = _visual_image_cell_luma_variance(im, left_i, top_i, cell_w_i, cell_w_i)
+    except Exception:
+        variance = 0.0
+    out["vision_top_left_variance"] = round(float(variance), 2)
+    out["vision_scan_bounds"] = {
+        "left": 0,
+        "top": int(top_dev),
+        "right": int(max(24, int(ww) // 3)),
+        "bottom": int(top_dev + max(24, int(ww) // 3)),
+    }
+    if float(variance) < float(_POST_FOLLOW_LIKES_GRID_PARTIAL_VAR_THR):
+        out["reason"] = "vision_thumbnail_top_left_not_found"
+        return out
+    cell_w_d = max(24, int(ww) // 3)
+    top_d = int(top_dev)
+    bottom_d = int(min(int(wh) - 1, top_d + cell_w_d))
+    if bottom_d <= top_d + 24:
+        out["reason"] = "vision_thumbnail_top_left_ambiguous_bounds"
+        return out
+    out["reliable"] = True
+    out["reason"] = "vision_thumbnail_top_left"
+    out["vision_cell_found"] = True
+    out["cell"] = {
+        "left": 0,
+        "top": top_d,
+        "right": int(min(int(ww) - 1, cell_w_d)),
+        "bottom": bottom_d,
+        "center_x": int(min(int(ww) - 1, max(1, cell_w_d // 2))),
+        "center_y": int((top_d + bottom_d) // 2),
+    }
+    return out
+
+
+def _post_follow_likes_probe_top_left_xml_cell_meta(
+    d: u2.Device,
+    *,
+    ww: int,
+    wh: int,
+    budget_deadline: float | None = None,
+    profile_tabs_visible: bool = True,
+) -> dict[str, Any]:
+    """XML-only probe for the top-left post thumbnail (no geometry estimate)."""
+    out: dict[str, Any] = {
+        "reliable": False,
+        "reason": "top_left_xml_thumbnail_not_found",
+        "cell": None,
+        "y_min_px": None,
+        "target_cell": "top_left",
+        "profile_tabs_visible": bool(profile_tabs_visible),
+        "xml_scan_bounds": None,
+        "xml_candidate_count": 0,
+        "relaxed_candidate_count": 0,
+        "vision_fallback_attempted": False,
+        "vision_cell_found": False,
+    }
+    if not profile_tabs_visible:
+        out["reason"] = "profile_tabs_not_visible"
+        return out
+    if budget_deadline is not None and time.perf_counter() >= float(budget_deadline):
+        out["reason"] = "budget_deadline_before_tabs_geometry"
+        return out
+    tabs_bt, _phase = _followers_profile_tabs_bottom_y_px(d, window_h=int(wh))
+    if tabs_bt is None:
+        out["reason"] = "profile_tabs_bottom_unknown"
+        return out
+    margin = int(_POST_FOLLOW_PROFILE_TABS_GRID_MARGIN_PX)
+    y_min = int(tabs_bt) + margin
+    out["y_min_px"] = y_min
+    out["xml_scan_bounds"] = {
+        "left": 0,
+        "top": int(y_min),
+        "right": int(ww),
+        "bottom": int(wh),
+    }
+    xml_probe = _post_follow_likes_xml_grid_thumbnails_below_tabs(
+        d,
+        y_min_px=y_min,
+        ww=int(ww),
+        wh=int(wh),
+        relaxed_probe=False,
+    )
+    out["xml_candidate_count"] = int(xml_probe.get("cell_count") or 0)
+    top_left = _post_follow_likes_pick_top_left_xml_cell(
+        list(xml_probe.get("cells") or []), ww=int(ww)
+    )
+    source = "xml_thumbnail_top_left"
+    if top_left is None and (
+        budget_deadline is None or time.perf_counter() < float(budget_deadline)
+    ):
+        relaxed_probe = _post_follow_likes_xml_grid_thumbnails_below_tabs(
+            d,
+            y_min_px=y_min,
+            ww=int(ww),
+            wh=int(wh),
+            relaxed_probe=True,
+        )
+        out["relaxed_candidate_count"] = int(relaxed_probe.get("cell_count") or 0)
+        top_left = _post_follow_likes_pick_top_left_xml_cell(
+            list(relaxed_probe.get("cells") or []), ww=int(ww)
+        )
+        source = "xml_thumbnail_top_left_relaxed"
+    if top_left is None:
+        if budget_deadline is not None and time.perf_counter() >= float(budget_deadline):
+            return out
+        vision_meta = _post_follow_likes_probe_top_left_vision_cell_meta(
+            d,
+            ww=int(ww),
+            wh=int(wh),
+            y_min_px=y_min,
+            budget_deadline=budget_deadline,
+        )
+        out["vision_fallback_attempted"] = bool(
+            vision_meta.get("vision_fallback_attempted")
+        )
+        out["vision_cell_found"] = bool(vision_meta.get("vision_cell_found"))
+        for k in (
+            "screenshot_path",
+            "vision_error",
+            "vision_top_left_variance",
+            "vision_scan_bounds",
+        ):
+            if k in vision_meta:
+                out[k] = vision_meta.get(k)
+        if bool(vision_meta.get("reliable")) and isinstance(vision_meta.get("cell"), dict):
+            out["reliable"] = True
+            out["cell"] = dict(vision_meta["cell"])
+            out["reason"] = "vision_thumbnail_top_left"
+            return out
+        out["reason"] = "top_left_post_not_detected_after_xml_and_vision_probe"
+        return out
+    out["reliable"] = True
+    out["cell"] = dict(top_left)
+    out["reason"] = source
+    return out
+
+
+def _post_follow_likes_run_top_left_xml_probe_sequence(
+    d: u2.Device,
+    *,
+    ui_hints: dict[str, Any],
+    budget_deadline: float | None,
+    ww: int,
+    wh: int,
+    visual_candidate_id: str = "",
+    source_profile_username: str = "",
+    follower_username: str = "",
+    after_reveal_scroll: bool = False,
+    grid_cap_deadline: float | None = None,
+    xml_probe_budget_ms: float | None = None,
+    skip_estimate_fallback: bool = False,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Short settle + bounded XML reprobes for the top-left post cell after grid reveal."""
+    hints = dict(ui_hints)
+    estimate_fallback = False
+    last_cell: dict[str, Any] = {
+        "reliable": False,
+        "reason": "top_left_xml_thumbnail_not_found",
+        "cell": None,
+        "y_min_px": None,
+        "target_cell": "top_left",
+    }
+    reveal_state = _post_follow_likes_assess_reveal_cell_state(
+        last_cell, ww=int(ww), wh=int(wh)
+    )
+    max_attempts = int(_POST_FOLLOW_LIKE_TOP_LEFT_XML_PROBE_MAX_ATTEMPTS)
+    for probe_attempt in range(1, max_attempts + 1):
+        grid_cap_remaining_ms = _post_follow_likes_grid_cap_remaining_ms(grid_cap_deadline)
+        probe_cap_remaining_ms = _post_follow_likes_grid_cap_remaining_ms(budget_deadline)
+        budget_exhausted = (
+            budget_deadline is not None and time.perf_counter() >= float(budget_deadline)
+        )
+        try:
+            log(
+                "info",
+                "like_top_left_xml_probe_started",
+                visual_candidate_id=visual_candidate_id,
+                source_profile_username=source_profile_username,
+                follower_username=follower_username,
+                probe_attempt=int(probe_attempt),
+                after_reveal_scroll=bool(after_reveal_scroll),
+                grid_cap_remaining_ms=grid_cap_remaining_ms,
+                xml_probe_budget_ms=xml_probe_budget_ms,
+                probe_budget_remaining_ms=probe_cap_remaining_ms,
+                budget_exhausted=bool(budget_exhausted),
+            )
+        except Exception:
+            pass
+        xml_cell_found = False
+        cell_meta = dict(last_cell)
+        if budget_exhausted:
+            reveal_state = _post_follow_likes_assess_reveal_cell_state(
+                cell_meta, ww=int(ww), wh=int(wh)
+            )
+        else:
+            if probe_attempt == 1:
+                time.sleep(float(_POST_FOLLOW_LIKE_TOP_LEFT_XML_SETTLE_S))
+            else:
+                time.sleep(float(_POST_FOLLOW_LIKE_TOP_LEFT_XML_RETRY_SETTLE_S))
+            cell_meta = _post_follow_likes_probe_top_left_xml_cell_meta(
+                d,
+                ww=int(ww),
+                wh=int(wh),
+                budget_deadline=budget_deadline,
+                profile_tabs_visible=bool(hints.get("profile_tabs_visible", True)),
+            )
+            xml_cell_found = str(cell_meta.get("reason") or "") in {
+                "xml_thumbnail_top_left",
+                "xml_thumbnail_top_left_relaxed",
+            }
+            detected_cell_found = str(cell_meta.get("reason") or "") in {
+                "xml_thumbnail_top_left",
+                "xml_thumbnail_top_left_relaxed",
+                "vision_thumbnail_top_left",
+            }
+            if (
+                not detected_cell_found
+                and not bool(skip_estimate_fallback)
+                and budget_deadline is not None
+                and time.perf_counter() < float(budget_deadline)
+            ):
+                estimate_meta = _post_follow_likes_visible_grid_cell_under_suggested(
+                    d,
+                    ui_hints=hints,
+                    budget_deadline=budget_deadline,
+                )
+                estimate_fallback = str(estimate_meta.get("reason") or "") == (
+                    "profile_tabs_grid_cell_estimate"
+                )
+            reveal_state = _post_follow_likes_assess_reveal_cell_state(
+                cell_meta, ww=int(ww), wh=int(wh)
+            )
+        cell = cell_meta.get("cell") if isinstance(cell_meta.get("cell"), dict) else {}
+        detected_cell_found = str(cell_meta.get("reason") or "") in {
+            "xml_thumbnail_top_left",
+            "xml_thumbnail_top_left_relaxed",
+            "vision_thumbnail_top_left",
+        }
+        tap_x = int(cell.get("center_x") or 0) if detected_cell_found else 0
+        tap_y = int(cell.get("center_y") or 0) if detected_cell_found else 0
+        try:
+            log(
+                "info",
+                "like_top_left_xml_probe_completed",
+                visual_candidate_id=visual_candidate_id,
+                source_profile_username=source_profile_username,
+                follower_username=follower_username,
+                probe_attempt=int(probe_attempt),
+                xml_cell_found=bool(xml_cell_found),
+                xml_scan_bounds=cell_meta.get("xml_scan_bounds"),
+                xml_candidate_count=int(cell_meta.get("xml_candidate_count") or 0),
+                relaxed_candidate_count=int(cell_meta.get("relaxed_candidate_count") or 0),
+                vision_fallback_attempted=bool(cell_meta.get("vision_fallback_attempted")),
+                vision_cell_found=bool(cell_meta.get("vision_cell_found")),
+                cell_source=str(cell_meta.get("reason") or ""),
+                estimate_fallback=bool(estimate_fallback),
+                grid_cap_remaining_ms=grid_cap_remaining_ms,
+                xml_probe_budget_ms=xml_probe_budget_ms,
+                probe_budget_remaining_ms=probe_cap_remaining_ms,
+                budget_exhausted=bool(budget_exhausted),
+                top_left_post_visible=bool(reveal_state.get("top_left_post_visible")),
+                top_left_post_tap_safe=bool(reveal_state.get("top_left_post_tap_safe")),
+                tap_x=tap_x,
+                tap_y=tap_y,
+            )
+        except Exception:
+            pass
+        last_cell = dict(cell_meta)
+        if bool(reveal_state.get("top_left_post_tap_safe")):
+            return last_cell, reveal_state
+        if budget_exhausted:
+            break
+    if after_reveal_scroll and not bool(reveal_state.get("top_left_post_tap_safe")):
+        src = str(last_cell.get("reason") or "")
+        if src in {
+            "",
+            "top_left_xml_thumbnail_not_found",
+            "top_left_post_not_detected_after_xml_and_vision_probe",
+            "profile_tabs_grid_cell_estimate",
+            "no_xml_thumbnail_below_tabs",
+        } or bool(estimate_fallback):
+            reveal_state = dict(reveal_state)
+            reveal_state["tap_safe"] = False
+            reveal_state["tap_safe_reason"] = (
+                "top_left_post_not_detected_after_xml_and_vision_probe"
+            )
+            reveal_state["failure_reason"] = (
+                "top_left_post_not_detected_after_xml_and_vision_probe"
+            )
+    return last_cell, reveal_state
+
+
+def _post_follow_likes_assess_reveal_cell_state(
+    cell_meta: dict[str, Any],
+    *,
+    ww: int,
+    wh: int,
+) -> dict[str, Any]:
+    base: dict[str, Any] = {
+        "tap_safe": False,
+        "tap_safe_reason": "post_grid_not_exposed_after_scroll",
+        "grid_exposure": "unstable",
+        "top_left_post_visible": False,
+        "top_left_post_tap_safe": False,
+        "overscroll_risk": False,
+        "is_top_left_target": False,
+        "pinned_highlights_visible": False,
+        "grid_visible_too_low": False,
+    }
+    if not bool(cell_meta.get("reliable")):
+        raw_reason = str(cell_meta.get("reason") or "post_grid_not_exposed_after_scroll")
+        if raw_reason in {
+            "",
+            "profile_tabs_not_visible",
+            "profile_tabs_bottom_unknown",
+            "no_xml_thumbnail_below_tabs",
+            "budget_deadline_before_tabs_geometry",
+        }:
+            base["tap_safe_reason"] = "post_grid_not_exposed_after_scroll"
+        else:
+            base["tap_safe_reason"] = raw_reason
+        return base
+    assessment = _post_follow_likes_evaluate_top_left_post_target(
+        cell_meta.get("cell"),
+        reason=str(cell_meta.get("reason") or ""),
+        ww=int(ww),
+        wh=int(wh),
+        y_min_px=cell_meta.get("y_min_px"),
+    )
+    ge = _post_follow_likes_grid_exposure_for_cell(
+        cell_meta.get("cell"),
+        reason=str(cell_meta.get("reason") or ""),
+        ww=int(ww),
+        wh=int(wh),
+        y_min_px=cell_meta.get("y_min_px"),
+    )
+    base.update(assessment)
+    base["grid_exposure"] = str(
+        assessment.get("grid_exposure") or ge.get("grid_exposure") or "unstable"
+    )
+    base["pinned_highlights_visible"] = bool(ge.get("pinned_highlights_visible"))
+    base["grid_visible_too_low"] = bool(ge.get("grid_visible_too_low"))
+    if bool(assessment.get("top_left_post_tap_safe")):
+        base["tap_safe"] = True
+        base["tap_safe_reason"] = ""
+    else:
+        base["tap_safe_reason"] = str(
+            assessment.get("failure_reason") or ge.get("failure_reason") or "top_left_post_not_safe_to_tap"
+        )
+    return base
+
+
+def _post_follow_likes_evaluate_post_cell_tap_safe(
+    cell: dict[str, Any] | None,
+    *,
+    reason: str,
+    ww: int,
+    wh: int,
+    y_min_px: int | None = None,
+) -> tuple[bool, str]:
+    """Fail-closed tap safety for direct post-cell open under Suggested overlay."""
+    assessment = _post_follow_likes_evaluate_top_left_post_target(
+        cell, reason=reason, ww=ww, wh=wh, y_min_px=y_min_px
+    )
+    if not bool(assessment.get("top_left_post_tap_safe")):
+        return False, str(
+            assessment.get("failure_reason") or "top_left_post_not_safe_to_tap"
+        )
+    return True, ""
+
+
+def _post_follow_likes_grid_exposure_for_cell(
+    cell: dict[str, Any] | None,
+    *,
+    reason: str,
+    ww: int,
+    wh: int,
+    y_min_px: int | None = None,
+) -> dict[str, Any]:
+    """Classify whether a post cell is exposed enough for a safe direct tap."""
+    out: dict[str, Any] = {
+        "grid_exposure": "unstable",
+        "failure_reason": "post_grid_not_exposed_after_scroll",
+        "pinned_highlights_visible": False,
+        "grid_visible_too_low": False,
+    }
+    if not isinstance(cell, dict):
+        out["failure_reason"] = "post_cell_estimate_not_safe_to_tap"
+        return out
+    src = str(reason or "").strip().lower()
+    if src == "profile_tabs_grid_cell_estimate":
+        out["failure_reason"] = "post_cell_estimate_not_safe_to_tap"
+        return out
+    if src not in _post_follow_likes_safe_cell_sources():
+        out["failure_reason"] = "post_cell_estimate_not_safe_to_tap"
+        return out
+    try:
+        cx = int(cell.get("center_x") or 0)
+        cy = int(cell.get("center_y") or 0)
+        top = int(cell.get("top") or 0)
+        bottom = int(cell.get("bottom") or 0)
+    except (TypeError, ValueError):
+        out["failure_reason"] = "post_cell_estimate_not_safe_to_tap"
+        return out
+    if cx <= 0 or cy <= 0 or top <= 0 or bottom <= top:
+        out["failure_reason"] = "post_cell_estimate_not_safe_to_tap"
+        return out
+    if cx < 8 or cx > int(ww) - 8:
+        out["failure_reason"] = "post_cell_estimate_not_safe_to_tap"
+        return out
+    if cy < int(wh * 0.08):
+        out["failure_reason"] = "post_cell_estimate_not_safe_to_tap"
+        return out
+    if y_min_px is not None and int(y_min_px) > int(
+        wh * float(_POST_FOLLOW_LIKE_HIGHLIGHTS_BLOCKING_Y_MIN_RATIO)
+    ):
+        out["pinned_highlights_visible"] = True
+        out["grid_visible_too_low"] = True
+        out["failure_reason"] = "highlights_blocking_post_grid"
+        return out
+    cell_w = max(24, int(ww) // 3)
+    if (bottom - top) < int(cell_w * float(_POST_FOLLOW_LIKE_MIN_CELL_HEIGHT_WIDTH_RATIO)):
+        out["failure_reason"] = "post_grid_not_exposed_after_scroll"
+        return out
+    if top > int(wh * float(_POST_FOLLOW_LIKE_GRID_TOO_LOW_TOP_RATIO)):
+        out["grid_visible_too_low"] = True
+        out["failure_reason"] = "post_grid_not_exposed_after_scroll"
+        return out
+    max_y = int(wh * float(_POST_FOLLOW_LIKE_TAP_SAFE_MAX_Y_RATIO))
+    if cy > max_y:
+        out["grid_visible_too_low"] = True
+        out["failure_reason"] = "post_cell_too_low_for_safe_tap"
+        return out
+    max_bottom = int(wh * float(_POST_FOLLOW_LIKE_TAP_SAFE_MAX_BOTTOM_Y_RATIO))
+    if bottom > max_bottom:
+        out["grid_visible_too_low"] = True
+        out["failure_reason"] = "post_cell_too_low_for_safe_tap"
+        return out
+    if y_min_px is not None and cy < int(y_min_px) + 24:
+        out["failure_reason"] = "post_cell_estimate_not_safe_to_tap"
+        return out
+    out["grid_exposure"] = "stable"
+    out["failure_reason"] = ""
+    return out
+
+
+def _post_follow_likes_stabilize_grid_under_suggested_overlay(
+    d: u2.Device,
+    *,
+    ui_hints: dict[str, Any],
+    budget_deadline: float | None,
+    ww: int,
+    wh: int,
+    visual_candidate_id: str = "",
+    source_profile_username: str = "",
+    follower_username: str = "",
+) -> dict[str, Any]:
+    """
+    Up to one calibrated reveal scroll plus one small nudge to expose the post grid
+    while keeping the top-left (most recent) post visible and tap-safe.
+    """
+    max_scrolls = int(_POST_FOLLOW_LIKE_SUGGESTED_MAX_STABILIZATION_SCROLLS)
+    current_ui = dict(ui_hints)
+    scroll_attempts = 0
+    last_cell: dict[str, Any] = {"reliable": False, "reason": "", "cell": None}
+    tap_safe = False
+    tap_safe_reason = "post_grid_not_exposed_after_scroll"
+    reveal_state: dict[str, Any] = _post_follow_likes_assess_reveal_cell_state(
+        last_cell, ww=int(ww), wh=int(wh)
+    )
+
+    def _reprobe_after_scroll(
+        *,
+        scroll_attempt_index: int,
+        scroll_profile: str,
+        grid_exposure_before: str,
+    ) -> None:
+        nonlocal current_ui, last_cell, tap_safe, tap_safe_reason, reveal_state
+        probe_deadline, xml_probe_budget_ms = _post_follow_likes_resolve_top_left_xml_probe_deadline(
+            budget_deadline
+        )
+        last_cell, reveal_state = _post_follow_likes_run_top_left_xml_probe_sequence(
+            d,
+            ui_hints=current_ui,
+            budget_deadline=probe_deadline,
+            grid_cap_deadline=budget_deadline,
+            xml_probe_budget_ms=xml_probe_budget_ms,
+            skip_estimate_fallback=True,
+            ww=int(ww),
+            wh=int(wh),
+            visual_candidate_id=visual_candidate_id,
+            source_profile_username=source_profile_username,
+            follower_username=follower_username,
+            after_reveal_scroll=True,
+        )
+        tap_safe = bool(reveal_state.get("top_left_post_tap_safe"))
+        tap_safe_reason = str(
+            reveal_state.get("tap_safe_reason")
+            or reveal_state.get("failure_reason")
+            or "post_grid_not_exposed_after_scroll"
+        )
+        try:
+            current_ui = _post_follow_likes_grid_ui_surface_hints(d)
+        except Exception:
+            pass
+        try:
+            log(
+                "info",
+                "like_grid_reprobe_after_reveal_scroll",
+                visual_candidate_id=visual_candidate_id,
+                source_profile_username=source_profile_username,
+                follower_username=follower_username,
+                scroll_profile=str(scroll_profile),
+                scroll_attempt_index=int(scroll_attempt_index),
+                cell_reliable=bool(last_cell.get("reliable")),
+                cell_source=str(last_cell.get("reason") or ""),
+                target_cell="top_left",
+                suggested_overlay_visible=bool(
+                    current_ui.get("suggested_for_you")
+                    or current_ui.get("discover_people")
+                ),
+                grid_exposure_before=str(grid_exposure_before),
+                grid_exposure_after=str(reveal_state.get("grid_exposure") or "unstable"),
+                top_left_post_visible=bool(reveal_state.get("top_left_post_visible")),
+                top_left_post_tap_safe=bool(reveal_state.get("top_left_post_tap_safe")),
+                overscroll_risk=bool(reveal_state.get("overscroll_risk")),
+                tap_safe=bool(tap_safe),
+                failure_reason=tap_safe_reason,
+                pinned_highlights_visible=bool(
+                    reveal_state.get("pinned_highlights_visible")
+                ),
+                grid_visible_too_low=bool(reveal_state.get("grid_visible_too_low")),
+            )
+        except Exception:
+            pass
+
+    last_cell = _post_follow_likes_visible_grid_cell_under_suggested(
+        d,
+        ui_hints=current_ui,
+        budget_deadline=budget_deadline,
+    )
+    reveal_state = _post_follow_likes_assess_reveal_cell_state(
+        last_cell, ww=int(ww), wh=int(wh)
+    )
+    if bool(reveal_state.get("top_left_post_tap_safe")):
+        tap_safe = True
+        tap_safe_reason = ""
+    elif bool(reveal_state.get("overscroll_risk")):
+        tap_safe_reason = str(
+            reveal_state.get("tap_safe_reason") or "grid_reveal_overscrolled_top_left_post"
+        )
+    else:
+        for attempt in range(1, max_scrolls + 1):
+            if budget_deadline is not None and time.perf_counter() >= float(budget_deadline):
+                break
+            last_cell = _post_follow_likes_visible_grid_cell_under_suggested(
+                d,
+                ui_hints=current_ui,
+                budget_deadline=budget_deadline,
+            )
+            reveal_state = _post_follow_likes_assess_reveal_cell_state(
+                last_cell, ww=int(ww), wh=int(wh)
+            )
+            if bool(reveal_state.get("overscroll_risk")):
+                tap_safe_reason = str(
+                    reveal_state.get("tap_safe_reason")
+                    or "grid_reveal_overscrolled_top_left_post"
+                )
+                break
+            if bool(reveal_state.get("top_left_post_tap_safe")):
+                tap_safe = True
+                tap_safe_reason = ""
+                break
+            scroll_profile = _post_follow_likes_reveal_scroll_profile_for_attempt(attempt)
+            grid_exposure_before = str(reveal_state.get("grid_exposure") or "unstable")
+            try:
+                log(
+                    "info",
+                    "like_grid_reveal_scroll_attempted",
+                    visual_candidate_id=visual_candidate_id,
+                    source_profile_username=source_profile_username,
+                    follower_username=follower_username,
+                    scroll_profile=scroll_profile,
+                    scroll_attempt_index=attempt,
+                    max_scrolls=max_scrolls,
+                    scroll_reason="reveal_top_left_post_grid",
+                    grid_exposure_before=grid_exposure_before,
+                    top_left_post_visible=bool(reveal_state.get("top_left_post_visible")),
+                    overscroll_risk=bool(reveal_state.get("overscroll_risk")),
+                    **_post_follow_likes_scroll_log_fields(
+                        scroll_profile=scroll_profile, ww=int(ww), wh=int(wh)
+                    ),
+                )
+            except Exception:
+                pass
+            t_scroll = time.perf_counter()
+            sw = _post_follow_likes_profile_scroll_swipe(
+                d, scroll_profile=scroll_profile, ww=int(ww), wh=int(wh)
+            )
+            scroll_attempts = attempt
+            if not bool(sw.get("swipe_ok")):
+                break
+            time.sleep(0.18)
+            try:
+                log(
+                    "info",
+                    "like_grid_reveal_scroll_completed",
+                    visual_candidate_id=visual_candidate_id,
+                    source_profile_username=source_profile_username,
+                    follower_username=follower_username,
+                    scroll_profile=scroll_profile,
+                    scroll_attempt_index=attempt,
+                    scroll_elapsed_ms=round((time.perf_counter() - t_scroll) * 1000.0, 2),
+                    swipe_ok=bool(sw.get("swipe_ok")),
+                    scroll_reason="reveal_top_left_post_grid",
+                    scroll_start_y=sw.get("y_start"),
+                    scroll_end_y=sw.get("y_end"),
+                    scroll_distance_px=sw.get("scroll_distance_px"),
+                    grid_exposure_before=grid_exposure_before,
+                )
+            except Exception:
+                pass
+            _reprobe_after_scroll(
+                scroll_attempt_index=attempt,
+                scroll_profile=scroll_profile,
+                grid_exposure_before=grid_exposure_before,
+            )
+            if bool(reveal_state.get("overscroll_risk")):
+                tap_safe = False
+                tap_safe_reason = str(
+                    reveal_state.get("tap_safe_reason")
+                    or "grid_reveal_overscrolled_top_left_post"
+                )
+                break
+            if bool(reveal_state.get("top_left_post_tap_safe")):
+                tap_safe = True
+                tap_safe_reason = ""
+                break
+            if tap_safe_reason in {
+                "post_cell_estimate_not_safe_to_tap",
+                "top_left_post_xml_not_found_after_reveal_scroll",
+                "top_left_post_not_detected_after_xml_and_vision_probe",
+                "top_left_post_not_visible_after_scroll",
+            }:
+                tap_safe_reason = str(
+                    reveal_state.get("tap_safe_reason")
+                    or "top_left_post_not_detected_after_xml_and_vision_probe"
+                )
+
+    if (
+        not tap_safe
+        and budget_deadline is not None
+        and time.perf_counter() < float(budget_deadline)
+        and tap_safe_reason
+        in {
+            "highlights_blocking_post_grid",
+            "post_cell_too_low_for_safe_tap",
+            "post_grid_not_exposed_after_scroll",
+            "post_cell_estimate_not_safe_to_tap",
+            "top_left_post_not_visible_after_scroll",
+            "top_left_post_not_safe_to_tap",
+            "top_left_post_xml_not_found_after_reveal_scroll",
+            "top_left_post_not_detected_after_xml_and_vision_probe",
+        }
+        and not bool(reveal_state.get("overscroll_risk"))
+    ):
+        for h_attempt in range(
+            1, int(_POST_FOLLOW_LIKE_HIGHLIGHTS_MAX_STABILIZATION_SCROLLS) + 1
+        ):
+            if time.perf_counter() >= float(budget_deadline):
+                break
+            scroll_profile = "reveal_nudge"
+            grid_exposure_before = str(reveal_state.get("grid_exposure") or "unstable")
+            try:
+                log(
+                    "info",
+                    "like_highlights_scroll_attempted",
+                    visual_candidate_id=visual_candidate_id,
+                    source_profile_username=source_profile_username,
+                    follower_username=follower_username,
+                    scroll_attempt=h_attempt,
+                    reason=tap_safe_reason,
+                    scroll_profile=scroll_profile,
+                    scroll_reason="highlights_or_estimate_blocks_grid",
+                    grid_exposure_before=grid_exposure_before,
+                    **_post_follow_likes_scroll_log_fields(
+                        scroll_profile=scroll_profile, ww=int(ww), wh=int(wh)
+                    ),
+                )
+            except Exception:
+                pass
+            t_scroll = time.perf_counter()
+            sw = _post_follow_likes_profile_scroll_swipe(
+                d, scroll_profile=scroll_profile, ww=int(ww), wh=int(wh)
+            )
+            scroll_attempts += 1
+            if not bool(sw.get("swipe_ok")):
+                break
+            time.sleep(0.18)
+            try:
+                log(
+                    "info",
+                    "like_highlights_scroll_completed",
+                    visual_candidate_id=visual_candidate_id,
+                    source_profile_username=source_profile_username,
+                    follower_username=follower_username,
+                    scroll_attempt=h_attempt,
+                    total_scroll_attempts=scroll_attempts,
+                    scroll_profile=scroll_profile,
+                    scroll_elapsed_ms=round((time.perf_counter() - t_scroll) * 1000.0, 2),
+                    swipe_ok=bool(sw.get("swipe_ok")),
+                    scroll_reason="highlights_or_estimate_blocks_grid",
+                    scroll_start_y=sw.get("y_start"),
+                    scroll_end_y=sw.get("y_end"),
+                    scroll_distance_px=sw.get("scroll_distance_px"),
+                )
+            except Exception:
+                pass
+            _reprobe_after_scroll(
+                scroll_attempt_index=scroll_attempts,
+                scroll_profile=scroll_profile,
+                grid_exposure_before=grid_exposure_before,
+            )
+            if bool(reveal_state.get("overscroll_risk")):
+                tap_safe = False
+                tap_safe_reason = str(
+                    reveal_state.get("tap_safe_reason")
+                    or "grid_reveal_overscrolled_top_left_post"
+                )
+                break
+            if bool(reveal_state.get("top_left_post_tap_safe")):
+                tap_safe = True
+                tap_safe_reason = ""
+                break
+            tap_safe_reason = str(
+                reveal_state.get("tap_safe_reason") or "top_left_post_not_visible_after_scroll"
+            )
+
+    if bool(last_cell.get("reliable")) and not tap_safe:
+        cell_reason = str(last_cell.get("reason") or "")
+        if cell_reason == "profile_tabs_grid_cell_estimate" and int(scroll_attempts) > 0:
+            tap_safe_reason = "top_left_post_not_detected_after_xml_and_vision_probe"
+        else:
+            tap_safe, tap_safe_reason = _post_follow_likes_evaluate_post_cell_tap_safe(
+                last_cell.get("cell"),
+                reason=cell_reason,
+                ww=int(ww),
+                wh=int(wh),
+                y_min_px=last_cell.get("y_min_px"),
+            )
+            if not tap_safe_reason:
+                tap_safe_reason = "top_left_post_not_safe_to_tap"
+        if int(scroll_attempts) > 0 and tap_safe_reason in {
+            "post_cell_estimate_not_safe_to_tap",
+            "top_left_xml_thumbnail_not_found",
+            "top_left_post_not_detected_after_xml_and_vision_probe",
+            "post_grid_not_exposed_after_scroll",
+            "no_xml_thumbnail_below_tabs",
+        }:
+            tap_safe_reason = "top_left_post_not_detected_after_xml_and_vision_probe"
+
+    return {
+        "ui_hints": current_ui,
+        "cell_meta": last_cell,
+        "scroll_attempts": scroll_attempts,
+        "tap_safe": tap_safe,
+        "tap_safe_reason": tap_safe_reason,
+        "grid_exposure": str(reveal_state.get("grid_exposure") or "unstable"),
+        "pinned_highlights_visible": bool(reveal_state.get("pinned_highlights_visible")),
+        "grid_visible_too_low": bool(reveal_state.get("grid_visible_too_low")),
+        "top_left_post_visible": bool(reveal_state.get("top_left_post_visible")),
+        "overscroll_risk": bool(reveal_state.get("overscroll_risk")),
     }
 
 
@@ -15334,9 +16522,26 @@ def _post_follow_likes_visible_grid_cell_under_suggested(
     margin = int(_POST_FOLLOW_PROFILE_TABS_GRID_MARGIN_PX)
     y_min = int(tabs_bt) + margin
     out["y_min_px"] = y_min
-    # Bounded fast-path: once profile tabs are visible, the first grid cell is below
-    # the tab strip. Avoid hierarchy-wide ImageView scans here; they caused 8s+
-    # Suggested-overlay skips on Samsung.
+    xml_probe = _post_follow_likes_xml_grid_thumbnails_below_tabs(
+        d, y_min_px=y_min, ww=int(ww), wh=int(wh)
+    )
+    if bool(xml_probe.get("reliable")) and xml_probe.get("cells"):
+        top_left = _post_follow_likes_pick_top_left_xml_cell(
+            list(xml_probe.get("cells") or []), ww=int(ww)
+        )
+        if top_left is not None:
+            out["reliable"] = True
+            out["cell"] = top_left
+            out["reason"] = "xml_thumbnail_top_left"
+            out["target_cell"] = "top_left"
+            return out
+        cell = dict(xml_probe["cells"][0])
+        out["reliable"] = True
+        out["cell"] = cell
+        out["reason"] = "xml_thumbnail_below_tabs"
+        out["target_cell"] = "top_left_missing"
+        return out
+    # Geometry estimate only — never used for direct tap without stabilization + XML.
     cell_w = max(24, int(ww) // 3)
     cx = max(12, min(int(ww) - 12, cell_w // 2))
     cy = max(y_min + 12, min(int(wh * 0.92), y_min + cell_w // 2))
@@ -15350,6 +16555,7 @@ def _post_follow_likes_visible_grid_cell_under_suggested(
         "center_y": int(cy),
     }
     out["reason"] = "profile_tabs_grid_cell_estimate"
+    out["target_cell"] = "top_left"
     return out
 
 
@@ -15429,11 +16635,14 @@ def _post_follow_likes_try_clear_suggested_overlay_fast(
             continue
     if not out["handled"] and time.perf_counter() < float(budget_deadline):
         sw = _post_follow_likes_profile_scroll_swipe(
-            d, scroll_profile="micro", ww=int(ww), wh=int(wh)
+            d, scroll_profile="reveal_moderate", ww=int(ww), wh=int(wh)
         )
         if sw.get("swipe_ok"):
             out["handled"] = True
-            out["action"] = "micro_scroll_reveal_grid"
+            out["action"] = "bounded_scroll_reveal_moderate"
+            out["scroll_start_y"] = sw.get("y_start")
+            out["scroll_end_y"] = sw.get("y_end")
+            out["scroll_distance_px"] = sw.get("scroll_distance_px")
             time.sleep(0.18)
     out["elapsed_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
     return out
@@ -15447,18 +16656,14 @@ def _post_follow_likes_profile_scroll_swipe(
     wh: int,
 ) -> dict[str, Any]:
     """Bounded vertical swipe on profile to reveal post grid (finger up = content down)."""
-    sp = str(scroll_profile or "micro").strip().lower()
-    xmid = int(ww * 0.5)
-    if sp == "long":
-        y_start = int(wh * 0.72)
-        y_end = int(wh * 0.38)
-        duration_s = 0.14
-    else:
-        y_start = int(wh * 0.58)
-        y_end = int(wh * 0.48)
-        duration_s = 0.11
-    y_start = max(int(wh * 0.22), min(int(wh * 0.88), y_start))
-    y_end = max(int(wh * 0.12), min(y_start - 8, y_end))
+    geom = _post_follow_likes_scroll_geometry(
+        scroll_profile=scroll_profile, ww=int(ww), wh=int(wh)
+    )
+    sp = str(geom["scroll_profile"])
+    xmid = int(geom["x"])
+    y_start = int(geom["y_start"])
+    y_end = int(geom["y_end"])
+    duration_s = float(geom["duration_s"])
     try:
         _followers_log_scroll_or_swipe_about_to_run(
             d,
@@ -15473,6 +16678,7 @@ def _post_follow_likes_profile_scroll_swipe(
             "scroll_profile": sp,
             "y_start": y_start,
             "y_end": y_end,
+            "scroll_distance_px": abs(y_start - y_end),
             "duration_s": duration_s,
             "error": str(e),
         }
@@ -15481,8 +16687,69 @@ def _post_follow_likes_profile_scroll_swipe(
         "scroll_profile": sp,
         "y_start": y_start,
         "y_end": y_end,
+        "scroll_distance_px": abs(y_start - y_end),
         "duration_s": duration_s,
         "error": None,
+    }
+
+
+def _post_follow_likes_scroll_geometry(
+    *,
+    scroll_profile: str,
+    ww: int,
+    wh: int,
+) -> dict[str, int | float | str]:
+    sp = str(scroll_profile or "micro").strip().lower()
+    xmid = int(ww * 0.5)
+    if sp in {"reveal_moderate", "reveal_calibrated"}:
+        y_start = int(wh * 0.72)
+        y_end = int(wh * 0.40)
+        duration_s = 0.16
+        sp = "reveal_moderate"
+    elif sp in {"reveal_nudge", "nudge"}:
+        y_start = int(wh * 0.60)
+        y_end = int(wh * 0.50)
+        duration_s = 0.12
+        sp = "reveal_nudge"
+    elif sp in {"reveal_grid", "grid_reveal", "strong"}:
+        y_start = int(wh * 0.76)
+        y_end = int(wh * 0.30)
+        duration_s = 0.18
+        sp = "reveal_grid"
+    elif sp == "long":
+        y_start = int(wh * 0.72)
+        y_end = int(wh * 0.38)
+        duration_s = 0.14
+    else:
+        y_start = int(wh * 0.58)
+        y_end = int(wh * 0.48)
+        duration_s = 0.11
+        sp = "micro"
+    y_start = max(int(wh * 0.22), min(int(wh * 0.88), y_start))
+    y_end = max(int(wh * 0.12), min(y_start - 8, y_end))
+    return {
+        "scroll_profile": sp,
+        "x": xmid,
+        "y_start": y_start,
+        "y_end": y_end,
+        "scroll_distance_px": abs(y_start - y_end),
+        "duration_s": duration_s,
+    }
+
+
+def _post_follow_likes_scroll_log_fields(
+    *,
+    scroll_profile: str,
+    ww: int,
+    wh: int,
+) -> dict[str, Any]:
+    geom = _post_follow_likes_scroll_geometry(
+        scroll_profile=scroll_profile, ww=int(ww), wh=int(wh)
+    )
+    return {
+        "scroll_start_y": int(geom["y_start"]),
+        "scroll_end_y": int(geom["y_end"]),
+        "scroll_distance_px": int(geom["scroll_distance_px"]),
     }
 
 
@@ -15888,10 +17155,28 @@ def ensure_post_grid_visible_for_post_follow_likes(
         except Exception:
             pass
 
-    overlay_cap_s = float(_POST_FOLLOW_LIKE_OVERLAY_PHASE_CAP_S)
-    global_phase_t0 = float(likes_perf_phase_t0) if likes_perf_phase_t0 is not None else t0
-    global_cap_deadline = global_phase_t0 + overlay_cap_s
     try:
+        ui_pre = _post_follow_likes_grid_ui_surface_hints(d)
+    except Exception:
+        ui_pre = {}
+    overlay_cap_s = float(_POST_FOLLOW_LIKE_OVERLAY_PHASE_CAP_S)
+    grid_probe_t0 = time.perf_counter()
+    grid_cap_deadline = grid_probe_t0 + overlay_cap_s
+    try:
+        log(
+            "info",
+            "post_follow_like_state_entered",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            follower_username=cand,
+            state="like_grid_surface_observed",
+            profile_tabs_visible=bool(ui_pre.get("profile_tabs_visible")),
+            suggested_overlay_visible=bool(
+                ui_pre.get("suggested_for_you") or ui_pre.get("discover_people")
+            ),
+            elapsed_from_phase_start_ms=_likes_perf_elapsed_ms(likes_perf_phase_t0),
+            reason="grid_surface_hints_collected",
+        )
         log(
             "info",
             "like_grid_global_timer_started",
@@ -15899,16 +17184,18 @@ def ensure_post_grid_visible_for_post_follow_likes(
             source_profile_username=src,
             follower_username=cand,
             cap_s=round(overlay_cap_s, 4),
-            phase_t0_monotonic=round(global_phase_t0, 4),
+            phase_t0_monotonic=round(float(likes_perf_phase_t0 or t0), 4),
+            grid_probe_t0_monotonic=round(grid_probe_t0, 4),
+            timer_scope="grid_probe_after_surface_observed",
         )
     except Exception:
         pass
 
     def _global_elapsed_ms() -> float:
-        return round((time.perf_counter() - global_phase_t0) * 1000.0, 2)
+        return round((time.perf_counter() - grid_probe_t0) * 1000.0, 2)
 
     def _global_cap_reached() -> bool:
-        return time.perf_counter() >= global_cap_deadline
+        return time.perf_counter() >= grid_cap_deadline
 
     def _finish_global_cap(
         *,
@@ -15927,7 +17214,9 @@ def ensure_post_grid_visible_for_post_follow_likes(
                 follower_username=cand,
                 cap_s=round(overlay_cap_s, 4),
                 elapsed_ms=elapsed_ms,
+                elapsed_from_phase_start_ms=_likes_perf_elapsed_ms(likes_perf_phase_t0),
                 failure_reason=failure_reason,
+                timer_scope="grid_probe_after_surface_observed",
             )
             log(
                 "info",
@@ -15937,6 +17226,7 @@ def ensure_post_grid_visible_for_post_follow_likes(
                 follower_username=cand,
                 cap_s=round(overlay_cap_s, 4),
                 elapsed_ms=elapsed_ms,
+                timer_scope="grid_probe_after_surface_observed",
             )
         except Exception:
             pass
@@ -15944,22 +17234,12 @@ def ensure_post_grid_visible_for_post_follow_likes(
             out,
             timings=timings,
             overlay_strategy=overlay_strategy,
-            t_phase0=global_phase_t0,
+            t_phase0=grid_probe_t0,
             visual_candidate_id=vcid,
             source_profile_username=src,
             follower_username=cand,
             failure_reason=failure_reason,
         )
-
-    if _global_cap_reached():
-        return _finish_global_cap()
-
-    try:
-        ui_pre = _post_follow_likes_grid_ui_surface_hints(d)
-    except Exception:
-        ui_pre = {}
-    if _global_cap_reached():
-        return _finish_global_cap()
 
     def _suggested_overlay_flow(
         ui_hints: dict[str, Any], *, phase: str
@@ -15984,14 +17264,28 @@ def ensure_post_grid_visible_for_post_follow_likes(
             )
         except Exception:
             pass
-        def _finish_visible_cell(cell_meta: dict[str, Any], *, after_micro_scroll: bool = False) -> dict[str, Any]:
+        def _finish_visible_cell(
+            cell_meta: dict[str, Any],
+            *,
+            after_micro_scroll: bool = False,
+            tap_safe: bool = False,
+            scroll_attempts: int = 0,
+            suggested_overlay_visible: bool = True,
+            grid_exposure: str = "stable",
+        ) -> dict[str, Any]:
             cell = cell_meta.get("cell")
+            cell_source = str(cell_meta.get("reason") or "")
+            tx = int((cell or {}).get("center_x") or 0) if isinstance(cell, dict) else 0
+            ty = int((cell or {}).get("center_y") or 0) if isinstance(cell, dict) else 0
             overlay_strategy["result"] = (
-                "visible_cell_after_micro_scroll"
+                "visible_cell_after_suggested_stabilization_scroll"
                 if after_micro_scroll
                 else "visible_cell_under_suggested_continue"
             )
             overlay_strategy["visible_cell"] = cell
+            overlay_strategy["scroll_attempts"] = int(scroll_attempts)
+            overlay_strategy["tap_safe"] = bool(tap_safe)
+            overlay_strategy["grid_exposure"] = str(grid_exposure or "stable")
             elapsed_ms = _global_elapsed_ms()
             timings["grid_prep_total_ms"] = elapsed_ms
             timings["overlay_strategy_ms"] = round(
@@ -16003,131 +17297,179 @@ def ensure_post_grid_visible_for_post_follow_likes(
             out["failure_reason"] = None
             out["timings_ms"] = timings
             out["direct_post_cell_under_suggested"] = cell
+            out["direct_post_cell_tap_safe"] = bool(tap_safe)
+            out["direct_post_cell_source"] = cell_source
+            out["direct_post_cell_scroll_attempts"] = int(scroll_attempts)
+            out["suggested_overlay_visible"] = bool(suggested_overlay_visible)
+            out["direct_post_grid_exposure"] = str(grid_exposure or "stable")
             out["likes_perf_grid"] = {
                 "initial_probe_ms": {},
                 "overlay_strategy": dict(overlay_strategy),
                 "scroll_cycles": list(scroll_perf_cycles),
                 "direct_post_cell_under_suggested": cell,
-                "final_suggested_for_you": True,
+                "direct_post_cell_tap_safe": bool(tap_safe),
+                "direct_post_cell_source": cell_source,
+                "direct_post_grid_exposure": str(grid_exposure or "stable"),
+                "final_suggested_for_you": bool(suggested_overlay_visible),
                 "final_profile_tabs_visible": bool(ui_hints.get("profile_tabs_visible")),
                 "grid_prepare_total_ms": elapsed_ms,
             }
             try:
                 log(
                     "info",
-                    "like_post_cell_selected_under_suggested",
+                    "like_first_post_cell_observed",
                     visual_candidate_id=vcid,
                     source_profile_username=src,
                     follower_username=cand,
                     phase=phase,
-                    after_micro_scroll=bool(after_micro_scroll),
+                    cell_source=cell_source,
+                    target_cell=str(cell_meta.get("target_cell") or "top_left"),
+                    is_top_left_target=bool(
+                        cell_meta.get("target_cell") == "top_left"
+                        or cell_source == "xml_thumbnail_top_left"
+                    ),
+                    tap_safe=bool(tap_safe),
+                    suggested_overlay_visible=bool(suggested_overlay_visible),
+                    tap_x=tx,
+                    tap_y=ty,
+                    scroll_attempts=int(scroll_attempts),
+                    grid_exposure=str(grid_exposure or "stable"),
                     cell=cell,
-                    reason=str(cell_meta.get("reason") or ""),
-                    grid_detect_ms=elapsed_ms,
                 )
             except Exception:
                 pass
             return out
 
-        cell_under = _post_follow_likes_visible_grid_cell_under_suggested(
-            d, ui_hints=ui_hints, budget_deadline=global_cap_deadline
-        )
-        if bool(cell_under.get("reliable")):
-            try:
-                log(
-                    "info",
-                    "like_visible_grid_cell_under_suggested",
-                    visual_candidate_id=vcid,
-                    source_profile_username=src,
-                    follower_username=cand,
-                    phase=phase,
-                    cell=cell_under.get("cell"),
-                    reason=str(cell_under.get("reason") or ""),
-                )
-            except Exception:
-                pass
-            return _finish_visible_cell(cell_under)
         if _global_cap_reached():
             return _finish_global_cap(
                 failure_reason="post_grid_partial_suggested_overlay_fast",
-                result="suggested_overlay_global_cap_after_cell_probe",
+                result="suggested_overlay_global_cap_before_action",
             )
         try:
             ww_ov, wh_ov = d.window_size()
         except Exception:
             ww_ov, wh_ov = 1080, 2340
-        ov_clear = _post_follow_likes_try_clear_suggested_overlay_fast(
+        stab = _post_follow_likes_stabilize_grid_under_suggested_overlay(
             d,
+            ui_hints=ui_hints,
+            budget_deadline=grid_cap_deadline,
             ww=int(ww_ov),
             wh=int(wh_ov),
-            budget_deadline=global_cap_deadline,
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            follower_username=cand,
         )
         overlay_strategy.update(
             {
-                "handled": bool(ov_clear.get("handled")),
-                "action": str(ov_clear.get("action") or ""),
-                "elapsed_ms": float(ov_clear.get("elapsed_ms") or 0.0),
+                "handled": bool(stab.get("scroll_attempts")),
+                "action": "suggested_stabilization_micro_scroll",
+                "scroll_attempts": int(stab.get("scroll_attempts") or 0),
+                "tap_safe": bool(stab.get("tap_safe")),
             }
         )
-        if str(ov_clear.get("action") or "") == "micro_scroll_reveal_grid":
+        cell_meta = stab.get("cell_meta") if isinstance(stab.get("cell_meta"), dict) else {}
+        ui_after = stab.get("ui_hints") if isinstance(stab.get("ui_hints"), dict) else ui_hints
+        scroll_attempts = int(stab.get("scroll_attempts") or 0)
+        tap_safe = bool(stab.get("tap_safe"))
+        grid_exposure = str(stab.get("grid_exposure") or "unstable")
+        suggested_vis = bool(
+            ui_after.get("suggested_for_you") or ui_after.get("discover_people")
+        )
+        if not bool(cell_meta.get("reliable")):
+            failure_reason = str(
+                stab.get("tap_safe_reason") or "post_grid_not_exposed_after_scroll"
+            )
+            overlay_strategy["result"] = failure_reason
             try:
                 log(
                     "info",
-                    "like_micro_scroll_after_suggested",
+                    "like_suggested_overlay_fast_skip",
                     visual_candidate_id=vcid,
                     source_profile_username=src,
                     follower_username=cand,
                     phase=phase,
-                    elapsed_ms=ov_clear.get("elapsed_ms"),
+                    failure_reason=failure_reason,
+                    scroll_attempts=scroll_attempts,
+                    grid_exposure=grid_exposure,
                 )
             except Exception:
                 pass
-        try:
-            ui_after = _post_follow_likes_grid_ui_surface_hints(d)
-        except Exception:
-            ui_after = dict(ui_hints)
-        cell_after = _post_follow_likes_visible_grid_cell_under_suggested(
-            d, ui_hints=ui_after, budget_deadline=global_cap_deadline
-        )
-        if bool(cell_after.get("reliable")):
+            out_fail = _post_follow_likes_finish_overlay_fast_skip(
+                out,
+                timings=timings,
+                overlay_strategy=overlay_strategy,
+                t_phase0=grid_probe_t0,
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                follower_username=cand,
+                failure_reason=failure_reason,
+            )
+            out_fail["failure_reason"] = failure_reason
+            return out_fail
+        if not tap_safe:
+            failure_reason = str(
+                stab.get("tap_safe_reason")
+                or "top_left_post_not_detected_after_xml_and_vision_probe"
+            )
+            if (
+                int(scroll_attempts) > 0
+                and failure_reason == "post_cell_estimate_not_safe_to_tap"
+            ):
+                failure_reason = "top_left_post_not_detected_after_xml_and_vision_probe"
+            overlay_strategy["result"] = failure_reason
             try:
                 log(
                     "info",
-                    "like_visible_grid_cell_under_suggested",
+                    "like_suggested_overlay_fast_skip",
                     visual_candidate_id=vcid,
                     source_profile_username=src,
                     follower_username=cand,
                     phase=phase,
-                    after_micro_scroll=True,
-                    cell=cell_after.get("cell"),
+                    failure_reason=failure_reason,
+                    scroll_attempts=scroll_attempts,
+                    cell_source=str(cell_meta.get("reason") or ""),
+                    grid_exposure=grid_exposure,
+                    estimate_only_after_scroll=str(cell_meta.get("reason") or "")
+                    == "profile_tabs_grid_cell_estimate",
                 )
             except Exception:
                 pass
-            return _finish_visible_cell(cell_after, after_micro_scroll=True)
-        overlay_strategy["result"] = (
-            "skipped_after_overlay_strategy_no_reliable_cell"
-            if not _global_cap_reached()
-            else "skipped_after_overlay_strategy_global_cap"
-        )
+            out_fail = _post_follow_likes_finish_overlay_fast_skip(
+                out,
+                timings=timings,
+                overlay_strategy=overlay_strategy,
+                t_phase0=grid_probe_t0,
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                follower_username=cand,
+                failure_reason=failure_reason,
+            )
+            out_fail["failure_reason"] = failure_reason
+            return out_fail
         try:
             log(
                 "info",
-                "like_suggested_overlay_fast_skip",
+                "like_visible_grid_cell_under_suggested",
                 visual_candidate_id=vcid,
                 source_profile_username=src,
                 follower_username=cand,
                 phase=phase,
+                after_micro_scroll=scroll_attempts > 0,
+                cell=cell_meta.get("cell"),
+                reason=str(cell_meta.get("reason") or ""),
+                tap_safe=True,
+                scroll_attempts=scroll_attempts,
+                grid_exposure=grid_exposure,
             )
         except Exception:
             pass
-        return _post_follow_likes_finish_overlay_fast_skip(
-            out,
-            timings=timings,
-            overlay_strategy=overlay_strategy,
-            t_phase0=global_phase_t0,
-            visual_candidate_id=vcid,
-            source_profile_username=src,
-            follower_username=cand,
+        return _finish_visible_cell(
+            cell_meta,
+            after_micro_scroll=scroll_attempts > 0,
+            tap_safe=True,
+            scroll_attempts=scroll_attempts,
+            suggested_overlay_visible=suggested_vis,
+            grid_exposure=grid_exposure,
         )
 
     skip_probe = _suggested_overlay_flow(ui_pre, phase="pre_grid_probe")
@@ -16146,7 +17488,7 @@ def ensure_post_grid_visible_for_post_follow_likes(
             out,
             timings=timings,
             overlay_strategy=overlay_strategy,
-            t_phase0=global_phase_t0,
+            t_phase0=grid_probe_t0,
             visual_candidate_id=vcid,
             source_profile_username=src,
             follower_username=cand,
@@ -16276,7 +17618,7 @@ def ensure_post_grid_visible_for_post_follow_likes(
                 d,
                 ww=int(ww_ov),
                 wh=int(wh_ov),
-                budget_deadline=global_cap_deadline,
+                budget_deadline=grid_cap_deadline,
             )
             overlay_strategy.update(
                 {
@@ -17555,6 +18897,320 @@ def _visual_grid_cell_tap_xy_device(
     cy_img = max(y0 + 8, min(y0 + cell_h - 8, cy_img))
     tap_x, tap_y = _visual_xy_image_to_device(cx_img, cy_img, iw, ih, ww, wh)
     return max(2, min(ww - 3, tap_x)), max(2, min(wh - 3, tap_y))
+
+
+def _post_follow_likes_open_top_left_legacy_visual_safe(
+    d: u2.Device,
+    *,
+    pkg: str,
+    source_profile_username: str,
+    expected_follower_username: str,
+    visual_candidate_id: str,
+    post_index: int,
+    likes_perf_phase_t0: float | None = None,
+) -> dict[str, Any]:
+    """
+    Safe, targeted reuse of the emulator-era visual open path.
+    It only considers row=0,col=0 below profile tabs and requires viewer confirmation.
+    """
+    t0 = time.perf_counter()
+
+    def _finish(reason: str, **extra: Any) -> dict[str, Any]:
+        out = {
+            "ok": False,
+            "post_detected": False,
+            "failure_reason": str(reason or "legacy_visual_top_left_failed"),
+            "open_strategy": "vision_open_top_left_legacy_safe",
+            "likes_perf_post_open": {
+                "legacy_visual_top_left_total_ms": round(
+                    (time.perf_counter() - t0) * 1000.0, 2
+                ),
+                "failure_reason": str(reason or "legacy_visual_top_left_failed"),
+                **extra,
+            },
+            **extra,
+        }
+        try:
+            log(
+                "warning",
+                "vision_open_top_left_legacy_safe_failed",
+                visual_candidate_id=visual_candidate_id,
+                source_profile_username=source_profile_username,
+                follower_username=expected_follower_username,
+                post_index=int(post_index),
+                failure_reason=out["failure_reason"],
+                **extra,
+            )
+        except Exception:
+            pass
+        return out
+
+    try:
+        meta0 = _followers_current_pkg_activity(d)
+    except Exception:
+        meta0 = {}
+    try:
+        log(
+            "info",
+            "vision_open_top_left_legacy_safe_started",
+            visual_candidate_id=visual_candidate_id,
+            source_profile_username=source_profile_username,
+            follower_username=expected_follower_username,
+            post_index=int(post_index),
+            current_activity=meta0.get("current_activity"),
+            current_package=meta0.get("current_package"),
+            selection_policy=_VISUAL_POST_OPEN_SELECTION_FIRST_ROW_LTR,
+            allowed_row=0,
+            allowed_col=0,
+        )
+    except Exception:
+        pass
+
+    tv_open = visual_target_profile_lock_verify(
+        d,
+        source_profile_username=source_profile_username,
+        action="vision_open_top_left_legacy_safe",
+    )
+    if not bool(tv_open.get("ok")):
+        return _finish("legacy_visual_top_left_failed", target_profile_lock_mismatch=True)
+
+    try:
+        ww, wh = d.window_size()
+    except Exception:
+        ww, wh = 1080, 2340
+    try:
+        ui_hints = _post_follow_likes_grid_ui_surface_hints(d)
+    except Exception:
+        ui_hints = {}
+    try:
+        tabs_bt, _phase = _followers_profile_tabs_bottom_y_px(d, window_h=int(wh))
+    except Exception:
+        tabs_bt = None
+    if tabs_bt is None:
+        return _finish("legacy_visual_top_left_candidate_ambiguous")
+    margin = int(_POST_FOLLOW_PROFILE_TABS_GRID_MARGIN_PX)
+    y_floor = int(tabs_bt) + margin
+    if y_floor > int(wh * float(_POST_FOLLOW_LIKE_HIGHLIGHTS_BLOCKING_Y_MIN_RATIO)):
+        return _finish(
+            "legacy_visual_top_left_candidate_ambiguous",
+            profile_tabs_bottom_y_px=int(tabs_bt),
+            dynamic_first_row_search_y_min_px=int(y_floor),
+        )
+
+    _ensure_debug_dirs()
+    shot_path = str(
+        _SCREENSHOTS_DIR
+        / f"vision_open_top_left_legacy_safe_{int(time.time() * 1000)}.png"
+    )
+    try:
+        screenshot(d, shot_path)
+        from PIL import Image
+
+        im = Image.open(shot_path).convert("RGB")
+        iw, ih = im.size
+    except Exception as e:
+        return _finish("legacy_visual_top_left_failed", error=str(e)[:160])
+
+    (
+        search_y_min_px,
+        search_y_min_source,
+        profile_tabs_bottom_y_px,
+        profile_tabs_grid_margin_px,
+    ) = _post_follow_dynamic_first_row_search_y_min_layout(d, int(ih), ui_hints)
+    if (
+        str(search_y_min_source) != "profile_tabs_bottom"
+        or profile_tabs_bottom_y_px is None
+    ):
+        return _finish(
+            "legacy_visual_top_left_candidate_ambiguous",
+            dynamic_first_row_search_y_min_source=str(search_y_min_source),
+            suggested_for_you=bool(ui_hints.get("suggested_for_you")),
+            discover_people=bool(ui_hints.get("discover_people")),
+        )
+
+    dyn = _dynamic_first_post_grid_row_from_image(
+        im,
+        int(iw),
+        int(ih),
+        var_thr=float(_POST_FOLLOW_LIKES_GRID_VAR_THR),
+        search_y_min_px=int(search_y_min_px),
+    )
+    if not bool(dyn.get("ok")):
+        return _finish(
+            "legacy_visual_top_left_variance_insufficient",
+            screenshot_path=shot_path,
+            dynamic_first_row_search_y_min_px=int(search_y_min_px),
+        )
+    cell_w = max(24, int(iw) // 3)
+    cell_h = cell_w
+    x0 = 0
+    try:
+        y0 = int(dyn.get("first_row_top"))
+    except (TypeError, ValueError):
+        return _finish("legacy_visual_top_left_candidate_ambiguous")
+    if y0 < int(profile_tabs_bottom_y_px) + int(profile_tabs_grid_margin_px):
+        return _finish(
+            "legacy_visual_top_left_above_tabs",
+            cell_top_y_px=int(y0),
+            profile_tabs_bottom_y_px=int(profile_tabs_bottom_y_px),
+            profile_tabs_grid_margin_px=int(profile_tabs_grid_margin_px),
+        )
+    if y0 + cell_h > int(ih) or y0 > int(ih * 0.82):
+        return _finish(
+            "legacy_visual_top_left_candidate_ambiguous",
+            cell_top_y_px=int(y0),
+            cell_h=int(cell_h),
+        )
+    try:
+        variance = _visual_image_cell_luma_variance(im, x0, y0, cell_w, cell_h)
+    except Exception:
+        variance = 0.0
+    if float(variance) < float(_POST_FOLLOW_LIKES_GRID_VAR_THR):
+        return _finish(
+            "legacy_visual_top_left_variance_insufficient",
+            selected_variance=round(float(variance), 2),
+            variance_threshold=float(_POST_FOLLOW_LIKES_GRID_VAR_THR),
+            screenshot_path=shot_path,
+        )
+    tap_x, tap_y = _visual_grid_cell_tap_xy_device(
+        x0,
+        y0,
+        cell_w,
+        cell_h,
+        iw=int(iw),
+        ih=int(ih),
+        ww=int(ww),
+        wh=int(wh),
+        tap_frac_x=float(_POST_FOLLOW_GRID_CELL_TAP_FRAC_X),
+        tap_frac_y=float(_POST_FOLLOW_GRID_CELL_TAP_FRAC_Y),
+    )
+    try:
+        log(
+            "info",
+            "vision_open_top_left_legacy_safe_candidate_detected",
+            visual_candidate_id=visual_candidate_id,
+            source_profile_username=source_profile_username,
+            follower_username=expected_follower_username,
+            post_index=int(post_index),
+            selected_col=0,
+            selected_row=0,
+            selected_variance=round(float(variance), 2),
+            tap_x=int(tap_x),
+            tap_y=int(tap_y),
+            cell_w=int(cell_w),
+            cell_h=int(cell_h),
+            dynamic_first_row_top=int(y0),
+            dynamic_first_row_solid_count=dyn.get("solid_count"),
+            screenshot_path=shot_path,
+            selection_policy=_VISUAL_POST_OPEN_SELECTION_FIRST_ROW_LTR,
+        )
+    except Exception:
+        pass
+    try:
+        time.sleep(float(_POST_FOLLOW_RECENT_POST_OPEN_PRE_TAP_SETTLE_S))
+    except Exception:
+        pass
+    try:
+        log(
+            "info",
+            "like_post_open_attempted",
+            visual_candidate_id=visual_candidate_id,
+            source_profile_username=source_profile_username,
+            follower_username=expected_follower_username,
+            post_index=int(post_index),
+            tap_x=int(tap_x),
+            tap_y=int(tap_y),
+            action="legacy_visual_top_left_safe",
+            cell_source="vision_open_top_left_legacy_safe",
+            scroll_attempts=0,
+            grid_exposure="legacy_visual_top_left",
+        )
+        d.click(int(tap_x), int(tap_y))
+        log(
+            "info",
+            "vision_open_top_left_legacy_safe_tap_sent",
+            visual_candidate_id=visual_candidate_id,
+            source_profile_username=source_profile_username,
+            follower_username=expected_follower_username,
+            post_index=int(post_index),
+            tap_x=int(tap_x),
+            tap_y=int(tap_y),
+            selected_col=0,
+            selected_row=0,
+        )
+    except Exception as e:
+        return _finish("legacy_visual_top_left_failed", tap_x=int(tap_x), tap_y=int(tap_y), error=str(e)[:160])
+
+    viewer = _visual_wait_post_viewer_opened_after_tap(
+        d,
+        pkg=pkg,
+        expected_follower_username=str(expected_follower_username or "").strip().lstrip("@"),
+        act_before=meta0.get("current_activity"),
+        poll_label="legacy_top_left_tap",
+        post_follow_fast=True,
+    )
+    try:
+        log(
+            "info",
+            "vision_open_top_left_legacy_safe_viewer_poll_completed",
+            visual_candidate_id=visual_candidate_id,
+            source_profile_username=source_profile_username,
+            follower_username=expected_follower_username,
+            post_index=int(post_index),
+            post_detected=bool(viewer.get("post_detected")),
+            detect_reason=viewer.get("detect_reason"),
+            viewer_detect_path=viewer.get("viewer_detect_path"),
+            viewer_open_poll_wait_ms=viewer.get("viewer_open_poll_wait_ms"),
+            viewer_detect_total_ms=viewer.get("viewer_detect_total_ms"),
+        )
+    except Exception:
+        pass
+    if not bool(viewer.get("post_detected")):
+        return _finish(
+            "legacy_visual_top_left_viewer_not_confirmed",
+            tap_x=int(tap_x),
+            tap_y=int(tap_y),
+            viewer_detect_path=viewer.get("viewer_detect_path"),
+            detect_reason=viewer.get("detect_reason"),
+        )
+    perf = {
+        **dict(viewer),
+        "legacy_visual_top_left_total_ms": round((time.perf_counter() - t0) * 1000.0, 2),
+        "legacy_visual_top_left": True,
+        "open_strategy": "vision_open_top_left_legacy_safe",
+        "selected_col": 0,
+        "selected_row": 0,
+        "selected_variance": round(float(variance), 2),
+        "screenshot_path": shot_path,
+        "elapsed_from_phase_start_ms": _likes_perf_elapsed_ms(likes_perf_phase_t0),
+    }
+    try:
+        log(
+            "info",
+            "vision_open_top_left_legacy_safe_success",
+            visual_candidate_id=visual_candidate_id,
+            source_profile_username=source_profile_username,
+            follower_username=expected_follower_username,
+            post_index=int(post_index),
+            tap_x=int(tap_x),
+            tap_y=int(tap_y),
+            detect_reason=viewer.get("detect_reason"),
+            viewer_detect_path=viewer.get("viewer_detect_path"),
+        )
+    except Exception:
+        pass
+    return {
+        "ok": True,
+        "post_detected": True,
+        "failure_reason": "",
+        "open_strategy": "vision_open_top_left_legacy_safe",
+        "tap_x": int(tap_x),
+        "tap_y": int(tap_y),
+        "detect_reason": viewer.get("detect_reason"),
+        "viewer_detect_path": viewer.get("viewer_detect_path"),
+        "likes_perf_post_open": perf,
+        "tap_to_viewer_detected_ms": viewer.get("viewer_detect_total_ms"),
+    }
 
 
 def _visual_select_profile_grid_cell(
@@ -21629,6 +23285,7 @@ def visual_like_open_post(
     source_profile_username: str | None = None,
     expected_profile_context: dict[str, Any] | None = None,
     post_opened_via_profile_grid: bool = False,
+    post_open_context: dict[str, Any] | None = None,
     expected_follower_username: str | None = None,
     likes_perf_like_accum: dict[str, Any] | None = None,
     likes_perf_phase_t0: float | None = None,
@@ -21942,6 +23599,15 @@ def visual_like_open_post(
 
         lock_ctx = bool(getattr(config, "ENABLE_VISUAL_PROFILE_CONTEXT_LOCK", False))
         exp_ctx = expected_profile_context or {}
+        open_ctx = post_open_context if isinstance(post_open_context, dict) else {}
+        legacy_safe_open_context_ok = bool(
+            post_opened_via_profile_grid
+            and str(open_ctx.get("open_strategy") or "")
+            == "vision_open_top_left_legacy_safe"
+            and bool(open_ctx.get("post_detected"))
+            and str(open_ctx.get("viewer_detect_path") or "")
+            in {"phase_a2_exact_like_desc_fast", "phase_a_like_unlike_fast"}
+        )
         min_ctx = float(
             getattr(config, "VISUAL_PROFILE_CONTEXT_MIN_MATCH_CONFIDENCE", 0.72)
             or 0.72
@@ -21953,6 +23619,71 @@ def visual_like_open_post(
                 or ""
             )
             if exp_ctx.get("ok") is False or not exp_fp0:
+                if legacy_safe_open_context_ok:
+                    if _lkperf is not None:
+                        _lkperf["post_open_context_guard_ms"] = 0.0
+                        _lkperf["post_open_context_guard_source"] = (
+                            "legacy_safe_open_viewer_proof"
+                        )
+                    try:
+                        log(
+                            "info",
+                            "visual_post_like_context_accepted_from_legacy_safe_open",
+                            source_profile_username=source_profile_username or "",
+                            expected_follower_username=str(
+                                expected_follower_username or ""
+                            )[:120],
+                            open_strategy=str(open_ctx.get("open_strategy") or ""),
+                            viewer_detect_path=str(
+                                open_ctx.get("viewer_detect_path") or ""
+                            ),
+                            detect_reason=str(open_ctx.get("detect_reason") or ""),
+                            like_button_bounds=like_button_bounds,
+                            tap_x=tap_x,
+                            tap_y=tap_y,
+                            already_liked=False,
+                        )
+                    except Exception:
+                        pass
+                    # The opened viewer itself is the fresh context; skip profile-baseline lock.
+                    pass
+                else:
+                    meta_ctx = _followers_current_pkg_activity(d)
+                    log(
+                        "info",
+                        "visual_profile_context_mismatch_abort",
+                        action="visual_post_like_real",
+                        abort_reason="missing_expected_profile_context_baseline",
+                        expected_profile_fingerprint="",
+                        current_profile_fingerprint="",
+                        confidence=0.0,
+                        same_profile=False,
+                        verification_method="none",
+                        current_activity=meta_ctx.get("current_activity"),
+                        current_package=meta_ctx.get("current_package"),
+                        source_profile_username=source_profile_username or "",
+                    )
+                    return {
+                        "ok": False,
+                        "already_liked": False,
+                        "skipped": False,
+                        "real_tap_sent": False,
+                        "profile_context_mismatch": True,
+                        "like_button_bounds": like_button_bounds,
+                        "tap_x": tap_x,
+                        "tap_y": tap_y,
+                        "confidence": confidence,
+                        "current_activity": meta_ctx.get("current_activity"),
+                        "current_package": meta_ctx.get("current_package"),
+                        "source_profile_username": source_profile_username or "",
+                        "failure_reason": "profile_context_mismatch",
+                        "dry_run": False,
+                        "liked_verified": False,
+                        "verification_method": "profile_context_lock",
+                    }
+            if legacy_safe_open_context_ok and (exp_ctx.get("ok") is False or not exp_fp0):
+                pass
+            elif exp_ctx.get("ok") is False or not exp_fp0:
                 meta_ctx = _followers_current_pkg_activity(d)
                 log(
                     "info",
@@ -21987,7 +23718,7 @@ def visual_like_open_post(
                     "verification_method": "profile_context_lock",
                 }
             pkg_ctx = str(getattr(config, "INSTAGRAM_PACKAGE", "") or "")
-            if bool(post_opened_via_profile_grid):
+            if bool(post_opened_via_profile_grid) and not legacy_safe_open_context_ok:
                 _guard_perf: dict[str, Any] = {}
                 po_ok, po_why, po_meta = _visual_post_viewer_context_guard_for_like(
                     d,
@@ -22099,6 +23830,27 @@ def visual_like_open_post(
                         like_ui_present=po_meta.get("like_ui_present"),
                         like_ui_method=po_meta.get("like_ui_method"),
                         post_viewer_chrome=po_meta.get("post_viewer_chrome"),
+                    )
+                except Exception:
+                    pass
+            elif legacy_safe_open_context_ok:
+                try:
+                    log(
+                        "info",
+                        "visual_profile_context_verify_skipped_for_legacy_safe_open",
+                        source_profile_username=source_profile_username or "",
+                        expected_follower_username=str(
+                            expected_follower_username or ""
+                        )[:120],
+                        open_strategy=str(open_ctx.get("open_strategy") or ""),
+                        viewer_detect_path=str(
+                            open_ctx.get("viewer_detect_path") or ""
+                        ),
+                        detect_reason=str(open_ctx.get("detect_reason") or ""),
+                        like_button_bounds=like_button_bounds,
+                        tap_x=tap_x,
+                        tap_y=tap_y,
+                        already_liked=False,
                     )
                 except Exception:
                     pass
@@ -22244,6 +23996,19 @@ def visual_like_open_post(
             current_package=meta1.get("current_package"),
             source_profile_username=source_profile_username or "",
         )
+        try:
+            log(
+                "info",
+                "visual_post_like_tap_sent",
+                tap_x=tap_x,
+                tap_y=tap_y,
+                confidence=round(confidence, 4),
+                current_activity=meta1.get("current_activity"),
+                current_package=meta1.get("current_package"),
+                source_profile_username=source_profile_username or "",
+            )
+        except Exception:
+            pass
         _clear_post_follow_open_like_proof_stash()
         time.sleep(1.2)
         post_shot = str(
@@ -34434,6 +36199,10 @@ def _mute_engine_v2_remaining_s(t0: float) -> float:
     return max(0.0, _MUTE_ENGINE_V2_EFFECTIVE_TOTAL_S - (time.perf_counter() - t0))
 
 
+def _mute_engine_v2_axis_remaining_s(axis_t0: float, axis_budget_s: float) -> float:
+    return max(0.0, float(axis_budget_s or 0.0) - (time.perf_counter() - axis_t0))
+
+
 def _mute_engine_v2_toggle_required_budget_s(
     *, want_posts: bool = True, want_stories: bool = True
 ) -> float:
@@ -34502,6 +36271,24 @@ def _mute_engine_v2_map_toggle_rsn(rsn: str) -> str:
     if r in ("", "skipped"):
         return "skipped"
     return r or "unknown"
+
+
+def _mute_engine_v2_axis_reason(axis: str, raw_reason: str, *, already_on: bool = False) -> str:
+    prefix = "stories_axis" if str(axis or "") == "stories" else "posts_axis"
+    r = str(raw_reason or "").strip()
+    if already_on or r.startswith("already_on"):
+        return f"{prefix}_skipped_already_muted"
+    if r in ("", "skipped"):
+        return "applied_or_verified"
+    if r in ("budget", "mute_axis_budget_exhausted", "toggle_stage_wall_cap"):
+        return f"{prefix}_skipped_budget_exhausted"
+    if r == "toggle_label_not_found":
+        return f"{prefix}_skipped_toggle_not_found"
+    if r in ("state_invalid", "mute_toggles_sheet_not_confirmed"):
+        return f"{prefix}_skipped_state_invalid"
+    if r == "config_disabled":
+        return f"{prefix}_skipped_config_disabled"
+    return r
 
 
 def _mute_engine_v2_missing_axis(
@@ -35272,9 +37059,14 @@ def _mute_engine_v2_tap_toggle_short(
     axis: str = "",
     visual_candidate_id: str = "",
     source_profile_username: str = "",
+    axis_budget_s: float | None = None,
 ) -> tuple[bool, bool, str]:
     """Returns (tapped_or_already_on, is_already_on, reason)."""
-    rem = _mute_engine_v2_remaining_s(t0)
+    rem = (
+        _mute_engine_v2_axis_remaining_s(t0, float(axis_budget_s))
+        if axis_budget_s is not None
+        else _mute_engine_v2_remaining_s(t0)
+    )
     if rem < 0.08:
         return False, False, "budget"
     row = _mute_engine_v2_resolve_toggle_row(
@@ -35334,6 +37126,7 @@ def _mute_engine_v2_compact_axis_toggle(
     toggle_stage_deadline: float,
     visual_candidate_id: str = "",
     source_profile_username: str = "",
+    axis_budget_s: float | None = None,
 ) -> tuple[bool, bool, bool, str, float]:
     """
     Compact Posts/Stories toggle: XML verify-first, minimal live polling, no structure diag.
@@ -35361,6 +37154,7 @@ def _mute_engine_v2_compact_axis_toggle(
         axis=axis,
         visual_candidate_id=visual_candidate_id,
         source_profile_username=source_profile_username,
+        axis_budget_s=axis_budget_s,
     )
     tap_attempted = bool(tapped and not already)
     if already:
@@ -35371,7 +37165,15 @@ def _mute_engine_v2_compact_axis_toggle(
         )
     settle_s = min(
         float(_MUTE_V2_TOGGLE_POST_TAP_SETTLE_S),
-        max(0.04, _mute_engine_v2_remaining_s(t0) * 0.12),
+        max(
+            0.04,
+            (
+                _mute_engine_v2_axis_remaining_s(t0, float(axis_budget_s))
+                if axis_budget_s is not None
+                else _mute_engine_v2_remaining_s(t0)
+            )
+            * 0.12,
+        ),
     )
     if settle_s >= 0.03:
         time.sleep(settle_s)
@@ -35381,7 +37183,11 @@ def _mute_engine_v2_compact_axis_toggle(
         return True, tap_attempted, False, rsn, elapsed_ms
     if time.perf_counter() >= toggle_stage_deadline:
         return False, tap_attempted, False, "mute_axis_budget_exhausted", elapsed_ms
-    rem_v = _mute_engine_v2_remaining_s(t0)
+    rem_v = (
+        _mute_engine_v2_axis_remaining_s(t0, float(axis_budget_s))
+        if axis_budget_s is not None
+        else _mute_engine_v2_remaining_s(t0)
+    )
     vto = min(0.28, max(0.1, rem_v * 0.22))
     ok_live, vmeta = _visual_verify_toggle_on_for_labels_detailed(d, labels, timeout_s=vto)
     if ok_live:
@@ -35568,6 +37374,16 @@ def run_mute_engine_v2(
     timings: dict[str, float] = {}
     vcid = str(visual_candidate_id or "").strip()
     src = str(source_profile_username or "").strip()
+    log_account_id = ""
+    log_run_id = ""
+    try:
+        import supabase_client as _mute_supabase_client  # local import avoids a hard nav dependency
+
+        log_account_id = str(getattr(_mute_supabase_client, "_LOG_CONTEXT_ACCOUNT_ID", "") or "")
+        log_run_id = str(getattr(_mute_supabase_client, "_LOG_CONTEXT_RUN_ID", "") or "")
+    except Exception:
+        log_account_id = ""
+        log_run_id = ""
     pkg = str(pkg or getattr(config, "INSTAGRAM_PACKAGE", "") or "")
     fs_after = str(follow_state_after or "").strip()
     want_posts = bool(getattr(config, "VISUAL_MUTE_POSTS_AFTER_FOLLOW", True))
@@ -36032,6 +37848,18 @@ def run_mute_engine_v2(
         **ui_snapshot,
     )
     timings["observe_state_ms"] = round((time.perf_counter() - t_obs) * 1000, 2)
+    log(
+        "info",
+        "post_follow_mute_state_entered",
+        account_id=log_account_id,
+        run_id=log_run_id,
+        target_username=str(follower_username or "").strip(),
+        visual_candidate_id=vcid,
+        source_profile_username=src,
+        state="post_follow_profile_opened",
+        navigation_state=str(nav.get("state") or ""),
+        reason="profile_state_observed",
+    )
 
     if (not following_clicked_fast_path) and not _vision_validation_mute_engine_surface(
         screenshot_path="",
@@ -36245,7 +38073,7 @@ def run_mute_engine_v2(
     stories_v = bool(sheet_meta.get("stories_label")) or _mute_engine_v2_u2_text_exists(
         d, text="Stories"
     )
-    if not posts_v or not stories_v:
+    if not posts_v and not stories_v:
         return _abort("posts_or_stories_labels_missing", fr="posts_or_stories_labels_missing")
 
     log(
@@ -36266,6 +38094,19 @@ def run_mute_engine_v2(
         sheet_level="mute_toggles",
         posts_visible=posts_v,
         stories_visible=stories_v,
+    )
+    log(
+        "info",
+        "post_follow_mute_state_entered",
+        account_id=log_account_id,
+        run_id=log_run_id,
+        target_username=str(follower_username or "").strip(),
+        visual_candidate_id=vcid,
+        source_profile_username=src,
+        state="mute_menu_opened",
+        posts_visible=posts_v,
+        stories_visible=stories_v,
+        reason="mute_toggles_sheet_confirmed",
     )
 
     _rem_toggle_stage = _mute_engine_v2_remaining_s(t_all)
@@ -36327,9 +38168,90 @@ def run_mute_engine_v2(
     rsn_s = "skipped"
     t_toggle_stage = time.perf_counter()
     toggle_stage_deadline = t_toggle_stage + float(_MUTE_V2_TOGGLE_STAGE_WALL_CAP_S)
+    _axes_wanted = int(bool(want_posts)) + int(bool(want_stories))
+    _axis_budget_default_s = (
+        float(_MUTE_V2_TOGGLE_STAGE_WALL_CAP_S) / float(max(1, _axes_wanted))
+    )
+    posts_budget_s = max(float(_MUTE_V2_PER_AXIS_TOGGLE_MIN_S), _axis_budget_default_s)
+    stories_budget_s = max(float(_MUTE_V2_PER_AXIS_TOGGLE_MIN_S), _axis_budget_default_s)
+    timings["posts_budget_s"] = round(float(posts_budget_s), 4) if want_posts else 0.0
+    timings["stories_budget_s"] = round(float(stories_budget_s), 4) if want_stories else 0.0
+    timings["total_mute_budget_s"] = round(float(_MUTE_V2_TOGGLE_STAGE_WALL_CAP_S), 4)
+    posts_axis_reason = (
+        "pending" if want_posts else _mute_engine_v2_axis_reason("posts", "config_disabled")
+    )
+    stories_axis_reason = (
+        "pending" if want_stories else _mute_engine_v2_axis_reason("stories", "config_disabled")
+    )
+
+    def _axis_log_base(axis: str, axis_budget_s: float, axis_t0: float) -> dict[str, Any]:
+        return {
+            "account_id": log_account_id,
+            "run_id": log_run_id,
+            "target_username": str(follower_username or "").strip(),
+            "visual_candidate_id": vcid,
+            "source_profile_username": src,
+            "axis": axis,
+            "axis_budget_s": round(float(axis_budget_s), 4),
+            "elapsed_s": round(max(0.0, time.perf_counter() - axis_t0), 4),
+        }
+
+    def _emit_axis_skipped(
+        axis: str,
+        *,
+        axis_budget_s: float,
+        reason: str,
+        toggle_seen: bool = False,
+        verified: bool = False,
+        axis_t0: float | None = None,
+    ) -> None:
+        _t = axis_t0 if axis_t0 is not None else time.perf_counter()
+        log(
+            "info",
+            "post_follow_mute_axis_skipped",
+            **_axis_log_base(axis, axis_budget_s, _t),
+            toggle_seen=bool(toggle_seen),
+            toggle_tapped=False,
+            verified=bool(verified),
+            reason=reason,
+        )
+
+    def _emit_final_mute_state(reason: str) -> None:
+        log(
+            "info",
+            "post_follow_mute_final_state",
+            account_id=log_account_id,
+            run_id=log_run_id,
+            target_username=str(follower_username or "").strip(),
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            muted_posts=bool(posts_ok),
+            muted_stories=bool(stories_ok),
+            mute_posts_attempted=bool(posts_tapped),
+            mute_stories_attempted=bool(stories_tapped),
+            posts_axis_reason=posts_axis_reason,
+            stories_axis_reason=stories_axis_reason,
+            reason=reason,
+        )
+
+    if not want_posts:
+        _emit_axis_skipped(
+            "posts",
+            axis_budget_s=0.0,
+            reason=posts_axis_reason,
+            toggle_seen=bool(posts_v),
+            verified=True,
+        )
+    if not want_stories:
+        _emit_axis_skipped(
+            "stories",
+            axis_budget_s=0.0,
+            reason=stories_axis_reason,
+            toggle_seen=bool(stories_v),
+            verified=True,
+        )
 
     # Posts before Stories when both required; per-axis wall slice so neither axis starves the other.
-    _axes_wanted = int(bool(want_posts)) + int(bool(want_stories))
     _axes_left = _axes_wanted
 
     def _run_axis_with_deadline(
@@ -36345,15 +38267,55 @@ def run_mute_engine_v2(
         started_event: str,
         completed_event: str,
     ) -> None:
-        nonlocal _axes_left
+        nonlocal _axes_left, posts_axis_reason, stories_axis_reason
         if not want_axis:
             return
         axis_deadline = _mute_engine_v2_toggle_stage_axis_deadline(
             toggle_stage_deadline,
             axes_remaining=max(1, _axes_left),
-            t_all=t_all,
+            t_all=None,
         )
         _axes_left = max(0, _axes_left - 1)
+        axis_budget_s = posts_budget_s if axis == "posts" else stories_budget_s
+        axis_t0 = time.perf_counter()
+        toggle_seen = bool(posts_v) if axis == "posts" else bool(stories_v)
+        observed_state = "posts_toggle_observed" if axis == "posts" else "stories_toggle_observed"
+        completed_state = (
+            "posts_toggle_applied_or_already_ok"
+            if axis == "posts"
+            else "stories_toggle_applied_or_already_ok"
+        )
+        if not toggle_seen:
+            reason = _mute_engine_v2_axis_reason(axis, "toggle_label_not_found")
+            if axis == "posts":
+                posts_axis_reason = reason
+            else:
+                stories_axis_reason = reason
+            rsn_ref[0] = "toggle_label_not_found"
+            _emit_axis_skipped(
+                axis,
+                axis_budget_s=axis_budget_s,
+                reason=reason,
+                toggle_seen=False,
+                verified=False,
+                axis_t0=axis_t0,
+            )
+            timings[timing_key] = round((time.perf_counter() - axis_t0) * 1000.0, 2)
+            return
+        log(
+            "info",
+            "post_follow_mute_state_entered",
+            account_id=log_account_id,
+            run_id=log_run_id,
+            target_username=str(follower_username or "").strip(),
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            state=observed_state,
+            axis=axis,
+            axis_budget_s=round(float(axis_budget_s), 4),
+            toggle_seen=True,
+            reason="toggle_label_observed",
+        )
         try:
             log(
                 "info",
@@ -36365,6 +38327,15 @@ def run_mute_engine_v2(
                     max(0.0, axis_deadline - time.perf_counter()), 4
                 ),
             )
+            log(
+                "info",
+                "post_follow_mute_axis_started",
+                **_axis_log_base(axis, axis_budget_s, axis_t0),
+                toggle_seen=True,
+                toggle_tapped=False,
+                verified=False,
+                reason="axis_started",
+            )
         except Exception:
             pass
         axis_ok, tap_att, already_on, raw_rsn, elapsed_ms = _mute_engine_v2_compact_axis_toggle(
@@ -36372,15 +38343,21 @@ def run_mute_engine_v2(
             axis=axis,
             labels=labels,
             ww=ww,
-            t0=t_all,
+            t0=axis_t0,
             toggle_stage_deadline=axis_deadline,
             visual_candidate_id=vcid,
             source_profile_username=src,
+            axis_budget_s=axis_budget_s,
         )
         ok_ref[0] = bool(axis_ok)
         tapped_ref[0] = bool(tap_att)
         already_ref[0] = bool(already_on)
         rsn_ref[0] = str(raw_rsn or "")
+        axis_reason = _mute_engine_v2_axis_reason(axis, raw_rsn, already_on=bool(already_on))
+        if axis == "posts":
+            posts_axis_reason = axis_reason
+        else:
+            stories_axis_reason = axis_reason
         timings[timing_key] = float(elapsed_ms)
         verified = bool(axis_ok)
         log(
@@ -36398,6 +38375,38 @@ def run_mute_engine_v2(
             elapsed_ms=elapsed_ms,
             remaining_budget_s=round(_mute_engine_v2_remaining_s(t_all), 4),
         )
+        event_name = (
+            "post_follow_mute_axis_completed"
+            if bool(axis_ok)
+            else "post_follow_mute_axis_skipped"
+        )
+        log(
+            "info" if bool(axis_ok) else "warning",
+            event_name,
+            **_axis_log_base(axis, axis_budget_s, axis_t0),
+            toggle_seen=True,
+            toggle_tapped=bool(tap_att),
+            verified=verified,
+            reason=axis_reason,
+            raw_reason=str(raw_rsn or ""),
+        )
+        if bool(axis_ok):
+            log(
+                "info",
+                "post_follow_mute_state_entered",
+                account_id=log_account_id,
+                run_id=log_run_id,
+                target_username=str(follower_username or "").strip(),
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                state=completed_state,
+                axis=axis,
+                axis_budget_s=round(float(axis_budget_s), 4),
+                toggle_seen=True,
+                toggle_tapped=bool(tap_att),
+                verified=True,
+                reason=axis_reason,
+            )
         try:
             log(
                 "info",
@@ -36461,6 +38470,7 @@ def run_mute_engine_v2(
     if want_posts and want_stories:
         if posts_ok and stories_ok:
             _emit_mute_perf_summary(result="success", skip_reason="")
+            _emit_final_mute_state("final_mute_state_verified")
             log(
                 "info",
                 "mute_engine_v2_success",
@@ -36500,6 +38510,12 @@ def run_mute_engine_v2(
                 "stories_verified": True,
                 "posts_tapped": posts_tapped,
                 "stories_tapped": stories_tapped,
+                "muted_posts": True,
+                "muted_stories": True,
+                "mute_posts_attempted": bool(posts_tapped),
+                "mute_stories_attempted": bool(stories_tapped),
+                "posts_axis_reason": posts_axis_reason,
+                "stories_axis_reason": stories_axis_reason,
                 "mute_row_label": "",
                 "timings_ms": dict(timings),
             }
@@ -36514,6 +38530,7 @@ def run_mute_engine_v2(
                 result="partial_success",
                 skip_reason="mute_partial_one_toggle",
             )
+            _emit_final_mute_state("final_mute_state_verified")
             log(
                 "warning",
                 "mute_engine_v2_partial_success",
@@ -36565,6 +38582,12 @@ def run_mute_engine_v2(
                 "missing_axis": missing_axis,
                 "posts_tapped": posts_tapped,
                 "stories_tapped": stories_tapped,
+                "muted_posts": bool(posts_ok),
+                "muted_stories": bool(stories_ok),
+                "mute_posts_attempted": bool(posts_tapped),
+                "mute_stories_attempted": bool(stories_tapped),
+                "posts_axis_reason": posts_axis_reason,
+                "stories_axis_reason": stories_axis_reason,
                 "timings_ms": dict(timings),
             }
         _ab_reason, _fail_reason = _mute_engine_v2_classify_both_toggles_failure(
@@ -36579,6 +38602,7 @@ def run_mute_engine_v2(
             rsn_p=rsn_p,
             rsn_s=rsn_s,
         )
+        _emit_final_mute_state("final_mute_state_verified")
         return _abort(
             _ab_reason,
             fr=_fail_reason,
@@ -36606,6 +38630,7 @@ def run_mute_engine_v2(
     # only one of want_posts / want_stories
     if (want_posts and posts_ok) or (want_stories and stories_ok):
         _emit_mute_perf_summary(result="success", skip_reason="")
+        _emit_final_mute_state("final_mute_state_verified")
         log(
             "info",
             "mute_engine_v2_success",
@@ -36645,6 +38670,12 @@ def run_mute_engine_v2(
             "stories_verified": bool(stories_ok),
             "posts_tapped": posts_tapped,
             "stories_tapped": stories_tapped,
+            "muted_posts": bool(posts_ok),
+            "muted_stories": bool(stories_ok),
+            "mute_posts_attempted": bool(posts_tapped),
+            "mute_stories_attempted": bool(stories_tapped),
+            "posts_axis_reason": posts_axis_reason,
+            "stories_axis_reason": stories_axis_reason,
             "timings_ms": dict(timings),
         }
     _ab2, _fr2 = _mute_engine_v2_classify_single_toggle_failure(
@@ -36659,6 +38690,7 @@ def run_mute_engine_v2(
         rsn_p=rsn_p,
         rsn_s=rsn_s,
     )
+    _emit_final_mute_state("final_mute_state_verified")
     return _abort(
         _ab2,
         fr=_fr2,
@@ -37264,27 +39296,305 @@ def run_post_follow_post_likes_phase(
                 failed_navigation_count=failed_nav,
                 per_post=per_post,
             )
-        t_grid = time.perf_counter()
-        grid_rem_s = max(
-            0.8,
-            min(
-                budget_s - (time.perf_counter() - t_all),
-                float(_POST_FOLLOW_LIKE_GRID_PREP_MAX_S),
-                float(_POST_FOLLOW_LIKE_PARTIAL_GRID_DETECT_CAP_S),
-            ),
-        )
-        grid_out = ensure_post_grid_visible_for_post_follow_likes(
+        try:
+            log(
+                "info",
+                "legacy_like_tap_comparison_completed",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                follower_username=cand,
+                post_index=post_idx,
+                old_open_strategy="xml_then_vision_then_legacy_fallback",
+                promoted_open_strategy="vision_open_top_left_legacy_safe_first",
+                like_context_guard="legacy_safe_viewer_proof_can_replace_missing_profile_baseline",
+                selection_policy=_VISUAL_POST_OPEN_SELECTION_FIRST_ROW_LTR,
+            )
+        except Exception:
+            pass
+        preopened_out: dict[str, Any] | None = None
+        grid_out: dict[str, Any] = {}
+        t_open_legacy_first = time.perf_counter()
+        legacy_first_out = _post_follow_likes_open_top_left_legacy_visual_safe(
             d,
+            pkg=pkg,
             source_profile_username=src,
-            follower_username=cand,
+            expected_follower_username=cand,
             visual_candidate_id=vcid,
-            budget_s=grid_rem_s,
+            post_index=post_idx,
             likes_perf_phase_t0=_likes_perf_ctx.get("phase_t0"),
-            likes_perf_follow_state_after=fs_after,
         )
-        timings[f"grid_prep_{post_idx}_ms"] = round(
-            (time.perf_counter() - t_grid) * 1000, 2
-        )
+        if bool(legacy_first_out.get("ok")) and bool(legacy_first_out.get("post_detected")):
+            preopened_out = dict(legacy_first_out)
+            timings[f"open_post_{post_idx}_ms"] = round(
+                (time.perf_counter() - t_open_legacy_first) * 1000, 2
+            )
+            grid_out = {
+                "ok": True,
+                "grid_state_after": "legacy_visual_top_left_opened",
+                "legacy_visual_top_left_opened": True,
+                "failure_reason": None,
+                "likes_perf_grid": {
+                    "legacy_visual_top_left_first": True,
+                    "final_suggested_for_you": None,
+                    "final_profile_tabs_visible": True,
+                },
+            }
+        else:
+            legacy_first_failure_reason = str(
+                legacy_first_out.get("failure_reason")
+                or "legacy_visual_top_left_failed"
+            )
+            if legacy_first_failure_reason == "legacy_visual_top_left_candidate_ambiguous":
+                t_retry_path0 = time.perf_counter()
+                try:
+                    log(
+                        "info",
+                        "legacy_safe_first_failed_to_retry_started",
+                        visual_candidate_id=vcid,
+                        source_profile_username=src,
+                        follower_username=cand,
+                        post_index=post_idx,
+                        failure_reason=legacy_first_failure_reason,
+                        legacy_safe_first_failed_to_retry_started_ms=round(
+                            (time.perf_counter() - t_open_legacy_first) * 1000.0,
+                            2,
+                        ),
+                    )
+                    log(
+                        "info",
+                        "xml_probe_skipped_after_legacy_ambiguous",
+                        visual_candidate_id=vcid,
+                        source_profile_username=src,
+                        follower_username=cand,
+                        post_index=post_idx,
+                        failure_reason=legacy_first_failure_reason,
+                        skipped_probe_path="standard_xml_relaxed_xml_vision_top_left",
+                    )
+                except Exception:
+                    pass
+                try:
+                    ww_retry, wh_retry = d.window_size()
+                except Exception:
+                    ww_retry, wh_retry = 1080, 2340
+                scroll_profile = "reveal_moderate"
+                try:
+                    log(
+                        "info",
+                        "like_grid_reveal_scroll_attempted",
+                        visual_candidate_id=vcid,
+                        source_profile_username=src,
+                        follower_username=cand,
+                        scroll_profile=scroll_profile,
+                        scroll_attempt_index=1,
+                        max_scrolls=1,
+                        scroll_reason="legacy_safe_ambiguous_retry_reveal_top_left",
+                        grid_exposure_before="legacy_visual_top_left_ambiguous",
+                        top_left_post_visible=False,
+                        overscroll_risk=False,
+                        **_post_follow_likes_scroll_log_fields(
+                            scroll_profile=scroll_profile,
+                            ww=int(ww_retry),
+                            wh=int(wh_retry),
+                        ),
+                    )
+                except Exception:
+                    pass
+                t_retry_scroll = time.perf_counter()
+                sw_retry = _post_follow_likes_profile_scroll_swipe(
+                    d,
+                    scroll_profile=scroll_profile,
+                    ww=int(ww_retry),
+                    wh=int(wh_retry),
+                )
+                if bool(sw_retry.get("swipe_ok")):
+                    time.sleep(0.18)
+                try:
+                    log(
+                        "info",
+                        "like_grid_reveal_scroll_completed",
+                        visual_candidate_id=vcid,
+                        source_profile_username=src,
+                        follower_username=cand,
+                        scroll_profile=scroll_profile,
+                        scroll_attempt_index=1,
+                        scroll_elapsed_ms=round(
+                            (time.perf_counter() - t_retry_scroll) * 1000.0,
+                            2,
+                        ),
+                        swipe_ok=bool(sw_retry.get("swipe_ok")),
+                        scroll_reason="legacy_safe_ambiguous_retry_reveal_top_left",
+                        scroll_start_y=sw_retry.get("y_start"),
+                        scroll_end_y=sw_retry.get("y_end"),
+                        scroll_distance_px=sw_retry.get("scroll_distance_px"),
+                        grid_exposure_before="legacy_visual_top_left_ambiguous",
+                    )
+                except Exception:
+                    pass
+                if bool(sw_retry.get("swipe_ok")):
+                    try:
+                        log(
+                            "info",
+                            "legacy_safe_retry_after_reveal_started",
+                            visual_candidate_id=vcid,
+                            source_profile_username=src,
+                            follower_username=cand,
+                            post_index=post_idx,
+                            scroll_profile=scroll_profile,
+                            retry_reason=legacy_first_failure_reason,
+                        )
+                    except Exception:
+                        pass
+                    t_open_legacy_retry = time.perf_counter()
+                    preopened_out = _post_follow_likes_open_top_left_legacy_visual_safe(
+                        d,
+                        pkg=pkg,
+                        source_profile_username=src,
+                        expected_follower_username=cand,
+                        visual_candidate_id=vcid,
+                        post_index=post_idx,
+                        likes_perf_phase_t0=_likes_perf_ctx.get("phase_t0"),
+                    )
+                    timings[f"open_post_{post_idx}_ms"] = round(
+                        (time.perf_counter() - t_open_legacy_retry) * 1000,
+                        2,
+                    )
+                    retry_ok = bool(preopened_out.get("ok")) and bool(
+                        preopened_out.get("post_detected")
+                    )
+                    try:
+                        log(
+                            "info",
+                            "legacy_safe_retry_after_reveal_completed",
+                            visual_candidate_id=vcid,
+                            source_profile_username=src,
+                            follower_username=cand,
+                            post_index=post_idx,
+                            ok=retry_ok,
+                            post_detected=bool(preopened_out.get("post_detected")),
+                            failure_reason=str(
+                                preopened_out.get("failure_reason") or ""
+                            ),
+                            viewer_detect_path=preopened_out.get("viewer_detect_path"),
+                            detect_reason=preopened_out.get("detect_reason"),
+                            retry_total_ms=round(
+                                (time.perf_counter() - t_open_legacy_retry) * 1000.0,
+                                2,
+                            ),
+                        )
+                    except Exception:
+                        pass
+                    if retry_ok:
+                        try:
+                            log(
+                                "info",
+                                "legacy_safe_retry_viewer_confirmed",
+                                visual_candidate_id=vcid,
+                                source_profile_username=src,
+                                follower_username=cand,
+                                post_index=post_idx,
+                                viewer_detect_path=preopened_out.get(
+                                    "viewer_detect_path"
+                                ),
+                                detect_reason=preopened_out.get("detect_reason"),
+                            )
+                        except Exception:
+                            pass
+                        grid_out = {
+                            "ok": True,
+                            "grid_state_after": "legacy_visual_top_left_opened",
+                            "legacy_visual_top_left_opened": True,
+                            "failure_reason": None,
+                            "scroll_profile": scroll_profile,
+                            "scroll_used": 1,
+                            "likes_perf_grid": {
+                                "legacy_visual_top_left_retry_after_reveal": True,
+                                "legacy_safe_first_failure_reason": legacy_first_failure_reason,
+                                "legacy_safe_retry_after_reveal_ms": round(
+                                    (time.perf_counter() - t_retry_path0) * 1000.0,
+                                    2,
+                                ),
+                                "xml_probe_skipped_after_legacy_ambiguous": True,
+                                "final_suggested_for_you": None,
+                                "final_profile_tabs_visible": True,
+                            },
+                        }
+                    else:
+                        retry_failure_reason = str(
+                            preopened_out.get("failure_reason")
+                            or "legacy_visual_top_left_retry_failed"
+                        )
+                        grid_out = {
+                            "ok": False,
+                            "grid_state_after": "legacy_visual_top_left_retry_failed",
+                            "failure_reason": (
+                                "legacy_safe_retry_after_reveal_failed:"
+                                f"{retry_failure_reason}"
+                            ),
+                            "scroll_profile": scroll_profile,
+                            "scroll_used": 1,
+                            "likes_perf_grid": {
+                                "legacy_visual_top_left_retry_after_reveal": False,
+                                "legacy_safe_first_failure_reason": legacy_first_failure_reason,
+                                "legacy_safe_retry_failure_reason": retry_failure_reason,
+                                "xml_probe_skipped_after_legacy_ambiguous": True,
+                                "final_suggested_for_you": None,
+                                "final_profile_tabs_visible": True,
+                            },
+                        }
+                else:
+                    grid_out = {
+                        "ok": False,
+                        "grid_state_after": "legacy_visual_top_left_retry_scroll_failed",
+                        "failure_reason": "legacy_safe_retry_reveal_scroll_failed",
+                        "scroll_profile": scroll_profile,
+                        "scroll_used": 0,
+                        "likes_perf_grid": {
+                            "legacy_visual_top_left_retry_after_reveal": False,
+                            "legacy_safe_first_failure_reason": legacy_first_failure_reason,
+                            "xml_probe_skipped_after_legacy_ambiguous": True,
+                            "final_suggested_for_you": None,
+                            "final_profile_tabs_visible": True,
+                        },
+                    }
+                timings[f"grid_prep_{post_idx}_ms"] = round(
+                    (time.perf_counter() - t_retry_path0) * 1000,
+                    2,
+                )
+            else:
+                try:
+                    log(
+                        "info",
+                        "vision_open_top_left_legacy_safe_option1_fallback_to_xml_probe",
+                        visual_candidate_id=vcid,
+                        source_profile_username=src,
+                        follower_username=cand,
+                        post_index=post_idx,
+                        failure_reason=legacy_first_failure_reason,
+                    )
+                except Exception:
+                    pass
+                t_grid = time.perf_counter()
+                grid_rem_s = max(
+                    0.8,
+                    min(
+                        budget_s - (time.perf_counter() - t_all),
+                        float(_POST_FOLLOW_LIKE_GRID_PREP_MAX_S),
+                        float(_POST_FOLLOW_LIKE_PARTIAL_GRID_DETECT_CAP_S),
+                    ),
+                )
+                grid_out = ensure_post_grid_visible_for_post_follow_likes(
+                    d,
+                    source_profile_username=src,
+                    follower_username=cand,
+                    visual_candidate_id=vcid,
+                    budget_s=grid_rem_s,
+                    likes_perf_phase_t0=_likes_perf_ctx.get("phase_t0"),
+                    likes_perf_follow_state_after=fs_after,
+                )
+                timings[f"grid_prep_{post_idx}_ms"] = round(
+                    (time.perf_counter() - t_grid) * 1000,
+                    2,
+                )
         _grid_perf = dict(grid_out.get("likes_perf_grid") or {})
         _grid_timings = dict(grid_out.get("timings_ms") or {})
         if _grid_timings.get("like_grid_probe_capped_total") is not None:
@@ -37297,53 +39607,84 @@ def run_post_follow_post_likes_phase(
             )
 
         if not grid_out.get("ok"):
-            failed_nav += 1
-            _likes_perf_ctx["grid"] = dict(_grid_perf)
-            _likes_perf_ctx["failure_reason"] = str(
-                grid_out.get("failure_reason") or "post_grid_not_visible_before_open"
-            )
-            _likes_perf_ctx["grid_readiness_mode"] = None
-            _likes_perf_ctx["final_grid_state"] = grid_out.get("grid_state_after")
-            post_rec["outcome"] = "grid_not_visible"
             fr_grid = str(
                 grid_out.get("failure_reason") or "post_grid_not_visible_before_open"
             )
-            post_rec["failure_reason"] = fr_grid
-            _likes_perf_ctx["likes_failure_kind"] = fr_grid
-            per_post.append(post_rec)
-            log(
-                "warning",
-                "post_follow_post_likes_open_skipped_grid_not_visible",
-                visual_candidate_id=vcid,
-                source_profile_username=src,
-                follower_username=cand,
-                failure_reason=fr_grid,
-                grid_state_before=grid_out.get("grid_state_before"),
-                grid_state_after=grid_out.get("grid_state_after"),
-                scroll_used=grid_out.get("scroll_used"),
-                scroll_profile=grid_out.get("scroll_profile"),
-                attempts=grid_out.get("attempts"),
-            )
-            log(
-                "warning",
-                "post_follow_post_like_open_failed",
-                visual_candidate_id=vcid,
-                source_profile_username=src,
-                follower_username=cand,
-                failure_reason=fr_grid,
-            )
-            return _finish(
-                phase_outcome="failed_safe_continue",
-                skipped_reason="likes_failed_open_post_safe_continue",
-                skipped=False,
-                ok=False,
-                attempted_count=attempted_count,
-                liked_count=liked_count,
-                skipped_already_liked_count=skipped_already,
-                failed_navigation_count=failed_nav,
-                per_post=per_post,
-            )
-
+            if fr_grid == "top_left_post_not_detected_after_xml_and_vision_probe":
+                t_open_legacy = time.perf_counter()
+                preopened_out = _post_follow_likes_open_top_left_legacy_visual_safe(
+                    d,
+                    pkg=pkg,
+                    source_profile_username=src,
+                    expected_follower_username=cand,
+                    visual_candidate_id=vcid,
+                    post_index=post_idx,
+                    likes_perf_phase_t0=_likes_perf_ctx.get("phase_t0"),
+                )
+                timings[f"open_post_{post_idx}_ms"] = round(
+                    (time.perf_counter() - t_open_legacy) * 1000, 2
+                )
+                if bool(preopened_out.get("ok")) and bool(
+                    preopened_out.get("post_detected")
+                ):
+                    grid_out = dict(grid_out)
+                    grid_out["ok"] = True
+                    grid_out["grid_state_after"] = str(
+                        grid_out.get("grid_state_after") or "partial"
+                    )
+                    grid_out["legacy_visual_top_left_opened"] = True
+                    grid_out["failure_reason"] = None
+                else:
+                    fr_grid = str(
+                        preopened_out.get("failure_reason")
+                        or "legacy_visual_top_left_failed"
+                    )
+            if not grid_out.get("ok"):
+                failed_nav += 1
+                _likes_perf_ctx["grid"] = dict(_grid_perf)
+                _likes_perf_ctx["failure_reason"] = fr_grid
+                _likes_perf_ctx["grid_readiness_mode"] = None
+                _likes_perf_ctx["final_grid_state"] = grid_out.get("grid_state_after")
+                if preopened_out is not None:
+                    _likes_perf_ctx["post_open"] = dict(
+                        preopened_out.get("likes_perf_post_open") or {}
+                    )
+                post_rec["outcome"] = "grid_not_visible"
+                post_rec["failure_reason"] = fr_grid
+                _likes_perf_ctx["likes_failure_kind"] = fr_grid
+                per_post.append(post_rec)
+                log(
+                    "warning",
+                    "post_follow_post_likes_open_skipped_grid_not_visible",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    follower_username=cand,
+                    failure_reason=fr_grid,
+                    grid_state_before=grid_out.get("grid_state_before"),
+                    grid_state_after=grid_out.get("grid_state_after"),
+                    scroll_used=grid_out.get("scroll_used"),
+                    scroll_profile=grid_out.get("scroll_profile"),
+                    attempts=grid_out.get("attempts"),
+                )
+                log(
+                    "warning",
+                    "post_follow_post_like_open_failed",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    follower_username=cand,
+                    failure_reason=fr_grid,
+                )
+                return _finish(
+                    phase_outcome="failed_safe_continue",
+                    skipped_reason="likes_failed_open_post_safe_continue",
+                    skipped=False,
+                    ok=False,
+                    attempted_count=attempted_count,
+                    liked_count=liked_count,
+                    skipped_already_liked_count=skipped_already,
+                    failed_navigation_count=failed_nav,
+                    per_post=per_post,
+                )
         _likes_perf_ctx["grid"] = dict(grid_out.get("likes_perf_grid") or {})
         _glc = _likes_perf_ctx["grid"]
         _likes_perf_ctx["final_grid_state"] = grid_out.get("grid_state_after")
@@ -37357,7 +39698,9 @@ def run_post_follow_post_likes_phase(
             _likes_perf_ctx["grid_readiness_mode"] = "visible_confirmed"
         _likes_perf_ctx["failure_reason"] = None
 
-        if bool(getattr(config, "ENABLE_VISUAL_PROFILE_CONTEXT_LOCK", False)):
+        if preopened_out is None and bool(
+            getattr(config, "ENABLE_VISUAL_PROFILE_CONTEXT_LOCK", False)
+        ):
             t_ctx = time.perf_counter()
             profile_baseline = visual_capture_profile_context(
                 d, source_profile_username=src
@@ -37399,47 +39742,88 @@ def run_post_follow_post_likes_phase(
         gps = grid_out.get("grid_probe_source")
         gpss = grid_out.get("grid_probe_screenshot_path")
         direct_cell = grid_out.get("direct_post_cell_under_suggested")
-        if isinstance(direct_cell, dict):
+        if preopened_out is not None:
+            open_out = dict(preopened_out)
+        elif isinstance(direct_cell, dict):
+            cell_source = str(grid_out.get("direct_post_cell_source") or "")
+            tap_safe = bool(grid_out.get("direct_post_cell_tap_safe"))
+            scroll_attempts = int(grid_out.get("direct_post_cell_scroll_attempts") or 0)
+            suggested_overlay_visible = bool(grid_out.get("suggested_overlay_visible"))
+            grid_exposure = str(grid_out.get("direct_post_grid_exposure") or "")
+            tx = int(direct_cell.get("center_x") or 0)
+            ty = int(direct_cell.get("center_y") or 0)
             try:
-                meta_before_direct = _followers_current_pkg_activity(d)
-                tx = int(direct_cell.get("center_x") or 0)
-                ty = int(direct_cell.get("center_y") or 0)
-                d.click(tx, ty)
                 log(
                     "info",
-                    "like_post_cell_selected_under_suggested",
+                    "like_first_post_cell_observed",
                     visual_candidate_id=vcid,
                     source_profile_username=src,
                     follower_username=cand,
                     post_index=post_idx,
+                    cell_source=cell_source,
+                    tap_safe=tap_safe,
+                    suggested_overlay_visible=suggested_overlay_visible,
                     tap_x=tx,
                     tap_y=ty,
-                    action="direct_tap",
+                    scroll_attempts=scroll_attempts,
+                    grid_exposure=grid_exposure,
                 )
-                viewer_direct = _visual_wait_post_viewer_opened_after_tap(
-                    d,
-                    pkg=pkg,
-                    expected_follower_username=cand,
-                    act_before=meta_before_direct.get("current_activity"),
-                    post_follow_fast=True,
+            except Exception:
+                pass
+            if not tap_safe:
+                fail_reason = str(
+                    grid_out.get("failure_reason") or "post_cell_estimate_not_safe_to_tap"
                 )
-                open_out = {
-                    "ok": bool(viewer_direct.get("post_detected")),
-                    "post_detected": bool(viewer_direct.get("post_detected")),
-                    "failure_reason": ""
-                    if bool(viewer_direct.get("post_detected"))
-                    else "post_viewer_not_detected_after_direct_cell_tap",
-                    "open_strategy": "direct_cell_under_suggested",
-                    "tap_to_viewer_detected_ms": viewer_direct.get("viewer_detect_total_ms"),
-                    "likes_perf_post_open": dict(viewer_direct),
-                }
-            except Exception as e:
                 open_out = {
                     "ok": False,
                     "post_detected": False,
-                    "failure_reason": f"direct_cell_tap_failed:{type(e).__name__}",
-                    "open_strategy": "direct_cell_under_suggested",
+                    "failure_reason": fail_reason,
+                    "open_strategy": "direct_cell_under_suggested_blocked",
                 }
+            else:
+                try:
+                    meta_before_direct = _followers_current_pkg_activity(d)
+                    log(
+                        "info",
+                        "like_post_open_attempted",
+                        visual_candidate_id=vcid,
+                        source_profile_username=src,
+                        follower_username=cand,
+                        post_index=post_idx,
+                        tap_x=tx,
+                        tap_y=ty,
+                        action="direct_tap",
+                        cell_source=cell_source,
+                        scroll_attempts=scroll_attempts,
+                        grid_exposure=grid_exposure,
+                    )
+                    d.click(tx, ty)
+                    viewer_direct = _visual_wait_post_viewer_opened_after_tap(
+                        d,
+                        pkg=pkg,
+                        expected_follower_username=cand,
+                        act_before=meta_before_direct.get("current_activity"),
+                        post_follow_fast=True,
+                    )
+                    open_out = {
+                        "ok": bool(viewer_direct.get("post_detected")),
+                        "post_detected": bool(viewer_direct.get("post_detected")),
+                        "failure_reason": ""
+                        if bool(viewer_direct.get("post_detected"))
+                        else "post_viewer_not_detected_after_direct_cell_tap",
+                        "open_strategy": "direct_cell_under_suggested",
+                        "tap_to_viewer_detected_ms": viewer_direct.get(
+                            "viewer_detect_total_ms"
+                        ),
+                        "likes_perf_post_open": dict(viewer_direct),
+                    }
+                except Exception as e:
+                    open_out = {
+                        "ok": False,
+                        "post_detected": False,
+                        "failure_reason": f"direct_cell_tap_failed:{type(e).__name__}",
+                        "open_strategy": "direct_cell_under_suggested",
+                    }
         else:
             open_out = visual_open_recent_post_from_profile(
                 d,
@@ -37459,9 +39843,10 @@ def run_post_follow_post_likes_phase(
                 likes_perf_phase_t0=_likes_perf_ctx.get("phase_t0"),
                 post_follow_stash_open_like_proof=True,
             )
-        timings[f"open_post_{post_idx}_ms"] = round(
-            (time.perf_counter() - t_open) * 1000, 2
-        )
+        if preopened_out is None:
+            timings[f"open_post_{post_idx}_ms"] = round(
+                (time.perf_counter() - t_open) * 1000, 2
+            )
         _likes_perf_ctx["post_open"] = dict(open_out.get("likes_perf_post_open") or {})
         try:
             _pod = dict(_likes_perf_ctx["post_open"])
@@ -37650,6 +40035,7 @@ def run_post_follow_post_likes_phase(
             source_profile_username=src,
             expected_profile_context=profile_baseline,
             post_opened_via_profile_grid=True,
+            post_open_context=open_out,
             expected_follower_username=cand,
             likes_perf_like_accum=_like_accum,
             likes_perf_phase_t0=_likes_perf_ctx.get("phase_t0"),
@@ -37731,6 +40117,20 @@ def run_post_follow_post_likes_phase(
             _likes_perf_ctx["like_verify_failure_reason"] = (
                 None if liked_verified else "verify_failed"
             )
+            try:
+                log(
+                    "info",
+                    "visual_post_like_verify_completed",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    follower_username=cand,
+                    liked_verified=bool(liked_verified),
+                    verification_method=ver.get("verification_method"),
+                    verify_attempts_count=ver.get("verify_attempts_count"),
+                    verify_total_ms=_likes_perf_ctx.get("like_verify_ms"),
+                )
+            except Exception:
+                pass
             try:
                 log(
                     "info",
