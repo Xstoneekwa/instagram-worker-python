@@ -12144,12 +12144,56 @@ def main() -> int:
         app_start(d, config.INSTAGRAM_PACKAGE)
         ws = time.perf_counter()
         log("info", "wait_started", wait_reason="app_start_wait")
-        time.sleep(config.APP_START_WAIT_S)
+        app_start_wait_deadline_s = max(0.0, float(config.APP_START_WAIT_S))
+        app_start_wait_deadline_ms = app_start_wait_deadline_s * 1000.0
+        app_start_wait_attempts = 0
+        app_start_wait_foreground_ok = False
+        app_start_wait_package_seen = ""
+        app_start_wait_expected_package = str(config.INSTAGRAM_PACKAGE or "")
+        app_start_wait_deadline = time.monotonic() + app_start_wait_deadline_s
+        log(
+            "info",
+            "startup_app_readiness_app_start_wait_poll_started",
+            duration_ms=round((time.perf_counter() - ws) * 1000.0, 2),
+            attempts=0,
+            early_exit=False,
+            foreground_ok=False,
+            deadline_ms=round(app_start_wait_deadline_ms, 2),
+            package_seen=None,
+            expected_package=app_start_wait_expected_package or None,
+        )
+        while True:
+            app_start_wait_attempts += 1
+            try:
+                current_app = d.app_current()
+                app_start_wait_package_seen = str(
+                    (current_app or {}).get("package") or ""
+                ).strip()
+            except Exception:
+                app_start_wait_package_seen = ""
+            if app_start_wait_package_seen == app_start_wait_expected_package:
+                app_start_wait_foreground_ok = True
+                break
+            remaining_s = app_start_wait_deadline - time.monotonic()
+            if remaining_s <= 0:
+                break
+            time.sleep(min(0.1, remaining_s))
         log(
             "info",
             "wait_finished",
             wait_reason="app_start_wait",
             wait_duration_ms=round((time.perf_counter() - ws) * 1000, 2),
+        )
+        log(
+            "info",
+            "startup_app_readiness_app_start_wait_poll_completed",
+            duration_ms=round((time.perf_counter() - ws) * 1000.0, 2),
+            attempts=int(app_start_wait_attempts),
+            early_exit=bool(app_start_wait_foreground_ok),
+            foreground_ok=bool(app_start_wait_foreground_ok),
+            deadline_ms=round(app_start_wait_deadline_ms, 2),
+            package_seen=app_start_wait_package_seen or None,
+            expected_package=app_start_wait_expected_package or None,
         )
         t = _phase("app_start", t)
     startup_wait_ms = (time.perf_counter() - t_session) * 1000
