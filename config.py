@@ -41,7 +41,7 @@ def _env_float(name: str, default: float) -> float:
 # Controlled real-send test: prefer empty / new thread only (no prior DM history with this account).
 TARGET_USERNAME = "mythyllus"
 
-INSTAGRAM_PACKAGE = "com.instagram.android"
+INSTAGRAM_PACKAGE = _env_str("INSTAGRAM_PACKAGE", "com.instagram.android")
 
 # None = use default device from adb / uiautomator2
 DEVICE_SERIAL = None
@@ -368,12 +368,26 @@ VISUAL_MUTE_STORIES_AFTER_FOLLOW = True
 ENABLE_REAL_VISUAL_MUTE_AFTER_FOLLOW = True
 VISUAL_MUTE_VERIFY_AFTER_TAP = True
 VISUAL_MUTE_VERIFY_TIMEOUT_S = 3.0
+MUTE_ENGINE_V2_BUDGET_S = _env_float("MUTE_ENGINE_V2_BUDGET_S", 10.0)
+MUTE_ENGINE_V2_FOLLOWING_CTA_SEARCH_BUDGET_S = _env_float(
+    "MUTE_ENGINE_V2_FOLLOWING_CTA_SEARCH_BUDGET_S", 1.5
+)
+MUTE_ENGINE_V2_TOGGLE_STAGE_BUDGET_S = _env_float(
+    "MUTE_ENGINE_V2_TOGGLE_STAGE_BUDGET_S", 2.0
+)
 # Post-follow likes on candidate profile (after mute, before return CT). Master switch off until validated.
 POST_FOLLOW_POST_LIKES_ENABLED = True
 POST_FOLLOW_POST_LIKES_COUNT_RANGE = "1-1"
 POST_FOLLOW_POST_LIKES_PERCENTAGE = 100
 POST_FOLLOW_TOTAL_LIKES_LIMIT = 150
-POST_FOLLOW_POST_LIKES_BUDGET_S = 10.0
+POST_FOLLOW_POST_LIKES_BUDGET_S = _env_float("POST_FOLLOW_POST_LIKES_BUDGET_S", 16.0)
+POST_FOLLOW_LIKE_GRID_PREP_MAX_S = _env_float("POST_FOLLOW_LIKE_GRID_PREP_MAX_S", 6.0)
+POST_FOLLOW_LIKE_PARTIAL_GRID_DETECT_CAP_S = _env_float(
+    "POST_FOLLOW_LIKE_PARTIAL_GRID_DETECT_CAP_S", 4.5
+)
+POST_FOLLOW_LIKE_OVERLAY_PHASE_CAP_S = _env_float(
+    "POST_FOLLOW_LIKE_OVERLAY_PHASE_CAP_S", 12.0
+)
 # Min remaining seconds inside grid-prep (after initial probe) to realistically run micro→reprobe→long→reprobe.
 # Below this, first swipe is promoted to long when grid is partial + Suggested overlay (see ensure_post_grid_visible_for_post_follow_likes).
 POST_FOLLOW_LIKES_GRID_SECOND_PASS_RESERVE_S = 5.5

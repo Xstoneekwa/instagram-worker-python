@@ -1095,6 +1095,11 @@ def update_run_status(
     performance_summary: dict[str, Any],
 ) -> None:
     now = _utc_now_iso()
+    session_counters = (
+        performance_summary.get("session_counters")
+        if isinstance(performance_summary, dict)
+        else None
+    )
     body: dict[str, Any] = {
         "status": status,
         "totals": totals,
@@ -1102,6 +1107,11 @@ def update_run_status(
         "total_targets": int(totals.get("total", 0)),
         "updated_at": now,
     }
+    if isinstance(session_counters, dict):
+        if session_counters.get("follows") is not None:
+            body["total_follow"] = max(0, int(session_counters.get("follows") or 0))
+        if session_counters.get("likes") is not None:
+            body["total_like"] = max(0, int(session_counters.get("likes") or 0))
     if status == "completed":
         body["finished_at"] = now
         body["completed_at"] = now

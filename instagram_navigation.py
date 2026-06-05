@@ -15233,6 +15233,212 @@ def _post_follow_merge_grid_probe_meta(
     out["grid_probe_source"] = "post_follow_likes_grid_probe_same_capture"
 
 
+def _post_follow_like_partial_suggested_overlay(probe: dict[str, Any]) -> bool:
+    st = str(probe.get("grid_state") or "").strip().lower()
+    return st == "partial" and bool(probe.get("suggested_for_you"))
+
+
+def _post_follow_likes_overlay_hints_suggest_block(ui_hints: dict[str, Any]) -> bool:
+    return bool(
+        ui_hints.get("suggested_for_you") or ui_hints.get("discover_people")
+    )
+
+
+def _post_follow_likes_xml_grid_thumbnails_below_tabs(
+    d: u2.Device,
+    *,
+    y_min_px: int,
+    ww: int,
+    wh: int,
+) -> dict[str, Any]:
+    """Fast XML scan for post-grid thumbnails strictly below profile tabs."""
+    cell_w = max(24, int(ww) // 3)
+    cells: list[dict[str, int]] = []
+    try:
+        for el in d(className="android.widget.ImageView").all()[:72]:
+            try:
+                b = el.info.get("bounds") or {}
+                left, top, right, bottom = (
+                    int(b.get("left", 0)),
+                    int(b.get("top", 0)),
+                    int(b.get("right", 0)),
+                    int(b.get("bottom", 0)),
+                )
+            except Exception:
+                continue
+            cy = (top + bottom) // 2
+            if cy < int(y_min_px):
+                continue
+            w = right - left
+            h = bottom - top
+            if w < int(cell_w * 0.45) or w > int(cell_w * 1.9):
+                continue
+            if h < int(cell_w * 0.35):
+                continue
+            if bottom > int(wh * 0.98):
+                continue
+            cells.append(
+                {
+                    "left": left,
+                    "top": top,
+                    "right": right,
+                    "bottom": bottom,
+                    "center_x": (left + right) // 2,
+                    "center_y": cy,
+                }
+            )
+    except Exception:
+        cells = []
+    cells.sort(key=lambda c: (c["top"], c["left"]))
+    reliable = len(cells) >= 1
+    return {
+        "reliable": reliable,
+        "cell_count": len(cells),
+        "cells": cells[:3],
+        "y_min_px": int(y_min_px),
+    }
+
+
+def _post_follow_likes_visible_grid_cell_under_suggested(
+    d: u2.Device,
+    *,
+    ui_hints: dict[str, Any] | None = None,
+    budget_deadline: float | None = None,
+) -> dict[str, Any]:
+    """
+    When Suggested-for-you is visible, detect whether a post-grid cell is still
+    reachable below the profile tabs (capture-2 case).
+    """
+    hints = ui_hints if isinstance(ui_hints, dict) else _post_follow_likes_grid_ui_surface_hints(d)
+    out: dict[str, Any] = {
+        "reliable": False,
+        "reason": "",
+        "cell": None,
+        "y_min_px": None,
+        "profile_tabs_visible": bool(hints.get("profile_tabs_visible")),
+    }
+    if not bool(hints.get("profile_tabs_visible")):
+        out["reason"] = "profile_tabs_not_visible"
+        return out
+    if budget_deadline is not None and time.perf_counter() >= float(budget_deadline):
+        out["reason"] = "budget_deadline_before_tabs_geometry"
+        return out
+    try:
+        ww, wh = d.window_size()
+    except Exception:
+        ww, wh = 1080, 2340
+    tabs_bt, _phase = _followers_profile_tabs_bottom_y_px(d, window_h=int(wh))
+    if tabs_bt is None:
+        out["reason"] = "profile_tabs_bottom_unknown"
+        return out
+    margin = int(_POST_FOLLOW_PROFILE_TABS_GRID_MARGIN_PX)
+    y_min = int(tabs_bt) + margin
+    out["y_min_px"] = y_min
+    # Bounded fast-path: once profile tabs are visible, the first grid cell is below
+    # the tab strip. Avoid hierarchy-wide ImageView scans here; they caused 8s+
+    # Suggested-overlay skips on Samsung.
+    cell_w = max(24, int(ww) // 3)
+    cx = max(12, min(int(ww) - 12, cell_w // 2))
+    cy = max(y_min + 12, min(int(wh * 0.92), y_min + cell_w // 2))
+    out["reliable"] = True
+    out["cell"] = {
+        "left": 0,
+        "top": int(y_min),
+        "right": int(cell_w),
+        "bottom": int(y_min + cell_w),
+        "center_x": int(cx),
+        "center_y": int(cy),
+    }
+    out["reason"] = "profile_tabs_grid_cell_estimate"
+    return out
+
+
+def _post_follow_likes_finish_overlay_fast_skip(
+    out: dict[str, Any],
+    *,
+    timings: dict[str, float],
+    overlay_strategy: dict[str, Any],
+    t_phase0: float,
+    visual_candidate_id: str,
+    source_profile_username: str,
+    follower_username: str,
+    failure_reason: str = "post_grid_partial_suggested_overlay_fast",
+) -> dict[str, Any]:
+    elapsed_ms = round((time.perf_counter() - t_phase0) * 1000.0, 2)
+    timings["grid_prep_total_ms"] = elapsed_ms
+    timings["overlay_strategy_ms"] = round(
+        float(overlay_strategy.get("elapsed_ms") or 0.0), 2
+    )
+    timings["grid_detect_capped"] = True
+    timings["like_grid_probe_capped_total"] = elapsed_ms
+    out["failure_reason"] = failure_reason
+    out["grid_state_after"] = "partial"
+    out["timings_ms"] = timings
+    out["likes_perf_grid"] = {
+        "initial_probe_ms": {},
+        "overlay_strategy": dict(overlay_strategy),
+        "scroll_cycles": [],
+        "grid_detect_capped": True,
+        "fast_overlay_skip": True,
+    }
+    try:
+        log(
+            "info",
+            "like_overlay_strategy_result",
+            visual_candidate_id=visual_candidate_id,
+            source_profile_username=source_profile_username,
+            follower_username=follower_username,
+            result=str(overlay_strategy.get("result") or "fast_skip"),
+            overlay_strategy_ms=timings.get("overlay_strategy_ms"),
+            grid_detect_ms=elapsed_ms,
+            like_grid_probe_capped_total=elapsed_ms,
+            failure_reason=failure_reason,
+        )
+    except Exception:
+        pass
+    return out
+
+
+def _post_follow_likes_try_clear_suggested_overlay_fast(
+    d: u2.Device,
+    *,
+    ww: int,
+    wh: int,
+    budget_deadline: float,
+) -> dict[str, Any]:
+    """One safe dismiss or micro-scroll to reveal grid under Suggested-for-you (no long waits)."""
+    out: dict[str, Any] = {
+        "handled": False,
+        "action": "",
+        "elapsed_ms": 0.0,
+    }
+    if time.perf_counter() >= float(budget_deadline):
+        return out
+    t0 = time.perf_counter()
+    for needle in ("Close", "Not Now", "Not now", "Dismiss", "Hide"):
+        if time.perf_counter() >= float(budget_deadline):
+            break
+        try:
+            if d(textContains=needle).exists(timeout=0.04):
+                d(textContains=needle).click()
+                out["handled"] = True
+                out["action"] = f"tap_text:{needle}"
+                time.sleep(0.12)
+                break
+        except Exception:
+            continue
+    if not out["handled"] and time.perf_counter() < float(budget_deadline):
+        sw = _post_follow_likes_profile_scroll_swipe(
+            d, scroll_profile="micro", ww=int(ww), wh=int(wh)
+        )
+        if sw.get("swipe_ok"):
+            out["handled"] = True
+            out["action"] = "micro_scroll_reveal_grid"
+            time.sleep(0.18)
+    out["elapsed_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
+    return out
+
+
 def _post_follow_likes_profile_scroll_swipe(
     d: u2.Device,
     *,
@@ -15460,6 +15666,13 @@ def ensure_post_grid_visible_for_post_follow_likes(
     scroll_profiles_used: list[str] = []
     screenshot_paths: list[str] = []
     scroll_perf_cycles: list[dict[str, Any]] = []
+    overlay_strategy: dict[str, Any] = {
+        "attempted": False,
+        "handled": False,
+        "action": "",
+        "elapsed_ms": 0.0,
+        "result": "not_needed",
+    }
     budget_snapshot_total_ms: float | None = None
 
     def _probe_once() -> tuple[dict[str, Any], str | None, dict[str, float]]:
@@ -15675,7 +15888,284 @@ def ensure_post_grid_visible_for_post_follow_likes(
         except Exception:
             pass
 
+    overlay_cap_s = float(_POST_FOLLOW_LIKE_OVERLAY_PHASE_CAP_S)
+    global_phase_t0 = float(likes_perf_phase_t0) if likes_perf_phase_t0 is not None else t0
+    global_cap_deadline = global_phase_t0 + overlay_cap_s
+    try:
+        log(
+            "info",
+            "like_grid_global_timer_started",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            follower_username=cand,
+            cap_s=round(overlay_cap_s, 4),
+            phase_t0_monotonic=round(global_phase_t0, 4),
+        )
+    except Exception:
+        pass
+
+    def _global_elapsed_ms() -> float:
+        return round((time.perf_counter() - global_phase_t0) * 1000.0, 2)
+
+    def _global_cap_reached() -> bool:
+        return time.perf_counter() >= global_cap_deadline
+
+    def _finish_global_cap(
+        *,
+        failure_reason: str = "like_grid_global_cap_skipped",
+        result: str = "global_cap_reached",
+    ) -> dict[str, Any]:
+        overlay_strategy["attempted"] = True
+        overlay_strategy["result"] = result
+        elapsed_ms = _global_elapsed_ms()
+        try:
+            log(
+                "warning",
+                "like_grid_global_cap_reached",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                follower_username=cand,
+                cap_s=round(overlay_cap_s, 4),
+                elapsed_ms=elapsed_ms,
+                failure_reason=failure_reason,
+            )
+            log(
+                "info",
+                "like_grid_probe_skipped_global_cap",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                follower_username=cand,
+                cap_s=round(overlay_cap_s, 4),
+                elapsed_ms=elapsed_ms,
+            )
+        except Exception:
+            pass
+        return _post_follow_likes_finish_overlay_fast_skip(
+            out,
+            timings=timings,
+            overlay_strategy=overlay_strategy,
+            t_phase0=global_phase_t0,
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            follower_username=cand,
+            failure_reason=failure_reason,
+        )
+
+    if _global_cap_reached():
+        return _finish_global_cap()
+
+    try:
+        ui_pre = _post_follow_likes_grid_ui_surface_hints(d)
+    except Exception:
+        ui_pre = {}
+    if _global_cap_reached():
+        return _finish_global_cap()
+
+    def _suggested_overlay_flow(
+        ui_hints: dict[str, Any], *, phase: str
+    ) -> dict[str, Any] | None:
+        if not _post_follow_likes_overlay_hints_suggest_block(ui_hints):
+            return None
+        if _global_cap_reached():
+            return _finish_global_cap(
+                failure_reason="post_grid_partial_suggested_overlay_fast",
+                result="suggested_overlay_global_cap_before_action",
+            )
+        overlay_strategy["attempted"] = True
+        overlay_strategy["result"] = "suggested_overlay_pre_probe"
+        try:
+            log(
+                "info",
+                "like_suggested_overlay_visible",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                follower_username=cand,
+                phase=phase,
+            )
+        except Exception:
+            pass
+        def _finish_visible_cell(cell_meta: dict[str, Any], *, after_micro_scroll: bool = False) -> dict[str, Any]:
+            cell = cell_meta.get("cell")
+            overlay_strategy["result"] = (
+                "visible_cell_after_micro_scroll"
+                if after_micro_scroll
+                else "visible_cell_under_suggested_continue"
+            )
+            overlay_strategy["visible_cell"] = cell
+            elapsed_ms = _global_elapsed_ms()
+            timings["grid_prep_total_ms"] = elapsed_ms
+            timings["overlay_strategy_ms"] = round(
+                float(overlay_strategy.get("elapsed_ms") or 0.0), 2
+            )
+            out["ok"] = True
+            out["grid_state_before"] = "partial"
+            out["grid_state_after"] = "visible"
+            out["failure_reason"] = None
+            out["timings_ms"] = timings
+            out["direct_post_cell_under_suggested"] = cell
+            out["likes_perf_grid"] = {
+                "initial_probe_ms": {},
+                "overlay_strategy": dict(overlay_strategy),
+                "scroll_cycles": list(scroll_perf_cycles),
+                "direct_post_cell_under_suggested": cell,
+                "final_suggested_for_you": True,
+                "final_profile_tabs_visible": bool(ui_hints.get("profile_tabs_visible")),
+                "grid_prepare_total_ms": elapsed_ms,
+            }
+            try:
+                log(
+                    "info",
+                    "like_post_cell_selected_under_suggested",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    follower_username=cand,
+                    phase=phase,
+                    after_micro_scroll=bool(after_micro_scroll),
+                    cell=cell,
+                    reason=str(cell_meta.get("reason") or ""),
+                    grid_detect_ms=elapsed_ms,
+                )
+            except Exception:
+                pass
+            return out
+
+        cell_under = _post_follow_likes_visible_grid_cell_under_suggested(
+            d, ui_hints=ui_hints, budget_deadline=global_cap_deadline
+        )
+        if bool(cell_under.get("reliable")):
+            try:
+                log(
+                    "info",
+                    "like_visible_grid_cell_under_suggested",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    follower_username=cand,
+                    phase=phase,
+                    cell=cell_under.get("cell"),
+                    reason=str(cell_under.get("reason") or ""),
+                )
+            except Exception:
+                pass
+            return _finish_visible_cell(cell_under)
+        if _global_cap_reached():
+            return _finish_global_cap(
+                failure_reason="post_grid_partial_suggested_overlay_fast",
+                result="suggested_overlay_global_cap_after_cell_probe",
+            )
+        try:
+            ww_ov, wh_ov = d.window_size()
+        except Exception:
+            ww_ov, wh_ov = 1080, 2340
+        ov_clear = _post_follow_likes_try_clear_suggested_overlay_fast(
+            d,
+            ww=int(ww_ov),
+            wh=int(wh_ov),
+            budget_deadline=global_cap_deadline,
+        )
+        overlay_strategy.update(
+            {
+                "handled": bool(ov_clear.get("handled")),
+                "action": str(ov_clear.get("action") or ""),
+                "elapsed_ms": float(ov_clear.get("elapsed_ms") or 0.0),
+            }
+        )
+        if str(ov_clear.get("action") or "") == "micro_scroll_reveal_grid":
+            try:
+                log(
+                    "info",
+                    "like_micro_scroll_after_suggested",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    follower_username=cand,
+                    phase=phase,
+                    elapsed_ms=ov_clear.get("elapsed_ms"),
+                )
+            except Exception:
+                pass
+        try:
+            ui_after = _post_follow_likes_grid_ui_surface_hints(d)
+        except Exception:
+            ui_after = dict(ui_hints)
+        cell_after = _post_follow_likes_visible_grid_cell_under_suggested(
+            d, ui_hints=ui_after, budget_deadline=global_cap_deadline
+        )
+        if bool(cell_after.get("reliable")):
+            try:
+                log(
+                    "info",
+                    "like_visible_grid_cell_under_suggested",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    follower_username=cand,
+                    phase=phase,
+                    after_micro_scroll=True,
+                    cell=cell_after.get("cell"),
+                )
+            except Exception:
+                pass
+            return _finish_visible_cell(cell_after, after_micro_scroll=True)
+        overlay_strategy["result"] = (
+            "skipped_after_overlay_strategy_no_reliable_cell"
+            if not _global_cap_reached()
+            else "skipped_after_overlay_strategy_global_cap"
+        )
+        try:
+            log(
+                "info",
+                "like_suggested_overlay_fast_skip",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                follower_username=cand,
+                phase=phase,
+            )
+        except Exception:
+            pass
+        return _post_follow_likes_finish_overlay_fast_skip(
+            out,
+            timings=timings,
+            overlay_strategy=overlay_strategy,
+            t_phase0=global_phase_t0,
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            follower_username=cand,
+        )
+
+    skip_probe = _suggested_overlay_flow(ui_pre, phase="pre_grid_probe")
+    if skip_probe is not None:
+        return skip_probe
+
+    if _global_cap_reached():
+        return _finish_global_cap()
+
     probe0, perr, p0perf = _probe_once()
+    if _global_cap_reached() and _post_follow_like_partial_suggested_overlay(
+        probe0 if isinstance(probe0, dict) else {}
+    ):
+        overlay_strategy["result"] = "skipped_after_global_capped_full_probe"
+        return _post_follow_likes_finish_overlay_fast_skip(
+            out,
+            timings=timings,
+            overlay_strategy=overlay_strategy,
+            t_phase0=global_phase_t0,
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            follower_username=cand,
+            failure_reason="post_grid_partial_suggested_overlay_fast",
+        )
+    if (time.perf_counter() - t0) >= overlay_cap_s and _post_follow_like_partial_suggested_overlay(
+        probe0 if isinstance(probe0, dict) else {}
+    ):
+        overlay_strategy["result"] = "skipped_after_capped_full_probe"
+        return _post_follow_likes_finish_overlay_fast_skip(
+            out,
+            timings=timings,
+            overlay_strategy=overlay_strategy,
+            t_phase0=t0,
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            follower_username=cand,
+            failure_reason="post_grid_partial_suggested_overlay",
+        )
     if perr:
         out["failure_reason"] = perr
         timings["grid_prep_total_ms"] = round((time.perf_counter() - t0) * 1000, 2)
@@ -15724,6 +16214,156 @@ def ensure_post_grid_visible_for_post_follow_likes(
         )
     except Exception:
         pass
+
+    try:
+        log(
+            "info",
+            "post_follow_like_grid_state",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            follower_username=cand,
+            grid_state=state,
+            suggested_for_you=bool(probe0.get("suggested_for_you")),
+            discover_people=bool(probe0.get("discover_people")),
+            profile_tabs_visible=probe0.get("profile_tabs_visible"),
+            lower_solid_cell_count=probe0.get("lower_solid_cell_count"),
+            elapsed_from_phase_start_ms=_likes_perf_elapsed_ms(likes_perf_phase_t0),
+        )
+    except Exception:
+        pass
+
+    if _post_follow_like_partial_suggested_overlay(probe0):
+        overlay_strategy["attempted"] = True
+        try:
+            log(
+                "info",
+                "post_follow_like_suggested_overlay_detected",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                follower_username=cand,
+                grid_state=state,
+            )
+        except Exception:
+            pass
+        cell_after_probe = _post_follow_likes_visible_grid_cell_under_suggested(
+            d,
+            ui_hints={
+                "suggested_for_you": bool(probe0.get("suggested_for_you")),
+                "discover_people": bool(probe0.get("discover_people")),
+                "profile_tabs_visible": bool(probe0.get("profile_tabs_visible")),
+            },
+        )
+        if bool(cell_after_probe.get("reliable")):
+            try:
+                log(
+                    "info",
+                    "like_visible_grid_cell_under_suggested",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    follower_username=cand,
+                    phase="after_initial_probe",
+                    cell=cell_after_probe.get("cell"),
+                )
+            except Exception:
+                pass
+            overlay_strategy["result"] = "visible_cell_after_probe_continue"
+        else:
+            try:
+                ww_ov, wh_ov = d.window_size()
+            except Exception:
+                ww_ov, wh_ov = 1080, 2340
+            ov_clear = _post_follow_likes_try_clear_suggested_overlay_fast(
+                d,
+                ww=int(ww_ov),
+                wh=int(wh_ov),
+                budget_deadline=global_cap_deadline,
+            )
+            overlay_strategy.update(
+                {
+                    "handled": bool(ov_clear.get("handled")),
+                    "action": str(ov_clear.get("action") or ""),
+                    "elapsed_ms": float(ov_clear.get("elapsed_ms") or 0.0),
+                    "result": "dismiss_or_scroll_attempted"
+                    if bool(ov_clear.get("handled"))
+                    else "no_safe_overlay_action",
+                }
+            )
+            try:
+                log(
+                    "info",
+                    "post_follow_like_suggested_overlay_handled",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    follower_username=cand,
+                    handled=bool(ov_clear.get("handled")),
+                    action=str(ov_clear.get("action") or ""),
+                    elapsed_ms=ov_clear.get("elapsed_ms"),
+                )
+            except Exception:
+                pass
+            if bool(ov_clear.get("handled")) and not _global_cap_reached():
+                probe0, perr_ov, p0perf_ov = _probe_once()
+                if perr_ov:
+                    out["failure_reason"] = perr_ov
+                    timings["grid_prep_total_ms"] = round((time.perf_counter() - t0) * 1000, 2)
+                    out["timings_ms"] = timings
+                    out["likes_perf_grid"] = {
+                        "initial_probe_ms": dict(p0perf),
+                        "overlay_reprobe_ms": dict(p0perf_ov),
+                        "scroll_cycles": list(scroll_perf_cycles),
+                    }
+                    return out
+                probe_last = probe0
+                state = str(probe0.get("grid_state") or "not_visible")
+                out["grid_state_before"] = state
+                _log_checked(probe0, phase="after_suggested_overlay_clear")
+                p0perf = {**dict(p0perf), **{f"overlay_{k}": v for k, v in p0perf_ov.items()}}
+                try:
+                    log(
+                        "info",
+                        "post_follow_like_grid_state",
+                        visual_candidate_id=vcid,
+                        source_profile_username=src,
+                        follower_username=cand,
+                        grid_state=state,
+                        phase="after_suggested_overlay_clear",
+                        suggested_for_you=bool(probe0.get("suggested_for_you")),
+                    )
+                except Exception:
+                    pass
+        if _post_follow_like_partial_suggested_overlay(
+            probe0
+        ) and _sparse_post_grid_partial_acceptable_for_post_follow(probe0):
+            overlay_strategy["result"] = "partial_grid_accepted_after_overlay_strategy"
+        elif _post_follow_like_partial_suggested_overlay(probe0):
+            elapsed_partial_s = time.perf_counter() - t0
+            if elapsed_partial_s >= float(_POST_FOLLOW_LIKE_PARTIAL_GRID_DETECT_CAP_S):
+                overlay_strategy["result"] = "skipped_after_capped_partial_grid_detect"
+                try:
+                    log(
+                        "info",
+                        "like_grid_detect_capped",
+                        visual_candidate_id=vcid,
+                        source_profile_username=src,
+                        follower_username=cand,
+                        cap_s=float(_POST_FOLLOW_LIKE_PARTIAL_GRID_DETECT_CAP_S),
+                        elapsed_s=round(elapsed_partial_s, 3),
+                    )
+                except Exception:
+                    pass
+                out["failure_reason"] = "post_grid_partial_suggested_overlay"
+                out["grid_state_after"] = str(probe0.get("grid_state") or "partial")
+                timings["grid_prep_total_ms"] = round(elapsed_partial_s * 1000.0, 2)
+                timings["grid_detect_capped"] = True
+                out["timings_ms"] = timings
+                out["likes_perf_grid"] = {
+                    "initial_probe_ms": dict(p0perf),
+                    "overlay_strategy": dict(overlay_strategy),
+                    "scroll_cycles": list(scroll_perf_cycles),
+                    "grid_detect_capped": True,
+                }
+                return out
+            overlay_strategy["result"] = "partial_grid_needs_micro_scroll"
 
     if state != "visible" and _sparse_post_grid_partial_acceptable_for_post_follow(
         probe0
@@ -15933,13 +16573,18 @@ def ensure_post_grid_visible_for_post_follow_likes(
 
     attempts = 0
     state_after = state
-    while attempts < 2 and (time.perf_counter() - t0) <= budget:
+    max_scroll_attempts = 1 if suggested_overlay else 2
+    while attempts < max_scroll_attempts and (time.perf_counter() - t0) <= budget:
         t_cycle_wall_0 = time.perf_counter()
         sp = "micro" if state_after in ("partial", "visible") else "long"
+        if suggested_overlay and state_after == "partial":
+            sp = "micro"
         if attempts == 1 and state_after == "partial":
             sp = "long"
         if attempts == 0 and promote_long_first and state_after == "partial":
             sp = "long"
+        if suggested_overlay and state_after == "partial":
+            sp = "micro"
         grid_state_before_this_attempt = str(state_after)
         log(
             "info",
@@ -16155,6 +16800,8 @@ def ensure_post_grid_visible_for_post_follow_likes(
         "scroll_cycles": list(scroll_perf_cycles),
         "grid_prepare_total_ms": timings.get("grid_prep_total_ms"),
         "budget_snapshot_ms": budget_snapshot_total_ms,
+        "overlay_strategy_ms": overlay_strategy.get("elapsed_ms"),
+        "overlay_strategy": dict(overlay_strategy),
         "final_suggested_for_you": probe_last.get("suggested_for_you"),
         "final_profile_tabs_visible": probe_last.get("profile_tabs_visible"),
     }
@@ -16252,7 +16899,12 @@ def ensure_post_grid_visible_for_post_follow_likes(
         out["likes_perf_grid"] = dict(_likes_perf_grid_common)
     elif not out.get("ok"):
         if not out.get("failure_reason"):
-            out["failure_reason"] = "post_grid_not_visible_before_open"
+            if bool(overlay_strategy.get("attempted")):
+                out["failure_reason"] = "post_grid_partial_suggested_overlay"
+            else:
+                out["failure_reason"] = "post_grid_not_visible_before_open"
+        if bool(overlay_strategy.get("attempted")):
+            overlay_strategy["result"] = "skipped_after_short_overlay_strategy"
         log(
             "warning",
             "post_follow_post_likes_grid_still_not_visible",
@@ -16264,8 +16916,21 @@ def ensure_post_grid_visible_for_post_follow_likes(
             scroll_used=bool(out.get("scroll_used")),
             scroll_profiles_used=scroll_profiles_used,
             attempts=attempts,
+            overlay_strategy=dict(overlay_strategy),
             screenshot_path=screenshot_paths[-1] if screenshot_paths else None,
         )
+        if str(out.get("failure_reason") or "") == "post_grid_partial_suggested_overlay":
+            log(
+                "warning",
+                "post_follow_like_skipped_grid_partial",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                follower_username=cand,
+                failure_reason="post_grid_partial_suggested_overlay",
+                grid_state=state_after,
+                suggested_for_you=bool(probe_last.get("suggested_for_you")),
+                overlay_strategy=dict(overlay_strategy),
+            )
         try:
             log(
                 "warning",
@@ -16501,6 +17166,8 @@ def visual_detect_private_profile(
 
     ui_rows: list[tuple[str, str, float]] = [
         ("ui_textContains_this_account_private_en", "This account is private", 0.93),
+        ("ui_textContains_this_account_private_en_cap", "This Account is Private", 0.93),
+        ("ui_textContains_account_is_private_en", "account is private", 0.86),
         (
             "ui_textContains_follow_to_see_en",
             "Follow this account to see their photos and videos",
@@ -16582,10 +17249,13 @@ def visual_detect_private_profile(
     hl = hier.lower()
     hier_markers: tuple[tuple[str, str], ...] = (
         ("this account is private", "hierarchy:this_account_private"),
+        ("this account is private.", "hierarchy:this_account_private_dot"),
+        ("account is private", "hierarchy:account_is_private"),
         (
             "follow this account to see their photos",
             "hierarchy:follow_to_see_photos",
         ),
+        ("follow to see their photos", "hierarchy:follow_to_see_short"),
         ("ce compte est privé", "hierarchy:ce_compte_prive"),
         ("compte privé", "hierarchy:compte_prive"),
         ("suivez ce compte pour voir", "hierarchy:suivez_compte"),
@@ -16642,6 +17312,21 @@ _VISUAL_POST_VIEWER_OPEN_POLL_INITIAL_S = 0.38
 _VISUAL_POST_VIEWER_OPEN_POLL_INTERVAL_S = 0.18
 _VISUAL_POST_VIEWER_OPEN_POLL_MAX_S = 1.35
 _VISUAL_POST_VIEWER_OPEN_POLL_RETRY_MAX_S = 1.45
+# Post-follow likes: short polls; wall cap prevents multi-second detect calls from stretching the phase.
+_POST_FOLLOW_GRID_CELL_TAP_FRAC_X = 0.50
+_POST_FOLLOW_GRID_CELL_TAP_FRAC_Y = 0.50
+_POST_FOLLOW_GRID_CELL_RETRY_TAP_FRAC_X = 0.50
+_POST_FOLLOW_GRID_CELL_RETRY_TAP_FRAC_Y = 0.52
+_POST_FOLLOW_RECENT_POST_OPEN_PRE_TAP_SETTLE_S = 0.12
+_POST_FOLLOW_VIEWER_OPEN_POLL_INITIAL_S = 0.20
+_POST_FOLLOW_VIEWER_OPEN_POLL_INTERVAL_S = 0.10
+_POST_FOLLOW_VIEWER_OPEN_POLL_MAX_S = 0.95
+_POST_FOLLOW_VIEWER_OPEN_POLL_RETRY_MAX_S = 1.05
+_POST_FOLLOW_VIEWER_OPEN_WALL_CAP_S = 2.20
+_POST_FOLLOW_LIKE_GRID_PREP_MAX_S = float(
+    getattr(config, "POST_FOLLOW_LIKE_GRID_PREP_MAX_S", 6.0) or 6.0
+)
+_POST_FOLLOW_LIKE_OPEN_POST_MAX_S = 3.5
 _POST_FOLLOW_OPEN_LIKE_PROOF_TTL_MS = 20_000.0
 _post_follow_open_like_proof_stash: dict[str, Any] | None = None
 _TRUSTED_POST_FOLLOW_OPEN_NOT_LIKED_RID_SUFFIX = ":not_liked"
@@ -16717,14 +17402,24 @@ def _visual_wait_post_viewer_opened_after_tap(
     expected_follower_username: str,
     act_before: Any,
     poll_label: str = "first_tap",
+    post_follow_fast: bool = False,
 ) -> dict[str, Any]:
     """Adaptive poll for post viewer after grid tap (replaces fixed 1.6s sleep)."""
     t0 = time.perf_counter()
-    initial_s = float(_VISUAL_POST_VIEWER_OPEN_POLL_INITIAL_S)
-    interval_s = float(_VISUAL_POST_VIEWER_OPEN_POLL_INTERVAL_S)
-    max_s = float(_VISUAL_POST_VIEWER_OPEN_POLL_MAX_S)
-    if str(poll_label or "").strip() == "retry_tap":
-        max_s = float(_VISUAL_POST_VIEWER_OPEN_POLL_RETRY_MAX_S)
+    if post_follow_fast:
+        initial_s = float(_POST_FOLLOW_VIEWER_OPEN_POLL_INITIAL_S)
+        interval_s = float(_POST_FOLLOW_VIEWER_OPEN_POLL_INTERVAL_S)
+        max_s = float(_POST_FOLLOW_VIEWER_OPEN_POLL_MAX_S)
+        if str(poll_label or "").strip() == "retry_tap":
+            max_s = float(_POST_FOLLOW_VIEWER_OPEN_POLL_RETRY_MAX_S)
+        wall_cap_s = float(_POST_FOLLOW_VIEWER_OPEN_WALL_CAP_S)
+    else:
+        initial_s = float(_VISUAL_POST_VIEWER_OPEN_POLL_INITIAL_S)
+        interval_s = float(_VISUAL_POST_VIEWER_OPEN_POLL_INTERVAL_S)
+        max_s = float(_VISUAL_POST_VIEWER_OPEN_POLL_MAX_S)
+        if str(poll_label or "").strip() == "retry_tap":
+            max_s = float(_VISUAL_POST_VIEWER_OPEN_POLL_RETRY_MAX_S)
+        wall_cap_s = None
 
     poll_sleep_s = 0.0
     if initial_s > 0:
@@ -16735,6 +17430,8 @@ def _visual_wait_post_viewer_opened_after_tap(
     last_detect_ms = 0.0
     det: dict[str, Any] = {}
     while True:
+        if wall_cap_s is not None and (time.perf_counter() - t0) >= wall_cap_s:
+            break
         poll_count += 1
         t_detect0 = time.perf_counter()
         det = _visual_detect_post_viewer_opened_after_tap(
@@ -16742,6 +17439,7 @@ def _visual_wait_post_viewer_opened_after_tap(
             pkg=pkg,
             expected_follower_username=expected_follower_username,
             act_before=act_before,
+            post_follow_fast=bool(post_follow_fast),
         )
         last_detect_ms = (time.perf_counter() - t_detect0) * 1000.0
         if bool(det.get("post_detected")):
@@ -16975,6 +17673,7 @@ def _visual_detect_post_viewer_opened_after_tap(
     pkg: str,
     expected_follower_username: str = "",
     act_before: Any = None,
+    post_follow_fast: bool = False,
 ) -> dict[str, Any]:
     """
     Post-open detection aligned with post-follow like viewer guard (not legacy profile guess alone).
@@ -17083,6 +17782,41 @@ def _visual_detect_post_viewer_opened_after_tap(
             posts_action_bar=posts_bar,
             action_bar_title=ab_title,
         )
+
+    if post_follow_fast:
+        t_grid0 = time.perf_counter()
+        still_grid = False
+        try:
+            still_grid = bool(
+                _try_profile_signals_once(d, "", pkg)
+                and _followers_profile_tabs_visible(d)
+            )
+        except Exception:
+            still_grid = False
+        stage["viewer_detect_profile_still_ms"] = _visual_detect_post_viewer_stage_ms(
+            t_grid0
+        )
+        if still_grid:
+            signals.append("still_profile_grid")
+        out_fast = {
+            "post_detected": False,
+            "detect_reason": "",
+            "viewer_detection_signals_seen": signals,
+            "prof_still_on_candidate_profile": bool(still_grid),
+            "still_profile_grid": bool(still_grid),
+            "like_ui_present": False,
+            "posts_action_bar": False,
+            "post_header_username_detected": "",
+            "action_bar_title": "",
+            "current_activity": None,
+            "current_package": None,
+            "viewer_detect_path": "post_follow_fast_miss",
+            "viewer_detect_checked_signals": signals,
+            **stage,
+            "viewer_detect_total_ms": _visual_detect_post_viewer_stage_ms(t_total0),
+        }
+        _visual_detect_post_viewer_timing_log(out_fast, post_follow_fast=True)
+        return out_fast
 
     t_broad0 = time.perf_counter()
     liked_ui, liked_m, _ = _ui_post_viewer_broad_like_chrome_hint(d)
@@ -17240,6 +17974,7 @@ def visual_open_recent_post_from_profile(
     lperf: dict[str, Any] | None = (
         {} if likes_perf_phase_t0 is not None else None
     )
+    post_follow_fast = lperf is not None
     t_po0 = time.perf_counter() if lperf is not None else None
 
     def _po_fin(
@@ -17710,12 +18445,46 @@ def visual_open_recent_post_from_profile(
             failure_reason="candidate_above_profile_tabs",
         )
 
-    tap_x, tap_y = _visual_grid_cell_tap_xy_device(
-        x0, y0, cell_w, cell_h, iw=iw, ih=ih, ww=ww, wh=wh
-    )
+    if post_follow_fast:
+        tap_x, tap_y = _visual_grid_cell_tap_xy_device(
+            x0,
+            y0,
+            cell_w,
+            cell_h,
+            iw=iw,
+            ih=ih,
+            ww=ww,
+            wh=wh,
+            tap_frac_x=_POST_FOLLOW_GRID_CELL_TAP_FRAC_X,
+            tap_frac_y=_POST_FOLLOW_GRID_CELL_TAP_FRAC_Y,
+        )
+    else:
+        tap_x, tap_y = _visual_grid_cell_tap_xy_device(
+            x0, y0, cell_w, cell_h, iw=iw, ih=ih, ww=ww, wh=wh
+        )
     first_tap_coords = [tap_x, tap_y]
     retry_used = False
     retry_strategy = ""
+
+    if post_follow_fast:
+        try:
+            log(
+                "info",
+                "post_follow_like_open_candidate_selected",
+                col=col,
+                row=row,
+                variance=round(float(var), 2),
+                tap_x=tap_x,
+                tap_y=tap_y,
+                cell_w=cell_w,
+                cell_h=cell_h,
+                tap_frac_x=_POST_FOLLOW_GRID_CELL_TAP_FRAC_X,
+                tap_frac_y=_POST_FOLLOW_GRID_CELL_TAP_FRAC_Y,
+                selection_policy=pol,
+                source_profile_username=source_profile_username or "",
+            )
+        except Exception:
+            pass
 
     log(
         "info",
@@ -17754,7 +18523,11 @@ def visual_open_recent_post_from_profile(
             (time.perf_counter() - _t_sel0) * 1000.0, 2
         )
 
-    _settle_s = float(_VISUAL_RECENT_POST_OPEN_PRE_TAP_SETTLE_S)
+    _settle_s = (
+        float(_POST_FOLLOW_RECENT_POST_OPEN_PRE_TAP_SETTLE_S)
+        if post_follow_fast
+        else float(_VISUAL_RECENT_POST_OPEN_PRE_TAP_SETTLE_S)
+    )
     _t_settle0 = time.perf_counter()
     try:
         time.sleep(_settle_s)
@@ -17764,6 +18537,7 @@ def visual_open_recent_post_from_profile(
         lperf["pre_tap_settle_ms"] = round(
             (time.perf_counter() - _t_settle0) * 1000.0, 2
         )
+        lperf["post_follow_fast_open"] = True
     try:
         log(
             "info",
@@ -17834,6 +18608,19 @@ def visual_open_recent_post_from_profile(
         post_detected=False,
         source_profile_username=source_profile_username or "",
     )
+    if post_follow_fast:
+        try:
+            log(
+                "info",
+                "post_follow_like_open_tap_sent",
+                tap_x=tap_x,
+                tap_y=tap_y,
+                selected_col=col,
+                selected_row=row,
+                source_profile_username=source_profile_username or "",
+            )
+        except Exception:
+            pass
 
     exp_fu = str(expected_follower_username or "").strip().lstrip("@")
     det_open = _visual_wait_post_viewer_opened_after_tap(
@@ -17842,6 +18629,7 @@ def visual_open_recent_post_from_profile(
         expected_follower_username=exp_fu,
         act_before=act0,
         poll_label="first_tap",
+        post_follow_fast=bool(post_follow_fast),
     )
     post_detected = bool(det_open.get("post_detected"))
     prof_still = bool(det_open.get("prof_still_on_candidate_profile"))
@@ -17909,8 +18697,12 @@ def visual_open_recent_post_from_profile(
         retry_used = True
         retry_strategy = "same_cell_more_central_point"
         _t_retry0 = time.perf_counter()
-        _retry_fx = float(_VISUAL_GRID_CELL_RETRY_TAP_FRAC_X)
-        _retry_fy = float(_VISUAL_GRID_CELL_RETRY_TAP_FRAC_Y)
+        if post_follow_fast:
+            _retry_fx = float(_POST_FOLLOW_GRID_CELL_RETRY_TAP_FRAC_X)
+            _retry_fy = float(_POST_FOLLOW_GRID_CELL_RETRY_TAP_FRAC_Y)
+        else:
+            _retry_fx = float(_VISUAL_GRID_CELL_RETRY_TAP_FRAC_X)
+            _retry_fy = float(_VISUAL_GRID_CELL_RETRY_TAP_FRAC_Y)
         retry_x, retry_y = _visual_grid_cell_tap_xy_device(
             x0,
             y0,
@@ -17960,6 +18752,7 @@ def visual_open_recent_post_from_profile(
                 expected_follower_username=exp_fu,
                 act_before=act0,
                 poll_label="retry_tap",
+                post_follow_fast=bool(post_follow_fast),
             )
             post_detected = bool(det_retry.get("post_detected"))
             prof_still = bool(det_retry.get("prof_still_on_candidate_profile"))
@@ -18089,6 +18882,20 @@ def visual_open_recent_post_from_profile(
             if retry_used and bool(det_retry.get("post_detected"))
             else det_open
         )
+        if post_follow_fast:
+            try:
+                log(
+                    "info",
+                    "post_follow_like_viewer_detected",
+                    tap_x=tap_x,
+                    tap_y=tap_y,
+                    retry_used=bool(retry_used),
+                    detect_reason=det_final.get("detect_reason"),
+                    viewer_detect_path=det_final.get("viewer_detect_path"),
+                    source_profile_username=source_profile_username or "",
+                )
+            except Exception:
+                pass
         if post_follow_stash_open_like_proof and exp_fu:
             _stash_post_follow_open_like_proof(
                 det_final,
@@ -18122,6 +18929,24 @@ def visual_open_recent_post_from_profile(
             failure_reason=None,
         )
 
+    if post_follow_fast:
+        try:
+            log(
+                "warning",
+                "post_follow_like_open_failed_fast",
+                tap_x=tap_x,
+                tap_y=tap_y,
+                retry_used=bool(retry_used),
+                viewer_open_poll_wait_ms_first=det_open.get("viewer_open_poll_wait_ms"),
+                viewer_open_poll_wait_ms_retry=det_retry.get("viewer_open_poll_wait_ms")
+                if retry_used
+                else None,
+                viewer_detection_signals_seen=viewer_signals[:24],
+                failure_reason="post_viewer_not_detected",
+                source_profile_username=source_profile_username or "",
+            )
+        except Exception:
+            pass
     log(
         "error",
         "visual_recent_post_open_failed",
@@ -26273,6 +27098,44 @@ def scroll_followers_list_forward(
     )
 
 
+def scroll_followers_list_backward(
+    d: u2.Device,
+    *,
+    source_profile_username: str | None = None,
+    scroll_steps: int = 1,
+) -> bool:
+    """Scroll followers list toward the scan-start zone (older rows / top of list).
+
+    Narrow helper for Welcome list-native sender reposition after a forward scan scroll.
+    """
+    steps = max(1, int(scroll_steps))
+    try:
+        w, h = d.window_size()
+    except Exception:
+        w, h = 1080, 1920
+    x = int(w // 2)
+    y_start = int(h * 0.32)
+    y_end = int(h * 0.72)
+    duration_s = 0.34
+    ok_any = False
+    for step_idx in range(steps):
+        try:
+            log(
+                "info",
+                "followers_list_scroll",
+                direction="backward",
+                step_index=step_idx + 1,
+                step_total=steps,
+                source_profile_username=str(source_profile_username or "") or None,
+            )
+            d.swipe(x, y_start, x, y_end, duration_s)
+            time.sleep(0.35)
+            ok_any = True
+        except Exception:
+            return False
+    return ok_any
+
+
 def _followers_fetch_hierarchy_xml_raw(d: u2.Device) -> str | None:
     try:
         try:
@@ -31303,10 +32166,20 @@ def _post_follow_overlay_ui_hints(d: u2.Device) -> dict[str, Any]:
     """Lightweight sheet/popup hints for post-follow observation (no OCR)."""
     hints: dict[str, Any] = {}
     try:
-        if d(textContains="Posts").exists(timeout=0.06) and d(
-            textContains="Stories"
-        ).exists(timeout=0.05):
+        sheet_level, _sheet_meta = _mute_engine_v2_detect_sheet_level(d)
+        hints["mute_sheet_level"] = sheet_level
+        if sheet_level == "mute_toggles":
             hints["likely_mute_toggle_sheet"] = True
+            try:
+                log(
+                    "info",
+                    "mute_toggle_sheet_detected",
+                    sheet_level=sheet_level,
+                )
+            except Exception:
+                pass
+        elif sheet_level == "following_options":
+            hints["likely_following_options_sheet"] = True
     except Exception:
         pass
     for needle, key in (
@@ -32800,6 +33673,187 @@ def post_follow_controlled_return_to_followers_list(
     return False, str(how_last or "failed"), fail_reason
 
 
+def _post_follow_likes_failure_return_ct_capped(
+    d: u2.Device,
+    *,
+    pkg: str,
+    source_profile_username: str,
+    follower_username: str,
+    visual_candidate_id: str,
+    det: dict[str, Any] | None = None,
+) -> tuple[bool, str, str | None]:
+    """Compact return-CT after like skip with a hard wall clock cap."""
+    src = str(source_profile_username or "").strip()
+    cand = str(follower_username or "").strip()
+    vcid = str(visual_candidate_id or "").strip()
+    cap_s = float(_POST_FOLLOW_RETURN_CT_POST_LIKE_RECOVERY_CAP_S)
+    t0 = time.perf_counter()
+    try:
+        log(
+            "info",
+            "post_follow_return_ct_recovery_started",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            follower_username=cand,
+            recovery_cap_s=cap_s,
+            compact=True,
+        )
+    except Exception:
+        pass
+    det_use = det if isinstance(det, dict) else {}
+    try:
+        ok_ret, how_ret, fail_re = post_follow_controlled_return_to_followers_list(
+            d,
+            pkg=pkg,
+            source_profile_username=src,
+            follower_username=cand,
+            visual_candidate_id=vcid,
+            det=det_use,
+            max_rounds=1,
+            compact_after_follow_verified_mute=True,
+            compact_reason="post_like_skip_compact_return",
+        )
+    except Exception as e:
+        ok_ret, how_ret, fail_re = (
+            False,
+            f"exception:{type(e).__name__}",
+            "post_follow_likes_failure_return_ct_recovery_failed",
+        )
+    elapsed_s = time.perf_counter() - t0
+    if elapsed_s > cap_s:
+        try:
+            log(
+                "warning",
+                "post_follow_return_ct_recovery_capped",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                follower_username=cand,
+                elapsed_s=round(elapsed_s, 3),
+                recovery_cap_s=cap_s,
+                ok=bool(ok_ret),
+            )
+        except Exception:
+            pass
+    if ok_ret:
+        try:
+            log(
+                "info",
+                "post_follow_return_ct_recovery_success",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                follower_username=cand,
+                how=str(how_ret or ""),
+                elapsed_s=round(elapsed_s, 3),
+            )
+        except Exception:
+            pass
+    else:
+        try:
+            log(
+                "warning",
+                "post_follow_return_ct_recovery_failed_fast",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                follower_username=cand,
+                how=str(how_ret or ""),
+                failure_reason=str(fail_re or ""),
+                elapsed_s=round(elapsed_s, 3),
+            )
+        except Exception:
+            pass
+    return bool(ok_ret), str(how_ret or ""), fail_re
+
+
+def _post_follow_likes_failure_light_unwind(
+    d: u2.Device,
+    *,
+    pkg: str,
+    source_profile_username: str,
+    follower_username: str,
+    visual_candidate_id: str,
+) -> dict[str, Any]:
+    """
+    Fast unwind after grid/open like failures (no return-CT scan, max 2 backs).
+    """
+    src = str(source_profile_username or "").strip()
+    cand = str(follower_username or "").strip()
+    vcid = str(visual_candidate_id or "").strip()
+    out: dict[str, Any] = {
+        "attempted": True,
+        "ok": False,
+        "how": "light_back_unwind",
+        "failure_reason": "post_follow_likes_failure_light_unwind_failed",
+        "backs_used": 0,
+        "on_followers_list": False,
+        "on_candidate_profile": False,
+    }
+    log(
+        "info",
+        "post_follow_likes_failure_light_unwind_started",
+        visual_candidate_id=vcid,
+        source_profile_username=src,
+        follower_username=cand,
+        max_backs=2,
+    )
+    cand_n = _normalize_handle(cand)
+    for backs_used in range(1, 3):
+        out["backs_used"] = backs_used
+        try:
+            if not verify_app_foreground(d, pkg):
+                break
+            d.press("back")
+            time.sleep(0.22)
+        except Exception:
+            break
+        try:
+            ab = str(
+                read_current_profile_username_for_follow_gate(d) or ""
+            ).strip().lstrip("@")
+        except Exception:
+            ab = ""
+        if cand_n and _normalize_handle(ab) == cand_n:
+            out["ok"] = True
+            out["on_candidate_profile"] = True
+            out["failure_reason"] = ""
+            log(
+                "info",
+                "post_follow_likes_failure_light_unwind_ok",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                follower_username=cand,
+                backs_used=backs_used,
+                surface="candidate_profile",
+            )
+            return out
+        try:
+            det_s = detect_followers_list_screen(d, source_profile_username=src)
+        except Exception:
+            det_s = {}
+        if bool(det_s.get("is_followers_list")):
+            out["ok"] = True
+            out["on_followers_list"] = True
+            out["failure_reason"] = ""
+            log(
+                "info",
+                "post_follow_likes_failure_light_unwind_ok",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                follower_username=cand,
+                backs_used=backs_used,
+                surface="followers_list",
+            )
+            return out
+    log(
+        "warning",
+        "post_follow_likes_failure_light_unwind_failed",
+        visual_candidate_id=vcid,
+        source_profile_username=src,
+        follower_username=cand,
+        backs_used=out.get("backs_used"),
+    )
+    return out
+
+
 def _post_follow_likes_failure_recover_return_ct(
     d: u2.Device,
     *,
@@ -32942,26 +33996,14 @@ def _post_follow_likes_failure_recover_return_ct(
         )
         return out
 
-    log(
-        "info",
-        "post_follow_likes_failure_recovery_return_ct_started",
-        visual_candidate_id=vcid,
-        source_profile_username=src,
-        follower_username=cand,
-        max_rounds=2,
-        compact_after_follow_verified_mute=False,
-    )
     try:
-        ok_ret, how_ret, fail_re = post_follow_controlled_return_to_followers_list(
+        ok_ret, how_ret, fail_re = _post_follow_likes_failure_return_ct_capped(
             d,
             pkg=pkg,
             source_profile_username=src,
             follower_username=cand,
             visual_candidate_id=vcid,
             det=det_s,
-            max_rounds=2,
-            compact_after_follow_verified_mute=False,
-            compact_reason=None,
         )
     except Exception as e:
         ok_ret, how_ret, fail_re = (
@@ -33001,10 +34043,17 @@ def _post_follow_likes_failure_recover_return_ct(
 # --- Mute Engine V2: bounded, non-recovery mute after verified follow (best-effort) ---
 
 # Nominal post-follow window (observe + overlay + fingerprint); Following CTA search needs extra time.
-_MUTE_ENGINE_V2_BUDGET_S = 4.0
-MIN_FOLLOWING_CTA_SEARCH_BUDGET_S = 1.5
+_MUTE_ENGINE_V2_BUDGET_S = float(getattr(config, "MUTE_ENGINE_V2_BUDGET_S", 10.0) or 10.0)
+MIN_FOLLOWING_CTA_SEARCH_BUDGET_S = float(
+    getattr(config, "MUTE_ENGINE_V2_FOLLOWING_CTA_SEARCH_BUDGET_S", 1.5) or 1.5
+)
 # Reserved tail for mute toggle sheet: label wait + tap + short verify per axis (Posts + Stories).
-MIN_MUTE_TOGGLE_STAGE_BUDGET_S = 2.0
+MIN_MUTE_TOGGLE_STAGE_BUDGET_S = float(
+    getattr(config, "MUTE_ENGINE_V2_TOGGLE_STAGE_BUDGET_S", 2.0) or 2.0
+)
+# Samsung A16 physical runs showed 1.56s is enough to attempt Posts+Stories when the sheet
+# is already confirmed; 1.84s was too pessimistic and caused pre-toggle starvation.
+MIN_MUTE_TOGGLE_STAGE_SAMSUNG_SAFE_REQUIRED_S = 1.52
 _MUTE_ENGINE_V2_EFFECTIVE_TOTAL_S = (
     _MUTE_ENGINE_V2_BUDGET_S
     + MIN_FOLLOWING_CTA_SEARCH_BUDGET_S
@@ -33015,6 +34064,20 @@ _MUTE_ENGINE_V2_EFFECTIVE_TOTAL_S = (
 _MUTE_V2_TOGGLE_POST_TAP_SETTLE_S = 0.12
 _MUTE_V2_TOGGLE_VERIFY_MIN_S = 0.35
 _MUTE_V2_TOGGLE_VERIFY_MAX_S = 1.4
+_MUTE_V2_COMPACT_TOGGLE_VERIFY_MAX_S = 0.48
+_MUTE_V2_TOGGLE_STAGE_WALL_CAP_S = 4.5
+_MUTE_V2_PER_AXIS_TOGGLE_MIN_S = 1.1
+_MUTE_V2_POST_SHEET_TRUE_STARVED_S = 0.55
+_MUTE_V2_PRE_ACTION_RESERVED_S = 2.0
+# Hard cap for like grid prep when Suggested overlay blocks a real post cell (Samsung runs).
+_POST_FOLLOW_LIKE_PARTIAL_GRID_DETECT_CAP_S = float(
+    getattr(config, "POST_FOLLOW_LIKE_PARTIAL_GRID_DETECT_CAP_S", 4.5) or 4.5
+)
+_POST_FOLLOW_LIKE_OVERLAY_PHASE_CAP_S = float(
+    getattr(config, "POST_FOLLOW_LIKE_OVERLAY_PHASE_CAP_S", 12.0) or 12.0
+)
+# After like skip/fail: compact return-CT must not run unbounded multi-round recovery.
+_POST_FOLLOW_RETURN_CT_POST_LIKE_RECOVERY_CAP_S = 7.0
 
 _MUTE_V2_REJECT_SUBSTR: tuple[str, ...] = (
     "contact",
@@ -33042,8 +34105,388 @@ _MUTE_V2_FOLLOWING_STATE_LABELS: tuple[str, ...] = (
 )
 
 
+def _mute_engine_v2_u2_text_exists(
+    d: u2.Device,
+    *,
+    text: str | None = None,
+    text_contains: str | None = None,
+    timeout_s: float = 0.05,
+) -> bool:
+    try:
+        if text and d(text=text).exists(timeout=float(timeout_s)):
+            return True
+        if text_contains and d(textContains=text_contains).exists(timeout=float(timeout_s)):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _mute_engine_v2_is_mute_toggles_sheet(d: u2.Device) -> bool:
+    """True on the Posts/Stories/Notes toggle sheet (not Following options level 1)."""
+    posts = _mute_engine_v2_u2_text_exists(d, text="Posts") or _mute_engine_v2_u2_text_exists(
+        d, text="Publications"
+    )
+    stories = _mute_engine_v2_u2_text_exists(d, text="Stories")
+    if not (posts and stories):
+        return False
+    notes = _mute_engine_v2_u2_text_exists(d, text="Notes")
+    if notes:
+        return True
+    close_friend = _mute_engine_v2_u2_text_exists(
+        d, text_contains="Close friend"
+    ) or _mute_engine_v2_u2_text_exists(d, text="Add to favorites")
+    unfollow = _mute_engine_v2_u2_text_exists(d, text="Unfollow")
+    if close_friend and unfollow:
+        return False
+    return _mute_engine_v2_u2_text_exists(d, text="Mute")
+
+
+def _mute_engine_v2_is_following_options_sheet(d: u2.Device) -> bool:
+    """Level-1 Following menu: Close friend / favorites / Mute row / Restrict / Unfollow."""
+    unfollow = _mute_engine_v2_u2_text_exists(d, text="Unfollow")
+    mute_row = _mute_engine_v2_u2_text_exists(d, text="Mute") or _mute_engine_v2_u2_text_exists(
+        d, text_contains="Mute"
+    )
+    level1_marker = (
+        _mute_engine_v2_u2_text_exists(d, text_contains="Close friend")
+        or _mute_engine_v2_u2_text_exists(d, text="Add to favorites")
+        or _mute_engine_v2_u2_text_exists(d, text="Restrict")
+    )
+    return bool(unfollow and mute_row and level1_marker and not _mute_engine_v2_is_mute_toggles_sheet(d))
+
+
+def _mute_engine_v2_detect_sheet_level(d: u2.Device) -> tuple[str, dict[str, Any]]:
+    meta: dict[str, Any] = {
+        "posts_label": _mute_engine_v2_u2_text_exists(d, text="Posts")
+        or _mute_engine_v2_u2_text_exists(d, text="Publications"),
+        "stories_label": _mute_engine_v2_u2_text_exists(d, text="Stories"),
+        "notes_label": _mute_engine_v2_u2_text_exists(d, text="Notes"),
+        "unfollow_visible": _mute_engine_v2_u2_text_exists(d, text="Unfollow"),
+        "close_friend_visible": _mute_engine_v2_u2_text_exists(d, text_contains="Close friend"),
+        "favorites_visible": _mute_engine_v2_u2_text_exists(d, text="Add to favorites"),
+    }
+    if _mute_engine_v2_is_mute_toggles_sheet(d):
+        return "mute_toggles", meta
+    if _mute_engine_v2_is_following_options_sheet(d):
+        return "following_options", meta
+    return "unknown", meta
+
+
+def _mute_engine_v2_enter_mute_subsheet_from_following_options(
+    d: u2.Device,
+    *,
+    visual_candidate_id: str = "",
+    source_profile_username: str = "",
+    toggle_required_budget_s: float = 0.0,
+    t_all: float,
+) -> tuple[bool, str]:
+    """Tap Mute row on Following options sheet to open toggle subsheet."""
+    try:
+        log(
+            "info",
+            "mute_enter_subsheet_started",
+            visual_candidate_id=visual_candidate_id,
+            source_profile_username=source_profile_username,
+        )
+    except Exception:
+        pass
+    mute_el, mute_lab = _visual_find_mute_row_first_sheet(d)
+    if mute_el is None:
+        try:
+            log(
+                "warning",
+                "mute_enter_subsheet_failed",
+                visual_candidate_id=visual_candidate_id,
+                source_profile_username=source_profile_username,
+                reason="mute_row_not_found",
+            )
+        except Exception:
+            pass
+        return False, "mute_row_not_found"
+    try:
+        mute_el.click()
+    except Exception as e:
+        try:
+            log(
+                "warning",
+                "mute_enter_subsheet_failed",
+                visual_candidate_id=visual_candidate_id,
+                source_profile_username=source_profile_username,
+                reason=f"mute_row_click_failed:{e}",
+            )
+        except Exception:
+            pass
+        return False, f"mute_row_click_failed:{e}"
+    _sleep_sheet = _mute_engine_v2_pre_toggle_wait_s(
+        remaining_s=_mute_engine_v2_remaining_s(t_all),
+        desired_s=0.28,
+        required_toggle_s=float(toggle_required_budget_s),
+    )
+    if _sleep_sheet >= 0.02:
+        time.sleep(_sleep_sheet)
+    level, _meta = _mute_engine_v2_detect_sheet_level(d)
+    if level != "mute_toggles":
+        try:
+            log(
+                "warning",
+                "mute_enter_subsheet_failed",
+                visual_candidate_id=visual_candidate_id,
+                source_profile_username=source_profile_username,
+                reason="mute_toggles_not_confirmed",
+                sheet_level=level,
+            )
+        except Exception:
+            pass
+        return False, "mute_toggles_not_confirmed"
+    try:
+        log(
+            "info",
+            "mute_enter_subsheet_completed",
+            visual_candidate_id=visual_candidate_id,
+            source_profile_username=source_profile_username,
+            mute_row_label=str(mute_lab or "")[:80],
+        )
+    except Exception:
+        pass
+    return True, ""
+
+
+def _mute_engine_v2_dismiss_mute_sheets_level_aware(
+    d: u2.Device,
+    *,
+    visual_candidate_id: str = "",
+    source_profile_username: str = "",
+) -> tuple[bool, float]:
+    """Dismiss mute toggles sheet then Following options sheet if still open."""
+    t0 = time.perf_counter()
+    try:
+        log(
+            "info",
+            "mute_sheet_dismiss_started",
+            visual_candidate_id=visual_candidate_id,
+            source_profile_username=source_profile_username,
+            level_aware=True,
+        )
+    except Exception:
+        pass
+    level, _meta = _mute_engine_v2_detect_sheet_level(d)
+    if level == "unknown" and not _mute_engine_v2_mute_sheet_still_visible(d):
+        ms = round((time.perf_counter() - t0) * 1000.0, 2)
+        return True, ms
+    ok = True
+    if level in ("mute_toggles", "unknown") and _mute_engine_v2_is_mute_toggles_sheet(d):
+        try:
+            d.press("back")
+            time.sleep(0.22)
+        except Exception:
+            ok = False
+        try:
+            log(
+                "info",
+                "mute_dismiss_level2_completed",
+                visual_candidate_id=visual_candidate_id,
+                source_profile_username=source_profile_username,
+                still_toggles=_mute_engine_v2_is_mute_toggles_sheet(d),
+            )
+        except Exception:
+            pass
+    level_after, _ = _mute_engine_v2_detect_sheet_level(d)
+    if level_after == "following_options":
+        try:
+            d.press("back")
+            time.sleep(0.2)
+        except Exception:
+            ok = False
+        try:
+            log(
+                "info",
+                "mute_dismiss_level1_completed",
+                visual_candidate_id=visual_candidate_id,
+                source_profile_username=source_profile_username,
+            )
+        except Exception:
+            pass
+    elif _mute_engine_v2_u2_text_exists(d, text_contains="Close friend") and _mute_engine_v2_u2_text_exists(
+        d, text="Unfollow"
+    ):
+        try:
+            log(
+                "warning",
+                "mute_dismiss_wrong_surface_close_friend_risk",
+                visual_candidate_id=visual_candidate_id,
+                source_profile_username=source_profile_username,
+            )
+        except Exception:
+            pass
+    still = _mute_engine_v2_mute_sheet_still_visible(d) or _mute_engine_v2_is_following_options_sheet(
+        d
+    )
+    ms = round((time.perf_counter() - t0) * 1000.0, 2)
+    if not still:
+        try:
+            log(
+                "info",
+                "mute_sheet_dismiss_completed",
+                visual_candidate_id=visual_candidate_id,
+                source_profile_username=source_profile_username,
+                elapsed_ms=ms,
+            )
+        except Exception:
+            pass
+    else:
+        ok = False
+        try:
+            log(
+                "warning",
+                "mute_sheet_dismiss_failed",
+                visual_candidate_id=visual_candidate_id,
+                source_profile_username=source_profile_username,
+                elapsed_ms=ms,
+            )
+        except Exception:
+            pass
+    return ok, ms
+
+
+def _mute_engine_v2_resolve_toggle_row(
+    d: u2.Device,
+    *,
+    axis: str,
+    labels: tuple[str, ...],
+    ww: int,
+) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "axis": axis,
+        "label_found": False,
+        "label_text": "",
+        "row_bounds": None,
+        "toggle_bounds": None,
+        "toggle_state": "unknown",
+    }
+    el: Any | None = None
+    for lab in labels:
+        try:
+            cand = d(text=lab)
+            if cand.exists(timeout=0.12):
+                el = cand
+                out["label_text"] = str(lab)
+                break
+        except Exception:
+            continue
+    if el is None:
+        return out
+    out["label_found"] = True
+    try:
+        lb = el.info.get("bounds") or {}
+        out["row_bounds"] = {
+            "left": int(lb.get("left", 0)),
+            "top": int(lb.get("top", 0)),
+            "right": int(lb.get("right", 0)),
+            "bottom": int(lb.get("bottom", 0)),
+        }
+    except Exception:
+        pass
+    chk = _visual_switch_checked_near_row(d, el)
+    if chk is True:
+        out["toggle_state"] = "on"
+    elif chk is False:
+        out["toggle_state"] = "off"
+    cands = _mute_row_toggle_candidates_near_label(d, el)
+    sw_el, sw_diag = _mute_row_toggle_pick_best(cands)
+    if sw_el is not None:
+        try:
+            sb = sw_el.info.get("bounds") or {}
+            out["toggle_bounds"] = {
+                "left": int(sb.get("left", 0)),
+                "top": int(sb.get("top", 0)),
+                "right": int(sb.get("right", 0)),
+                "bottom": int(sb.get("bottom", 0)),
+            }
+        except Exception:
+            pass
+        if out["toggle_state"] == "unknown" and isinstance(
+            sw_diag.get("matched_toggle_checked"), bool
+        ):
+            out["toggle_state"] = "on" if sw_diag["matched_toggle_checked"] else "off"
+    try:
+        log(
+            "info",
+            "mute_toggle_row_detected",
+            axis=axis,
+            label_text=str(out.get("label_text") or "")[:40],
+            row_bounds=out.get("row_bounds"),
+            toggle_bounds=out.get("toggle_bounds"),
+        )
+        log(
+            "info",
+            "mute_toggle_state_resolved",
+            axis=axis,
+            toggle_state=str(out.get("toggle_state") or "unknown"),
+            label_found=bool(out.get("label_found")),
+        )
+    except Exception:
+        pass
+    return out
+
+
 def _mute_engine_v2_remaining_s(t0: float) -> float:
     return max(0.0, _MUTE_ENGINE_V2_EFFECTIVE_TOTAL_S - (time.perf_counter() - t0))
+
+
+def _mute_engine_v2_toggle_required_budget_s(
+    *, want_posts: bool = True, want_stories: bool = True
+) -> float:
+    axes = int(bool(want_posts)) + int(bool(want_stories))
+    if axes <= 0:
+        return 0.0
+    if axes == 1:
+        return 0.82
+    return float(MIN_MUTE_TOGGLE_STAGE_SAMSUNG_SAFE_REQUIRED_S)
+
+
+def _mute_engine_v2_budget_starved_for_toggle(
+    remaining_s: float,
+    *,
+    want_posts: bool = True,
+    want_stories: bool = True,
+) -> tuple[bool, float]:
+    required = _mute_engine_v2_toggle_required_budget_s(
+        want_posts=want_posts,
+        want_stories=want_stories,
+    )
+    return float(remaining_s or 0.0) < required, required
+
+
+def _mute_engine_v2_pre_toggle_wait_s(
+    *,
+    remaining_s: float,
+    desired_s: float,
+    required_toggle_s: float,
+) -> float:
+    spare = max(0.0, float(remaining_s or 0.0) - float(required_toggle_s or 0.0))
+    return max(0.0, min(float(desired_s or 0.0), spare))
+
+
+def _mute_engine_v2_toggle_stage_axis_deadline(
+    toggle_stage_deadline: float,
+    *,
+    axes_remaining: int,
+    t_all: float | None = None,
+) -> float:
+    """Per-axis deadline: reserve min budget for later axes (Stories after Posts)."""
+    axes_left = max(1, int(axes_remaining))
+    now = time.perf_counter()
+    rem_wall = max(0.0, float(toggle_stage_deadline) - now)
+    reserve_later = float(_MUTE_V2_PER_AXIS_TOGGLE_MIN_S) * max(0, axes_left - 1)
+    usable = max(0.0, rem_wall - reserve_later)
+    per_axis = max(float(_MUTE_V2_PER_AXIS_TOGGLE_MIN_S), usable / float(axes_left))
+    deadline = now + per_axis
+    if t_all is not None:
+        rem_global = _mute_engine_v2_remaining_s(t_all)
+        if rem_global > 0.12:
+            deadline = min(deadline, now + rem_global)
+    return min(float(toggle_stage_deadline), deadline)
 
 
 def _mute_engine_v2_map_toggle_rsn(rsn: str) -> str:
@@ -33052,11 +34495,28 @@ def _mute_engine_v2_map_toggle_rsn(rsn: str) -> str:
         return "budget"
     if r == "toggle_label_not_found":
         return "label_missing"
+    if r == "toggle_stage_wall_cap":
+        return "mute_axis_budget_exhausted"
     if r.startswith("tap_failed"):
         return "tap_failed"
     if r in ("", "skipped"):
         return "skipped"
     return r or "unknown"
+
+
+def _mute_engine_v2_missing_axis(
+    *,
+    want_posts: bool,
+    want_stories: bool,
+    posts_ok: bool,
+    stories_ok: bool,
+) -> str:
+    missing: list[str] = []
+    if want_posts and not posts_ok:
+        missing.append("posts")
+    if want_stories and not stories_ok:
+        missing.append("stories")
+    return ",".join(missing)
 
 
 def _mute_engine_v2_classify_both_toggles_failure(
@@ -33512,6 +34972,123 @@ def _mute_engine_v2_resolve_effective_candidate_username(
     return "", "unresolved"
 
 
+def _post_follow_mute_perf_summary_payload(
+    *,
+    timings: dict[str, Any],
+    result: str,
+    skip_reason: str | None,
+    budget_s: float,
+    effective_total_budget_s: float,
+    toggle_stage_required_budget_s: float,
+) -> dict[str, Any]:
+    t = dict(timings or {})
+
+    def _first_present(*keys: str) -> Any:
+        for key in keys:
+            if key in t and t.get(key) is not None:
+                return t.get(key)
+        return None
+
+    return {
+        "total_ms": t.get("mute_total_ms"),
+        "sheet_open_ms": _first_present(
+            "open_mute_sheet_ms",
+            "following_cta_open_sheet_ms",
+            "sheet_open_ms",
+        ),
+        "labels_detect_ms": _first_present(
+            "labels_detect_ms",
+            "mute_sheet_labels_ms",
+            "label_probe_ms",
+        ),
+        "toggle_ms": round(
+            float(t.get("toggle_posts_ms") or 0.0)
+            + float(t.get("toggle_stories_ms") or 0.0),
+            2,
+        ),
+        "result": str(result or ""),
+        "skip_reason": str(skip_reason or ""),
+        "budget_s": budget_s,
+        "effective_total_budget_s": effective_total_budget_s,
+        "toggle_stage_required_budget_s": toggle_stage_required_budget_s,
+        "sheet_dismiss_ms": _first_present("sheet_dismiss_ms", "mute_sheet_dismiss_ms"),
+    }
+
+
+def _mute_engine_v2_mute_sheet_still_visible(d: u2.Device) -> bool:
+    try:
+        return bool(_mute_engine_v2_is_mute_toggles_sheet(d))
+    except Exception:
+        return False
+
+
+def _mute_engine_v2_dismiss_mute_sheet(
+    d: u2.Device,
+    *,
+    visual_candidate_id: str = "",
+    source_profile_username: str = "",
+) -> tuple[bool, float]:
+    """Dismiss mute bottom sheet before post-follow like / return CT."""
+    t0 = time.perf_counter()
+    try:
+        log(
+            "info",
+            "mute_sheet_dismiss_started",
+            visual_candidate_id=visual_candidate_id,
+            source_profile_username=source_profile_username,
+        )
+    except Exception:
+        pass
+    if not _mute_engine_v2_mute_sheet_still_visible(d):
+        ms = round((time.perf_counter() - t0) * 1000.0, 2)
+        try:
+            log(
+                "info",
+                "mute_sheet_dismiss_completed",
+                visual_candidate_id=visual_candidate_id,
+                source_profile_username=source_profile_username,
+                already_gone=True,
+                elapsed_ms=ms,
+            )
+        except Exception:
+            pass
+        return True, ms
+    ok = False
+    for attempt in (1, 2):
+        try:
+            d.press("back")
+            time.sleep(0.24 if attempt == 1 else 0.2)
+        except Exception:
+            pass
+        if not _mute_engine_v2_mute_sheet_still_visible(d):
+            ok = True
+            break
+    ms = round((time.perf_counter() - t0) * 1000.0, 2)
+    if ok:
+        try:
+            log(
+                "info",
+                "mute_sheet_dismiss_completed",
+                visual_candidate_id=visual_candidate_id,
+                source_profile_username=source_profile_username,
+                elapsed_ms=ms,
+            )
+        except Exception:
+            pass
+    else:
+        try:
+            log(
+                "warning",
+                "mute_sheet_dismiss_failed",
+                visual_candidate_id=visual_candidate_id,
+                source_profile_username=source_profile_username,
+                elapsed_ms=ms,
+            )
+        except Exception:
+            pass
+    return ok, ms
+
+
 def _mute_engine_v2_surface_unstable(
     d: u2.Device,
     *,
@@ -33687,35 +35264,288 @@ def _mute_engine_v2_surface_unstable(
 
 
 def _mute_engine_v2_tap_toggle_short(
-    d: u2.Device, labels: tuple[str, ...], ww: int, t0: float
+    d: u2.Device,
+    labels: tuple[str, ...],
+    ww: int,
+    t0: float,
+    *,
+    axis: str = "",
+    visual_candidate_id: str = "",
+    source_profile_username: str = "",
 ) -> tuple[bool, bool, str]:
     """Returns (tapped_or_already_on, is_already_on, reason)."""
     rem = _mute_engine_v2_remaining_s(t0)
     if rem < 0.08:
         return False, False, "budget"
-    wt = max(0.05, min(0.22, rem * 0.35))
-    el: Any | None = None
+    row = _mute_engine_v2_resolve_toggle_row(
+        d, axis=str(axis or ""), labels=labels, ww=int(ww)
+    )
+    if not bool(row.get("label_found")):
+        return False, False, "toggle_label_not_found"
+    if str(row.get("toggle_state") or "") == "on":
+        return True, True, "already_on_row"
+    sw_el: Any | None = None
     for lab in labels:
         try:
             cand = d(text=lab)
-            if cand.wait(timeout=wt):
-                el = cand
-                break
+            if cand.exists(timeout=0.1):
+                cands = _mute_row_toggle_candidates_near_label(d, cand)
+                sw_el, _diag = _mute_row_toggle_pick_best(cands)
+                if sw_el is not None:
+                    break
         except Exception:
             continue
-    if el is None:
-        return False, False, "toggle_label_not_found"
-    chk = _visual_switch_checked_near_row(d, el)
-    if chk is True:
-        return True, True, ""
     try:
-        b = el.info.get("bounds") or {}
-        cy = (int(b["top"]) + int(b["bottom"])) // 2
-        tap_x = min(ww - 6, max(int(ww * 0.88), int(b.get("right", 0)) + 72))
-        d.click(int(tap_x), int(cy))
+        if sw_el is not None:
+            sw_el.click()
+        else:
+            tb = row.get("toggle_bounds") or row.get("row_bounds") or {}
+            if tb:
+                tx = int((int(tb["left"]) + int(tb["right"])) // 2)
+                ty = int((int(tb["top"]) + int(tb["bottom"])) // 2)
+                d.click(tx, ty)
+            else:
+                tapped, already, rsn, _el = _visual_tap_toggle_row_for_label(d, labels, ww)
+                return tapped, already, rsn
     except Exception as e:
         return False, False, f"tap_failed:{e}"
+    try:
+        log(
+            "info",
+            "mute_axis_tap_sent",
+            axis=str(axis or "")[:20],
+            visual_candidate_id=visual_candidate_id,
+            source_profile_username=source_profile_username,
+            label_text=str(row.get("label_text") or "")[:40],
+            toggle_bounds=row.get("toggle_bounds"),
+        )
+    except Exception:
+        pass
     return True, False, ""
+
+
+def _mute_engine_v2_compact_axis_toggle(
+    d: u2.Device,
+    *,
+    axis: str,
+    labels: tuple[str, ...],
+    ww: int,
+    t0: float,
+    toggle_stage_deadline: float,
+    visual_candidate_id: str = "",
+    source_profile_username: str = "",
+) -> tuple[bool, bool, bool, str, float]:
+    """
+    Compact Posts/Stories toggle: XML verify-first, minimal live polling, no structure diag.
+    Returns (axis_ok, tap_attempted, already_on, raw_reason, elapsed_ms).
+    """
+    if time.perf_counter() >= toggle_stage_deadline:
+        if axis == "stories" and (
+            _mute_engine_v2_u2_text_exists(d, text="Stories")
+            or _mute_engine_v2_u2_text_exists(d, text="Historias")
+        ):
+            toggle_stage_deadline = time.perf_counter() + min(
+                0.65, float(_MUTE_V2_PER_AXIS_TOGGLE_MIN_S)
+            )
+        else:
+            return False, False, False, "mute_axis_budget_exhausted", 0.0
+    t_ax = time.perf_counter()
+    xml_on, _xml_fields = _mute_engine_v2_verify_toggle_on_from_xml_dump(d, axis=axis)
+    if xml_on is True:
+        return True, False, True, "already_on_xml", round((time.perf_counter() - t_ax) * 1000.0, 2)
+    tapped, already, rsn = _mute_engine_v2_tap_toggle_short(
+        d,
+        labels,
+        ww,
+        t0,
+        axis=axis,
+        visual_candidate_id=visual_candidate_id,
+        source_profile_username=source_profile_username,
+    )
+    tap_attempted = bool(tapped and not already)
+    if already:
+        return True, False, True, rsn or "already_on", round((time.perf_counter() - t_ax) * 1000.0, 2)
+    if not tapped:
+        return False, False, False, rsn or "toggle_label_not_found", round(
+            (time.perf_counter() - t_ax) * 1000.0, 2
+        )
+    settle_s = min(
+        float(_MUTE_V2_TOGGLE_POST_TAP_SETTLE_S),
+        max(0.04, _mute_engine_v2_remaining_s(t0) * 0.12),
+    )
+    if settle_s >= 0.03:
+        time.sleep(settle_s)
+    xml_after, _xml_after_fields = _mute_engine_v2_verify_toggle_on_from_xml_dump(d, axis=axis)
+    elapsed_ms = round((time.perf_counter() - t_ax) * 1000.0, 2)
+    if xml_after is True:
+        return True, tap_attempted, False, rsn, elapsed_ms
+    if time.perf_counter() >= toggle_stage_deadline:
+        return False, tap_attempted, False, "mute_axis_budget_exhausted", elapsed_ms
+    rem_v = _mute_engine_v2_remaining_s(t0)
+    vto = min(0.28, max(0.1, rem_v * 0.22))
+    ok_live, vmeta = _visual_verify_toggle_on_for_labels_detailed(d, labels, timeout_s=vto)
+    if ok_live:
+        return True, tap_attempted, False, rsn, elapsed_ms
+    try:
+        if _mute_engine_v2_toggle_verify_xml_fallback_maybe(
+            d,
+            axis=axis,
+            vmeta=vmeta,
+            visual_candidate_id=visual_candidate_id,
+            source_profile_username=source_profile_username,
+        ):
+            return True, tap_attempted, False, rsn, elapsed_ms
+    except Exception:
+        pass
+    return False, tap_attempted, False, rsn or "verify_failed", elapsed_ms
+
+
+def _post_follow_like_precheck_mute_sheet(
+    d: u2.Device,
+    *,
+    visual_candidate_id: str = "",
+    source_profile_username: str = "",
+    follower_username: str = "",
+) -> dict[str, Any]:
+    """
+    Before grid detect: ensure mute sheet is not blocking the profile grid.
+     """
+    t0 = time.perf_counter()
+    out: dict[str, Any] = {
+        "sheet_visible": False,
+        "dismissed": False,
+        "still_open": False,
+        "skip_like": False,
+        "skip_reason": "",
+        "precheck_ms": 0.0,
+    }
+    try:
+        visible = bool(_post_follow_overlay_ui_hints(d).get("likely_mute_toggle_sheet"))
+    except Exception:
+        visible = _mute_engine_v2_mute_sheet_still_visible(d)
+    out["sheet_visible"] = visible
+    try:
+        log(
+            "info",
+            "like_precheck_sheet_visible",
+            visual_candidate_id=visual_candidate_id,
+            source_profile_username=source_profile_username,
+            follower_username=follower_username,
+            sheet_visible=visible,
+        )
+        log(
+            "info",
+            "mute_sheet_visible_before_like",
+            visual_candidate_id=visual_candidate_id,
+            source_profile_username=source_profile_username,
+            follower_username=follower_username,
+            sheet_visible=visible,
+        )
+    except Exception:
+        pass
+    if not visible:
+        out["precheck_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
+        return out
+    dismissed, _dms = _mute_engine_v2_dismiss_mute_sheet(
+        d,
+        visual_candidate_id=visual_candidate_id,
+        source_profile_username=source_profile_username,
+    )
+    out["dismissed"] = bool(dismissed)
+    still = _mute_engine_v2_mute_sheet_still_visible(d)
+    out["still_open"] = bool(still)
+    out["precheck_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
+    if dismissed and not still:
+        try:
+            log(
+                "info",
+                "like_precheck_sheet_dismissed",
+                visual_candidate_id=visual_candidate_id,
+                source_profile_username=source_profile_username,
+                follower_username=follower_username,
+                precheck_ms=out["precheck_ms"],
+            )
+        except Exception:
+            pass
+        return out
+    out["skip_like"] = True
+    out["skip_reason"] = "mute_sheet_still_open"
+    try:
+        log(
+            "warning",
+            "like_precheck_sheet_still_open",
+            visual_candidate_id=visual_candidate_id,
+            source_profile_username=source_profile_username,
+            follower_username=follower_username,
+            precheck_ms=out["precheck_ms"],
+        )
+    except Exception:
+        pass
+    return out
+
+
+def _post_follow_like_precheck_surface(
+    d: u2.Device,
+    *,
+    source_profile_username: str = "",
+    follower_username: str = "",
+    visual_candidate_id: str = "",
+) -> dict[str, Any]:
+    """Fast post-follow like surface gate; never probes the grid on a wrong surface."""
+    t0 = time.perf_counter()
+    src = str(source_profile_username or "").strip()
+    cand = str(follower_username or "").strip().lstrip("@")
+    out: dict[str, Any] = {
+        "skip_like": False,
+        "skip_reason": "",
+        "followers_list_visible": False,
+        "profile_candidate_visible": False,
+        "grid_tab_visible": False,
+        "suggested_overlay_visible": False,
+        "precheck_ms": 0.0,
+        "action_bar_title": "",
+    }
+    try:
+        out["followers_list_visible"] = bool(
+            is_followers_list_surface_quick(d, source_profile_username=src)
+        )
+    except Exception:
+        out["followers_list_visible"] = False
+    try:
+        ab = str(read_current_profile_username_for_follow_gate(d) or "").strip().lstrip("@")
+        out["action_bar_title"] = ab
+        out["profile_candidate_visible"] = bool(
+            ab and cand and _normalize_handle(ab) == _normalize_handle(cand)
+        )
+    except Exception:
+        out["profile_candidate_visible"] = False
+    if bool(out["followers_list_visible"]) and not bool(out["profile_candidate_visible"]):
+        out["skip_like"] = True
+        out["skip_reason"] = "followers_list_visible_before_like"
+    if not bool(out["skip_like"]) and not bool(out["profile_candidate_visible"]):
+        out["skip_like"] = True
+        out["skip_reason"] = "candidate_profile_not_visible_before_like"
+    try:
+        hints = _post_follow_likes_grid_ui_surface_hints(d)
+        out["grid_tab_visible"] = bool(hints.get("profile_tabs_visible"))
+        out["suggested_overlay_visible"] = bool(
+            hints.get("suggested_for_you") or hints.get("discover_people")
+        )
+    except Exception:
+        pass
+    out["precheck_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
+    try:
+        log(
+            "info",
+            "post_follow_like_surface_precheck",
+            visual_candidate_id=str(visual_candidate_id or ""),
+            source_profile_username=src,
+            follower_username=cand,
+            **out,
+        )
+    except Exception:
+        pass
+    return out
 
 
 def run_mute_engine_v2(
@@ -33740,6 +35570,12 @@ def run_mute_engine_v2(
     src = str(source_profile_username or "").strip()
     pkg = str(pkg or getattr(config, "INSTAGRAM_PACKAGE", "") or "")
     fs_after = str(follow_state_after or "").strip()
+    want_posts = bool(getattr(config, "VISUAL_MUTE_POSTS_AFTER_FOLLOW", True))
+    want_stories = bool(getattr(config, "VISUAL_MUTE_STORIES_AFTER_FOLLOW", True))
+    toggle_required_budget_s = _mute_engine_v2_toggle_required_budget_s(
+        want_posts=want_posts,
+        want_stories=want_stories,
+    )
     raw_inv = False
     try:
         raw_inv = bool(_visual_raw_follow_invite_visible_quick(d))
@@ -33756,7 +35592,50 @@ def run_mute_engine_v2(
         budget_s=_MUTE_ENGINE_V2_BUDGET_S,
         effective_total_budget_s=_MUTE_ENGINE_V2_EFFECTIVE_TOTAL_S,
         following_cta_reserved_budget_s=MIN_FOLLOWING_CTA_SEARCH_BUDGET_S,
+        toggle_stage_reserved_budget_s=MIN_MUTE_TOGGLE_STAGE_BUDGET_S,
+        toggle_stage_required_budget_s=toggle_required_budget_s,
+        want_posts=want_posts,
+        want_stories=want_stories,
     )
+
+    def _emit_mute_perf_summary(
+        *,
+        result: str,
+        skip_reason: str | None = None,
+    ) -> None:
+        try:
+            _dismiss_ok, _dismiss_ms = _mute_engine_v2_dismiss_mute_sheets_level_aware(
+                d,
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+            )
+            timings["sheet_dismiss_ms"] = _dismiss_ms
+            timings["mute_sheet_dismiss_ok"] = bool(_dismiss_ok)
+        except Exception:
+            pass
+        try:
+            payload = _post_follow_mute_perf_summary_payload(
+                timings={
+                    **dict(timings),
+                    "mute_total_ms": timings.get("mute_total_ms")
+                    or round((time.perf_counter() - t_all) * 1000.0, 2),
+                },
+                result=result,
+                skip_reason=skip_reason,
+                budget_s=_MUTE_ENGINE_V2_BUDGET_S,
+                effective_total_budget_s=_MUTE_ENGINE_V2_EFFECTIVE_TOTAL_S,
+                toggle_stage_required_budget_s=toggle_required_budget_s,
+            )
+            log(
+                "info",
+                "post_follow_mute_perf_summary",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                follower_username=str(follower_username or "").strip(),
+                **payload,
+            )
+        except Exception:
+            pass
 
     def _abort(reason: str, *, fr: str | None = None, **log_extra: Any) -> dict[str, Any]:
         timings["mute_total_ms"] = round((time.perf_counter() - t_all) * 1000, 2)
@@ -33774,6 +35653,7 @@ def run_mute_engine_v2(
             "mute_engine_v2_safe_abort",
             **_log_payload,
         )
+        _emit_mute_perf_summary(result="safe_abort", skip_reason=fr or reason)
         _out: dict[str, Any] = {
             "ok": False,
             "partial": False,
@@ -33916,8 +35796,105 @@ def run_mute_engine_v2(
     ):
         mute_preflight_fast = True
 
-    t_nav = time.perf_counter()
+    following_clicked_fast_path = False
+    following_method = ""
+    fast_path_pre_action_budget_reserved_s = float(_MUTE_V2_PRE_ACTION_RESERVED_S)
+    try:
+        log(
+            "info",
+            "mute_pre_action_budget_reserved",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            reserved_s=round(fast_path_pre_action_budget_reserved_s, 4),
+            remaining_budget_s=round(_mute_engine_v2_remaining_s(t_all), 4),
+            fast_path_candidate=bool(mute_preflight_fast),
+        )
+    except Exception:
+        pass
+
     if mute_preflight_fast:
+        try:
+            ww_fast, wh_fast = d.window_size()
+        except Exception:
+            ww_fast, wh_fast = 1080, 2400
+        try:
+            log(
+                "info",
+                "mute_fast_path_following_cta_available",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                action_bar_title=ab_live[:120],
+                follower_username=fu2[:120] if fu2 else "",
+                following_visible=True,
+                candidate_profile_confirmed=True,
+                remaining_budget_s=round(_mute_engine_v2_remaining_s(t_all), 4),
+            )
+        except Exception:
+            pass
+        btn_fast, following_method = _mute_engine_v2_pick_following_cta(
+            d,
+            ww=int(ww_fast),
+            wh=int(wh_fast),
+            t0=t_all,
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+        )
+        if btn_fast is not None:
+            try:
+                btn_fast.click()
+                following_clicked_fast_path = True
+                timings["following_fast_path_tap_ms"] = round(
+                    (time.perf_counter() - t_obs) * 1000.0, 2
+                )
+                log(
+                    "info",
+                    "mute_fast_path_following_cta_used",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    method=following_method,
+                    remaining_budget_s=round(_mute_engine_v2_remaining_s(t_all), 4),
+                )
+                time.sleep(0.12)
+            except Exception as e:
+                return _abort("following_click_failed", fr=str(e))
+        elif _mute_engine_v2_remaining_s(t_all) < fast_path_pre_action_budget_reserved_s:
+            log(
+                "warning",
+                "mute_budget_starved_before_cta_only_if_no_cta",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                remaining_budget_s=round(_mute_engine_v2_remaining_s(t_all), 4),
+                following_visible=True,
+                reason="following_cta_pick_failed_fast_path_budget_low",
+            )
+            return _abort(
+                "following_button_not_found_fast_path",
+                fr="following_button_not_found_fast_path",
+            )
+
+    t_nav = time.perf_counter()
+    if following_clicked_fast_path:
+        nav = {
+            "state": NavigationEngineState.PROFILE.value,
+            "confidence": 0.9,
+            "reason": "mute_v2_following_cta_fast_path_clicked_skip_observe",
+            "signals": {"mute_v2_following_cta_fast_path": True},
+            "xml_guess": str(det.get("current_screen_guess") or ""),
+            "visual_guess": "",
+            "foreground_package": pkg,
+        }
+        try:
+            log(
+                "info",
+                "mute_observe_state_skipped_fast_path",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                action_bar_title=ab_live[:120],
+                reason="following_cta_already_clicked",
+            )
+        except Exception:
+            pass
+    elif mute_preflight_fast:
         nav = {
             "state": NavigationEngineState.PROFILE.value,
             "confidence": 0.86,
@@ -33965,8 +35942,27 @@ def run_mute_engine_v2(
     )
 
     t_ov = time.perf_counter()
-    overlay = _post_follow_overlay_ui_hints(d)
-    if safe_fp_fast:
+    if following_clicked_fast_path:
+        overlay = {}
+        fp = {
+            "fingerprint_id": "mute_fast_path_following_cta_clicked",
+            "screen_class": "profile_like",
+        }
+        try:
+            log(
+                "info",
+                "mute_overlay_fp_skipped_fast_path",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                reason="following_cta_already_clicked",
+            )
+        except Exception:
+            pass
+    else:
+        overlay = _post_follow_overlay_ui_hints(d)
+    if following_clicked_fast_path:
+        pass
+    elif safe_fp_fast:
         fp = _post_follow_screen_fingerprint_mute_v2_fast(
             d,
             nav_state=nav_st,
@@ -34009,7 +36005,7 @@ def run_mute_engine_v2(
         (time.perf_counter() - t_ov) * 1000, 2
     )
     fhs = ""
-    if safe_fp_fast:
+    if following_clicked_fast_path or safe_fp_fast:
         fhs = fs_low
     else:
         try:
@@ -34037,7 +36033,7 @@ def run_mute_engine_v2(
     )
     timings["observe_state_ms"] = round((time.perf_counter() - t_obs) * 1000, 2)
 
-    if not _vision_validation_mute_engine_surface(
+    if (not following_clicked_fast_path) and not _vision_validation_mute_engine_surface(
         screenshot_path="",
         det=det,
         nav=nav,
@@ -34053,23 +36049,24 @@ def run_mute_engine_v2(
             fr="vision_validation_mute_surface_rejected",
         )
 
-    bad, why = _mute_engine_v2_surface_unstable(
-        d,
-        nav=nav,
-        overlay=overlay,
-        det=det,
-        fp=fp if isinstance(fp, dict) else None,
-        follower_username=follower_username,
-        follow_state_after=follow_state_after,
-        pkg=pkg,
-        budget_remaining_s=_mute_engine_v2_remaining_s(t_all),
-        visual_candidate_id=vcid,
-        source_profile_username=src,
-        det_hint=det_hint if isinstance(det_hint, dict) else None,
-        follow_header_snapshot=fhs,
-    )
-    if bad:
-        return _abort("unstable_post_follow_surface", fr=why)
+    if not following_clicked_fast_path:
+        bad, why = _mute_engine_v2_surface_unstable(
+            d,
+            nav=nav,
+            overlay=overlay,
+            det=det,
+            fp=fp if isinstance(fp, dict) else None,
+            follower_username=follower_username,
+            follow_state_after=follow_state_after,
+            pkg=pkg,
+            budget_remaining_s=_mute_engine_v2_remaining_s(t_all),
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            det_hint=det_hint if isinstance(det_hint, dict) else None,
+            follow_header_snapshot=fhs,
+        )
+        if bad:
+            return _abort("unstable_post_follow_surface", fr=why)
 
     try:
         ww, wh = d.window_size()
@@ -34077,33 +36074,64 @@ def run_mute_engine_v2(
         ww, wh = 1080, 2400
 
     skip_following = False
+    sheet_level_pre = "unknown"
     try:
-        if overlay.get("likely_mute_toggle_sheet"):
-            p0 = bool(d(text="Posts").exists(timeout=0.06)) or bool(
-                d(text="Publications").exists(timeout=0.05)
+        sheet_level_pre, sheet_meta_pre = _mute_engine_v2_detect_sheet_level(d)
+        log(
+            "info",
+            "mute_sheet_level_detected",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            sheet_level=sheet_level_pre,
+            phase="precheck",
+            **{k: bool(v) for k, v in sheet_meta_pre.items()},
+        )
+        if sheet_level_pre == "mute_toggles":
+            skip_following = True
+            log(
+                "info",
+                "mute_engine_v2_sheet_detected",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                phase="precheck",
+                sheet_level="mute_toggles",
+                note="mute_toggles_already_visible_skip_following_tap",
             )
-            s0 = bool(d(text="Stories").exists(timeout=0.06))
-            if p0 and s0:
-                skip_following = True
-                log(
-                    "info",
-                    "mute_engine_v2_sheet_detected",
-                    visual_candidate_id=vcid,
-                    source_profile_username=src,
-                    phase="precheck",
-                    posts_visible=True,
-                    stories_visible=True,
-                    note="sheet_already_visible_skip_following_tap",
-                )
     except Exception:
         pass
 
     t_follow = time.perf_counter()
-    following_method = ""
-    if not skip_following:
+    if not skip_following and not following_clicked_fast_path:
         _eff_total = float(_MUTE_ENGINE_V2_EFFECTIVE_TOTAL_S)
         _obs_cap = max(0.0, _eff_total - float(MIN_FOLLOWING_CTA_SEARCH_BUDGET_S))
         _rem_cta = _mute_engine_v2_remaining_s(t_all)
+        _starved_pre_cta, _req_pre_cta = _mute_engine_v2_budget_starved_for_toggle(
+            _rem_cta,
+            want_posts=want_posts,
+            want_stories=want_stories,
+        )
+        if _starved_pre_cta:
+            try:
+                log(
+                    "warning",
+                    "mute_budget_starved_before_cta_only_if_no_cta",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    remaining_budget_s=round(float(_rem_cta), 4),
+                    required_toggle_budget_s=round(float(_req_pre_cta), 4),
+                    following_visible=False,
+                )
+            except Exception:
+                pass
+            return _abort(
+                "mute_toggle_budget_starved",
+                fr="mute_toggle_budget_starved",
+                remaining_budget_s=round(float(_rem_cta), 4),
+                required_toggle_budget_s=round(float(_req_pre_cta), 4),
+                phase="before_following_cta",
+                posts_visible=False,
+                stories_visible=False,
+            )
         try:
             log(
                 "info",
@@ -34114,6 +36142,7 @@ def run_mute_engine_v2(
                 observe_budget_s=round(_obs_cap, 4),
                 following_cta_reserved_budget_s=float(MIN_FOLLOWING_CTA_SEARCH_BUDGET_S),
                 toggle_stage_reserved_budget_s=float(MIN_MUTE_TOGGLE_STAGE_BUDGET_S),
+                toggle_stage_required_budget_s=round(float(toggle_required_budget_s), 4),
                 budget_remaining_before_cta_s=round(float(_rem_cta), 4),
                 mute_preflight_fast_observe=bool(mute_preflight_fast),
             )
@@ -34155,7 +36184,13 @@ def run_mute_engine_v2(
             btn.click()
         except Exception as e:
             return _abort("following_click_failed", fr=str(e))
-        time.sleep(min(0.38, max(0.12, _mute_engine_v2_remaining_s(t_all) * 0.25)))
+        _sleep_following = _mute_engine_v2_pre_toggle_wait_s(
+            remaining_s=_mute_engine_v2_remaining_s(t_all),
+            desired_s=min(0.38, max(0.12, _mute_engine_v2_remaining_s(t_all) * 0.25)),
+            required_toggle_s=toggle_required_budget_s,
+        )
+        if _sleep_following >= 0.02:
+            time.sleep(_sleep_following)
 
     timings["following_detect_ms"] = round((time.perf_counter() - t_follow) * 1000, 2)
 
@@ -34163,53 +36198,106 @@ def run_mute_engine_v2(
         return _abort("mute_budget_exceeded", fr="mute_budget_exceeded")
 
     t_sheet = time.perf_counter()
+    sheet_level, sheet_meta = _mute_engine_v2_detect_sheet_level(d)
     if not skip_following:
-        mute_el, mute_lab = _visual_find_mute_row_first_sheet(d)
-        if mute_el is None:
-            return _abort("mute_row_not_found", fr="mute_row_not_found")
-        try:
-            mute_el.click()
-        except Exception as e:
-            return _abort("mute_row_click_failed", fr=str(e))
-        time.sleep(min(0.42, max(0.12, _mute_engine_v2_remaining_s(t_all) * 0.28)))
-
-    posts_v = bool(d(text="Posts").exists(timeout=min(0.35, _mute_engine_v2_remaining_s(t_all) * 0.45)))
-    if not posts_v:
-        posts_v = bool(
-            d(text="Publications").exists(
-                timeout=min(0.22, max(0.05, _mute_engine_v2_remaining_s(t_all) * 0.35))
+        if sheet_level == "following_options":
+            entered, enter_rsn = _mute_engine_v2_enter_mute_subsheet_from_following_options(
+                d,
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                toggle_required_budget_s=float(toggle_required_budget_s),
+                t_all=t_all,
             )
-        )
-    stories_v = bool(
-        d(text="Stories").exists(
-            timeout=min(0.35, max(0.05, _mute_engine_v2_remaining_s(t_all) * 0.45))
-        )
-    )
+            if not entered:
+                return _abort(
+                    "mute_subsheet_enter_failed",
+                    fr=str(enter_rsn or "mute_subsheet_enter_failed"),
+                )
+            sheet_level, sheet_meta = _mute_engine_v2_detect_sheet_level(d)
+        elif sheet_level != "mute_toggles":
+            entered, enter_rsn = _mute_engine_v2_enter_mute_subsheet_from_following_options(
+                d,
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                toggle_required_budget_s=float(toggle_required_budget_s),
+                t_all=t_all,
+            )
+            if not entered:
+                return _abort(
+                    "mute_sheet_level_unknown_after_following_tap",
+                    fr=str(enter_rsn or "mute_sheet_level_unknown_after_following_tap"),
+                    sheet_level=sheet_level,
+                )
+            sheet_level, sheet_meta = _mute_engine_v2_detect_sheet_level(d)
+
     timings["mute_sheet_open_ms"] = round((time.perf_counter() - t_sheet) * 1000, 2)
 
+    if sheet_level != "mute_toggles" or not _mute_engine_v2_is_mute_toggles_sheet(d):
+        return _abort(
+            "mute_toggles_sheet_not_confirmed",
+            fr="mute_toggles_sheet_not_confirmed",
+            sheet_level=sheet_level,
+        )
+
+    posts_v = bool(sheet_meta.get("posts_label")) or _mute_engine_v2_u2_text_exists(
+        d, text="Posts"
+    )
+    stories_v = bool(sheet_meta.get("stories_label")) or _mute_engine_v2_u2_text_exists(
+        d, text="Stories"
+    )
     if not posts_v or not stories_v:
         return _abort("posts_or_stories_labels_missing", fr="posts_or_stories_labels_missing")
 
     log(
         "info",
+        "mute_sheet_level_detected",
+        visual_candidate_id=vcid,
+        source_profile_username=src,
+        sheet_level="mute_toggles",
+        posts_visible=posts_v,
+        stories_visible=stories_v,
+        notes_visible=bool(sheet_meta.get("notes_label")),
+    )
+    log(
+        "info",
         "mute_engine_v2_sheet_detected",
         visual_candidate_id=vcid,
         source_profile_username=src,
+        sheet_level="mute_toggles",
         posts_visible=posts_v,
         stories_visible=stories_v,
     )
 
     _rem_toggle_stage = _mute_engine_v2_remaining_s(t_all)
     timings["toggle_stage_remaining_budget_s"] = round(_rem_toggle_stage, 4)
-    timings["toggle_stage_required_budget_s"] = float(MIN_MUTE_TOGGLE_STAGE_BUDGET_S)
-    _req_toggle_floor = float(MIN_MUTE_TOGGLE_STAGE_BUDGET_S) * 0.92
-    if _rem_toggle_stage < _req_toggle_floor:
+    timings["toggle_stage_reserved_budget_s"] = float(MIN_MUTE_TOGGLE_STAGE_BUDGET_S)
+    timings["toggle_stage_required_budget_s"] = round(float(toggle_required_budget_s), 4)
+    _toggle_starved, _req_toggle_floor = _mute_engine_v2_budget_starved_for_toggle(
+        _rem_toggle_stage,
+        want_posts=want_posts,
+        want_stories=want_stories,
+    )
+    if _toggle_starved and _rem_toggle_stage < _MUTE_V2_POST_SHEET_TRUE_STARVED_S:
         return _abort(
             "mute_toggle_budget_starved",
             fr="mute_toggle_budget_starved",
             remaining_budget_s=round(_rem_toggle_stage, 4),
             required_toggle_budget_s=round(_req_toggle_floor, 4),
             phase="post_sheet_pre_toggle",
+            posts_visible=posts_v,
+            stories_visible=stories_v,
+        )
+    if _toggle_starved:
+        log(
+            "info",
+            "mute_engine_v2_toggle_stage_floor_bypassed_after_sheet_visible",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            remaining_budget_s=round(_rem_toggle_stage, 4),
+            required_toggle_budget_s=round(_req_toggle_floor, 4),
+            posts_visible=posts_v,
+            stories_visible=stories_v,
+            reason="labels_visible_try_compact_axis_sequence",
         )
     try:
         log(
@@ -34218,13 +36306,12 @@ def run_mute_engine_v2(
             visual_candidate_id=vcid,
             source_profile_username=src,
             remaining_budget_s=round(_rem_toggle_stage, 4),
-            required_toggle_budget_s=float(MIN_MUTE_TOGGLE_STAGE_BUDGET_S),
+            required_toggle_budget_s=round(float(toggle_required_budget_s), 4),
+            reserved_toggle_budget_s=float(MIN_MUTE_TOGGLE_STAGE_BUDGET_S),
         )
     except Exception:
         pass
 
-    want_posts = bool(getattr(config, "VISUAL_MUTE_POSTS_AFTER_FOLLOW", True))
-    want_stories = bool(getattr(config, "VISUAL_MUTE_STORIES_AFTER_FOLLOW", True))
     posts_labels = ("Posts", "Publications")
     stories_labels = ("Stories", "Historias", "Storie")
 
@@ -34238,245 +36325,168 @@ def run_mute_engine_v2(
     tapped_s = False
     already_s = False
     rsn_s = "skipped"
+    t_toggle_stage = time.perf_counter()
+    toggle_stage_deadline = t_toggle_stage + float(_MUTE_V2_TOGGLE_STAGE_WALL_CAP_S)
 
-    if want_posts:
+    # Posts before Stories when both required; per-axis wall slice so neither axis starves the other.
+    _axes_wanted = int(bool(want_posts)) + int(bool(want_stories))
+    _axes_left = _axes_wanted
+
+    def _run_axis_with_deadline(
+        axis: str,
+        labels: tuple[str, ...],
+        *,
+        want_axis: bool,
+        ok_ref: list[bool],
+        tapped_ref: list[bool],
+        already_ref: list[bool],
+        rsn_ref: list[str],
+        timing_key: str,
+        started_event: str,
+        completed_event: str,
+    ) -> None:
+        nonlocal _axes_left
+        if not want_axis:
+            return
+        axis_deadline = _mute_engine_v2_toggle_stage_axis_deadline(
+            toggle_stage_deadline,
+            axes_remaining=max(1, _axes_left),
+            t_all=t_all,
+        )
+        _axes_left = max(0, _axes_left - 1)
         try:
             log(
                 "info",
-                "mute_engine_v2_posts_toggle_started",
+                started_event,
                 visual_candidate_id=vcid,
                 source_profile_username=src,
                 remaining_budget_s=round(_mute_engine_v2_remaining_s(t_all), 4),
-            )
-        except Exception:
-            pass
-        t_tp = time.perf_counter()
-        tapped_p, already_p, rsn_p = _mute_engine_v2_tap_toggle_short(
-            d, posts_labels, ww, t_all
-        )
-        posts_tapped = bool(tapped_p and not already_p)
-        if already_p:
-            posts_ok = True
-        elif tapped_p:
-            _settle = min(
-                float(_MUTE_V2_TOGGLE_POST_TAP_SETTLE_S),
-                max(0.0, _mute_engine_v2_remaining_s(t_all) - 0.06),
-            )
-            if _settle >= 0.02:
-                time.sleep(_settle)
-            _rem_v = _mute_engine_v2_remaining_s(t_all)
-            vto = min(
-                float(_MUTE_V2_TOGGLE_VERIFY_MAX_S),
-                max(
-                    float(_MUTE_V2_TOGGLE_VERIFY_MIN_S),
-                    min(_rem_v * 0.48, float(_MUTE_V2_TOGGLE_VERIFY_MAX_S)),
+                axis_deadline_in_s=round(
+                    max(0.0, axis_deadline - time.perf_counter()), 4
                 ),
             )
-            posts_ok, _posts_vmeta = _visual_verify_toggle_on_for_labels_detailed(
-                d, posts_labels, timeout_s=vto
-            )
-            if not posts_ok:
-                try:
-                    log(
-                        "warning",
-                        "mute_engine_v2_toggle_verify_diag",
-                        axis="posts",
-                        visual_candidate_id=vcid,
-                        source_profile_username=src,
-                        verify_timeout_s=_posts_vmeta.get("verify_timeout_s"),
-                        verify_ok=bool(_posts_vmeta.get("verify_ok")),
-                        probe_cycles=_posts_vmeta.get("probe_cycles"),
-                        inner_probes=_posts_vmeta.get("inner_probes"),
-                        last_label=_posts_vmeta.get("last_label"),
-                        last_checked_signal=_posts_vmeta.get("last_checked_signal"),
-                        last_switches_in_band=_posts_vmeta.get("last_switches_in_band"),
-                        last_nearest_dy=_posts_vmeta.get("last_nearest_dy"),
-                        checked_raw_on_nearest=_posts_vmeta.get("checked_raw_on_nearest"),
-                        post_tap_settle_s=round(_settle, 4),
-                        matched_toggle_class=_posts_vmeta.get("matched_toggle_class"),
-                        matched_toggle_resource_id=_posts_vmeta.get("matched_toggle_resource_id"),
-                        matched_toggle_checked=_posts_vmeta.get("matched_toggle_checked"),
-                    )
-                except Exception:
-                    pass
-                try:
-                    _mute_engine_v2_toggle_live_candidates_diag(
-                        d,
-                        axis="posts",
-                        vmeta=_posts_vmeta,
-                        labels_tuple=posts_labels,
-                        visual_candidate_id=vcid,
-                        source_profile_username=src,
-                    )
-                except Exception:
-                    pass
-                try:
-                    if _mute_engine_v2_toggle_verify_xml_fallback_maybe(
-                        d,
-                        axis="posts",
-                        vmeta=_posts_vmeta,
-                        visual_candidate_id=vcid,
-                        source_profile_username=src,
-                    ):
-                        posts_ok = True
-                except Exception:
-                    pass
-                _mute_engine_v2_toggle_verify_structure_diag(
-                    d,
-                    axis="posts",
-                    labels_tuple=posts_labels,
-                    vmeta=_posts_vmeta,
-                    visual_candidate_id=vcid,
-                    source_profile_username=src,
-                )
-        timings["toggle_posts_ms"] = round((time.perf_counter() - t_tp) * 1000, 2)
-        try:
-            log(
-                "info",
-                "mute_engine_v2_posts_toggle_completed",
-                visual_candidate_id=vcid,
-                source_profile_username=src,
-                posts_ok=bool(posts_ok),
-                posts_toggle_raw_reason=rsn_p,
-                posts_toggle_reason=_mute_engine_v2_map_toggle_rsn(rsn_p),
-                posts_tap_attempted=bool(posts_tapped),
-                remaining_budget_s=round(_mute_engine_v2_remaining_s(t_all), 4),
-            )
         except Exception:
             pass
-        if posts_ok:
-            log(
-                "info",
-                "mute_engine_v2_posts_toggle_detected",
-                visual_candidate_id=vcid,
-                source_profile_username=src,
-                posts_verified=True,
-            )
-
-    if want_stories:
-        try:
-            log(
-                "info",
-                "mute_engine_v2_stories_toggle_started",
-                visual_candidate_id=vcid,
-                source_profile_username=src,
-                remaining_budget_s=round(_mute_engine_v2_remaining_s(t_all), 4),
-            )
-        except Exception:
-            pass
-        t_ts = time.perf_counter()
-        tapped_s, already_s, rsn_s = _mute_engine_v2_tap_toggle_short(
-            d, stories_labels, ww, t_all
+        axis_ok, tap_att, already_on, raw_rsn, elapsed_ms = _mute_engine_v2_compact_axis_toggle(
+            d,
+            axis=axis,
+            labels=labels,
+            ww=ww,
+            t0=t_all,
+            toggle_stage_deadline=axis_deadline,
+            visual_candidate_id=vcid,
+            source_profile_username=src,
         )
-        stories_tapped = bool(tapped_s and not already_s)
-        if already_s:
-            stories_ok = True
-        elif tapped_s:
-            _settle_s = min(
-                float(_MUTE_V2_TOGGLE_POST_TAP_SETTLE_S),
-                max(0.0, _mute_engine_v2_remaining_s(t_all) - 0.06),
-            )
-            if _settle_s >= 0.02:
-                time.sleep(_settle_s)
-            _rem_vs = _mute_engine_v2_remaining_s(t_all)
-            vto_s = min(
-                float(_MUTE_V2_TOGGLE_VERIFY_MAX_S),
-                max(
-                    float(_MUTE_V2_TOGGLE_VERIFY_MIN_S),
-                    min(_rem_vs * 0.48, float(_MUTE_V2_TOGGLE_VERIFY_MAX_S)),
-                ),
-            )
-            stories_ok, _stories_vmeta = _visual_verify_toggle_on_for_labels_detailed(
-                d, stories_labels, timeout_s=vto_s
-            )
-            if not stories_ok:
-                try:
-                    log(
-                        "warning",
-                        "mute_engine_v2_toggle_verify_diag",
-                        axis="stories",
-                        visual_candidate_id=vcid,
-                        source_profile_username=src,
-                        verify_timeout_s=_stories_vmeta.get("verify_timeout_s"),
-                        verify_ok=bool(_stories_vmeta.get("verify_ok")),
-                        probe_cycles=_stories_vmeta.get("probe_cycles"),
-                        inner_probes=_stories_vmeta.get("inner_probes"),
-                        last_label=_stories_vmeta.get("last_label"),
-                        last_checked_signal=_stories_vmeta.get("last_checked_signal"),
-                        last_switches_in_band=_stories_vmeta.get("last_switches_in_band"),
-                        last_nearest_dy=_stories_vmeta.get("last_nearest_dy"),
-                        checked_raw_on_nearest=_stories_vmeta.get("checked_raw_on_nearest"),
-                        post_tap_settle_s=round(_settle_s, 4),
-                        matched_toggle_class=_stories_vmeta.get("matched_toggle_class"),
-                        matched_toggle_resource_id=_stories_vmeta.get("matched_toggle_resource_id"),
-                        matched_toggle_checked=_stories_vmeta.get("matched_toggle_checked"),
-                    )
-                except Exception:
-                    pass
-                try:
-                    _mute_engine_v2_toggle_live_candidates_diag(
-                        d,
-                        axis="stories",
-                        vmeta=_stories_vmeta,
-                        labels_tuple=stories_labels,
-                        visual_candidate_id=vcid,
-                        source_profile_username=src,
-                    )
-                except Exception:
-                    pass
-                try:
-                    if _mute_engine_v2_toggle_verify_xml_fallback_maybe(
-                        d,
-                        axis="stories",
-                        vmeta=_stories_vmeta,
-                        visual_candidate_id=vcid,
-                        source_profile_username=src,
-                    ):
-                        stories_ok = True
-                except Exception:
-                    pass
-                _mute_engine_v2_toggle_verify_structure_diag(
-                    d,
-                    axis="stories",
-                    labels_tuple=stories_labels,
-                    vmeta=_stories_vmeta,
-                    visual_candidate_id=vcid,
-                    source_profile_username=src,
-                )
-        timings["toggle_stories_ms"] = round((time.perf_counter() - t_ts) * 1000, 2)
+        ok_ref[0] = bool(axis_ok)
+        tapped_ref[0] = bool(tap_att)
+        already_ref[0] = bool(already_on)
+        rsn_ref[0] = str(raw_rsn or "")
+        timings[timing_key] = float(elapsed_ms)
+        verified = bool(axis_ok)
+        log(
+            "info",
+            "mute_axis_result",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            axis=axis,
+            done=bool(axis_ok),
+            tap_attempted=bool(tap_att),
+            already_on=bool(already_on),
+            verified=verified,
+            reason=_mute_engine_v2_map_toggle_rsn(raw_rsn),
+            raw_reason=raw_rsn,
+            elapsed_ms=elapsed_ms,
+            remaining_budget_s=round(_mute_engine_v2_remaining_s(t_all), 4),
+        )
         try:
             log(
                 "info",
-                "mute_engine_v2_stories_toggle_completed",
+                completed_event,
                 visual_candidate_id=vcid,
                 source_profile_username=src,
-                stories_ok=bool(stories_ok),
-                stories_toggle_raw_reason=rsn_s,
-                stories_toggle_reason=_mute_engine_v2_map_toggle_rsn(rsn_s),
-                stories_tap_attempted=bool(stories_tapped),
+                axis_ok=bool(axis_ok),
+                toggle_raw_reason=raw_rsn,
+                tap_attempted=bool(tap_att),
                 remaining_budget_s=round(_mute_engine_v2_remaining_s(t_all), 4),
             )
         except Exception:
             pass
-        if stories_ok:
-            log(
-                "info",
-                "mute_engine_v2_stories_toggle_detected",
-                visual_candidate_id=vcid,
-                source_profile_username=src,
-                stories_verified=True,
-            )
+
+    _posts_ok_box = [posts_ok]
+    _posts_tapped_box = [False]
+    _already_p_box = [already_p]
+    _rsn_p_box = [rsn_p]
+    _run_axis_with_deadline(
+        "posts",
+        posts_labels,
+        want_axis=want_posts,
+        ok_ref=_posts_ok_box,
+        tapped_ref=_posts_tapped_box,
+        already_ref=_already_p_box,
+        rsn_ref=_rsn_p_box,
+        timing_key="toggle_posts_ms",
+        started_event="mute_engine_v2_posts_toggle_started",
+        completed_event="mute_engine_v2_posts_toggle_completed",
+    )
+    posts_ok = _posts_ok_box[0]
+    posts_tapped = bool(_posts_tapped_box[0])
+    already_p = _already_p_box[0]
+    rsn_p = _rsn_p_box[0]
+    tapped_p = bool(posts_tapped)
+
+    _stories_ok_box = [stories_ok]
+    _stories_tapped_box = [False]
+    _already_s_box = [already_s]
+    _rsn_s_box = [rsn_s]
+    _run_axis_with_deadline(
+        "stories",
+        stories_labels,
+        want_axis=want_stories,
+        ok_ref=_stories_ok_box,
+        tapped_ref=_stories_tapped_box,
+        already_ref=_already_s_box,
+        rsn_ref=_rsn_s_box,
+        timing_key="toggle_stories_ms",
+        started_event="mute_engine_v2_stories_toggle_started",
+        completed_event="mute_engine_v2_stories_toggle_completed",
+    )
+    stories_ok = _stories_ok_box[0]
+    stories_tapped = bool(_stories_tapped_box[0])
+    already_s = _already_s_box[0]
+    rsn_s = _rsn_s_box[0]
+    tapped_s = bool(stories_tapped)
 
     timings["mute_total_ms"] = round((time.perf_counter() - t_all) * 1000, 2)
 
     if want_posts and want_stories:
         if posts_ok and stories_ok:
+            _emit_mute_perf_summary(result="success", skip_reason="")
             log(
                 "info",
                 "mute_engine_v2_success",
                 visual_candidate_id=vcid,
                 source_profile_username=src,
                 timings_ms=dict(timings),
+            )
+            log(
+                "info",
+                "post_follow_mute_completed",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                posts_done=True,
+                stories_done=True,
+                reason="success",
+                timings_ms=dict(timings),
+            )
+            log(
+                "info",
+                "mute_completed_all_axes",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                posts_done=True,
+                stories_done=True,
+                sheet_dismiss_ok=bool(timings.get("mute_sheet_dismiss_ok")),
+                sheet_dismiss_ms=timings.get("sheet_dismiss_ms"),
             )
             return {
                 "ok": True,
@@ -34494,6 +36504,16 @@ def run_mute_engine_v2(
                 "timings_ms": dict(timings),
             }
         if posts_ok or stories_ok:
+            missing_axis = _mute_engine_v2_missing_axis(
+                want_posts=want_posts,
+                want_stories=want_stories,
+                posts_ok=bool(posts_ok),
+                stories_ok=bool(stories_ok),
+            )
+            _emit_mute_perf_summary(
+                result="partial_success",
+                skip_reason="mute_partial_one_toggle",
+            )
             log(
                 "warning",
                 "mute_engine_v2_partial_success",
@@ -34502,6 +36522,35 @@ def run_mute_engine_v2(
                 posts_verified=bool(posts_ok),
                 stories_verified=bool(stories_ok),
                 timings_ms=dict(timings),
+            )
+            log(
+                "warning",
+                "post_follow_mute_partial",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                posts_done=bool(posts_ok),
+                stories_done=bool(stories_ok),
+                missing_axis=missing_axis,
+                reason="mute_partial_one_toggle",
+                posts_toggle_reason=_mute_engine_v2_map_toggle_rsn(rsn_p),
+                stories_toggle_reason=_mute_engine_v2_map_toggle_rsn(rsn_s),
+                timings_ms=dict(timings),
+            )
+            log(
+                "warning",
+                "mute_partial_missing_axis",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                missing_axis=missing_axis,
+                posts_done=bool(posts_ok),
+                stories_done=bool(stories_ok),
+                posts_tap_attempted=bool(posts_tapped),
+                stories_tap_attempted=bool(stories_tapped),
+                posts_toggle_reason=_mute_engine_v2_map_toggle_rsn(rsn_p),
+                stories_toggle_reason=_mute_engine_v2_map_toggle_rsn(rsn_s),
+                remaining_budget_s=round(_mute_engine_v2_remaining_s(t_all), 4),
+                sheet_dismiss_ok=bool(timings.get("mute_sheet_dismiss_ok")),
+                sheet_dismiss_ms=timings.get("mute_sheet_dismiss_ms"),
             )
             return {
                 "ok": True,
@@ -34513,6 +36562,7 @@ def run_mute_engine_v2(
                 "mute_engine_v2": True,
                 "posts_verified": bool(posts_ok),
                 "stories_verified": bool(stories_ok),
+                "missing_axis": missing_axis,
                 "posts_tapped": posts_tapped,
                 "stories_tapped": stories_tapped,
                 "timings_ms": dict(timings),
@@ -34540,16 +36590,48 @@ def run_mute_engine_v2(
             stories_toggle_raw_reason=rsn_s,
             posts_tap_attempted=bool(posts_tapped),
             stories_tap_attempted=bool(stories_tapped),
+            remaining_budget_s=round(_mute_engine_v2_remaining_s(t_all), 4)
+            if _ab_reason == "mute_toggle_budget_starved"
+            else None,
+            required_toggle_budget_s=round(float(toggle_required_budget_s), 4)
+            if _ab_reason == "mute_toggle_budget_starved"
+            else None,
+            phase="toggle_execution"
+            if _ab_reason == "mute_toggle_budget_starved"
+            else None,
+            posts_visible=posts_v if _ab_reason == "mute_toggle_budget_starved" else None,
+            stories_visible=stories_v if _ab_reason == "mute_toggle_budget_starved" else None,
         )
 
     # only one of want_posts / want_stories
     if (want_posts and posts_ok) or (want_stories and stories_ok):
+        _emit_mute_perf_summary(result="success", skip_reason="")
         log(
             "info",
             "mute_engine_v2_success",
             visual_candidate_id=vcid,
             source_profile_username=src,
             timings_ms=dict(timings),
+        )
+        log(
+            "info",
+            "post_follow_mute_completed",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            posts_done=bool(posts_ok),
+            stories_done=bool(stories_ok),
+            reason="success",
+            timings_ms=dict(timings),
+        )
+        log(
+            "info",
+            "mute_completed_all_axes",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            posts_done=bool(posts_ok),
+            stories_done=bool(stories_ok),
+            sheet_dismiss_ok=bool(timings.get("mute_sheet_dismiss_ok")),
+            sheet_dismiss_ms=timings.get("sheet_dismiss_ms"),
         )
         return {
             "ok": True,
@@ -34588,6 +36670,15 @@ def run_mute_engine_v2(
         stories_toggle_raw_reason=rsn_s,
         posts_tap_attempted=bool(posts_tapped),
         stories_tap_attempted=bool(stories_tapped),
+        remaining_budget_s=round(_mute_engine_v2_remaining_s(t_all), 4)
+        if _ab2 == "mute_toggle_budget_starved"
+        else None,
+        required_toggle_budget_s=round(float(toggle_required_budget_s), 4)
+        if _ab2 == "mute_toggle_budget_starved"
+        else None,
+        phase="toggle_execution" if _ab2 == "mute_toggle_budget_starved" else None,
+        posts_visible=posts_v if _ab2 == "mute_toggle_budget_starved" else None,
+        stories_visible=stories_v if _ab2 == "mute_toggle_budget_starved" else None,
     )
 
 
@@ -34621,6 +36712,9 @@ def _post_follow_post_likes_out_template() -> dict[str, Any]:
         "post_follow_likes_recoverable_failure_count": 0,
         "post_follow_likes_return_ct_recovery_used": False,
         "post_follow_likes_return_ct_recovery_ok": False,
+        "post_follow_likes_light_unwind_used": False,
+        "post_follow_likes_light_unwind_ok": False,
+        "likes_failure_kind": None,
         "target_count": 0,
         "attempted_count": 0,
         "liked_count": 0,
@@ -34629,6 +36723,33 @@ def _post_follow_post_likes_out_template() -> dict[str, Any]:
         "post_like_mode": "profile_grid_single_v1",
         "timings_ms": {},
         "per_post": [],
+    }
+
+
+def _post_follow_like_perf_summary_payload(
+    *,
+    timings: dict[str, Any],
+    post_open: dict[str, Any] | None = None,
+    like_perf: dict[str, Any] | None = None,
+    result: str,
+    failure_reason: str | None = None,
+    recovery_ms: float | None = None,
+) -> dict[str, Any]:
+    t = dict(timings or {})
+    po = dict(post_open or {})
+    lk = dict(like_perf or {})
+    return {
+        "total_ms": t.get("likes_total_ms"),
+        "grid_detect_ms": t.get("grid_prep_0_ms"),
+        "open_post_ms": t.get("open_post_0_ms"),
+        "viewer_detect_ms": po.get("tap_to_viewer_detected_ms"),
+        "like_tap_ms": lk.get("like_tap_dispatch_ms"),
+        "overlay_strategy_ms": t.get("overlay_strategy_ms"),
+        "like_grid_probe_capped_total": t.get("like_grid_probe_capped_total"),
+        "sheet_precheck_ms": t.get("sheet_precheck_ms"),
+        "recovery_ms": recovery_ms,
+        "result": str(result or ""),
+        "failure_reason": str(failure_reason or ""),
     }
 
 
@@ -34643,6 +36764,7 @@ def run_post_follow_post_likes_phase(
     follow_state_after: str,
     skipped_tap: bool,
     session_likes_used: int = 0,
+    follow_context: Any | None = None,
 ) -> dict[str, Any]:
     """
     Post-follow: like recent post(s) on the open candidate profile (V1: single post).
@@ -34681,6 +36803,7 @@ def run_post_follow_post_likes_phase(
         "return_to_profile_ms": None,
         "return_success": None,
         "failure_reason": None,
+        "likes_failure_kind": None,
     }
 
     def _likes_cfg_effective() -> dict[str, Any]:
@@ -34745,10 +36868,43 @@ def run_post_follow_post_likes_phase(
         for k, v in counts.items():
             if k in out:
                 out[k] = v
+        out["likes_failure_kind"] = _likes_perf_ctx.get("likes_failure_kind")
         if not bool(_likes_perf_ctx.get("summary_emitted")):
             pt0 = _likes_perf_ctx.get("phase_t0")
             if not isinstance(pt0, (int, float)):
                 pt0 = t_all
+            po = _likes_perf_ctx.get("post_open") or {}
+            po_dict = po if isinstance(po, dict) else {}
+            try:
+                like_payload = _post_follow_like_perf_summary_payload(
+                    timings=timings,
+                    post_open=po_dict,
+                    like_perf=(
+                        _likes_perf_ctx.get("like")
+                        if isinstance(_likes_perf_ctx.get("like"), dict)
+                        else {}
+                    ),
+                    result=str(phase_outcome or ""),
+                    failure_reason=_likes_perf_ctx.get("failure_reason"),
+                    recovery_ms=None,
+                )
+                log(
+                    "info",
+                    "post_follow_like_perf_summary",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    follower_username=cand,
+                    **like_payload,
+                    phase_outcome=str(phase_outcome or ""),
+                    likes_phase_total_ms=round(
+                        (time.perf_counter() - float(pt0)) * 1000.0, 2
+                    ),
+                    grid_prep_ms=timings.get("grid_prep_0_ms"),
+                    post_follow_fast_open=po_dict.get("post_follow_fast_open"),
+                    likes_failure_kind=_likes_perf_ctx.get("likes_failure_kind"),
+                )
+            except Exception:
+                pass
             try:
                 g = _likes_perf_ctx.get("grid")
                 g_dict = g if isinstance(g, dict) else {}
@@ -35015,8 +37171,108 @@ def run_post_follow_post_likes_phase(
             follower_username=cand,
             post_index=post_idx,
         )
+        sheet_precheck = _post_follow_like_precheck_mute_sheet(
+            d,
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            follower_username=cand,
+        )
+        timings["sheet_precheck_ms"] = float(sheet_precheck.get("precheck_ms") or 0.0)
+        surface_precheck: dict[str, Any] = {}
+        if not bool(sheet_precheck.get("skip_like")):
+            surface_precheck = _post_follow_like_precheck_surface(
+                d,
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                follower_username=cand,
+            )
+            timings["surface_precheck_ms"] = float(
+                surface_precheck.get("precheck_ms") or 0.0
+            )
+        from follow_state_contract import FollowContext, evaluate_like_precheck_contract
+
+        _like_contract_ctx, _can_probe_like_grid, _like_contract_reason = (
+            evaluate_like_precheck_contract(
+                sheet_precheck=sheet_precheck,
+                surface_precheck=surface_precheck,
+                follower_username=cand,
+                source_profile_username=src,
+                visual_candidate_id=vcid,
+                initial_context=follow_context if isinstance(follow_context, FollowContext) else None,
+            )
+        )
+        if not _can_probe_like_grid:
+            failed_nav += 1
+            fr_contract = str(
+                _like_contract_reason
+                or sheet_precheck.get("skip_reason")
+                or surface_precheck.get("skip_reason")
+                or "like_surface_not_ready"
+            )
+            post_rec["outcome"] = (
+                "mute_sheet_blocking"
+                if fr_contract == "mute_sheet_still_open"
+                else "surface_precheck_blocked"
+            )
+            post_rec["failure_reason"] = fr_contract
+            _likes_perf_ctx["failure_reason"] = fr_contract
+            _likes_perf_ctx["likes_failure_kind"] = fr_contract
+            _likes_perf_ctx["follow_state_contract"] = str(
+                _like_contract_ctx.current_state.value
+            )
+            try:
+                log(
+                    "warning",
+                    "post_follow_like_skipped_follow_state_contract",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    follower_username=cand,
+                    failure_reason=fr_contract,
+                    follow_state=_like_contract_ctx.current_state.value,
+                    sheet_visible=bool(sheet_precheck.get("sheet_visible")),
+                    followers_list_visible=bool(
+                        surface_precheck.get("followers_list_visible")
+                    ),
+                    profile_candidate_visible=bool(
+                        surface_precheck.get("profile_candidate_visible")
+                    ),
+                )
+            except Exception:
+                pass
+            like_payload = _post_follow_like_perf_summary_payload(
+                timings=timings,
+                result="skipped",
+                failure_reason=fr_contract,
+            )
+            log(
+                "info",
+                "post_follow_like_perf_summary",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                follower_username=cand,
+                **like_payload,
+            )
+            per_post.append(post_rec)
+            return _finish(
+                phase_outcome="skipped",
+                skipped_reason=fr_contract,
+                skipped=True,
+                ok=False,
+                attempted_count=attempted_count,
+                liked_count=liked_count,
+                skipped_already_liked_count=skipped_already,
+                failed_navigation_count=failed_nav,
+                per_post=per_post,
+            )
         t_grid = time.perf_counter()
-        grid_rem_s = max(1.5, budget_s - (time.perf_counter() - t_all))
+        grid_rem_s = max(
+            0.8,
+            min(
+                budget_s - (time.perf_counter() - t_all),
+                float(_POST_FOLLOW_LIKE_GRID_PREP_MAX_S),
+                float(_POST_FOLLOW_LIKE_PARTIAL_GRID_DETECT_CAP_S),
+            ),
+        )
         grid_out = ensure_post_grid_visible_for_post_follow_likes(
             d,
             source_profile_username=src,
@@ -35029,10 +37285,20 @@ def run_post_follow_post_likes_phase(
         timings[f"grid_prep_{post_idx}_ms"] = round(
             (time.perf_counter() - t_grid) * 1000, 2
         )
+        _grid_perf = dict(grid_out.get("likes_perf_grid") or {})
+        _grid_timings = dict(grid_out.get("timings_ms") or {})
+        if _grid_timings.get("like_grid_probe_capped_total") is not None:
+            timings[f"grid_prep_{post_idx}_ms"] = float(
+                _grid_timings.get("like_grid_probe_capped_total") or 0.0
+            )
+        if _grid_perf.get("overlay_strategy_ms") is not None:
+            timings["overlay_strategy_ms"] = float(
+                _grid_perf.get("overlay_strategy_ms") or 0.0
+            )
 
         if not grid_out.get("ok"):
             failed_nav += 1
-            _likes_perf_ctx["grid"] = dict(grid_out.get("likes_perf_grid") or {})
+            _likes_perf_ctx["grid"] = dict(_grid_perf)
             _likes_perf_ctx["failure_reason"] = str(
                 grid_out.get("failure_reason") or "post_grid_not_visible_before_open"
             )
@@ -35042,9 +37308,8 @@ def run_post_follow_post_likes_phase(
             fr_grid = str(
                 grid_out.get("failure_reason") or "post_grid_not_visible_before_open"
             )
-            if fr_grid != "post_grid_not_visible_before_open":
-                fr_grid = "post_grid_not_visible_before_open"
             post_rec["failure_reason"] = fr_grid
+            _likes_perf_ctx["likes_failure_kind"] = fr_grid
             per_post.append(post_rec)
             log(
                 "warning",
@@ -35133,24 +37398,67 @@ def run_post_follow_post_likes_phase(
         dr_bottom = grid_out.get("dynamic_first_row_bottom")
         gps = grid_out.get("grid_probe_source")
         gpss = grid_out.get("grid_probe_screenshot_path")
-        open_out = visual_open_recent_post_from_profile(
-            d,
-            source_profile_username=src,
-            expected_follower_username=cand,
-            grid_y0_ratio=_POST_FOLLOW_LIKES_GRID_Y0_RATIO,
-            grid_y1_ratio=_POST_FOLLOW_LIKES_GRID_Y1_RATIO,
-            selection_policy=_VISUAL_POST_OPEN_SELECTION_FIRST_ROW_LTR,
-            dynamic_grid_first_row_top_px=(
-                int(dr_top) if isinstance(dr_top, (int, float)) else None
-            ),
-            dynamic_grid_first_row_bottom_px=(
-                int(dr_bottom) if isinstance(dr_bottom, (int, float)) else None
-            ),
-            grid_probe_source=str(gps).strip() if gps else None,
-            grid_probe_screenshot_path=str(gpss).strip() if gpss else None,
-            likes_perf_phase_t0=_likes_perf_ctx.get("phase_t0"),
-            post_follow_stash_open_like_proof=True,
-        )
+        direct_cell = grid_out.get("direct_post_cell_under_suggested")
+        if isinstance(direct_cell, dict):
+            try:
+                meta_before_direct = _followers_current_pkg_activity(d)
+                tx = int(direct_cell.get("center_x") or 0)
+                ty = int(direct_cell.get("center_y") or 0)
+                d.click(tx, ty)
+                log(
+                    "info",
+                    "like_post_cell_selected_under_suggested",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    follower_username=cand,
+                    post_index=post_idx,
+                    tap_x=tx,
+                    tap_y=ty,
+                    action="direct_tap",
+                )
+                viewer_direct = _visual_wait_post_viewer_opened_after_tap(
+                    d,
+                    pkg=pkg,
+                    expected_follower_username=cand,
+                    act_before=meta_before_direct.get("current_activity"),
+                    post_follow_fast=True,
+                )
+                open_out = {
+                    "ok": bool(viewer_direct.get("post_detected")),
+                    "post_detected": bool(viewer_direct.get("post_detected")),
+                    "failure_reason": ""
+                    if bool(viewer_direct.get("post_detected"))
+                    else "post_viewer_not_detected_after_direct_cell_tap",
+                    "open_strategy": "direct_cell_under_suggested",
+                    "tap_to_viewer_detected_ms": viewer_direct.get("viewer_detect_total_ms"),
+                    "likes_perf_post_open": dict(viewer_direct),
+                }
+            except Exception as e:
+                open_out = {
+                    "ok": False,
+                    "post_detected": False,
+                    "failure_reason": f"direct_cell_tap_failed:{type(e).__name__}",
+                    "open_strategy": "direct_cell_under_suggested",
+                }
+        else:
+            open_out = visual_open_recent_post_from_profile(
+                d,
+                source_profile_username=src,
+                expected_follower_username=cand,
+                grid_y0_ratio=_POST_FOLLOW_LIKES_GRID_Y0_RATIO,
+                grid_y1_ratio=_POST_FOLLOW_LIKES_GRID_Y1_RATIO,
+                selection_policy=_VISUAL_POST_OPEN_SELECTION_FIRST_ROW_LTR,
+                dynamic_grid_first_row_top_px=(
+                    int(dr_top) if isinstance(dr_top, (int, float)) else None
+                ),
+                dynamic_grid_first_row_bottom_px=(
+                    int(dr_bottom) if isinstance(dr_bottom, (int, float)) else None
+                ),
+                grid_probe_source=str(gps).strip() if gps else None,
+                grid_probe_screenshot_path=str(gpss).strip() if gpss else None,
+                likes_perf_phase_t0=_likes_perf_ctx.get("phase_t0"),
+                post_follow_stash_open_like_proof=True,
+            )
         timings[f"open_post_{post_idx}_ms"] = round(
             (time.perf_counter() - t_open) * 1000, 2
         )
@@ -35209,6 +37517,7 @@ def run_post_follow_post_likes_phase(
             post_rec["failure_reason"] = fr_open
             per_post.append(post_rec)
             _likes_perf_ctx["failure_reason"] = fr_open
+            _likes_perf_ctx["likes_failure_kind"] = fr_open
             log(
                 "warning",
                 "post_follow_post_like_open_failed",
@@ -35582,6 +37891,18 @@ def run_post_follow_post_likes_phase(
 
     out_liked = liked_count
     if out_liked >= target_count and target_count > 0:
+        try:
+            log(
+                "info",
+                "post_follow_like_completed",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                follower_username=cand,
+                liked_count=out_liked,
+                target_count=target_count,
+            )
+        except Exception:
+            pass
         log(
             "info",
             "post_follow_post_likes_phase_success",
@@ -35646,6 +37967,276 @@ def run_post_follow_post_likes_phase(
     )
 
 
+def _post_follow_recover_candidate_profile_from_list(
+    d: u2.Device,
+    *,
+    candidate_username: str,
+    source_profile_username: str,
+    candidate_pick: dict[str, Any] | None = None,
+    budget_s: float | None = None,
+) -> dict[str, Any]:
+    """
+    One-shot reopen of the followed candidate from the CT followers list for mute/like.
+    No scroll; bounded budget; backs out on mismatch or missing Following CTA.
+    """
+    t0 = time.perf_counter()
+    cand = str(candidate_username or "").strip().lstrip("@")
+    src = str(source_profile_username or "").strip()
+    cap_s = float(
+        budget_s
+        if budget_s is not None
+        else getattr(config, "POST_FOLLOW_RECOVER_CANDIDATE_PROFILE_BUDGET_S", 2.5) or 2.5
+    )
+    cap_s = max(1.0, min(cap_s, 3.0))
+    out: dict[str, Any] = {
+        "recovered": False,
+        "reason": "",
+        "duration_ms": 0.0,
+        "tap_x": None,
+        "tap_y": None,
+    }
+
+    def _elapsed_ms() -> float:
+        return round((time.perf_counter() - t0) * 1000.0, 2)
+
+    def _budget_exceeded() -> bool:
+        return (time.perf_counter() - t0) >= cap_s
+
+    if not cand or not src:
+        out["reason"] = "missing_username"
+        out["duration_ms"] = _elapsed_ms()
+        return out
+
+    enabled = bool(
+        getattr(config, "POST_FOLLOW_RECOVER_CANDIDATE_PROFILE_FROM_LIST", True)
+    )
+    if not enabled:
+        out["reason"] = "recovery_disabled_by_config"
+        out["duration_ms"] = _elapsed_ms()
+        return out
+
+    log(
+        "info",
+        "post_follow_candidate_profile_recovery_started",
+        follower_username=cand,
+        source_profile_username=src,
+        budget_s=round(cap_s, 3),
+    )
+
+    row: dict[str, Any] | None = None
+    pick = candidate_pick if isinstance(candidate_pick, dict) else {}
+    pick_un = _normalize_handle(str(pick.get("username") or ""))
+    if pick_un == _normalize_handle(cand):
+        rc = pick.get("row_center")
+        if isinstance(rc, (list, tuple)) and len(rc) >= 2:
+            row = dict(pick)
+    if row is None and not _budget_exceeded():
+        row = find_visible_followers_row_by_username(
+            d,
+            cand,
+            source_profile_username=src,
+            force_fresh_hierarchy=True,
+        )
+    if not row:
+        out["reason"] = "candidate_row_not_visible"
+        out["duration_ms"] = _elapsed_ms()
+        log(
+            "warning",
+            "post_follow_candidate_profile_recovery_failed",
+            follower_username=cand,
+            source_profile_username=src,
+            reason=out["reason"],
+            duration_ms=out["duration_ms"],
+        )
+        return out
+
+    if _budget_exceeded():
+        out["reason"] = "recovery_budget_exceeded_before_tap"
+        out["duration_ms"] = _elapsed_ms()
+        return out
+
+    ok_tap, tx, ty = tap_followers_list_username_row(d, row, username=cand)
+    out["tap_x"] = tx
+    out["tap_y"] = ty
+    if not ok_tap:
+        out["reason"] = "row_tap_failed"
+        out["duration_ms"] = _elapsed_ms()
+        log(
+            "warning",
+            "post_follow_candidate_profile_recovery_failed",
+            follower_username=cand,
+            source_profile_username=src,
+            reason=out["reason"],
+            duration_ms=out["duration_ms"],
+        )
+        return out
+
+    settle_s = float(getattr(config, "PROFILE_POST_TAP_STABILIZE_S", 0.12) or 0.12)
+    time.sleep(min(max(settle_s, 0.12), 0.22))
+
+    if _budget_exceeded():
+        out["reason"] = "recovery_budget_exceeded_after_tap"
+        out["duration_ms"] = _elapsed_ms()
+        return out
+
+    try:
+        ab = str(read_current_profile_username_for_follow_gate(d) or "").strip().lstrip("@")
+    except Exception:
+        ab = ""
+    if _normalize_handle(ab) != _normalize_handle(cand):
+        out["reason"] = "profile_handle_mismatch_after_tap"
+        out["duration_ms"] = _elapsed_ms()
+        try:
+            d.press("back")
+            time.sleep(0.15)
+        except Exception:
+            pass
+        log(
+            "warning",
+            "post_follow_candidate_profile_recovery_failed",
+            follower_username=cand,
+            source_profile_username=src,
+            action_bar_title=ab,
+            reason=out["reason"],
+            duration_ms=out["duration_ms"],
+        )
+        return out
+
+    fs = _follow_ui_state_snapshot(d)
+    cta_ok = fs in ("following", "requested")
+    if not cta_ok:
+        try:
+            fol_meta = visual_profile_already_following_before_follow(
+                d, source_profile_username=src
+            )
+            cta_ok = bool(fol_meta.get("already_following"))
+        except Exception:
+            cta_ok = False
+    if not cta_ok:
+        out["reason"] = "following_cta_not_verified_after_recovery"
+        out["duration_ms"] = _elapsed_ms()
+        try:
+            d.press("back")
+            time.sleep(0.15)
+        except Exception:
+            pass
+        log(
+            "warning",
+            "post_follow_candidate_profile_recovery_failed",
+            follower_username=cand,
+            source_profile_username=src,
+            follow_header_state=fs,
+            reason=out["reason"],
+            duration_ms=out["duration_ms"],
+        )
+        return out
+
+    out["recovered"] = True
+    out["reason"] = "profile_reopened_with_following_cta"
+    out["duration_ms"] = _elapsed_ms()
+    log(
+        "info",
+        "post_follow_candidate_profile_recovery_success",
+        follower_username=cand,
+        source_profile_username=src,
+        action_bar_title=ab,
+        follow_header_state=fs,
+        duration_ms=out["duration_ms"],
+        tap_x=tx,
+        tap_y=ty,
+    )
+    return out
+
+
+def _post_follow_resolve_surface_truth(
+    d: u2.Device,
+    *,
+    candidate_username: str,
+    source_profile_username: str,
+    follow_state_after: str,
+    det: dict[str, Any] | None = None,
+    nav_obs: dict[str, Any] | None = None,
+    fp: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Fast truth gate after follow: candidate profile evidence beats generic list class."""
+    t0 = time.perf_counter()
+    cand = str(candidate_username or "").strip().lstrip("@")
+    cand_norm = _normalize_handle(cand)
+    det_use = det if isinstance(det, dict) else {}
+    nav_use = nav_obs if isinstance(nav_obs, dict) else {}
+    fp_use = fp if isinstance(fp, dict) else {}
+    action_bar_title = str(det_use.get("action_bar_title") or "").strip().lstrip("@")
+    if not action_bar_title:
+        try:
+            action_bar_title = str(read_current_profile_username_for_follow_gate(d) or "").strip().lstrip("@")
+        except Exception:
+            action_bar_title = ""
+    title_norm = _normalize_handle(action_bar_title)
+    handle_match = bool(cand_norm and title_norm and cand_norm == title_norm)
+
+    fs = str(follow_state_after or "").strip().lower()
+    follow_state_verified = fs in {"following", "requested", "already_following"}
+    following_meta: dict[str, Any] = {"already_following": False, "detection_method": "not_checked"}
+    try:
+        following_meta = visual_profile_already_following_before_follow(
+            d, source_profile_username=source_profile_username
+        )
+    except Exception as exc:
+        following_meta = {
+            "already_following": False,
+            "detection_method": "exception",
+            "error": str(exc)[:120],
+        }
+    cta_verified = follow_state_verified or bool(following_meta.get("already_following"))
+    nav_state = str(nav_use.get("state") or "")
+    screen_class = str(fp_use.get("screen_class") or det_use.get("screen_class") or "")
+    evidence_profile = bool(
+        handle_match
+        and (
+            cta_verified
+            or nav_state == "CANDIDATE_PROFILE"
+            or "profile" in screen_class.lower()
+        )
+    )
+    evidence_followers_list = bool(
+        det_use.get("is_followers_list")
+        or nav_state == "FOLLOWERS_LIST"
+        or "followers_list" in screen_class.lower()
+    )
+    conflict = bool(evidence_profile and evidence_followers_list)
+    if evidence_profile:
+        decision = "candidate_profile_confirmed"
+    elif evidence_followers_list or (cand_norm and title_norm and cand_norm != title_norm):
+        decision = "candidate_profile_lost"
+    else:
+        decision = "unknown"
+    out = {
+        "decision": decision,
+        "candidate_username": cand,
+        "action_bar_title": action_bar_title,
+        "screen_class": screen_class,
+        "navigation_state": nav_state,
+        "evidence_profile": evidence_profile,
+        "evidence_followers_list": evidence_followers_list,
+        "handle_match": handle_match,
+        "cta_verified": cta_verified,
+        "following_detection_method": str(following_meta.get("detection_method") or ""),
+        "conflict": conflict,
+        "duration_ms": round((time.perf_counter() - t0) * 1000.0, 2),
+    }
+    try:
+        log("info", "post_follow_surface_truth_resolved", **out)
+        if conflict:
+            log("warning", "post_follow_surface_conflict", **out)
+        if decision == "candidate_profile_confirmed":
+            log("info", "post_follow_candidate_profile_confirmed", **out)
+        elif decision == "candidate_profile_lost":
+            log("warning", "post_follow_candidate_profile_lost", **out)
+    except Exception:
+        pass
+    return out
+
+
 def run_visual_candidate_post_follow_phase(
     d: u2.Device,
     *,
@@ -35659,13 +38250,17 @@ def run_visual_candidate_post_follow_phase(
     det: dict[str, Any] | None,
     session_likes_used: int = 0,
     own_unified_xml_list: bool = False,
+    follow_context: Any | None = None,
+    candidate_pick: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Post-follow: observe UI, optional real mute, controlled return to CT followers list.
     Does not modify follow / harvester / row mapping.
     """
     from navigation_engine import NavigationEngineState, observe_instagram_state
+    from follow_state_contract import FollowContext
 
+    t_mute_decision = time.perf_counter()
     pkg = pkg or str(getattr(config, "INSTAGRAM_PACKAGE", "") or "")
     vcid = str(visual_candidate_id or "").strip()
     src = str(source_profile_username or "").strip()
@@ -35695,36 +38290,150 @@ def run_visual_candidate_post_follow_phase(
         ),
     )
 
-    det_use: dict[str, Any] = dict(det) if isinstance(det, dict) else {}
+    if isinstance(follow_context, FollowContext):
+        post_follow_ctx = follow_context
+        if cand and not post_follow_ctx.follower_username:
+            post_follow_ctx.follower_username = cand
+        if src and not post_follow_ctx.source_profile_username:
+            post_follow_ctx.source_profile_username = src
+        if vcid and not post_follow_ctx.visual_candidate_id:
+            post_follow_ctx.visual_candidate_id = vcid
+    else:
+        post_follow_ctx = FollowContext.from_follow_verified(
+            follower_username=cand,
+            source_profile_username=src,
+            visual_candidate_id=vcid,
+            follow_state_after=fs_after,
+        )
+    post_follow_ctx.mark_post_follow_decision(reason="post_follow_started")
+
+    det_use: dict[str, Any] = {}
     try:
         det_fresh = detect_followers_list_screen(d, source_profile_username=src)
         if isinstance(det_fresh, dict) and det_fresh:
             det_use = det_fresh
     except Exception:
-        pass
-
+        det_use = dict(det) if isinstance(det, dict) else {}
     nav_obs: dict[str, Any] = {}
-    try:
-        nav_obs = observe_instagram_state(
-            d,
-            expected_package=pkg,
-            last_known_state=NavigationEngineState.CANDIDATE_PROFILE.value,
-            context={
-                "phase": "post_follow_observe",
-                "visual_candidate_id": vcid,
-                "source_profile_username": src,
-                "det": det_use,
-                "disable_followers_visual_fallback": True,
-                "expected_state": "CANDIDATE_PROFILE",
-            },
-        )
-    except Exception as e:
-        nav_obs = {"state": "UNKNOWN", "confidence": 0.0, "reason": str(e)}
-
-    overlay = _post_follow_overlay_ui_hints(d)
-    fp = _post_follow_screen_fingerprint(
-        d, nav_state=str(nav_obs.get("state") or ""), det=det_use
+    fp: dict[str, Any] = {}
+    fast_surface_truth = _post_follow_resolve_surface_truth(
+        d,
+        candidate_username=cand,
+        source_profile_username=src,
+        follow_state_after=fs_after,
+        det=det_use,
+        nav_obs={},
+        fp={},
     )
+    profile_recovery: dict[str, Any] = {}
+    if (
+        follow_success_verified
+        and not skipped_tap
+        and fast_surface_truth.get("decision") == "candidate_profile_lost"
+        and cand
+    ):
+        profile_recovery = _post_follow_recover_candidate_profile_from_list(
+            d,
+            candidate_username=cand,
+            source_profile_username=src,
+            candidate_pick=candidate_pick,
+        )
+        if profile_recovery.get("recovered"):
+            try:
+                det_after = detect_followers_list_screen(d, source_profile_username=src)
+                if isinstance(det_after, dict) and det_after:
+                    det_use = det_after
+            except Exception:
+                pass
+            fast_surface_truth = _post_follow_resolve_surface_truth(
+                d,
+                candidate_username=cand,
+                source_profile_username=src,
+                follow_state_after=fs_after,
+                det=det_use,
+                nav_obs={},
+                fp={},
+            )
+    if fast_surface_truth.get("decision") == "candidate_profile_confirmed":
+        nav_obs = {
+            "state": NavigationEngineState.CANDIDATE_PROFILE.value,
+            "confidence": 0.86,
+            "reason": "post_follow_surface_truth_candidate_profile_confirmed",
+        }
+        fp = {
+            "screen_class": "candidate_profile_confirmed",
+            "fingerprint_id": "post_follow_surface_truth",
+        }
+        det_use = {
+            **det_use,
+            "action_bar_title": str(fast_surface_truth.get("action_bar_title") or ""),
+            "is_followers_list": False,
+        }
+    elif fast_surface_truth.get("decision") == "candidate_profile_lost":
+        nav_obs = {
+            "state": NavigationEngineState.FOLLOWERS_LIST.value,
+            "confidence": 0.84,
+            "reason": "post_follow_surface_truth_candidate_profile_lost",
+        }
+        fp = {
+            "screen_class": "followers_list",
+            "fingerprint_id": "post_follow_surface_truth_lost",
+        }
+        det_use = {
+            **det_use,
+            "action_bar_title": str(fast_surface_truth.get("action_bar_title") or ""),
+            "is_followers_list": bool(fast_surface_truth.get("evidence_followers_list")),
+        }
+    else:
+        try:
+            det_fresh = detect_followers_list_screen(d, source_profile_username=src)
+            if isinstance(det_fresh, dict) and det_fresh:
+                det_use = det_fresh
+        except Exception:
+            pass
+        try:
+            nav_obs = observe_instagram_state(
+                d,
+                expected_package=pkg,
+                last_known_state=NavigationEngineState.CANDIDATE_PROFILE.value,
+                context={
+                    "phase": "post_follow_observe",
+                    "visual_candidate_id": vcid,
+                    "source_profile_username": src,
+                    "det": det_use,
+                    "disable_followers_visual_fallback": True,
+                    "expected_state": "CANDIDATE_PROFILE",
+                },
+            )
+        except Exception as e:
+            nav_obs = {"state": "UNKNOWN", "confidence": 0.0, "reason": str(e)}
+        fp = _post_follow_screen_fingerprint(
+            d, nav_state=str(nav_obs.get("state") or ""), det=det_use
+        )
+    overlay = _post_follow_overlay_ui_hints(d)
+    if fast_surface_truth.get("decision") in {
+        "candidate_profile_confirmed",
+        "candidate_profile_lost",
+    }:
+        surface_truth = fast_surface_truth
+    else:
+        surface_truth = _post_follow_resolve_surface_truth(
+            d,
+            candidate_username=cand,
+            source_profile_username=src,
+            follow_state_after=fs_after,
+            det=det_use,
+            nav_obs=nav_obs,
+            fp=fp,
+        )
+    candidate_profile_lost = surface_truth.get("decision") == "candidate_profile_lost"
+    candidate_profile_confirmed = surface_truth.get("decision") == "candidate_profile_confirmed"
+    if candidate_profile_confirmed and str(nav_obs.get("state") or "") == NavigationEngineState.FOLLOWERS_LIST.value:
+        nav_obs = {
+            **nav_obs,
+            "state": NavigationEngineState.CANDIDATE_PROFILE.value,
+            "reason": "post_follow_surface_truth_overrode_generic_followers_list",
+        }
     obs_reason = "ok"
     if overlay.get("likely_mute_toggle_sheet"):
         obs_reason = "overlay_mute_sheet_like"
@@ -35760,6 +38469,49 @@ def run_visual_candidate_post_follow_phase(
     real_mute = bool(getattr(config, "ENABLE_REAL_VISUAL_MUTE_AFTER_FOLLOW", False))
     follow_priv = bool(getattr(config, "FOLLOW_PRIVATE_ACCOUNTS", False))
     pending_rq = fs_after == "requested"
+    want_posts_for_budget = bool(getattr(config, "VISUAL_MUTE_POSTS_AFTER_FOLLOW", True))
+    want_stories_for_budget = bool(getattr(config, "VISUAL_MUTE_STORIES_AFTER_FOLLOW", True))
+    toggle_required_budget_s = _mute_engine_v2_toggle_required_budget_s(
+        want_posts=want_posts_for_budget,
+        want_stories=want_stories_for_budget,
+    )
+    mute_early_summary_emitted = False
+
+    def _emit_mute_early_skip_perf_summary(skip_reason: str) -> None:
+        nonlocal mute_early_summary_emitted
+        if mute_early_summary_emitted:
+            return
+        mute_early_summary_emitted = True
+        reason = str(skip_reason or "unknown").strip() or "unknown"
+        try:
+            payload = _post_follow_mute_perf_summary_payload(
+                timings={
+                    "mute_total_ms": round(
+                        (time.perf_counter() - t_mute_decision) * 1000.0, 2
+                    ),
+                    "open_mute_sheet_ms": 0.0,
+                    "labels_detect_ms": 0.0,
+                    "toggle_posts_ms": 0.0,
+                    "toggle_stories_ms": 0.0,
+                },
+                result="skipped",
+                skip_reason=reason,
+                budget_s=float(_MUTE_ENGINE_V2_BUDGET_S),
+                effective_total_budget_s=float(_MUTE_ENGINE_V2_EFFECTIVE_TOTAL_S),
+                toggle_stage_required_budget_s=round(
+                    float(toggle_required_budget_s), 4
+                ),
+            )
+            log(
+                "info",
+                "post_follow_mute_perf_summary",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                follower_username=cand,
+                **payload,
+            )
+        except Exception:
+            pass
 
     should_mute = bool(
         follow_success_verified
@@ -35781,6 +38533,9 @@ def run_visual_candidate_post_follow_phase(
     elif pending_rq and follow_priv:
         mute_decision_reason = "private_follow_request_pending_skip_mute"
         should_mute = False
+    elif candidate_profile_lost:
+        mute_decision_reason = "post_follow_candidate_profile_lost"
+        should_mute = False
 
     log(
         "info",
@@ -35791,9 +38546,11 @@ def run_visual_candidate_post_follow_phase(
         reason=mute_decision_reason,
         ENABLE_VISUAL_FOLLOW_MUTE_FLOW=flow_on,
         ENABLE_REAL_VISUAL_MUTE_AFTER_FOLLOW=real_mute,
+        surface_truth_decision=str(surface_truth.get("decision") or ""),
+        candidate_profile_confirmed=bool(candidate_profile_confirmed),
     )
 
-    if should_mute:
+    if should_mute and not candidate_profile_confirmed:
         if not _vision_validation_post_follow_before_mute(
             screenshot_path="",
             det=det_use,
@@ -35807,6 +38564,7 @@ def run_visual_candidate_post_follow_phase(
             mute_decision_reason = "vision_validation_post_follow_blocked"
 
     if not follow_success_verified:
+        mute_out["skipped_reason"] = "follow_not_verified"
         log(
             "info",
             "post_follow_mute_skipped",
@@ -35814,7 +38572,9 @@ def run_visual_candidate_post_follow_phase(
             source_profile_username=src,
             reason="follow_not_verified",
         )
+        _emit_mute_early_skip_perf_summary("follow_not_verified")
     elif not flow_on or not real_mute:
+        mute_out["skipped_reason"] = "mute_disabled"
         log(
             "info",
             "post_follow_mute_skipped",
@@ -35822,7 +38582,9 @@ def run_visual_candidate_post_follow_phase(
             source_profile_username=src,
             reason="mute_disabled_by_config",
         )
+        _emit_mute_early_skip_perf_summary("mute_disabled")
     elif skipped_tap:
+        mute_out["skipped_reason"] = "already_following_skipped_tap"
         log(
             "info",
             "post_follow_mute_skipped",
@@ -35830,7 +38592,9 @@ def run_visual_candidate_post_follow_phase(
             source_profile_username=src,
             reason="already_following_skipped_tap",
         )
+        _emit_mute_early_skip_perf_summary("already_following_skipped_tap")
     elif pending_rq and follow_priv:
+        mute_out["skipped_reason"] = "private_follow_request_pending"
         log(
             "info",
             "post_follow_mute_skipped",
@@ -35838,6 +38602,32 @@ def run_visual_candidate_post_follow_phase(
             source_profile_username=src,
             reason="private_follow_request_pending",
         )
+        _emit_mute_early_skip_perf_summary("private_follow_request_pending")
+    elif candidate_profile_lost:
+        mute_out["skipped_reason"] = "post_follow_candidate_profile_lost"
+        post_follow_ctx.mark_mute_skipped(reason="post_follow_candidate_profile_lost")
+        post_follow_ctx.mark_mute_done_or_skipped(reason="post_follow_candidate_profile_lost")
+        log(
+            "info",
+            "post_follow_mute_skipped",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            reason="post_follow_candidate_profile_lost",
+            surface_truth_decision=str(surface_truth.get("decision") or ""),
+        )
+        _emit_mute_early_skip_perf_summary("post_follow_candidate_profile_lost")
+    elif not should_mute:
+        mute_out["skipped_reason"] = mute_decision_reason
+        post_follow_ctx.mark_mute_skipped(reason=mute_decision_reason)
+        post_follow_ctx.mark_mute_done_or_skipped(reason=mute_decision_reason)
+        log(
+            "info",
+            "post_follow_mute_skipped",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            reason=mute_decision_reason,
+        )
+        _emit_mute_early_skip_perf_summary(mute_decision_reason)
     elif should_mute:
         mute_out["mute_started"] = True
         log(
@@ -35872,6 +38662,7 @@ def run_visual_candidate_post_follow_phase(
             "stories_verified": bool(v2.get("stories_verified")),
         }
         if outcome == "success":
+            post_follow_ctx.mark_mute_done_or_skipped(reason="mute_success")
             log(
                 "info",
                 "post_follow_mute_success",
@@ -35887,6 +38678,7 @@ def run_visual_candidate_post_follow_phase(
                 visual_candidate_id=vcid,
             )
         elif outcome == "partial_success":
+            post_follow_ctx.mark_mute_done_or_skipped(reason="mute_partial_success")
             log(
                 "info",
                 "post_follow_mute_success",
@@ -35903,6 +38695,9 @@ def run_visual_candidate_post_follow_phase(
                 visual_candidate_id=vcid,
             )
         else:
+            post_follow_ctx.mark_mute_done_or_skipped(
+                reason=str(v2.get("failure_reason") or outcome or "mute_failed")
+            )
             log(
                 "warning",
                 "post_follow_mute_failed",
@@ -35916,7 +38711,27 @@ def run_visual_candidate_post_follow_phase(
             )
 
     likes_out: dict[str, Any] = _post_follow_post_likes_out_template()
-    if follow_success_verified and cand:
+    if candidate_profile_lost:
+        post_follow_ctx.mark_post_grid_blocked(reason="post_follow_candidate_profile_lost")
+        post_follow_ctx.mark_like_done_or_skipped(reason="post_follow_candidate_profile_lost")
+        likes_out.update(
+            {
+                "ok": False,
+                "skipped": True,
+                "phase_outcome": "skipped",
+                "skipped_reason": "post_follow_candidate_profile_lost",
+                "likes_failure_kind": "post_follow_candidate_profile_lost",
+            }
+        )
+        log(
+            "info",
+            "post_follow_like_skipped_profile_lost",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            follower_username=cand,
+            reason="post_follow_candidate_profile_lost",
+        )
+    elif follow_success_verified and cand:
         likes_out = run_post_follow_post_likes_phase(
             d,
             pkg=pkg,
@@ -35927,6 +38742,7 @@ def run_visual_candidate_post_follow_phase(
             follow_state_after=fs_after,
             skipped_tap=skipped_tap,
             session_likes_used=int(session_likes_used or 0),
+            follow_context=post_follow_ctx,
         )
     likes_recoverable_failure = bool(
         str(likes_out.get("phase_outcome") or "") == "failed_safe_continue"
@@ -35989,16 +38805,60 @@ def run_visual_candidate_post_follow_phase(
         pass
     likes_return_recovery_used = False
     likes_return_recovery_ok = False
+    likes_recovery_t0 = time.perf_counter()
+    likes_recovery_ms: float | None = None
     if likes_recoverable_failure:
-        rec = _post_follow_likes_failure_recover_return_ct(
-            d,
-            pkg=pkg,
-            source_profile_username=src,
-            follower_username=cand,
-            visual_candidate_id=vcid,
+        likes_fr_kind = str(likes_out.get("likes_failure_kind") or "").strip()
+        use_light_unwind = likes_fr_kind in (
+            "post_grid_partial_suggested_overlay",
+            "post_grid_partial_suggested_overlay_fast",
+            "post_grid_not_visible_before_open",
+            "post_viewer_not_detected",
+            "post_viewer_not_detected_after_tap",
         )
+        if use_light_unwind:
+            rec = _post_follow_likes_failure_light_unwind(
+                d,
+                pkg=pkg,
+                source_profile_username=src,
+                follower_username=cand,
+                visual_candidate_id=vcid,
+            )
+            likes_out["post_follow_likes_light_unwind_used"] = bool(rec.get("attempted"))
+            likes_out["post_follow_likes_light_unwind_ok"] = bool(rec.get("ok"))
+            if bool(rec.get("on_followers_list")):
+                ok_ret = True
+                how_ret = "light_unwind_on_followers_list"
+                fail_re = None
+            elif bool(rec.get("on_candidate_profile")) or bool(rec.get("ok")):
+                det_lw: dict[str, Any] = {}
+                try:
+                    det_lw = detect_followers_list_screen(d, source_profile_username=src)
+                except Exception:
+                    det_lw = {}
+                ok_ret, how_ret, fail_re = _post_follow_likes_failure_return_ct_capped(
+                    d,
+                    pkg=pkg,
+                    source_profile_username=src,
+                    follower_username=cand,
+                    visual_candidate_id=vcid,
+                    det=det_lw,
+                )
+            else:
+                ok_ret = False
+                how_ret = str(rec.get("how") or "")
+                fail_re = "post_follow_likes_failure_light_unwind_failed"
+        else:
+            rec = _post_follow_likes_failure_recover_return_ct(
+                d,
+                pkg=pkg,
+                source_profile_username=src,
+                follower_username=cand,
+                visual_candidate_id=vcid,
+            )
         likes_return_recovery_used = bool(rec.get("attempted"))
         likes_return_recovery_ok = bool(rec.get("ok"))
+        likes_recovery_ms = round((time.perf_counter() - likes_recovery_t0) * 1000.0, 2)
         ok_ret = bool(rec.get("ok"))
         how_ret = str(rec.get("how") or "")
         fail_re = (
@@ -36024,6 +38884,34 @@ def run_visual_candidate_post_follow_phase(
     likes_out["post_follow_likes_return_ct_recovery_ok"] = bool(
         likes_return_recovery_ok
     )
+    if likes_recoverable_failure:
+        try:
+            ltim = dict(likes_out.get("timings_ms") or {})
+            po0 = None
+            viewer0 = None
+            post0 = likes_out.get("per_post")
+            if isinstance(post0, list) and post0:
+                po0 = (post0[0] or {}).get("failure_reason")
+            like_payload = _post_follow_like_perf_summary_payload(
+                timings=ltim,
+                post_open=None,
+                like_perf=None,
+                result=str(likes_out.get("phase_outcome") or ""),
+                failure_reason=str(likes_out.get("likes_failure_kind") or po0 or ""),
+                recovery_ms=likes_recovery_ms,
+            )
+            log(
+                "info",
+                "post_follow_like_perf_summary",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                follower_username=cand,
+                **like_payload,
+                recovery_used=bool(likes_return_recovery_used),
+                recovery_ok=bool(likes_return_recovery_ok),
+            )
+        except Exception:
+            pass
     try:
         from followers_inter_candidate_perf import inter_candidate_on_post_return_ct_finished
 
@@ -36053,6 +38941,11 @@ def run_visual_candidate_post_follow_phase(
             failure_reason=str(fail_re or ""),
             how=str(how_ret or ""),
         )
+    try:
+        if ok_ret:
+            post_follow_ctx.mark_returned_to_ct(reason="return_ct_ok")
+    except Exception:
+        pass
     log(
         "info",
         "post_follow_likes_recovery_summary",
@@ -36083,6 +38976,7 @@ def run_visual_candidate_post_follow_phase(
         "follow_success_verified": bool(follow_success_verified),
         "navigation_observed": nav_obs,
         "overlay_hints": overlay,
+        "follow_context_state": str(getattr(post_follow_ctx.current_state, "value", "")),
         "post_follow_likes_recoverable_failure_count": int(
             likes_out.get("post_follow_likes_recoverable_failure_count") or 0
         ),
@@ -36565,12 +39459,98 @@ def _visual_raw_follow_invite_visible_quick(d: u2.Device) -> bool:
     return False
 
 
+def visual_candidate_pre_follow_private_gate(
+    d: u2.Device,
+    *,
+    source_profile_username: str | None = None,
+    dont_follow_private_accounts: bool = True,
+    follower_username: str | None = None,
+    visual_candidate_id: str | None = None,
+    prior_private_probe: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """
+    Fast XML-only private profile barrier immediately before Follow / Request tap.
+    When ``dont_follow_private_accounts`` is False, never rejects (setting allows private follows).
+    """
+    src = str(source_profile_username or "").strip()
+    cand = str(follower_username or "").strip().lstrip("@")
+    vcid = str(visual_candidate_id or "").strip()
+    out: dict[str, Any] = {
+        "reject": False,
+        "reason": "private_follow_allowed_by_setting",
+        "private_profile_detected": False,
+        "dont_follow_private_accounts": bool(dont_follow_private_accounts),
+        "detection_method": "none",
+        "confidence": 0.0,
+        "probe_ms": 0.0,
+        "hierarchy_fallback_used": False,
+        "source_profile_username": src,
+        "follower_username": cand,
+        "visual_candidate_id": vcid,
+    }
+    if not dont_follow_private_accounts:
+        return out
+
+    if isinstance(prior_private_probe, dict) and prior_private_probe:
+        priv = dict(prior_private_probe)
+        if "probe_ms" not in priv and "private_gate_probe_ms" in priv:
+            priv["probe_ms"] = priv.get("private_gate_probe_ms")
+        if "detection_method" not in priv and "private_gate_detection_method" in priv:
+            priv["detection_method"] = priv.get("private_gate_detection_method")
+        if (
+            "hierarchy_fallback_used" not in priv
+            and "private_gate_hierarchy_fallback_used" in priv
+        ):
+            priv["hierarchy_fallback_used"] = priv.get("private_gate_hierarchy_fallback_used")
+        out["probe_reused"] = True
+    else:
+        priv = visual_detect_private_profile(d, source_profile_username=src or None)
+        out["probe_reused"] = False
+    out["private_profile_detected"] = bool(priv.get("private_profile_detected"))
+    out["detection_method"] = str(priv.get("detection_method") or "none")
+    out["confidence"] = float(priv.get("confidence") or 0.0)
+    out["probe_ms"] = float(priv.get("probe_ms") or 0.0)
+    out["hierarchy_fallback_used"] = bool(priv.get("hierarchy_fallback_used"))
+
+    if out["private_profile_detected"]:
+        out["reject"] = True
+        out["reason"] = "private_account"
+        log(
+            "info",
+            "visual_pre_follow_private_gate_reject",
+            source_profile_username=src or None,
+            follower_username=cand or None,
+            visual_candidate_id=vcid or None,
+            detection_method=out["detection_method"],
+            confidence=out["confidence"],
+            private_profile_probe_ms=out["probe_ms"],
+            private_profile_hierarchy_fallback_used=out["hierarchy_fallback_used"],
+            dont_follow_private_accounts=True,
+            probe_reused=bool(out.get("probe_reused")),
+        )
+    else:
+        out["reason"] = "private_not_detected"
+        log(
+            "info",
+            "visual_pre_follow_private_gate_passed",
+            source_profile_username=src or None,
+            follower_username=cand or None,
+            visual_candidate_id=vcid or None,
+            private_profile_probe_ms=out["probe_ms"],
+            probe_reused=bool(out.get("probe_reused")),
+        )
+    return out
+
+
 def visual_candidate_follow_pre_follow_screen_guard(
     d: u2.Device,
     *,
     source_profile_username: str,
     pkg: str,
     pick: dict[str, Any] | None = None,
+    dont_follow_private_accounts: bool | None = None,
+    profile_already_open: bool = False,
+    defer_private_gate: bool = False,
 ) -> dict[str, Any]:
     """
     Before ``perform_follow_safe(profile_already_open=True)``, confirm we are not back on the
@@ -36591,6 +39571,10 @@ def visual_candidate_follow_pre_follow_screen_guard(
 
     sn = _normalize_handle(src_raw)
     an = _normalize_handle(ab_title)
+    follower_hint = str(
+        p.get("resolved_username_hint") or p.get("follower_username") or ab_title or ""
+    ).strip().lstrip("@")
+    fn = _normalize_handle(follower_hint)
 
     out: dict[str, Any] = {
         "ok": False,
@@ -36604,7 +39588,65 @@ def visual_candidate_follow_pre_follow_screen_guard(
         "raw_follow_invite_visible": False,
         "visual_candidate_id": vcid,
         "source_profile_username": src_raw,
+        "fast_path": False,
+        "private_gate_deferred": bool(defer_private_gate),
     }
+
+    if profile_already_open and fn and an and fn == an:
+        hdr_quick = ""
+        try:
+            hdr_quick = _follow_ui_state_snapshot(d)
+        except Exception:
+            hdr_quick = ""
+        raw_inv_quick = False
+        try:
+            raw_inv_quick = bool(_visual_raw_follow_invite_visible_quick(d))
+        except Exception:
+            raw_inv_quick = False
+        on_followers_list_quick = False
+        try:
+            on_followers_list_quick = bool(
+                d(resourceId="com.instagram.android:id/follow_list_username").exists(
+                    timeout=0.04
+                )
+            )
+        except Exception:
+            on_followers_list_quick = False
+        out["follow_header_state"] = hdr_quick
+        out["raw_follow_invite_visible"] = raw_inv_quick
+        out["followers_list_xml_hint"] = on_followers_list_quick
+        if sn and an and sn == an:
+            out["ok"] = False
+            out["reason"] = "current_screen_is_source_profile"
+            return out
+        if on_followers_list_quick:
+            out["ok"] = False
+            out["reason"] = "current_screen_is_followers_list"
+            return out
+        if not raw_inv_quick and hdr_quick != "follow":
+            out["ok"] = False
+            out["reason"] = "follow_invite_not_visible"
+            return out
+        if defer_private_gate:
+            out["ok"] = True
+            out["reason"] = "candidate_profile_surface_ok_fast_path"
+            out["fast_path"] = True
+            out["navigation_state"] = NavigationEngineState.CANDIDATE_PROFILE.value
+            out["navigation_confidence"] = 0.74
+            out["navigation_reason"] = "profile_already_open_lightweight"
+            try:
+                log(
+                    "info",
+                    "visual_follow_pre_follow_guard_fast_path",
+                    source_profile_username=src_raw,
+                    visual_candidate_id=vcid or None,
+                    follower_username=follower_hint,
+                    follow_header_state=hdr_quick,
+                    private_gate_deferred=True,
+                )
+            except Exception:
+                pass
+            return out
 
     nav = observe_instagram_state(
         d,
@@ -36677,6 +39719,33 @@ def visual_candidate_follow_pre_follow_screen_guard(
     if not out["raw_follow_invite_visible"] and out["follow_header_state"] != "follow":
         out["ok"] = False
         out["reason"] = "follow_invite_not_visible"
+        return out
+
+    if defer_private_gate:
+        out["ok"] = True
+        out["reason"] = "candidate_profile_surface_ok"
+        return out
+
+    _skip_private = (
+        True if dont_follow_private_accounts is None else bool(dont_follow_private_accounts)
+    )
+    _priv_gate = visual_candidate_pre_follow_private_gate(
+        d,
+        source_profile_username=src_raw,
+        dont_follow_private_accounts=_skip_private,
+        follower_username=str(p.get("resolved_username_hint") or ab_title or "").strip().lstrip(
+            "@"
+        ),
+        visual_candidate_id=vcid,
+    )
+    out["private_gate_probe_ms"] = float(_priv_gate.get("probe_ms") or 0.0)
+    out["private_gate_detection_method"] = str(_priv_gate.get("detection_method") or "none")
+    out["private_gate_hierarchy_fallback_used"] = bool(_priv_gate.get("hierarchy_fallback_used"))
+    out["private_profile_detected"] = bool(_priv_gate.get("private_profile_detected"))
+    out["private_gate_reason"] = str(_priv_gate.get("reason") or "")
+    if _priv_gate.get("reject"):
+        out["ok"] = False
+        out["reason"] = "private_account"
         return out
 
     out["ok"] = True
