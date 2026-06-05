@@ -8,11 +8,15 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 MIGRATION = ROOT / "supabase" / "migrations" / "20260601185000_phone_app_instances_schedule_capacity.sql"
+BUSINESS_TZ_MIGRATION = ROOT / "supabase" / "migrations" / "20260605115414_business_timezone_africa_johannesburg.sql"
 
 
 class PhoneAppInstancesScheduleCapacityTests(unittest.TestCase):
     def _sql(self) -> str:
         return MIGRATION.read_text(encoding="utf-8")
+
+    def _business_tz_sql(self) -> str:
+        return BUSINESS_TZ_MIGRATION.read_text(encoding="utf-8")
 
     def test_phone_app_instances_model_represents_primary_and_clones(self) -> None:
         sql = self._sql()
@@ -193,6 +197,20 @@ class PhoneAppInstancesScheduleCapacityTests(unittest.TestCase):
             "current_account_id = null",
         ):
             self.assertIn(fragment, sql)
+
+    def test_business_timezone_defaults_to_africa_johannesburg(self) -> None:
+        sql = self._business_tz_sql()
+        for fragment in (
+            "alter table public.phone_devices",
+            "alter column timezone set default 'Africa/Johannesburg'",
+            "alter table public.phone_rest_windows",
+            "update public.phone_devices",
+            "timezone = 'UTC'",
+            "update public.phone_rest_windows",
+            "Default: Africa/Johannesburg",
+        ):
+            self.assertIn(fragment, sql)
+        self.assertNotIn("set default 'UTC'", sql)
 
 
 if __name__ == "__main__":
