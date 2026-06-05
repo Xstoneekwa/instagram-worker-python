@@ -1382,6 +1382,10 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
     def test_legacy_visual_top_left_safe_opens_only_top_left_with_viewer_confirmed(self) -> None:
         device = mock.MagicMock()
         device.window_size.return_value = (1080, 2340)
+        log_events: list[str] = []
+
+        def _fake_log(_level: str, event: str, **_kw: object) -> None:
+            log_events.append(str(event))
 
         def _fake_screenshot(_d: object, path: str) -> None:
             from PIL import Image
@@ -1431,7 +1435,9 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
                 "viewer_detect_path": "phase_a_like_unlike_fast",
                 "viewer_detect_total_ms": 120.0,
             },
-        ), mock.patch.object(nav, "log"), mock.patch.object(nav, "time") as tmock:
+        ), mock.patch.object(nav, "log", side_effect=_fake_log), mock.patch.object(
+            nav, "time"
+        ) as tmock:
             tmock.perf_counter = time.perf_counter
             tmock.time = time.time
             tmock.sleep = lambda *_a, **_k: None
@@ -1449,6 +1455,75 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
         self.assertTrue(out.get("post_detected"))
         self.assertEqual(out.get("open_strategy"), "vision_open_top_left_legacy_safe")
         device.click.assert_called_once_with(180, 1180)
+        for event in {
+            "legacy_safe_timing_profile_lock_completed",
+            "legacy_safe_timing_ui_hints_completed",
+            "legacy_safe_timing_tabs_bottom_completed",
+            "legacy_safe_timing_screenshot_capture_completed",
+            "legacy_safe_timing_pil_open_completed",
+            "legacy_safe_timing_dynamic_row_scan_completed",
+            "legacy_safe_timing_candidate_selection_completed",
+        }:
+            self.assertIn(event, log_events)
+
+    def test_legacy_safe_ui_hints_lightweight_skips_mute_sheet_probe(self) -> None:
+        class _Selector:
+            def __init__(self, exists: bool) -> None:
+                self._exists = exists
+
+            def exists(self, timeout: float = 0.0) -> bool:
+                return self._exists
+
+        device = mock.MagicMock()
+
+        def _selector(**kw: object) -> _Selector:
+            if kw.get("textContains") == "Suggested for you":
+                return _Selector(True)
+            if kw.get("textContains") == "Discover people":
+                return _Selector(True)
+            if kw.get("resourceIdMatches") == r".*:id/profile_tabs_container":
+                return _Selector(True)
+            return _Selector(False)
+
+        device.side_effect = _selector
+        previous_ctx = getattr(nav, "_LEGACY_SAFE_TIMING_CONTEXT", None)
+        nav._LEGACY_SAFE_TIMING_CONTEXT = {
+            "visual_candidate_id": "vc-1",
+            "source_profile_username": "ct",
+            "follower_username": "cand",
+            "post_index": 0,
+            "attempt_label": "legacy_safe_attempt_test",
+            "known_previous_signals": {},
+        }
+        log_calls: list[dict[str, object]] = []
+
+        def _fake_log(_level: str, event: str, **kw: object) -> None:
+            if event in {
+                "legacy_safe_ui_hints_probe_started",
+                "legacy_safe_ui_hints_probe_completed",
+            }:
+                log_calls.append({"event": event, **kw})
+
+        try:
+            with mock.patch.object(
+                nav, "_mute_engine_v2_detect_sheet_level"
+            ) as sheet_probe, mock.patch.object(nav, "log", side_effect=_fake_log):
+                hints = nav._post_follow_likes_grid_ui_surface_hints(device)
+        finally:
+            nav._LEGACY_SAFE_TIMING_CONTEXT = previous_ctx
+
+        sheet_probe.assert_not_called()
+        self.assertTrue(hints.get("profile_tabs_visible"))
+        self.assertTrue(hints.get("suggested_for_you"))
+        self.assertTrue(hints.get("discover_people"))
+        self.assertTrue(log_calls)
+        for call in log_calls:
+            self.assertEqual(call.get("hint_mode"), "legacy_safe_lightweight")
+            self.assertTrue(call.get("mute_sheet_level_skipped"))
+            self.assertEqual(
+                call.get("skipped_reason"),
+                "not_needed_for_legacy_safe_like_open",
+            )
 
     def test_legacy_visual_top_left_safe_refuses_low_variance(self) -> None:
         device = mock.MagicMock()

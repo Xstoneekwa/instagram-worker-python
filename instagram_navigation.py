@@ -11679,10 +11679,19 @@ def _followers_profile_tabs_visible(d: u2.Device) -> bool:
         ("resourceId:profile_tabs", lambda: d(resourceIdMatches=r".*:id/profile_tabs[^_].*")),
     ]
     for phase, fact in checks:
+        t_probe = time.perf_counter()
         el = None
         try:
             el = fact()
         except Exception as e:
+            _legacy_safe_log_substep(
+                "legacy_safe_ui_hints_substep_completed",
+                f"profile_tabs_visible:{phase}",
+                t_probe,
+                dump_count=0,
+                signals_found=[],
+                probe_error="selector_build",
+            )
             log(
                 "warning",
                 "followers_profile_tabs_visible_probe_failed",
@@ -11694,8 +11703,30 @@ def _followers_profile_tabs_visible(d: u2.Device) -> bool:
             continue
         try:
             if el.exists(timeout=0.06):
+                _legacy_safe_log_substep(
+                    "legacy_safe_ui_hints_substep_completed",
+                    f"profile_tabs_visible:{phase}",
+                    t_probe,
+                    dump_count=0,
+                    signals_found=[phase],
+                )
                 return True
+            _legacy_safe_log_substep(
+                "legacy_safe_ui_hints_substep_completed",
+                f"profile_tabs_visible:{phase}",
+                t_probe,
+                dump_count=0,
+                signals_found=[],
+            )
         except Exception as e:
+            _legacy_safe_log_substep(
+                "legacy_safe_ui_hints_substep_completed",
+                f"profile_tabs_visible:{phase}",
+                t_probe,
+                dump_count=0,
+                signals_found=[],
+                probe_error="exists",
+            )
             log(
                 "warning",
                 "followers_profile_tabs_visible_probe_failed",
@@ -11724,6 +11755,36 @@ _POST_FOLLOW_LIKE_TOP_LEFT_XML_PROBE_MAX_ATTEMPTS = 2
 _POST_FOLLOW_LIKE_TOP_LEFT_XML_PROBE_RESERVED_S = 2.8
 _POST_FOLLOW_LIKE_TOP_LEFT_XML_SETTLE_S = 0.06
 _POST_FOLLOW_LIKE_TOP_LEFT_XML_RETRY_SETTLE_S = 0.05
+_LEGACY_SAFE_TIMING_CONTEXT: dict[str, Any] | None = None
+_LEGACY_SAFE_LAST_TABS_BOTTOM_BY_KEY: dict[str, int | None] = {}
+_LEGACY_SAFE_LAST_UI_HINTS_BY_KEY: dict[str, dict[str, bool]] = {}
+_LEGACY_SAFE_ATTEMPT_COUNT_BY_KEY: dict[str, int] = {}
+
+
+def _legacy_safe_timing_context() -> dict[str, Any] | None:
+    ctx = _LEGACY_SAFE_TIMING_CONTEXT
+    return ctx if isinstance(ctx, dict) else None
+
+
+def _legacy_safe_log_substep(event: str, substep: str, started_at: float, **extra: Any) -> None:
+    ctx = _legacy_safe_timing_context()
+    if not ctx:
+        return
+    try:
+        log(
+            "info",
+            event,
+            visual_candidate_id=ctx.get("visual_candidate_id"),
+            source_profile_username=ctx.get("source_profile_username"),
+            follower_username=ctx.get("follower_username"),
+            post_index=ctx.get("post_index"),
+            attempt_label=ctx.get("attempt_label"),
+            substep=str(substep),
+            duration_ms=round((time.perf_counter() - started_at) * 1000.0, 2),
+            **extra,
+        )
+    except Exception:
+        pass
 
 
 def _followers_profile_tabs_bottom_y_px(
@@ -11736,6 +11797,15 @@ def _followers_profile_tabs_bottom_y_px(
     Uses the same resource/description signals as ``_followers_profile_tabs_visible``,
     but returns geometry so callers can clamp grid scans strictly below the strip.
     """
+    ctx = _legacy_safe_timing_context()
+    previous_tabs_bottom: int | None = None
+    if ctx:
+        try:
+            previous_tabs_bottom = _LEGACY_SAFE_LAST_TABS_BOTTOM_BY_KEY.get(
+                str(ctx.get("stable_key") or "")
+            )
+        except Exception:
+            previous_tabs_bottom = None
     try:
         _, wh = d.window_size()
     except Exception:
@@ -11783,17 +11853,51 @@ def _followers_profile_tabs_bottom_y_px(
     best: int | None = None
     best_phase = ""
     for phase, fact in checks:
+        t_probe = time.perf_counter()
+        found_for_phase = False
+        candidate_bottom: int | None = None
         try:
             sel = fact()
         except Exception:
+            _legacy_safe_log_substep(
+                "legacy_safe_tabs_bottom_substep_completed",
+                phase,
+                t_probe,
+                source=phase,
+                tabs_bottom_y_px=None,
+                cached_possible=previous_tabs_bottom is not None,
+                stable_vs_previous=False,
+                probe_error="selector_build",
+            )
             continue
         for el in _nodes_for_selector(sel):
             bb = _bounds_bottom(el)
             if bb is None:
                 continue
+            found_for_phase = True
+            candidate_bottom = int(bb)
             if best is None or bb > best:
                 best = bb
                 best_phase = phase
+        _legacy_safe_log_substep(
+            "legacy_safe_tabs_bottom_substep_completed",
+            phase,
+            t_probe,
+            source=phase,
+            tabs_bottom_y_px=candidate_bottom,
+            cached_possible=previous_tabs_bottom is not None,
+            stable_vs_previous=(
+                previous_tabs_bottom is not None
+                and candidate_bottom is not None
+                and int(previous_tabs_bottom) == int(candidate_bottom)
+            ),
+            probe_found=found_for_phase,
+        )
+    if ctx:
+        try:
+            _LEGACY_SAFE_LAST_TABS_BOTTOM_BY_KEY[str(ctx.get("stable_key") or "")] = best
+        except Exception:
+            pass
     return (best, best_phase) if best is not None else (None, "")
 
 
@@ -14940,17 +15044,136 @@ _POST_FOLLOW_LIKES_GRID_DEEP_Y1_RATIO = 0.92
 
 def _post_follow_likes_grid_ui_surface_hints(d: u2.Device) -> dict[str, Any]:
     """Overlay + profile tab chrome for post-follow grid classification."""
-    overlay = _post_follow_overlay_ui_hints(d)
+    t_probe = time.perf_counter()
+    ctx = _legacy_safe_timing_context()
+    legacy_safe_lightweight = bool(ctx)
+    hint_mode = (
+        "legacy_safe_lightweight"
+        if legacy_safe_lightweight
+        else "standard_with_mute_sheet_probe"
+    )
+    if ctx:
+        try:
+            log(
+                "info",
+                "legacy_safe_ui_hints_probe_started",
+                visual_candidate_id=ctx.get("visual_candidate_id"),
+                source_profile_username=ctx.get("source_profile_username"),
+                follower_username=ctx.get("follower_username"),
+                post_index=ctx.get("post_index"),
+                attempt_label=ctx.get("attempt_label"),
+                hint_mode=hint_mode,
+                mute_sheet_level_skipped=True,
+                skipped_reason="not_needed_for_legacy_safe_like_open",
+                signals_searched=[
+                    "suggested_for_you",
+                    "discover_people",
+                    "turn_on_notifications",
+                    "notification_prompt",
+                    "profile_tabs_visible",
+                ],
+                known_previous_signals=ctx.get("known_previous_signals") or {},
+            )
+        except Exception:
+            pass
+    t_overlay = time.perf_counter()
+    if legacy_safe_lightweight:
+        overlay: dict[str, Any] = {}
+        for needle, key in (
+            ("Suggested for you", "suggested_for_you"),
+            ("Discover people", "discover_people"),
+            ("Turn On Notifications", "turn_on_notifications"),
+            ("notifications from", "notification_prompt"),
+        ):
+            t_text_probe = time.perf_counter()
+            found = False
+            try:
+                if d(textContains=needle).exists(timeout=0.04):
+                    overlay[key] = True
+                    found = True
+            except Exception:
+                _legacy_safe_log_substep(
+                    "legacy_safe_ui_hints_substep_completed",
+                    f"overlay_lightweight:textContains:{key}",
+                    t_text_probe,
+                    dump_count=0,
+                    signals_found=[],
+                    hint_mode=hint_mode,
+                    mute_sheet_level_skipped=True,
+                    skipped_reason="not_needed_for_legacy_safe_like_open",
+                    probe_error="exists",
+                )
+                continue
+            _legacy_safe_log_substep(
+                "legacy_safe_ui_hints_substep_completed",
+                f"overlay_lightweight:textContains:{key}",
+                t_text_probe,
+                dump_count=0,
+                signals_found=[key] if found else [],
+                hint_mode=hint_mode,
+                mute_sheet_level_skipped=True,
+                skipped_reason="not_needed_for_legacy_safe_like_open",
+            )
+    else:
+        overlay = _post_follow_overlay_ui_hints(d)
+    _legacy_safe_log_substep(
+        "legacy_safe_ui_hints_substep_completed",
+        "overlay_ui_hints",
+        t_overlay,
+        dump_count=0,
+        signals_found=sorted([k for k, v in overlay.items() if bool(v)]),
+        hint_mode=hint_mode,
+        mute_sheet_level_skipped=legacy_safe_lightweight,
+        skipped_reason=(
+            "not_needed_for_legacy_safe_like_open"
+            if legacy_safe_lightweight
+            else ""
+        ),
+    )
     tabs_visible = False
+    t_tabs_visible = time.perf_counter()
     try:
         tabs_visible = bool(_followers_profile_tabs_visible(d))
     except Exception:
         tabs_visible = False
-    return {
+    _legacy_safe_log_substep(
+        "legacy_safe_ui_hints_substep_completed",
+        "profile_tabs_visible_total",
+        t_tabs_visible,
+        dump_count=0,
+        signals_found=["profile_tabs_visible"] if tabs_visible else [],
+    )
+    out = {
         "suggested_for_you": bool(overlay.get("suggested_for_you")),
         "discover_people": bool(overlay.get("discover_people")),
         "profile_tabs_visible": tabs_visible,
     }
+    if ctx:
+        try:
+            log(
+                "info",
+                "legacy_safe_ui_hints_probe_completed",
+                visual_candidate_id=ctx.get("visual_candidate_id"),
+                source_profile_username=ctx.get("source_profile_username"),
+                follower_username=ctx.get("follower_username"),
+                post_index=ctx.get("post_index"),
+                attempt_label=ctx.get("attempt_label"),
+                duration_ms=round((time.perf_counter() - t_probe) * 1000.0, 2),
+                dump_count=0,
+                hint_mode=hint_mode,
+                mute_sheet_level_skipped=True,
+                skipped_reason="not_needed_for_legacy_safe_like_open",
+                signals_found=sorted([k for k, v in out.items() if bool(v)]),
+                signals_needed_for_legacy_retry=[
+                    "profile_tabs_visible",
+                    "suggested_for_you",
+                    "discover_people",
+                ],
+                known_previous_signals=ctx.get("known_previous_signals") or {},
+            )
+        except Exception:
+            pass
+    return out
 
 
 def _visual_profile_post_grid_band_probe(
@@ -18915,6 +19138,21 @@ def _post_follow_likes_open_top_left_legacy_visual_safe(
     """
     t0 = time.perf_counter()
 
+    def _log_timing(event: str, started_at: float, **extra: Any) -> None:
+        try:
+            log(
+                "info",
+                event,
+                visual_candidate_id=visual_candidate_id,
+                source_profile_username=source_profile_username,
+                follower_username=expected_follower_username,
+                post_index=int(post_index),
+                duration_ms=round((time.perf_counter() - started_at) * 1000.0, 2),
+                **extra,
+            )
+        except Exception:
+            pass
+
     def _finish(reason: str, **extra: Any) -> dict[str, Any]:
         out = {
             "ok": False,
@@ -18966,10 +19204,38 @@ def _post_follow_likes_open_top_left_legacy_visual_safe(
     except Exception:
         pass
 
+    stable_key = (
+        f"{source_profile_username}\0{expected_follower_username}\0"
+        f"{visual_candidate_id}\0{int(post_index)}"
+    )
+    try:
+        attempt_index = int(_LEGACY_SAFE_ATTEMPT_COUNT_BY_KEY.get(stable_key, 0)) + 1
+        _LEGACY_SAFE_ATTEMPT_COUNT_BY_KEY[stable_key] = attempt_index
+    except Exception:
+        attempt_index = 0
+    previous_ui_hints = _LEGACY_SAFE_LAST_UI_HINTS_BY_KEY.get(stable_key, {})
+    legacy_timing_ctx = {
+        "visual_candidate_id": visual_candidate_id,
+        "source_profile_username": source_profile_username,
+        "follower_username": expected_follower_username,
+        "post_index": int(post_index),
+        "stable_key": stable_key,
+        "attempt_index": attempt_index,
+        "attempt_label": f"legacy_safe_attempt_{attempt_index}" if attempt_index else "",
+        "known_previous_signals": previous_ui_hints,
+    }
+
+    _t_profile_lock = time.perf_counter()
     tv_open = visual_target_profile_lock_verify(
         d,
         source_profile_username=source_profile_username,
         action="vision_open_top_left_legacy_safe",
+    )
+    _log_timing(
+        "legacy_safe_timing_profile_lock_completed",
+        _t_profile_lock,
+        ok=bool(tv_open.get("ok")),
+        target_profile_lock_mismatch=not bool(tv_open.get("ok")),
     )
     if not bool(tv_open.get("ok")):
         return _finish("legacy_visual_top_left_failed", target_profile_lock_mismatch=True)
@@ -18978,14 +19244,83 @@ def _post_follow_likes_open_top_left_legacy_visual_safe(
         ww, wh = d.window_size()
     except Exception:
         ww, wh = 1080, 2340
+    _t_ui_hints = time.perf_counter()
+    _prev_timing_ctx = _LEGACY_SAFE_TIMING_CONTEXT
     try:
+        globals()["_LEGACY_SAFE_TIMING_CONTEXT"] = legacy_timing_ctx
         ui_hints = _post_follow_likes_grid_ui_surface_hints(d)
     except Exception:
         ui_hints = {}
+    finally:
+        globals()["_LEGACY_SAFE_TIMING_CONTEXT"] = _prev_timing_ctx
     try:
+        _LEGACY_SAFE_LAST_UI_HINTS_BY_KEY[stable_key] = {
+            "profile_tabs_visible": bool(ui_hints.get("profile_tabs_visible")),
+            "suggested_for_you": bool(ui_hints.get("suggested_for_you")),
+            "discover_people": bool(ui_hints.get("discover_people")),
+        }
+    except Exception:
+        pass
+    _log_timing(
+        "legacy_safe_timing_ui_hints_completed",
+        _t_ui_hints,
+        profile_tabs_visible=bool(ui_hints.get("profile_tabs_visible")),
+        suggested_for_you=bool(ui_hints.get("suggested_for_you")),
+        discover_people=bool(ui_hints.get("discover_people")),
+    )
+    _t_tabs_bottom = time.perf_counter()
+    previous_tabs_bottom = _LEGACY_SAFE_LAST_TABS_BOTTOM_BY_KEY.get(stable_key)
+    try:
+        log(
+            "info",
+            "legacy_safe_tabs_bottom_probe_started",
+            visual_candidate_id=visual_candidate_id,
+            source_profile_username=source_profile_username,
+            follower_username=expected_follower_username,
+            post_index=int(post_index),
+            attempt_label=legacy_timing_ctx.get("attempt_label"),
+            cached_possible=previous_tabs_bottom is not None,
+            previous_tabs_bottom_y_px=previous_tabs_bottom,
+        )
+    except Exception:
+        pass
+    _prev_timing_ctx = _LEGACY_SAFE_TIMING_CONTEXT
+    try:
+        globals()["_LEGACY_SAFE_TIMING_CONTEXT"] = legacy_timing_ctx
         tabs_bt, _phase = _followers_profile_tabs_bottom_y_px(d, window_h=int(wh))
     except Exception:
         tabs_bt = None
+        _phase = ""
+    finally:
+        globals()["_LEGACY_SAFE_TIMING_CONTEXT"] = _prev_timing_ctx
+    try:
+        log(
+            "info",
+            "legacy_safe_tabs_bottom_probe_completed",
+            visual_candidate_id=visual_candidate_id,
+            source_profile_username=source_profile_username,
+            follower_username=expected_follower_username,
+            post_index=int(post_index),
+            attempt_label=legacy_timing_ctx.get("attempt_label"),
+            duration_ms=round((time.perf_counter() - _t_tabs_bottom) * 1000.0, 2),
+            source=str(_phase or ""),
+            tabs_bottom_y_px=int(tabs_bt) if tabs_bt is not None else None,
+            cached_possible=previous_tabs_bottom is not None,
+            stable_vs_previous=(
+                previous_tabs_bottom is not None
+                and tabs_bt is not None
+                and int(previous_tabs_bottom) == int(tabs_bt)
+            ),
+        )
+    except Exception:
+        pass
+    _log_timing(
+        "legacy_safe_timing_tabs_bottom_completed",
+        _t_tabs_bottom,
+        tabs_bottom_found=tabs_bt is not None,
+        profile_tabs_bottom_y_px=int(tabs_bt) if tabs_bt is not None else None,
+        phase=str(_phase or ""),
+    )
     if tabs_bt is None:
         return _finish("legacy_visual_top_left_candidate_ambiguous")
     margin = int(_POST_FOLLOW_PROFILE_TABS_GRID_MARGIN_PX)
@@ -19003,14 +19338,27 @@ def _post_follow_likes_open_top_left_legacy_visual_safe(
         / f"vision_open_top_left_legacy_safe_{int(time.time() * 1000)}.png"
     )
     try:
+        _t_screenshot = time.perf_counter()
         screenshot(d, shot_path)
+        _log_timing(
+            "legacy_safe_timing_screenshot_capture_completed",
+            _t_screenshot,
+        )
         from PIL import Image
 
+        _t_pil_open = time.perf_counter()
         im = Image.open(shot_path).convert("RGB")
         iw, ih = im.size
+        _log_timing(
+            "legacy_safe_timing_pil_open_completed",
+            _t_pil_open,
+            image_width=int(iw),
+            image_height=int(ih),
+        )
     except Exception as e:
         return _finish("legacy_visual_top_left_failed", error=str(e)[:160])
 
+    _t_dynamic_scan = time.perf_counter()
     (
         search_y_min_px,
         search_y_min_source,
@@ -19035,12 +19383,27 @@ def _post_follow_likes_open_top_left_legacy_visual_safe(
         var_thr=float(_POST_FOLLOW_LIKES_GRID_VAR_THR),
         search_y_min_px=int(search_y_min_px),
     )
+    _log_timing(
+        "legacy_safe_timing_dynamic_row_scan_completed",
+        _t_dynamic_scan,
+        ok=bool(dyn.get("ok")),
+        dynamic_first_row_search_y_min_px=int(search_y_min_px),
+        dynamic_first_row_search_y_min_source=str(search_y_min_source),
+        profile_tabs_bottom_y_px=(
+            int(profile_tabs_bottom_y_px)
+            if profile_tabs_bottom_y_px is not None
+            else None
+        ),
+        dynamic_first_row_top=dyn.get("first_row_top"),
+        dynamic_first_row_solid_count=dyn.get("solid_count"),
+    )
     if not bool(dyn.get("ok")):
         return _finish(
             "legacy_visual_top_left_variance_insufficient",
             screenshot_path=shot_path,
             dynamic_first_row_search_y_min_px=int(search_y_min_px),
         )
+    _t_candidate_selection = time.perf_counter()
     cell_w = max(24, int(iw) // 3)
     cell_h = cell_w
     x0 = 0
@@ -19083,6 +19446,17 @@ def _post_follow_likes_open_top_left_legacy_visual_safe(
         wh=int(wh),
         tap_frac_x=float(_POST_FOLLOW_GRID_CELL_TAP_FRAC_X),
         tap_frac_y=float(_POST_FOLLOW_GRID_CELL_TAP_FRAC_Y),
+    )
+    _log_timing(
+        "legacy_safe_timing_candidate_selection_completed",
+        _t_candidate_selection,
+        selected_col=0,
+        selected_row=0,
+        selected_variance=round(float(variance), 2),
+        tap_x=int(tap_x),
+        tap_y=int(tap_y),
+        dynamic_first_row_top=int(y0),
+        dynamic_first_row_solid_count=dyn.get("solid_count"),
     )
     try:
         log(
@@ -33930,6 +34304,7 @@ def open_follower_profile_from_list(
 def _post_follow_overlay_ui_hints(d: u2.Device) -> dict[str, Any]:
     """Lightweight sheet/popup hints for post-follow observation (no OCR)."""
     hints: dict[str, Any] = {}
+    t_sheet = time.perf_counter()
     try:
         sheet_level, _sheet_meta = _mute_engine_v2_detect_sheet_level(d)
         hints["mute_sheet_level"] = sheet_level
@@ -33947,17 +34322,42 @@ def _post_follow_overlay_ui_hints(d: u2.Device) -> dict[str, Any]:
             hints["likely_following_options_sheet"] = True
     except Exception:
         pass
+    _legacy_safe_log_substep(
+        "legacy_safe_ui_hints_substep_completed",
+        "overlay:mute_sheet_level",
+        t_sheet,
+        dump_count=0,
+        signals_found=sorted([k for k, v in hints.items() if bool(v)]),
+    )
     for needle, key in (
         ("Suggested for you", "suggested_for_you"),
         ("Discover people", "discover_people"),
         ("Turn On Notifications", "turn_on_notifications"),
         ("notifications from", "notification_prompt"),
     ):
+        t_probe = time.perf_counter()
+        found = False
         try:
             if d(textContains=needle).exists(timeout=0.04):
                 hints[key] = True
+                found = True
         except Exception:
+            _legacy_safe_log_substep(
+                "legacy_safe_ui_hints_substep_completed",
+                f"overlay:textContains:{key}",
+                t_probe,
+                dump_count=0,
+                signals_found=[],
+                probe_error="exists",
+            )
             continue
+        _legacy_safe_log_substep(
+            "legacy_safe_ui_hints_substep_completed",
+            f"overlay:textContains:{key}",
+            t_probe,
+            dump_count=0,
+            signals_found=[key] if found else [],
+        )
     return hints
 
 
