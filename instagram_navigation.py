@@ -37,6 +37,29 @@ _TYPE_SEARCH_FAILURE_REASON: str | None = None
 def get_type_search_failure_reason() -> str | None:
     return _TYPE_SEARCH_FAILURE_REASON
 
+
+def _startup_timing_log(
+    event: str,
+    started_at: float,
+    *,
+    phase: str,
+    substep: str,
+    source: str,
+    **fields: Any,
+) -> None:
+    try:
+        log(
+            "info",
+            event,
+            duration_ms=round((time.perf_counter() - started_at) * 1000.0, 2),
+            phase=str(phase or ""),
+            substep=str(substep or ""),
+            source=str(source or ""),
+            **fields,
+        )
+    except Exception:
+        pass
+
 # Warm search surface cache (same session / activity family)
 _LAST_SEARCH_SURFACE_TS: float = 0.0
 _LAST_SEARCH_SURFACE_OK: bool = False
@@ -2288,6 +2311,21 @@ def open_search(
             caller_context=ctx or None,
             strict_verify_ms=round(strict_verify_ms, 2),
         )
+        _startup_timing_log(
+            "startup_timing_search_surface_completed",
+            t_open_entry,
+            phase="ct_search",
+            substep="open_search_strict_verified",
+            source="open_search",
+            cache_hit=False,
+            reused_signal=False,
+            duplicate_detected=False,
+            selector=click_name,
+            caller_context=ctx or None,
+            strict_verify_ms=round(strict_verify_ms, 2),
+            search_click_ms=round(search_click_ms, 2),
+            search_field_ready_ms=round(search_field_ready_ms, 2),
+        )
         _mark_search_surface_ok(d, pkg)
         if is_follow_ct_search_context_active():
             mark_follow_ct_open_search_strict_verified()
@@ -4069,6 +4107,10 @@ def _early_profile_transition_signal(d: u2.Device, username: str) -> str | None:
     First profile-open hints after row tap (tight resource-ids + chrome).
     Used only for transition timing; verify_profile remains authoritative.
     """
+    s = _profile_signal_a_header_ids(d)
+    if s:
+        return s
+
     rid_pairs = (
         ("action_bar_title", "com.instagram.android:id/action_bar_title"),
         ("profile_header", "com.instagram.android:id/profile_header"),
@@ -4248,6 +4290,39 @@ def tap_account_result(
             exact_match_ms=exact_ready_ms,
             reject_reasons_top=[],
         )
+        if follow_ct_active:
+            _startup_timing_log(
+                "startup_timing_ct_row_detect_completed",
+                t_detect,
+                phase="ct_search",
+                substep="ct_row_detect",
+                source="tap_account_result",
+                cache_hit=False,
+                reused_signal=bool(fast_accept_used or hot_el_found),
+                duplicate_detected=False,
+                username=username,
+                found=bool(found),
+                selected_path=selected_path,
+                row_detect_ms=round(float(_perf.get("row_detect_ms", 0.0) or 0.0), 2),
+                first_result_ms=first_seen_ms,
+                exact_match_ms=exact_ready_ms,
+            )
+            _startup_timing_log(
+                "startup_ct_row_detect_completed",
+                t_detect,
+                phase="ct_search",
+                substep="ct_row_detect",
+                source="tap_account_result",
+                cache_hit=False,
+                reused_signal=bool(fast_accept_used or hot_el_found),
+                duplicate_detected=False,
+                username=username,
+                found=bool(found),
+                selected_path=selected_path,
+                row_detect_ms=round(float(_perf.get("row_detect_ms", 0.0) or 0.0), 2),
+                first_result_ms=first_seen_ms,
+                exact_match_ms=exact_ready_ms,
+            )
 
     fused = _peek_pending_fused_fast_ime_row(username)
     if fused:
@@ -4257,6 +4332,19 @@ def tap_account_result(
     el = None
     fast_accept_used = False
     t_detect = time.perf_counter()
+    if follow_ct_active:
+        _startup_timing_log(
+            "startup_ct_row_detect_started",
+            t_detect,
+            phase="ct_search",
+            substep="ct_row_detect_started",
+            source="tap_account_result",
+            cache_hit=False,
+            reused_signal=False,
+            duplicate_detected=False,
+            username=username,
+            search_ui_mode=get_search_ui_mode(),
+        )
     poll_s = float(getattr(config, "HOT_ROW_POLL_S", 0.12))
 
     if fused:
@@ -4479,6 +4567,7 @@ def tap_account_result(
         t_click = time.perf_counter()
         d.click(cx, cy)
         row_tap_ms = (time.perf_counter() - t_click) * 1000
+        t_after_row_tap = time.perf_counter()
         _perf["row_tap_command_ms"] = row_tap_ms
         log(
             "info",
@@ -4499,6 +4588,21 @@ def tap_account_result(
             tap_mode=tap_mode,
             search_ui_mode=get_search_ui_mode(),
         )
+        if follow_ct_active:
+            _startup_timing_log(
+                "startup_ct_row_tap_completed",
+                t_click,
+                phase="ct_profile_transition",
+                substep="ct_row_tap",
+                source="tap_account_result",
+                cache_hit=False,
+                reused_signal=False,
+                duplicate_detected=False,
+                username=username,
+                row_tap_command_ms=round(row_tap_ms, 2),
+                tap_mode=tap_mode,
+                search_ui_mode=get_search_ui_mode(),
+            )
 
         settle_s = min(
             0.15,
@@ -4527,6 +4631,25 @@ def tap_account_result(
                 break
             time.sleep(random.uniform(sleep_lo, sleep_hi))
         _perf["profile_transition_wait_ms"] = (time.perf_counter() - t_trans) * 1000
+        if follow_ct_active:
+            _startup_timing_log(
+                "startup_ct_profile_transition_completed",
+                t_after_row_tap,
+                phase="ct_profile_transition",
+                substep="ct_profile_transition_after_row_tap",
+                source="tap_account_result",
+                cache_hit=False,
+                reused_signal=False,
+                duplicate_detected=False,
+                username=username,
+                transition_signal=trans_signal or "",
+                post_tap_settle_ms=round(
+                    float(_perf.get("post_tap_settle_ms", 0.0) or 0.0), 2
+                ),
+                profile_transition_wait_ms=round(
+                    float(_perf.get("profile_transition_wait_ms", 0.0) or 0.0), 2
+                ),
+            )
 
         log(
             "info",
@@ -4584,6 +4707,19 @@ def verify_profile(d: u2.Device, username: str) -> bool:
                 log(
                     "info",
                     "profile_verify_success",
+                    username=username,
+                    signal=signal,
+                    attempts=attempt,
+                )
+                _startup_timing_log(
+                    "startup_timing_ct_profile_verified",
+                    t0,
+                    phase="ct_profile_transition",
+                    substep="profile_verify_completed",
+                    source="verify_profile",
+                    cache_hit=False,
+                    reused_signal=False,
+                    duplicate_detected=False,
                     username=username,
                     signal=signal,
                     attempts=attempt,
@@ -18562,7 +18698,7 @@ def visual_profile_has_no_posts(
 
     for needle in ui_needles:
         try:
-            if d(textContains=needle).exists(timeout=0.1):
+            if d(textContains=needle).exists(timeout=0.1) is True:
                 out = dict(base_out)
                 out["no_posts_detected"] = True
                 out["detection_method"] = f"ui_textContains:{needle[:48]}"
@@ -18578,7 +18714,7 @@ def visual_profile_has_no_posts(
         "Pas encore de publication",
     ):
         try:
-            if d(descriptionContains=needle).exists(timeout=0.09):
+            if d(descriptionContains=needle).exists(timeout=0.09) is True:
                 out = dict(base_out)
                 out["no_posts_detected"] = True
                 out["detection_method"] = f"ui_descriptionContains:{needle[:48]}"
@@ -39713,6 +39849,52 @@ def run_post_follow_post_likes_phase(
             pass
         preopened_out: dict[str, Any] | None = None
         grid_out: dict[str, Any] = {}
+        no_posts_check = visual_profile_has_no_posts(d, source_profile_username=src)
+        if no_posts_check.get("no_posts_detected") is True:
+            meta_np = _followers_current_pkg_activity(d)
+            reason_np = "post_follow_like_skipped_no_posts_yet"
+            post_rec["outcome"] = "no_posts"
+            post_rec["failure_reason"] = reason_np
+            per_post.append(post_rec)
+            _likes_perf_ctx["failure_reason"] = reason_np
+            _likes_perf_ctx["likes_failure_kind"] = reason_np
+            try:
+                log(
+                    "info",
+                    "visual_profile_no_posts_detected",
+                    source_profile_username=src,
+                    follower_username=cand,
+                    visual_candidate_id=vcid,
+                    current_activity=meta_np.get("current_activity"),
+                    current_package=meta_np.get("current_package"),
+                    detection_method=no_posts_check.get("detection_method"),
+                    confidence=round(float(no_posts_check.get("confidence") or 0.0), 4),
+                )
+                log(
+                    "info",
+                    "post_follow_post_likes_phase_skipped",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    follower_username=cand,
+                    reason="likes_skipped_no_posts",
+                    skipped_reason=reason_np,
+                    no_posts_profile=True,
+                    no_posts_detection_method=no_posts_check.get("detection_method"),
+                    no_posts_confidence=round(float(no_posts_check.get("confidence") or 0.0), 4),
+                )
+            except Exception:
+                pass
+            return _finish(
+                phase_outcome="skipped",
+                skipped_reason=reason_np,
+                skipped=True,
+                ok=True,
+                attempted_count=0,
+                liked_count=0,
+                skipped_already_liked_count=0,
+                failed_navigation_count=failed_nav,
+                per_post=per_post,
+            )
         t_open_legacy_first = time.perf_counter()
         legacy_first_out = _post_follow_likes_open_top_left_legacy_visual_safe(
             d,
@@ -42086,6 +42268,7 @@ def ensure_global_search_surface(
         "source_profile_username": source_profile_username,
     }
     try:
+        t_surface = time.perf_counter()
         log(
             "info",
             "ensure_global_search_surface_started",
@@ -42112,6 +42295,18 @@ def ensure_global_search_surface(
                 phase="ensure_global_search_surface",
                 detail="open_search_ok",
             )
+            _startup_timing_log(
+                "startup_timing_search_surface_completed",
+                t_surface,
+                phase="ct_search",
+                substep="ensure_global_search_surface",
+                source="ensure_global_search_surface",
+                cache_hit=False,
+                reused_signal=False,
+                duplicate_detected=False,
+                detail="open_search_ok",
+                intended_username=intended_username,
+            )
             return meta
         if is_lightweight_search_screen(d, pkg):
             if apply_search_surface_reuse_metrics(d, pkg, "ensure_global_fallback"):
@@ -42122,6 +42317,18 @@ def ensure_global_search_surface(
                     "instagram_search_surface_verified",
                     phase="ensure_global_search_surface",
                     detail="lightweight_search_screen",
+                )
+                _startup_timing_log(
+                    "startup_timing_search_surface_completed",
+                    t_surface,
+                    phase="ct_search",
+                    substep="ensure_global_search_surface",
+                    source="ensure_global_search_surface",
+                    cache_hit=True,
+                    reused_signal=True,
+                    duplicate_detected=False,
+                    detail="lightweight_search_screen",
+                    intended_username=intended_username,
                 )
                 return meta
         meta["reason"] = "open_search_failed"

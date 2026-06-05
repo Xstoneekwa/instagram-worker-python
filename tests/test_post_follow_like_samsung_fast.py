@@ -7,6 +7,24 @@ from unittest import mock
 import instagram_navigation as nav
 
 
+class FakeWaitSelector:
+    def __init__(self, present: bool) -> None:
+        self.present = present
+
+    def wait(self, timeout: float = 0.0) -> bool:
+        return self.present
+
+
+class FakeCloneHeaderDevice:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def __call__(self, **kwargs: object) -> FakeWaitSelector:
+        self.calls.append(dict(kwargs))
+        rid_match = str(kwargs.get("resourceIdMatches") or "")
+        return FakeWaitSelector(bool(rid_match and "profile_header" in rid_match))
+
+
 def _probe_sequence_from_visible_fn(
     visible_fn: object,
 ) -> object:
@@ -52,6 +70,20 @@ def _probe_sequence_from_visible_fn(
 
 
 class PostFollowLikeSamsungFastTest(unittest.TestCase):
+    def test_early_profile_transition_uses_clone_compatible_header_before_username_band(self) -> None:
+        d = FakeCloneHeaderDevice()
+        with mock.patch.object(
+            nav,
+            "_profile_signal_b_username_top_band",
+            side_effect=AssertionError("username_top_band should not be checked before header ids"),
+        ):
+            signal = nav._early_profile_transition_signal(d, "source.profile")
+
+        self.assertEqual(signal, "header_resource_id")
+        self.assertTrue(
+            any("profile_header" in str(call.get("resourceIdMatches") or "") for call in d.calls)
+        )
+
     def test_post_follow_surface_truth_confirms_profile_over_followers_list(self) -> None:
         device = mock.MagicMock()
         logs: list[tuple[str, str, dict[str, object]]] = []
@@ -553,6 +585,88 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
     def test_open_post_budget_constants(self) -> None:
         self.assertLessEqual(nav._POST_FOLLOW_LIKE_OPEN_POST_MAX_S, 4.0)
         self.assertLessEqual(nav._POST_FOLLOW_LIKE_GRID_PREP_MAX_S, 6.0)
+
+    def test_no_posts_yet_skips_like_before_legacy_safe_open(self) -> None:
+        device = mock.MagicMock()
+        contract_ctx = mock.MagicMock()
+        contract_ctx.current_state.value = "sheet_dismissed"
+        logs: list[tuple[str, dict[str, object]]] = []
+
+        def _fake_log(_level: str, event: str, **kw: object) -> None:
+            logs.append((str(event), dict(kw)))
+
+        with mock.patch.object(
+            nav.config, "POST_FOLLOW_POST_LIKES_ENABLED", True, create=True
+        ), mock.patch.object(
+            nav.config, "ENABLE_REAL_VISUAL_POST_LIKE", True, create=True
+        ), mock.patch.object(
+            nav.config, "POST_FOLLOW_POST_LIKES_PERCENTAGE", 100, create=True
+        ), mock.patch.object(
+            nav.config, "POST_FOLLOW_POST_LIKES_COUNT_RANGE", "1-1", create=True
+        ), mock.patch.object(
+            nav.config, "POST_FOLLOW_TOTAL_LIKES_LIMIT", 150, create=True
+        ), mock.patch.object(
+            nav, "read_current_profile_username_for_follow_gate", return_value="cand"
+        ), mock.patch(
+            "navigation_engine.observe_instagram_state",
+            return_value={"state": "CANDIDATE_PROFILE", "confidence": 0.9},
+        ), mock.patch.object(
+            nav,
+            "_post_follow_like_precheck_mute_sheet",
+            return_value={"skip_like": False, "precheck_ms": 1.0},
+        ), mock.patch.object(
+            nav,
+            "_post_follow_like_precheck_surface",
+            return_value={
+                "skip_like": False,
+                "skip_reason": "",
+                "precheck_ms": 1.0,
+                "profile_candidate_visible": True,
+            },
+        ), mock.patch(
+            "follow_state_contract.evaluate_like_precheck_contract",
+            return_value=(contract_ctx, True, ""),
+        ), mock.patch.object(
+            nav,
+            "visual_profile_has_no_posts",
+            return_value={
+                "no_posts_detected": True,
+                "detection_method": "hierarchy_regex:0_posts_en",
+                "confidence": 0.83,
+            },
+        ) as no_posts, mock.patch.object(
+            nav,
+            "_post_follow_likes_open_top_left_legacy_visual_safe",
+        ) as legacy_open, mock.patch.object(
+            nav, "ensure_post_grid_visible_for_post_follow_likes"
+        ) as grid_probe, mock.patch.object(
+            nav, "log", side_effect=_fake_log
+        ), mock.patch.object(nav, "time") as tmock:
+            tmock.perf_counter = time.perf_counter
+            tmock.time = time.time
+            tmock.sleep = lambda *_a, **_k: None
+            out = nav.run_post_follow_post_likes_phase(
+                device,
+                pkg="com.instagram.android",
+                source_profile_username="ct",
+                follower_username="cand",
+                visual_candidate_id="vc-1",
+                follow_success_verified=True,
+                follow_state_after="following",
+                skipped_tap=False,
+            )
+
+        no_posts.assert_called_once()
+        legacy_open.assert_not_called()
+        grid_probe.assert_not_called()
+        self.assertTrue(out.get("ok"))
+        self.assertTrue(out.get("skipped"))
+        self.assertEqual(out.get("phase_outcome"), "skipped")
+        self.assertEqual(out.get("skipped_reason"), "post_follow_like_skipped_no_posts_yet")
+        self.assertEqual(out.get("liked_count"), 0)
+        self.assertEqual(out.get("attempted_count"), 0)
+        self.assertIn("visual_profile_no_posts_detected", [event for event, _kw in logs])
+        self.assertIn("post_follow_post_likes_phase_skipped", [event for event, _kw in logs])
 
     def test_legacy_ambiguous_reveals_and_retries_without_xml_probe(self) -> None:
         device = mock.MagicMock()
