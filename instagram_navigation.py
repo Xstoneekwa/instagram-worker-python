@@ -19392,6 +19392,78 @@ def ensure_post_grid_visible_for_post_follow_likes(
     return out
 
 
+_POST_FOLLOW_NO_POSTS_TIER1_TEXT_TIMEOUT_S = 0.04
+_POST_FOLLOW_NO_POSTS_TIER1_DESC_TIMEOUT_S = 0.035
+_POST_FOLLOW_NO_POSTS_TIER1_EMPTY_TEXT_RE = (
+    r"(?i).*(no\s+posts(?:\s+yet)?|aucune\s+(publication|photo)|"
+    r"pas\s+encore\s+de\s+(publication|photo)|sin\s+publicaciones(?:\s+a[uú]n)?|"
+    r"keine\s+beitr[aä]ge(?:\s+vorhanden)?|nessun\s+post|nessuna\s+pubblicazione|"
+    r"sem\s+publica[cç][oõ]es(?:\s+ainda)?|投稿なし|投稿がありません).*"
+)
+_POST_FOLLOW_NO_POSTS_TIER1_ZERO_POSTS_RE = (
+    r"(?i)^\s*0\s+(posts?|publications?|publicaci[oó]n(?:es)?|"
+    r"beitr[aä]ge|pubblicazioni)\s*$"
+)
+
+
+def _visual_profile_no_posts_tier1_direct_check(
+    d: u2.Device,
+    *,
+    source_profile_username: str | None = None,
+) -> dict[str, Any]:
+    """
+    Ultra-cheap No Posts probe: direct UI text/content-desc only.
+    No hierarchy dump and no screenshot. Used before legacy-safe when surface is confirmed.
+    """
+    meta = _followers_current_pkg_activity(d)
+    base_out: dict[str, Any] = {
+        "no_posts_detected": False,
+        "detection_method": "none",
+        "confidence": 0.0,
+        "current_activity": meta.get("current_activity"),
+        "current_package": meta.get("current_package"),
+        "source_profile_username": source_profile_username or "",
+        "tier1_detected": False,
+    }
+
+    for selector_kind, selector_kwargs, method, confidence, timeout_s in (
+        (
+            "textMatches",
+            {"textMatches": _POST_FOLLOW_NO_POSTS_TIER1_EMPTY_TEXT_RE},
+            "tier1_ui_textMatches:empty_message",
+            0.91,
+            _POST_FOLLOW_NO_POSTS_TIER1_TEXT_TIMEOUT_S,
+        ),
+        (
+            "textMatches",
+            {"textMatches": _POST_FOLLOW_NO_POSTS_TIER1_ZERO_POSTS_RE},
+            "tier1_ui_textMatches:0_posts",
+            0.84,
+            _POST_FOLLOW_NO_POSTS_TIER1_TEXT_TIMEOUT_S,
+        ),
+        (
+            "descriptionMatches",
+            {"descriptionMatches": _POST_FOLLOW_NO_POSTS_TIER1_EMPTY_TEXT_RE},
+            "tier1_ui_descriptionMatches:empty_message",
+            0.89,
+            _POST_FOLLOW_NO_POSTS_TIER1_DESC_TIMEOUT_S,
+        ),
+    ):
+        try:
+            if d(**selector_kwargs).exists(timeout=float(timeout_s)) is True:
+                out = dict(base_out)
+                out["no_posts_detected"] = True
+                out["tier1_detected"] = True
+                out["detection_method"] = method
+                out["confidence"] = confidence
+                out["selector_kind"] = selector_kind
+                return out
+        except Exception:
+            continue
+
+    return base_out
+
+
 def visual_profile_has_no_posts(
     d: u2.Device,
     *,
@@ -41845,36 +41917,126 @@ def run_post_follow_post_likes_phase(
                 pass
             return no_posts_visual
 
-        t_np_cheap = time.perf_counter()
+        surface_profile_ok = bool(
+            surface_precheck.get("profile_candidate_visible")
+        ) and not bool(surface_precheck.get("followers_list_visible"))
+        grid_tab_visible = bool(surface_precheck.get("grid_tab_visible"))
+
+        t_np_tier1 = time.perf_counter()
         try:
             log(
                 "info",
-                "visual_profile_no_posts_cheap_check_started",
+                "visual_profile_no_posts_tier1_check_started",
                 source_profile_username=src,
                 follower_username=cand,
                 visual_candidate_id=vcid,
+                surface_profile_ok=surface_profile_ok,
+                grid_tab_visible=grid_tab_visible,
             )
         except Exception:
             pass
-        no_posts_check = visual_profile_has_no_posts(
+        tier1_check = _visual_profile_no_posts_tier1_direct_check(
             d,
             source_profile_username=src,
-            include_visual_fallback=False,
         )
+        tier1_duration_ms = round((time.perf_counter() - t_np_tier1) * 1000.0, 2)
         try:
             log(
                 "info",
-                "visual_profile_no_posts_cheap_check_completed",
+                "visual_profile_no_posts_tier1_check_completed",
                 source_profile_username=src,
                 follower_username=cand,
                 visual_candidate_id=vcid,
-                cheap_detected=bool(no_posts_check.get("no_posts_detected")),
-                visual_fallback_used=False,
-                reason=str(no_posts_check.get("detection_method") or "not_detected"),
-                duration_ms=round((time.perf_counter() - t_np_cheap) * 1000.0, 2),
+                tier1_detected=bool(tier1_check.get("no_posts_detected")),
+                full_check_used=False,
+                reason=str(tier1_check.get("detection_method") or "not_detected"),
+                duration_ms=tier1_duration_ms,
+                surface_profile_ok=surface_profile_ok,
+                grid_tab_visible=grid_tab_visible,
             )
         except Exception:
             pass
+        if tier1_check.get("no_posts_detected") is True:
+            return _skip_no_posts(tier1_check)
+
+        full_check_used = False
+        no_posts_check: dict[str, Any] = dict(tier1_check)
+        if surface_profile_ok and grid_tab_visible:
+            try:
+                log(
+                    "info",
+                    "visual_profile_no_posts_full_cheap_check_skipped",
+                    source_profile_username=src,
+                    follower_username=cand,
+                    visual_candidate_id=vcid,
+                    tier1_detected=False,
+                    full_check_used=False,
+                    reason="surface_profile_and_grid_tabs_confirmed",
+                    duration_ms=0.0,
+                    surface_profile_ok=surface_profile_ok,
+                    grid_tab_visible=grid_tab_visible,
+                )
+            except Exception:
+                pass
+        else:
+            full_check_used = True
+            t_np_full = time.perf_counter()
+            try:
+                log(
+                    "info",
+                    "visual_profile_no_posts_full_cheap_check_started",
+                    source_profile_username=src,
+                    follower_username=cand,
+                    visual_candidate_id=vcid,
+                    surface_profile_ok=surface_profile_ok,
+                    grid_tab_visible=grid_tab_visible,
+                    reason=(
+                        "surface_profile_or_grid_tabs_ambiguous"
+                        if not surface_profile_ok or not grid_tab_visible
+                        else "full_cheap_required"
+                    ),
+                )
+            except Exception:
+                pass
+            no_posts_check = visual_profile_has_no_posts(
+                d,
+                source_profile_username=src,
+                include_visual_fallback=False,
+            )
+            try:
+                log(
+                    "info",
+                    "visual_profile_no_posts_full_cheap_check_completed",
+                    source_profile_username=src,
+                    follower_username=cand,
+                    visual_candidate_id=vcid,
+                    tier1_detected=False,
+                    full_check_used=True,
+                    cheap_detected=bool(no_posts_check.get("no_posts_detected")),
+                    visual_fallback_used=False,
+                    reason=str(no_posts_check.get("detection_method") or "not_detected"),
+                    duration_ms=round((time.perf_counter() - t_np_full) * 1000.0, 2),
+                    surface_profile_ok=surface_profile_ok,
+                    grid_tab_visible=grid_tab_visible,
+                )
+            except Exception:
+                pass
+            try:
+                log(
+                    "info",
+                    "visual_profile_no_posts_cheap_check_completed",
+                    source_profile_username=src,
+                    follower_username=cand,
+                    visual_candidate_id=vcid,
+                    cheap_detected=bool(no_posts_check.get("no_posts_detected")),
+                    visual_fallback_used=False,
+                    reason=str(no_posts_check.get("detection_method") or "not_detected"),
+                    duration_ms=round((time.perf_counter() - t_np_full) * 1000.0, 2),
+                    full_check_used=full_check_used,
+                    tier1_detected=False,
+                )
+            except Exception:
+                pass
         if no_posts_check.get("no_posts_detected") is True:
             return _skip_no_posts(no_posts_check)
         try:
