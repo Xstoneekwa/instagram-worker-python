@@ -1101,6 +1101,12 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
         self.assertTrue(completed)
         self.assertTrue(completed[-1].get("pre_reveal_used"))
         self.assertEqual(completed[-1].get("tabs_bottom_y"), 1777)
+        invalidated = [
+            kw for event, kw in logs if event == "post_like_surface_context_invalidated"
+        ]
+        self.assertTrue(invalidated)
+        self.assertEqual(invalidated[-1].get("known_tabs_bottom_y_px"), 1777)
+        self.assertFalse(invalidated[-1].get("reused"))
 
     def test_pre_reveal_tabs_normal_keeps_first_legacy_safe_direct(self) -> None:
         device = mock.MagicMock()
@@ -1448,6 +1454,50 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
         )
         self.assertTrue(ok)
         self.assertEqual(reason, "")
+
+    def test_dynamic_first_row_layout_reuses_known_tabs_bottom(self) -> None:
+        device = mock.MagicMock()
+        with mock.patch.object(
+            nav, "_followers_profile_tabs_bottom_y_px"
+        ) as tabs_probe:
+            y_min, source, tabs_bottom, margin = (
+                nav._post_follow_dynamic_first_row_search_y_min_layout(
+                    device,
+                    2340,
+                    {"profile_tabs_visible": True},
+                    known_tabs_bottom_y_px=900,
+                    known_tabs_bottom_source="same_attempt_tabs",
+                )
+            )
+
+        tabs_probe.assert_not_called()
+        self.assertEqual(y_min, 900 + nav._POST_FOLLOW_PROFILE_TABS_GRID_MARGIN_PX)
+        self.assertEqual(source, "profile_tabs_bottom")
+        self.assertEqual(tabs_bottom, 900)
+        self.assertEqual(margin, nav._POST_FOLLOW_PROFILE_TABS_GRID_MARGIN_PX)
+
+    def test_dynamic_first_row_layout_falls_back_when_known_tabs_invalid(self) -> None:
+        device = mock.MagicMock()
+        with mock.patch.object(
+            nav,
+            "_followers_profile_tabs_bottom_y_px",
+            return_value=(800, "resourceId:profile_tabs_container"),
+        ) as tabs_probe:
+            y_min, source, tabs_bottom, margin = (
+                nav._post_follow_dynamic_first_row_search_y_min_layout(
+                    device,
+                    2340,
+                    {"profile_tabs_visible": True},
+                    known_tabs_bottom_y_px=-1,
+                    known_tabs_bottom_source="invalid_pre_scroll",
+                )
+            )
+
+        tabs_probe.assert_called_once_with(device, window_h=2340)
+        self.assertEqual(y_min, 800 + nav._POST_FOLLOW_PROFILE_TABS_GRID_MARGIN_PX)
+        self.assertEqual(source, "profile_tabs_bottom")
+        self.assertEqual(tabs_bottom, 800)
+        self.assertEqual(margin, nav._POST_FOLLOW_PROFILE_TABS_GRID_MARGIN_PX)
 
     def test_evaluate_tap_safe_rejects_xml_cell_too_low(self) -> None:
         cell = {
@@ -2102,11 +2152,11 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
             nav, "_followers_profile_tabs_bottom_y_px", return_value=(900, "tabs")
         ), mock.patch.object(
             nav, "screenshot", side_effect=_fake_screenshot
-        ), mock.patch.object(
+        ) as shot, mock.patch.object(
             nav,
             "_post_follow_dynamic_first_row_search_y_min_layout",
             return_value=(984, "profile_tabs_bottom", 900, 84),
-        ), mock.patch.object(
+        ) as layout, mock.patch.object(
             nav,
             "_dynamic_first_post_grid_row_from_image",
             return_value={
@@ -2127,7 +2177,7 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
                 "viewer_detect_path": "phase_a_like_unlike_fast",
                 "viewer_detect_total_ms": 120.0,
             },
-        ), mock.patch.object(nav, "log", side_effect=_fake_log), mock.patch.object(
+        ) as viewer_wait, mock.patch.object(nav, "log", side_effect=_fake_log), mock.patch.object(
             nav, "time"
         ) as tmock:
             tmock.perf_counter = time.perf_counter
@@ -2147,6 +2197,10 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
         self.assertTrue(out.get("post_detected"))
         self.assertEqual(out.get("open_strategy"), "vision_open_top_left_legacy_safe")
         device.click.assert_called_once_with(180, 1180)
+        shot.assert_called_once()
+        viewer_wait.assert_called_once()
+        self.assertEqual(layout.call_args.kwargs.get("known_tabs_bottom_y_px"), 900)
+        self.assertEqual(layout.call_args.kwargs.get("known_tabs_bottom_source"), "tabs")
         for event in {
             "legacy_safe_timing_profile_lock_completed",
             "legacy_safe_timing_ui_hints_completed",
@@ -2155,6 +2209,7 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
             "legacy_safe_timing_pil_open_completed",
             "legacy_safe_timing_dynamic_row_scan_completed",
             "legacy_safe_timing_candidate_selection_completed",
+            "post_like_surface_context_reused",
         }:
             self.assertIn(event, log_events)
 

@@ -12776,6 +12776,9 @@ def _post_follow_dynamic_first_row_search_y_min_layout(
     d: u2.Device,
     ih: int,
     ui_hints: dict[str, Any],
+    *,
+    known_tabs_bottom_y_px: int | None = None,
+    known_tabs_bottom_source: str | None = None,
 ) -> tuple[int, str, int | None, int]:
     """
     Lower Y bound (screenshot / device pixels, same space as ``ih``) for scanning the
@@ -12785,9 +12788,23 @@ def _post_follow_dynamic_first_row_search_y_min_layout(
     """
     margin = int(_POST_FOLLOW_PROFILE_TABS_GRID_MARGIN_PX)
     ih = max(120, int(ih))
-    tabs_bt, _phase = _followers_profile_tabs_bottom_y_px(d, window_h=ih)
-    if tabs_bt is None and bool(ui_hints.get("profile_tabs_visible")):
+    tabs_bt: int | None = None
+    _phase = ""
+    try:
+        known_tabs_i = (
+            int(known_tabs_bottom_y_px)
+            if known_tabs_bottom_y_px is not None
+            else None
+        )
+    except (TypeError, ValueError):
+        known_tabs_i = None
+    if known_tabs_i is not None and 0 < known_tabs_i < ih:
+        tabs_bt = known_tabs_i
+        _phase = str(known_tabs_bottom_source or "known_tabs_bottom")
+    else:
         tabs_bt, _phase = _followers_profile_tabs_bottom_y_px(d, window_h=ih)
+        if tabs_bt is None and bool(ui_hints.get("profile_tabs_visible")):
+            tabs_bt, _phase = _followers_profile_tabs_bottom_y_px(d, window_h=ih)
     if tabs_bt is not None:
         y_floor = min(max(8, int(tabs_bt) + margin), ih - 8)
         return y_floor, "profile_tabs_bottom", int(tabs_bt), margin
@@ -20306,12 +20323,48 @@ def _post_follow_likes_open_top_left_legacy_visual_safe(
         return _finish("legacy_visual_top_left_failed", error=str(e)[:160])
 
     _t_dynamic_scan = time.perf_counter()
+    reusable_tabs_bottom: int | None = None
+    reusable_tabs_source = ""
+    if tabs_bt is not None:
+        try:
+            tabs_bt_i = int(tabs_bt)
+        except (TypeError, ValueError):
+            tabs_bt_i = -1
+        if 0 < tabs_bt_i < int(ih):
+            reusable_tabs_bottom = tabs_bt_i
+            reusable_tabs_source = str(_phase or "")
+    try:
+        log(
+            "info",
+            "post_like_surface_context_reused",
+            visual_candidate_id=visual_candidate_id,
+            source_profile_username=source_profile_username,
+            follower_username=expected_follower_username,
+            post_index=int(post_index),
+            scope="legacy_safe_same_attempt_tabs_bottom",
+            known_tabs_bottom_y_px=reusable_tabs_bottom,
+            known_tabs_bottom_source=reusable_tabs_source,
+            reused=reusable_tabs_bottom is not None,
+            reason=(
+                "same_attempt_post_scroll_tabs_bottom"
+                if reusable_tabs_bottom is not None
+                else "tabs_bottom_absent_or_invalid"
+            ),
+        )
+    except Exception:
+        pass
     (
         search_y_min_px,
         search_y_min_source,
         profile_tabs_bottom_y_px,
         profile_tabs_grid_margin_px,
-    ) = _post_follow_dynamic_first_row_search_y_min_layout(d, int(ih), ui_hints)
+    ) = _post_follow_dynamic_first_row_search_y_min_layout(
+        d,
+        int(ih),
+        ui_hints,
+        known_tabs_bottom_y_px=reusable_tabs_bottom,
+        known_tabs_bottom_source=reusable_tabs_source,
+    )
     if (
         str(search_y_min_source) != "profile_tabs_bottom"
         or profile_tabs_bottom_y_px is None
@@ -42252,6 +42305,22 @@ def run_post_follow_post_likes_phase(
             timings[f"pre_reveal_{post_idx}_ms"] = float(
                 pre_reveal_out.get("duration_ms") or 0.0
             )
+            try:
+                log(
+                    "info",
+                    "post_like_surface_context_invalidated",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    follower_username=cand,
+                    post_index=post_idx,
+                    scope="pre_reveal_pre_scroll_tabs_bottom",
+                    known_tabs_bottom_y_px=pre_reveal_out.get("tabs_bottom_y"),
+                    known_tabs_bottom_source=pre_reveal_out.get("tabs_bottom_source"),
+                    reason="scroll_reveal_changed_profile_geometry",
+                    reused=False,
+                )
+            except Exception:
+                pass
         t_open_legacy_first = time.perf_counter()
         legacy_first_out = _post_follow_likes_open_top_left_legacy_visual_safe(
             d,
