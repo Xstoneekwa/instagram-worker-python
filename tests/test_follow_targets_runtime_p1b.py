@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import patch
 
 import account_session_orchestrator as session
+import instagram_navigation as nav
 
 
 class FakeFollowersEngine:
@@ -21,6 +22,66 @@ class FakeFollowersEngine:
         return exit_code
 
 
+class FakeSearchElement:
+    def __init__(self, text: str, rid: str) -> None:
+        self._text = text
+        self.info = {
+            "bounds": {"left": 1, "top": 2, "right": 3, "bottom": 4},
+            "resourceName": rid,
+            "resourceId": rid,
+        }
+
+    def get_text(self) -> str:
+        return self._text
+
+
+class FakeSearchSelector:
+    def __init__(self, elements: list[FakeSearchElement] | None = None) -> None:
+        self._elements = list(elements or [])
+
+    def all(self) -> list[FakeSearchElement]:
+        return list(self._elements)
+
+    def wait(self, timeout: float = 0.0) -> bool:
+        return bool(self._elements)
+
+
+class FakeSearchDevice:
+    def __init__(
+        self,
+        package: str,
+        responses: dict[
+            tuple[str, str],
+            list[FakeSearchElement] | list[list[FakeSearchElement]],
+        ],
+    ) -> None:
+        self.package = package
+        self.responses = responses
+        self.calls: list[tuple[str, str]] = []
+        self.call_counts: dict[tuple[str, str], int] = {}
+
+    def app_current(self) -> dict:
+        return {"package": self.package}
+
+    def __call__(self, **kwargs):
+        if "resourceId" in kwargs:
+            key = ("resourceId", str(kwargs["resourceId"]))
+        elif "resourceIdMatches" in kwargs:
+            key = ("resourceIdMatches", str(kwargs["resourceIdMatches"]))
+        else:
+            key = ("other", str(kwargs))
+        self.calls.append(key)
+        count = self.call_counts.get(key, 0)
+        self.call_counts[key] = count + 1
+        response = self.responses.get(key, [])
+        if response and isinstance(response[0], list):
+            sequence = response  # type: ignore[assignment]
+            elements = sequence[count] if count < len(sequence) else sequence[-1]
+        else:
+            elements = response
+        return FakeSearchSelector(elements)  # type: ignore[arg-type]
+
+
 def target(target_id: str, source: str, index: int) -> dict:
     return {
         "target_id": target_id,
@@ -31,6 +92,165 @@ def target(target_id: str, source: str, index: int) -> dict:
 
 
 class FollowTargetsRuntimeP1bTest(unittest.TestCase):
+    def test_follow_ct_clone_exact_rid_short_circuits_when_exact_match_found(self) -> None:
+        rid = "com.instagram.androie:id/row_search_user_username"
+        d = FakeSearchDevice(
+            "com.instagram.androie",
+            {("resourceId", rid): [FakeSearchElement("relive.group", rid)]},
+        )
+        trace = {
+            "follow_ct": True,
+            "username": "relive.group",
+            "expected_package": "com.instagram.androie",
+            "poll_index": 1,
+            "fast_accept": True,
+            "trace_state": {},
+        }
+        logs: list[tuple[str, dict]] = []
+
+        with patch.object(nav.config, "INSTAGRAM_PACKAGE", "com.instagram.androie"), patch.object(
+            nav, "log", side_effect=lambda _level, event, **kw: logs.append((event, kw))
+        ):
+            out = nav._collect_raw_row_search_elements(d, trace_context=trace)
+
+        self.assertEqual(len(out), 1)
+        self.assertEqual(d.calls, [("resourceId", rid)])
+        self.assertIn("ct_row_detect_selector_short_circuited", [event for event, _ in logs])
+
+    def test_follow_ct_clone_exact_rid_non_exact_keeps_fallbacks(self) -> None:
+        clone_rid = "com.instagram.androie:id/row_search_user_username"
+        android_rid = "com.instagram.android:id/row_search_user_username"
+        d = FakeSearchDevice(
+            "com.instagram.androie",
+            {("resourceId", clone_rid): [FakeSearchElement("someone_else", clone_rid)]},
+        )
+        trace = {
+            "follow_ct": True,
+            "username": "relive.group",
+            "expected_package": "com.instagram.androie",
+            "poll_index": 1,
+            "fast_accept": True,
+            "trace_state": {},
+        }
+
+        with patch.object(nav.config, "INSTAGRAM_PACKAGE", "com.instagram.androie"):
+            out = nav._collect_raw_row_search_elements(d, trace_context=trace)
+
+        self.assertEqual(len(out), 1)
+        self.assertIn(("resourceId", clone_rid), d.calls)
+        self.assertIn(("resourceId", android_rid), d.calls)
+        self.assertIn(("resourceIdMatches", r".*/id/row_search_user_username"), d.calls)
+
+    def test_follow_ct_clone_exact_rid_absent_keeps_fallbacks(self) -> None:
+        clone_rid = "com.instagram.androie:id/row_search_user_username"
+        android_rid = "com.instagram.android:id/row_search_user_username"
+        d = FakeSearchDevice("com.instagram.androie", {})
+        trace = {
+            "follow_ct": True,
+            "username": "relive.group",
+            "expected_package": "com.instagram.androie",
+            "poll_index": 1,
+            "fast_accept": True,
+            "trace_state": {},
+        }
+
+        with patch.object(nav.config, "INSTAGRAM_PACKAGE", "com.instagram.androie"):
+            out = nav._collect_raw_row_search_elements(d, trace_context=trace)
+
+        self.assertEqual(out, [])
+        self.assertIn(("resourceId", clone_rid), d.calls)
+        self.assertIn(("resourceId", android_rid), d.calls)
+        self.assertIn(("resourceIdMatches", r".*/id/row_search_user_username"), d.calls)
+
+    def test_follow_ct_package_resource_id_clone_exact_short_circuits(self) -> None:
+        clone_rid = "com.instagram.androie:id/row_search_user_username"
+        android_rid = "com.instagram.android:id/row_search_user_username"
+        other_clone_rid = "com.instagram.androii:id/row_search_user_username"
+        d = FakeSearchDevice(
+            "com.instagram.androie",
+            {
+                ("resourceId", clone_rid): [
+                    [],
+                    [FakeSearchElement("relive.group", clone_rid)],
+                ],
+            },
+        )
+        trace = {
+            "follow_ct": True,
+            "username": "relive.group",
+            "expected_package": "com.instagram.androie",
+            "poll_index": 1,
+            "fast_accept": True,
+            "trace_state": {},
+        }
+        logs: list[tuple[str, dict]] = []
+
+        with patch.object(nav.config, "INSTAGRAM_PACKAGE", "com.instagram.androie"), patch.object(
+            nav, "log", side_effect=lambda _level, event, **kw: logs.append((event, kw))
+        ):
+            out = nav._collect_raw_row_search_elements(d, trace_context=trace)
+
+        self.assertEqual(len(out), 1)
+        self.assertEqual(d.calls.count(("resourceId", clone_rid)), 2)
+        self.assertIn(("resourceId", android_rid), d.calls)
+        self.assertNotIn(("resourceId", other_clone_rid), d.calls)
+        short_circuit_logs = [
+            kw for event, kw in logs if event == "ct_row_detect_selector_short_circuited"
+        ]
+        self.assertEqual(len(short_circuit_logs), 1)
+        self.assertEqual(
+            short_circuit_logs[0].get("selector_source"),
+            "package_resource_id_clone",
+        )
+
+    def test_follow_ct_package_resource_id_clone_non_exact_keeps_following_selectors(self) -> None:
+        clone_rid = "com.instagram.androie:id/row_search_user_username"
+        other_clone_rid = "com.instagram.androii:id/row_search_user_username"
+        d = FakeSearchDevice(
+            "com.instagram.androie",
+            {
+                ("resourceId", clone_rid): [
+                    [],
+                    [FakeSearchElement("someone_else", clone_rid)],
+                ],
+            },
+        )
+        trace = {
+            "follow_ct": True,
+            "username": "relive.group",
+            "expected_package": "com.instagram.androie",
+            "poll_index": 1,
+            "fast_accept": True,
+            "trace_state": {},
+        }
+
+        with patch.object(nav.config, "INSTAGRAM_PACKAGE", "com.instagram.androie"):
+            out = nav._collect_raw_row_search_elements(d, trace_context=trace)
+
+        self.assertEqual(len(out), 1)
+        self.assertIn(("resourceId", other_clone_rid), d.calls)
+
+    def test_follow_ct_standard_package_exact_rid_still_short_circuits(self) -> None:
+        rid = "com.instagram.android:id/row_search_user_username"
+        d = FakeSearchDevice(
+            "com.instagram.android",
+            {("resourceId", rid): [FakeSearchElement("relive.group", rid)]},
+        )
+        trace = {
+            "follow_ct": True,
+            "username": "relive.group",
+            "expected_package": "com.instagram.android",
+            "poll_index": 1,
+            "fast_accept": True,
+            "trace_state": {},
+        }
+
+        with patch.object(nav.config, "INSTAGRAM_PACKAGE", "com.instagram.android"):
+            out = nav._collect_raw_row_search_elements(d, trace_context=trace)
+
+        self.assertEqual(len(out), 1)
+        self.assertEqual(d.calls, [("resourceId", rid)])
+
     def test_exhaustion_classifier_accepts_sparse_and_bounded_exhaustion(self) -> None:
         self.assertTrue(session.is_follow_target_exhaustion_outcome(exit_code=66))
         self.assertTrue(session.is_follow_target_exhaustion_outcome(

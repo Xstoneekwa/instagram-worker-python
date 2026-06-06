@@ -613,7 +613,11 @@ def _peek_pending_fused_fast_ime_row(username: str) -> bool:
     return _PENDING_FUSED_FAST_IME_ROW and _PENDING_FUSED_FAST_IME_USERNAME == username
 
 
-def _collect_raw_row_search_elements(d: u2.Device) -> list[tuple[object, str]]:
+def _collect_raw_row_search_elements(
+    d: u2.Device,
+    *,
+    trace_context: dict[str, Any] | None = None,
+) -> list[tuple[object, str]]:
     """
     Ordered candidates: exact com.instagram.android:id/row_search_user_username,
     then resourceIdMatches .*/id/row_search_user_username, then per-package ids,
@@ -621,33 +625,217 @@ def _collect_raw_row_search_elements(d: u2.Device) -> list[tuple[object, str]]:
     """
     raw: list[tuple[object, str]] = []
     seen_el: set[int] = set()
+    target = _normalize_handle(str((trace_context or {}).get("username") or ""))
+    trace_state = (
+        trace_context.get("trace_state")
+        if isinstance(trace_context, dict)
+        else None
+    )
+    if not isinstance(trace_state, dict):
+        trace_state = {}
+    trace_follow_ct = isinstance(trace_context, dict) and bool(trace_context.get("follow_ct"))
+    expected_package = (
+        str((trace_context or {}).get("expected_package") or "").strip()
+        if isinstance(trace_context, dict)
+        else ""
+    ) or str(getattr(config, "INSTAGRAM_PACKAGE", "") or "").strip()
 
-    def _append_from_selector(sel, rid_hint: str) -> None:
+    def _selector_trace_enabled() -> bool:
+        return isinstance(trace_context, dict) and bool(trace_context.get("follow_ct"))
+
+    def _element_text_matches_target(el: object) -> bool:
+        if not target:
+            return False
+        try:
+            return _normalize_handle(str(el.get_text() or "")) == target
+        except Exception:
+            return False
+
+    def _emit_selector_trace(
+        *,
+        selector_name: str,
+        selector_source: str,
+        started_at: float,
+        candidate_count: int,
+        exact_match_found: bool,
+        package_name: str = "",
+        used_hardcoded_android_rid: bool = False,
+        used_clone_rid: bool = False,
+        used_resource_id_matches: bool = False,
+    ) -> None:
+        if not _selector_trace_enabled():
+            return
+        try:
+            trace_context["candidate_count"] = int(
+                trace_context.get("candidate_count", 0) or 0
+            ) + int(candidate_count)
+            if exact_match_found:
+                trace_context["exact_match_found"] = True
+            first_raw_seen = bool(trace_state.get("first_raw_seen"))
+            if candidate_count > 0 and not first_raw_seen:
+                trace_state["first_raw_seen"] = True
+                trace_state["first_raw_poll_index"] = trace_context.get("poll_index")
+                log(
+                    "info",
+                    "ct_row_detect_first_raw_element_seen",
+                    username=trace_context.get("username") or None,
+                    poll_index=trace_context.get("poll_index"),
+                    selector_name=selector_name,
+                    selector_source=selector_source,
+                    duration_ms=round((time.perf_counter() - started_at) * 1000.0, 2),
+                    candidate_count=int(candidate_count),
+                    exact_match_found=bool(exact_match_found),
+                    fast_accept=bool(trace_context.get("fast_accept")),
+                    package_name=package_name or None,
+                    expected_package=trace_context.get("expected_package") or None,
+                    used_hardcoded_android_rid=bool(used_hardcoded_android_rid),
+                    used_clone_rid=bool(used_clone_rid),
+                    used_resource_id_matches=bool(used_resource_id_matches),
+                )
+                first_raw_seen = True
+            log(
+                "info",
+                "ct_row_detect_selector_completed",
+                username=trace_context.get("username") or None,
+                poll_index=trace_context.get("poll_index"),
+                selector_name=selector_name,
+                selector_source=selector_source,
+                duration_ms=round((time.perf_counter() - started_at) * 1000.0, 2),
+                candidate_count=int(candidate_count),
+                exact_match_found=bool(exact_match_found),
+                first_raw_seen=bool(first_raw_seen),
+                fast_accept=bool(trace_context.get("fast_accept")),
+                package_name=package_name or None,
+                expected_package=trace_context.get("expected_package") or None,
+                used_hardcoded_android_rid=bool(used_hardcoded_android_rid),
+                used_clone_rid=bool(used_clone_rid),
+                used_resource_id_matches=bool(used_resource_id_matches),
+            )
+        except Exception:
+            pass
+
+    def _emit_selector_short_circuit(
+        *,
+        selector_name: str,
+        selector_source: str,
+        candidate_count: int,
+        exact_match_found: bool,
+        saved_selector_count: int,
+        saved_duration_ms_estimate: float,
+    ) -> None:
+        if not _selector_trace_enabled():
+            return
+        try:
+            log(
+                "info",
+                "ct_row_detect_selector_short_circuited",
+                username=trace_context.get("username") or None,
+                poll_index=trace_context.get("poll_index"),
+                selector_name=selector_name,
+                selector_source=selector_source,
+                candidate_count=int(candidate_count),
+                exact_match_found=bool(exact_match_found),
+                saved_selector_count=int(saved_selector_count),
+                saved_duration_ms_estimate=round(float(saved_duration_ms_estimate), 2),
+                expected_package=trace_context.get("expected_package") or None,
+                fast_accept=bool(trace_context.get("fast_accept")),
+            )
+        except Exception:
+            pass
+
+    def _append_from_selector(sel, rid_hint: str) -> tuple[int, bool]:
         try:
             arr = sel.all() if hasattr(sel, "all") else list(sel)
         except Exception:
             arr = []
+        added = 0
+        exact = False
         for el in arr:
             oid = id(el)
             if oid in seen_el:
                 continue
             seen_el.add(oid)
             raw.append((el, rid_hint))
+            added += 1
+            if _element_text_matches_target(el):
+                exact = True
+        return added, exact
 
+    if trace_follow_ct and target and expected_package:
+        rid = f"{expected_package}:id/{ROW_SEARCH_USER_USERNAME_RES_NAME}"
+        t_selector = time.perf_counter()
+        added = 0
+        exact = False
+        try:
+            added, exact = _append_from_selector(d(resourceId=rid), rid)
+        except Exception:
+            pass
+        _emit_selector_trace(
+            selector_name=rid,
+            selector_source="clone_exact_rid",
+            started_at=t_selector,
+            candidate_count=added,
+            exact_match_found=exact,
+            package_name=expected_package,
+            used_hardcoded_android_rid=expected_package == "com.instagram.android",
+            used_clone_rid=expected_package != "com.instagram.android",
+        )
+        if exact:
+            _emit_selector_short_circuit(
+                selector_name=rid,
+                selector_source="clone_exact_rid",
+                candidate_count=added,
+                exact_match_found=True,
+                saved_selector_count=4,
+                saved_duration_ms_estimate=0.0,
+            )
+            return raw
+
+    t_selector = time.perf_counter()
+    added = 0
+    exact = False
     try:
-        _append_from_selector(d(resourceId=ROW_SEARCH_USERNAME_EXACT_RES), ROW_SEARCH_USERNAME_EXACT_RES)
+        added, exact = _append_from_selector(
+            d(resourceId=ROW_SEARCH_USERNAME_EXACT_RES),
+            ROW_SEARCH_USERNAME_EXACT_RES,
+        )
     except Exception:
         pass
+    _emit_selector_trace(
+        selector_name=ROW_SEARCH_USERNAME_EXACT_RES,
+        selector_source="exact_resource_id",
+        started_at=t_selector,
+        candidate_count=added,
+        exact_match_found=exact,
+        package_name="com.instagram.android",
+        used_hardcoded_android_rid=True,
+    )
+    t_selector = time.perf_counter()
+    added = 0
+    exact = False
     try:
-        _append_from_selector(
+        added, exact = _append_from_selector(
             d(resourceIdMatches=r".*/id/row_search_user_username"),
             "",
         )
     except Exception:
         pass
+    _emit_selector_trace(
+        selector_name=".*/id/row_search_user_username",
+        selector_source="resource_id_matches",
+        started_at=t_selector,
+        candidate_count=added,
+        exact_match_found=exact,
+        used_resource_id_matches=True,
+    )
 
     if not raw:
-        for rid in _row_search_username_resource_id_list(d):
+        package_rids = _row_search_username_resource_id_list(d)
+        for idx, rid in enumerate(package_rids):
+            t_selector = time.perf_counter()
+            added = 0
+            exact = False
+            pkg_name = rid.split(":id/", 1)[0] if ":id/" in rid else ""
             try:
                 s2 = d(resourceId=rid)
                 got = s2.all() if hasattr(s2, "all") else []
@@ -659,28 +847,76 @@ def _collect_raw_row_search_elements(d: u2.Device) -> list[tuple[object, str]]:
                         continue
                     seen_el.add(oid)
                     raw.append((el, rid))
+                    added += 1
+                    if _element_text_matches_target(el):
+                        exact = True
             except Exception:
+                pass
+            _emit_selector_trace(
+                selector_name=rid,
+                selector_source="package_resource_id",
+                started_at=t_selector,
+                candidate_count=added,
+                exact_match_found=exact,
+                package_name=pkg_name,
+                used_hardcoded_android_rid=pkg_name == "com.instagram.android",
+                used_clone_rid=bool(pkg_name and pkg_name != "com.instagram.android"),
+            )
+            if trace_follow_ct and exact and pkg_name == expected_package:
+                _emit_selector_short_circuit(
+                    selector_name=rid,
+                    selector_source=(
+                        "package_resource_id_clone"
+                        if pkg_name != "com.instagram.android"
+                        else "package_resource_id_expected"
+                    ),
+                    candidate_count=added,
+                    exact_match_found=True,
+                    saved_selector_count=max(0, len(package_rids) - idx - 1) + 1,
+                    saved_duration_ms_estimate=0.0,
+                )
+                return raw
+            if raw:
                 continue
 
     if not raw:
+        t_selector = time.perf_counter()
+        added = 0
+        exact = False
         try:
-            _append_from_selector(
+            added, exact = _append_from_selector(
                 d(resourceIdMatches=f".*:id/{ROW_SEARCH_USER_USERNAME_RES_NAME}"),
                 "",
             )
         except Exception:
             pass
+        _emit_selector_trace(
+            selector_name=f".*:id/{ROW_SEARCH_USER_USERNAME_RES_NAME}",
+            selector_source="legacy_resource_id_matches",
+            started_at=t_selector,
+            candidate_count=added,
+            exact_match_found=exact,
+            used_resource_id_matches=True,
+        )
 
     return raw
 
 
-def find_first_row_search_username_hot(d: u2.Device, username: str):
+def find_first_row_search_username_hot(
+    d: u2.Device,
+    username: str,
+    *,
+    trace_context: dict[str, Any] | None = None,
+):
     """
     First exact-normalized match on resource-id row_search_user_username only.
     No avatar/parent/XPath/XML/ranking.
     """
     target = _normalize_handle(username)
-    for el, _rid_hint in _collect_raw_row_search_elements(d):
+    for el, _rid_hint in _collect_raw_row_search_elements(
+        d,
+        trace_context=trace_context,
+    ):
         try:
             txt = el.get_text() or ""
             if _normalize_handle(txt) == target:
@@ -695,6 +931,7 @@ def find_username_elements_by_resource_id(
     username: str,
     *,
     follow_ct_search_context: bool = False,
+    trace_context: dict[str, Any] | None = None,
 ) -> list[tuple[object, str]]:
     """
     Strong signal: TextViews with id row_search_user_username matching exact handle.
@@ -704,7 +941,7 @@ def find_username_elements_by_resource_id(
     seen: set[int] = set()
     matches: list[tuple[object, str]] = []
     _t_collect_raw = time.perf_counter()
-    raw = _collect_raw_row_search_elements(d)
+    raw = _collect_raw_row_search_elements(d, trace_context=trace_context)
     if _follow_ct_search_active(explicit=follow_ct_search_context):
         try:
             log(
@@ -1578,6 +1815,7 @@ def find_real_account_text_element(
     *,
     dump_on_failure: bool = True,
     follow_ct_search_context: bool = False,
+    trace_context: dict[str, Any] | None = None,
 ):
     """
     Resource-id row_search_user_username first (GramAddict/Propulse style), then XPath TextViews.
@@ -1589,7 +1827,10 @@ def find_real_account_text_element(
     weak_rows: list[tuple[int, dict, object, str | None]] = []
 
     for el, rid in find_username_elements_by_resource_id(
-        d, username, follow_ct_search_context=follow_ct_search_context
+        d,
+        username,
+        follow_ct_search_context=follow_ct_search_context,
+        trace_context=trace_context,
     ):
         try:
             txt = el.get_text()
@@ -2229,6 +2470,32 @@ def open_search(
         selector=click_name,
         caller_context=ctx or None,
         ok=ok,
+    )
+    log(
+        "info",
+        "open_search_probe_completed",
+        selector_name=click_name,
+        selector_source=(
+            "resource_id_matches"
+            if str(click_name or "").startswith("rid_matches_")
+            else "description"
+            if click_name in {"desc_en", "desc_fr", "desc_explore", "desc_explorer"}
+            else "exact_resource_id"
+            if click_name and str(click_name) != "percent_fallback"
+            else "percent_fallback"
+        ),
+        duration_ms=round(search_click_ms, 2),
+        found=bool(clicked),
+        hardcoded_android_rid=bool(str(click_name or "").startswith("com.instagram.android:")),
+        clone_package_rid=bool(
+            click_name
+            and ":id/" in str(click_name)
+            and not str(click_name).startswith("com.instagram.android:")
+            and not str(click_name).startswith("rid_matches_")
+        ),
+        resource_id_matches=bool(str(click_name or "").startswith("rid_matches_")),
+        click_sent=bool(clicked),
+        field_ready_duration_ms=round(search_field_ready_ms, 2),
     )
     if click_name == "percent_fallback":
         log(
@@ -3134,6 +3401,12 @@ def _click_search_tab_in_open_search(d: u2.Device) -> tuple[bool, str | None]:
     exact_wait = min(0.05, probe_timeout)
     t_phase = time.perf_counter()
     log("info", "open_search_pre_click_probe_started", probe_timeout_s=probe_timeout)
+    log(
+        "info",
+        "open_search_probe_started",
+        probe_timeout_s=probe_timeout,
+        exact_wait_s=exact_wait,
+    )
 
     clicked = False
     click_name: str | None = None
@@ -3164,6 +3437,19 @@ def _click_search_tab_in_open_search(d: u2.Device) -> tuple[bool, str | None]:
                 wait_ms=round((time.perf_counter() - t_probe) * 1000, 2),
                 error=err_s or None,
             )
+            log(
+                "info",
+                "open_search_probe_selector_completed",
+                selector_name=rid,
+                selector_source="exact_resource_id",
+                duration_ms=round((time.perf_counter() - t_probe) * 1000, 2),
+                found=found,
+                hardcoded_android_rid=ipkg == "com.instagram.android",
+                clone_package_rid=ipkg != "com.instagram.android",
+                resource_id_matches=False,
+                click_sent=bool(found),
+                package_name=ipkg,
+            )
             if clicked:
                 break
         if clicked:
@@ -3191,6 +3477,19 @@ def _click_search_tab_in_open_search(d: u2.Device) -> tuple[bool, str | None]:
                 found=found,
                 wait_ms=round((time.perf_counter() - t_probe) * 1000, 2),
                 error=err_s or None,
+            )
+            log(
+                "info",
+                "open_search_probe_selector_completed",
+                selector_name=f".*:id/{suffix}",
+                selector_source="resource_id_matches",
+                duration_ms=round((time.perf_counter() - t_probe) * 1000, 2),
+                found=found,
+                hardcoded_android_rid=False,
+                clone_package_rid=False,
+                resource_id_matches=True,
+                click_sent=bool(found),
+                package_name=None,
             )
             if clicked:
                 break
@@ -3222,6 +3521,19 @@ def _click_search_tab_in_open_search(d: u2.Device) -> tuple[bool, str | None]:
                 found=found,
                 wait_ms=round((time.perf_counter() - t_probe) * 1000, 2),
                 error=err_s or None,
+            )
+            log(
+                "info",
+                "open_search_probe_selector_completed",
+                selector_name=name,
+                selector_source="description",
+                duration_ms=round((time.perf_counter() - t_probe) * 1000, 2),
+                found=found,
+                hardcoded_android_rid=False,
+                clone_package_rid=False,
+                resource_id_matches=False,
+                click_sent=bool(found),
+                package_name=None,
             )
             if clicked:
                 break
@@ -4168,6 +4480,8 @@ def tap_account_result(
     """Tap chosen row: FastIME+fused uses hot resource-id poll + direct tap; else legacy find."""
     follow_ct_active = _follow_ct_search_active(explicit=follow_ct_search_context)
     outreach_active = bool(outreach_search_context)
+    row_detect_trace_state: dict[str, Any] = {"first_raw_seen": False}
+    row_detect_poll_index = 0
     try:
         log(
             "info",
@@ -4184,18 +4498,99 @@ def tap_account_result(
     except Exception:
         pass
 
-    def scan_once():
+    def _begin_ct_row_detect_poll(
+        *,
+        poll_source: str,
+        fast_accept: bool,
+    ) -> tuple[int, float, dict[str, Any]]:
+        nonlocal row_detect_poll_index
+        row_detect_poll_index += 1
+        poll_started = time.perf_counter()
+        trace_context = {
+            "username": username,
+            "poll_index": row_detect_poll_index,
+            "poll_source": poll_source,
+            "follow_ct": bool(follow_ct_active),
+            "fast_accept": bool(fast_accept),
+            "expected_package": str(config.INSTAGRAM_PACKAGE or ""),
+            "trace_state": row_detect_trace_state,
+            "candidate_count": 0,
+            "exact_match_found": False,
+        }
+        if follow_ct_active:
+            try:
+                log(
+                    "info",
+                    "ct_row_detect_poll_started",
+                    username=username,
+                    poll_index=row_detect_poll_index,
+                    selector_source=poll_source,
+                    fast_accept=bool(fast_accept),
+                    expected_package=str(config.INSTAGRAM_PACKAGE or "") or None,
+                )
+            except Exception:
+                pass
+        return row_detect_poll_index, poll_started, trace_context
+
+    def _complete_ct_row_detect_poll(
+        *,
+        poll_index: int,
+        poll_started: float,
+        trace_context: dict[str, Any],
+        found: bool,
+        fast_accept: bool,
+    ) -> None:
+        if not follow_ct_active:
+            return
+        try:
+            exact_match_found = bool(found or trace_context.get("exact_match_found"))
+            if exact_match_found:
+                log(
+                    "info",
+                    "ct_row_detect_exact_match_ready",
+                    username=username,
+                    poll_index=poll_index,
+                    selector_source=trace_context.get("poll_source") or None,
+                    duration_ms=round((time.perf_counter() - poll_started) * 1000.0, 2),
+                    candidate_count=int(trace_context.get("candidate_count", 0) or 0),
+                    exact_match_found=True,
+                    first_raw_seen=bool(row_detect_trace_state.get("first_raw_seen")),
+                    fast_accept=bool(fast_accept),
+                    expected_package=str(config.INSTAGRAM_PACKAGE or "") or None,
+                )
+            log(
+                "info",
+                "ct_row_detect_poll_completed",
+                username=username,
+                poll_index=poll_index,
+                selector_source=trace_context.get("poll_source") or None,
+                duration_ms=round((time.perf_counter() - poll_started) * 1000.0, 2),
+                candidate_count=int(trace_context.get("candidate_count", 0) or 0),
+                exact_match_found=exact_match_found,
+                first_raw_seen=bool(row_detect_trace_state.get("first_raw_seen")),
+                fast_accept=bool(fast_accept),
+                expected_package=str(config.INSTAGRAM_PACKAGE or "") or None,
+            )
+        except Exception:
+            pass
+
+    def scan_once(trace_context: dict[str, Any] | None = None):
         return find_real_account_text_element(
             d,
             username,
             dump_on_failure=False,
             follow_ct_search_context=follow_ct_search_context,
+            trace_context=trace_context,
         )
 
-    def scan_once_hot():
+    def scan_once_hot(trace_context: dict[str, Any] | None = None):
         if not (follow_ct_active or outreach_active):
             return None
-        hot = find_first_row_search_username_hot(d, username)
+        hot = find_first_row_search_username_hot(
+            d,
+            username,
+            trace_context=trace_context,
+        )
         if hot is None:
             return None
         if outreach_active and get_search_ui_mode() == "mixed_results":
@@ -4354,7 +4749,22 @@ def tap_account_result(
             timeout_s = float(config.ACCOUNTS_RESULT_WAIT_S)
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
-            hot_probe = find_first_row_search_username_hot(d, username)
+            poll_index, poll_started, trace_context = _begin_ct_row_detect_poll(
+                poll_source="fused_hot_row",
+                fast_accept=False,
+            )
+            hot_probe = find_first_row_search_username_hot(
+                d,
+                username,
+                trace_context=trace_context,
+            )
+            _complete_ct_row_detect_poll(
+                poll_index=poll_index,
+                poll_started=poll_started,
+                trace_context=trace_context,
+                found=hot_probe is not None,
+                fast_accept=False,
+            )
             if hot_probe is not None:
                 _log_first_result_seen(hot_probe, via="hot_row")
             el = hot_probe
@@ -4377,7 +4787,18 @@ def tap_account_result(
             )
 
             def _legacy_scan():
-                found = scan_once()
+                poll_index, poll_started, trace_context = _begin_ct_row_detect_poll(
+                    poll_source="legacy_scan_after_hot_miss",
+                    fast_accept=False,
+                )
+                found = scan_once(trace_context=trace_context)
+                _complete_ct_row_detect_poll(
+                    poll_index=poll_index,
+                    poll_started=poll_started,
+                    trace_context=trace_context,
+                    found=found is not None,
+                    fast_accept=False,
+                )
                 if found is not None:
                     _log_first_result_seen(found, via="legacy_scan")
                     _log_exact_match_ready(found, via="legacy_scan")
@@ -4396,7 +4817,18 @@ def tap_account_result(
         fast_accept_used = False
         if get_search_ui_mode() == "mixed_results":
             if follow_ct_active or outreach_active:
-                found_hot = scan_once_hot()
+                poll_index, poll_started, trace_context = _begin_ct_row_detect_poll(
+                    poll_source="initial_hot_row",
+                    fast_accept=True,
+                )
+                found_hot = scan_once_hot(trace_context=trace_context)
+                _complete_ct_row_detect_poll(
+                    poll_index=poll_index,
+                    poll_started=poll_started,
+                    trace_context=trace_context,
+                    found=found_hot is not None,
+                    fast_accept=True,
+                )
                 if found_hot is not None:
                     el = found_hot
                     fast_accept_used = True
@@ -4417,7 +4849,24 @@ def tap_account_result(
             fast_deadline = time.monotonic() + fast_poll_max_s
             fast_poll_s = float(getattr(config, "EXACT_ACCOUNT_ROW_FAST_POLL_S", 0.10))
             while time.monotonic() < fast_deadline and el is None:
-                found_fast = scan_once_hot() if (follow_ct_active or outreach_active) else scan_once()
+                poll_index, poll_started, trace_context = _begin_ct_row_detect_poll(
+                    poll_source="fast_poll_hot_row"
+                    if (follow_ct_active or outreach_active)
+                    else "fast_poll_full_scan",
+                    fast_accept=True,
+                )
+                found_fast = (
+                    scan_once_hot(trace_context=trace_context)
+                    if (follow_ct_active or outreach_active)
+                    else scan_once(trace_context=trace_context)
+                )
+                _complete_ct_row_detect_poll(
+                    poll_index=poll_index,
+                    poll_started=poll_started,
+                    trace_context=trace_context,
+                    found=found_fast is not None,
+                    fast_accept=True,
+                )
                 if found_fast is not None:
                     el = found_fast
                     fast_accept_used = True
@@ -4440,7 +4889,18 @@ def tap_account_result(
             )
 
             def _full_scan():
-                found = scan_once()
+                poll_index, poll_started, trace_context = _begin_ct_row_detect_poll(
+                    poll_source="full_scan",
+                    fast_accept=False,
+                )
+                found = scan_once(trace_context=trace_context)
+                _complete_ct_row_detect_poll(
+                    poll_index=poll_index,
+                    poll_started=poll_started,
+                    trace_context=trace_context,
+                    found=found is not None,
+                    fast_accept=False,
+                )
                 if found is not None:
                     _log_first_result_seen(found, via="full_scan")
                     _log_exact_match_ready(found, via="full_scan")
