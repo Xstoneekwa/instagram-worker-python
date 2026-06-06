@@ -74,7 +74,12 @@ def _context(username: str = "public_user") -> dict:
     )
 
 
-def _run_follow(device: _Device, username: str = "public_user") -> dict:
+def _run_follow(
+    device: _Device,
+    username: str = "public_user",
+    *,
+    return_review_mocks: bool = False,
+) -> dict | tuple[dict, MagicMock, MagicMock]:
     with patch(
         "follow_action_engine.follow_action_surface_wait_and_select_element",
         return_value=(
@@ -85,14 +90,14 @@ def _run_follow(device: _Device, username: str = "public_user") -> dict:
         nav,
         "_try_review_before_follow_popup_confirm",
         return_value=False,
-    ), patch.object(
+    ) as mock_review_confirm, patch.object(
         nav,
         "_review_before_follow_popup_visible",
         return_value=False,
-    ), patch(
+    ) as mock_review_visible, patch(
         "instagram_navigation.time.sleep"
     ):
-        return nav.perform_follow_safe(
+        out = nav.perform_follow_safe(
             device,
             username,
             "com.instagram.android",
@@ -102,6 +107,9 @@ def _run_follow(device: _Device, username: str = "public_user") -> dict:
             dont_follow_private_accounts=False,
             pre_follow_context=_context(username),
         )
+    if return_review_mocks:
+        return out, mock_review_confirm, mock_review_visible
+    return out
 
 
 class FollowPostTapVerifyFastTest(unittest.TestCase):
@@ -116,21 +124,29 @@ class FollowPostTapVerifyFastTest(unittest.TestCase):
     def test_rid_following_succeeds_without_full_snapshot(self) -> None:
         device = _Device([self._state_info("Following")])
         with patch.object(nav, "_follow_ui_state_snapshot") as mock_snapshot:
-            out = _run_follow(device)
+            out, mock_review_confirm, mock_review_visible = _run_follow(
+                device, return_review_mocks=True
+            )
 
         self.assertTrue(out["ok"])
         self.assertEqual(out["follow_state_after"], "following")
         self.assertEqual(out["verify_attempts"], 1)
         mock_snapshot.assert_not_called()
+        mock_review_confirm.assert_not_called()
+        mock_review_visible.assert_not_called()
 
     def test_rid_requested_succeeds_without_full_snapshot(self) -> None:
         device = _Device([self._state_info("Requested")])
         with patch.object(nav, "_follow_ui_state_snapshot") as mock_snapshot:
-            out = _run_follow(device)
+            out, mock_review_confirm, mock_review_visible = _run_follow(
+                device, return_review_mocks=True
+            )
 
         self.assertTrue(out["ok"])
         self.assertEqual(out["follow_state_after"], "requested")
         mock_snapshot.assert_not_called()
+        mock_review_confirm.assert_not_called()
+        mock_review_visible.assert_not_called()
 
     def test_rid_still_follow_polls_then_falls_back_to_snapshot(self) -> None:
         device = _Device(
@@ -145,12 +161,16 @@ class FollowPostTapVerifyFastTest(unittest.TestCase):
             "_follow_ui_state_snapshot",
             return_value="following",
         ) as mock_snapshot:
-            out = _run_follow(device)
+            out, mock_review_confirm, mock_review_visible = _run_follow(
+                device, return_review_mocks=True
+            )
 
         self.assertTrue(out["ok"])
         self.assertEqual(out["follow_state_after"], "following")
         self.assertEqual(out["verify_attempts"], 3)
         mock_snapshot.assert_called_once()
+        self.assertGreaterEqual(mock_review_confirm.call_count, 1)
+        self.assertGreaterEqual(mock_review_visible.call_count, 1)
 
     def test_rid_absent_falls_back_to_snapshot(self) -> None:
         device = _Device([None])
@@ -159,11 +179,15 @@ class FollowPostTapVerifyFastTest(unittest.TestCase):
             "_follow_ui_state_snapshot",
             return_value="following",
         ) as mock_snapshot:
-            out = _run_follow(device)
+            out, mock_review_confirm, mock_review_visible = _run_follow(
+                device, return_review_mocks=True
+            )
 
         self.assertTrue(out["ok"])
         self.assertEqual(out["follow_state_after"], "following")
         mock_snapshot.assert_called_once()
+        self.assertGreaterEqual(mock_review_confirm.call_count, 1)
+        self.assertGreaterEqual(mock_review_visible.call_count, 1)
 
     def test_ambiguous_rid_text_falls_back_to_snapshot(self) -> None:
         device = _Device([self._state_info("See options")])
@@ -172,11 +196,15 @@ class FollowPostTapVerifyFastTest(unittest.TestCase):
             "_follow_ui_state_snapshot",
             return_value="following",
         ) as mock_snapshot:
-            out = _run_follow(device)
+            out, mock_review_confirm, mock_review_visible = _run_follow(
+                device, return_review_mocks=True
+            )
 
         self.assertTrue(out["ok"])
         self.assertEqual(out["follow_state_after"], "following")
         mock_snapshot.assert_called_once()
+        self.assertGreaterEqual(mock_review_confirm.call_count, 1)
+        self.assertGreaterEqual(mock_review_visible.call_count, 1)
 
     def test_review_sheet_visible_uses_existing_abort_path(self) -> None:
         device = _Device([self._state_info("Follow")])

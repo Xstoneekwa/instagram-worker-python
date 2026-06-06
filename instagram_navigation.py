@@ -9280,7 +9280,149 @@ def perform_follow_safe(
         },
     )
 
+    def _complete_follow_verify_success(
+        state_after_success: str,
+        attempts_success: int,
+    ) -> dict[str, Any]:
+        if tap_exact:
+            log(
+                "info",
+                "follow_action_exact_follow_verified",
+                target_username=str(username or ""),
+                visual_candidate_id=str(visual_candidate_id or ""),
+                follow_state_before=state_before,
+                follow_state_after=state_after_success,
+                verify_attempts=attempts_success,
+            )
+            events.append(
+                (
+                    "follow_action_exact_follow_verified",
+                    {
+                        "target_username": username,
+                        "visual_candidate_id": str(visual_candidate_id or ""),
+                        "follow_state_after": state_after_success,
+                        "verify_attempts": attempts_success,
+                    },
+                )
+            )
+        _verify_phase_ms = round((time.perf_counter() - t_all) * 1000, 2)
+        _record(
+            "follow_verify_success",
+            {
+                "target_username": username,
+                "profile_already_open": bool(profile_already_open),
+                "visual_candidate_id": str(visual_candidate_id or ""),
+                "follow_state_before": state_before,
+                "follow_state_after": state_after_success,
+                "verify_attempts": attempts_success,
+                "navigation_state": "profile",
+                "timings_ms": {"verify_phase_ms": _verify_phase_ms},
+            },
+        )
+        try:
+            from followers_inter_candidate_perf import (
+                inter_candidate_on_follow_verify_success,
+            )
+
+            inter_candidate_on_follow_verify_success(
+                target_username=str(username or ""),
+                verify_phase_ms=_verify_phase_ms,
+            )
+        except Exception:
+            pass
+        _record(
+            "follow_completed",
+            {
+                "target_username": username,
+                "profile_already_open": bool(profile_already_open),
+                "visual_candidate_id": str(visual_candidate_id or ""),
+                "follow_state_before": state_before,
+                "follow_state_after": state_after_success,
+                "verify_attempts": attempts_success,
+                "navigation_state": "profile",
+                "timings_ms": {"total": round((time.perf_counter() - t_all) * 1000, 2)},
+            },
+        )
+        if profile_already_open:
+            log(
+                "info",
+                "visual_follow_direct_profile_action_success",
+                target_username=str(username or ""),
+                visual_candidate_id=str(visual_candidate_id or ""),
+                follow_state_after=state_after_success,
+                verify_attempts=attempts_success,
+            )
+        if _use_follow_action_v2:
+            _fav = {
+                "target_username": username,
+                "visual_candidate_id": str(visual_candidate_id or ""),
+                "follow_state_after": state_after_success,
+                "verify_attempts": attempts_success,
+            }
+            events.append(("follow_action_verified", dict(_fav)))
+            log("info", "follow_action_verified", **_fav)
+        return {
+            "ok": True,
+            "failure_code": None,
+            "tapped": True,
+            "follow_state_before": state_before,
+            "follow_state_after": state_after_success,
+            "verify_attempts": attempts_success,
+            "events": events,
+        }
+
     time.sleep(0.1 if tap_exact else 0.16)
+    if tap_exact:
+        _early_verify_t0 = time.perf_counter()
+        _early_state, _early_meta = _follow_state_from_header_button_rid_fast(d, pkg)
+        _early_probe_ms = round((time.perf_counter() - _early_verify_t0) * 1000.0, 2)
+        _early_button_text = str(_early_meta.get("button_text") or "")
+        _early_button_desc = str(_early_meta.get("button_desc") or "")
+        _early_payload = {
+            "target_username": str(username or ""),
+            "visual_candidate_id": str(visual_candidate_id or ""),
+            "duration_ms": _early_probe_ms,
+            "attempt": 1,
+            "signal_source": "rid_fast",
+            "result": _early_state,
+            "button_text": _early_button_text,
+            "button_desc": _early_button_desc,
+            "fallback_used": False,
+            "tap_exact": True,
+            "package_name": str(pkg or ""),
+            "rid_found": bool(_early_meta.get("rid_found")),
+            "phase": "early_pre_review",
+        }
+        events.append(("follow_action_post_verify_fast_rid_probe", dict(_early_payload)))
+        log("info", "follow_action_post_verify_fast_rid_probe", **_early_payload)
+        if _early_state in ("following", "requested"):
+            log(
+                "info",
+                "post_follow_timing_verify_poll_completed",
+                target_username=str(username or ""),
+                visual_candidate_id=str(visual_candidate_id or ""),
+                duration_ms=_early_probe_ms,
+                attempt=1,
+                signal_source="rid_fast",
+                result=_early_state,
+                button_text=_early_button_text,
+                button_desc=_early_button_desc,
+                fallback_used=False,
+                tap_exact=True,
+                package_name=str(pkg or ""),
+                phase="early_pre_review",
+            )
+            _pvv = {
+                "target_username": username,
+                "visual_candidate_id": str(visual_candidate_id or ""),
+                "verify_attempts": 1,
+                "follow_state_after": _early_state,
+                "follow_state_before": state_before,
+            }
+            events.append(("follow_action_post_verify", dict(_pvv)))
+            log("info", "follow_action_post_verify", **_pvv)
+            return _complete_follow_verify_success(_early_state, 1)
+
     if _try_review_before_follow_popup_confirm(
         d,
         target_username=str(username or ""),
@@ -9412,92 +9554,7 @@ def perform_follow_safe(
             events.append(("follow_action_post_verify", dict(_pvv)))
             log("info", "follow_action_post_verify", **_pvv)
         if state_after in ("following", "requested"):
-            if tap_exact:
-                log(
-                    "info",
-                    "follow_action_exact_follow_verified",
-                    target_username=str(username or ""),
-                    visual_candidate_id=str(visual_candidate_id or ""),
-                    follow_state_before=state_before,
-                    follow_state_after=state_after,
-                    verify_attempts=attempts,
-                )
-                events.append(
-                    (
-                        "follow_action_exact_follow_verified",
-                        {
-                            "target_username": username,
-                            "visual_candidate_id": str(visual_candidate_id or ""),
-                            "follow_state_after": state_after,
-                            "verify_attempts": attempts,
-                        },
-                    )
-                )
-            _verify_phase_ms = round((time.perf_counter() - t_all) * 1000, 2)
-            _record(
-                "follow_verify_success",
-                {
-                    "target_username": username,
-                    "profile_already_open": bool(profile_already_open),
-                    "visual_candidate_id": str(visual_candidate_id or ""),
-                    "follow_state_before": state_before,
-                    "follow_state_after": state_after,
-                    "verify_attempts": attempts,
-                    "navigation_state": "profile",
-                    "timings_ms": {"verify_phase_ms": _verify_phase_ms},
-                },
-            )
-            try:
-                from followers_inter_candidate_perf import (
-                    inter_candidate_on_follow_verify_success,
-                )
-
-                inter_candidate_on_follow_verify_success(
-                    target_username=str(username or ""),
-                    verify_phase_ms=_verify_phase_ms,
-                )
-            except Exception:
-                pass
-            _record(
-                "follow_completed",
-                {
-                    "target_username": username,
-                    "profile_already_open": bool(profile_already_open),
-                    "visual_candidate_id": str(visual_candidate_id or ""),
-                    "follow_state_before": state_before,
-                    "follow_state_after": state_after,
-                    "verify_attempts": attempts,
-                    "navigation_state": "profile",
-                    "timings_ms": {"total": round((time.perf_counter() - t_all) * 1000, 2)},
-                },
-            )
-            if profile_already_open:
-                log(
-                    "info",
-                    "visual_follow_direct_profile_action_success",
-                    target_username=str(username or ""),
-                    visual_candidate_id=str(visual_candidate_id or ""),
-                    follow_state_after=state_after,
-                    verify_attempts=attempts,
-                )
-            if _use_follow_action_v2:
-                _fav = {
-                    "target_username": username,
-                    "visual_candidate_id": str(visual_candidate_id or ""),
-                    "follow_state_after": state_after,
-                    "verify_attempts": attempts,
-                }
-                events.append(("follow_action_verified", dict(_fav)))
-                log("info", "follow_action_verified", **_fav)
-            return {
-                "ok": True,
-                "failure_code": None,
-                "tapped": True,
-                "follow_state_before": state_before,
-                "follow_state_after": state_after,
-                "verify_attempts": attempts,
-                "events": events,
-            }
+            return _complete_follow_verify_success(state_after, attempts)
         time.sleep(poll_v)
 
     if tap_exact and state_after not in ("following", "requested"):
