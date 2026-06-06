@@ -39223,6 +39223,7 @@ def _mute_engine_v2_tap_toggle_short(
     visual_candidate_id: str = "",
     source_profile_username: str = "",
     axis_budget_s: float | None = None,
+    timing_meta: dict[str, Any] | None = None,
 ) -> tuple[bool, bool, str]:
     """Returns (tapped_or_already_on, is_already_on, reason)."""
     rem = (
@@ -39232,13 +39233,67 @@ def _mute_engine_v2_tap_toggle_short(
     )
     if rem < 0.08:
         return False, False, "budget"
+    t_resolve = time.perf_counter()
     row = _mute_engine_v2_resolve_toggle_row(
         d, axis=str(axis or ""), labels=labels, ww=int(ww)
     )
+    if timing_meta is not None:
+        timing_meta["resolve_row_ms"] = round((time.perf_counter() - t_resolve) * 1000.0, 2)
     if not bool(row.get("label_found")):
         return False, False, "toggle_label_not_found"
     if str(row.get("toggle_state") or "") == "on":
+        if timing_meta is not None:
+            timing_meta["tap_source"] = "already_on_row"
         return True, True, "already_on_row"
+    row_bounds = row.get("row_bounds") or {}
+    toggle_bounds = row.get("toggle_bounds")
+    row_reusable = False
+    if isinstance(row_bounds, dict) and (
+        toggle_bounds is None or str(row.get("toggle_state") or "") == "unknown"
+    ):
+        try:
+            rl = int(row_bounds["left"])
+            rt = int(row_bounds["top"])
+            rr = int(row_bounds["right"])
+            rb = int(row_bounds["bottom"])
+            row_reusable = (
+                rr > rl
+                and rb > rt
+                and rl >= 0
+                and rt >= 0
+                and rr <= int(ww) + 4
+                and (rr - rl) >= 24
+                and (rb - rt) >= 24
+            )
+        except Exception:
+            row_reusable = False
+    if row_reusable:
+        try:
+            tx = int((int(row_bounds["left"]) + int(row_bounds["right"])) // 2)
+            ty = int((int(row_bounds["top"]) + int(row_bounds["bottom"])) // 2)
+            t_tap = time.perf_counter()
+            d.click(tx, ty)
+            if timing_meta is not None:
+                timing_meta["tap_ms"] = round((time.perf_counter() - t_tap) * 1000.0, 2)
+                timing_meta["row_reused"] = True
+                timing_meta["tap_source"] = "row_bounds_reused"
+        except Exception as e:
+            return False, False, f"tap_failed:{e}"
+        try:
+            log(
+                "info",
+                "mute_axis_tap_sent",
+                axis=str(axis or "")[:20],
+                visual_candidate_id=visual_candidate_id,
+                source_profile_username=source_profile_username,
+                label_text=str(row.get("label_text") or "")[:40],
+                toggle_bounds=row.get("toggle_bounds"),
+                tap_source="row_bounds_reused",
+                row_reused=True,
+            )
+        except Exception:
+            pass
+        return True, False, ""
     sw_el: Any | None = None
     for lab in labels:
         try:
@@ -39252,15 +39307,30 @@ def _mute_engine_v2_tap_toggle_short(
             continue
     try:
         if sw_el is not None:
+            t_tap = time.perf_counter()
             sw_el.click()
+            if timing_meta is not None:
+                timing_meta["tap_ms"] = round((time.perf_counter() - t_tap) * 1000.0, 2)
+                timing_meta["row_reused"] = False
+                timing_meta["tap_source"] = "switch_bounds"
         else:
             tb = row.get("toggle_bounds") or row.get("row_bounds") or {}
             if tb:
                 tx = int((int(tb["left"]) + int(tb["right"])) // 2)
                 ty = int((int(tb["top"]) + int(tb["bottom"])) // 2)
+                t_tap = time.perf_counter()
                 d.click(tx, ty)
+                if timing_meta is not None:
+                    timing_meta["tap_ms"] = round((time.perf_counter() - t_tap) * 1000.0, 2)
+                    timing_meta["row_reused"] = False
+                    timing_meta["tap_source"] = "fallback"
             else:
+                t_tap = time.perf_counter()
                 tapped, already, rsn, _el = _visual_tap_toggle_row_for_label(d, labels, ww)
+                if timing_meta is not None:
+                    timing_meta["tap_ms"] = round((time.perf_counter() - t_tap) * 1000.0, 2)
+                    timing_meta["row_reused"] = False
+                    timing_meta["tap_source"] = "fallback"
                 return tapped, already, rsn
     except Exception as e:
         return False, False, f"tap_failed:{e}"
@@ -39273,6 +39343,8 @@ def _mute_engine_v2_tap_toggle_short(
             source_profile_username=source_profile_username,
             label_text=str(row.get("label_text") or "")[:40],
             toggle_bounds=row.get("toggle_bounds"),
+            tap_source=(timing_meta or {}).get("tap_source", ""),
+            row_reused=bool((timing_meta or {}).get("row_reused")),
         )
     except Exception:
         pass
@@ -39306,9 +39378,40 @@ def _mute_engine_v2_compact_axis_toggle(
         else:
             return False, False, False, "mute_axis_budget_exhausted", 0.0
     t_ax = time.perf_counter()
+    pre_xml_ms = 0.0
+    resolve_row_ms = 0.0
+    tap_ms = 0.0
+    post_xml_verify_ms = 0.0
+    row_reused = False
+    tap_source = ""
+
+    def _emit_toggle_timing(duration_ms: float, *, source_override: str = "") -> None:
+        try:
+            log(
+                "info",
+                "mute_toggle_timing_completed",
+                axis=str(axis or "")[:20],
+                visual_candidate_id=visual_candidate_id,
+                source_profile_username=source_profile_username,
+                row_reused=bool(row_reused),
+                tap_source=str(source_override or tap_source or "fallback")[:40],
+                pre_xml_ms=pre_xml_ms,
+                resolve_row_ms=resolve_row_ms,
+                tap_ms=tap_ms,
+                post_xml_verify_ms=post_xml_verify_ms,
+                duration_ms=duration_ms,
+            )
+        except Exception:
+            pass
+
+    t_pre_xml = time.perf_counter()
     xml_on, _xml_fields = _mute_engine_v2_verify_toggle_on_from_xml_dump(d, axis=axis)
+    pre_xml_ms = round((time.perf_counter() - t_pre_xml) * 1000.0, 2)
     if xml_on is True:
-        return True, False, True, "already_on_xml", round((time.perf_counter() - t_ax) * 1000.0, 2)
+        elapsed_ms = round((time.perf_counter() - t_ax) * 1000.0, 2)
+        _emit_toggle_timing(elapsed_ms, source_override="already_on_xml")
+        return True, False, True, "already_on_xml", elapsed_ms
+    timing_meta: dict[str, Any] = {}
     tapped, already, rsn = _mute_engine_v2_tap_toggle_short(
         d,
         labels,
@@ -39318,14 +39421,21 @@ def _mute_engine_v2_compact_axis_toggle(
         visual_candidate_id=visual_candidate_id,
         source_profile_username=source_profile_username,
         axis_budget_s=axis_budget_s,
+        timing_meta=timing_meta,
     )
+    resolve_row_ms = float(timing_meta.get("resolve_row_ms") or 0.0)
+    tap_ms = float(timing_meta.get("tap_ms") or 0.0)
+    row_reused = bool(timing_meta.get("row_reused"))
+    tap_source = str(timing_meta.get("tap_source") or "")
     tap_attempted = bool(tapped and not already)
     if already:
-        return True, False, True, rsn or "already_on", round((time.perf_counter() - t_ax) * 1000.0, 2)
+        elapsed_ms = round((time.perf_counter() - t_ax) * 1000.0, 2)
+        _emit_toggle_timing(elapsed_ms, source_override=tap_source or "already_on_row")
+        return True, False, True, rsn or "already_on", elapsed_ms
     if not tapped:
-        return False, False, False, rsn or "toggle_label_not_found", round(
-            (time.perf_counter() - t_ax) * 1000.0, 2
-        )
+        elapsed_ms = round((time.perf_counter() - t_ax) * 1000.0, 2)
+        _emit_toggle_timing(elapsed_ms, source_override=tap_source or "fallback")
+        return False, False, False, rsn or "toggle_label_not_found", elapsed_ms
     settle_s = min(
         float(_MUTE_V2_TOGGLE_POST_TAP_SETTLE_S),
         max(
@@ -39340,11 +39450,15 @@ def _mute_engine_v2_compact_axis_toggle(
     )
     if settle_s >= 0.03:
         time.sleep(settle_s)
+    t_post_xml = time.perf_counter()
     xml_after, _xml_after_fields = _mute_engine_v2_verify_toggle_on_from_xml_dump(d, axis=axis)
+    post_xml_verify_ms = round((time.perf_counter() - t_post_xml) * 1000.0, 2)
     elapsed_ms = round((time.perf_counter() - t_ax) * 1000.0, 2)
     if xml_after is True:
+        _emit_toggle_timing(elapsed_ms)
         return True, tap_attempted, False, rsn, elapsed_ms
     if time.perf_counter() >= toggle_stage_deadline:
+        _emit_toggle_timing(elapsed_ms)
         return False, tap_attempted, False, "mute_axis_budget_exhausted", elapsed_ms
     rem_v = (
         _mute_engine_v2_axis_remaining_s(t0, float(axis_budget_s))
@@ -39354,6 +39468,8 @@ def _mute_engine_v2_compact_axis_toggle(
     vto = min(0.28, max(0.1, rem_v * 0.22))
     ok_live, vmeta = _visual_verify_toggle_on_for_labels_detailed(d, labels, timeout_s=vto)
     if ok_live:
+        elapsed_ms = round((time.perf_counter() - t_ax) * 1000.0, 2)
+        _emit_toggle_timing(elapsed_ms)
         return True, tap_attempted, False, rsn, elapsed_ms
     try:
         if _mute_engine_v2_toggle_verify_xml_fallback_maybe(
@@ -39363,9 +39479,13 @@ def _mute_engine_v2_compact_axis_toggle(
             visual_candidate_id=visual_candidate_id,
             source_profile_username=source_profile_username,
         ):
+            elapsed_ms = round((time.perf_counter() - t_ax) * 1000.0, 2)
+            _emit_toggle_timing(elapsed_ms)
             return True, tap_attempted, False, rsn, elapsed_ms
     except Exception:
         pass
+    elapsed_ms = round((time.perf_counter() - t_ax) * 1000.0, 2)
+    _emit_toggle_timing(elapsed_ms)
     return False, tap_attempted, False, rsn or "verify_failed", elapsed_ms
 
 

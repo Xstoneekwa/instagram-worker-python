@@ -573,6 +573,39 @@ class MuteEngineV2SheetLevelsTest(unittest.TestCase):
         observe_state.assert_not_called()
         fp_fast.assert_not_called()
 
+    def test_toggle_short_reuses_resolved_row_bounds_without_switch_rescan(self) -> None:
+        device = mock.MagicMock()
+        timing_meta: dict[str, object] = {}
+
+        with mock.patch.object(
+            nav,
+            "_mute_engine_v2_resolve_toggle_row",
+            return_value={
+                "label_found": True,
+                "label_text": "Posts",
+                "row_bounds": {"left": 45, "top": 1417, "right": 889, "bottom": 1569},
+                "toggle_bounds": None,
+                "toggle_state": "unknown",
+            },
+        ), mock.patch.object(nav, "_mute_row_toggle_candidates_near_label") as rescan:
+            tapped, already, reason = nav._mute_engine_v2_tap_toggle_short(
+                device,
+                ("Posts",),
+                1080,
+                time.perf_counter(),
+                axis="posts",
+                timing_meta=timing_meta,
+                axis_budget_s=2.25,
+            )
+
+        self.assertTrue(tapped)
+        self.assertFalse(already)
+        self.assertEqual(reason, "")
+        device.click.assert_called_once_with(467, 1493)
+        rescan.assert_not_called()
+        self.assertTrue(timing_meta.get("row_reused"))
+        self.assertEqual(timing_meta.get("tap_source"), "row_bounds_reused")
+
 
 if __name__ == "__main__":
     unittest.main()
