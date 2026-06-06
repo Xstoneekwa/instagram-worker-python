@@ -7,6 +7,7 @@ Per-account overrides live in ig_account_unfollow_settings.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -203,7 +204,36 @@ def load_unfollow_settings(
     if not aid:
         raise ValueError("account_id is required")
 
-    row = supabase_client.get_account_unfollow_settings(aid)
+    t0 = time.perf_counter()
+    log_base = {
+        "step": "unfollow_settings_loaded",
+        "fn_name": "get_account_unfollow_settings",
+        "attempt": 1,
+        "run_id": "",
+        "account_id": aid[:160],
+    }
+    log("info", "supabase_persist_step_started", **log_base)
+    try:
+        row = supabase_client.get_account_unfollow_settings(aid)
+    except Exception as e:
+        log(
+            "warning",
+            "supabase_persist_step_failed",
+            **log_base,
+            duration_ms=round((time.perf_counter() - t0) * 1000.0, 2),
+            ok=False,
+            error_code=type(e).__name__,
+        )
+        raise
+    log(
+        "info",
+        "supabase_persist_step_completed",
+        **log_base,
+        duration_ms=round((time.perf_counter() - t0) * 1000.0, 2),
+        ok=row is not None,
+        error_code="",
+        record_count=1 if row else 0,
+    )
     if row:
         settings = _row_to_settings(aid, row, defaults_used=False)
         log(

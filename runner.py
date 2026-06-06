@@ -631,6 +631,64 @@ def _safe_supabase_call(fn_name: str, *args, **kwargs):
         return None
 
 
+def _timed_safe_supabase_call(
+    step: str,
+    fn_name: str,
+    *args,
+    log_run_id: str | None = None,
+    log_account_id: str | None = None,
+    log_attempt: int = 1,
+    log_record_count: int | None = None,
+    **kwargs,
+):
+    """Instrumentation-only wrapper around Supabase writes; never logs payloads."""
+    safe_step = str(step or fn_name or "unknown")[:160]
+    safe_fn = str(fn_name or "")[:160]
+    t0 = time.perf_counter()
+    base_log = {
+        "step": safe_step,
+        "fn_name": safe_fn,
+        "attempt": int(log_attempt or 1),
+        "run_id": str(log_run_id or kwargs.get("run_id") or "")[:160],
+        "account_id": str(log_account_id or kwargs.get("account_id") or "")[:160],
+    }
+    if log_record_count is not None:
+        try:
+            base_log["record_count"] = int(log_record_count)
+        except Exception:
+            base_log["record_count"] = 0
+    log("info", "supabase_persist_step_started", **base_log)
+    fn = getattr(supabase_client, fn_name)
+    try:
+        out = fn(*args, **kwargs)
+    except Exception as e:
+        duration_ms = round((time.perf_counter() - t0) * 1000.0, 2)
+        error_code = type(e).__name__
+        log(
+            "warning",
+            "supabase_persist_step_failed",
+            **base_log,
+            duration_ms=duration_ms,
+            ok=False,
+            error_code=error_code,
+        )
+        log("warning", "supabase_call_failed", fn=fn_name, error=str(e))
+        return None
+    duration_ms = round((time.perf_counter() - t0) * 1000.0, 2)
+    ok = True
+    if isinstance(out, dict) and "ok" in out:
+        ok = bool(out.get("ok"))
+    log(
+        "info",
+        "supabase_persist_step_completed",
+        **base_log,
+        duration_ms=duration_ms,
+        ok=ok,
+        error_code="",
+    )
+    return out
+
+
 def _reset_session_counters() -> None:
     global _SESSION_COUNTERS
     _SESSION_COUNTERS = {
@@ -1724,10 +1782,21 @@ def _flush_follow_action_logs_to_supabase(
 ) -> None:
     if not (supabase_mode and run_id and account_id):
         return
+    t_flush = time.perf_counter()
+    flush_base = {
+        "step": "_flush_follow_action_logs_to_supabase",
+        "fn_name": "insert_action_log",
+        "attempt": 1,
+        "record_count": len(events or []),
+        "run_id": str(run_id or "")[:160],
+        "account_id": str(account_id or "")[:160],
+    }
+    log("info", "supabase_persist_step_started", **flush_base)
     for ev, pl in events or []:
         base = {"target_username": target_username, "account_id": account_id, "run_id": run_id}
         merged = {**base, **pl}
-        _safe_supabase_call(
+        _timed_safe_supabase_call(
+            "flush_follow_action_log",
             "insert_action_log",
             run_id=run_id,
             account_id=account_id,
@@ -1736,7 +1805,18 @@ def _flush_follow_action_logs_to_supabase(
             status="info",
             message=ev,
             payload=merged,
+            log_run_id=run_id,
+            log_account_id=account_id,
+            log_record_count=len(events or []),
         )
+    log(
+        "info",
+        "supabase_persist_step_completed",
+        **flush_base,
+        duration_ms=round((time.perf_counter() - t_flush) * 1000.0, 2),
+        ok=True,
+        error_code="",
+    )
 
 
 def _persist_verified_follow_success_to_supabase(
@@ -1767,11 +1847,23 @@ def _persist_verified_follow_success_to_supabase(
             persist_phase=phase,
         )
         return
-    mem = _safe_supabase_call(
+    t_persist = time.perf_counter()
+    persist_base = {
+        "step": "_persist_verified_follow_success_to_supabase",
+        "fn_name": "record_follow_interaction_outcome",
+        "attempt": 1,
+        "run_id": str(run_id or "")[:160],
+        "account_id": str(account_id or "")[:160],
+    }
+    log("info", "supabase_persist_step_started", **persist_base)
+    mem = _timed_safe_supabase_call(
+        "social_memory_updated",
         "record_follow_interaction_outcome",
         account_id,
         follower_un,
         source_profile_username,
+        log_run_id=run_id or None,
+        log_account_id=account_id,
         run_id=run_id or None,
         session_id=_SESSION_SOCIAL_ID or None,
         follow_ok=True,
@@ -1792,8 +1884,11 @@ def _persist_verified_follow_success_to_supabase(
         persist_phase=phase,
     )
     if not bool(follow_out.get("skipped_tap")):
-        _safe_supabase_call(
+        _timed_safe_supabase_call(
             "record_follow_source_follow_success",
+            "record_follow_source_follow_success",
+            log_run_id=run_id or None,
+            log_account_id=account_id,
             account_id=account_id,
             target_id=target_id or None,
             source_profile=source_profile_username,
@@ -1801,6 +1896,14 @@ def _persist_verified_follow_success_to_supabase(
             run_id=run_id or None,
             outcome=f_st or fs_af or "follow_verified",
         )
+    log(
+        "info",
+        "supabase_persist_step_completed",
+        **persist_base,
+        duration_ms=round((time.perf_counter() - t_persist) * 1000.0, 2),
+        ok=True,
+        error_code="",
+    )
 
 
 def _cleanup_session_apps(d) -> None:
@@ -1927,8 +2030,10 @@ def _update_run_status_safe(
     totals: dict,
     performance_summary: dict,
 ) -> None:
-    _safe_supabase_call(
+    _timed_safe_supabase_call(
+        "run_status_updated",
         "update_run_status",
+        log_run_id=run_id,
         run_id=run_id,
         status=status,
         totals=totals,
@@ -12784,11 +12889,14 @@ def _run_followers_list_engine_session(
                         and str(_mute_pf.get("mute_v2_outcome") or "")
                         in ("success", "partial_success")
                     ):
-                        _safe_supabase_call(
+                        _timed_safe_supabase_call(
+                            "record_mute_interaction_success",
                             "record_mute_interaction_success",
                             account_id,
                             follower_un,
                             source_profile_username,
+                            log_run_id=run_id or None,
+                            log_account_id=account_id,
                             run_id=run_id or None,
                             session_id=_SESSION_SOCIAL_ID or None,
                             muted_posts=bool(_mute_pf.get("posts_verified")),
@@ -12804,11 +12912,14 @@ def _run_followers_list_engine_session(
                     _liked_n = int(_likes_pf.get("liked_count") or 0)
                     if _likes_phase in ("success", "partial_success") and _liked_n > 0:
                         _SESSION_COUNTERS["likes"] = int(_SESSION_COUNTERS.get("likes") or 0) + _liked_n
-                        _safe_supabase_call(
+                        _timed_safe_supabase_call(
+                            "record_post_like_interaction_success",
                             "record_post_like_interaction_success",
                             account_id,
                             follower_un,
                             source_profile_username,
+                            log_run_id=run_id or None,
+                            log_account_id=account_id,
                             run_id=run_id or None,
                             session_id=_SESSION_SOCIAL_ID or None,
                             liked_count=_liked_n,
@@ -12827,6 +12938,20 @@ def _run_followers_list_engine_session(
                             if isinstance(_likes_pf.get("per_post"), list)
                             else None,
                         )
+                        _post_likes_persisted_t0 = time.perf_counter()
+                        _post_likes_persisted_base = {
+                            "step": "post_likes_persisted",
+                            "fn_name": "record_post_like_interaction_success",
+                            "attempt": 1,
+                            "record_count": _liked_n,
+                            "run_id": str(run_id or "")[:160],
+                            "account_id": str(account_id or "")[:160],
+                        }
+                        log(
+                            "info",
+                            "supabase_persist_step_started",
+                            **_post_likes_persisted_base,
+                        )
                         log(
                             "info",
                             "post_likes_persisted",
@@ -12835,6 +12960,18 @@ def _run_followers_list_engine_session(
                             liked_count=_liked_n,
                             phase_outcome=_likes_phase,
                             visual_candidate_id=_pf_log_vcid,
+                        )
+                        log(
+                            "info",
+                            "supabase_persist_step_completed",
+                            **_post_likes_persisted_base,
+                            duration_ms=round(
+                                (time.perf_counter() - _post_likes_persisted_t0)
+                                * 1000.0,
+                                2,
+                            ),
+                            ok=True,
+                            error_code="",
                         )
                 ok_back = bool(_pf.get("return_ok"))
                 how = str(_pf.get("return_how") or "")
