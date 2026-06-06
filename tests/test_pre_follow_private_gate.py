@@ -303,6 +303,74 @@ class CandidateFollowDecisionTest(unittest.TestCase):
         self.assertEqual(decision["blocked_reason"], "follow_header_not_invite:message")
 
 
+class PreFollowTapContextTest(unittest.TestCase):
+    def _fresh_public_context(self) -> dict:
+        return nav.build_pre_follow_tap_context(
+            follower_username="public_user",
+            source_profile_username="healthup.sw",
+            visual_candidate_id="vc-1",
+            screen_guard={
+                "ok": True,
+                "follow_header_state": "follow",
+                "fast_path": True,
+            },
+            private_gate={
+                "reject": False,
+                "private_profile_detected": False,
+                "probe_ms": 3333.0,
+                "probe_reused": False,
+                "reason": "private_not_detected",
+                "private_probe_payload": {
+                    "private_profile_detected": False,
+                    "detection_method": "none",
+                    "confidence": 0.0,
+                    "probe_ms": 3333.0,
+                    "hierarchy_fallback_used": True,
+                },
+            },
+        )
+
+    def test_reusable_context_requires_fresh_private_probe(self) -> None:
+        ctx = self._fresh_public_context()
+        self.assertTrue(
+            nav._is_reusable_pre_follow_tap_context(
+                ctx,
+                follower_username="public_user",
+                source_profile_username="healthup.sw",
+            )
+        )
+
+    def test_screen_guard_dict_not_reusable_as_context_private_probe(self) -> None:
+        ctx = nav.build_pre_follow_tap_context(
+            follower_username="dazeone0001",
+            source_profile_username="cafecuba_geneve",
+            visual_candidate_id="vc-private",
+            screen_guard={
+                "ok": True,
+                "follow_header_state": "follow",
+                "action_bar_title": "dazeone0001",
+            },
+            private_gate={
+                "reject": False,
+                "private_profile_detected": False,
+                "probe_ms": 0.0,
+                "probe_reused": True,
+                "private_probe_payload": {
+                    "ok": True,
+                    "follow_header_state": "follow",
+                    "action_bar_title": "dazeone0001",
+                },
+            },
+        )
+        self.assertFalse(
+            nav._is_reusable_pre_follow_tap_context(
+                ctx,
+                follower_username="dazeone0001",
+                source_profile_username="cafecuba_geneve",
+            )
+        )
+
+
 class PerformFollowSafePrivateGateTest(unittest.TestCase):
     def _mock_follow_button(self) -> MagicMock:
         btn = MagicMock()
@@ -417,6 +485,71 @@ class PerformFollowSafePrivateGateTest(unittest.TestCase):
         mock_detect.assert_not_called()
         self.assertTrue(out["ok"])
         self.assertTrue(out.get("skipped_tap"))
+
+    def test_reusable_context_skips_terminal_private_probe(self) -> None:
+        device = MagicMock()
+        btn = self._mock_follow_button()
+        ctx = nav.build_pre_follow_tap_context(
+            follower_username="public_user",
+            source_profile_username="healthup.sw",
+            visual_candidate_id="vc-1",
+            screen_guard={"ok": True, "follow_header_state": "follow"},
+            private_gate={
+                "reject": False,
+                "private_profile_detected": False,
+                "probe_ms": 3010.0,
+                "probe_reused": False,
+                "private_probe_payload": {
+                    "private_profile_detected": False,
+                    "detection_method": "none",
+                    "confidence": 0.0,
+                    "probe_ms": 3010.0,
+                    "hierarchy_fallback_used": True,
+                },
+            },
+        )
+        with patch.object(
+            nav,
+            "_follow_ui_state_snapshot",
+            side_effect=["following"],
+        ) as mock_snap, patch(
+            "follow_action_engine.follow_action_surface_wait_and_select_element",
+            return_value=(
+                btn,
+                {
+                    "events": [],
+                    "exact_follow_fast_path": False,
+                    "last_ui_state": "follow",
+                },
+            ),
+        ), patch.object(
+            nav,
+            "visual_detect_private_profile",
+        ) as mock_detect, patch.object(
+            nav,
+            "_try_review_before_follow_popup_confirm",
+            return_value=False,
+        ), patch.object(
+            nav,
+            "_review_before_follow_popup_visible",
+            return_value=False,
+        ), patch("instagram_navigation.time.sleep"):
+            out = nav.perform_follow_safe(
+                device,
+                "public_user",
+                "com.instagram.android",
+                profile_already_open=True,
+                dont_follow_private_accounts=True,
+                source_profile_username="healthup.sw",
+                pre_follow_context=ctx,
+            )
+
+        mock_detect.assert_not_called()
+        self.assertNotEqual(
+            out.get("visual_follow_failure_reason"),
+            "follow_blocked_private_account",
+        )
+        btn.click.assert_called()
 
     def test_exact_fast_path_does_not_bypass_terminal_private_gate(self) -> None:
         device = MagicMock()

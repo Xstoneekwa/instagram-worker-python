@@ -156,6 +156,7 @@ from instagram_navigation import (
     reacquire_target_profile_for_follow,
     visual_candidate_follow_pre_follow_screen_guard,
     visual_candidate_pre_follow_private_gate,
+    build_pre_follow_tap_context,
     _followers_current_pkg_activity,
     _follow_ui_state_snapshot,
     _visual_follow_request_pending_state,
@@ -11924,6 +11925,20 @@ def _run_followers_list_engine_session(
                         else ""
                     )
                 )
+                _pre_follow_tap_ctx = None
+                if _profile_follow_already_open and _dont_follow_private_pre:
+                    _pre_follow_tap_ctx = build_pre_follow_tap_context(
+                        follower_username=str(follower_un or ""),
+                        source_profile_username=source_profile_username,
+                        visual_candidate_id=(
+                            _follow_engine_vcid
+                            or _post_follow_visual_candidate_id(
+                                pick, str(follower_un or "")
+                            )
+                        ),
+                        screen_guard=_g_final,
+                        private_gate=_pre_follow_priv,
+                    )
                 follow_out = perform_follow_safe(
                     d,
                     follower_un,
@@ -11932,6 +11947,7 @@ def _run_followers_list_engine_session(
                     visual_candidate_id=_follow_engine_vcid or None,
                     source_profile_username=source_profile_username,
                     dont_follow_private_accounts=_dont_follow_private_pre,
+                    pre_follow_context=_pre_follow_tap_ctx,
                 )
                 _ct_clear_candidate_attempt_timer()
                 _follow_action_events = list(follow_out.get("events") or [])

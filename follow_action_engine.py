@@ -1798,6 +1798,7 @@ def follow_action_surface_wait_and_select_element(
     *,
     visual_candidate_id: str,
     source_profile_username: str = "",
+    initial_ui_state: str | None = None,
 ) -> tuple[Any | None, dict[str, Any]]:
     """
     Poll with recovery micro-adjustments until a follow control is selected or timeout.
@@ -1825,20 +1826,66 @@ def follow_action_surface_wait_and_select_element(
     except Exception:
         sw, sh = 1080, 1920
 
+    started_at = time.perf_counter()
+    attempt = 0
     while time.monotonic() < deadline:
-        if not ign.verify_app_foreground(d, pkg):
+        attempt += 1
+        _fg_t0 = time.perf_counter()
+        _fg_ok = ign.verify_app_foreground(d, pkg)
+        _emit(
+            "follow_action_timing_foreground_check_completed",
+            {
+                "duration_ms": round((time.perf_counter() - _fg_t0) * 1000.0, 2),
+                "caller": "follow_action_surface_wait_and_select_element",
+                "result": bool(_fg_ok),
+                "visual_candidate_id": str(visual_candidate_id or ""),
+                "attempt": attempt,
+                "fallback_used": False,
+            },
+        )
+        if not _fg_ok:
             time.sleep(poll_s)
             continue
 
-        try:
-            ui_q = ign._follow_ui_state_snapshot(d)
-        except Exception:
-            ui_q = "unknown"
+        _ui_reused = bool(
+            attempt == 1
+            and str(initial_ui_state or "").strip() == "follow"
+        )
+        _ui_t0 = time.perf_counter()
+        if _ui_reused:
+            ui_q = "follow"
+        else:
+            try:
+                ui_q = ign._follow_ui_state_snapshot(d)
+            except Exception:
+                ui_q = "unknown"
+        _emit(
+            "pre_follow_timing_ui_state_snapshot_completed",
+            {
+                "duration_ms": round((time.perf_counter() - _ui_t0) * 1000.0, 2),
+                "caller": "follow_action_engine",
+                "result": ui_q,
+                "signals_found": [ui_q] if ui_q else [],
+                "visual_candidate_id": str(visual_candidate_id or ""),
+                "source_profile_username": str(source_profile_username or ""),
+                "follow_button": ui_q == "follow",
+                "following": ui_q == "following",
+                "requested": ui_q == "requested",
+                "private": False,
+                "message_or_contact": False,
+                "follow_header_state_reused": _ui_reused,
+                "fallback_used": not _ui_reused,
+                "attempt": attempt,
+            },
+        )
+        _raw_t0 = time.perf_counter()
         try:
             raw_q = ign._visual_raw_follow_invite_visible_quick(d)
         except Exception:
             raw_q = False
+        _raw_ms = round((time.perf_counter() - _raw_t0) * 1000.0, 2)
 
+        _exact_t0 = time.perf_counter()
         probe_el, probe_meta = try_select_exact_profile_header_follow_fast(
             d,
             ign,
@@ -1847,6 +1894,28 @@ def follow_action_surface_wait_and_select_element(
             ui_snap=ui_q,
             raw_inv=raw_q,
             screen_class=None,
+        )
+        _exact_ms = round((time.perf_counter() - _exact_t0) * 1000.0, 2)
+        _emit(
+            "follow_action_timing_exact_probe_completed",
+            {
+                "duration_ms": _exact_ms,
+                "caller": "follow_action_surface_wait_and_select_element",
+                "result": bool(probe_el is not None),
+                "reason": "exact_profile_header_follow_found"
+                if probe_el is not None
+                else "exact_profile_header_follow_absent",
+                "signals_found": ["exact_profile_header_follow_button"]
+                if probe_el is not None
+                else [],
+                "visual_candidate_id": str(visual_candidate_id or ""),
+                "source_profile_username": str(source_profile_username or ""),
+                "follow_header_state": ui_q,
+                "raw_follow_invite_visible": bool(raw_q),
+                "raw_invite_duration_ms": _raw_ms,
+                "attempt": attempt,
+                "fallback_used": probe_el is None,
+            },
         )
         if probe_el is not None:
             pm = probe_meta or {}
@@ -1861,6 +1930,20 @@ def follow_action_surface_wait_and_select_element(
                     "follow_candidate_acceptance_mode": "exact_follow_fast",
                 },
             )
+            _emit(
+                "follow_action_timing_surface_selection_completed",
+                {
+                    "duration_ms": round((time.perf_counter() - started_at) * 1000.0, 2),
+                    "caller": "follow_action_surface_wait_and_select_element",
+                    "result": "ready",
+                    "reason": "exact_follow_fast_path_selected",
+                    "visual_candidate_id": str(visual_candidate_id or ""),
+                    "source_profile_username": str(source_profile_username or ""),
+                    "attempt": attempt,
+                    "fallback_used": False,
+                    "exact_follow_fast_path": True,
+                },
+            )
             return probe_el, {
                 "outcome": "ready",
                 "pick_meta": pm,
@@ -1869,6 +1952,7 @@ def follow_action_surface_wait_and_select_element(
                 "exact_follow_fast_path": True,
             }
 
+        _surface_t0 = time.perf_counter()
         surf = detect_follow_action_surface(
             d,
             pkg=pkg,
@@ -1877,6 +1961,7 @@ def follow_action_surface_wait_and_select_element(
             visual_candidate_id=visual_candidate_id,
             source_profile_username=source_profile_username,
         )
+        _surface_ms = round((time.perf_counter() - _surface_t0) * 1000.0, 2)
         last_ui = str(surf.get("follow_state") or "unknown")
 
         _emit(
@@ -1892,6 +1977,21 @@ def follow_action_surface_wait_and_select_element(
                 ),
                 "signals": surf.get("signals"),
                 "exact_follow_fast_path": bool(surf.get("exact_follow_fast_path")),
+            },
+        )
+        _emit(
+            "follow_action_timing_surface_probe_completed",
+            {
+                "duration_ms": _surface_ms,
+                "caller": "follow_action_surface_wait_and_select_element",
+                "result": str(surf.get("reason") or ""),
+                "visual_candidate_id": str(visual_candidate_id or ""),
+                "source_profile_username": str(source_profile_username or ""),
+                "follow_state": surf.get("follow_state"),
+                "follow_available": bool(surf.get("follow_available")),
+                "exact_follow_fast_path": bool(surf.get("exact_follow_fast_path")),
+                "attempt": attempt,
+                "fallback_used": True,
             },
         )
 
@@ -1910,6 +2010,20 @@ def follow_action_surface_wait_and_select_element(
             )
 
         if surf.get("follow_state") in ("following", "requested"):
+            _emit(
+                "follow_action_timing_surface_selection_completed",
+                {
+                    "duration_ms": round((time.perf_counter() - started_at) * 1000.0, 2),
+                    "caller": "follow_action_surface_wait_and_select_element",
+                    "result": "already_connected",
+                    "reason": str(surf.get("follow_state") or ""),
+                    "visual_candidate_id": str(visual_candidate_id or ""),
+                    "source_profile_username": str(source_profile_username or ""),
+                    "attempt": attempt,
+                    "fallback_used": True,
+                    "exact_follow_fast_path": bool(surf.get("exact_follow_fast_path")),
+                },
+            )
             return None, {
                 "outcome": "already_connected",
                 "ui_state": surf.get("follow_state"),
@@ -1932,6 +2046,20 @@ def follow_action_surface_wait_and_select_element(
                     "follow_candidate_acceptance_mode": surf.get(
                         "follow_candidate_acceptance_mode"
                     ),
+                },
+            )
+            _emit(
+                "follow_action_timing_surface_selection_completed",
+                {
+                    "duration_ms": round((time.perf_counter() - started_at) * 1000.0, 2),
+                    "caller": "follow_action_surface_wait_and_select_element",
+                    "result": "ready",
+                    "reason": str(bc.get("reason") or surf.get("reason") or ""),
+                    "visual_candidate_id": str(visual_candidate_id or ""),
+                    "source_profile_username": str(source_profile_username or ""),
+                    "attempt": attempt,
+                    "fallback_used": True,
+                    "exact_follow_fast_path": bool(surf.get("exact_follow_fast_path")),
                 },
             )
             return el_pick, {
@@ -1982,6 +2110,20 @@ def follow_action_surface_wait_and_select_element(
             "wait_s": round(
                 float(getattr(ign.config, "FOLLOW_BUTTON_WAIT_S", 4.0)), 3
             ),
+        },
+    )
+    _emit(
+        "follow_action_timing_surface_selection_completed",
+        {
+            "duration_ms": round((time.perf_counter() - started_at) * 1000.0, 2),
+            "caller": "follow_action_surface_wait_and_select_element",
+            "result": "not_found",
+            "reason": str(last_ui or "timeout"),
+            "visual_candidate_id": str(visual_candidate_id or ""),
+            "source_profile_username": str(source_profile_username or ""),
+            "attempt": attempt,
+            "fallback_used": True,
+            "exact_follow_fast_path": False,
         },
     )
     return None, {
