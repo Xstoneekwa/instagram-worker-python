@@ -19396,6 +19396,7 @@ def visual_profile_has_no_posts(
     d: u2.Device,
     *,
     source_profile_username: str | None = None,
+    include_visual_fallback: bool = True,
 ) -> dict[str, Any]:
     """
     Detect Instagram profile empty grid ("No posts yet" / localized / visual blank grid).
@@ -19518,6 +19519,9 @@ def visual_profile_has_no_posts(
             "vorschläge für dich",
         )
     )
+
+    if not bool(include_visual_fallback):
+        return base_out
 
     try:
         _ensure_debug_dirs()
@@ -41754,8 +41758,9 @@ def run_post_follow_post_likes_phase(
             pass
         preopened_out: dict[str, Any] | None = None
         grid_out: dict[str, Any] = {}
-        no_posts_check = visual_profile_has_no_posts(d, source_profile_username=src)
-        if no_posts_check.get("no_posts_detected") is True:
+        visual_no_posts_fallback_used = False
+
+        def _skip_no_posts(no_posts_check: dict[str, Any]) -> dict[str, Any]:
             meta_np = _followers_current_pkg_activity(d)
             reason_np = "post_follow_like_skipped_no_posts_yet"
             post_rec["outcome"] = "no_posts"
@@ -41800,6 +41805,92 @@ def run_post_follow_post_likes_phase(
                 failed_navigation_count=failed_nav,
                 per_post=per_post,
             )
+
+        def _run_deferred_visual_no_posts_fallback(reason: str) -> dict[str, Any]:
+            nonlocal visual_no_posts_fallback_used
+            visual_no_posts_fallback_used = True
+            t_vnp = time.perf_counter()
+            try:
+                log(
+                    "info",
+                    "visual_profile_no_posts_visual_fallback_started",
+                    source_profile_username=src,
+                    follower_username=cand,
+                    visual_candidate_id=vcid,
+                    reason=str(reason or ""),
+                )
+            except Exception:
+                pass
+            no_posts_visual = visual_profile_has_no_posts(
+                d,
+                source_profile_username=src,
+                include_visual_fallback=True,
+            )
+            try:
+                log(
+                    "info",
+                    "visual_profile_no_posts_visual_fallback_completed",
+                    source_profile_username=src,
+                    follower_username=cand,
+                    visual_candidate_id=vcid,
+                    cheap_detected=False,
+                    visual_fallback_used=True,
+                    reason=str(reason or ""),
+                    duration_ms=round((time.perf_counter() - t_vnp) * 1000.0, 2),
+                    no_posts_detected=bool(no_posts_visual.get("no_posts_detected")),
+                    detection_method=no_posts_visual.get("detection_method"),
+                    confidence=round(float(no_posts_visual.get("confidence") or 0.0), 4),
+                )
+            except Exception:
+                pass
+            return no_posts_visual
+
+        t_np_cheap = time.perf_counter()
+        try:
+            log(
+                "info",
+                "visual_profile_no_posts_cheap_check_started",
+                source_profile_username=src,
+                follower_username=cand,
+                visual_candidate_id=vcid,
+            )
+        except Exception:
+            pass
+        no_posts_check = visual_profile_has_no_posts(
+            d,
+            source_profile_username=src,
+            include_visual_fallback=False,
+        )
+        try:
+            log(
+                "info",
+                "visual_profile_no_posts_cheap_check_completed",
+                source_profile_username=src,
+                follower_username=cand,
+                visual_candidate_id=vcid,
+                cheap_detected=bool(no_posts_check.get("no_posts_detected")),
+                visual_fallback_used=False,
+                reason=str(no_posts_check.get("detection_method") or "not_detected"),
+                duration_ms=round((time.perf_counter() - t_np_cheap) * 1000.0, 2),
+            )
+        except Exception:
+            pass
+        if no_posts_check.get("no_posts_detected") is True:
+            return _skip_no_posts(no_posts_check)
+        try:
+            log(
+                "info",
+                "visual_profile_no_posts_visual_fallback_deferred",
+                source_profile_username=src,
+                follower_username=cand,
+                visual_candidate_id=vcid,
+                cheap_detected=False,
+                visual_fallback_used=False,
+                reason="cheap_no_posts_not_detected_before_grid_open",
+                duration_ms=0.0,
+            )
+        except Exception:
+            pass
         t_open_legacy_first = time.perf_counter()
         legacy_first_out = _post_follow_likes_open_top_left_legacy_visual_safe(
             d,
@@ -42127,6 +42218,9 @@ def run_post_follow_post_likes_phase(
                         or "legacy_visual_top_left_failed"
                     )
             if not grid_out.get("ok"):
+                no_posts_visual = _run_deferred_visual_no_posts_fallback(fr_grid)
+                if no_posts_visual.get("no_posts_detected") is True:
+                    return _skip_no_posts(no_posts_visual)
                 failed_nav += 1
                 _likes_perf_ctx["grid"] = dict(_grid_perf)
                 _likes_perf_ctx["failure_reason"] = fr_grid
@@ -42375,6 +42469,11 @@ def run_post_follow_post_likes_phase(
             )
 
         if not open_out.get("ok") or not open_out.get("post_detected"):
+            no_posts_visual = _run_deferred_visual_no_posts_fallback(
+                str(open_out.get("failure_reason") or "post_open_failed")
+            )
+            if no_posts_visual.get("no_posts_detected") is True:
+                return _skip_no_posts(no_posts_visual)
             failed_nav += 1
             post_rec["outcome"] = "open_failed"
             fr_open = str(open_out.get("failure_reason") or "")
