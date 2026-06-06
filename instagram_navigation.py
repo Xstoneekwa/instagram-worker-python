@@ -42543,7 +42543,7 @@ def run_visual_candidate_post_follow_phase(
     Does not modify follow / harvester / row mapping.
     """
     from navigation_engine import NavigationEngineState, observe_instagram_state
-    from follow_state_contract import FollowContext
+    from follow_state_contract import FollowContext, FollowPhysicalState
 
     t_mute_decision = time.perf_counter()
     pkg = pkg or str(getattr(config, "INSTAGRAM_PACKAGE", "") or "")
@@ -42590,29 +42590,120 @@ def run_visual_candidate_post_follow_phase(
             visual_candidate_id=vcid,
             follow_state_after=fs_after,
         )
+    post_follow_was_verified_context = (
+        str(
+            getattr(
+                getattr(post_follow_ctx, "current_state", ""),
+                "value",
+                getattr(post_follow_ctx, "current_state", ""),
+            )
+            or ""
+        )
+        == FollowPhysicalState.FOLLOW_VERIFIED.value
+    )
     post_follow_ctx.mark_post_follow_decision(reason="post_follow_started")
 
     det_use: dict[str, Any] = {}
-    try:
-        det_fresh = detect_followers_list_screen(d, source_profile_username=src)
-        if isinstance(det_fresh, dict) and det_fresh:
-            det_use = det_fresh
-    except Exception:
-        det_use = dict(det) if isinstance(det, dict) else {}
     nav_obs: dict[str, Any] = {}
     fp: dict[str, Any] = {}
-    fast_surface_truth = _post_follow_resolve_surface_truth(
-        d,
-        candidate_username=cand,
-        source_profile_username=src,
-        follow_state_after=fs_after,
-        det=det_use,
-        nav_obs={},
-        fp={},
+    post_follow_verified_context_reused = False
+    fast_surface_truth: dict[str, Any] = {}
+    post_follow_state_raw = str(
+        getattr(
+            getattr(post_follow_ctx, "current_state", ""),
+            "value",
+            getattr(post_follow_ctx, "current_state", ""),
+        )
+        or ""
     )
+    if (
+        bool(follow_success_verified)
+        and fs_after == "following"
+        and not bool(skipped_tap)
+        and bool(cand)
+        and post_follow_was_verified_context
+    ):
+        try:
+            foreground_ok = verify_app_foreground(d, pkg)
+        except Exception:
+            foreground_ok = False
+        if foreground_ok:
+            try:
+                det_light = _mute_engine_v2_build_lightweight_profile_det(
+                    d,
+                    det_hint=det if isinstance(det, dict) else None,
+                    pkg=pkg,
+                )
+            except Exception:
+                det_light = {}
+            ab_light = str(det_light.get("action_bar_title") or "").strip()
+            if (
+                ab_light
+                and _normalize_handle(ab_light) == _normalize_handle(cand)
+                and (not src or _normalize_handle(ab_light) != _normalize_handle(src))
+            ):
+                det_use = {
+                    **dict(det_light),
+                    "action_bar_title": ab_light,
+                    "is_followers_list": False,
+                    "current_screen_guess": "likely_profile",
+                }
+                fast_surface_truth = {
+                    "decision": "candidate_profile_confirmed",
+                    "candidate_username": cand,
+                    "action_bar_title": ab_light,
+                    "screen_class": "candidate_profile_confirmed",
+                    "navigation_state": NavigationEngineState.CANDIDATE_PROFILE.value,
+                    "evidence_profile": True,
+                    "evidence_followers_list": False,
+                    "handle_match": True,
+                    "cta_verified": True,
+                    "following_detection_method": "post_follow_verified_context",
+                    "conflict": False,
+                    "duration_ms": 0.0,
+                }
+                nav_obs = {
+                    "state": NavigationEngineState.CANDIDATE_PROFILE.value,
+                    "confidence": 0.9,
+                    "reason": "post_follow_verified_context_reused_for_mute",
+                }
+                fp = {
+                    "screen_class": "candidate_profile_confirmed",
+                    "fingerprint_id": "post_follow_verified_context",
+                }
+                post_follow_verified_context_reused = True
+                log(
+                    "info",
+                    "post_follow_verified_context_reused_for_mute",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    follower_username=cand,
+                    follow_state_after=fs_after,
+                    action_bar_title=ab_light,
+                    navigation_state=nav_obs["state"],
+                    foreground_ok=True,
+                    current_state=post_follow_state_raw,
+                )
+    if not post_follow_verified_context_reused:
+        try:
+            det_fresh = detect_followers_list_screen(d, source_profile_username=src)
+            if isinstance(det_fresh, dict) and det_fresh:
+                det_use = det_fresh
+        except Exception:
+            det_use = dict(det) if isinstance(det, dict) else {}
+        fast_surface_truth = _post_follow_resolve_surface_truth(
+            d,
+            candidate_username=cand,
+            source_profile_username=src,
+            follow_state_after=fs_after,
+            det=det_use,
+            nav_obs={},
+            fp={},
+        )
     profile_recovery: dict[str, Any] = {}
     if (
-        follow_success_verified
+        not post_follow_verified_context_reused
+        and follow_success_verified
         and not skipped_tap
         and fast_surface_truth.get("decision") == "candidate_profile_lost"
         and cand
@@ -42695,7 +42786,7 @@ def run_visual_candidate_post_follow_phase(
         fp = _post_follow_screen_fingerprint(
             d, nav_state=str(nav_obs.get("state") or ""), det=det_use
         )
-    overlay = _post_follow_overlay_ui_hints(d)
+    overlay = {} if post_follow_verified_context_reused else _post_follow_overlay_ui_hints(d)
     if fast_surface_truth.get("decision") in {
         "candidate_profile_confirmed",
         "candidate_profile_lost",
