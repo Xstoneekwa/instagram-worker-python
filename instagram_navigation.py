@@ -16055,6 +16055,91 @@ def _post_follow_likes_grid_ui_surface_hints(d: u2.Device) -> dict[str, Any]:
             )
         except Exception:
             pass
+    if legacy_safe_lightweight:
+        t_critical = time.perf_counter()
+        critical_found = False
+        critical_error = ""
+        try:
+            critical_found = bool(
+                d(resourceIdMatches=r".*:id/profile_tabs_container").exists(
+                    timeout=0.04
+                )
+            )
+        except Exception as e:
+            critical_error = type(e).__name__
+        _legacy_safe_log_substep(
+            "legacy_safe_ui_hints_substep_completed",
+            "critical_profile_tabs_visible:resourceId:profile_tabs_container",
+            t_critical,
+            dump_count=0,
+            signals_found=["profile_tabs_visible"] if critical_found else [],
+            hint_mode=hint_mode,
+            mute_sheet_level_skipped=True,
+            skipped_reason="not_needed_for_legacy_safe_like_open",
+            probe_error=critical_error,
+        )
+        try:
+            log(
+                "info",
+                "legacy_safe_ui_hints_critical_fast_path",
+                visual_candidate_id=ctx.get("visual_candidate_id") if ctx else None,
+                source_profile_username=(
+                    ctx.get("source_profile_username") if ctx else None
+                ),
+                follower_username=ctx.get("follower_username") if ctx else None,
+                post_index=ctx.get("post_index") if ctx else None,
+                attempt_label=ctx.get("attempt_label") if ctx else None,
+                profile_tabs_visible=bool(critical_found),
+                profile_tabs_source=(
+                    "resourceId:profile_tabs_container" if critical_found else ""
+                ),
+                overlay_probes_skipped=bool(critical_found),
+                reason=(
+                    "critical_profile_tabs_rid_found"
+                    if critical_found
+                    else (critical_error or "critical_profile_tabs_rid_absent")
+                ),
+                duration_ms=round((time.perf_counter() - t_critical) * 1000.0, 2),
+                fallback_used=not bool(critical_found),
+            )
+        except Exception:
+            pass
+        if critical_found:
+            out = {
+                "suggested_for_you": False,
+                "discover_people": False,
+                "profile_tabs_visible": True,
+            }
+            if ctx:
+                try:
+                    log(
+                        "info",
+                        "legacy_safe_ui_hints_probe_completed",
+                        visual_candidate_id=ctx.get("visual_candidate_id"),
+                        source_profile_username=ctx.get("source_profile_username"),
+                        follower_username=ctx.get("follower_username"),
+                        post_index=ctx.get("post_index"),
+                        attempt_label=ctx.get("attempt_label"),
+                        duration_ms=round(
+                            (time.perf_counter() - t_probe) * 1000.0, 2
+                        ),
+                        dump_count=0,
+                        hint_mode=hint_mode,
+                        mute_sheet_level_skipped=True,
+                        skipped_reason="not_needed_for_legacy_safe_like_open",
+                        signals_found=["profile_tabs_visible"],
+                        signals_needed_for_legacy_retry=[
+                            "profile_tabs_visible",
+                            "suggested_for_you",
+                            "discover_people",
+                        ],
+                        known_previous_signals=ctx.get("known_previous_signals") or {},
+                        overlay_probes_skipped=True,
+                        fallback_used=False,
+                    )
+                except Exception:
+                    pass
+            return out
     t_overlay = time.perf_counter()
     if legacy_safe_lightweight:
         overlay: dict[str, Any] = {}
