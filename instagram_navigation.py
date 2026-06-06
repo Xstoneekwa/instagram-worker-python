@@ -41891,6 +41891,205 @@ def run_post_follow_post_likes_phase(
             )
         except Exception:
             pass
+        pre_reveal_out: dict[str, Any] = {}
+
+        def _run_pre_reveal_guard_before_legacy_safe() -> dict[str, Any]:
+            t_pre_reveal = time.perf_counter()
+            out: dict[str, Any] = {
+                "pre_reveal_used": False,
+                "reason": "",
+                "tabs_bottom_y": None,
+                "screen_height": None,
+                "y_floor": None,
+                "threshold_y": None,
+                "grid_region_height": None,
+            }
+            try:
+                log(
+                    "info",
+                    "post_follow_like_pre_reveal_guard_started",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    follower_username=cand,
+                    post_index=post_idx,
+                    profile_candidate_visible=bool(
+                        surface_precheck.get("profile_candidate_visible")
+                    ),
+                    grid_tab_visible=bool(surface_precheck.get("grid_tab_visible")),
+                    no_posts_cheap_detected=False,
+                )
+            except Exception:
+                pass
+            try:
+                ww_pre, wh_pre = d.window_size()
+            except Exception:
+                ww_pre, wh_pre = 1080, 2340
+            try:
+                ww_i = int(ww_pre)
+                wh_i = int(wh_pre)
+            except (TypeError, ValueError):
+                ww_i, wh_i = 1080, 2340
+            out["screen_height"] = wh_i
+            if not (
+                bool(surface_precheck.get("profile_candidate_visible"))
+                and bool(surface_precheck.get("grid_tab_visible"))
+            ):
+                out["reason"] = "surface_precheck_not_confirmed_for_pre_reveal"
+            else:
+                try:
+                    tabs_bt, tabs_phase = _followers_profile_tabs_bottom_y_px(
+                        d, window_h=wh_i
+                    )
+                except Exception:
+                    tabs_bt, tabs_phase = None, ""
+                if tabs_bt is None:
+                    out["reason"] = "profile_tabs_bottom_unknown"
+                else:
+                    try:
+                        tabs_bottom_i = int(tabs_bt)
+                    except (TypeError, ValueError):
+                        tabs_bottom_i = -1
+                    if tabs_bottom_i <= 0:
+                        out["reason"] = "profile_tabs_bottom_invalid"
+                    else:
+                        margin = int(_POST_FOLLOW_PROFILE_TABS_GRID_MARGIN_PX)
+                        y_floor = int(tabs_bottom_i) + margin
+                        threshold_y = int(
+                            wh_i * float(_POST_FOLLOW_LIKE_HIGHLIGHTS_BLOCKING_Y_MIN_RATIO)
+                        )
+                        grid_region_height = max(0, wh_i - y_floor)
+                        out.update(
+                            {
+                                "tabs_bottom_y": tabs_bottom_i,
+                                "tabs_bottom_source": str(tabs_phase or ""),
+                                "y_floor": y_floor,
+                                "threshold_y": threshold_y,
+                                "grid_region_height": grid_region_height,
+                            }
+                        )
+                        if y_floor <= threshold_y:
+                            out["reason"] = "grid_geometry_exploitable_before_legacy_safe"
+                        else:
+                            out["reason"] = "tabs_too_low_before_legacy_safe"
+                            scroll_profile = "reveal_moderate"
+                            try:
+                                log(
+                                    "info",
+                                    "post_follow_like_pre_reveal_needed",
+                                    visual_candidate_id=vcid,
+                                    source_profile_username=src,
+                                    follower_username=cand,
+                                    post_index=post_idx,
+                                    tabs_bottom_y=tabs_bottom_i,
+                                    screen_height=wh_i,
+                                    y_floor=y_floor,
+                                    threshold_y=threshold_y,
+                                    grid_region_height=grid_region_height,
+                                    reason=out["reason"],
+                                    scroll_profile=scroll_profile,
+                                    **_post_follow_likes_scroll_log_fields(
+                                        scroll_profile=scroll_profile,
+                                        ww=ww_i,
+                                        wh=wh_i,
+                                    ),
+                                )
+                                log(
+                                    "info",
+                                    "like_grid_reveal_scroll_attempted",
+                                    visual_candidate_id=vcid,
+                                    source_profile_username=src,
+                                    follower_username=cand,
+                                    scroll_profile=scroll_profile,
+                                    scroll_attempt_index=1,
+                                    max_scrolls=1,
+                                    scroll_reason="pre_reveal_tabs_too_low_before_legacy_safe",
+                                    grid_exposure_before="profile_tabs_too_low",
+                                    top_left_post_visible=False,
+                                    overscroll_risk=False,
+                                    **_post_follow_likes_scroll_log_fields(
+                                        scroll_profile=scroll_profile,
+                                        ww=ww_i,
+                                        wh=wh_i,
+                                    ),
+                                )
+                            except Exception:
+                                pass
+                            t_scroll = time.perf_counter()
+                            sw = _post_follow_likes_profile_scroll_swipe(
+                                d,
+                                scroll_profile=scroll_profile,
+                                ww=ww_i,
+                                wh=wh_i,
+                            )
+                            if bool(sw.get("swipe_ok")):
+                                out["pre_reveal_used"] = True
+                                time.sleep(0.18)
+                            else:
+                                out["reason"] = "pre_reveal_scroll_failed"
+                            out.update(
+                                {
+                                    "swipe_ok": bool(sw.get("swipe_ok")),
+                                    "scroll_profile": scroll_profile,
+                                    "scroll_start_y": sw.get("y_start"),
+                                    "scroll_end_y": sw.get("y_end"),
+                                    "scroll_distance_px": sw.get("scroll_distance_px"),
+                                }
+                            )
+                            try:
+                                log(
+                                    "info",
+                                    "like_grid_reveal_scroll_completed",
+                                    visual_candidate_id=vcid,
+                                    source_profile_username=src,
+                                    follower_username=cand,
+                                    scroll_profile=scroll_profile,
+                                    scroll_attempt_index=1,
+                                    scroll_elapsed_ms=round(
+                                        (time.perf_counter() - t_scroll) * 1000.0,
+                                        2,
+                                    ),
+                                    swipe_ok=bool(sw.get("swipe_ok")),
+                                    scroll_reason="pre_reveal_tabs_too_low_before_legacy_safe",
+                                    scroll_start_y=sw.get("y_start"),
+                                    scroll_end_y=sw.get("y_end"),
+                                    scroll_distance_px=sw.get("scroll_distance_px"),
+                                    grid_exposure_before="profile_tabs_too_low",
+                                )
+                            except Exception:
+                                pass
+            duration_ms = round((time.perf_counter() - t_pre_reveal) * 1000.0, 2)
+            out["duration_ms"] = duration_ms
+            try:
+                log(
+                    "info",
+                    "post_follow_like_pre_reveal_guard_completed",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    follower_username=cand,
+                    post_index=post_idx,
+                    pre_reveal_used=bool(out.get("pre_reveal_used")),
+                    tabs_bottom_y=out.get("tabs_bottom_y"),
+                    screen_height=out.get("screen_height"),
+                    y_floor=out.get("y_floor"),
+                    threshold_y=out.get("threshold_y"),
+                    grid_region_height=out.get("grid_region_height"),
+                    reason=str(out.get("reason") or ""),
+                    duration_ms=duration_ms,
+                    swipe_ok=out.get("swipe_ok"),
+                    scroll_profile=out.get("scroll_profile"),
+                    scroll_start_y=out.get("scroll_start_y"),
+                    scroll_end_y=out.get("scroll_end_y"),
+                    scroll_distance_px=out.get("scroll_distance_px"),
+                )
+            except Exception:
+                pass
+            return out
+
+        pre_reveal_out = _run_pre_reveal_guard_before_legacy_safe()
+        if bool(pre_reveal_out.get("pre_reveal_used")):
+            timings[f"pre_reveal_{post_idx}_ms"] = float(
+                pre_reveal_out.get("duration_ms") or 0.0
+            )
         t_open_legacy_first = time.perf_counter()
         legacy_first_out = _post_follow_likes_open_top_left_legacy_visual_safe(
             d,
