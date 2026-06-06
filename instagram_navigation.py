@@ -30525,6 +30525,28 @@ def _followers_entry_v2_xml_hierarchy_parent_map(
     return parent_map
 
 
+def _followers_entry_v2_action_bar_title_from_hierarchy_xml(hierarchy_xml: str) -> str:
+    hier = (hierarchy_xml or "").strip()
+    if not hier:
+        return ""
+    try:
+        try:
+            root = ET.fromstring(hier)
+        except ET.ParseError:
+            root = ET.fromstring(f"<wrap>{hier}</wrap>")
+    except Exception:
+        return ""
+    for suffix in ("action_bar_large_title_auto_size", "action_bar_title"):
+        for el in root.iter():
+            rid = str(el.get("resource-id") or "")
+            if suffix not in rid:
+                continue
+            title = str(el.get("text") or el.get("content-desc") or "").strip()
+            if title:
+                return title
+    return ""
+
+
 def _followers_entry_v2_rid_is_familiar_followers_column(rid: str) -> bool:
     rl = str(rid or "").lower()
     return _FOLLOWERS_ENTRY_XML_FAMILIAR_RID_SUFFIX in rl
@@ -30748,6 +30770,95 @@ def _followers_entry_v2_xml_familiar_followers_candidates(
         break
 
     return out
+
+
+def _followers_entry_fast_path_exact_xml_candidate(
+    hierarchy_xml: str,
+    *,
+    w: int,
+    h: int,
+    source_profile_username: str,
+    profile_verified: bool,
+) -> tuple[dict[str, Any] | None, str]:
+    """Return one exact XML followers metric candidate, or a fallback reason."""
+    if not bool(profile_verified):
+        return None, "profile_not_verified"
+    hier = (hierarchy_xml or "").strip()
+    if not hier:
+        return None, "hierarchy_empty"
+    profile_title = _followers_entry_v2_action_bar_title_from_hierarchy_xml(hier)
+    if not _followers_entry_v2_entry_title_gate_ok(
+        source_profile_username=source_profile_username,
+        profile_action_bar_title=profile_title,
+        profile_verified=True,
+    ):
+        return None, "source_profile_title_mismatch"
+    try:
+        try:
+            root = ET.fromstring(hier)
+        except ET.ParseError:
+            root = ET.fromstring(f"<wrap>{hier}</wrap>")
+    except Exception:
+        return None, "hierarchy_parse_failed"
+    parent_map = _followers_entry_v2_xml_hierarchy_parent_map(root)
+    raw_candidates: list[dict[str, Any]] = []
+    for el in root.iter():
+        rid = str(el.get("resource-id") or "")
+        if not _followers_entry_v2_rid_is_familiar_followers_column(rid):
+            continue
+        bd = _followers_entry_v2_xml_pick_clickable_bounds(el, parent_map)
+        if not bd:
+            continue
+        if not _followers_entry_v2_xml_bounds_in_metrics_band(bd, w=int(w), h=int(h)):
+            continue
+        raw_candidates.append(
+            _followers_entry_v2_xml_bounds_to_raw_candidate(
+                bd,
+                method=_FOLLOWERS_ENTRY_XML_FAMILIAR_EXACT_METHOD,
+                tap_source="followers_entry_fast_path_xml_exact",
+                detected=_FOLLOWERS_ENTRY_XML_FAMILIAR_RID_SUFFIX,
+                score=12800,
+            )
+        )
+    if not raw_candidates:
+        return None, "exact_followers_metric_absent"
+    unique: dict[tuple[int, int, int, int], dict[str, Any]] = {}
+    for raw in raw_candidates:
+        bd = dict(raw.get("tbounds") or {})
+        try:
+            key = (
+                int(bd["left"]),
+                int(bd["top"]),
+                int(bd["right"]),
+                int(bd["bottom"]),
+            )
+        except Exception:
+            continue
+        unique[key] = raw
+    if len(unique) != 1:
+        return None, "exact_followers_metric_ambiguous"
+    candidate = _followers_entry_v2_public_candidate(next(iter(unique.values())))
+    ok_metric, why_metric = _followers_entry_v2_entry_candidate_followers_metric_ok(
+        candidate,
+        w=int(w),
+    )
+    if not ok_metric:
+        return None, why_metric or "metric_rejected"
+    bd = dict(candidate.get("bounds") or {})
+    try:
+        tx = int(candidate.get("tap_x") or 0)
+        ty = int(candidate.get("tap_y") or 0)
+        left = int(bd.get("left", 0))
+        top = int(bd.get("top", 0))
+        right = int(bd.get("right", 0))
+        bottom = int(bd.get("bottom", 0))
+    except Exception:
+        return None, "bounds_invalid"
+    if right <= left or bottom <= top or tx <= 0 or ty <= 0:
+        return None, "bounds_invalid"
+    if tx < 0 or ty < 0 or tx > int(w) or ty > int(h):
+        return None, "tap_outside_screen"
+    return candidate, ""
 
 
 _FOLLOWERS_ENTRY_V2_SOURCE_BY_METHOD: dict[str, str] = {
@@ -34117,6 +34228,245 @@ def _open_followers_list_from_profile_v2(
 
 
 
+def _try_followers_entry_fast_path_from_profile(
+    d: u2.Device,
+    source_profile_username: str,
+    pkg: str,
+    *,
+    profile_verified: bool,
+    foreground_ok: bool,
+    pkg_meta: dict[str, Any],
+    screen_guess: str,
+) -> tuple[str, dict[str, Any]]:
+    t0 = time.perf_counter()
+
+    def _elapsed() -> float:
+        return round((time.perf_counter() - t0) * 1000.0, 2)
+
+    def _log_skipped(reason: str, **extra: Any) -> None:
+        log(
+            "info",
+            "followers_entry_fast_path_skipped",
+            reason=reason,
+            metric_name=str(extra.get("metric_name") or ""),
+            selector_source=str(extra.get("selector_source") or "hierarchy_xml_exact_rid"),
+            tap_x=extra.get("tap_x"),
+            tap_y=extra.get("tap_y"),
+            bounds=extra.get("bounds"),
+            profile_verified=bool(profile_verified),
+            foreground_ok=bool(foreground_ok),
+            fallback_used=True,
+            duration_ms=_elapsed(),
+        )
+
+    log(
+        "info",
+        "followers_entry_fast_path_started",
+        source_profile_username=source_profile_username,
+        profile_verified=bool(profile_verified),
+        foreground_ok=bool(foreground_ok),
+        selector_source="hierarchy_xml_exact_rid",
+    )
+    if not bool(profile_verified):
+        _log_skipped("profile_not_verified")
+        return "fallback", {}
+    if not bool(foreground_ok):
+        _log_skipped("not_foreground")
+        return "fallback", {}
+
+    try:
+        w, h = d.window_size()
+    except Exception:
+        w, h = 1080, 1920
+    hierarchy_xml = followers_dump_fresh_hierarchy(d, store_in_cache=False)
+    candidate, reason = _followers_entry_fast_path_exact_xml_candidate(
+        hierarchy_xml,
+        w=int(w),
+        h=int(h),
+        source_profile_username=source_profile_username,
+        profile_verified=True,
+    )
+    if not candidate:
+        _log_skipped(reason or "exact_followers_metric_unavailable")
+        return "fallback", {}
+
+    bd = dict(candidate.get("bounds") or {})
+    tx = int(candidate.get("tap_x") or 0)
+    ty = int(candidate.get("tap_y") or 0)
+    metric_name = str(candidate.get("method") or _FOLLOWERS_ENTRY_XML_FAMILIAR_EXACT_METHOD)
+    log(
+        "info",
+        "followers_entry_fast_path_metric_found",
+        reason="exact_followers_metric",
+        metric_name=metric_name,
+        selector_source="hierarchy_xml_exact_rid",
+        tap_x=tx,
+        tap_y=ty,
+        bounds=bd,
+        profile_verified=bool(profile_verified),
+        foreground_ok=bool(foreground_ok),
+        fallback_used=False,
+        duration_ms=_elapsed(),
+    )
+
+    tap_diag: dict[str, Any] = {
+        "followers_stat_found": True,
+        "followers_stat_text": metric_name,
+        "followers_stat_bounds": bd,
+        "tap_x": tx,
+        "tap_y": ty,
+        "tap_method": metric_name,
+        "followers_stat_text_detected": metric_name,
+        "followers_stat_text_bounds": bd,
+        "followers_stat_tap_x": tx,
+        "followers_stat_tap_y": ty,
+        "followers_stat_tap_source": "followers_entry_fast_path_xml_exact",
+        "followers_stat_text_dump": [],
+        "stats_band_texts": [],
+        "profile_stats_visible": [],
+        "followers_stat_coordinate_retry": False,
+        "followers_coord_fallback": False,
+        "followers_exact_rid_used": True,
+        "profile_rescan_swiped": False,
+        "entry_engine_v2": True,
+        "entry_v2_fast_path": True,
+        "entry_v2_source_profile_username": source_profile_username,
+        "entry_v2_underlying_candidate_method": metric_name,
+        "semantic_followers_metric": True,
+    }
+    log(
+        "info",
+        "followers_entry_transition_started",
+        source_profile_username=source_profile_username,
+        tap_x=tx,
+        tap_y=ty,
+        confidence=candidate.get("confidence"),
+        candidate_method=metric_name,
+        multi_tap_strategies=False,
+        bounds=bd,
+        fast_path=True,
+    )
+    try:
+        d.click(tx, ty)
+    except Exception as e:
+        log(
+            "warning",
+            "followers_entry_transition_failed",
+            source_profile_username=source_profile_username,
+            phase="fast_path_tap",
+            error=str(e),
+        )
+        fmeta = _followers_open_build_failure_meta(
+            source_profile_username=source_profile_username,
+            failure_reason="entry_fast_path_tap_failed",
+            profile_verified=profile_verified,
+            pkg_meta=pkg_meta,
+            screen_guess=screen_guess,
+            tap_diag=tap_diag,
+            after_tap_screen_snapshot={},
+            last_poll_snapshot={},
+            cap={},
+            open_method="followers_entry_fast_path",
+            used_coord_fallback=False,
+        )
+        _followers_open_emit_failure(fmeta)
+        return "failed", fmeta
+
+    log(
+        "info",
+        "followers_entry_fast_path_tap_sent",
+        reason="exact_followers_metric",
+        metric_name=metric_name,
+        selector_source="hierarchy_xml_exact_rid",
+        tap_x=tx,
+        tap_y=ty,
+        bounds=bd,
+        profile_verified=bool(profile_verified),
+        foreground_ok=bool(foreground_ok),
+        fallback_used=False,
+        duration_ms=_elapsed(),
+    )
+
+    _followers_enable_post_tap_detection_lock(source_profile_username)
+    try:
+        opened, after_det, last_det, poll_n = _followers_entry_v2_post_tap_confirm(
+            d,
+            tap_diag,
+            source_profile_username,
+            post_tap_settle_s=2.0,
+        )
+    finally:
+        _followers_release_post_tap_detection_lock(source_profile_username)
+
+    if opened:
+        log(
+            "info",
+            "followers_entry_transition_confirmed",
+            source_profile_username=source_profile_username,
+            poll_attempts=poll_n,
+            open_detection_method=last_det.get("open_detection_method"),
+        )
+        log(
+            "info",
+            "followers_list_open_success",
+            source_profile_username=source_profile_username,
+            profile_verified=bool(profile_verified),
+            signals=last_det.get("signals"),
+            sample=last_det.get("visible_usernames_sample"),
+            tap_method=tap_diag.get("tap_method"),
+            tap_x=tap_diag.get("tap_x"),
+            tap_y=tap_diag.get("tap_y"),
+            stats_band_texts=tap_diag.get("stats_band_texts"),
+            followers_stat_text=tap_diag.get("followers_stat_text"),
+            entry_engine_v2=True,
+            current_package=pkg_meta.get("current_package"),
+            after_tap_screen_snapshot=after_det,
+            last_poll_snapshot=last_det,
+            open_method="followers_entry_fast_path",
+            open_detection_method=last_det.get("open_detection_method") or "xml",
+        )
+        followers_session_mark_list_committed_open(
+            source_profile_username,
+            committed_source="entry_v2_fast_path",
+        )
+        _followers_set_last_open_detection_method(
+            str(last_det.get("open_detection_method") or "xml")
+        )
+        return "success", _followers_open_success_payload(
+            tap_diag,
+            after_tap_det=after_det,
+            last_det=last_det,
+            open_method="followers_entry_fast_path",
+            pkg_meta=pkg_meta,
+            source_profile_username=source_profile_username,
+            profile_verified=profile_verified,
+        )
+
+    log(
+        "warning",
+        "followers_entry_transition_failed",
+        source_profile_username=source_profile_username,
+        is_followers_list=bool(last_det.get("is_followers_list")),
+        open_detection_method=last_det.get("open_detection_method"),
+        phase="fast_path_post_tap_confirm",
+    )
+    fmeta = _followers_open_build_failure_meta(
+        source_profile_username=source_profile_username,
+        failure_reason="entry_fast_path_transition_not_confirmed",
+        profile_verified=profile_verified,
+        pkg_meta=pkg_meta,
+        screen_guess=screen_guess,
+        tap_diag=tap_diag,
+        after_tap_screen_snapshot=after_det,
+        last_poll_snapshot=last_det,
+        cap={},
+        open_method="followers_entry_fast_path",
+        used_coord_fallback=False,
+    )
+    _followers_open_emit_failure(fmeta)
+    return "failed", fmeta
+
+
 def open_followers_list_from_profile(
     d: u2.Device,
     source_profile_username: str,
@@ -34139,7 +34489,8 @@ def open_followers_list_from_profile(
     pkg_meta = _followers_current_pkg_activity(d)
     screen_guess = _guess_profile_screen(d, pkg, source_profile_username)
 
-    if not verify_app_foreground(d, pkg):
+    foreground_ok = verify_app_foreground(d, pkg)
+    if not foreground_ok:
         cap = _followers_debug_capture(d, "followers_open_not_foreground")
         tap_diag_obs: dict[str, Any] = {
             "stats_band_texts": [],
@@ -34175,6 +34526,24 @@ def open_followers_list_from_profile(
         )
         _followers_open_emit_failure(fmeta)
         return False, fmeta
+
+    if (
+        bool(getattr(config, "ENABLE_FOLLOWERS_ENTRY_ENGINE_V2", False))
+        and not followers_session_list_committed_open_for(source_profile_username)
+    ):
+        fast_status, fast_payload = _try_followers_entry_fast_path_from_profile(
+            d,
+            source_profile_username,
+            pkg,
+            profile_verified=bool(profile_verified),
+            foreground_ok=bool(foreground_ok),
+            pkg_meta=pkg_meta,
+            screen_guess=screen_guess,
+        )
+        if fast_status == "success":
+            return True, fast_payload
+        if fast_status == "failed":
+            return False, fast_payload
 
     # After verify_profile success (callers pass profile_verified=True): let header/stats render.
     if profile_verified:

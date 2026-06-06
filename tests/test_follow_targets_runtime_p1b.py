@@ -82,6 +82,55 @@ class FakeSearchDevice:
         return FakeSearchSelector(elements)  # type: ignore[arg-type]
 
 
+class FakeFollowersEntryDevice:
+    def __init__(self, hierarchy_xml: str) -> None:
+        self.hierarchy_xml = hierarchy_xml
+        self.clicks: list[tuple[int, int]] = []
+
+    def window_size(self) -> tuple[int, int]:
+        return 1080, 2340
+
+    def dump_hierarchy(self, compressed: bool = False) -> str:
+        return self.hierarchy_xml
+
+    def click(self, x: int, y: int) -> None:
+        self.clicks.append((int(x), int(y)))
+
+
+def followers_entry_profile_xml(
+    *,
+    source: str = "reveaustral",
+    metric: str = "followers",
+    bounds: str = "[523,336][788,496]",
+    duplicate_followers: bool = False,
+) -> str:
+    metric_rid = {
+        "followers": "profile_header_followers_stacked_familiar",
+        "following": "profile_header_following_stacked_familiar",
+        "posts": "profile_header_post_count_front_familiar",
+    }[metric]
+    metric_desc = {
+        "followers": "688 followers",
+        "following": "1 234 following",
+        "posts": "42 posts",
+    }[metric]
+    extra = (
+        '<node class="android.view.ViewGroup" resource-id="com.instagram.androie:id/profile_header_followers_stacked_familiar" '
+        'content-desc="12 followers" bounds="[523,520][788,620]" clickable="true" />'
+        if duplicate_followers
+        else ""
+    )
+    return f"""<?xml version="1.0" encoding="utf-8"?>
+<hierarchy>
+  <node class="android.widget.TextView" resource-id="com.instagram.androie:id/action_bar_title" text="{source}" bounds="[0,80][1080,180]" />
+  <node class="android.view.ViewGroup" resource-id="com.instagram.androie:id/{metric_rid}" content-desc="{metric_desc}" bounds="{bounds}" clickable="true">
+    <node class="android.widget.TextView" resource-id="com.instagram.androie:id/profile_header_familiar_followers_value" text="688" bounds="[552,359][667,420]" />
+    <node class="android.widget.TextView" resource-id="com.instagram.androie:id/profile_header_familiar_followers_label" text="followers" bounds="[552,420][711,473]" />
+  </node>
+  {extra}
+</hierarchy>"""
+
+
 def target(target_id: str, source: str, index: int) -> dict:
     return {
         "target_id": target_id,
@@ -250,6 +299,167 @@ class FollowTargetsRuntimeP1bTest(unittest.TestCase):
 
         self.assertEqual(len(out), 1)
         self.assertEqual(d.calls, [("resourceId", rid)])
+
+    def test_followers_entry_fast_path_exact_clone_xml_taps_followers(self) -> None:
+        nav.followers_session_reset_list_committed_open()
+        self.addCleanup(nav.followers_session_reset_list_committed_open)
+        d = FakeFollowersEntryDevice(followers_entry_profile_xml())
+        det = {
+            "is_followers_list": True,
+            "open_detection_method": "own_unified_follow_list",
+            "signals": ["own_unified_followers_list_detected"],
+            "visible_usernames_sample": [],
+        }
+        logs: list[tuple[str, dict]] = []
+
+        with patch.object(nav.config, "ENABLE_FOLLOWERS_ENTRY_ENGINE_V2", True), patch.object(
+            nav, "verify_app_foreground", return_value=True
+        ), patch.object(
+            nav, "_followers_current_pkg_activity", return_value={"current_package": "com.instagram.androie"}
+        ), patch.object(
+            nav, "_guess_profile_screen", return_value="likely_profile"
+        ), patch.object(
+            nav, "_followers_debug_capture", side_effect=AssertionError("debug capture skipped")
+        ), patch.object(
+            nav, "_followers_entry_v2_post_tap_confirm", return_value=(True, det, det, 1)
+        ) as post_confirm, patch.object(
+            nav, "log", side_effect=lambda _level, event, **kw: logs.append((event, kw))
+        ):
+            ok, meta = nav.open_followers_list_from_profile(
+                d,
+                "reveaustral",
+                "com.instagram.androie",
+                profile_verified=True,
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(d.clicks, [(655, 416)])
+        self.assertEqual(meta["open_method"], "followers_entry_fast_path")
+        post_confirm.assert_called_once()
+        self.assertEqual(post_confirm.call_args.kwargs["post_tap_settle_s"], 2.0)
+        self.assertIn("followers_entry_fast_path_metric_found", [event for event, _ in logs])
+        self.assertIn("followers_entry_fast_path_tap_sent", [event for event, _ in logs])
+
+    def test_followers_entry_fast_path_rejects_following_metric_and_falls_back(self) -> None:
+        nav.followers_session_reset_list_committed_open()
+        self.addCleanup(nav.followers_session_reset_list_committed_open)
+        d = FakeFollowersEntryDevice(followers_entry_profile_xml(metric="following"))
+
+        with patch.object(nav.config, "ENABLE_FOLLOWERS_ENTRY_ENGINE_V2", True), patch.object(
+            nav, "verify_app_foreground", return_value=True
+        ), patch.object(
+            nav, "_followers_current_pkg_activity", return_value={"current_package": "com.instagram.androie"}
+        ), patch.object(
+            nav, "_guess_profile_screen", return_value="likely_profile"
+        ), patch.object(
+            nav.time, "sleep", return_value=None
+        ), patch.object(
+            nav, "_followers_debug_capture", return_value={}
+        ), patch.object(
+            nav, "_open_followers_list_from_profile_v2", return_value=(True, {"open_method": "fallback_v2"})
+        ) as fallback_v2:
+            ok, meta = nav.open_followers_list_from_profile(
+                d,
+                "reveaustral",
+                "com.instagram.androie",
+                profile_verified=True,
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(meta["open_method"], "fallback_v2")
+        self.assertEqual(d.clicks, [])
+        fallback_v2.assert_called_once()
+
+    def test_followers_entry_fast_path_absent_or_ambiguous_metric_falls_back(self) -> None:
+        for xml in (
+            followers_entry_profile_xml(metric="posts"),
+            followers_entry_profile_xml(duplicate_followers=True),
+        ):
+            nav.followers_session_reset_list_committed_open()
+            d = FakeFollowersEntryDevice(xml)
+            with patch.object(nav.config, "ENABLE_FOLLOWERS_ENTRY_ENGINE_V2", True), patch.object(
+                nav, "verify_app_foreground", return_value=True
+            ), patch.object(
+                nav, "_followers_current_pkg_activity", return_value={"current_package": "com.instagram.androie"}
+            ), patch.object(
+                nav, "_guess_profile_screen", return_value="likely_profile"
+            ), patch.object(
+                nav.time, "sleep", return_value=None
+            ), patch.object(
+                nav, "_followers_debug_capture", return_value={}
+            ), patch.object(
+                nav, "_open_followers_list_from_profile_v2", return_value=(True, {"open_method": "fallback_v2"})
+            ) as fallback_v2:
+                ok, meta = nav.open_followers_list_from_profile(
+                    d,
+                    "reveaustral",
+                    "com.instagram.androie",
+                    profile_verified=True,
+                )
+
+            self.assertTrue(ok)
+            self.assertEqual(meta["open_method"], "fallback_v2")
+            self.assertEqual(d.clicks, [])
+            fallback_v2.assert_called_once()
+        nav.followers_session_reset_list_committed_open()
+
+    def test_followers_entry_fast_path_unsafe_bounds_falls_back_without_tap(self) -> None:
+        nav.followers_session_reset_list_committed_open()
+        self.addCleanup(nav.followers_session_reset_list_committed_open)
+        d = FakeFollowersEntryDevice(followers_entry_profile_xml(bounds="[900,336][1040,496]"))
+
+        with patch.object(nav.config, "ENABLE_FOLLOWERS_ENTRY_ENGINE_V2", True), patch.object(
+            nav, "verify_app_foreground", return_value=True
+        ), patch.object(
+            nav, "_followers_current_pkg_activity", return_value={"current_package": "com.instagram.androie"}
+        ), patch.object(
+            nav, "_guess_profile_screen", return_value="likely_profile"
+        ), patch.object(
+            nav.time, "sleep", return_value=None
+        ), patch.object(
+            nav, "_followers_debug_capture", return_value={}
+        ), patch.object(
+            nav, "_open_followers_list_from_profile_v2", return_value=(True, {"open_method": "fallback_v2"})
+        ) as fallback_v2:
+            ok, meta = nav.open_followers_list_from_profile(
+                d,
+                "reveaustral",
+                "com.instagram.androie",
+                profile_verified=True,
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(meta["open_method"], "fallback_v2")
+        self.assertEqual(d.clicks, [])
+        fallback_v2.assert_called_once()
+
+    def test_followers_entry_fast_path_requires_post_tap_validation_success(self) -> None:
+        nav.followers_session_reset_list_committed_open()
+        self.addCleanup(nav.followers_session_reset_list_committed_open)
+        d = FakeFollowersEntryDevice(followers_entry_profile_xml())
+        det = {"is_followers_list": False, "open_detection_method": ""}
+
+        with patch.object(nav.config, "ENABLE_FOLLOWERS_ENTRY_ENGINE_V2", True), patch.object(
+            nav, "verify_app_foreground", return_value=True
+        ), patch.object(
+            nav, "_followers_current_pkg_activity", return_value={"current_package": "com.instagram.androie"}
+        ), patch.object(
+            nav, "_guess_profile_screen", return_value="likely_profile"
+        ), patch.object(
+            nav, "_followers_entry_v2_post_tap_confirm", return_value=(False, det, det, 1)
+        ) as post_confirm:
+            ok, meta = nav.open_followers_list_from_profile(
+                d,
+                "reveaustral",
+                "com.instagram.androie",
+                profile_verified=True,
+            )
+
+        self.assertFalse(ok)
+        self.assertEqual(d.clicks, [(655, 416)])
+        self.assertEqual(meta["failure_reason"], "entry_fast_path_transition_not_confirmed")
+        post_confirm.assert_called_once()
+        self.assertEqual(post_confirm.call_args.kwargs["post_tap_settle_s"], 2.0)
 
     def test_exhaustion_classifier_accepts_sparse_and_bounded_exhaustion(self) -> None:
         self.assertTrue(session.is_follow_target_exhaustion_outcome(exit_code=66))
