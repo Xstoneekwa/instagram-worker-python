@@ -36717,6 +36717,41 @@ def post_follow_controlled_return_to_followers_list(
                 return False
         return False
 
+    def _try_reuse_post_back_det(
+        det_reuse: dict[str, Any],
+        *,
+        det_observed_at: float,
+    ) -> tuple[bool, dict[str, Any], str, float]:
+        det_age_ms = round(max(0.0, (time.perf_counter() - det_observed_at) * 1000.0), 2)
+        if not isinstance(det_reuse, dict) or not det_reuse:
+            return False, {}, "det_absent", det_age_ms
+        if det_age_ms > 1200.0:
+            return False, det_reuse, "det_stale", det_age_ms
+        if not bool(det_reuse.get("is_followers_list")):
+            return False, det_reuse, "not_followers_list", det_age_ms
+        action_bar_title = str(det_reuse.get("action_bar_title") or "").strip()
+        action_bar_norm = _normalize_handle(action_bar_title) if action_bar_title else ""
+        expected_norm = _normalize_handle(src)
+        cand_norm = _normalize_handle(cand or "")
+        if not action_bar_norm:
+            return False, det_reuse, "missing_action_bar_title", det_age_ms
+        if not expected_norm or action_bar_norm != expected_norm:
+            return False, det_reuse, "action_bar_not_ct", det_age_ms
+        if cand_norm and action_bar_norm == cand_norm:
+            return False, det_reuse, "action_bar_matches_candidate", det_age_ms
+        try:
+            ct_ok = verify_followers_list_surface_is_ct_account(
+                d,
+                source_profile_username=src,
+                follower_candidate_username=cand or None,
+                det=det_reuse,
+            )
+        except Exception:
+            ct_ok = False
+        if not bool(ct_ok):
+            return False, det_reuse, "ct_verify_failed", det_age_ms
+        return True, det_reuse, "", det_age_ms
+
     ok0, det0 = _list_confirmed()
     if ok0:
         log(
@@ -37178,6 +37213,7 @@ def post_follow_controlled_return_to_followers_list(
             last_det = detect_followers_list_screen(d, source_profile_username=src)
         except Exception:
             last_det = {}
+        post_back_det_observed_at = time.perf_counter()
         nav_ctx2 = dict(nav_ctx)
         nav_ctx2["det"] = last_det
         try:
@@ -37200,6 +37236,53 @@ def post_follow_controlled_return_to_followers_list(
             navigation_confidence=float(nav2.get("confidence") or 0.0),
             navigation_reason=str(nav2.get("reason") or ""),
             xml_guess=str(nav2.get("xml_guess") or ""),
+        )
+
+        reuse_ok, det_reuse, reuse_reason, det_age_ms = _try_reuse_post_back_det(
+            last_det,
+            det_observed_at=post_back_det_observed_at,
+        )
+        if reuse_ok:
+            action_bar_title = str(det_reuse.get("action_bar_title") or "")[:120]
+            log(
+                "info",
+                "post_follow_return_ct_post_back_det_reused",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                attempt=round_idx,
+                det_age_ms=det_age_ms,
+                action_bar_title=action_bar_title,
+                expected_ct_username=src,
+                is_followers_list=bool(det_reuse.get("is_followers_list")),
+                reused=True,
+                reject_reason="",
+                method="compact_safe_back_then_list",
+                duration_saved_estimate_ms=3200.0,
+            )
+            log(
+                "info",
+                "post_follow_return_ct_visual_confirmed",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                attempt=round_idx,
+                how="compact_safe_back_then_list",
+                action_bar_title=action_bar_title,
+            )
+            return True, "compact_safe_back_then_list", None
+        log(
+            "info",
+            "post_follow_return_ct_post_back_det_reuse_rejected",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            attempt=round_idx,
+            det_age_ms=det_age_ms,
+            action_bar_title=str((det_reuse or {}).get("action_bar_title") or "")[:120],
+            expected_ct_username=src,
+            is_followers_list=bool((det_reuse or {}).get("is_followers_list")),
+            reused=False,
+            reject_reason=reuse_reason,
+            method="compact_safe_back_then_list",
+            duration_saved_estimate_ms=0.0,
         )
 
         ok_after, det_after = _list_confirmed()
