@@ -3894,6 +3894,54 @@ def _followers_det_skip_redetect_after_visual_bypass(
     return out
 
 
+def _candidate_selection_snapshot_reuse_candidate(
+    open_list_meta: dict[str, Any] | None,
+    *,
+    source_profile_username: str,
+    snapshot_age_ms: float,
+    max_age_ms: float = 8500.0,
+) -> tuple[dict[str, Any] | None, str]:
+    if not isinstance(open_list_meta, dict):
+        return None, "open_list_meta_missing"
+    if float(snapshot_age_ms) < 0.0 or float(snapshot_age_ms) > float(max_age_ms):
+        return None, "snapshot_stale"
+    meta_src = str(open_list_meta.get("source_profile_username") or "").strip()
+    want_src = str(source_profile_username or "").strip()
+    if meta_src and want_src and meta_src != want_src:
+        return None, "source_profile_mismatch"
+    for key in ("last_poll_snapshot", "after_tap_screen_snapshot"):
+        snap = open_list_meta.get(key)
+        if not isinstance(snap, dict) or not snap:
+            continue
+        odm = str(snap.get("open_detection_method") or open_list_meta.get("open_detection_method") or "")
+        if odm != "own_unified_follow_list":
+            continue
+        if not bool(snap.get("is_followers_list")):
+            continue
+        try:
+            candidate_count = int(snap.get("candidate_username_count") or 0)
+        except Exception:
+            candidate_count = 0
+        if candidate_count <= 0:
+            return None, "candidate_username_count_zero"
+        signals = [str(x) for x in (snap.get("signals") or [])]
+        required_any = {
+            "own_unified_followers_list_detected",
+            "follow_list_username",
+            "follow_list_container",
+            "list_chrome_recycler_or_listview",
+        }
+        if not any(s in required_any for s in signals):
+            return None, "missing_list_signals"
+        visible_headers = snap.get("visible_header_texts") or []
+        if not visible_headers and "selected_followers_tab" not in signals:
+            return None, "missing_header_signals"
+        out = dict(snap)
+        out["open_detection_method"] = odm
+        return out, ""
+    return None, "snapshot_absent"
+
+
 def _open_meta_visual_fallback_list_was_open(meta: dict) -> bool:
     """True when open success payload shows followers list validated via visual_fallback."""
     if str(meta.get("open_detection_method") or "") not in FOLLOWERS_ENGINE_VISUAL_OPEN_METHODS:
@@ -6814,6 +6862,85 @@ def _run_followers_list_engine_session(
                 inter_candidate_segment_b_pre_picker_loop_detect_start()
             except Exception:
                 pass
+            _snapshot_reuse_t0 = time.perf_counter()
+            _snapshot_reuse_used = False
+            _snapshot_reuse_age_ms = _committed_age_loop_early
+            log(
+                "info",
+                "candidate_selection_snapshot_reuse_started",
+                source_profile_username=source_profile_username,
+                open_detection_method=str(open_list_meta.get("open_detection_method") or ""),
+                candidate_username_count=(
+                    (open_list_meta.get("last_poll_snapshot") or {}).get(
+                        "candidate_username_count"
+                    )
+                    if isinstance(open_list_meta.get("last_poll_snapshot"), dict)
+                    else None
+                ),
+                snapshot_age_ms=_snapshot_reuse_age_ms,
+                fallback_used=False,
+                duration_ms=0.0,
+            )
+            _reuse_det, _reuse_reason = _candidate_selection_snapshot_reuse_candidate(
+                open_list_meta,
+                source_profile_username=source_profile_username,
+                snapshot_age_ms=_snapshot_reuse_age_ms,
+            )
+            if _reuse_det is not None and processed == 0 and followers_engine_loop_iteration == 1:
+                det = _reuse_det
+                det_xml_last_for_bypass = det
+                followers_xml_detect_skipped_this_iter = True
+                _snapshot_reuse_used = True
+                open_detection_method = str(
+                    det.get("open_detection_method") or open_detection_method or ""
+                )
+                if open_detection_method.strip():
+                    _followers_set_last_open_detection_method(open_detection_method)
+                _vfd_reuse = det.get("visual_fallback_detail")
+                if isinstance(_vfd_reuse, dict) and _vfd_reuse:
+                    session_vf_detail_for_loop = dict(_vfd_reuse)
+                    visual_loop_state["session_vf_detail"] = session_vf_detail_for_loop
+                log(
+                    "info",
+                    "candidate_selection_snapshot_reuse_accepted",
+                    reason="strong_open_success_snapshot",
+                    open_detection_method=open_detection_method,
+                    candidate_username_count=int(det.get("candidate_username_count") or 0),
+                    source_profile_username=source_profile_username,
+                    snapshot_age_ms=_snapshot_reuse_age_ms,
+                    fallback_used=False,
+                    duration_ms=round((time.perf_counter() - _snapshot_reuse_t0) * 1000.0, 2),
+                )
+            elif _reuse_det is None:
+                log(
+                    "info",
+                    "candidate_selection_snapshot_reuse_skipped",
+                    reason=_reuse_reason or "snapshot_unusable",
+                    open_detection_method=str(open_list_meta.get("open_detection_method") or ""),
+                    candidate_username_count=(
+                        (open_list_meta.get("last_poll_snapshot") or {}).get(
+                            "candidate_username_count"
+                        )
+                        if isinstance(open_list_meta.get("last_poll_snapshot"), dict)
+                        else None
+                    ),
+                    source_profile_username=source_profile_username,
+                    snapshot_age_ms=_snapshot_reuse_age_ms,
+                    fallback_used=True,
+                    duration_ms=round((time.perf_counter() - _snapshot_reuse_t0) * 1000.0, 2),
+                )
+            else:
+                log(
+                    "info",
+                    "candidate_selection_snapshot_reuse_skipped",
+                    reason="not_first_iteration",
+                    open_detection_method=str(open_list_meta.get("open_detection_method") or ""),
+                    candidate_username_count=int(_reuse_det.get("candidate_username_count") or 0),
+                    source_profile_username=source_profile_username,
+                    snapshot_age_ms=_snapshot_reuse_age_ms,
+                    fallback_used=True,
+                    duration_ms=round((time.perf_counter() - _snapshot_reuse_t0) * 1000.0, 2),
+                )
             _skip_loop_detect, _skip_loop_detect_meta = should_skip_committed_loop_top_detect(
                 open_list_meta,
                 visual_loop_state,
@@ -6821,7 +6948,9 @@ def _run_followers_list_engine_session(
                 committed_age_ms=_committed_age_loop_early,
                 list_committed_open=bool(_list_committed_loop_early),
             )
-            if _skip_loop_detect:
+            if _snapshot_reuse_used:
+                pass
+            elif _skip_loop_detect:
                 det = _followers_det_skip_redetect_after_visual_bypass(
                     det_xml_last_for_bypass if isinstance(det_xml_last_for_bypass, dict) else {},
                     session_vf_detail_for_loop,

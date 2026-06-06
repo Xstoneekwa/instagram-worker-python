@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import account_session_orchestrator as session
 import instagram_navigation as nav
+import runner
 
 
 class FakeFollowersEngine:
@@ -129,6 +130,38 @@ def followers_entry_profile_xml(
   </node>
   {extra}
 </hierarchy>"""
+
+
+def strong_followers_snapshot_meta(
+    *,
+    source_profile_username: str = "reveaustral",
+    candidate_username_count: int = 8,
+    open_detection_method: str = "own_unified_follow_list",
+    signals: list[str] | None = None,
+) -> dict:
+    snap = {
+        "is_followers_list": True,
+        "open_detection_method": open_detection_method,
+        "candidate_username_count": candidate_username_count,
+        "visible_header_texts": ["688 followers"],
+        "visible_usernames_sample": ["emmanuel_wildnature"],
+        "signals": signals
+        if signals is not None
+        else [
+            "own_unified_followers_list_detected",
+            "selected_followers_tab",
+            "follow_list_username",
+            "follow_list_container",
+            "list_chrome_recycler_or_listview",
+            "own_unified:hierarchy_xml",
+        ],
+    }
+    return {
+        "source_profile_username": source_profile_username,
+        "open_detection_method": open_detection_method,
+        "last_poll_snapshot": dict(snap),
+        "after_tap_screen_snapshot": dict(snap),
+    }
 
 
 def target(target_id: str, source: str, index: int) -> dict:
@@ -460,6 +493,81 @@ class FollowTargetsRuntimeP1bTest(unittest.TestCase):
         self.assertEqual(meta["failure_reason"], "entry_fast_path_transition_not_confirmed")
         post_confirm.assert_called_once()
         self.assertEqual(post_confirm.call_args.kwargs["post_tap_settle_s"], 2.0)
+
+    def test_candidate_selection_snapshot_reuse_accepts_strong_snapshot(self) -> None:
+        det, reason = runner._candidate_selection_snapshot_reuse_candidate(
+            strong_followers_snapshot_meta(),
+            source_profile_username="reveaustral",
+            snapshot_age_ms=1500.0,
+        )
+
+        self.assertEqual(reason, "")
+        self.assertIsNotNone(det)
+        self.assertTrue(det["is_followers_list"])
+        self.assertEqual(det["open_detection_method"], "own_unified_follow_list")
+        self.assertEqual(det["candidate_username_count"], 8)
+
+    def test_candidate_selection_snapshot_reuse_falls_back_when_absent_or_stale(self) -> None:
+        det_absent, reason_absent = runner._candidate_selection_snapshot_reuse_candidate(
+            {},
+            source_profile_username="reveaustral",
+            snapshot_age_ms=100.0,
+        )
+        det_stale, reason_stale = runner._candidate_selection_snapshot_reuse_candidate(
+            strong_followers_snapshot_meta(),
+            source_profile_username="reveaustral",
+            snapshot_age_ms=9000.0,
+        )
+
+        self.assertIsNone(det_absent)
+        self.assertEqual(reason_absent, "snapshot_absent")
+        self.assertIsNone(det_stale)
+        self.assertEqual(reason_stale, "snapshot_stale")
+
+    def test_candidate_selection_snapshot_reuse_falls_back_on_wrong_source(self) -> None:
+        det, reason = runner._candidate_selection_snapshot_reuse_candidate(
+            strong_followers_snapshot_meta(source_profile_username="other_source"),
+            source_profile_username="reveaustral",
+            snapshot_age_ms=100.0,
+        )
+
+        self.assertIsNone(det)
+        self.assertEqual(reason, "source_profile_mismatch")
+
+    def test_candidate_selection_snapshot_reuse_falls_back_on_zero_candidates(self) -> None:
+        det, reason = runner._candidate_selection_snapshot_reuse_candidate(
+            strong_followers_snapshot_meta(candidate_username_count=0),
+            source_profile_username="reveaustral",
+            snapshot_age_ms=100.0,
+        )
+
+        self.assertIsNone(det)
+        self.assertEqual(reason, "candidate_username_count_zero")
+
+    def test_candidate_selection_snapshot_reuse_requires_list_signals(self) -> None:
+        det, reason = runner._candidate_selection_snapshot_reuse_candidate(
+            strong_followers_snapshot_meta(signals=["selected_followers_tab"]),
+            source_profile_username="reveaustral",
+            snapshot_age_ms=100.0,
+        )
+
+        self.assertIsNone(det)
+        self.assertEqual(reason, "missing_list_signals")
+
+    def test_candidate_selection_snapshot_reuse_does_not_change_candidate_filters(self) -> None:
+        following_row = {"row_cta_xml_class": "following", "row_cta_xml_text": "Following"}
+        follow_row = {"row_cta_xml_class": "follow", "row_cta_xml_text": "Follow"}
+
+        det, reason = runner._candidate_selection_snapshot_reuse_candidate(
+            strong_followers_snapshot_meta(),
+            source_profile_username="reveaustral",
+            snapshot_age_ms=100.0,
+        )
+
+        self.assertIsNotNone(det)
+        self.assertEqual(reason, "")
+        self.assertEqual(following_row["row_cta_xml_class"], "following")
+        self.assertEqual(follow_row["row_cta_xml_class"], "follow")
 
     def test_exhaustion_classifier_accepts_sparse_and_bounded_exhaustion(self) -> None:
         self.assertTrue(session.is_follow_target_exhaustion_outcome(exit_code=66))
