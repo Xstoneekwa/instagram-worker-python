@@ -2233,6 +2233,379 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
         }:
             self.assertIn(event, log_events)
 
+
+    def test_legacy_safe_viewer_trusted_exact_like_proof_is_stashed(self) -> None:
+        device = mock.MagicMock()
+        device.window_size.return_value = (1080, 2340)
+        logs: list[tuple[str, dict[str, object]]] = []
+
+        def _fake_log(_level: str, event: str, **kw: object) -> None:
+            logs.append((str(event), dict(kw)))
+
+        def _fake_screenshot(_d: object, path: str) -> None:
+            from PIL import Image
+
+            Image.new("RGB", (1080, 2340), "black").save(path)
+
+        nav._clear_post_follow_open_like_proof_stash()
+        try:
+            with mock.patch.object(
+                nav, "visual_target_profile_lock_verify", return_value={"ok": True}
+            ), mock.patch.object(
+                nav,
+                "_followers_current_pkg_activity",
+                return_value={"current_activity": "profile", "current_package": "pkg"},
+            ), mock.patch.object(
+                nav,
+                "_post_follow_likes_grid_ui_surface_hints",
+                return_value={
+                    "profile_tabs_visible": True,
+                    "suggested_for_you": False,
+                    "discover_people": False,
+                },
+            ), mock.patch.object(
+                nav, "_followers_profile_tabs_bottom_y_px", return_value=(900, "tabs")
+            ), mock.patch.object(
+                nav, "screenshot", side_effect=_fake_screenshot
+            ), mock.patch.object(
+                nav,
+                "_post_follow_dynamic_first_row_search_y_min_layout",
+                return_value=(984, "profile_tabs_bottom", 900, 84),
+            ), mock.patch.object(
+                nav,
+                "_dynamic_first_post_grid_row_from_image",
+                return_value={
+                    "ok": True,
+                    "first_row_top": 1000,
+                    "first_row_bottom": 1360,
+                    "solid_count": 1,
+                    "cell_h": 360,
+                },
+            ), mock.patch.object(
+                nav, "_visual_image_cell_luma_variance", return_value=180.0
+            ), mock.patch.object(
+                nav,
+                "_visual_wait_post_viewer_opened_after_tap",
+                return_value={
+                    "post_detected": True,
+                    "detect_reason": "like_unlike_ui",
+                    "viewer_detect_path": "phase_a2_exact_like_desc_fast",
+                    "viewer_detect_a2_exact_desc_signal": "ui_description_exact_like",
+                    "viewer_detect_exact_desc_guard_result": "posts_bar_and_not_profile_grid",
+                    "posts_action_bar": True,
+                    "viewer_detect_total_ms": 120.0,
+                },
+            ), mock.patch.object(nav, "log", side_effect=_fake_log), mock.patch.object(
+                nav, "time"
+            ) as tmock:
+                tmock.perf_counter = time.perf_counter
+                tmock.time = time.time
+                tmock.sleep = lambda *_a, **_k: None
+                out = nav._post_follow_likes_open_top_left_legacy_visual_safe(
+                    device,
+                    pkg="pkg",
+                    source_profile_username="ct",
+                    expected_follower_username="cand",
+                    visual_candidate_id="vc-1",
+                    post_index=0,
+                    likes_perf_phase_t0=time.perf_counter(),
+                )
+
+            self.assertTrue(out.get("ok"))
+            ok, stash, _age_ms, reject = nav._validate_post_follow_open_like_proof_stash(
+                source_profile_username="ct",
+                expected_follower_username="cand",
+            )
+            self.assertTrue(ok, reject)
+            self.assertEqual(stash.get("proof_method"), "ui_description_exact_like")
+            self.assertEqual(stash.get("proof_source"), "legacy_safe")
+            stash_logs = [
+                kw
+                for event, kw in logs
+                if event == "post_follow_like_open_proof_stashed_from_legacy_safe"
+            ]
+            self.assertTrue(stash_logs)
+            self.assertTrue(stash_logs[-1].get("trusted"))
+            self.assertEqual(stash_logs[-1].get("signal"), "ui_description_exact_like")
+        finally:
+            nav._clear_post_follow_open_like_proof_stash()
+
+    def test_already_liked_precheck_reuses_trusted_open_proof(self) -> None:
+        device = mock.MagicMock()
+        logs: list[tuple[str, dict[str, object]]] = []
+        nav._clear_post_follow_open_like_proof_stash()
+        try:
+            nav._stash_post_follow_open_like_proof(
+                {
+                    "post_detected": True,
+                    "viewer_detect_path": "phase_a2_exact_like_desc_fast",
+                    "viewer_detect_a2_exact_desc_signal": "ui_description_exact_like",
+                    "viewer_detect_exact_desc_guard_result": "posts_bar_and_not_profile_grid",
+                    "posts_action_bar": True,
+                },
+                source_profile_username="ct",
+                follower_username="cand",
+                proof_source="legacy_safe",
+            )
+            with mock.patch.object(
+                nav,
+                "_followers_current_pkg_activity",
+                return_value={"current_activity": "post", "current_package": "pkg"},
+            ), mock.patch.object(
+                nav,
+                "_log_rejected_broad_liked_semantic_candidates",
+                side_effect=AssertionError("hierarchy fallback should be skipped"),
+            ), mock.patch.object(
+                nav, "log", side_effect=lambda level, event, **kw: logs.append((str(event), dict(kw)))
+            ):
+                out = nav.visual_post_already_liked(
+                    device,
+                    source_profile_username="ct",
+                    expected_follower_username="cand",
+                    post_follow_primary_precheck=True,
+                )
+
+            self.assertFalse(out.get("already_liked"))
+            self.assertTrue(out.get("open_proof_reused"))
+            self.assertEqual(out.get("detection_method"), "post_follow_open_like_proof_reuse")
+            reuse_logs = [
+                kw for event, kw in logs if event == "post_follow_like_open_proof_reused"
+            ]
+            self.assertTrue(reuse_logs)
+            self.assertTrue(reuse_logs[-1].get("reused"))
+            self.assertTrue(reuse_logs[-1].get("trusted"))
+        finally:
+            nav._clear_post_follow_open_like_proof_stash()
+
+    def test_open_proof_absent_non_trusted_expired_or_mismatch_falls_back_to_hierarchy(self) -> None:
+        cases: list[tuple[str, dict[str, object] | None, str, str]] = [
+            ("absent", None, "ct", "cand"),
+            (
+                "non_trusted",
+                {
+                    "viewer_detect_path": "phase_a2_exact_like_desc_fast",
+                    "proof_method": "ui_description_exact_comment",
+                    "posts_action_bar": True,
+                    "stashed_at_monotonic": time.perf_counter(),
+                    "source_profile_username": "ct",
+                    "follower_username": "cand",
+                    "proof_source": "legacy_safe",
+                },
+                "ct",
+                "cand",
+            ),
+            (
+                "expired",
+                {
+                    "viewer_detect_path": "phase_a2_exact_like_desc_fast",
+                    "proof_method": "ui_description_exact_like",
+                    "posts_action_bar": True,
+                    "stashed_at_monotonic": time.perf_counter() - 30.0,
+                    "source_profile_username": "ct",
+                    "follower_username": "cand",
+                    "proof_source": "legacy_safe",
+                },
+                "ct",
+                "cand",
+            ),
+            (
+                "mismatch",
+                {
+                    "viewer_detect_path": "phase_a2_exact_like_desc_fast",
+                    "proof_method": "ui_description_exact_like",
+                    "posts_action_bar": True,
+                    "stashed_at_monotonic": time.perf_counter(),
+                    "source_profile_username": "other_ct",
+                    "follower_username": "cand",
+                    "proof_source": "legacy_safe",
+                },
+                "ct",
+                "cand",
+            ),
+        ]
+        for label, stash, source_username, follower_username in cases:
+            with self.subTest(label=label):
+                logs: list[tuple[str, dict[str, object]]] = []
+                nav._clear_post_follow_open_like_proof_stash()
+                if stash is not None:
+                    nav._post_follow_open_like_proof_stash = dict(stash)
+                try:
+                    with mock.patch.object(
+                        nav,
+                        "_followers_current_pkg_activity",
+                        return_value={"current_activity": "post", "current_package": "pkg"},
+                    ), mock.patch.object(
+                        nav,
+                        "_log_rejected_broad_liked_semantic_candidates",
+                        return_value='<node content-desc="Like" />',
+                    ) as hierarchy_probe, mock.patch.object(
+                        nav,
+                        "_ui_post_viewer_action_button_liked_strict",
+                        return_value=(False, "", 0.0, {}),
+                    ), mock.patch.object(
+                        nav,
+                        "_ui_post_viewer_action_button_not_liked_strict",
+                        return_value=(False, "", 0.0, {}),
+                    ), mock.patch.object(
+                        nav, "log", side_effect=lambda level, event, **kw: logs.append((str(event), dict(kw)))
+                    ):
+                        out = nav.visual_post_already_liked(
+                            mock.MagicMock(),
+                            source_profile_username=source_username,
+                            expected_follower_username=follower_username,
+                            post_follow_primary_precheck=True,
+                        )
+
+                    self.assertFalse(out.get("already_liked"))
+                    self.assertEqual(out.get("detection_method"), "hierarchy_like_hint")
+                    hierarchy_probe.assert_called_once()
+                    reject_logs = [
+                        kw
+                        for event, kw in logs
+                        if event == "post_follow_like_open_proof_reuse_rejected"
+                    ]
+                    self.assertTrue(reject_logs)
+                    self.assertFalse(reject_logs[-1].get("reused"))
+                    self.assertTrue(reject_logs[-1].get("reject_reason"))
+                finally:
+                    nav._clear_post_follow_open_like_proof_stash()
+
+    def test_already_liked_true_still_blocks_tap_and_verify_still_required(self) -> None:
+        device = mock.MagicMock()
+        contract_ctx = mock.MagicMock()
+        contract_ctx.current_state.value = "sheet_dismissed"
+        with ExitStack() as stack:
+            _patch_like_phase_common(stack, contract_ctx=contract_ctx)
+            stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "_post_follow_likes_open_top_left_legacy_visual_safe",
+                    return_value={
+                        "ok": True,
+                        "post_detected": True,
+                        "failure_reason": "",
+                        "open_strategy": "vision_open_top_left_legacy_safe",
+                        "tap_x": 180,
+                        "tap_y": 1282,
+                        "detect_reason": "like_unlike_ui",
+                        "viewer_detect_path": "phase_a2_exact_like_desc_fast",
+                        "likes_perf_post_open": {},
+                    },
+                )
+            )
+            already_liked = stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "visual_post_already_liked",
+                    return_value={
+                        "already_liked": True,
+                        "detection_method": "ui_description_unlike_exact",
+                        "confidence": 0.94,
+                        "semantic_like_state": "unlike",
+                        "already_liked_decision_reason": "action_button_unlike_confirmed",
+                    },
+                )
+            )
+            like_open = stack.enter_context(mock.patch.object(nav, "visual_like_open_post"))
+            verify = stack.enter_context(mock.patch.object(nav, "visual_verify_post_liked"))
+            stack.enter_context(
+                mock.patch.object(
+                    nav, "visual_return_to_profile_from_post", return_value={"ok": True}
+                )
+            )
+            out = nav.run_post_follow_post_likes_phase(
+                device,
+                pkg="com.instagram.android",
+                source_profile_username="ct",
+                follower_username="cand",
+                visual_candidate_id="vc-1",
+                follow_success_verified=True,
+                follow_state_after="following",
+                skipped_tap=False,
+            )
+
+        already_liked.assert_called_once()
+        like_open.assert_not_called()
+        verify.assert_not_called()
+        self.assertEqual(out.get("phase_outcome"), "skipped")
+        self.assertEqual(out.get("skipped_reason"), "likes_skipped_already_liked")
+
+        with ExitStack() as stack:
+            _patch_like_phase_common(stack, contract_ctx=contract_ctx)
+            stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "_post_follow_likes_open_top_left_legacy_visual_safe",
+                    return_value={
+                        "ok": True,
+                        "post_detected": True,
+                        "failure_reason": "",
+                        "open_strategy": "vision_open_top_left_legacy_safe",
+                        "tap_x": 180,
+                        "tap_y": 1282,
+                        "detect_reason": "like_unlike_ui",
+                        "viewer_detect_path": "phase_a2_exact_like_desc_fast",
+                        "likes_perf_post_open": {},
+                    },
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "visual_post_already_liked",
+                    return_value={
+                        "already_liked": False,
+                        "detection_method": "post_follow_open_like_proof_reuse",
+                        "confidence": 0.91,
+                    },
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "visual_like_open_post",
+                    return_value={
+                        "ok": True,
+                        "already_liked": False,
+                        "real_tap_sent": True,
+                        "tap_x": 79,
+                        "tap_y": 1891,
+                        "confidence": 0.8,
+                        "likes_perf_like": {"like_tap_dispatch_ms": 1.0},
+                    },
+                )
+            )
+            verify = stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "visual_verify_post_liked",
+                    return_value={
+                        "liked_verified": True,
+                        "verification_method": "visual_filled_heart_red_ratio_verify_post_tap_reuse",
+                        "verify_attempts_count": 1,
+                    },
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    nav, "visual_return_to_profile_from_post", return_value={"ok": True}
+                )
+            )
+            out = nav.run_post_follow_post_likes_phase(
+                device,
+                pkg="com.instagram.android",
+                source_profile_username="ct",
+                follower_username="cand",
+                visual_candidate_id="vc-1",
+                follow_success_verified=True,
+                follow_state_after="following",
+                skipped_tap=False,
+            )
+
+        verify.assert_called_once()
+        self.assertEqual(out.get("phase_outcome"), "success")
+        self.assertEqual(out.get("liked_count"), 1)
+
     def test_legacy_safe_ui_hints_lightweight_skips_mute_sheet_probe(self) -> None:
         class _Selector:
             def __init__(self, exists: bool) -> None:

@@ -20725,6 +20725,12 @@ def _post_follow_likes_open_top_left_legacy_visual_safe(
             viewer_detect_path=viewer.get("viewer_detect_path"),
             detect_reason=viewer.get("detect_reason"),
         )
+    _stash_post_follow_open_like_proof(
+        dict(viewer),
+        source_profile_username=source_profile_username,
+        follower_username=expected_follower_username,
+        proof_source="legacy_safe",
+    )
     perf = {
         **dict(viewer),
         "legacy_visual_top_left_total_ms": round((time.perf_counter() - t0) * 1000.0, 2),
@@ -23771,11 +23777,12 @@ def _stash_post_follow_open_like_proof(
     *,
     source_profile_username: str,
     follower_username: str,
-) -> None:
+    proof_source: str = "standard_post_open",
+) -> bool:
     global _post_follow_open_like_proof_stash
     payload = _post_follow_open_like_proof_from_viewer_detect(det)
     if not payload:
-        return
+        return False
     src_n = _normalize_handle(source_profile_username)
     fu_n = _normalize_handle(follower_username)
     _post_follow_open_like_proof_stash = {
@@ -23783,6 +23790,7 @@ def _stash_post_follow_open_like_proof(
         "stashed_at_monotonic": time.perf_counter(),
         "source_profile_username": src_n,
         "follower_username": fu_n,
+        "proof_source": str(proof_source or "standard_post_open"),
     }
     try:
         log(
@@ -23796,6 +23804,23 @@ def _stash_post_follow_open_like_proof(
         )
     except Exception:
         pass
+    if str(proof_source or "") == "legacy_safe":
+        try:
+            log(
+                "info",
+                "post_follow_like_open_proof_stashed_from_legacy_safe",
+                proof_source="legacy_safe",
+                viewer_phase=payload.get("viewer_detect_path"),
+                signal=payload.get("proof_method"),
+                trusted=True,
+                proof_age_ms=0.0,
+                reused=False,
+                reject_reason="",
+                source_profile_username=src_n,
+            )
+        except Exception:
+            pass
+    return True
 
 
 def _try_reuse_post_follow_open_like_proof_already_liked(
@@ -23821,6 +23846,21 @@ def _try_reuse_post_follow_open_like_proof_already_liked(
                 )
             except Exception:
                 pass
+            try:
+                log(
+                    "info",
+                    "post_follow_like_open_proof_reuse_rejected",
+                    proof_source=str((stash or {}).get("proof_source") or ""),
+                    viewer_phase=str((stash or {}).get("viewer_detect_path") or ""),
+                    signal=str((stash or {}).get("proof_method") or ""),
+                    trusted=False,
+                    proof_age_ms=age_ms,
+                    reused=False,
+                    reject_reason=reject_reason,
+                    source_profile_username=source_profile_username or "",
+                )
+            except Exception:
+                pass
         return None
 
     proof_method = str(stash.get("proof_method") or "")
@@ -23837,6 +23877,21 @@ def _try_reuse_post_follow_open_like_proof_already_liked(
             decision="not_liked",
             source_profile_username=src_n,
             expected_follower_username=fu_n,
+        )
+    except Exception:
+        pass
+    try:
+        log(
+            "info",
+            "post_follow_like_open_proof_reused",
+            proof_source=str(stash.get("proof_source") or ""),
+            viewer_phase=str(stash.get("viewer_detect_path") or ""),
+            signal=proof_method,
+            trusted=True,
+            proof_age_ms=age_ms,
+            reused=True,
+            reject_reason="",
+            source_profile_username=src_n,
         )
     except Exception:
         pass
