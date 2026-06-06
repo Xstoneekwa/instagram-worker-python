@@ -37761,20 +37761,320 @@ def _mute_engine_v2_is_following_options_sheet(d: u2.Device) -> bool:
 
 
 def _mute_engine_v2_detect_sheet_level(d: u2.Device) -> tuple[str, dict[str, Any]]:
+    t0 = time.perf_counter()
+    probe_timings: list[dict[str, Any]] = []
+
+    def _probe(name: str, **kwargs: Any) -> bool:
+        p0 = time.perf_counter()
+        ok = _mute_engine_v2_u2_text_exists(d, **kwargs)
+        probe_timings.append(
+            {
+                "name": name,
+                "ok": bool(ok),
+                "duration_ms": round((time.perf_counter() - p0) * 1000.0, 2),
+            }
+        )
+        return bool(ok)
+
+    posts = _probe("text:Posts", text="Posts") or _probe("text:Publications", text="Publications")
+    stories = _probe("text:Stories", text="Stories")
+    notes = _probe("text:Notes", text="Notes")
+    unfollow = _probe("text:Unfollow", text="Unfollow")
+    close_friend = _probe("textContains:Close friend", text_contains="Close friend")
+    favorites = _probe("text:Add to favorites", text="Add to favorites")
+    mute_exact = _probe("text:Mute", text="Mute")
+    mute_contains = False
+    if not mute_exact:
+        mute_contains = _probe("textContains:Mute", text_contains="Mute")
+    restrict = False
+
+    toggles = False
+    if posts and stories:
+        if notes:
+            toggles = True
+        elif close_friend and unfollow:
+            toggles = False
+        else:
+            toggles = bool(mute_exact)
+
+    level1_marker = bool(close_friend or favorites)
+    if not toggles and unfollow and (mute_exact or mute_contains):
+        restrict = _probe("text:Restrict", text="Restrict")
+        level1_marker = bool(level1_marker or restrict)
+
+    following_options = bool(
+        (not toggles) and unfollow and (mute_exact or mute_contains) and level1_marker
+    )
+    level = "mute_toggles" if toggles else ("following_options" if following_options else "unknown")
     meta: dict[str, Any] = {
-        "posts_label": _mute_engine_v2_u2_text_exists(d, text="Posts")
-        or _mute_engine_v2_u2_text_exists(d, text="Publications"),
-        "stories_label": _mute_engine_v2_u2_text_exists(d, text="Stories"),
-        "notes_label": _mute_engine_v2_u2_text_exists(d, text="Notes"),
-        "unfollow_visible": _mute_engine_v2_u2_text_exists(d, text="Unfollow"),
-        "close_friend_visible": _mute_engine_v2_u2_text_exists(d, text_contains="Close friend"),
-        "favorites_visible": _mute_engine_v2_u2_text_exists(d, text="Add to favorites"),
+        "posts_label": posts,
+        "stories_label": stories,
+        "notes_label": notes,
+        "unfollow_visible": unfollow,
+        "close_friend_visible": close_friend,
+        "favorites_visible": favorites,
+        "mute_exact_visible": mute_exact,
+        "mute_contains_visible": mute_contains,
+        "restrict_visible": restrict,
+        "probe_count": len(probe_timings),
+        "probe_timings": probe_timings,
+        "detect_duration_ms": round((time.perf_counter() - t0) * 1000.0, 2),
     }
-    if _mute_engine_v2_is_mute_toggles_sheet(d):
-        return "mute_toggles", meta
-    if _mute_engine_v2_is_following_options_sheet(d):
-        return "following_options", meta
-    return "unknown", meta
+    return level, meta
+
+
+def _mute_engine_v2_log_sheet_detect_timing(
+    *,
+    visual_candidate_id: str,
+    source_profile_username: str,
+    phase: str,
+    sheet_level: str,
+    meta: dict[str, Any],
+) -> None:
+    try:
+        log(
+            "info",
+            "mute_sheet_detect_timing_completed",
+            visual_candidate_id=str(visual_candidate_id or ""),
+            source_profile_username=str(source_profile_username or ""),
+            phase=str(phase or ""),
+            sheet_level=str(sheet_level or ""),
+            duration_ms=float(meta.get("detect_duration_ms") or 0.0),
+            probe_count=int(meta.get("probe_count") or 0),
+            probe_timings=list(meta.get("probe_timings") or [])[:16],
+        )
+    except Exception:
+        pass
+
+
+def _mute_engine_v2_sheet_meta_has_exact_mute(meta: dict[str, Any] | None) -> bool:
+    if not isinstance(meta, dict):
+        return False
+    if bool(meta.get("mute_exact_visible")):
+        return True
+    for probe in list(meta.get("probe_timings") or []):
+        if not isinstance(probe, dict):
+            continue
+        if str(probe.get("name") or "") == "text:Mute" and bool(probe.get("ok")):
+            return True
+    return False
+
+
+def _mute_engine_v2_exact_mute_row_bounds_safe(el: Any, *, ww: int, wh: int) -> bool:
+    try:
+        b = el.info.get("bounds") or {}
+        top = int(b.get("top", 0))
+        bottom = int(b.get("bottom", 0))
+        left = int(b.get("left", 0))
+        right = int(b.get("right", 0))
+        cy = (top + bottom) // 2
+    except Exception:
+        return False
+    return bool(
+        int(wh * 0.28) <= cy <= int(wh * 0.92)
+        and left <= int(ww * 0.45)
+        and right >= int(ww * 0.18)
+        and bottom > top
+    )
+
+
+def _mute_engine_v2_element_bounds_diag(el: Any, *, ww: int, wh: int) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "left": None,
+        "top": None,
+        "right": None,
+        "bottom": None,
+        "center_x": None,
+        "center_y": None,
+        "width": None,
+        "height": None,
+        "screen_width": int(ww),
+        "screen_height": int(wh),
+        "bounds_present": False,
+        "bounds_reject_reason": "",
+    }
+    try:
+        b = (el.info or {}).get("bounds") or {}
+        if not b:
+            return out
+        left = int(b.get("left", 0))
+        top = int(b.get("top", 0))
+        right = int(b.get("right", 0))
+        bottom = int(b.get("bottom", 0))
+        cx = (left + right) // 2
+        cy = (top + bottom) // 2
+        out.update(
+            {
+                "left": left,
+                "top": top,
+                "right": right,
+                "bottom": bottom,
+                "center_x": cx,
+                "center_y": cy,
+                "width": max(0, right - left),
+                "height": max(0, bottom - top),
+                "bounds_present": True,
+            }
+        )
+        if right <= left or bottom <= top:
+            out["bounds_reject_reason"] = "invalid_bounds_geometry"
+        elif cx < 0 or cx > int(ww) or cy < 0 or cy > int(wh):
+            out["bounds_reject_reason"] = "center_outside_screen"
+    except Exception as e:
+        out["bounds_reject_reason"] = f"bounds_parse_error:{e}"
+    return out
+
+
+def _mute_engine_v2_count_exact_mute_candidates(d: u2.Device) -> tuple[int, str]:
+    try:
+        sel = d(text="Mute")
+        raw = list(sel.all())
+    except Exception:
+        return 0, "all_unavailable"
+    count = 0
+    for el in raw:
+        try:
+            if str((el.info or {}).get("text") or "").strip() == "Mute":
+                count += 1
+        except Exception:
+            continue
+    return count, "all_available"
+
+
+def _mute_engine_v2_find_mute_row_from_confirmed_following_options(
+    d: u2.Device,
+    *,
+    ww: int,
+    wh: int,
+) -> tuple[Any | None, dict[str, Any]]:
+    t0 = time.perf_counter()
+    out: dict[str, Any] = {
+        "found": False,
+        "ambiguous": False,
+        "reason": "",
+        "candidate_count": 0,
+        "duration_ms": 0.0,
+        "selector_source": "fallback_exact_text_mute",
+        "label": "",
+        "bounds_safe": None,
+        "bounds": {},
+        "click_method": "uiobject_click",
+        "exact_candidate_count_source": "",
+    }
+    exact_count, exact_count_source = _mute_engine_v2_count_exact_mute_candidates(d)
+    out["exact_candidate_count_source"] = exact_count_source
+    if exact_count > 1:
+        out["ambiguous"] = True
+        out["candidate_count"] = exact_count
+        out["reason"] = "multiple_exact_mute_rows"
+        out["duration_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
+        return None, out
+    try:
+        el, label = _visual_find_mute_row_first_sheet(d)
+    except Exception as e:
+        out["reason"] = f"fallback_exact_mute_probe_error:{e}"
+        out["duration_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
+        return None, out
+    out["label"] = str(label or "")[:80]
+    if el is None:
+        out["reason"] = "fallback_exact_mute_not_found"
+        out["duration_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
+        return None, out
+    if str(label or "").strip() != "Mute":
+        out["reason"] = "fallback_exact_mute_label_not_exact"
+        out["duration_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
+        return None, out
+    bounds_diag = _mute_engine_v2_element_bounds_diag(el, ww=ww, wh=wh)
+    out["bounds"] = bounds_diag
+    if bool(bounds_diag.get("bounds_present")):
+        safe = not bool(bounds_diag.get("bounds_reject_reason"))
+        out["bounds_safe"] = bool(safe)
+        if not safe:
+            out["reason"] = str(bounds_diag.get("bounds_reject_reason") or "bounds_unsafe")
+            out["duration_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
+            return None, out
+    out["found"] = True
+    out["candidate_count"] = 1
+    out["reason"] = "fallback_exact_mute_confirmed_by_sheet_probe"
+    out["duration_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
+    return el, out
+
+
+def _mute_engine_v2_find_exact_mute_row_fast(
+    d: u2.Device,
+    *,
+    ww: int,
+    wh: int,
+    timeout_s: float,
+) -> tuple[Any | None, dict[str, Any]]:
+    t0 = time.perf_counter()
+    out: dict[str, Any] = {
+        "found": False,
+        "ambiguous": False,
+        "reason": "",
+        "candidate_count": 0,
+        "duration_ms": 0.0,
+        "selector_source": "",
+    }
+    deadline = time.perf_counter() + max(0.05, min(1.0, float(timeout_s or 0.0)))
+    while time.perf_counter() < deadline:
+        try:
+            sel = d(text="Mute")
+            if sel.exists(timeout=0.06):
+                candidates: list[Any] = []
+                try:
+                    raw = list(sel.all())
+                except Exception:
+                    raw = [sel]
+                if not raw:
+                    raw = [sel]
+                for el in raw:
+                    has_text = False
+                    try:
+                        info = el.info
+                        txt = str(info.get("text") or "").strip()
+                        has_text = bool(txt)
+                    except Exception:
+                        txt = "Mute"
+                    if has_text and txt != "Mute":
+                        continue
+                    try:
+                        bounds = (el.info or {}).get("bounds") or {}
+                    except Exception:
+                        bounds = {}
+                    if bounds and not _mute_engine_v2_exact_mute_row_bounds_safe(
+                        el, ww=ww, wh=wh
+                    ):
+                        continue
+                    candidates.append(el)
+                out["candidate_count"] = len(candidates)
+                if len(candidates) == 1:
+                    out["found"] = True
+                    try:
+                        info = candidates[0].info
+                        bounds = info.get("bounds") or {}
+                    except Exception:
+                        bounds = {}
+                    if bounds:
+                        out["reason"] = "exact_mute_single_safe_bounds"
+                        out["selector_source"] = "exact_text_mute_safe_bounds"
+                    else:
+                        out["reason"] = "exact_mute_selector_no_bounds"
+                        out["selector_source"] = "fallback_exact_text_mute"
+                    out["duration_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
+                    return candidates[0], out
+                if len(candidates) > 1:
+                    out["ambiguous"] = True
+                    out["reason"] = "multiple_exact_mute_rows"
+                    break
+        except Exception as e:
+            out["reason"] = f"probe_error:{e}"
+            break
+        time.sleep(0.04)
+    if not out.get("reason"):
+        out["reason"] = "exact_mute_row_not_found"
+    out["duration_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
+    return None, out
 
 
 def _mute_engine_v2_enter_mute_subsheet_from_following_options(
@@ -37786,6 +38086,7 @@ def _mute_engine_v2_enter_mute_subsheet_from_following_options(
     t_all: float,
 ) -> tuple[bool, str]:
     """Tap Mute row on Following options sheet to open toggle subsheet."""
+    t_enter = time.perf_counter()
     try:
         log(
             "info",
@@ -37795,7 +38096,22 @@ def _mute_engine_v2_enter_mute_subsheet_from_following_options(
         )
     except Exception:
         pass
+    t_find = time.perf_counter()
     mute_el, mute_lab = _visual_find_mute_row_first_sheet(d)
+    find_ms = round((time.perf_counter() - t_find) * 1000.0, 2)
+    try:
+        log(
+            "info",
+            "mute_row_find_timing_completed",
+            visual_candidate_id=visual_candidate_id,
+            source_profile_username=source_profile_username,
+            duration_ms=find_ms,
+            found=bool(mute_el is not None),
+            label=str(mute_lab or "")[:80],
+            source="fallback_visual_find_mute_row_first_sheet",
+        )
+    except Exception:
+        pass
     if mute_el is None:
         try:
             log(
@@ -37830,6 +38146,13 @@ def _mute_engine_v2_enter_mute_subsheet_from_following_options(
     if _sleep_sheet >= 0.02:
         time.sleep(_sleep_sheet)
     level, _meta = _mute_engine_v2_detect_sheet_level(d)
+    _mute_engine_v2_log_sheet_detect_timing(
+        visual_candidate_id=visual_candidate_id,
+        source_profile_username=source_profile_username,
+        phase="enter_subsheet_confirm",
+        sheet_level=level,
+        meta=_meta if isinstance(_meta, dict) else {},
+    )
     if level != "mute_toggles":
         try:
             log(
@@ -37850,6 +38173,7 @@ def _mute_engine_v2_enter_mute_subsheet_from_following_options(
             visual_candidate_id=visual_candidate_id,
             source_profile_username=source_profile_username,
             mute_row_label=str(mute_lab or "")[:80],
+            duration_ms=round((time.perf_counter() - t_enter) * 1000.0, 2),
         )
     except Exception:
         pass
@@ -39742,8 +40066,17 @@ def run_mute_engine_v2(
 
     skip_following = False
     sheet_level_pre = "unknown"
+    sheet_meta_pre: dict[str, Any] = {}
+    following_cta_tapped = bool(following_clicked_fast_path)
     try:
         sheet_level_pre, sheet_meta_pre = _mute_engine_v2_detect_sheet_level(d)
+        _mute_engine_v2_log_sheet_detect_timing(
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            phase="precheck",
+            sheet_level=sheet_level_pre,
+            meta=sheet_meta_pre if isinstance(sheet_meta_pre, dict) else {},
+        )
         log(
             "info",
             "mute_sheet_level_detected",
@@ -39849,6 +40182,7 @@ def run_mute_engine_v2(
         )
         try:
             btn.click()
+            following_cta_tapped = True
         except Exception as e:
             return _abort("following_click_failed", fr=str(e))
         _sleep_following = _mute_engine_v2_pre_toggle_wait_s(
@@ -39865,9 +40199,132 @@ def run_mute_engine_v2(
         return _abort("mute_budget_exceeded", fr="mute_budget_exceeded")
 
     t_sheet = time.perf_counter()
-    sheet_level, sheet_meta = _mute_engine_v2_detect_sheet_level(d)
+    sheet_level = "unknown"
+    sheet_meta: dict[str, Any] = {}
+    fast_mute_row_clicked = False
+    if following_cta_tapped and not skip_following:
+        if sheet_level_pre == "following_options" and _mute_engine_v2_sheet_meta_has_exact_mute(
+            sheet_meta_pre
+        ):
+            fast_row, fast_row_meta = _mute_engine_v2_find_mute_row_from_confirmed_following_options(
+                d,
+                ww=int(ww),
+                wh=int(wh),
+            )
+        else:
+            fast_row, fast_row_meta = (
+                None,
+                {
+                    "duration_ms": 0.0,
+                    "found": False,
+                    "ambiguous": False,
+                    "candidate_count": 0,
+                    "reason": "exact_mute_sheet_probe_not_confirmed",
+                    "selector_source": "",
+                },
+            )
+        try:
+            log(
+                "info",
+                "mute_row_find_timing_completed",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                duration_ms=float(fast_row_meta.get("duration_ms") or 0.0),
+                found=bool(fast_row is not None),
+                ambiguous=bool(fast_row_meta.get("ambiguous")),
+                candidate_count=int(fast_row_meta.get("candidate_count") or 0),
+                reason=str(fast_row_meta.get("reason") or ""),
+                selector_source=str(fast_row_meta.get("selector_source") or ""),
+                label=str(fast_row_meta.get("label") or "")[:80],
+                bounds_safe=fast_row_meta.get("bounds_safe"),
+                bounds=fast_row_meta.get("bounds"),
+                click_method=str(fast_row_meta.get("click_method") or ""),
+                exact_candidate_count_source=str(
+                    fast_row_meta.get("exact_candidate_count_source") or ""
+                ),
+                source="fast_exact_mute_after_following_tap",
+            )
+        except Exception:
+            pass
+        if fast_row is not None and not bool(fast_row_meta.get("ambiguous")):
+            try:
+                log(
+                    "info",
+                    "mute_following_options_fast_mute_row_found",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    reason=str(fast_row_meta.get("reason") or ""),
+                    selector_source=str(fast_row_meta.get("selector_source") or ""),
+                    label=str(fast_row_meta.get("label") or "")[:80],
+                    bounds_safe=fast_row_meta.get("bounds_safe"),
+                    bounds=fast_row_meta.get("bounds"),
+                    click_method=str(fast_row_meta.get("click_method") or ""),
+                    duration_ms=float(fast_row_meta.get("duration_ms") or 0.0),
+                )
+                fast_row.click()
+                fast_mute_row_clicked = True
+                log(
+                    "info",
+                    "mute_following_options_fast_mute_row_tapped",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    selector_source=str(fast_row_meta.get("selector_source") or ""),
+                    label=str(fast_row_meta.get("label") or "")[:80],
+                    click_method=str(fast_row_meta.get("click_method") or "uiobject_click"),
+                    remaining_budget_s=round(_mute_engine_v2_remaining_s(t_all), 4),
+                )
+            except Exception:
+                fast_mute_row_clicked = False
+        if fast_mute_row_clicked:
+            _sleep_fast_sheet = _mute_engine_v2_pre_toggle_wait_s(
+                remaining_s=_mute_engine_v2_remaining_s(t_all),
+                desired_s=0.18,
+                required_toggle_s=float(toggle_required_budget_s),
+            )
+            if _sleep_fast_sheet >= 0.02:
+                time.sleep(_sleep_fast_sheet)
+            sheet_level, sheet_meta = _mute_engine_v2_detect_sheet_level(d)
+            _mute_engine_v2_log_sheet_detect_timing(
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                phase="fast_mute_row_confirm",
+                sheet_level=sheet_level,
+                meta=sheet_meta if isinstance(sheet_meta, dict) else {},
+            )
+            if sheet_level != "mute_toggles":
+                fast_mute_row_clicked = False
+                log(
+                    "warning",
+                    "mute_following_options_fast_mute_row_fallback",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    reason="mute_toggles_not_confirmed_after_fast_row_tap",
+                    sheet_level=sheet_level,
+                )
+    if not fast_mute_row_clicked:
+        sheet_level, sheet_meta = _mute_engine_v2_detect_sheet_level(d)
+        _mute_engine_v2_log_sheet_detect_timing(
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            phase="after_following_tap",
+            sheet_level=sheet_level,
+            meta=sheet_meta if isinstance(sheet_meta, dict) else {},
+        )
     if not skip_following:
-        if sheet_level == "following_options":
+        if fast_mute_row_clicked:
+            pass
+        elif sheet_level == "following_options":
+            try:
+                log(
+                    "info",
+                    "mute_following_options_to_enter_subsheet_gap_ms",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    duration_ms=round((time.perf_counter() - t_sheet) * 1000.0, 2),
+                    sheet_level=sheet_level,
+                )
+            except Exception:
+                pass
             entered, enter_rsn = _mute_engine_v2_enter_mute_subsheet_from_following_options(
                 d,
                 visual_candidate_id=vcid,
@@ -39881,7 +40338,25 @@ def run_mute_engine_v2(
                     fr=str(enter_rsn or "mute_subsheet_enter_failed"),
                 )
             sheet_level, sheet_meta = _mute_engine_v2_detect_sheet_level(d)
+            _mute_engine_v2_log_sheet_detect_timing(
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                phase="post_enter_subsheet",
+                sheet_level=sheet_level,
+                meta=sheet_meta if isinstance(sheet_meta, dict) else {},
+            )
         elif sheet_level != "mute_toggles":
+            try:
+                log(
+                    "info",
+                    "mute_following_options_to_enter_subsheet_gap_ms",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    duration_ms=round((time.perf_counter() - t_sheet) * 1000.0, 2),
+                    sheet_level=sheet_level,
+                )
+            except Exception:
+                pass
             entered, enter_rsn = _mute_engine_v2_enter_mute_subsheet_from_following_options(
                 d,
                 visual_candidate_id=vcid,
@@ -39896,6 +40371,13 @@ def run_mute_engine_v2(
                     sheet_level=sheet_level,
                 )
             sheet_level, sheet_meta = _mute_engine_v2_detect_sheet_level(d)
+            _mute_engine_v2_log_sheet_detect_timing(
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                phase="post_enter_subsheet_unknown_fallback",
+                sheet_level=sheet_level,
+                meta=sheet_meta if isinstance(sheet_meta, dict) else {},
+            )
 
     timings["mute_sheet_open_ms"] = round((time.perf_counter() - t_sheet) * 1000, 2)
 
