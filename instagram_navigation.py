@@ -7846,6 +7846,54 @@ def _follow_ui_state_snapshot(d: u2.Device) -> str:
     return "unknown"
 
 
+_FOLLOW_POST_TAP_RID_FAST_FOLLOW_FALLBACK_ATTEMPTS = 3
+
+
+def _follow_state_from_header_button_rid_fast(
+    d: u2.Device,
+    pkg: str | None,
+) -> tuple[str, dict[str, Any]]:
+    """Fast post-tap state read from Instagram's exact profile header follow button."""
+    pkg_s = str(pkg or "").strip()
+    meta: dict[str, Any] = {
+        "button_text": "",
+        "button_desc": "",
+        "button_resource_id": "",
+        "rid_found": False,
+        "package_name": pkg_s,
+    }
+    if not pkg_s:
+        return "unknown", meta
+    rid = f"{pkg_s}:id/profile_header_follow_button"
+    try:
+        sel = d(resourceId=rid)
+        if not sel.exists(timeout=0.06):
+            return "unknown", meta
+        inf = _follow_safe_info(sel)
+    except Exception:
+        return "unknown", meta
+
+    text = str(inf.get("text") or "")
+    desc = str(inf.get("contentDescription") or "")
+    resource_id = str(inf.get("resourceName") or rid)
+    meta.update(
+        {
+            "button_text": text,
+            "button_desc": desc,
+            "button_resource_id": resource_id,
+            "rid_found": True,
+        }
+    )
+    blob = f"{text} {desc}".strip().casefold()
+    if any(label in blob for label in ("requested", "demande envoyée", "en attente")):
+        return "requested", meta
+    if any(label in blob for label in ("following", "abonné", "abonnée", "suivi")):
+        return "following", meta
+    if blob in ("follow", "suivre") or text.strip().casefold() in ("follow", "suivre"):
+        return "follow", meta
+    return "unknown", meta
+
+
 def _follow_rid_suspicious(rid: str) -> bool:
     r = _follow_norm(rid)
     if not r:
@@ -9263,7 +9311,48 @@ def perform_follow_safe(
     review_popup_handled_once = False
     while time.monotonic() < verify_deadline:
         attempts += 1
-        state_after = _follow_ui_state_snapshot(d)
+        _verify_poll_t0 = time.perf_counter()
+        _verify_signal_source = "ui_snapshot"
+        _verify_fallback_used = True
+        _verify_button_text = ""
+        _verify_button_desc = ""
+        if tap_exact:
+            _rid_probe_t0 = time.perf_counter()
+            _rid_state, _rid_meta = _follow_state_from_header_button_rid_fast(d, pkg)
+            _rid_probe_ms = round((time.perf_counter() - _rid_probe_t0) * 1000.0, 2)
+            _verify_button_text = str(_rid_meta.get("button_text") or "")
+            _verify_button_desc = str(_rid_meta.get("button_desc") or "")
+            _rid_payload = {
+                "target_username": str(username or ""),
+                "visual_candidate_id": str(visual_candidate_id or ""),
+                "duration_ms": _rid_probe_ms,
+                "attempt": attempts,
+                "signal_source": "rid_fast",
+                "result": _rid_state,
+                "button_text": _verify_button_text,
+                "button_desc": _verify_button_desc,
+                "fallback_used": False,
+                "tap_exact": True,
+                "package_name": str(pkg or ""),
+                "rid_found": bool(_rid_meta.get("rid_found")),
+            }
+            events.append(("follow_action_post_verify_fast_rid_probe", dict(_rid_payload)))
+            log("info", "follow_action_post_verify_fast_rid_probe", **_rid_payload)
+            if _rid_state in ("following", "requested"):
+                state_after = _rid_state
+                _verify_signal_source = "rid_fast"
+                _verify_fallback_used = False
+            elif (
+                _rid_state == "follow"
+                and attempts < _FOLLOW_POST_TAP_RID_FAST_FOLLOW_FALLBACK_ATTEMPTS
+            ):
+                state_after = _rid_state
+                _verify_signal_source = "rid_fast"
+                _verify_fallback_used = False
+            else:
+                state_after = _follow_ui_state_snapshot(d)
+        else:
+            state_after = _follow_ui_state_snapshot(d)
         if (
             not review_popup_handled_once
             and attempts <= 2
@@ -9277,6 +9366,8 @@ def perform_follow_safe(
                 review_popup_handled_once = True
                 verify_deadline = verify_deadline + 1.2
                 state_after = _follow_ui_state_snapshot(d)
+                _verify_signal_source = "ui_snapshot"
+                _verify_fallback_used = True
             elif _review_before_follow_popup_visible(d):
                 _review_abort = _follow_review_popup_unhandled_abort(
                     d,
@@ -9290,6 +9381,22 @@ def perform_follow_safe(
                 )
                 if _review_abort is not None:
                     return _review_abort
+        _verify_poll_ms = round((time.perf_counter() - _verify_poll_t0) * 1000.0, 2)
+        log(
+            "info",
+            "post_follow_timing_verify_poll_completed",
+            target_username=str(username or ""),
+            visual_candidate_id=str(visual_candidate_id or ""),
+            duration_ms=_verify_poll_ms,
+            attempt=attempts,
+            signal_source=_verify_signal_source,
+            result=state_after,
+            button_text=_verify_button_text,
+            button_desc=_verify_button_desc,
+            fallback_used=_verify_fallback_used,
+            tap_exact=tap_exact,
+            package_name=str(pkg or ""),
+        )
         if _use_follow_action_v2 and (
             attempts == 1
             or attempts % 5 == 0
