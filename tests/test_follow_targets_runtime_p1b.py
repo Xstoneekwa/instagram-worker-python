@@ -98,6 +98,27 @@ class FakeFollowersEntryDevice:
         self.clicks.append((int(x), int(y)))
 
 
+class FakeFollowersPostTapDevice:
+    def __init__(
+        self,
+        hierarchy_xml: str,
+        *,
+        package: str = "com.instagram.androie",
+        activity: str = "com.instagram.mainactivity.InstagramMainActivity",
+    ) -> None:
+        self.hierarchy_xml = hierarchy_xml
+        self.package = package
+        self.activity = activity
+        self.dump_calls = 0
+
+    def app_current(self) -> dict:
+        return {"package": self.package, "activity": self.activity}
+
+    def dump_hierarchy(self, compressed: bool = False) -> str:
+        self.dump_calls += 1
+        return self.hierarchy_xml
+
+
 def followers_entry_profile_xml(
     *,
     source: str = "reveaustral",
@@ -130,6 +151,52 @@ def followers_entry_profile_xml(
   </node>
   {extra}
 </hierarchy>"""
+
+
+def followers_list_xml(
+    *,
+    source: str = "reveaustral",
+    selected_followers_tab: bool = True,
+    include_container: bool = True,
+    include_recycler: bool = True,
+    candidate_count: int = 3,
+) -> str:
+    selected = ' selected="true"' if selected_followers_tab else ""
+    container = (
+        '<node class="android.view.ViewGroup" resource-id="com.instagram.androie:id/follow_list_container" bounds="[0,250][1080,2200]">'
+        if include_container
+        else '<node class="android.view.ViewGroup" bounds="[0,250][1080,2200]">'
+    )
+    recycler = (
+        '<node class="androidx.recyclerview.widget.RecyclerView" bounds="[0,360][1080,2200]">'
+        if include_recycler
+        else '<node class="android.view.ViewGroup" bounds="[0,360][1080,2200]">'
+    )
+    rows = "\n".join(
+        f'<node class="android.widget.TextView" resource-id="com.instagram.androie:id/follow_list_username" text="candidate_{i}" bounds="[80,{430 + i * 120}][500,{480 + i * 120}]" />'
+        for i in range(candidate_count)
+    )
+    return f"""<?xml version="1.0" encoding="utf-8"?>
+<hierarchy>
+  <node class="android.widget.TextView" resource-id="com.instagram.androie:id/action_bar_title" text="{source}" bounds="[0,80][1080,180]" />
+  <node class="android.widget.HorizontalScrollView" resource-id="com.instagram.androie:id/unified_follow_list_tab_layout" bounds="[0,180][1080,300]">
+    <node class="android.widget.TextView" resource-id="com.instagram.androie:id/title" text="10K followers"{selected} bounds="[0,180][540,300]" />
+  </node>
+  {container}
+    {recycler}
+      {rows}
+    </node>
+  </node>
+</hierarchy>"""
+
+
+def post_tap_xml_fast_diag() -> dict:
+    return {
+        "entry_engine_v2": True,
+        "semantic_followers_metric": True,
+        "post_tap_xml_fast_deadline_ms": 1.0,
+        "post_tap_xml_fast_interval_ms": 1.0,
+    }
 
 
 def strong_followers_snapshot_meta(
@@ -493,6 +560,197 @@ class FollowTargetsRuntimeP1bTest(unittest.TestCase):
         self.assertEqual(meta["failure_reason"], "entry_fast_path_transition_not_confirmed")
         post_confirm.assert_called_once()
         self.assertEqual(post_confirm.call_args.kwargs["post_tap_settle_s"], 2.0)
+
+    def test_followers_entry_post_tap_xml_fast_confirms_without_vision(self) -> None:
+        d = FakeFollowersPostTapDevice(followers_list_xml())
+        tap_diag = post_tap_xml_fast_diag()
+        logs: list[tuple[str, dict]] = []
+
+        with patch.object(nav.config, "INSTAGRAM_PACKAGE", "com.instagram.androie"), patch.object(
+            nav, "_followers_after_tap_immediate_capture_and_detect", side_effect=AssertionError("fallback skipped")
+        ), patch.object(
+            nav, "_vision_validation_followers_list_open_gate", side_effect=AssertionError("vision skipped")
+        ), patch.object(
+            nav, "log", side_effect=lambda _level, event, **kw: logs.append((event, kw))
+        ):
+            ok, after_det, last_det, attempts = nav._followers_entry_v2_post_tap_confirm(
+                d,
+                tap_diag,
+                "reveaustral",
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(attempts, 1)
+        self.assertEqual(d.dump_calls, 1)
+        self.assertEqual(last_det["open_detection_method"], "own_unified_follow_list")
+        self.assertEqual(last_det["candidate_username_count"], 3)
+        self.assertEqual(after_det, last_det)
+        self.assertTrue(tap_diag["followers_entry_post_tap_xml_fast_confirmed"])
+        self.assertIn(
+            "followers_entry_post_tap_xml_fast_confirmed",
+            [event for event, _ in logs],
+        )
+
+    def test_followers_entry_post_tap_xml_fast_zero_candidates_falls_back(self) -> None:
+        d = FakeFollowersPostTapDevice(followers_list_xml(candidate_count=0))
+        tap_diag = post_tap_xml_fast_diag()
+        fallback_det = {"is_followers_list": True, "open_detection_method": "fallback_visual"}
+
+        with patch.object(nav.config, "INSTAGRAM_PACKAGE", "com.instagram.androie"), patch.object(
+            nav, "_followers_after_tap_immediate_capture_and_detect",
+            return_value=({"screenshot_path": "shot.png", "xml_path": "x.xml"}, fallback_det),
+        ) as fallback, patch.object(
+            nav, "_followers_entry_v2_enrich_transition_visual_detail",
+            return_value=fallback_det,
+        ), patch.object(
+            nav, "_followers_entry_v2_list_open_quality_ok", return_value=(True, "ok")
+        ), patch.object(
+            nav, "_vision_validation_followers_list_open_gate", return_value=(True, "ok")
+        ), patch.object(nav.time, "sleep", return_value=None):
+            ok, _, last_det, _ = nav._followers_entry_v2_post_tap_confirm(
+                d,
+                tap_diag,
+                "reveaustral",
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(last_det["open_detection_method"], "fallback_visual")
+        fallback.assert_called_once()
+
+    def test_followers_entry_post_tap_xml_fast_wrong_source_falls_back(self) -> None:
+        d = FakeFollowersPostTapDevice(followers_list_xml(source="other_source"))
+        tap_diag = post_tap_xml_fast_diag()
+        fallback_det = {"is_followers_list": True, "open_detection_method": "fallback_visual"}
+
+        with patch.object(nav.config, "INSTAGRAM_PACKAGE", "com.instagram.androie"), patch.object(
+            nav, "_followers_after_tap_immediate_capture_and_detect",
+            return_value=({"screenshot_path": "shot.png", "xml_path": "x.xml"}, fallback_det),
+        ) as fallback, patch.object(
+            nav, "_followers_entry_v2_enrich_transition_visual_detail",
+            return_value=fallback_det,
+        ), patch.object(
+            nav, "_followers_entry_v2_list_open_quality_ok", return_value=(True, "ok")
+        ), patch.object(
+            nav, "_vision_validation_followers_list_open_gate", return_value=(True, "ok")
+        ), patch.object(nav.time, "sleep", return_value=None):
+            ok, _, last_det, _ = nav._followers_entry_v2_post_tap_confirm(
+                d,
+                tap_diag,
+                "reveaustral",
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(last_det["open_detection_method"], "fallback_visual")
+        fallback.assert_called_once()
+
+    def test_followers_entry_post_tap_xml_fast_missing_selected_tab_falls_back(self) -> None:
+        d = FakeFollowersPostTapDevice(followers_list_xml(selected_followers_tab=False))
+        tap_diag = post_tap_xml_fast_diag()
+        fallback_det = {"is_followers_list": True, "open_detection_method": "fallback_visual"}
+
+        with patch.object(nav.config, "INSTAGRAM_PACKAGE", "com.instagram.androie"), patch.object(
+            nav, "_followers_after_tap_immediate_capture_and_detect",
+            return_value=({"screenshot_path": "shot.png", "xml_path": "x.xml"}, fallback_det),
+        ) as fallback, patch.object(
+            nav, "_followers_entry_v2_enrich_transition_visual_detail",
+            return_value=fallback_det,
+        ), patch.object(
+            nav, "_followers_entry_v2_list_open_quality_ok", return_value=(True, "ok")
+        ), patch.object(
+            nav, "_vision_validation_followers_list_open_gate", return_value=(True, "ok")
+        ), patch.object(nav.time, "sleep", return_value=None):
+            ok, _, last_det, _ = nav._followers_entry_v2_post_tap_confirm(
+                d,
+                tap_diag,
+                "reveaustral",
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(last_det["open_detection_method"], "fallback_visual")
+        fallback.assert_called_once()
+
+    def test_followers_entry_post_tap_xml_fast_missing_container_or_chrome_falls_back(self) -> None:
+        for xml in (
+            followers_list_xml(include_container=False),
+            followers_list_xml(include_recycler=False),
+        ):
+            d = FakeFollowersPostTapDevice(xml)
+            tap_diag = post_tap_xml_fast_diag()
+            fallback_det = {"is_followers_list": True, "open_detection_method": "fallback_visual"}
+
+            with patch.object(nav.config, "INSTAGRAM_PACKAGE", "com.instagram.androie"), patch.object(
+                nav, "_followers_after_tap_immediate_capture_and_detect",
+                return_value=({"screenshot_path": "shot.png", "xml_path": "x.xml"}, fallback_det),
+            ) as fallback, patch.object(
+                nav, "_followers_entry_v2_enrich_transition_visual_detail",
+                return_value=fallback_det,
+            ), patch.object(
+                nav, "_followers_entry_v2_list_open_quality_ok", return_value=(True, "ok")
+            ), patch.object(
+                nav, "_vision_validation_followers_list_open_gate", return_value=(True, "ok")
+            ), patch.object(nav.time, "sleep", return_value=None):
+                ok, _, last_det, _ = nav._followers_entry_v2_post_tap_confirm(
+                    d,
+                    tap_diag,
+                    "reveaustral",
+                )
+
+            self.assertTrue(ok)
+            self.assertEqual(last_det["open_detection_method"], "fallback_visual")
+            fallback.assert_called_once()
+
+    def test_followers_entry_post_tap_xml_fast_foreground_mismatch_falls_back(self) -> None:
+        d = FakeFollowersPostTapDevice(followers_list_xml(), package="com.other.app")
+        tap_diag = post_tap_xml_fast_diag()
+        fallback_det = {"is_followers_list": True, "open_detection_method": "fallback_visual"}
+
+        with patch.object(nav.config, "INSTAGRAM_PACKAGE", "com.instagram.androie"), patch.object(
+            nav, "_followers_after_tap_immediate_capture_and_detect",
+            return_value=({"screenshot_path": "shot.png", "xml_path": "x.xml"}, fallback_det),
+        ) as fallback, patch.object(
+            nav, "_followers_entry_v2_enrich_transition_visual_detail",
+            return_value=fallback_det,
+        ), patch.object(
+            nav, "_followers_entry_v2_list_open_quality_ok", return_value=(True, "ok")
+        ), patch.object(
+            nav, "_vision_validation_followers_list_open_gate", return_value=(True, "ok")
+        ), patch.object(nav.time, "sleep", return_value=None):
+            ok, _, last_det, _ = nav._followers_entry_v2_post_tap_confirm(
+                d,
+                tap_diag,
+                "reveaustral",
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(last_det["open_detection_method"], "fallback_visual")
+        fallback.assert_called_once()
+
+    def test_followers_entry_post_tap_xml_fast_snapshot_supports_candidate_reuse(self) -> None:
+        d = FakeFollowersPostTapDevice(followers_list_xml())
+        tap_diag = post_tap_xml_fast_diag()
+
+        with patch.object(nav.config, "INSTAGRAM_PACKAGE", "com.instagram.androie"):
+            ok, after_det, last_det, _ = nav._followers_entry_v2_post_tap_confirm(
+                d,
+                tap_diag,
+                "reveaustral",
+            )
+        open_list_meta = {
+            "source_profile_username": "reveaustral",
+            "open_detection_method": last_det.get("open_detection_method"),
+            "last_poll_snapshot": last_det,
+            "after_tap_screen_snapshot": after_det,
+        }
+        reuse_det, reason = runner._candidate_selection_snapshot_reuse_candidate(
+            open_list_meta,
+            source_profile_username="reveaustral",
+            snapshot_age_ms=100.0,
+        )
+
+        self.assertTrue(ok)
+        self.assertEqual(reason, "")
+        self.assertIsNotNone(reuse_det)
+        self.assertEqual(reuse_det["open_detection_method"], "own_unified_follow_list")
 
     def test_candidate_selection_snapshot_reuse_accepts_strong_snapshot(self) -> None:
         det, reason = runner._candidate_selection_snapshot_reuse_candidate(

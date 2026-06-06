@@ -33191,6 +33191,194 @@ def _followers_entry_v2_second_pass_fresh_capture_and_detect(
     return paths, det
 
 
+def _followers_entry_post_tap_xml_fast_detect_from_hierarchy(
+    hierarchy_xml: str,
+    *,
+    source_profile_username: str,
+    pkg_meta: dict[str, Any],
+) -> tuple[bool, dict[str, Any], str, dict[str, Any]]:
+    own = _detect_own_unified_followers_list_from_hierarchy_xml(
+        hierarchy_xml,
+        source_profile_username=source_profile_username,
+    )
+    expected_pkg = str(getattr(config, "INSTAGRAM_PACKAGE", "") or "").strip()
+    current_pkg = str((pkg_meta or {}).get("current_package") or "").strip()
+    if expected_pkg and not current_pkg:
+        return False, {}, "app_foreground_unknown", own
+    if expected_pkg and current_pkg != expected_pkg:
+        return False, {}, "app_foreground_mismatch", own
+    src = _normalize_handle(str(source_profile_username or ""))
+    ab = _normalize_handle(str(own.get("action_bar_title") or ""))
+    if src and ab and src != ab:
+        return False, {}, "source_profile_mismatch", own
+    if not bool(own.get("detected")):
+        return False, {}, "own_unified_follow_list_not_detected", own
+    if not str(own.get("selected_followers_tab_text") or "").strip():
+        return False, {}, "selected_followers_tab_missing", own
+    if not bool(own.get("follow_list_container_present")):
+        return False, {}, "follow_list_container_missing", own
+    if not bool(own.get("recycler_present") or own.get("listview_present")):
+        return False, {}, "list_chrome_missing", own
+    follow_count = int(own.get("follow_list_username_count") or 0)
+    if follow_count <= 0:
+        return False, {}, "candidate_username_count_zero", own
+    det: dict[str, Any] = {
+        "is_followers_list": True,
+        "title_match": False,
+        "action_bar_title": str(own.get("action_bar_title") or ""),
+        "recycler_present": bool(own.get("recycler_present")),
+        "listview_present": bool(own.get("listview_present")),
+        "scrollable_present": False,
+        "scrollable_count": 0,
+        "profile_tabs_absent": False,
+        "visible_usernames_sample": [],
+        "visible_header_texts": [str(own.get("selected_followers_tab_text") or "").strip()],
+        "candidate_username_count": follow_count,
+        "follow_list_username_count": follow_count,
+        "stacked_central_textview_run": 0,
+        "relaxed_rules_matched": [],
+        "strict_list_open": False,
+        "relaxed_list_open": True,
+        "current_package": current_pkg,
+        "current_activity": (pkg_meta or {}).get("current_activity"),
+        "current_screen_guess": "followers_list",
+    }
+    _apply_own_unified_followers_list_to_det(det, own)
+    return True, det, "strong_own_unified_follow_list", own
+
+
+def _followers_entry_post_tap_xml_fast_poll(
+    d: u2.Device,
+    tap_diag: dict[str, Any],
+    source_profile_username: str,
+    *,
+    deadline_ms: float = 2800.0,
+    interval_ms: float = 300.0,
+) -> tuple[bool, dict[str, Any], int]:
+    if not _followers_entry_v2_post_tap_semantic_followers_context(tap_diag):
+        log(
+            "info",
+            "followers_entry_post_tap_xml_fast_skipped",
+            reason="not_semantic_followers_context",
+            source_profile_username=source_profile_username,
+            deadline_ms=float(deadline_ms),
+            interval_ms=float(interval_ms),
+            attempt=0,
+            duration_ms=0.0,
+            fallback_used=True,
+        )
+        return False, {}, 0
+    started = time.perf_counter()
+    deadline_s = max(0.1, float(deadline_ms) / 1000.0)
+    interval_s = max(0.05, float(interval_ms) / 1000.0)
+    log(
+        "info",
+        "followers_entry_post_tap_xml_fast_poll_started",
+        source_profile_username=source_profile_username,
+        deadline_ms=float(deadline_ms),
+        interval_ms=float(interval_ms),
+        fallback_used=False,
+    )
+    attempt = 0
+    last_reason = "deadline_elapsed"
+    last_own: dict[str, Any] = {}
+    while True:
+        attempt += 1
+        attempt_t0 = time.perf_counter()
+        pkg_meta = _followers_current_pkg_activity(d)
+        hier_text = ""
+        dump_error = ""
+        try:
+            try:
+                hier = d.dump_hierarchy(compressed=False)
+            except TypeError:
+                hier = d.dump_hierarchy()
+            hier_text = hier if isinstance(hier, str) else str(hier or "")
+            _bump_xml_fetch()
+        except Exception as e:
+            dump_error = str(e)
+        ok = False
+        det: dict[str, Any] = {}
+        reason = "hierarchy_empty"
+        own: dict[str, Any] = {}
+        if hier_text.strip():
+            ok, det, reason, own = _followers_entry_post_tap_xml_fast_detect_from_hierarchy(
+                hier_text,
+                source_profile_username=source_profile_username,
+                pkg_meta=pkg_meta,
+            )
+        elif dump_error:
+            reason = "dump_hierarchy_failed"
+        last_reason = reason
+        last_own = own
+        elapsed_ms = round((time.perf_counter() - started) * 1000.0, 2)
+        log(
+            "info",
+            "followers_entry_post_tap_xml_fast_poll_attempt",
+            attempt=attempt,
+            duration_ms=round((time.perf_counter() - attempt_t0) * 1000.0, 2),
+            elapsed_ms=elapsed_ms,
+            deadline_ms=float(deadline_ms),
+            interval_ms=float(interval_ms),
+            open_detection_method=det.get("open_detection_method") or "",
+            candidate_username_count=det.get("candidate_username_count")
+            or own.get("follow_list_username_count")
+            or 0,
+            follow_list_username_count=own.get("follow_list_username_count") or 0,
+            selected_followers_tab=bool(own.get("selected_followers_tab_text")),
+            recycler_present=bool(own.get("recycler_present")),
+            listview_present=bool(own.get("listview_present")),
+            source_profile_username=source_profile_username,
+            fallback_used=not ok,
+            reason=reason,
+        )
+        if ok:
+            _followers_store_detect_hierarchy_xml(
+                hier_text,
+                xml_path="followers_entry_post_tap_xml_fast_poll",
+            )
+            tap_diag["followers_entry_post_tap_xml_fast_confirmed"] = True
+            log(
+                "info",
+                "followers_entry_post_tap_xml_fast_confirmed",
+                attempt=attempt,
+                duration_ms=round((time.perf_counter() - started) * 1000.0, 2),
+                deadline_ms=float(deadline_ms),
+                interval_ms=float(interval_ms),
+                open_detection_method=det.get("open_detection_method"),
+                candidate_username_count=det.get("candidate_username_count"),
+                follow_list_username_count=own.get("follow_list_username_count") or 0,
+                selected_followers_tab=bool(own.get("selected_followers_tab_text")),
+                recycler_present=bool(own.get("recycler_present")),
+                listview_present=bool(own.get("listview_present")),
+                source_profile_username=source_profile_username,
+                fallback_used=False,
+                reason=reason,
+            )
+            return True, det, attempt
+        if (time.perf_counter() - started) >= deadline_s:
+            break
+        time.sleep(min(interval_s, max(0.0, deadline_s - (time.perf_counter() - started))))
+    log(
+        "info",
+        "followers_entry_post_tap_xml_fast_skipped",
+        attempt=attempt,
+        duration_ms=round((time.perf_counter() - started) * 1000.0, 2),
+        deadline_ms=float(deadline_ms),
+        interval_ms=float(interval_ms),
+        open_detection_method="",
+        candidate_username_count=last_own.get("follow_list_username_count") or 0,
+        follow_list_username_count=last_own.get("follow_list_username_count") or 0,
+        selected_followers_tab=bool(last_own.get("selected_followers_tab_text")),
+        recycler_present=bool(last_own.get("recycler_present")),
+        listview_present=bool(last_own.get("listview_present")),
+        source_profile_username=source_profile_username,
+        fallback_used=True,
+        reason=last_reason,
+    )
+    return False, {}, attempt
+
+
 def _followers_entry_v2_post_tap_confirm(
     d: u2.Device,
     tap_diag: dict[str, Any],
@@ -33200,6 +33388,17 @@ def _followers_entry_v2_post_tap_confirm(
 ) -> tuple[bool, dict[str, Any], dict[str, Any], int]:
     """Single immediate capture + one optional short re-detect; no hierarchy refresh recovery."""
     _followers_reset_post_tap_capture_gate()
+    fast_ok, fast_det, fast_attempts = _followers_entry_post_tap_xml_fast_poll(
+        d,
+        tap_diag,
+        source_profile_username,
+        deadline_ms=float(tap_diag.get("post_tap_xml_fast_deadline_ms", 2800.0) or 2800.0),
+        interval_ms=float(tap_diag.get("post_tap_xml_fast_interval_ms", 300.0) or 300.0),
+    )
+    if fast_ok:
+        tap_diag["followers_list_post_tap_capture_done"] = False
+        tap_diag["entry_engine_v2"] = True
+        return True, fast_det, fast_det, fast_attempts
     paths, det_imm = _followers_after_tap_immediate_capture_and_detect(
         d,
         source_profile_username=source_profile_username,
