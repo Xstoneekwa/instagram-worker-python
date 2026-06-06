@@ -8702,6 +8702,7 @@ def perform_follow_safe(
     profile_already_open: bool = False,
     visual_candidate_id: str | None = None,
     source_profile_username: str | None = None,
+    dont_follow_private_accounts: bool = False,
 ) -> dict[str, Any]:
     """
     Single-tap follow with bounded verification (Following or Requested). No retries / multi-tap.
@@ -8816,7 +8817,42 @@ def perform_follow_safe(
             header_band_relaxed=True,
         )
 
+    _state_before_t0 = time.perf_counter()
     state_before = _follow_ui_state_snapshot(d)
+    _state_before_ms = round((time.perf_counter() - _state_before_t0) * 1000.0, 2)
+    log(
+        "info",
+        "pre_follow_timing_ui_state_snapshot_completed",
+        duration_ms=_state_before_ms,
+        caller="perform_follow_safe_initial",
+        result=state_before,
+        signals_found=[state_before] if state_before else [],
+        target_username=str(username or ""),
+        visual_candidate_id=str(visual_candidate_id or ""),
+        source_profile_username=str(source_profile_username or ""),
+        follow_button=state_before == "follow",
+        following=state_before == "following",
+        requested=state_before == "requested",
+        private=False,
+        message_or_contact=False,
+        follow_header_state_reused=False,
+        fallback_used=False,
+    )
+    log(
+        "info",
+        "pre_follow_timing_perform_follow_entry_completed",
+        duration_ms=round((time.perf_counter() - t_all) * 1000.0, 2),
+        caller="perform_follow_safe",
+        result=state_before,
+        reason="initial_ui_state_snapshot_completed",
+        target_username=str(username or ""),
+        visual_candidate_id=str(visual_candidate_id or ""),
+        source_profile_username=str(source_profile_username or ""),
+        profile_already_open=bool(profile_already_open),
+        guards_executed=["initial_follow_ui_state_snapshot"],
+        snapshot_duration_ms=_state_before_ms,
+        fallback_used=False,
+    )
     if state_before in ("following", "requested", "follow_back"):
         _record(
             "follow_completed",
@@ -8997,6 +9033,33 @@ def perform_follow_safe(
             follow_action_engine_v2=_use_follow_action_v2,
             exact_follow_fast_path=tap_exact,
         )
+
+    if dont_follow_private_accounts and profile_already_open and btn is not None:
+        _priv_terminal = visual_detect_private_profile(
+            d, source_profile_username=_src_prof or None
+        )
+        if bool(_priv_terminal.get("private_profile_detected")):
+            log(
+                "info",
+                "follow_blocked_private_account",
+                target_username=str(username or ""),
+                visual_candidate_id=str(visual_candidate_id or ""),
+                source_profile_username=_src_prof or None,
+                detection_method=str(_priv_terminal.get("detection_method") or "none"),
+                private_profile_probe_ms=float(_priv_terminal.get("probe_ms") or 0.0),
+                exact_follow_fast_path=tap_exact,
+            )
+            return {
+                "ok": False,
+                "failure_code": 35,
+                "tapped": False,
+                "follow_state_before": state_before,
+                "follow_state_after": state_before,
+                "verify_attempts": 0,
+                "events": events,
+                "visual_follow_failure_reason": "follow_blocked_private_account",
+                "private_profile_detected": True,
+            }
 
     if tap_exact:
         log(
@@ -43494,6 +43557,20 @@ def _visual_raw_follow_invite_visible_quick(d: u2.Device) -> bool:
     return False
 
 
+def _is_reusable_prior_private_probe(probe: dict[str, Any] | None) -> bool:
+    """Only reuse payloads from an actual private-profile probe, not screen-guard metadata."""
+    if not isinstance(probe, dict) or not probe:
+        return False
+    if "private_profile_detected" not in probe:
+        return False
+    # Screen-guard dicts (accidentally passed as prior probe) carry follow-surface keys.
+    if "ok" in probe and (
+        "follow_header_state" in probe or "fast_path" in probe or "action_bar_title" in probe
+    ):
+        return False
+    return True
+
+
 def visual_candidate_pre_follow_private_gate(
     d: u2.Device,
     *,
@@ -43526,8 +43603,8 @@ def visual_candidate_pre_follow_private_gate(
     if not dont_follow_private_accounts:
         return out
 
-    if isinstance(prior_private_probe, dict) and prior_private_probe:
-        priv = dict(prior_private_probe)
+    if _is_reusable_prior_private_probe(prior_private_probe):
+        priv = dict(prior_private_probe or {})
         if "probe_ms" not in priv and "private_gate_probe_ms" in priv:
             priv["probe_ms"] = priv.get("private_gate_probe_ms")
         if "detection_method" not in priv and "private_gate_detection_method" in priv:
@@ -43539,6 +43616,16 @@ def visual_candidate_pre_follow_private_gate(
             priv["hierarchy_fallback_used"] = priv.get("private_gate_hierarchy_fallback_used")
         out["probe_reused"] = True
     else:
+        if isinstance(prior_private_probe, dict) and prior_private_probe:
+            log(
+                "warning",
+                "visual_pre_follow_private_probe_reuse_rejected",
+                source_profile_username=src or None,
+                follower_username=cand or None,
+                visual_candidate_id=vcid or None,
+                reason="prior_probe_not_a_private_detection_result",
+                prior_keys=sorted(str(k) for k in prior_private_probe.keys()),
+            )
         priv = visual_detect_private_profile(d, source_profile_username=src or None)
         out["probe_reused"] = False
     out["private_profile_detected"] = bool(priv.get("private_profile_detected"))
@@ -43549,7 +43636,7 @@ def visual_candidate_pre_follow_private_gate(
 
     if out["private_profile_detected"]:
         out["reject"] = True
-        out["reason"] = "private_account"
+        out["reason"] = "candidate_rejected_private_account"
         log(
             "info",
             "visual_pre_follow_private_gate_reject",
@@ -43593,16 +43680,19 @@ def visual_candidate_follow_pre_follow_screen_guard(
     """
     from navigation_engine import NavigationEngineState, observe_instagram_state
 
+    _guard_t0 = time.perf_counter()
     src_raw = str(source_profile_username or "").strip()
     p = dict(pick) if isinstance(pick, dict) else {}
     vcid = str(p.get("visual_candidate_id") or "").strip()
     exp_pkg = str(pkg or getattr(config, "INSTAGRAM_PACKAGE", "") or "").strip()
 
     ab_title = ""
+    _ab_t0 = time.perf_counter()
     try:
         ab_title = read_current_profile_username_for_follow_gate(d)
     except Exception:
         ab_title = ""
+    _ab_ms = round((time.perf_counter() - _ab_t0) * 1000.0, 2)
 
     sn = _normalize_handle(src_raw)
     an = _normalize_handle(ab_title)
@@ -43627,18 +43717,70 @@ def visual_candidate_follow_pre_follow_screen_guard(
         "private_gate_deferred": bool(defer_private_gate),
     }
 
+    def _log_screen_guard_completed(reason: str) -> None:
+        try:
+            log(
+                "info",
+                "pre_follow_timing_screen_guard_completed",
+                duration_ms=round((time.perf_counter() - _guard_t0) * 1000.0, 2),
+                caller="visual_candidate_follow_pre_follow_screen_guard",
+                result=bool(out.get("ok")),
+                guard_passed=bool(out.get("ok")),
+                reason=str(reason or out.get("reason") or ""),
+                source_profile_username=src_raw or None,
+                visual_candidate_id=vcid or None,
+                action_bar_title=ab_title or None,
+                username_reused=bool(profile_already_open and fn and an and fn == an),
+                action_bar_check_duration_ms=_ab_ms,
+                follow_header_state_reused=False,
+                follow_header_state=out.get("follow_header_state"),
+                raw_follow_invite_visible=bool(out.get("raw_follow_invite_visible")),
+                followers_list_xml_hint=bool(out.get("followers_list_xml_hint")),
+                private_current_screen_result=str(out.get("navigation_state") or ""),
+                snapshot_reused=False,
+                fallback_used=not bool(out.get("fast_path")),
+            )
+        except Exception:
+            pass
+
     if profile_already_open and fn and an and fn == an:
         hdr_quick = ""
+        _hdr_t0 = time.perf_counter()
         try:
             hdr_quick = _follow_ui_state_snapshot(d)
         except Exception:
             hdr_quick = ""
+        _hdr_ms = round((time.perf_counter() - _hdr_t0) * 1000.0, 2)
+        try:
+            log(
+                "info",
+                "pre_follow_timing_ui_state_snapshot_completed",
+                duration_ms=_hdr_ms,
+                caller="pre_follow_guard",
+                result=hdr_quick,
+                signals_found=[hdr_quick] if hdr_quick else [],
+                source_profile_username=src_raw or None,
+                visual_candidate_id=vcid or None,
+                follower_username=follower_hint or None,
+                follow_button=hdr_quick == "follow",
+                following=hdr_quick == "following",
+                requested=hdr_quick == "requested",
+                private=False,
+                message_or_contact=False,
+                follow_header_state_reused=False,
+                fallback_used=False,
+            )
+        except Exception:
+            pass
         raw_inv_quick = False
+        _raw_t0 = time.perf_counter()
         try:
             raw_inv_quick = bool(_visual_raw_follow_invite_visible_quick(d))
         except Exception:
             raw_inv_quick = False
+        _raw_ms = round((time.perf_counter() - _raw_t0) * 1000.0, 2)
         on_followers_list_quick = False
+        _list_t0 = time.perf_counter()
         try:
             on_followers_list_quick = bool(
                 d(resourceId="com.instagram.android:id/follow_list_username").exists(
@@ -43647,20 +43789,44 @@ def visual_candidate_follow_pre_follow_screen_guard(
             )
         except Exception:
             on_followers_list_quick = False
+        _list_ms = round((time.perf_counter() - _list_t0) * 1000.0, 2)
         out["follow_header_state"] = hdr_quick
         out["raw_follow_invite_visible"] = raw_inv_quick
         out["followers_list_xml_hint"] = on_followers_list_quick
+        try:
+            log(
+                "info",
+                "pre_follow_timing_screen_guard_probe_breakdown",
+                caller="visual_candidate_follow_pre_follow_screen_guard",
+                source_profile_username=src_raw or None,
+                visual_candidate_id=vcid or None,
+                follower_username=follower_hint or None,
+                action_bar_check_duration_ms=_ab_ms,
+                follow_header_check_duration_ms=_hdr_ms,
+                invite_hint_duration_ms=_raw_ms,
+                list_hint_duration_ms=_list_ms,
+                username_reused=True,
+                follow_header_state_reused=False,
+                follow_header_state=hdr_quick,
+                raw_follow_invite_visible=raw_inv_quick,
+                followers_list_xml_hint=on_followers_list_quick,
+            )
+        except Exception:
+            pass
         if sn and an and sn == an:
             out["ok"] = False
             out["reason"] = "current_screen_is_source_profile"
+            _log_screen_guard_completed(out["reason"])
             return out
         if on_followers_list_quick:
             out["ok"] = False
             out["reason"] = "current_screen_is_followers_list"
+            _log_screen_guard_completed(out["reason"])
             return out
         if not raw_inv_quick and hdr_quick != "follow":
             out["ok"] = False
             out["reason"] = "follow_invite_not_visible"
+            _log_screen_guard_completed(out["reason"])
             return out
         if defer_private_gate:
             out["ok"] = True
@@ -43681,6 +43847,7 @@ def visual_candidate_follow_pre_follow_screen_guard(
                 )
             except Exception:
                 pass
+            _log_screen_guard_completed(out["reason"])
             return out
 
     nav = observe_instagram_state(
