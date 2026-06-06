@@ -7,6 +7,26 @@ from unittest import mock
 import instagram_navigation as nav
 
 
+class _TabsNode:
+    def __init__(self, bounds: dict[str, int]) -> None:
+        self.info = {"bounds": dict(bounds)}
+
+
+class _TabsSelector:
+    def __init__(self, nodes: list[_TabsNode]) -> None:
+        self._nodes = list(nodes)
+
+    def exists(self, timeout: float = 0.0) -> bool:
+        return bool(self._nodes)
+
+    def all(self) -> list[_TabsNode]:
+        return list(self._nodes)
+
+
+def _tabs_bounds(top: int, bottom: int) -> dict[str, int]:
+    return {"left": 0, "top": int(top), "right": 1080, "bottom": int(bottom)}
+
+
 class FakeWaitSelector:
     def __init__(self, present: bool) -> None:
         self.present = present
@@ -2271,6 +2291,163 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
                 call.get("skipped_reason"),
                 "not_needed_for_legacy_safe_like_open",
             )
+
+    def test_tabs_bottom_authoritative_rid_short_circuits_when_safe(self) -> None:
+        device = mock.MagicMock()
+        device.window_size.return_value = (1080, 2340)
+        calls: list[dict[str, object]] = []
+        log_calls: list[dict[str, object]] = []
+
+        def _selector(**kw: object) -> _TabsSelector:
+            calls.append(dict(kw))
+            if kw.get("resourceIdMatches") == r".*:id/profile_tabs_container":
+                return _TabsSelector([_TabsNode(_tabs_bounds(900, 961))])
+            if kw.get("resourceIdMatches") == r".*:id/profile_tab_layout":
+                self.fail("fallback probe should not run after safe authoritative RID")
+            return _TabsSelector([])
+
+        def _fake_log(_level: str, event: str, **kw: object) -> None:
+            if event == "legacy_safe_tabs_bottom_authoritative_short_circuit":
+                log_calls.append(dict(kw))
+
+        previous_ctx = getattr(nav, "_LEGACY_SAFE_TIMING_CONTEXT", None)
+        nav._LEGACY_SAFE_TIMING_CONTEXT = {
+            "visual_candidate_id": "vc-1",
+            "source_profile_username": "ct",
+            "follower_username": "cand",
+            "post_index": 0,
+            "attempt_label": "legacy_safe_attempt_test",
+            "stable_key": "stable-tabs",
+            "profile_lock_ok": True,
+            "profile_tabs_visible": True,
+        }
+        try:
+            with mock.patch.object(nav, "log", side_effect=_fake_log):
+                device.side_effect = _selector
+                tabs_bottom, source = nav._followers_profile_tabs_bottom_y_px(
+                    device, window_h=2340
+                )
+        finally:
+            nav._LEGACY_SAFE_TIMING_CONTEXT = previous_ctx
+
+        self.assertEqual((tabs_bottom, source), (961, "resourceId:profile_tabs_container"))
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(log_calls)
+        self.assertTrue(log_calls[-1].get("short_circuit_used"))
+        self.assertEqual(log_calls[-1].get("reason"), "authoritative_rid_bounds_safe")
+
+    def test_tabs_bottom_authoritative_rid_absent_uses_full_fallback(self) -> None:
+        device = mock.MagicMock()
+        device.window_size.return_value = (1080, 2340)
+        calls: list[dict[str, object]] = []
+
+        def _selector(**kw: object) -> _TabsSelector:
+            calls.append(dict(kw))
+            if kw.get("resourceIdMatches") == r".*:id/profile_tab_layout":
+                return _TabsSelector([_TabsNode(_tabs_bounds(900, 960))])
+            return _TabsSelector([])
+
+        previous_ctx = getattr(nav, "_LEGACY_SAFE_TIMING_CONTEXT", None)
+        nav._LEGACY_SAFE_TIMING_CONTEXT = {
+            "stable_key": "stable-tabs",
+            "profile_lock_ok": True,
+            "profile_tabs_visible": True,
+        }
+        try:
+            with mock.patch.object(nav, "log"):
+                device.side_effect = _selector
+                tabs_bottom, source = nav._followers_profile_tabs_bottom_y_px(
+                    device, window_h=2340
+                )
+        finally:
+            nav._LEGACY_SAFE_TIMING_CONTEXT = previous_ctx
+
+        self.assertEqual((tabs_bottom, source), (960, "resourceId:profile_tab_layout"))
+        self.assertIn(
+            {"resourceIdMatches": r".*:id/profile_tab_layout"},
+            calls,
+        )
+
+    def test_tabs_bottom_authoritative_rid_ambiguous_uses_full_fallback(self) -> None:
+        device = mock.MagicMock()
+        device.window_size.return_value = (1080, 2340)
+        calls: list[dict[str, object]] = []
+        log_calls: list[dict[str, object]] = []
+
+        def _selector(**kw: object) -> _TabsSelector:
+            calls.append(dict(kw))
+            if kw.get("resourceIdMatches") == r".*:id/profile_tabs_container":
+                return _TabsSelector(
+                    [
+                        _TabsNode(_tabs_bounds(850, 930)),
+                        _TabsNode(_tabs_bounds(900, 950)),
+                    ]
+                )
+            if kw.get("resourceIdMatches") == r".*:id/profile_tab_layout":
+                return _TabsSelector([_TabsNode(_tabs_bounds(900, 960))])
+            return _TabsSelector([])
+
+        def _fake_log(_level: str, event: str, **kw: object) -> None:
+            if event == "legacy_safe_tabs_bottom_authoritative_short_circuit":
+                log_calls.append(dict(kw))
+
+        previous_ctx = getattr(nav, "_LEGACY_SAFE_TIMING_CONTEXT", None)
+        nav._LEGACY_SAFE_TIMING_CONTEXT = {
+            "stable_key": "stable-tabs",
+            "profile_lock_ok": True,
+            "profile_tabs_visible": True,
+        }
+        try:
+            with mock.patch.object(nav, "log", side_effect=_fake_log):
+                device.side_effect = _selector
+                tabs_bottom, source = nav._followers_profile_tabs_bottom_y_px(
+                    device, window_h=2340
+                )
+        finally:
+            nav._LEGACY_SAFE_TIMING_CONTEXT = previous_ctx
+
+        self.assertEqual((tabs_bottom, source), (960, "resourceId:profile_tab_layout"))
+        self.assertIn(
+            {"resourceIdMatches": r".*:id/profile_tab_layout"},
+            calls,
+        )
+        self.assertTrue(log_calls)
+        self.assertFalse(log_calls[-1].get("short_circuit_used"))
+        self.assertEqual(log_calls[-1].get("reason"), "authoritative_rid_ambiguous")
+
+    def test_tabs_bottom_authoritative_rid_unsafe_uses_full_fallback(self) -> None:
+        device = mock.MagicMock()
+        device.window_size.return_value = (1080, 2340)
+        calls: list[dict[str, object]] = []
+
+        def _selector(**kw: object) -> _TabsSelector:
+            calls.append(dict(kw))
+            if kw.get("resourceIdMatches") == r".*:id/profile_tabs_container":
+                return _TabsSelector([_TabsNode(_tabs_bounds(5, 80))])
+            if kw.get("resourceIdMatches") == r".*:id/profile_tab_layout":
+                return _TabsSelector([_TabsNode(_tabs_bounds(900, 960))])
+            return _TabsSelector([])
+
+        previous_ctx = getattr(nav, "_LEGACY_SAFE_TIMING_CONTEXT", None)
+        nav._LEGACY_SAFE_TIMING_CONTEXT = {
+            "stable_key": "stable-tabs",
+            "profile_lock_ok": True,
+            "profile_tabs_visible": True,
+        }
+        try:
+            with mock.patch.object(nav, "log"):
+                device.side_effect = _selector
+                tabs_bottom, source = nav._followers_profile_tabs_bottom_y_px(
+                    device, window_h=2340
+                )
+        finally:
+            nav._LEGACY_SAFE_TIMING_CONTEXT = previous_ctx
+
+        self.assertEqual((tabs_bottom, source), (960, "resourceId:profile_tab_layout"))
+        self.assertIn(
+            {"resourceIdMatches": r".*:id/profile_tab_layout"},
+            calls,
+        )
 
     def test_legacy_visual_top_left_safe_refuses_low_variance(self) -> None:
         device = mock.MagicMock()

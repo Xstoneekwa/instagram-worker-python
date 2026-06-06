@@ -12678,14 +12678,15 @@ def _followers_profile_tabs_bottom_y_px(
         except Exception:
             previous_tabs_bottom = None
     try:
-        _, wh = d.window_size()
+        ww, wh = d.window_size()
     except Exception:
-        wh = int(window_h or 2400)
+        ww, wh = 1080, int(window_h or 2400)
+    ww = max(320, int(ww))
     wh = max(480, int(wh))
     y_top_min = int(wh * 0.10)
     y_bot_max = int(wh * 0.92)
 
-    def _bounds_bottom(el: Any) -> int | None:
+    def _bounds_for_element(el: Any) -> dict[str, int] | None:
         try:
             b = (el.info or {}).get("bounds") or {}
             bot = int(b.get("bottom", 0))
@@ -12694,9 +12695,17 @@ def _followers_profile_tabs_bottom_y_px(
                 return None
             if top < y_top_min or bot > y_bot_max:
                 return None
-            return bot
+            left = int(b.get("left", 0))
+            right = int(b.get("right", 0))
+            if right <= left or right <= 0 or left >= ww:
+                return None
+            return {"left": left, "top": top, "right": right, "bottom": bot}
         except Exception:
             return None
+
+    def _bounds_bottom(el: Any) -> int | None:
+        b = _bounds_for_element(el)
+        return int(b["bottom"]) if b is not None else None
 
     def _nodes_for_selector(sel: Any) -> list[Any]:
         try:
@@ -12710,6 +12719,39 @@ def _followers_profile_tabs_bottom_y_px(
         except Exception:
             pass
         return [sel]
+
+    def _log_authoritative_short_circuit(
+        *,
+        started_at: float,
+        tabs_bottom_y_px: int | None,
+        bounds: dict[str, int] | None,
+        used: bool,
+        reason: str,
+    ) -> None:
+        ctx_now = _legacy_safe_timing_context()
+        if not ctx_now:
+            return
+        try:
+            log(
+                "info",
+                "legacy_safe_tabs_bottom_authoritative_short_circuit",
+                visual_candidate_id=ctx_now.get("visual_candidate_id"),
+                source_profile_username=ctx_now.get("source_profile_username"),
+                follower_username=ctx_now.get("follower_username"),
+                post_index=ctx_now.get("post_index"),
+                attempt_label=ctx_now.get("attempt_label"),
+                source="resourceId:profile_tabs_container",
+                tabs_bottom_y_px=(
+                    int(tabs_bottom_y_px) if tabs_bottom_y_px is not None else None
+                ),
+                bounds=dict(bounds or {}),
+                screen_height=int(wh),
+                short_circuit_used=bool(used),
+                reason=str(reason or ""),
+                duration_ms=round((time.perf_counter() - started_at) * 1000.0, 2),
+            )
+        except Exception:
+            pass
 
     checks: list[tuple[str, Callable[[], Any]]] = [
         ("resourceId:profile_tabs_container", lambda: d(resourceIdMatches=r".*:id/profile_tabs_container")),
@@ -12741,10 +12783,14 @@ def _followers_profile_tabs_bottom_y_px(
                 probe_error="selector_build",
             )
             continue
-        for el in _nodes_for_selector(sel):
-            bb = _bounds_bottom(el)
-            if bb is None:
+        nodes = _nodes_for_selector(sel)
+        valid_bounds: list[dict[str, int]] = []
+        for el in nodes:
+            bounds = _bounds_for_element(el)
+            if bounds is None:
                 continue
+            valid_bounds.append(bounds)
+            bb = int(bounds["bottom"])
             found_for_phase = True
             candidate_bottom = int(bb)
             if best is None or bb > best:
@@ -12764,6 +12810,51 @@ def _followers_profile_tabs_bottom_y_px(
             ),
             probe_found=found_for_phase,
         )
+        if phase == "resourceId:profile_tabs_container" and ctx:
+            authoritative_reason = ""
+            if not bool(ctx.get("profile_lock_ok")):
+                authoritative_reason = "profile_lock_not_confirmed"
+            elif not bool(ctx.get("profile_tabs_visible")):
+                authoritative_reason = "profile_tabs_visible_not_confirmed"
+            elif len(valid_bounds) != 1:
+                authoritative_reason = (
+                    "authoritative_rid_absent"
+                    if len(valid_bounds) == 0
+                    else "authoritative_rid_ambiguous"
+                )
+            else:
+                authoritative_bounds = dict(valid_bounds[0])
+                authoritative_bottom = int(authoritative_bounds["bottom"])
+                margin = int(_POST_FOLLOW_PROFILE_TABS_GRID_MARGIN_PX)
+                threshold_y = int(
+                    wh * float(_POST_FOLLOW_LIKE_HIGHLIGHTS_BLOCKING_Y_MIN_RATIO)
+                )
+                if authoritative_bottom + margin > threshold_y:
+                    authoritative_reason = "authoritative_rid_tabs_too_low_for_grid_scan"
+                else:
+                    authoritative_reason = "authoritative_rid_bounds_safe"
+                    _log_authoritative_short_circuit(
+                        started_at=t_probe,
+                        tabs_bottom_y_px=authoritative_bottom,
+                        bounds=authoritative_bounds,
+                        used=True,
+                        reason=authoritative_reason,
+                    )
+                    if ctx:
+                        try:
+                            _LEGACY_SAFE_LAST_TABS_BOTTOM_BY_KEY[
+                                str(ctx.get("stable_key") or "")
+                            ] = authoritative_bottom
+                        except Exception:
+                            pass
+                    return authoritative_bottom, phase
+            _log_authoritative_short_circuit(
+                started_at=t_probe,
+                tabs_bottom_y_px=candidate_bottom,
+                bounds=dict(valid_bounds[0]) if len(valid_bounds) == 1 else None,
+                used=False,
+                reason=authoritative_reason,
+            )
     if ctx:
         try:
             _LEGACY_SAFE_LAST_TABS_BOTTOM_BY_KEY[str(ctx.get("stable_key") or "")] = best
@@ -20203,6 +20294,7 @@ def _post_follow_likes_open_top_left_legacy_visual_safe(
     )
     if not bool(tv_open.get("ok")):
         return _finish("legacy_visual_top_left_failed", target_profile_lock_mismatch=True)
+    legacy_timing_ctx["profile_lock_ok"] = True
 
     try:
         ww, wh = d.window_size()
@@ -20232,6 +20324,7 @@ def _post_follow_likes_open_top_left_legacy_visual_safe(
         suggested_for_you=bool(ui_hints.get("suggested_for_you")),
         discover_people=bool(ui_hints.get("discover_people")),
     )
+    legacy_timing_ctx["profile_tabs_visible"] = bool(ui_hints.get("profile_tabs_visible"))
     _t_tabs_bottom = time.perf_counter()
     previous_tabs_bottom = _LEGACY_SAFE_LAST_TABS_BOTTOM_BY_KEY.get(stable_key)
     try:
