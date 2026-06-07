@@ -3325,5 +3325,212 @@ class DeferredPostReturnPersistTests(unittest.TestCase):
         self.assertEqual(len(runner._DEFERRED_POST_RETURN_PERSIST_STEPS), 0)
 
 
+class CtCheckpointV1Tests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._orig_enabled = getattr(runner.config, "FOLLOW_CT_CHECKPOINT_V1_ENABLED", True)
+        runner.config.FOLLOW_CT_CHECKPOINT_V1_ENABLED = True
+
+    def tearDown(self) -> None:
+        runner.config.FOLLOW_CT_CHECKPOINT_V1_ENABLED = self._orig_enabled
+
+    def _new_checkpoint(self, **overrides: object) -> dict:
+        ck = runner._ct_checkpoint_new(
+            source_username="ct_one",
+            source_target_id="tid-1",
+            account_id="acct-1",
+            run_id="run-1",
+        )
+        ck.update(overrides)
+        return ck
+
+    def test_checkpoint_new_has_expected_fields(self) -> None:
+        ck = self._new_checkpoint()
+        self.assertEqual(ck["source_username"], "ct_one")
+        self.assertEqual(ck["last_scroll_index"], -1)
+        self.assertEqual(ck["seen_count"], 0)
+        self.assertFalse(ck["scroll_resume_applied"])
+
+    def test_update_visible_window_emits_created_then_updated(self) -> None:
+        logs: list[tuple[str, str, dict]] = []
+        ck = self._new_checkpoint()
+        candidates = [{"username": "user_a"}, {"username": "user_b"}]
+        with patch.object(runner, "log", side_effect=lambda level, event, **kw: logs.append((level, event, kw))):
+            runner._ct_checkpoint_update_visible_window(
+                ck,
+                candidates,
+                scroll_used=0,
+                loop_iteration=1,
+                reason="after_collect_candidates",
+            )
+            runner._ct_checkpoint_update_visible_window(
+                ck,
+                candidates,
+                scroll_used=1,
+                loop_iteration=2,
+                reason="after_collect_candidates",
+            )
+        events = [event for _level, event, _kw in logs]
+        self.assertIn("follow_target_checkpoint_created", events)
+        self.assertIn("follow_target_checkpoint_updated", events)
+        self.assertEqual(ck["last_visible_usernames"], ["user_a", "user_b"])
+        self.assertEqual(ck["last_scroll_index"], 1)
+
+    def test_mark_rejected_feeds_checkpoint_and_seen(self) -> None:
+        logs: list[tuple[str, str, dict]] = []
+        ck = self._new_checkpoint()
+        with patch.object(runner, "log", side_effect=lambda level, event, **kw: logs.append((level, event, kw))):
+            runner._ct_checkpoint_mark_rejected(
+                ck,
+                "private_user",
+                reason="private_account",
+                source_phase="private_gate",
+            )
+        self.assertEqual(ck["rejected_count"], 1)
+        self.assertEqual(ck["private_rejected_count"], 1)
+        self.assertIn("private_user", ck["last_rejected_candidate_usernames"])
+        self.assertIn("private_user", ck["last_seen_candidate_usernames"])
+
+    def test_fast_skip_rejected_visible_candidate(self) -> None:
+        ck = self._new_checkpoint()
+        ck["last_visible_usernames"] = ["known_reject", "fresh_user"]
+        ck["last_rejected_candidate_usernames"] = {"known_reject": "private_account"}
+        ck["seen_count"] = 1
+        skip, reason = runner._ct_checkpoint_should_fast_skip_visible_candidate(
+            ck,
+            {"username": "known_reject"},
+            runtime_followed=set(),
+            runtime_seen=set(),
+            runtime_skipped=set(),
+        )
+        self.assertTrue(skip)
+        self.assertEqual(reason, "private_account")
+
+    def test_fast_skip_does_not_skip_unknown_candidate(self) -> None:
+        ck = self._new_checkpoint()
+        ck["last_visible_usernames"] = ["fresh_user"]
+        skip, reason = runner._ct_checkpoint_should_fast_skip_visible_candidate(
+            ck,
+            {"username": "fresh_user"},
+            runtime_followed=set(),
+            runtime_seen=set(),
+            runtime_skipped=set(),
+        )
+        self.assertFalse(skip)
+        self.assertEqual(reason, "")
+
+    def test_fast_skip_requires_fresh_visible_window(self) -> None:
+        ck = self._new_checkpoint()
+        ck["last_visible_usernames"] = ["other_user"]
+        ck["last_rejected_candidate_usernames"] = {"known_reject": "private_account"}
+        skip, _reason = runner._ct_checkpoint_should_fast_skip_visible_candidate(
+            ck,
+            {"username": "known_reject"},
+            runtime_followed=set(),
+            runtime_seen=set(),
+            runtime_skipped=set(),
+        )
+        self.assertFalse(skip)
+
+    def test_validate_rejects_mismatch_and_stale(self) -> None:
+        ck = self._new_checkpoint()
+        ok, reason = runner._ct_checkpoint_validate(
+            ck,
+            source_username="ct_two",
+            account_id="acct-1",
+            run_id="run-1",
+        )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "source_username_mismatch")
+
+        stale = self._new_checkpoint(updated_at_epoch=time.time() - 3600.0)
+        ok2, reason2 = runner._ct_checkpoint_validate(
+            stale,
+            source_username="ct_one",
+            account_id="acct-1",
+            run_id="run-1",
+        )
+        self.assertFalse(ok2)
+        self.assertEqual(reason2, "checkpoint_stale")
+
+    def test_plan_scroll_resume_when_all_known(self) -> None:
+        logs: list[tuple[str, str, dict]] = []
+        ck = self._new_checkpoint()
+        ck["last_scroll_index"] = 2
+        ck["last_visible_usernames"] = ["seen_a", "seen_b"]
+        ck["last_rejected_candidate_usernames"] = {"seen_a": "private_account", "seen_b": "filter_rejected"}
+        ck["seen_count"] = 2
+        candidates = [{"username": "seen_a"}, {"username": "seen_b"}]
+        with patch.object(runner, "log", side_effect=lambda level, event, **kw: logs.append((level, event, kw))):
+            resume_idx, ok, reason = runner._ct_checkpoint_plan_scroll_resume(
+                ck,
+                scroll_used=2,
+                source_username="ct_one",
+                account_id="acct-1",
+                run_id="run-1",
+                candidates=candidates,
+                runtime_followed=set(),
+                runtime_seen=set(),
+                runtime_skipped=set(),
+            )
+        self.assertTrue(ok)
+        self.assertEqual(reason, "visible_window_all_known")
+        self.assertEqual(resume_idx, 3)
+        self.assertIn("follow_target_scroll_resume_planned", [event for _level, event, _kw in logs])
+
+    def test_plan_scroll_resume_rejects_unknown_window(self) -> None:
+        ck = self._new_checkpoint()
+        ck["last_visible_usernames"] = ["seen_a", "fresh_user"]
+        ck["last_rejected_candidate_usernames"] = {"seen_a": "private_account"}
+        ck["seen_count"] = 1
+        candidates = [{"username": "seen_a"}, {"username": "fresh_user"}]
+        _resume_idx, ok, reason = runner._ct_checkpoint_plan_scroll_resume(
+            ck,
+            scroll_used=0,
+            source_username="ct_one",
+            account_id="acct-1",
+            run_id="run-1",
+            candidates=candidates,
+            runtime_followed=set(),
+            runtime_seen=set(),
+            runtime_skipped=set(),
+        )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "visible_window_has_unknown_candidate")
+
+    def test_mark_followed_updates_checkpoint(self) -> None:
+        ck = self._new_checkpoint()
+        runner._ct_checkpoint_mark_followed(ck, "followed_user", reason="follow_verify_success")
+        self.assertEqual(ck["last_followed_candidate_username"], "followed_user")
+        self.assertEqual(ck["followed_count"], 1)
+        self.assertIn("followed_user", ck["last_seen_candidate_usernames"])
+
+    def test_target_rejection_record_feeds_checkpoint(self) -> None:
+        tracker = runner._target_rejection_tracker("ct_one")
+        ck = self._new_checkpoint()
+        tracker["_ct_checkpoint"] = ck
+        runner._target_rejection_record(
+            tracker,
+            reason="private_account",
+            source_phase="private_gate",
+            candidate_username="private_user",
+            emit_log=False,
+        )
+        self.assertEqual(ck["rejected_count"], 1)
+        self.assertIn("private_user", ck["last_rejected_candidate_usernames"])
+
+    def test_fast_skip_runtime_seen_without_bypassing_unknown(self) -> None:
+        ck = self._new_checkpoint()
+        ck["last_visible_usernames"] = ["runtime_seen_user"]
+        skip, reason = runner._ct_checkpoint_should_fast_skip_visible_candidate(
+            ck,
+            {"username": "runtime_seen_user"},
+            runtime_followed=set(),
+            runtime_seen={"runtime_seen_user"},
+            runtime_skipped=set(),
+        )
+        self.assertTrue(skip)
+        self.assertEqual(reason, "runtime_seen")
+
+
 if __name__ == "__main__":
     unittest.main()

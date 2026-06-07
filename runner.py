@@ -1084,6 +1084,7 @@ def _target_rejection_record(
     source_phase: str = "",
     count: int = 1,
     emit_log: bool = True,
+    checkpoint: dict[str, Any] | None = None,
 ) -> str:
     stable = _normalize_target_rejection_reason(reason)
     n = max(1, int(count or 1))
@@ -1101,6 +1102,15 @@ def _target_rejection_record(
             raw_reason=str(reason or "")[:160],
             source_phase=str(source_phase or "")[:80],
         )
+    ck = checkpoint if isinstance(checkpoint, dict) else tracker.get("_ct_checkpoint")
+    if isinstance(ck, dict) and str(candidate_username or "").strip():
+        for _ in range(n):
+            _ct_checkpoint_mark_rejected(
+                ck,
+                str(candidate_username or ""),
+                reason=stable,
+                source_phase=str(source_phase or ""),
+            )
     return stable
 
 
@@ -1120,6 +1130,422 @@ def _target_rejection_summary_payload(
         "last_scroll_index": int(tracker.get("last_scroll_index") or -1),
         "stop_reason": str(stop_reason or ""),
     }
+
+
+_CT_CHECKPOINT_FRESH_MS = 20 * 60 * 1000.0
+_CT_CHECKPOINT_SCROLL_RESUME_OFFSET = 1
+
+
+def _ct_checkpoint_utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _ct_checkpoint_stale_after_iso() -> str:
+    stale_after_s = float(_CT_CHECKPOINT_FRESH_MS) / 1000.0
+    return datetime.fromtimestamp(time.time() + stale_after_s, timezone.utc).isoformat()
+
+
+def _ct_checkpoint_enabled() -> bool:
+    return bool(getattr(config, "FOLLOW_CT_CHECKPOINT_V1_ENABLED", True))
+
+
+def _ct_checkpoint_new(
+    *,
+    source_username: str,
+    source_target_id: str = "",
+    account_id: str = "",
+    run_id: str = "",
+) -> dict[str, Any]:
+    now = time.perf_counter()
+    now_iso = _ct_checkpoint_utc_now_iso()
+    stale_after = _ct_checkpoint_stale_after_iso()
+    # Keep V1 runtime-only, but use DB-ready field names for the future persisted V2.
+    return {
+        "source_username": str(source_username or "").strip(),
+        "source_target_id": str(source_target_id or "").strip(),
+        "account_id": str(account_id or "").strip(),
+        "run_id": str(run_id or "").strip(),
+        "last_run_id": str(run_id or "").strip(),
+        "last_scroll_index": -1,
+        "last_seen_candidate_usernames": [],
+        "last_rejected_candidate_usernames": {},
+        "last_private_rejected_usernames": [],
+        "last_followed_candidate_username": "",
+        "last_successful_candidate_at": "",
+        "last_successful_candidate_at_mono": 0.0,
+        "checkpoint_reason": "",
+        "checkpoint_status": "active",
+        "last_checkpoint_reason": "",
+        "stale_after": stale_after,
+        "created_at": now_iso,
+        "updated_at": now_iso,
+        "created_by_runtime": "python_worker",
+        "created_at_mono": now,
+        "updated_at_mono": now,
+        "updated_at_epoch": time.time(),
+        "last_visible_usernames": [],
+        "private_rejected_count": 0,
+        "followed_count": 0,
+        "rejected_count": 0,
+        "seen_count": 0,
+        "sequence": 0,
+        "scroll_resume_planned_index": None,
+        "scroll_resume_applied": False,
+    }
+
+
+def _ct_checkpoint_age_ms(checkpoint: dict[str, Any]) -> float:
+    epoch = float(checkpoint.get("updated_at_epoch") or 0.0)
+    if epoch > 0:
+        return round((time.time() - epoch) * 1000.0, 2)
+    updated = float(checkpoint.get("updated_at_mono") or 0.0)
+    if updated <= 0:
+        return 0.0
+    age_s = time.perf_counter() - updated
+    if age_s < 0:
+        return 0.0
+    return round(age_s * 1000.0, 2)
+
+
+def _ct_checkpoint_common_fields(checkpoint: dict[str, Any]) -> dict[str, Any]:
+    rejected_map = dict(checkpoint.get("last_rejected_candidate_usernames") or {})
+    return {
+        "source_username": str(checkpoint.get("source_username") or ""),
+        "source_target_id": str(checkpoint.get("source_target_id") or "") or None,
+        "account_id": str(checkpoint.get("account_id") or "") or None,
+        "run_id": str(checkpoint.get("run_id") or "") or None,
+        "last_run_id": str(checkpoint.get("last_run_id") or checkpoint.get("run_id") or "") or None,
+        "scroll_index": int(checkpoint.get("last_scroll_index") or -1),
+        "seen_count": int(checkpoint.get("seen_count") or 0),
+        "rejected_count": int(checkpoint.get("rejected_count") or 0),
+        "private_rejected_count": int(checkpoint.get("private_rejected_count") or 0),
+        "followed_count": int(checkpoint.get("followed_count") or 0),
+        "checkpoint_reason": str(
+            checkpoint.get("checkpoint_reason")
+            or checkpoint.get("last_checkpoint_reason")
+            or ""
+        ),
+        "checkpoint_status": str(checkpoint.get("checkpoint_status") or "active"),
+        "stale_after": str(checkpoint.get("stale_after") or "") or None,
+        "updated_at": str(checkpoint.get("updated_at") or "") or None,
+        "checkpoint_age_ms": _ct_checkpoint_age_ms(checkpoint),
+        "fallback_used": False,
+        "safe_to_resume": False,
+    }
+
+
+def _ct_checkpoint_emit(
+    checkpoint: dict[str, Any],
+    event: str,
+    *,
+    reason: str = "",
+    **fields: Any,
+) -> None:
+    if not _ct_checkpoint_enabled():
+        return
+    payload = dict(_ct_checkpoint_common_fields(checkpoint))
+    payload.update(fields)
+    if reason:
+        payload["reason"] = str(reason)
+    try:
+        log("info", event, **payload)
+    except Exception:
+        pass
+
+
+def _ct_checkpoint_validate(
+    checkpoint: dict[str, Any],
+    *,
+    source_username: str,
+    account_id: str,
+    run_id: str,
+) -> tuple[bool, str]:
+    if not checkpoint:
+        return False, "checkpoint_missing"
+    src = _norm_ig_handle(source_username)
+    ck_src = _norm_ig_handle(str(checkpoint.get("source_username") or ""))
+    if not src or src != ck_src:
+        return False, "source_username_mismatch"
+    if str(checkpoint.get("account_id") or "") != str(account_id or ""):
+        return False, "account_id_mismatch"
+    if str(checkpoint.get("run_id") or "") != str(run_id or ""):
+        return False, "run_id_mismatch"
+    age_ms = _ct_checkpoint_age_ms(checkpoint)
+    if age_ms > _CT_CHECKPOINT_FRESH_MS:
+        return False, "checkpoint_stale"
+    return True, "ok"
+
+
+def _ct_checkpoint_mark_seen(
+    checkpoint: dict[str, Any],
+    candidate_username: str,
+    *,
+    reason: str = "candidate_seen",
+) -> None:
+    key = _norm_ig_handle(candidate_username)
+    if not key:
+        return
+    seen = list(checkpoint.get("last_seen_candidate_usernames") or [])
+    if key not in seen:
+        seen.append(key)
+        checkpoint["seen_count"] = int(checkpoint.get("seen_count") or 0) + 1
+    checkpoint["last_seen_candidate_usernames"] = seen[-96:]
+    checkpoint["updated_at"] = _ct_checkpoint_utc_now_iso()
+    checkpoint["updated_at_mono"] = time.perf_counter()
+    checkpoint["updated_at_epoch"] = time.time()
+    checkpoint["stale_after"] = _ct_checkpoint_stale_after_iso()
+    checkpoint["checkpoint_reason"] = str(reason or "candidate_seen")
+    checkpoint["last_checkpoint_reason"] = str(reason or "candidate_seen")
+    checkpoint["sequence"] = int(checkpoint.get("sequence") or 0) + 1
+    _ct_checkpoint_emit(
+        checkpoint,
+        "follow_target_checkpoint_updated",
+        reason=str(reason or "candidate_seen"),
+        candidate_username=key,
+    )
+
+
+def _ct_checkpoint_mark_rejected(
+    checkpoint: dict[str, Any],
+    candidate_username: str,
+    *,
+    reason: str,
+    source_phase: str = "",
+) -> None:
+    key = _norm_ig_handle(candidate_username)
+    if not key:
+        return
+    stable = _normalize_target_rejection_reason(reason)
+    rejected = dict(checkpoint.get("last_rejected_candidate_usernames") or {})
+    if key not in rejected:
+        checkpoint["rejected_count"] = int(checkpoint.get("rejected_count") or 0) + 1
+    rejected[key] = stable
+    checkpoint["last_rejected_candidate_usernames"] = rejected
+    if stable == "private_account":
+        checkpoint["private_rejected_count"] = int(
+            checkpoint.get("private_rejected_count") or 0
+        ) + 1
+        private_rejected = list(checkpoint.get("last_private_rejected_usernames") or [])
+        if key not in private_rejected:
+            private_rejected.append(key)
+        checkpoint["last_private_rejected_usernames"] = private_rejected[-96:]
+    _ct_checkpoint_mark_seen(
+        checkpoint,
+        key,
+        reason=f"rejected:{stable}",
+    )
+    _ct_checkpoint_emit(
+        checkpoint,
+        "follow_target_checkpoint_updated",
+        reason=stable,
+        candidate_username=key,
+        source_phase=str(source_phase or "")[:80],
+    )
+
+
+def _ct_checkpoint_mark_followed(
+    checkpoint: dict[str, Any],
+    candidate_username: str,
+    *,
+    reason: str = "follow_verified",
+) -> None:
+    key = _norm_ig_handle(candidate_username)
+    if not key:
+        return
+    checkpoint["last_followed_candidate_username"] = key
+    checkpoint["last_successful_candidate_at"] = _ct_checkpoint_utc_now_iso()
+    checkpoint["last_successful_candidate_at_mono"] = time.perf_counter()
+    checkpoint["followed_count"] = int(checkpoint.get("followed_count") or 0) + 1
+    _ct_checkpoint_mark_seen(checkpoint, key, reason=str(reason or "follow_verified"))
+
+
+def _ct_checkpoint_update_visible_window(
+    checkpoint: dict[str, Any],
+    candidates: list[Any],
+    *,
+    scroll_used: int,
+    loop_iteration: int,
+    reason: str,
+) -> None:
+    usernames = [
+        _norm_ig_handle(str(c.get("username") or c.get("resolved_username_hint") or ""))
+        for c in candidates
+        if _norm_ig_handle(str(c.get("username") or c.get("resolved_username_hint") or ""))
+    ]
+    checkpoint["last_scroll_index"] = int(scroll_used)
+    checkpoint["last_visible_usernames"] = usernames[:24]
+    checkpoint["updated_at"] = _ct_checkpoint_utc_now_iso()
+    checkpoint["updated_at_mono"] = time.perf_counter()
+    checkpoint["updated_at_epoch"] = time.time()
+    checkpoint["stale_after"] = _ct_checkpoint_stale_after_iso()
+    checkpoint["checkpoint_reason"] = str(reason or "visible_window_updated")
+    checkpoint["last_checkpoint_reason"] = str(reason or "visible_window_updated")
+    checkpoint["sequence"] = int(checkpoint.get("sequence") or 0) + 1
+    event = (
+        "follow_target_checkpoint_created"
+        if int(checkpoint.get("sequence") or 0) == 1
+        else "follow_target_checkpoint_updated"
+    )
+    _ct_checkpoint_emit(
+        checkpoint,
+        event,
+        reason=str(reason or "visible_window_updated"),
+        loop_iteration=int(loop_iteration),
+        visible_count=len(usernames),
+        sample_usernames=usernames[:8],
+    )
+
+
+def _ct_checkpoint_known_keys(checkpoint: dict[str, Any]) -> set[str]:
+    known: set[str] = set()
+    for u in checkpoint.get("last_seen_candidate_usernames") or []:
+        k = _norm_ig_handle(str(u))
+        if k:
+            known.add(k)
+    for u in (checkpoint.get("last_rejected_candidate_usernames") or {}).keys():
+        k = _norm_ig_handle(str(u))
+        if k:
+            known.add(k)
+    followed = _norm_ig_handle(str(checkpoint.get("last_followed_candidate_username") or ""))
+    if followed:
+        known.add(followed)
+    return known
+
+
+def _ct_checkpoint_fast_skip_reason(
+    checkpoint: dict[str, Any],
+    candidate_key: str,
+    *,
+    runtime_followed: set[str],
+    runtime_seen: set[str],
+    runtime_skipped: set[str],
+) -> str:
+    rejected = dict(checkpoint.get("last_rejected_candidate_usernames") or {})
+    if candidate_key in rejected:
+        return str(rejected.get(candidate_key) or "checkpoint_rejected")
+    if candidate_key in runtime_followed:
+        return "runtime_followed"
+    if candidate_key in runtime_skipped:
+        return "runtime_skipped"
+    if candidate_key in runtime_seen:
+        return "runtime_seen"
+    followed = _norm_ig_handle(str(checkpoint.get("last_followed_candidate_username") or ""))
+    if followed and candidate_key == followed:
+        return "checkpoint_followed"
+    return ""
+
+
+def _ct_checkpoint_should_fast_skip_visible_candidate(
+    checkpoint: dict[str, Any],
+    candidate: dict[str, Any],
+    *,
+    runtime_followed: set[str],
+    runtime_seen: set[str],
+    runtime_skipped: set[str],
+) -> tuple[bool, str]:
+    if not _ct_checkpoint_enabled():
+        return False, ""
+    key = _norm_ig_handle(
+        str(candidate.get("username") or candidate.get("resolved_username_hint") or "")
+    )
+    if not key:
+        return False, ""
+    visible = {
+        _norm_ig_handle(str(u))
+        for u in (checkpoint.get("last_visible_usernames") or [])
+        if _norm_ig_handle(str(u))
+    }
+    if visible and key not in visible:
+        return False, ""
+    reason = _ct_checkpoint_fast_skip_reason(
+        checkpoint,
+        key,
+        runtime_followed=runtime_followed,
+        runtime_seen=runtime_seen,
+        runtime_skipped=runtime_skipped,
+    )
+    if not reason:
+        return False, ""
+    return True, reason
+
+
+def _ct_checkpoint_visible_window_all_known(
+    checkpoint: dict[str, Any],
+    candidates: list[Any],
+    *,
+    runtime_followed: set[str],
+    runtime_seen: set[str],
+    runtime_skipped: set[str],
+) -> bool:
+    if not candidates:
+        return False
+    for c in candidates:
+        key = _norm_ig_handle(
+            str(c.get("username") or c.get("resolved_username_hint") or "")
+        )
+        if not key:
+            return False
+        if not _ct_checkpoint_fast_skip_reason(
+            checkpoint,
+            key,
+            runtime_followed=runtime_followed,
+            runtime_seen=runtime_seen,
+            runtime_skipped=runtime_skipped,
+        ):
+            return False
+    return True
+
+
+def _ct_checkpoint_plan_scroll_resume(
+    checkpoint: dict[str, Any],
+    *,
+    scroll_used: int,
+    source_username: str,
+    account_id: str,
+    run_id: str,
+    candidates: list[Any],
+    runtime_followed: set[str],
+    runtime_seen: set[str],
+    runtime_skipped: set[str],
+) -> tuple[int | None, bool, str]:
+    ok, reject_reason = _ct_checkpoint_validate(
+        checkpoint,
+        source_username=source_username,
+        account_id=account_id,
+        run_id=run_id,
+    )
+    if not ok:
+        _ct_checkpoint_emit(
+            checkpoint,
+            "follow_target_checkpoint_rejected",
+            reason=reject_reason,
+            fallback_used=True,
+            safe_to_resume=False,
+        )
+        return None, False, reject_reason
+    if not _ct_checkpoint_visible_window_all_known(
+        checkpoint,
+        candidates,
+        runtime_followed=runtime_followed,
+        runtime_seen=runtime_seen,
+        runtime_skipped=runtime_skipped,
+    ):
+        return None, False, "visible_window_has_unknown_candidate"
+    last_idx = int(checkpoint.get("last_scroll_index") if checkpoint.get("last_scroll_index") is not None else -1)
+    resume_idx = max(int(scroll_used), last_idx + _CT_CHECKPOINT_SCROLL_RESUME_OFFSET)
+    if resume_idx <= int(scroll_used):
+        resume_idx = int(scroll_used) + _CT_CHECKPOINT_SCROLL_RESUME_OFFSET
+    checkpoint["scroll_resume_planned_index"] = resume_idx
+    _ct_checkpoint_emit(
+        checkpoint,
+        "follow_target_scroll_resume_planned",
+        reason="visible_window_all_known",
+        resume_scroll_index=resume_idx,
+        scroll_index=int(scroll_used),
+        safe_to_resume=True,
+        fallback_used=False,
+    )
+    return resume_idx, True, "visible_window_all_known"
 
 
 def _new_candidate_follow_decision(
@@ -8881,6 +9307,13 @@ def _run_followers_list_engine_session(
         "exit_code": None,
     }
     target_scan_tracker = _target_rejection_tracker(source_profile_username)
+    ct_checkpoint = _ct_checkpoint_new(
+        source_username=source_profile_username,
+        source_target_id=str(target_id or ""),
+        account_id=str(account_id or ""),
+        run_id=str(run_id or ""),
+    )
+    target_scan_tracker["_ct_checkpoint"] = ct_checkpoint
 
     def _publish_followers_session_summary(**updates: Any) -> None:
         if "rejection_reason_counts" not in updates:
@@ -11207,6 +11640,14 @@ def _run_followers_list_engine_session(
                 candidates_len=len(candidates) if isinstance(candidates, list) else -1,
                 source_profile_username=source_profile_username,
             )
+            if isinstance(candidates, list) and _ct_checkpoint_enabled():
+                _ct_checkpoint_update_visible_window(
+                    ct_checkpoint,
+                    candidates,
+                    scroll_used=int(scroll_used),
+                    loop_iteration=int(followers_engine_loop_iteration),
+                    reason="after_collect_candidates",
+                )
             _odm_open_meta_gate = str(open_list_meta.get("open_detection_method") or "")
             if str(open_detection_method) == "visual_fallback" or _odm_open_meta_gate == "visual_fallback":
                 _svf_early = (
@@ -11957,6 +12398,7 @@ def _run_followers_list_engine_session(
             def _first_eligible_follower_pick(cand_list: list) -> dict | None:
                 visual_loop_state["_ac_pending_had_skip_hit"] = False
                 _expl_v1.begin_visible_window(cand_list)
+                _checkpoint_fast_skip_started = False
                 for c in cand_list:
                     ckey = _norm_ig_handle(str(c.get("username") or ""))
                     if ckey == src_key:
@@ -11968,6 +12410,49 @@ def _run_followers_list_engine_session(
                         )
                         _expl_v1.note_visible_skip("source_profile")
                         continue
+                    if _ct_checkpoint_enabled():
+                        _ck_skip, _ck_reason = _ct_checkpoint_should_fast_skip_visible_candidate(
+                            ct_checkpoint,
+                            c,
+                            runtime_followed=_RUNTIME_FOLLOWED_USERNAMES,
+                            runtime_seen=_RUNTIME_SEEN_FOLLOWER_USERNAMES,
+                            runtime_skipped=_RUNTIME_SKIPPED_USERNAMES,
+                        )
+                        if _ck_skip:
+                            if not _checkpoint_fast_skip_started:
+                                _reuse_ok, _ = _ct_checkpoint_validate(
+                                    ct_checkpoint,
+                                    source_username=source_profile_username,
+                                    account_id=str(account_id or ""),
+                                    run_id=str(run_id or ""),
+                                )
+                                if _reuse_ok and int(ct_checkpoint.get("seen_count") or 0) > 0:
+                                    _ct_checkpoint_emit(
+                                        ct_checkpoint,
+                                        "follow_target_checkpoint_reused",
+                                        reason="fast_skip_visible_window",
+                                    )
+                                _ct_checkpoint_emit(
+                                    ct_checkpoint,
+                                    "follow_target_fast_skip_started",
+                                    reason=_ck_reason,
+                                    seen_count=len(cand_list),
+                                )
+                                _checkpoint_fast_skip_started = True
+                            _ct_checkpoint_emit(
+                                ct_checkpoint,
+                                "follow_target_fast_skip_candidate_seen",
+                                candidate_username=ckey,
+                                reason=_ck_reason,
+                            )
+                            _ct_checkpoint_emit(
+                                ct_checkpoint,
+                                "follow_target_fast_skip_candidate_rejected",
+                                candidate_username=ckey,
+                                reason=_ck_reason,
+                            )
+                            _expl_v1.note_visible_skip(f"checkpoint_{_ck_reason}")
+                            continue
                     if c.get("already_seen_runtime"):
                         log(
                             "info",
@@ -12116,6 +12601,12 @@ def _run_followers_list_engine_session(
                     _bid_all = _ac_blocked_visual_ids()
                     if all(v in _bid_all for v in vids_blk):
                         visual_loop_state["_ac_all_blocked_need_scroll"] = True
+                if _checkpoint_fast_skip_started:
+                    _ct_checkpoint_emit(
+                        ct_checkpoint,
+                        "follow_target_fast_skip_completed",
+                        reason="visible_window_scanned",
+                    )
                 return None
 
             def _followers_note_ac_pending_scroll_forced_if_needed(
@@ -12351,6 +12842,22 @@ def _run_followers_list_engine_session(
                         count=len(candidates),
                         emit_log=False,
                     )
+                if _ct_checkpoint_enabled():
+                    _resume_idx, _resume_ok, _resume_reason = _ct_checkpoint_plan_scroll_resume(
+                        ct_checkpoint,
+                        scroll_used=int(scroll_used),
+                        source_username=source_profile_username,
+                        account_id=str(account_id or ""),
+                        run_id=str(run_id or ""),
+                        candidates=candidates if isinstance(candidates, list) else [],
+                        runtime_followed=_RUNTIME_FOLLOWED_USERNAMES,
+                        runtime_seen=_RUNTIME_SEEN_FOLLOWER_USERNAMES,
+                        runtime_skipped=_RUNTIME_SKIPPED_USERNAMES,
+                    )
+                    if _resume_ok:
+                        exploratory_scroll_permit_armed_this_iter = True
+                        exploratory_scroll_profile_this_iter = "default"
+                        ct_checkpoint["scroll_resume_pending"] = True
 
             if _ac_scroll_forced and pick is None:
                 try:
@@ -12906,6 +13413,29 @@ def _run_followers_list_engine_session(
                         ).strip()
                     scroll_used += 1
                     _expl_v1.mark_scroll_completed_pending_check()
+                    if _ct_checkpoint_enabled() and (
+                        ct_checkpoint.get("scroll_resume_pending")
+                        or ct_checkpoint.get("scroll_resume_planned_index") is not None
+                    ):
+                        if not ct_checkpoint.get("scroll_resume_applied"):
+                            _ct_checkpoint_emit(
+                                ct_checkpoint,
+                                "follow_target_scroll_resume_applied",
+                                reason="scroll_forward_ok",
+                                resume_scroll_index=int(
+                                    ct_checkpoint.get("scroll_resume_planned_index") or scroll_used
+                                ),
+                                scroll_index=int(scroll_used),
+                                safe_to_resume=True,
+                            )
+                            ct_checkpoint["scroll_resume_applied"] = True
+                            ct_checkpoint["scroll_resume_pending"] = False
+                        ct_checkpoint["last_scroll_index"] = int(scroll_used)
+                        ct_checkpoint["updated_at"] = _ct_checkpoint_utc_now_iso()
+                        ct_checkpoint["updated_at_mono"] = time.perf_counter()
+                        ct_checkpoint["updated_at_epoch"] = time.time()
+                        ct_checkpoint["stale_after"] = _ct_checkpoint_stale_after_iso()
+                        ct_checkpoint["checkpoint_reason"] = "scroll_resume_applied"
                     if exploratory_scroll_permit_armed_this_iter:
                         try:
                             log(
@@ -15849,6 +16379,12 @@ def _run_followers_list_engine_session(
                         _pf_follow_context.mark_follow_verified(
                             reason="follow_verify_success"
                         )
+                        if _ct_checkpoint_enabled():
+                            _ct_checkpoint_mark_followed(
+                                ct_checkpoint,
+                                str(follower_un or ""),
+                                reason="follow_verify_success",
+                            )
                     except Exception:
                         _pf_follow_context = None
                 _pf = run_visual_candidate_post_follow_phase(

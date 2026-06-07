@@ -2,6 +2,13 @@
 
 *Document volatil : à mettre à jour après les prochains jalons produit / tech.*
 
+## CT Checkpoint / Fast-Skip Roadmap
+
+- **V1 runtime-only** : valider vite dans `runner.py` un checkpoint sûr par CT/source, sans migration DB et sans bypass des guards private/social/screen/follow.
+- **V2 DB persistée obligatoire après validation V1** : synchroniser la progression CT entre worker Python, dashboard admin, futur dashboard client, BotApp et autres opérateurs.
+- Les champs V1 restent proches de la future table : `account_id`, `source_target_id`, `source_username`, `last_run_id`, `last_scroll_index`, candidats vus/rejetés/private/followés, `checkpoint_reason`, `checkpoint_status`, `stale_after`, `created_at`, `updated_at`.
+- V2 devra auditer les resets/admin mutations, expirer les checkpoints stale, et ne jamais exposer secrets, sessions, screenshots bruts ou XML brut.
+
 ## Ce qui fonctionne
 
 - **Ouverture followers visuelle** : chemin opérationnel dans les runs récents.
