@@ -15679,6 +15679,137 @@ _VISUAL_POST_LIKE_TAPS_RECORDED: int = 0
 _VISUAL_TARGET_PROFILE_LOCK_ACTIVE: bool = False
 _VISUAL_TARGET_PROFILE_CONTEXT: dict[str, Any] | None = None
 
+_POST_MUTE_SHEET_CLOSED_PROOF_TTL_S = 10.0
+_post_mute_sheet_closed_proof_stash: dict[str, Any] | None = None
+
+
+def _clear_post_mute_sheet_closed_proof_stash() -> None:
+    global _post_mute_sheet_closed_proof_stash
+    _post_mute_sheet_closed_proof_stash = None
+
+
+def _stash_post_mute_sheet_closed_proof(
+    *,
+    source_profile_username: str,
+    candidate_username: str,
+    visual_candidate_id: str,
+    action_bar_title: str,
+    duration_ms: float,
+) -> None:
+    global _post_mute_sheet_closed_proof_stash
+    src = _normalize_handle(str(source_profile_username or ""))
+    cand = _normalize_handle(str(candidate_username or ""))
+    ab = str(action_bar_title or "").strip().lstrip("@")
+    if not cand or not ab or _normalize_handle(ab) != cand:
+        _clear_post_mute_sheet_closed_proof_stash()
+        return
+    _post_mute_sheet_closed_proof_stash = {
+        "stashed_at_monotonic": time.perf_counter(),
+        "source_profile_username": src,
+        "candidate_username": cand,
+        "visual_candidate_id": str(visual_candidate_id or "").strip(),
+        "action_bar_title": ab,
+        "sheet_closed": True,
+        "duration_ms": float(duration_ms or 0.0),
+    }
+    try:
+        log(
+            "info",
+            "post_mute_sheet_closed_proof_stashed",
+            visual_candidate_id=str(visual_candidate_id or "").strip(),
+            source_profile_username=src,
+            candidate_username=cand,
+            expected_username=cand,
+            action_bar_title=ab,
+            sheet_closed=True,
+            used_cached_context=True,
+            duration_ms=round(float(duration_ms or 0.0), 2),
+            proof_age_ms=0.0,
+            fallback_used=False,
+            reject_reason="",
+        )
+    except Exception:
+        pass
+
+
+def _post_mute_sheet_closed_proof_reject(
+    *,
+    event: str,
+    source_profile_username: str,
+    candidate_username: str,
+    visual_candidate_id: str,
+    reject_reason: str,
+    proof_age_ms: float = 0.0,
+    action_bar_title: str = "",
+    duration_ms: float = 0.0,
+    fallback_used: bool = True,
+) -> None:
+    try:
+        log(
+            "info",
+            event,
+            visual_candidate_id=str(visual_candidate_id or "").strip(),
+            source_profile_username=_normalize_handle(str(source_profile_username or "")),
+            candidate_username=_normalize_handle(str(candidate_username or "")),
+            expected_username=_normalize_handle(str(candidate_username or "")),
+            proof_age_ms=round(float(proof_age_ms or 0.0), 2),
+            sheet_closed=False,
+            action_bar_title=str(action_bar_title or ""),
+            used_cached_context=False,
+            reject_reason=str(reject_reason or ""),
+            duration_ms=round(float(duration_ms or 0.0), 2),
+            fallback_used=bool(fallback_used),
+        )
+    except Exception:
+        pass
+
+
+def _validate_post_mute_sheet_closed_proof(
+    *,
+    source_profile_username: str,
+    candidate_username: str,
+    visual_candidate_id: str = "",
+) -> tuple[bool, dict[str, Any], float, str]:
+    stash = _post_mute_sheet_closed_proof_stash
+    if not isinstance(stash, dict) or not stash:
+        return False, {}, 0.0, "missing_proof"
+    age_ms = round(
+        (time.perf_counter() - float(stash.get("stashed_at_monotonic") or 0.0))
+        * 1000.0,
+        2,
+    )
+    if age_ms > (_POST_MUTE_SHEET_CLOSED_PROOF_TTL_S * 1000.0):
+        return False, dict(stash), age_ms, "stale_proof"
+    src = _normalize_handle(str(source_profile_username or ""))
+    cand = _normalize_handle(str(candidate_username or ""))
+    stash_src = _normalize_handle(str(stash.get("source_profile_username") or ""))
+    stash_cand = _normalize_handle(str(stash.get("candidate_username") or ""))
+    stash_vcid = str(stash.get("visual_candidate_id") or "")
+    vcid = str(visual_candidate_id or "")
+    if src and stash_src and src != stash_src:
+        return False, dict(stash), age_ms, "source_mismatch"
+    if not cand or not stash_cand or cand != stash_cand:
+        return False, dict(stash), age_ms, "candidate_mismatch"
+    if vcid and stash_vcid and vcid != stash_vcid:
+        return False, dict(stash), age_ms, "visual_candidate_mismatch"
+    if not bool(stash.get("sheet_closed")):
+        return False, dict(stash), age_ms, "sheet_not_proven_closed"
+    ab = str(stash.get("action_bar_title") or "").strip().lstrip("@")
+    if not ab or _normalize_handle(ab) != cand:
+        return False, dict(stash), age_ms, "stashed_action_bar_mismatch"
+    return True, dict(stash), age_ms, ""
+
+
+def _quick_mute_sheet_visible_guard(d: u2.Device) -> bool:
+    try:
+        posts = _mute_engine_v2_u2_text_exists(d, text="Posts", timeout_s=0.01) or (
+            _mute_engine_v2_u2_text_exists(d, text="Publications", timeout_s=0.01)
+        )
+        stories = _mute_engine_v2_u2_text_exists(d, text="Stories", timeout_s=0.01)
+        return bool(posts and stories)
+    except Exception:
+        return False
+
 
 def visual_target_profile_lock_clear() -> None:
     global _VISUAL_TARGET_PROFILE_LOCK_ACTIVE, _VISUAL_TARGET_PROFILE_CONTEXT
@@ -16021,15 +16152,31 @@ _POST_FOLLOW_LIKES_GRID_DEEP_Y0_RATIO = 0.62
 _POST_FOLLOW_LIKES_GRID_DEEP_Y1_RATIO = 0.92
 
 
-def _post_follow_likes_grid_ui_surface_hints(d: u2.Device) -> dict[str, Any]:
+def _post_follow_likes_grid_ui_surface_hints(
+    d: u2.Device,
+    *,
+    source_profile_username: str = "",
+    follower_username: str = "",
+    visual_candidate_id: str = "",
+) -> dict[str, Any]:
     """Overlay + profile tab chrome for post-follow grid classification."""
     t_probe = time.perf_counter()
     ctx = _legacy_safe_timing_context()
     legacy_safe_lightweight = bool(ctx)
+    proof_ok, proof, proof_age_ms, proof_reject = _validate_post_mute_sheet_closed_proof(
+        source_profile_username=source_profile_username,
+        candidate_username=follower_username,
+        visual_candidate_id=visual_candidate_id,
+    )
+    sheet_probe_can_skip = bool(proof_ok and not legacy_safe_lightweight)
     hint_mode = (
         "legacy_safe_lightweight"
         if legacy_safe_lightweight
-        else "standard_with_mute_sheet_probe"
+        else (
+            "post_mute_sheet_closed_proof_tabs_only"
+            if sheet_probe_can_skip
+            else "standard_with_mute_sheet_probe"
+        )
     )
     if ctx:
         try:
@@ -16178,7 +16325,39 @@ def _post_follow_likes_grid_ui_surface_hints(d: u2.Device) -> dict[str, Any]:
                 mute_sheet_level_skipped=True,
                 skipped_reason="not_needed_for_legacy_safe_like_open",
             )
+    elif sheet_probe_can_skip:
+        overlay = {}
+        try:
+            log(
+                "info",
+                "post_follow_like_surface_precheck_sheet_probe_skipped",
+                visual_candidate_id=str(visual_candidate_id or ""),
+                source_profile_username=_normalize_handle(str(source_profile_username or "")),
+                candidate_username=_normalize_handle(str(follower_username or "")),
+                expected_username=_normalize_handle(str(follower_username or "")),
+                proof_age_ms=round(float(proof_age_ms or 0.0), 2),
+                sheet_closed=True,
+                action_bar_title=str(proof.get("action_bar_title") or ""),
+                used_cached_context=True,
+                reject_reason="",
+                duration_ms=round((time.perf_counter() - t_probe) * 1000.0, 2),
+                fallback_used=False,
+            )
+        except Exception:
+            pass
     else:
+        if proof_reject:
+            _post_mute_sheet_closed_proof_reject(
+                event="post_follow_like_surface_precheck_sheet_probe_fallback",
+                source_profile_username=source_profile_username,
+                candidate_username=follower_username,
+                visual_candidate_id=visual_candidate_id,
+                reject_reason=proof_reject,
+                proof_age_ms=proof_age_ms,
+                action_bar_title=str((proof or {}).get("action_bar_title") or ""),
+                duration_ms=round((time.perf_counter() - t_probe) * 1000.0, 2),
+                fallback_used=True,
+            )
         overlay = _post_follow_overlay_ui_hints(d)
     _legacy_safe_log_substep(
         "legacy_safe_ui_hints_substep_completed",
@@ -16187,11 +16366,15 @@ def _post_follow_likes_grid_ui_surface_hints(d: u2.Device) -> dict[str, Any]:
         dump_count=0,
         signals_found=sorted([k for k, v in overlay.items() if bool(v)]),
         hint_mode=hint_mode,
-        mute_sheet_level_skipped=legacy_safe_lightweight,
+        mute_sheet_level_skipped=bool(legacy_safe_lightweight or sheet_probe_can_skip),
         skipped_reason=(
             "not_needed_for_legacy_safe_like_open"
             if legacy_safe_lightweight
-            else ""
+            else (
+                "post_mute_sheet_closed_proof_reused"
+                if sheet_probe_can_skip
+                else ""
+            )
         ),
     )
     tabs_visible = False
@@ -36521,6 +36704,13 @@ def _post_mute_state_checkpoint(
             )
             if fast_ok:
                 total_ms = round((time.perf_counter() - checkpoint_t0) * 1000.0, 2)
+                _stash_post_mute_sheet_closed_proof(
+                    source_profile_username=src,
+                    candidate_username=cand,
+                    visual_candidate_id=vcid,
+                    action_bar_title=ab,
+                    duration_ms=total_ms,
+                )
                 log(
                     "info",
                     "post_mute_gap_completed",
@@ -40240,6 +40430,81 @@ def _post_follow_like_precheck_mute_sheet(
         "skip_reason": "",
         "precheck_ms": 0.0,
     }
+    proof_ok, proof, proof_age_ms, proof_reject = _validate_post_mute_sheet_closed_proof(
+        source_profile_username=source_profile_username,
+        candidate_username=follower_username,
+        visual_candidate_id=visual_candidate_id,
+    )
+    if proof_ok:
+        if _quick_mute_sheet_visible_guard(d):
+            _clear_post_mute_sheet_closed_proof_stash()
+            proof_reject = "quick_guard_sheet_visible"
+            _post_mute_sheet_closed_proof_reject(
+                event="post_follow_like_sheet_closed_proof_rejected",
+                source_profile_username=source_profile_username,
+                candidate_username=follower_username,
+                visual_candidate_id=visual_candidate_id,
+                reject_reason=proof_reject,
+                proof_age_ms=proof_age_ms,
+                action_bar_title=str(proof.get("action_bar_title") or ""),
+                duration_ms=round((time.perf_counter() - t0) * 1000.0, 2),
+                fallback_used=True,
+            )
+        else:
+            out["precheck_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
+            out["proof_reused"] = True
+            out["used_cached_context"] = True
+            try:
+                log(
+                    "info",
+                    "post_follow_like_sheet_closed_proof_reused",
+                    visual_candidate_id=visual_candidate_id,
+                    source_profile_username=source_profile_username,
+                    candidate_username=_normalize_handle(str(follower_username or "")),
+                    expected_username=_normalize_handle(str(follower_username or "")),
+                    proof_age_ms=proof_age_ms,
+                    sheet_closed=True,
+                    action_bar_title=str(proof.get("action_bar_title") or ""),
+                    used_cached_context=True,
+                    reject_reason="",
+                    duration_ms=out["precheck_ms"],
+                    fallback_used=False,
+                )
+                log(
+                    "info",
+                    "like_precheck_sheet_visible",
+                    visual_candidate_id=visual_candidate_id,
+                    source_profile_username=source_profile_username,
+                    follower_username=follower_username,
+                    sheet_visible=False,
+                    used_cached_context=True,
+                    proof_age_ms=proof_age_ms,
+                )
+                log(
+                    "info",
+                    "mute_sheet_visible_before_like",
+                    visual_candidate_id=visual_candidate_id,
+                    source_profile_username=source_profile_username,
+                    follower_username=follower_username,
+                    sheet_visible=False,
+                    used_cached_context=True,
+                    proof_age_ms=proof_age_ms,
+                )
+            except Exception:
+                pass
+            return out
+    else:
+        _post_mute_sheet_closed_proof_reject(
+            event="post_follow_like_sheet_closed_proof_rejected",
+            source_profile_username=source_profile_username,
+            candidate_username=follower_username,
+            visual_candidate_id=visual_candidate_id,
+            reject_reason=proof_reject,
+            proof_age_ms=proof_age_ms,
+            action_bar_title=str((proof or {}).get("action_bar_title") or ""),
+            duration_ms=round((time.perf_counter() - t0) * 1000.0, 2),
+            fallback_used=True,
+        )
     try:
         visible = bool(_post_follow_overlay_ui_hints(d).get("likely_mute_toggle_sheet"))
     except Exception:
@@ -40347,7 +40612,12 @@ def _post_follow_like_precheck_surface(
         out["skip_like"] = True
         out["skip_reason"] = "candidate_profile_not_visible_before_like"
     try:
-        hints = _post_follow_likes_grid_ui_surface_hints(d)
+        hints = _post_follow_likes_grid_ui_surface_hints(
+            d,
+            source_profile_username=src,
+            follower_username=cand,
+            visual_candidate_id=visual_candidate_id,
+        )
         out["grid_tab_visible"] = bool(hints.get("profile_tabs_visible"))
         out["suggested_overlay_visible"] = bool(
             hints.get("suggested_for_you") or hints.get("discover_people")
@@ -41977,6 +42247,7 @@ def run_post_follow_post_likes_phase(
     """
     from navigation_engine import NavigationEngineState, observe_instagram_state
 
+    global _VISUAL_POST_LIKE_TAPS_RECORDED
     t_all = time.perf_counter()
     timings: dict[str, float] = {}
     pkg = str(pkg or getattr(config, "INSTAGRAM_PACKAGE", "") or "")
@@ -42060,6 +42331,7 @@ def run_post_follow_post_likes_phase(
         **counts: Any,
     ) -> dict[str, Any]:
         _clear_post_follow_open_like_proof_stash()
+        _clear_post_mute_sheet_closed_proof_stash()
         if log_early_exit and skipped_reason:
             _log_likes_early_exit(skipped_reason)
         timings["likes_total_ms"] = round((time.perf_counter() - t_all) * 1000, 2)
@@ -42194,6 +42466,27 @@ def run_post_follow_post_likes_phase(
     except Exception:
         pass
 
+    previous_profile_like_taps = int(_VISUAL_POST_LIKE_TAPS_RECORDED or 0)
+    _VISUAL_POST_LIKE_TAPS_RECORDED = 0
+    try:
+        log(
+            "info",
+            "post_follow_like_profile_counter_reset",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            follower_username=cand,
+            candidate_username=cand,
+            previous_profile_like_taps=previous_profile_like_taps,
+            new_profile_like_taps=0,
+            max_likes_per_profile=int(
+                getattr(config, "VISUAL_POST_MAX_LIKES_PER_PROFILE", 1) or 1
+            ),
+            session_likes_used=int(_cfg_snap["session_likes_used"]),
+            session_likes_limit=int(_cfg_snap["total_likes_limit"]),
+        )
+    except Exception:
+        pass
+
     if not cand:
         _log_likes_early_exit("unresolved_follower_username")
         return _finish(phase_outcome="skipped", skipped_reason="unresolved_follower_username")
@@ -42302,26 +42595,114 @@ def run_post_follow_post_likes_phase(
 
     t_prof = time.perf_counter()
     ab = ""
-    try:
-        ab = str(read_current_profile_username_for_follow_gate(d) or "").strip().lstrip("@")
-    except Exception:
-        ab = ""
     nav_prof: dict[str, Any] = {}
-    try:
-        nav_prof = observe_instagram_state(
-            d,
-            expected_package=pkg,
-            last_known_state=NavigationEngineState.CANDIDATE_PROFILE.value,
-            context={
-                "phase": "post_follow_post_likes_profile_guard",
-                "visual_candidate_id": vcid,
-                "source_profile_username": src,
-                "disable_followers_visual_fallback": True,
-                "expected_state": "CANDIDATE_PROFILE",
-            },
+    fast_profile_guard_reused = False
+    profile_guard_live_mismatch = False
+    proof_ok, proof, proof_age_ms, proof_reject = _validate_post_mute_sheet_closed_proof(
+        source_profile_username=src,
+        candidate_username=cand,
+        visual_candidate_id=vcid,
+    )
+    if proof_ok:
+        reject_reason = ""
+        cur_pkg = ""
+        try:
+            meta = _followers_current_pkg_activity(d)
+            cur_pkg = str(meta.get("current_package") or "")
+        except Exception:
+            cur_pkg = ""
+        if cur_pkg and "instagram" not in cur_pkg.lower():
+            reject_reason = "instagram_not_foreground"
+        try:
+            ab = str(read_current_profile_username_for_follow_gate(d) or "").strip().lstrip("@")
+        except Exception:
+            ab = ""
+        if not reject_reason and (
+            not ab or _normalize_handle(ab) != _normalize_handle(cand)
+        ):
+            reject_reason = "action_bar_mismatch"
+            profile_guard_live_mismatch = bool(ab)
+        followers_quick = False
+        if not reject_reason:
+            try:
+                followers_quick = bool(
+                    is_followers_list_surface_quick(d, source_profile_username=src)
+                )
+            except Exception:
+                followers_quick = False
+            if followers_quick:
+                reject_reason = "followers_list_quick_visible"
+        if not reject_reason:
+            fast_profile_guard_reused = True
+            nav_prof = {
+                "state": NavigationEngineState.CANDIDATE_PROFILE.value,
+                "confidence": 0.95,
+                "reason": "post_mute_fast_profile_proof_reused",
+            }
+            try:
+                log(
+                    "info",
+                    "post_follow_like_profile_guard_fast_proof_reused",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    candidate_username=cand,
+                    expected_username=cand,
+                    proof_age_ms=proof_age_ms,
+                    sheet_closed=True,
+                    action_bar_title=ab,
+                    current_package=cur_pkg,
+                    used_cached_context=True,
+                    reject_reason="",
+                    duration_ms=round((time.perf_counter() - t_prof) * 1000, 2),
+                    fallback_used=False,
+                )
+            except Exception:
+                pass
+        else:
+            _post_mute_sheet_closed_proof_reject(
+                event="post_follow_like_profile_guard_fast_proof_rejected",
+                source_profile_username=src,
+                candidate_username=cand,
+                visual_candidate_id=vcid,
+                reject_reason=reject_reason,
+                proof_age_ms=proof_age_ms,
+                action_bar_title=ab or str(proof.get("action_bar_title") or ""),
+                duration_ms=round((time.perf_counter() - t_prof) * 1000, 2),
+                fallback_used=True,
+            )
+    else:
+        _post_mute_sheet_closed_proof_reject(
+            event="post_follow_like_profile_guard_fast_proof_rejected",
+            source_profile_username=src,
+            candidate_username=cand,
+            visual_candidate_id=vcid,
+            reject_reason=proof_reject,
+            proof_age_ms=proof_age_ms,
+            action_bar_title=str((proof or {}).get("action_bar_title") or ""),
+            duration_ms=round((time.perf_counter() - t_prof) * 1000, 2),
+            fallback_used=True,
         )
-    except Exception as e:
-        nav_prof = {"state": "UNKNOWN", "confidence": 0.0, "reason": str(e)}
+    if not fast_profile_guard_reused:
+        if not ab:
+            try:
+                ab = str(read_current_profile_username_for_follow_gate(d) or "").strip().lstrip("@")
+            except Exception:
+                ab = ""
+        try:
+            nav_prof = observe_instagram_state(
+                d,
+                expected_package=pkg,
+                last_known_state=NavigationEngineState.CANDIDATE_PROFILE.value,
+                context={
+                    "phase": "post_follow_post_likes_profile_guard",
+                    "visual_candidate_id": vcid,
+                    "source_profile_username": src,
+                    "disable_followers_visual_fallback": True,
+                    "expected_state": "CANDIDATE_PROFILE",
+                },
+            )
+        except Exception as e:
+            nav_prof = {"state": "UNKNOWN", "confidence": 0.0, "reason": str(e)}
     timings["profile_guard_ms"] = round((time.perf_counter() - t_prof) * 1000, 2)
     st_prof = str(nav_prof.get("state") or "")
     prof_like = st_prof in (
@@ -42330,19 +42711,27 @@ def run_post_follow_post_likes_phase(
         NavigationEngineState.PRIVATE_PROFILE.value,
     )
     ab_match = bool(ab) and _normalize_handle(ab) == _normalize_handle(cand)
-    if not prof_like and not ab_match:
+    if (profile_guard_live_mismatch and not ab_match) or (not prof_like and not ab_match):
         log(
             "warning",
             "post_follow_post_likes_phase_skipped",
             visual_candidate_id=vcid,
             source_profile_username=src,
-            reason="profile_not_confirmed",
+            reason=(
+                "profile_mismatch_after_fast_proof"
+                if profile_guard_live_mismatch
+                else "profile_not_confirmed"
+            ),
             navigation_state=st_prof,
             action_bar_title=ab,
         )
         return _finish(
             phase_outcome="skipped",
-            skipped_reason="profile_not_confirmed_before_likes",
+            skipped_reason=(
+                "profile_mismatch_before_likes"
+                if profile_guard_live_mismatch
+                else "profile_not_confirmed_before_likes"
+            ),
         )
 
     per_post: list[dict[str, Any]] = []

@@ -134,6 +134,28 @@ class FakeCloneHeaderDevice:
 
 
 class PostMuteGapTrackingTest(unittest.TestCase):
+    def tearDown(self) -> None:
+        nav._clear_post_mute_sheet_closed_proof_stash()
+
+    def _stash_sheet_closed_proof(
+        self,
+        *,
+        source: str = "ct",
+        candidate: str = "cand",
+        vcid: str = "vc-1",
+        age_s: float = 0.0,
+        action_bar: str | None = None,
+    ) -> None:
+        nav._post_mute_sheet_closed_proof_stash = {
+            "stashed_at_monotonic": time.perf_counter() - float(age_s),
+            "source_profile_username": source,
+            "candidate_username": candidate,
+            "visual_candidate_id": vcid,
+            "action_bar_title": action_bar if action_bar is not None else candidate,
+            "sheet_closed": True,
+            "duration_ms": 12.0,
+        }
+
     def test_post_mute_checkpoint_fast_profile_proof_skips_heavy_revalidation(self) -> None:
         device = mock.MagicMock()
         logs: list[tuple[str, str, dict[str, object]]] = []
@@ -260,6 +282,292 @@ class PostMuteGapTrackingTest(unittest.TestCase):
         ][-1]
         self.assertFalse(fast_done["safe_to_continue_ui"])
         self.assertEqual(fast_done["reason"], "candidate_profile_not_confirmed")
+
+    def test_like_sheet_precheck_reuses_fresh_sheet_closed_proof(self) -> None:
+        self._stash_sheet_closed_proof()
+        device = mock.MagicMock()
+        logs: list[str] = []
+        with mock.patch.object(
+            nav, "_quick_mute_sheet_visible_guard", return_value=False
+        ), mock.patch.object(
+            nav,
+            "_post_follow_overlay_ui_hints",
+            side_effect=AssertionError("full overlay probe should be skipped"),
+        ), mock.patch.object(
+            nav, "log", side_effect=lambda _level, event, **_kw: logs.append(str(event))
+        ):
+            out = nav._post_follow_like_precheck_mute_sheet(
+                device,
+                visual_candidate_id="vc-1",
+                source_profile_username="ct",
+                follower_username="cand",
+            )
+
+        self.assertFalse(out["skip_like"])
+        self.assertFalse(out["sheet_visible"])
+        self.assertTrue(out["proof_reused"])
+        self.assertIn("post_follow_like_sheet_closed_proof_reused", logs)
+
+    def test_like_sheet_precheck_stale_proof_falls_back_to_full_probe(self) -> None:
+        self._stash_sheet_closed_proof(age_s=30.0)
+        device = mock.MagicMock()
+        with mock.patch.object(
+            nav, "_post_follow_overlay_ui_hints", return_value={"likely_mute_toggle_sheet": False}
+        ) as overlay:
+            out = nav._post_follow_like_precheck_mute_sheet(
+                device,
+                visual_candidate_id="vc-1",
+                source_profile_username="ct",
+                follower_username="cand",
+            )
+
+        self.assertFalse(out["skip_like"])
+        overlay.assert_called_once()
+
+    def test_like_sheet_precheck_candidate_mismatch_falls_back_to_full_probe(self) -> None:
+        self._stash_sheet_closed_proof(candidate="other")
+        device = mock.MagicMock()
+        with mock.patch.object(
+            nav, "_post_follow_overlay_ui_hints", return_value={"likely_mute_toggle_sheet": False}
+        ) as overlay:
+            out = nav._post_follow_like_precheck_mute_sheet(
+                device,
+                visual_candidate_id="vc-1",
+                source_profile_username="ct",
+                follower_username="cand",
+            )
+
+        self.assertFalse(out["skip_like"])
+        overlay.assert_called_once()
+
+    def test_like_sheet_precheck_quick_guard_visible_rejects_proof_and_blocks_like(
+        self,
+    ) -> None:
+        self._stash_sheet_closed_proof()
+        device = mock.MagicMock()
+        logs: list[tuple[str, dict[str, object]]] = []
+        with mock.patch.object(
+            nav, "_quick_mute_sheet_visible_guard", return_value=True
+        ), mock.patch.object(
+            nav, "_post_follow_overlay_ui_hints", return_value={"likely_mute_toggle_sheet": True}
+        ), mock.patch.object(
+            nav, "_mute_engine_v2_dismiss_mute_sheet", return_value=(False, 1.0)
+        ), mock.patch.object(
+            nav, "_mute_engine_v2_mute_sheet_still_visible", return_value=True
+        ), mock.patch.object(
+            nav, "log", side_effect=lambda _level, event, **kw: logs.append((str(event), kw))
+        ):
+            out = nav._post_follow_like_precheck_mute_sheet(
+                device,
+                visual_candidate_id="vc-1",
+                source_profile_username="ct",
+                follower_username="cand",
+            )
+
+        self.assertTrue(out["skip_like"])
+        self.assertEqual(out["skip_reason"], "mute_sheet_still_open")
+        rejected = [
+            kw for event, kw in logs if event == "post_follow_like_sheet_closed_proof_rejected"
+        ]
+        self.assertTrue(rejected)
+        self.assertEqual(rejected[-1]["reject_reason"], "quick_guard_sheet_visible")
+
+    def test_profile_guard_fast_proof_reused_skips_heavy_observe(self) -> None:
+        self._stash_sheet_closed_proof()
+        device = mock.MagicMock()
+        with mock.patch.object(
+            nav.config, "POST_FOLLOW_POST_LIKES_ENABLED", True, create=True
+        ), mock.patch.object(
+            nav.config, "ENABLE_REAL_VISUAL_POST_LIKE", True, create=True
+        ), mock.patch.object(
+            nav.config, "POST_FOLLOW_POST_LIKES_PERCENTAGE", 100, create=True
+        ), mock.patch.object(
+            nav.config, "POST_FOLLOW_POST_LIKES_COUNT_RANGE", "1-1", create=True
+        ), mock.patch.object(
+            nav, "_followers_current_pkg_activity",
+            return_value={"current_package": "com.instagram.android"},
+        ), mock.patch.object(
+            nav, "read_current_profile_username_for_follow_gate", return_value="cand"
+        ), mock.patch.object(
+            nav, "is_followers_list_surface_quick", return_value=False
+        ), mock.patch(
+            "navigation_engine.observe_instagram_state",
+            side_effect=AssertionError("heavy observe should be skipped"),
+        ), mock.patch.object(
+            nav, "_post_follow_like_precheck_mute_sheet",
+            return_value={"skip_like": True, "skip_reason": "unit_stop"},
+        ), mock.patch.object(nav, "log"):
+            out = nav.run_post_follow_post_likes_phase(
+                device,
+                pkg="com.instagram.android",
+                source_profile_username="ct",
+                follower_username="cand",
+                visual_candidate_id="vc-1",
+                follow_success_verified=True,
+                follow_state_after="following",
+                skipped_tap=False,
+            )
+
+        self.assertEqual(out["skipped_reason"], "unit_stop")
+
+    def test_profile_guard_mismatch_falls_back_to_heavy_and_fails_safe(self) -> None:
+        self._stash_sheet_closed_proof()
+        device = mock.MagicMock()
+        with mock.patch.object(
+            nav.config, "POST_FOLLOW_POST_LIKES_ENABLED", True, create=True
+        ), mock.patch.object(
+            nav.config, "ENABLE_REAL_VISUAL_POST_LIKE", True, create=True
+        ), mock.patch.object(
+            nav.config, "POST_FOLLOW_POST_LIKES_PERCENTAGE", 100, create=True
+        ), mock.patch.object(
+            nav.config, "POST_FOLLOW_POST_LIKES_COUNT_RANGE", "1-1", create=True
+        ), mock.patch.object(
+            nav, "_followers_current_pkg_activity",
+            return_value={"current_package": "com.instagram.android"},
+        ), mock.patch.object(
+            nav, "read_current_profile_username_for_follow_gate", return_value="other"
+        ), mock.patch(
+            "navigation_engine.observe_instagram_state",
+            return_value={"state": "CANDIDATE_PROFILE", "confidence": 0.9},
+        ) as observe, mock.patch.object(nav, "log"):
+            out = nav.run_post_follow_post_likes_phase(
+                device,
+                pkg="com.instagram.android",
+                source_profile_username="ct",
+                follower_username="cand",
+                visual_candidate_id="vc-1",
+                follow_success_verified=True,
+                follow_state_after="following",
+                skipped_tap=False,
+            )
+
+        observe.assert_called_once()
+        self.assertEqual(out["skipped_reason"], "profile_mismatch_before_likes")
+
+    def test_surface_precheck_skips_mute_sheet_probe_with_fresh_proof(self) -> None:
+        self._stash_sheet_closed_proof()
+        device = mock.MagicMock()
+        logs: list[str] = []
+        with mock.patch.object(
+            nav, "is_followers_list_surface_quick", return_value=False
+        ), mock.patch.object(
+            nav, "read_current_profile_username_for_follow_gate", return_value="cand"
+        ), mock.patch.object(
+            nav, "_followers_profile_tabs_visible", return_value=True
+        ), mock.patch.object(
+            nav,
+            "_post_follow_overlay_ui_hints",
+            side_effect=AssertionError("surface precheck should not probe mute sheet"),
+        ), mock.patch.object(
+            nav, "log", side_effect=lambda _level, event, **_kw: logs.append(str(event))
+        ):
+            out = nav._post_follow_like_precheck_surface(
+                device,
+                source_profile_username="ct",
+                follower_username="cand",
+                visual_candidate_id="vc-1",
+            )
+
+        self.assertFalse(out["skip_like"])
+        self.assertTrue(out["grid_tab_visible"])
+        self.assertIn("post_follow_like_surface_precheck_sheet_probe_skipped", logs)
+
+    def test_like_phase_still_runs_no_posts_and_like_protections(self) -> None:
+        self._stash_sheet_closed_proof()
+        device = mock.MagicMock()
+        device.window_size.return_value = (1080, 2340)
+        logs: list[str] = []
+        with mock.patch.object(
+            nav.config, "POST_FOLLOW_POST_LIKES_ENABLED", True, create=True
+        ), mock.patch.object(
+            nav.config, "ENABLE_REAL_VISUAL_POST_LIKE", True, create=True
+        ), mock.patch.object(
+            nav.config, "POST_FOLLOW_POST_LIKES_PERCENTAGE", 100, create=True
+        ), mock.patch.object(
+            nav.config, "POST_FOLLOW_POST_LIKES_COUNT_RANGE", "1-1", create=True
+        ), mock.patch.object(
+            nav.config, "POST_FOLLOW_TOTAL_LIKES_LIMIT", 150, create=True
+        ), mock.patch.object(
+            nav, "_followers_current_pkg_activity",
+            return_value={"current_package": "com.instagram.android"},
+        ), mock.patch.object(
+            nav, "read_current_profile_username_for_follow_gate", return_value="cand"
+        ), mock.patch.object(
+            nav, "is_followers_list_surface_quick", return_value=False
+        ), mock.patch.object(
+            nav, "_quick_mute_sheet_visible_guard", return_value=False
+        ), mock.patch.object(
+            nav, "_followers_profile_tabs_visible", return_value=True
+        ), mock.patch.object(
+            nav,
+            "_visual_profile_no_posts_tier1_direct_check",
+            return_value={
+                "no_posts_detected": False,
+                "detection_method": "none",
+                "confidence": 0.0,
+            },
+        ) as no_posts, mock.patch.object(
+            nav, "_followers_profile_tabs_bottom_y_px", return_value=(900, "unit")
+        ), mock.patch.object(
+            nav,
+            "_post_follow_likes_open_top_left_legacy_visual_safe",
+            return_value={
+                "ok": True,
+                "post_detected": True,
+                "tap_x": 180,
+                "tap_y": 1280,
+                "open_strategy": "vision_open_top_left_legacy_safe",
+                "viewer_detect_path": "phase_a2_exact_like_desc_fast",
+                "detect_reason": "like_unlike_ui",
+                "likes_perf_post_open": {},
+            },
+        ) as legacy_safe, mock.patch.object(
+            nav,
+            "visual_post_already_liked",
+            return_value={"already_liked": False, "detection_method": "hierarchy_like_hint"},
+        ) as already_liked, mock.patch.object(
+            nav,
+            "visual_like_open_post",
+            return_value={
+                "ok": True,
+                "real_tap_sent": True,
+                "tap_x": 50,
+                "tap_y": 1000,
+                "confidence": 0.8,
+                "likes_perf_like": {},
+            },
+        ) as like_open, mock.patch.object(
+            nav,
+            "visual_verify_post_liked",
+            return_value={
+                "liked_verified": True,
+                "verification_method": "unit",
+                "verify_attempts_count": 1,
+            },
+        ) as verify, mock.patch.object(
+            nav, "visual_return_to_profile_from_post", return_value={"ok": True}
+        ), mock.patch.object(
+            nav, "log", side_effect=lambda _level, event, **_kw: logs.append(str(event))
+        ):
+            out = nav.run_post_follow_post_likes_phase(
+                device,
+                pkg="com.instagram.android",
+                source_profile_username="ct",
+                follower_username="cand",
+                visual_candidate_id="vc-1",
+                follow_success_verified=True,
+                follow_state_after="following",
+                skipped_tap=False,
+            )
+
+        self.assertEqual(out["phase_outcome"], "success")
+        no_posts.assert_called_once()
+        legacy_safe.assert_called_once()
+        already_liked.assert_called_once()
+        like_open.assert_called_once()
+        verify.assert_called_once()
+        self.assertIn("post_follow_like_pre_reveal_guard_started", logs)
+        self.assertIn("post_follow_like_pre_reveal_guard_completed", logs)
 
 
 def _probe_sequence_from_visible_fn(
@@ -2822,6 +3130,179 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
         verify.assert_called_once()
         self.assertEqual(out.get("phase_outcome"), "success")
         self.assertEqual(out.get("liked_count"), 1)
+
+    def test_post_follow_like_phase_resets_profile_like_counter_for_new_candidate(
+        self,
+    ) -> None:
+        nav._VISUAL_POST_LIKE_TAPS_RECORDED = 1
+        device = mock.MagicMock()
+        contract_ctx = _like_phase_contract_ctx()
+        logs: list[tuple[str, dict[str, object]]] = []
+        with ExitStack() as stack:
+            _patch_like_phase_common(stack, contract_ctx=contract_ctx)
+            stack.enter_context(
+                mock.patch.object(
+                    nav.config, "VISUAL_POST_MAX_LIKES_PER_PROFILE", 1, create=True
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "_post_follow_likes_open_top_left_legacy_visual_safe",
+                    return_value={
+                        "ok": True,
+                        "post_detected": True,
+                        "failure_reason": "",
+                        "open_strategy": "vision_open_top_left_legacy_safe",
+                        "tap_x": 180,
+                        "tap_y": 1282,
+                        "detect_reason": "like_unlike_ui",
+                        "viewer_detect_path": "phase_a2_exact_like_desc_fast",
+                        "likes_perf_post_open": {},
+                    },
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "visual_post_already_liked",
+                    return_value={
+                        "already_liked": False,
+                        "detection_method": "post_follow_open_like_proof_reuse",
+                        "confidence": 0.91,
+                    },
+                )
+            )
+
+            def _fake_like_open(*_args: object, **_kwargs: object) -> dict[str, object]:
+                self.assertEqual(nav._VISUAL_POST_LIKE_TAPS_RECORDED, 0)
+                nav._VISUAL_POST_LIKE_TAPS_RECORDED += 1
+                return {
+                    "ok": True,
+                    "already_liked": False,
+                    "real_tap_sent": True,
+                    "tap_x": 79,
+                    "tap_y": 1891,
+                    "confidence": 0.8,
+                    "likes_perf_like": {"like_tap_dispatch_ms": 1.0},
+                }
+
+            like_open = stack.enter_context(
+                mock.patch.object(nav, "visual_like_open_post", side_effect=_fake_like_open)
+            )
+            verify = stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "visual_verify_post_liked",
+                    return_value={
+                        "liked_verified": True,
+                        "verification_method": "visual",
+                        "verify_attempts_count": 1,
+                    },
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    nav, "visual_return_to_profile_from_post", return_value={"ok": True}
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "log",
+                    side_effect=lambda _level, event, **kw: logs.append((str(event), dict(kw))),
+                )
+            )
+            out = nav.run_post_follow_post_likes_phase(
+                device,
+                pkg="com.instagram.android",
+                source_profile_username="ct",
+                follower_username="new_cand",
+                visual_candidate_id="vc-new",
+                follow_success_verified=True,
+                follow_state_after="following",
+                skipped_tap=False,
+                session_likes_used=0,
+            )
+
+        self.assertEqual(out.get("phase_outcome"), "success")
+        like_open.assert_called_once()
+        verify.assert_called_once()
+        reset_logs = [
+            kw for event, kw in logs if event == "post_follow_like_profile_counter_reset"
+        ]
+        self.assertTrue(reset_logs)
+        self.assertEqual(reset_logs[-1]["candidate_username"], "new_cand")
+        self.assertEqual(reset_logs[-1]["previous_profile_like_taps"], 1)
+        self.assertEqual(reset_logs[-1]["new_profile_like_taps"], 0)
+        self.assertEqual(reset_logs[-1]["max_likes_per_profile"], 1)
+
+    def test_visual_like_max_still_blocks_second_tap_inside_same_profile(self) -> None:
+        nav._VISUAL_POST_LIKE_TAPS_RECORDED = 1
+        device = mock.MagicMock()
+        with mock.patch.object(
+            nav.config, "ENABLE_REAL_VISUAL_POST_LIKE", True, create=True
+        ), mock.patch.object(
+            nav.config, "VISUAL_POST_MAX_LIKES_PER_PROFILE", 1, create=True
+        ), mock.patch.object(
+            nav,
+            "_followers_current_pkg_activity",
+            return_value={"current_activity": "post", "current_package": "pkg"},
+        ), mock.patch.object(nav, "screenshot") as screenshot, mock.patch.object(nav, "log"):
+            out = nav.visual_like_open_post(
+                device,
+                source_profile_username="ct",
+                expected_profile_context={"ok": True},
+                post_opened_via_profile_grid=True,
+                post_open_context={"ok": True, "post_detected": True},
+                expected_follower_username="cand",
+            )
+
+        self.assertFalse(out.get("ok"))
+        self.assertEqual(out.get("failure_reason"), "max_likes_per_profile")
+        self.assertFalse(out.get("real_tap_sent"))
+        screenshot.assert_not_called()
+
+    def test_post_follow_total_likes_limit_still_blocks_after_profile_counter_reset(
+        self,
+    ) -> None:
+        nav._VISUAL_POST_LIKE_TAPS_RECORDED = 1
+        device = mock.MagicMock()
+        logs: list[tuple[str, dict[str, object]]] = []
+        with mock.patch.object(
+            nav.config, "POST_FOLLOW_POST_LIKES_ENABLED", True, create=True
+        ), mock.patch.object(
+            nav.config, "ENABLE_REAL_VISUAL_POST_LIKE", True, create=True
+        ), mock.patch.object(
+            nav.config, "POST_FOLLOW_TOTAL_LIKES_LIMIT", 1, create=True
+        ), mock.patch.object(
+            nav, "visual_like_open_post"
+        ) as like_open, mock.patch.object(
+            nav,
+            "log",
+            side_effect=lambda _level, event, **kw: logs.append((str(event), dict(kw))),
+        ):
+            out = nav.run_post_follow_post_likes_phase(
+                device,
+                pkg="com.instagram.android",
+                source_profile_username="ct",
+                follower_username="cand",
+                visual_candidate_id="vc-1",
+                follow_success_verified=True,
+                follow_state_after="following",
+                skipped_tap=False,
+                session_likes_used=1,
+            )
+
+        self.assertEqual(out.get("skipped_reason"), "likes_skipped_session_quota")
+        like_open.assert_not_called()
+        reset_logs = [
+            kw for event, kw in logs if event == "post_follow_like_profile_counter_reset"
+        ]
+        self.assertTrue(reset_logs)
+        self.assertEqual(reset_logs[-1]["previous_profile_like_taps"], 1)
+        self.assertEqual(reset_logs[-1]["session_likes_used"], 1)
+        self.assertEqual(reset_logs[-1]["session_likes_limit"], 1)
 
     def test_return_ct_reuses_post_back_ct_det_without_final_redump(self) -> None:
         device = mock.MagicMock()
