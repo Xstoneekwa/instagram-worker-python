@@ -16,6 +16,9 @@ import supabase_client
 SUPPORTED_RUN_ASSIGNMENT_TYPES: dict[str, set[str]] = {
     "outreach_session": {"outreach_only", "full_cycle"},
     "account_session": {"full_cycle"},
+    "dm_welcome_session_send": {"full_cycle"},
+    "login_provisioning": {"full_cycle"},
+    "login_email_code_resume": {"full_cycle"},
 }
 
 
@@ -258,12 +261,13 @@ def resolve_account_assignment_runtime_context(
     app_instance = _nested(assignment, "phone_app_instance", "phone_app_instances", "app_instance")
     instance_index = app_instance.get("instance_index", clone.get("clone_index"))
     instance_label = app_instance.get("visible_label", clone.get("clone_label"))
+    package_name = app_instance.get("package_name")
     adb_serial = str(device.get("adb_serial") or "").strip()
     if not adb_serial:
         ctx = _empty_context(
             account_id=aid,
             run_type=rtype,
-            reason="device_adb_serial_missing",
+            reason="assignment_device_missing_adb_serial",
             require_assignment=True,
             fallback_used=False,
         )
@@ -284,6 +288,7 @@ def resolve_account_assignment_runtime_context(
                 "app_instance_type": app_instance.get("instance_type"),
                 "app_instance_index": instance_index,
                 "app_instance_label": instance_label,
+                "package_name": package_name,
             }
         )
         return ctx
@@ -311,6 +316,7 @@ def resolve_account_assignment_runtime_context(
         "app_instance_type": app_instance.get("instance_type"),
         "app_instance_index": instance_index,
         "app_instance_label": instance_label,
+        "package_name": package_name,
         "source": "account_assignments",
         "fallback_used": False,
         "reason": "assignment_resolved",

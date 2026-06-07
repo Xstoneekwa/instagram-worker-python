@@ -55,6 +55,23 @@ Checkpoints recents valides :
 - Validation finale follow V1 `f2eb4d2b` : 4 follows, 3 Likes persistés, 1 skip
   Like métier `No posts yet`, private skips sans follow tap, checkpoints V1 et
   post-return skips actifs, `run_status_updated=completed`.
+- Welcome DM physique send-one : smoke manuel isolé validé sur
+  `j_automatise_pour_toi` pour le job
+  `8df8a49f-747f-4486-9519-e8af3fc5221a`, status DB final `sent`, `sent_at`
+  et `finished_at` renseignés, aucun pending Welcome/Outreach et aucune surface
+  active. Les détails recipient/message restent hors documentation persistée.
+  Ce chemin `send-one` utilise la recherche globale pour un contrôle opérateur
+  strict seulement; il ne remplace pas la baseline production Welcome.
+- Welcome production reste list-native : le chemin validé sur émulateur est
+  `followers list -> candidat -> DM -> send -> back to followers list ->
+  prochain candidat` via `dm_welcome_session_send` / `welcome_list_sender`. Les
+  timings Search du smoke physique ne sont pas une baseline production. Avant un
+  vrai Welcome DB/list-native sur phone physique, valider explicitement ce même
+  chemin list-native sur phone.
+- Baseline Welcome : ne pas remplir artificiellement
+  `welcome_baseline_completed_at` pour un smoke manuel strict. Après le
+  send-one, un dry-run qui retourne `no_pending_welcome_job` et
+  `welcome_baseline_not_completed` est attendu.
 - Entry 2E-5A : classifier/provisioner skeleton;
 - Entry 2E-5B : login UI probe;
 - Entry 2E-5C : isolated login probe CLI;

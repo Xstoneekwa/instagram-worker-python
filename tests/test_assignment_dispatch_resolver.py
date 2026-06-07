@@ -52,6 +52,7 @@ def _assignment(
             "instance_type": "clone",
             "instance_index": 1,
             "visible_label": "Instagram 1",
+            "package_name": "com.instagram.androie",
         },
     }
 
@@ -75,12 +76,49 @@ class AssignmentDispatchResolverTest(unittest.TestCase):
         self.assertEqual(ctx["adb_serial"], "emulator-5554")
         self.assertEqual(ctx["app_instance_id"], "app-instance-1")
         self.assertEqual(ctx["app_instance_label"], "Instagram 1")
+        self.assertEqual(ctx["package_name"], "com.instagram.androie")
         self.assertEqual(ctx["reason"], "assignment_resolved")
 
     def test_full_cycle_outreach_session_accepted(self) -> None:
         ctx = self._resolve(_assignment(assignment_type="full_cycle"))
         self.assertTrue(ctx["assignment_found"])
         self.assertEqual(ctx["assignment_type"], "full_cycle")
+
+    def test_full_cycle_welcome_session_send_accepted(self) -> None:
+        ctx = self._resolve(
+            _assignment(assignment_type="full_cycle"),
+            run_type="dm_welcome_session_send",
+        )
+        self.assertTrue(ctx["assignment_found"])
+        self.assertEqual(ctx["assignment_type"], "full_cycle")
+        self.assertEqual(ctx["reason"], "assignment_resolved")
+
+    def test_full_cycle_welcome_session_send_resolves_outside_window_when_not_enforced(
+        self,
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        ctx = self._resolve(
+            _assignment(
+                assignment_type="full_cycle",
+                adb_serial="RFGL145VCKE",
+                starts_at=(now - timedelta(hours=2)).isoformat(),
+                ends_at=(now - timedelta(hours=1)).isoformat(),
+            ),
+            run_type="dm_welcome_session_send",
+            enforce_window=False,
+        )
+        self.assertTrue(ctx["assignment_found"])
+        self.assertEqual(ctx["reason"], "assignment_resolved")
+        self.assertEqual(ctx["adb_serial"], "RFGL145VCKE")
+        self.assertEqual(ctx["package_name"], "com.instagram.androie")
+
+    def test_outreach_only_welcome_session_send_incompatible(self) -> None:
+        ctx = self._resolve(
+            _assignment(assignment_type="outreach_only"),
+            run_type="dm_welcome_session_send",
+        )
+        self.assertFalse(ctx["assignment_found"])
+        self.assertEqual(ctx["reason"], "assignment_type_incompatible")
 
     def test_outreach_only_account_session_incompatible(self) -> None:
         ctx = self._resolve(
@@ -125,6 +163,12 @@ class AssignmentDispatchResolverTest(unittest.TestCase):
             enforce_window=False,
         )
         self.assertTrue(ctx["assignment_found"])
+
+    def test_missing_device_adb_serial_returns_stable_block_reason(self) -> None:
+        ctx = self._resolve(_assignment(assignment_type="full_cycle", adb_serial=""), run_type="account_session")
+        self.assertFalse(ctx["assignment_found"])
+        self.assertEqual(ctx["reason"], "assignment_device_missing_adb_serial")
+        self.assertFalse(ctx["fallback_used"])
 
     def test_redacted_log_fields_hide_sensitive_values(self) -> None:
         ctx = self._resolve(_assignment())

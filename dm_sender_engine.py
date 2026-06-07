@@ -23,7 +23,9 @@ from dm_real_send_flags import (
 from instagram_navigation import (
     _dm_find_focus_composer,
     _wait_search_edittext,
-    cleanup_dm_after_send_button_missing,
+    clear_dm_draft,
+    dm_thread_shows_outgoing_message,
+    read_dm_composer_text,
     detect_unexpected_android_media_permission_dialog,
     detect_unsupported_start_surface,
     dismiss_android_permission_dialog,
@@ -3010,6 +3012,21 @@ def _perform_real_welcome_dm_send(
     if not draft_text.strip():
         return False, {}, "empty_message_body"
 
+    if dm_thread_shows_outgoing_message(d, draft_text):
+        log(
+            "info",
+            "dm_sender_existing_sent_message_detected",
+            username=uname,
+            message_len=len(draft_text),
+        )
+        log(
+            "info",
+            "dm_sender_duplicate_send_prevented",
+            username=uname,
+            thread_state=thread_state,
+        )
+        return True, {"sent": True, "duplicate_prevented": True}, None
+
     flags = _dm_message_typing_flags(draft_text)
     strategy = _select_dm_typing_strategy(flags)
     log(
@@ -3047,51 +3064,102 @@ def _perform_real_welcome_dm_send(
     if not bool(getattr(config, "DM_DRAFT_TYPING_ENABLED", True)):
         return False, {}, "draft_typing_disabled"
 
-    force_method = "set_text" if strategy == "set_text" else None
-    ok_type, type_info = type_dm_draft_only(
-        d, draft_text, pkg, force_method=force_method
-    )
-    log(
-        "info",
-        "dm_sender_real_send_draft_typed",
-        username=uname,
-        draft_ok=bool(ok_type),
-        strategy=strategy,
-        type_info=str(type_info)[:200] if not isinstance(type_info, dict) else type_info.get("method"),
-    )
-    if not ok_type:
-        fail_reason = "draft_typing_failed"
-        if isinstance(type_info, dict):
-            fail_reason = str(type_info.get("reason") or type_info.get("method") or fail_reason)
-        elif isinstance(type_info, str):
-            fail_reason = type_info
+    existing_draft = read_dm_composer_text(d)
+    ok_type = False
+    type_info: Any = {}
+    reused_draft = False
+    if existing_draft.strip() == draft_text.strip():
         log(
-            "error",
-            "dm_sender_typing_strategy_failed",
+            "info",
+            "dm_sender_existing_draft_detected",
             username=uname,
-            strategy=strategy,
-            failure_reason=fail_reason,
-            **flags,
+            draft_len=len(existing_draft),
         )
-        if strategy == "fast_ime":
-            log(
-                "info",
-                "dm_sender_typing_fallback_used",
-                username=uname,
-                from_strategy="fast_ime",
-                to_strategy="set_text",
-            )
-            ok_type, type_info = type_dm_draft_only(
-                d, draft_text, pkg, force_method="set_text"
-            )
+        log(
+            "info",
+            "dm_sender_existing_draft_reused",
+            username=uname,
+            thread_state=thread_state,
+        )
+        ok_type = True
+        type_info = {"method": "existing_draft_reused"}
+        reused_draft = True
+    elif existing_draft.strip():
+        log(
+            "info",
+            "dm_sender_existing_draft_detected",
+            username=uname,
+            draft_len=len(existing_draft),
+            draft_mismatch=True,
+        )
+        log(
+            "info",
+            "dm_sender_existing_draft_cleared",
+            username=uname,
+            thread_state=thread_state,
+        )
+        clear_dm_draft(d)
+
+    if not reused_draft:
+        force_method = "set_text" if strategy == "set_text" else None
+        ok_type, type_info = type_dm_draft_only(
+            d, draft_text, pkg, force_method=force_method
+        )
+        log(
+            "info",
+            "dm_sender_real_send_draft_typed",
+            username=uname,
+            draft_ok=bool(ok_type),
+            strategy=strategy,
+            type_info=str(type_info)[:200]
+            if not isinstance(type_info, dict)
+            else type_info.get("method"),
+        )
         if not ok_type:
-            return False, {"type_info": type_info}, "draft_typing_failed"
+            fail_reason = "draft_typing_failed"
+            if isinstance(type_info, dict):
+                fail_reason = str(
+                    type_info.get("reason") or type_info.get("method") or fail_reason
+                )
+            elif isinstance(type_info, str):
+                fail_reason = type_info
+            log(
+                "error",
+                "dm_sender_typing_strategy_failed",
+                username=uname,
+                strategy=strategy,
+                failure_reason=fail_reason,
+                **flags,
+            )
+            if strategy == "fast_ime":
+                log(
+                    "info",
+                    "dm_sender_typing_fallback_used",
+                    username=uname,
+                    from_strategy="fast_ime",
+                    to_strategy="set_text",
+                )
+                ok_type, type_info = type_dm_draft_only(
+                    d, draft_text, pkg, force_method="set_text"
+                )
+            if not ok_type:
+                return False, {"type_info": type_info}, "draft_typing_failed"
+
     log(
         "info",
         "dm_sender_typing_completed",
         username=uname,
         strategy=strategy,
+        reused_existing_draft=reused_draft,
         **flags,
+    )
+    composer_after_type = read_dm_composer_text(d)
+    log(
+        "info",
+        "dm_sender_draft_text_after_typing",
+        username=uname,
+        draft_len=len(composer_after_type),
+        draft_matches_expected=composer_after_type.strip() == draft_text.strip(),
     )
 
     if bool(getattr(config, "DM_VERIFY_TYPED_TEXT", True)):
@@ -3111,8 +3179,8 @@ def _perform_real_welcome_dm_send(
     finally:
         config.ENABLE_REAL_DM_SEND = prev_enable
 
-    if send_out.get("reason") == "send_button_missing":
-        cleanup_dm_after_send_button_missing(d, pkg)
+    if bool(send_out.get("duplicate_prevented")):
+        return True, send_out, None
 
     if bool(send_out.get("sent")):
         log(
@@ -3184,6 +3252,7 @@ def execute_dm_job_real_send(
     run_id: str | None = None,
     previous_username: str | None = None,
     restore_search_after_job: bool = True,
+    skip_post_job_restore: bool = False,
     parent_search_ready: dict[str, Any] | None = None,
     job_index: int = 0,
     jobs_total: int = 0,
@@ -3368,6 +3437,22 @@ def execute_dm_job_real_send(
                 job_terminal_handled=job_terminal_handled,
                 job_status_before_post_job_restore=final_status,
             )
+        elif skip_post_job_restore:
+            _reset_dm_sender_post_job_restore()
+            _set_dm_sender_post_job_restore(
+                post_job_restore_mode="skipped_send_one",
+                post_job_restore_final_mode="skipped_send_one",
+                post_job_restore_final_reason="single_prepared_job",
+            )
+            log(
+                "info",
+                "dm_sender_post_job_restore_skipped_send_one",
+                job_id=job_id,
+                recipient_username=recipient,
+                dm_type=dm_type,
+                jobs_total=jobs_total,
+            )
+            post_job_restore = _get_dm_sender_post_job_restore()
         elif dm_type == "outreach" and not bool(restore_search_after_job):
             _reset_dm_sender_post_job_restore()
             _set_dm_sender_post_job_restore(
@@ -3769,6 +3854,7 @@ def run_dm_sender_send(
         recipient = str(job.get("recipient_username") or "").strip()
         summary["processed_recipients"].append(recipient)
 
+        skip_post_job_restore = bool(using_prepared_jobs and max_jobs == 1)
         last_result = execute_dm_job_real_send(
             d,
             job,
@@ -3784,6 +3870,7 @@ def run_dm_sender_send(
             restore_search_after_job=not (
                 dm_type_resolved == "outreach" and job_index >= max_jobs - 1
             ),
+            skip_post_job_restore=skip_post_job_restore,
             parent_search_ready=parent_search_ready,
             job_index=job_index,
             jobs_total=max_jobs,

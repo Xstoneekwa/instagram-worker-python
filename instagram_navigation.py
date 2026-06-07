@@ -5452,8 +5452,16 @@ _DM_SEND_POSITION_NOISE: tuple[str, ...] = (
     "stickers",
     "gif",
     "like",
+    "systemui",
+    "menu_container",
     "row_thread_right_composer_button_write_with_ai",
     "row_thread_composer_button_sticker_shortcut",
+)
+
+_DM_SEND_RID_PRIORITY: tuple[tuple[str, int], ...] = (
+    ("row_thread_composer_send_button_container", 100),
+    ("row_thread_composer_send_button_background", 80),
+    ("row_thread_composer_send_button_icon", 70),
 )
 
 
@@ -5463,6 +5471,58 @@ def _dm_position_fallback_obvious_noise(rid: str, desc: str, txt: str) -> bool:
         if frag in blob:
             return True
     return False
+
+
+def _dm_send_rid_is_noise(rid: str) -> bool:
+    r = (rid or "").lower()
+    return "systemui" in r or "menu_container" in r
+
+
+def _dm_is_send_specific_candidate(candidate: dict[str, Any]) -> bool:
+    rid = str(candidate.get("resourceId") or "").lower()
+    if _dm_send_rid_is_noise(rid):
+        return False
+    if any(frag in rid for frag, _ in _DM_SEND_RID_PRIORITY):
+        return True
+    desc = str(candidate.get("contentDescription") or "").strip().lower()
+    return desc in {"send", "envoyer"}
+
+
+def _dm_send_candidate_score(candidate: dict[str, Any]) -> int:
+    rid = str(candidate.get("resourceId") or "").lower()
+    if _dm_send_rid_is_noise(rid):
+        return -1
+    score = 0
+    for frag, pts in _DM_SEND_RID_PRIORITY:
+        if frag in rid:
+            score = max(score, pts)
+    desc = str(candidate.get("contentDescription") or "").strip().lower()
+    if desc in {"send", "envoyer"}:
+        score += 50
+    if bool(candidate.get("clickable")):
+        score += 10
+    if bool(candidate.get("right_of_composer")):
+        score += 5
+    if bool(candidate.get("near_composer_vertical")):
+        score += 3
+    return score
+
+
+def _dm_select_best_send_candidate(
+    candidates: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    best: dict[str, Any] | None = None
+    best_score = -1
+    for candidate in candidates:
+        score = _dm_send_candidate_score(candidate)
+        if score < 0:
+            continue
+        if not _dm_is_send_specific_candidate(candidate) and score < 50:
+            continue
+        if score > best_score:
+            best_score = score
+            best = candidate
+    return best
 
 
 def _dm_position_fallback_class_ok(class_name: str) -> bool:
@@ -5697,6 +5757,21 @@ def _dm_find_exact_instagram_send_candidate(
         target["in_composer_vertical_band"] = in_vertical_band
 
         if reject_reason:
+            if rid.endswith("row_thread_composer_send_button_background") or rid.endswith(
+                "row_thread_composer_send_button_icon"
+            ):
+                if (
+                    right_of_composer
+                    and in_vertical_band
+                    and lower_half
+                    and not _dm_send_rid_is_noise(rid)
+                ):
+                    raw["matched_resource_id"] = rid
+                    raw["right_of_composer"] = right_of_composer
+                    raw["lower_screen_half"] = lower_half
+                    raw["in_composer_vertical_band"] = in_vertical_band
+                    out["selected"] = raw
+                    return out
             out["rejected"].append({"candidate": target, "reject_reason": reject_reason})
             continue
 
@@ -5722,7 +5797,7 @@ def _dm_visual_send_candidates_from_hierarchy_xml(
         "rejection_breakdown": {},
     }
     raw = _dm_gather_send_raw_candidates(xml_text, screen_w, screen_h)
-    out["surviving_candidates"] = raw
+    out["raw_candidates"] = raw
     survivors: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
     reasons_count: dict[str, int] = {}
@@ -5775,6 +5850,7 @@ def _dm_visual_send_candidates_from_hierarchy_xml(
         survivors.append(c)
 
     out["candidates"] = survivors
+    out["surviving_candidates"] = survivors
     out["visual_candidates_rejected"] = rejected
     out["rejection_breakdown"] = reasons_count
     return out
@@ -5865,6 +5941,142 @@ def _dm_try_unique_send_resource_u2(d: u2.Device) -> Any | None:
     return None
 
 
+def _dm_resolve_send_button_from_hierarchy(
+    d: u2.Device,
+    hier: str,
+    *,
+    composer_bounds: dict[str, int],
+    screen_w: int,
+    screen_h: int,
+    thread_state: str,
+) -> tuple[Any | None, str, dict[str, Any]]:
+    """Pick best Send tap target from hierarchy XML (exact id path, then visual survivors)."""
+    meta: dict[str, Any] = {
+        "send_button_candidate_count": 0,
+        "send_button_position_fallback": False,
+        "filtered_send_candidates": [],
+        "surviving_candidates": [],
+        "visual_candidates_rejected": [],
+        "rejection_breakdown": {},
+        "send_button_selection_score": 0,
+    }
+    exact = _dm_find_exact_instagram_send_candidate(hier, composer_bounds, screen_h)
+    for s in list(exact.get("seen") or []):
+        log(
+            "info",
+            "dm_send_exact_instagram_candidate_seen",
+            matched_resource_id=s.get("matched_resource_id"),
+            used_click_target_resource_id=s.get("resourceId"),
+            used_click_target_class=s.get("className"),
+            used_click_target_bounds=s.get("bounds"),
+            composer_bounds=composer_bounds,
+            thread_state=thread_state,
+        )
+    for rej in list(exact.get("rejected") or []):
+        c = rej.get("candidate") or {}
+        log(
+            "info",
+            "dm_send_exact_instagram_candidate_rejected",
+            reject_reason=rej.get("reject_reason"),
+            matched_resource_id=c.get("matched_resource_id"),
+            used_click_target_resource_id=c.get("resourceId"),
+            used_click_target_class=c.get("className"),
+            used_click_target_bounds=c.get("bounds"),
+            composer_bounds=composer_bounds,
+            thread_state=thread_state,
+        )
+    ex_sel = exact.get("selected")
+    if isinstance(ex_sel, dict):
+        log(
+            "info",
+            "dm_send_exact_instagram_candidate_selected",
+            matched_resource_id=ex_sel.get("matched_resource_id"),
+            used_click_target_resource_id=ex_sel.get("resourceId"),
+            used_click_target_class=ex_sel.get("className"),
+            used_click_target_bounds=ex_sel.get("bounds"),
+            composer_bounds=composer_bounds,
+            thread_state=thread_state,
+        )
+        log(
+            "info",
+            "dm_send_button_candidate_selected",
+            path="exact_instagram",
+            resourceId=ex_sel.get("resourceId"),
+            contentDescription=ex_sel.get("contentDescription"),
+            center_x=ex_sel.get("center_x"),
+            center_y=ex_sel.get("center_y"),
+            thread_state=thread_state,
+        )
+        meta["send_button_candidate_count"] = 1
+        meta["send_button_position_fallback"] = True
+        meta["send_button_selection_score"] = _dm_send_candidate_score(ex_sel)
+        return (
+            _DmSendTapOnce(d, int(ex_sel["center_x"]), int(ex_sel["center_y"])),
+            "ok",
+            meta,
+        )
+
+    info = _dm_visual_send_candidates_from_hierarchy_xml(
+        hier, composer_bounds, screen_w, screen_h
+    )
+    filtered = list(info.get("candidates") or [])
+    meta["filtered_send_candidates"] = filtered
+    meta["surviving_candidates"] = list(info.get("surviving_candidates") or [])
+    meta["visual_candidates_rejected"] = list(info.get("visual_candidates_rejected") or [])
+    meta["rejection_breakdown"] = dict(info.get("rejection_breakdown") or {})
+    meta["send_button_candidate_count"] = len(filtered)
+
+    best = _dm_select_best_send_candidate(filtered)
+    if best is None and not filtered:
+        raw_send = [
+            c
+            for c in list(info.get("raw_candidates") or [])
+            if _dm_is_send_specific_candidate(c)
+        ]
+        best = _dm_select_best_send_candidate(raw_send)
+        if best is not None:
+            filtered = [best]
+            meta["filtered_send_candidates"] = filtered
+            meta["send_button_candidate_count"] = 1
+
+    if best is not None:
+        log(
+            "info",
+            "dm_send_button_candidate_selected",
+            path="visual_survivor",
+            className=best.get("className"),
+            resourceId=best.get("resourceId"),
+            contentDescription=best.get("contentDescription"),
+            bounds=best.get("bounds"),
+            center_x=best.get("center_x"),
+            center_y=best.get("center_y"),
+            right_of_composer=best.get("right_of_composer"),
+            lower_screen_half=best.get("lower_screen_half"),
+            near_composer_vertical=best.get("near_composer_vertical"),
+            selection_score=_dm_send_candidate_score(best),
+            surviving_count=len(filtered),
+            thread_state=thread_state,
+        )
+        meta["send_button_position_fallback"] = True
+        meta["send_button_selection_score"] = _dm_send_candidate_score(best)
+        return (
+            _DmSendTapOnce(d, int(best["center_x"]), int(best["center_y"])),
+            "ok",
+            meta,
+        )
+
+    log(
+        "info",
+        "dm_send_candidate_summary",
+        thread_state=thread_state,
+        candidate_count=len(filtered),
+        surviving_candidates=meta.get("surviving_candidates"),
+        rejection_breakdown=meta.get("rejection_breakdown"),
+        visual_candidates_rejected=meta.get("visual_candidates_rejected"),
+    )
+    return None, "missing", meta
+
+
 def wait_for_dm_send_button_after_draft(
     d: u2.Device,
     composer,
@@ -5914,168 +6126,36 @@ def wait_for_dm_send_button_after_draft(
                 hier = d.dump_hierarchy(compressed=False)
             except Exception:
                 hier = d.dump_hierarchy()
-            exact = _dm_find_exact_instagram_send_candidate(hier, composer_bounds, h)
-            for s in list(exact.get("seen") or []):
-                log(
-                    "info",
-                    "dm_send_exact_instagram_candidate_seen",
-                    matched_resource_id=s.get("matched_resource_id"),
-                    used_click_target_resource_id=s.get("resourceId"),
-                    used_click_target_class=s.get("className"),
-                    used_click_target_bounds=s.get("bounds"),
-                    composer_bounds=composer_bounds,
-                    thread_state=thread_state,
-                )
-            for rej in list(exact.get("rejected") or []):
-                c = rej.get("candidate") or {}
-                log(
-                    "info",
-                    "dm_send_exact_instagram_candidate_rejected",
-                    reject_reason=rej.get("reject_reason"),
-                    matched_resource_id=c.get("matched_resource_id"),
-                    used_click_target_resource_id=c.get("resourceId"),
-                    used_click_target_class=c.get("className"),
-                    used_click_target_bounds=c.get("bounds"),
-                    composer_bounds=composer_bounds,
-                    thread_state=thread_state,
-                )
-            ex_sel = exact.get("selected")
-            if isinstance(ex_sel, dict):
-                log(
-                    "info",
-                    "dm_send_exact_instagram_candidate_selected",
-                    matched_resource_id=ex_sel.get("matched_resource_id"),
-                    used_click_target_resource_id=ex_sel.get("resourceId"),
-                    used_click_target_class=ex_sel.get("className"),
-                    used_click_target_bounds=ex_sel.get("bounds"),
-                    composer_bounds=composer_bounds,
-                    thread_state=thread_state,
-                )
-                meta["send_button_candidate_count"] = 1
-                meta["send_button_position_fallback"] = True
-                return _DmSendTapOnce(d, ex_sel["center_x"], ex_sel["center_y"]), "ok", meta
-            info = _dm_visual_send_candidates_from_hierarchy_xml(
-                hier, composer_bounds, w, h
+            tap, status, resolved = _dm_resolve_send_button_from_hierarchy(
+                d,
+                hier,
+                composer_bounds=composer_bounds,
+                screen_w=w,
+                screen_h=h,
+                thread_state=thread_state,
             )
-            pos = list(info.get("candidates") or [])
-            meta["send_button_candidate_count"] = len(pos)
-            meta["surviving_candidates"] = list(info.get("surviving_candidates") or [])
-            meta["visual_candidates_rejected"] = list(
-                info.get("visual_candidates_rejected") or []
-            )
-            meta["rejection_breakdown"] = dict(info.get("rejection_breakdown") or {})
-            if len(pos) == 1:
-                c = pos[0]
-                log(
-                    "info",
-                    "dm_send_button_detected_visual_only",
-                    className=c.get("className"),
-                    resourceId=c.get("resourceId"),
-                    text=c.get("text"),
-                    contentDescription=c.get("contentDescription"),
-                    bounds=c.get("bounds"),
-                    center_x=c.get("center_x"),
-                    center_y=c.get("center_y"),
-                    width=c.get("width"),
-                    height=c.get("height"),
-                    right_of_composer=c.get("right_of_composer"),
-                    lower_screen_half=c.get("lower_screen_half"),
-                    candidate=c,
-                    thread_state=thread_state,
-                )
-                meta["send_button_position_fallback"] = True
-                tap = _DmSendTapOnce(d, c["center_x"], c["center_y"])
+            meta.update(resolved)
+            if status == "ok" and tap is not None:
                 return tap, "ok", meta
         time.sleep(poll_s)
 
-    meta["send_button_candidate_count"] = 0
     try:
         hier = d.dump_hierarchy(compressed=False)
     except Exception:
         hier = d.dump_hierarchy()
     if allow_pos and composer_bounds:
-        exact = _dm_find_exact_instagram_send_candidate(hier, composer_bounds, h)
-        for s in list(exact.get("seen") or []):
-            log(
-                "info",
-                "dm_send_exact_instagram_candidate_seen",
-                matched_resource_id=s.get("matched_resource_id"),
-                used_click_target_resource_id=s.get("resourceId"),
-                used_click_target_class=s.get("className"),
-                used_click_target_bounds=s.get("bounds"),
-                composer_bounds=composer_bounds,
-                thread_state=thread_state,
-            )
-        for rej in list(exact.get("rejected") or []):
-            c = rej.get("candidate") or {}
-            log(
-                "info",
-                "dm_send_exact_instagram_candidate_rejected",
-                reject_reason=rej.get("reject_reason"),
-                matched_resource_id=c.get("matched_resource_id"),
-                used_click_target_resource_id=c.get("resourceId"),
-                used_click_target_class=c.get("className"),
-                used_click_target_bounds=c.get("bounds"),
-                composer_bounds=composer_bounds,
-                thread_state=thread_state,
-            )
-        ex_sel = exact.get("selected")
-        if isinstance(ex_sel, dict):
-            log(
-                "info",
-                "dm_send_exact_instagram_candidate_selected",
-                matched_resource_id=ex_sel.get("matched_resource_id"),
-                used_click_target_resource_id=ex_sel.get("resourceId"),
-                used_click_target_class=ex_sel.get("className"),
-                used_click_target_bounds=ex_sel.get("bounds"),
-                composer_bounds=composer_bounds,
-                thread_state=thread_state,
-            )
-            meta["send_button_candidate_count"] = 1
-            meta["send_button_position_fallback"] = True
-            return _DmSendTapOnce(d, ex_sel["center_x"], ex_sel["center_y"]), "ok", meta
-        info = _dm_visual_send_candidates_from_hierarchy_xml(
-            hier, composer_bounds, w, h
-        )
-        pos = list(info.get("candidates") or [])
-        meta["send_button_candidate_count"] = len(pos)
-        meta["surviving_candidates"] = list(info.get("surviving_candidates") or [])
-        meta["visual_candidates_rejected"] = list(
-            info.get("visual_candidates_rejected") or []
-        )
-        meta["rejection_breakdown"] = dict(info.get("rejection_breakdown") or {})
-        if len(pos) == 1:
-            c = pos[0]
-            log(
-                "info",
-                "dm_send_button_detected_visual_only",
-                className=c.get("className"),
-                resourceId=c.get("resourceId"),
-                text=c.get("text"),
-                contentDescription=c.get("contentDescription"),
-                bounds=c.get("bounds"),
-                center_x=c.get("center_x"),
-                center_y=c.get("center_y"),
-                width=c.get("width"),
-                height=c.get("height"),
-                right_of_composer=c.get("right_of_composer"),
-                lower_screen_half=c.get("lower_screen_half"),
-                candidate=c,
-                thread_state=thread_state,
-            )
-            meta["send_button_position_fallback"] = True
-            tap = _DmSendTapOnce(d, c["center_x"], c["center_y"])
-            return tap, "ok", meta
-        log(
-            "info",
-            "dm_send_candidate_summary",
+        tap, status, resolved = _dm_resolve_send_button_from_hierarchy(
+            d,
+            hier,
+            composer_bounds=composer_bounds,
+            screen_w=w,
+            screen_h=h,
             thread_state=thread_state,
-            candidate_count=len(pos),
-            surviving_candidates=meta.get("surviving_candidates"),
-            rejection_breakdown=meta.get("rejection_breakdown"),
-            visual_candidates_rejected=meta.get("visual_candidates_rejected"),
         )
-        if len(pos) == 0:
+        meta.update(resolved)
+        if status == "ok" and tap is not None:
+            return tap, "ok", meta
+        if int(resolved.get("send_button_candidate_count") or 0) == 0:
             rx, ry = _dm_coordinate_send_point_from_composer(composer_bounds, w)
             log(
                 "info",
@@ -6093,14 +6173,47 @@ def wait_for_dm_send_button_after_draft(
     return None, "missing", meta
 
 
-def _dm_read_composer_text_len(d: u2.Device) -> int:
+def read_dm_composer_text(d: u2.Device) -> str:
     try:
         cur = _dm_find_focus_composer(d)
         if cur is None:
-            return 0
-        return len(str(cur.get_text() or ""))
+            return ""
+        return str(cur.get_text() or "").strip()
     except Exception:
-        return 0
+        return ""
+
+
+def dm_thread_shows_outgoing_message(d: u2.Device, expected_text: str) -> bool:
+    """Best-effort: outgoing bubble text appears in thread hierarchy (not composer-only)."""
+    needle = str(expected_text or "").strip()
+    if not needle:
+        return False
+    try:
+        hier = d.dump_hierarchy(compressed=False)
+    except Exception:
+        try:
+            hier = d.dump_hierarchy()
+        except Exception:
+            return False
+    if needle not in hier:
+        return False
+    composer_text = read_dm_composer_text(d)
+    if composer_text.strip() == needle and not _dm_hierarchy_suggests_existing_thread(hier):
+        return False
+    markers = (
+        "row_thread_message",
+        "direct_message_text",
+        "message_content",
+        "thread_message",
+        "inbox_message",
+        "message_bubble",
+    )
+    blob = hier.lower()
+    return any(m in blob for m in markers)
+
+
+def _dm_read_composer_text_len(d: u2.Device) -> int:
+    return len(read_dm_composer_text(d))
 
 
 def _dm_post_send_signal_poll(
@@ -47380,13 +47493,28 @@ def send_dm_safe(
         _LAST_DM_SEND_RESULT = dict(out)
         return out
 
-    try:
-        cur = composer.get_text() or ""
-    except Exception:
-        cur = ""
+    cur = read_dm_composer_text(d)
     out["composer_text_len_before_send"] = len(cur)
     draft_ok = cur.strip() == msg.strip()
     out["draft_matches_before_send"] = draft_ok
+    out["composer_text_before_send"] = cur[:120] if cur else ""
+    log(
+        "info",
+        "dm_sender_draft_present_before_send",
+        target_username=username,
+        draft_len=len(cur),
+        draft_matches_expected=bool(draft_ok),
+        thread_state=dm_state,
+    )
+    if msg.strip() and not draft_ok:
+        log(
+            "warning",
+            "dm_sender_draft_disappeared_before_send",
+            target_username=username,
+            expected_len=len(msg.strip()),
+            actual_len=len(cur),
+            thread_state=dm_state,
+        )
 
     btn, status, meta = wait_for_dm_send_button_after_draft(
         d,
@@ -47396,12 +47524,18 @@ def send_dm_safe(
     )
     out["send_button_candidate_count"] = meta.get("send_button_candidate_count", 0)
     out["coordinate_fallback_used"] = bool(meta.get("send_button_coordinate_fallback"))
+    out["send_button_selection_score"] = meta.get("send_button_selection_score", 0)
+    out["filtered_send_candidates_count"] = len(meta.get("filtered_send_candidates") or [])
     w, h = _dm_screen_size_for_dm(d)
     cb = _dm_composer_bounds_u2(composer)
 
     if status != "ok" or btn is None:
         out["precheck_ok"] = False
-        out["reason"] = "send_button_missing"
+        filtered = list(meta.get("filtered_send_candidates") or [])
+        if _dm_select_best_send_candidate(filtered):
+            out["reason"] = "send_button_selection_failed"
+        else:
+            out["reason"] = "send_button_missing"
         try:
             _ensure_debug_dirs()
             stem = f"dm_send_missing_{int(time.time() * 1000)}"
@@ -47423,17 +47557,57 @@ def send_dm_safe(
                 debug_xml_path=xml_path,
             )
             out.update(art)
+            out["composer_text_at_failure"] = read_dm_composer_text(d)[:120]
         except Exception as e:
             out["debug_screenshot_error"] = str(e)
         _LAST_DM_SEND_RESULT = dict(out)
         return out
 
+    pre_send_len = int(out.get("composer_text_len_before_send") or 0)
+    log(
+        "info",
+        "dm_send_button_tap_started",
+        target_username=username,
+        thread_state=dm_state,
+        send_button_candidate_count=out.get("send_button_candidate_count"),
+    )
     try:
         btn.click()
-        out["sent"] = True
+        log(
+            "info",
+            "dm_send_button_tap_sent",
+            target_username=username,
+            thread_state=dm_state,
+        )
     except Exception as e:
         out["failure_event"] = "dm_sent_failed"
-        out["reason"] = str(e)
+        out["reason"] = "send_button_tap_failed"
+        out["tap_error"] = str(e)
+        _LAST_DM_SEND_RESULT = dict(out)
+        return out
+
+    sig_ok, sig_reason = _dm_post_send_signal_poll(d, pre_send_text_len=pre_send_len)
+    if sig_ok:
+        out["sent"] = True
+        out["post_send_signal_reason"] = sig_reason
+        log(
+            "info",
+            "dm_send_button_tap_confirmed",
+            target_username=username,
+            thread_state=dm_state,
+            reason=sig_reason,
+        )
+    else:
+        out["sent"] = False
+        out["reason"] = "send_confirmation_failed"
+        out["post_send_signal_reason"] = sig_reason
+        log(
+            "warning",
+            "dm_send_button_tap_unconfirmed",
+            target_username=username,
+            thread_state=dm_state,
+            reason=sig_reason,
+        )
     _LAST_DM_SEND_RESULT = dict(out)
     return out
 
@@ -47514,6 +47688,8 @@ def cleanup_dm_after_send_button_missing(d, pkg=None) -> bool:
     - return True/False but never raise
     """
     try:
+        if read_dm_composer_text(d):
+            log("info", "dm_sender_draft_cleared_by_restore")
         clear_dm_draft(d)
     except Exception:
         pass

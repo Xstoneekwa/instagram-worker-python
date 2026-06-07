@@ -2,6 +2,33 @@
 
 *Document volatil : à mettre à jour après les prochains jalons produit / tech.*
 
+## Welcome DM physique — 2026-06-08
+
+- **Premier Welcome DM physique send-one validé** : le smoke manuel isolé
+  `welcome_dm_physical_smoke.py --mode send-one` a envoyé le job exact
+  `8df8a49f-747f-4486-9519-e8af3fc5221a` pour
+  `j_automatise_pour_toi`, avec cap Welcome=1,
+  Follow/Like/Mute/Outreach/Unfollow OFF et sans créer de nouveau job. Les
+  détails recipient/message restent hors documentation persistée.
+- **Portée du `send-one`** : ce chemin utilise la recherche globale uniquement
+  pour un smoke opérateur manuel isolé. Il ne devient pas la baseline
+  production Welcome et ses timings Search ne doivent pas être utilisés comme
+  référence de performance produit.
+- **Chemin production Welcome à préserver** : la voie validée sur émulateur reste
+  `followers list -> candidat -> DM -> send -> back to followers list ->
+  prochain candidat`, via `dm_welcome_session_send` et
+  `welcome_list_sender`. Avant un vrai Welcome DB/list-native sur phone
+  physique, il faudra valider ce chemin émulateur sur phone.
+- **Baseline DB** : ne pas marquer artificiellement
+  `welcome_baseline_completed_at` pour ce smoke manuel strict. Le dry-run
+  post-send qui remonte `no_pending_welcome_job` et
+  `welcome_baseline_not_completed` est attendu après validation du job unique.
+- **Correctifs runtime** : le Send button accepte maintenant la variante UI
+  physique `row_thread_composer_send_button_background` / icon quand le
+  container exact n'est pas sélectionnable; le retry réutilise un draft identique
+  ou retape une seule fois, évite le double-send si le message est déjà visible,
+  et skip le restore Search lourd pour un unique prepared send-one.
+
 ## État chantier follow — 2026-06-07
 
 - **9/3/3 physique validé** : run `5ad58174-95a0-45f2-91d7-33fcfdc3b5a0`
