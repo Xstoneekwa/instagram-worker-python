@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import os
 import time
 import unittest
@@ -2653,6 +2654,310 @@ class FollowTargetRotationPendingTests(unittest.TestCase):
         self.assertNotIn("auth_token", fields)
         self.assertNotIn("password", fields)
         self.assertNotIn("client_secret", fields)
+
+    def test_private_skip_fast_path_detects_and_returns_before_follow(self) -> None:
+        logs: list[tuple[str, str, dict]] = []
+        returns: list[tuple[object, str, str]] = []
+
+        def return_func(d: object, source: str, pkg: str) -> tuple[bool, str]:
+            returns.append((d, source, pkg))
+            return True, "direct_back_to_followers_list"
+
+        with patch.object(
+            runner,
+            "visual_candidate_pre_follow_private_gate",
+            return_value={
+                "reject": True,
+                "private_profile_detected": True,
+                "detection_method": "ui_textContains_this_account_private_en",
+                "confidence": 0.93,
+                "probe_ms": 18.0,
+                "hierarchy_fallback_used": False,
+                "reason": "candidate_rejected_private_account",
+            },
+        ) as probe, patch.object(
+            runner,
+            "mark_visual_follow_target_processed",
+        ) as mark_processed, patch.object(
+            runner,
+            "perform_follow_safe",
+        ) as perform_follow, patch.object(
+            runner,
+            "log",
+            side_effect=lambda level, event, **kw: logs.append((level, event, kw)),
+        ):
+            out = runner._private_skip_fast_path_handle(
+                FakeDevice(),
+                target_username="ct_one",
+                candidate_username="private_user",
+                source_profile_username="ct_one",
+                visual_candidate_id="vc-1",
+                dont_follow_private_accounts=True,
+                profile_already_open=True,
+                pkg="com.instagram.android",
+                run_id="run",
+                source_account_context="acct",
+                return_func=return_func,
+            )
+
+        self.assertTrue(out["handled"])
+        self.assertTrue(out["return_ok"])
+        probe.assert_called_once()
+        mark_processed.assert_called_once()
+        perform_follow.assert_not_called()
+        self.assertEqual(returns, [(returns[0][0], "ct_one", "com.instagram.android")])
+        events = [event for _level, event, _kw in logs]
+        self.assertLess(events.index("private_skip_fast_path_detected"), events.index("private_skip_fast_path_return_started"))
+        self.assertIn("private_skip_fast_path_return_completed", events)
+        completed = [kw for _level, event, kw in logs if event == "private_skip_fast_path_completed"][-1]
+        self.assertEqual(completed["private_signal"], "ui_textContains_this_account_private_en")
+        self.assertTrue(completed["safe_to_skip"])
+        self.assertTrue(completed["return_ok"])
+
+    def test_private_skip_fast_path_non_private_falls_back_without_return(self) -> None:
+        logs: list[tuple[str, str, dict]] = []
+        with patch.object(
+            runner,
+            "visual_candidate_pre_follow_private_gate",
+            return_value={
+                "reject": False,
+                "private_profile_detected": False,
+                "detection_method": "none",
+                "confidence": 0.0,
+                "probe_ms": 11.0,
+                "hierarchy_fallback_used": True,
+                "reason": "private_not_detected",
+            },
+        ), patch.object(
+            runner,
+            "log",
+            side_effect=lambda level, event, **kw: logs.append((level, event, kw)),
+        ):
+            out = runner._private_skip_fast_path_handle(
+                FakeDevice(),
+                target_username="ct_one",
+                candidate_username="public_user",
+                source_profile_username="ct_one",
+                visual_candidate_id="vc-1",
+                dont_follow_private_accounts=True,
+                profile_already_open=True,
+                return_func=Mock(side_effect=AssertionError("return should not run")),
+            )
+
+        self.assertFalse(out["handled"])
+        events = [event for _level, event, _kw in logs]
+        self.assertIn("private_skip_fast_path_rejected", events)
+        rejected = [kw for _level, event, kw in logs if event == "private_skip_fast_path_rejected"][-1]
+        self.assertTrue(rejected["fallback_used"])
+        self.assertFalse(rejected["safe_to_skip"])
+
+    def test_private_skip_fast_path_ambiguous_signal_falls_back(self) -> None:
+        with patch.object(
+            runner,
+            "visual_candidate_pre_follow_private_gate",
+            return_value={
+                "reject": False,
+                "private_profile_detected": True,
+                "detection_method": "hierarchy:account_is_private",
+                "confidence": 0.79,
+                "probe_ms": 20.0,
+                "hierarchy_fallback_used": True,
+                "reason": "private_not_detected",
+            },
+        ), patch.object(runner, "log"):
+            out = runner._private_skip_fast_path_handle(
+                FakeDevice(),
+                target_username="ct_one",
+                candidate_username="maybe_private",
+                source_profile_username="ct_one",
+                visual_candidate_id="vc-1",
+                dont_follow_private_accounts=True,
+                profile_already_open=True,
+                return_func=Mock(side_effect=AssertionError("return should not run")),
+            )
+
+        self.assertFalse(out["handled"])
+        self.assertEqual(out["reason"], "private_not_detected")
+
+    def test_private_skip_fast_path_profile_mismatch_fails_safe_without_probe(self) -> None:
+        with patch.object(
+            runner,
+            "visual_candidate_pre_follow_private_gate",
+        ) as probe, patch.object(runner, "log"):
+            out = runner._private_skip_fast_path_handle(
+                FakeDevice(),
+                target_username="ct_one",
+                candidate_username="wrong_user",
+                source_profile_username="ct_one",
+                visual_candidate_id="vc-1",
+                dont_follow_private_accounts=True,
+                profile_already_open=True,
+                profile_username_matches=False,
+                return_func=Mock(side_effect=AssertionError("return should not run")),
+            )
+
+        self.assertFalse(out["handled"])
+        self.assertEqual(out["reason"], "profile_username_mismatch")
+        probe.assert_not_called()
+
+    def test_private_skip_fast_path_private_setting_off_uses_fallback(self) -> None:
+        with patch.object(
+            runner,
+            "visual_candidate_pre_follow_private_gate",
+        ) as probe, patch.object(runner, "log"):
+            out = runner._private_skip_fast_path_handle(
+                FakeDevice(),
+                target_username="ct_one",
+                candidate_username="private_user",
+                source_profile_username="ct_one",
+                visual_candidate_id="vc-1",
+                dont_follow_private_accounts=False,
+                profile_already_open=True,
+                return_func=Mock(side_effect=AssertionError("return should not run")),
+            )
+
+        self.assertFalse(out["handled"])
+        self.assertEqual(out["reason"], "private_follow_allowed_by_setting")
+        probe.assert_not_called()
+
+    def test_private_skip_fast_path_caller_uses_account_id_kwarg(self) -> None:
+        src = inspect.getsource(runner._run_followers_list_engine_session)
+        self.assertIn("_private_skip_fast_path_handle(", src)
+        self.assertIn('source_account_context=str(account_id or "")', src)
+        self.assertNotIn('source_account_context=str(source_account_context or "")', src)
+
+    def test_private_skip_fast_path_return_fail_recovery_succeeds(self) -> None:
+        device = FakeDevice()
+        with patch.object(
+            runner,
+            "verify_followers_list_surface_is_ct_account",
+            side_effect=[False, True],
+        ) as verify, patch.object(
+            runner,
+            "_ct_return_followers_list_or_canonical_reset",
+        ) as reset, patch.object(
+            runner,
+            "_reenter_ct_followers_list_after_canonical_reset",
+        ) as reenter:
+            ok = runner._recover_ct_followers_list_after_private_skip(
+                device,
+                source_profile_username="ct_one",
+                pkg="com.instagram.android",
+                account_id="acct-1",
+                candidate_username="private_user",
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(verify.call_count, 2)
+        reset.assert_called_once()
+        reenter.assert_not_called()
+
+    def test_private_skip_fast_path_return_fail_recovery_uses_reenter(self) -> None:
+        device = FakeDevice()
+        with patch.object(
+            runner,
+            "verify_followers_list_surface_is_ct_account",
+            return_value=False,
+        ), patch.object(
+            runner,
+            "_ct_return_followers_list_or_canonical_reset",
+        ) as reset, patch.object(
+            runner,
+            "_reenter_ct_followers_list_after_canonical_reset",
+            return_value=True,
+        ) as reenter:
+            ok = runner._recover_ct_followers_list_after_private_skip(
+                device,
+                source_profile_username="ct_one",
+                pkg="com.instagram.android",
+                account_id="acct-1",
+                candidate_username="private_user",
+            )
+
+        self.assertTrue(ok)
+        reset.assert_called_once()
+        reenter.assert_called_once()
+
+    def test_private_skip_fast_path_return_exception_not_success(self) -> None:
+        logs: list[tuple[str, str, dict]] = []
+
+        def return_func(_d: object, _src: str, _pkg: str) -> tuple[bool, str]:
+            raise RuntimeError("return blew up")
+
+        with patch.object(
+            runner,
+            "visual_candidate_pre_follow_private_gate",
+            return_value={
+                "reject": True,
+                "private_profile_detected": True,
+                "detection_method": "ui_textContains_this_account_private_en",
+                "confidence": 0.93,
+                "probe_ms": 18.0,
+                "hierarchy_fallback_used": False,
+                "reason": "candidate_rejected_private_account",
+            },
+        ), patch.object(
+            runner,
+            "mark_visual_follow_target_processed",
+        ), patch.object(
+            runner,
+            "log",
+            side_effect=lambda level, event, **kw: logs.append((level, event, kw)),
+        ):
+            out = runner._private_skip_fast_path_handle(
+                FakeDevice(),
+                target_username="ct_one",
+                candidate_username="private_user",
+                source_profile_username="ct_one",
+                visual_candidate_id="vc-1",
+                dont_follow_private_accounts=True,
+                profile_already_open=True,
+                return_func=return_func,
+            )
+
+        self.assertTrue(out["handled"])
+        self.assertFalse(out["return_ok"])
+        completed = [kw for _level, event, kw in logs if event == "private_skip_fast_path_completed"][-1]
+        self.assertFalse(completed["return_ok"])
+        self.assertTrue(completed["safe_to_skip"])
+
+    def test_private_skip_fast_path_no_follow_tap_on_private(self) -> None:
+        with patch.object(
+            runner,
+            "visual_candidate_pre_follow_private_gate",
+            return_value={
+                "reject": True,
+                "private_profile_detected": True,
+                "detection_method": "ui_textContains_this_account_private_en",
+                "confidence": 0.93,
+                "probe_ms": 18.0,
+                "hierarchy_fallback_used": False,
+                "reason": "candidate_rejected_private_account",
+            },
+        ), patch.object(
+            runner,
+            "mark_visual_follow_target_processed",
+        ), patch.object(
+            runner,
+            "perform_follow_safe",
+        ) as perform_follow, patch.object(
+            runner,
+            "log",
+        ):
+            out = runner._private_skip_fast_path_handle(
+                FakeDevice(),
+                target_username="ct_one",
+                candidate_username="private_user",
+                source_profile_username="ct_one",
+                visual_candidate_id="vc-1",
+                dont_follow_private_accounts=True,
+                profile_already_open=True,
+                return_func=lambda _d, _src, _pkg: (True, "back"),
+            )
+
+        self.assertTrue(out["handled"])
+        self.assertEqual(out["reason"], "private_account")
+        perform_follow.assert_not_called()
 
     def test_rotation_pending_set_and_scoped_to_target(self) -> None:
         logs: list[tuple[str, str, dict]] = []

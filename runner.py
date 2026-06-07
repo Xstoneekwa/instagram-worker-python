@@ -233,6 +233,183 @@ def _pre_follow_gap_log(
         pass
 
 
+def _private_skip_fast_path_handle(
+    d: Any,
+    *,
+    target_username: str,
+    candidate_username: str,
+    source_profile_username: str,
+    visual_candidate_id: str,
+    dont_follow_private_accounts: bool,
+    profile_already_open: bool,
+    profile_username_matches: bool = True,
+    pkg: str = "",
+    run_id: Any = None,
+    source_account_context: str = "",
+    return_func: Any | None = None,
+) -> dict[str, Any]:
+    """Early no-tap private-account skip before heavier pre-follow guards."""
+    t0 = time.perf_counter()
+    cand = str(candidate_username or "").strip().lstrip("@")
+    src = str(source_profile_username or target_username or "").strip()
+    vcid = str(visual_candidate_id or "").strip()
+    base_fields = {
+        "target_username": str(target_username or src or ""),
+        "candidate_username": cand,
+        "source_profile_username": src,
+        "visual_candidate_id": vcid,
+        "private_signal": "",
+        "proof_method": "",
+        "fallback_used": False,
+        "safe_to_skip": False,
+        "return_ok": False,
+    }
+
+    def _emit(event: str, **kw: Any) -> None:
+        payload = dict(base_fields)
+        payload.update(kw)
+        payload["duration_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
+        try:
+            log("info", event, **payload)
+        except Exception:
+            pass
+
+    _emit("private_skip_fast_path_started")
+
+    if not dont_follow_private_accounts:
+        _emit(
+            "private_skip_fast_path_rejected",
+            reason="private_follow_allowed_by_setting",
+            fallback_used=True,
+        )
+        _emit(
+            "private_skip_fast_path_completed",
+            reason="private_follow_allowed_by_setting",
+            fallback_used=True,
+        )
+        return {"handled": False, "reason": "private_follow_allowed_by_setting"}
+    if not profile_already_open:
+        _emit(
+            "private_skip_fast_path_rejected",
+            reason="profile_not_confirmed_open",
+            fallback_used=True,
+        )
+        _emit(
+            "private_skip_fast_path_completed",
+            reason="profile_not_confirmed_open",
+            fallback_used=True,
+        )
+        return {"handled": False, "reason": "profile_not_confirmed_open"}
+    if not cand or not profile_username_matches:
+        reason = "profile_username_mismatch" if cand else "candidate_username_missing"
+        _emit("private_skip_fast_path_rejected", reason=reason, fallback_used=True)
+        _emit("private_skip_fast_path_completed", reason=reason, fallback_used=True)
+        return {"handled": False, "reason": reason}
+
+    probe = visual_candidate_pre_follow_private_gate(
+        d,
+        source_profile_username=src or None,
+        dont_follow_private_accounts=True,
+        follower_username=cand,
+        visual_candidate_id=vcid,
+        prior_private_probe=None,
+    )
+    private_signal = str(probe.get("detection_method") or "none")
+    proof_method = "visual_candidate_pre_follow_private_gate"
+    safe_to_skip = bool(probe.get("reject")) and bool(probe.get("private_profile_detected"))
+    if not safe_to_skip:
+        _emit(
+            "private_skip_fast_path_rejected",
+            private_signal=private_signal,
+            proof_method=proof_method,
+            fallback_used=True,
+            reason=str(probe.get("reason") or "private_not_detected"),
+        )
+        _emit(
+            "private_skip_fast_path_completed",
+            private_signal=private_signal,
+            proof_method=proof_method,
+            fallback_used=True,
+            reason=str(probe.get("reason") or "private_not_detected"),
+        )
+        return {
+            "handled": False,
+            "reason": str(probe.get("reason") or "private_not_detected"),
+            "probe": probe,
+        }
+
+    _emit(
+        "private_skip_fast_path_detected",
+        private_signal=private_signal,
+        proof_method=proof_method,
+        fallback_used=False,
+        safe_to_skip=True,
+        reason="private_account",
+    )
+    try:
+        mark_visual_follow_target_processed(
+            source_profile_username=src,
+            target_username=cand,
+            visual_candidate_id=vcid,
+            status="skipped_private",
+            follow_verified=False,
+            follow_request_pending=False,
+            run_id=str(run_id or ""),
+            source_account_context=str(source_account_context or ""),
+            metadata={
+                "skip_reason": "private_account",
+                "fast_path": "private_skip_fast_path",
+                "private_signal": private_signal,
+                "proof_method": proof_method,
+            },
+        )
+    except Exception:
+        pass
+
+    _emit(
+        "private_skip_fast_path_return_started",
+        private_signal=private_signal,
+        proof_method=proof_method,
+        safe_to_skip=True,
+        reason="private_account",
+    )
+    ret = return_func or return_to_followers_list
+    return_ok = False
+    return_how = ""
+    try:
+        return_ok, return_how = ret(d, src, pkg)
+    except Exception as exc:
+        return_ok = False
+        return_how = f"exception:{type(exc).__name__}"
+    _emit(
+        "private_skip_fast_path_return_completed",
+        private_signal=private_signal,
+        proof_method=proof_method,
+        safe_to_skip=True,
+        return_ok=bool(return_ok),
+        reason="private_account",
+        how=str(return_how or ""),
+    )
+    _emit(
+        "private_skip_fast_path_completed",
+        private_signal=private_signal,
+        proof_method=proof_method,
+        fallback_used=False,
+        safe_to_skip=True,
+        return_ok=bool(return_ok),
+        reason="private_account",
+    )
+    return {
+        "handled": True,
+        "reason": "private_account",
+        "return_ok": bool(return_ok),
+        "return_how": str(return_how or ""),
+        "probe": probe,
+        "private_signal": private_signal,
+        "proof_method": proof_method,
+    }
+
+
 # Real DM sends per worker process (pairs with SEND_DM_MAX_PER_RUN).
 _RUNTIME_REAL_DM_SENT_COUNT: int = 0
 # Successful follows this process (pairs with FOLLOW_MAX_PER_RUN).
@@ -6300,6 +6477,43 @@ def _ct_return_followers_list_or_canonical_reset(
         reason=f"ct_followers_{reason}",
         source_profile_username=source_profile_username,
         source_account_context=str(account_id or ""),
+    )
+
+
+def _recover_ct_followers_list_after_private_skip(
+    d: Any,
+    *,
+    source_profile_username: str,
+    pkg: str,
+    account_id: str | None,
+    candidate_username: str | None = None,
+    context: str = "private_skip_fast_path",
+) -> bool:
+    """Best-effort CT followers list recovery after private skip return failure."""
+    if verify_followers_list_surface_is_ct_account(
+        d,
+        source_profile_username=source_profile_username,
+        follower_candidate_username=candidate_username or None,
+    ):
+        return True
+    _ct_return_followers_list_or_canonical_reset(
+        d,
+        source_profile_username=source_profile_username,
+        pkg=pkg,
+        account_id=account_id,
+        reason=context,
+    )
+    if verify_followers_list_surface_is_ct_account(
+        d,
+        source_profile_username=source_profile_username,
+        follower_candidate_username=candidate_username or None,
+    ):
+        return True
+    return _reenter_ct_followers_list_after_canonical_reset(
+        d,
+        source_profile_username=source_profile_username,
+        account_id=str(account_id or ""),
+        context=f"{context}_reenter",
     )
 
 
@@ -13433,6 +13647,137 @@ def _run_followers_list_engine_session(
                 inter_candidate_on_profile_verify_success(username=follower_un)
             except Exception:
                 pass
+            _vcid_sm = str(pick.get("visual_candidate_id") or "").strip()
+            _xml_list_profile_open = (
+                _pick_is_own_unified_xml_list(pick)
+                and bool(str(follower_un or "").strip())
+            )
+            _profile_follow_already_open = bool(_vcid_sm) or _xml_list_profile_open
+            _dont_follow_private_pre = _dont_follow_private_accounts_for_account(
+                account_id
+            )
+            _early_private_probe_for_terminal: dict[str, Any] | None = None
+            if _profile_follow_already_open:
+                try:
+                    _private_fast_path = _private_skip_fast_path_handle(
+                        d,
+                        target_username=source_profile_username,
+                        candidate_username=str(follower_un or ""),
+                        source_profile_username=source_profile_username,
+                        visual_candidate_id=(
+                            _vcid_sm
+                            or _post_follow_visual_candidate_id(
+                                pick, str(follower_un or "")
+                            )
+                        ),
+                        dont_follow_private_accounts=_dont_follow_private_pre,
+                        profile_already_open=True,
+                        profile_username_matches=bool(str(follower_un or "").strip()),
+                        pkg=pkg,
+                        run_id=run_id,
+                        source_account_context=str(account_id or ""),
+                    )
+                except Exception as exc:
+                    log(
+                        "error",
+                        "private_skip_fast_path_exception",
+                        source_profile_username=source_profile_username,
+                        candidate_username=str(follower_un or ""),
+                        exception_type=type(exc).__name__,
+                        exception=str(exc)[:240],
+                    )
+                    _private_fast_path = {
+                        "handled": False,
+                        "reason": f"exception:{type(exc).__name__}",
+                    }
+                _early_probe = _private_fast_path.get("probe")
+                if isinstance(_early_probe, dict) and "private_profile_detected" in _early_probe:
+                    _early_private_probe_for_terminal = dict(_early_probe)
+                if bool(_private_fast_path.get("handled")):
+                    _target_rejection_record(
+                        target_scan_tracker,
+                        reason="private_account",
+                        candidate_username=follower_un,
+                        source_phase="private_skip_fast_path",
+                    )
+                    log(
+                        "info",
+                        "follow_private_account_skipped_by_setting",
+                        account_id=account_id or None,
+                        username=follower_un,
+                        source_profile=source_profile_username,
+                        dont_follow_private_accounts=True,
+                        reason="skip_private_profile",
+                        detection_method=_private_fast_path.get("private_signal"),
+                        proof_method=_private_fast_path.get("proof_method"),
+                        fast_path=True,
+                    )
+                    log(
+                        "info",
+                        "visual_followers_resolved_username_skip_reason",
+                        reason="private_account",
+                        follower_username=follower_un,
+                        source_profile_username=source_profile_username,
+                        fast_path="private_skip_fast_path",
+                    )
+                    if fkey:
+                        _RUNTIME_SEEN_FOLLOWER_USERNAMES.add(fkey)
+                        _RUNTIME_SKIPPED_USERNAMES.add(fkey)
+                    _ct_clear_candidate_attempt_timer()
+                    _RUNTIME_FOLLOWERS_POST_RESOLVE_STREAK.pop(fkey, None)
+                    _pre_follow_gap_log(
+                        "pre_follow_gap_completed",
+                        target_username=source_profile_username,
+                        candidate_username=str(follower_un or ""),
+                        source_profile_username=source_profile_username,
+                        visual_candidate_id=str(
+                            _private_fast_path.get("visual_candidate_id")
+                            or _vcid_sm
+                            or _post_follow_visual_candidate_id(
+                                pick, str(follower_un or "")
+                            )
+                        ),
+                        phase="candidate_selected_to_no_tap",
+                        blocking_step="private_skip_fast_path",
+                        started_at=_pre_follow_gap_t0,
+                        fallback_used=False,
+                        surface_type="candidate_profile",
+                        safe_to_tap=False,
+                        is_private=True,
+                        reason="private_account",
+                        tapped=False,
+                        ok=False,
+                    )
+                    if not bool(_private_fast_path.get("return_ok")):
+                        _recovered = _recover_ct_followers_list_after_private_skip(
+                            d,
+                            source_profile_username=source_profile_username,
+                            pkg=pkg,
+                            account_id=account_id,
+                            candidate_username=str(follower_un or ""),
+                            context="private_skip_fast_path",
+                        )
+                        log(
+                            "info" if _recovered else "error",
+                            "private_skip_fast_path_return_recovery_result",
+                            source_profile_username=source_profile_username,
+                            candidate_username=str(follower_un or ""),
+                            return_ok=False,
+                            recovered=bool(_recovered),
+                            fast_path=True,
+                        )
+                        if not _recovered:
+                            if _vcid_sm:
+                                log(
+                                    "error",
+                                    "visual_candidate_profile_flow_failed",
+                                    failure_reason="visual_candidate_return_ct_failed",
+                                    phase="private_skip_fast_path",
+                                    source_profile_username=source_profile_username,
+                                    visual_candidate_id=pick.get("visual_candidate_id"),
+                                )
+                            return 42
+                    continue
             _candidate_follow_decision = _new_candidate_follow_decision(
                 follower_username=follower_un,
                 visual_candidate_id=str(pick.get("visual_candidate_id") or ""),
@@ -13504,7 +13849,6 @@ def _run_followers_list_engine_session(
                     return 42
                 continue
 
-            _vcid_sm = str(pick.get("visual_candidate_id") or "").strip()
             _sm_target_username = str(follower_un or "").strip()
             if _vcid_sm and not _sm_target_username:
                 _sm_target_username = str(pick.get("resolved_username_hint") or "").strip()
@@ -13990,14 +14334,6 @@ def _run_followers_list_engine_session(
                         reason="resolve_streak_no_follow_tap",
                     )
                     continue
-                _xml_list_profile_open = (
-                    _pick_is_own_unified_xml_list(pick)
-                    and bool(str(follower_un or "").strip())
-                )
-                _profile_follow_already_open = bool(_vcid_sm) or _xml_list_profile_open
-                _dont_follow_private_pre = _dont_follow_private_accounts_for_account(
-                    account_id
-                )
                 if _profile_follow_already_open and str(follower_un or "").strip():
                     log(
                         "info",
@@ -14286,7 +14622,7 @@ def _run_followers_list_engine_session(
                     dont_follow_private_accounts=_dont_follow_private_pre,
                     follower_username=follower_un,
                     visual_candidate_id=_pre_follow_terminal_vcid,
-                    prior_private_probe=None,
+                    prior_private_probe=_early_private_probe_for_terminal,
                 )
                 _pre_follow_private_gate_ms = round(
                     (time.perf_counter() - _pre_follow_t0) * 1000.0,
