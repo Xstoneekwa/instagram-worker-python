@@ -167,6 +167,72 @@ from instagram_navigation import (
 )
 from logs import get_run_log_file_path, init_run_file_logging, log
 
+
+def _pre_follow_gap_log(
+    event: str,
+    *,
+    target_username: str = "",
+    candidate_username: str = "",
+    source_profile_username: str = "",
+    visual_candidate_id: str = "",
+    phase: str = "",
+    started_at: float | None = None,
+    duration_ms: float | None = None,
+    blocking_step: str = "",
+    probe_count: Any = None,
+    used_cached_context: bool | None = None,
+    fallback_used: bool | None = None,
+    surface_type: str = "",
+    safe_to_tap: bool | None = None,
+    follow_state: str = "",
+    pending_state: Any = None,
+    is_private: bool | None = None,
+    reason: str = "",
+    **fields: Any,
+) -> None:
+    """Structured pre-follow timing log. Instrumentation-only; no decisions."""
+    payload: dict[str, Any] = {
+        "target_username": str(target_username or source_profile_username or ""),
+        "candidate_username": str(candidate_username or target_username or ""),
+        "source_profile_username": str(source_profile_username or ""),
+        "visual_candidate_id": str(visual_candidate_id or ""),
+        "phase": str(phase or ""),
+        "blocking_step": str(blocking_step or ""),
+        "surface_type": str(surface_type or ""),
+        "reason": str(reason or ""),
+    }
+    if started_at is not None:
+        try:
+            payload["duration_ms"] = round((time.perf_counter() - float(started_at)) * 1000.0, 2)
+        except Exception:
+            payload["duration_ms"] = 0.0
+    elif duration_ms is not None:
+        payload["duration_ms"] = round(float(duration_ms), 2)
+    if probe_count is not None:
+        payload["probe_count"] = probe_count
+    if used_cached_context is not None:
+        payload["used_cached_context"] = bool(used_cached_context)
+    if fallback_used is not None:
+        payload["fallback_used"] = bool(fallback_used)
+    if safe_to_tap is not None:
+        payload["safe_to_tap"] = bool(safe_to_tap)
+    if follow_state:
+        payload["follow_state"] = str(follow_state)
+    if pending_state is not None:
+        payload["pending_state"] = pending_state
+    if is_private is not None:
+        payload["is_private"] = bool(is_private)
+    for key, value in fields.items():
+        key_l = str(key).lower()
+        if any(marker in key_l for marker in ("token", "password", "secret")):
+            continue
+        payload[key] = value
+    try:
+        log("info", event, **payload)
+    except Exception:
+        pass
+
+
 # Real DM sends per worker process (pairs with SEND_DM_MAX_PER_RUN).
 _RUNTIME_REAL_DM_SENT_COUNT: int = 0
 # Successful follows this process (pairs with FOLLOW_MAX_PER_RUN).
@@ -9460,6 +9526,18 @@ def _run_followers_list_engine_session(
             source_profile_username=source_profile_username,
             visual_candidate_id=pick_ctx.get("visual_candidate_id"),
         )
+        _pre_follow_profile_proof_t0 = time.perf_counter()
+        _pre_follow_gap_log(
+            "pre_follow_profile_proof_started",
+            target_username=source_profile_username,
+            candidate_username=str(follower_un_so_far or pick_ctx.get("resolved_username_hint") or ""),
+            source_profile_username=source_profile_username,
+            visual_candidate_id=str(pick_ctx.get("visual_candidate_id") or ""),
+            phase="profile_proof",
+            blocking_step="profile_open_to_profile_proof",
+            surface_type="candidate_profile",
+            reason="visual_candidate_profile_analysis_started",
+        )
         _settle_s = (
             round(0.12 + random.random() * 0.08, 3)
             if _xml_list_fast_trace
@@ -9586,6 +9664,18 @@ def _run_followers_list_engine_session(
 
         _private_profile_detected = False
         if _xml_list_fast_trace:
+            _pre_follow_gap_log(
+                "pre_follow_private_gate_started",
+                target_username=source_profile_username,
+                candidate_username=str(follower_un_so_far or pick_ctx.get("resolved_username_hint") or ""),
+                source_profile_username=source_profile_username,
+                visual_candidate_id=str(pick_ctx.get("visual_candidate_id") or ""),
+                phase="private_gate",
+                blocking_step="profile_proof_private_gate_deferred",
+                used_cached_context=True,
+                surface_type="candidate_profile",
+                reason="deferred_to_pre_follow_private_gate",
+            )
             log(
                 "info",
                 "visual_candidate_private_probe_deferred",
@@ -9593,12 +9683,53 @@ def _run_followers_list_engine_session(
                 visual_candidate_id=pick_ctx.get("visual_candidate_id"),
                 reason="deferred_to_pre_follow_private_gate",
             )
+            _pre_follow_gap_log(
+                "pre_follow_private_gate_completed",
+                target_username=source_profile_username,
+                candidate_username=str(follower_un_so_far or pick_ctx.get("resolved_username_hint") or ""),
+                source_profile_username=source_profile_username,
+                visual_candidate_id=str(pick_ctx.get("visual_candidate_id") or ""),
+                phase="private_gate",
+                blocking_step="profile_proof_private_gate_deferred",
+                duration_ms=0.0,
+                used_cached_context=True,
+                surface_type="candidate_profile",
+                is_private=False,
+                reason="deferred_to_pre_follow_private_gate",
+            )
         else:
             try:
+                _private_gate_profile_t0 = time.perf_counter()
+                _pre_follow_gap_log(
+                    "pre_follow_private_gate_started",
+                    target_username=source_profile_username,
+                    candidate_username=str(follower_un_so_far or pick_ctx.get("resolved_username_hint") or ""),
+                    source_profile_username=source_profile_username,
+                    visual_candidate_id=str(pick_ctx.get("visual_candidate_id") or ""),
+                    phase="private_gate",
+                    blocking_step="profile_proof_to_private_gate",
+                    surface_type="candidate_profile",
+                    reason="visual_detect_private_profile",
+                )
                 _priv = visual_detect_private_profile(
                     d, source_profile_username=source_profile_username
                 )
                 _private_profile_detected = bool(_priv.get("private_profile_detected"))
+                _pre_follow_gap_log(
+                    "pre_follow_private_gate_completed",
+                    target_username=source_profile_username,
+                    candidate_username=str(follower_un_so_far or pick_ctx.get("resolved_username_hint") or ""),
+                    source_profile_username=source_profile_username,
+                    visual_candidate_id=str(pick_ctx.get("visual_candidate_id") or ""),
+                    phase="private_gate",
+                    blocking_step="profile_proof_to_private_gate",
+                    started_at=_private_gate_profile_t0,
+                    probe_count="visual_private_profile_probe",
+                    fallback_used=bool(_priv.get("hierarchy_fallback_used")),
+                    surface_type="candidate_profile",
+                    is_private=bool(_private_profile_detected),
+                    reason=str(_priv.get("detection_method") or "private_probe_completed"),
+                )
             except Exception as exc:
                 log(
                     "warning",
@@ -9644,6 +9775,18 @@ def _run_followers_list_engine_session(
             except NameError:
                 _hdr = _follow_ui_state_snapshot(d)
         try:
+            _follow_state_probe_t0 = time.perf_counter()
+            _pre_follow_gap_log(
+                "pre_follow_follow_state_probe_started",
+                target_username=source_profile_username,
+                candidate_username=str(follower_un_so_far or pick_ctx.get("resolved_username_hint") or ""),
+                source_profile_username=source_profile_username,
+                visual_candidate_id=str(pick_ctx.get("visual_candidate_id") or ""),
+                phase="follow_state_probe",
+                blocking_step="profile_proof_to_follow_state",
+                surface_type="candidate_profile",
+                reason="follow_header_snapshot",
+            )
             _hdr = _follow_ui_state_snapshot(d)
             log(
                 "info",
@@ -9651,6 +9794,33 @@ def _run_followers_list_engine_session(
                 source_profile_username=source_profile_username,
                 visual_candidate_id=pick_ctx.get("visual_candidate_id"),
                 follow_header_state=_hdr,
+            )
+            _pre_follow_gap_log(
+                "pre_follow_follow_state_probe_completed",
+                target_username=source_profile_username,
+                candidate_username=str(follower_un_so_far or pick_ctx.get("resolved_username_hint") or ""),
+                source_profile_username=source_profile_username,
+                visual_candidate_id=str(pick_ctx.get("visual_candidate_id") or ""),
+                phase="follow_state_probe",
+                blocking_step="profile_proof_to_follow_state",
+                started_at=_follow_state_probe_t0,
+                surface_type="candidate_profile",
+                follow_state=_hdr,
+                reason="follow_header_snapshot_completed",
+            )
+            _pre_follow_gap_log(
+                "pre_follow_profile_proof_completed",
+                target_username=source_profile_username,
+                candidate_username=str(follower_un_so_far or pick_ctx.get("resolved_username_hint") or ""),
+                source_profile_username=source_profile_username,
+                visual_candidate_id=str(pick_ctx.get("visual_candidate_id") or ""),
+                phase="profile_proof",
+                blocking_step="profile_open_to_profile_proof",
+                started_at=_pre_follow_profile_proof_t0,
+                surface_type="candidate_profile",
+                follow_state=_hdr,
+                is_private=bool(_private_profile_detected),
+                reason=str(nav_obs_local.get("reason") or "profile_proof_completed"),
             )
         except Exception as exc:
             log(
@@ -9770,6 +9940,18 @@ def _run_followers_list_engine_session(
 
         try:
             _pending_t0 = time.perf_counter()
+            _pre_follow_gap_log(
+                "pre_follow_pending_requested_probe_started",
+                target_username=source_profile_username,
+                candidate_username=str(follower_un_so_far or ""),
+                source_profile_username=source_profile_username,
+                visual_candidate_id=str(pick_ctx.get("visual_candidate_id") or ""),
+                phase="pending_requested_probe",
+                blocking_step="follow_state_to_pending_requested",
+                surface_type="candidate_profile",
+                follow_state=_hdr,
+                reason="pending_request_probe_started",
+            )
             _pend_rq, _pend_m = _visual_follow_request_pending_state(d)
             log(
                 "info",
@@ -9788,6 +9970,23 @@ def _run_followers_list_engine_session(
                 vision_used=False,
                 hierarchy_fallback_used=str(_pend_m or "").startswith("hierarchy_"),
                 fallback_used=False,
+            )
+            _pre_follow_gap_log(
+                "pre_follow_pending_requested_probe_completed",
+                target_username=source_profile_username,
+                candidate_username=str(follower_un_so_far or ""),
+                source_profile_username=source_profile_username,
+                visual_candidate_id=str(pick_ctx.get("visual_candidate_id") or ""),
+                phase="pending_requested_probe",
+                blocking_step="follow_state_to_pending_requested",
+                started_at=_pending_t0,
+                probe_count="bounded_pending_request_checks",
+                used_cached_context=False,
+                fallback_used=False,
+                surface_type="candidate_profile",
+                follow_state=_hdr,
+                pending_state=bool(_pend_rq),
+                reason=str(_pend_m or "pending_request_probe_completed"),
             )
             if _pend_rq:
                 log(
@@ -12582,6 +12781,35 @@ def _run_followers_list_engine_session(
                 follower_username=pick.get("username"),
                 source_profile_username=source_profile_username,
             )
+            _pre_follow_gap_t0 = time.perf_counter()
+            _pre_follow_last_checkpoint_t0 = _pre_follow_gap_t0
+            _pre_follow_candidate_hint = str(
+                pick.get("username") or pick.get("resolved_username_hint") or ""
+            ).strip()
+            _pre_follow_visual_candidate_id = str(pick.get("visual_candidate_id") or "")
+            _pre_follow_gap_log(
+                "pre_follow_gap_started",
+                target_username=source_profile_username,
+                candidate_username=_pre_follow_candidate_hint,
+                source_profile_username=source_profile_username,
+                visual_candidate_id=_pre_follow_visual_candidate_id,
+                phase="candidate_selected",
+                blocking_step="candidate_selected_to_follow_tap",
+                surface_type="followers_list",
+                reason="followers_candidate_selected",
+            )
+            _pre_follow_gap_log(
+                "pre_follow_gap_checkpoint",
+                target_username=source_profile_username,
+                candidate_username=_pre_follow_candidate_hint,
+                source_profile_username=source_profile_username,
+                visual_candidate_id=_pre_follow_visual_candidate_id,
+                phase="candidate_selected",
+                blocking_step="candidate_selected",
+                started_at=_pre_follow_last_checkpoint_t0,
+                surface_type="followers_list",
+                reason="selected",
+            )
             _eng_log(
                 "followers_candidate_selected",
                 "info",
@@ -12698,6 +12926,19 @@ def _run_followers_list_engine_session(
                 target_scan_tracker.get("candidates_opened_count") or 0
             ) + 1
             _candidate_open_t0 = time.perf_counter()
+            _pre_follow_gap_log(
+                "pre_follow_profile_open_wait_started",
+                target_username=source_profile_username,
+                candidate_username=str(
+                    pick.get("username") or pick.get("resolved_username_hint") or ""
+                ),
+                source_profile_username=source_profile_username,
+                visual_candidate_id=str(pick.get("visual_candidate_id") or ""),
+                phase="profile_open_wait",
+                blocking_step="row_tap_to_profile_open",
+                surface_type="followers_list",
+                reason="open_follower_profile_from_list",
+            )
             if _follow_target_rotation_pending_block(
                 action="open_profile",
                 target_username=source_profile_username,
@@ -12727,16 +12968,43 @@ def _run_followers_list_engine_session(
                     return 42
                 continue
 
+            _profile_open_ms = round((time.perf_counter() - _candidate_open_t0) * 1000.0, 2)
+            _pre_follow_gap_log(
+                "pre_follow_profile_open_wait_completed",
+                target_username=source_profile_username,
+                candidate_username=str(
+                    pick.get("username") or pick.get("resolved_username_hint") or ""
+                ),
+                source_profile_username=source_profile_username,
+                visual_candidate_id=str(pick.get("visual_candidate_id") or ""),
+                phase="profile_open_wait",
+                blocking_step="row_tap_to_profile_open",
+                duration_ms=_profile_open_ms,
+                surface_type="candidate_profile",
+                reason="profile_open_success",
+            )
+            _pre_follow_gap_log(
+                "pre_follow_gap_checkpoint",
+                target_username=source_profile_username,
+                candidate_username=str(
+                    pick.get("username") or pick.get("resolved_username_hint") or ""
+                ),
+                source_profile_username=source_profile_username,
+                visual_candidate_id=str(pick.get("visual_candidate_id") or ""),
+                phase="profile_open_wait",
+                blocking_step="profile_open_success",
+                duration_ms=_profile_open_ms,
+                surface_type="candidate_profile",
+                reason="profile_open_success",
+            )
+            _pre_follow_last_checkpoint_t0 = time.perf_counter()
             log(
                 "info",
                 "candidate_open_perf_summary",
                 follower_username=str(pick.get("username") or ""),
                 source_profile_username=source_profile_username,
                 visual_candidate_id=str(pick.get("visual_candidate_id") or ""),
-                profile_open_ms=round(
-                    (time.perf_counter() - _candidate_open_t0) * 1000.0,
-                    2,
-                ),
+                profile_open_ms=_profile_open_ms,
                 open_method=str(pick.get("extraction_source") or pick.get("pick_mode") or ""),
             )
             followers_session_clear_list_committed_open(source_profile_username)
@@ -13465,6 +13733,19 @@ def _run_followers_list_engine_session(
                     ct_follow_tap_attempted_yet=fkey
                     in _RUNTIME_CT_LIST_FOLLOW_TAP_ATTEMPTED_USERNAMES,
                 )
+                _social_memory_t0 = time.perf_counter()
+                _pre_follow_gap_log(
+                    "pre_follow_social_memory_guard_started",
+                    target_username=source_profile_username,
+                    candidate_username=str(follower_un or ""),
+                    source_profile_username=source_profile_username,
+                    visual_candidate_id=str(pick.get("visual_candidate_id") or ""),
+                    phase="social_memory_guard",
+                    blocking_step="pending_requested_to_social_memory",
+                    surface_type="candidate_profile",
+                    follow_state=str(_follow_hdr_snap or ""),
+                    reason="social_memory_check_started",
+                )
                 try:
                     from followers_inter_candidate_perf import (
                         inter_candidate_on_social_memory_check_started,
@@ -13497,6 +13778,24 @@ def _run_followers_list_engine_session(
                     follow_invite_visible=_follow_invite_visible,
                     enable_real_follow=_enable_real_follow,
                     enable_visual_follow=_enable_visual_follow,
+                )
+                _pre_follow_gap_log(
+                    "pre_follow_social_memory_guard_completed",
+                    target_username=source_profile_username,
+                    candidate_username=str(follower_un or ""),
+                    source_profile_username=source_profile_username,
+                    visual_candidate_id=str(pick.get("visual_candidate_id") or ""),
+                    phase="social_memory_guard",
+                    blocking_step="pending_requested_to_social_memory",
+                    started_at=_social_memory_t0,
+                    used_cached_context=False,
+                    fallback_used=False,
+                    surface_type="candidate_profile",
+                    safe_to_tap=bool(elig.allowed or _sm_bypass_dup),
+                    follow_state=str(_follow_hdr_snap or ""),
+                    reason=str(elig.reason or "allowed"),
+                    social_memory_duplicate_bypassed=bool(_sm_bypass_dup),
+                    interaction_state=str(elig.interaction_state or ""),
                 )
                 if _sm_bypass_dup:
                     log(
@@ -13594,6 +13893,22 @@ def _run_followers_list_engine_session(
                     _RUNTIME_INTERACTED_USERNAMES.add(fkey)
                     _RUNTIME_SKIPPED_USERNAMES.add(fkey)
                     _RUNTIME_SEEN_FOLLOWER_USERNAMES.add(fkey)
+                    _pre_follow_gap_log(
+                        "pre_follow_gap_completed",
+                        target_username=source_profile_username,
+                        candidate_username=str(follower_un or ""),
+                        source_profile_username=source_profile_username,
+                        visual_candidate_id=str(pick.get("visual_candidate_id") or ""),
+                        phase="candidate_selected_to_no_tap",
+                        blocking_step="social_memory_guard_blocked",
+                        started_at=_pre_follow_gap_t0,
+                        surface_type="candidate_profile",
+                        safe_to_tap=False,
+                        follow_state=str(_follow_hdr_snap or ""),
+                        reason=f"social_memory_blocked:{elig.reason}",
+                        tapped=False,
+                        ok=False,
+                    )
                     ok_el, _ = return_to_followers_list(d, source_profile_username, pkg)
                     if not ok_el:
                         if _vcid_sm:
@@ -13709,6 +14024,18 @@ def _run_followers_list_engine_session(
                         visual_candidate_id=pick.get("visual_candidate_id"),
                         follower_username=follower_un,
                     )
+                    _pre_follow_gap_log(
+                        "pre_follow_screen_guard_started",
+                        target_username=source_profile_username,
+                        candidate_username=str(follower_un or ""),
+                        source_profile_username=source_profile_username,
+                        visual_candidate_id=str(pick.get("visual_candidate_id") or ""),
+                        phase="screen_guard",
+                        blocking_step="social_memory_to_screen_guard",
+                        surface_type="candidate_profile",
+                        follow_state=str(_follow_hdr_snap or ""),
+                        reason="visual_candidate_current_screen_guard_started",
+                    )
                     try:
                         from followers_inter_candidate_perf import (
                             inter_candidate_on_screen_guard_started,
@@ -13730,6 +14057,22 @@ def _run_followers_list_engine_session(
                     _g_final = _g_pre
                     if not _guard_ok:
                         if str(_g_pre.get("reason") or "") == "private_account":
+                            _pre_follow_gap_log(
+                                "pre_follow_screen_guard_completed",
+                                target_username=source_profile_username,
+                                candidate_username=str(follower_un or ""),
+                                source_profile_username=source_profile_username,
+                                visual_candidate_id=str(pick.get("visual_candidate_id") or ""),
+                                phase="screen_guard",
+                                blocking_step="social_memory_to_screen_guard",
+                                started_at=_screen_guard_t0,
+                                fallback_used=False,
+                                surface_type=str(_g_pre.get("navigation_state") or "candidate_profile"),
+                                safe_to_tap=False,
+                                follow_state=str(_g_pre.get("follow_header_state") or _follow_hdr_snap or ""),
+                                is_private=True,
+                                reason="private_account",
+                            )
                             _target_rejection_record(
                                 target_scan_tracker,
                                 reason="private_account",
@@ -13896,6 +14239,22 @@ def _run_followers_list_engine_session(
                         navigation_state=_g_final.get("navigation_state"),
                         recovered_after_reopen=_recovered_after_reopen,
                     )
+                    _pre_follow_gap_log(
+                        "pre_follow_screen_guard_completed",
+                        target_username=source_profile_username,
+                        candidate_username=str(follower_un or ""),
+                        source_profile_username=source_profile_username,
+                        visual_candidate_id=str(pick.get("visual_candidate_id") or ""),
+                        phase="screen_guard",
+                        blocking_step="social_memory_to_screen_guard",
+                        duration_ms=_screen_guard_ms,
+                        fallback_used=bool(_recovered_after_reopen),
+                        surface_type=str(_g_final.get("navigation_state") or "candidate_profile"),
+                        safe_to_tap=True,
+                        follow_state=str(_g_final.get("follow_header_state") or _follow_hdr_snap or ""),
+                        is_private=bool(_g_final.get("private_profile_detected") or False),
+                        reason=str(_g_final.get("reason") or "screen_guard_passed"),
+                    )
                     try:
                         from followers_inter_candidate_perf import (
                             inter_candidate_on_screen_guard_passed,
@@ -13905,14 +14264,28 @@ def _run_followers_list_engine_session(
                     except Exception:
                         pass
                 _pre_follow_t0 = time.perf_counter()
+                _pre_follow_terminal_vcid = _post_follow_visual_candidate_id(
+                    pick, str(follower_un or "")
+                )
+                _pre_follow_gap_log(
+                    "pre_follow_private_gate_started",
+                    target_username=source_profile_username,
+                    candidate_username=str(follower_un or ""),
+                    source_profile_username=source_profile_username,
+                    visual_candidate_id=_pre_follow_terminal_vcid,
+                    phase="private_gate",
+                    blocking_step="screen_guard_to_private_gate",
+                    used_cached_context=bool(_g_final),
+                    surface_type="candidate_profile",
+                    follow_state=str(_g_final.get("follow_header_state") or _follow_hdr_snap or ""),
+                    reason="visual_candidate_pre_follow_private_gate",
+                )
                 _pre_follow_priv = visual_candidate_pre_follow_private_gate(
                     d,
                     source_profile_username=source_profile_username,
                     dont_follow_private_accounts=_dont_follow_private_pre,
                     follower_username=follower_un,
-                    visual_candidate_id=_post_follow_visual_candidate_id(
-                        pick, str(follower_un or "")
-                    ),
+                    visual_candidate_id=_pre_follow_terminal_vcid,
                     prior_private_probe=None,
                 )
                 _pre_follow_private_gate_ms = round(
@@ -13921,6 +14294,25 @@ def _run_followers_list_engine_session(
                 )
                 _pre_follow_private_detected = bool(
                     _pre_follow_priv.get("private_profile_detected")
+                )
+                _pre_follow_gap_log(
+                    "pre_follow_private_gate_completed",
+                    target_username=source_profile_username,
+                    candidate_username=str(follower_un or ""),
+                    source_profile_username=source_profile_username,
+                    visual_candidate_id=_pre_follow_terminal_vcid,
+                    phase="private_gate",
+                    blocking_step="screen_guard_to_private_gate",
+                    duration_ms=_pre_follow_private_gate_ms,
+                    probe_count="pre_follow_private_gate",
+                    used_cached_context=bool(_pre_follow_priv.get("probe_reused")),
+                    fallback_used=bool(_pre_follow_priv.get("hierarchy_fallback_used")),
+                    surface_type="candidate_profile",
+                    safe_to_tap=not bool(_pre_follow_priv.get("reject")),
+                    follow_state=str(_g_final.get("follow_header_state") or _follow_hdr_snap or ""),
+                    is_private=bool(_pre_follow_private_detected),
+                    reason=str(_pre_follow_priv.get("reason") or "private_gate_completed"),
+                    pending_state=bool(_candidate_follow_decision.get("pending_detected") or False),
                 )
                 _pre_follow_breakdown: dict[str, float] = {}
                 try:
@@ -13988,6 +14380,23 @@ def _run_followers_list_engine_session(
                     )
                     _RUNTIME_SEEN_FOLLOWER_USERNAMES.add(fkey)
                     _RUNTIME_SKIPPED_USERNAMES.add(fkey)
+                    _pre_follow_gap_log(
+                        "pre_follow_gap_completed",
+                        target_username=source_profile_username,
+                        candidate_username=str(follower_un or ""),
+                        source_profile_username=source_profile_username,
+                        visual_candidate_id=_pre_follow_terminal_vcid,
+                        phase="candidate_selected_to_no_tap",
+                        blocking_step="private_gate_blocked",
+                        started_at=_pre_follow_gap_t0,
+                        surface_type="candidate_profile",
+                        safe_to_tap=False,
+                        follow_state=str(_g_final.get("follow_header_state") or _follow_hdr_snap or ""),
+                        is_private=True,
+                        reason="private_account",
+                        tapped=False,
+                        ok=False,
+                    )
                     _ct_clear_candidate_attempt_timer()
                     _RUNTIME_FOLLOWERS_POST_RESOLVE_STREAK.pop(fkey, None)
                     ok_priv_sk, _ = return_to_followers_list(
@@ -14109,6 +14518,27 @@ def _run_followers_list_engine_session(
                         )
                     _RUNTIME_SEEN_FOLLOWER_USERNAMES.add(fkey)
                     _RUNTIME_SKIPPED_USERNAMES.add(fkey)
+                    _pre_follow_gap_log(
+                        "pre_follow_gap_completed",
+                        target_username=source_profile_username,
+                        candidate_username=str(follower_un or ""),
+                        source_profile_username=source_profile_username,
+                        visual_candidate_id=_post_follow_visual_candidate_id(
+                            pick, str(follower_un or "")
+                        ),
+                        phase="candidate_selected_to_no_tap",
+                        blocking_step="follow_state_contract_blocked",
+                        started_at=_pre_follow_gap_t0,
+                        surface_type="candidate_profile",
+                        safe_to_tap=False,
+                        follow_state=str(
+                            _candidate_follow_decision.get("current_state") or ""
+                        ),
+                        is_private=bool(_private_blocked),
+                        reason=_blocked_reason,
+                        tapped=False,
+                        ok=False,
+                    )
                     _ct_clear_candidate_attempt_timer()
                     _RUNTIME_FOLLOWERS_POST_RESOLVE_STREAK.pop(fkey, None)
                     ok_contract_block, _ = return_to_followers_list(
@@ -14190,6 +14620,25 @@ def _run_followers_list_engine_session(
                         screen_guard=_g_final,
                         private_gate=_pre_follow_priv,
                     )
+                _follow_button_detect_t0 = time.perf_counter()
+                _pre_follow_gap_log(
+                    "pre_follow_button_detect_started",
+                    target_username=source_profile_username,
+                    candidate_username=str(follower_un or ""),
+                    source_profile_username=source_profile_username,
+                    visual_candidate_id=str(_follow_engine_vcid or ""),
+                    phase="button_detect",
+                    blocking_step="private_gate_to_follow_button_detect",
+                    used_cached_context=bool(_pre_follow_tap_ctx),
+                    surface_type="candidate_profile",
+                    safe_to_tap=not bool(_pre_follow_priv.get("reject")),
+                    follow_state=str(
+                        _candidate_follow_decision.get("current_state") or "follow_allowed"
+                    ),
+                    pending_state=bool(_candidate_follow_decision.get("pending_detected") or False),
+                    is_private=bool(_pre_follow_private_detected),
+                    reason="perform_follow_safe",
+                )
                 follow_out = perform_follow_safe(
                     d,
                     follower_un,
@@ -14199,6 +14648,87 @@ def _run_followers_list_engine_session(
                     source_profile_username=source_profile_username,
                     dont_follow_private_accounts=_dont_follow_private_pre,
                     pre_follow_context=_pre_follow_tap_ctx,
+                )
+                _follow_action_events_for_prefollow = list(follow_out.get("events") or [])
+                _surface_event = next(
+                    (
+                        ev_payload
+                        for ev_name, ev_payload in _follow_action_events_for_prefollow
+                        if ev_name == "follow_action_timing_surface_selection_completed"
+                        and isinstance(ev_payload, dict)
+                    ),
+                    {},
+                )
+                _tap_sent_seen = any(
+                    ev_name in ("follow_tap_sent", "follow_action_exact_follow_tap_sent")
+                    for ev_name, _ev_payload in _follow_action_events_for_prefollow
+                )
+                _button_detect_reason = str(
+                    (_surface_event or {}).get("reason")
+                    or follow_out.get("visual_follow_failure_reason")
+                    or follow_out.get("failure_code")
+                    or "perform_follow_safe_completed"
+                )
+                _button_detect_result = str(
+                    (_surface_event or {}).get("result")
+                    or ("tap_sent" if _tap_sent_seen else "no_tap")
+                )
+                _pre_follow_gap_log(
+                    "pre_follow_button_detect_completed",
+                    target_username=source_profile_username,
+                    candidate_username=str(follower_un or ""),
+                    source_profile_username=source_profile_username,
+                    visual_candidate_id=str(_follow_engine_vcid or ""),
+                    phase="button_detect",
+                    blocking_step="private_gate_to_follow_button_detect",
+                    started_at=_follow_button_detect_t0,
+                    probe_count=(_surface_event or {}).get("attempt"),
+                    used_cached_context=bool(_pre_follow_tap_ctx),
+                    fallback_used=bool((_surface_event or {}).get("fallback_used"))
+                    if _surface_event
+                    else None,
+                    surface_type="candidate_profile",
+                    safe_to_tap=bool(_tap_sent_seen),
+                    follow_state=str(
+                        follow_out.get("follow_state_after")
+                        or follow_out.get("follow_state_before")
+                        or _candidate_follow_decision.get("current_state")
+                        or ""
+                    ),
+                    pending_state=bool(_candidate_follow_decision.get("pending_detected") or False),
+                    is_private=bool(
+                        _pre_follow_private_detected
+                        or follow_out.get("private_profile_detected")
+                    ),
+                    reason=_button_detect_reason,
+                    result=_button_detect_result,
+                )
+                _pre_follow_gap_log(
+                    "pre_follow_gap_completed",
+                    target_username=source_profile_username,
+                    candidate_username=str(follower_un or ""),
+                    source_profile_username=source_profile_username,
+                    visual_candidate_id=str(_follow_engine_vcid or ""),
+                    phase="candidate_selected_to_follow_tap",
+                    blocking_step="candidate_selected_to_follow_tap",
+                    started_at=_pre_follow_gap_t0,
+                    used_cached_context=bool(_pre_follow_tap_ctx),
+                    surface_type="candidate_profile",
+                    safe_to_tap=bool(_tap_sent_seen),
+                    follow_state=str(
+                        follow_out.get("follow_state_after")
+                        or follow_out.get("follow_state_before")
+                        or _candidate_follow_decision.get("current_state")
+                        or ""
+                    ),
+                    pending_state=bool(_candidate_follow_decision.get("pending_detected") or False),
+                    is_private=bool(
+                        _pre_follow_private_detected
+                        or follow_out.get("private_profile_detected")
+                    ),
+                    reason="follow_tap_sent" if _tap_sent_seen else "no_follow_tap_sent",
+                    tapped=bool(follow_out.get("tapped")),
+                    ok=bool(follow_out.get("ok")),
                 )
                 _ct_clear_candidate_attempt_timer()
                 _follow_action_events = list(follow_out.get("events") or [])

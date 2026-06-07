@@ -133,6 +133,73 @@ class FakeCloneHeaderDevice:
         return FakeWaitSelector(bool(rid_match and "profile_header" in rid_match))
 
 
+class PreFollowTapInstrumentationTest(unittest.TestCase):
+    def test_followable_candidate_emits_tap_ready_before_tap_sent(self) -> None:
+        device = mock.MagicMock()
+        button = mock.MagicMock()
+        logs: list[tuple[str, dict[str, object]]] = []
+
+        with mock.patch.object(
+            nav, "_follow_ui_state_snapshot", side_effect=["follow", "following"]
+        ), mock.patch(
+            "follow_action_engine.follow_action_surface_wait_and_select_element",
+            return_value=(
+                button,
+                {
+                    "events": [
+                        (
+                            "follow_action_timing_surface_selection_completed",
+                            {
+                                "result": "ready",
+                                "reason": "unit_follow_button",
+                                "fallback_used": True,
+                            },
+                        )
+                    ],
+                    "exact_follow_fast_path": False,
+                    "last_ui_state": "follow",
+                },
+            ),
+        ), mock.patch.object(
+            nav,
+            "visual_detect_private_profile",
+            return_value={
+                "private_profile_detected": False,
+                "detection_method": "none",
+                "confidence": 0.0,
+                "probe_ms": 1.0,
+                "hierarchy_fallback_used": False,
+            },
+        ), mock.patch.object(
+            nav, "_try_review_before_follow_popup_confirm", return_value=False
+        ), mock.patch.object(
+            nav, "_review_before_follow_popup_visible", return_value=False
+        ), mock.patch(
+            "instagram_navigation.time.sleep"
+        ), mock.patch.object(
+            nav, "log", side_effect=lambda _level, event, **kw: logs.append((str(event), kw))
+        ):
+            out = nav.perform_follow_safe(
+                device,
+                "public_user",
+                "com.instagram.android",
+                profile_already_open=True,
+                source_profile_username="source_ct",
+                visual_candidate_id="vc-1",
+                dont_follow_private_accounts=True,
+            )
+
+        events = [event for event, _kw in logs]
+        self.assertTrue(out["tapped"])
+        self.assertLess(events.index("pre_follow_tap_ready"), events.index("pre_follow_tap_sent"))
+        ready = [kw for event, kw in logs if event == "pre_follow_tap_ready"][-1]
+        sent = [kw for event, kw in logs if event == "pre_follow_tap_sent"][-1]
+        self.assertEqual(ready["target_username"], "source_ct")
+        self.assertEqual(ready["candidate_username"], "public_user")
+        self.assertTrue(ready["safe_to_tap"])
+        self.assertEqual(sent["reason"], "follow_tap_sent")
+
+
 class PostMuteGapTrackingTest(unittest.TestCase):
     def tearDown(self) -> None:
         nav._clear_post_mute_sheet_closed_proof_stash()

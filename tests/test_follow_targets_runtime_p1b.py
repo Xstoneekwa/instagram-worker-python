@@ -2602,6 +2602,58 @@ class FollowTargetRotationPendingTests(unittest.TestCase):
     def setUp(self) -> None:
         runner.reset_follow_target_rotation_pending()
 
+    def test_pre_follow_gap_log_emits_expected_fields_without_secrets(self) -> None:
+        logs: list[tuple[str, str, dict]] = []
+        with patch.object(
+            runner,
+            "log",
+            side_effect=lambda level, event, **kw: logs.append((level, event, kw)),
+        ):
+            runner._pre_follow_gap_log(
+                "pre_follow_gap_checkpoint",
+                target_username="ct_one",
+                candidate_username="cand_one",
+                source_profile_username="ct_one",
+                visual_candidate_id="vc-1",
+                phase="social_memory_guard",
+                duration_ms=12.34,
+                probe_count=2,
+                used_cached_context=True,
+                fallback_used=False,
+                surface_type="candidate_profile",
+                safe_to_tap=True,
+                follow_state="follow",
+                pending_state=False,
+                is_private=False,
+                reason="unit",
+                auth_token="should_not_log",
+                password="should_not_log",
+                client_secret="should_not_log",
+            )
+
+        self.assertEqual(len(logs), 1)
+        _level, event, fields = logs[0]
+        self.assertEqual(event, "pre_follow_gap_checkpoint")
+        for key in (
+            "target_username",
+            "candidate_username",
+            "phase",
+            "duration_ms",
+            "probe_count",
+            "used_cached_context",
+            "fallback_used",
+            "surface_type",
+            "safe_to_tap",
+            "follow_state",
+            "pending_state",
+            "is_private",
+            "reason",
+        ):
+            self.assertIn(key, fields)
+        self.assertNotIn("auth_token", fields)
+        self.assertNotIn("password", fields)
+        self.assertNotIn("client_secret", fields)
+
     def test_rotation_pending_set_and_scoped_to_target(self) -> None:
         logs: list[tuple[str, str, dict]] = []
         with patch.object(runner, "log", side_effect=lambda level, event, **kw: logs.append((level, event, kw))):

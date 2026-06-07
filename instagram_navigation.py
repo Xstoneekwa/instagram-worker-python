@@ -9188,6 +9188,29 @@ def perform_follow_safe(
             )
         )
 
+    log(
+        "info",
+        "pre_follow_tap_ready",
+        target_username=str(source_profile_username or username or ""),
+        candidate_username=str(username or ""),
+        source_profile_username=str(source_profile_username or ""),
+        visual_candidate_id=str(visual_candidate_id or ""),
+        phase="tap_ready",
+        blocking_step="follow_button_detect_to_tap_ready",
+        duration_ms=round((time.perf_counter() - t_all) * 1000.0, 2),
+        probe_count=None,
+        used_cached_context=bool(_ctx_reuse),
+        fallback_used=not bool(tap_exact),
+        surface_type="candidate_profile",
+        safe_to_tap=True,
+        follow_state=str(state_before or ""),
+        pending_state=None,
+        is_private=False,
+        reason="follow_button_ready",
+        exact_follow_fast_path=bool(tap_exact),
+        tap_coords_ready=bool(tap_coords_ready),
+    )
+
     try:
         if tap_exact and tap_coords_ready:
             d.click(tap_cx, tap_cy)
@@ -9278,6 +9301,27 @@ def perform_follow_safe(
             "timings_ms": {"to_tap_ms": round((time.perf_counter() - t_all) * 1000, 2)},
             "exact_follow_fast_path": tap_exact,
         },
+    )
+    log(
+        "info",
+        "pre_follow_tap_sent",
+        target_username=str(source_profile_username or username or ""),
+        candidate_username=str(username or ""),
+        source_profile_username=str(source_profile_username or ""),
+        visual_candidate_id=str(visual_candidate_id or ""),
+        phase="tap_sent",
+        blocking_step="tap_ready_to_tap_sent",
+        duration_ms=round((time.perf_counter() - t_all) * 1000.0, 2),
+        probe_count=None,
+        used_cached_context=bool(_ctx_reuse),
+        fallback_used=not bool(tap_exact),
+        surface_type="candidate_profile",
+        safe_to_tap=True,
+        follow_state=str(state_before or ""),
+        pending_state=None,
+        is_private=False,
+        reason="follow_tap_sent",
+        exact_follow_fast_path=bool(tap_exact),
     )
 
     def _complete_follow_verify_success(
