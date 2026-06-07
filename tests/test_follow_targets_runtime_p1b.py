@@ -3350,6 +3350,11 @@ class CtCheckpointV1Tests(unittest.TestCase):
         self.assertEqual(ck["seen_count"], 0)
         self.assertFalse(ck["scroll_resume_applied"])
 
+    def test_checkpoint_common_fields_preserves_zero_scroll_index(self) -> None:
+        ck = self._new_checkpoint(last_scroll_index=0)
+        fields = runner._ct_checkpoint_common_fields(ck)
+        self.assertEqual(fields["scroll_index"], 0)
+
     def test_update_visible_window_emits_created_then_updated(self) -> None:
         logs: list[tuple[str, str, dict]] = []
         ck = self._new_checkpoint()
@@ -3530,6 +3535,279 @@ class CtCheckpointV1Tests(unittest.TestCase):
         )
         self.assertTrue(skip)
         self.assertEqual(reason, "runtime_seen")
+
+    def test_post_return_picker_refresh_can_skip_with_fresh_checkpoint(self) -> None:
+        ck = self._new_checkpoint(last_scroll_index=0)
+        ck["last_visible_usernames"] = ["candidate_one", "candidate_two"]
+        visual_state = {
+            "post_return_picker_refresh_pending": True,
+            "post_return_picker_refresh_meta": {
+                "return_method": "compact_safe_back_then_list",
+                "follower_username": "candidate_one",
+            },
+        }
+        with patch.object(runner, "followers_session_list_committed_open_for", return_value=True):
+            ok, reason = runner._ct_checkpoint_should_skip_post_return_picker_refresh(
+                ck,
+                source_username="ct_one",
+                account_id="acct-1",
+                run_id="run-1",
+                scroll_used=0,
+                visual_loop_state=visual_state,
+            )
+        self.assertTrue(ok)
+        self.assertEqual(reason, "checkpoint_visible_window_fresh")
+
+    def test_post_return_picker_refresh_falls_back_on_scroll_mismatch(self) -> None:
+        ck = self._new_checkpoint(last_scroll_index=0)
+        ck["last_visible_usernames"] = ["candidate_one", "candidate_two"]
+        visual_state = {
+            "post_return_picker_refresh_pending": True,
+            "post_return_picker_refresh_meta": {
+                "return_method": "compact_safe_back_then_list",
+                "follower_username": "candidate_one",
+            },
+        }
+        with patch.object(runner, "followers_session_list_committed_open_for", return_value=True):
+            ok, reason = runner._ct_checkpoint_should_skip_post_return_picker_refresh(
+                ck,
+                source_username="ct_one",
+                account_id="acct-1",
+                run_id="run-1",
+                scroll_used=1,
+                visual_loop_state=visual_state,
+            )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "checkpoint_scroll_index_mismatch")
+
+    def _post_return_visual_state(
+        self,
+        return_method: str = "compact_safe_back_then_list",
+        *,
+        source_username: str = "ct_one",
+        proof_at_mono: float | None = None,
+    ) -> dict:
+        if proof_at_mono is None:
+            proof_at_mono = time.perf_counter()
+        return {
+            "post_return_picker_refresh_pending": True,
+            "post_return_picker_refresh_meta": {
+                "return_method": return_method,
+                "follower_username": "candidate_one",
+                "source_username": source_username,
+                "post_return_proof_at_mono": proof_at_mono,
+            },
+        }
+
+    def _post_return_reuse_det(self, source_username: str = "ct_one") -> dict:
+        return {
+            "is_followers_list": True,
+            "open_detection_method": "own_unified_follow_list",
+            "candidate_username_count": 2,
+            "signals": ["own_unified_followers_list_detected", "follow_list_username"],
+            "visible_header_texts": ["123 followers"],
+            "source_profile_username": source_username,
+        }
+
+    def test_post_return_list_revalidation_can_skip_with_fresh_checkpoint(self) -> None:
+        ck = self._new_checkpoint(last_scroll_index=0)
+        ck["last_visible_usernames"] = ["candidate_one", "candidate_two"]
+        with patch.object(runner, "followers_session_list_committed_open_for", return_value=True):
+            ok, reason = runner._ct_checkpoint_should_skip_post_return_list_revalidation(
+                ck,
+                source_username="ct_one",
+                account_id="acct-1",
+                run_id="run-1",
+                scroll_used=0,
+                visual_loop_state=self._post_return_visual_state(proof_at_mono=0.0),
+                reuse_det=self._post_return_reuse_det(),
+                committed_age_ms=700.0,
+            )
+        self.assertTrue(ok)
+        self.assertEqual(reason, "checkpoint_visible_window_fresh")
+
+    def test_post_return_list_revalidation_skip_log_emitted(self) -> None:
+        ck = self._new_checkpoint(last_scroll_index=0)
+        ck["last_visible_usernames"] = ["candidate_one", "candidate_two"]
+        logs: list[tuple[str, str, dict]] = []
+        with patch.object(runner, "log", side_effect=lambda level, event, **kw: logs.append((level, event, kw))):
+            runner._ct_checkpoint_emit_post_return_list_revalidation_skipped(
+                ck,
+                source_username="ct_one",
+                reason="checkpoint_visible_window_fresh",
+                scroll_used=0,
+                committed_age_ms=700.0,
+                open_detection_method="own_unified_follow_list",
+            )
+        self.assertEqual(logs[0][1], "followers_post_return_list_revalidation_skipped_checkpoint_fresh")
+        self.assertFalse(logs[0][2]["fallback_used"])
+        self.assertTrue(logs[0][2]["safe_to_recollect"])
+
+    def test_post_return_picker_refresh_skip_log_contract(self) -> None:
+        ck = self._new_checkpoint(last_scroll_index=0)
+        ck["last_visible_usernames"] = ["candidate_one", "candidate_two"]
+        visual_state = self._post_return_visual_state()
+        with patch.object(runner, "followers_session_list_committed_open_for", return_value=True):
+            ok, reason = runner._ct_checkpoint_should_skip_post_return_picker_refresh(
+                ck,
+                source_username="ct_one",
+                account_id="acct-1",
+                run_id="run-1",
+                scroll_used=0,
+                visual_loop_state=visual_state,
+            )
+        self.assertTrue(ok)
+        self.assertEqual(reason, "checkpoint_visible_window_fresh")
+
+    def test_post_return_list_revalidation_falls_back_on_ct_mismatch(self) -> None:
+        ck = self._new_checkpoint(last_scroll_index=0)
+        ck["last_visible_usernames"] = ["candidate_one", "candidate_two"]
+        with patch.object(runner, "followers_session_list_committed_open_for", return_value=True):
+            ok, reason = runner._ct_checkpoint_should_skip_post_return_list_revalidation(
+                ck,
+                source_username="ct_two",
+                account_id="acct-1",
+                run_id="run-1",
+                scroll_used=0,
+                visual_loop_state=self._post_return_visual_state(),
+                reuse_det=self._post_return_reuse_det("ct_two"),
+                committed_age_ms=700.0,
+            )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "source_username_mismatch")
+
+    def test_post_return_list_revalidation_falls_back_on_stale_checkpoint(self) -> None:
+        ck = self._new_checkpoint(last_scroll_index=0, updated_at_epoch=time.time() - 61.0)
+        ck["last_visible_usernames"] = ["candidate_one", "candidate_two"]
+        with patch.object(runner, "followers_session_list_committed_open_for", return_value=True):
+            ok, reason = runner._ct_checkpoint_should_skip_post_return_list_revalidation(
+                ck,
+                source_username="ct_one",
+                account_id="acct-1",
+                run_id="run-1",
+                scroll_used=0,
+                visual_loop_state=self._post_return_visual_state(proof_at_mono=0.0),
+                reuse_det=self._post_return_reuse_det(),
+                committed_age_ms=700.0,
+            )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "checkpoint_visible_window_stale")
+
+    def test_post_return_list_revalidation_allows_old_checkpoint_with_fresh_return_proof(self) -> None:
+        ck = self._new_checkpoint(last_scroll_index=0, updated_at_epoch=time.time() - 67.0)
+        ck["last_visible_usernames"] = ["candidate_one", "candidate_two"]
+        with patch.object(runner, "followers_session_list_committed_open_for", return_value=True):
+            ok, reason = runner._ct_checkpoint_should_skip_post_return_list_revalidation(
+                ck,
+                source_username="ct_one",
+                account_id="acct-1",
+                run_id="run-1",
+                scroll_used=0,
+                visual_loop_state=self._post_return_visual_state(),
+                reuse_det=self._post_return_reuse_det(),
+                committed_age_ms=700.0,
+            )
+        self.assertTrue(ok)
+        self.assertEqual(reason, "checkpoint_visible_window_fresh")
+
+    def test_post_return_list_revalidation_falls_back_on_stale_return_proof(self) -> None:
+        ck = self._new_checkpoint(last_scroll_index=0, updated_at_epoch=time.time() - 67.0)
+        ck["last_visible_usernames"] = ["candidate_one", "candidate_two"]
+        stale_proof = time.perf_counter() - 20.0
+        with patch.object(runner, "followers_session_list_committed_open_for", return_value=True):
+            ok, reason = runner._ct_checkpoint_should_skip_post_return_list_revalidation(
+                ck,
+                source_username="ct_one",
+                account_id="acct-1",
+                run_id="run-1",
+                scroll_used=0,
+                visual_loop_state=self._post_return_visual_state(proof_at_mono=stale_proof),
+                reuse_det=self._post_return_reuse_det(),
+                committed_age_ms=700.0,
+            )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "checkpoint_visible_window_stale")
+
+    def test_post_return_list_revalidation_falls_back_on_post_return_source_mismatch(self) -> None:
+        ck = self._new_checkpoint(last_scroll_index=0)
+        ck["last_visible_usernames"] = ["candidate_one", "candidate_two"]
+        with patch.object(runner, "followers_session_list_committed_open_for", return_value=True):
+            ok, reason = runner._ct_checkpoint_should_skip_post_return_list_revalidation(
+                ck,
+                source_username="ct_one",
+                account_id="acct-1",
+                run_id="run-1",
+                scroll_used=0,
+                visual_loop_state=self._post_return_visual_state(source_username="ct_other"),
+                reuse_det=self._post_return_reuse_det(),
+                committed_age_ms=700.0,
+            )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "post_return_source_mismatch")
+
+    def test_post_return_list_revalidation_falls_back_on_scroll_mismatch(self) -> None:
+        ck = self._new_checkpoint(last_scroll_index=0)
+        ck["last_visible_usernames"] = ["candidate_one", "candidate_two"]
+        with patch.object(runner, "followers_session_list_committed_open_for", return_value=True):
+            ok, reason = runner._ct_checkpoint_should_skip_post_return_list_revalidation(
+                ck,
+                source_username="ct_one",
+                account_id="acct-1",
+                run_id="run-1",
+                scroll_used=1,
+                visual_loop_state=self._post_return_visual_state(),
+                reuse_det=self._post_return_reuse_det(),
+                committed_age_ms=700.0,
+            )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "checkpoint_scroll_index_mismatch")
+
+    def test_post_return_list_revalidation_falls_back_without_post_return_proof(self) -> None:
+        ck = self._new_checkpoint(last_scroll_index=0)
+        ck["last_visible_usernames"] = ["candidate_one", "candidate_two"]
+        with patch.object(runner, "followers_session_list_committed_open_for", return_value=True):
+            ok, reason = runner._ct_checkpoint_should_skip_post_return_list_revalidation(
+                ck,
+                source_username="ct_one",
+                account_id="acct-1",
+                run_id="run-1",
+                scroll_used=0,
+                visual_loop_state={},
+                reuse_det=self._post_return_reuse_det(),
+                committed_age_ms=700.0,
+            )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "post_return_proof_missing")
+
+    def test_post_return_list_revalidation_falls_back_on_ambiguous_return_method(self) -> None:
+        ck = self._new_checkpoint(last_scroll_index=0)
+        ck["last_visible_usernames"] = ["candidate_one", "candidate_two"]
+        with patch.object(runner, "followers_session_list_committed_open_for", return_value=True):
+            ok, reason = runner._ct_checkpoint_should_skip_post_return_list_revalidation(
+                ck,
+                source_username="ct_one",
+                account_id="acct-1",
+                run_id="run-1",
+                scroll_used=0,
+                visual_loop_state=self._post_return_visual_state("unknown_return_method"),
+                reuse_det=self._post_return_reuse_det(),
+                committed_age_ms=700.0,
+            )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "return_method_not_reusable")
+
+    def test_post_return_list_revalidation_unknown_candidate_keeps_normal_flow(self) -> None:
+        ck = self._new_checkpoint(last_scroll_index=0)
+        ck["last_visible_usernames"] = ["candidate_one", "candidate_two"]
+        skip, reason = runner._ct_checkpoint_should_fast_skip_visible_candidate(
+            ck,
+            {"username": "candidate_two"},
+            runtime_followed=set(),
+            runtime_seen=set(),
+            runtime_skipped=set(),
+        )
+        self.assertFalse(skip)
+        self.assertEqual(reason, "")
 
 
 if __name__ == "__main__":

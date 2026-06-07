@@ -2,12 +2,51 @@
 
 *Document volatil : à mettre à jour après les prochains jalons produit / tech.*
 
+## État chantier follow — 2026-06-07
+
+- **4/2/2 validés fonctionnellement** : les derniers runs contrôlés sur
+  `j_automatise_pour_toi` ont confirmé le budget multi-target `4 follows /
+  2 CT / 2 follows par CT`, avec follow, mute, like/skip métier et return CT
+  corrélés. Les runs utilisés pour le diagnostic incluent `51720464`,
+  `3521ba8f` et `34ae4947`.
+- **Private skip fast path** : validé sur profils privés rencontrés
+  (`_nataniel_06_`, `fouebastard`, `michel_di_rosa`, `maynaa.aa` selon les
+  runs). Aucun `follow_tap_sent` sur privé ; retour CT puis continuation du
+  scan OK.
+- **CT Checkpoint V1 runtime-only** : ledger en mémoire par CT/source pour
+  visible window, candidats vus/rejetés/private/followés, fast-skip et
+  observabilité. Il est utile dans la session courante mais ne connaît pas les
+  runs précédents ; la validation dense cross-run attend V2 DB persistée.
+- **Correction intra-CT post-return** : le skip de revalidation liste et de
+  screenshot post-return utilise maintenant une preuve fraîche
+  `post_follow_return_ct_success` (`source_username`, return method safe,
+  committed surface, même scroll/run/account) au lieu de dépendre seulement du
+  TTL du checkpoint visible-window.
+- **Correction No Posts précoce** : le fallback visuel coûteux No Posts ne doit
+  plus tourner sur profils normaux avec surface profil + grille confirmées et
+  sans hint No Posts. Il est gated par signaux forts/ambigus et garde le
+  fallback existant si la preuve est insuffisante.
+
 ## CT Checkpoint / Fast-Skip Roadmap
 
 - **V1 runtime-only** : valider vite dans `runner.py` un checkpoint sûr par CT/source, sans migration DB et sans bypass des guards private/social/screen/follow.
 - **V2 DB persistée obligatoire après validation V1** : synchroniser la progression CT entre worker Python, dashboard admin, futur dashboard client, BotApp et autres opérateurs.
 - Les champs V1 restent proches de la future table : `account_id`, `source_target_id`, `source_username`, `last_run_id`, `last_scroll_index`, candidats vus/rejetés/private/followés, `checkpoint_reason`, `checkpoint_status`, `stale_after`, `created_at`, `updated_at`.
 - V2 devra auditer les resets/admin mutations, expirer les checkpoints stale, et ne jamais exposer secrets, sessions, screenshots bruts ou XML brut.
+- **V2 DB persistée (plus tard)** : prévoir compatibilité dashboard web,
+  future BotApp, multi-admin, audit/reset manuel, stale expiration et
+  synchronisation multi-device/multi-clone. Ne pas intégrer cette persistance
+  dans le commit V1 runtime.
+
+## Décisions de sécurité follow
+
+- Aucun bypass des guards critiques : private gate, social memory, screen guard,
+  follow proof, follow verify.
+- Aucun faux Like / faux completed : un profil `No posts yet` prouvé doit être
+  un succès follow+mute avec Like skipped métier, sans `post_likes_persisted`.
+- Aucun tap magique ni coordonnée fixe ajoutée dans ces optimisations.
+- Les candidats inconnus restent dans le flow normal : pas de fast-skip d'un
+  profil non vu/rejeté/followé par le ledger runtime.
 
 ## Ce qui fonctionne
 

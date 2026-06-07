@@ -23,6 +23,21 @@ Le projet construit une Phone Farm Instagram production-grade :
 
 Checkpoints recents valides :
 
+- CT Checkpoint / Fast-Skip V1 runtime-only : ledger par CT/source dans le
+  worker Python pour fenêtre visible, candidats vus/rejetés/private/followés,
+  fast-skip et observabilité. Validé fonctionnellement sur runs 4/2/2 récents,
+  mais sans persistance cross-run.
+- Private skip fast path : validé sur profils privés pendant les runs follow ;
+  aucun follow tap sur privé, retour CT OK, continuation vers candidat suivant.
+- Optimisation intra-CT post-return : le skip de revalidation followers-list et
+  de screenshot post-return est autorisé uniquement avec preuve fraîche de
+  `post_follow_return_ct_success`, return method safe, même CT/source,
+  account/run identiques, scroll identique, surface followers committed et
+  visible window checkpoint présente.
+- No Posts précoce : le check visuel coûteux est gated. Il ne doit pas tourner
+  sur profil normal avec surface profil/grille confirmée sans hint No Posts ;
+  il peut accélérer le skip Like seulement si des signaux No Posts forts ou
+  ambigus le justifient.
 - Entry 2E-5A : classifier/provisioner skeleton;
 - Entry 2E-5B : login UI probe;
 - Entry 2E-5C : isolated login probe CLI;
@@ -48,6 +63,25 @@ Checkpoints recents valides :
 Le runtime principal n'est pas encore branche au login/provisioning complet :
 pas de vrai login, pas de password tap, pas de runner hook, pas de run device
 provisioning.
+
+### Follow runtime safety decisions
+
+- Les optimisations follow ne bypassent pas private gate, social memory, screen
+  guard, follow proof ni follow verify.
+- Les profils `No posts yet` prouves sont traites comme follow+mute OK avec
+  Like skipped metier ; aucun faux `post_likes_persisted`, aucun faux
+  completed.
+- Les candidats inconnus ne sont pas fast-skippés : le checkpoint V1 ne saute
+  que les profils connus runtime (vus, rejetés/private, followés ou skipped).
+- Les screenshots/XML bruts et secrets restent hors persistance checkpoint.
+
+### V2 checkpoint persisted future
+
+La V2 DB persistée est hors scope du commit V1 mais obligatoire pour la suite :
+dashboard web, future BotApp, multi-admin, synchronisation multi-device /
+multi-clone, audit/reset manuel, expiration stale et mutation contrôlée par
+opérateur. Elle devra rester dashboard-safe et ne pas exposer secrets, sessions,
+screenshots bruts ni XML brut.
 
 ## 3. Checkpoints SHA / Tags Recents
 

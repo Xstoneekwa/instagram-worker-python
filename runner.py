@@ -1134,6 +1134,17 @@ def _target_rejection_summary_payload(
 
 _CT_CHECKPOINT_FRESH_MS = 20 * 60 * 1000.0
 _CT_CHECKPOINT_SCROLL_RESUME_OFFSET = 1
+_CT_CHECKPOINT_POST_RETURN_REUSE_MS = 60_000.0
+_CT_CHECKPOINT_POST_RETURN_SAFE_METHODS = frozenset(
+    (
+        "compact_safe_back_then_list",
+        "compact_foreign_profile_back_visual_followers_list_confirmed",
+        "compact_foreign_profile_fallback_then_list",
+        "foreign_profile_one_safe_back_then_list",
+        "compact_initial_list_confirmed",
+        "already_on_followers_list",
+    )
+)
 
 
 def _ct_checkpoint_utc_now_iso() -> str:
@@ -1207,6 +1218,16 @@ def _ct_checkpoint_age_ms(checkpoint: dict[str, Any]) -> float:
     return round(age_s * 1000.0, 2)
 
 
+def _ct_checkpoint_last_scroll_index(checkpoint: dict[str, Any]) -> int:
+    raw = checkpoint.get("last_scroll_index")
+    if raw is None:
+        return -1
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return -1
+
+
 def _ct_checkpoint_common_fields(checkpoint: dict[str, Any]) -> dict[str, Any]:
     rejected_map = dict(checkpoint.get("last_rejected_candidate_usernames") or {})
     return {
@@ -1215,7 +1236,7 @@ def _ct_checkpoint_common_fields(checkpoint: dict[str, Any]) -> dict[str, Any]:
         "account_id": str(checkpoint.get("account_id") or "") or None,
         "run_id": str(checkpoint.get("run_id") or "") or None,
         "last_run_id": str(checkpoint.get("last_run_id") or checkpoint.get("run_id") or "") or None,
-        "scroll_index": int(checkpoint.get("last_scroll_index") or -1),
+        "scroll_index": _ct_checkpoint_last_scroll_index(checkpoint),
         "seen_count": int(checkpoint.get("seen_count") or 0),
         "rejected_count": int(checkpoint.get("rejected_count") or 0),
         "private_rejected_count": int(checkpoint.get("private_rejected_count") or 0),
@@ -1393,6 +1414,143 @@ def _ct_checkpoint_update_visible_window(
         loop_iteration=int(loop_iteration),
         visible_count=len(usernames),
         sample_usernames=usernames[:8],
+    )
+
+
+def _ct_checkpoint_should_reuse_post_return_visible_window(
+    checkpoint: dict[str, Any],
+    *,
+    source_username: str,
+    account_id: str,
+    run_id: str,
+    scroll_used: int,
+    visual_loop_state: dict[str, Any],
+) -> tuple[bool, str]:
+    if not _ct_checkpoint_enabled():
+        return False, "checkpoint_disabled"
+    if not bool(visual_loop_state.get("post_return_picker_refresh_pending")):
+        return False, "post_return_proof_missing"
+    ok, reject_reason = _ct_checkpoint_validate(
+        checkpoint,
+        source_username=source_username,
+        account_id=account_id,
+        run_id=run_id,
+    )
+    if not ok:
+        return False, reject_reason
+    if not followers_session_list_committed_open_for(source_username):
+        return False, "followers_surface_not_committed"
+    meta = visual_loop_state.get("post_return_picker_refresh_meta")
+    if not isinstance(meta, dict):
+        return False, "picker_refresh_meta_missing"
+    meta_source = _norm_ig_handle(str(meta.get("source_username") or ""))
+    want_source = _norm_ig_handle(str(source_username or ""))
+    if meta_source and want_source and meta_source != want_source:
+        return False, "post_return_source_mismatch"
+    return_method = str(meta.get("return_method") or "")
+    if return_method not in _CT_CHECKPOINT_POST_RETURN_SAFE_METHODS:
+        return False, "return_method_not_reusable"
+    visible = [
+        _norm_ig_handle(str(u))
+        for u in (checkpoint.get("last_visible_usernames") or [])
+        if _norm_ig_handle(str(u))
+    ]
+    if not visible:
+        return False, "checkpoint_visible_window_missing"
+    if _ct_checkpoint_last_scroll_index(checkpoint) != int(scroll_used):
+        return False, "checkpoint_scroll_index_mismatch"
+    checkpoint_age_ms = _ct_checkpoint_age_ms(checkpoint)
+    proof_at = float(meta.get("post_return_proof_at_mono") or 0.0)
+    proof_age_ms = (
+        round((time.perf_counter() - proof_at) * 1000.0, 2) if proof_at > 0.0 else -1.0
+    )
+    proof_fresh = 0.0 <= proof_age_ms <= 15_000.0
+    if checkpoint_age_ms > _CT_CHECKPOINT_POST_RETURN_REUSE_MS and not proof_fresh:
+        return False, "checkpoint_visible_window_stale"
+    return True, "checkpoint_visible_window_fresh"
+
+
+def _ct_checkpoint_should_skip_post_return_picker_refresh(
+    checkpoint: dict[str, Any],
+    *,
+    source_username: str,
+    account_id: str,
+    run_id: str,
+    scroll_used: int,
+    visual_loop_state: dict[str, Any],
+) -> tuple[bool, str]:
+    return _ct_checkpoint_should_reuse_post_return_visible_window(
+        checkpoint,
+        source_username=source_username,
+        account_id=account_id,
+        run_id=run_id,
+        scroll_used=scroll_used,
+        visual_loop_state=visual_loop_state,
+    )
+
+
+def _ct_checkpoint_should_skip_post_return_list_revalidation(
+    checkpoint: dict[str, Any],
+    *,
+    source_username: str,
+    account_id: str,
+    run_id: str,
+    scroll_used: int,
+    visual_loop_state: dict[str, Any],
+    reuse_det: dict[str, Any] | None,
+    committed_age_ms: float,
+) -> tuple[bool, str]:
+    ok, reason = _ct_checkpoint_should_reuse_post_return_visible_window(
+        checkpoint,
+        source_username=source_username,
+        account_id=account_id,
+        run_id=run_id,
+        scroll_used=scroll_used,
+        visual_loop_state=visual_loop_state,
+    )
+    if not ok:
+        return False, reason
+    if not isinstance(reuse_det, dict) or not reuse_det:
+        return False, "snapshot_reuse_det_missing"
+    if not bool(reuse_det.get("is_followers_list")):
+        return False, "snapshot_not_followers_list"
+    if str(reuse_det.get("open_detection_method") or "") != "own_unified_follow_list":
+        return False, "snapshot_open_method_not_reusable"
+    try:
+        candidate_count = int(reuse_det.get("candidate_username_count") or 0)
+    except Exception:
+        candidate_count = 0
+    if candidate_count <= 0:
+        return False, "snapshot_candidate_count_zero"
+    if float(committed_age_ms) < 0.0 or float(committed_age_ms) > 8_500.0:
+        return False, "committed_surface_proof_stale"
+    return True, "checkpoint_visible_window_fresh"
+
+
+def _ct_checkpoint_emit_post_return_list_revalidation_skipped(
+    checkpoint: dict[str, Any],
+    *,
+    source_username: str,
+    reason: str,
+    scroll_used: int,
+    committed_age_ms: float,
+    open_detection_method: str,
+) -> None:
+    log(
+        "info",
+        "followers_post_return_list_revalidation_skipped_checkpoint_fresh",
+        source_profile_username=source_username,
+        reason=str(reason or "checkpoint_visible_window_fresh"),
+        scroll_index=int(scroll_used),
+        checkpoint_age_ms=_ct_checkpoint_age_ms(checkpoint),
+        committed_age_ms=float(committed_age_ms),
+        visible_count=len(checkpoint.get("last_visible_usernames") or []),
+        seen_count=int(checkpoint.get("seen_count") or 0),
+        rejected_count=int(checkpoint.get("rejected_count") or 0),
+        followed_count=int(checkpoint.get("followed_count") or 0),
+        open_detection_method=str(open_detection_method or ""),
+        safe_to_recollect=True,
+        fallback_used=False,
     )
 
 
@@ -2324,6 +2482,8 @@ def _visual_candidate_already_connected_fast_return(
                     "follower_username": str(follower_username or ""),
                     "return_method": str(how or ""),
                     "phase": "already_connected_fast_return",
+                    "source_username": str(source_profile_username or ""),
+                    "post_return_proof_at_mono": time.perf_counter(),
                 }
                 log(
                     "info",
@@ -10976,6 +11136,22 @@ def _run_followers_list_engine_session(
                     fallback_used=True,
                     duration_ms=round((time.perf_counter() - _snapshot_reuse_t0) * 1000.0, 2),
                 )
+            _skip_post_return_list_revalidation = False
+            _skip_post_return_list_revalidation_reason = ""
+            if not _snapshot_reuse_used:
+                (
+                    _skip_post_return_list_revalidation,
+                    _skip_post_return_list_revalidation_reason,
+                ) = _ct_checkpoint_should_skip_post_return_list_revalidation(
+                    ct_checkpoint,
+                    source_username=source_profile_username,
+                    account_id=str(account_id or ""),
+                    run_id=str(run_id or ""),
+                    scroll_used=int(scroll_used),
+                    visual_loop_state=visual_loop_state,
+                    reuse_det=_reuse_det if isinstance(_reuse_det, dict) else None,
+                    committed_age_ms=float(_committed_age_loop_early),
+                )
             _skip_loop_detect, _skip_loop_detect_meta = should_skip_committed_loop_top_detect(
                 open_list_meta,
                 visual_loop_state,
@@ -10985,6 +11161,37 @@ def _run_followers_list_engine_session(
             )
             if _snapshot_reuse_used:
                 pass
+            elif _skip_post_return_list_revalidation:
+                det = _followers_det_skip_redetect_after_visual_bypass(
+                    _reuse_det if isinstance(_reuse_det, dict) else {},
+                    session_vf_detail_for_loop,
+                    str(
+                        (_reuse_det or {}).get("open_detection_method")
+                        if isinstance(_reuse_det, dict)
+                        else open_detection_method
+                    ),
+                )
+                det["is_followers_list"] = True
+                det_xml_last_for_bypass = det
+                followers_xml_detect_skipped_this_iter = True
+                try:
+                    _det_odm_skip = str(det.get("open_detection_method") or open_detection_method or "")
+                    if _det_odm_skip.strip():
+                        open_detection_method = _det_odm_skip
+                        _followers_set_last_open_detection_method(open_detection_method)
+                except Exception:
+                    pass
+                try:
+                    _ct_checkpoint_emit_post_return_list_revalidation_skipped(
+                        ct_checkpoint,
+                        source_username=source_profile_username,
+                        reason=_skip_post_return_list_revalidation_reason,
+                        scroll_used=int(scroll_used),
+                        committed_age_ms=float(_committed_age_loop_early),
+                        open_detection_method=str(det.get("open_detection_method") or ""),
+                    )
+                except Exception:
+                    pass
             elif _skip_loop_detect:
                 det = _followers_det_skip_redetect_after_visual_bypass(
                     det_xml_last_for_bypass if isinstance(det_xml_last_for_bypass, dict) else {},
@@ -11263,12 +11470,45 @@ def _run_followers_list_engine_session(
                         reason="post_return_picker_refresh_blocked_rotation_pending",
                     )
                 else:
-                    _followers_try_post_return_picker_injection_refresh(
-                        d,
-                        open_list_meta,
-                        visual_loop_state=visual_loop_state,
-                        source_profile_username=source_profile_username,
+                    _skip_picker_refresh, _skip_picker_refresh_reason = (
+                        _ct_checkpoint_should_skip_post_return_picker_refresh(
+                            ct_checkpoint,
+                            source_username=source_profile_username,
+                            account_id=str(account_id or ""),
+                            run_id=str(run_id or ""),
+                            scroll_used=int(scroll_used),
+                            visual_loop_state=visual_loop_state,
+                        )
                     )
+                    if _skip_picker_refresh:
+                        visual_loop_state["post_return_picker_refresh_pending"] = False
+                        visual_loop_state.pop("post_return_picker_refresh_meta", None)
+                        try:
+                            log(
+                                "info",
+                                "followers_post_return_picker_refresh_skipped_checkpoint_fresh",
+                                source_profile_username=source_profile_username,
+                                reason=_skip_picker_refresh_reason,
+                                scroll_index=int(scroll_used),
+                                checkpoint_age_ms=_ct_checkpoint_age_ms(ct_checkpoint),
+                                visible_count=len(
+                                    ct_checkpoint.get("last_visible_usernames") or []
+                                ),
+                                seen_count=int(ct_checkpoint.get("seen_count") or 0),
+                                rejected_count=int(ct_checkpoint.get("rejected_count") or 0),
+                                followed_count=int(ct_checkpoint.get("followed_count") or 0),
+                                safe_to_recollect=True,
+                                fallback_used=False,
+                            )
+                        except Exception:
+                            pass
+                    else:
+                        _followers_try_post_return_picker_injection_refresh(
+                            d,
+                            open_list_meta,
+                            visual_loop_state=visual_loop_state,
+                            source_profile_username=source_profile_username,
+                        )
 
             if not det.get("is_followers_list"):
                 if followers_session_list_committed_open_for(source_profile_username):
@@ -16861,6 +17101,8 @@ def _run_followers_list_engine_session(
                             "visual_candidate_id": _pf_log_vcid,
                             "follower_username": str(follower_un or ""),
                             "return_method": str(how or ""),
+                            "source_username": str(source_profile_username or ""),
+                            "post_return_proof_at_mono": time.perf_counter(),
                         }
                         try:
                             log(

@@ -4,6 +4,73 @@ Ce registre fige les decisions de la sequence d'optimisation
 follow / mute / like / return CT / accounting. Il ne decrit aucun patch runtime
 nouveau.
 
+## Checkpoint: CT Checkpoint / Fast-Skip V1 runtime
+
+- Scope: ledger runtime-only par CT/source dans `runner.py`, avec fenêtre visible,
+  candidats vus, rejetés/private, followés, `last_scroll_index`, raisons stables
+  et champs proches de la future V2 DB.
+- Objectif: accélérer la sélection du candidat suivant dans une même session et
+  rendre les décisions observables sans persistance DB.
+- Validation 4/2/2: runs contrôlés `51720464`, `3521ba8f`, `34ae4947` et suites
+  suivantes. Les runs ont validé follow/mute/like ou skip métier, return CT,
+  private skip fast path et checkpoint updates/reuse.
+- Limite V1: runtime-only. Un CT déjà exploité dans un run précédent (ex.
+  `pumptracktour`) n'est pas connu au démarrage suivant ; la vraie validation
+  cross-run/dense attend la V2 DB persistée.
+
+Observabilité attendue:
+
+- `follow_target_checkpoint_created`
+- `follow_target_checkpoint_updated`
+- `follow_target_checkpoint_reused`
+- `follow_target_fast_skip_started`
+- `follow_target_fast_skip_candidate_seen`
+- `follow_target_fast_skip_candidate_rejected`
+- `follow_target_scroll_resume_planned`
+- `follow_target_scroll_resume_applied`
+- `followers_post_return_list_revalidation_skipped_checkpoint_fresh`
+- `followers_post_return_picker_refresh_skipped_checkpoint_fresh`
+
+Sécurité:
+
+- aucun bypass private gate, social memory, screen guard, follow proof,
+  follow verify;
+- aucun fast-skip de candidat inconnu;
+- aucun private follow;
+- fallback revalidation lourde + screenshot conservé si preuve manquante,
+  mismatch CT/source, scroll mismatch, return method ambiguë, surface non
+  committed ou recovery incertaine.
+
+## Checkpoint: No Posts early visual gate
+
+- Problème observé: le fallback visuel No Posts précoce coûtait environ 5.7 à
+  6.1 secondes par profil normal quand il tournait systématiquement après tier1
+  négatif.
+- Correction: gate strict avant `visual_profile_has_no_posts(...,
+  include_visual_fallback=True)`. Sur profil normal avec surface profil + grille
+  confirmées et sans hint No Posts, log
+  `visual_profile_no_posts_early_visual_check_skipped` et poursuite du flow
+  normal.
+- Le check précoce peut tourner seulement avec signaux forts ou ambigus :
+  grid/tabs absents ou incohérents, hints No Posts faibles, surface profil sans
+  cellules candidates visibles, ou tier1 inconclusive avec suspicion No Posts.
+- Si No Posts est prouvé: skip Like rapide, follow+mute restent valides, aucun
+  faux `post_likes_persisted`.
+- Si ambigu/faux: fallback existant conservé ; pas de faux completed ni faux
+  skip Like.
+
+## Future: CT Checkpoint V2 DB persisted
+
+- Hors scope du commit V1.
+- Objectifs futurs: dashboard web, future BotApp, multi-admin, audit/reset,
+  stale expiration, synchronisation multi-device/multi-clone et historique des
+  candidats par CT/source.
+- Contraintes: ne pas exposer secrets, sessions, screenshots bruts ou XML brut ;
+  mutations admin auditées ; reset contrôlé ; compatibilité avec les champs V1
+  (`account_id`, `source_target_id`, `source_username`, `last_run_id`,
+  `last_scroll_index`, candidates seen/rejected/private/followed,
+  `checkpoint_reason`, `checkpoint_status`, `stale_after`, timestamps).
+
 ## Checkpoint: return CT detection reuse
 
 - Commit: `84c037f`

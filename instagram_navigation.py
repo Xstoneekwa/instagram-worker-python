@@ -43330,6 +43330,97 @@ def run_post_follow_post_likes_phase(
                 pass
             return no_posts_visual
 
+        def _no_posts_weak_hint_present(check: dict[str, Any]) -> bool:
+            method = str(check.get("detection_method") or "").strip().lower()
+            if not method or method in ("none", "not_detected"):
+                return False
+            return "no_post" in method or "no posts" in method or "0_posts" in method
+
+        def _early_visual_no_posts_gate(
+            *,
+            surface_profile_ok: bool,
+            grid_tab_visible: bool,
+            tier1_check: dict[str, Any],
+            surface_precheck: dict[str, Any],
+        ) -> tuple[bool, str, dict[str, bool]]:
+            post_cells_visible = bool(
+                surface_precheck.get("post_cells_visible")
+                or surface_precheck.get("post_grid_visible")
+                or surface_precheck.get("grid_cells_visible")
+            )
+            no_posts_hint_present = _no_posts_weak_hint_present(tier1_check)
+            fields = {
+                "grid_tab_visible": bool(grid_tab_visible),
+                "profile_tabs_visible": bool(grid_tab_visible),
+                "post_cells_visible": bool(post_cells_visible),
+                "no_posts_hint_present": bool(no_posts_hint_present),
+            }
+            if post_cells_visible:
+                return False, "posts_visible", fields
+            if bool(surface_profile_ok) and bool(grid_tab_visible) and not no_posts_hint_present:
+                return False, "normal_grid_surface_confirmed", fields
+            if not bool(surface_profile_ok):
+                return False, "profile_surface_not_confirmed", fields
+            if no_posts_hint_present:
+                return True, "no_posts_hint_present", fields
+            if not bool(grid_tab_visible):
+                return True, "grid_tabs_absent_or_incoherent", fields
+            return False, "normal_grid_surface_confirmed", fields
+
+        def _run_early_visual_no_posts_check(
+            *,
+            gate_reason: str,
+            gate_fields: dict[str, bool],
+        ) -> dict[str, Any]:
+            t_early = time.perf_counter()
+            try:
+                log(
+                    "info",
+                    "visual_profile_no_posts_early_visual_check_started",
+                    source_profile_username=src,
+                    follower_username=cand,
+                    visual_candidate_id=vcid,
+                    reason=str(gate_reason or ""),
+                    **gate_fields,
+                )
+            except Exception:
+                pass
+            out_early = visual_profile_has_no_posts(
+                d,
+                source_profile_username=src,
+                include_visual_fallback=True,
+            )
+            detected = bool(out_early.get("no_posts_detected"))
+            try:
+                log(
+                    "info",
+                    "visual_profile_no_posts_early_visual_check_completed",
+                    source_profile_username=src,
+                    follower_username=cand,
+                    visual_candidate_id=vcid,
+                    reason=str(gate_reason or ""),
+                    duration_ms=round((time.perf_counter() - t_early) * 1000.0, 2),
+                    no_posts_detected=detected,
+                    detection_method=out_early.get("detection_method"),
+                    confidence=round(float(out_early.get("confidence") or 0.0), 4),
+                    **gate_fields,
+                )
+                if not detected:
+                    log(
+                        "info",
+                        "visual_profile_no_posts_early_visual_check_rejected",
+                        source_profile_username=src,
+                        follower_username=cand,
+                        visual_candidate_id=vcid,
+                        reason="no_posts_not_confirmed",
+                        detection_method=out_early.get("detection_method"),
+                        confidence=round(float(out_early.get("confidence") or 0.0), 4),
+                        **gate_fields,
+                    )
+            except Exception:
+                pass
+            return out_early
+
         surface_profile_ok = bool(
             surface_precheck.get("profile_candidate_visible")
         ) and not bool(surface_precheck.get("followers_list_visible"))
@@ -43477,6 +43568,32 @@ def run_post_follow_post_likes_phase(
                 pass
         if no_posts_check.get("no_posts_detected") is True:
             return _skip_no_posts(no_posts_check)
+        _early_ok, _early_reason, _early_fields = _early_visual_no_posts_gate(
+            surface_profile_ok=surface_profile_ok,
+            grid_tab_visible=grid_tab_visible,
+            tier1_check=tier1_check,
+            surface_precheck=surface_precheck,
+        )
+        if _early_ok:
+            no_posts_visual_early = _run_early_visual_no_posts_check(
+                gate_reason=_early_reason,
+                gate_fields=_early_fields,
+            )
+            if no_posts_visual_early.get("no_posts_detected") is True:
+                return _skip_no_posts(no_posts_visual_early)
+        else:
+            try:
+                log(
+                    "info",
+                    "visual_profile_no_posts_early_visual_check_skipped",
+                    source_profile_username=src,
+                    follower_username=cand,
+                    visual_candidate_id=vcid,
+                    reason=str(_early_reason or "normal_grid_surface_confirmed"),
+                    **_early_fields,
+                )
+            except Exception:
+                pass
         try:
             log(
                 "info",
