@@ -59,6 +59,23 @@ Sécurité:
 - Si ambigu/faux: fallback existant conservé ; pas de faux completed ni faux
   skip Like.
 
+## Checkpoint: legacy-safe scroll-first when tabs bottom unknown
+
+- Problème observé: sur profil normal, `profile_tabs_bottom_unknown` pouvait
+  lancer une tentative legacy-safe avant scroll, échouer en
+  `legacy_visual_top_left_candidate_ambiguous`, puis scroller et réussir. Coût
+  observé environ 4.35s sur `provalux.fr`.
+- Correction: traiter `profile_tabs_bottom_unknown` comme signal scroll-first :
+  log `post_follow_like_legacy_safe_pre_scroll_skipped`, log
+  `post_follow_like_scroll_first_for_unknown_tabs`, reveal/scroll safe existant,
+  puis legacy-safe normal après scroll.
+- Guards conservés: No Posts tier1/early gate, pre-reveal guard, legacy-safe,
+  viewer proof, already-liked et Like verify.
+- Validation finale `f2eb4d2b`: le pattern n'est pas réapparu ; les profils
+  normaux ont suivi `tabs_too_low_before_legacy_safe` avec scroll direct, viewer
+  proof OK et Like verify OK. Aucun fallback visuel No Posts coûteux sur profil
+  normal.
+
 ## Future: CT Checkpoint V2 DB persisted
 
 - Hors scope du commit V1.
@@ -70,6 +87,8 @@ Sécurité:
   (`account_id`, `source_target_id`, `source_username`, `last_run_id`,
   `last_scroll_index`, candidates seen/rejected/private/followed,
   `checkpoint_reason`, `checkpoint_status`, `stale_after`, timestamps).
+- Décision actuelle: ne pas migrer en DB tant que les cas CT dense, fast-skip
+  utile, scroll resume réel et contrat dashboard/BotApp ne sont pas validés.
 
 ## Checkpoint: return CT detection reuse
 

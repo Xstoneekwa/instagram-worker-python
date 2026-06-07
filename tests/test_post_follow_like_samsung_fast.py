@@ -1733,6 +1733,112 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
             include_visual_fallback=True,
         )
 
+    def test_pre_reveal_unknown_tabs_scrolls_before_legacy_safe(self) -> None:
+        device = mock.MagicMock()
+        device.window_size.return_value = (1080, 2340)
+        contract_ctx = mock.MagicMock()
+        contract_ctx.current_state.value = "sheet_dismissed"
+        order: list[str] = []
+        logs: list[tuple[str, dict[str, object]]] = []
+
+        def _fake_log(_level: str, event: str, **kw: object) -> None:
+            order.append(str(event))
+            logs.append((str(event), dict(kw)))
+
+        def _legacy_open(*_a: object, **_kw: object) -> dict[str, object]:
+            order.append("legacy_open")
+            return {
+                "ok": True,
+                "post_detected": True,
+                "failure_reason": "",
+                "open_strategy": "vision_open_top_left_legacy_safe",
+                "tap_x": 180,
+                "tap_y": 1056,
+                "detect_reason": "like_unlike_ui",
+                "viewer_detect_path": "phase_a2_exact_like_desc_fast",
+                "likes_perf_post_open": {},
+            }
+
+        def _pre_reveal_swipe(*_a: object, **_kw: object) -> dict[str, object]:
+            order.append("pre_reveal_swipe")
+            return {"swipe_ok": True, "y_start": 1684, "y_end": 936, "scroll_distance_px": 748}
+
+        with mock.patch.object(nav.config, "POST_FOLLOW_POST_LIKES_ENABLED", True, create=True), mock.patch.object(
+            nav.config, "ENABLE_REAL_VISUAL_POST_LIKE", True, create=True
+        ), mock.patch.object(nav.config, "POST_FOLLOW_POST_LIKES_PERCENTAGE", 100, create=True), mock.patch.object(
+            nav.config, "POST_FOLLOW_POST_LIKES_COUNT_RANGE", "1-1", create=True
+        ), mock.patch.object(nav.config, "POST_FOLLOW_TOTAL_LIKES_LIMIT", 150, create=True), mock.patch.object(
+            nav, "read_current_profile_username_for_follow_gate", return_value="cand"
+        ), mock.patch(
+            "navigation_engine.observe_instagram_state",
+            return_value={"state": "CANDIDATE_PROFILE", "confidence": 0.9},
+        ), mock.patch.object(
+            nav, "_post_follow_like_precheck_mute_sheet", return_value={"skip_like": False, "precheck_ms": 1.0}
+        ), mock.patch.object(
+            nav, "_post_follow_like_precheck_surface",
+            return_value={"skip_like": False, "precheck_ms": 1.0, "profile_candidate_visible": True, "grid_tab_visible": True},
+        ), mock.patch(
+            "follow_state_contract.evaluate_like_precheck_contract",
+            return_value=(contract_ctx, True, ""),
+        ), mock.patch.object(
+            nav, "_visual_profile_no_posts_tier1_direct_check",
+            return_value={"no_posts_detected": False, "detection_method": "none", "confidence": 0.0},
+        ), mock.patch.object(
+            nav, "_followers_profile_tabs_bottom_y_px", return_value=(None, "")
+        ), mock.patch.object(
+            nav, "_post_follow_likes_profile_scroll_swipe", side_effect=_pre_reveal_swipe
+        ) as reveal_swipe, mock.patch.object(
+            nav, "_post_follow_likes_open_top_left_legacy_visual_safe", side_effect=_legacy_open
+        ) as legacy_open, mock.patch.object(
+            nav, "visual_post_already_liked",
+            return_value={"already_liked": False, "detection_method": "hierarchy_like_hint"},
+        ), mock.patch.object(
+            nav, "visual_like_open_post",
+            return_value={"ok": True, "already_liked": False, "real_tap_sent": True, "likes_perf_like": {}},
+        ), mock.patch.object(
+            nav, "visual_verify_post_liked",
+            return_value={"liked_verified": True, "verification_method": "visual", "verify_attempts_count": 1},
+        ), mock.patch.object(
+            nav, "visual_return_to_profile_from_post", return_value={"ok": True}
+        ), mock.patch.object(nav, "log", side_effect=_fake_log), mock.patch.object(nav, "time") as tmock:
+            tmock.perf_counter = time.perf_counter
+            tmock.time = time.time
+            tmock.sleep = lambda *_a, **_k: None
+            out = nav.run_post_follow_post_likes_phase(
+                device,
+                pkg="com.instagram.android",
+                source_profile_username="ct",
+                follower_username="cand",
+                visual_candidate_id="vc-1",
+                follow_success_verified=True,
+                follow_state_after="following",
+                skipped_tap=False,
+            )
+
+        self.assertEqual(out.get("phase_outcome"), "success")
+        legacy_open.assert_called_once()
+        reveal_swipe.assert_called_once()
+        self.assertIn("post_follow_like_legacy_safe_pre_scroll_skipped", order)
+        self.assertIn("post_follow_like_scroll_first_for_unknown_tabs", order)
+        self.assertLess(order.index("post_follow_like_legacy_safe_pre_scroll_skipped"), order.index("pre_reveal_swipe"))
+        self.assertLess(order.index("pre_reveal_swipe"), order.index("legacy_open"))
+        legacy_started_checkpoints = [
+            kw
+            for event, kw in logs
+            if event == "post_like_surface_to_scroll_gap_checkpoint"
+            and kw.get("checkpoint") == "legacy_safe_started"
+        ]
+        self.assertFalse(legacy_started_checkpoints)
+        self.assertNotIn("legacy_safe_first_failed_to_retry_started", order)
+        completed = [kw for event, kw in logs if event == "post_follow_like_pre_reveal_guard_completed"]
+        self.assertTrue(completed)
+        self.assertFalse(completed[-1].get("pre_reveal_used"))
+        self.assertEqual(completed[-1].get("reason"), "profile_tabs_bottom_unknown")
+        scroll_attempts = [kw for event, kw in logs if event == "like_grid_reveal_scroll_attempted"]
+        self.assertTrue(scroll_attempts)
+        self.assertEqual(scroll_attempts[-1].get("scroll_reason"), "profile_tabs_bottom_unknown_scroll_first")
+        self.assertIn("legacy_safe_retry_after_reveal_completed", order)
+
     def test_pre_reveal_tabs_too_low_runs_before_first_legacy_safe(self) -> None:
         device = mock.MagicMock()
         device.window_size.return_value = (1080, 2340)

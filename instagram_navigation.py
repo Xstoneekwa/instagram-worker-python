@@ -43865,47 +43865,82 @@ def run_post_follow_post_likes_phase(
                 )
             except Exception:
                 pass
-        t_open_legacy_first = time.perf_counter()
-        try:
-            log(
-                "info",
-                "post_like_surface_to_scroll_gap_checkpoint",
-                visual_candidate_id=vcid,
-                source_profile_username=src,
-                follower_username=cand,
-                post_index=post_idx,
-                checkpoint="legacy_safe_started",
-                elapsed_ms=round((time.perf_counter() - t_surface_to_scroll) * 1000.0, 2),
-                pre_reveal_used=bool(pre_reveal_out.get("pre_reveal_used")),
-            )
-        except Exception:
-            pass
-        legacy_first_out = _post_follow_likes_open_top_left_legacy_visual_safe(
-            d,
-            pkg=pkg,
-            source_profile_username=src,
-            expected_follower_username=cand,
-            visual_candidate_id=vcid,
-            post_index=post_idx,
-            likes_perf_phase_t0=_likes_perf_ctx.get("phase_t0"),
+        scroll_first_unknown_tabs = (
+            str(pre_reveal_out.get("reason") or "") == "profile_tabs_bottom_unknown"
+            and not bool(pre_reveal_out.get("pre_reveal_used"))
         )
-        try:
-            log(
-                "info",
-                "post_like_legacy_safe_candidate_timing",
-                visual_candidate_id=vcid,
+        t_open_legacy_first = time.perf_counter()
+        if scroll_first_unknown_tabs:
+            legacy_first_out = {
+                "ok": False,
+                "post_detected": False,
+                "failure_reason": "profile_tabs_bottom_unknown",
+            }
+            try:
+                log(
+                    "info",
+                    "post_follow_like_legacy_safe_pre_scroll_skipped",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    follower_username=cand,
+                    post_index=post_idx,
+                    reason="profile_tabs_bottom_unknown",
+                    pre_reveal_used=False,
+                    screen_height=pre_reveal_out.get("screen_height"),
+                )
+                log(
+                    "info",
+                    "post_follow_like_scroll_first_for_unknown_tabs",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    follower_username=cand,
+                    post_index=post_idx,
+                    reason="profile_tabs_bottom_unknown",
+                    scroll_profile="reveal_moderate",
+                )
+            except Exception:
+                pass
+        else:
+            try:
+                log(
+                    "info",
+                    "post_like_surface_to_scroll_gap_checkpoint",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    follower_username=cand,
+                    post_index=post_idx,
+                    checkpoint="legacy_safe_started",
+                    elapsed_ms=round((time.perf_counter() - t_surface_to_scroll) * 1000.0, 2),
+                    pre_reveal_used=bool(pre_reveal_out.get("pre_reveal_used")),
+                )
+            except Exception:
+                pass
+            legacy_first_out = _post_follow_likes_open_top_left_legacy_visual_safe(
+                d,
+                pkg=pkg,
                 source_profile_username=src,
-                follower_username=cand,
+                expected_follower_username=cand,
+                visual_candidate_id=vcid,
                 post_index=post_idx,
-                attempt="first",
-                duration_ms=round((time.perf_counter() - t_open_legacy_first) * 1000.0, 2),
-                ok=bool(legacy_first_out.get("ok")),
-                post_detected=bool(legacy_first_out.get("post_detected")),
-                failure_reason=str(legacy_first_out.get("failure_reason") or ""),
-                viewer_detect_path=legacy_first_out.get("viewer_detect_path"),
+                likes_perf_phase_t0=_likes_perf_ctx.get("phase_t0"),
             )
-        except Exception:
-            pass
+            try:
+                log(
+                    "info",
+                    "post_like_legacy_safe_candidate_timing",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    follower_username=cand,
+                    post_index=post_idx,
+                    attempt="first",
+                    duration_ms=round((time.perf_counter() - t_open_legacy_first) * 1000.0, 2),
+                    ok=bool(legacy_first_out.get("ok")),
+                    post_detected=bool(legacy_first_out.get("post_detected")),
+                    failure_reason=str(legacy_first_out.get("failure_reason") or ""),
+                    viewer_detect_path=legacy_first_out.get("viewer_detect_path"),
+                )
+            except Exception:
+                pass
         if bool(legacy_first_out.get("ok")) and bool(legacy_first_out.get("post_detected")):
             preopened_out = dict(legacy_first_out)
             timings[f"open_post_{post_idx}_ms"] = round(
@@ -43942,39 +43977,53 @@ def run_post_follow_post_likes_phase(
                 legacy_first_out.get("failure_reason")
                 or "legacy_visual_top_left_failed"
             )
-            if legacy_first_failure_reason == "legacy_visual_top_left_candidate_ambiguous":
+            if legacy_first_failure_reason in {
+                "legacy_visual_top_left_candidate_ambiguous",
+                "profile_tabs_bottom_unknown",
+            }:
                 t_retry_path0 = time.perf_counter()
-                try:
-                    log(
-                        "info",
-                        "legacy_safe_first_failed_to_retry_started",
-                        visual_candidate_id=vcid,
-                        source_profile_username=src,
-                        follower_username=cand,
-                        post_index=post_idx,
-                        failure_reason=legacy_first_failure_reason,
-                        legacy_safe_first_failed_to_retry_started_ms=round(
-                            (time.perf_counter() - t_open_legacy_first) * 1000.0,
-                            2,
-                        ),
-                    )
-                    log(
-                        "info",
-                        "xml_probe_skipped_after_legacy_ambiguous",
-                        visual_candidate_id=vcid,
-                        source_profile_username=src,
-                        follower_username=cand,
-                        post_index=post_idx,
-                        failure_reason=legacy_first_failure_reason,
-                        skipped_probe_path="standard_xml_relaxed_xml_vision_top_left",
-                    )
-                except Exception:
-                    pass
+                if not scroll_first_unknown_tabs:
+                    try:
+                        log(
+                            "info",
+                            "legacy_safe_first_failed_to_retry_started",
+                            visual_candidate_id=vcid,
+                            source_profile_username=src,
+                            follower_username=cand,
+                            post_index=post_idx,
+                            failure_reason=legacy_first_failure_reason,
+                            legacy_safe_first_failed_to_retry_started_ms=round(
+                                (time.perf_counter() - t_open_legacy_first) * 1000.0,
+                                2,
+                            ),
+                        )
+                        log(
+                            "info",
+                            "xml_probe_skipped_after_legacy_ambiguous",
+                            visual_candidate_id=vcid,
+                            source_profile_username=src,
+                            follower_username=cand,
+                            post_index=post_idx,
+                            failure_reason=legacy_first_failure_reason,
+                            skipped_probe_path="standard_xml_relaxed_xml_vision_top_left",
+                        )
+                    except Exception:
+                        pass
                 try:
                     ww_retry, wh_retry = d.window_size()
                 except Exception:
                     ww_retry, wh_retry = 1080, 2340
                 scroll_profile = "reveal_moderate"
+                scroll_reason = (
+                    "profile_tabs_bottom_unknown_scroll_first"
+                    if scroll_first_unknown_tabs
+                    else "legacy_safe_ambiguous_retry_reveal_top_left"
+                )
+                grid_exposure_before = (
+                    "profile_tabs_bottom_unknown"
+                    if scroll_first_unknown_tabs
+                    else "legacy_visual_top_left_ambiguous"
+                )
                 try:
                     log(
                         "info",
@@ -43985,8 +44034,8 @@ def run_post_follow_post_likes_phase(
                         scroll_profile=scroll_profile,
                         scroll_attempt_index=1,
                         max_scrolls=1,
-                        scroll_reason="legacy_safe_ambiguous_retry_reveal_top_left",
-                        grid_exposure_before="legacy_visual_top_left_ambiguous",
+                        scroll_reason=scroll_reason,
+                        grid_exposure_before=grid_exposure_before,
                         top_left_post_visible=False,
                         overscroll_risk=False,
                         **_post_follow_likes_scroll_log_fields(
@@ -44020,11 +44069,11 @@ def run_post_follow_post_likes_phase(
                             2,
                         ),
                         swipe_ok=bool(sw_retry.get("swipe_ok")),
-                        scroll_reason="legacy_safe_ambiguous_retry_reveal_top_left",
+                        scroll_reason=scroll_reason,
                         scroll_start_y=sw_retry.get("y_start"),
                         scroll_end_y=sw_retry.get("y_end"),
                         scroll_distance_px=sw_retry.get("scroll_distance_px"),
-                        grid_exposure_before="legacy_visual_top_left_ambiguous",
+                        grid_exposure_before=grid_exposure_before,
                     )
                     log(
                         "info",
@@ -44033,7 +44082,7 @@ def run_post_follow_post_likes_phase(
                         source_profile_username=src,
                         follower_username=cand,
                         post_index=post_idx,
-                        scroll_reason="legacy_safe_ambiguous_retry_reveal_top_left",
+                        scroll_reason=scroll_reason,
                         scroll_profile=scroll_profile,
                         scroll_elapsed_ms=round(
                             (time.perf_counter() - t_retry_scroll) * 1000.0,

@@ -26,17 +26,26 @@
   plus tourner sur profils normaux avec surface profil + grille confirmées et
   sans hint No Posts. Il est gated par signaux forts/ambigus et garde le
   fallback existant si la preuve est insuffisante.
+- **Validation finale 4/2/2 `f2eb4d2b`** : run visuellement OK sur
+  `bonjour_cluses` puis `messodie_creations`, avec 4 follows, 3 Likes persistés
+  et 1 skip Like métier `No posts yet` (`flamingsonic_8084h`) sans faux
+  `post_likes_persisted`. `run_status_updated=completed`.
+- **Legacy-safe scroll-first** : si le pre-reveal donne
+  `profile_tabs_bottom_unknown`, le flow ne tente plus legacy-safe avant scroll ;
+  il logge `post_follow_like_legacy_safe_pre_scroll_skipped`, fait le reveal
+  safe, puis relance legacy-safe avec viewer proof et Like verify inchangés.
 
 ## CT Checkpoint / Fast-Skip Roadmap
 
 - **V1 runtime-only** : valider vite dans `runner.py` un checkpoint sûr par CT/source, sans migration DB et sans bypass des guards private/social/screen/follow.
-- **V2 DB persistée obligatoire après validation V1** : synchroniser la progression CT entre worker Python, dashboard admin, futur dashboard client, BotApp et autres opérateurs.
+- **V2 DB persistée après validation plus large** : synchroniser la progression CT entre worker Python, dashboard admin, futur dashboard client, BotApp et autres opérateurs.
 - Les champs V1 restent proches de la future table : `account_id`, `source_target_id`, `source_username`, `last_run_id`, `last_scroll_index`, candidats vus/rejetés/private/followés, `checkpoint_reason`, `checkpoint_status`, `stale_after`, `created_at`, `updated_at`.
 - V2 devra auditer les resets/admin mutations, expirer les checkpoints stale, et ne jamais exposer secrets, sessions, screenshots bruts ou XML brut.
 - **V2 DB persistée (plus tard)** : prévoir compatibilité dashboard web,
   future BotApp, multi-admin, audit/reset manuel, stale expiration et
   synchronisation multi-device/multi-clone. Ne pas intégrer cette persistance
-  dans le commit V1 runtime.
+  dans le commit V1 runtime. Attendre plus de cas réels : CT dense avec rejets,
+  fast-skip utile, scroll resume planned/applied et contrat dashboard/BotApp.
 
 ## Décisions de sécurité follow
 

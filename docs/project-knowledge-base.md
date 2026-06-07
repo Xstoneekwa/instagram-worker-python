@@ -38,6 +38,13 @@ Checkpoints recents valides :
   sur profil normal avec surface profil/grille confirmée sans hint No Posts ;
   il peut accélérer le skip Like seulement si des signaux No Posts forts ou
   ambigus le justifient.
+- Legacy-safe Like surface : quand `profile_tabs_bottom_unknown` rend la
+  localisation top-left insuffisamment fiable, le worker doit scroller/reveal
+  avant de tenter legacy-safe, puis conserver viewer proof, already-liked et
+  Like verify. Aucun tap magique ni coordonnée fixe.
+- Validation finale follow V1 `f2eb4d2b` : 4 follows, 3 Likes persistés, 1 skip
+  Like métier `No posts yet`, private skips sans follow tap, checkpoints V1 et
+  post-return skips actifs, `run_status_updated=completed`.
 - Entry 2E-5A : classifier/provisioner skeleton;
 - Entry 2E-5B : login UI probe;
 - Entry 2E-5C : isolated login probe CLI;
@@ -77,11 +84,12 @@ provisioning.
 
 ### V2 checkpoint persisted future
 
-La V2 DB persistée est hors scope du commit V1 mais obligatoire pour la suite :
-dashboard web, future BotApp, multi-admin, synchronisation multi-device /
-multi-clone, audit/reset manuel, expiration stale et mutation contrôlée par
-opérateur. Elle devra rester dashboard-safe et ne pas exposer secrets, sessions,
-screenshots bruts ni XML brut.
+La V2 DB persistée reste hors scope après validation V1 runtime. Elle attend
+plus de cas réels : CT dense avec plusieurs rejets, fast-skip utile, scroll
+resume planned/applied en conditions réelles, validation des champs pour
+dashboard/BotApp, et définition reset/audit/stale expiration. Elle devra rester
+dashboard-safe et ne pas exposer secrets, sessions, screenshots bruts ni XML
+brut.
 
 ## 3. Checkpoints SHA / Tags Recents
 
