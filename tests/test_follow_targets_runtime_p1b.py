@@ -3502,6 +3502,96 @@ class CtCheckpointV1Tests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(reason, "visible_window_has_unknown_candidate")
 
+    def test_visible_window_all_skipped_with_quota_requires_scroll(self) -> None:
+        self.assertTrue(
+            runner._followers_visible_window_exhausted_scroll_required(
+                candidates_len=8,
+                visible_skip_count=8,
+                follows_completed=0,
+                follows_goal_effective=3,
+                scroll_used=0,
+                max_scroll=12,
+            )
+        )
+
+    def test_visible_window_not_all_skipped_does_not_force_scroll(self) -> None:
+        self.assertFalse(
+            runner._followers_visible_window_exhausted_scroll_required(
+                candidates_len=8,
+                visible_skip_count=7,
+                follows_completed=0,
+                follows_goal_effective=3,
+                scroll_used=0,
+                max_scroll=12,
+            )
+        )
+
+    def test_visible_window_scroll_not_required_when_quota_or_scroll_budget_closed(self) -> None:
+        self.assertFalse(
+            runner._followers_visible_window_exhausted_scroll_required(
+                candidates_len=8,
+                visible_skip_count=8,
+                follows_completed=3,
+                follows_goal_effective=3,
+                scroll_used=0,
+                max_scroll=12,
+            )
+        )
+        self.assertFalse(
+            runner._followers_visible_window_exhausted_scroll_required(
+                candidates_len=8,
+                visible_skip_count=8,
+                follows_completed=0,
+                follows_goal_effective=3,
+                scroll_used=12,
+                max_scroll=12,
+            )
+        )
+        self.assertFalse(
+            runner._followers_visible_window_exhausted_scroll_required(
+                candidates_len=8,
+                visible_skip_count=8,
+                follows_completed=0,
+                follows_goal_effective=3,
+                scroll_used=0,
+                max_scroll=12,
+                should_stop_scrolling=True,
+            )
+        )
+
+    def test_visible_window_scroll_helper_does_not_depend_on_checkpoint_flag(self) -> None:
+        helper_src = inspect.getsource(runner._followers_visible_window_exhausted_scroll_required)
+        self.assertNotIn("_ct_checkpoint_enabled", helper_src)
+        self.assertNotIn("FOLLOW_CT_CHECKPOINT_V1_ENABLED", helper_src)
+
+    def test_visible_window_scroll_strategy_progresses_soft_soft_strong(self) -> None:
+        first = runner._followers_visible_window_scroll_strategy(scroll_used=0)
+        second = runner._followers_visible_window_scroll_strategy(scroll_used=1)
+        third = runner._followers_visible_window_scroll_strategy(scroll_used=2)
+
+        self.assertEqual(first["strategy"], "soft_initial")
+        self.assertEqual(first["scroll_profile"], "soft_initial")
+        self.assertEqual(first["distance_ratio"], 0.25)
+        self.assertEqual(first["expected_new_rows_min"], 7)
+        self.assertEqual(second["strategy"], "soft_retry")
+        self.assertEqual(second["scroll_profile"], "soft_retry")
+        self.assertEqual(second["distance_ratio"], 0.27)
+        self.assertEqual(second["expected_new_rows_min"], 7)
+        self.assertEqual(third["strategy"], "strong_search")
+        self.assertEqual(third["scroll_profile"], "accelerated_skip_streak")
+        self.assertEqual(third["distance_ratio"], 0.56)
+
+    def test_followers_scroll_helper_exposes_soft_and_strong_logs(self) -> None:
+        scroll_src = inspect.getsource(nav._followers_scroll_list_forward)
+        self.assertIn('"soft_initial"', scroll_src)
+        self.assertIn('"soft_retry"', scroll_src)
+        self.assertIn("followers_list_soft_scroll_started", scroll_src)
+        self.assertIn("followers_list_soft_scroll_completed", scroll_src)
+        self.assertIn("_soft_steps = 4", scroll_src)
+        self.assertIn("expected_new_rows_min=7", scroll_src)
+        self.assertIn("followers_list_strong_scroll_started", scroll_src)
+        self.assertIn("followers_list_strong_scroll_completed", scroll_src)
+
     def test_mark_followed_updates_checkpoint(self) -> None:
         ck = self._new_checkpoint()
         runner._ct_checkpoint_mark_followed(ck, "followed_user", reason="follow_verify_success")
@@ -3808,6 +3898,37 @@ class CtCheckpointV1Tests(unittest.TestCase):
         )
         self.assertFalse(skip)
         self.assertEqual(reason, "")
+
+
+class FollowVisibleWindowScrollPatchScopeTests(unittest.TestCase):
+    def test_patch_symbols_scoped_to_runner_followers_engine(self) -> None:
+        engine_src = inspect.getsource(runner._run_followers_list_engine_session)
+        self.assertIn("_followers_visible_window_exhausted_scroll_required", engine_src)
+        self.assertIn("follow_target_visible_window_exhausted_scroll_required", engine_src)
+        self.assertIn("bypass_post_tap_capture_gate=bool(_visible_window_scroll_required)", engine_src)
+
+        rotation_src = inspect.getsource(session._run_follow_target_rotation)
+        self.assertNotIn("_followers_visible_window_exhausted_scroll_required", rotation_src)
+        self.assertNotIn("follow_target_visible_window_exhausted_scroll_required", rotation_src)
+
+    def test_non_follow_modules_do_not_reference_visible_window_scroll_patch(self) -> None:
+        for module in (
+            "welcome_baseline_scanner",
+            "welcome_scan_producer",
+            "unfollow_session_orchestrator",
+            "instagram_login_provisioner_orchestrator",
+        ):
+            with self.subTest(module=module):
+                mod = __import__(module)
+                src = inspect.getsource(mod)
+                self.assertNotIn("follow_target_visible_window_exhausted_scroll_required", src)
+                self.assertNotIn("_followers_visible_window_exhausted_scroll_required", src)
+
+    def test_scroll_bypass_still_respects_post_tap_lock_in_navigation_helper(self) -> None:
+        scroll_src = inspect.getsource(nav._followers_scroll_list_forward)
+        lock_idx = scroll_src.index("_followers_abort_scroll_if_post_tap_lock")
+        gate_idx = scroll_src.index("if not bypass_post_tap_capture_gate")
+        self.assertLess(lock_idx, gate_idx)
 
 
 if __name__ == "__main__":

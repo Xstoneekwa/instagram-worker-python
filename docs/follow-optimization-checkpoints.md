@@ -76,6 +76,31 @@ Sécurité:
   proof OK et Like verify OK. Aucun fallback visuel No Posts coûteux sur profil
   normal.
 
+## Checkpoint: physical 9/3/3 followers-list scroll
+
+- Validation physique: run `5ad58174-95a0-45f2-91d7-33fcfdc3b5a0` sur
+  `j_automatise_pour_toi`, status `completed`, 9/9 follows, 9 mutes, 9 Likes,
+  9/9 return CT, deferred persist terminé avant `run_status_updated=completed`,
+  aucun `subprocess_timeout`, aucun private follow.
+- CT validés: `messodie_creations` (`lmrlyn.ak`, `pavillonhenri4`,
+  `digital.lexs`), `pumptracktour` (`adriaan_kia`, `maxencemunding`,
+  `lauryne_str`), `home.id_cil` (`b.l.industrie`, `bati_masazur8390`,
+  `swiss.energie`).
+- Privés correctement rejetés: `_nataniel_06_`, `fouebastard`, `louca_rbc`.
+- Correction scroll: le premier scroll followers-list ne doit pas utiliser le
+  profil fort `accelerated_skip_streak`. La stratégie progressive est:
+  `soft_initial` (`distance_ratio=0.25`, `steps=4`), puis `soft_retry`
+  (`distance_ratio=0.27`, `steps=4`), puis `strong_search` uniquement après
+  deux soft scrolls sans candidat followable.
+- Observabilité: `followers_list_scroll_strategy_selected` expose `strategy`,
+  `scroll_attempt_index`, `scroll_used`, `distance_ratio`,
+  `expected_new_rows_min` et `visible_before_count`. Les gestes loggent
+  `followers_list_soft_scroll_started/completed` ou
+  `followers_list_strong_scroll_started/completed`.
+- Scope sécurité: followers-list confirmée uniquement ; pas de changement No
+  Posts, legacy-safe, post-mute, V2 DB, Welcome, Outreach, Unfollow, warmup ou
+  login.
+
 ## Future: CT Checkpoint V2 DB persisted
 
 - Hors scope du commit V1.

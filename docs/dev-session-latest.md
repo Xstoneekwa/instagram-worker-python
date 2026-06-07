@@ -4,6 +4,20 @@
 
 ## État chantier follow — 2026-06-07
 
+- **9/3/3 physique validé** : run `5ad58174-95a0-45f2-91d7-33fcfdc3b5a0`
+  sur `j_automatise_pour_toi`, `completed`, 9/9 follows, 9 mutes, 9 Likes,
+  9/9 return CT, `run_status_updated=completed`, deferred persist terminé
+  avant completed, aucun `subprocess_timeout`, aucun private follow. CT validés:
+  `messodie_creations`, `pumptracktour`, `home.id_cil`.
+- **Scroll followers-list phone physique** : le scroll fort initial est remplacé
+  par une stratégie progressive followers-list confirmée. `soft_initial`
+  utilise `distance_ratio=0.25` et `steps=4`, `soft_retry`
+  `distance_ratio=0.27` et `steps=4`; `strong_search` reste réservé au
+  troisième scroll exhausted après deux soft scrolls sans candidat followable.
+  Les logs incluent `followers_list_scroll_strategy_selected`,
+  `followers_list_soft_scroll_started/completed`,
+  `followers_list_strong_scroll_started/completed`, `expected_new_rows_min=7`
+  et `visible_before_count`.
 - **4/2/2 validés fonctionnellement** : les derniers runs contrôlés sur
   `j_automatise_pour_toi` ont confirmé le budget multi-target `4 follows /
   2 CT / 2 follows par CT`, avec follow, mute, like/skip métier et return CT

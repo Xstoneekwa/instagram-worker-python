@@ -23,6 +23,16 @@ Le projet construit une Phone Farm Instagram production-grade :
 
 Checkpoints recents valides :
 
+- Follow physique 9/3/3 : validé sur `j_automatise_pour_toi` avec le run
+  `5ad58174-95a0-45f2-91d7-33fcfdc3b5a0` (`completed`). Résultat: 9/9
+  follows, 9 mutes, 9 Likes, 9/9 return CT, `run_status_updated=completed`,
+  deferred persist terminé avant completed, aucun `subprocess_timeout`, aucun
+  private follow.
+- Scroll followers-list physique : stratégie progressive runtime-only. Les deux
+  premiers scrolls de fenêtre visible exhausted sont soft
+  (`soft_initial` `distance_ratio=0.25`, `steps=4`; `soft_retry`
+  `distance_ratio=0.27`, `steps=4`). Le scroll fort `strong_search` reste
+  disponible uniquement après deux soft scrolls sans candidat followable.
 - CT Checkpoint / Fast-Skip V1 runtime-only : ledger par CT/source dans le
   worker Python pour fenêtre visible, candidats vus/rejetés/private/followés,
   fast-skip et observabilité. Validé fonctionnellement sur runs 4/2/2 récents,

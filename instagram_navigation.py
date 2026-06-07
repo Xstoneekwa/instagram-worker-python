@@ -30303,11 +30303,14 @@ def _followers_scroll_list_forward(
         "micro_reposition",
         "zero_follow_spans_soft",
         "accelerated_skip_streak",
+        "soft_initial",
+        "soft_retry",
     ):
         profile_req = "default"
     micro_reposition = bool(use_exploratory) and profile_req == "micro_reposition"
     zero_follow_spans_soft = bool(use_exploratory) and profile_req == "zero_follow_spans_soft"
     accelerated_skip_streak = profile_req == "accelerated_skip_streak"
+    soft_followers_scroll = profile_req in {"soft_initial", "soft_retry"}
     exhausted_was = False
     fallback_guard_would_block = False
     permit_reason_snapshot = ""
@@ -30537,6 +30540,84 @@ def _followers_scroll_list_forward(
             )
         except Exception:
             pass
+    elif soft_followers_scroll:
+        _mode = ""
+        _distance_ratio = 0.25 if profile_req == "soft_initial" else 0.27
+        _soft_steps = 4
+        try:
+            rv = d(classNameMatches=".*RecyclerView.*")
+            if rv.exists(timeout=0.25):
+                _mode = "recyclerview"
+                try:
+                    log(
+                        "info",
+                        "followers_list_soft_scroll_started",
+                        source_profile_username=str(source_profile_username or ""),
+                        strategy=profile_req,
+                        mode=_mode,
+                        steps=int(_soft_steps),
+                        distance_ratio=_distance_ratio,
+                        expected_new_rows_min=7,
+                    )
+                except Exception:
+                    pass
+                _followers_log_scroll_or_swipe_about_to_run(
+                    d,
+                    source_function="_followers_scroll_list_forward",
+                    reason=f"recyclerview_scroll_vert_forward_{profile_req}",
+                )
+                rv.scroll.vert.forward(steps=int(_soft_steps))
+                time.sleep(0.22)
+                scroll_ok = True
+        except Exception:
+            pass
+        if not scroll_ok:
+            try:
+                w, h = d.window_size()
+                y_start = int(h * 0.66)
+                y_end = int(h * (0.66 - _distance_ratio))
+                duration_s = 0.24
+                _mode = "fallback_swipe"
+                try:
+                    log(
+                        "info",
+                        "followers_list_soft_scroll_started",
+                        source_profile_username=str(source_profile_username or ""),
+                        strategy=profile_req,
+                        mode=_mode,
+                        y_start=int(y_start),
+                        y_end=int(y_end),
+                        duration_s=float(duration_s),
+                        distance_ratio=_distance_ratio,
+                        screen_w=int(w),
+                        screen_h=int(h),
+                        expected_new_rows_min=7,
+                    )
+                except Exception:
+                    pass
+                _followers_log_scroll_or_swipe_about_to_run(
+                    d,
+                    source_function="_followers_scroll_list_forward",
+                    reason=f"fallback_vertical_swipe_followers_list_{profile_req}",
+                )
+                d.swipe(w // 2, y_start, w // 2, y_end, duration_s)
+                time.sleep(0.22)
+                scroll_ok = True
+            except Exception:
+                scroll_ok = False
+        try:
+            log(
+                "info",
+                "followers_list_soft_scroll_completed",
+                source_profile_username=str(source_profile_username or ""),
+                strategy=profile_req,
+                scroll_succeeded=bool(scroll_ok),
+                mode=_mode or ("recyclerview" if scroll_ok else "unknown"),
+                distance_ratio=_distance_ratio,
+                expected_new_rows_min=7,
+            )
+        except Exception:
+            pass
     elif accelerated_skip_streak:
         _accel_steps = int(
             getattr(config, "FOLLOWERS_EXPLORATION_V1_ACCEL_RECYCLER_STEPS", 10) or 10
@@ -30548,6 +30629,15 @@ def _followers_scroll_list_forward(
             if rv.exists(timeout=0.25):
                 _mode = "recyclerview"
                 try:
+                    log(
+                        "info",
+                        "followers_list_strong_scroll_started",
+                        source_profile_username=str(source_profile_username or ""),
+                        strategy="strong_search",
+                        mode=_mode,
+                        steps=int(_accel_steps),
+                        distance_ratio=0.56,
+                    )
                     log(
                         "info",
                         "followers_exploration_accelerated_scroll_started",
@@ -30578,6 +30668,19 @@ def _followers_scroll_list_forward(
                 try:
                     log(
                         "info",
+                        "followers_list_strong_scroll_started",
+                        source_profile_username=str(source_profile_username or ""),
+                        strategy="strong_search",
+                        mode=_mode,
+                        y_start=int(y_start),
+                        y_end=int(y_end),
+                        duration_s=float(duration_s),
+                        screen_w=int(w),
+                        screen_h=int(h),
+                        distance_ratio=0.56,
+                    )
+                    log(
+                        "info",
                         "followers_exploration_accelerated_scroll_started",
                         source_profile_username=str(source_profile_username or ""),
                         profile="accelerated_skip_streak",
@@ -30601,6 +30704,15 @@ def _followers_scroll_list_forward(
             except Exception:
                 scroll_ok = False
         try:
+            log(
+                "info",
+                "followers_list_strong_scroll_completed",
+                source_profile_username=str(source_profile_username or ""),
+                strategy="strong_search",
+                scroll_succeeded=bool(scroll_ok),
+                mode=_mode or ("recyclerview" if scroll_ok else "unknown"),
+                distance_ratio=0.56,
+            )
             log(
                 "info",
                 "followers_exploration_accelerated_scroll_used",

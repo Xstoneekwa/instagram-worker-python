@@ -1706,6 +1706,62 @@ def _ct_checkpoint_plan_scroll_resume(
     return resume_idx, True, "visible_window_all_known"
 
 
+def _followers_visible_window_exhausted_scroll_required(
+    *,
+    candidates_len: int,
+    visible_skip_count: int,
+    follows_completed: int,
+    follows_goal_effective: int | None,
+    scroll_used: int,
+    max_scroll: int,
+    should_stop_scrolling: bool = False,
+) -> bool:
+    """True when all visible rows were skipped but quota and scroll budget remain."""
+    if bool(should_stop_scrolling):
+        return False
+    if int(candidates_len or 0) <= 0:
+        return False
+    if int(visible_skip_count or 0) < int(candidates_len or 0):
+        return False
+    if follows_goal_effective is not None and int(follows_completed or 0) >= int(
+        follows_goal_effective or 0
+    ):
+        return False
+    if int(scroll_used or 0) >= int(max_scroll or 0):
+        return False
+    return True
+
+
+def _followers_visible_window_scroll_strategy(*, scroll_used: int) -> dict[str, Any]:
+    attempt_index = max(1, int(scroll_used or 0) + 1)
+    if attempt_index == 1:
+        return {
+            "strategy": "soft_initial",
+            "scroll_profile": "soft_initial",
+            "distance_ratio": 0.25,
+            "expected_new_rows_min": 7,
+            "reason": "visible_window_exhausted_first_scroll_soft",
+            "scroll_attempt_index": attempt_index,
+        }
+    if attempt_index == 2:
+        return {
+            "strategy": "soft_retry",
+            "scroll_profile": "soft_retry",
+            "distance_ratio": 0.27,
+            "expected_new_rows_min": 7,
+            "reason": "visible_window_exhausted_second_scroll_soft",
+            "scroll_attempt_index": attempt_index,
+        }
+    return {
+        "strategy": "strong_search",
+        "scroll_profile": "accelerated_skip_streak",
+        "distance_ratio": 0.56,
+        "expected_new_rows_min": 7,
+        "reason": "visible_window_exhausted_after_two_soft_scrolls",
+        "scroll_attempt_index": attempt_index,
+    }
+
+
 def _new_candidate_follow_decision(
     *,
     follower_username: str = "",
@@ -13597,6 +13653,78 @@ def _run_followers_list_engine_session(
                     )
                 except Exception:
                     pass
+                _visible_window_scroll_required = _followers_visible_window_exhausted_scroll_required(
+                    candidates_len=len(candidates) if isinstance(candidates, list) else 0,
+                    visible_skip_count=int(
+                        _expl_v1.state.get("consecutive_visible_skip_count") or 0
+                    ),
+                    follows_completed=int(follows_completed_count),
+                    follows_goal_effective=int(max_iter or 0) if max_iter is not None else None,
+                    scroll_used=int(scroll_used),
+                    max_scroll=int(max_scroll),
+                    should_stop_scrolling=bool(_main_scroll_stop),
+                )
+                _visible_window_scroll_strategy: dict[str, Any] = {}
+                if _visible_window_scroll_required:
+                    _visible_window_scroll_strategy = _followers_visible_window_scroll_strategy(
+                        scroll_used=int(scroll_used)
+                    )
+                    _main_scroll_profile = str(
+                        _visible_window_scroll_strategy.get("scroll_profile") or _main_scroll_profile
+                    )
+                    _scroll_trigger_reason = str(
+                        _visible_window_scroll_strategy.get("reason") or _scroll_trigger_reason
+                    )
+                    try:
+                        log(
+                            "info",
+                            "follow_target_visible_window_exhausted_scroll_required",
+                            source_profile_username=source_profile_username,
+                            candidates_len=len(candidates) if isinstance(candidates, list) else -1,
+                            visible_skip_count=int(
+                                _expl_v1.state.get("consecutive_visible_skip_count") or 0
+                            ),
+                            rejected_count=int(
+                                target_scan_tracker.get("candidates_rejected_count") or 0
+                            ),
+                            private_rejected_count=int(
+                                (target_scan_tracker.get("rejection_reason_counts") or {}).get(
+                                    "private_account", 0
+                                )
+                                or 0
+                            ),
+                            follows_completed_count=int(follows_completed_count),
+                            follows_goal_effective=int(max_iter or 0),
+                            scroll_used=int(scroll_used),
+                            max_scroll=int(max_scroll),
+                            scroll_profile=str(_main_scroll_profile or ""),
+                            bypass_post_tap_capture_gate=True,
+                            bypass_scroll_xml_guards=True,
+                            reason="visible_window_all_skipped_scroll_required",
+                        )
+                        log(
+                            "info",
+                            "followers_list_scroll_strategy_selected",
+                            source_profile_username=source_profile_username,
+                            strategy=str(_visible_window_scroll_strategy.get("strategy") or ""),
+                            scroll_attempt_index=int(
+                                _visible_window_scroll_strategy.get("scroll_attempt_index") or 0
+                            ),
+                            scroll_used=int(scroll_used),
+                            reason=str(_visible_window_scroll_strategy.get("reason") or ""),
+                            distance_ratio=float(
+                                _visible_window_scroll_strategy.get("distance_ratio") or 0.0
+                            ),
+                            expected_new_rows_min=int(
+                                _visible_window_scroll_strategy.get("expected_new_rows_min") or 0
+                            ),
+                            visible_before_count=len(candidates)
+                            if isinstance(candidates, list)
+                            else 0,
+                            scroll_profile=str(_main_scroll_profile or ""),
+                        )
+                    except Exception:
+                        pass
                 try:
                     log(
                         "info",
@@ -13609,6 +13737,7 @@ def _run_followers_list_engine_session(
                 except Exception:
                     pass
                 _scroll_forward_t0 = time.perf_counter()
+                _main_scroll_diag: dict[str, Any] = {}
                 _scroll_forward_ok = scroll_followers_list_forward(
                     d,
                     apply_exploratory_xml_override=exploratory_scroll_permit_armed_this_iter,
@@ -13620,6 +13749,9 @@ def _run_followers_list_engine_session(
                         and exploratory_scroll_profile_this_iter == "micro_reposition"
                         else None
                     ),
+                    bypass_post_tap_capture_gate=bool(_visible_window_scroll_required),
+                    bypass_scroll_xml_guards=bool(_visible_window_scroll_required),
+                    scroll_diag_out=_main_scroll_diag,
                 )
                 target_scan_tracker["scrolls_attempted"] = int(
                     target_scan_tracker.get("scrolls_attempted") or 0
@@ -13639,6 +13771,37 @@ def _run_followers_list_engine_session(
                 except Exception:
                     pass
                 if not _scroll_forward_ok:
+                    if _visible_window_scroll_required:
+                        _followers_loop_finally_stop = "visible_window_exhausted_scroll_failed"
+                        visual_loop_state["list_progressive_exploration_exhausted"] = True
+                        try:
+                            log(
+                                "warning",
+                                "follow_target_visible_window_exhausted_scroll_unavailable",
+                                source_profile_username=source_profile_username,
+                                candidates_len=len(candidates) if isinstance(candidates, list) else -1,
+                                visible_skip_count=int(
+                                    _expl_v1.state.get("consecutive_visible_skip_count") or 0
+                                ),
+                                scroll_used=int(scroll_used),
+                                max_scroll=int(max_scroll),
+                                failure_reason=str(
+                                    _main_scroll_diag.get("failure_reason")
+                                    or "scroll_returned_false"
+                                )[:160],
+                                whether_physical_swipe_attempted=bool(
+                                    _main_scroll_diag.get("whether_physical_swipe_attempted")
+                                ),
+                                bypass_post_tap_capture_gate=bool(
+                                    _main_scroll_diag.get("bypass_post_tap_capture_gate")
+                                ),
+                                bypass_scroll_xml_guards=bool(
+                                    _main_scroll_diag.get("bypass_scroll_xml_guards")
+                                ),
+                                reason="visible_window_all_skipped_scroll_unavailable",
+                            )
+                        except Exception:
+                            pass
                     _expl_v1.log_stop_reason(
                         "scroll_failed",
                         scroll_used=int(scroll_used),
