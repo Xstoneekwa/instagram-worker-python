@@ -2,9 +2,97 @@ from __future__ import annotations
 
 import time
 import unittest
+from contextlib import ExitStack
 from unittest import mock
 
 import instagram_navigation as nav
+
+_SURFACE_PRECHECK_OK: dict[str, object] = {
+    "skip_like": False,
+    "precheck_ms": 1.0,
+    "profile_candidate_visible": True,
+    "grid_tab_visible": True,
+    "followers_list_visible": False,
+}
+
+
+def _like_phase_contract_ctx() -> mock.MagicMock:
+    contract_ctx = mock.MagicMock()
+    contract_ctx.current_state.value = "sheet_dismissed"
+    return contract_ctx
+
+
+def _patch_like_phase_common(
+    stack: ExitStack,
+    *,
+    contract_ctx: mock.MagicMock,
+    fast_path_enabled: bool = False,
+    positive_direct_enabled: bool = False,
+) -> None:
+    stack.enter_context(
+        mock.patch.object(nav.config, "POST_FOLLOW_POST_LIKES_ENABLED", True, create=True)
+    )
+    stack.enter_context(
+        mock.patch.object(
+            nav.config,
+            "POST_FOLLOW_LIKE_POSTS_COUNT_FAST_PATH_ENABLED",
+            fast_path_enabled,
+            create=True,
+        )
+    )
+    stack.enter_context(
+        mock.patch.object(
+            nav.config,
+            "POST_FOLLOW_LIKE_POSTS_COUNT_POSITIVE_DIRECT_OPEN_ENABLED",
+            positive_direct_enabled,
+            create=True,
+        )
+    )
+    stack.enter_context(
+        mock.patch.object(nav.config, "ENABLE_REAL_VISUAL_POST_LIKE", True, create=True)
+    )
+    stack.enter_context(
+        mock.patch.object(nav.config, "POST_FOLLOW_POST_LIKES_PERCENTAGE", 100, create=True)
+    )
+    stack.enter_context(
+        mock.patch.object(nav.config, "POST_FOLLOW_POST_LIKES_COUNT_RANGE", "1-1", create=True)
+    )
+    stack.enter_context(
+        mock.patch.object(nav.config, "POST_FOLLOW_TOTAL_LIKES_LIMIT", 150, create=True)
+    )
+    stack.enter_context(
+        mock.patch.object(
+            nav, "read_current_profile_username_for_follow_gate", return_value="cand"
+        )
+    )
+    stack.enter_context(
+        mock.patch(
+            "navigation_engine.observe_instagram_state",
+            return_value={"state": "CANDIDATE_PROFILE", "confidence": 0.9},
+        )
+    )
+    stack.enter_context(
+        mock.patch.object(
+            nav,
+            "_post_follow_like_precheck_mute_sheet",
+            return_value={"skip_like": False, "precheck_ms": 1.0},
+        )
+    )
+    stack.enter_context(
+        mock.patch.object(
+            nav, "_post_follow_like_precheck_surface", return_value=dict(_SURFACE_PRECHECK_OK)
+        )
+    )
+    stack.enter_context(
+        mock.patch(
+            "follow_state_contract.evaluate_like_precheck_contract",
+            return_value=(contract_ctx, True, ""),
+        )
+    )
+    tmock = stack.enter_context(mock.patch.object(nav, "time"))
+    tmock.perf_counter = time.perf_counter
+    tmock.time = time.time
+    tmock.sleep = lambda *_a, **_k: None
 
 
 class _TabsNode:
@@ -43,6 +131,135 @@ class FakeCloneHeaderDevice:
         self.calls.append(dict(kwargs))
         rid_match = str(kwargs.get("resourceIdMatches") or "")
         return FakeWaitSelector(bool(rid_match and "profile_header" in rid_match))
+
+
+class PostMuteGapTrackingTest(unittest.TestCase):
+    def test_post_mute_checkpoint_fast_profile_proof_skips_heavy_revalidation(self) -> None:
+        device = mock.MagicMock()
+        logs: list[tuple[str, str, dict[str, object]]] = []
+        with mock.patch.object(
+            nav, "read_current_profile_username_for_follow_gate", return_value="cand"
+        ) as mock_read, mock.patch.object(
+            nav,
+            "_post_follow_like_precheck_mute_sheet",
+            return_value={"skip_like": False, "sheet_visible": False, "precheck_ms": 1.0},
+        ), mock.patch.object(
+            nav,
+            "detect_followers_list_screen",
+            side_effect=AssertionError("heavy followers detect should be skipped"),
+        ), mock.patch(
+            "navigation_engine.observe_instagram_state",
+            side_effect=AssertionError("heavy navigation observe should be skipped"),
+        ), mock.patch.object(
+            nav, "log", side_effect=lambda level, event, **kw: logs.append((level, event, kw))
+        ):
+            out = nav._post_mute_state_checkpoint(
+                device,
+                pkg="com.instagram.android",
+                source_profile_username="source",
+                visual_candidate_id="vc-1",
+                candidate_username="cand",
+                sheet_dismiss_ok=True,
+                allow_fast_profile_proof=True,
+            )
+
+        events = [event for _level, event, _kw in logs]
+        self.assertTrue(out["ok"])
+        self.assertTrue(out["fast_profile_proof"])
+        self.assertEqual(mock_read.call_count, 1)
+        self.assertIn("post_mute_gap_started", events)
+        self.assertIn("post_mute_profile_surface_confirm_started", events)
+        self.assertIn("post_mute_profile_surface_confirm_completed", events)
+        self.assertIn("post_mute_gap_completed", events)
+        completed = [kw for _level, event, kw in logs if event == "post_mute_gap_completed"][-1]
+        self.assertTrue(completed["safe_to_continue_ui"])
+        self.assertTrue(completed["used_cached_context"])
+
+    def test_post_mute_checkpoint_ambiguous_profile_falls_back_to_heavy_revalidation(self) -> None:
+        device = mock.MagicMock()
+        logs: list[tuple[str, str, dict[str, object]]] = []
+        with mock.patch.object(
+            nav, "read_current_profile_username_for_follow_gate", return_value="other"
+        ), mock.patch.object(
+            nav,
+            "_post_follow_like_precheck_mute_sheet",
+            return_value={"skip_like": False, "sheet_visible": False, "precheck_ms": 1.0},
+        ), mock.patch.object(
+            nav,
+            "_post_follow_overlay_ui_hints",
+            return_value={"likely_mute_toggle_sheet": False},
+        ), mock.patch.object(
+            nav,
+            "detect_followers_list_screen",
+            return_value={"is_followers_list": False},
+        ) as mock_detect, mock.patch(
+            "navigation_engine.observe_instagram_state",
+            return_value={"state": "CANDIDATE_PROFILE", "confidence": 0.9, "reason": "unit"},
+        ) as mock_observe, mock.patch.object(
+            nav, "log", side_effect=lambda level, event, **kw: logs.append((level, event, kw))
+        ):
+            out = nav._post_mute_state_checkpoint(
+                device,
+                pkg="com.instagram.android",
+                source_profile_username="source",
+                visual_candidate_id="vc-1",
+                candidate_username="cand",
+                sheet_dismiss_ok=True,
+                allow_fast_profile_proof=True,
+            )
+
+        events = [event for _level, event, _kw in logs]
+        self.assertTrue(out["ok"])
+        self.assertFalse(out.get("fast_profile_proof", False))
+        self.assertEqual(mock_detect.call_count, 1)
+        self.assertEqual(mock_observe.call_count, 1)
+        self.assertIn("post_mute_gap_checkpoint", events)
+        self.assertIn("post_mute_profile_surface_confirm_completed", events)
+
+    def test_post_mute_checkpoint_profile_mismatch_without_candidate_profile_is_not_fast_ok(
+        self,
+    ) -> None:
+        device = mock.MagicMock()
+        logs: list[tuple[str, str, dict[str, object]]] = []
+        with mock.patch.object(
+            nav, "read_current_profile_username_for_follow_gate", return_value="other"
+        ), mock.patch.object(
+            nav,
+            "_post_follow_like_precheck_mute_sheet",
+            return_value={"skip_like": False, "sheet_visible": False, "precheck_ms": 1.0},
+        ), mock.patch.object(
+            nav,
+            "_post_follow_overlay_ui_hints",
+            return_value={"likely_mute_toggle_sheet": False},
+        ), mock.patch.object(
+            nav,
+            "detect_followers_list_screen",
+            return_value={"is_followers_list": True},
+        ), mock.patch(
+            "navigation_engine.observe_instagram_state",
+            return_value={"state": "FOLLOWERS_LIST", "confidence": 0.9, "reason": "unit"},
+        ), mock.patch.object(
+            nav, "log", side_effect=lambda level, event, **kw: logs.append((level, event, kw))
+        ):
+            out = nav._post_mute_state_checkpoint(
+                device,
+                pkg="com.instagram.android",
+                source_profile_username="source",
+                visual_candidate_id="vc-1",
+                candidate_username="cand",
+                sheet_dismiss_ok=True,
+                allow_fast_profile_proof=True,
+            )
+
+        self.assertFalse(out.get("fast_profile_proof", False))
+        fast_done = [
+            kw
+            for _level, event, kw in logs
+            if event == "post_mute_profile_surface_confirm_completed"
+            and kw.get("phase") == "post_mute_fast_profile_proof"
+        ][-1]
+        self.assertFalse(fast_done["safe_to_continue_ui"])
+        self.assertEqual(fast_done["reason"], "candidate_profile_not_confirmed")
 
 
 def _probe_sequence_from_visible_fn(

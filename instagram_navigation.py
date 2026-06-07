@@ -36367,6 +36367,9 @@ def _post_mute_state_checkpoint(
     pkg: str,
     source_profile_username: str,
     visual_candidate_id: str,
+    candidate_username: str = "",
+    sheet_dismiss_ok: bool | None = None,
+    allow_fast_profile_proof: bool = False,
 ) -> dict[str, Any]:
     """
     After mute toggles: dismiss residual sheets and observe state before return CT.
@@ -36375,13 +36378,178 @@ def _post_mute_state_checkpoint(
 
     vcid = str(visual_candidate_id or "").strip()
     src = str(source_profile_username or "").strip()
+    cand = str(candidate_username or "").strip().lstrip("@")
     pkg = pkg or str(getattr(config, "INSTAGRAM_PACKAGE", "") or "")
+    checkpoint_t0 = time.perf_counter()
     log(
         "info",
         "post_mute_state_checkpoint_started",
         visual_candidate_id=vcid,
         source_profile_username=src,
+        target_username=cand,
+        candidate_username=cand,
     )
+    log(
+        "info",
+        "post_mute_gap_started",
+        visual_candidate_id=vcid,
+        source_profile_username=src,
+        target_username=cand,
+        candidate_username=cand,
+        phase="post_mute_checkpoint",
+        blocking_step="post_mute_state_checkpoint",
+        action_taken="start_checkpoint",
+        duration_ms=0.0,
+        poll_count=0,
+        sleep_ms=0.0,
+        used_cached_context=bool(allow_fast_profile_proof),
+        safe_to_continue_ui=False,
+    )
+    if allow_fast_profile_proof and sheet_dismiss_ok is True and cand:
+        fast_t0 = time.perf_counter()
+        sheet_probe_t0 = time.perf_counter()
+        try:
+            sheet_probe = _post_follow_like_precheck_mute_sheet(
+                d,
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                follower_username=cand,
+            )
+        except Exception as e:
+            sheet_probe = {
+                "skip_like": True,
+                "sheet_visible": True,
+                "skip_reason": "sheet_probe_exception",
+                "error": str(e)[:160],
+            }
+        sheet_visible = bool(sheet_probe.get("skip_like") or sheet_probe.get("sheet_visible"))
+        sheet_probe_ms = round((time.perf_counter() - sheet_probe_t0) * 1000.0, 2)
+        log(
+            "info" if not sheet_visible else "warning",
+            "post_mute_gap_checkpoint",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            target_username=cand,
+            candidate_username=cand,
+            phase="post_mute_fast_profile_proof",
+            blocking_step="sheet_closed_probe",
+            surface_type="mute_sheet" if sheet_visible else "candidate_profile_or_unknown",
+            action_taken="verify_sheet_closed",
+            duration_ms=sheet_probe_ms,
+            poll_count=1,
+            sleep_ms=0.0,
+            used_cached_context=True,
+            safe_to_continue_ui=not sheet_visible,
+            reason=str(sheet_probe.get("skip_reason") or ""),
+        )
+        if sheet_visible:
+            log(
+                "warning",
+                "post_mute_profile_surface_confirm_completed",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                target_username=cand,
+                candidate_username=cand,
+                phase="post_mute_fast_profile_proof",
+                blocking_step="sheet_closed_probe",
+                surface_type="mute_sheet",
+                action_taken="fast_profile_proof_rejected",
+                duration_ms=round((time.perf_counter() - fast_t0) * 1000.0, 2),
+                poll_count=1,
+                sleep_ms=0.0,
+                used_cached_context=True,
+                safe_to_continue_ui=False,
+                reason="mute_sheet_still_visible",
+            )
+        else:
+            log(
+                "info",
+                "post_mute_profile_surface_confirm_started",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                target_username=cand,
+                candidate_username=cand,
+                phase="post_mute_fast_profile_proof",
+                blocking_step="read_current_profile_username",
+                action_taken="read_action_bar_title",
+                used_cached_context=True,
+                safe_to_continue_ui=False,
+            )
+            try:
+                ab = str(read_current_profile_username_for_follow_gate(d) or "").strip().lstrip("@")
+            except Exception:
+                ab = ""
+            fast_ok = bool(ab and _normalize_handle(ab) == _normalize_handle(cand))
+            fast_ms = round((time.perf_counter() - fast_t0) * 1000.0, 2)
+            log(
+                "info" if fast_ok else "warning",
+                "post_mute_profile_surface_confirm_completed",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                target_username=cand,
+                candidate_username=cand,
+                phase="post_mute_fast_profile_proof",
+                blocking_step="read_current_profile_username",
+                surface_type="candidate_profile" if fast_ok else "unknown",
+                action_taken="fast_profile_proof",
+                duration_ms=fast_ms,
+                poll_count=2,
+                sleep_ms=0.0,
+                used_cached_context=True,
+                safe_to_continue_ui=fast_ok,
+                action_bar_title=ab,
+                expected_username=cand,
+                reason="candidate_profile_confirmed" if fast_ok else "candidate_profile_not_confirmed",
+            )
+            log(
+                "info" if fast_ok else "warning",
+                "post_mute_gap_checkpoint",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                target_username=cand,
+                candidate_username=cand,
+                phase="post_mute_fast_profile_proof",
+                blocking_step="profile_surface_confirm",
+                surface_type="candidate_profile" if fast_ok else "unknown",
+                action_taken="fast_profile_proof",
+                duration_ms=fast_ms,
+                poll_count=2,
+                sleep_ms=0.0,
+                used_cached_context=True,
+                safe_to_continue_ui=fast_ok,
+                reason="candidate_profile_confirmed" if fast_ok else "fallback_heavy_checkpoint",
+            )
+            if fast_ok:
+                total_ms = round((time.perf_counter() - checkpoint_t0) * 1000.0, 2)
+                log(
+                    "info",
+                    "post_mute_gap_completed",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    target_username=cand,
+                    candidate_username=cand,
+                    phase="post_mute_checkpoint",
+                    blocking_step="profile_surface_confirm",
+                    surface_type="candidate_profile",
+                    action_taken="fast_profile_proof",
+                    duration_ms=total_ms,
+                    poll_count=2,
+                    sleep_ms=0.0,
+                    used_cached_context=True,
+                    safe_to_continue_ui=True,
+                )
+                return {
+                    "ok": True,
+                    "overlay_presses": 0,
+                    "navigation_observed": {
+                        "state": NavigationEngineState.CANDIDATE_PROFILE.value,
+                        "confidence": 0.95,
+                        "reason": "fast_profile_proof_after_mute_dismiss",
+                    },
+                    "mute_sheet_still_visible": False,
+                    "fast_profile_proof": True,
+                    "duration_ms": total_ms,
+                }
     closed = 0
     last_err = ""
     for attempt in range(1, 5):
@@ -36411,10 +36579,43 @@ def _post_mute_state_checkpoint(
             )
             break
     nav_obs: dict[str, Any] = {}
+    det_t0 = time.perf_counter()
+    log(
+        "info",
+        "post_mute_profile_surface_confirm_started",
+        visual_candidate_id=vcid,
+        source_profile_username=src,
+        target_username=cand,
+        candidate_username=cand,
+        phase="post_mute_heavy_checkpoint",
+        blocking_step="detect_followers_list_screen",
+        action_taken="detect_followers_list_screen",
+        used_cached_context=False,
+        safe_to_continue_ui=False,
+    )
     try:
         det_ck = detect_followers_list_screen(d, source_profile_username=src)
     except Exception:
         det_ck = {}
+    det_ms = round((time.perf_counter() - det_t0) * 1000.0, 2)
+    log(
+        "info",
+        "post_mute_gap_checkpoint",
+        visual_candidate_id=vcid,
+        source_profile_username=src,
+        target_username=cand,
+        candidate_username=cand,
+        phase="post_mute_heavy_checkpoint",
+        blocking_step="detect_followers_list_screen",
+        action_taken="detect_followers_list_screen",
+        duration_ms=det_ms,
+        poll_count=1,
+        sleep_ms=0.0,
+        used_cached_context=False,
+        safe_to_continue_ui=False,
+        surface_type="followers_list" if bool((det_ck or {}).get("is_followers_list")) else "unknown",
+    )
+    obs_t0 = time.perf_counter()
     try:
         nav_obs = observe_instagram_state(
             d,
@@ -36431,7 +36632,27 @@ def _post_mute_state_checkpoint(
         )
     except Exception as e:
         nav_obs = {"state": "UNKNOWN", "confidence": 0.0, "reason": str(e)}
+    obs_ms = round((time.perf_counter() - obs_t0) * 1000.0, 2)
+    nav_state = str(nav_obs.get("state") or "")
+    log(
+        "info",
+        "post_mute_gap_checkpoint",
+        visual_candidate_id=vcid,
+        source_profile_username=src,
+        target_username=cand,
+        candidate_username=cand,
+        phase="post_mute_heavy_checkpoint",
+        blocking_step="observe_instagram_state",
+        surface_type=nav_state,
+        action_taken="observe_instagram_state",
+        duration_ms=obs_ms,
+        poll_count=1,
+        sleep_ms=0.0,
+        used_cached_context=False,
+        safe_to_continue_ui=nav_state == NavigationEngineState.CANDIDATE_PROFILE.value,
+    )
     still_sheet = bool(_post_follow_overlay_ui_hints(d).get("likely_mute_toggle_sheet"))
+    total_ms = round((time.perf_counter() - checkpoint_t0) * 1000.0, 2)
     log(
         "info",
         "post_mute_state_checkpoint_result",
@@ -36441,12 +36662,49 @@ def _post_mute_state_checkpoint(
         navigation_state=str(nav_obs.get("state") or ""),
         navigation_confidence=float(nav_obs.get("confidence") or 0.0),
         mute_sheet_still_visible=still_sheet,
+        duration_ms=total_ms,
+    )
+    log(
+        "info" if not still_sheet else "warning",
+        "post_mute_profile_surface_confirm_completed",
+        visual_candidate_id=vcid,
+        source_profile_username=src,
+        target_username=cand,
+        candidate_username=cand,
+        phase="post_mute_heavy_checkpoint",
+        blocking_step="observe_instagram_state",
+        surface_type=str(nav_obs.get("state") or ""),
+        action_taken="heavy_checkpoint",
+        duration_ms=total_ms,
+        poll_count=1,
+        sleep_ms=round(float(closed) * 380.0, 2),
+        used_cached_context=False,
+        safe_to_continue_ui=not still_sheet,
+        reason=str(nav_obs.get("reason") or ""),
+    )
+    log(
+        "info" if not still_sheet else "warning",
+        "post_mute_gap_completed",
+        visual_candidate_id=vcid,
+        source_profile_username=src,
+        target_username=cand,
+        candidate_username=cand,
+        phase="post_mute_checkpoint",
+        blocking_step="heavy_checkpoint",
+        surface_type=str(nav_obs.get("state") or ""),
+        action_taken="heavy_checkpoint",
+        duration_ms=total_ms,
+        poll_count=1,
+        sleep_ms=round(float(closed) * 380.0, 2),
+        used_cached_context=False,
+        safe_to_continue_ui=not still_sheet,
     )
     return {
         "ok": not still_sheet,
         "overlay_presses": closed,
         "navigation_observed": nav_obs,
         "mute_sheet_still_visible": still_sheet,
+        "duration_ms": total_ms,
     }
 
 
@@ -38641,6 +38899,20 @@ def _mute_engine_v2_dismiss_mute_sheets_level_aware(
             source_profile_username=source_profile_username,
             level_aware=True,
         )
+        log(
+            "info",
+            "post_mute_sheet_dismiss_started",
+            visual_candidate_id=visual_candidate_id,
+            source_profile_username=source_profile_username,
+            phase="mute_sheet_dismiss",
+            blocking_step="dismiss_mute_sheets",
+            action_taken="start_level_aware_dismiss",
+            duration_ms=0.0,
+            poll_count=0,
+            sleep_ms=0.0,
+            used_cached_context=False,
+            safe_to_continue_ui=False,
+        )
     except Exception:
         pass
     level, _meta = _mute_engine_v2_detect_sheet_level(d)
@@ -38704,6 +38976,21 @@ def _mute_engine_v2_dismiss_mute_sheets_level_aware(
                 visual_candidate_id=visual_candidate_id,
                 source_profile_username=source_profile_username,
                 elapsed_ms=ms,
+            )
+            log(
+                "info",
+                "post_mute_sheet_dismiss_completed",
+                visual_candidate_id=visual_candidate_id,
+                source_profile_username=source_profile_username,
+                phase="mute_sheet_dismiss",
+                blocking_step="dismiss_mute_sheets",
+                surface_type="candidate_profile_or_unknown",
+                action_taken="level_aware_back",
+                duration_ms=ms,
+                poll_count=2,
+                sleep_ms=420.0,
+                used_cached_context=False,
+                safe_to_continue_ui=True,
             )
         except Exception:
             pass
@@ -44386,6 +44673,7 @@ def run_visual_candidate_post_follow_phase(
             should_mute = False
             mute_decision_reason = "vision_validation_post_follow_blocked"
 
+    post_mute_checkpoint: dict[str, Any] = {}
     if not follow_success_verified:
         mute_out["skipped_reason"] = "follow_not_verified"
         log(
@@ -44494,11 +44782,14 @@ def run_visual_candidate_post_follow_phase(
                 mute_engine_v2=True,
                 timings_ms=v2.get("timings_ms") or {},
             )
-            _post_mute_state_checkpoint(
+            post_mute_checkpoint = _post_mute_state_checkpoint(
                 d,
                 pkg=pkg,
                 source_profile_username=src,
                 visual_candidate_id=vcid,
+                candidate_username=cand,
+                sheet_dismiss_ok=bool((v2.get("timings_ms") or {}).get("mute_sheet_dismiss_ok")),
+                allow_fast_profile_proof=True,
             )
         elif outcome == "partial_success":
             post_follow_ctx.mark_mute_done_or_skipped(reason="mute_partial_success")
