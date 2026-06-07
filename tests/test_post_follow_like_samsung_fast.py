@@ -568,6 +568,11 @@ class PostMuteGapTrackingTest(unittest.TestCase):
         verify.assert_called_once()
         self.assertIn("post_follow_like_pre_reveal_guard_started", logs)
         self.assertIn("post_follow_like_pre_reveal_guard_completed", logs)
+        self.assertIn("post_like_surface_to_scroll_gap_started", logs)
+        self.assertIn("post_like_no_posts_tier1_timing", logs)
+        self.assertIn("post_like_pre_reveal_timing", logs)
+        self.assertIn("post_like_legacy_safe_candidate_timing", logs)
+        self.assertIn("post_like_surface_to_scroll_gap_completed", logs)
 
 
 def _probe_sequence_from_visible_fn(

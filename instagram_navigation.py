@@ -39091,6 +39091,13 @@ def _mute_engine_v2_dismiss_mute_sheets_level_aware(
         )
         log(
             "info",
+            "mute_sheet_dismiss_timing_started",
+            visual_candidate_id=visual_candidate_id,
+            source_profile_username=source_profile_username,
+            level_aware=True,
+        )
+        log(
+            "info",
             "post_mute_sheet_dismiss_started",
             visual_candidate_id=visual_candidate_id,
             source_profile_username=source_profile_username,
@@ -39105,34 +39112,268 @@ def _mute_engine_v2_dismiss_mute_sheets_level_aware(
         )
     except Exception:
         pass
+    t_probe = time.perf_counter()
+    try:
+        log(
+            "info",
+            "mute_sheet_dismiss_level2_probe_started",
+            visual_candidate_id=visual_candidate_id,
+            source_profile_username=source_profile_username,
+            probe_sequence="initial",
+        )
+    except Exception:
+        pass
     level, _meta = _mute_engine_v2_detect_sheet_level(d)
+    try:
+        log(
+            "info",
+            "mute_sheet_dismiss_level2_probe_completed",
+            visual_candidate_id=visual_candidate_id,
+            source_profile_username=source_profile_username,
+            probe_sequence="initial",
+            sheet_level=level,
+            duration_ms=round((time.perf_counter() - t_probe) * 1000.0, 2),
+        )
+    except Exception:
+        pass
     if level == "unknown" and not _mute_engine_v2_mute_sheet_still_visible(d):
         ms = round((time.perf_counter() - t0) * 1000.0, 2)
+        try:
+            log(
+                "info",
+                "mute_sheet_dismiss_sheet_closed_fast_detected",
+                visual_candidate_id=visual_candidate_id,
+                source_profile_username=source_profile_username,
+                stage="initial",
+                elapsed_ms=ms,
+            )
+        except Exception:
+            pass
         return True, ms
     ok = True
     if level in ("mute_toggles", "unknown") and _mute_engine_v2_is_mute_toggles_sheet(d):
         try:
             d.press("back")
+            log(
+                "info",
+                "mute_sheet_dismiss_back_sent",
+                visual_candidate_id=visual_candidate_id,
+                source_profile_username=source_profile_username,
+                back_index=1,
+                from_sheet_level="mute_toggles",
+                elapsed_ms=round((time.perf_counter() - t0) * 1000.0, 2),
+            )
             time.sleep(0.22)
         except Exception:
             ok = False
+        fast_ok, fast_meta = _mute_engine_v2_fast_sheet_closed_profile_proof(d)
+        if fast_ok:
+            ms = round((time.perf_counter() - t0) * 1000.0, 2)
+            try:
+                log(
+                    "info",
+                    "mute_sheet_dismiss_sheet_closed_fast_detected",
+                    visual_candidate_id=visual_candidate_id,
+                    source_profile_username=source_profile_username,
+                    stage="after_first_back",
+                    elapsed_ms=ms,
+                    **fast_meta,
+                )
+                log(
+                    "info",
+                    "mute_sheet_dismiss_fast_path_used",
+                    visual_candidate_id=visual_candidate_id,
+                    source_profile_username=source_profile_username,
+                    stage="after_first_back",
+                    elapsed_ms=ms,
+                    **fast_meta,
+                )
+                log(
+                    "info",
+                    "mute_sheet_dismiss_completed",
+                    visual_candidate_id=visual_candidate_id,
+                    source_profile_username=source_profile_username,
+                    elapsed_ms=ms,
+                    fast_path_used=True,
+                )
+                log(
+                    "info",
+                    "post_mute_sheet_dismiss_completed",
+                    visual_candidate_id=visual_candidate_id,
+                    source_profile_username=source_profile_username,
+                    phase="mute_sheet_dismiss",
+                    blocking_step="dismiss_mute_sheets",
+                    surface_type="candidate_profile",
+                    action_taken="level_aware_back_fast_path",
+                    duration_ms=ms,
+                    poll_count=1,
+                    sleep_ms=220.0,
+                    used_cached_context=False,
+                    safe_to_continue_ui=True,
+                    fast_path_used=True,
+                )
+            except Exception:
+                pass
+            return True, ms
+        try:
+            log(
+                "info",
+                "mute_sheet_dismiss_fast_path_rejected",
+                visual_candidate_id=visual_candidate_id,
+                source_profile_username=source_profile_username,
+                stage="after_first_back",
+                elapsed_ms=round((time.perf_counter() - t0) * 1000.0, 2),
+                **fast_meta,
+            )
+            log(
+                "info",
+                "mute_sheet_dismiss_full_fallback_used",
+                visual_candidate_id=visual_candidate_id,
+                source_profile_username=source_profile_username,
+                stage="after_first_back",
+                reason=str(fast_meta.get("reason") or "fast_path_not_proven"),
+            )
+        except Exception:
+            pass
+        t_level2 = time.perf_counter()
+        try:
+            log(
+                "info",
+                "mute_sheet_dismiss_level2_probe_started",
+                visual_candidate_id=visual_candidate_id,
+                source_profile_username=source_profile_username,
+                probe_sequence="after_first_back",
+            )
+        except Exception:
+            pass
+        still_toggles = _mute_engine_v2_is_mute_toggles_sheet(d)
         try:
             log(
                 "info",
                 "mute_dismiss_level2_completed",
                 visual_candidate_id=visual_candidate_id,
                 source_profile_username=source_profile_username,
-                still_toggles=_mute_engine_v2_is_mute_toggles_sheet(d),
+                still_toggles=still_toggles,
+            )
+            log(
+                "info",
+                "mute_sheet_dismiss_level2_probe_completed",
+                visual_candidate_id=visual_candidate_id,
+                source_profile_username=source_profile_username,
+                probe_sequence="after_first_back",
+                still_toggles=still_toggles,
+                duration_ms=round((time.perf_counter() - t_level2) * 1000.0, 2),
             )
         except Exception:
             pass
+    t_level1 = time.perf_counter()
+    try:
+        log(
+            "info",
+            "mute_sheet_dismiss_level1_probe_started",
+            visual_candidate_id=visual_candidate_id,
+            source_profile_username=source_profile_username,
+            probe_sequence="after_level2",
+        )
+    except Exception:
+        pass
     level_after, _ = _mute_engine_v2_detect_sheet_level(d)
+    try:
+        log(
+            "info",
+            "mute_sheet_dismiss_level1_probe_completed",
+            visual_candidate_id=visual_candidate_id,
+            source_profile_username=source_profile_username,
+            probe_sequence="after_level2",
+            sheet_level=level_after,
+            duration_ms=round((time.perf_counter() - t_level1) * 1000.0, 2),
+        )
+    except Exception:
+        pass
     if level_after == "following_options":
         try:
             d.press("back")
+            log(
+                "info",
+                "mute_sheet_dismiss_back_sent",
+                visual_candidate_id=visual_candidate_id,
+                source_profile_username=source_profile_username,
+                back_index=2,
+                from_sheet_level="following_options",
+                elapsed_ms=round((time.perf_counter() - t0) * 1000.0, 2),
+            )
             time.sleep(0.2)
         except Exception:
             ok = False
+        fast_ok_after_second, fast_meta_after_second = _mute_engine_v2_fast_sheet_closed_profile_proof(d)
+        if fast_ok_after_second:
+            ms = round((time.perf_counter() - t0) * 1000.0, 2)
+            try:
+                log(
+                    "info",
+                    "mute_sheet_dismiss_sheet_closed_fast_detected",
+                    visual_candidate_id=visual_candidate_id,
+                    source_profile_username=source_profile_username,
+                    stage="after_second_back",
+                    elapsed_ms=ms,
+                    **fast_meta_after_second,
+                )
+                log(
+                    "info",
+                    "mute_sheet_dismiss_fast_path_used",
+                    visual_candidate_id=visual_candidate_id,
+                    source_profile_username=source_profile_username,
+                    stage="after_second_back",
+                    elapsed_ms=ms,
+                    **fast_meta_after_second,
+                )
+                log(
+                    "info",
+                    "mute_sheet_dismiss_completed",
+                    visual_candidate_id=visual_candidate_id,
+                    source_profile_username=source_profile_username,
+                    elapsed_ms=ms,
+                    fast_path_used=True,
+                )
+                log(
+                    "info",
+                    "post_mute_sheet_dismiss_completed",
+                    visual_candidate_id=visual_candidate_id,
+                    source_profile_username=source_profile_username,
+                    phase="mute_sheet_dismiss",
+                    blocking_step="dismiss_mute_sheets",
+                    surface_type="candidate_profile",
+                    action_taken="level_aware_second_back_fast_path",
+                    duration_ms=ms,
+                    poll_count=2,
+                    sleep_ms=420.0,
+                    used_cached_context=False,
+                    safe_to_continue_ui=True,
+                    fast_path_used=True,
+                )
+            except Exception:
+                pass
+            return True, ms
+        try:
+            log(
+                "info",
+                "mute_sheet_dismiss_fast_path_rejected",
+                visual_candidate_id=visual_candidate_id,
+                source_profile_username=source_profile_username,
+                stage="after_second_back",
+                elapsed_ms=round((time.perf_counter() - t0) * 1000.0, 2),
+                **fast_meta_after_second,
+            )
+            log(
+                "info",
+                "mute_sheet_dismiss_full_fallback_used",
+                visual_candidate_id=visual_candidate_id,
+                source_profile_username=source_profile_username,
+                stage="after_second_back",
+                reason=str(fast_meta_after_second.get("reason") or "fast_path_not_proven"),
+            )
+        except Exception:
+            pass
         try:
             log(
                 "info",
@@ -39160,6 +39401,14 @@ def _mute_engine_v2_dismiss_mute_sheets_level_aware(
     ms = round((time.perf_counter() - t0) * 1000.0, 2)
     if not still:
         try:
+            log(
+                "info",
+                "mute_sheet_dismiss_sheet_closed_fast_detected",
+                visual_candidate_id=visual_candidate_id,
+                source_profile_username=source_profile_username,
+                stage="final",
+                elapsed_ms=ms,
+            )
             log(
                 "info",
                 "mute_sheet_dismiss_completed",
@@ -39892,6 +40141,64 @@ def _mute_engine_v2_mute_sheet_still_visible(d: u2.Device) -> bool:
         return bool(_mute_engine_v2_is_mute_toggles_sheet(d))
     except Exception:
         return False
+
+
+def _mute_engine_v2_fast_sheet_closed_profile_proof(d: u2.Device) -> tuple[bool, dict[str, Any]]:
+    """Cheap post-back proof that mute sheets are gone and the profile surface is back."""
+    t0 = time.perf_counter()
+    out: dict[str, Any] = {
+        "duration_ms": 0.0,
+        "toggles_visible": False,
+        "following_options_marker_visible": False,
+        "profile_marker_visible": False,
+        "action_bar_visible": False,
+        "profile_tabs_visible": False,
+        "reason": "",
+    }
+    try:
+        out["toggles_visible"] = bool(_quick_mute_sheet_visible_guard(d))
+    except Exception:
+        out["toggles_visible"] = False
+    if bool(out["toggles_visible"]):
+        out["reason"] = "mute_toggles_still_visible"
+        out["duration_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
+        return False, out
+    try:
+        following_marker = (
+            _mute_engine_v2_u2_text_exists(d, text="Unfollow", timeout_s=0.01)
+            or _mute_engine_v2_u2_text_exists(d, text_contains="Close friend", timeout_s=0.01)
+            or _mute_engine_v2_u2_text_exists(d, text="Add to favorites", timeout_s=0.01)
+        )
+    except Exception:
+        following_marker = False
+    out["following_options_marker_visible"] = bool(following_marker)
+    if bool(following_marker):
+        out["reason"] = "following_options_still_visible"
+        out["duration_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
+        return False, out
+    try:
+        action_bar_visible = bool(
+            d(resourceIdMatches=r".*:id/action_bar_title.*").exists(timeout=0.04)
+            or d(resourceIdMatches=r".*:id/action_bar_large_title_auto_size$").exists(timeout=0.04)
+        )
+    except Exception:
+        action_bar_visible = False
+    out["action_bar_visible"] = bool(action_bar_visible)
+    profile_tabs_visible = False
+    if not action_bar_visible:
+        try:
+            profile_tabs_visible = bool(_followers_profile_tabs_visible(d))
+        except Exception:
+            profile_tabs_visible = False
+    out["profile_tabs_visible"] = bool(profile_tabs_visible)
+    out["profile_marker_visible"] = bool(action_bar_visible or profile_tabs_visible)
+    if not bool(out["profile_marker_visible"]):
+        out["reason"] = "profile_surface_not_confirmed"
+        out["duration_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
+        return False, out
+    out["reason"] = "sheet_absent_profile_visible"
+    out["duration_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
+    return True, out
 
 
 def _mute_engine_v2_dismiss_mute_sheet(
@@ -42783,6 +43090,23 @@ def run_post_follow_post_likes_phase(
             timings["surface_precheck_ms"] = float(
                 surface_precheck.get("precheck_ms") or 0.0
             )
+        t_surface_to_scroll = time.perf_counter()
+        try:
+            log(
+                "info",
+                "post_like_surface_to_scroll_gap_started",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                follower_username=cand,
+                post_index=post_idx,
+                surface_precheck_ms=float(surface_precheck.get("precheck_ms") or 0.0),
+                sheet_precheck_ms=float(sheet_precheck.get("precheck_ms") or 0.0),
+                profile_candidate_visible=bool(surface_precheck.get("profile_candidate_visible")),
+                grid_tab_visible=bool(surface_precheck.get("grid_tab_visible")),
+                followers_list_visible=bool(surface_precheck.get("followers_list_visible")),
+            )
+        except Exception:
+            pass
         from follow_state_contract import FollowContext, evaluate_like_precheck_contract
 
         _like_contract_ctx, _can_probe_like_grid, _like_contract_reason = (
@@ -42998,6 +43322,31 @@ def run_post_follow_post_likes_phase(
                 duration_ms=tier1_duration_ms,
                 surface_profile_ok=surface_profile_ok,
                 grid_tab_visible=grid_tab_visible,
+            )
+        except Exception:
+            pass
+        try:
+            log(
+                "info",
+                "post_like_no_posts_tier1_timing",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                follower_username=cand,
+                post_index=post_idx,
+                duration_ms=tier1_duration_ms,
+                tier1_detected=bool(tier1_check.get("no_posts_detected")),
+                reason=str(tier1_check.get("detection_method") or "not_detected"),
+            )
+            log(
+                "info",
+                "post_like_surface_to_scroll_gap_checkpoint",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                follower_username=cand,
+                post_index=post_idx,
+                checkpoint="no_posts_tier1_completed",
+                elapsed_ms=round((time.perf_counter() - t_surface_to_scroll) * 1000.0, 2),
+                duration_ms=tier1_duration_ms,
             )
         except Exception:
             pass
@@ -43262,6 +43611,24 @@ def run_post_follow_post_likes_phase(
                                     scroll_distance_px=sw.get("scroll_distance_px"),
                                     grid_exposure_before="profile_tabs_too_low",
                                 )
+                                log(
+                                    "info",
+                                    "post_like_first_scroll_timing",
+                                    visual_candidate_id=vcid,
+                                    source_profile_username=src,
+                                    follower_username=cand,
+                                    post_index=post_idx,
+                                    scroll_reason="pre_reveal_tabs_too_low_before_legacy_safe",
+                                    scroll_profile=scroll_profile,
+                                    scroll_elapsed_ms=round(
+                                        (time.perf_counter() - t_scroll) * 1000.0,
+                                        2,
+                                    ),
+                                    swipe_ok=bool(sw.get("swipe_ok")),
+                                    scroll_start_y=sw.get("y_start"),
+                                    scroll_end_y=sw.get("y_end"),
+                                    scroll_distance_px=sw.get("scroll_distance_px"),
+                                )
                             except Exception:
                                 pass
             duration_ms = round((time.perf_counter() - t_pre_reveal) * 1000.0, 2)
@@ -43287,6 +43654,30 @@ def run_post_follow_post_likes_phase(
                     scroll_start_y=out.get("scroll_start_y"),
                     scroll_end_y=out.get("scroll_end_y"),
                     scroll_distance_px=out.get("scroll_distance_px"),
+                )
+                log(
+                    "info",
+                    "post_like_pre_reveal_timing",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    follower_username=cand,
+                    post_index=post_idx,
+                    duration_ms=duration_ms,
+                    pre_reveal_used=bool(out.get("pre_reveal_used")),
+                    reason=str(out.get("reason") or ""),
+                    swipe_ok=out.get("swipe_ok"),
+                )
+                log(
+                    "info",
+                    "post_like_surface_to_scroll_gap_checkpoint",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    follower_username=cand,
+                    post_index=post_idx,
+                    checkpoint="pre_reveal_completed",
+                    elapsed_ms=round((time.perf_counter() - t_surface_to_scroll) * 1000.0, 2),
+                    duration_ms=duration_ms,
+                    pre_reveal_used=bool(out.get("pre_reveal_used")),
                 )
             except Exception:
                 pass
@@ -43314,6 +43705,20 @@ def run_post_follow_post_likes_phase(
             except Exception:
                 pass
         t_open_legacy_first = time.perf_counter()
+        try:
+            log(
+                "info",
+                "post_like_surface_to_scroll_gap_checkpoint",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                follower_username=cand,
+                post_index=post_idx,
+                checkpoint="legacy_safe_started",
+                elapsed_ms=round((time.perf_counter() - t_surface_to_scroll) * 1000.0, 2),
+                pre_reveal_used=bool(pre_reveal_out.get("pre_reveal_used")),
+            )
+        except Exception:
+            pass
         legacy_first_out = _post_follow_likes_open_top_left_legacy_visual_safe(
             d,
             pkg=pkg,
@@ -43323,6 +43728,23 @@ def run_post_follow_post_likes_phase(
             post_index=post_idx,
             likes_perf_phase_t0=_likes_perf_ctx.get("phase_t0"),
         )
+        try:
+            log(
+                "info",
+                "post_like_legacy_safe_candidate_timing",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                follower_username=cand,
+                post_index=post_idx,
+                attempt="first",
+                duration_ms=round((time.perf_counter() - t_open_legacy_first) * 1000.0, 2),
+                ok=bool(legacy_first_out.get("ok")),
+                post_detected=bool(legacy_first_out.get("post_detected")),
+                failure_reason=str(legacy_first_out.get("failure_reason") or ""),
+                viewer_detect_path=legacy_first_out.get("viewer_detect_path"),
+            )
+        except Exception:
+            pass
         if bool(legacy_first_out.get("ok")) and bool(legacy_first_out.get("post_detected")):
             preopened_out = dict(legacy_first_out)
             timings[f"open_post_{post_idx}_ms"] = round(
@@ -43339,6 +43761,21 @@ def run_post_follow_post_likes_phase(
                     "final_profile_tabs_visible": True,
                 },
             }
+            try:
+                log(
+                    "info",
+                    "post_like_surface_to_scroll_gap_completed",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    follower_username=cand,
+                    post_index=post_idx,
+                    outcome="post_opened_first_legacy_safe",
+                    elapsed_ms=round((time.perf_counter() - t_surface_to_scroll) * 1000.0, 2),
+                    open_post_ms=timings.get(f"open_post_{post_idx}_ms"),
+                    pre_reveal_used=bool(pre_reveal_out.get("pre_reveal_used")),
+                )
+            except Exception:
+                pass
         else:
             legacy_first_failure_reason = str(
                 legacy_first_out.get("failure_reason")
@@ -43428,6 +43865,24 @@ def run_post_follow_post_likes_phase(
                         scroll_distance_px=sw_retry.get("scroll_distance_px"),
                         grid_exposure_before="legacy_visual_top_left_ambiguous",
                     )
+                    log(
+                        "info",
+                        "post_like_first_scroll_timing",
+                        visual_candidate_id=vcid,
+                        source_profile_username=src,
+                        follower_username=cand,
+                        post_index=post_idx,
+                        scroll_reason="legacy_safe_ambiguous_retry_reveal_top_left",
+                        scroll_profile=scroll_profile,
+                        scroll_elapsed_ms=round(
+                            (time.perf_counter() - t_retry_scroll) * 1000.0,
+                            2,
+                        ),
+                        swipe_ok=bool(sw_retry.get("swipe_ok")),
+                        scroll_start_y=sw_retry.get("y_start"),
+                        scroll_end_y=sw_retry.get("y_end"),
+                        scroll_distance_px=sw_retry.get("scroll_distance_px"),
+                    )
                 except Exception:
                     pass
                 if bool(sw_retry.get("swipe_ok")):
@@ -43464,6 +43919,23 @@ def run_post_follow_post_likes_phase(
                     try:
                         log(
                             "info",
+                            "post_like_legacy_safe_candidate_timing",
+                            visual_candidate_id=vcid,
+                            source_profile_username=src,
+                            follower_username=cand,
+                            post_index=post_idx,
+                            attempt="retry_after_reveal",
+                            duration_ms=round(
+                                (time.perf_counter() - t_open_legacy_retry) * 1000.0,
+                                2,
+                            ),
+                            ok=bool(preopened_out.get("ok")),
+                            post_detected=bool(preopened_out.get("post_detected")),
+                            failure_reason=str(preopened_out.get("failure_reason") or ""),
+                            viewer_detect_path=preopened_out.get("viewer_detect_path"),
+                        )
+                        log(
+                            "info",
                             "legacy_safe_retry_after_reveal_completed",
                             visual_candidate_id=vcid,
                             source_profile_username=src,
@@ -43484,6 +43956,21 @@ def run_post_follow_post_likes_phase(
                     except Exception:
                         pass
                     if retry_ok:
+                        try:
+                            log(
+                                "info",
+                                "post_like_surface_to_scroll_gap_completed",
+                                visual_candidate_id=vcid,
+                                source_profile_username=src,
+                                follower_username=cand,
+                                post_index=post_idx,
+                                outcome="post_opened_retry_after_reveal",
+                                elapsed_ms=round((time.perf_counter() - t_surface_to_scroll) * 1000.0, 2),
+                                open_post_ms=timings.get(f"open_post_{post_idx}_ms"),
+                                pre_reveal_used=bool(pre_reveal_out.get("pre_reveal_used")),
+                            )
+                        except Exception:
+                            pass
                         try:
                             log(
                                 "info",

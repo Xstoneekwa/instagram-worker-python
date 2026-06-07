@@ -8,6 +8,235 @@ import instagram_navigation as nav
 
 
 class MuteEngineV2SheetLevelsTest(unittest.TestCase):
+    def test_level_aware_dismiss_fast_path_stops_after_first_back(self) -> None:
+        d = mock.MagicMock()
+        logs: list[tuple[str, dict[str, object]]] = []
+        with mock.patch.object(
+            nav,
+            "_mute_engine_v2_detect_sheet_level",
+            return_value=("mute_toggles", {"detect_duration_ms": 1.0}),
+        ) as detect_level, mock.patch.object(
+            nav, "_mute_engine_v2_is_mute_toggles_sheet", return_value=True
+        ), mock.patch.object(
+            nav,
+            "_mute_engine_v2_fast_sheet_closed_profile_proof",
+            return_value=(
+                True,
+                {
+                    "duration_ms": 12.0,
+                    "toggles_visible": False,
+                    "following_options_marker_visible": False,
+                    "profile_marker_visible": True,
+                    "action_bar_visible": True,
+                    "profile_tabs_visible": False,
+                    "reason": "sheet_absent_profile_visible",
+                },
+            ),
+        ) as fast_proof, mock.patch.object(
+            nav, "log", side_effect=lambda _level, event, **kw: logs.append((str(event), kw))
+        ), mock.patch.object(
+            nav, "time"
+        ) as tmock:
+            tmock.perf_counter = time.perf_counter
+            tmock.sleep = lambda *_a, **_k: None
+            ok, _ms = nav._mute_engine_v2_dismiss_mute_sheets_level_aware(
+                d,
+                visual_candidate_id="vc-1",
+                source_profile_username="ct",
+            )
+
+        events = [event for event, _kw in logs]
+        self.assertTrue(ok)
+        self.assertEqual(d.press.call_count, 1)
+        self.assertEqual(detect_level.call_count, 1)
+        fast_proof.assert_called_once()
+        self.assertIn("mute_sheet_dismiss_fast_path_used", events)
+        self.assertNotIn("mute_sheet_dismiss_level1_probe_started", events)
+        completed = [kw for event, kw in logs if event == "post_mute_sheet_dismiss_completed"][-1]
+        self.assertTrue(completed["fast_path_used"])
+        self.assertEqual(completed["sleep_ms"], 220.0)
+
+    def test_level_aware_dismiss_visible_sheet_uses_full_fallback(self) -> None:
+        d = mock.MagicMock()
+        logs: list[tuple[str, dict[str, object]]] = []
+        with mock.patch.object(
+            nav,
+            "_mute_engine_v2_detect_sheet_level",
+            side_effect=[
+                ("mute_toggles", {"detect_duration_ms": 1.0}),
+                ("following_options", {"detect_duration_ms": 1.0}),
+            ],
+        ), mock.patch.object(
+            nav, "_mute_engine_v2_is_mute_toggles_sheet", side_effect=[True, False]
+        ), mock.patch.object(
+            nav, "_mute_engine_v2_mute_sheet_still_visible", return_value=False
+        ), mock.patch.object(
+            nav, "_mute_engine_v2_is_following_options_sheet", return_value=False
+        ), mock.patch.object(
+            nav,
+            "_mute_engine_v2_fast_sheet_closed_profile_proof",
+            return_value=(
+                False,
+                {
+                    "duration_ms": 10.0,
+                    "toggles_visible": True,
+                    "following_options_marker_visible": False,
+                    "profile_marker_visible": False,
+                    "action_bar_visible": False,
+                    "profile_tabs_visible": False,
+                    "reason": "mute_toggles_still_visible",
+                },
+            ),
+        ), mock.patch.object(
+            nav, "log", side_effect=lambda _level, event, **kw: logs.append((str(event), kw))
+        ), mock.patch.object(
+            nav, "time"
+        ) as tmock:
+            tmock.perf_counter = time.perf_counter
+            tmock.sleep = lambda *_a, **_k: None
+            ok, _ms = nav._mute_engine_v2_dismiss_mute_sheets_level_aware(
+                d,
+                visual_candidate_id="vc-1",
+                source_profile_username="ct",
+            )
+
+        events = [event for event, _kw in logs]
+        self.assertTrue(ok)
+        self.assertIn("mute_sheet_dismiss_timing_started", events)
+        self.assertIn("mute_sheet_dismiss_level2_probe_started", events)
+        self.assertIn("mute_sheet_dismiss_level2_probe_completed", events)
+        self.assertIn("mute_sheet_dismiss_level1_probe_started", events)
+        self.assertIn("mute_sheet_dismiss_level1_probe_completed", events)
+        self.assertIn("mute_sheet_dismiss_back_sent", events)
+        self.assertIn("mute_sheet_dismiss_fast_path_rejected", events)
+        self.assertIn("mute_sheet_dismiss_full_fallback_used", events)
+        self.assertIn("mute_sheet_dismiss_sheet_closed_fast_detected", events)
+        self.assertIn("mute_sheet_dismiss_completed", events)
+        back_events = [kw for event, kw in logs if event == "mute_sheet_dismiss_back_sent"]
+        self.assertEqual([kw.get("back_index") for kw in back_events], [1, 2])
+
+    def test_level_aware_dismiss_second_back_fast_path_skips_final_heavy_check(self) -> None:
+        d = mock.MagicMock()
+        logs: list[tuple[str, dict[str, object]]] = []
+        with mock.patch.object(
+            nav,
+            "_mute_engine_v2_detect_sheet_level",
+            side_effect=[
+                ("mute_toggles", {"detect_duration_ms": 1.0}),
+                ("following_options", {"detect_duration_ms": 1.0}),
+            ],
+        ) as detect_level, mock.patch.object(
+            nav, "_mute_engine_v2_is_mute_toggles_sheet", side_effect=[True, False]
+        ), mock.patch.object(
+            nav,
+            "_mute_engine_v2_fast_sheet_closed_profile_proof",
+            side_effect=[
+                (
+                    False,
+                    {
+                        "duration_ms": 10.0,
+                        "toggles_visible": False,
+                        "following_options_marker_visible": True,
+                        "profile_marker_visible": True,
+                        "action_bar_visible": True,
+                        "profile_tabs_visible": False,
+                        "reason": "following_options_still_visible",
+                    },
+                ),
+                (
+                    True,
+                    {
+                        "duration_ms": 12.0,
+                        "toggles_visible": False,
+                        "following_options_marker_visible": False,
+                        "profile_marker_visible": True,
+                        "action_bar_visible": True,
+                        "profile_tabs_visible": False,
+                        "reason": "sheet_absent_profile_visible",
+                    },
+                ),
+            ],
+        ) as fast_proof, mock.patch.object(
+            nav, "_mute_engine_v2_mute_sheet_still_visible"
+        ) as final_toggles, mock.patch.object(
+            nav, "_mute_engine_v2_is_following_options_sheet"
+        ) as final_following, mock.patch.object(
+            nav, "log", side_effect=lambda _level, event, **kw: logs.append((str(event), kw))
+        ), mock.patch.object(
+            nav, "time"
+        ) as tmock:
+            tmock.perf_counter = time.perf_counter
+            tmock.sleep = lambda *_a, **_k: None
+            ok, _ms = nav._mute_engine_v2_dismiss_mute_sheets_level_aware(
+                d,
+                visual_candidate_id="vc-1",
+                source_profile_username="ct",
+            )
+
+        events = [event for event, _kw in logs]
+        self.assertTrue(ok)
+        self.assertEqual(d.press.call_count, 2)
+        self.assertEqual(detect_level.call_count, 2)
+        self.assertEqual(fast_proof.call_count, 2)
+        final_toggles.assert_not_called()
+        final_following.assert_not_called()
+        used = [kw for event, kw in logs if event == "mute_sheet_dismiss_fast_path_used"][-1]
+        self.assertEqual(used["stage"], "after_second_back")
+        self.assertIn("mute_sheet_dismiss_full_fallback_used", events)
+
+    def test_level_aware_dismiss_ambiguous_fast_probe_uses_full_fallback(self) -> None:
+        d = mock.MagicMock()
+        logs: list[tuple[str, dict[str, object]]] = []
+        with mock.patch.object(
+            nav,
+            "_mute_engine_v2_detect_sheet_level",
+            side_effect=[
+                ("mute_toggles", {"detect_duration_ms": 1.0}),
+                ("following_options", {"detect_duration_ms": 1.0}),
+            ],
+        ), mock.patch.object(
+            nav, "_mute_engine_v2_is_mute_toggles_sheet", side_effect=[True, False]
+        ), mock.patch.object(
+            nav, "_mute_engine_v2_mute_sheet_still_visible", return_value=False
+        ), mock.patch.object(
+            nav, "_mute_engine_v2_is_following_options_sheet", return_value=False
+        ), mock.patch.object(
+            nav,
+            "_mute_engine_v2_fast_sheet_closed_profile_proof",
+            return_value=(
+                False,
+                {
+                    "duration_ms": 10.0,
+                    "toggles_visible": False,
+                    "following_options_marker_visible": False,
+                    "profile_marker_visible": False,
+                    "action_bar_visible": False,
+                    "profile_tabs_visible": False,
+                    "reason": "profile_surface_not_confirmed",
+                },
+            ),
+        ), mock.patch.object(
+            nav, "log", side_effect=lambda _level, event, **kw: logs.append((str(event), kw))
+        ), mock.patch.object(
+            nav, "time"
+        ) as tmock:
+            tmock.perf_counter = time.perf_counter
+            tmock.sleep = lambda *_a, **_k: None
+            ok, _ms = nav._mute_engine_v2_dismiss_mute_sheets_level_aware(
+                d,
+                visual_candidate_id="vc-1",
+                source_profile_username="ct",
+            )
+
+        events = [event for event, _kw in logs]
+        self.assertTrue(ok)
+        self.assertIn("mute_sheet_dismiss_fast_path_rejected", events)
+        self.assertIn("mute_sheet_dismiss_full_fallback_used", events)
+        rejected = [kw for event, kw in logs if event == "mute_sheet_dismiss_fast_path_rejected"][-1]
+        self.assertEqual(rejected["reason"], "profile_surface_not_confirmed")
+        back_events = [kw for event, kw in logs if event == "mute_sheet_dismiss_back_sent"]
+        self.assertEqual([kw.get("back_index") for kw in back_events], [1, 2])
+
     def test_following_options_sheet_detected(self) -> None:
         d = mock.MagicMock()
 
