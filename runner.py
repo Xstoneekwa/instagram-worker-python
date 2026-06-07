@@ -150,6 +150,9 @@ from instagram_navigation import (
     verify_followers_list_surface_is_ct_account,
     reset_instagram_to_canonical_state,
     ensure_global_search_surface,
+    instagram_search_surface_strict_ok,
+    is_followers_list_surface_quick,
+    _wait_search_edittext,
     visual_profile_metrics_pass_filter,
     visual_profile_stats_posts_count,
     read_current_profile_username_for_follow_gate,
@@ -639,6 +642,7 @@ def _timed_safe_supabase_call(
     log_account_id: str | None = None,
     log_attempt: int = 1,
     log_record_count: int | None = None,
+    return_status: bool = False,
     **kwargs,
 ):
     """Instrumentation-only wrapper around Supabase writes; never logs payloads."""
@@ -673,6 +677,8 @@ def _timed_safe_supabase_call(
             error_code=error_code,
         )
         log("warning", "supabase_call_failed", fn=fn_name, error=str(e))
+        if return_status:
+            return {"_supabase_call_ok": False, "value": None}
         return None
     duration_ms = round((time.perf_counter() - t0) * 1000.0, 2)
     ok = True
@@ -686,6 +692,8 @@ def _timed_safe_supabase_call(
         ok=ok,
         error_code="",
     )
+    if return_status:
+        return {"_supabase_call_ok": ok, "value": out}
     return out
 
 
@@ -1772,6 +1780,130 @@ def _ct_list_bypass_runtime_duplicate_social_memory(
     return bool(followers_resolved_continue or resolve_streak >= 2)
 
 
+_DEFERRED_FOLLOW_ACTION_LOG_FLUSHES: list[dict[str, Any]] = []
+_DEFERRED_POST_RETURN_PERSIST_STEPS: list[dict[str, Any]] = []
+
+
+def _pending_deferred_follow_action_log_count() -> int:
+    return len(_DEFERRED_FOLLOW_ACTION_LOG_FLUSHES) + len(_DEFERRED_POST_RETURN_PERSIST_STEPS)
+
+
+def _deferred_follow_action_log_record_count() -> int:
+    total = 0
+    for item in _DEFERRED_FOLLOW_ACTION_LOG_FLUSHES:
+        try:
+            total += len(item.get("events") or [])
+        except Exception:
+            pass
+    total += len(_DEFERRED_POST_RETURN_PERSIST_STEPS)
+    return total
+
+
+def _deferred_step_common_log_fields(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "step": str(item.get("step") or ""),
+        "fn_name": str(item.get("fn_name") or ""),
+        "target_username": str(item.get("source_profile_username") or item.get("target_username") or ""),
+        "candidate_username": str(item.get("candidate_username") or ""),
+        "critical": False,
+        "deferred": True,
+        "flush_required_before_completed": True,
+        "safe_to_continue_ui": True,
+        "reason": str(item.get("reason") or ""),
+    }
+
+
+def _schedule_deferred_post_return_supabase_step(
+    *,
+    step: str,
+    fn_name: str,
+    args: tuple[Any, ...] = (),
+    kwargs: dict[str, Any] | None = None,
+    run_id: str | None = None,
+    account_id: str | None = None,
+    source_profile_username: str = "",
+    candidate_username: str = "",
+    target_username: str = "",
+    reason: str = "",
+    log_record_count: int | None = None,
+    success_event: str = "",
+    success_payload: dict[str, Any] | None = None,
+) -> None:
+    item = {
+        "step": str(step or fn_name or ""),
+        "fn_name": str(fn_name or ""),
+        "args": tuple(args or ()),
+        "kwargs": dict(kwargs or {}),
+        "run_id": str(run_id or ""),
+        "account_id": str(account_id or ""),
+        "source_profile_username": str(source_profile_username or ""),
+        "candidate_username": str(candidate_username or target_username or ""),
+        "target_username": str(target_username or candidate_username or ""),
+        "reason": str(reason or ""),
+        "log_record_count": log_record_count,
+        "success_event": str(success_event or ""),
+        "success_payload": dict(success_payload or {}),
+    }
+    _DEFERRED_POST_RETURN_PERSIST_STEPS.append(item)
+    log(
+        "info",
+        "post_return_deferred_step_scheduled",
+        **_deferred_step_common_log_fields(item),
+        pending_deferred_count=_pending_deferred_follow_action_log_count(),
+    )
+
+
+def _flush_deferred_post_return_supabase_steps(*, reason: str) -> bool:
+    if not _DEFERRED_POST_RETURN_PERSIST_STEPS:
+        return True
+    ok_all = True
+    while _DEFERRED_POST_RETURN_PERSIST_STEPS:
+        item = _DEFERRED_POST_RETURN_PERSIST_STEPS.pop(0)
+        t0 = time.perf_counter()
+        common = _deferred_step_common_log_fields({**item, "reason": reason or item.get("reason") or ""})
+        log(
+            "info",
+            "post_return_deferred_step_started",
+            **common,
+            pending_deferred_count=_pending_deferred_follow_action_log_count() + 1,
+        )
+        out = _timed_safe_supabase_call(
+            str(item.get("step") or item.get("fn_name") or ""),
+            str(item.get("fn_name") or ""),
+            *(item.get("args") or ()),
+            **dict(item.get("kwargs") or {}),
+            log_run_id=str(item.get("run_id") or "") or None,
+            log_account_id=str(item.get("account_id") or "") or None,
+            log_record_count=item.get("log_record_count"),
+            return_status=True,
+        )
+        duration_ms = round((time.perf_counter() - t0) * 1000.0, 2)
+        ok = bool(isinstance(out, dict) and out.get("_supabase_call_ok"))
+        if ok:
+            success_event = str(item.get("success_event") or "")
+            if success_event:
+                log("info", success_event, **dict(item.get("success_payload") or {}))
+            log(
+                "info",
+                "post_return_deferred_step_completed",
+                **common,
+                duration_ms=duration_ms,
+                pending_deferred_count=_pending_deferred_follow_action_log_count(),
+            )
+        else:
+            ok_all = False
+            _DEFERRED_POST_RETURN_PERSIST_STEPS.insert(0, item)
+            log(
+                "error",
+                "post_return_deferred_step_failed",
+                **common,
+                duration_ms=duration_ms,
+                pending_deferred_count=_pending_deferred_follow_action_log_count(),
+            )
+            break
+    return ok_all
+
+
 def _flush_follow_action_logs_to_supabase(
     *,
     events: list[tuple[str, dict]],
@@ -1779,9 +1911,11 @@ def _flush_follow_action_logs_to_supabase(
     account_id: str,
     target_username: str,
     supabase_mode: bool,
-) -> None:
+) -> bool:
     if not (supabase_mode and run_id and account_id):
-        return
+        return True
+    if not events:
+        return True
     t_flush = time.perf_counter()
     flush_base = {
         "step": "_flush_follow_action_logs_to_supabase",
@@ -1792,10 +1926,11 @@ def _flush_follow_action_logs_to_supabase(
         "account_id": str(account_id or "")[:160],
     }
     log("info", "supabase_persist_step_started", **flush_base)
+    ok_all = True
     for ev, pl in events or []:
         base = {"target_username": target_username, "account_id": account_id, "run_id": run_id}
         merged = {**base, **pl}
-        _timed_safe_supabase_call(
+        out = _timed_safe_supabase_call(
             "flush_follow_action_log",
             "insert_action_log",
             run_id=run_id,
@@ -1808,15 +1943,157 @@ def _flush_follow_action_logs_to_supabase(
             log_run_id=run_id,
             log_account_id=account_id,
             log_record_count=len(events or []),
+            return_status=True,
         )
+        if isinstance(out, dict) and "_supabase_call_ok" in out:
+            if not bool(out.get("_supabase_call_ok")):
+                ok_all = False
+        elif isinstance(out, dict) and not bool(out.get("ok", True)):
+            ok_all = False
     log(
         "info",
         "supabase_persist_step_completed",
         **flush_base,
         duration_ms=round((time.perf_counter() - t_flush) * 1000.0, 2),
-        ok=True,
-        error_code="",
+        ok=ok_all,
+        error_code="" if ok_all else "deferred_action_log_flush_failed",
     )
+    return ok_all
+
+
+def _schedule_deferred_follow_action_log_flush(
+    *,
+    events: list[tuple[str, dict]],
+    run_id: str,
+    account_id: str,
+    target_username: str,
+    supabase_mode: bool,
+    source_profile_username: str = "",
+    candidate_username: str = "",
+) -> None:
+    if not (supabase_mode and run_id and account_id and events):
+        return
+    _DEFERRED_FOLLOW_ACTION_LOG_FLUSHES.append(
+        {
+            "events": list(events or []),
+            "run_id": str(run_id or ""),
+            "account_id": str(account_id or ""),
+            "target_username": str(target_username or ""),
+            "source_profile_username": str(source_profile_username or ""),
+            "candidate_username": str(candidate_username or target_username or ""),
+        }
+    )
+    log(
+        "info",
+        "post_return_deferred_persist_scheduled",
+        target_username=str(source_profile_username or target_username or ""),
+        candidate_username=str(candidate_username or target_username or ""),
+        deferred_record_count=len(events or []),
+        flush_required_before_completed=True,
+        pending_deferred_count=_pending_deferred_follow_action_log_count(),
+        safe_to_continue_ui=True,
+    )
+    log(
+        "info",
+        "post_return_deferred_step_scheduled",
+        step="_flush_follow_action_logs_to_supabase",
+        fn_name="insert_action_log",
+        target_username=str(source_profile_username or target_username or ""),
+        candidate_username=str(candidate_username or target_username or ""),
+        duration_ms=0.0,
+        critical=False,
+        deferred=True,
+        reason="action_logs_deferred_until_run_status",
+        safe_to_continue_ui=True,
+        flush_required_before_completed=True,
+        pending_deferred_count=_pending_deferred_follow_action_log_count(),
+    )
+
+
+def _flush_deferred_follow_action_log_persists(*, reason: str) -> bool:
+    if not _DEFERRED_FOLLOW_ACTION_LOG_FLUSHES:
+        return True
+    ok_all = True
+    while _DEFERRED_FOLLOW_ACTION_LOG_FLUSHES:
+        item = _DEFERRED_FOLLOW_ACTION_LOG_FLUSHES.pop(0)
+        events = list(item.get("events") or [])
+        t0 = time.perf_counter()
+        log(
+            "info",
+            "post_return_deferred_persist_started",
+            target_username=str(item.get("source_profile_username") or item.get("target_username") or ""),
+            candidate_username=str(item.get("candidate_username") or ""),
+            deferred_record_count=len(events),
+            flush_required_before_completed=True,
+            pending_deferred_count=_pending_deferred_follow_action_log_count() + 1,
+            reason=str(reason or ""),
+        )
+        log(
+            "info",
+            "post_return_deferred_step_started",
+            step="_flush_follow_action_logs_to_supabase",
+            fn_name="insert_action_log",
+            target_username=str(item.get("source_profile_username") or item.get("target_username") or ""),
+            candidate_username=str(item.get("candidate_username") or ""),
+            duration_ms=0.0,
+            critical=False,
+            deferred=True,
+            reason=str(reason or ""),
+            safe_to_continue_ui=True,
+            flush_required_before_completed=True,
+            pending_deferred_count=_pending_deferred_follow_action_log_count() + 1,
+        )
+        ok = _flush_follow_action_logs_to_supabase(
+            events=events,
+            run_id=str(item.get("run_id") or ""),
+            account_id=str(item.get("account_id") or ""),
+            target_username=str(item.get("target_username") or ""),
+            supabase_mode=True,
+        )
+        duration_ms = round((time.perf_counter() - t0) * 1000.0, 2)
+        if ok:
+            log(
+                "info",
+                "post_return_deferred_persist_completed",
+                target_username=str(item.get("source_profile_username") or item.get("target_username") or ""),
+                candidate_username=str(item.get("candidate_username") or ""),
+                deferred_record_count=len(events),
+                deferred_duration_ms=duration_ms,
+                flush_required_before_completed=True,
+                pending_deferred_count=_pending_deferred_follow_action_log_count(),
+                reason=str(reason or ""),
+            )
+            log(
+                "info",
+                "post_return_deferred_step_completed",
+                step="_flush_follow_action_logs_to_supabase",
+                fn_name="insert_action_log",
+                target_username=str(item.get("source_profile_username") or item.get("target_username") or ""),
+                candidate_username=str(item.get("candidate_username") or ""),
+                duration_ms=duration_ms,
+                critical=False,
+                deferred=True,
+                reason=str(reason or ""),
+                safe_to_continue_ui=True,
+                flush_required_before_completed=True,
+                pending_deferred_count=_pending_deferred_follow_action_log_count(),
+            )
+        else:
+            ok_all = False
+            _DEFERRED_FOLLOW_ACTION_LOG_FLUSHES.insert(0, item)
+            log(
+                "error",
+                "post_return_deferred_persist_failed",
+                target_username=str(item.get("source_profile_username") or item.get("target_username") or ""),
+                candidate_username=str(item.get("candidate_username") or ""),
+                deferred_record_count=len(events),
+                deferred_duration_ms=duration_ms,
+                flush_required_before_completed=True,
+                pending_deferred_count=_pending_deferred_follow_action_log_count(),
+                reason=str(reason or ""),
+            )
+            break
+    return ok_all
 
 
 def _persist_verified_follow_success_to_supabase(
@@ -1831,10 +2108,11 @@ def _persist_verified_follow_success_to_supabase(
     f_st: str,
     target_id: str | None,
     phase: str,
-) -> None:
+    defer_source_follow_success: bool = False,
+) -> bool:
     """Persist follow outcome after post-follow so mute/like are not blocked on DB I/O."""
     if not (supabase_mode and account_id):
-        return
+        return True
     _vfp_un_ok = str(follower_un or "").strip()
     if not _vfp_un_ok:
         log(
@@ -1846,7 +2124,7 @@ def _persist_verified_follow_success_to_supabase(
             reason="verified_follow_without_resolved_username",
             persist_phase=phase,
         )
-        return
+        return True
     t_persist = time.perf_counter()
     persist_base = {
         "step": "_persist_verified_follow_success_to_supabase",
@@ -1856,6 +2134,20 @@ def _persist_verified_follow_success_to_supabase(
         "account_id": str(account_id or "")[:160],
     }
     log("info", "supabase_persist_step_started", **persist_base)
+    log(
+        "info",
+        "post_return_critical_persist_step_started",
+        step="record_follow_interaction_outcome",
+        fn_name="record_follow_interaction_outcome",
+        target_username=source_profile_username,
+        candidate_username=follower_un,
+        critical=True,
+        deferred=False,
+        reason="follow_success_required_before_ui_resume",
+        safe_to_continue_ui=False,
+        flush_required_before_completed=False,
+    )
+    _mem_t0 = time.perf_counter()
     mem = _timed_safe_supabase_call(
         "social_memory_updated",
         "record_follow_interaction_outcome",
@@ -1874,6 +2166,21 @@ def _persist_verified_follow_success_to_supabase(
         failure_reason=None,
         target_id=target_id or None,
     )
+    _mem_ok = bool(mem is not None and (not isinstance(mem, dict) or bool(mem.get("ok", True))))
+    log(
+        "info" if _mem_ok else "error",
+        "post_return_critical_persist_step_completed",
+        step="record_follow_interaction_outcome",
+        fn_name="record_follow_interaction_outcome",
+        target_username=source_profile_username,
+        candidate_username=follower_un,
+        duration_ms=round((time.perf_counter() - _mem_t0) * 1000.0, 2),
+        critical=True,
+        deferred=False,
+        reason="follow_success_required_before_ui_resume",
+        safe_to_continue_ui=_mem_ok,
+        flush_required_before_completed=False,
+    )
     log(
         "info",
         "social_memory_updated",
@@ -1883,27 +2190,47 @@ def _persist_verified_follow_success_to_supabase(
         target_id=str(target_id or "") or None,
         persist_phase=phase,
     )
-    if not bool(follow_out.get("skipped_tap")):
-        _timed_safe_supabase_call(
-            "record_follow_source_follow_success",
-            "record_follow_source_follow_success",
-            log_run_id=run_id or None,
-            log_account_id=account_id,
-            account_id=account_id,
-            target_id=target_id or None,
-            source_profile=source_profile_username,
-            candidate_username=follower_un,
-            run_id=run_id or None,
-            outcome=f_st or fs_af or "follow_verified",
-        )
+    ok_all = _mem_ok
+    if ok_all and not bool(follow_out.get("skipped_tap")):
+        _src_kwargs = {
+            "account_id": account_id,
+            "target_id": target_id or None,
+            "source_profile": source_profile_username,
+            "candidate_username": follower_un,
+            "run_id": run_id or None,
+            "outcome": f_st or fs_af or "follow_verified",
+        }
+        if defer_source_follow_success:
+            _schedule_deferred_post_return_supabase_step(
+                step="record_follow_source_follow_success",
+                fn_name="record_follow_source_follow_success",
+                kwargs=_src_kwargs,
+                run_id=run_id or None,
+                account_id=account_id,
+                source_profile_username=source_profile_username,
+                candidate_username=follower_un,
+                target_username=follower_un,
+                reason="source_follow_success_can_flush_before_completed",
+            )
+        else:
+            src = _timed_safe_supabase_call(
+                "record_follow_source_follow_success",
+                "record_follow_source_follow_success",
+                log_run_id=run_id or None,
+                log_account_id=account_id,
+                **_src_kwargs,
+            )
+            if src is None or (isinstance(src, dict) and not bool(src.get("ok", True))):
+                ok_all = False
     log(
         "info",
         "supabase_persist_step_completed",
         **persist_base,
         duration_ms=round((time.perf_counter() - t_persist) * 1000.0, 2),
-        ok=True,
-        error_code="",
+        ok=ok_all,
+        error_code="" if ok_all else "critical_follow_persist_failed",
     )
+    return ok_all
 
 
 def _cleanup_session_apps(d) -> None:
@@ -2030,6 +2357,29 @@ def _update_run_status_safe(
     totals: dict,
     performance_summary: dict,
 ) -> None:
+    if status in {"completed", "failed"}:
+        deferred_steps_ok = _flush_deferred_post_return_supabase_steps(
+            reason=f"before_run_status_{status}"
+        )
+        deferred_logs_ok = _flush_deferred_follow_action_log_persists(
+            reason=f"before_run_status_{status}"
+        )
+        deferred_ok = bool(deferred_steps_ok and deferred_logs_ok)
+        if not deferred_ok and status == "completed":
+            log(
+                "error",
+                "run_completed_blocked_deferred_persist_failed",
+                run_id=run_id,
+                pending_deferred_count=_pending_deferred_follow_action_log_count(),
+                deferred_record_count=_deferred_follow_action_log_record_count(),
+            )
+            status = "failed"
+            performance_summary = {
+                **(performance_summary or {}),
+                "reason": "deferred_persist_failed_before_completed",
+                "pending_deferred_count": _pending_deferred_follow_action_log_count(),
+                "deferred_record_count": _deferred_follow_action_log_record_count(),
+            }
     _timed_safe_supabase_call(
         "run_status_updated",
         "update_run_status",
@@ -3940,6 +4290,178 @@ def should_stop_for_target_follow_budget(
     return budget > 0 and completed >= budget
 
 
+_FOLLOW_TARGET_ROTATION_PENDING_STATE: dict[str, Any] = {
+    "rotation_pending": False,
+    "target_username": "",
+    "candidate_username": "",
+    "target_follow_count": 0,
+    "max_follows_per_target_per_run": 0,
+    "global_follow_remaining": 0,
+    "reason": "",
+    "set_at_monotonic": 0.0,
+}
+_POST_RETURN_IDLE_GAP_STATE: dict[str, Any] = {
+    "started_at_monotonic": 0.0,
+    "target_username": "",
+}
+
+
+def reset_follow_target_rotation_pending() -> None:
+    global _FOLLOW_TARGET_ROTATION_PENDING_STATE, _POST_RETURN_IDLE_GAP_STATE
+    _FOLLOW_TARGET_ROTATION_PENDING_STATE = {
+        "rotation_pending": False,
+        "target_username": "",
+        "candidate_username": "",
+        "target_follow_count": 0,
+        "max_follows_per_target_per_run": 0,
+        "global_follow_remaining": 0,
+        "reason": "",
+        "set_at_monotonic": 0.0,
+    }
+    _POST_RETURN_IDLE_GAP_STATE = {
+        "started_at_monotonic": 0.0,
+        "target_username": "",
+    }
+
+
+def get_follow_target_rotation_pending_state() -> dict[str, Any]:
+    return dict(_FOLLOW_TARGET_ROTATION_PENDING_STATE)
+
+
+def is_follow_target_rotation_pending(*, target_username: str = "") -> bool:
+    if not bool(_FOLLOW_TARGET_ROTATION_PENDING_STATE.get("rotation_pending")):
+        return False
+    pending_target = _norm_ig_handle(
+        str(_FOLLOW_TARGET_ROTATION_PENDING_STATE.get("target_username") or "")
+    )
+    if not target_username:
+        return bool(pending_target)
+    return pending_target == _norm_ig_handle(target_username)
+
+
+def _follow_target_rotation_pending_payload(**extra: Any) -> dict[str, Any]:
+    payload = dict(_FOLLOW_TARGET_ROTATION_PENDING_STATE)
+    payload["rotation_pending"] = bool(payload.get("rotation_pending"))
+    payload.update(extra)
+    return payload
+
+
+def set_follow_target_rotation_pending(
+    *,
+    target_username: str,
+    reason: str,
+    target_follow_count: int = 0,
+    max_follows_per_target_per_run: int = 0,
+    global_follow_remaining: int = 0,
+    candidate_username: str = "",
+) -> None:
+    global _FOLLOW_TARGET_ROTATION_PENDING_STATE
+    if bool(_FOLLOW_TARGET_ROTATION_PENDING_STATE.get("rotation_pending")):
+        return
+    _FOLLOW_TARGET_ROTATION_PENDING_STATE = {
+        "rotation_pending": True,
+        "target_username": str(target_username or ""),
+        "candidate_username": str(candidate_username or ""),
+        "target_follow_count": int(target_follow_count),
+        "max_follows_per_target_per_run": int(max_follows_per_target_per_run),
+        "global_follow_remaining": int(global_follow_remaining),
+        "reason": str(reason or ""),
+        "set_at_monotonic": time.perf_counter(),
+    }
+    log(
+        "info",
+        "follow_target_rotation_pending_set",
+        **_follow_target_rotation_pending_payload(),
+    )
+
+
+def _start_post_return_idle_gap(*, target_username: str) -> None:
+    global _POST_RETURN_IDLE_GAP_STATE
+    if float(_POST_RETURN_IDLE_GAP_STATE.get("started_at_monotonic") or 0.0) > 0.0:
+        return
+    _POST_RETURN_IDLE_GAP_STATE = {
+        "started_at_monotonic": time.perf_counter(),
+        "target_username": str(target_username or ""),
+    }
+    log(
+        "info",
+        "follow_target_post_return_idle_gap_started",
+        target_username=str(target_username or ""),
+        rotation_pending=True,
+    )
+
+
+def _complete_post_return_idle_gap(*, reason: str) -> None:
+    global _POST_RETURN_IDLE_GAP_STATE
+    started_at = float(_POST_RETURN_IDLE_GAP_STATE.get("started_at_monotonic") or 0.0)
+    if started_at <= 0.0:
+        return
+    duration_ms = round((time.perf_counter() - started_at) * 1000.0, 2)
+    log(
+        "info",
+        "follow_target_post_return_idle_gap_completed",
+        target_username=str(_POST_RETURN_IDLE_GAP_STATE.get("target_username") or ""),
+        reason=str(reason or ""),
+        duration_ms=duration_ms,
+        rotation_pending=is_follow_target_rotation_pending(),
+    )
+    _POST_RETURN_IDLE_GAP_STATE = {
+        "started_at_monotonic": 0.0,
+        "target_username": "",
+    }
+
+
+def _follow_target_rotation_pending_block(
+    *,
+    action: str,
+    target_username: str,
+    candidate_username: str = "",
+    reason: str = "",
+    **extra: Any,
+) -> bool:
+    if not is_follow_target_rotation_pending(target_username=target_username):
+        return False
+    event = (
+        "follow_target_candidate_scan_blocked_rotation_pending"
+        if action == "scan"
+        else "follow_target_candidate_click_blocked_rotation_pending"
+    )
+    payload = _follow_target_rotation_pending_payload(
+        target_username=str(target_username or ""),
+        candidate_username=str(candidate_username or ""),
+        reason=str(reason or action or "rotation_pending"),
+        **extra,
+    )
+    log("info", event, **payload)
+    return True
+
+
+def _invalidate_follow_target_snapshot_after_budget(
+    open_list_meta: dict[str, Any] | None,
+    visual_loop_state: dict[str, Any] | None,
+    *,
+    source_profile_username: str,
+    reason: str = "target_budget_reached",
+) -> None:
+    if isinstance(visual_loop_state, dict):
+        visual_loop_state["post_return_picker_refresh_pending"] = False
+        visual_loop_state.pop("post_return_picker_refresh_meta", None)
+    if isinstance(open_list_meta, dict):
+        invalidate_followers_injection_evidence(
+            open_list_meta,
+            visual_loop_state if isinstance(visual_loop_state, dict) else {},
+            reason="target_budget_reached",
+            source_profile_username=source_profile_username,
+        )
+    log(
+        "info",
+        "follow_target_snapshot_invalidated_budget_reached",
+        target_username=str(source_profile_username or ""),
+        reason=str(reason or "target_budget_reached"),
+        rotation_pending=is_follow_target_rotation_pending(target_username=source_profile_username),
+    )
+
+
 def _fast_rotation_result(
     *,
     ok: bool,
@@ -3948,8 +4470,9 @@ def _fast_rotation_result(
     to_source_target: str,
     steps_completed: list[str],
     started_at: float,
+    followers_list_proof: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    result = {
         "ok": bool(ok),
         "reason": str(reason or ""),
         "from_source_target": str(from_source_target or ""),
@@ -3957,6 +4480,9 @@ def _fast_rotation_result(
         "steps_completed": list(steps_completed),
         "elapsed_ms": int(round((time.perf_counter() - started_at) * 1000.0)),
     }
+    if isinstance(followers_list_proof, dict) and followers_list_proof:
+        result["followers_list_proof"] = dict(followers_list_proof)
+    return result
 
 
 def _log_fast_target_rotation(
@@ -3970,19 +4496,1195 @@ def _log_fast_target_rotation(
     reason: str,
     started_at: float,
     attempt: int = 1,
+    **extra: Any,
 ) -> None:
+    payload: dict[str, Any] = {
+        "account_id": str(account_id or ""),
+        "run_id": str(run_id or ""),
+        "from_source_target": str(from_source_target or ""),
+        "to_source_target": str(to_source_target or ""),
+        "step": str(step or ""),
+        "reason": str(reason or ""),
+        "elapsed_ms": int(round((time.perf_counter() - started_at) * 1000.0)),
+        "attempt": int(attempt),
+    }
+    payload.update(extra)
     log(
         "info" if not event.endswith("_failed") else "warning",
         event,
-        account_id=str(account_id or ""),
-        run_id=str(run_id or ""),
-        from_source_target=str(from_source_target or ""),
-        to_source_target=str(to_source_target or ""),
-        step=str(step or ""),
-        reason=str(reason or ""),
-        elapsed_ms=int(round((time.perf_counter() - started_at) * 1000.0)),
-        attempt=int(attempt),
+        **payload,
     )
+
+
+def _fast_rotation_search_surface_context(
+    d,
+    *,
+    from_source_target: str = "",
+    to_source_target: str = "",
+) -> dict[str, Any]:
+    previous_target = _norm_ig_handle(from_source_target)
+    target = _norm_ig_handle(to_source_target)
+
+    def _exists(**selector: Any) -> bool:
+        try:
+            return bool(d(**selector).wait(timeout=0.05))
+        except Exception:
+            return False
+
+    has_recent_label = any(
+        _exists(className="android.widget.TextView", text=label)
+        for label in ("Recent", "Récents", "Recent searches")
+    )
+    next_target_visible = False
+    if target:
+        for raw in {target, str(to_source_target or "").strip()}:
+            if raw and _exists(className="android.widget.TextView", text=raw):
+                next_target_visible = True
+                break
+    has_recent_targets = bool(has_recent_label or next_target_visible)
+    search_query_text = ""
+    try:
+        ed = d(className="android.widget.EditText")
+        if bool(ed.exists):
+            try:
+                search_query_text = str(ed.get_text() or "")
+            except Exception:
+                search_query_text = str(getattr(ed, "text", "") or "")
+    except Exception:
+        search_query_text = ""
+    query_norm = _norm_ig_handle(search_query_text)
+    previous_query_visible = bool(previous_target and query_norm == previous_target)
+    previous_target_visible = False
+    if previous_target:
+        for raw in {previous_target, str(from_source_target or "").strip()}:
+            if raw and _exists(className="android.widget.TextView", text=raw):
+                previous_target_visible = True
+                break
+    account_result_texts: list[str] = []
+    for selector in (
+        {"resourceId": f"{config.INSTAGRAM_PACKAGE}:id/row_search_user_username"},
+        {"resourceId": "com.instagram.android:id/row_search_user_username"},
+        {"resourceIdMatches": r".*/id/row_search_user_username"},
+    ):
+        try:
+            for el in d(**selector).all():
+                try:
+                    txt = str(getattr(el, "text", "") or el.get_text() or "").strip()
+                except Exception:
+                    txt = str(getattr(el, "text", "") or "").strip()
+                if txt:
+                    account_result_texts.append(txt)
+        except Exception:
+            pass
+        if account_result_texts:
+            break
+    account_result_norms = {_norm_ig_handle(txt) for txt in account_result_texts if txt}
+    has_account_results = bool(account_result_norms)
+    previous_target_result_visible = bool(previous_target and previous_target in account_result_norms)
+    previous_search_results_ok = bool(
+        has_account_results and (previous_query_visible or previous_target_visible or previous_target_result_visible)
+    )
+    image_count = 0
+    try:
+        image_count = len(d(className="android.widget.ImageView").all())
+    except Exception:
+        image_count = 0
+    has_explore_grid = bool(
+        image_count >= 9
+        and not has_recent_label
+        and not next_target_visible
+        and not previous_search_results_ok
+    )
+    is_query_empty = not bool(query_norm) or query_norm in {"search", "recherche"}
+    return {
+        "has_recent_label": has_recent_label,
+        "has_recent_targets": has_recent_targets,
+        "has_explore_grid": has_explore_grid,
+        "next_target_visible_in_recent": next_target_visible,
+        "search_query_text": str(search_query_text or "")[:80],
+        "previous_query_visible": previous_query_visible,
+        "previous_target_visible": previous_target_visible,
+        "previous_target_result_visible": previous_target_result_visible,
+        "has_account_results": has_account_results,
+        "account_result_count": len(account_result_norms),
+        "previous_search_results_ok": previous_search_results_ok,
+        "is_global_search_empty": bool(
+            is_query_empty
+            and not has_recent_label
+            and not next_target_visible
+            and not has_account_results
+        ),
+    }
+
+
+def _fast_rotation_probe_search_surface(
+    d,
+    pkg: str,
+    from_source_target: str,
+    to_source_target: str = "",
+) -> dict[str, Any]:
+    t0 = time.perf_counter()
+    lightweight = bool(is_lightweight_search_screen(d, pkg))
+    local_followers = bool(
+        is_followers_list_surface_quick(d, source_profile_username=from_source_target)
+    )
+    global_ok = False
+    surface_reason = "not_lightweight_search"
+    if lightweight:
+        ed = _wait_search_edittext(d)
+        if ed is not None:
+            global_ok, surface_reason = instagram_search_surface_strict_ok(
+                d,
+                ed,
+                pkg=pkg,
+                source_profile_username=from_source_target,
+            )
+        else:
+            surface_reason = "edittext_not_found"
+    ctx = _fast_rotation_search_surface_context(
+        d,
+        from_source_target=from_source_target,
+        to_source_target=to_source_target,
+    ) if lightweight else {
+        "has_recent_label": False,
+        "has_recent_targets": False,
+        "has_explore_grid": False,
+        "next_target_visible_in_recent": False,
+        "search_query_text": "",
+        "previous_query_visible": False,
+        "previous_target_visible": False,
+        "previous_target_result_visible": False,
+        "has_account_results": False,
+        "account_result_count": 0,
+        "previous_search_results_ok": False,
+        "is_global_search_empty": False,
+    }
+    previous_ok = bool(global_ok and ctx.get("previous_search_results_ok"))
+    recent_ok = bool(
+        global_ok
+        and (
+            ctx.get("has_recent_label")
+            or ctx.get("has_recent_targets")
+            or ctx.get("next_target_visible_in_recent")
+        )
+    )
+    if previous_ok:
+        surface_type = "previous_target_search_results"
+        surface_reason = "previous_target_search_results"
+    elif recent_ok:
+        surface_type = "recent_search"
+    elif global_ok and ctx.get("has_explore_grid"):
+        surface_type = "explore_grid_search"
+        surface_reason = "explore_grid_search_surface"
+    elif global_ok:
+        surface_type = "global_search_empty"
+        surface_reason = "global_search_recent_missing"
+    elif local_followers:
+        surface_type = "local_followers_search"
+    elif lightweight:
+        surface_type = "lightweight_search_unconfirmed"
+    else:
+        surface_type = "unknown"
+    return {
+        "is_global_search": global_ok,
+        "is_previous_search_results_surface": previous_ok,
+        "is_recent_search_surface": recent_ok,
+        "is_local_followers_search": local_followers,
+        "is_lightweight_search": lightweight,
+        "surface_type": surface_type,
+        "surface_reason": str(surface_reason or ""),
+        "has_search_bar": lightweight,
+        "has_recent_label": bool(ctx.get("has_recent_label")),
+        "has_recent_targets": bool(ctx.get("has_recent_targets")),
+        "has_explore_grid": bool(ctx.get("has_explore_grid")),
+        "next_target_visible_in_recent": bool(ctx.get("next_target_visible_in_recent")),
+        "search_query_text": str(ctx.get("search_query_text") or "")[:80],
+        "previous_query_visible": bool(ctx.get("previous_query_visible")),
+        "previous_target_visible": bool(ctx.get("previous_target_visible")),
+        "previous_target_result_visible": bool(ctx.get("previous_target_result_visible")),
+        "has_account_results": bool(ctx.get("has_account_results")),
+        "account_result_count": int(ctx.get("account_result_count") or 0),
+        "is_global_search_empty": bool(ctx.get("is_global_search_empty")),
+        "duration_ms": round((time.perf_counter() - t0) * 1000.0, 2),
+    }
+
+
+def _fast_rotation_search_probe_is_exploitable_recent(probe: dict[str, Any]) -> bool:
+    if bool(probe.get("is_recent_search_surface")):
+        return True
+    # Older tests and some pre-context probes used "global_search/ok" for a
+    # reusable search surface before Recent-vs-empty fields existed. Runtime
+    # probes now mark bad surfaces explicitly as global_search_empty/explore.
+    if (
+        bool(probe.get("is_global_search"))
+        and not bool(probe.get("is_global_search_empty"))
+        and not bool(probe.get("has_explore_grid"))
+        and str(probe.get("surface_type") or "") == "global_search"
+        and str(probe.get("surface_reason") or "") == "ok"
+    ):
+        return True
+    return False
+
+
+def _fast_rotation_search_probe_is_previous_results(probe: dict[str, Any]) -> bool:
+    return bool(probe.get("is_global_search")) and bool(
+        probe.get("is_previous_search_results_surface")
+        or str(probe.get("surface_type") or "") == "previous_target_search_results"
+    )
+
+
+def _fast_rotation_search_probe_is_controlled_empty(probe: dict[str, Any]) -> bool:
+    return bool(
+        probe.get("is_global_search")
+        and probe.get("has_search_bar")
+        and (
+            probe.get("is_global_search_empty")
+            or str(probe.get("surface_type") or "") == "global_search_empty"
+        )
+        and not probe.get("has_account_results")
+        and not probe.get("has_explore_grid")
+        and not probe.get("is_local_followers_search")
+    )
+
+
+def _fast_rotation_recover_global_search_surface(
+    d,
+    *,
+    pkg: str,
+    from_source_target: str,
+    to_source_target: str,
+    account_id: str,
+    run_id: str | None,
+    started_at: float,
+    current_back_count: int = 0,
+) -> tuple[bool, str]:
+    _log_fast_target_rotation(
+        "follow_target_fast_rotation_back_to_recent_search_started",
+        account_id=account_id,
+        run_id=run_id,
+        from_source_target=from_source_target,
+        to_source_target=to_source_target,
+        step="back_to_recent_search",
+        reason="wrong_search_surface_detected",
+        started_at=started_at,
+        fallback_used=False,
+    )
+    recovery_started = time.perf_counter()
+    _log_fast_target_rotation(
+        "follow_target_fast_rotation_third_back_started",
+        account_id=account_id,
+        run_id=run_id,
+        from_source_target=from_source_target,
+        to_source_target=to_source_target,
+        step="back_to_recent_search",
+        reason="global_search_empty_or_wrong_surface",
+        started_at=started_at,
+        back_count=int(current_back_count),
+        fallback_used=False,
+    )
+    third_back_sent = False
+    try:
+        d.press("back")
+        third_back_sent = True
+    except Exception:
+        pass
+    time.sleep(0.12)
+    first_probe = _fast_rotation_probe_search_surface(
+        d, pkg, from_source_target, to_source_target
+    )
+    _log_fast_target_rotation(
+        "follow_target_fast_rotation_third_back_completed",
+        account_id=account_id,
+        run_id=run_id,
+        from_source_target=from_source_target,
+        to_source_target=to_source_target,
+        step="back_to_recent_search",
+        reason="third_back_sent" if third_back_sent else "third_back_failed",
+        started_at=started_at,
+        back_count=int(current_back_count) + (1 if third_back_sent else 0),
+        surface_type=first_probe.get("surface_type"),
+        surface_reason=first_probe.get("surface_reason"),
+        has_search_bar=first_probe.get("has_search_bar"),
+        has_recent_label=first_probe.get("has_recent_label"),
+        has_recent_targets=first_probe.get("has_recent_targets"),
+        has_explore_grid=first_probe.get("has_explore_grid"),
+        next_target_visible_in_recent=first_probe.get("next_target_visible_in_recent"),
+        is_global_search_empty=first_probe.get("is_global_search_empty"),
+        is_recent_search_surface=first_probe.get("is_recent_search_surface"),
+        fallback_used=False,
+    )
+    if _fast_rotation_search_probe_is_exploitable_recent(first_probe):
+        _log_fast_target_rotation(
+            "follow_target_fast_rotation_back_to_recent_search_success",
+            account_id=account_id,
+            run_id=run_id,
+            from_source_target=from_source_target,
+            to_source_target=to_source_target,
+            step="back_to_recent_search",
+            reason="extra_back",
+            started_at=started_at,
+            surface_type=first_probe.get("surface_type"),
+            surface_reason=first_probe.get("surface_reason"),
+            is_global_search=first_probe.get("is_global_search"),
+            is_recent_search_surface=first_probe.get("is_recent_search_surface"),
+            is_local_followers_search=first_probe.get("is_local_followers_search"),
+            has_search_bar=first_probe.get("has_search_bar"),
+            has_recent_label=first_probe.get("has_recent_label"),
+            has_recent_targets=first_probe.get("has_recent_targets"),
+            has_explore_grid=first_probe.get("has_explore_grid"),
+            next_target_visible_in_recent=first_probe.get("next_target_visible_in_recent"),
+            is_global_search_empty=first_probe.get("is_global_search_empty"),
+            duration_ms=round((time.perf_counter() - recovery_started) * 1000.0, 2),
+            fallback_used=False,
+        )
+        _log_fast_target_rotation(
+            "follow_target_fast_rotation_recent_search_confirmed_after_third_back",
+            account_id=account_id,
+            run_id=run_id,
+            from_source_target=from_source_target,
+            to_source_target=to_source_target,
+            step="back_to_recent_search",
+            reason="recent_search_ready",
+            started_at=started_at,
+            back_count=int(current_back_count) + (1 if third_back_sent else 0),
+            surface_type=first_probe.get("surface_type"),
+            surface_reason=first_probe.get("surface_reason"),
+            has_search_bar=first_probe.get("has_search_bar"),
+            has_recent_label=first_probe.get("has_recent_label"),
+            has_recent_targets=first_probe.get("has_recent_targets"),
+            has_explore_grid=first_probe.get("has_explore_grid"),
+            next_target_visible_in_recent=first_probe.get("next_target_visible_in_recent"),
+            is_global_search_empty=first_probe.get("is_global_search_empty"),
+            is_recent_search_surface=first_probe.get("is_recent_search_surface"),
+            fallback_used=False,
+        )
+        return True, "extra_back"
+    if _fast_rotation_search_probe_is_previous_results(first_probe):
+        _log_fast_target_rotation(
+            "follow_target_fast_rotation_previous_search_results_detected",
+            account_id=account_id,
+            run_id=run_id,
+            from_source_target=from_source_target,
+            to_source_target=to_source_target,
+            step="back_to_recent_search",
+            reason="previous_target_search_results_after_third_back",
+            started_at=started_at,
+            back_count=int(current_back_count) + (1 if third_back_sent else 0),
+            surface_type=first_probe.get("surface_type"),
+            surface_reason=first_probe.get("surface_reason"),
+            has_search_bar=first_probe.get("has_search_bar"),
+            search_query_text=first_probe.get("search_query_text"),
+            previous_target_visible=first_probe.get("previous_target_visible"),
+            previous_query_visible=first_probe.get("previous_query_visible"),
+            previous_target_result_visible=first_probe.get("previous_target_result_visible"),
+            has_account_results=first_probe.get("has_account_results"),
+            has_recent_label=first_probe.get("has_recent_label"),
+            has_recent_targets=first_probe.get("has_recent_targets"),
+            has_explore_grid=first_probe.get("has_explore_grid"),
+            is_global_search_empty=first_probe.get("is_global_search_empty"),
+            fallback_used=False,
+        )
+        _log_fast_target_rotation(
+            "follow_target_fast_rotation_previous_search_results_used",
+            account_id=account_id,
+            run_id=run_id,
+            from_source_target=from_source_target,
+            to_source_target=to_source_target,
+            step="back_to_recent_search",
+            reason="previous_target_search_results_after_third_back",
+            started_at=started_at,
+            back_count=int(current_back_count) + (1 if third_back_sent else 0),
+            surface_type=first_probe.get("surface_type"),
+            search_query_text=first_probe.get("search_query_text"),
+            previous_target_visible=first_probe.get("previous_target_visible"),
+            has_account_results=first_probe.get("has_account_results"),
+            fallback_used=False,
+        )
+        return True, "previous_target_search_results"
+    settle_deadline = time.monotonic() + 1.5
+    while time.monotonic() < settle_deadline:
+        probe = _fast_rotation_probe_search_surface(
+            d, pkg, from_source_target, to_source_target
+        )
+        if _fast_rotation_search_probe_is_previous_results(probe):
+            _log_fast_target_rotation(
+                "follow_target_fast_rotation_previous_search_results_detected",
+                account_id=account_id,
+                run_id=run_id,
+                from_source_target=from_source_target,
+                to_source_target=to_source_target,
+                step="back_to_recent_search",
+                reason="previous_target_search_results_after_third_back",
+                started_at=started_at,
+                surface_type=probe.get("surface_type"),
+                surface_reason=probe.get("surface_reason"),
+                has_search_bar=probe.get("has_search_bar"),
+                search_query_text=probe.get("search_query_text"),
+                previous_target_visible=probe.get("previous_target_visible"),
+                previous_query_visible=probe.get("previous_query_visible"),
+                previous_target_result_visible=probe.get("previous_target_result_visible"),
+                has_account_results=probe.get("has_account_results"),
+                has_recent_label=probe.get("has_recent_label"),
+                has_recent_targets=probe.get("has_recent_targets"),
+                has_explore_grid=probe.get("has_explore_grid"),
+                is_global_search_empty=probe.get("is_global_search_empty"),
+                duration_ms=round((time.perf_counter() - recovery_started) * 1000.0, 2),
+                fallback_used=False,
+            )
+            _log_fast_target_rotation(
+                "follow_target_fast_rotation_previous_search_results_used",
+                account_id=account_id,
+                run_id=run_id,
+                from_source_target=from_source_target,
+                to_source_target=to_source_target,
+                step="back_to_recent_search",
+                reason="previous_target_search_results_after_third_back",
+                started_at=started_at,
+                surface_type=probe.get("surface_type"),
+                search_query_text=probe.get("search_query_text"),
+                previous_target_visible=probe.get("previous_target_visible"),
+                has_account_results=probe.get("has_account_results"),
+                fallback_used=False,
+            )
+            return True, "previous_target_search_results"
+        if _fast_rotation_search_probe_is_exploitable_recent(probe):
+            _log_fast_target_rotation(
+                "follow_target_fast_rotation_back_to_recent_search_success",
+                account_id=account_id,
+                run_id=run_id,
+                from_source_target=from_source_target,
+                to_source_target=to_source_target,
+                step="back_to_recent_search",
+                reason="extra_back",
+                started_at=started_at,
+                surface_type=probe.get("surface_type"),
+                surface_reason=probe.get("surface_reason"),
+                is_global_search=probe.get("is_global_search"),
+                is_recent_search_surface=probe.get("is_recent_search_surface"),
+                is_local_followers_search=probe.get("is_local_followers_search"),
+                has_search_bar=probe.get("has_search_bar"),
+                has_recent_label=probe.get("has_recent_label"),
+                has_recent_targets=probe.get("has_recent_targets"),
+                has_explore_grid=probe.get("has_explore_grid"),
+                next_target_visible_in_recent=probe.get("next_target_visible_in_recent"),
+                is_global_search_empty=probe.get("is_global_search_empty"),
+                duration_ms=round((time.perf_counter() - recovery_started) * 1000.0, 2),
+                fallback_used=False,
+            )
+            _log_fast_target_rotation(
+                "follow_target_fast_rotation_recent_search_confirmed_after_third_back",
+                account_id=account_id,
+                run_id=run_id,
+                from_source_target=from_source_target,
+                to_source_target=to_source_target,
+                step="back_to_recent_search",
+                reason="recent_search_ready",
+                started_at=started_at,
+                back_count=int(current_back_count) + (1 if third_back_sent else 0),
+                surface_type=probe.get("surface_type"),
+                surface_reason=probe.get("surface_reason"),
+                has_search_bar=probe.get("has_search_bar"),
+                has_recent_label=probe.get("has_recent_label"),
+                has_recent_targets=probe.get("has_recent_targets"),
+                has_explore_grid=probe.get("has_explore_grid"),
+                next_target_visible_in_recent=probe.get("next_target_visible_in_recent"),
+                is_global_search_empty=probe.get("is_global_search_empty"),
+                is_recent_search_surface=probe.get("is_recent_search_surface"),
+                fallback_used=False,
+            )
+            return True, "extra_back"
+        if probe.get("has_explore_grid") or (
+            probe.get("is_global_search") and not probe.get("is_recent_search_surface", True)
+        ):
+            _log_fast_target_rotation(
+                "follow_target_fast_rotation_explore_grid_surface_detected"
+                if probe.get("has_explore_grid")
+                else "follow_target_fast_rotation_search_recent_surface_missing",
+                account_id=account_id,
+                run_id=run_id,
+                from_source_target=from_source_target,
+                to_source_target=to_source_target,
+                step="back_to_recent_search",
+                reason=str(probe.get("surface_reason") or "recent_search_missing"),
+                started_at=started_at,
+                surface_type=probe.get("surface_type"),
+                surface_reason=probe.get("surface_reason"),
+                has_search_bar=probe.get("has_search_bar"),
+                has_recent_label=probe.get("has_recent_label"),
+                has_recent_targets=probe.get("has_recent_targets"),
+                has_explore_grid=probe.get("has_explore_grid"),
+                next_target_visible_in_recent=probe.get("next_target_visible_in_recent"),
+                is_global_search_empty=probe.get("is_global_search_empty"),
+                is_recent_search_surface=probe.get("is_recent_search_surface"),
+                duration_ms=round((time.perf_counter() - recovery_started) * 1000.0, 2),
+                fallback_used=False,
+            )
+        if not probe.get("is_lightweight_search") and not probe.get(
+            "is_local_followers_search"
+        ):
+            break
+        time.sleep(0.08)
+    probe = _fast_rotation_probe_search_surface(
+        d, pkg, from_source_target, to_source_target
+    )
+    if probe.get("is_global_search_empty"):
+        invalidate_search_surface_cache("fast_rotation_recent_recovery_global_search_empty")
+        _log_fast_target_rotation(
+            "follow_target_fast_rotation_search_cache_rejected_empty",
+            account_id=account_id,
+            run_id=run_id,
+            from_source_target=from_source_target,
+            to_source_target=to_source_target,
+            step="back_to_recent_search",
+            reason=str(probe.get("surface_reason") or "global_search_empty"),
+            started_at=started_at,
+            surface_type=probe.get("surface_type"),
+            surface_reason=probe.get("surface_reason"),
+            has_search_bar=probe.get("has_search_bar"),
+            has_recent_label=probe.get("has_recent_label"),
+            has_recent_targets=probe.get("has_recent_targets"),
+            next_target_visible_in_recent=probe.get("next_target_visible_in_recent"),
+            is_global_search_empty=probe.get("is_global_search_empty"),
+            is_recent_search_surface=probe.get("is_recent_search_surface"),
+            fallback_used=False,
+        )
+    _log_fast_target_rotation(
+        "follow_target_fast_rotation_back_to_recent_search_failed",
+        account_id=account_id,
+        run_id=run_id,
+        from_source_target=from_source_target,
+        to_source_target=to_source_target,
+        step="back_to_recent_search",
+        reason=str(probe.get("surface_reason") or "recent_search_not_found"),
+        started_at=started_at,
+        surface_type=probe.get("surface_type"),
+        surface_reason=probe.get("surface_reason"),
+        is_global_search=probe.get("is_global_search"),
+        is_recent_search_surface=probe.get("is_recent_search_surface"),
+        is_local_followers_search=probe.get("is_local_followers_search"),
+        has_search_bar=probe.get("has_search_bar"),
+        has_recent_label=probe.get("has_recent_label"),
+        has_recent_targets=probe.get("has_recent_targets"),
+        has_explore_grid=probe.get("has_explore_grid"),
+        next_target_visible_in_recent=probe.get("next_target_visible_in_recent"),
+        is_global_search_empty=probe.get("is_global_search_empty"),
+        duration_ms=round((time.perf_counter() - recovery_started) * 1000.0, 2),
+        fallback_used=False,
+        fallback_reason="recent_search_recovery_failed",
+    )
+    return False, "recent_search_recovery_failed"
+
+
+def _fast_rotation_back_back_to_global_search(
+    d,
+    *,
+    pkg: str,
+    from_source_target: str,
+    to_source_target: str,
+    account_id: str,
+    run_id: str | None,
+    started_at: float,
+    started_on_followers_list: bool,
+) -> tuple[bool, str, int]:
+    back_count = 0
+    _log_fast_target_rotation(
+        "follow_target_fast_rotation_back_back_started",
+        account_id=account_id,
+        run_id=run_id,
+        from_source_target=from_source_target,
+        to_source_target=to_source_target,
+        step="back_back",
+        reason="target_budget_reached",
+        started_at=started_at,
+        back_count=back_count,
+        fallback_used=False,
+    )
+    if started_on_followers_list:
+        try:
+            d.press("back")
+            back_count += 1
+        except Exception:
+            return False, "back_from_followers_failed", back_count
+        if not verify_profile(d, from_source_target):
+            return False, "profile_after_followers_back_not_validated", back_count
+        _log_fast_target_rotation(
+            "follow_target_fast_rotation_back_step_completed",
+            account_id=account_id,
+            run_id=run_id,
+            from_source_target=from_source_target,
+            to_source_target=to_source_target,
+            step="back_profile",
+            reason="followers_to_profile",
+            started_at=started_at,
+            back_count=back_count,
+            surface_type="ct_profile",
+            fallback_used=False,
+        )
+    try:
+        d.press("back")
+        back_count += 1
+    except Exception as e:
+        log("warning", "search_back_press_failed", error=str(e))
+        return False, "back_to_search_not_validated", back_count
+    _log_fast_target_rotation(
+        "follow_target_fast_rotation_back_step_completed",
+        account_id=account_id,
+        run_id=run_id,
+        from_source_target=from_source_target,
+        to_source_target=to_source_target,
+        step="back_search",
+        reason="profile_to_search",
+        started_at=started_at,
+        back_count=back_count,
+        surface_type="pending_probe",
+        fallback_used=False,
+    )
+    t_poll = time.perf_counter()
+    deadline = time.monotonic() + float(
+        getattr(config, "BACK_TO_SEARCH_MAX_WAIT_S", 3.0)
+    )
+    while time.monotonic() < deadline:
+        probe = _fast_rotation_probe_search_surface(
+            d, pkg, from_source_target, to_source_target
+        )
+        if _fast_rotation_search_probe_is_previous_results(probe):
+            _log_fast_target_rotation(
+                "follow_target_fast_rotation_previous_search_results_detected",
+                account_id=account_id,
+                run_id=run_id,
+                from_source_target=from_source_target,
+                to_source_target=to_source_target,
+                step="back_search",
+                reason="previous_target_search_results",
+                started_at=started_at,
+                back_count=back_count,
+                surface_type=probe.get("surface_type"),
+                surface_reason=probe.get("surface_reason"),
+                has_search_bar=probe.get("has_search_bar"),
+                search_query_text=probe.get("search_query_text"),
+                previous_target_visible=probe.get("previous_target_visible"),
+                previous_query_visible=probe.get("previous_query_visible"),
+                previous_target_result_visible=probe.get("previous_target_result_visible"),
+                has_account_results=probe.get("has_account_results"),
+                has_recent_label=probe.get("has_recent_label"),
+                has_recent_targets=probe.get("has_recent_targets"),
+                has_explore_grid=probe.get("has_explore_grid"),
+                is_global_search_empty=probe.get("is_global_search_empty"),
+                fallback_used=False,
+            )
+            _log_fast_target_rotation(
+                "follow_target_fast_rotation_previous_search_results_used",
+                account_id=account_id,
+                run_id=run_id,
+                from_source_target=from_source_target,
+                to_source_target=to_source_target,
+                step="back_search",
+                reason="previous_target_search_results",
+                started_at=started_at,
+                back_count=back_count,
+                surface_type=probe.get("surface_type"),
+                search_query_text=probe.get("search_query_text"),
+                previous_target_visible=probe.get("previous_target_visible"),
+                has_account_results=probe.get("has_account_results"),
+                fallback_used=False,
+            )
+            return True, "previous_target_search_results", back_count
+        if _fast_rotation_search_probe_is_exploitable_recent(probe):
+            _log_fast_target_rotation(
+                "follow_target_fast_rotation_back_back_surface_detected",
+                account_id=account_id,
+                run_id=run_id,
+                from_source_target=from_source_target,
+                to_source_target=to_source_target,
+                step="back_search",
+                reason="recent_search",
+                started_at=started_at,
+                back_count=back_count,
+                surface_type=probe.get("surface_type"),
+                surface_reason=probe.get("surface_reason"),
+                is_global_search=probe.get("is_global_search"),
+                is_recent_search_surface=probe.get("is_recent_search_surface"),
+                is_local_followers_search=probe.get("is_local_followers_search"),
+                has_search_bar=probe.get("has_search_bar"),
+                has_recent_label=probe.get("has_recent_label"),
+                has_recent_targets=probe.get("has_recent_targets"),
+                has_explore_grid=probe.get("has_explore_grid"),
+                next_target_visible_in_recent=probe.get("next_target_visible_in_recent"),
+                is_global_search_empty=probe.get("is_global_search_empty"),
+                duration_ms=round((time.perf_counter() - t_poll) * 1000.0, 2),
+                fallback_used=False,
+            )
+            _log_fast_target_rotation(
+                "follow_target_fast_rotation_search_recent_surface_detected",
+                account_id=account_id,
+                run_id=run_id,
+                from_source_target=from_source_target,
+                to_source_target=to_source_target,
+                step="back_search",
+                reason="recent_search_ready",
+                started_at=started_at,
+                back_count=back_count,
+                surface_type=probe.get("surface_type"),
+                surface_reason=probe.get("surface_reason"),
+                is_global_search=probe.get("is_global_search"),
+                is_recent_search_surface=probe.get("is_recent_search_surface"),
+                is_local_followers_search=probe.get("is_local_followers_search"),
+                has_search_bar=probe.get("has_search_bar"),
+                has_recent_label=probe.get("has_recent_label"),
+                has_recent_targets=probe.get("has_recent_targets"),
+                has_explore_grid=probe.get("has_explore_grid"),
+                next_target_visible_in_recent=probe.get("next_target_visible_in_recent"),
+                is_global_search_empty=probe.get("is_global_search_empty"),
+                duration_ms=round((time.perf_counter() - t_poll) * 1000.0, 2),
+                fallback_used=False,
+            )
+            return True, "recent_search_ready", back_count
+        if probe.get("is_global_search") and not probe.get("is_recent_search_surface", True):
+            _log_fast_target_rotation(
+                "follow_target_fast_rotation_previous_search_results_missing",
+                account_id=account_id,
+                run_id=run_id,
+                from_source_target=from_source_target,
+                to_source_target=to_source_target,
+                step="back_search",
+                reason=str(probe.get("surface_reason") or "previous_search_results_missing"),
+                started_at=started_at,
+                back_count=back_count,
+                surface_type=probe.get("surface_type"),
+                has_search_bar=probe.get("has_search_bar"),
+                search_query_text=probe.get("search_query_text"),
+                previous_target_visible=probe.get("previous_target_visible"),
+                has_account_results=probe.get("has_account_results"),
+                has_explore_grid=probe.get("has_explore_grid"),
+                is_global_search_empty=probe.get("is_global_search_empty"),
+                fallback_used=False,
+            )
+            _log_fast_target_rotation(
+                "follow_target_fast_rotation_explore_grid_surface_detected"
+                if probe.get("has_explore_grid")
+                else "follow_target_fast_rotation_search_recent_surface_missing",
+                account_id=account_id,
+                run_id=run_id,
+                from_source_target=from_source_target,
+                to_source_target=to_source_target,
+                step="back_search",
+                reason=str(probe.get("surface_reason") or "recent_search_missing"),
+                started_at=started_at,
+                back_count=back_count,
+                surface_type=probe.get("surface_type"),
+                surface_reason=probe.get("surface_reason"),
+                is_global_search=probe.get("is_global_search"),
+                is_recent_search_surface=probe.get("is_recent_search_surface"),
+                has_search_bar=probe.get("has_search_bar"),
+                has_recent_label=probe.get("has_recent_label"),
+                has_recent_targets=probe.get("has_recent_targets"),
+                has_explore_grid=probe.get("has_explore_grid"),
+                next_target_visible_in_recent=probe.get("next_target_visible_in_recent"),
+                is_global_search_empty=probe.get("is_global_search_empty"),
+                duration_ms=round((time.perf_counter() - t_poll) * 1000.0, 2),
+                fallback_used=False,
+            )
+            if _fast_rotation_search_probe_is_controlled_empty(probe):
+                _log_fast_target_rotation(
+                    "follow_target_switcher_surface_classified",
+                    account_id=account_id,
+                    run_id=run_id,
+                    from_source_target=from_source_target,
+                    to_source_target=to_source_target,
+                    from_target=from_source_target,
+                    to_target=to_source_target,
+                    step="back_search",
+                    reason="controlled_empty_search",
+                    started_at=started_at,
+                    back_count=back_count,
+                    surface_type="controlled_empty_search",
+                    search_query_text=probe.get("search_query_text"),
+                    has_search_bar=probe.get("has_search_bar"),
+                    has_explore_grid=probe.get("has_explore_grid"),
+                    has_local_followers_search=probe.get("is_local_followers_search"),
+                    exact_row_found=False,
+                    duration_ms=round((time.perf_counter() - t_poll) * 1000.0, 2),
+                    fallback_used=False,
+                )
+                _log_fast_target_rotation(
+                    "follow_target_switcher_controlled_empty_search_ready",
+                    account_id=account_id,
+                    run_id=run_id,
+                    from_source_target=from_source_target,
+                    to_source_target=to_source_target,
+                    from_target=from_source_target,
+                    to_target=to_source_target,
+                    step="back_search",
+                    reason="controlled_empty_search_ready",
+                    started_at=started_at,
+                    back_count=back_count,
+                    surface_type="controlled_empty_search",
+                    search_query_text=probe.get("search_query_text"),
+                    has_search_bar=probe.get("has_search_bar"),
+                    has_explore_grid=probe.get("has_explore_grid"),
+                    has_local_followers_search=probe.get("is_local_followers_search"),
+                    exact_row_found=False,
+                    duration_ms=round((time.perf_counter() - t_poll) * 1000.0, 2),
+                    fallback_used=False,
+                )
+                _log_fast_target_rotation(
+                    "follow_target_fast_rotation_controlled_empty_search_used",
+                    account_id=account_id,
+                    run_id=run_id,
+                    from_source_target=from_source_target,
+                    to_source_target=to_source_target,
+                    step="back_search",
+                    reason="controlled_empty_search_ready",
+                    started_at=started_at,
+                    back_count=back_count,
+                    surface_type="controlled_empty_search",
+                    has_search_bar=probe.get("has_search_bar"),
+                    search_query_text=probe.get("search_query_text"),
+                    previous_target_visible=probe.get("previous_target_visible"),
+                    has_account_results=probe.get("has_account_results"),
+                    has_recent_label=probe.get("has_recent_label"),
+                    has_recent_targets=probe.get("has_recent_targets"),
+                    has_explore_grid=probe.get("has_explore_grid"),
+                    is_global_search_empty=probe.get("is_global_search_empty"),
+                    fallback_used=False,
+                )
+                return True, "controlled_empty_search", back_count
+            _log_fast_target_rotation(
+                "follow_target_fast_rotation_wrong_search_surface_rejected",
+                account_id=account_id,
+                run_id=run_id,
+                from_source_target=from_source_target,
+                to_source_target=to_source_target,
+                step="back_search",
+                reason=str(probe.get("surface_reason") or "recent_search_missing"),
+                started_at=started_at,
+                back_count=back_count,
+                surface_type=probe.get("surface_type"),
+                surface_reason=probe.get("surface_reason"),
+                has_search_bar=probe.get("has_search_bar"),
+                has_recent_label=probe.get("has_recent_label"),
+                has_recent_targets=probe.get("has_recent_targets"),
+                has_explore_grid=probe.get("has_explore_grid"),
+                next_target_visible_in_recent=probe.get("next_target_visible_in_recent"),
+                is_global_search_empty=probe.get("is_global_search_empty"),
+                is_recent_search_surface=probe.get("is_recent_search_surface"),
+                fallback_used=False,
+            )
+            recovered, recovery_reason = _fast_rotation_recover_global_search_surface(
+                d,
+                pkg=pkg,
+                from_source_target=from_source_target,
+                to_source_target=to_source_target,
+                account_id=account_id,
+                run_id=run_id,
+                started_at=started_at,
+                current_back_count=back_count,
+            )
+            if recovered:
+                return True, recovery_reason, back_count + 1
+            invalidate_search_surface_cache("fast_rotation_wrong_search_surface_rejected")
+            if probe.get("is_global_search_empty"):
+                _log_fast_target_rotation(
+                    "follow_target_fast_rotation_search_cache_rejected_empty",
+                    account_id=account_id,
+                    run_id=run_id,
+                    from_source_target=from_source_target,
+                    to_source_target=to_source_target,
+                    step="back_search",
+                    reason=str(probe.get("surface_reason") or "global_search_empty"),
+                    started_at=started_at,
+                    back_count=back_count,
+                    surface_type=probe.get("surface_type"),
+                    surface_reason=probe.get("surface_reason"),
+                    has_search_bar=probe.get("has_search_bar"),
+                    has_recent_label=probe.get("has_recent_label"),
+                    has_recent_targets=probe.get("has_recent_targets"),
+                    next_target_visible_in_recent=probe.get("next_target_visible_in_recent"),
+                    is_global_search_empty=probe.get("is_global_search_empty"),
+                    is_recent_search_surface=probe.get("is_recent_search_surface"),
+                    fallback_used=False,
+                )
+                if _fast_rotation_search_probe_is_controlled_empty(probe):
+                    _log_fast_target_rotation(
+                        "follow_target_fast_rotation_controlled_empty_search_used",
+                        account_id=account_id,
+                        run_id=run_id,
+                        from_source_target=from_source_target,
+                        to_source_target=to_source_target,
+                        step="back_search",
+                        reason="previous_and_recent_missing_controlled_empty",
+                        started_at=started_at,
+                        back_count=back_count,
+                        surface_type=probe.get("surface_type"),
+                        has_search_bar=probe.get("has_search_bar"),
+                        search_query_text=probe.get("search_query_text"),
+                        previous_target_visible=probe.get("previous_target_visible"),
+                        has_account_results=probe.get("has_account_results"),
+                        has_recent_label=probe.get("has_recent_label"),
+                        has_recent_targets=probe.get("has_recent_targets"),
+                        has_explore_grid=probe.get("has_explore_grid"),
+                        is_global_search_empty=probe.get("is_global_search_empty"),
+                        fallback_used=False,
+                    )
+                    return True, "controlled_empty_search", back_count
+                _log_fast_target_rotation(
+                    "follow_target_fast_rotation_controlled_empty_search_rejected",
+                    account_id=account_id,
+                    run_id=run_id,
+                    from_source_target=from_source_target,
+                    to_source_target=to_source_target,
+                    step="back_search",
+                    reason="empty_search_not_controlled",
+                    started_at=started_at,
+                    back_count=back_count,
+                    surface_type=probe.get("surface_type"),
+                    has_search_bar=probe.get("has_search_bar"),
+                    has_explore_grid=probe.get("has_explore_grid"),
+                    is_global_search_empty=probe.get("is_global_search_empty"),
+                    fallback_used=False,
+                )
+            return False, "wrong_search_surface_rejected", back_count
+        if probe.get("is_local_followers_search") or (
+            probe.get("is_lightweight_search") and not probe.get("is_global_search")
+        ):
+            _log_fast_target_rotation(
+                "follow_target_fast_rotation_local_search_surface_detected",
+                account_id=account_id,
+                run_id=run_id,
+                from_source_target=from_source_target,
+                to_source_target=to_source_target,
+                step="back_search",
+                reason=str(probe.get("surface_reason") or "local_followers_search"),
+                started_at=started_at,
+                back_count=back_count,
+                surface_type=probe.get("surface_type"),
+                surface_reason=probe.get("surface_reason"),
+                is_global_search=False,
+                is_local_followers_search=probe.get("is_local_followers_search"),
+                duration_ms=round((time.perf_counter() - t_poll) * 1000.0, 2),
+                fallback_used=False,
+            )
+            _log_fast_target_rotation(
+                "follow_target_fast_rotation_back_back_surface_detected",
+                account_id=account_id,
+                run_id=run_id,
+                from_source_target=from_source_target,
+                to_source_target=to_source_target,
+                step="back_search",
+                reason=str(probe.get("surface_reason") or "local_followers_search"),
+                started_at=started_at,
+                back_count=back_count,
+                surface_type=probe.get("surface_type"),
+                surface_reason=probe.get("surface_reason"),
+                is_global_search=False,
+                is_local_followers_search=probe.get("is_local_followers_search"),
+                duration_ms=round((time.perf_counter() - t_poll) * 1000.0, 2),
+                fallback_used=False,
+            )
+            recovered, recovery_reason = _fast_rotation_recover_global_search_surface(
+                d,
+                pkg=pkg,
+                from_source_target=from_source_target,
+                to_source_target=to_source_target,
+                account_id=account_id,
+                run_id=run_id,
+                started_at=started_at,
+                current_back_count=back_count,
+            )
+            if recovered:
+                _log_fast_target_rotation(
+                    "follow_target_fast_rotation_search_recent_surface_detected",
+                    account_id=account_id,
+                    run_id=run_id,
+                    from_source_target=from_source_target,
+                    to_source_target=to_source_target,
+                    step="back_to_recent_search",
+                    reason=recovery_reason,
+                    started_at=started_at,
+                    back_count=back_count + 1,
+                    is_global_search=True,
+                    is_recent_search_surface=True,
+                    is_local_followers_search=False,
+                    fallback_used=False,
+                )
+                return True, recovery_reason, back_count + 1
+            return False, "back_to_search_not_validated", back_count
+        time.sleep(0.08)
+    probe = _fast_rotation_probe_search_surface(
+        d, pkg, from_source_target, to_source_target
+    )
+    if probe.get("is_local_followers_search") or (
+        probe.get("is_lightweight_search") and not probe.get("is_global_search")
+    ):
+        recovered, recovery_reason = _fast_rotation_recover_global_search_surface(
+            d,
+            pkg=pkg,
+            from_source_target=from_source_target,
+            to_source_target=to_source_target,
+            account_id=account_id,
+            run_id=run_id,
+            started_at=started_at,
+            current_back_count=back_count,
+        )
+        if recovered:
+            _log_fast_target_rotation(
+                "follow_target_fast_rotation_search_recent_surface_detected",
+                account_id=account_id,
+                run_id=run_id,
+                from_source_target=from_source_target,
+                to_source_target=to_source_target,
+                step="back_to_recent_search",
+                reason=recovery_reason,
+                started_at=started_at,
+                back_count=back_count + 1,
+                is_global_search=True,
+                is_recent_search_surface=True,
+                is_local_followers_search=False,
+                fallback_used=False,
+            )
+            return True, recovery_reason, back_count + 1
+    log(
+        "warning",
+        "search_back_to_search_timeout",
+        search_back_to_search_ms=round((time.perf_counter() - t_poll) * 1000.0, 2),
+        surface_type=probe.get("surface_type"),
+        surface_reason=probe.get("surface_reason"),
+    )
+    return False, "back_to_search_not_validated", back_count
+
+
+def _fast_rotation_followers_list_strong_open_proof(
+    open_meta: dict[str, Any] | None,
+    *,
+    to_target: str,
+) -> tuple[bool, str, dict[str, Any]]:
+    """
+    Strong proof from ``open_followers_list_from_profile`` success payload only.
+    Used to skip post-open quick revalidate when CT followers list is already confirmed.
+    """
+    details: dict[str, Any] = {
+        "source_profile_username": "",
+        "action_bar_title": "",
+        "profile_verified": False,
+        "open_detection_method": "",
+    }
+    if not isinstance(open_meta, dict) or not open_meta:
+        return False, "open_meta_missing", details
+
+    to_norm = _norm_ig_handle(to_target)
+    if not to_norm:
+        return False, "missing_to_target", details
+
+    src_norm = _norm_ig_handle(str(open_meta.get("source_profile_username") or ""))
+    details["source_profile_username"] = str(open_meta.get("source_profile_username") or "")
+    details["profile_verified"] = bool(open_meta.get("profile_verified"))
+    details["open_detection_method"] = str(open_meta.get("open_detection_method") or "")
+
+    if src_norm != to_norm:
+        return False, "source_profile_username_mismatch", details
+    if not bool(open_meta.get("profile_verified")):
+        return False, "profile_not_verified", details
+    if details["open_detection_method"] != "own_unified_follow_list":
+        return False, "open_detection_method_not_own_unified", details
+
+    snap = open_meta.get("after_tap_screen_snapshot")
+    if not isinstance(snap, dict):
+        snap = open_meta.get("last_poll_snapshot")
+    if not isinstance(snap, dict):
+        return False, "followers_snapshot_missing", details
+
+    details["action_bar_title"] = str(snap.get("action_bar_title") or "")
+    list_confirmed = bool(snap.get("is_followers_list")) or bool(
+        snap.get("own_unified_followers_list_detected")
+    )
+    if not list_confirmed:
+        return False, "followers_list_not_confirmed", details
+
+    title_norm = _norm_ig_handle(details["action_bar_title"])
+    if title_norm and title_norm != to_norm:
+        return False, "action_bar_title_mismatch", details
+
+    signals = open_meta.get("signals")
+    if not isinstance(signals, list):
+        signals = snap.get("signals")
+    if isinstance(signals, list) and signals:
+        if (
+            "own_unified_followers_list_detected" not in signals
+            and not bool(snap.get("own_unified_followers_list_detected"))
+        ):
+            return False, "own_unified_signal_missing", details
+
+    return True, "ok", details
+
+
+def _fast_rotation_followers_list_proof_payload(
+    open_meta: dict[str, Any],
+    *,
+    proof_details: dict[str, Any],
+    to_target: str,
+) -> dict[str, Any]:
+    snap = open_meta.get("after_tap_screen_snapshot")
+    if not isinstance(snap, dict):
+        snap = open_meta.get("last_poll_snapshot")
+    last_snap = open_meta.get("last_poll_snapshot")
+    if not isinstance(last_snap, dict):
+        last_snap = snap
+    return {
+        "source_profile_username": str(proof_details.get("source_profile_username") or to_target),
+        "profile_verified": bool(proof_details.get("profile_verified")),
+        "open_detection_method": str(proof_details.get("open_detection_method") or ""),
+        "action_bar_title": str(proof_details.get("action_bar_title") or ""),
+        "after_tap_screen_snapshot": dict(snap or {}),
+        "last_poll_snapshot": dict(last_snap or {}),
+        "signals": list(open_meta.get("signals") or (snap or {}).get("signals") or []),
+        "fast_rotation_followers_list_proof_accepted": True,
+        "proof_accepted_monotonic": time.perf_counter(),
+    }
+
+
+def _follow_target_scan_start_surface_proof(
+    prevalidated_followers_list_meta: dict[str, Any] | None,
+    *,
+    source_profile_username: str,
+    max_age_ms: float = 15000.0,
+) -> tuple[bool, str, dict[str, Any], float]:
+    if not isinstance(prevalidated_followers_list_meta, dict):
+        return False, "proof_meta_missing", {}, -1.0
+    fast_rotation = prevalidated_followers_list_meta.get("fast_target_rotation")
+    if not isinstance(fast_rotation, dict):
+        return False, "fast_rotation_result_missing", {}, -1.0
+    proof = fast_rotation.get("followers_list_proof")
+    if not isinstance(proof, dict) or not proof:
+        return False, "followers_list_proof_missing", {}, -1.0
+    accepted_at = float(proof.get("proof_accepted_monotonic") or 0.0)
+    proof_age_ms = (
+        round((time.perf_counter() - accepted_at) * 1000.0, 2)
+        if accepted_at > 0.0
+        else -1.0
+    )
+    if proof_age_ms < 0.0:
+        return False, "proof_timestamp_missing", proof, proof_age_ms
+    if proof_age_ms > float(max_age_ms):
+        return False, "proof_stale", proof, proof_age_ms
+    if not bool(proof.get("fast_rotation_followers_list_proof_accepted")):
+        return False, "proof_not_accepted", proof, proof_age_ms
+    if _norm_ig_handle(str(proof.get("source_profile_username") or "")) != _norm_ig_handle(source_profile_username):
+        return False, "source_profile_username_mismatch", proof, proof_age_ms
+    if not bool(proof.get("profile_verified")):
+        return False, "profile_not_verified", proof, proof_age_ms
+    if str(proof.get("open_detection_method") or "") != "own_unified_follow_list":
+        return False, "open_detection_method_not_own_unified", proof, proof_age_ms
+    snap = proof.get("after_tap_screen_snapshot")
+    if not isinstance(snap, dict):
+        snap = proof.get("last_poll_snapshot")
+    if not isinstance(snap, dict) or not snap:
+        return False, "followers_snapshot_missing", proof, proof_age_ms
+    if not (bool(snap.get("is_followers_list")) or bool(snap.get("own_unified_followers_list_detected"))):
+        return False, "followers_list_not_confirmed", proof, proof_age_ms
+    title = str(proof.get("action_bar_title") or snap.get("action_bar_title") or "")
+    if title and _norm_ig_handle(title) != _norm_ig_handle(source_profile_username):
+        return False, "action_bar_title_mismatch", proof, proof_age_ms
+    return True, "ok", proof, proof_age_ms
 
 
 def fast_rotate_to_next_target_from_followers(
@@ -4025,6 +5727,7 @@ def fast_rotate_to_next_target_from_followers(
             started_at=started_at,
         )
 
+    _complete_post_return_idle_gap(reason="fast_rotation_started")
     _log_fast_target_rotation(
         "follow_target_fast_rotation_started",
         account_id=account_id,
@@ -4035,35 +5738,54 @@ def fast_rotate_to_next_target_from_followers(
         reason="target_budget_reached",
         started_at=started_at,
     )
+    _log_fast_target_rotation(
+        "follow_target_switcher_started",
+        account_id=account_id,
+        run_id=run_id,
+        from_source_target=from_target,
+        to_source_target=to_target,
+        from_target=from_target,
+        to_target=to_target,
+        step="start",
+        reason="target_budget_reached",
+        started_at=started_at,
+        surface_type="unknown",
+        exact_row_found=False,
+        fallback_used=False,
+    )
     if not from_target or not to_target:
         return fail("missing_source_target", "precheck")
     if from_target == to_target:
         return fail("same_source_target", "precheck")
 
-    list_ok, list_meta = followers_surface_quick_revalidate(
-        d,
-        source_profile_username=from_target,
-        max_seconds=0.6,
-    )
-    if list_ok:
-        steps.append("current_followers_validated")
-        try:
-            d.press("back")
-        except Exception:
-            return fail("back_from_followers_failed", "back_profile")
-        if not verify_profile(d, from_target):
-            return fail("profile_after_followers_back_not_validated", "back_profile")
-        steps.append("back_profile")
+    list_ok = False
+    list_meta: dict[str, Any] = {}
+    if followers_session_list_committed_open_for(from_target):
+        list_ok = True
+        list_meta = {
+            "reason": "session_list_committed_open",
+            "committed_age_ms": followers_session_committed_open_age_ms(),
+            **(followers_session_committed_meta() or {}),
+        }
         _log_fast_target_rotation(
-            "follow_target_fast_rotation_back_profile",
+            "follow_target_fast_rotation_committed_followers_list_accepted",
             account_id=account_id,
             run_id=run_id,
             from_source_target=from_target,
             to_source_target=to_target,
-            step="back_profile",
-            reason="followers_to_profile",
+            step="precheck",
+            reason="session_list_committed_open",
             started_at=started_at,
+            committed_age_ms=list_meta.get("committed_age_ms"),
         )
+    else:
+        list_ok, list_meta = followers_surface_quick_revalidate(
+            d,
+            source_profile_username=from_target,
+            max_seconds=3.0,
+        )
+    if list_ok:
+        steps.append("current_followers_validated")
     else:
         # The only accepted non-list start state is the current CT profile itself.
         if not verify_profile(d, from_target):
@@ -4083,10 +5805,20 @@ def fast_rotate_to_next_target_from_followers(
             started_at=started_at,
         )
 
-    if not return_to_search_from_profile(d, pkg):
-        return fail("back_to_search_not_validated", "back_search")
-    if not is_lightweight_search_screen(d, pkg):
-        return fail("search_surface_not_confirmed", "back_search")
+    search_ok, search_reason, _back_count = _fast_rotation_back_back_to_global_search(
+        d,
+        pkg=pkg,
+        from_source_target=from_target,
+        to_source_target=to_target,
+        account_id=account_id,
+        run_id=run_id,
+        started_at=started_at,
+        started_on_followers_list=bool(list_ok),
+    )
+    if not search_ok:
+        return fail(search_reason, "back_search")
+    if list_ok:
+        steps.append("back_profile")
     steps.append("back_search")
     _log_fast_target_rotation(
         "follow_target_fast_rotation_back_search",
@@ -4095,12 +5827,78 @@ def fast_rotate_to_next_target_from_followers(
         from_source_target=from_target,
         to_source_target=to_target,
         step="back_search",
-        reason="search_confirmed",
+        reason=str(search_reason or "search_confirmed"),
         started_at=started_at,
+        back_count=_back_count,
+        is_global_search=True,
+        fallback_used=False,
     )
+    _surface_type = (
+        "controlled_empty_search"
+        if search_reason == "controlled_empty_search"
+        else (
+            "previous_target_search_results"
+            if search_reason == "previous_target_search_results"
+            else ("recent_search_surface" if search_reason == "recent_search_ready" else str(search_reason or "search_confirmed"))
+        )
+    )
+    _log_fast_target_rotation(
+        "follow_target_switcher_surface_classified",
+        account_id=account_id,
+        run_id=run_id,
+        from_source_target=from_target,
+        to_source_target=to_target,
+        from_target=from_target,
+        to_target=to_target,
+        step="back_search",
+        reason=str(search_reason or "search_confirmed"),
+        started_at=started_at,
+        back_count=_back_count,
+        surface_type=_surface_type,
+        has_search_bar=True,
+        has_explore_grid=False,
+        has_local_followers_search=False,
+        exact_row_found=False,
+        fallback_used=False,
+    )
+    if search_reason == "controlled_empty_search":
+        _log_fast_target_rotation(
+            "follow_target_switcher_controlled_empty_search_ready",
+            account_id=account_id,
+            run_id=run_id,
+            from_source_target=from_target,
+            to_source_target=to_target,
+            from_target=from_target,
+            to_target=to_target,
+            step="back_search",
+            reason="controlled_empty_search_ready",
+            started_at=started_at,
+            back_count=_back_count,
+            surface_type="controlled_empty_search",
+            has_search_bar=True,
+            has_explore_grid=False,
+            has_local_followers_search=False,
+            exact_row_found=False,
+            fallback_used=False,
+        )
 
     enter_follow_ct_search_context()
     try:
+        _log_fast_target_rotation(
+            "follow_target_switcher_type_next_target_started",
+            account_id=account_id,
+            run_id=run_id,
+            from_source_target=from_target,
+            to_source_target=to_target,
+            from_target=from_target,
+            to_target=to_target,
+            step="search_next",
+            reason="type_next_target",
+            started_at=started_at,
+            surface_type=_surface_type,
+            exact_row_found=False,
+            fallback_used=False,
+        )
         if not type_search(
             d,
             to_target,
@@ -4127,14 +5925,66 @@ def fast_rotate_to_next_target_from_followers(
         else:
             accounts_tab_clicked = open_accounts_tab(d)
         set_search_ui_mode("accounts_tab" if accounts_tab_clicked else "mixed_results")
+        _log_fast_target_rotation(
+            "follow_target_fast_rotation_next_target_open_started",
+            account_id=account_id,
+            run_id=run_id,
+            from_source_target=from_target,
+            to_source_target=to_target,
+            step="open_next",
+            reason="typed_next_target",
+            started_at=started_at,
+            fallback_used=False,
+        )
         if not tap_account_result(d, to_target, follow_ct_search_context=True):
             return fail("open_next_target_failed", "open_next")
+        _log_fast_target_rotation(
+            "follow_target_switcher_exact_target_row_found",
+            account_id=account_id,
+            run_id=run_id,
+            from_source_target=from_target,
+            to_source_target=to_target,
+            from_target=from_target,
+            to_target=to_target,
+            step="open_next",
+            reason="exact_target_row_tapped",
+            started_at=started_at,
+            surface_type=_surface_type,
+            exact_row_found=True,
+            fallback_used=False,
+        )
     finally:
         clear_follow_ct_search_context()
 
     if not verify_profile(d, to_target):
         return fail("next_profile_not_validated", "open_next")
     steps.append("open_next")
+    _log_fast_target_rotation(
+        "follow_target_fast_rotation_next_target_open_success",
+        account_id=account_id,
+        run_id=run_id,
+        from_source_target=from_target,
+        to_source_target=to_target,
+        step="open_next",
+        reason="next_profile_validated",
+        started_at=started_at,
+        fallback_used=False,
+    )
+    _log_fast_target_rotation(
+        "follow_target_switcher_target_open_success",
+        account_id=account_id,
+        run_id=run_id,
+        from_source_target=from_target,
+        to_source_target=to_target,
+        from_target=from_target,
+        to_target=to_target,
+        step="open_next",
+        reason="next_profile_validated",
+        started_at=started_at,
+        surface_type=_surface_type,
+        exact_row_found=True,
+        fallback_used=False,
+    )
     _log_fast_target_rotation(
         "follow_target_fast_rotation_open_next",
         account_id=account_id,
@@ -4155,6 +6005,117 @@ def fast_rotate_to_next_target_from_followers(
     )
     if not open_ok:
         return fail(str((open_meta or {}).get("failure_reason") or "open_followers_failed"), "open_followers")
+
+    t_proof = time.perf_counter()
+    proof_ok, proof_reason, proof_details = _fast_rotation_followers_list_strong_open_proof(
+        open_meta if isinstance(open_meta, dict) else None,
+        to_target=to_target,
+    )
+    if proof_ok:
+        followers_list_proof = _fast_rotation_followers_list_proof_payload(
+            open_meta if isinstance(open_meta, dict) else {},
+            proof_details=proof_details,
+            to_target=to_target,
+        )
+        _log_fast_target_rotation(
+            "follow_target_fast_rotation_followers_list_proof_accepted",
+            account_id=account_id,
+            run_id=run_id,
+            from_source_target=from_target,
+            to_source_target=to_target,
+            step="open_followers",
+            reason="strong_open_proof",
+            started_at=started_at,
+            from_target=from_target,
+            next_target=to_target,
+            source_profile_username=str(proof_details.get("source_profile_username") or to_target),
+            action_bar_title=str(proof_details.get("action_bar_title") or ""),
+            profile_verified=bool(proof_details.get("profile_verified")),
+            open_detection_method=str(proof_details.get("open_detection_method") or ""),
+            accepted=True,
+            duration_ms=round((time.perf_counter() - t_proof) * 1000.0, 2),
+            fallback_used=False,
+        )
+        steps.append("open_followers")
+        _log_fast_target_rotation(
+            "follow_target_fast_rotation_open_followers",
+            account_id=account_id,
+            run_id=run_id,
+            from_source_target=from_target,
+            to_source_target=to_target,
+            step="open_followers",
+            reason="next_followers_validated",
+            started_at=started_at,
+        )
+        _log_fast_target_rotation(
+            "follow_target_switcher_followers_open_success",
+            account_id=account_id,
+            run_id=run_id,
+            from_source_target=from_target,
+            to_source_target=to_target,
+            from_target=from_target,
+            to_target=to_target,
+            step="open_followers",
+            reason="next_followers_validated",
+            started_at=started_at,
+            surface_type=_surface_type,
+            exact_row_found=True,
+            fallback_used=False,
+        )
+        _log_fast_target_rotation(
+            "follow_target_fast_rotation_completed",
+            account_id=account_id,
+            run_id=run_id,
+            from_source_target=from_target,
+            to_source_target=to_target,
+            step="completed",
+            reason="ok",
+            started_at=started_at,
+        )
+        _log_fast_target_rotation(
+            "follow_target_switcher_completed",
+            account_id=account_id,
+            run_id=run_id,
+            from_source_target=from_target,
+            to_source_target=to_target,
+            from_target=from_target,
+            to_target=to_target,
+            step="completed",
+            reason="ok",
+            started_at=started_at,
+            surface_type=_surface_type,
+            exact_row_found=True,
+            fallback_used=False,
+        )
+        return _fast_rotation_result(
+            ok=True,
+            reason="ok",
+            from_source_target=from_target,
+            to_source_target=to_target,
+            steps_completed=steps,
+            started_at=started_at,
+            followers_list_proof=followers_list_proof,
+        )
+
+    _log_fast_target_rotation(
+        "follow_target_fast_rotation_followers_list_proof_rejected",
+        account_id=account_id,
+        run_id=run_id,
+        from_source_target=from_target,
+        to_source_target=to_target,
+        step="open_followers",
+        reason=str(proof_reason or "proof_rejected"),
+        started_at=started_at,
+        from_target=from_target,
+        next_target=to_target,
+        source_profile_username=str(proof_details.get("source_profile_username") or ""),
+        action_bar_title=str(proof_details.get("action_bar_title") or ""),
+        profile_verified=bool(proof_details.get("profile_verified")),
+        open_detection_method=str(proof_details.get("open_detection_method") or ""),
+        accepted=False,
+        reject_reason=str(proof_reason or "proof_rejected"),
+        duration_ms=round((time.perf_counter() - t_proof) * 1000.0, 2),
+    )
     reval_ok, reval_meta = followers_surface_quick_revalidate(
         d,
         source_profile_username=to_target,
@@ -4177,6 +6138,21 @@ def fast_rotate_to_next_target_from_followers(
         started_at=started_at,
     )
     _log_fast_target_rotation(
+        "follow_target_switcher_followers_open_success",
+        account_id=account_id,
+        run_id=run_id,
+        from_source_target=from_target,
+        to_source_target=to_target,
+        from_target=from_target,
+        to_target=to_target,
+        step="open_followers",
+        reason="next_followers_validated_revalidated",
+        started_at=started_at,
+        surface_type=_surface_type,
+        exact_row_found=True,
+        fallback_used=False,
+    )
+    _log_fast_target_rotation(
         "follow_target_fast_rotation_completed",
         account_id=account_id,
         run_id=run_id,
@@ -4186,6 +6162,21 @@ def fast_rotate_to_next_target_from_followers(
         reason="ok",
         started_at=started_at,
     )
+    _log_fast_target_rotation(
+        "follow_target_switcher_completed",
+        account_id=account_id,
+        run_id=run_id,
+        from_source_target=from_target,
+        to_source_target=to_target,
+        from_target=from_target,
+        to_target=to_target,
+        step="completed",
+        reason="ok",
+        started_at=started_at,
+        surface_type=_surface_type,
+        exact_row_found=True,
+        fallback_used=False,
+    )
     return _fast_rotation_result(
         ok=True,
         reason="ok",
@@ -4193,6 +6184,24 @@ def fast_rotate_to_next_target_from_followers(
         to_source_target=to_target,
         steps_completed=steps,
         started_at=started_at,
+    )
+
+
+def fast_rotate_to_next_target_via_controlled_search(
+    d,
+    *,
+    account_id: str,
+    run_id: str | None,
+    from_source_target: str,
+    to_source_target: str,
+) -> dict[str, Any]:
+    """Official CT switcher: stable search surface -> exact next target -> profile proof -> followers proof."""
+    return fast_rotate_to_next_target_from_followers(
+        d,
+        account_id=account_id,
+        run_id=run_id,
+        from_source_target=from_source_target,
+        to_source_target=to_source_target,
     )
 
 
@@ -6573,6 +8582,7 @@ def _run_followers_list_engine_session(
     global _RUNTIME_SKIPPED_USERNAMES
     global _VISUAL_FOLLOWERS_OPEN_COUNT_THIS_SESSION
     _VISUAL_FOLLOWERS_OPEN_COUNT_THIS_SESSION = 0
+    reset_follow_target_rotation_pending()
     pkg = config.INSTAGRAM_PACKAGE
     src_key = _norm_ig_handle(source_profile_username)
     processed = 0
@@ -6730,8 +8740,38 @@ def _run_followers_list_engine_session(
             payload,
         )
 
+    def _maybe_set_rotation_pending_after_budget(
+        *,
+        reason: str,
+        candidate_username: str = "",
+    ) -> None:
+        if not _target_budget_reached():
+            return
+        _global_remaining = 0
+        if global_follow_goal_effective is not None:
+            _global_remaining = max(
+                0,
+                int(global_follow_goal_effective) - int(follows_completed_count),
+            )
+        set_follow_target_rotation_pending(
+            target_username=source_profile_username,
+            reason=reason,
+            target_follow_count=int(follows_completed_count),
+            max_follows_per_target_per_run=int(target_follow_budget_effective or 0),
+            global_follow_remaining=_global_remaining,
+            candidate_username=candidate_username,
+        )
+        _invalidate_follow_target_snapshot_after_budget(
+            open_list_meta if isinstance(open_list_meta, dict) else {},
+            visual_loop_state if isinstance(visual_loop_state, dict) else {},
+            source_profile_username=source_profile_username,
+            reason=reason,
+        )
+        _start_post_return_idle_gap(target_username=source_profile_username)
+
     def _mark_target_budget_reached(reason: str) -> None:
         nonlocal _followers_loop_finally_status, _followers_loop_finally_stop, target_budget_reached_logged
+        _maybe_set_rotation_pending_after_budget(reason=reason)
         payload = _target_budget_check_payload(reason)
         if not target_budget_reached_logged:
             log("info", "follow_target_budget_reached", **payload)
@@ -6810,6 +8850,7 @@ def _run_followers_list_engine_session(
         target_id=str(target_id or "") or None,
         account_id=str(account_id or ""),
         run_id=str(run_id or "") or None,
+        start_from_current_followers_list=bool(start_from_current_followers_list),
     )
     if _runtime_follow_cap_exceeded():
         _target_rejection_record(
@@ -6849,38 +8890,98 @@ def _run_followers_list_engine_session(
 
     open_list_meta: dict[str, Any] = {}
     if start_from_current_followers_list:
-        reval_ok, reval_meta = followers_surface_quick_revalidate(
-            d,
-            source_profile_username=source_profile_username,
-            max_seconds=0.6,
+        proof_ttl_ms = float(
+            getattr(config, "FOLLOW_TARGET_SCAN_START_SURFACE_PROOF_MAX_AGE_MS", 15000.0)
+            or 15000.0
         )
-        if not reval_ok:
+        proof_ok, proof_reason, proof_meta, proof_age_ms = _follow_target_scan_start_surface_proof(
+            prevalidated_followers_list_meta,
+            source_profile_username=source_profile_username,
+            max_age_ms=proof_ttl_ms,
+        )
+        if proof_ok:
+            log(
+                "info",
+                "follow_target_scan_start_surface_proof_reused",
+                target_username=source_profile_username,
+                source_profile_username=str(proof_meta.get("source_profile_username") or ""),
+                proof_age_ms=proof_age_ms,
+                open_detection_method=str(proof_meta.get("open_detection_method") or ""),
+                profile_verified=bool(proof_meta.get("profile_verified")),
+                start_from_current_followers_list=True,
+                reused=True,
+                reject_reason="",
+            )
+            open_list_meta = {
+                **dict(proof_meta),
+                "fast_target_rotation": dict(
+                    (prevalidated_followers_list_meta or {}).get("fast_target_rotation") or {}
+                ),
+                "fast_target_rotation_prevalidated": True,
+                "fast_rotation_followers_list_proof_reused": True,
+                "proof_age_ms": proof_age_ms,
+                "source_profile_username": source_profile_username,
+                "open_detection_method": str(
+                    proof_meta.get("open_detection_method") or "own_unified_follow_list"
+                ),
+            }
             _eng_log(
-                "followers_engine_aborted",
-                "failed",
-                "prevalidated_followers_surface_lost",
+                "followers_list_open_success",
+                "success",
+                "fast_target_rotation_prevalidated",
                 {
-                    "reason": str((reval_meta or {}).get("reason") or "followers_surface_not_validated"),
                     "source_profile_username": source_profile_username,
+                    "source_account_context": account_id,
+                    "fast_target_rotation_prevalidated": True,
+                    "fast_rotation_followers_list_proof_reused": True,
+                    "proof_age_ms": proof_age_ms,
                 },
             )
-            return 40
-        open_list_meta = {
-            **(prevalidated_followers_list_meta or {}),
-            "open_detection_method": str((reval_meta or {}).get("open_detection_method") or "fast_target_rotation"),
-            "fast_target_rotation_prevalidated": True,
-            "last_poll_snapshot": reval_meta,
-        }
-        _eng_log(
-            "followers_list_open_success",
-            "success",
-            "fast_target_rotation_prevalidated",
-            {
-                "source_profile_username": source_profile_username,
-                "source_account_context": account_id,
+        else:
+            log(
+                "info",
+                "follow_target_scan_start_surface_proof_rejected",
+                target_username=source_profile_username,
+                source_profile_username=str(proof_meta.get("source_profile_username") or ""),
+                proof_age_ms=proof_age_ms,
+                open_detection_method=str(proof_meta.get("open_detection_method") or ""),
+                profile_verified=bool(proof_meta.get("profile_verified")),
+                start_from_current_followers_list=True,
+                reused=False,
+                reject_reason=str(proof_reason or "proof_rejected"),
+            )
+            reval_ok, reval_meta = followers_surface_quick_revalidate(
+                d,
+                source_profile_username=source_profile_username,
+                max_seconds=0.6,
+            )
+            if not reval_ok:
+                _eng_log(
+                    "followers_engine_aborted",
+                    "failed",
+                    "prevalidated_followers_surface_lost",
+                    {
+                        "reason": str((reval_meta or {}).get("reason") or "followers_surface_not_validated"),
+                        "source_profile_username": source_profile_username,
+                    },
+                )
+                return 40
+            open_list_meta = {
+                **(prevalidated_followers_list_meta or {}),
+                "open_detection_method": str((reval_meta or {}).get("open_detection_method") or "fast_target_rotation"),
                 "fast_target_rotation_prevalidated": True,
-            },
-        )
+                "last_poll_snapshot": reval_meta,
+            }
+            _eng_log(
+                "followers_list_open_success",
+                "success",
+                "fast_target_rotation_prevalidated",
+                {
+                    "source_profile_username": source_profile_username,
+                    "source_account_context": account_id,
+                    "fast_target_rotation_prevalidated": True,
+                },
+            )
     else:
         enter_follow_ct_search_context()
         try:
@@ -7881,6 +9982,14 @@ def _run_followers_list_engine_session(
             if _runtime_follow_cap_exceeded():
                 _mark_global_follow_cap_reached(phase="before_candidate_selection")
                 break
+            if is_follow_target_rotation_pending(target_username=source_profile_username):
+                _follow_target_rotation_pending_block(
+                    action="scan",
+                    target_username=source_profile_username,
+                    reason="rotation_pending_before_candidate_selection",
+                )
+                _mark_target_budget_reached("rotation_pending_before_candidate_selection")
+                break
             if _target_budget_reached():
                 _mark_target_budget_reached("target_budget_reached_before_candidate")
                 break
@@ -8299,12 +10408,21 @@ def _run_followers_list_engine_session(
                     bypassed_xml_stale_this_iter = True
 
             if bool(visual_loop_state.get("post_return_picker_refresh_pending")):
-                _followers_try_post_return_picker_injection_refresh(
-                    d,
-                    open_list_meta,
-                    visual_loop_state=visual_loop_state,
-                    source_profile_username=source_profile_username,
-                )
+                if is_follow_target_rotation_pending(target_username=source_profile_username):
+                    visual_loop_state["post_return_picker_refresh_pending"] = False
+                    visual_loop_state.pop("post_return_picker_refresh_meta", None)
+                    _follow_target_rotation_pending_block(
+                        action="scan",
+                        target_username=source_profile_username,
+                        reason="post_return_picker_refresh_blocked_rotation_pending",
+                    )
+                else:
+                    _followers_try_post_return_picker_injection_refresh(
+                        d,
+                        open_list_meta,
+                        visual_loop_state=visual_loop_state,
+                        source_profile_username=source_profile_username,
+                    )
 
             if not det.get("is_followers_list"):
                 if followers_session_list_committed_open_for(source_profile_username):
@@ -8857,6 +10975,16 @@ def _run_followers_list_engine_session(
 
             _vp_inj_for_defer: dict | None = None
             _row_mapping_diag: dict[str, Any] = {}
+            if gate_passed and is_follow_target_rotation_pending(
+                target_username=source_profile_username
+            ):
+                _follow_target_rotation_pending_block(
+                    action="scan",
+                    target_username=source_profile_username,
+                    reason="rotation_pending_before_visual_picker",
+                )
+                _mark_target_budget_reached("rotation_pending_before_visual_picker")
+                break
             if gate_passed:
                 _shot_inj = _gate_shot_str
                 if _shot_inj:
@@ -10570,6 +12698,14 @@ def _run_followers_list_engine_session(
                 target_scan_tracker.get("candidates_opened_count") or 0
             ) + 1
             _candidate_open_t0 = time.perf_counter()
+            if _follow_target_rotation_pending_block(
+                action="open_profile",
+                target_username=source_profile_username,
+                candidate_username=str(pick.get("username") or pick.get("resolved_username_hint") or ""),
+                reason="rotation_pending_before_open_follower_profile",
+            ):
+                _mark_target_budget_reached("rotation_pending_before_open_follower_profile")
+                break
             if not open_follower_profile_from_list(d, pick, source_profile_username, pkg):
                 _target_rejection_record(
                     target_scan_tracker,
@@ -11676,6 +13812,16 @@ def _run_followers_list_engine_session(
                                     visual_candidate_id=pick.get("visual_candidate_id"),
                                 )
                             return 42
+                        if _follow_target_rotation_pending_block(
+                            action="open_profile",
+                            target_username=source_profile_username,
+                            candidate_username=str(pick.get("username") or ""),
+                            reason="rotation_pending_before_screen_guard_reopen",
+                        ):
+                            _mark_target_budget_reached(
+                                "rotation_pending_before_screen_guard_reopen"
+                            )
+                            break
                         if not open_follower_profile_from_list(
                             d, pick, source_profile_username, pkg
                         ):
@@ -12699,6 +14845,10 @@ def _run_followers_list_engine_session(
                 ) + 1
                 _SESSION_COUNTERS["interactions"] += 1
                 _SESSION_COUNTERS["successful_interactions"] += 1
+                _maybe_set_rotation_pending_after_budget(
+                    reason="target_budget_reached_after_follow_count",
+                    candidate_username=str(follower_un or ""),
+                )
 
                 _pf_vcid_early = str(pick.get("visual_candidate_id") or "").strip()
                 _pf_xml_list_early = _pick_is_own_unified_xml_list(pick) and bool(
@@ -12850,6 +15000,23 @@ def _run_followers_list_engine_session(
                     follow_context=_pf_follow_context,
                     candidate_pick=pick if isinstance(pick, dict) else None,
                 )
+                _critical_persist_t0 = time.perf_counter()
+                _critical_persist_ok = True
+                _post_return_next_action = "same_target_next_candidate"
+                if _runtime_follow_cap_exceeded():
+                    _post_return_next_action = "finish_run"
+                elif _target_budget_reached():
+                    _post_return_next_action = "rotate_next_target"
+                log(
+                    "info",
+                    "post_return_critical_persist_started",
+                    target_username=source_profile_username,
+                    candidate_username=str(follower_un or ""),
+                    next_action=_post_return_next_action,
+                    flush_required_before_completed=True,
+                    pending_deferred_count=_pending_deferred_follow_action_log_count(),
+                    safe_to_continue_ui=False,
+                )
                 if _defer_follow_side_effects_until_post_follow and supabase_mode and account_id:
                     _fs_af_persist = str((follow_out or {}).get("follow_state_after") or "")
                     if bool((follow_out or {}).get("skipped_tap")):
@@ -12858,7 +15025,7 @@ def _run_followers_list_engine_session(
                         _f_st_persist = "requested"
                     else:
                         _f_st_persist = "following"
-                    _persist_verified_follow_success_to_supabase(
+                    _critical_persist_ok = _persist_verified_follow_success_to_supabase(
                         supabase_mode=supabase_mode,
                         account_id=account_id,
                         follower_un=str(follower_un or ""),
@@ -12869,17 +15036,16 @@ def _run_followers_list_engine_session(
                         f_st=_f_st_persist,
                         target_id=target_id,
                         phase="after_post_follow",
+                        defer_source_follow_success=True,
                     )
                     _log_target_budget_check("after_follow_verified")
                     if _target_budget_reached():
                         _mark_target_budget_reached("target_budget_reached_after_follow_verified")
-                _flush_follow_action_logs_to_supabase(
-                    events=_follow_action_events,
-                    run_id=run_id,
-                    account_id=account_id,
-                    target_username=_ct_follow_logs_flush_username,
-                    supabase_mode=supabase_mode,
-                )
+                _post_return_next_action = "same_target_next_candidate"
+                if _runtime_follow_cap_exceeded():
+                    _post_return_next_action = "finish_run"
+                elif _target_budget_reached():
+                    _post_return_next_action = "rotate_next_target"
                 if supabase_mode and account_id and str(follower_un or "").strip():
                     _mute_pf = _pf.get("mute") if isinstance(_pf.get("mute"), dict) else {}
                     if (
@@ -12889,90 +15055,142 @@ def _run_followers_list_engine_session(
                         and str(_mute_pf.get("mute_v2_outcome") or "")
                         in ("success", "partial_success")
                     ):
-                        _timed_safe_supabase_call(
-                            "record_mute_interaction_success",
-                            "record_mute_interaction_success",
-                            account_id,
-                            follower_un,
-                            source_profile_username,
-                            log_run_id=run_id or None,
-                            log_account_id=account_id,
+                        _schedule_deferred_post_return_supabase_step(
+                            step="record_mute_interaction_success",
+                            fn_name="record_mute_interaction_success",
+                            args=(account_id, follower_un, source_profile_username),
+                            kwargs={
+                                "run_id": run_id or None,
+                                "session_id": _SESSION_SOCIAL_ID or None,
+                                "muted_posts": bool(_mute_pf.get("posts_verified")),
+                                "muted_stories": bool(_mute_pf.get("stories_verified")),
+                                "mute_partial": bool(_mute_pf.get("mute_v2_partial")),
+                                "visual_candidate_id": _pf_log_vcid,
+                                "timings_ms": _mute_pf.get("timings_ms")
+                                if isinstance(_mute_pf.get("timings_ms"), dict)
+                                else {},
+                            },
                             run_id=run_id or None,
-                            session_id=_SESSION_SOCIAL_ID or None,
-                            muted_posts=bool(_mute_pf.get("posts_verified")),
-                            muted_stories=bool(_mute_pf.get("stories_verified")),
-                            mute_partial=bool(_mute_pf.get("mute_v2_partial")),
-                            visual_candidate_id=_pf_log_vcid,
-                            timings_ms=_mute_pf.get("timings_ms")
-                            if isinstance(_mute_pf.get("timings_ms"), dict)
-                            else {},
+                            account_id=account_id,
+                            source_profile_username=source_profile_username,
+                            candidate_username=follower_un,
+                            target_username=follower_un,
+                            reason="mute_persist_can_flush_before_completed",
                         )
                     _likes_pf = _pf.get("likes") if isinstance(_pf.get("likes"), dict) else {}
                     _likes_phase = str(_likes_pf.get("phase_outcome") or "")
                     _liked_n = int(_likes_pf.get("liked_count") or 0)
                     if _likes_phase in ("success", "partial_success") and _liked_n > 0:
                         _SESSION_COUNTERS["likes"] = int(_SESSION_COUNTERS.get("likes") or 0) + _liked_n
-                        _timed_safe_supabase_call(
-                            "record_post_like_interaction_success",
-                            "record_post_like_interaction_success",
-                            account_id,
-                            follower_un,
-                            source_profile_username,
-                            log_run_id=run_id or None,
-                            log_account_id=account_id,
+                        _schedule_deferred_post_return_supabase_step(
+                            step="record_post_like_interaction_success",
+                            fn_name="record_post_like_interaction_success",
+                            args=(account_id, follower_un, source_profile_username),
+                            kwargs={
+                                "run_id": run_id or None,
+                                "session_id": _SESSION_SOCIAL_ID or None,
+                                "liked_count": _liked_n,
+                                "target_count": int(_likes_pf.get("target_count") or 0),
+                                "attempted_count": int(_likes_pf.get("attempted_count") or 0),
+                                "skipped_already_liked_count": int(
+                                    _likes_pf.get("skipped_already_liked_count") or 0
+                                ),
+                                "phase_outcome": _likes_phase,
+                                "post_like_mode": str(_likes_pf.get("post_like_mode") or ""),
+                                "visual_candidate_id": _pf_log_vcid,
+                                "timings_ms": _likes_pf.get("timings_ms")
+                                if isinstance(_likes_pf.get("timings_ms"), dict)
+                                else {},
+                                "per_post": _likes_pf.get("per_post")
+                                if isinstance(_likes_pf.get("per_post"), list)
+                                else None,
+                            },
                             run_id=run_id or None,
-                            session_id=_SESSION_SOCIAL_ID or None,
-                            liked_count=_liked_n,
-                            target_count=int(_likes_pf.get("target_count") or 0),
-                            attempted_count=int(_likes_pf.get("attempted_count") or 0),
-                            skipped_already_liked_count=int(
-                                _likes_pf.get("skipped_already_liked_count") or 0
-                            ),
-                            phase_outcome=_likes_phase,
-                            post_like_mode=str(_likes_pf.get("post_like_mode") or ""),
-                            visual_candidate_id=_pf_log_vcid,
-                            timings_ms=_likes_pf.get("timings_ms")
-                            if isinstance(_likes_pf.get("timings_ms"), dict)
-                            else {},
-                            per_post=_likes_pf.get("per_post")
-                            if isinstance(_likes_pf.get("per_post"), list)
-                            else None,
-                        )
-                        _post_likes_persisted_t0 = time.perf_counter()
-                        _post_likes_persisted_base = {
-                            "step": "post_likes_persisted",
-                            "fn_name": "record_post_like_interaction_success",
-                            "attempt": 1,
-                            "record_count": _liked_n,
-                            "run_id": str(run_id or "")[:160],
-                            "account_id": str(account_id or "")[:160],
-                        }
-                        log(
-                            "info",
-                            "supabase_persist_step_started",
-                            **_post_likes_persisted_base,
-                        )
-                        log(
-                            "info",
-                            "post_likes_persisted",
-                            target_username=follower_un,
+                            account_id=account_id,
                             source_profile_username=source_profile_username,
-                            liked_count=_liked_n,
-                            phase_outcome=_likes_phase,
-                            visual_candidate_id=_pf_log_vcid,
+                            candidate_username=follower_un,
+                            target_username=follower_un,
+                            reason="post_like_persist_can_flush_before_completed",
+                            log_record_count=_liked_n,
+                            success_event="post_likes_persisted",
+                            success_payload={
+                                "target_username": follower_un,
+                                "source_profile_username": source_profile_username,
+                                "liked_count": _liked_n,
+                                "phase_outcome": _likes_phase,
+                                "visual_candidate_id": _pf_log_vcid,
+                            },
                         )
-                        log(
-                            "info",
-                            "supabase_persist_step_completed",
-                            **_post_likes_persisted_base,
-                            duration_ms=round(
-                                (time.perf_counter() - _post_likes_persisted_t0)
-                                * 1000.0,
-                                2,
-                            ),
-                            ok=True,
-                            error_code="",
-                        )
+                _critical_duration_ms = round(
+                    (time.perf_counter() - _critical_persist_t0) * 1000.0,
+                    2,
+                )
+                log(
+                    "info" if _critical_persist_ok else "error",
+                    "post_return_critical_persist_completed",
+                    target_username=source_profile_username,
+                    candidate_username=str(follower_un or ""),
+                    critical_duration_ms=_critical_duration_ms,
+                    next_action=_post_return_next_action,
+                    flush_required_before_completed=True,
+                    pending_deferred_count=_pending_deferred_follow_action_log_count(),
+                    safe_to_continue_ui=bool(_critical_persist_ok),
+                )
+                if not _critical_persist_ok:
+                    log(
+                        "error",
+                        "post_return_critical_persist_failed",
+                        target_username=source_profile_username,
+                        candidate_username=str(follower_un or ""),
+                        critical_duration_ms=_critical_duration_ms,
+                        next_action=_post_return_next_action,
+                        reason="critical_post_return_persist_failed",
+                    )
+                    _publish_followers_session_summary(
+                        exit_code=96,
+                        follow_session_outcome="post_return_critical_persist_failed",
+                        follow_stop_reason="post_return_critical_persist_failed",
+                        follows_completed_count=int(follows_completed_count),
+                        target_follow_budget_effective=target_follow_budget_effective,
+                    )
+                    _emit_performance_summary(
+                        t0=t0,
+                        warm_session_used=warm_session_used,
+                        force_stop_used=force_stop_used,
+                        exit_code=96,
+                        target_username=source_profile_username,
+                    )
+                    return 96
+                _schedule_deferred_follow_action_log_flush(
+                    events=_follow_action_events,
+                    run_id=run_id,
+                    account_id=account_id,
+                    target_username=_ct_follow_logs_flush_username,
+                    supabase_mode=supabase_mode,
+                    source_profile_username=source_profile_username,
+                    candidate_username=str(follower_un or ""),
+                )
+                log(
+                    "info",
+                    "post_return_ui_resume_allowed",
+                    target_username=source_profile_username,
+                    candidate_username=str(follower_un or ""),
+                    critical_duration_ms=_critical_duration_ms,
+                    next_action=_post_return_next_action,
+                    flush_required_before_completed=True,
+                    pending_deferred_count=_pending_deferred_follow_action_log_count(),
+                    safe_to_continue_ui=True,
+                )
+                log(
+                    "info",
+                    "post_return_next_ui_action_started",
+                    target_username=source_profile_username,
+                    candidate_username=str(follower_un or ""),
+                    next_action=_post_return_next_action,
+                    flush_required_before_completed=True,
+                    pending_deferred_count=_pending_deferred_follow_action_log_count(),
+                    safe_to_continue_ui=True,
+                )
                 ok_back = bool(_pf.get("return_ok"))
                 how = str(_pf.get("return_how") or "")
                 _pf_fail = str(_pf.get("return_failure_reason") or "")
@@ -13184,6 +15402,7 @@ def _run_followers_list_engine_session(
                 if str(how or "") in (
                     "compact_foreign_profile_back_visual_followers_list_confirmed",
                     "compact_foreign_profile_fallback_then_list",
+                    "compact_safe_back_then_list",
                 ):
                     followers_session_mark_list_committed_open(
                         source_profile_username,
@@ -13232,23 +15451,36 @@ def _run_followers_list_engine_session(
                             )
                         except Exception:
                             pass
-                    visual_loop_state["post_return_picker_refresh_pending"] = True
-                    visual_loop_state["post_return_picker_refresh_meta"] = {
-                        "visual_candidate_id": _pf_log_vcid,
-                        "follower_username": str(follower_un or ""),
-                        "return_method": str(how or ""),
-                    }
-                    try:
+                    if not is_follow_target_rotation_pending(
+                        target_username=source_profile_username
+                    ):
+                        visual_loop_state["post_return_picker_refresh_pending"] = True
+                        visual_loop_state["post_return_picker_refresh_meta"] = {
+                            "visual_candidate_id": _pf_log_vcid,
+                            "follower_username": str(follower_un or ""),
+                            "return_method": str(how or ""),
+                        }
+                        try:
+                            log(
+                                "info",
+                                "followers_post_return_picker_refresh_armed",
+                                source_profile_username=source_profile_username,
+                                visual_candidate_id=_pf_log_vcid,
+                                follower_username=str(follower_un or ""),
+                                return_method=str(how or ""),
+                            )
+                        except Exception:
+                            pass
+                    else:
                         log(
                             "info",
-                            "followers_post_return_picker_refresh_armed",
+                            "followers_post_return_picker_refresh_skipped_rotation_pending",
                             source_profile_username=source_profile_username,
                             visual_candidate_id=_pf_log_vcid,
                             follower_username=str(follower_un or ""),
                             return_method=str(how or ""),
+                            rotation_pending=True,
                         )
-                    except Exception:
-                        pass
 
             fk_session = _norm_ig_handle(str(follower_un or ""))
             if fk_session:
@@ -13265,6 +15497,8 @@ def _run_followers_list_engine_session(
 
     finally:
         try:
+            if is_follow_target_rotation_pending(target_username=source_profile_username):
+                _complete_post_return_idle_gap(reason="followers_engine_session_finished")
             _publish_followers_session_summary(
                 follow_processed_count=int(processed),
                 follows_completed_count=int(follows_completed_count),
@@ -15236,7 +17470,7 @@ def main() -> int:
             max_follow_targets_per_run=None,
             max_follows_per_target_per_run=None,
             run_followers_list_engine_session=_run_followers_list_engine_session,
-            fast_rotate_to_next_target_from_followers=fast_rotate_to_next_target_from_followers,
+            fast_rotate_to_next_target_from_followers=fast_rotate_to_next_target_via_controlled_search,
             supabase_mode=supabase_mode,
             warm_session_used=warm_session_used,
             force_stop_used=force_stop_used,

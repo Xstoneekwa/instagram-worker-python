@@ -38,6 +38,7 @@ from welcome_scan_producer import get_last_welcome_scan_summary
 from welcome_session_orchestrator import dispatch_welcome_session_send
 
 FollowEngineRunner = Callable[..., int]
+FastRotationRunner = Callable[..., dict[str, Any]]
 
 H3_SUPPORTED_UNFOLLOW_MODES = frozenset({*UNFOLLOW_MODES_DB_STRICT, UNFOLLOW_MODE_ANY})
 FOLLOW_TARGET_MAX_TARGETS_PER_RUN_ENV = "FOLLOW_TARGET_ROTATION_MAX_TARGETS_PER_RUN"
@@ -69,6 +70,29 @@ FOLLOW_TARGET_NON_EXHAUSTION_TOKENS = frozenset(
         "support_required",
     }
 )
+
+
+def _startup_timing_log(
+    event: str,
+    started_at: float,
+    *,
+    phase: str,
+    substep: str,
+    source: str,
+    **fields: Any,
+) -> None:
+    try:
+        log(
+            "info",
+            event,
+            duration_ms=round((time.perf_counter() - started_at) * 1000.0, 2),
+            phase=str(phase or ""),
+            substep=str(substep or ""),
+            source=str(source or ""),
+            **fields,
+        )
+    except Exception:
+        pass
 
 
 def _is_unfollow_any_mode(mode: str) -> bool:
@@ -194,6 +218,31 @@ def _validate_rotation_setting(value: Any, *, field: str, lower: int, upper: int
     return parsed
 
 
+def _resolve_rotation_setting_with_fallback(
+    value: Any,
+    *,
+    field: str,
+    lower: int,
+    upper: int,
+    fallback: int,
+    account_id: str,
+) -> tuple[int, bool]:
+    try:
+        return _validate_rotation_setting(value, field=field, lower=lower, upper=upper), False
+    except ValueError as exc:
+        log(
+            "warning",
+            "follow_source_rotation_setting_fallback_used",
+            account_id=account_id,
+            field=field,
+            reason=str(exc),
+            fallback_value=fallback,
+            lower_bound=lower,
+            upper_bound=upper,
+        )
+        return fallback, True
+
+
 def _resolve_follow_source_rotation_settings(account_id: str) -> dict[str, Any]:
     max_targets_upper = int(getattr(config, "FOLLOW_TARGET_ROTATION_MAX_TARGETS_PER_RUN_UPPER_BOUND", 10) or 10)
     max_follows_upper = int(getattr(config, "FOLLOW_TARGET_MAX_FOLLOWS_PER_TARGET_PER_RUN_UPPER_BOUND", 50) or 50)
@@ -219,20 +268,30 @@ def _resolve_follow_source_rotation_settings(account_id: str) -> dict[str, Any]:
         return fallback
     if not row:
         return fallback
+    max_targets_per_run, max_targets_fallback_used = _resolve_rotation_setting_with_fallback(
+        row.get("max_targets_per_run"),
+        field="max_targets_per_run",
+        lower=1,
+        upper=max_targets_upper,
+        fallback=int(fallback["max_targets_per_run"]),
+        account_id=account_id,
+    )
+    max_follows_per_target_per_run, max_follows_fallback_used = _resolve_rotation_setting_with_fallback(
+        row.get("max_follows_per_target_per_run"),
+        field="max_follows_per_target_per_run",
+        lower=1,
+        upper=max_follows_upper,
+        fallback=int(fallback["max_follows_per_target_per_run"]),
+        account_id=account_id,
+    )
     return {
-        "max_targets_per_run": _validate_rotation_setting(
-            row.get("max_targets_per_run"),
-            field="max_targets_per_run",
-            lower=1,
-            upper=max_targets_upper,
+        "max_targets_per_run": max_targets_per_run,
+        "max_follows_per_target_per_run": max_follows_per_target_per_run,
+        "settings_source": (
+            "account_with_fallback"
+            if max_targets_fallback_used or max_follows_fallback_used
+            else "account"
         ),
-        "max_follows_per_target_per_run": _validate_rotation_setting(
-            row.get("max_follows_per_target_per_run"),
-            field="max_follows_per_target_per_run",
-            lower=1,
-            upper=max_follows_upper,
-        ),
-        "settings_source": "account",
         "bounds": fallback["bounds"],
     }
 
@@ -381,6 +440,7 @@ def _run_follow_target_rotation(
     force_stop_used: bool,
     max_targets_per_run: int | None = None,
     max_follows_per_target_per_run: int | None = None,
+    fast_rotate_to_next_target_from_followers: FastRotationRunner | None = None,
 ) -> dict[str, Any]:
     total_targets = len(follow_targets)
     max_targets = _resolve_max_follow_targets_per_run(total_targets, max_targets_per_run)
@@ -396,6 +456,8 @@ def _run_follow_target_rotation(
     final_summary: dict[str, Any] = {}
     final_reason = "no_follow_targets"
     final_target: dict[str, Any] | None = None
+    prevalidated_followers_target_key: str | None = None
+    prevalidated_followers_meta: dict[str, Any] = {}
     t0 = time.perf_counter()
 
     log(
@@ -419,6 +481,45 @@ def _run_follow_target_rotation(
             else max_follows_per_target
         )
         if global_remaining <= 0:
+            target_id = _as_target_id(target.get("target_id")) or None
+            source_profile = _as_source_profile(target.get("source_profile"))
+            target_index = int(target.get("target_index") or attempt_index)
+            log(
+                "info",
+                "target_rotation_stopped_global_cap",
+                account_id=account_id,
+                run_id=run_id,
+                target_id=target_id,
+                source_profile=source_profile,
+                target_index=target_index,
+                current_count=global_follows_completed,
+                cap=global_follow_goal,
+                follows_done=global_follows_completed,
+                stop_reason="global_follow_cap_reached",
+                candidates_not_scanned_due_to_cap=True,
+            )
+            log(
+                "info",
+                "target_rotation_decision",
+                from_target=source_profile,
+                to_target="",
+                reason="global_follow_cap_reached",
+                global_follows_done=global_follows_completed,
+                global_follow_cap=global_follow_goal,
+            )
+            log(
+                "info",
+                "run_follow_phase_completed_due_to_cap",
+                account_id=account_id,
+                run_id=run_id,
+                target_id=target_id,
+                source_profile=source_profile,
+                target_index=target_index,
+                follows_done=global_follows_completed,
+                cap=global_follow_goal,
+                stop_reason="global_follow_cap_reached",
+                candidates_not_scanned_due_to_cap=True,
+            )
             final_exit_code = 0
             final_reason = "global_follow_cap_reached"
             final_summary.update(
@@ -428,14 +529,18 @@ def _run_follow_target_rotation(
                     "follow_stop_reason": "global_follow_cap_reached",
                     "global_follows_completed": global_follows_completed,
                     "global_follows_goal_effective": global_follow_goal,
+                    "current_target": source_profile,
+                    "candidates_not_scanned_due_to_cap": True,
                     "rotation_attempts": attempts,
                 }
             )
+            final_target = target
             break
         target_budget = min(max_follows_per_target, global_remaining)
         target_id = _as_target_id(target.get("target_id")) or None
         source_profile = _as_source_profile(target.get("source_profile"))
         target_index = int(target.get("target_index") or attempt_index)
+        t_target_selected = time.perf_counter()
         log(
             "info",
             "follow_target_selected",
@@ -451,6 +556,31 @@ def _run_follow_target_rotation(
             global_follow_remaining=global_remaining,
             selection_source=str(target.get("selection_source") or ""),
         )
+        _startup_timing_log(
+            "startup_timing_target_selection_completed",
+            t_target_selected,
+            phase="target_settings",
+            substep="rotation_target_selected",
+            source="follow_target_rotation",
+            cache_hit=False,
+            reused_signal=True,
+            duplicate_detected=True,
+            account_id=account_id,
+            run_id=run_id,
+            target_index=target_index,
+            total_targets=total_targets,
+            selection_source=str(target.get("selection_source") or ""),
+        )
+        log(
+            "info",
+            "target_scan_started",
+            target_username=source_profile,
+            target_index=target_index,
+            max_targets_per_run=max_targets,
+            account_id=account_id,
+            run_id=run_id,
+            target_id=target_id,
+        )
         if supabase_mode:
             _record_follow_target_metric(
                 "target_selected",
@@ -459,20 +589,27 @@ def _run_follow_target_rotation(
                 source_profile=source_profile,
                 run_id=run_id,
             )
-        follow_t0 = time.perf_counter()
-        exit_code = int(
-            run_followers_list_engine_session(
-                d,
-                source_profile_username=source_profile,
-                target_id=target_id,
-                account_id=account_id,
-                run_id=str(run_id or ""),
-                supabase_mode=supabase_mode,
-                warm_session_used=warm_session_used,
-                force_stop_used=force_stop_used,
-                target_follow_budget=target_budget,
-            )
+        start_from_current_followers_list = (
+            bool(prevalidated_followers_target_key)
+            and target_key == prevalidated_followers_target_key
         )
+        call_kwargs: dict[str, Any] = {
+            "source_profile_username": source_profile,
+            "target_id": target_id,
+            "account_id": account_id,
+            "run_id": str(run_id or ""),
+            "supabase_mode": supabase_mode,
+            "warm_session_used": warm_session_used,
+            "force_stop_used": force_stop_used,
+            "target_follow_budget": target_budget,
+        }
+        if start_from_current_followers_list:
+            call_kwargs["start_from_current_followers_list"] = True
+            call_kwargs["prevalidated_followers_list_meta"] = dict(prevalidated_followers_meta)
+            prevalidated_followers_target_key = None
+            prevalidated_followers_meta = {}
+        follow_t0 = time.perf_counter()
+        exit_code = int(run_followers_list_engine_session(d, **call_kwargs))
         follow_total_ms = round((time.perf_counter() - follow_t0) * 1000.0, 2)
         summary = _last_follow_engine_summary(run_followers_list_engine_session)
         summary.update(
@@ -488,6 +625,15 @@ def _run_follow_target_rotation(
         )
         target_follows_completed = _as_optional_int(summary.get("follows_completed_count")) or 0
         global_follows_completed += target_follows_completed
+        summary_reason = str(summary.get("follow_stop_reason") or summary.get("follow_session_outcome") or "")
+        if summary_reason == "global_follow_cap_reached":
+            summary_global_completed = (
+                _as_optional_int(summary.get("global_follows_completed"))
+                or _as_optional_int(summary.get("follows_done"))
+                or _as_optional_int(summary.get("current_count"))
+            )
+            if summary_global_completed is not None:
+                global_follows_completed = max(global_follows_completed, summary_global_completed)
         summary_global_goal = _as_optional_int(summary.get("global_follows_goal_effective"))
         if summary_global_goal is not None:
             global_follow_goal = (
@@ -530,6 +676,19 @@ def _run_follow_target_rotation(
             global_follow_goal=global_follow_goal,
             follow_total_ms=follow_total_ms,
         )
+        log(
+            "info",
+            "target_scan_completed",
+            target_username=source_profile,
+            duration_ms=follow_total_ms,
+            candidates_seen=summary.get("candidates_seen_count"),
+            candidates_opened=summary.get("candidates_opened_count"),
+            candidates_rejected=summary.get("candidates_rejected_count"),
+            follows_sent=target_follows_completed,
+            stop_reason=summary_reason,
+            target_index=target_index,
+            max_targets_per_run=max_targets,
+        )
         exhausted = is_follow_target_exhaustion_outcome(
             exit_code=exit_code,
             outcome=str(summary.get("follow_session_outcome") or ""),
@@ -541,6 +700,58 @@ def _run_follow_target_rotation(
             and global_follows_completed >= global_follow_goal
         )
         budget_reached = is_follow_target_budget_reached(summary, target_budget)
+        if summary_reason == "global_follow_cap_reached":
+            final_reason = "global_follow_cap_reached"
+            final_exit_code = 0
+            final_summary.update(
+                {
+                    "exit_code": 0,
+                    "follow_session_outcome": "global_follow_cap_reached",
+                    "follow_stop_reason": "global_follow_cap_reached",
+                    "global_follows_completed": global_follows_completed,
+                    "global_follows_goal_effective": global_follow_goal,
+                    "current_target": source_profile,
+                    "candidates_not_scanned_due_to_cap": True,
+                    "rotation_attempts": attempts,
+                }
+            )
+            log(
+                "info",
+                "target_rotation_stopped_global_cap",
+                account_id=account_id,
+                run_id=run_id,
+                target_id=target_id,
+                source_profile=source_profile,
+                target_index=target_index,
+                current_count=global_follows_completed,
+                cap=global_follow_goal,
+                follows_done=global_follows_completed,
+                stop_reason="global_follow_cap_reached",
+                candidates_not_scanned_due_to_cap=True,
+            )
+            log(
+                "info",
+                "target_rotation_decision",
+                from_target=source_profile,
+                to_target="",
+                reason="global_follow_cap_reached",
+                global_follows_done=global_follows_completed,
+                global_follow_cap=global_follow_goal,
+            )
+            log(
+                "info",
+                "run_follow_phase_completed_due_to_cap",
+                account_id=account_id,
+                run_id=run_id,
+                target_id=target_id,
+                source_profile=source_profile,
+                target_index=target_index,
+                follows_done=global_follows_completed,
+                cap=global_follow_goal,
+                stop_reason="global_follow_cap_reached",
+                candidates_not_scanned_due_to_cap=True,
+            )
+            break
         if budget_reached and not exhausted:
             budget_reached_keys.add(target_key)
             log(
@@ -577,8 +788,46 @@ def _run_follow_target_rotation(
                         "follow_stop_reason": "global_follow_cap_reached",
                         "global_follows_completed": global_follows_completed,
                         "global_follows_goal_effective": global_follow_goal,
+                        "current_target": source_profile,
+                        "candidates_not_scanned_due_to_cap": True,
                         "rotation_attempts": attempts,
                     }
+                )
+                log(
+                    "info",
+                    "target_rotation_stopped_global_cap",
+                    account_id=account_id,
+                    run_id=run_id,
+                    target_id=target_id,
+                    source_profile=source_profile,
+                    target_index=target_index,
+                    current_count=global_follows_completed,
+                    cap=global_follow_goal,
+                    follows_done=global_follows_completed,
+                    stop_reason="global_follow_cap_reached",
+                    candidates_not_scanned_due_to_cap=True,
+                )
+                log(
+                    "info",
+                    "target_rotation_decision",
+                    from_target=source_profile,
+                    to_target="",
+                    reason="global_follow_cap_reached",
+                    global_follows_done=global_follows_completed,
+                    global_follow_cap=global_follow_goal,
+                )
+                log(
+                    "info",
+                    "run_follow_phase_completed_due_to_cap",
+                    account_id=account_id,
+                    run_id=run_id,
+                    target_id=target_id,
+                    source_profile=source_profile,
+                    target_index=target_index,
+                    follows_done=global_follows_completed,
+                    cap=global_follow_goal,
+                    stop_reason="global_follow_cap_reached",
+                    candidates_not_scanned_due_to_cap=True,
                 )
                 break
             remaining_budget_targets = [
@@ -589,6 +838,66 @@ def _run_follow_target_rotation(
             ]
             if remaining_budget_targets:
                 next_target = remaining_budget_targets[0]
+                next_target_id = _as_target_id(next_target.get("target_id")) or None
+                next_source_profile = _as_source_profile(next_target.get("source_profile"))
+                next_target_index = int(next_target.get("target_index") or 0)
+                rotation_payload = {
+                    "account_id": account_id,
+                    "run_id": run_id,
+                    "from_source_target": source_profile,
+                    "to_source_target": next_source_profile,
+                    "target_id": target_id,
+                    "next_target_id": next_target_id,
+                    "target_index": target_index,
+                    "next_target_index": next_target_index,
+                    "total_targets": total_targets,
+                    "reason": "target_budget_reached",
+                    "target_follows_sent_this_run": target_follows_completed,
+                    "max_follows_per_target_per_run": target_budget,
+                    "total_follows_this_run": global_follows_completed,
+                    "effective_follow_cap": global_follow_goal,
+                }
+                log(
+                    "info",
+                    "target_rotation_decision",
+                    from_target=source_profile,
+                    to_target=next_source_profile,
+                    reason="target_budget_reached",
+                    global_follows_done=global_follows_completed,
+                    global_follow_cap=global_follow_goal,
+                )
+                log("info", "follow_target_rotation_requested", **rotation_payload)
+                fast_rotation_result: dict[str, Any] | None = None
+                if fast_rotate_to_next_target_from_followers is not None:
+                    fast_rotation_result = fast_rotate_to_next_target_from_followers(
+                        d,
+                        account_id=account_id,
+                        run_id=run_id,
+                        from_source_target=source_profile,
+                        to_source_target=next_source_profile,
+                    )
+                    if bool((fast_rotation_result or {}).get("ok")):
+                        prevalidated_followers_target_key = _follow_target_key(next_target)
+                        prevalidated_followers_meta = {
+                            "fast_target_rotation": fast_rotation_result,
+                            "fast_target_rotation_prevalidated": True,
+                        }
+                    else:
+                        fallback_payload = {
+                            **rotation_payload,
+                            "reason": str((fast_rotation_result or {}).get("reason") or "fast_target_rotation_failed"),
+                            "step": str(
+                                ((fast_rotation_result or {}).get("steps_completed") or [""])[-1]
+                                if (fast_rotation_result or {}).get("steps_completed")
+                                else "fast_rotation"
+                            ),
+                            "elapsed_ms": int((fast_rotation_result or {}).get("elapsed_ms") or 0),
+                        }
+                        log(
+                            "warning",
+                            "follow_target_fast_rotation_fallback_standard",
+                            **fallback_payload,
+                        )
                 log(
                     "info",
                     "follow_target_switched",
@@ -596,12 +905,19 @@ def _run_follow_target_rotation(
                     run_id=run_id,
                     target_id=target_id,
                     source_profile=source_profile,
-                    next_target_id=_as_target_id(next_target.get("target_id")) or None,
-                    next_source_profile=_as_source_profile(next_target.get("source_profile")),
+                    next_target_id=next_target_id,
+                    next_source_profile=next_source_profile,
                     target_index=target_index,
-                    next_target_index=int(next_target.get("target_index") or 0),
+                    next_target_index=next_target_index,
                     total_targets=total_targets,
                     reason="target_budget_reached",
+                )
+                log(
+                    "info",
+                    "follow_target_rotation_completed",
+                    **rotation_payload,
+                    fast_rotation_ok=bool((fast_rotation_result or {}).get("ok")) if fast_rotation_result is not None else None,
+                    fast_rotation_reason=str((fast_rotation_result or {}).get("reason") or "") if fast_rotation_result is not None else "",
                 )
                 continue
             final_reason = "target_budget_reached"
@@ -670,6 +986,16 @@ def _run_follow_target_rotation(
         ]
         if remaining:
             next_target = remaining[0]
+            next_source_profile = _as_source_profile(next_target.get("source_profile"))
+            log(
+                "info",
+                "target_rotation_decision",
+                from_target=source_profile,
+                to_target=next_source_profile,
+                reason="target_exhausted",
+                global_follows_done=global_follows_completed,
+                global_follow_cap=global_follow_goal,
+            )
             log(
                 "info",
                 "follow_target_switched",
@@ -678,7 +1004,7 @@ def _run_follow_target_rotation(
                 target_id=target_id,
                 source_profile=source_profile,
                 next_target_id=_as_target_id(next_target.get("target_id")) or None,
-                next_source_profile=_as_source_profile(next_target.get("source_profile")),
+                next_source_profile=next_source_profile,
                 target_index=target_index,
                 next_target_index=int(next_target.get("target_index") or 0),
                 total_targets=total_targets,
@@ -2011,6 +2337,7 @@ def run_account_session(
     follow_targets: list[dict[str, Any]] | None = None,
     max_follow_targets_per_run: int | None = None,
     max_follows_per_target_per_run: int | None = None,
+    fast_rotate_to_next_target_from_followers: FastRotationRunner | None = None,
 ) -> int:
     t0 = time.perf_counter()
     aid = str(account_id or "").strip()
@@ -2028,6 +2355,7 @@ def run_account_session(
         target_id=tid or None,
     )
 
+    t_settings_load = time.perf_counter()
     if not src:
         log("error", "account_session_aborted", reason="missing_followers_source_username")
         log(
@@ -2051,6 +2379,19 @@ def run_account_session(
         settings = supabase_client.get_account_dm_settings(aid) or {}
     except Exception as e:
         log("error", "account_session_settings_load_failed", error=str(e))
+    _startup_timing_log(
+        "startup_timing_target_selection_completed",
+        t_settings_load,
+        phase="target_settings",
+        substep="account_dm_settings_load",
+        source="account_session_orchestrator",
+        cache_hit=False,
+        reused_signal=False,
+        duplicate_detected=False,
+        account_id=aid,
+        run_id=run_id,
+        settings_loaded=bool(settings),
+    )
 
     welcome_enabled = bool(settings.get("welcome_enabled"))
     real_send_enabled, real_send_source = resolve_welcome_dm_real_send_enabled()
@@ -2237,11 +2578,26 @@ def run_account_session(
                 ),
             )
             follow_t0 = time.perf_counter()
+            t_rotation_targets = time.perf_counter()
             rotation_targets = _build_follow_rotation_targets(
                 follow_targets=follow_targets,
                 fallback_source_profile=src,
                 fallback_target_id=tid or None,
             )
+            _startup_timing_log(
+                "startup_timing_target_selection_completed",
+                t_rotation_targets,
+                phase="target_settings",
+                substep="rotation_targets_built",
+                source="account_session_orchestrator",
+                cache_hit=False,
+                reused_signal=bool(follow_targets),
+                duplicate_detected=bool(follow_targets),
+                account_id=aid,
+                run_id=run_id,
+                target_count=len(rotation_targets),
+            )
+            t_rotation_settings = time.perf_counter()
             rotation_settings = _resolve_follow_source_rotation_settings(aid)
             log(
                 "info",
@@ -2252,6 +2608,19 @@ def run_account_session(
                 max_targets_per_run=rotation_settings["max_targets_per_run"],
                 settings_source=rotation_settings["settings_source"],
                 bounds=rotation_settings["bounds"],
+            )
+            _startup_timing_log(
+                "startup_timing_target_selection_completed",
+                t_rotation_settings,
+                phase="target_settings",
+                substep="follow_source_rotation_settings_load",
+                source="account_session_orchestrator",
+                cache_hit=False,
+                reused_signal=False,
+                duplicate_detected=False,
+                account_id=aid,
+                run_id=run_id,
+                settings_source=rotation_settings["settings_source"],
             )
             rotation_result = _run_follow_target_rotation(
                 d,
@@ -2273,6 +2642,7 @@ def run_account_session(
                     if max_follows_per_target_per_run is not None
                     else int(rotation_settings["max_follows_per_target_per_run"])
                 ),
+                fast_rotate_to_next_target_from_followers=fast_rotate_to_next_target_from_followers,
             )
             follow_t1 = time.perf_counter()
             follow_phase_executed = True
@@ -2789,6 +3159,7 @@ def dispatch_account_session(
     follow_targets: list[dict[str, Any]] | None = None,
     max_follow_targets_per_run: int | None = None,
     max_follows_per_target_per_run: int | None = None,
+    fast_rotate_to_next_target_from_followers: FastRotationRunner | None = None,
 ) -> int:
     return run_account_session(
         d,
@@ -2800,6 +3171,7 @@ def dispatch_account_session(
         follow_targets=follow_targets,
         max_follow_targets_per_run=max_follow_targets_per_run,
         max_follows_per_target_per_run=max_follows_per_target_per_run,
+        fast_rotate_to_next_target_from_followers=fast_rotate_to_next_target_from_followers,
         run_followers_list_engine_session=run_followers_list_engine_session,
         supabase_mode=supabase_mode,
         warm_session_used=warm_session_used,
