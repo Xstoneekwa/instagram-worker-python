@@ -15,6 +15,7 @@ def _assignment(
     starts_at: str | None = None,
     ends_at: str | None = None,
     adb_serial: str = "emulator-5554",
+    package_name: str = "com.instagram.androie",
 ) -> dict:
     now = datetime.now(timezone.utc)
     return {
@@ -52,7 +53,7 @@ def _assignment(
             "instance_type": "clone",
             "instance_index": 1,
             "visible_label": "Instagram 1",
-            "package_name": "com.instagram.androie",
+            "package_name": package_name,
         },
     }
 
@@ -93,6 +94,42 @@ class AssignmentDispatchResolverTest(unittest.TestCase):
         self.assertEqual(ctx["assignment_type"], "full_cycle")
         self.assertEqual(ctx["reason"], "assignment_resolved")
 
+    def test_full_cycle_welcome_baseline_accepted(self) -> None:
+        ctx = self._resolve(
+            _assignment(
+                assignment_type="full_cycle",
+                adb_serial="RFGL145VCKE",
+                package_name="com.instagram.androif",
+            ),
+            run_type="dm_welcome_baseline",
+            require_assignment=True,
+            enforce_window=False,
+        )
+        self.assertTrue(ctx["assignment_found"])
+        self.assertEqual(ctx["assignment_type"], "full_cycle")
+        self.assertEqual(ctx["slot_kind"], "full_cycle_6h")
+        self.assertEqual(ctx["reason"], "assignment_resolved")
+        self.assertEqual(ctx["adb_serial"], "RFGL145VCKE")
+        self.assertEqual(ctx["package_name"], "com.instagram.androif")
+        self.assertFalse(ctx["fallback_used"])
+
+    def test_full_cycle_welcome_baseline_resolves_inside_active_window(self) -> None:
+        now = datetime.now(timezone.utc)
+        ctx = self._resolve(
+            _assignment(
+                assignment_type="full_cycle",
+                adb_serial="RFGL145VCKE",
+                starts_at=(now - timedelta(hours=1)).isoformat(),
+                ends_at=(now + timedelta(hours=5)).isoformat(),
+            ),
+            run_type="dm_welcome_baseline",
+            require_assignment=True,
+            enforce_window=False,
+        )
+        self.assertTrue(ctx["assignment_found"])
+        self.assertEqual(ctx["reason"], "assignment_resolved")
+        self.assertEqual(ctx["adb_serial"], "RFGL145VCKE")
+
     def test_full_cycle_welcome_session_send_resolves_outside_window_when_not_enforced(
         self,
     ) -> None:
@@ -116,6 +153,25 @@ class AssignmentDispatchResolverTest(unittest.TestCase):
         ctx = self._resolve(
             _assignment(assignment_type="outreach_only"),
             run_type="dm_welcome_session_send",
+        )
+        self.assertFalse(ctx["assignment_found"])
+        self.assertEqual(ctx["reason"], "assignment_type_incompatible")
+
+    def test_outreach_only_welcome_baseline_incompatible(self) -> None:
+        ctx = self._resolve(
+            _assignment(assignment_type="outreach_only"),
+            run_type="dm_welcome_baseline",
+            require_assignment=True,
+        )
+        self.assertFalse(ctx["assignment_found"])
+        self.assertEqual(ctx["reason"], "assignment_type_incompatible")
+        self.assertFalse(ctx["fallback_used"])
+
+    def test_full_cycle_welcome_scan_not_globally_allowed(self) -> None:
+        ctx = self._resolve(
+            _assignment(assignment_type="full_cycle"),
+            run_type="dm_welcome_scan",
+            require_assignment=True,
         )
         self.assertFalse(ctx["assignment_found"])
         self.assertEqual(ctx["reason"], "assignment_type_incompatible")

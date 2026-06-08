@@ -69,6 +69,29 @@ _TRUSTED_GLOBAL_SEARCH_CONTEXTS = frozenset(
     }
 )
 
+_DM_COMPOSER_PLACEHOLDER_TEXTS = frozenset(
+    " ".join(value.strip().lower().replace("\u2026", "...").split())
+    for value in (
+        "Message",
+        "Message...",
+        "Message…",
+        "Send message",
+        "Write a message",
+        "Envoyer un message",
+        "Écrire un message",
+        "Ecrire un message",
+    )
+)
+
+
+def _is_dm_composer_placeholder_text(value: str | None) -> bool:
+    """Instagram can expose composer hint text via get_text(); do not treat it as draft."""
+    raw = str(value or "").strip()
+    if not raw:
+        return False
+    normalized = " ".join(raw.lower().replace("\u2026", "...").split())
+    return normalized in _DM_COMPOSER_PLACEHOLDER_TEXTS
+
 
 def _resolve_reserved_by(d: u2.Device) -> str:
     cfg = str(getattr(config, "DM_SENDER_RESERVED_BY", "") or "").strip()
@@ -3068,7 +3091,16 @@ def _perform_real_welcome_dm_send(
     ok_type = False
     type_info: Any = {}
     reused_draft = False
-    if existing_draft.strip() == draft_text.strip():
+    existing_draft_is_placeholder = _is_dm_composer_placeholder_text(existing_draft)
+    if existing_draft_is_placeholder:
+        log(
+            "info",
+            "dm_sender_existing_draft_ignored_placeholder",
+            username=uname,
+            draft_len=len(existing_draft),
+            thread_state=thread_state,
+        )
+    elif existing_draft.strip() == draft_text.strip():
         log(
             "info",
             "dm_sender_existing_draft_detected",
@@ -3207,6 +3239,7 @@ def _perform_real_welcome_dm_send(
                 pre_send_composer_text_len=int(
                     send_out.get("composer_text_len_before_send") or 0
                 ),
+                send_already_confirmed=True,
             )
             send_out["post_finalize"] = fin
             if not bool(fin.get("followers_surface_ok")):

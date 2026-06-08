@@ -6510,6 +6510,7 @@ def return_welcome_list_from_dm_to_followers(
     *,
     source_profile_username: str = "",
     pre_send_composer_text_len: int = 0,
+    send_already_confirmed: bool = False,
 ) -> dict[str, Any]:
     """
   Welcome list-native post-send / post-skip: DM → action-bar back → profile → action-bar back → followers.
@@ -6525,19 +6526,30 @@ def return_welcome_list_from_dm_to_followers(
         "followers_surface_ok": False,
     }
 
-    sig_ok, sig_reason = _dm_post_send_signal_poll(
-        d, pre_send_text_len=int(pre_send_composer_text_len or 0)
-    )
+    if send_already_confirmed:
+        sig_ok, sig_reason = True, "already_confirmed_before_return"
+        log(
+            "info",
+            "welcome_list_sender_post_send_return_fast_path_started",
+            username=username,
+            source_profile_username=src or None,
+            reason=sig_reason,
+        )
+    else:
+        sig_ok, sig_reason = _dm_post_send_signal_poll(
+            d, pre_send_text_len=int(pre_send_composer_text_len or 0)
+        )
     out["post_send_signal_ok"] = bool(sig_ok)
     out["post_send_signal_reason"] = sig_reason
-    try:
-        clear_dm_draft(d)
-    except Exception:
-        pass
-    try:
-        finalize_dm_draft_before_back(d)
-    except Exception:
-        pass
+    if not send_already_confirmed:
+        try:
+            clear_dm_draft(d)
+        except Exception:
+            pass
+        try:
+            finalize_dm_draft_before_back(d)
+        except Exception:
+            pass
 
     log(
         "info",

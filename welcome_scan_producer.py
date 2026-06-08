@@ -83,7 +83,9 @@ def run_welcome_scan_producer(
     welcome_enabled = False
     baseline_completed = False
     welcome_template_id: str | None = None
-    session_job_cap = 10
+    session_sent_cap = 10
+    session_candidate_attempt_cap = 10
+    configured_candidate_attempt_cap = 10
     db_welcome_per_session_limit = 10
     db_welcome_per_day_limit = 10
     db_total_dm_per_day_limit = 10
@@ -136,7 +138,10 @@ def run_welcome_scan_producer(
             total_dm_sent_today=total_dm_sent_today,
             welcome_day_remaining_today=welcome_day_remaining_today,
             total_dm_day_remaining_today=total_dm_day_remaining_today,
-            effective_welcome_scan_cap=session_job_cap,
+            effective_welcome_scan_cap=session_candidate_attempt_cap,
+            effective_welcome_sent_cap=session_sent_cap,
+            candidate_attempt_cap=session_candidate_attempt_cap,
+            configured_candidate_attempt_cap=configured_candidate_attempt_cap,
             screens_scanned=screens_scanned,
             scrolls_done=scrolls_done,
             usernames_seen_total=usernames_seen_total,
@@ -202,10 +207,20 @@ def run_welcome_scan_producer(
     total_dm_sent_today = _as_nonnegative_int(counter.get("total_dm_sent_count"), 0)
     welcome_day_remaining_today = max(0, db_welcome_per_day_limit - welcome_sent_today)
     total_dm_day_remaining_today = max(0, db_total_dm_per_day_limit - total_dm_sent_today)
-    session_job_cap = min(
+    session_sent_cap = min(
         db_welcome_per_session_limit,
         welcome_day_remaining_today,
         total_dm_day_remaining_today,
+    )
+    configured_candidate_attempt_cap = _as_nonnegative_int(
+        getattr(config, "WELCOME_SCAN_CANDIDATE_ATTEMPT_CAP", 3),
+        3,
+    )
+    if configured_candidate_attempt_cap <= 0:
+        configured_candidate_attempt_cap = session_sent_cap
+    session_candidate_attempt_cap = max(
+        session_sent_cap,
+        configured_candidate_attempt_cap,
     )
     log(
         "info",
@@ -219,8 +234,19 @@ def run_welcome_scan_producer(
         total_dm_sent_today=total_dm_sent_today,
         welcome_day_remaining_today=welcome_day_remaining_today,
         total_dm_day_remaining_today=total_dm_day_remaining_today,
-        effective_welcome_scan_cap=session_job_cap,
+        effective_welcome_scan_cap=session_candidate_attempt_cap,
+        effective_welcome_sent_cap=session_sent_cap,
         source="min(db_session,db_day_remaining,total_dm_day_remaining)",
+    )
+    log(
+        "info",
+        "welcome_scan_candidate_attempt_cap_resolved",
+        account_id=aid,
+        run_id=scan_run_id,
+        sent_cap=session_sent_cap,
+        candidate_attempt_cap=session_candidate_attempt_cap,
+        configured_candidate_attempt_cap=configured_candidate_attempt_cap,
+        source="max(sent_cap,config.WELCOME_SCAN_CANDIDATE_ATTEMPT_CAP)",
     )
 
     if not welcome_enabled:
@@ -231,7 +257,7 @@ def run_welcome_scan_producer(
         log("info", "welcome_scan_skipped", account_id=aid, reason="baseline_not_completed")
         return _finish("skipped", 0, "baseline_not_completed")
 
-    if session_job_cap <= 0:
+    if session_sent_cap <= 0:
         log("info", "welcome_scan_skipped", account_id=aid, reason="welcome_day_limit_reached")
         return _finish("skipped", 0, "welcome_day_limit_reached")
 
@@ -248,6 +274,9 @@ def run_welcome_scan_producer(
         d,
         uname,
         pkg=str(getattr(config, "INSTAGRAM_PACKAGE", "") or ""),
+        followers_open_wait_s=float(
+            getattr(config, "WELCOME_SCAN_FOLLOWERS_OPEN_WAIT_S", 0.6) or 0.0
+        ),
     )
     if not ok_followers:
         log("error", "welcome_scan_aborted", reason="own_followers_open_failed")
@@ -280,7 +309,7 @@ def run_welcome_scan_producer(
             return True
         if phase == "post_anchor" and consecutive_known >= known_stop_k:
             return True
-        if jobs_enqueued_count >= session_job_cap:
+        if jobs_enqueued_count >= session_candidate_attempt_cap:
             return True
         return False
 
@@ -301,6 +330,20 @@ def run_welcome_scan_producer(
             force_fresh_hierarchy=(screen_index > 0),
             screen_index=screen_index,
         )
+        if (
+            screen_index == 0
+            and str(meta.get("hierarchy_source") or "") == "cached"
+            and row_models
+        ):
+            log(
+                "info",
+                "welcome_scan_harvest_reused_followers_entry_snapshot",
+                account_id=aid,
+                run_id=scan_run_id,
+                screen_index=screen_index,
+                rows_count=len(row_models),
+                extraction_methods=list(meta.get("extraction_methods") or []),
+            )
         batch = [str(r.get("username") or "").strip() for r in row_models if r.get("username")]
         row_by_key = {_norm_username(str(r.get("username") or "")): r for r in row_models}
         screens_scanned += 1
@@ -345,6 +388,10 @@ def run_welcome_scan_producer(
                 )
 
         known_map = supabase_client.fetch_followers_by_usernames(aid, ordered_handles)
+        pending_job_map = supabase_client.fetch_pending_welcome_jobs_by_usernames(
+            aid,
+            ordered_handles,
+        )
 
         log(
             "info",
@@ -368,6 +415,73 @@ def run_welcome_scan_producer(
             row = known_map.get(key)
             if row is not None:
                 known_count += 1
+                baseline_anchor = bool(row.get("baseline_existing")) or (
+                    str(row.get("welcome_dm_status") or "") == "not_eligible_baseline"
+                )
+                if not baseline_anchor and phase == "pre_anchor":
+                    pending_job = pending_job_map.get(key)
+                    if (
+                        str(row.get("welcome_dm_status") or "") == "pending"
+                        and pending_job
+                        and jobs_enqueued_count < session_candidate_attempt_cap
+                    ):
+                        jobs_enqueued_count += 1
+                        jid = str(pending_job.get("id") or "")
+                        new_follower_usernames_detected.append(str(handle).strip())
+                        new_follower_usernames_enqueued.append(str(handle).strip())
+                        row_snap = row_by_key.get(key)
+                        tap_bounds = dict(
+                            (row_snap or {}).get("tap_bounds")
+                            or (row_snap or {}).get("bounds")
+                            or {}
+                        )
+                        username_bounds = dict((row_snap or {}).get("username_bounds") or {})
+                        new_follower_visible_rows_enqueued.append(
+                            {
+                                "username": str((row_snap or {}).get("username") or handle),
+                                "row_index": (row_snap or {}).get("row_index"),
+                                "username_bounds": username_bounds,
+                                "tap_bounds": tap_bounds,
+                                "extraction_source": str((row_snap or {}).get("extraction_source") or ""),
+                                "screen_index": int((row_snap or {}).get("screen_index") or screen_index),
+                                "hierarchy_source": str(
+                                    (row_snap or {}).get("hierarchy_source")
+                                    or meta.get("hierarchy_source")
+                                    or ""
+                                ),
+                            }
+                        )
+                        new_follower_job_ids_enqueued.append(
+                            {
+                                "job_id": jid,
+                                "username": str(handle).strip(),
+                                "screen_index": int((row_snap or {}).get("screen_index") or screen_index),
+                                "row_index": (row_snap or {}).get("row_index"),
+                                "tap_bounds": tap_bounds or None,
+                                "username_bounds": username_bounds or None,
+                                "bounds": tap_bounds or username_bounds or None,
+                            }
+                        )
+                        log(
+                            "info",
+                            "welcome_scan_existing_pending_job_reused",
+                            account_id=aid,
+                            username=handle,
+                            job_id=jid,
+                            screen_index=screen_index,
+                            welcome_dm_status=str(row.get("welcome_dm_status") or ""),
+                        )
+                        continue
+                    log(
+                        "info",
+                        "welcome_scan_known_nonbaseline_pre_anchor_ignored",
+                        account_id=aid,
+                        username=str(row.get("follower_username") or handle),
+                        screen_index=screen_index,
+                        welcome_dm_status=str(row.get("welcome_dm_status") or ""),
+                        skip_reason=str(row.get("skip_reason") or ""),
+                    )
+                    continue
                 if not anchor_found:
                     anchor_found = True
                     first_anchor_username = str(row.get("follower_username") or handle)
@@ -399,14 +513,15 @@ def run_welcome_scan_producer(
                     screen_index=screen_index,
                     discovery_phase=phase,
                 )
-                if jobs_enqueued_count >= session_job_cap:
+                if jobs_enqueued_count >= session_candidate_attempt_cap:
                     if stop_reason is None:
-                        stop_reason = "session_job_cap_reached"
+                        stop_reason = "candidate_attempt_cap_reached"
                     log(
                         "info",
-                        "welcome_scan_job_cap_reached",
+                        "welcome_scan_candidate_attempt_cap_reached",
                         account_id=aid,
-                        cap=session_job_cap,
+                        sent_cap=session_sent_cap,
+                        candidate_attempt_cap=session_candidate_attempt_cap,
                         jobs_enqueued_count=jobs_enqueued_count,
                     )
                     break
@@ -593,8 +708,8 @@ def run_welcome_scan_producer(
         _process_screen(scrolls_done)
 
     if stop_reason is None:
-        if jobs_enqueued_count >= session_job_cap:
-            stop_reason = "session_job_cap_reached"
+        if jobs_enqueued_count >= session_candidate_attempt_cap:
+            stop_reason = "candidate_attempt_cap_reached"
         elif phase == "post_anchor" and consecutive_known >= known_stop_k:
             stop_reason = "consecutive_known_stop"
         elif scrolls_done >= max_scrolls:

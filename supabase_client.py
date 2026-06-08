@@ -2869,6 +2869,44 @@ def fetch_followers_by_usernames(
     return out
 
 
+def fetch_pending_welcome_jobs_by_usernames(
+    account_id: str,
+    usernames: list[str],
+) -> dict[str, dict[str, Any]]:
+    """Batch lookup pending Welcome jobs by normalized recipient username."""
+    aid = str(account_id or "").strip()
+    keys = []
+    seen: set[str] = set()
+    for raw in usernames:
+        key = _normalize_follower_username(raw)
+        if key and key not in seen:
+            seen.add(key)
+            keys.append(key)
+    if not aid or not keys:
+        return {}
+    rows = _request_json(
+        "GET",
+        "ig_dm_jobs",
+        query={
+            "select": "id,status,recipient_username,dm_type,source,created_at",
+            "account_id": f"eq.{aid}",
+            "dm_type": "eq.welcome",
+            "status": "eq.pending",
+            "recipient_username": f"in.({','.join(keys)})",
+        },
+    )
+    out: dict[str, dict[str, Any]] = {}
+    if not rows or not isinstance(rows, list):
+        return out
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        nk = _normalize_follower_username(str(row.get("recipient_username") or ""))
+        if nk:
+            out[nk] = row
+    return out
+
+
 def mark_followbacks_from_seen_followers(
     account_id: str,
     follower_usernames: list[str],

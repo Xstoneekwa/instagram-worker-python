@@ -4,6 +4,30 @@
 
 ## Welcome DM physique — 2026-06-08
 
+- **Welcome list-native physique validé cap 1/2/3** : `dm_welcome_baseline`
+  puis `dm_welcome_session_send` sont validés sur téléphone physique. Le chemin
+  production Welcome est `followers list -> candidat -> profil/thread -> Send
+  -> back followers list -> candidat suivant`, sans Search global. Le dernier
+  run cap 3 validé est `609866af-3b00-4b96-bce6-4047d25ae9ef`
+  (`revario_schweiz`, `vaneaurealestate`, `le12emecru`), `jobs_sent_count=3`,
+  `jobs_failed_count=0`, `sender_status=success`, `run_status_updated=completed`.
+- **Handoff Welcome -> Follow validé via `account_session`** : le vrai chemin
+  production enchaîne Welcome optionnel, `prepare_dm_to_follow_handoff()`, puis
+  Follow rotation. Test A `7967e78d-ef57-4d30-ad61-9edca67aa1a2` a validé
+  1 Welcome (`chezhansi_colmar`) puis 1 Follow (`kernel_monster`) après un skip
+  privé propre (`maynaa.aa`). Test B
+  `4c9d22db-10f9-4882-90e5-59ef252b6c66` a validé 2 Welcome
+  (`velvet_club_geneve`, `schwendi_bierundwistub`) puis 2 Follows avec
+  Like/Mute ON, return CT OK, Outreach/Unfollow absents et `completed`.
+- **Paramètres Welcome validés** : `WELCOME_SCAN_CANDIDATE_ATTEMPT_CAP` sépare
+  cap de candidats et cap de sent; `WELCOME_SCAN_FOLLOWERS_OPEN_WAIT_S=0.6`
+  est validé. Les jobs pending non-baseline créés avant anchor sont repris; les
+  skips privés/non-DM-able (`dm_not_available`) ne doivent pas bloquer la
+  recherche d'un autre candidat tant que le sent cap n'est pas atteint.
+- **Optimisations/safety Welcome validées** : placeholder `Message…` ignoré,
+  Send button physique corrigé, pas de double-send, post-job restore redondant
+  évité après retour followers confirmé, DB jobs `sent_at`/`finished_at`
+  propres.
 - **Premier Welcome DM physique send-one validé** : le smoke manuel isolé
   `welcome_dm_physical_smoke.py --mode send-one` a envoyé le job exact
   `8df8a49f-747f-4486-9519-e8af3fc5221a` pour
@@ -11,14 +35,15 @@
   Follow/Like/Mute/Outreach/Unfollow OFF et sans créer de nouveau job. Les
   détails recipient/message restent hors documentation persistée.
 - **Portée du `send-one`** : ce chemin utilise la recherche globale uniquement
-  pour un smoke opérateur manuel isolé. Il ne devient pas la baseline
-  production Welcome et ses timings Search ne doivent pas être utilisés comme
-  référence de performance produit.
-- **Chemin production Welcome à préserver** : la voie validée sur émulateur reste
-  `followers list -> candidat -> DM -> send -> back to followers list ->
-  prochain candidat`, via `dm_welcome_session_send` et
-  `welcome_list_sender`. Avant un vrai Welcome DB/list-native sur phone
-  physique, il faudra valider ce chemin émulateur sur phone.
+  pour un smoke opérateur manuel isolé. Il reste utile comme future base
+  Outreach/Search DM (`search -> profil -> DM -> send -> back -> zone de
+  recherche -> candidat suivant`), mais ne devient pas la baseline production
+  Welcome et ses timings Search ne doivent pas être utilisés comme référence de
+  performance produit.
+- **Chemin production Welcome à préserver** : la voie validée sur téléphone
+  physique est maintenant list-native via `dm_welcome_session_send` et
+  `welcome_list_sender`. Le send-one Search reste smoke manuel / socle futur
+  Outreach, pas chemin production Welcome.
 - **Baseline DB** : ne pas marquer artificiellement
   `welcome_baseline_completed_at` pour ce smoke manuel strict. Le dry-run
   post-send qui remonte `no_pending_welcome_job` et
@@ -31,6 +56,11 @@
 
 ## État chantier follow — 2026-06-07
 
+- **Non-régression Follow via handoff** : les runs `account_session` Test A/B ont
+  confirmé que le handoff Welcome ne casse pas CT checkpoint V1, private skip,
+  scroll followers-list, post-follow mute, post-follow like, return CT et
+  accounting. Test B a persisté 2 follows, 2 Likes et 2 mutes posts/stories
+  avec `run_status_updated=completed`.
 - **9/3/3 physique validé** : run `5ad58174-95a0-45f2-91d7-33fcfdc3b5a0`
   sur `j_automatise_pour_toi`, `completed`, 9/9 follows, 9 mutes, 9 Likes,
   9/9 return CT, `run_status_updated=completed`, deferred persist terminé

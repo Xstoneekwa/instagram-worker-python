@@ -4,6 +4,27 @@ Ce registre fige les decisions de la sequence d'optimisation
 follow / mute / like / return CT / accounting. Il ne decrit aucun patch runtime
 nouveau.
 
+## Checkpoint: Welcome -> Follow handoff production
+
+- Scope: validation du vrai chemin `account_session` après Welcome DM
+  list-native. Ordre validé: Welcome optionnel ->
+  `prepare_dm_to_follow_handoff()` -> Follow rotation -> Unfollow optionnel
+  (OFF pendant les tests).
+- Test A: run `7967e78d-ef57-4d30-ad61-9edca67aa1a2`, 1 Welcome
+  (`chezhansi_colmar`), handoff `own_followers_list`, skip privé propre
+  `maynaa.aa`, puis 1 Follow `kernel_monster`, `ig_runs.completed`.
+- Test B: run `4c9d22db-10f9-4882-90e5-59ef252b6c66`, 2 Welcome
+  (`velvet_club_geneve`, `schwendi_bierundwistub`), handoff OK, rotation
+  `2 targets x 1 follow`, 2 Follows (`chloe.brtr24`,
+  `librairie.ausommetdesmots`), Like/Mute ON, return CT OK,
+  `total_follow=2`, `total_like=2`, Outreach/Unfollow absents.
+- Non-régression Follow validée: CT checkpoint V1, private skip, visible-window
+  exhausted scroll, soft scroll, post-follow mute, post-follow like, return CT
+  et accounting restent fonctionnels après la phase Welcome.
+- Sécurité: Follow ne doit pas démarrer depuis un thread DM ou une surface
+  ambiguë; `prepare_dm_to_follow_handoff()` est le gate obligatoire quand
+  Welcome a été exécuté.
+
 ## Checkpoint: CT Checkpoint / Fast-Skip V1 runtime
 
 - Scope: ledger runtime-only par CT/source dans `runner.py`, avec fenêtre visible,

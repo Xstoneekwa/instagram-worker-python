@@ -126,7 +126,7 @@ def open_own_profile_from_bottom_nav(d: u2.Device) -> bool:
 
 
 def _header_has_follow_others_cta(d: u2.Device) -> bool:
-    """True when a primary Follow/Suivre CTA appears (typical on someone else's profile)."""
+    """True when a Follow/Suivre CTA is visible anywhere on screen (not header-scoped)."""
     probes = (
         lambda: d(text="Follow"),
         lambda: d(text="Suivre"),
@@ -140,6 +140,40 @@ def _header_has_follow_others_cta(d: u2.Device) -> bool:
         except Exception:
             continue
     return False
+
+
+def _strict_own_profile_username_verified(
+    d: u2.Device,
+    expected_username: str,
+) -> tuple[bool, dict[str, Any]]:
+    """Require exact handle proof (live signals or hierarchy) before bypassing Follow CTA heuristics."""
+    meta: dict[str, Any] = {}
+    exp = _normalize_handle(expected_username or "")
+    if not exp:
+        return False, meta
+
+    ok = verify_profile(d, expected_username)
+    meta["verify_profile_ok"] = bool(ok)
+    if ok:
+        meta["verification_method"] = "verify_profile"
+        return True, meta
+
+    try:
+        from account_identity_guard import (
+            _dump_hierarchy,
+            _extract_own_profile_username_from_hierarchy,
+            normalize_account_username,
+        )
+
+        hierarchy = _dump_hierarchy(d)
+        actual_raw, method, hier_meta = _extract_own_profile_username_from_hierarchy(hierarchy)
+        meta["hierarchy_meta"] = hier_meta
+        if normalize_account_username(actual_raw) == exp:
+            meta["verification_method"] = f"own_profile_username_exact:{method}"
+            return True, meta
+    except Exception:
+        pass
+    return False, meta
 
 
 def verify_own_profile(
@@ -169,15 +203,6 @@ def verify_own_profile(
         )
         return False, meta
 
-    meta["follow_cta_on_header"] = _header_has_follow_others_cta(d)
-    if meta["follow_cta_on_header"]:
-        log(
-            "info",
-            "welcome_baseline_own_profile_open_failed",
-            reason="follow_cta_present_not_own_profile",
-        )
-        return False, meta
-
     meta["profile_tabs_visible"] = bool(_followers_profile_tabs_visible(d))
     try:
         w, h = d.window_size()
@@ -186,18 +211,55 @@ def verify_own_profile(
     except Exception:
         meta["stats_band_present"] = False
 
+    meta["follow_cta_on_header"] = _header_has_follow_others_cta(d)
+
+    strict_username_ok = False
+    if exp:
+        strict_username_ok, strict_meta = _strict_own_profile_username_verified(
+            d,
+            expected_username,
+        )
+        meta.update(strict_meta)
+
+    if strict_username_ok:
+        if meta["follow_cta_on_header"]:
+            log(
+                "info",
+                "welcome_baseline_follow_cta_present_on_verified_own_profile_ignored",
+                expected_username=expected_username,
+                verification_method=str(meta.get("verification_method") or ""),
+                profile_tabs_visible=meta["profile_tabs_visible"],
+                stats_band_present=meta["stats_band_present"],
+            )
+        log(
+            "info",
+            "welcome_baseline_own_profile_verified",
+            expected_username=expected_username,
+            profile_tabs_visible=meta["profile_tabs_visible"],
+            stats_band_present=meta["stats_band_present"],
+            verification_method=str(meta.get("verification_method") or ""),
+            follow_cta_ignored=bool(meta["follow_cta_on_header"]),
+        )
+        return True, meta
+
+    if meta["follow_cta_on_header"]:
+        log(
+            "info",
+            "welcome_baseline_own_profile_open_failed",
+            reason="follow_cta_present_not_own_profile",
+        )
+        return False, meta
+
     if not exp:
         ok = bool(meta["profile_tabs_visible"] or meta["stats_band_present"])
         if ok:
             log("info", "welcome_baseline_own_profile_verified", username_match="skipped_no_expected")
         return ok, meta
 
-    ok = verify_profile(d, expected_username)
-    meta["verify_profile_ok"] = bool(ok)
-    if not ok:
-        if meta["profile_tabs_visible"] and meta["stats_band_present"]:
-            ok = True
-            meta["verify_profile_fallback"] = "profile_chrome_without_username_match"
+    ok = bool(meta.get("verify_profile_ok"))
+    if not ok and meta["profile_tabs_visible"] and meta["stats_band_present"]:
+        ok = True
+        meta["verify_profile_fallback"] = "profile_chrome_without_username_match"
     if ok:
         log(
             "info",
@@ -229,6 +291,7 @@ def open_own_followers_list_from_own_profile(
     account_username: str,
     *,
     pkg: str | None = None,
+    followers_open_wait_s: float | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     """
     Tap Followers stat on own profile and confirm followers list surface.
@@ -261,7 +324,11 @@ def open_own_followers_list_from_own_profile(
         )
         return False, open_meta if isinstance(open_meta, dict) else {}
 
-    wait_s = float(getattr(config, "WELCOME_BASELINE_FOLLOWERS_OPEN_WAIT_S", 4.0) or 4.0)
+    wait_s = (
+        float(followers_open_wait_s)
+        if followers_open_wait_s is not None
+        else float(getattr(config, "WELCOME_BASELINE_FOLLOWERS_OPEN_WAIT_S", 4.0) or 4.0)
+    )
     if wait_s > 0:
         time.sleep(min(wait_s, 8.0))
 

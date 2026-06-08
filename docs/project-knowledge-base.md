@@ -55,19 +55,38 @@ Checkpoints recents valides :
 - Validation finale follow V1 `f2eb4d2b` : 4 follows, 3 Likes persistés, 1 skip
   Like métier `No posts yet`, private skips sans follow tap, checkpoints V1 et
   post-return skips actifs, `run_status_updated=completed`.
+- Welcome DM physique list-native : `dm_welcome_baseline` puis
+  `dm_welcome_session_send` sont validés sur téléphone physique jusqu'à
+  3 DMs/session. Le chemin production est `followers list -> candidat ->
+  profil/thread -> Send -> back followers list -> candidat suivant`, sans
+  Search global. Run cap 3 validé:
+  `609866af-3b00-4b96-bce6-4047d25ae9ef`, recipients
+  `revario_schweiz`, `vaneaurealestate`, `le12emecru`, `jobs_sent_count=3`,
+  `jobs_failed_count=0`, `sender_status=success`, `run_status_updated=completed`.
+- Handoff production Welcome -> Follow : `account_session` est le chemin
+  production réel. Ordre validé: Welcome optionnel ->
+  `prepare_dm_to_follow_handoff()` -> Follow rotation -> Unfollow optionnel.
+  Test A `7967e78d-ef57-4d30-ad61-9edca67aa1a2` a validé 1 Welcome
+  (`chezhansi_colmar`) -> handoff `own_followers_list` -> 1 Follow
+  (`kernel_monster`) avec skip privé propre. Test B
+  `4c9d22db-10f9-4882-90e5-59ef252b6c66` a validé 2 Welcome
+  (`velvet_club_geneve`, `schwendi_bierundwistub`) -> handoff OK ->
+  2 Follows complets, Like/Mute ON, return CT OK, Outreach/Unfollow absents et
+  `ig_runs.completed`.
 - Welcome DM physique send-one : smoke manuel isolé validé sur
   `j_automatise_pour_toi` pour le job
   `8df8a49f-747f-4486-9519-e8af3fc5221a`, status DB final `sent`, `sent_at`
   et `finished_at` renseignés, aucun pending Welcome/Outreach et aucune surface
   active. Les détails recipient/message restent hors documentation persistée.
   Ce chemin `send-one` utilise la recherche globale pour un contrôle opérateur
-  strict seulement; il ne remplace pas la baseline production Welcome.
-- Welcome production reste list-native : le chemin validé sur émulateur est
-  `followers list -> candidat -> DM -> send -> back to followers list ->
-  prochain candidat` via `dm_welcome_session_send` / `welcome_list_sender`. Les
-  timings Search du smoke physique ne sont pas une baseline production. Avant un
-  vrai Welcome DB/list-native sur phone physique, valider explicitement ce même
-  chemin list-native sur phone.
+  strict seulement. Il reste utile comme future base Outreach/Search DM
+  (`search -> profil -> DM -> send -> back -> zone de recherche -> candidat
+  suivant`), mais ne remplace pas la baseline production Welcome.
+- Welcome runtime details validés : `WELCOME_SCAN_CANDIDATE_ATTEMPT_CAP` borne
+  les candidats tentés indépendamment du sent cap; `WELCOME_SCAN_FOLLOWERS_OPEN_WAIT_S=0.6`
+  est validé; les jobs pending créés avant anchor sont repris; les skips privés
+  ou `dm_not_available` n'autorisent pas un faux completed et doivent continuer
+  vers un autre candidat tant que le cap sent/budget le permet.
 - Baseline Welcome : ne pas remplir artificiellement
   `welcome_baseline_completed_at` pour un smoke manuel strict. Après le
   send-one, un dry-run qui retourne `no_pending_welcome_job` et
@@ -846,17 +865,24 @@ controle device, pas a contourner la state machine Instagram.
 
 Ordre recommande :
 
-1. Confirmer explicitement le lifecycle canceled/stopped/archived du compte
+1. Préparer Outreach DM par audit/préflight uniquement, sans run réel:
+   source recipients, caps DB/env, séparation stricte Welcome/Outreach,
+   `OUTREACH_DM_REAL_SEND_ENABLED`, `DM_SENDER_REAL_SEND_ENABLED=false`, jobs,
+   counters, stop conditions, logs/no-leak et projection dashboard/BotApp.
+2. Baseline Outreach prudente: V1 safe à 10 DMs/jour par compte; 20 DMs/jour
+   après 3-5 jours propres; 30-40 après validation sans restriction; hard cap
+   prudent 50-60 DMs/jour maximum pour un compte solide.
+3. Confirmer explicitement le lifecycle canceled/stopped/archived du compte
    suggere actuellement visible via un helper lookup read-only explicite, ou
    afficher directement `login_form_empty` sur device idle.
-2. Valider le smoke password-only reel `cinema_catchup` uniquement via le flow
+4. Valider le smoke password-only reel `cinema_catchup` uniquement via le flow
    securise Vault/SecretValue, sans password dans chat/Cursor/logs/git.
-3. Definir le modele durable lifecycle compte + `clone_reuse_allowed` dans la
+5. Definir le modele durable lifecycle compte + `clone_reuse_allowed` dans la
    DB/dashboard, sans hardcode username.
-4. Integration provisioner runtime derriere flags.
-5. Status publish connected/2FA/checkpoint/failed via provisioner orchestrator.
-6. State machine / recovery login plus riche avant tout branchement production.
-7. Rappel device : 1 phone = 1 action UI active; aucun password dans
+6. Integration provisioner runtime derriere flags.
+7. Status publish connected/2FA/checkpoint/failed via provisioner orchestrator.
+8. State machine / recovery login plus riche avant tout branchement production.
+9. Rappel device : 1 phone = 1 action UI active; aucun password dans
    chat/Cursor/logs/git/XML/screenshots.
 
 Le checkpoint 2E-5H est deja pousse :

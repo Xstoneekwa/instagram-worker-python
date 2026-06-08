@@ -235,6 +235,17 @@ def run_welcome_session_send(
         list_navigation_total_ms=sender_summary.get("list_navigation_total_ms"),
         dm_send_total_ms=sender_summary.get("dm_send_total_ms"),
     )
+    if int(sender_summary.get("jobs_sent_count") or 0) >= max_jobs and max_jobs > 0:
+        log(
+            "info",
+            "welcome_session_sent_cap_reached",
+            account_id=aid,
+            run_id=run_id,
+            sent_cap=max_jobs,
+            jobs_sent_count=sender_summary.get("jobs_sent_count"),
+            jobs_skipped_count=sender_summary.get("jobs_skipped_count"),
+            sender_status=sender_summary.get("sender_status"),
+        )
 
     total_ms = (time.perf_counter() - t0) * 1000.0
     session_status = _session_status(

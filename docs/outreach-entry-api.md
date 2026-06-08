@@ -17,6 +17,41 @@ dashboard / n8n / import
 
 The function never writes directly to `ig_dm_jobs` and never calls the sender.
 
+## Outreach Runtime Readiness Context — 2026-06-08
+
+Welcome DM and the Welcome -> Follow handoff are validated before Outreach:
+
+- Welcome production path is list-native, not Search:
+  `followers list -> candidat -> profil/thread -> Send -> back followers list`.
+- Physical Welcome caps 1/2/3 are validated on `j_automatise_pour_toi`; cap 3
+  run `609866af-3b00-4b96-bce6-4047d25ae9ef` sent
+  `revario_schweiz`, `vaneaurealestate`, `le12emecru`.
+- `account_session` validates the production handoff:
+  Welcome optional -> `prepare_dm_to_follow_handoff()` -> Follow rotation.
+  Test B `4c9d22db-10f9-4882-90e5-59ef252b6c66` completed 2 Welcome DMs then
+  2 full Follows with Like/Mute ON, return CT OK, Outreach OFF and Unfollow OFF.
+- The isolated Welcome `send-one` Search smoke remains useful as a technical
+  base for Outreach Search DM (`Search -> profile -> DM -> send -> back -> back
+  to search zone -> next candidate`), but it is not the Welcome production path.
+
+Before any real Outreach run, audit:
+
+- recipient source and deduplication;
+- DB/env caps and daily counters;
+- strict separation from Welcome jobs/counters;
+- `OUTREACH_DM_REAL_SEND_ENABLED=true` only for the Outreach test;
+- `DM_SENDER_REAL_SEND_ENABLED=false` legacy generic flag;
+- no Follow/Welcome/Unfollow coupling;
+- no double-send and no stale `reserved/running` jobs;
+- stop conditions, logs, no-leak, and dashboard/BotApp status projection.
+
+Safe ramp proposal:
+
+- V1 safe Outreach: 10 DMs/day/account.
+- After 3-5 clean days: 20 DMs/day/account.
+- After validation without restrictions: 30-40 DMs/day/account.
+- Hard prudent cap: 50-60 DMs/day for a solid account.
+
 ## Runtime
 
 Supabase Edge Function:

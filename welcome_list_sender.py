@@ -31,6 +31,7 @@ from instagram_navigation import (
     detect_followers_list_screen_fresh,
     followers_clear_detect_hierarchy_cache,
     followers_refresh_detect_hierarchy_cache,
+    followers_session_clear_list_committed_open,
     harvest_visible_followers_rows,
     get_last_dm_thread_classify_snapshot,
     is_dm_thread_screen,
@@ -38,6 +39,7 @@ from instagram_navigation import (
     open_dm_thread_from_profile,
     reset_dm_thread_probe_state,
     return_welcome_list_from_dm_to_followers,
+    scroll_followers_list_backward,
     scroll_followers_list_to_find_row,
     tap_followers_list_username_row,
     verify_dm_composer_safe,
@@ -113,6 +115,7 @@ def _resolve_followers_row(
     account_username: str,
     scan_anchors: dict[str, dict[str, Any]],
     screen_index: int = 0,
+    allow_scan_anchor_fast_path: bool = False,
 ) -> tuple[dict[str, Any] | None, int, str, dict[str, Any]]:
     """
     Path 1 scan anchor → path 2 fresh visible harvest → path 3 bounded scroll.
@@ -124,7 +127,28 @@ def _resolve_followers_row(
     debug: dict[str, Any] = {
         "username": uname,
         "scan_anchor_present": key in scan_anchors,
+        "scan_anchor_fast_path_allowed": bool(allow_scan_anchor_fast_path),
     }
+
+    anchor = scan_anchors.get(key)
+    if allow_scan_anchor_fast_path and anchor is not None:
+        t_fast = time.perf_counter()
+        row = _row_from_scan_anchor(anchor)
+        if row is not None:
+            elapsed_ms = round((time.perf_counter() - t_fast) * 1000.0, 2)
+            debug["lookup_path_used"] = "scan_anchor_fast_path"
+            log(
+                "info",
+                "welcome_list_sender_fast_row_tap_from_scan_anchor_used",
+                username=uname,
+                row_index=row.get("row_index"),
+                username_bounds=row.get("username_bounds"),
+                tap_bounds=row.get("tap_bounds"),
+                extraction_source=row.get("extraction_source"),
+                screen_index=row.get("screen_index"),
+                scan_anchor_to_tap_ms=elapsed_ms,
+            )
+            return row, 0, "scan_anchor_fast_path", debug
 
     rows, harvest_meta = harvest_visible_followers_rows(
         d,
@@ -152,7 +176,6 @@ def _resolve_followers_row(
         scan_anchor_present=bool(debug["scan_anchor_present"]),
     )
 
-    anchor = scan_anchors.get(key)
     if anchor is not None:
         row = _row_from_scan_anchor(anchor)
         if row is not None:
@@ -261,9 +284,13 @@ def _restore_followers_list_to_scan_start_zone(
     *,
     account_username: str,
     pkg: str,
+    scan_final_screen_index: int = 0,
 ) -> tuple[bool, str]:
     """
-    Reset followers list scroll to the top: action-bar back to own profile, then re-open followers.
+    Return the followers list to the scan-start viewport.
+
+    Prefer in-place backward scroll while the committed scan surface is still open.
+    Only fall back to profile back + reopen after clearing the committed-open guard.
     """
     from instagram_navigation import tap_instagram_action_bar_back_button
     from own_profile_navigation import open_own_followers_list_from_own_profile
@@ -271,10 +298,51 @@ def _restore_followers_list_to_scan_start_zone(
     settle_s = float(
         getattr(config, "WELCOME_LIST_SENDER_BACK_SETTLE_S", 0.45) or 0.45
     )
+    scroll_steps = max(0, int(scan_final_screen_index))
     det, _ = detect_followers_list_screen_fresh(
         d, source_profile_username=account_username
     )
-    if bool(det.get("is_followers_list")):
+    on_followers = bool(det.get("is_followers_list"))
+
+    if on_followers and scroll_steps == 0:
+        followers_refresh_detect_hierarchy_cache(d, screen_index=0)
+        return True, "already_on_followers_scan_start"
+
+    if on_followers and scroll_steps > 0:
+        scrolled = scroll_followers_list_backward(
+            d,
+            source_profile_username=account_username,
+            scroll_steps=scroll_steps,
+        )
+        followers_clear_detect_hierarchy_cache()
+        followers_refresh_detect_hierarchy_cache(d, screen_index=0)
+        det_after, _ = detect_followers_list_screen_fresh(
+            d, source_profile_username=account_username
+        )
+        if scrolled and bool(det_after.get("is_followers_list")):
+            log(
+                "info",
+                "welcome_list_sender_reposition_scroll_restore_ok",
+                account_username=account_username,
+                scroll_steps=scroll_steps,
+                open_detection_method=det_after.get("open_detection_method"),
+            )
+            return True, "followers_scroll_backward_to_scan_start"
+        log(
+            "warning",
+            "welcome_list_sender_reposition_scroll_restore_failed",
+            account_username=account_username,
+            scroll_steps=scroll_steps,
+            scrolled=scrolled,
+            is_followers_list=bool(det_after.get("is_followers_list")),
+            action_bar_title=det_after.get("action_bar_title"),
+        )
+
+    followers_session_clear_list_committed_open(account_username)
+    det_now, _ = detect_followers_list_screen_fresh(
+        d, source_profile_username=account_username
+    )
+    if bool(det_now.get("is_followers_list")):
         tapped, _method = tap_instagram_action_bar_back_button(d, pkg)
         if tapped and settle_s > 0:
             time.sleep(settle_s)
@@ -367,6 +435,7 @@ def _resolve_session_sender_plan(
     pkg: str,
     max_jobs: int,
     scan_anchors: dict[str, dict[str, Any]],
+    attempt_cap: int | None = None,
 ) -> tuple[list[dict[str, Any]], str, dict[str, Any]]:
     """
     Build planned session jobs and optional reposition to scan-start zone.
@@ -390,7 +459,8 @@ def _resolve_session_sender_plan(
         harvest_meta.get("hierarchy_source") or ""
     )
 
-    scan_order_slice = candidates[:max_jobs]
+    plan_cap = max_jobs if attempt_cap is None else max(0, int(attempt_cap))
+    scan_order_slice = candidates[:plan_cap]
     needs_restore = _planned_jobs_need_restore_scan_start(
         [
             {
@@ -416,7 +486,10 @@ def _resolve_session_sender_plan(
             reason="planned_scan_order_jobs_not_in_current_viewport",
         )
         ok_restore, method = _restore_followers_list_to_scan_start_zone(
-            d, account_username=account_username, pkg=pkg
+            d,
+            account_username=account_username,
+            pkg=pkg,
+            scan_final_screen_index=scan_final_screen_index,
         )
         position_meta["reposition_method"] = method
         position_meta["reposition_success"] = ok_restore
@@ -444,7 +517,7 @@ def _resolve_session_sender_plan(
             selection_strategy = "current_viewport_order"
             selected = _order_scan_jobs_viewport_first(
                 candidates, visible_keys=visible_keys
-            )[:max_jobs]
+            )[:plan_cap]
             log(
                 "info",
                 "welcome_list_sender_reposition_finished",
@@ -464,7 +537,7 @@ def _resolve_session_sender_plan(
                 selection_strategy = "current_viewport_order"
                 selected = _order_scan_jobs_viewport_first(
                     candidates, visible_keys=visible_keys
-                )[:max_jobs]
+                )[:plan_cap]
             else:
                 selected = scan_order_slice
         else:
@@ -496,9 +569,56 @@ def _verify_followers_surface(
             context=context,
             account_username=account_username,
             action_bar_title=det.get("action_bar_title"),
+            current_screen_guess=det.get("current_screen_guess"),
+            open_detection_method=det.get("open_detection_method"),
             signals=det.get("signals"),
         )
     return ok, obs
+
+
+def _skip_current_scan_session_jobs(
+    scan_summary: dict[str, Any],
+    *,
+    run_id: str | None,
+    reason: str,
+    last_error: str,
+) -> int:
+    """Terminalize scan-enqueued Welcome jobs when sender exits before any send."""
+    skipped = 0
+    metadata_patch = {
+        "cleanup_run_id": str(run_id or ""),
+        "cleanup_reason": reason,
+    }
+    for entry in _session_scan_jobs_from_summary(scan_summary):
+        job_id = str(entry.get("job_id") or "").strip()
+        if not job_id:
+            continue
+        try:
+            supabase_client.complete_dm_job(
+                job_id,
+                "skipped",
+                skip_reason=reason,
+                last_error=last_error,
+                metadata_patch=metadata_patch,
+            )
+            skipped += 1
+        except Exception as exc:
+            log(
+                "error",
+                "welcome_list_sender_scan_job_cleanup_failed",
+                job_id=job_id,
+                reason=reason,
+                error=str(exc),
+            )
+    if skipped:
+        log(
+            "info",
+            "welcome_list_sender_scan_jobs_skipped_after_sender_failure",
+            skipped_count=skipped,
+            reason=reason,
+            run_id=run_id,
+        )
+    return skipped
 
 
 def _navigate_followers_row_to_dm(
@@ -508,10 +628,12 @@ def _navigate_followers_row_to_dm(
     pkg: str,
     account_username: str,
     scan_anchors: dict[str, dict[str, Any]],
+    planned_job_context: dict[str, Any] | None = None,
 ) -> tuple[str, bool, dict[str, Any]]:
     """Followers list row tap → profile → DM thread."""
     uname = str(username or "").strip()
     nav_meta: dict[str, Any] = {"username": uname}
+    plan_ctx = dict(planned_job_context or {})
     reset_dm_thread_probe_state()
 
     row, scrolls, lookup_path, lookup_debug = _resolve_followers_row(
@@ -519,6 +641,10 @@ def _navigate_followers_row_to_dm(
         uname,
         account_username=account_username,
         scan_anchors=scan_anchors,
+        allow_scan_anchor_fast_path=bool(
+            plan_ctx.get("current_scan_session")
+            and plan_ctx.get("followers_surface_fresh")
+        ),
     )
     nav_meta["followers_scrolls_to_find"] = scrolls
     nav_meta["lookup_path_used"] = lookup_path
@@ -683,6 +809,8 @@ def execute_welcome_list_job(
     updated_job: dict[str, Any] | None = None
     list_nav_ms = 0.0
     dm_send_ms = 0.0
+    fail_reason: str | None = None
+    followers_surface_restored_by_send_finalize = False
 
     try:
         if _check_dm_sender_permission_blocker(
@@ -709,6 +837,7 @@ def execute_welcome_list_job(
             pkg=pkg,
             account_username=account_username,
             scan_anchors=scan_anchors,
+            planned_job_context=planned_job_context,
         )
         list_nav_ms = (time.perf_counter() - t_nav) * 1000.0
         snap = get_last_dm_thread_classify_snapshot()
@@ -830,6 +959,7 @@ def execute_welcome_list_job(
                 )
                 dm_send_ms = (time.perf_counter() - t_send) * 1000.0
                 if sent_ok and fail_reason in (None, "post_finalize_partial"):
+                    followers_surface_restored_by_send_finalize = fail_reason is None
                     updated_job = supabase_client.complete_dm_job(
                         job_id,
                         "sent",
@@ -867,7 +997,15 @@ def execute_welcome_list_job(
                         reason=str(fail_reason or "real_send_failed"),
                     )
     finally:
-        if not _restore_followers_after_job(
+        if followers_surface_restored_by_send_finalize:
+            log(
+                "info",
+                "welcome_list_sender_post_job_restore_skipped_after_confirmed_return",
+                job_id=job_id,
+                recipient_username=recipient,
+                reason="followers_surface_restored_by_send_finalize",
+            )
+        elif not _restore_followers_after_job(
             d, recipient, pkg=pkg, account_username=account_username
         ):
             _check_dm_sender_permission_blocker(
@@ -880,6 +1018,8 @@ def execute_welcome_list_job(
         "outcome": outcome,
         "final_job_status": final_status,
         "thread_state": thread_state,
+        "post_finalize_partial": fail_reason == "post_finalize_partial",
+        "followers_surface_restored": bool(followers_surface_restored_by_send_finalize),
         "list_navigation_ms": round(list_nav_ms, 2),
         "dm_send_ms": round(dm_send_ms, 2),
         "job": updated_job,
@@ -911,11 +1051,19 @@ def run_welcome_list_sender(
     scan = dict(scan_summary or {})
     current_scan_session_mode = scan_summary is not None
     session_scan_jobs = _session_scan_jobs_from_summary(scan)
+    scan_attempt_cap = int(
+        scan.get("candidate_attempt_cap")
+        or scan.get("effective_welcome_scan_cap")
+        or max_jobs
+    )
+    sender_attempt_cap = max(max_jobs, scan_attempt_cap) if current_scan_session_mode else max_jobs
 
     summary: dict[str, Any] = {
         "account_id": aid,
         "run_id": run_id,
         "max_jobs": max_jobs,
+        "sent_cap": max_jobs,
+        "attempt_cap": sender_attempt_cap,
         "sender_mode": "welcome_list_native",
         "current_scan_session_mode": current_scan_session_mode,
         "session_claim_mode": (
@@ -961,6 +1109,8 @@ def run_welcome_list_sender(
         account_username=acct_user,
         run_id=run_id,
         max_jobs=max_jobs,
+        sent_cap=max_jobs,
+        attempt_cap=sender_attempt_cap,
         current_scan_session_mode=current_scan_session_mode,
         scan_jobs_total=len(session_scan_jobs),
     )
@@ -988,6 +1138,7 @@ def run_welcome_list_sender(
                     pkg=pkg,
                     max_jobs=max_jobs,
                     scan_anchors=scan_anchors,
+                    attempt_cap=sender_attempt_cap,
                 )
             )
         else:
@@ -1026,6 +1177,8 @@ def run_welcome_list_sender(
             planned_jobs=planned_session_jobs,
             scan_jobs_total=position_meta.get("scan_jobs_total", len(session_scan_jobs)),
             max_jobs=max_jobs,
+            sent_cap=max_jobs,
+            attempt_cap=sender_attempt_cap,
             selection_strategy=selection_strategy,
             scan_final_screen_index=position_meta.get("scan_final_screen_index"),
             sender_start_surface=position_meta.get("sender_start_surface"),
@@ -1192,8 +1345,8 @@ def run_welcome_list_sender(
             )
             break
 
-        if len(summary["processed_recipients"]) >= max_jobs:
-            loop_exit_reason = "max_jobs_reached"
+        if len(summary["processed_recipients"]) >= sender_attempt_cap:
+            loop_exit_reason = "attempt_cap_reached"
             break
 
         if _dm_sender_session_should_abort():
@@ -1228,6 +1381,7 @@ def run_welcome_list_sender(
                 "selection_strategy": selection_strategy
                 or str(planned.get("selection_reason") or ""),
                 "reposition_applied": reposition_applied,
+                "followers_surface_fresh": True,
             }
 
         try:
@@ -1267,6 +1421,23 @@ def run_welcome_list_sender(
             summary["jobs_skipped_count"] += 1
             summary["skipped_recipients"].append(recipient)
             summary["recipients_skipped"].append(recipient)
+            if str(result.get("thread_state") or "") in (
+                "dm_not_available",
+                "restricted_account",
+            ):
+                log(
+                    "info",
+                    "welcome_sender_job_skipped_non_dmable",
+                    account_id=aid,
+                    run_id=run_id,
+                    job_id=str(job.get("id") or ""),
+                    recipient_username=recipient,
+                    thread_state=str(result.get("thread_state") or ""),
+                    jobs_sent_count=int(summary["jobs_sent_count"]),
+                    jobs_skipped_count=int(summary["jobs_skipped_count"]),
+                    sent_cap=max_jobs,
+                    attempt_cap=sender_attempt_cap,
+                )
         else:
             summary["jobs_failed_count"] += 1
             summary["failed_recipients"].append(recipient)
@@ -1283,6 +1454,34 @@ def run_welcome_list_sender(
             )
             break
 
+        if (
+            outcome == "sent"
+            and int(summary["jobs_sent_count"]) >= max_jobs
+            and bool(result.get("followers_surface_restored"))
+        ):
+            loop_exit_reason = "sent_cap_reached"
+            log(
+                "info",
+                "welcome_list_sender_sent_cap_exit_immediate_after_job_sent",
+                account_id=aid,
+                run_id=run_id,
+                recipient_username=recipient,
+                sent_cap=max_jobs,
+                jobs_sent_count=int(summary["jobs_sent_count"]),
+                followers_surface_restored=True,
+            )
+            log(
+                "info",
+                "welcome_sender_sent_cap_reached",
+                account_id=aid,
+                run_id=run_id,
+                sent_cap=max_jobs,
+                jobs_sent_count=int(summary["jobs_sent_count"]),
+                jobs_skipped_count=int(summary["jobs_skipped_count"]),
+                processed_recipients=list(summary["processed_recipients"]),
+            )
+            break
+
         followers_ok, _ = _verify_followers_surface(
             d,
             account_username=acct_user,
@@ -1293,8 +1492,44 @@ def run_welcome_list_sender(
             summary["failure_reason"] = "followers_surface_lost_after_job"
             break
 
+        if int(summary["jobs_sent_count"]) >= max_jobs:
+            loop_exit_reason = "sent_cap_reached"
+            log(
+                "info",
+                "welcome_sender_sent_cap_reached",
+                account_id=aid,
+                run_id=run_id,
+                sent_cap=max_jobs,
+                jobs_sent_count=int(summary["jobs_sent_count"]),
+                jobs_skipped_count=int(summary["jobs_skipped_count"]),
+                processed_recipients=list(summary["processed_recipients"]),
+            )
+            break
+
+        if (
+            outcome == "skipped"
+            and str(result.get("thread_state") or "")
+            in ("dm_not_available", "restricted_account")
+        ):
+            remaining_attempts = max(
+                0,
+                sender_attempt_cap - len(summary["processed_recipients"]),
+            )
+            if remaining_attempts > 0:
+                log(
+                    "info",
+                    "welcome_sender_continue_after_skipped_non_dmable",
+                    account_id=aid,
+                    run_id=run_id,
+                    recipient_username=recipient,
+                    thread_state=str(result.get("thread_state") or ""),
+                    remaining_attempts=remaining_attempts,
+                    jobs_sent_count=int(summary["jobs_sent_count"]),
+                    sent_cap=max_jobs,
+                )
+
     if loop_exit_reason is None:
-        loop_exit_reason = "max_jobs_reached"
+        loop_exit_reason = "attempt_cap_reached"
     summary["loop_exit_reason"] = loop_exit_reason
     log(
         "info",
@@ -1303,7 +1538,11 @@ def run_welcome_list_sender(
         run_id=run_id,
         exit_reason=loop_exit_reason,
         max_jobs=max_jobs,
+        sent_cap=max_jobs,
+        attempt_cap=sender_attempt_cap,
         jobs_claimed_count=int(summary["jobs_claimed_count"]),
+        jobs_sent_count=int(summary["jobs_sent_count"]),
+        jobs_skipped_count=int(summary["jobs_skipped_count"]),
     )
 
     total_ms = (time.perf_counter() - t0) * 1000.0
@@ -1312,6 +1551,9 @@ def run_welcome_list_sender(
     sent = int(summary["jobs_sent_count"])
 
     if str(summary.get("loop_exit_reason") or "") == "no_current_scan_jobs":
+        sender_status = "success"
+        exit_code = 0
+    elif sent >= max_jobs and max_jobs > 0 and failed == 0:
         sender_status = "success"
         exit_code = 0
     elif claimed == 0:
@@ -1330,6 +1572,24 @@ def run_welcome_list_sender(
     if str(summary.get("failure_reason") or "").startswith("followers_surface"):
         sender_status = "failed" if sent == 0 else "partial_success"
         exit_code = 0 if sent > 0 else 1
+
+    if (
+        current_scan_session_mode
+        and sent == 0
+        and session_scan_jobs
+        and (
+            sender_status == "failed"
+            or str(summary.get("failure_reason") or "").startswith("followers_surface")
+        )
+    ):
+        failure_reason = str(summary.get("failure_reason") or summary.get("loop_exit_reason") or "")
+        cleanup_reason = failure_reason or "welcome_sender_exit_before_send"
+        summary["scan_jobs_cleanup_count"] = _skip_current_scan_session_jobs(
+            scan,
+            run_id=run_id,
+            reason="welcome_sender_failed_before_send",
+            last_error=cleanup_reason[:240],
+        )
 
     summary["sender_status"] = sender_status
     summary["total_ms"] = round(total_ms, 2)

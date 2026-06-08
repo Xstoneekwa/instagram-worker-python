@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import types
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import dm_sender_engine
 from dm_real_send_flags import (
@@ -113,6 +113,44 @@ class DmRealSendFlagsTest(unittest.TestCase):
 
         self.assertTrue(enabled)
         self.assertEqual(source, "legacy:env")
+
+    def test_dm_composer_placeholder_text_is_not_existing_draft(self) -> None:
+        self.assertTrue(dm_sender_engine._is_dm_composer_placeholder_text("Message…"))
+        self.assertTrue(dm_sender_engine._is_dm_composer_placeholder_text("Message..."))
+        self.assertTrue(dm_sender_engine._is_dm_composer_placeholder_text("Écrire un message"))
+        self.assertFalse(dm_sender_engine._is_dm_composer_placeholder_text("Salut"))
+
+    def _perform_welcome_send_with_existing_draft(self, existing_draft: str) -> MagicMock:
+        clear_mock = MagicMock()
+        with (
+            patch.object(dm_sender_engine, "dm_thread_shows_outgoing_message", return_value=False),
+            patch.object(dm_sender_engine, "_resolve_dm_text_composer", return_value=(object(), None)),
+            patch.object(dm_sender_engine, "verify_dm_composer_safe", return_value=(True, "ok")),
+            patch.object(dm_sender_engine, "read_dm_composer_text", side_effect=[existing_draft, "Salut", "Salut"]),
+            patch.object(dm_sender_engine, "clear_dm_draft", clear_mock),
+            patch.object(dm_sender_engine, "type_dm_draft_only", return_value=(True, {"method": "set_text"})),
+            patch.object(dm_sender_engine, "verify_dm_draft_text", return_value=True),
+            patch.object(dm_sender_engine, "send_dm_safe", return_value={"sent": True, "composer_text_len_before_send": 5}),
+            patch.object(dm_sender_engine, "finalize_after_real_send", return_value={"back_to_profile_ok": True}),
+        ):
+            sent_ok, _send_out, failure_reason = dm_sender_engine._perform_real_welcome_dm_send(
+                object(),
+                username="recipient",
+                message_body="Salut",
+                thread_state="empty_new_thread",
+                pkg="com.instagram.androif",
+            )
+        self.assertTrue(sent_ok)
+        self.assertIsNone(failure_reason)
+        return clear_mock
+
+    def test_placeholder_existing_draft_is_not_cleared_before_typing(self) -> None:
+        clear_mock = self._perform_welcome_send_with_existing_draft("Message…")
+        clear_mock.assert_not_called()
+
+    def test_real_existing_draft_mismatch_is_still_cleared(self) -> None:
+        clear_mock = self._perform_welcome_send_with_existing_draft("old text")
+        clear_mock.assert_called_once()
 
     def test_run_dm_sender_send_outreach_allowed_without_legacy_global(self) -> None:
         env = {
