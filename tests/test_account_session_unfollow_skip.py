@@ -4,6 +4,7 @@ import unittest
 from types import SimpleNamespace
 
 import account_session_orchestrator as account_session
+import outreach_session_orchestrator
 
 
 class AccountSessionUnfollowSkipTest(unittest.TestCase):
@@ -187,6 +188,123 @@ class AccountSessionUnfollowSkipTest(unittest.TestCase):
 
         self.assertEqual(summary["skip_reason"], "unfollow_any_no_safe_candidate")
         self.assertEqual(summary["failure_reason"], "unfollow_any_no_safe_candidate")
+
+    def test_outreach_addon_disabled_does_not_touch_outreach(self) -> None:
+        original_flag = getattr(account_session.config, "ACCOUNT_SESSION_OUTREACH_ADDON_ENABLED", False)
+        account_session.config.ACCOUNT_SESSION_OUTREACH_ADDON_ENABLED = False
+        try:
+            out = account_session._run_account_session_outreach_addon(
+                SimpleNamespace(),
+                account_id="account-id",
+                account_username="i_m_your_traker",
+                run_id="parent-run-id",
+            )
+        finally:
+            account_session.config.ACCOUNT_SESSION_OUTREACH_ADDON_ENABLED = original_flag
+
+        self.assertFalse(out["enabled"])
+        self.assertFalse(out["executed"])
+        self.assertEqual(out["status"], "disabled")
+        self.assertEqual(out["skip_reason"], "addon_disabled")
+
+    def test_outreach_addon_enabled_dispatches_prepared_external_job_with_parent_run_id(self) -> None:
+        original_flag = getattr(account_session.config, "ACCOUNT_SESSION_OUTREACH_ADDON_ENABLED", False)
+        original_max = getattr(account_session.config, "ACCOUNT_SESSION_OUTREACH_ADDON_MAX_JOBS", 1)
+        original_prepare = outreach_session_orchestrator.prepare_outreach_session
+        original_dispatch = outreach_session_orchestrator.dispatch_outreach_session
+        original_last_summary = outreach_session_orchestrator.get_last_outreach_session_summary
+        calls: dict[str, object] = {}
+
+        def fake_prepare(_d, **kwargs):
+            calls["prepare_kwargs"] = kwargs
+            return {
+                "session_status": "prepared",
+                "exit_code": 0,
+                "prepared_jobs_count": 1,
+                "prepared_job_ids": ["job-id-1"],
+                "prepared_jobs": [{"id": "job-id-1", "recipient_username": "prosjektoslo.no"}],
+                "max_jobs_effective": 1,
+            }
+
+        def fake_dispatch(_d, **kwargs):
+            calls["dispatch_kwargs"] = kwargs
+            return 0
+
+        account_session.config.ACCOUNT_SESSION_OUTREACH_ADDON_ENABLED = True
+        account_session.config.ACCOUNT_SESSION_OUTREACH_ADDON_MAX_JOBS = 1
+        outreach_session_orchestrator.prepare_outreach_session = fake_prepare
+        outreach_session_orchestrator.dispatch_outreach_session = fake_dispatch
+        outreach_session_orchestrator.get_last_outreach_session_summary = lambda: {
+            "session_status": "completed_clean",
+            "jobs_claimed": 1,
+            "jobs_completed": 1,
+            "jobs_failed": 0,
+            "jobs_skipped": 0,
+        }
+        try:
+            out = account_session._run_account_session_outreach_addon(
+                SimpleNamespace(),
+                account_id="account-id",
+                account_username="i_m_your_traker",
+                run_id="parent-run-id",
+            )
+        finally:
+            account_session.config.ACCOUNT_SESSION_OUTREACH_ADDON_ENABLED = original_flag
+            account_session.config.ACCOUNT_SESSION_OUTREACH_ADDON_MAX_JOBS = original_max
+            outreach_session_orchestrator.prepare_outreach_session = original_prepare
+            outreach_session_orchestrator.dispatch_outreach_session = original_dispatch
+            outreach_session_orchestrator.get_last_outreach_session_summary = original_last_summary
+
+        prepare_kwargs = calls["prepare_kwargs"]
+        dispatch_kwargs = calls["dispatch_kwargs"]
+        self.assertEqual(prepare_kwargs["run_id"], "parent-run-id")
+        self.assertEqual(prepare_kwargs["max_jobs_override"], 1)
+        self.assertTrue(prepare_kwargs["reject_unfollow_handoff_jobs"])
+        self.assertEqual(dispatch_kwargs["run_id"], "parent-run-id")
+        self.assertEqual(dispatch_kwargs["prepared_outreach"]["prepared_jobs_count"], 1)
+        self.assertTrue(out["executed"])
+        self.assertEqual(out["jobs_claimed"], 1)
+        self.assertEqual(out["jobs_completed"], 1)
+
+    def test_outreach_addon_no_pending_job_skips_without_dispatch(self) -> None:
+        original_flag = getattr(account_session.config, "ACCOUNT_SESSION_OUTREACH_ADDON_ENABLED", False)
+        original_prepare = outreach_session_orchestrator.prepare_outreach_session
+        original_dispatch = outreach_session_orchestrator.dispatch_outreach_session
+        dispatch_called = False
+
+        def fake_prepare(_d, **_kwargs):
+            return {
+                "session_status": "no_jobs",
+                "exit_code": 0,
+                "prepared_jobs_count": 0,
+                "prepared_jobs": [],
+                "max_jobs_effective": 1,
+            }
+
+        def fake_dispatch(_d, **_kwargs):
+            nonlocal dispatch_called
+            dispatch_called = True
+            return 0
+
+        account_session.config.ACCOUNT_SESSION_OUTREACH_ADDON_ENABLED = True
+        outreach_session_orchestrator.prepare_outreach_session = fake_prepare
+        outreach_session_orchestrator.dispatch_outreach_session = fake_dispatch
+        try:
+            out = account_session._run_account_session_outreach_addon(
+                SimpleNamespace(),
+                account_id="account-id",
+                account_username="i_m_your_traker",
+                run_id="parent-run-id",
+            )
+        finally:
+            account_session.config.ACCOUNT_SESSION_OUTREACH_ADDON_ENABLED = original_flag
+            outreach_session_orchestrator.prepare_outreach_session = original_prepare
+            outreach_session_orchestrator.dispatch_outreach_session = original_dispatch
+
+        self.assertFalse(dispatch_called)
+        self.assertFalse(out["executed"])
+        self.assertEqual(out["status"], "skipped")
+        self.assertEqual(out["skip_reason"], "no_pending_outreach_job")
 
 
 if __name__ == "__main__":

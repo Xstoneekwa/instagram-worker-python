@@ -1558,6 +1558,149 @@ def _follow_to_unfollow_real_max_actions_effective(account_id: str | None = None
     return int(_resolve_follow_to_unfollow_runtime_cap(account_id).get("runtime_cap") or 0)
 
 
+def _account_session_outreach_addon_enabled() -> bool:
+    return bool(getattr(config, "ACCOUNT_SESSION_OUTREACH_ADDON_ENABLED", False))
+
+
+def _account_session_outreach_addon_max_jobs() -> int:
+    try:
+        return max(0, int(getattr(config, "ACCOUNT_SESSION_OUTREACH_ADDON_MAX_JOBS", 1)))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _skip_account_session_outreach_addon(
+    *,
+    enabled: bool,
+    reason: str,
+    max_jobs: int | None = None,
+    prepare_summary: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    out = {
+        "enabled": bool(enabled),
+        "executed": False,
+        "status": "disabled" if not enabled else "skipped",
+        "skip_reason": str(reason or ""),
+        "max_jobs": max_jobs,
+        "prepared_jobs_count": 0,
+        "jobs_claimed": 0,
+        "jobs_completed": 0,
+        "jobs_failed": 0,
+        "jobs_skipped": 0,
+    }
+    if prepare_summary:
+        out["prepare_summary"] = dict(prepare_summary)
+        out["prepared_jobs_count"] = int(prepare_summary.get("prepared_jobs_count") or 0)
+    return out
+
+
+def _run_account_session_outreach_addon(
+    d: u2.Device,
+    *,
+    account_id: str,
+    account_username: str,
+    run_id: str | None,
+) -> dict[str, Any]:
+    enabled = _account_session_outreach_addon_enabled()
+    max_jobs = _account_session_outreach_addon_max_jobs()
+    if not enabled:
+        return _skip_account_session_outreach_addon(
+            enabled=False,
+            reason="addon_disabled",
+            max_jobs=max_jobs,
+        )
+    if max_jobs <= 0:
+        return _skip_account_session_outreach_addon(
+            enabled=True,
+            reason="addon_max_jobs_zero",
+            max_jobs=max_jobs,
+        )
+
+    from outreach_session_orchestrator import (
+        dispatch_outreach_session,
+        get_last_outreach_session_summary,
+        prepare_outreach_session,
+    )
+
+    log(
+        "info",
+        "account_session_outreach_addon_started",
+        account_id=account_id,
+        account_username=account_username,
+        run_id=run_id,
+        max_jobs=max_jobs,
+        external_queue_only=True,
+    )
+    prepare_summary = prepare_outreach_session(
+        d,
+        account_id=account_id,
+        account_username=account_username,
+        run_id=run_id,
+        reject_unfollow_handoff_jobs=True,
+        max_jobs_override=max_jobs,
+    )
+    prepare_status = str(prepare_summary.get("session_status") or "")
+    prepared_jobs_count = int(prepare_summary.get("prepared_jobs_count") or 0)
+    if int(prepare_summary.get("exit_code") or 0) != 0:
+        out = _skip_account_session_outreach_addon(
+            enabled=True,
+            reason=str(prepare_summary.get("failure_reason") or "outreach_prepare_failed"),
+            max_jobs=max_jobs,
+            prepare_summary=prepare_summary,
+        )
+        out["status"] = "blocked"
+        log("info", "account_session_outreach_addon_blocked", account_id=account_id, run_id=run_id, **out)
+        return out
+    if prepare_status == "no_quota":
+        out = _skip_account_session_outreach_addon(
+            enabled=True,
+            reason="outreach_no_quota",
+            max_jobs=max_jobs,
+            prepare_summary=prepare_summary,
+        )
+        log("info", "account_session_outreach_addon_skipped", account_id=account_id, run_id=run_id, **out)
+        return out
+    if prepared_jobs_count <= 0:
+        out = _skip_account_session_outreach_addon(
+            enabled=True,
+            reason="no_pending_outreach_job",
+            max_jobs=max_jobs,
+            prepare_summary=prepare_summary,
+        )
+        log("info", "account_session_outreach_addon_skipped", account_id=account_id, run_id=run_id, **out)
+        return out
+
+    exit_code = dispatch_outreach_session(
+        d,
+        account_id=account_id,
+        account_username=account_username,
+        run_id=run_id,
+        prepared_outreach=prepare_summary,
+    )
+    outreach_summary = get_last_outreach_session_summary()
+    jobs_claimed = int(outreach_summary.get("jobs_claimed") or 0)
+    jobs_completed = int(outreach_summary.get("jobs_completed") or 0)
+    jobs_failed = int(outreach_summary.get("jobs_failed") or 0)
+    jobs_skipped = int(outreach_summary.get("jobs_skipped") or 0)
+    out = {
+        "enabled": True,
+        "executed": True,
+        "status": str(outreach_summary.get("session_status") or ("completed" if exit_code == 0 else "failed")),
+        "exit_code": int(exit_code),
+        "max_jobs": max_jobs,
+        "prepared_jobs_count": prepared_jobs_count,
+        "prepared_job_ids": list(prepare_summary.get("prepared_job_ids") or []),
+        "jobs_claimed": jobs_claimed,
+        "jobs_completed": jobs_completed,
+        "jobs_failed": jobs_failed,
+        "jobs_skipped": jobs_skipped,
+        "prepare_summary": prepare_summary,
+        "outreach_summary": outreach_summary,
+    }
+    log("info", "account_session_outreach_addon_completed", account_id=account_id, run_id=run_id, **out)
+    return out
+
+
 def _current_package(d: u2.Device) -> str:
     try:
         return str((d.app_current() or {}).get("package") or "")
@@ -2556,6 +2699,13 @@ def run_account_session(
         "unfollow_actions_failed": 0,
         "unfollow_results_persisted_count": 0,
     }
+    account_session_outreach_addon: dict[str, Any] = _skip_account_session_outreach_addon(
+        enabled=_account_session_outreach_addon_enabled(),
+        reason="addon_disabled"
+        if not _account_session_outreach_addon_enabled()
+        else "follow_phase_not_completed",
+        max_jobs=_account_session_outreach_addon_max_jobs(),
+    )
 
     run_follow, transition_reason = _should_run_follow_after_welcome(
         welcome_enabled=welcome_enabled,
@@ -2785,6 +2935,27 @@ def run_account_session(
                         diagnostic=follow_to_unfollow_diagnostic,
                     )
 
+    if _account_session_outreach_addon_enabled():
+        if not follow_phase_executed:
+            account_session_outreach_addon = _skip_account_session_outreach_addon(
+                enabled=True,
+                reason="follow_phase_not_executed",
+                max_jobs=_account_session_outreach_addon_max_jobs(),
+            )
+        elif not bool(follow_to_unfollow_real.get("executed")):
+            account_session_outreach_addon = _skip_account_session_outreach_addon(
+                enabled=True,
+                reason=str(follow_to_unfollow_real.get("skip_reason") or "h3_unfollow_not_executed"),
+                max_jobs=_account_session_outreach_addon_max_jobs(),
+            )
+        else:
+            account_session_outreach_addon = _run_account_session_outreach_addon(
+                d,
+                account_id=aid,
+                account_username=uname,
+                run_id=run_id,
+            )
+
     session_status = _account_session_status(
         transition_reason=transition_reason,
         follow_phase_executed=follow_phase_executed,
@@ -2890,6 +3061,7 @@ def run_account_session(
                 "unfollow_results_persisted_count"
             ),
             "follow_to_unfollow_real": follow_to_unfollow_real,
+            "account_session_outreach_addon": account_session_outreach_addon,
         }
         log(
             "info",
@@ -3001,6 +3173,7 @@ def run_account_session(
             "unfollow_results_persisted_count"
         ),
         "follow_to_unfollow_real": follow_to_unfollow_real,
+        "account_session_outreach_addon": account_session_outreach_addon,
         "auto_restart_restart_allowed": auto_restart_restart_allowed,
         "auto_restart_restart_block_reason": auto_restart_restart_block_reason,
         "auto_restart_resume_plan": auto_restart_resume_plan,
@@ -3160,6 +3333,7 @@ def run_account_session(
         unfollow_phase_status=unfollow_phase_status,
         follow_to_unfollow_probe=follow_to_unfollow_probe,
         follow_to_unfollow_real=follow_to_unfollow_real,
+        account_session_outreach_addon=account_session_outreach_addon,
         mandatory_unfollow_executed=mandatory_unfollow_executed,
         auto_restart_v1b_enabled=auto_restart_v1b_enabled,
         auto_restart_v1b_dry_run=auto_restart_v1b_dry_run,

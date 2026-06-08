@@ -94,6 +94,7 @@ def prepare_outreach_session(
     account_username: str,
     run_id: str | None = None,
     reject_unfollow_handoff_jobs: bool = False,
+    max_jobs_override: int | None = None,
 ) -> dict[str, Any]:
     t0 = time.perf_counter()
     aid = str(account_id or "").strip()
@@ -176,6 +177,13 @@ def prepare_outreach_session(
         log("warning", "outreach_prepare_stale_job_cleanup_failed", account_id=aid, error=str(exc))
 
     quota = _resolve_effective_max_jobs(settings, counter)
+    if max_jobs_override is not None:
+        quota["max_jobs_effective"] = min(
+            int(quota.get("max_jobs_effective") or 0),
+            max(0, int(max_jobs_override)),
+        )
+        quota["max_jobs_override"] = max(0, int(max_jobs_override))
+        quota["max_jobs_override_source"] = "account_session_outreach_addon"
     log(
         "info",
         "outreach_prepare_quota_resolved",

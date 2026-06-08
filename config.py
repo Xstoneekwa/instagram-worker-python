@@ -464,6 +464,13 @@ ACCOUNT_SESSION_FOLLOW_TO_UNFOLLOW_REAL_HARD_MAX = max(
     0,
     min(_env_int("ACCOUNT_SESSION_FOLLOW_TO_UNFOLLOW_REAL_HARD_MAX", 3), 10),
 )
+# Account session optional Outreach add-on. Disabled by default; consumes existing
+# pending Outreach jobs only after the Follow -> Unfollow handoff path.
+ACCOUNT_SESSION_OUTREACH_ADDON_ENABLED = _env_bool("ACCOUNT_SESSION_OUTREACH_ADDON_ENABLED", False)
+ACCOUNT_SESSION_OUTREACH_ADDON_MAX_JOBS = max(
+    0,
+    min(_env_int("ACCOUNT_SESSION_OUTREACH_ADDON_MAX_JOBS", 1), 10),
+)
 # Auto Restart V1A: passive resume-plan defaults only. No scheduler is wired here.
 AUTO_RESTART_ENABLED = _env_bool("AUTO_RESTART_ENABLED", False)
 AUTO_RESTART_DELAY_MINUTES = max(0, _env_int("AUTO_RESTART_DELAY_MINUTES", 20))
