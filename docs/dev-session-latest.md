@@ -2,6 +2,40 @@
 
 *Document volatil : à mettre à jour après les prochains jalons produit / tech.*
 
+## Full-cycle minimum physique — checkpoint 2026-06-08
+
+- **Validation fonctionnelle complète sur téléphone physique** :
+  `account_session` est validé sur `i_m_your_traker` avec
+  `RFGL145VCKE` / `com.instagram.androie`, assignment
+  `full_cycle/full_cycle_6h`, run
+  `d82c23e4-071a-46ae-9395-dda36cdfbc58` (`completed`). Le flow réel validé
+  est désormais `Welcome -> Follow -> Mute/Like normal -> H3 Unfollow ->
+  Outreach add-on`.
+- **Résultat du run minimum** : 1 Welcome envoyé (`vipbeach`), 1 Follow
+  persisté (`ctec.system`, `was_successful=true`, source
+  `cafecuba_geneve`), Mute post-follow OK (`muted_posts=true`,
+  `muted_stories=true`), H3 Unfollow OK (`cocolibcook`,
+  `unfollowed_completed`, `follow_status=unfollowed`), Outreach add-on OK
+  (`roazhontiti35`, job `sent`), cleanup DB OK.
+- **Guards validés avant retry** : add-on Outreach `account_session` reste
+  OFF par défaut et ne s'active qu'avec
+  `ACCOUNT_SESSION_OUTREACH_ADDON_ENABLED=true`; `WELCOME_SESSION_SEND_MAX_JOBS`
+  borne maintenant le scan/enqueue Welcome uniquement quand le hard cap env est
+  explicitement présent; `unfollow-any` ignore les rows dont la DB porte déjà
+  `unfollowed_at` et passe au candidat visible suivant.
+- **Restore/no-leak validé** : les réglages Welcome temporaires ont été
+  restaurés (`welcome_enabled=false`, template/baseline null), le template
+  Welcome temporaire supprimé, `Welcome/Outreach pending/reserved/running=0`,
+  `active runs/requests/live=0/0/0`, aucun autre recipient Outreach touché.
+- **Réserve mineure à surveiller** : le Like post-follow n'a pas été observé ni
+  persisté sur ce run précis (`total_like=0`), mais Mute est OK et cette réserve
+  ne justifie pas de désactiver Mute/Like post-follow. Garder Mute/Like comme
+  partie normale du flow; auditer Like/performance plus tard si besoin.
+- **Checkpoints code liés** : add-on Outreach
+  `0444b0a` / `checkpoint-account-session-outreach-addon-guarded-20260608`;
+  guards retry `217500ecfcceffe5f270023b4db3e177557ebec0` /
+  `checkpoint-fullcycle-minimum-retry-guards-20260608`.
+
 ## Welcome DM physique — 2026-06-08
 
 - **Welcome list-native physique validé cap 1/2/3** : `dm_welcome_baseline`

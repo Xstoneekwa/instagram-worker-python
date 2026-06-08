@@ -23,6 +23,30 @@ Le projet construit une Phone Farm Instagram production-grade :
 
 Checkpoints recents valides :
 
+- Full-cycle minimum physique `account_session` : validé fonctionnellement sur
+  `i_m_your_traker`, téléphone `RFGL145VCKE`, package `com.instagram.androie`,
+  assignment `full_cycle/full_cycle_6h`, run
+  `d82c23e4-071a-46ae-9395-dda36cdfbc58` (`completed`). Le flow validé en réel
+  enchaîne désormais Welcome -> Follow -> Mute/Like normal -> H3 Unfollow ->
+  Outreach add-on. Résultat : 1 Welcome envoyé à `vipbeach`, 1 Follow persisté
+  sur `ctec.system` depuis `cafecuba_geneve`, Mute OK, H3 Unfollow OK sur
+  `cocolibcook` (`unfollowed_completed`), Outreach add-on envoyé à
+  `roazhontiti35`, restore Welcome et cleanup DB OK, aucun job
+  pending/reserved/running et aucun autre recipient Outreach touché.
+- Full-cycle guards validés : l'add-on Outreach reste OFF par défaut et
+  nécessite `ACCOUNT_SESSION_OUTREACH_ADDON_ENABLED=true`; le scan Welcome
+  respecte `WELCOME_SESSION_SEND_MAX_JOBS` quand ce hard cap env est explicite
+  sans changer le comportement prod normal hors env; `unfollow-any` exclut les
+  rows dont `ig_interacted_users.unfollowed_at` est déjà renseigné et continue
+  vers le candidat visible suivant. Code checkpointé par `0444b0a`
+  (`checkpoint-account-session-outreach-addon-guarded-20260608`) et
+  `217500ecfcceffe5f270023b4db3e177557ebec0`
+  (`checkpoint-fullcycle-minimum-retry-guards-20260608`).
+- Réserve suivie : le Like post-follow n'a pas été observé/persisté sur le run
+  full-cycle minimum (`total_like=0`), mais c'est une réserve mineure non
+  bloquante. Mute/Like post-follow restent une partie normale du flow et ne
+  doivent pas être désactivés; garder le point pour un audit Like/performance
+  futur.
 - Follow physique 9/3/3 : validé sur `j_automatise_pour_toi` avec le run
   `5ad58174-95a0-45f2-91d7-33fcfdc3b5a0` (`completed`). Résultat: 9/9
   follows, 9 mutes, 9 Likes, 9/9 return CT, `run_status_updated=completed`,
@@ -169,6 +193,12 @@ brut.
 - 2E-5I :
   - SHA `349587f816dae843bca2b37d38f15cc76d425bcf`
   - tag `checkpoint-entry2e5i-password-form-executor-20260526`
+- Full-cycle minimum retry guards :
+  - SHA `217500ecfcceffe5f270023b4db3e177557ebec0`
+  - tag `checkpoint-fullcycle-minimum-retry-guards-20260608`
+- Account-session Outreach add-on :
+  - SHA `0444b0a`
+  - tag `checkpoint-account-session-outreach-addon-guarded-20260608`
 
 ## 4. Architecture Actuelle
 
