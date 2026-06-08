@@ -52,6 +52,192 @@ Safe ramp proposal:
 - After validation without restrictions: 30-40 DMs/day/account.
 - Hard prudent cap: 50-60 DMs/day for a solid account.
 
+Physical Outreach preflight:
+
+- `outreach_physical_smoke.py` is the dedicated read-only gate validator before
+  the first physical Outreach DM smoke.
+- Current supported safe command is dry-run only:
+  `python3 outreach_physical_smoke.py <username> --mode dry-run --json`.
+- The tool resolves `run_type=outreach_session`, checks assignment/device/package
+  and ADBKeyboard, active runs/requests/live views, `reserved/running` DM jobs,
+  pending Outreach jobs, pending Welcome jobs without processing them, Outreach
+  settings/template, daily counters, session/day/total caps, and isolated real
+  send flags.
+- `--mode real-send` and `--mode send-one --job-id <uuid>` are parsed for future
+  operator workflow design but remain explicitly blocked in this checkpoint; the
+  script does not start Instagram, does not connect `uiautomator2`, and does not
+  call `dm_sender_engine`.
+
+DM template rendering:
+
+- DM templates are rendered before freezing `ig_dm_jobs.message_body`; the sender
+  sends only the stored final body.
+- Supported variables are `{username}` / `{{username}}`, `{name}` / `{{name}}`,
+  and `{account_username}` / `{{account_username}}`.
+- `username` is the recipient username. `account_username` is the sender
+  Instagram username. `name` uses recipient display/full name when supplied and
+  falls back to recipient username in V1.
+- Unknown variables such as `{company}` are rejected. Jobs/templates with any
+  unresolved `{...}` or `{{...}}` token must not pass preflight.
+- Python producers render through `dm_template_renderer.py` before RPC enqueue;
+  the Outreach Edge enqueue function mirrors the same rendering before calling
+  `enqueue_outreach_dm_job`.
+- `dm_sender_engine` keeps a final guard: if a stored `message_body` still
+  contains a template token, it blocks before UI interaction with
+  `unresolved_template_token`.
+- V1 does not add a display-name migration. Future profile enrichment can fill
+  recipient display/full name so `{name}` becomes more personal without changing
+  sender behavior.
+
+Physical validation checkpoint (2026-06-08):
+
+- The Search-based Outreach sender path is validated in real physical runs:
+  `Search -> profile -> DM -> send -> profile/search restore -> next job`.
+- `j_automatise_pour_toi` / `com.instagram.androif` validated 1 DM, 2 DMs, and
+  3 DMs with stable inter-job Search restore.
+- `i_m_your_traker` / `com.instagram.androie` validated run
+  `c2a9da0e-4600-4e78-b702-f428f694b505` with 3 sent jobs
+  (`deisantidj`, `pipa_polaris`, `worm.generation`), no failed/skipped jobs,
+  DB counters incremented by +3, and no pending/reserved Outreach jobs after run.
+- Fast paths active on the post-patch run:
+  `dm_send_post_finalize_fast_path_used`,
+  `dm_sender_composer_resolve_fast_path_from_thread_snapshot_used`,
+  `dm_sender_post_job_followers_probe_skipped_outreach_restore`, and summary
+  `post_send_fast_finalize_used=true`.
+- `total_post_job_ms` should be interpreted as restore/teardown time, not only
+  post-send finalize time. In `c2a9da0e`, post-send finalize was short per job
+  (~4.7s, ~3.1s, ~3.0s), while job1/job2 restore had a first back-stack timeout
+  followed by successful hardware-back reuse.
+
+Dashboard template UX requirement:
+
+- Admin Manage -> DM settings must show variable chips beside both Welcome DM
+  message and Outreach DM message: `{username}`, `{{username}}`, `{name}`,
+  `{{name}}`, `{account_username}`, `{{account_username}}`.
+- Active admin implementation is in
+  `/Users/admin/Projects/boost-ai-frontend/app/instagram-dashboard/InstagramDashboardButtons.tsx`.
+- The same UX is mandatory for the future client dashboard once its DM settings
+  screen is wired.
+- Definitions shown in UI: username = recipient username; name = recipient
+  display name when available, otherwise username; account_username = sending
+  Instagram account username.
+- The UI preview should render with safe sample values
+  `username=justperfect.eu`, `name=Marie`,
+  `account_username=j_automatise_pour_toi`, and warn on unsupported variables
+  such as `{company}`.
+- UI warnings are not the final safety boundary. Edge/Python enqueue rendering,
+  preflight checks, and the sender guard still block unresolved or unsupported
+  tokens before any real send.
+
+## Outreach job sources
+
+All Outreach producers must converge on the same contract:
+
+```text
+template/message input
+  -> render supported variables
+  -> ig_dm_jobs.message_body final and auditable
+  -> outreach_session claims pending jobs
+  -> sender sends message_body only
+  -> sender guard blocks any unresolved token
+```
+
+Supported sources in the current DB enum / Edge allowlist:
+
+- `n8n`: HTTP producer using `OUTREACH_ENQUEUE_INTERNAL_API_TOKEN`;
+- `dashboard`: client/admin dashboard producer via the Edge boundary;
+- `campaign`: bulk import/campaign producer, including CSV-style imports;
+- `manual`: ops/manual smoke producer. For a first smoke, use
+  `source=manual` and `metadata.source_context=manual_smoke` rather than adding
+  a new enum value.
+
+Known but not separate enum values:
+
+- `client_dashboard` and `admin_dashboard` are represented as `source=dashboard`
+  plus metadata such as `created_by`, `created_for` and `source_context`;
+- `manual_smoke` is represented as `source=manual` plus
+  `metadata.source_context=manual_smoke`;
+- `import_csv` is rejected by the Edge Function; use `source=campaign`.
+
+### N8N / webhook
+
+```text
+N8N/webhook
+  -> POST /functions/v1/outreach-enqueue/outreach/enqueue or bulk-enqueue
+  -> Authorization: Bearer OUTREACH_ENQUEUE_INTERNAL_API_TOKEN
+  -> account entitlement via client_account_has_outreach_entitlement
+  -> template/message validation and rendering in Edge
+  -> enqueue_outreach_dm_job
+  -> ig_dm_jobs(dm_type=outreach, source=n8n|campaign, status=pending)
+  -> outreach_session -> dm_sender_engine
+```
+
+Required audit metadata: at least one stable safe field such as
+`external_request_id`, `import_id`, `created_by` or `source_context`.
+
+### Dashboard client
+
+The client dashboard enqueue UI is future work. When wired, it must call the
+same Edge Function with a Supabase Auth JWT. Access is checked by
+`client_can_enqueue_outreach(auth_user_id, account_id)`, which requires active
+client ownership, an active Outreach entitlement and
+`ig_account_dm_settings.outreach_enabled=true`. It must use the same chips,
+rendered preview and unsupported-token warning as the admin UI.
+
+### Dashboard admin
+
+The admin Manage DM drawer is patched in the active frontend to expose template
+variables and preview rendering, but admin job creation is not a separate
+runtime enqueue path yet. Future admin manual enqueue should call the same Edge
+boundary or the audited Python wrapper with `source=dashboard` and safe metadata
+(`created_by`, `source_context=admin_dashboard`, request/action id).
+
+### Backend / API internal
+
+Internal Python producers use `supabase_client.enqueue_outreach_dm_job()`, which
+renders templates through `dm_template_renderer.py` before calling
+`enqueue_outreach_dm_job`. Direct RPC calls must be avoided unless they preserve
+the same rendering and audit contract.
+
+### Manual smoke
+
+The first controlled smoke should enqueue through the same backend/API contract:
+
+```text
+source=manual
+metadata.source_context=manual_smoke
+template_id or template body
+render -> ig_dm_jobs.message_body final
+```
+
+`outreach_physical_smoke.py` is read-only and validates the pending job before
+any real send. It now stops if the source is unknown, audit metadata is missing,
+the message contains unresolved tokens, the template has unsupported variables,
+the job is not pending Outreach, caps are exhausted, or unsafe real-send flags
+are active during dry-run.
+
+### `ig_dm_jobs` contract and caps
+
+Current Outreach job contract:
+
+- `dm_type='outreach'`;
+- `source in ('n8n','dashboard','campaign','manual')`;
+- `template_id` when a template is used;
+- `message_body` is the final rendered body, never a raw template;
+- `metadata` carries safe audit fields (`created_by`, `created_for`,
+  `external_request_id`, `import_id`, `source_context`, `campaign_name`, `note`);
+- `idempotency_key` dedupes by account, normalized recipient and optional
+  `campaign_id`.
+
+Caps are split:
+
+- enqueue time: Edge validates entitlement, `outreach_enabled`, batch size and
+  pending queue limit (`OUTREACH_ENQUEUE_MAX_PENDING_PER_ACCOUNT`);
+- claim time: `outreach_session` applies session/day/total caps and hard caps
+  before claiming jobs;
+- send time: sender guard blocks unresolved tokens and real-send flags control
+  execution.
+
 ## Runtime
 
 Supabase Edge Function:

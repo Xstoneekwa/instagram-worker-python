@@ -82,6 +82,21 @@ Checkpoints recents valides :
   strict seulement. Il reste utile comme future base Outreach/Search DM
   (`search -> profil -> DM -> send -> back -> zone de recherche -> candidat
   suivant`), mais ne remplace pas la baseline production Welcome.
+- Outreach physique preflight : `outreach_physical_smoke.py` est ajouté comme
+  gate validator read-only avant tout run réel. Le mode autorisé à ce checkpoint
+  est `--mode dry-run --json`; `real-send` et `send-one` sont parsés mais
+  explicitement bloqués. Il vérifie `outreach_session`, assignment, package,
+  ADBKeyboard, runs/requests/live views actifs, jobs DM `reserved/running`,
+  pending Outreach jobs, pending Welcome jobs sans les traiter, template
+  Outreach, counters/caps et flags réels isolés. Aucun DM Outreach réel n'est
+  validé à ce stade.
+- Rendu templates DM : `dm_template_renderer.py` supporte `{username}`,
+  `{{username}}`, `{name}`, `{{name}}`, `{account_username}` et
+  `{{account_username}}`. Le rendu se fait avant stockage dans
+  `ig_dm_jobs.message_body` pour les producteurs Python et l'Edge Outreach; le
+  sender conserve seulement un garde-fou final qui bloque tout body contenant
+  encore un token. `{name}` utilise le display/full name si disponible et
+  fallback username en V1, sans migration d'enrichissement profil.
 - Welcome runtime details validés : `WELCOME_SCAN_CANDIDATE_ATTEMPT_CAP` borne
   les candidats tentés indépendamment du sent cap; `WELCOME_SCAN_FOLLOWERS_OPEN_WAIT_S=0.6`
   est validé; les jobs pending créés avant anchor sont repris; les skips privés
@@ -1876,6 +1891,130 @@ Process operateur actuel pour ajouter un phone:
 7. verifier Devices: phone visible, 4 app instances, heartbeat online/fresh,
    issues vides ou explicites;
 8. seulement ensuite: assignment, schedule et run via flows separes.
+
+### Dashboard DM template UX requirement
+
+Le drawer Manage -> DM settings du dashboard admin actif est dans
+`/Users/admin/Projects/boost-ai-frontend/app/instagram-dashboard/InstagramDashboardButtons.tsx`.
+Il doit exposer les variables supportees a cote des champs Welcome DM message et
+Outreach DM message:
+
+- `{username}` / `{{username}}` = username du destinataire;
+- `{name}` / `{{name}}` = nom affiche du destinataire si disponible, sinon
+  username;
+- `{account_username}` / `{{account_username}}` = username du compte Instagram
+  client qui envoie.
+
+UX obligatoire admin et futur dashboard client:
+
+- chips variables visibles et faciles a inserer/copier;
+- preview Instagram rendue avec sample safe `username=justperfect.eu`,
+  `name=Marie`, `account_username=j_automatise_pour_toi`;
+- warning inline si token non supporte comme `{company}`;
+- rappel UI que `{name}` fallback vers username cote backend;
+- aucune confiance exclusive dans l'UI: l'enqueue Edge/Python, les preflights et
+  le sender guard restent responsables de bloquer les tokens inconnus ou non
+  resolus avant tout DM reel.
+
+Statut: UI admin active patchee dans le repo frontend; dashboard client futur
+encore roadmap mais soumis au meme contrat UX.
+
+### Outreach job sources and rendering contract
+
+Toutes les sources Outreach doivent produire le meme resultat avant envoi:
+
+```text
+template/message -> render variables -> ig_dm_jobs.message_body final -> sender
+```
+
+Sources codees aujourd'hui:
+
+- `n8n`: Edge Function `supabase/functions/outreach-enqueue`, auth par
+  `OUTREACH_ENQUEUE_INTERNAL_API_TOKEN`, source `n8n`;
+- `campaign`: meme Edge Function en bulk/import, source `campaign`;
+- `dashboard`: Edge Function avec JWT client futur ou backend/admin proxy,
+  source `dashboard`;
+- `manual`: wrapper Python `supabase_client.enqueue_outreach_dm_job`, utilise
+  pour ops/manual smoke avec `metadata.source_context=manual_smoke`.
+
+Sources seulement prevues/documentees:
+
+- dashboard client UI enqueue complet;
+- dashboard admin creation manuelle de job Outreach;
+- workflow N8N JSON versionne dans le repo.
+
+Le contrat `ig_dm_jobs` actuel est `dm_type=outreach`, `source` enum
+`n8n|dashboard|campaign|manual`, `template_id` si template, `message_body`
+rendu final, `metadata` safe pour audit (`created_by`, `created_for`,
+`external_request_id`, `import_id`, `source_context`, `campaign_name`, `note`)
+et `idempotency_key` unique par compte, recipient normalise et `campaign_id`
+optionnel. Les caps enqueue sont entitlement/outreach_enabled/batch/pending
+queue; les caps session/day/total/hard caps sont appliques au claim par
+`outreach_session`.
+
+`outreach_physical_smoke.py` reste read-only et doit STOP si source inconnue,
+metadata audit absente, token non resolu dans `message_body`, variable inconnue
+dans template, job non pending Outreach, caps insuffisants ou flags real-send
+actifs pendant dry-run.
+
+### Outreach physical checkpoint 1/2/3 DMs — 2026-06-08
+
+Outreach Search DM est validé en réel sur téléphone physique :
+
+- `j_automatise_pour_toi` / `com.instagram.androif` : smoke 1 DM, 2 DMs, puis
+  3 DMs validés avec restore Search inter-job stable;
+- `i_m_your_traker` / `com.instagram.androie` : run post-fast-path
+  `c2a9da0e-4600-4e78-b702-f428f694b505`, recipients `deisantidj`,
+  `pipa_polaris`, `worm.generation`, `jobs_sent_count=3`,
+  `jobs_failed_count=0`, `jobs_skipped_count=0`, `sender_status=success`,
+  `run_status_updated=completed`;
+- DB post-check clean : 3 jobs `sent`, `sent_at`/`finished_at` renseignés,
+  `last_error=null`, `skip_reason=null`, pending Outreach=0,
+  reserved/running=0, active runs/requests/live views=0/0/0,
+  `outreach_sent_count=3`, `total_dm_sent_count=3` pour `i_m_your_traker`.
+
+Fast paths validés sur le run `c2a9da0e` :
+
+- `dm_send_post_finalize_fast_path_used` sur les 3 sends;
+- `dm_sender_composer_resolve_fast_path_from_thread_snapshot_used` sur les 3
+  threads `empty_new_thread`;
+- `dm_sender_post_job_followers_probe_skipped_outreach_restore` sur les restores
+  inter-job;
+- summary `post_send_fast_finalize_used=true`,
+  `previous_search_reuse_count=2`, `previous_search_reuse_fail_count=0`,
+  `fallback_open_search_between_jobs_count=0`.
+
+Observation perf : le fast finalize est actif, mais `total_post_job_ms` peut
+monter si le restore inter-job job1/job2 fait un premier back-stack timeout avant
+le retry hardware-back réussi. Le champ `total_post_job_ms` mesure donc surtout
+restore + teardown inter-job, pas seulement le finalize post-send.
+
+### Next checkpoint: Unfollow
+
+Ordre de validation demandé :
+
+1. Unfollow standalone.
+2. Handoff Unfollow -> Outreach.
+3. Handoff Follow -> Unfollow.
+4. Mini full-cycle final : 2 Welcome -> 2 Follow sur 2 CT -> 2 Unfollow ->
+   2 Outreach.
+
+Avant tout run réel Unfollow, vérifier en preflight strict :
+
+- `unfollow_enabled`;
+- `ig_account_unfollow_settings.unfollow_per_session_limit`;
+- `UNFOLLOW_SESSION_REAL_ACTION_ENABLED`;
+- `UNFOLLOW_SESSION_REAL_ACTION_MAX_PER_RUN`;
+- limite effective `min(db_unfollow_per_session_limit, env hard cap)`;
+- candidats unfollow éligibles;
+- absence de runs/requests/live views actifs et absence de concurrence
+  Welcome/Follow/Outreach;
+- assignment/device/package/ADBKeyboard OK.
+
+Si le log `unfollow_effective_limits_resolved` n'existe pas encore avec
+`db_unfollow_per_session_limit`, `env_real_action_max_per_run`,
+`effective_real_action_max_per_run` et `source="min(db,env_hard_cap)"`, ajouter
+ce patch minimal avant tout run réel.
 
 Device Heartbeat Publisher V1:
 

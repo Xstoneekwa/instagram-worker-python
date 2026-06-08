@@ -1,7 +1,9 @@
 import {
   accessDecision,
+  findTemplateTokens,
   normalizeUsername,
   parseAllowedAccountIds,
+  renderDmTemplate,
   sanitizeMetadata,
   validateForbiddenTopLevelFields,
   validateSource,
@@ -105,5 +107,33 @@ Deno.test("entry2a allowlist parsing trims empty values", () => {
   const parsed = parseAllowedAccountIds(" a, ,b ,, c ");
   if (parsed.join("|") !== "a|b|c") {
     throw new Error("allowlist parser did not trim empty values");
+  }
+});
+
+Deno.test("renders supported Outreach template variables", () => {
+  const rendered = renderDmTemplate("Salut {name}, c'est {{account_username}}.", {
+    recipientUsername: "justperfect.eu",
+    recipientName: "",
+    accountUsername: "j_automatise_pour_toi",
+  });
+  if (!rendered.ok) throw new Error("supported template was rejected");
+  if (rendered.renderedBody !== "Salut justperfect.eu, c'est j_automatise_pour_toi.") {
+    throw new Error("template variables were not rendered");
+  }
+  if (rendered.fallbacksUsed.join("|") !== "name:recipient_username") {
+    throw new Error("name fallback was not reported");
+  }
+});
+
+Deno.test("rejects unsupported Outreach template variables", () => {
+  const rendered = renderDmTemplate("Salut {company}.", {
+    recipientUsername: "justperfect.eu",
+    accountUsername: "j_automatise_pour_toi",
+  });
+  if (rendered.ok || rendered.error !== "unsupported_template_variable") {
+    throw new Error("unsupported variable was not rejected");
+  }
+  if (findTemplateTokens("Salut {{ username }} et {name}").join("|") !== "username|name") {
+    throw new Error("template token parser failed");
   }
 });

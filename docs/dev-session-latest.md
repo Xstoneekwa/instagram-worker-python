@@ -54,6 +54,70 @@
   ou retape une seule fois, évite le double-send si le message est déjà visible,
   et skip le restore Search lourd pour un unique prepared send-one.
 
+## Outreach DM physique — checkpoint 2026-06-08
+
+- **Audit comparatif validé** : le chemin technique Outreach existant est
+  `outreach_session -> dm_sender_engine -> Search -> profil -> DM -> send ->
+  restore Search`. Aucun run Outreach émulateur complété n'a été retrouvé dans
+  `runs/` ou docs persistants; le socle physique le plus proche validé est le
+  Welcome `send-one` Search, qui partage `dm_sender_engine`.
+- **Outil preflight ajouté** : `outreach_physical_smoke.py` vérifie en read-only
+  l'account, `outreach_session`, assignment, package clone (`com.instagram.androif`
+  ou `com.instagram.androie` selon l'instance), ADBKeyboard, absence de
+  runs/requests/live views actifs, absence de jobs DM `reserved/running`, pending
+  Outreach jobs, pending Welcome jobs sans les traiter, `outreach_enabled`,
+  template/message Outreach, counters du jour, caps session/day/total, flags
+  réels isolés et absence de tokens non résolus dans les jobs pending.
+- **Validation physique 1/2/3 DMs** : Outreach est validé en réel sur
+  `j_automatise_pour_toi` (`com.instagram.androif`) puis `i_m_your_traker`
+  (`com.instagram.androie`). Le run 3 DMs post-fast-path
+  `c2a9da0e-4600-4e78-b702-f428f694b505` a envoyé `deisantidj`,
+  `pipa_polaris`, `worm.generation` avec `jobs_sent_count=3`,
+  `jobs_failed_count=0`, `jobs_skipped_count=0`, `sender_status=success`,
+  `previous_search_reuse_count=2`, `previous_search_reuse_fail_count=0`,
+  `fallback_open_search_between_jobs_count=0`, et DB clean après run.
+- **Rendu templates DM avant stockage** : `dm_template_renderer.py` rend
+  `{username}` / `{{username}}`, `{name}` / `{{name}}` et
+  `{account_username}` / `{{account_username}}` avant de figer
+  `ig_dm_jobs.message_body`. `{name}` fallback sur `recipient_username` si aucun
+  display/full name fiable n'est disponible. Les variables inconnues sont
+  rejetées; le sender bloque en dernier recours tout `message_body` contenant
+  encore un token.
+- **Sources Outreach auditees** : sources DB/Edge supportees `n8n`,
+  `dashboard`, `campaign`, `manual`. `client_dashboard`, `admin_dashboard` et
+  `manual_smoke` doivent etre representes par `source` + metadata safe
+  (`created_by`, `created_for`, `external_request_id`, `import_id`,
+  `source_context`). `outreach_physical_smoke.py` STOP maintenant si source
+  inconnue, metadata audit absente, token non resolu ou template avec variable
+  inconnue.
+- **Exigence UI templates dashboard** : le drawer Manage -> DM settings actif
+  (`/Users/admin/Projects/boost-ai-frontend/app/instagram-dashboard/InstagramDashboardButtons.tsx`)
+  affiche les chips `{username}`, `{{username}}`, `{name}`, `{{name}}`,
+  `{account_username}`, `{{account_username}}` pour Welcome et Outreach,
+  propose une preview rendue avec sample safe (`justperfect.eu`, `Marie`,
+  `j_automatise_pour_toi`) et avertit sur les tokens inconnus. Meme exigence
+  obligatoire pour le futur dashboard client.
+- **Modes réels bloqués** : seul `--mode dry-run --json` est utilisable pour le
+  moment. `real-send` et `send-one` sont prévus côté CLI mais retournent des
+  STOP reasons explicites; le script ne lance pas Instagram et n'appelle pas le
+  sender.
+- **Fast paths Outreach validés sans régression fonctionnelle** :
+  `dm_send_post_finalize_fast_path_used`,
+  `dm_sender_composer_resolve_fast_path_from_thread_snapshot_used` et
+  `dm_sender_post_job_followers_probe_skipped_outreach_restore` sont actifs sur
+  le run `c2a9da0e`. La hausse de `total_post_job_ms` observée sur ce run vient
+  du restore inter-job job1/job2 (premier back-stack timeout puis hardware-back
+  réussi), pas du finalize post-send, qui reste court (~4.7s, ~3.1s, ~3.0s).
+- **Caps produit rappelés** : V1 safe Outreach 10 DMs/jour/compte; après 3-5
+  jours propres 20/jour; après validation sans restriction 30-40/jour; hard cap
+  prudent 50-60/jour max pour un compte solide.
+- **Prochain chantier : Unfollow** : avant tout run réel, refaire un preflight
+  strict `unfollow_enabled`, `ig_account_unfollow_settings`, limite effective
+  `min(db_unfollow_per_session_limit, UNFOLLOW_SESSION_REAL_ACTION_MAX_PER_RUN)`,
+  candidats éligibles, absence de runs/requests/live views actifs et assignment
+  device/package OK. Si `unfollow_effective_limits_resolved` n'est pas loggé,
+  ajouter ce patch minimal avant run réel.
+
 ## État chantier follow — 2026-06-07
 
 - **Non-régression Follow via handoff** : les runs `account_session` Test A/B ont

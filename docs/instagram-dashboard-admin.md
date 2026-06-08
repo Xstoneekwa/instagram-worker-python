@@ -277,6 +277,37 @@ Safe audit events to add later:
 - no password, credential refs, tokens, service-role keys, raw logs, XML,
   screenshot paths, full device secrets, or client-visible hub/USB details.
 
+## Manage DM Settings Template Variables
+
+The active admin Manage page DM settings drawer lives in
+`/Users/admin/Projects/boost-ai-frontend/app/instagram-dashboard/InstagramDashboardButtons.tsx`.
+It must make supported DM template variables visible next to both message
+editors:
+
+- Welcome DM message;
+- Outreach DM message.
+
+Required admin UX:
+
+- show chips for `{username}`, `{{username}}`, `{name}`, `{{name}}`,
+  `{account_username}` and `{{account_username}}`;
+- clicking a chip should insert the token into the edited message when the UI can
+  safely do so, or at minimum append/copy the token without changing runtime
+  behavior;
+- show a rendered Instagram preview using safe sample values:
+  `username=justperfect.eu`, `name=Marie`,
+  `account_username=j_automatise_pour_toi`;
+- show an inline warning for unsupported variables such as `{company}`;
+- remind operators that `{name}` falls back to username server-side when a
+  recipient display name is unavailable.
+
+The dashboard UI is guidance and early validation only. The backend enqueue path
+and sender guard remain authoritative: unknown or unresolved template tokens
+must not reach a real DM send.
+
+Status: admin active UI patched in the frontend repo. Future client dashboard UI
+must reproduce the same chips, rendered preview and unsupported-token warning.
+
 ## Account Lifecycle Actions
 
 Status: admin UI wired as of frontend commit

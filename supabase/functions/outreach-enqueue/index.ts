@@ -47,6 +47,8 @@ const SAFE_METADATA_FIELDS = new Set([
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const USERNAME_RE = /^[a-z0-9._]{1,30}$/;
+const TEMPLATE_TOKEN_RE = /\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}|\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}/g;
+const SUPPORTED_TEMPLATE_VARIABLES = new Set(["username", "name", "account_username"]);
 
 export function normalizeUsername(value: unknown): string {
   return String(value ?? "").trim().replace(/^@+/, "").toLowerCase();
@@ -61,6 +63,65 @@ export function validateUsername(value: unknown): { ok: true; username: string }
   if (!USERNAME_RE.test(username)) return { ok: false, error: "invalid_username" };
   if (username.includes("..")) return { ok: false, error: "invalid_username" };
   return { ok: true, username };
+}
+
+export function findTemplateTokens(value: unknown): string[] {
+  const body = String(value ?? "");
+  const found: string[] = [];
+  const seen = new Set<string>();
+  for (const match of body.matchAll(TEMPLATE_TOKEN_RE)) {
+    const name = String(match[1] || match[2] || "").trim();
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    found.push(name);
+  }
+  return found;
+}
+
+export function renderDmTemplate(
+  templateBody: string,
+  context: {
+    recipientUsername: string;
+    recipientName?: string | null;
+    accountUsername: string;
+  },
+): { ok: true; renderedBody: string; usedVariables: string[]; fallbacksUsed: string[] } | {
+  ok: false;
+  error: string;
+  unresolvedTokens: string[];
+} {
+  const body = String(templateBody || "");
+  const tokens = findTemplateTokens(body);
+  const unknown = tokens.filter((name) => !SUPPORTED_TEMPLATE_VARIABLES.has(name));
+  if (unknown.length > 0) {
+    return { ok: false, error: "unsupported_template_variable", unresolvedTokens: unknown };
+  }
+  const recipientUsername = String(context.recipientUsername || "").trim();
+  const recipientName = String(context.recipientName || "").trim();
+  const accountUsername = String(context.accountUsername || "").trim();
+  const values: Record<string, string> = {
+    username: recipientUsername,
+    name: recipientName || recipientUsername,
+    account_username: accountUsername,
+  };
+  const missing = tokens.filter((name) => !values[name]);
+  if (missing.length > 0) {
+    return { ok: false, error: "missing_template_variable", unresolvedTokens: missing };
+  }
+  const usedVariables: string[] = [];
+  const fallbacksUsed = tokens.includes("name") && !recipientName && recipientUsername
+    ? ["name:recipient_username"]
+    : [];
+  const renderedBody = body.replace(TEMPLATE_TOKEN_RE, (_match, a, b) => {
+    const name = String(a || b || "").trim();
+    if (!usedVariables.includes(name)) usedVariables.push(name);
+    return values[name] || "";
+  });
+  const unresolved = findTemplateTokens(renderedBody);
+  if (unresolved.length > 0) {
+    return { ok: false, error: "unresolved_template_token", unresolvedTokens: unresolved };
+  }
+  return { ok: true, renderedBody, usedVariables, fallbacksUsed };
 }
 
 export function validateSource(value: unknown): { ok: true; source: Source } | {
@@ -234,6 +295,13 @@ async function getTemplate(templateId: string): Promise<Record<string, any> | nu
   return Array.isArray(rows) && rows.length > 0 ? rows[0] : null;
 }
 
+async function getAccountUsername(accountId: string): Promise<string> {
+  const rows = await supabaseJson(
+    `/rest/v1/ig_accounts?id=eq.${encodeURIComponent(accountId)}&select=username&limit=1`,
+  );
+  return Array.isArray(rows) && rows.length > 0 ? String(rows[0]?.username || "").trim() : "";
+}
+
 async function pendingQueueCount(accountId: string): Promise<number> {
   const res = await supabaseFetch(
     `/rest/v1/ig_dm_jobs?account_id=eq.${encodeURIComponent(accountId)}&dm_type=eq.outreach&status=in.(pending,reserved,running)&select=id`,
@@ -268,7 +336,7 @@ async function findExistingJob(
 async function ensureMessageResolvable(
   payload: Record<string, unknown>,
   settings: Record<string, any>,
-): Promise<{ ok: true; messageBody: string | null; templateId: string | null } | {
+): Promise<{ ok: true; bodyTemplate: string; templateId: string | null } | {
   ok: false;
   error: string;
 }> {
@@ -292,6 +360,10 @@ async function ensureMessageResolvable(
     if (!rawBody && !String(template.body || "").trim()) {
       return { ok: false, error: "template_body_empty" };
     }
+    const bodyTemplate = rawBody || String(template.body || "").trim();
+    const unknown = findTemplateTokens(bodyTemplate).filter((name) => !SUPPORTED_TEMPLATE_VARIABLES.has(name));
+    if (unknown.length > 0) return { ok: false, error: "unsupported_template_variable" };
+    return { ok: true, bodyTemplate, templateId };
   }
 
   if (!rawBody && !templateId) {
@@ -302,9 +374,15 @@ async function ensureMessageResolvable(
       return { ok: false, error: "default_outreach_template_invalid" };
     }
     if (!String(template.body || "").trim()) return { ok: false, error: "default_template_body_empty" };
+    const bodyTemplate = String(template.body || "").trim();
+    const unknown = findTemplateTokens(bodyTemplate).filter((name) => !SUPPORTED_TEMPLATE_VARIABLES.has(name));
+    if (unknown.length > 0) return { ok: false, error: "unsupported_template_variable" };
+    return { ok: true, bodyTemplate, templateId: defaultId };
   }
 
-  return { ok: true, messageBody: rawBody || null, templateId };
+  const unknown = findTemplateTokens(rawBody).filter((name) => !SUPPORTED_TEMPLATE_VARIABLES.has(name));
+  if (unknown.length > 0) return { ok: false, error: "unsupported_template_variable" };
+  return { ok: true, bodyTemplate: rawBody, templateId };
 }
 
 export function parseAllowedAccountIds(raw: string): string[] {
@@ -400,7 +478,8 @@ async function validateCommon(
     source: Source;
     campaignId: string | null;
     templateId: string | null;
-    messageBody: string | null;
+    bodyTemplate: string;
+    accountUsername: string;
     priority: number;
     metadata: Record<string, string>;
     settings: Record<string, any>;
@@ -432,6 +511,9 @@ async function validateCommon(
   const message = await ensureMessageResolvable({ ...payload, account_id: accountId }, settings);
   if (!message.ok) return { ok: false, error: message.error, status: 400 };
 
+  const accountUsername = await getAccountUsername(accountId);
+  if (!accountUsername) return { ok: false, error: "account_username_missing", status: 400 };
+
   const priorityRaw = payload.priority == null ? 0 : Number(payload.priority);
   if (!Number.isFinite(priorityRaw)) return { ok: false, error: "priority_invalid", status: 400 };
   const priority = Math.trunc(priorityRaw);
@@ -442,7 +524,8 @@ async function validateCommon(
     source: sourceResult.source,
     campaignId: campaignResult.value,
     templateId: message.templateId,
-    messageBody: message.messageBody,
+    bodyTemplate: message.bodyTemplate,
+    accountUsername,
     priority,
     metadata: metadataResult.metadata,
     settings,
@@ -480,10 +563,22 @@ async function enqueueOne(
   }
 
   const existing = await findExistingJob(common.accountId, usernameResult.username, common.campaignId);
+  const rendered = renderDmTemplate(common.bodyTemplate, {
+    recipientUsername: usernameResult.username,
+    recipientName: String(payload.recipient_name || payload.name || "").trim(),
+    accountUsername: common.accountUsername,
+  });
+  if (!rendered.ok) {
+    return {
+      recipient_username: usernameResult.username,
+      ok: false,
+      error: rendered.error,
+    };
+  }
   const rpcPayload = {
     p_account_id: common.accountId,
     p_recipient_username: usernameResult.username,
-    p_message_body: common.messageBody,
+    p_message_body: rendered.renderedBody,
     p_template_id: common.templateId,
     p_source: common.source,
     p_campaign_id: common.campaignId,

@@ -3094,6 +3094,117 @@ def persist_welcome_scan_anchor_gap(
     return row
 
 
+def get_dm_template_by_id(template_id: str, *, account_id: str | None = None) -> dict[str, Any] | None:
+    tid = str(template_id or "").strip()
+    if not tid:
+        return None
+    query = {
+        "select": "id,account_id,template_type,active,body,is_default",
+        "id": f"eq.{tid}",
+        "limit": "1",
+    }
+    if account_id:
+        query["account_id"] = f"eq.{str(account_id)}"
+    rows = _request_json("GET", "ig_dm_templates", query=query) or []
+    return rows[0] if isinstance(rows, list) and rows else None
+
+
+def get_default_dm_template(account_id: str, dm_type: str) -> dict[str, Any] | None:
+    aid = str(account_id or "").strip()
+    kind = str(dm_type or "").strip().lower()
+    if not aid or kind not in ("welcome", "outreach"):
+        return None
+    rows = _request_json(
+        "GET",
+        "ig_dm_templates",
+        query={
+            "select": "id,account_id,template_type,active,body,is_default",
+            "account_id": f"eq.{aid}",
+            "template_type": f"eq.{kind}",
+            "active": "eq.true",
+            "is_default": "eq.true",
+            "order": "created_at.asc",
+            "limit": "1",
+        },
+    ) or []
+    return rows[0] if isinstance(rows, list) and rows else None
+
+
+def get_account_username(account_id: str) -> str:
+    aid = str(account_id or "").strip()
+    if not aid:
+        return ""
+    rows = _request_json(
+        "GET",
+        "ig_accounts",
+        query={"select": "username", "id": f"eq.{aid}", "limit": "1"},
+    ) or []
+    if isinstance(rows, list) and rows:
+        return str(rows[0].get("username") or "").strip()
+    return ""
+
+
+def _resolve_dm_template_for_enqueue(
+    account_id: str,
+    *,
+    dm_type: str,
+    template_id: str | None,
+) -> dict[str, Any] | None:
+    tid = str(template_id or "").strip()
+    if tid:
+        return get_dm_template_by_id(tid, account_id=account_id)
+
+    settings = get_account_dm_settings(account_id) or {}
+    settings_key = "welcome_template_id" if dm_type == "welcome" else "default_outreach_template_id"
+    settings_template_id = str(settings.get(settings_key) or "").strip()
+    if settings_template_id:
+        return get_dm_template_by_id(settings_template_id, account_id=account_id)
+    return get_default_dm_template(account_id, dm_type)
+
+
+def _render_dm_message_body_for_enqueue(
+    account_id: str,
+    *,
+    recipient_username: str,
+    recipient_name: str | None,
+    account_username: str | None,
+    dm_type: str,
+    message_body: str | None,
+    template_id: str | None,
+) -> str | None:
+    from dm_template_renderer import has_unresolved_template_tokens, render_dm_template
+
+    raw_body = str(message_body or "").strip()
+    template: dict[str, Any] | None = None
+    if not raw_body:
+        template = _resolve_dm_template_for_enqueue(account_id, dm_type=dm_type, template_id=template_id)
+        if template:
+            if template.get("active") is not True:
+                raise RuntimeError("dm_template_render_failed:template_inactive")
+            template_type = str(template.get("template_type") or "").strip().lower()
+            if template_type and template_type != str(dm_type or "").strip().lower():
+                raise RuntimeError("dm_template_render_failed:template_type_mismatch")
+        raw_body = str((template or {}).get("body") or "").strip()
+    if not raw_body:
+        return message_body
+
+    if not has_unresolved_template_tokens(raw_body):
+        return raw_body
+
+    sender_username = str(account_username or "").strip() or get_account_username(account_id)
+    result = render_dm_template(
+        raw_body,
+        {
+            "recipient_username": recipient_username,
+            "recipient_name": recipient_name,
+            "account_username": sender_username,
+        },
+    )
+    if not result.ok:
+        raise RuntimeError(f"dm_template_render_failed:{result.reason}")
+    return result.rendered_body
+
+
 def enqueue_welcome_dm_job_if_eligible(
     account_id: str,
     follower_username: str,
@@ -3101,16 +3212,27 @@ def enqueue_welcome_dm_job_if_eligible(
     scan_run_id: str | None = None,
     template_id: str | None = None,
     message_body: str | None = None,
+    recipient_name: str | None = None,
+    account_username: str | None = None,
     priority: int = 10,
 ) -> dict[str, Any] | None:
     """RPC enqueue_welcome_dm_job_if_eligible (no DM send). Returns job row or None."""
+    rendered_body = _render_dm_message_body_for_enqueue(
+        account_id,
+        recipient_username=follower_username,
+        recipient_name=recipient_name,
+        account_username=account_username,
+        dm_type="welcome",
+        message_body=message_body,
+        template_id=template_id,
+    )
     row = call_rpc(
         "enqueue_welcome_dm_job_if_eligible",
         {
             "p_account_id": str(account_id),
             "p_follower_username": str(follower_username),
             "p_source_scan_run_id": scan_run_id,
-            "p_message_body": message_body,
+            "p_message_body": rendered_body,
             "p_template_id": template_id,
             "p_priority": int(priority),
         },
@@ -3129,18 +3251,29 @@ def enqueue_outreach_dm_job(
     *,
     message_body: str | None = None,
     template_id: str | None = None,
+    recipient_name: str | None = None,
+    account_username: str | None = None,
     source: str = "manual",
     campaign_id: str | None = None,
     priority: int = 0,
     metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """RPC enqueue_outreach_dm_job (no DM send). Returns job row or None."""
+    rendered_body = _render_dm_message_body_for_enqueue(
+        account_id,
+        recipient_username=recipient_username,
+        recipient_name=recipient_name,
+        account_username=account_username,
+        dm_type="outreach",
+        message_body=message_body,
+        template_id=template_id,
+    )
     row = call_rpc(
         "enqueue_outreach_dm_job",
         {
             "p_account_id": str(account_id),
             "p_recipient_username": str(recipient_username),
-            "p_message_body": message_body,
+            "p_message_body": rendered_body,
             "p_template_id": template_id,
             "p_source": str(source or "manual"),
             "p_campaign_id": campaign_id,

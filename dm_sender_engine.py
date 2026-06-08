@@ -1130,9 +1130,24 @@ def prepare_dm_sender_global_search_surface(
             error=str(e)[:200],
         )
 
-    quick_pre = is_followers_list_surface_quick(d, source_profile_username=src)
+    skip_followers_probe_for_outreach_restore = (
+        context == "dm_sender_post_job" and prefer_back_stack_to_search
+    )
+    quick_pre = False
     det_pre: dict[str, Any] = {}
-    if quick_pre:
+    if skip_followers_probe_for_outreach_restore:
+        log(
+            "info",
+            "dm_sender_post_job_followers_probe_skipped_outreach_restore",
+            context=context,
+            phase="pre_exit",
+            account_username=src or None,
+            prefer_back_stack_to_search=True,
+            reason="outreach_search_restore_no_followers_surface_expected",
+        )
+    else:
+        quick_pre = is_followers_list_surface_quick(d, source_profile_username=src)
+    if not skip_followers_probe_for_outreach_restore and quick_pre:
         log(
             "info",
             "dm_sender_post_job_followers_probe_full_check",
@@ -1142,7 +1157,7 @@ def prepare_dm_sender_global_search_surface(
             account_username=src or None,
         )
         det_pre, _ = detect_followers_list_screen_fresh(d, source_profile_username=src)
-    else:
+    elif not skip_followers_probe_for_outreach_restore:
         log(
             "info",
             "dm_sender_post_job_followers_probe_quick_false",
@@ -1175,9 +1190,21 @@ def prepare_dm_sender_global_search_surface(
                 continue
             break
 
-    quick_post_exit = is_followers_list_surface_quick(d, source_profile_username=src)
+    quick_post_exit = False
     det_post_exit: dict[str, Any] = {}
-    if quick_post_exit:
+    if skip_followers_probe_for_outreach_restore:
+        log(
+            "info",
+            "dm_sender_post_job_followers_probe_skipped_outreach_restore",
+            context=context,
+            phase="post_exit",
+            account_username=src or None,
+            prefer_back_stack_to_search=True,
+            reason="outreach_search_restore_no_followers_surface_expected",
+        )
+    else:
+        quick_post_exit = is_followers_list_surface_quick(d, source_profile_username=src)
+    if not skip_followers_probe_for_outreach_restore and quick_post_exit:
         log(
             "info",
             "dm_sender_post_job_followers_probe_full_check",
@@ -1189,7 +1216,7 @@ def prepare_dm_sender_global_search_surface(
         det_post_exit, _ = detect_followers_list_screen_fresh(
             d, source_profile_username=src
         )
-    else:
+    elif not skip_followers_probe_for_outreach_restore:
         log(
             "info",
             "dm_sender_post_job_followers_probe_quick_false",
@@ -2953,16 +2980,67 @@ def _dm_audit_non_text_action_candidates(d: u2.Device, *, caller: str) -> None:
             continue
 
 
+def _thread_snapshot_supports_composer_fast_path(
+    snap: dict[str, Any],
+    *,
+    dm_type: str,
+    thread_state: str,
+) -> tuple[bool, str]:
+    dm_type_norm = str(dm_type or "").strip().lower()
+    if dm_type_norm != "outreach":
+        return False, "dm_type_not_outreach"
+    if str(thread_state or "").strip() != "empty_new_thread":
+        return False, "thread_state_not_empty_new_thread"
+    if not isinstance(snap, dict) or not bool(snap):
+        return False, "thread_snapshot_missing"
+    if not bool(snap.get("composer_visible")):
+        return False, "composer_not_visible_in_thread_snapshot"
+    composer_signal = str(snap.get("composer_signal") or "")
+    if "resource_id_exact_composer_pkg" not in composer_signal:
+        return False, "composer_signal_not_exact_resource_id"
+    return True, "ok"
+
+
 def _resolve_dm_text_composer(
     d: u2.Device,
     *,
     pkg: str,
     username: str,
     caller: str,
+    dm_type: str = "",
+    thread_state: str = "",
+    thread_snapshot: dict[str, Any] | None = None,
 ) -> tuple[Any | None, str | None]:
     if _check_dm_sender_permission_blocker(d, username=username, context=caller):
         return None, "unexpected_permission_dialog"
-    _dm_audit_non_text_action_candidates(d, caller=caller)
+    snap = thread_snapshot if isinstance(thread_snapshot, dict) else {}
+    fast_path_ok, fast_path_reason = _thread_snapshot_supports_composer_fast_path(
+        snap,
+        dm_type=dm_type,
+        thread_state=thread_state,
+    )
+    if fast_path_ok:
+        log(
+            "info",
+            "dm_sender_composer_resolve_fast_path_from_thread_snapshot_used",
+            username=username,
+            caller=caller,
+            thread_state=thread_state,
+            composer_signal=str(snap.get("composer_signal") or ""),
+            dm_type=str(dm_type or ""),
+        )
+    else:
+        if str(dm_type or "").strip().lower() == "outreach":
+            log(
+                "info",
+                "dm_sender_composer_resolve_fast_path_rejected",
+                username=username,
+                caller=caller,
+                thread_state=thread_state,
+                dm_type=str(dm_type or ""),
+                reason=fast_path_reason,
+            )
+        _dm_audit_non_text_action_candidates(d, caller=caller)
     ed = _dm_find_focus_composer(d)
     if ed is None:
         log(
@@ -3008,6 +3086,61 @@ def _resolve_dm_text_composer(
     return ed2, None
 
 
+def _finalize_after_confirmed_outreach_send(
+    d: u2.Device,
+    username: str,
+    pkg: str,
+    *,
+    post_send_signal_reason: str,
+) -> dict[str, Any]:
+    t_total = time.perf_counter()
+    log("info", "dm_send_post_finalize_started", username=username)
+    log(
+        "info",
+        "dm_send_post_finalize_fast_path_used",
+        username=username,
+        reason="send_already_confirmed",
+        post_send_signal_reason=post_send_signal_reason,
+        dm_type="outreach",
+    )
+    t_prof = time.perf_counter()
+    ok_profile = bool(return_to_profile_from_dm(d, username, pkg))
+    back_prof_ms = (time.perf_counter() - t_prof) * 1000.0
+    if ok_profile:
+        log(
+            "info",
+            "dm_send_post_back_to_profile_ok",
+            username=username,
+            ms=round(back_prof_ms, 2),
+        )
+    else:
+        log(
+            "warning",
+            "dm_send_post_back_to_profile_failed",
+            username=username,
+            ms=round(back_prof_ms, 2),
+        )
+    total_ms = (time.perf_counter() - t_total) * 1000.0
+    cleanup = "profile_only_search_deferred" if ok_profile else "profile_failed_search_deferred"
+    log(
+        "info",
+        "dm_send_post_finalize_done",
+        username=username,
+        post_send_cleanup_reason=cleanup,
+        post_send_finalize_total_ms=round(total_ms, 2),
+        post_send_fast_finalize_used=True,
+    )
+    return {
+        "post_send_signal_ok": True,
+        "post_send_signal_reason": post_send_signal_reason,
+        "back_to_profile_ok": ok_profile,
+        "back_to_search_ok": False,
+        "post_send_cleanup_reason": cleanup,
+        "post_send_fast_finalize_used": True,
+        "post_send_finalize_total_ms": round(total_ms, 2),
+    }
+
+
 def _perform_real_welcome_dm_send(
     d: u2.Device,
     *,
@@ -3017,6 +3150,8 @@ def _perform_real_welcome_dm_send(
     pkg: str,
     post_send_nav: str = "search",
     source_profile_username: str = "",
+    dm_type: str = "welcome",
+    thread_snapshot: dict[str, Any] | None = None,
 ) -> tuple[bool, dict[str, Any], str | None]:
     """
     Type job.message_body, verify draft, tap Send, post-send finalize.
@@ -3034,6 +3169,18 @@ def _perform_real_welcome_dm_send(
 
     if not draft_text.strip():
         return False, {}, "empty_message_body"
+
+    from dm_template_renderer import has_unresolved_template_tokens
+
+    if has_unresolved_template_tokens(draft_text):
+        log(
+            "error",
+            "dm_sender_unresolved_template_token_blocked",
+            username=uname,
+            thread_state=thread_state,
+            message_len=len(draft_text),
+        )
+        return False, {}, "unresolved_template_token"
 
     if dm_thread_shows_outgoing_message(d, draft_text):
         log(
@@ -3061,7 +3208,13 @@ def _perform_real_welcome_dm_send(
     )
 
     _ed, focus_err = _resolve_dm_text_composer(
-        d, pkg=pkg, username=uname, caller="real_send"
+        d,
+        pkg=pkg,
+        username=uname,
+        caller="real_send",
+        dm_type=dm_type,
+        thread_state=thread_state,
+        thread_snapshot=thread_snapshot,
     )
     if focus_err:
         log(
@@ -3246,16 +3399,30 @@ def _perform_real_welcome_dm_send(
                 return True, send_out, "post_finalize_partial"
             return True, send_out, None
 
-        fin = finalize_after_real_send(
-            d,
-            uname,
-            pkg,
-            use_fast_reset_between_targets=False,
-            pre_send_composer_text_len=int(
-                send_out.get("composer_text_len_before_send") or 0
-            ),
-            restore_global_search=False,
+        post_send_signal_reason = str(send_out.get("post_send_signal_reason") or "")
+        use_outreach_fast_finalize = (
+            str(dm_type or "").strip().lower() == "outreach"
+            and thread_state == "empty_new_thread"
+            and post_send_signal_reason in {"composer_text_shortened", "composer_empty"}
         )
+        if use_outreach_fast_finalize:
+            fin = _finalize_after_confirmed_outreach_send(
+                d,
+                uname,
+                pkg,
+                post_send_signal_reason=post_send_signal_reason,
+            )
+        else:
+            fin = finalize_after_real_send(
+                d,
+                uname,
+                pkg,
+                use_fast_reset_between_targets=False,
+                pre_send_composer_text_len=int(
+                    send_out.get("composer_text_len_before_send") or 0
+                ),
+                restore_global_search=False,
+            )
         send_out["post_finalize"] = fin
         nav_ok = bool(fin.get("back_to_profile_ok"))
         if not nav_ok:
@@ -3332,6 +3499,7 @@ def execute_dm_job_real_send(
     navigation_finished = False
     send_confirmed = False
     job_terminal_handled = False
+    post_send_fast_finalize_used = False
 
     try:
         thread_state, nav_ok = _navigate_to_recipient_dm_thread(
@@ -3411,6 +3579,11 @@ def execute_dm_job_real_send(
                     message_body=message_body,
                     thread_state=thread_state,
                     pkg=pkg,
+                    dm_type=dm_type,
+                    thread_snapshot=snap if isinstance(snap, dict) else None,
+                )
+                post_send_fast_finalize_used = bool(
+                    (send_out.get("post_finalize") or {}).get("post_send_fast_finalize_used")
                 )
                 if sent_ok and fail_reason in (None, "post_finalize_partial"):
                     send_method = "instagram_send_ui"
@@ -3491,7 +3664,7 @@ def execute_dm_job_real_send(
             _set_dm_sender_post_job_restore(
                 post_job_restore_mode="skipped_final_job",
                 post_job_restore_final_mode="skipped_final_job",
-                post_job_restore_final_reason="final_outreach_job",
+                post_job_restore_final_reason="final_job_no_restore_required",
             )
             log(
                 "info",
@@ -3500,6 +3673,7 @@ def execute_dm_job_real_send(
                 recipient_username=recipient,
                 dm_type=dm_type,
             )
+            post_job_restore = _get_dm_sender_post_job_restore()
         else:
             log(
                 "info",
@@ -3702,6 +3876,7 @@ def execute_dm_job_real_send(
         "typing_precheck_edittext_reused": bool(
             nav_timings.get("typing_precheck_edittext_reused")
         ),
+        "post_send_fast_finalize_used": bool(post_send_fast_finalize_used),
         "post_job_clear_previous_username_ms": float(
             nav_timings.get("post_job_clear_previous_username_ms") or 0.0
         ),
@@ -3799,6 +3974,7 @@ def run_dm_sender_send(
         "fast_path_mode": "",
         "fast_path_parent_proof_used": False,
         "typing_precheck_edittext_reused": False,
+        "post_send_fast_finalize_used": False,
     }
 
     log(
@@ -4000,6 +4176,8 @@ def run_dm_sender_send(
             summary["fast_path_parent_proof_used"] = True
         if bool(last_result.get("typing_precheck_edittext_reused")):
             summary["typing_precheck_edittext_reused"] = True
+        if bool(last_result.get("post_send_fast_finalize_used")):
+            summary["post_send_fast_finalize_used"] = True
         last_recipient_username = recipient
         outcome = str(last_result.get("outcome") or "")
         if outcome == "sent":
