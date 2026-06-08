@@ -1483,10 +1483,26 @@ def _follow_to_unfollow_real_hard_max() -> int:
     return max(0, min(raw, 10))
 
 
+def _h3_nonnegative_int(value: Any, default: int = 0) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return max(0, int(default))
+
+
+def _global_unfollow_session_real_max() -> int:
+    return _h3_nonnegative_int(
+        getattr(config, "UNFOLLOW_SESSION_REAL_ACTION_MAX_PER_RUN", 1),
+        1,
+    )
+
+
 def _resolve_follow_to_unfollow_runtime_cap(account_id: str | None = None) -> dict[str, Any]:
     requested = _follow_to_unfollow_real_max_actions_requested()
     hard_max = _follow_to_unfollow_real_hard_max()
-    env_effective = max(0, min(int(requested), hard_max))
+    h3_env_effective = max(0, min(int(requested), hard_max))
+    global_unfollow_env_cap = _global_unfollow_session_real_max()
+    env_effective = min(h3_env_effective, global_unfollow_env_cap)
     if not account_id:
         return {
             "runtime_cap": env_effective,
@@ -1494,15 +1510,48 @@ def _resolve_follow_to_unfollow_runtime_cap(account_id: str | None = None) -> di
             "runtime_cap_mode": "env_fallback",
             "runtime_cap_source": "env_fallback_unfollow_runtime_cap",
             "env_fallback_used": True,
+            "h3_requested_cap": requested,
+            "h3_hard_cap": hard_max,
+            "h3_env_cap": h3_env_effective,
+            "global_unfollow_env_cap": global_unfollow_env_cap,
+            "source": "min(h3_requested,h3_hard,global_unfollow_env)",
         }
 
     settings = load_unfollow_settings(str(account_id), ensure_row=False)
-    return resolve_unfollow_runtime_cap(
+    runtime = resolve_unfollow_runtime_cap(
         db_unfollow_per_session_limit=getattr(settings, "session_limit", 0),
         runtime_cap_mode=getattr(settings, "runtime_cap_mode", "prod_normal"),
         runtime_safety_cap=getattr(settings, "runtime_safety_cap", None),
         env_real_action_max_per_run=env_effective,
     )
+    db_day_limit = _h3_nonnegative_int(getattr(settings, "day_limit", 0), 0)
+    try:
+        unfollows_done_today = supabase_client.count_successful_unfollows_today(str(account_id))
+    except Exception:
+        unfollows_done_today = db_day_limit
+    day_remaining = max(0, db_day_limit - int(unfollows_done_today or 0))
+    domain_cap = _h3_nonnegative_int(runtime.get("runtime_cap"), 0)
+    effective = min(domain_cap, env_effective, day_remaining)
+    out = dict(runtime)
+    out.update(
+        {
+            "runtime_cap": effective,
+            "runtime_hard_cap": min(
+                _h3_nonnegative_int(runtime.get("runtime_hard_cap"), domain_cap),
+                hard_max,
+                global_unfollow_env_cap,
+            ),
+            "h3_requested_cap": requested,
+            "h3_hard_cap": hard_max,
+            "h3_env_cap": h3_env_effective,
+            "global_unfollow_env_cap": global_unfollow_env_cap,
+            "db_unfollow_per_day_limit": db_day_limit,
+            "unfollows_done_today": int(unfollows_done_today or 0),
+            "unfollow_day_remaining_today": day_remaining,
+            "source": "min(domain_runtime,h3_requested,h3_hard,global_unfollow_env,db_day_remaining)",
+        }
+    )
+    return out
 
 
 def _follow_to_unfollow_real_max_actions_effective(account_id: str | None = None) -> int:
