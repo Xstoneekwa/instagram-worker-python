@@ -3,6 +3,7 @@ from __future__ import annotations
 import types
 import unittest
 
+from unfollow_session_orchestrator import _effective_real_action_max_per_run
 from runtime_caps import (
     resolve_follow_runtime_limits,
     resolve_unfollow_runtime_cap,
@@ -109,6 +110,21 @@ class RuntimeCapsTest(unittest.TestCase):
         self.assertEqual(out["runtime_cap"], 1)
         self.assertEqual(out["runtime_cap_mode"], "mini_run")
         self.assertTrue(out["limited_by_runtime_cap"])
+
+    def test_unfollow_effective_cap_honors_env_hard_cap_in_prod_normal(self) -> None:
+        settings = types.SimpleNamespace(
+            session_limit=50,
+            runtime_cap_mode="prod_normal",
+            runtime_safety_cap=None,
+        )
+
+        out = _effective_real_action_max_per_run(
+            settings,
+            env_hard_cap=1,
+            day_remaining=200,
+        )
+
+        self.assertEqual(out, 1)
 
 
 if __name__ == "__main__":

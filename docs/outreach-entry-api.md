@@ -624,10 +624,12 @@ Feature flags are OFF by default:
 - `ACCOUNT_ASSIGNMENT_DISPATCH_LOG_SENSITIVE=false`
 
 When disabled, the worker keeps the legacy `DEVICE_SERIAL` / default ADB
-behavior. When enabled for `outreach_session`, the worker reads the latest
-`reserved` or `active` assignment for the target account, validates that its
-`assignment_type` is `outreach_only` or `full_cycle`, and uses the assignment
-device `adb_serial` as a local variable before `connect_device(...)`.
+behavior. When enabled for a supported run type, the worker reads the latest
+`reserved` or `active` assignment for the target account, validates the
+assignment compatibility, and uses the assignment device `adb_serial` as a local
+variable before `connect_device(...)`. `outreach_session` accepts
+`outreach_only` or `full_cycle`; `unfollow_session` is accepted only for
+`full_cycle` as a controlled full-cycle sub-flow.
 
 Entry 2C-3 v1 deliberately does not:
 
@@ -635,8 +637,7 @@ Entry 2C-3 v1 deliberately does not:
 - release assignments at session end;
 - implement the business 6h session guard or phone rest runtime;
 - provision credentials, auto-login, relogin, 2FA, or checkpoint flows;
-- dispatch `account_session`, unfollow, welcome, or follow sessions from
-  assignments;
+- dispatch unsupported session types from assignments;
 - change sender/orchestrator behavior or quotas.
 
 Logs use stable events such as `account_assignment_dispatch_resolved`,

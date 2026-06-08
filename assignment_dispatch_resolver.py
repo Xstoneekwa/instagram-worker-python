@@ -16,6 +16,7 @@ import supabase_client
 SUPPORTED_RUN_ASSIGNMENT_TYPES: dict[str, set[str]] = {
     "outreach_session": {"outreach_only", "full_cycle"},
     "account_session": {"full_cycle"},
+    "unfollow_session": {"full_cycle"},
     "dm_welcome_baseline": {"full_cycle"},
     "dm_welcome_session_send": {"full_cycle"},
     "login_provisioning": {"full_cycle"},

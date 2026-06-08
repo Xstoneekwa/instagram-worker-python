@@ -111,12 +111,16 @@
 - **Caps produit rappelés** : V1 safe Outreach 10 DMs/jour/compte; après 3-5
   jours propres 20/jour; après validation sans restriction 30-40/jour; hard cap
   prudent 50-60/jour max pour un compte solide.
-- **Prochain chantier : Unfollow** : avant tout run réel, refaire un preflight
-  strict `unfollow_enabled`, `ig_account_unfollow_settings`, limite effective
-  `min(db_unfollow_per_session_limit, UNFOLLOW_SESSION_REAL_ACTION_MAX_PER_RUN)`,
-  candidats éligibles, absence de runs/requests/live views actifs et assignment
-  device/package OK. Si `unfollow_effective_limits_resolved` n'est pas loggé,
-  ajouter ce patch minimal avant run réel.
+- **Unfollow standalone physique validé** : `i_m_your_traker` sur
+  `RFGL145VCKE` / `com.instagram.androie`, mode `unfollow-any`, a validé
+  cap 1 réel (`30b39e54`, target `pauline.hphotographie`) puis cap 2 réel
+  (`4c82f481`, targets `pause_energie.lise`, `facchinettilaurent`).
+  `unfollow_effective_limits_resolved` respecte
+  `min(db_session,env_hard_cap,runtime_mode_cap,db_day_remaining)`, le dispatcher
+  accepte `full_cycle/full_cycle_6h -> unfollow_session`, et le dry-run probe
+  route bien `unfollow-any` vers `_evaluate_visible_unfollow_any_with_session_cache`.
+  Le recoverable `heureusecoincidence/actions_sheet_signals_missing` n'a pas été
+  persisté comme succès; `return_to_following_list_ok=true`.
 
 ## État chantier follow — 2026-06-07
 

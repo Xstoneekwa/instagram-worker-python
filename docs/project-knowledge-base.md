@@ -1989,7 +1989,7 @@ monter si le restore inter-job job1/job2 fait un premier back-stack timeout avan
 le retry hardware-back réussi. Le champ `total_post_job_ms` mesure donc surtout
 restore + teardown inter-job, pas seulement le finalize post-send.
 
-### Next checkpoint: Unfollow
+### Checkpoint: Unfollow standalone physique
 
 Ordre de validation demandé :
 
@@ -2011,10 +2011,28 @@ Avant tout run réel Unfollow, vérifier en preflight strict :
   Welcome/Follow/Outreach;
 - assignment/device/package/ADBKeyboard OK.
 
-Si le log `unfollow_effective_limits_resolved` n'existe pas encore avec
-`db_unfollow_per_session_limit`, `env_real_action_max_per_run`,
-`effective_real_action_max_per_run` et `source="min(db,env_hard_cap)"`, ajouter
-ce patch minimal avant tout run réel.
+État validé le 2026-06-08 :
+
+- compte `i_m_your_traker`, assignment `full_cycle/full_cycle_6h`, device
+  `RFGL145VCKE`, package `com.instagram.androie`;
+- `full_cycle` autorise maintenant `unfollow_session` dans le dispatcher sans
+  affaiblir `outreach_only`, device/package/account ni les gates existants;
+- cap effectif Unfollow =
+  `min(db_session,env_hard_cap,runtime_mode_cap,db_day_remaining)`;
+- `unfollow-any` route le dry-run/probe vers
+  `_evaluate_visible_unfollow_any_with_session_cache`, pas vers l'évaluateur
+  strict DB;
+- cap 1 réel `30b39e54-0717-4a9a-91ba-a16b6b87888d`: completed, 1/1
+  `pauline.hphotographie`, DB persistée;
+- cap 2 réel `4c82f481-8c42-46d2-9894-b460250d40ff`: completed, 2/2
+  `pause_energie.lise` + `facchinettilaurent`, DB persistée;
+- recoverable `heureusecoincidence/actions_sheet_signals_missing` correctement
+  non persisté comme succès; session continuée et retour Following OK.
+
+Prochaine étape après checkpoint : auditer `Unfollow -> Outreach` sans run réel,
+en vérifiant hooks existants, source recipients, idempotence jobs Outreach, caps
+Outreach restants, no-concurrency et compatibilité assignment
+`full_cycle -> unfollow_session/outreach_session`.
 
 Device Heartbeat Publisher V1:
 

@@ -171,7 +171,7 @@ def _effective_real_action_max_per_run(
         runtime_safety_cap=getattr(settings, "runtime_safety_cap", None),
         env_real_action_max_per_run=env_cap,
     )
-    caps = [db_limit, int(runtime_cap.get("runtime_cap") or 0)]
+    caps = [db_limit, env_cap, int(runtime_cap.get("runtime_cap") or 0)]
     if day_remaining is not None:
         caps.append(max(0, int(day_remaining)))
     return min(caps)
@@ -434,6 +434,41 @@ def _visible_any_summary_fields(visible_eval: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _evaluate_visible_rows_for_unfollow_probe(
+    aid: str,
+    uname: str,
+    rows: list[dict[str, Any]],
+    *,
+    settings: Any,
+    row_cache: dict[str, dict[str, Any] | None],
+) -> tuple[dict[str, Any], dict[str, dict[str, Any]], dict[str, Any], bool]:
+    any_mode_active = str(getattr(settings, "mode", "") or "") == UNFOLLOW_MODE_ANY
+    if any_mode_active:
+        visible_eval = _evaluate_visible_unfollow_any_with_session_cache(
+            aid,
+            rows,
+            account_username=uname,
+            row_cache=row_cache,
+            completed_usernames=set(),
+        )
+        visible_candidates = _visible_candidates_by_username(visible_eval)
+        return visible_eval, visible_candidates, _visible_any_summary_fields(visible_eval), True
+
+    visible_usernames = [str(row.get("username") or "") for row in rows]
+    visible_eval = _evaluate_visible_unfollow_with_session_cache(
+        aid,
+        visible_usernames,
+        settings=settings,
+        row_cache=row_cache,
+    )
+    return (
+        visible_eval,
+        _visible_candidates_by_username(visible_eval),
+        _visible_eligibility_summary_fields(visible_eval),
+        False,
+    )
+
+
 def _evaluate_visible_unfollow_with_session_cache(
     aid: str,
     visible_usernames: list[str],
@@ -499,6 +534,14 @@ def _evaluate_visible_unfollow_any_with_session_cache(
     completed_usernames: set[str],
 ) -> dict[str, Any]:
     keys = _visible_username_keys([str(row.get("username") or "") for row in rows])
+    log(
+        "info",
+        "unfollow_any_visible_candidate_evaluation_started",
+        account_id=aid,
+        account_username=account_username,
+        visible_usernames_count=len(keys),
+        completed_usernames_count=len(completed_usernames),
+    )
     missing = [key for key in keys if key not in row_cache]
     cache_hits = len(keys) - len(missing)
 
@@ -549,6 +592,23 @@ def _evaluate_visible_unfollow_any_with_session_cache(
 
         if reject_reason:
             skip_counts[reject_reason] = int(skip_counts.get(reject_reason, 0)) + 1
+            reject_event = {
+                "own_account": "unfollow_any_reject_own_account",
+                "already_completed_in_run": "unfollow_any_session_cache_skip",
+                "row_cta_follow": "unfollow_any_reject_row_cta_follow",
+                "row_cta_follow_back": "unfollow_any_reject_row_cta_follow_back",
+            }.get(reject_reason)
+            if reject_event:
+                log(
+                    "info",
+                    reject_event,
+                    username=username or key,
+                    username_normalized=key,
+                    row_index=row_index,
+                    row_cta_class=row_cta_class,
+                    interaction_row_id=interaction_row_id,
+                    reject_reason=reject_reason,
+                )
             if reject_reason == "whitelist":
                 whitelist_skips += 1
                 log(
@@ -653,6 +713,22 @@ def _evaluate_visible_unfollow_any_with_session_cache(
         visible_eligibility_lookup_ms=lookup_ms,
         visible_eligibility_eval_ms=eval_ms,
     )
+    if candidates:
+        log(
+            "info",
+            "unfollow_any_visible_candidate_found",
+            account_id=aid,
+            visible_eligible_matches_count=len(candidates),
+            visible_eligible_matches_usernames=out["visible_eligible_matches_usernames"][:50],
+        )
+    else:
+        log(
+            "info",
+            "unfollow_any_visible_candidate_none_found",
+            account_id=aid,
+            visible_eligibility_lookup_count=out["visible_eligibility_lookup_count"],
+            visible_eligibility_skip_counts=skip_counts,
+        )
     return out
 
 
@@ -1867,7 +1943,7 @@ def run_unfollow_session(
         runtime_mode_cap=int(runtime_cap_resolution.get("runtime_cap") or 0),
         effective_real_action_max_per_run=real_action_max,
         source_day_counter="ig_interacted_users.unfollowed_at",
-        source="min(db_session,runtime_mode_cap,db_day_remaining)",
+        source="min(db_session,env_hard_cap,runtime_mode_cap,db_day_remaining)",
     )
     plan = plan_unfollow_targets(aid, settings=settings)
     planned_usernames = _planned_username_set(plan)
@@ -2077,15 +2153,15 @@ def run_unfollow_session(
             t0=t0,
         )
 
-    visible_usernames = [str(row.get("username") or "") for row in rows]
-    visible_eval = _evaluate_visible_unfollow_with_session_cache(
-        aid,
-        visible_usernames,
-        settings=settings,
-        row_cache=visible_eligibility_row_cache,
+    visible_eval, visible_candidates_by_username, visible_eligibility_fields, any_mode_probe_active = (
+        _evaluate_visible_rows_for_unfollow_probe(
+            aid,
+            uname,
+            rows,
+            settings=settings,
+            row_cache=visible_eligibility_row_cache,
+        )
     )
-    visible_candidates_by_username = _visible_candidates_by_username(visible_eval)
-    visible_eligibility_fields = _visible_eligibility_summary_fields(visible_eval)
     harvest_fields = {
         **harvest_fields,
         **visible_eligibility_fields,
@@ -2142,7 +2218,29 @@ def run_unfollow_session(
             cta_text=str(target_row.get("cta_text") or "")[:80],
         )
     else:
-        target_row, selection_reason = _select_probe_target_row(rows, planned_usernames)
+        if any_mode_probe_active:
+            selection_t0 = time.perf_counter()
+            target_row, selection_reason = _select_visible_any_target_row(
+                rows,
+                visible_candidates_by_username,
+                completed_usernames=set(),
+            )
+            harvest_fields["visible_target_selection_ms"] = round(
+                (time.perf_counter() - selection_t0) * 1000.0,
+                2,
+            )
+            if target_row is None:
+                summary = {
+                    **base_summary,
+                    **harvest_fields,
+                    "status": "no_visible_eligible_unfollow_target",
+                    "failure_reason": "unfollow_any_no_safe_candidate",
+                    "total_ms": round((time.perf_counter() - t0) * 1000.0, 2),
+                }
+                _emit_summary(summary)
+                return 0
+        else:
+            target_row, selection_reason = _select_probe_target_row(rows, planned_usernames)
         if target_row is None:
             summary = {
                 **base_summary,
@@ -2154,6 +2252,18 @@ def run_unfollow_session(
             _emit_summary(summary)
             return 1
         target_username = str(target_row.get("username") or "")
+        if any_mode_probe_active:
+            cand = visible_candidates_by_username.get(normalize_unfollow_username(target_username)) or {}
+            log(
+                "info",
+                "unfollow_any_visible_candidate_selected",
+                username=target_username,
+                username_normalized=normalize_unfollow_username(target_username),
+                row_index=int(target_row.get("row_index") or 0),
+                selection_reason=selection_reason,
+                row_cta_class=str(target_row.get("row_cta_class") or ""),
+                interaction_row_id=str(cand.get("interaction_row_id") or ""),
+            )
         log(
             "info",
             "unfollow_probe_target_row_selected",
