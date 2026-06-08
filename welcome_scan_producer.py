@@ -6,6 +6,7 @@ No DM UI, no thread open, no send.
 
 from __future__ import annotations
 
+import os
 import time
 import uuid
 from typing import Any, Literal
@@ -51,6 +52,15 @@ def _as_nonnegative_int(value: Any, default: int = 0) -> int:
         return max(0, int(default))
 
 
+def _explicit_welcome_send_hard_cap() -> tuple[bool, int]:
+    if "WELCOME_SESSION_SEND_MAX_JOBS" not in os.environ:
+        return False, 0
+    return True, _as_nonnegative_int(
+        getattr(config, "WELCOME_SESSION_SEND_MAX_JOBS", os.environ.get("WELCOME_SESSION_SEND_MAX_JOBS")),
+        0,
+    )
+
+
 def _emit_run_summary(**kwargs: Any) -> None:
     global _LAST_WELCOME_SCAN_SUMMARY
     _LAST_WELCOME_SCAN_SUMMARY = dict(kwargs)
@@ -93,6 +103,8 @@ def run_welcome_scan_producer(
     total_dm_sent_today = 0
     welcome_day_remaining_today = 10
     total_dm_day_remaining_today = 10
+    welcome_send_hard_cap_present = False
+    welcome_send_hard_cap = 0
 
     screens_scanned = 0
     scrolls_done = 0
@@ -140,6 +152,8 @@ def run_welcome_scan_producer(
             total_dm_day_remaining_today=total_dm_day_remaining_today,
             effective_welcome_scan_cap=session_candidate_attempt_cap,
             effective_welcome_sent_cap=session_sent_cap,
+            welcome_send_hard_cap_present=welcome_send_hard_cap_present,
+            welcome_send_hard_cap=welcome_send_hard_cap if welcome_send_hard_cap_present else None,
             candidate_attempt_cap=session_candidate_attempt_cap,
             configured_candidate_attempt_cap=configured_candidate_attempt_cap,
             screens_scanned=screens_scanned,
@@ -212,6 +226,9 @@ def run_welcome_scan_producer(
         welcome_day_remaining_today,
         total_dm_day_remaining_today,
     )
+    welcome_send_hard_cap_present, welcome_send_hard_cap = _explicit_welcome_send_hard_cap()
+    if welcome_send_hard_cap_present:
+        session_sent_cap = min(session_sent_cap, welcome_send_hard_cap)
     configured_candidate_attempt_cap = _as_nonnegative_int(
         getattr(config, "WELCOME_SCAN_CANDIDATE_ATTEMPT_CAP", 3),
         3,
@@ -222,6 +239,11 @@ def run_welcome_scan_producer(
         session_sent_cap,
         configured_candidate_attempt_cap,
     )
+    if welcome_send_hard_cap_present:
+        session_candidate_attempt_cap = min(
+            session_candidate_attempt_cap,
+            welcome_send_hard_cap,
+        )
     log(
         "info",
         "welcome_scan_effective_limits_resolved",
@@ -236,7 +258,11 @@ def run_welcome_scan_producer(
         total_dm_day_remaining_today=total_dm_day_remaining_today,
         effective_welcome_scan_cap=session_candidate_attempt_cap,
         effective_welcome_sent_cap=session_sent_cap,
-        source="min(db_session,db_day_remaining,total_dm_day_remaining)",
+        welcome_send_hard_cap_present=welcome_send_hard_cap_present,
+        welcome_send_hard_cap=welcome_send_hard_cap if welcome_send_hard_cap_present else None,
+        source="min(db_session,db_day_remaining,total_dm_day_remaining,env_hard_cap)"
+        if welcome_send_hard_cap_present
+        else "min(db_session,db_day_remaining,total_dm_day_remaining)",
     )
     log(
         "info",
@@ -246,7 +272,11 @@ def run_welcome_scan_producer(
         sent_cap=session_sent_cap,
         candidate_attempt_cap=session_candidate_attempt_cap,
         configured_candidate_attempt_cap=configured_candidate_attempt_cap,
-        source="max(sent_cap,config.WELCOME_SCAN_CANDIDATE_ATTEMPT_CAP)",
+        welcome_send_hard_cap_present=welcome_send_hard_cap_present,
+        welcome_send_hard_cap=welcome_send_hard_cap if welcome_send_hard_cap_present else None,
+        source="min(max(sent_cap,config.WELCOME_SCAN_CANDIDATE_ATTEMPT_CAP),env_hard_cap)"
+        if welcome_send_hard_cap_present
+        else "max(sent_cap,config.WELCOME_SCAN_CANDIDATE_ATTEMPT_CAP)",
     )
 
     if not welcome_enabled:
@@ -423,7 +453,12 @@ def run_welcome_scan_producer(
                     if (
                         str(row.get("welcome_dm_status") or "") == "pending"
                         and pending_job
-                        and jobs_enqueued_count < session_candidate_attempt_cap
+                        and jobs_enqueued_count
+                        < (
+                            session_sent_cap
+                            if welcome_send_hard_cap_present
+                            else session_candidate_attempt_cap
+                        )
                     ):
                         jobs_enqueued_count += 1
                         jid = str(pending_job.get("id") or "")
@@ -525,6 +560,18 @@ def run_welcome_scan_producer(
                         jobs_enqueued_count=jobs_enqueued_count,
                     )
                     break
+                if welcome_send_hard_cap_present and jobs_enqueued_count >= session_sent_cap:
+                    if stop_reason is None:
+                        stop_reason = "sent_cap_reached"
+                    log(
+                        "info",
+                        "welcome_scan_sent_cap_reached",
+                        account_id=aid,
+                        sent_cap=session_sent_cap,
+                        candidate_attempt_cap=session_candidate_attempt_cap,
+                        jobs_enqueued_count=jobs_enqueued_count,
+                    )
+                    break
                 if enqueue_blocked_global:
                     jobs_not_enqueued_count += 1
                     log(
@@ -542,9 +589,21 @@ def run_welcome_scan_producer(
                         scan_run_id=scan_run_id,
                         template_id=welcome_template_id,
                         message_body=None,
+                        account_username=uname,
                     )
                 except RuntimeError as e:
                     err = str(e)
+                    if "dm_template_render_failed" in err.lower():
+                        enqueue_blocked_global = True
+                        enqueue_block_reason = "welcome_template_render_failed"
+                        jobs_not_enqueued_count += 1
+                        log(
+                            "error",
+                            "welcome_scan_enqueue_failed_template_render",
+                            account_id=aid,
+                            reason=err[:160],
+                        )
+                        continue
                     if "no welcome message_body or template" in err.lower():
                         enqueue_blocked_global = True
                         enqueue_block_reason = "no_welcome_template"

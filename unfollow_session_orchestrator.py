@@ -559,6 +559,7 @@ def _evaluate_visible_unfollow_any_with_session_cache(
         "invalid_username": 0,
         "own_account": 0,
         "already_completed_in_run": 0,
+        "already_unfollowed": 0,
         "row_cta_follow": 0,
         "row_cta_follow_back": 0,
         "whitelist": 0,
@@ -589,12 +590,15 @@ def _evaluate_visible_unfollow_any_with_session_cache(
             reject_reason = "row_cta_follow_back"
         elif isinstance(db_row, dict) and bool(db_row.get("whitelist_protected")):
             reject_reason = "whitelist"
+        elif isinstance(db_row, dict) and db_row.get("unfollowed_at"):
+            reject_reason = "already_unfollowed"
 
         if reject_reason:
             skip_counts[reject_reason] = int(skip_counts.get(reject_reason, 0)) + 1
             reject_event = {
                 "own_account": "unfollow_any_reject_own_account",
                 "already_completed_in_run": "unfollow_any_session_cache_skip",
+                "already_unfollowed": "unfollow_any_visible_stale_already_unfollowed_skip",
                 "row_cta_follow": "unfollow_any_reject_row_cta_follow",
                 "row_cta_follow_back": "unfollow_any_reject_row_cta_follow_back",
             }.get(reject_reason)
@@ -607,6 +611,18 @@ def _evaluate_visible_unfollow_any_with_session_cache(
                     row_index=row_index,
                     row_cta_class=row_cta_class,
                     interaction_row_id=interaction_row_id,
+                    reject_reason=reject_reason,
+                )
+            if reject_reason == "already_unfollowed":
+                log(
+                    "info",
+                    "unfollow_any_visible_following_but_db_already_unfollowed",
+                    username=username or key,
+                    username_normalized=key,
+                    row_index=row_index,
+                    row_cta_class=row_cta_class,
+                    interaction_row_id=interaction_row_id,
+                    unfollowed_at=(db_row or {}).get("unfollowed_at") if isinstance(db_row, dict) else None,
                     reject_reason=reject_reason,
                 )
             if reject_reason == "whitelist":
@@ -646,17 +662,6 @@ def _evaluate_visible_unfollow_any_with_session_cache(
 
         if db_row is None:
             rows_without_history += 1
-        elif isinstance(db_row, dict) and db_row.get("unfollowed_at"):
-            log(
-                "info",
-                "unfollow_any_visible_following_but_db_already_unfollowed",
-                username=username or key,
-                username_normalized=key,
-                row_index=row_index,
-                row_cta_class=row_cta_class,
-                interaction_row_id=interaction_row_id,
-                unfollowed_at=db_row.get("unfollowed_at"),
-            )
 
         candidate = {
             "username": username or key,

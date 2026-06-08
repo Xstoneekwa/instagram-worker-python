@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -13,6 +14,8 @@ class WelcomeScanAttemptCapTest(unittest.TestCase):
         known_map: dict[str, dict],
         rows: list[dict],
         attempt_cap: int = 2,
+        welcome_send_max_jobs_env: int | None = None,
+        db_welcome_per_session_limit: int = 1,
     ) -> tuple[int, dict, MagicMock]:
         enqueue_mock = MagicMock(
             side_effect=lambda _aid, username, **_kwargs: {
@@ -21,13 +24,23 @@ class WelcomeScanAttemptCapTest(unittest.TestCase):
             }
         )
         device = MagicMock()
+        env_patch = {}
+        if welcome_send_max_jobs_env is not None:
+            env_patch["WELCOME_SESSION_SEND_MAX_JOBS"] = str(welcome_send_max_jobs_env)
         with (
+            patch.dict(os.environ, env_patch, clear=True),
             patch.object(scan.config, "WELCOME_SCAN_CANDIDATE_ATTEMPT_CAP", attempt_cap, create=True),
+            patch.object(
+                scan.config,
+                "WELCOME_SESSION_SEND_MAX_JOBS",
+                welcome_send_max_jobs_env if welcome_send_max_jobs_env is not None else 3,
+                create=True,
+            ),
             patch.object(scan.supabase_client, "ensure_account_dm_settings", return_value={
                 "welcome_enabled": True,
                 "welcome_baseline_completed_at": "2026-06-08T08:48:09Z",
                 "welcome_template_id": "template-1",
-                "welcome_per_session_limit": 1,
+                "welcome_per_session_limit": db_welcome_per_session_limit,
                 "welcome_per_day_limit": 10,
                 "total_dm_per_day_limit": 40,
             }),
@@ -71,11 +84,61 @@ class WelcomeScanAttemptCapTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(summary["effective_welcome_sent_cap"], 1)
         self.assertEqual(summary["candidate_attempt_cap"], 2)
+        self.assertFalse(summary["welcome_send_hard_cap_present"])
         self.assertEqual(summary["jobs_enqueued_count"], 2)
         self.assertEqual(
             summary["new_follower_usernames_enqueued"],
             ["pmwzstella", "espehair"],
         )
+        self.assertEqual(enqueue_mock.call_count, 2)
+
+    def test_explicit_welcome_send_hard_cap_one_limits_scan_enqueue_to_one(self) -> None:
+        rows = [
+            {"username": "pmwzstella", "row_index": 0, "screen_index": 0, "bounds": {"left": 1, "top": 1, "right": 2, "bottom": 2}},
+            {"username": "espehair", "row_index": 1, "screen_index": 0, "bounds": {"left": 1, "top": 3, "right": 2, "bottom": 4}},
+            {"username": "mini_durable", "row_index": 2, "screen_index": 0, "bounds": {"left": 1, "top": 5, "right": 2, "bottom": 6}},
+        ]
+
+        code, summary, enqueue_mock = self._run_scan(
+            known_map={},
+            rows=rows,
+            attempt_cap=10,
+            welcome_send_max_jobs_env=1,
+            db_welcome_per_session_limit=10,
+        )
+
+        self.assertEqual(code, 0)
+        self.assertTrue(summary["welcome_send_hard_cap_present"])
+        self.assertEqual(summary["welcome_send_hard_cap"], 1)
+        self.assertEqual(summary["effective_welcome_sent_cap"], 1)
+        self.assertEqual(summary["candidate_attempt_cap"], 1)
+        self.assertEqual(summary["jobs_enqueued_count"], 1)
+        self.assertEqual(summary["new_follower_usernames_enqueued"], ["pmwzstella"])
+        self.assertEqual(summary["stop_reason"], "candidate_attempt_cap_reached")
+        self.assertEqual(enqueue_mock.call_count, 1)
+
+    def test_explicit_welcome_send_hard_cap_two_limits_scan_enqueue_to_two(self) -> None:
+        rows = [
+            {"username": "pmwzstella", "row_index": 0, "screen_index": 0, "bounds": {"left": 1, "top": 1, "right": 2, "bottom": 2}},
+            {"username": "espehair", "row_index": 1, "screen_index": 0, "bounds": {"left": 1, "top": 3, "right": 2, "bottom": 4}},
+            {"username": "mini_durable", "row_index": 2, "screen_index": 0, "bounds": {"left": 1, "top": 5, "right": 2, "bottom": 6}},
+        ]
+
+        code, summary, enqueue_mock = self._run_scan(
+            known_map={},
+            rows=rows,
+            attempt_cap=10,
+            welcome_send_max_jobs_env=2,
+            db_welcome_per_session_limit=10,
+        )
+
+        self.assertEqual(code, 0)
+        self.assertTrue(summary["welcome_send_hard_cap_present"])
+        self.assertEqual(summary["welcome_send_hard_cap"], 2)
+        self.assertEqual(summary["effective_welcome_sent_cap"], 2)
+        self.assertEqual(summary["candidate_attempt_cap"], 2)
+        self.assertEqual(summary["jobs_enqueued_count"], 2)
+        self.assertEqual(summary["new_follower_usernames_enqueued"], ["pmwzstella", "espehair"])
         self.assertEqual(enqueue_mock.call_count, 2)
 
     def test_scan_does_not_treat_skipped_nonbaseline_as_anchor(self) -> None:

@@ -121,6 +121,53 @@ class UnfollowAnyProbeRoutingTest(unittest.TestCase):
         self.assertEqual(out["visible_eligibility_skip_counts"]["row_cta_follow_back"], 1)
         self.assertEqual(out["visible_eligibility_skip_counts"]["already_completed_in_run"], 1)
 
+    def test_unfollow_any_skips_already_unfollowed_visible_row_and_selects_next(self) -> None:
+        rows = [
+            {"username": "lybeetrip", "username_normalized": "lybeetrip", "row_cta_class": "following", "row_index": 0},
+            {"username": "cocolibcook", "username_normalized": "cocolibcook", "row_cta_class": "following", "row_index": 1},
+        ]
+        db_rows = {
+            "lybeetrip": {
+                "id": "interaction-stale",
+                "username": "lybeetrip",
+                "unfollowed_at": "2026-06-08T19:35:25.335771+00:00",
+            },
+            "cocolibcook": {
+                "id": "interaction-next",
+                "username": "cocolibcook",
+                "unfollowed_at": None,
+            },
+        }
+
+        with patch.object(
+            unfollow.supabase_client,
+            "fetch_visible_unfollow_eligibility_rows",
+            return_value=db_rows,
+        ):
+            out = unfollow._evaluate_visible_unfollow_any_with_session_cache(
+                "acct",
+                rows,
+                account_username="owner",
+                row_cache={},
+                completed_usernames=set(),
+            )
+
+        visible_candidates = unfollow._visible_candidates_by_username(out)
+        target_row, selection_reason = unfollow._select_visible_any_target_row(
+            rows,
+            visible_candidates,
+            completed_usernames=set(),
+        )
+
+        self.assertEqual(out["visible_eligible_matches_usernames"], ["cocolibcook"])
+        self.assertEqual(out["any_mode_visible_candidates_count"], 1)
+        self.assertEqual(out["visible_eligibility_skip_counts"]["already_unfollowed"], 1)
+        self.assertEqual(out["visible_ineligible_rows"][0]["username"], "lybeetrip")
+        self.assertEqual(out["visible_ineligible_rows"][0]["skip_reason"], "already_unfollowed")
+        self.assertIsNotNone(target_row)
+        self.assertEqual(target_row["username"], "cocolibcook")
+        self.assertEqual(selection_reason, "visible_any_safe_row")
+
 
 if __name__ == "__main__":
     unittest.main()
