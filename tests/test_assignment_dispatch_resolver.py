@@ -105,6 +105,26 @@ class AssignmentDispatchResolverTest(unittest.TestCase):
         self.assertEqual(ctx["package_name"], "com.instagram.androie")
         self.assertFalse(ctx["fallback_used"])
 
+    def test_full_cycle_unfollow_outreach_pipeline_accepted(self) -> None:
+        ctx = self._resolve(
+            _assignment(
+                assignment_type="full_cycle",
+                adb_serial="RFGL145VCKE",
+                package_name="com.instagram.androie",
+            ),
+            run_type="unfollow_outreach_pipeline",
+            require_assignment=True,
+            enforce_window=False,
+        )
+        self.assertTrue(ctx["assignment_found"])
+        self.assertEqual(ctx["assignment_type"], "full_cycle")
+        self.assertEqual(ctx["slot_kind"], "full_cycle_6h")
+        self.assertEqual(ctx["run_type"], "unfollow_outreach_pipeline")
+        self.assertEqual(ctx["reason"], "assignment_resolved")
+        self.assertEqual(ctx["adb_serial"], "RFGL145VCKE")
+        self.assertEqual(ctx["package_name"], "com.instagram.androie")
+        self.assertFalse(ctx["fallback_used"])
+
     def test_full_cycle_welcome_session_send_accepted(self) -> None:
         ctx = self._resolve(
             _assignment(assignment_type="full_cycle"),
@@ -196,6 +216,16 @@ class AssignmentDispatchResolverTest(unittest.TestCase):
         self.assertFalse(ctx["assignment_found"])
         self.assertEqual(ctx["reason"], "assignment_type_incompatible")
 
+    def test_unsupported_run_type_still_blocked(self) -> None:
+        ctx = self._resolve(
+            _assignment(assignment_type="full_cycle"),
+            run_type="unsupported_pipeline",
+            require_assignment=True,
+        )
+        self.assertFalse(ctx["assignment_found"])
+        self.assertEqual(ctx["reason"], "assignment_type_incompatible")
+        self.assertFalse(ctx["fallback_used"])
+
     def test_outreach_only_account_session_incompatible(self) -> None:
         ctx = self._resolve(
             _assignment(assignment_type="outreach_only"),
@@ -213,6 +243,26 @@ class AssignmentDispatchResolverTest(unittest.TestCase):
         )
         self.assertFalse(ctx["assignment_found"])
         self.assertEqual(ctx["reason"], "assignment_type_incompatible")
+        self.assertFalse(ctx["fallback_used"])
+
+    def test_outreach_only_unfollow_outreach_pipeline_incompatible(self) -> None:
+        ctx = self._resolve(
+            _assignment(assignment_type="outreach_only"),
+            run_type="unfollow_outreach_pipeline",
+            require_assignment=True,
+        )
+        self.assertFalse(ctx["assignment_found"])
+        self.assertEqual(ctx["reason"], "assignment_type_incompatible")
+        self.assertFalse(ctx["fallback_used"])
+
+    def test_full_cycle_unfollow_outreach_pipeline_missing_device_still_blocks(self) -> None:
+        ctx = self._resolve(
+            _assignment(assignment_type="full_cycle", adb_serial=""),
+            run_type="unfollow_outreach_pipeline",
+            require_assignment=True,
+        )
+        self.assertFalse(ctx["assignment_found"])
+        self.assertEqual(ctx["reason"], "assignment_device_missing_adb_serial")
         self.assertFalse(ctx["fallback_used"])
 
     def test_full_cycle_unfollow_session_missing_device_still_blocks(self) -> None:
