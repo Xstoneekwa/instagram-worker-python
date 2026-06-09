@@ -8,7 +8,13 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from device import adb_available, get_device_serial, is_fast_ime_available, run_adb_keyboard_b64_input
+from device import (
+    adb_available,
+    ensure_adb_keyboard_ready,
+    get_device_serial,
+    is_fast_ime_available,
+    run_adb_keyboard_b64_input_detailed as run_adb_keyboard_b64_input,
+)
 from instagram_credentials_runtime_access import SecretValue, redact_credentials_payload
 from instagram_login_status_classifier import LoginProbeOutcome, clean_login_probe_metadata
 from instagram_login_ui_probe import extract_login_screen_signals_from_hierarchy, probe_login_ui_from_hierarchy
@@ -492,8 +498,10 @@ def _input_code_robust(d: Any, target: Any, value: str, warnings: list[str], *, 
             "confirm_method": "adb_not_available",
             "reason": "adb_not_available",
         }
-    if not (serial and fast_ime_id and is_fast_ime_available(serial)):
-        warnings.append("verification_code_fast_ime_unavailable")
+    ready_state = ensure_adb_keyboard_ready(serial, fast_ime_id=fast_ime_id)
+    if not (serial and fast_ime_id and ready_state.get("reason") == "adb_keyboard_ready"):
+        unavailable_reason = str(ready_state.get("reason") or "adb_keyboard_unavailable")
+        warnings.append(f"verification_code_{unavailable_reason}")
         if _password_screen_ready_after_code(d):
             return {
                 "confirmed": True,
@@ -505,24 +513,45 @@ def _input_code_robust(d: Any, target: Any, value: str, warnings: list[str], *, 
         return {
             "confirmed": False,
             "method": "set_text",
-            "confirm_method": "hierarchy_code_field_empty",
-            "reason": "verification_code_input_empty",
+            "confirm_method": unavailable_reason,
+            "reason": "adb_keyboard_unavailable",
         }
     try:
-        command_ok, method, switch_ok, broadcast_ok = run_adb_keyboard_b64_input(
-            serial,
-            value,
-            fast_ime_id=fast_ime_id,
+        adb_result = _adb_input_result_dict(
+            run_adb_keyboard_b64_input(
+                serial,
+                value,
+                fast_ime_id=fast_ime_id,
+            )
         )
     except Exception:
-        command_ok, method, switch_ok, broadcast_ok = False, "adb_keyboard_b64", False, False
+        adb_result = {
+            "command_ok": False,
+            "method": "adb_keyboard_b64",
+            "switch_ok": False,
+            "broadcast_ok": False,
+            "reason": "adb_keyboard_exception",
+        }
+    command_ok = bool(adb_result.get("command_ok"))
+    switch_ok = bool(adb_result.get("switch_ok"))
+    broadcast_ok = bool(adb_result.get("broadcast_ok"))
+    method = str(adb_result.get("method") or "adb_keyboard_b64")
     if not (command_ok and switch_ok and broadcast_ok):
-        warnings.append("verification_code_adb_keyboard_b64_failed")
+        failure_reason = str(adb_result.get("reason") or "adb_keyboard_b64_failed")
+        warnings.append(f"verification_code_{failure_reason}")
+        if _password_screen_ready_after_code(d):
+            return {
+                "confirmed": True,
+                "method": method,
+                "confirm_method": "post_code_password_screen_detected",
+                "reason": "",
+                "skip_continue": True,
+            }
         return {
             "confirmed": False,
-            "method": method or "adb_keyboard_b64",
-            "confirm_method": "adb_keyboard_broadcast_failed" if command_ok else "adb_keyboard_command_failed",
-            "reason": "verification_code_input_failed",
+            "method": method,
+            "confirm_method": failure_reason,
+            "reason": failure_reason,
         }
     sleeper(CODE_CONFIRM_SETTLE_MS / 1000.0)
     if _code_input_confirmed(d):
@@ -547,6 +576,30 @@ def _input_code_robust(d: Any, target: Any, value: str, warnings: list[str], *, 
         "method": method or "adb_keyboard_b64",
         "confirm_method": "hierarchy_code_field_empty",
         "reason": "verification_code_input_empty",
+    }
+
+
+def _adb_input_result_dict(result: Any) -> dict[str, Any]:
+    if isinstance(result, dict):
+        return result
+    if isinstance(result, tuple):
+        command_ok = bool(result[0]) if len(result) > 0 else False
+        method = str(result[1] or "adb_keyboard_b64") if len(result) > 1 else "adb_keyboard_b64"
+        switch_ok = bool(result[2]) if len(result) > 2 else False
+        broadcast_ok = bool(result[3]) if len(result) > 3 else False
+        return {
+            "command_ok": command_ok,
+            "method": method,
+            "switch_ok": switch_ok,
+            "broadcast_ok": broadcast_ok,
+            "reason": "" if command_ok and switch_ok and broadcast_ok else "adb_keyboard_b64_failed",
+        }
+    return {
+        "command_ok": False,
+        "method": "adb_keyboard_b64",
+        "switch_ok": False,
+        "broadcast_ok": False,
+        "reason": "adb_keyboard_b64_failed",
     }
 
 

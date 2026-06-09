@@ -175,7 +175,11 @@ class EmailCodeExecutorTests(unittest.TestCase):
             set_text_updates=False,
         )
 
-        with patch.object(email_code_executor, "is_fast_ime_available", return_value=False):
+        with patch.object(
+            email_code_executor,
+            "ensure_adb_keyboard_ready",
+            return_value={"ok": False, "reason": "adb_keyboard_ime_not_enabled"},
+        ):
             result = execute_email_code_challenge_resume(
                 device,
                 verification_code=SecretValue("123456"),
@@ -185,7 +189,64 @@ class EmailCodeExecutorTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertFalse(result.code_entered)
         self.assertFalse(result.continue_tapped)
-        self.assertEqual(result.failure_reason, "verification_code_input_empty")
+        self.assertEqual(result.failure_reason, "adb_keyboard_unavailable")
         self.assertFalse(device.continue_target.clicked)
         rendered = str(result.safe_metadata)
         self.assertNotIn("123456", rendered)
+
+    def test_resume_reports_adb_keyboard_unavailable_when_ime_missing(self) -> None:
+        device = FakeDevice(
+            [EMAIL_CODE_CHALLENGE_XML, EMAIL_CODE_CHALLENGE_XML, EMAIL_CODE_CHALLENGE_XML],
+            set_text_updates=False,
+        )
+        with (
+            patch.object(email_code_executor, "adb_available", return_value=True),
+            patch.object(
+                email_code_executor,
+                "ensure_adb_keyboard_ready",
+                return_value={"ok": False, "reason": "adb_keyboard_package_missing"},
+            ),
+        ):
+            result = execute_email_code_challenge_resume(
+                device,
+                verification_code=SecretValue("123456"),
+                sleeper=Mock(),
+            )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.failure_reason, "adb_keyboard_unavailable")
+        self.assertIn("verification_code_adb_keyboard_package_missing", result.warnings)
+
+    def test_resume_reports_adb_keyboard_broadcast_failure(self) -> None:
+        device = FakeDevice(
+            [EMAIL_CODE_CHALLENGE_XML, EMAIL_CODE_CHALLENGE_XML, EMAIL_CODE_CHALLENGE_XML],
+            set_text_updates=False,
+        )
+        with (
+            patch.object(email_code_executor, "adb_available", return_value=True),
+            patch.object(
+                email_code_executor,
+                "ensure_adb_keyboard_ready",
+                return_value={"ok": True, "reason": "adb_keyboard_ready"},
+            ),
+            patch.object(
+                email_code_executor,
+                "run_adb_keyboard_b64_input",
+                return_value={
+                    "command_ok": False,
+                    "method": "adb_keyboard_b64",
+                    "switch_ok": True,
+                    "broadcast_ok": False,
+                    "reason": "adb_keyboard_broadcast_failed",
+                },
+            ),
+        ):
+            result = execute_email_code_challenge_resume(
+                device,
+                verification_code=SecretValue("123456"),
+                sleeper=Mock(),
+            )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.failure_reason, "adb_keyboard_broadcast_failed")
+        self.assertIn("verification_code_adb_keyboard_broadcast_failed", result.warnings)

@@ -85,6 +85,85 @@ def adb_available() -> bool:
     return resolve_adb_path() is not None
 
 
+def _fast_ime_package(fast_ime_id: str | None = None) -> str:
+    text = str(fast_ime_id or getattr(config, "FAST_IME", "") or "").strip()
+    return text.split("/", 1)[0] if "/" in text else text
+
+
+def inspect_adb_keyboard_state(serial: str | None, *, fast_ime_id: str | None = None) -> dict[str, Any]:
+    """Return safe ADBKeyboard readiness state for diagnostics and preflight."""
+
+    fast_ime = str(fast_ime_id or getattr(config, "FAST_IME", "") or "").strip()
+    package_name = _fast_ime_package(fast_ime)
+    state: dict[str, Any] = {
+        "adb_path_resolved": adb_available(),
+        "adb_keyboard_package_present": False,
+        "adb_keyboard_ime_listed": False,
+        "adb_keyboard_default": False,
+        "default_input_method_suffix": "",
+        "reason": "",
+    }
+    if not serial:
+        state["reason"] = "adb_serial_missing"
+        return state
+    if not fast_ime or not package_name:
+        state["reason"] = "fast_ime_not_configured"
+        return state
+    if not state["adb_path_resolved"]:
+        state["reason"] = "adb_not_available"
+        return state
+
+    pkg_code, _, _ = _adb_run(serial, ["shell", "pm", "path", package_name], timeout_s=10.0)
+    state["adb_keyboard_package_present"] = pkg_code == 0
+
+    ime_code, ime_out, _ = _adb_run(serial, ["shell", "ime", "list", "-s"], timeout_s=10.0)
+    ime_lines = [line.strip() for line in str(ime_out or "").splitlines() if line.strip()]
+    state["adb_keyboard_ime_listed"] = ime_code == 0 and any(fast_ime in line for line in ime_lines)
+
+    default = get_current_ime(serial)
+    state["adb_keyboard_default"] = default == fast_ime
+    state["default_input_method_suffix"] = default.split("/")[-1] if default else ""
+
+    if not state["adb_keyboard_package_present"]:
+        state["reason"] = "adb_keyboard_package_missing"
+    elif not state["adb_keyboard_ime_listed"]:
+        state["reason"] = "adb_keyboard_ime_not_enabled"
+    elif not state["adb_keyboard_default"]:
+        state["reason"] = "adb_keyboard_not_default"
+    else:
+        state["reason"] = "adb_keyboard_ready"
+    return state
+
+
+def ensure_adb_keyboard_ready(serial: str | None, *, fast_ime_id: str | None = None) -> dict[str, Any]:
+    """Ensure configured ADBKeyboard IME is installed, enabled, and default."""
+
+    fast_ime = str(fast_ime_id or getattr(config, "FAST_IME", "") or "").strip()
+    state = inspect_adb_keyboard_state(serial, fast_ime_id=fast_ime)
+    if state.get("reason") == "adb_keyboard_ready":
+        return {**state, "ok": True, "enable_attempted": False, "set_default_attempted": False}
+    if not serial or not fast_ime or not state.get("adb_path_resolved") or not state.get("adb_keyboard_package_present"):
+        return {**state, "ok": False, "enable_attempted": False, "set_default_attempted": False}
+
+    enable_attempted = False
+    set_default_attempted = False
+    if not state.get("adb_keyboard_ime_listed"):
+        enable_attempted = True
+        _adb_run(serial, ["shell", "ime", "enable", fast_ime], timeout_s=10.0)
+
+    if not state.get("adb_keyboard_default"):
+        set_default_attempted = True
+        set_ime(serial, fast_ime)
+
+    refreshed = inspect_adb_keyboard_state(serial, fast_ime_id=fast_ime)
+    return {
+        **refreshed,
+        "ok": refreshed.get("reason") == "adb_keyboard_ready",
+        "enable_attempted": enable_attempted,
+        "set_default_attempted": set_default_attempted,
+    }
+
+
 def runner_subprocess_env(base: dict[str, str] | None = None) -> dict[str, str]:
     """Build a subprocess env with adb discoverable under launchd/minimal PATH."""
 
@@ -126,6 +205,32 @@ def _adb_run(serial: str | None, argv: list[str], *, timeout_s: float = 45.0) ->
         return 1, "", str(e)
 
 
+def _adb_shell_stdin(serial: str | None, shell_line: str, *, timeout_s: float = 10.0) -> tuple[int, str, str]:
+    """Run `adb shell` with commands from stdin so sensitive input stays out of argv."""
+
+    adb_path = resolve_adb_path()
+    if not adb_path:
+        log("warning", "adb_shell_stdin_failed", error="adb_not_available")
+        return 1, "", "adb_not_available"
+    cmd = [adb_path]
+    if serial:
+        cmd.extend(["-s", serial])
+    cmd.append("shell")
+    try:
+        p = subprocess.run(
+            cmd,
+            input=shell_line,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            env=runner_subprocess_env(),
+        )
+        return int(p.returncode), (p.stdout or "").strip(), (p.stderr or "").strip()
+    except Exception as exc:
+        log("warning", "adb_shell_stdin_failed", error=type(exc).__name__)
+        return 1, "", type(exc).__name__
+
+
 def run_adb_keyboard_b64_input(
     serial: str,
     value: str,
@@ -134,22 +239,65 @@ def run_adb_keyboard_b64_input(
 ) -> tuple[bool, str, bool, bool]:
     """Switch to FAST_IME when needed and inject text via ADB_INPUT_B64 broadcast."""
 
+    result = run_adb_keyboard_b64_input_detailed(serial, value, fast_ime_id=fast_ime_id)
+    return (
+        bool(result.get("command_ok")),
+        str(result.get("method") or "adb_keyboard_b64"),
+        bool(result.get("switch_ok")),
+        bool(result.get("broadcast_ok")),
+    )
+
+
+def run_adb_keyboard_b64_input_detailed(
+    serial: str,
+    value: str,
+    *,
+    fast_ime_id: str,
+) -> dict[str, Any]:
+    """Detailed ADBKeyboard input result without exposing entered text."""
+
     fast_ime_id = str(fast_ime_id or "").strip()
-    if not serial or not fast_ime_id:
-        return False, "", False, False
-    if not adb_available():
-        return False, "adb_keyboard_b64", False, False
-    current_ime = get_current_ime(serial).strip()
-    switch_ok = current_ime == fast_ime_id or set_ime(serial, fast_ime_id)
-    if not switch_ok:
-        return False, "", False, False
+    ready = ensure_adb_keyboard_ready(serial, fast_ime_id=fast_ime_id)
+    if not ready.get("ok"):
+        return {
+            "command_ok": False,
+            "method": "adb_keyboard_b64",
+            "switch_ok": False,
+            "broadcast_ok": False,
+            "reason": str(ready.get("reason") or "adb_keyboard_unavailable"),
+            "adb_keyboard_ready": ready,
+        }
     encoded = base64.b64encode(str(value or "").encode("utf-8")).decode("ascii")
-    broadcast_code, _, _ = _adb_run(
+    # Send through adb shell stdin so secret-derived input never appears in host argv.
+    broadcast_code, _, _ = _adb_shell_stdin(
         serial,
-        ["shell", "sh", "-c", f"am broadcast -a ADB_INPUT_B64 --es msg {shlex.quote(encoded)}"],
+        f"am broadcast -a ADB_INPUT_B64 --es msg {shlex.quote(encoded)}\n",
         timeout_s=10.0,
     )
-    return broadcast_code == 0, "adb_keyboard_b64", True, broadcast_code == 0
+    if broadcast_code != 0:
+        text_code, _, _ = _adb_shell_stdin(
+            serial,
+            f"am broadcast -a ADB_INPUT_TEXT --es msg {shlex.quote(str(value or ''))}\n",
+            timeout_s=10.0,
+        )
+        return {
+            "command_ok": text_code == 0,
+            "method": "adb_keyboard_text",
+            "switch_ok": True,
+            "broadcast_ok": text_code == 0,
+            "reason": "" if text_code == 0 else "adb_keyboard_broadcast_failed",
+            "adb_keyboard_ready": ready,
+            "b64_broadcast_ok": False,
+        }
+    return {
+        "command_ok": True,
+        "method": "adb_keyboard_b64",
+        "switch_ok": True,
+        "broadcast_ok": True,
+        "reason": "",
+        "adb_keyboard_ready": ready,
+        "b64_broadcast_ok": True,
+    }
 
 
 def _adb_shell(serial: str | None, *shell_tokens: str) -> tuple[int, str, str]:

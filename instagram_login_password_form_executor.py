@@ -14,7 +14,13 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 import config
-from device import adb_available, get_device_serial, is_fast_ime_available, run_adb_keyboard_b64_input
+from device import (
+    adb_available,
+    ensure_adb_keyboard_ready,
+    get_device_serial,
+    is_fast_ime_available,
+    run_adb_keyboard_b64_input_detailed as run_adb_keyboard_b64_input,
+)
 from instagram_credentials_runtime_access import (
     SecretValue,
     redact_credentials_payload,
@@ -1108,11 +1114,16 @@ def _set_username_field_value(d: Any, target: Any, expected_username: str, warni
     fast_ime_id = str(getattr(config, "FAST_IME", "") or "").strip()
     if serial and fast_ime_id and is_fast_ime_available(serial):
         try:
-            command_ok, method_tag, _switch_ok, broadcast_ok = run_adb_keyboard_b64_input(
-                serial,
-                expected_username,
-                fast_ime_id=fast_ime_id,
+            adb_result = _adb_input_result_dict(
+                run_adb_keyboard_b64_input(
+                    serial,
+                    expected_username,
+                    fast_ime_id=fast_ime_id,
+                )
             )
+            command_ok = bool(adb_result.get("command_ok"))
+            method_tag = str(adb_result.get("method") or "adb_keyboard_b64")
+            broadcast_ok = bool(adb_result.get("broadcast_ok"))
         except Exception:
             command_ok, method_tag, broadcast_ok = False, "", False
         if command_ok and broadcast_ok:
@@ -1341,28 +1352,48 @@ def _attempt_password_adb_keyboard_injection(
             confirm_method="adb_not_available",
             injection_trace=["adb_not_available"],
         )
-    if not (serial and fast_ime_id and is_fast_ime_available(serial)):
+    if not serial:
         return _password_input_result(
             "",
             focused_before,
             False,
             "false",
-            "password_input_unavailable",
+            "adb_serial_missing",
             target_kind=target_kind,
             input_result="password_input_empty",
-            confirm_method="adb_keyboard_unavailable",
-            injection_trace=["fast_ime_unavailable"],
+            confirm_method="adb_serial_missing",
+            injection_trace=["adb_serial_missing"],
+        )
+    ready_state = ensure_adb_keyboard_ready(serial, fast_ime_id=fast_ime_id)
+    if not (serial and fast_ime_id and ready_state.get("ok")):
+        return _password_input_result(
+            "",
+            focused_before,
+            False,
+            "false",
+            str(ready_state.get("reason") or "adb_keyboard_unavailable"),
+            target_kind=target_kind,
+            input_result="password_input_empty",
+            confirm_method=str(ready_state.get("reason") or "adb_keyboard_unavailable"),
+            injection_trace=[str(ready_state.get("reason") or "adb_keyboard_unavailable")],
         )
     try:
-        command_ok, method_tag, switch_ok, broadcast_ok = run_adb_keyboard_b64_input(
-            serial,
-            value,
-            fast_ime_id=fast_ime_id,
+        adb_result = _adb_input_result_dict(
+            run_adb_keyboard_b64_input(
+                serial,
+                value,
+                fast_ime_id=fast_ime_id,
+            )
         )
+        command_ok = bool(adb_result.get("command_ok"))
+        method_tag = str(adb_result.get("method") or "adb_keyboard_b64")
+        switch_ok = bool(adb_result.get("switch_ok"))
+        broadcast_ok = bool(adb_result.get("broadcast_ok"))
+        adb_reason = str(adb_result.get("reason") or "")
     except Exception:
-        command_ok, method_tag, switch_ok, broadcast_ok = False, "", False, False
+        command_ok, method_tag, switch_ok, broadcast_ok, adb_reason = False, "", False, False, "adb_keyboard_exception"
     if not (command_ok and broadcast_ok):
-        trace = ["fast_ime_password_input_failed"]
+        trace = [adb_reason or "fast_ime_password_input_failed"]
         if not switch_ok:
             trace.append("fast_ime_switch_failed")
         return _password_input_result(
@@ -1370,10 +1401,10 @@ def _attempt_password_adb_keyboard_injection(
             focused_before,
             False,
             "false",
-            "password_input_missing_or_not_accepted",
+            adb_reason or "password_input_missing_or_not_accepted",
             target_kind=target_kind,
             input_result="password_input_empty",
-            confirm_method="adb_keyboard_broadcast_failed" if command_ok else "adb_keyboard_command_failed",
+            confirm_method=adb_reason or ("adb_keyboard_broadcast_failed" if command_ok else "adb_keyboard_command_failed"),
             injection_trace=trace,
         )
     time.sleep(PASSWORD_CONFIRM_SETTLE_MS / 1000.0)
@@ -1406,6 +1437,30 @@ def _password_injection_confirmed(result: dict[str, Any]) -> bool:
         str(result.get("password_input_result") or ""),
         str(result.get("password_field_non_empty_confirmed") or ""),
     )
+
+
+def _adb_input_result_dict(result: Any) -> dict[str, Any]:
+    if isinstance(result, dict):
+        return result
+    if isinstance(result, tuple):
+        command_ok = bool(result[0]) if len(result) > 0 else False
+        method = str(result[1] or "adb_keyboard_b64") if len(result) > 1 else "adb_keyboard_b64"
+        switch_ok = bool(result[2]) if len(result) > 2 else False
+        broadcast_ok = bool(result[3]) if len(result) > 3 else False
+        return {
+            "command_ok": command_ok,
+            "method": method,
+            "switch_ok": switch_ok,
+            "broadcast_ok": broadcast_ok,
+            "reason": "" if command_ok and switch_ok and broadcast_ok else "adb_keyboard_b64_failed",
+        }
+    return {
+        "command_ok": False,
+        "method": "adb_keyboard_b64",
+        "switch_ok": False,
+        "broadcast_ok": False,
+        "reason": "adb_keyboard_b64_failed",
+    }
 
 
 def _password_injection_confirmed_from_parts(input_result: str, non_empty_state: str) -> bool:

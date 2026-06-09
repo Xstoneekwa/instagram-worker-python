@@ -275,6 +275,17 @@ def configured_device(hierarchy: str = CONNECTED_XML) -> tuple[FakeDevice, FakeS
 
 
 class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._ensure_adb_keyboard_ready_patch = patch.object(
+            password_executor,
+            "ensure_adb_keyboard_ready",
+            return_value={"ok": True, "reason": "adb_keyboard_ready"},
+        )
+        self._ensure_adb_keyboard_ready_patch.start()
+
+    def tearDown(self) -> None:
+        self._ensure_adb_keyboard_ready_patch.stop()
+
     def test_valid_login_form_enters_username_password_and_taps_login(self) -> None:
         device, username, password_selector, login = configured_device()
         secret = TrackingSecretValue(PASSWORD)
@@ -1492,6 +1503,7 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
                 "password_input_missing_or_not_accepted",
                 "password_input_unavailable",
                 "adb_not_available",
+                "adb_serial_missing",
             },
         )
         self.assertFalse(result.executed)
@@ -1523,11 +1535,19 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
             CONNECTED_XML,
         ]
 
-        with patch.object(password_executor, "is_fast_ime_available", return_value=True), patch.object(
-            password_executor,
-            "run_adb_keyboard_b64_input",
-            return_value=(True, "adb_keyboard_b64", True, True),
-        ) as fast_input:
+        with (
+            patch.object(password_executor, "is_fast_ime_available", return_value=True),
+            patch.object(
+                password_executor,
+                "ensure_adb_keyboard_ready",
+                return_value={"ok": True, "reason": "adb_keyboard_ready"},
+            ),
+            patch.object(
+                password_executor,
+                "run_adb_keyboard_b64_input",
+                return_value=(True, "adb_keyboard_b64", True, True),
+            ) as fast_input,
+        ):
             result = execute_login_form_credentials(
                 device,
                 expected_username=USERNAME,
@@ -1744,6 +1764,69 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
         self.assertEqual(login.click_calls, 1)
         fast_input.assert_not_called()
 
+    def test_adb_keyboard_unavailable_is_retryable_when_set_text_not_confirmed(self) -> None:
+        device, _username, _password_selector, login = configured_device(CONNECTED_XML)
+        device.serial = "unit-test-serial"
+        device.selectors[("text", "Password")] = PlaceholderStickyPasswordSelector()
+
+        with (
+            patch.object(password_executor, "adb_available", return_value=True),
+            patch.object(
+                password_executor,
+                "ensure_adb_keyboard_ready",
+                return_value={"ok": False, "reason": "adb_keyboard_package_missing"},
+            ),
+        ):
+            result = execute_login_form_credentials(
+                device,
+                expected_username=USERNAME,
+                password=SecretValue(PASSWORD),
+                prevalidated_signals=PASSWORD_ONLY_SIGNALS,
+                sleeper=Mock(),
+            )
+
+        self.assertFalse(result.executed)
+        self.assertEqual(result.failure_reason, "adb_keyboard_package_missing")
+        self.assertEqual(login.click_calls, 0)
+        self.assertEqual(result.safe_metadata["password_confirm_method"], "adb_keyboard_package_missing")
+
+    def test_adb_keyboard_broadcast_failure_blocks_submit(self) -> None:
+        device, _username, _password_selector, login = configured_device(CONNECTED_XML)
+        device.serial = "unit-test-serial"
+        device.selectors[("text", "Password")] = PlaceholderStickyPasswordSelector()
+
+        with (
+            patch.object(password_executor, "adb_available", return_value=True),
+            patch.object(
+                password_executor,
+                "ensure_adb_keyboard_ready",
+                return_value={"ok": True, "reason": "adb_keyboard_ready"},
+            ),
+            patch.object(
+                password_executor,
+                "run_adb_keyboard_b64_input",
+                return_value={
+                    "command_ok": False,
+                    "method": "adb_keyboard_b64",
+                    "switch_ok": True,
+                    "broadcast_ok": False,
+                    "reason": "adb_keyboard_broadcast_failed",
+                },
+            ),
+        ):
+            result = execute_login_form_credentials(
+                device,
+                expected_username=USERNAME,
+                password=SecretValue(PASSWORD),
+                prevalidated_signals=PASSWORD_ONLY_SIGNALS,
+                sleeper=Mock(),
+            )
+
+        self.assertFalse(result.executed)
+        self.assertEqual(result.failure_reason, "adb_keyboard_broadcast_failed")
+        self.assertEqual(login.click_calls, 0)
+        self.assertEqual(result.safe_metadata["password_confirm_method"], "adb_keyboard_broadcast_failed")
+
     def test_result_safe_dict_contains_no_password(self) -> None:
         device, _username, _password_selector, _login = configured_device(SENSITIVE_XML)
 
@@ -1888,7 +1971,7 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
         rendered = json.dumps(asdict(result), sort_keys=True)
         self.assertIn(
             result.failure_reason,
-            {"password_input_failed", "password_input_missing_or_not_accepted"},
+            {"password_input_failed", "password_input_missing_or_not_accepted", "adb_keyboard_b64_failed"},
         )
         self.assertFalse(result.executed)
         self.assertEqual(login.click_calls, 0)
