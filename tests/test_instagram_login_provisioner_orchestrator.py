@@ -104,6 +104,14 @@ CONNECTED_XML = (
     '<node content-desc="Reels" />'
     '<node content-desc="Profile" />'
 )
+POST_LOGIN_LOCATION_SERVICES_PROMPT_XML = (
+    '<node text="Set up on new device" />'
+    '<node text="To use Location services, allow Instagram to access your location" />'
+    '<node text="How you can use location services" />'
+    '<node text="How we&apos;ll use this information" />'
+    '<node text="How you can control this" />'
+    '<node text="Continue" clickable="true" />'
+)
 NEEDS_2FA_XML = '<node text="Enter code" /><node text="authentication code" />'
 CHECKPOINT_XML = '<node text="Help us confirm it’s you" /><node text="Verify your account" />'
 LOGIN_FAILED_XML = '<node text="Sorry, your password was incorrect. Please try again." />'
@@ -2420,6 +2428,63 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertNotIn('"stage"', rendered_payload.split('"metadata"')[0])
         self.assertNotIn('"probe_version"', rendered_payload.split('"metadata"')[0])
         self.assertNotIn('"source"', rendered_payload.split('"metadata"')[0])
+
+    def test_post_login_location_services_prompt_publishes_connected_ready_and_safe_back(self) -> None:
+        calls = []
+
+        def strict_publisher(
+            account_id,
+            login_status=None,
+            provisioning_status=None,
+            onboarding_status=None,
+            reauth_required=None,
+            reauth_reason=None,
+            reason=None,
+            external_request_id=None,
+            metadata=None,
+        ):
+            calls.append(
+                {
+                    "account_id": account_id,
+                    "login_status": login_status,
+                    "provisioning_status": provisioning_status,
+                    "onboarding_status": onboarding_status,
+                    "reauth_required": reauth_required,
+                    "reauth_reason": reauth_reason,
+                    "reason": reason,
+                    "external_request_id": external_request_id,
+                    "metadata": metadata,
+                }
+            )
+            return {"published": True, "reason": "published"}
+
+        device, _selectors = configured_device(POST_LOGIN_LOCATION_SERVICES_PROMPT_XML)
+        result = self.run_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username=USERNAME,
+            credentials_getter=Mock(return_value=credentials()),
+            initial_signals=LOGIN_FORM_SIGNALS,
+            publisher=strict_publisher,
+            publish_enabled=True,
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.final_outcome, "connected")
+        self.assertEqual(result.final_login_status, "connected")
+        self.assertEqual(result.final_provisioning_status, "ready")
+        self.assertEqual(result.publish_reason, "published_connected")
+        self.assertEqual(calls[0]["login_status"], "connected")
+        self.assertEqual(calls[0]["provisioning_status"], "ready")
+        self.assertFalse(calls[0]["reauth_required"])
+        self.assertIsNone(calls[0]["reauth_reason"])
+        self.assertTrue(result.safe_metadata["password_result"]["post_login_location_services_prompt_detected"])
+        self.assertTrue(result.safe_metadata["password_result"]["post_login_location_services_prompt_dismissed"])
+        self.assertEqual(
+            result.safe_metadata["password_result"]["post_login_location_services_prompt_dismiss_method"],
+            "back",
+        )
+        self.assertEqual(device.press_calls, ["back"])
 
     def test_publish_payload_safe(self) -> None:
         publisher = Mock(return_value={"published": True})

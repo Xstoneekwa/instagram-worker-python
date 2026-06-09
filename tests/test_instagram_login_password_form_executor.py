@@ -42,6 +42,14 @@ CONNECTED_XML = (
     '<node content-desc="Reels" />'
     '<node content-desc="Profile" />'
 )
+POST_LOGIN_LOCATION_SERVICES_PROMPT_XML = (
+    '<node text="Set up on new device" />'
+    '<node text="To use Location services, allow Instagram to access your location" />'
+    '<node text="How you can use location services" />'
+    '<node text="How we&apos;ll use this information" />'
+    '<node text="How you can control this" />'
+    '<node text="Continue" clickable="true" />'
+)
 NEEDS_2FA_XML = '<node text="Enter code" /><node text="authentication code" />'
 CHECKPOINT_XML = '<node text="Help us confirm it’s you" /><node text="Verify your account" />'
 LOGIN_FAILED_XML = '<node text="Sorry, your password was incorrect. Please try again." />'
@@ -749,6 +757,36 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
 
         self.assertEqual(result.post_submit_outcome, "connected")
         self.assertEqual(result.safe_metadata["post_submit_screens"], ["loading", "connected"])
+
+    def test_post_submit_location_services_prompt_is_connected_and_safe_backed(self) -> None:
+        device, _username, _password_selector, login = configured_device()
+        continue_button = device.add_selector("text", "Continue", FakeSelector(1))
+        device.hierarchies = [POST_LOGIN_LOCATION_SERVICES_PROMPT_XML]
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=LOGIN_FORM_SIGNALS,
+            post_submit_wait_ms=0,
+            post_submit_observation_interval_ms=1,
+            max_post_submit_observations=2,
+            sleeper=Mock(),
+        )
+
+        self.assertEqual(result.post_submit_outcome, "connected")
+        self.assertEqual(result.post_submit_screen_type, "connected_post_login_location_services_prompt")
+        self.assertEqual(result.post_submit_probe_reason, "connected_post_login_location_services_prompt")
+        self.assertEqual(
+            result.safe_metadata["post_submit_screens"],
+            ["connected_post_login_location_services_prompt"],
+        )
+        self.assertTrue(result.safe_metadata["post_login_location_services_prompt_detected"])
+        self.assertTrue(result.safe_metadata["post_login_location_services_prompt_dismissed"])
+        self.assertEqual(result.safe_metadata["post_login_location_services_prompt_dismiss_method"], "back")
+        self.assertEqual(device.press_calls, ["back"])
+        self.assertEqual(continue_button.click_calls, 0)
+        self.assertEqual(login.click_calls, 1)
 
     def test_post_submit_all_loading_returns_still_loading_timeout(self) -> None:
         device, _username, _password_selector, _login = configured_device()

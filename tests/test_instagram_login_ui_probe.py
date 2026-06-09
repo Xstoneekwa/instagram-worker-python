@@ -155,6 +155,27 @@ class InstagramLoginUiProbeTest(unittest.TestCase):
         self.assertTrue(signals["google_password_manager_save_prompt"])
         self.assertTrue(signals["save_password_prompt"])
 
+    def test_detects_samsung_pass_save_password_prompt(self) -> None:
+        xml = (
+            '<node text="Samsung Pass" />'
+            '<node text="Save password for Instagram?" />'
+            '<node text="cinema_catchup" />'
+            '<node text="••••••••••" />'
+            '<node text="Cancel" clickable="true" />'
+            '<node text="Save" clickable="true" />'
+        )
+
+        result = probe_login_ui_from_hierarchy(xml)
+        signals = extract_login_screen_signals_from_hierarchy(xml, expected_username="cinema_catchup")
+
+        self.assertEqual(result.outcome, LoginProbeOutcome.UNKNOWN)
+        self.assertEqual(result.reason, "samsung_pass_save_password_prompt")
+        self.assertTrue(result.metadata["save_password_prompt_present"])
+        self.assertTrue(result.metadata["samsung_pass_save_password_prompt_present"])
+        self.assertEqual(signals["screen_type"], "samsung_pass_save_password_prompt")
+        self.assertTrue(signals["save_password_prompt"])
+        self.assertTrue(signals["samsung_pass_save_password_prompt"])
+
     def test_detects_connected_with_sufficient_connected_signals(self) -> None:
         xml = (
             '<node content-desc="Home" />'
@@ -168,6 +189,27 @@ class InstagramLoginUiProbeTest(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(result.outcome, LoginProbeOutcome.CONNECTED)
         self.assertEqual(result.reason, "connected_ui_signal")
+
+    def test_detects_post_login_location_services_prompt_as_connected(self) -> None:
+        xml = (
+            '<node text="Set up on new device" />'
+            '<node text="To use Location services, allow Instagram to access your location" />'
+            '<node text="How you can use location services" />'
+            '<node text="How we&apos;ll use this information" />'
+            '<node text="How you can control this" />'
+            '<node text="Continue" clickable="true" />'
+        )
+
+        result = probe_login_ui_from_hierarchy(xml, stage="post_submit")
+        signals = extract_login_screen_signals_from_hierarchy(xml)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.outcome, LoginProbeOutcome.CONNECTED)
+        self.assertEqual(result.reason, "connected_post_login_location_services_prompt")
+        self.assertEqual(result.metadata["screen_type"], "connected_post_login_location_services_prompt")
+        self.assertEqual(signals["screen_type"], "connected_post_login_location_services_prompt")
+        self.assertTrue(signals["post_login_location_services_prompt"])
+        self.assertTrue(signals["connected_post_login_setup"])
 
     def test_empty_xml_is_unknown(self) -> None:
         result = probe_login_ui_from_hierarchy("")

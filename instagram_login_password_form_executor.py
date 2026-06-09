@@ -389,6 +389,9 @@ def execute_login_form_credentials(
     samsung_pass_save_password_prompt_cancelled = False
     instagram_save_login_info_prompt_detected = False
     instagram_save_login_info_prompt_not_now = False
+    post_login_location_services_prompt_detected = False
+    post_login_location_services_prompt_dismissed = False
+    post_login_location_services_prompt_dismiss_method = ""
     post_dismiss_screen_type = ""
     post_dismiss_final_observation_count = 0
     post_dismiss_final_screens: list[str] = []
@@ -433,6 +436,15 @@ def execute_login_form_credentials(
                 observed.get("instagram_save_login_info_prompt_detected")
             )
             instagram_save_login_info_prompt_not_now = bool(observed.get("instagram_save_login_info_prompt_not_now"))
+            post_login_location_services_prompt_detected = bool(
+                observed.get("post_login_location_services_prompt_detected")
+            )
+            post_login_location_services_prompt_dismissed = bool(
+                observed.get("post_login_location_services_prompt_dismissed")
+            )
+            post_login_location_services_prompt_dismiss_method = str(
+                observed.get("post_login_location_services_prompt_dismiss_method") or ""
+            )
             post_dismiss_screen_type = str(observed.get("post_dismiss_screen_type") or "")
             post_dismiss_final_observation_count = int(observed.get("post_dismiss_final_observation_count") or 0)
             post_dismiss_final_screens = list(observed.get("post_dismiss_final_screens") or [])
@@ -513,6 +525,18 @@ def execute_login_form_credentials(
                             instagram_save_login_info_prompt_not_now = (
                                 instagram_save_login_info_prompt_not_now
                                 or bool(observed.get("instagram_save_login_info_prompt_not_now"))
+                            )
+                            post_login_location_services_prompt_detected = (
+                                post_login_location_services_prompt_detected
+                                or bool(observed.get("post_login_location_services_prompt_detected"))
+                            )
+                            post_login_location_services_prompt_dismissed = (
+                                post_login_location_services_prompt_dismissed
+                                or bool(observed.get("post_login_location_services_prompt_dismissed"))
+                            )
+                            post_login_location_services_prompt_dismiss_method = (
+                                str(observed.get("post_login_location_services_prompt_dismiss_method") or "")
+                                or post_login_location_services_prompt_dismiss_method
                             )
                             post_dismiss_screen_type = (
                                 str(observed.get("post_dismiss_screen_type") or "") or post_dismiss_screen_type
@@ -627,6 +651,9 @@ def execute_login_form_credentials(
         samsung_pass_save_password_prompt_cancelled=samsung_pass_save_password_prompt_cancelled,
         instagram_save_login_info_prompt_detected=instagram_save_login_info_prompt_detected,
         instagram_save_login_info_prompt_not_now=instagram_save_login_info_prompt_not_now,
+        post_login_location_services_prompt_detected=post_login_location_services_prompt_detected,
+        post_login_location_services_prompt_dismissed=post_login_location_services_prompt_dismissed,
+        post_login_location_services_prompt_dismiss_method=post_login_location_services_prompt_dismiss_method,
         post_dismiss_screen_type=post_dismiss_screen_type,
         post_dismiss_final_observation_count=post_dismiss_final_observation_count,
         post_dismiss_final_screens=post_dismiss_final_screens,
@@ -1820,6 +1847,17 @@ def _classify_post_submit_hierarchy(hierarchy_xml: str) -> dict[str, Any]:
             "terminal": False,
             "screen_label": "save_login_info_prompt",
         }
+    if signals.get("post_login_location_services_prompt") is True:
+        return {
+            "outcome": "connected",
+            "screen_type": "connected_post_login_location_services_prompt",
+            "reason": "connected_post_login_location_services_prompt",
+            "password_required_dialog_present": False,
+            "save_password_prompt_present": False,
+            "post_login_location_services_prompt_present": True,
+            "terminal": True,
+            "screen_label": "connected_post_login_location_services_prompt",
+        }
     if signals.get("email_code_challenge_present") is True:
         return {
             "outcome": "verification_pending",
@@ -1931,6 +1969,9 @@ def _observe_post_submit_settled(
     samsung_pass_save_password_prompt_cancelled = False
     instagram_save_login_info_prompt_detected = False
     instagram_save_login_info_prompt_not_now = False
+    post_login_location_services_prompt_detected = False
+    post_login_location_services_prompt_dismissed = False
+    post_login_location_services_prompt_dismiss_method = ""
     dismiss_method = ""
     post_dismiss_screen_type = ""
     post_dismiss_final_observation_count = 0
@@ -2010,6 +2051,16 @@ def _observe_post_submit_settled(
             instagram_save_login_info_prompt_not_now = True
             warnings.append("instagram_save_login_info_prompt_not_now")
             continue
+        if observed.get("post_login_location_services_prompt_present") is True:
+            post_login_location_services_prompt_detected = True
+            warnings.append("post_login_location_services_prompt_detected")
+            post_login_location_services_prompt_dismiss_method = "back"
+            if _dismiss_post_login_location_services_prompt_once(d, warnings):
+                post_login_location_services_prompt_dismissed = True
+                warnings.append("post_login_location_services_prompt_dismiss_back")
+            else:
+                warnings.append("post_login_location_services_prompt_back_unavailable")
+            break
         if observed.get("password_required_dialog_present") is True:
             break
         if bool(observed.get("terminal")):
@@ -2118,6 +2169,9 @@ def _observe_post_submit_settled(
         "samsung_pass_save_password_prompt_cancelled": samsung_pass_save_password_prompt_cancelled,
         "instagram_save_login_info_prompt_detected": instagram_save_login_info_prompt_detected,
         "instagram_save_login_info_prompt_not_now": instagram_save_login_info_prompt_not_now,
+        "post_login_location_services_prompt_detected": post_login_location_services_prompt_detected,
+        "post_login_location_services_prompt_dismissed": post_login_location_services_prompt_dismissed,
+        "post_login_location_services_prompt_dismiss_method": post_login_location_services_prompt_dismiss_method,
         "post_dismiss_screen_type": post_dismiss_screen_type,
         "post_dismiss_final_observation_count": post_dismiss_final_observation_count,
         "post_dismiss_final_screens": post_dismiss_final_screens,
@@ -2254,6 +2308,18 @@ def _dismiss_save_login_info_prompt_once(d: Any, warnings: list[str]) -> bool:
         return True
     except Exception:
         warnings.append("save_login_info_not_now_tap_failed")
+        return False
+
+
+def _dismiss_post_login_location_services_prompt_once(d: Any, warnings: list[str]) -> bool:
+    press = getattr(d, "press", None)
+    if not callable(press):
+        return False
+    try:
+        press("back")
+        return True
+    except Exception:
+        warnings.append("post_login_location_services_prompt_back_failed")
         return False
 
 
@@ -2425,6 +2491,9 @@ def _result(
     post_dismiss_final_wait_total_ms: int = 0,
     post_dismiss_final_screen_type: str = "",
     connected_detected_after_save_prompt_dismiss: bool = False,
+    post_login_location_services_prompt_detected: bool = False,
+    post_login_location_services_prompt_dismissed: bool = False,
+    post_login_location_services_prompt_dismiss_method: str = "",
     username_replaced: bool = False,
     username_input_confirmed: str = "unknown",
     username_input_result: str = "",
@@ -2479,6 +2548,9 @@ def _result(
                 "samsung_pass_save_password_prompt_cancelled": samsung_pass_save_password_prompt_cancelled,
                 "instagram_save_login_info_prompt_detected": instagram_save_login_info_prompt_detected,
                 "instagram_save_login_info_prompt_not_now": instagram_save_login_info_prompt_not_now,
+                "post_login_location_services_prompt_detected": post_login_location_services_prompt_detected,
+                "post_login_location_services_prompt_dismissed": post_login_location_services_prompt_dismissed,
+                "post_login_location_services_prompt_dismiss_method": post_login_location_services_prompt_dismiss_method,
                 "post_dismiss_screen_type": post_dismiss_screen_type,
                 "post_dismiss_final_observation_count": post_dismiss_final_observation_count,
                 "post_dismiss_final_screens": list(post_dismiss_final_screens or []),

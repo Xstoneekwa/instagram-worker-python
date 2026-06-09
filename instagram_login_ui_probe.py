@@ -96,6 +96,11 @@ GOOGLE_PASSWORD_MANAGER_PATTERNS = (
     "google password manager",
     "gestionnaire de mots de passe google",
 )
+SAMSUNG_PASS_PATTERNS = (
+    "samsung pass",
+    "credential manager",
+    "gestionnaire d'identifiants",
+)
 SAVE_PASSWORD_FOR_INSTAGRAM_PATTERNS = (
     "save password for instagram",
     "enregistrer le mot de passe pour instagram",
@@ -117,6 +122,14 @@ CONNECTED_PATTERNS = (
     "feed",
     "direct",
     "new post",
+)
+POST_LOGIN_LOCATION_SERVICES_PROMPT_MARKERS = (
+    "set up on new device",
+    "to use location services",
+    "allow instagram to access your location",
+    "how you can use location services",
+    "how we'll use this information",
+    "how you can control this",
 )
 COMMON_NON_USERNAME_TEXTS = {
     "continue",
@@ -248,9 +261,12 @@ def extract_login_screen_signals_from_hierarchy(
     has_ok_button = _has_phrase(text, "ok")
     has_password_required_dialog = _contains_any(text, PASSWORD_REQUIRED_DIALOG_PATTERNS) and has_ok_button
     has_google_password_manager = _contains_any(text, GOOGLE_PASSWORD_MANAGER_PATTERNS)
+    has_samsung_pass = _contains_any(text, SAMSUNG_PASS_PATTERNS)
     has_save_password_for_instagram = _contains_any(text, SAVE_PASSWORD_FOR_INSTAGRAM_PATTERNS)
     has_google_save_password_prompt = has_google_password_manager and has_save_password_for_instagram and has_continue_button
+    has_samsung_save_password_prompt = has_samsung_pass and has_save_password_for_instagram and has_cancel and has_save_button
     has_email_code_challenge = _is_email_code_challenge_text(text)
+    has_post_login_location_services_prompt = _is_post_login_location_services_prompt_text(text)
     masked_email_present = _has_masked_email_signal(text)
     suggested_username = _extract_suggested_username(text)
     available_usernames = _extract_available_usernames(text)
@@ -269,10 +285,14 @@ def extract_login_screen_signals_from_hierarchy(
 
     if has_email_code_challenge:
         screen_type = "email_code_challenge"
+    elif has_samsung_save_password_prompt:
+        screen_type = "samsung_pass_save_password_prompt"
     elif has_google_save_password_prompt:
         screen_type = "google_password_manager_save_prompt"
     elif has_password_required_dialog:
         screen_type = "password_required_dialog"
+    elif has_post_login_location_services_prompt:
+        screen_type = "connected_post_login_location_services_prompt"
     elif has_logout_confirmation_prompt and has_log_out and has_cancel:
         screen_type = "logout_confirmation_prompt"
     elif has_save_login_info_prompt and has_not_now and has_save_button:
@@ -334,9 +354,12 @@ def extract_login_screen_signals_from_hierarchy(
         "login_button_present": has_login_button,
         "has_ok_button": has_ok_button,
         "password_required_dialog_present": has_password_required_dialog,
-        "save_password_prompt_present": has_google_save_password_prompt,
+        "save_password_prompt_present": has_google_save_password_prompt or has_samsung_save_password_prompt,
+        "samsung_pass_save_password_prompt": screen_type == "samsung_pass_save_password_prompt",
+        "samsung_pass_save_password_prompt_present": has_samsung_save_password_prompt,
         "google_password_manager_save_prompt": screen_type == "google_password_manager_save_prompt",
-        "save_password_prompt": screen_type == "google_password_manager_save_prompt",
+        "save_password_prompt": screen_type
+        in {"google_password_manager_save_prompt", "samsung_pass_save_password_prompt"},
         "email_code_challenge_present": screen_type == "email_code_challenge",
         "challenge_type": "email" if screen_type == "email_code_challenge" else "",
         "masked_email_present": bool(masked_email_present) if screen_type == "email_code_challenge" else False,
@@ -361,12 +384,16 @@ def extract_login_screen_signals_from_hierarchy(
         "has_add_account_button": has_add_account,
         "has_log_out_button": has_log_out,
         "save_login_info_prompt": screen_type == "save_login_info_prompt",
+        "post_login_location_services_prompt": screen_type == "connected_post_login_location_services_prompt",
+        "connected_post_login_location_services_prompt": screen_type
+        == "connected_post_login_location_services_prompt",
         "has_not_now_button": has_not_now,
         "has_save_button": has_save_button,
         "logout_confirmation_prompt": screen_type == "logout_confirmation_prompt",
         "has_cancel_button": has_cancel,
         "active_account_home": screen_type == "active_account_home",
         "active_account_profile": screen_type == "active_account_profile",
+        "connected_post_login_setup": screen_type == "connected_post_login_location_services_prompt",
         "account_switcher_sheet": screen_type == "account_switcher_sheet",
         "add_account_sheet": screen_type == "add_account_sheet",
         "continue_password_only": screen_type == "continue_password_only",
@@ -411,6 +438,20 @@ def probe_login_ui_from_hierarchy(
             metadata={**metadata, "detection_reason": "password_required_dialog", "password_required_dialog_present": True},
         )
 
+    if _contains_any(text, SAMSUNG_PASS_PATTERNS) and _contains_any(text, SAVE_PASSWORD_FOR_INSTAGRAM_PATTERNS):
+        return LoginUiProbeResult(
+            outcome=LoginProbeOutcome.UNKNOWN,
+            ok=False,
+            reason="samsung_pass_save_password_prompt",
+            metadata={
+                **metadata,
+                "detection_reason": "samsung_pass_save_password_prompt",
+                "screen_type": "samsung_pass_save_password_prompt",
+                "save_password_prompt_present": True,
+                "samsung_pass_save_password_prompt_present": True,
+            },
+        )
+
     if _contains_any(text, GOOGLE_PASSWORD_MANAGER_PATTERNS) and _contains_any(text, SAVE_PASSWORD_FOR_INSTAGRAM_PATTERNS):
         return LoginUiProbeResult(
             outcome=LoginProbeOutcome.UNKNOWN,
@@ -419,6 +460,7 @@ def probe_login_ui_from_hierarchy(
             metadata={
                 **metadata,
                 "detection_reason": "google_password_manager_save_prompt",
+                "screen_type": "google_password_manager_save_prompt",
                 "save_password_prompt_present": True,
             },
         )
@@ -434,6 +476,20 @@ def probe_login_ui_from_hierarchy(
                 "screen_type": "email_code_challenge",
                 "challenge_type": "email",
                 "masked_email_present": _has_masked_email_signal(text),
+            },
+        )
+
+    if _is_post_login_location_services_prompt_text(text):
+        return LoginUiProbeResult(
+            outcome=LoginProbeOutcome.CONNECTED,
+            ok=True,
+            reason="connected_post_login_location_services_prompt",
+            metadata={
+                **metadata,
+                "detection_reason": "connected_post_login_location_services_prompt",
+                "screen_type": "connected_post_login_location_services_prompt",
+                "post_login_location_services_prompt": True,
+                "connected_post_login_setup": True,
             },
         )
 
@@ -623,6 +679,7 @@ def _is_email_code_challenge_text(text: str) -> bool:
     if has_resend and (has_header or has_masked_email or has_entry):
         return True
 
+    # Preserve the original strict English quartet for stable regression coverage.
     return (
         _has_phrase(text, "check your email")
         and _has_phrase(text, "enter the code we sent")
@@ -643,6 +700,16 @@ def _is_unsupported_post_submit_challenge_text(text: str) -> bool:
     if _contains_any(text, LOGGED_OUT_PATTERNS) and _has_phrase(text, "log in"):
         return False
     return _contains_any(text, UNSUPPORTED_POST_SUBMIT_CHALLENGE_PATTERNS)
+
+
+def _is_post_login_location_services_prompt_text(text: str) -> bool:
+    marker_hits = _count_pattern_hits(text, POST_LOGIN_LOCATION_SERVICES_PROMPT_MARKERS)
+    return (
+        marker_hits >= 3
+        and _has_phrase(text, "set up on new device")
+        and _has_phrase(text, "continue")
+        and "location" in text
+    )
 
 
 def _has_masked_email_signal(text: str) -> bool:
