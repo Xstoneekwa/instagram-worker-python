@@ -45,9 +45,38 @@ CHECKPOINT_PATTERNS = (
     "suspicious login attempt",
     "verify your account",
 )
+EMAIL_CODE_SENT_PATTERNS = (
+    "enter the code we sent",
+    "code we sent to",
+    "code que nous avons envoyé",
+    "code que nous avons envoye",
+    "saisissez le code que nous",
+    "entrez le code que nous",
+)
+EMAIL_CODE_HEADER_PATTERNS = (
+    "check your email",
+    "vérifiez votre e-mail",
+    "vérifiez votre email",
+    "verifiez votre e-mail",
+    "verifiez votre email",
+    "vérifiez vos e-mails",
+    "verifiez vos e-mails",
+)
+EMAIL_CODE_ENTRY_PATTERNS = (
+    "enter code",
+    "saisir le code",
+    "saisissez le code",
+    "entrez le code",
+    "entrer le code",
+)
+EMAIL_CODE_RESEND_PATTERNS = (
+    "get a new code",
+    "recevoir un nouveau code",
+    "obtenir un nouveau code",
+    "envoyer un nouveau code",
+)
 UNSUPPORTED_POST_SUBMIT_CHALLENGE_PATTERNS = (
     "try another way",
-    "get a new code",
     "confirm your identity",
     "security check",
     "unusual login attempt",
@@ -581,6 +610,19 @@ def _has_phrase(text: str, phrase: str) -> bool:
 
 
 def _is_email_code_challenge_text(text: str) -> bool:
+    if _contains_any(text, EMAIL_CODE_SENT_PATTERNS):
+        return True
+
+    has_header = _contains_any(text, EMAIL_CODE_HEADER_PATTERNS)
+    has_entry = _contains_any(text, EMAIL_CODE_ENTRY_PATTERNS)
+    has_resend = _contains_any(text, EMAIL_CODE_RESEND_PATTERNS)
+    has_masked_email = _has_masked_email_signal(text)
+
+    if has_header and has_entry:
+        return True
+    if has_resend and (has_header or has_masked_email or has_entry):
+        return True
+
     return (
         _has_phrase(text, "check your email")
         and _has_phrase(text, "enter the code we sent")

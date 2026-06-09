@@ -61,6 +61,38 @@ class InstagramLoginUiProbeTest(unittest.TestCase):
         self.assertEqual(signals["screen_type"], "email_code_challenge")
         self.assertTrue(signals["email_code_challenge_present"])
 
+    def test_detects_email_code_challenge_with_resend_and_masked_email_without_full_header(self) -> None:
+        xml = (
+            '<node text="Enter the code we sent to m*******e@hotmail.com" />'
+            '<node class="android.widget.EditText" text="Enter code" editable="true" />'
+            '<node text="Get a new code" />'
+            '<node text="Continue" />'
+        )
+
+        result = probe_login_ui_from_hierarchy(xml, stage="post_submit")
+
+        self.assertEqual(result.outcome, LoginProbeOutcome.VERIFICATION_PENDING)
+        self.assertEqual(result.reason, "email_verification_code_required")
+        self.assertEqual(result.metadata["screen_type"], "email_code_challenge")
+        self.assertEqual(result.metadata["challenge_type"], "email")
+        self.assertTrue(result.metadata["masked_email_present"])
+
+    def test_detects_french_email_code_challenge(self) -> None:
+        xml = (
+            '<node text="Vérifiez votre e-mail" />'
+            '<node text="Entrez le code que nous avons envoyé à m*******e@hotmail.com" />'
+            '<node class="android.widget.EditText" text="Entrez le code" editable="true" />'
+            '<node text="Recevoir un nouveau code" />'
+            '<node text="Essayer une autre méthode" />'
+        )
+
+        result = probe_login_ui_from_hierarchy(xml, stage="post_submit")
+
+        self.assertEqual(result.outcome, LoginProbeOutcome.VERIFICATION_PENDING)
+        self.assertEqual(result.reason, "email_verification_code_required")
+        self.assertEqual(result.metadata["screen_type"], "email_code_challenge")
+        self.assertEqual(result.metadata["challenge_type"], "email")
+
     def test_detects_unsupported_post_submit_challenge(self) -> None:
         xml = (
             '<node text="Was this you?" />'

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import config
@@ -26,6 +27,9 @@ LOGIN_CHALLENGE_ACTIONS = {
         "severity": "warning",
     },
 }
+
+EMAIL_CODE_ACTION_TTL_MINUTES = 10
+
 
 FORBIDDEN_METADATA_KEYS = {
     "password",
@@ -87,6 +91,11 @@ def upsert_login_challenge_dashboard_action(
         return {"published": False, "reason": "invalid_payload", "action_type": atype or None}
 
     spec = LOGIN_CHALLENGE_ACTIONS[atype]
+    action_expires_at = (
+        (datetime.now(timezone.utc) + timedelta(minutes=EMAIL_CODE_ACTION_TTL_MINUTES)).isoformat()
+        if atype == "enter_email_verification_code"
+        else None
+    )
     safe_metadata = _clean_metadata(
         {
             **(metadata or {}),
@@ -96,6 +105,8 @@ def upsert_login_challenge_dashboard_action(
             "stage": stage,
             "masked_email_present": masked_email_present,
             "human_review_required": human_review_required,
+            "action_expires_at": action_expires_at,
+            "ttl_minutes": EMAIL_CODE_ACTION_TTL_MINUTES if action_expires_at else None,
         }
     )
     dedupe_key = f"account:{aid}:dashboard_action:{atype}"
