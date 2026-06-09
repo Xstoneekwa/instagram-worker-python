@@ -25,12 +25,16 @@ from account_run_control import (
     get_account_run_request,
     insert_manual_run_audit,
     mark_account_run_request_starting,
+    normalize_request_uuid,
     reconcile_linked_ig_run_terminal,
     reclaim_stale_account_run_requests,
 )
 from assignment_dispatch_resolver import resolve_account_assignment_runtime_context, sensitive_log_fields
 from logs import log
 import supabase_client
+
+
+LOGIN_RUN_TYPES = frozenset({"login_provisioning", "login_email_code_resume"})
 
 
 @dataclass
@@ -94,7 +98,10 @@ def load_dispatcher_config() -> DispatcherConfig:
     host = socket.gethostname()
     default_worker_id = f"run-dispatcher:{host}"
     configured_worker_id = _env_str("RUN_CONTROL_DISPATCHER_WORKER_ID", default_worker_id)
-    allowed_raw = _env_str("RUN_CONTROL_DISPATCHER_ALLOWED_RUN_TYPES", "account_session,outreach_session")
+    allowed_raw = _env_str(
+        "RUN_CONTROL_DISPATCHER_ALLOWED_RUN_TYPES",
+        "account_session,outreach_session,login_provisioning,login_email_code_resume",
+    )
     allowed = [part.strip().lower() for part in allowed_raw.split(",") if part.strip()]
     test_ids_raw = _env_str("RUN_CONTROL_DISPATCHER_TEST_ACCOUNT_IDS", "")
     test_ids = {part.strip() for part in test_ids_raw.split(",") if part.strip()}
@@ -150,6 +157,106 @@ def dispatcher_is_healthy(cfg: DispatcherConfig | None = None) -> bool:
     return age_seconds <= max(cfg.heartbeat_seconds * 3, 60.0)
 
 
+def _allow_existing_queue_on_startup() -> bool:
+    return _env_bool("RUN_CONTROL_DISPATCHER_ALLOW_EXISTING_QUEUE", False)
+
+
+def count_active_account_run_requests() -> int:
+    """Read-only count of active queue rows for safe startup preflight."""
+    try:
+        rows = supabase_client._request_json(
+            "GET",
+            "account_run_requests",
+            query={
+                "select": "id",
+                "status": f"in.({','.join(sorted(ACTIVE_REQUEST_STATUSES))})",
+            },
+        ) or []
+    except Exception:
+        return -1
+    return len(rows)
+
+
+def summarize_active_account_run_requests(limit: int = 20) -> dict[str, Any]:
+    """Safe startup summary without secrets or device identifiers."""
+    try:
+        rows = supabase_client._request_json(
+            "GET",
+            "account_run_requests",
+            query={
+                "select": "id,account_id,status,requested_run_type,created_at",
+                "status": f"in.({','.join(sorted(ACTIVE_REQUEST_STATUSES))})",
+                "order": "created_at.asc",
+                "limit": str(max(1, int(limit))),
+            },
+        ) or []
+    except Exception as exc:
+        return {
+            "active_count": -1,
+            "requests": [],
+            "read_failed": True,
+            "error": str(exc)[:200],
+        }
+    safe_rows: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        safe_rows.append(
+            {
+                "request_id": normalize_request_uuid(row.get("id")),
+                "account_id": normalize_request_uuid(row.get("account_id")),
+                "status": str(row.get("status") or "").strip().lower() or None,
+                "requested_run_type": str(row.get("requested_run_type") or "").strip().lower() or None,
+                "created_at": str(row.get("created_at") or "").strip() or None,
+            }
+        )
+    return {
+        "active_count": len(safe_rows),
+        "requests": safe_rows,
+        "read_failed": False,
+        "error": None,
+    }
+
+
+def evaluate_launch_mode_startup_preflight(cfg: DispatcherConfig) -> dict[str, Any]:
+    """Block launch mode when an active queue exists unless explicitly overridden."""
+    if cfg.health_only or not cfg.launch_enabled:
+        return {
+            "ok": True,
+            "mode": "health_only",
+            "active_count": 0,
+            "allow_existing_queue": _allow_existing_queue_on_startup(),
+        }
+
+    summary = summarize_active_account_run_requests()
+    active_count = int(summary.get("active_count") or 0)
+    if summary.get("read_failed"):
+        return {
+            "ok": False,
+            "reason": "active_queue_read_failed",
+            "active_count": active_count,
+            "allow_existing_queue": _allow_existing_queue_on_startup(),
+            "requests": [],
+        }
+
+    if active_count > 0 and not _allow_existing_queue_on_startup():
+        return {
+            "ok": False,
+            "reason": "active_queue_present",
+            "active_count": active_count,
+            "allow_existing_queue": False,
+            "requests": list(summary.get("requests") or []),
+        }
+
+    return {
+        "ok": True,
+        "reason": "ready",
+        "active_count": active_count,
+        "allow_existing_queue": _allow_existing_queue_on_startup(),
+        "requests": list(summary.get("requests") or []),
+    }
+
+
 def _heartbeat(cfg: DispatcherConfig, *, status: str = "idle", metadata: dict[str, Any] | None = None) -> None:
     with _force_runtime_heartbeats():
         runtime_heartbeat.heartbeat_worker(
@@ -193,15 +300,90 @@ def _validate_assignment(account_id: str, run_type: str, cfg: DispatcherConfig) 
         require_assignment=cfg.require_assignment,
         enforce_window=cfg.enforce_assignment_window,
     )
+    reason = str(ctx.get("reason") or "")
+    if reason == "assignment_device_missing_adb_serial":
+        return False, reason, ctx
     if cfg.require_assignment and not bool(ctx.get("assignment_found")):
         reason = str(ctx.get("reason") or "assignment_not_found")
         return False, reason, ctx
     return True, None, ctx
 
 
-def _build_runner_command(account_id: str, run_type: str, request_id: str) -> list[str]:
+def _is_login_run_type(run_type: str) -> bool:
+    return str(run_type or "").strip().lower() in LOGIN_RUN_TYPES
+
+
+def _load_expected_username(account_id: str) -> str:
+    account = supabase_client.load_account(account_id=account_id)
+    if not account:
+        return ""
+    return str(account.get("username") or "").strip()
+
+
+def _build_login_provisioner_command(
+    account_id: str,
+    run_type: str,
+    request_id: str,
+    *,
+    device_serial: str | None = None,
+    package_name: str | None = None,
+    app_instance_id: str | None = None,
+    metadata_safe: dict[str, Any] | None = None,
+) -> list[str]:
+    expected_username = _load_expected_username(account_id)
+    cmd = [
+        sys.executable,
+        "-m",
+        "instagram_login_provisioner_cli",
+        "--account-id",
+        account_id,
+        "--expected-username",
+        expected_username or "unknown",
+        "--no-publish",
+        "--json",
+        "--run-id",
+        request_id,
+    ]
+    serial = str(device_serial or "").strip()
+    if serial:
+        cmd.extend(["--device-serial", serial])
+    package = str(package_name or "").strip()
+    if package:
+        cmd.extend(["--package-name", package])
+    app_instance = str(app_instance_id or "").strip()
+    if app_instance:
+        cmd.extend(["--expected-app-instance-id", app_instance])
+    meta = dict(metadata_safe or {})
+    if str(run_type or "").strip().lower() == "login_email_code_resume":
+        cmd.append("--resume-email-code-from-action")
+        action_id = str(meta.get("action_id") or meta.get("verification_action_id") or "").strip()
+        if action_id:
+            cmd.extend(["--verification-action-id", action_id])
+    return cmd
+
+
+def _build_runner_command(
+    account_id: str,
+    run_type: str,
+    request_id: str,
+    *,
+    device_serial: str | None = None,
+    package_name: str | None = None,
+    app_instance_id: str | None = None,
+    metadata_safe: dict[str, Any] | None = None,
+) -> list[str]:
+    if _is_login_run_type(run_type):
+        return _build_login_provisioner_command(
+            account_id,
+            run_type,
+            request_id,
+            device_serial=device_serial,
+            package_name=package_name,
+            app_instance_id=app_instance_id,
+            metadata_safe=metadata_safe,
+        )
     runner_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "runner.py")
-    return [
+    cmd = [
         sys.executable,
         runner_path,
         "--account-id",
@@ -211,6 +393,37 @@ def _build_runner_command(account_id: str, run_type: str, request_id: str) -> li
         "--run-request-id",
         request_id,
     ]
+    serial = str(device_serial or "").strip()
+    if serial:
+        cmd.extend(["--device-serial", serial])
+    return cmd
+
+
+def _safe_complete_account_run_request(
+    request_id: str | None,
+    worker_id: str,
+    status: str,
+    *,
+    error_code: str | None = None,
+    error_message_safe: str | None = None,
+) -> dict[str, Any] | None:
+    normalized_request_id = normalize_request_uuid(request_id)
+    if not normalized_request_id:
+        log(
+            "warning",
+            "run_control_skip_transition_invalid_request_id",
+            transition="complete",
+            terminal_status=status,
+            worker_id=worker_id,
+        )
+        return None
+    return complete_account_run_request(
+        normalized_request_id,
+        worker_id,
+        status,
+        error_code=error_code,
+        error_message_safe=error_message_safe,
+    )
 
 
 def _audit(
@@ -290,7 +503,7 @@ def _finalize_manual_run_after_subprocess(
     canceled = bool(latest.get("cancel_requested_at")) or str(latest.get("status") or "").strip().lower() == "canceled"
 
     if timed_out:
-        complete_account_run_request(
+        _safe_complete_account_run_request(
             request_id,
             cfg.worker_id,
             "failed",
@@ -315,7 +528,7 @@ def _finalize_manual_run_after_subprocess(
         return
 
     if exit_code == 0:
-        complete_account_run_request(request_id, cfg.worker_id, "completed")
+        _safe_complete_account_run_request(request_id, cfg.worker_id, "completed")
         _reconcile_linked_run(
             account_id=account_id,
             run_id=run_id,
@@ -334,7 +547,7 @@ def _finalize_manual_run_after_subprocess(
         return
 
     if canceled:
-        complete_account_run_request(request_id, cfg.worker_id, "canceled")
+        _safe_complete_account_run_request(request_id, cfg.worker_id, "canceled")
         _reconcile_linked_run(
             account_id=account_id,
             run_id=run_id,
@@ -352,7 +565,7 @@ def _finalize_manual_run_after_subprocess(
         )
         return
 
-    complete_account_run_request(
+    _safe_complete_account_run_request(
         request_id,
         cfg.worker_id,
         "failed",
@@ -416,22 +629,23 @@ def _wait_for_subprocess(
 
 
 def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> None:
-    request_id = str(request.get("id") or "").strip()
-    account_id = str(request.get("account_id") or "").strip()
+    request_id = normalize_request_uuid(request.get("id"))
+    account_id = normalize_request_uuid(request.get("account_id"))
     run_type = str(request.get("requested_run_type") or "").strip().lower()
     if not request_id or not account_id or not run_type:
-        complete_account_run_request(
-            request_id,
-            cfg.worker_id,
-            "failed",
-            error_code="invalid_request_row",
-            error_message_safe="Missing request identifiers.",
+        log(
+            "warning",
+            "run_control_skip_claimed_request_invalid_row",
+            has_request_id=bool(request_id),
+            has_account_id=bool(account_id),
+            has_run_type=bool(run_type),
+            worker_id=cfg.worker_id,
         )
         return
 
     allowed, block_reason = _account_is_launch_allowed(account_id, cfg)
     if not allowed:
-        complete_account_run_request(
+        _safe_complete_account_run_request(
             request_id,
             cfg.worker_id,
             "blocked",
@@ -454,7 +668,7 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
     ok_assignment, assignment_reason, dispatch_ctx = _validate_assignment(account_id, run_type, cfg)
     safe_dispatch = sensitive_log_fields(dispatch_ctx)
     if not ok_assignment:
-        complete_account_run_request(
+        _safe_complete_account_run_request(
             request_id,
             cfg.worker_id,
             "blocked",
@@ -470,15 +684,76 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
         )
         return
 
+    adb_serial = str(dispatch_ctx.get("adb_serial") or "").strip()
+    log(
+        "info",
+        "run_dispatcher_device_serial_resolved",
+        **safe_dispatch,
+        adb_serial_present=bool(adb_serial),
+    )
+
     _audit(
         account_id=account_id,
         action_type="manual_run_claimed",
         status="success",
         message="Manual run request claimed by dispatcher.",
-        payload={"request_id": request_id, "worker_id": cfg.worker_id},
+        payload={
+            "request_id": request_id,
+            "worker_id": cfg.worker_id,
+            "assignment": safe_dispatch,
+            "adb_serial_present": bool(adb_serial),
+        },
     )
 
-    cmd = _build_runner_command(account_id, run_type, request_id)
+    request_metadata = dict(request.get("metadata_safe") or {})
+    if _is_login_run_type(run_type) and not adb_serial:
+        _safe_complete_account_run_request(
+            request_id,
+            cfg.worker_id,
+            "blocked",
+            error_code="login_device_serial_required",
+            error_message_safe="Login run blocked: assigned device serial is required.",
+        )
+        _audit(
+            account_id=account_id,
+            action_type="manual_run_blocked",
+            status="blocked",
+            message="Login run blocked: assigned device serial is required.",
+            payload={"request_id": request_id, "run_type": run_type},
+        )
+        return
+
+    if run_type == "login_email_code_resume":
+        action_id = str(
+            request_metadata.get("action_id") or request_metadata.get("verification_action_id") or ""
+        ).strip()
+        if action_id:
+            try:
+                from login_challenge_runtime import mark_verification_action_resume_running
+
+                mark_verification_action_resume_running(
+                    action_id=action_id,
+                    account_id=account_id,
+                    run_request_id=request_id,
+                )
+            except Exception as exc:
+                log(
+                    "warning",
+                    "login_resume_action_state_update_failed",
+                    account_id=account_id,
+                    request_id=request_id,
+                    error=str(exc)[:200],
+                )
+
+    cmd = _build_runner_command(
+        account_id,
+        run_type,
+        request_id,
+        device_serial=adb_serial,
+        package_name=dispatch_ctx.get("package_name") or dispatch_ctx.get("app_package") or dispatch_ctx.get("package"),
+        app_instance_id=dispatch_ctx.get("app_instance_id"),
+        metadata_safe=request_metadata,
+    )
     log(
         "info",
         "manual_run_subprocess_starting",
@@ -486,6 +761,9 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
         request_id=request_id,
         run_type=run_type,
         worker_id=cfg.worker_id,
+        device_id=dispatch_ctx.get("device_id"),
+        app_instance_id=dispatch_ctx.get("app_instance_id"),
+        adb_serial_present=bool(adb_serial),
     )
     _heartbeat(cfg, status="running", metadata={"active_request_id": request_id, "account_id": account_id})
 
@@ -526,10 +804,24 @@ def run_once(cfg: DispatcherConfig | None = None) -> dict[str, Any]:
     if not request:
         return {"ok": True, "mode": "idle", "reclaimed": reclaimed}
 
-    request_id = str(request.get("id") or "").strip()
-    account_id = str(request.get("account_id") or "").strip()
+    request_id = normalize_request_uuid(request.get("id"))
+    if not request_id:
+        log(
+            "warning",
+            "run_control_skip_invalid_claim_row",
+            worker_id=cfg.worker_id,
+        )
+        return {"ok": True, "mode": "idle", "reason": "invalid_claim_row", "reclaimed": reclaimed}
+
+    account_id = normalize_request_uuid(request.get("account_id"))
     _handle_claimed_request(cfg, request)
-    return {"ok": True, "mode": "processed", "request_id": request_id, "reclaimed": reclaimed}
+    return {
+        "ok": True,
+        "mode": "processed",
+        "request_id": request_id,
+        "account_id": account_id,
+        "reclaimed": reclaimed,
+    }
 
 
 def run_forever(cfg: DispatcherConfig | None = None) -> int:
@@ -538,6 +830,19 @@ def run_forever(cfg: DispatcherConfig | None = None) -> int:
         log("error", "run_control_dispatcher_disabled")
         return 2
 
+    preflight = evaluate_launch_mode_startup_preflight(cfg)
+    if not preflight.get("ok"):
+        log(
+            "error",
+            "run_control_dispatcher_launch_preflight_blocked",
+            worker_id=cfg.worker_id,
+            reason=str(preflight.get("reason") or "blocked"),
+            active_count=int(preflight.get("active_count") or 0),
+            allow_existing_queue=bool(preflight.get("allow_existing_queue")),
+            active_requests=list(preflight.get("requests") or [])[:5],
+        )
+        return 3
+
     log(
         "info",
         "run_control_dispatcher_started",
@@ -545,6 +850,8 @@ def run_forever(cfg: DispatcherConfig | None = None) -> int:
         health_only=cfg.health_only,
         launch_enabled=cfg.launch_enabled,
         allowed_run_types=cfg.allowed_run_types,
+        startup_active_count=int(preflight.get("active_count") or 0),
+        startup_allow_existing_queue=bool(preflight.get("allow_existing_queue")),
     )
     _heartbeat(cfg, status="starting")
 
@@ -559,11 +866,20 @@ def run_forever(cfg: DispatcherConfig | None = None) -> int:
     signal.signal(signal.SIGTERM, _handle_signal)
 
     last_heartbeat = 0.0
+    last_loop_error_key = ""
+    last_loop_error_logged_at = 0.0
     while not stop:
         try:
             run_once(cfg)
+            last_loop_error_key = ""
         except Exception as exc:
-            log("error", "run_control_dispatcher_loop_failed", error=str(exc)[:500])
+            err = str(exc)[:500]
+            now = time.monotonic()
+            err_key = err[:200]
+            if err_key != last_loop_error_key or (now - last_loop_error_logged_at) >= 60.0:
+                log("error", "run_control_dispatcher_loop_failed", error=err)
+                last_loop_error_key = err_key
+                last_loop_error_logged_at = now
         now = time.monotonic()
         if now - last_heartbeat >= cfg.heartbeat_seconds:
             _heartbeat(cfg, status="idle")
@@ -577,6 +893,11 @@ def run_forever(cfg: DispatcherConfig | None = None) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = list(argv or sys.argv[1:])
+    if args and args[0] in {"--preflight", "preflight"}:
+        cfg = load_dispatcher_config()
+        result = evaluate_launch_mode_startup_preflight(cfg)
+        print(result)
+        return 0 if result.get("ok") else 3
     if args and args[0] in {"--once", "once"}:
         result = run_once()
         print(result)

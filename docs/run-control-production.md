@@ -59,13 +59,89 @@ export INSTAGRAM_RUN_CONTROL_DISPATCHER_HEALTH_MAX_AGE_SECONDS=60
 
 Play remains disabled if any of these are missing or the dispatcher heartbeat is stale.
 
+## Permanent Dispatcher Service
+
+Production default: supervised dispatcher service, not manual heartbeat commands.
+
+Artifacts:
+
+- Wrapper: `scripts/run_control_dispatcher_service.sh`
+- Env template: `docs/run-control-dispatcher.env.example`
+- launchd template: `ops/launchd/com.instagram.run-control-dispatcher.plist`
+
+### One-time setup
+
+```bash
+cd /Users/admin/instagram-worker-python
+cp docs/run-control-dispatcher.env.example .env.run-control-dispatcher
+# edit .env.run-control-dispatcher with SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY
+chmod +x scripts/run_control_dispatcher_service.sh
+```
+
+Set the same worker id on the dashboard host:
+
+```bash
+export INSTAGRAM_RUN_CONTROL_DISPATCHER_WORKER_ID="run-dispatcher:your-worker-host"
+```
+
+### Safe startup preflight
+
+Before launch mode starts, the dispatcher checks active `account_run_requests`
+(`queued`, `claimed`, `starting`, `running`).
+
+- If active queue exists and `RUN_CONTROL_DISPATCHER_ALLOW_EXISTING_QUEUE` is not `true`,
+  launch mode refuses to start.
+- Health-only mode still starts and publishes heartbeat.
+- Preflight is read-only: no claim, no mutation, no runner launch.
+
+Commands:
+
+```bash
+./scripts/run_control_dispatcher_service.sh status
+./scripts/run_control_dispatcher_service.sh preflight
+./scripts/run_control_dispatcher_service.sh once
+./scripts/run_control_dispatcher_service.sh start
+```
+
+### launchd install (macOS)
+
+```bash
+cp ops/launchd/com.instagram.run-control-dispatcher.plist ~/Library/LaunchAgents/
+launchctl unload ~/Library/LaunchAgents/com.instagram.run-control-dispatcher.plist 2>/dev/null || true
+launchctl load ~/Library/LaunchAgents/com.instagram.run-control-dispatcher.plist
+launchctl start com.instagram.run-control-dispatcher
+launchctl print gui/$(id -u)/com.instagram.run-control-dispatcher | head
+```
+
+Stop / restart:
+
+```bash
+launchctl stop com.instagram.run-control-dispatcher
+launchctl unload ~/Library/LaunchAgents/com.instagram.run-control-dispatcher.plist
+```
+
+Logs:
+
+- `logs/run-control-dispatcher/dispatcher.log`
+- `logs/run-control-dispatcher/launchd.stdout.log`
+- `logs/run-control-dispatcher/launchd.stderr.log`
+
+### Intentionally processing an existing queue
+
+Only after reviewing `./scripts/run_control_dispatcher_service.sh status`:
+
+```bash
+export RUN_CONTROL_DISPATCHER_ALLOW_EXISTING_QUEUE=true
+./scripts/run_control_dispatcher_service.sh start
+```
+
 ## Supervision
 
 Recommended first deployment:
 
-- macOS worker host: `launchctl` KeepAlive job for `account_run_request_consumer.py`
+- macOS worker host: `launchctl` KeepAlive job via `scripts/run_control_dispatcher_service.sh`
 - Linux worker host: `systemd` unit with `Restart=always`
-- Do not enable Play until staging smoke passes
+- Dashboard reads `/api/instagram-dashboard/runs/health` automatically
 
 Example launchd label:
 
@@ -75,6 +151,7 @@ Restart policy:
 
 - Always restart dispatcher process
 - Do not blindly replay child runs if `run_id` is already linked
+- Safe-start blocks launch mode when active queue exists unless explicitly overridden
 
 ## Staging Smoke Checklist
 
