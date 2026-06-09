@@ -32,8 +32,12 @@ from instagram_login_status_classifier import (
 from instagram_login_ui_probe import detect_login_probe_outcome_from_hierarchy, extract_login_screen_signals_from_hierarchy
 from login_challenge_runtime import (
     consume_verification_code_for_worker,
+    dispatch_login_package_mismatch_notifications,
     publish_login_challenge_pending_incident,
+    publish_login_package_mismatch_incident,
     sync_login_challenge_dashboard_action,
+    sync_login_package_mismatch_dashboard_action,
+    sync_verification_action_after_email_code_resume,
 )
 
 
@@ -71,6 +75,7 @@ NO_RETRY_FAILURES = {
     "wrong_account",
     "block_wrong_suggested_account",
     "save_password_prompt_blocking",
+    "save_login_info_prompt_blocking",
     "username_prefilled_not_editable",
     "username_input_failed",
 }
@@ -122,6 +127,13 @@ POST_LOGOUT_KNOWN_SCREENS = {
     "continue_password_only",
     "connected",
 }
+POST_EMAIL_CODE_PASSWORD_SCREENS = frozenset(
+    {
+        "continue_password_only",
+        "login_form_empty",
+        "login_form_prefilled_username",
+    }
+)
 POST_LOGOUT_SETTLING_OBSERVATIONS = 6
 POST_LOGOUT_SETTLING_INTERVAL_MS = DEFAULT_STARTUP_INTERVAL_MS
 PARENT_APP_START_METADATA_KEYS = (
@@ -215,6 +227,11 @@ def run_login_provisioning_flow(
     post_submit_timeout_ms: Optional[int] = None,
     operator_smoke_active_account_username: str | None = None,
     operator_smoke_allow_logout_fallback: bool = False,
+    run_id: str | None = None,
+    run_type: str | None = "login_provisioning",
+    device_serial: str | None = None,
+    device_id: str | None = None,
+    expected_app_instance_id: str | None = None,
     timer: Timer | None = None,
     sleeper: Sleeper | None = None,
 ) -> LoginProvisioningFlowResult:
@@ -237,6 +254,11 @@ def run_login_provisioning_flow(
     post_continue_metadata: dict[str, Any] = {}
     safe_account_id = str(account_id or "").strip()
     safe_expected_username = str(expected_username or "").strip()
+    safe_run_id = str(run_id or "").strip() or None
+    safe_run_type = str(run_type or "login_provisioning").strip() or "login_provisioning"
+    safe_device_id = str(device_id or "").strip() or None
+    safe_expected_app_instance_id = str(expected_app_instance_id or "").strip() or None
+    safe_adb_serial_masked = _mask_adb_serial(device_serial)
     safe_operator_smoke_active_username = _normalize_identity_username(operator_smoke_active_account_username)
     max_retries = min(MAX_RETRY_ATTEMPTS, max(0, int(max_retry_attempts or 0)))
     safe_package_name = _safe_package_name(package_name)
@@ -248,6 +270,12 @@ def run_login_provisioning_flow(
         "selected_route": "",
         "selected_route_reason": "",
         "expected_username": safe_expected_username,
+        "run_id": safe_run_id,
+        "run_type": safe_run_type,
+        "expected_package_name": safe_package_name,
+        "expected_app_instance_id": safe_expected_app_instance_id,
+        "device_id": safe_device_id,
+        **({"adb_serial_masked": safe_adb_serial_masked} if safe_adb_serial_masked else {}),
         "observe_current_screen_only": bool(observe_current_screen_only),
         "app_start_attempted": app_start_attempted,
         "app_start_ok": None,
@@ -312,6 +340,28 @@ def run_login_provisioning_flow(
         timings["post_start_wait_ms"] = bounded_post_start_wait_ms
         if bounded_post_start_wait_ms > 0:
             sleeper(bounded_post_start_wait_ms / 1000.0)
+        guard = _check_expected_foreground_package(d, expected_package_name=safe_package_name)
+        screen_preparation_metadata.update(guard)
+        if guard.get("package_guard_mismatch"):
+            return _finalize_package_mismatch(
+                account_id=safe_account_id,
+                expected_username=safe_expected_username,
+                expected_package_name=safe_package_name,
+                actual_foreground_package=str(guard.get("actual_foreground_package") or ""),
+                run_id=safe_run_id,
+                run_type=safe_run_type,
+                device_id=safe_device_id,
+                expected_app_instance_id=safe_expected_app_instance_id,
+                adb_serial_masked=safe_adb_serial_masked,
+                actions_taken=actions_taken,
+                timings=timings,
+                warnings=warnings,
+                extra_metadata=screen_preparation_metadata,
+                total_start=total_start,
+                timer=timer,
+                publisher=publisher,
+                publish_enabled=publish_enabled,
+            )
 
     signals = dict(initial_signals or {})
     if not signals and app_start_attempted:
@@ -896,6 +946,11 @@ def run_login_provisioning_flow(
                     post_submit_timeout_ms=post_submit_timeout_ms,
                     operator_smoke_active_account_username=None,
                     operator_smoke_allow_logout_fallback=False,
+                    run_id=safe_run_id,
+                    run_type=safe_run_type,
+                    device_serial=device_serial,
+                    device_id=safe_device_id,
+                    expected_app_instance_id=safe_expected_app_instance_id,
                     timer=timer,
                     sleeper=sleeper,
                 )
@@ -927,6 +982,28 @@ def run_login_provisioning_flow(
                 (SimpleNamespace(decision="tap_add_instagram_account"), ""),
             )
             for step_decision, expected_screen in add_existing_prefix_steps:
+                guard = _check_expected_foreground_package(d, expected_package_name=safe_package_name)
+                old_logged_in_metadata.update(guard)
+                if guard.get("package_guard_mismatch"):
+                    return _finalize_package_mismatch(
+                        account_id=safe_account_id,
+                        expected_username=safe_expected_username,
+                        expected_package_name=safe_package_name,
+                        actual_foreground_package=str(guard.get("actual_foreground_package") or ""),
+                        run_id=safe_run_id,
+                        run_type=safe_run_type,
+                        device_id=safe_device_id,
+                        expected_app_instance_id=safe_expected_app_instance_id,
+                        adb_serial_masked=safe_adb_serial_masked,
+                        actions_taken=actions_taken,
+                        timings=timings,
+                        warnings=warnings,
+                        extra_metadata={**_flow_metadata(previous_account_lifecycle), **old_logged_in_metadata},
+                        total_start=total_start,
+                        timer=timer,
+                        publisher=publisher,
+                        publish_enabled=publish_enabled,
+                    )
                 start = timer()
                 action_result = execute_login_screen_decision(
                     d,
@@ -1000,6 +1077,28 @@ def run_login_provisioning_flow(
 
             if str(signals.get("screen_type") or "") == "add_account_sheet":
                 old_logged_in_metadata["add_account_sheet_opened"] = True
+                guard = _check_expected_foreground_package(d, expected_package_name=safe_package_name)
+                old_logged_in_metadata.update(guard)
+                if guard.get("package_guard_mismatch"):
+                    return _finalize_package_mismatch(
+                        account_id=safe_account_id,
+                        expected_username=safe_expected_username,
+                        expected_package_name=safe_package_name,
+                        actual_foreground_package=str(guard.get("actual_foreground_package") or ""),
+                        run_id=safe_run_id,
+                        run_type=safe_run_type,
+                        device_id=safe_device_id,
+                        expected_app_instance_id=safe_expected_app_instance_id,
+                        adb_serial_masked=safe_adb_serial_masked,
+                        actions_taken=actions_taken,
+                        timings=timings,
+                        warnings=warnings,
+                        extra_metadata={**_flow_metadata(previous_account_lifecycle), **old_logged_in_metadata},
+                        total_start=total_start,
+                        timer=timer,
+                        publisher=publisher,
+                        publish_enabled=publish_enabled,
+                    )
                 start = timer()
                 log_into_result = execute_login_screen_decision(
                     d,
@@ -1202,6 +1301,49 @@ def run_login_provisioning_flow(
         )
 
     if route.decision == "unknown_no_action":
+        post_action_outcome = _post_action_outcome_from_signals(routing_signals)
+        if post_action_outcome:
+            classification = classify_login_probe_outcome(post_action_outcome)
+            return _finalize(
+                ok=post_action_outcome == LoginProbeOutcome.CONNECTED.value,
+                completed=post_action_outcome
+                in {
+                    LoginProbeOutcome.CONNECTED.value,
+                    LoginProbeOutcome.NEEDS_2FA.value,
+                    LoginProbeOutcome.CHECKPOINT.value,
+                    LoginProbeOutcome.LOGIN_FAILED.value,
+                },
+                final_outcome=post_action_outcome,
+                reason=f"post_action_{classification.reason}",
+                failure_reason=None if post_action_outcome == LoginProbeOutcome.CONNECTED.value else post_action_outcome,
+                final_login_status=classification.login_status,
+                final_provisioning_status=classification.provisioning_status,
+                final_onboarding_status=classification.onboarding_status,
+                dashboard_action_type=_dashboard_action_for_outcome(
+                    post_action_outcome,
+                    challenge_type=str(routing_signals.get("challenge_type") or ""),
+                    post_submit_screen_type=str(routing_signals.get("screen_type") or ""),
+                ),
+                should_publish_status=False,
+                account_id=safe_account_id,
+                expected_username=safe_expected_username,
+                actions_taken=actions_taken,
+                timings=timings,
+                warnings=warnings,
+                extra_metadata={
+                    **_flow_metadata(previous_account_lifecycle),
+                    **old_logged_in_metadata,
+                    **route_metadata,
+                    "post_action_status_candidate": post_action_outcome,
+                    "password_required": False,
+                    "ready_for_password_smoke": False,
+                    "would_submit_password": False,
+                },
+                total_start=total_start,
+                timer=timer,
+                publisher=publisher,
+                publish_enabled=publish_enabled,
+            )
         return _finalize(
             ok=False,
             completed=False,
@@ -1229,6 +1371,28 @@ def run_login_provisioning_flow(
         "select_expected_account_from_picker",
         "use_another_profile_previous_account_stopped",
     }:
+        guard = _check_expected_foreground_package(d, expected_package_name=safe_package_name)
+        old_logged_in_metadata.update(guard)
+        if guard.get("package_guard_mismatch"):
+            return _finalize_package_mismatch(
+                account_id=safe_account_id,
+                expected_username=safe_expected_username,
+                expected_package_name=safe_package_name,
+                actual_foreground_package=str(guard.get("actual_foreground_package") or ""),
+                run_id=safe_run_id,
+                run_type=safe_run_type,
+                device_id=safe_device_id,
+                expected_app_instance_id=safe_expected_app_instance_id,
+                adb_serial_masked=safe_adb_serial_masked,
+                actions_taken=actions_taken,
+                timings=timings,
+                warnings=warnings,
+                extra_metadata={**_flow_metadata(previous_account_lifecycle), **old_logged_in_metadata},
+                total_start=total_start,
+                timer=timer,
+                publisher=publisher,
+                publish_enabled=publish_enabled,
+            )
         start = timer()
         action_result = execute_login_screen_decision(d, route, post_action_wait_ms=0)
         timings["action_ms"] += _elapsed_ms(start, timer())
@@ -1452,7 +1616,11 @@ def run_login_provisioning_flow(
                 final_login_status=classification.login_status,
                 final_provisioning_status=classification.provisioning_status,
                 final_onboarding_status=classification.onboarding_status,
-                dashboard_action_type=_dashboard_action_for_outcome(post_action_outcome),
+                dashboard_action_type=_dashboard_action_for_outcome(
+                    post_action_outcome,
+                    challenge_type=str(signals.get("challenge_type") or ""),
+                    post_submit_screen_type=str(signals.get("screen_type") or ""),
+                ),
                 should_publish_status=False,
                 account_id=safe_account_id,
                 expected_username=safe_expected_username,
@@ -1491,6 +1659,34 @@ def run_login_provisioning_flow(
             publish_enabled=publish_enabled,
         )
 
+    guard = _check_expected_foreground_package(d, expected_package_name=safe_package_name)
+    old_logged_in_metadata.update(guard)
+    if guard.get("package_guard_mismatch"):
+        return _finalize_package_mismatch(
+            account_id=safe_account_id,
+            expected_username=safe_expected_username,
+            expected_package_name=safe_package_name,
+            actual_foreground_package=str(guard.get("actual_foreground_package") or ""),
+            run_id=safe_run_id,
+            run_type=safe_run_type,
+            device_id=safe_device_id,
+            expected_app_instance_id=safe_expected_app_instance_id,
+            adb_serial_masked=safe_adb_serial_masked,
+            actions_taken=actions_taken,
+            timings=timings,
+            warnings=warnings,
+            extra_metadata={
+                **_flow_metadata(previous_account_lifecycle),
+                **old_logged_in_metadata,
+                **post_continue_metadata,
+                **_pre_submit_observation_metadata(signals),
+            },
+            total_start=total_start,
+            timer=timer,
+            publisher=publisher,
+            publish_enabled=publish_enabled,
+        )
+
     credentials = _load_credentials(
         credentials_getter,
         safe_account_id,
@@ -1518,6 +1714,33 @@ def run_login_provisioning_flow(
 
     retry_count = 0
     retry_attempted = False
+    guard = _check_expected_foreground_package(d, expected_package_name=safe_package_name)
+    old_logged_in_metadata.update(guard)
+    if guard.get("package_guard_mismatch"):
+        return _finalize_package_mismatch(
+            account_id=safe_account_id,
+            expected_username=safe_expected_username,
+            expected_package_name=safe_package_name,
+            actual_foreground_package=str(guard.get("actual_foreground_package") or ""),
+            run_id=safe_run_id,
+            run_type=safe_run_type,
+            device_id=safe_device_id,
+            expected_app_instance_id=safe_expected_app_instance_id,
+            adb_serial_masked=safe_adb_serial_masked,
+            actions_taken=actions_taken,
+            timings=timings,
+            warnings=warnings,
+            extra_metadata={
+                **_flow_metadata(previous_account_lifecycle),
+                **old_logged_in_metadata,
+                **post_continue_metadata,
+                **_pre_submit_observation_metadata(signals),
+            },
+            total_start=total_start,
+            timer=timer,
+            publisher=publisher,
+            publish_enabled=publish_enabled,
+        )
     password_result = _execute_password_form(
         d,
         expected_username=safe_expected_username,
@@ -1538,6 +1761,33 @@ def run_login_provisioning_flow(
         if not _signals_confirm_login_form(signals):
             warnings.append("retry_aborted_login_form_not_validated")
             break
+        guard = _check_expected_foreground_package(d, expected_package_name=safe_package_name)
+        old_logged_in_metadata.update(guard)
+        if guard.get("package_guard_mismatch"):
+            return _finalize_package_mismatch(
+                account_id=safe_account_id,
+                expected_username=safe_expected_username,
+                expected_package_name=safe_package_name,
+                actual_foreground_package=str(guard.get("actual_foreground_package") or ""),
+                run_id=safe_run_id,
+                run_type=safe_run_type,
+                device_id=safe_device_id,
+                expected_app_instance_id=safe_expected_app_instance_id,
+                adb_serial_masked=safe_adb_serial_masked,
+                actions_taken=actions_taken,
+                timings=timings,
+                warnings=warnings,
+                extra_metadata={
+                    **_flow_metadata(previous_account_lifecycle),
+                    **old_logged_in_metadata,
+                    **post_continue_metadata,
+                    **_pre_submit_observation_metadata(signals),
+                },
+                total_start=total_start,
+                timer=timer,
+                publisher=publisher,
+                publish_enabled=publish_enabled,
+            )
         password_result = _execute_password_form(
             d,
             expected_username=safe_expected_username,
@@ -2809,6 +3059,32 @@ def _attempt_app_start(
         return {"ok": False}
 
 
+def _foreground_package_name(d: Any) -> str:
+    try:
+        app_current = getattr(d, "app_current", None)
+        if callable(app_current):
+            current = app_current() or {}
+            if isinstance(current, dict):
+                return str(current.get("package") or current.get("packageName") or "").strip()
+    except Exception:
+        return ""
+    return ""
+
+
+def _check_expected_foreground_package(d: Any, *, expected_package_name: str) -> dict[str, Any]:
+    expected = _safe_package_name(expected_package_name)
+    actual = _foreground_package_name(d)
+    checked = bool(expected and actual)
+    mismatch = bool(checked and actual != expected)
+    return {
+        "package_guard_checked": checked,
+        "expected_package_name": expected,
+        "actual_foreground_package": actual,
+        "package_guard_mismatch": mismatch,
+        "package_guard_reason": "expected_package_mismatch" if mismatch else "",
+    }
+
+
 def _retry_app_start_once(
     d: Any,
     *,
@@ -2989,6 +3265,7 @@ def _startup_screen_is_exploitable(signals: dict[str, Any]) -> bool:
         "login_form_empty",
         "login_form_prefilled_username",
         "continue_password_only",
+        "email_code_challenge",
         "active_account_home",
         "active_account_profile",
         "connected_home",
@@ -3003,6 +3280,7 @@ def _startup_screen_is_exploitable(signals: dict[str, Any]) -> bool:
         LoginProbeOutcome.CONNECTED.value,
         LoginProbeOutcome.NEEDS_2FA.value,
         LoginProbeOutcome.CHECKPOINT.value,
+        LoginProbeOutcome.VERIFICATION_PENDING.value,
         LoginProbeOutcome.LOGIN_FAILED.value,
     }
 
@@ -3014,6 +3292,15 @@ def _safe_package_name(value: Any) -> str:
     if not re.fullmatch(r"[A-Za-z0-9_.]+", text):
         return DEFAULT_INSTAGRAM_PACKAGE_NAME
     return text
+
+
+def _mask_adb_serial(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if len(text) <= 6:
+        return text[:1] + "***" + text[-1:]
+    return text[:4] + "***" + text[-4:]
 
 
 def _clamp_post_start_wait_ms(value: Any) -> int:
@@ -3289,11 +3576,15 @@ def _pre_submit_observation_metadata(signals: dict[str, Any]) -> dict[str, Any]:
 
 
 def _post_action_outcome_from_signals(signals: dict[str, Any]) -> str:
+    screen_type = str(signals.get("screen_type") or "").strip()
+    if screen_type == "email_code_challenge":
+        return LoginProbeOutcome.VERIFICATION_PENDING.value
     outcome = str(signals.get("login_probe_outcome") or "unknown").strip()
     if outcome in {
         LoginProbeOutcome.CONNECTED.value,
         LoginProbeOutcome.NEEDS_2FA.value,
         LoginProbeOutcome.CHECKPOINT.value,
+        LoginProbeOutcome.VERIFICATION_PENDING.value,
         LoginProbeOutcome.LOGIN_FAILED.value,
     }:
         return outcome
@@ -3856,6 +4147,10 @@ def _safe_password_result_metadata(result: Any) -> dict[str, Any]:
             "save_password_prompt_dismissed",
             "save_password_prompt_dismiss_attempt_count",
             "dismiss_method",
+            "samsung_pass_save_password_prompt_detected",
+            "samsung_pass_save_password_prompt_cancelled",
+            "instagram_save_login_info_prompt_detected",
+            "instagram_save_login_info_prompt_not_now",
             "post_dismiss_screen_type",
             "post_dismiss_final_observation_count",
             "post_dismiss_final_screens",
@@ -3885,6 +4180,7 @@ def _should_retry_password_result(result: Any, retry_count: int, max_retries: in
         "connected",
         "login_submit_still_loading",
         "save_password_prompt_blocking",
+        "save_login_info_prompt_blocking",
     }:
         return False
     if failure in TRANSIENT_RETRY_FAILURES:
@@ -3905,6 +4201,7 @@ def _password_result_outcome(result: Any) -> str:
         "username_input_failed",
         "username_prefilled_not_editable",
         "save_password_prompt_blocking",
+        "save_login_info_prompt_blocking",
         "login_submit_still_loading",
     }:
         return raw
@@ -3939,6 +4236,8 @@ def _final_reason_for_password_outcome(outcome: str, password_result: Any, class
         return "post_submit_unknown_after_settling"
     if outcome == "save_password_prompt_blocking":
         return "save_password_prompt_blocking"
+    if outcome == "save_login_info_prompt_blocking":
+        return "save_login_info_prompt_blocking"
     if outcome == "login_submit_still_loading":
         return "post_submit_loading_timeout"
     if outcome == "unknown":
@@ -3947,6 +4246,8 @@ def _final_reason_for_password_outcome(outcome: str, password_result: Any, class
 
 
 def _dashboard_action_for_failure(failure_reason: str | None) -> str | None:
+    if failure_reason in {"adb_not_available", "password_input_unavailable"}:
+        return "retry_provisioning"
     if failure_reason in {"credentials_missing", "credentials_not_found"}:
         return "submit_instagram_credentials"
     if failure_reason in {
@@ -3961,6 +4262,139 @@ def _dashboard_action_for_failure(failure_reason: str | None) -> str | None:
     if failure_reason in TRANSIENT_RETRY_FAILURES:
         return "retry_provisioning"
     return None
+
+
+def _finalize_package_mismatch(
+    *,
+    account_id: str,
+    expected_username: str,
+    expected_package_name: str,
+    actual_foreground_package: str,
+    actions_taken: list[str],
+    timings: dict[str, int],
+    warnings: list[str],
+    extra_metadata: dict[str, Any] | None,
+    total_start: float,
+    timer: Timer,
+    publisher: Publisher | None,
+    publish_enabled: bool,
+    run_id: str | None = None,
+    run_type: str | None = None,
+    device_id: str | None = None,
+    expected_app_instance_id: str | None = None,
+    adb_serial_masked: str | None = None,
+    reason: str = "expected_package_mismatch",
+) -> LoginProvisioningFlowResult:
+    metadata = {
+        **(extra_metadata or {}),
+        "final_outcome": "wrong_app_package",
+        "reason": reason,
+        "failure_reason": reason,
+        "package_guard_checked": True,
+        "package_guard_mismatch": True,
+        "expected_package_name": expected_package_name,
+        "actual_foreground_package": actual_foreground_package or "unknown",
+        "expected_app_instance_id": expected_app_instance_id,
+        "device_id": device_id,
+        "adb_serial_masked": adb_serial_masked,
+        "run_id": run_id,
+        "run_type": run_type,
+        "would_submit_password": False,
+        "password_input": False,
+        "submit_executed": False,
+    }
+    side_effects = _sync_login_package_mismatch_side_effects(
+        account_id=account_id,
+        expected_username=expected_username,
+        expected_package_name=expected_package_name,
+        actual_foreground_package=actual_foreground_package or "unknown",
+        run_id=run_id,
+        run_type=run_type,
+        device_id=device_id,
+        expected_app_instance_id=expected_app_instance_id,
+        adb_serial_masked=adb_serial_masked,
+        reason=reason,
+    )
+    metadata.update(side_effects)
+    if side_effects.get("warnings"):
+        warnings = [*warnings, *list(side_effects.get("warnings") or [])]
+    return _finalize(
+        ok=False,
+        completed=False,
+        final_outcome="wrong_app_package",
+        reason=reason,
+        failure_reason=reason,
+        final_login_status="logged_out",
+        final_provisioning_status="blocked",
+        final_onboarding_status="support_required",
+        dashboard_action_type="review_login_package_mismatch",
+        should_publish_status=False,
+        account_id=account_id,
+        expected_username=expected_username,
+        actions_taken=actions_taken,
+        timings=timings,
+        warnings=warnings,
+        extra_metadata=metadata,
+        total_start=total_start,
+        timer=timer,
+        publisher=publisher,
+        publish_enabled=publish_enabled,
+    )
+
+
+def _sync_login_package_mismatch_side_effects(
+    *,
+    account_id: str,
+    expected_username: str,
+    expected_package_name: str,
+    actual_foreground_package: str,
+    run_id: str | None,
+    run_type: str | None,
+    device_id: str | None,
+    expected_app_instance_id: str | None,
+    adb_serial_masked: str | None,
+    reason: str,
+) -> dict[str, Any]:
+    warnings: list[str] = []
+    try:
+        incident = publish_login_package_mismatch_incident(
+            account_id=account_id,
+            expected_username=expected_username,
+            expected_package_name=expected_package_name,
+            actual_foreground_package=actual_foreground_package,
+            run_id=run_id,
+            run_type=run_type,
+            device_id=device_id,
+            expected_app_instance_id=expected_app_instance_id,
+            adb_serial_masked=adb_serial_masked,
+            reason=reason,
+        )
+    except Exception:
+        incident = {"published": False, "reason": "incident_publish_failed"}
+        warnings.append("login_package_mismatch_incident_failed_safe")
+    try:
+        dashboard_action = sync_login_package_mismatch_dashboard_action(
+            account_id=account_id,
+            expected_package_name=expected_package_name,
+            actual_foreground_package=actual_foreground_package,
+            run_id=run_id,
+            expected_app_instance_id=expected_app_instance_id,
+            reason=reason,
+        )
+    except Exception:
+        dashboard_action = {"published": False, "reason": "dashboard_action_sync_failed"}
+        warnings.append("login_package_mismatch_dashboard_action_failed_safe")
+    try:
+        notifications = dispatch_login_package_mismatch_notifications()
+    except Exception:
+        notifications = {"dispatched": False, "reason": "dispatch_failed"}
+        warnings.append("login_package_mismatch_notifications_failed_safe")
+    return {
+        "login_package_mismatch_incident": incident,
+        "login_package_mismatch_dashboard_action": dashboard_action,
+        "login_package_mismatch_notifications": notifications,
+        "warnings": warnings,
+    }
 
 
 def _finalize(
@@ -4342,18 +4776,279 @@ def _sync_login_challenge_side_effects(
     }
 
 
+def _post_email_code_password_screen_ready(signals: dict[str, Any]) -> bool:
+    screen_type = str(signals.get("screen_type") or "")
+    if screen_type not in POST_EMAIL_CODE_PASSWORD_SCREENS:
+        return False
+    return _signals_confirm_login_form(signals)
+
+
+def _signals_indicate_password_entry_ready(signals: dict[str, Any]) -> bool:
+    if _post_email_code_password_screen_ready(signals):
+        return True
+    if signals.get("email_code_challenge_present") is True:
+        return False
+    return bool(signals.get("has_password_field")) and bool(signals.get("has_login_button"))
+
+
+def _should_chain_password_after_email_code_resume(resume_result: Any, password_signals: dict[str, Any]) -> bool:
+    if _signals_indicate_password_entry_ready(password_signals):
+        return True
+    outcome = str(getattr(resume_result, "post_submit_outcome", "") or getattr(resume_result, "reason", "") or "")
+    if outcome == "post_code_password_required":
+        return True
+    screen_type = str(getattr(resume_result, "post_submit_screen_type", "") or password_signals.get("screen_type") or "")
+    if screen_type in POST_EMAIL_CODE_PASSWORD_SCREENS:
+        return True
+    failure = str(getattr(resume_result, "failure_reason", "") or "")
+    reason = str(getattr(resume_result, "reason", "") or "")
+    if failure in {"email_code_challenge_screen_required"} or reason in {"post_code_password_required"}:
+        return _signals_indicate_password_entry_ready(password_signals)
+    if failure.startswith("verification_code") or reason in {"verification_code_input_empty", "adb_not_available"}:
+        return _signals_indicate_password_entry_ready(password_signals)
+    return False
+
+
+def _submit_password_after_email_code(
+    d: Any,
+    *,
+    account_id: str,
+    expected_username: str,
+    credentials_getter: CredentialsGetter,
+    signals: dict[str, Any],
+    actions_taken: list[str],
+    timings: dict[str, int],
+    warnings: list[str],
+    total_start: float,
+    timer: Timer,
+    publisher: Publisher | None,
+    publish_enabled: bool,
+    package_name: str,
+    run_id: str | None,
+    run_type: str,
+    device_id: str | None,
+    expected_app_instance_id: str | None,
+    adb_serial_masked: str | None,
+    post_submit_timeout_ms: Optional[int],
+    max_retry_attempts: int,
+    action_id: str | None,
+    consume_from_action: bool,
+    resume_extra_metadata: dict[str, Any],
+) -> LoginProvisioningFlowResult:
+    safe_account_id = str(account_id or "").strip()
+    safe_expected_username = str(expected_username or "").strip()
+    safe_package_name = _safe_package_name(package_name)
+    max_retries = min(MAX_RETRY_ATTEMPTS, max(0, int(max_retry_attempts or 0)))
+
+    route = route_login_screen(
+        expected_username=safe_expected_username,
+        suggested_username=str(signals.get("suggested_username") or signals.get("prefilled_username") or ""),
+        screen_type=str(signals.get("screen_type") or "unknown"),
+        available_usernames=list(signals.get("available_usernames") or []),
+        account_id=safe_account_id,
+    )
+    if route.decision == "block_wrong_suggested_account":
+        return _finalize(
+            ok=False,
+            completed=True,
+            final_outcome="mismatch",
+            reason=route.reason or "wrong_suggested_account_requires_admin_review",
+            failure_reason="mismatch",
+            final_login_status="mismatch",
+            final_provisioning_status="blocked",
+            final_onboarding_status="support_required",
+            dashboard_action_type="review_account_mismatch",
+            should_publish_status=True,
+            account_id=safe_account_id,
+            expected_username=safe_expected_username,
+            actions_taken=actions_taken,
+            timings=timings,
+            warnings=warnings,
+            extra_metadata={
+                **resume_extra_metadata,
+                **_pre_submit_observation_metadata(signals),
+                "selected_route": route.decision,
+                "selected_route_reason": route.reason,
+            },
+            total_start=total_start,
+            timer=timer,
+            publisher=publisher,
+            publish_enabled=publish_enabled,
+        )
+
+    credentials = _load_credentials(
+        credentials_getter,
+        safe_account_id,
+        expected_username=safe_expected_username,
+    )
+    if not credentials["ok"]:
+        return _credentials_failure_result(
+            credentials,
+            account_id=safe_account_id,
+            expected_username=safe_expected_username,
+            actions_taken=actions_taken,
+            timings=timings,
+            warnings=warnings,
+            extra_metadata={
+                **resume_extra_metadata,
+                **_pre_submit_observation_metadata(signals),
+            },
+            total_start=total_start,
+            timer=timer,
+            publisher=publisher,
+            publish_enabled=publish_enabled,
+        )
+
+    guard = _check_expected_foreground_package(d, expected_package_name=safe_package_name)
+    if guard.get("package_guard_mismatch"):
+        return _finalize_package_mismatch(
+            account_id=safe_account_id,
+            expected_username=safe_expected_username,
+            expected_package_name=safe_package_name,
+            actual_foreground_package=str(guard.get("actual_foreground_package") or ""),
+            run_id=run_id,
+            run_type=run_type,
+            device_id=device_id,
+            expected_app_instance_id=expected_app_instance_id,
+            adb_serial_masked=adb_serial_masked,
+            actions_taken=actions_taken,
+            timings=timings,
+            warnings=warnings,
+            extra_metadata={
+                **resume_extra_metadata,
+                **_pre_submit_observation_metadata(signals),
+                **guard,
+            },
+            total_start=total_start,
+            timer=timer,
+            publisher=publisher,
+            publish_enabled=publish_enabled,
+            reason="resume_email_code_wrong_package",
+        )
+
+    retry_count = 0
+    retry_attempted = False
+    password_result = _execute_password_form(
+        d,
+        expected_username=safe_expected_username,
+        password=credentials["password"],
+        signals=signals,
+        post_submit_timeout_ms=post_submit_timeout_ms,
+        timer=timer,
+    )
+    actions_taken.append("login_form_submit")
+
+    while _should_retry_password_result(password_result, retry_count, max_retries):
+        retry_attempted = True
+        retry_count += 1
+        actions_taken.append("retry_reobserve_login_form")
+        start = timer()
+        signals = _observe_login_signals(d, expected_username=safe_expected_username)
+        timings["observe_ms"] += _elapsed_ms(start, timer())
+        if not _signals_confirm_login_form(signals):
+            warnings.append("retry_aborted_login_form_not_validated")
+            break
+        password_result = _execute_password_form(
+            d,
+            expected_username=safe_expected_username,
+            password=credentials["password"],
+            signals=signals,
+            post_submit_timeout_ms=post_submit_timeout_ms,
+            timer=timer,
+        )
+        actions_taken.append("login_form_submit_retry")
+
+    outcome = _password_result_outcome(password_result)
+    password_result_metadata = {"password_result": _safe_password_result_metadata(password_result)}
+    password_meta = password_result_metadata["password_result"]
+    classification = classify_login_probe_outcome(
+        outcome,
+        metadata={
+            **password_meta,
+            "screen_type": password_meta.get("post_submit_screen_type"),
+        },
+    )
+    dashboard_action_type = _dashboard_action_for_outcome(
+        outcome,
+        challenge_type=str(password_meta.get("challenge_type") or ""),
+        post_submit_screen_type=str(password_meta.get("post_submit_screen_type") or ""),
+    )
+    final_reason = _final_reason_for_password_outcome(outcome, password_result, classification.reason)
+
+    action_sync: dict[str, Any] | None = None
+    if consume_from_action and action_id:
+        try:
+            action_sync = sync_verification_action_after_email_code_resume(
+                action_id=action_id,
+                account_id=safe_account_id,
+                run_id=run_id,
+                ok=outcome == LoginProbeOutcome.CONNECTED.value,
+                final_outcome=outcome,
+                failure_reason=None if outcome == LoginProbeOutcome.CONNECTED.value else outcome,
+                screen_type=str(password_meta.get("post_submit_screen_type") or ""),
+            )
+        except Exception:
+            warnings.append("verification_action_sync_failed_safe")
+
+    return _finalize(
+        ok=outcome == LoginProbeOutcome.CONNECTED.value,
+        completed=outcome
+        in {
+            LoginProbeOutcome.CONNECTED.value,
+            LoginProbeOutcome.NEEDS_2FA.value,
+            LoginProbeOutcome.CHECKPOINT.value,
+            LoginProbeOutcome.VERIFICATION_PENDING.value,
+            LoginProbeOutcome.UNSUPPORTED_POST_SUBMIT_CHALLENGE.value,
+            LoginProbeOutcome.LOGIN_FAILED.value,
+        },
+        final_outcome=outcome,
+        reason=final_reason,
+        failure_reason=None if outcome == LoginProbeOutcome.CONNECTED.value else outcome,
+        final_login_status=classification.login_status,
+        final_provisioning_status=classification.provisioning_status,
+        final_onboarding_status=classification.onboarding_status,
+        retry_attempted=retry_attempted,
+        retry_count=retry_count,
+        dashboard_action_type=dashboard_action_type,
+        should_publish_status=classification.should_publish,
+        account_id=safe_account_id,
+        expected_username=safe_expected_username,
+        actions_taken=actions_taken,
+        timings=_merge_timings(timings, password_result.timings),
+        warnings=[*warnings, *password_result.warnings],
+        extra_metadata={
+            **resume_extra_metadata,
+            **({"verification_action_sync": action_sync} if action_sync else {}),
+            **_pre_submit_observation_metadata(signals),
+            **password_result_metadata,
+            "post_email_code_password_submit": True,
+        },
+        total_start=total_start,
+        timer=timer,
+        publisher=publisher,
+        publish_enabled=publish_enabled,
+    )
+
+
 def run_email_code_resume_flow(
     d: Any,
     *,
     account_id: str,
     expected_username: str,
     verification_code: SecretValue,
+    credentials_getter: CredentialsGetter | None = None,
     action_id: str | None = None,
     consume_from_action: bool = False,
     run_id: str | None = None,
     publisher: Publisher | None = None,
     publish_enabled: bool = False,
+    package_name: str = DEFAULT_INSTAGRAM_PACKAGE_NAME,
+    run_type: str | None = "login_email_code_resume",
+    device_serial: str | None = None,
+    device_id: str | None = None,
+    expected_app_instance_id: str | None = None,
     post_submit_timeout_ms: Optional[int] = None,
+    max_retry_attempts: int = MAX_RETRY_ATTEMPTS,
     timer: Timer | None = None,
     sleeper: Sleeper | None = None,
 ) -> LoginProvisioningFlowResult:
@@ -4367,7 +5062,52 @@ def run_email_code_resume_flow(
     actions_taken = ["route:email_code_resume"]
     safe_account_id = str(account_id or "").strip()
     safe_expected_username = str(expected_username or "").strip()
+    safe_package_name = _safe_package_name(package_name)
+    safe_run_type = str(run_type or "login_email_code_resume").strip() or "login_email_code_resume"
+    safe_device_id = str(device_id or "").strip() or None
+    safe_expected_app_instance_id = str(expected_app_instance_id or "").strip() or None
+    safe_adb_serial_masked = _mask_adb_serial(device_serial)
     code_value = verification_code
+    resume_extra_base: dict[str, Any] = {
+        "resume_mode": "consume_action" if consume_from_action else "stdin",
+        "run_id": run_id,
+    }
+
+    guard = _check_expected_foreground_package(d, expected_package_name=safe_package_name)
+    if guard.get("package_guard_mismatch"):
+        return _finalize_package_mismatch(
+            account_id=safe_account_id,
+            expected_username=safe_expected_username,
+            expected_package_name=safe_package_name,
+            actual_foreground_package=str(guard.get("actual_foreground_package") or ""),
+            run_id=run_id,
+            run_type=safe_run_type,
+            device_id=safe_device_id,
+            expected_app_instance_id=safe_expected_app_instance_id,
+            adb_serial_masked=safe_adb_serial_masked,
+            actions_taken=actions_taken,
+            timings=timings,
+            warnings=warnings,
+            extra_metadata={
+                "resume_mode": "consume_action" if consume_from_action else "stdin",
+                "run_id": run_id,
+                "expected_package_name": safe_package_name,
+                "expected_app_instance_id": safe_expected_app_instance_id,
+                "device_id": safe_device_id,
+                "adb_serial_masked": safe_adb_serial_masked,
+                **guard,
+            },
+            total_start=total_start,
+            timer=timer,
+            publisher=publisher,
+            publish_enabled=publish_enabled,
+            reason="resume_email_code_wrong_package",
+        )
+
+    observe_start = timer()
+    initial_signals = _observe_login_signals(d, expected_username=safe_expected_username)
+    timings["observe_ms"] += _elapsed_ms(observe_start, timer())
+    password_screen_ready = _signals_indicate_password_entry_ready(initial_signals)
 
     if consume_from_action:
         consumed = consume_verification_code_for_worker(
@@ -4376,12 +5116,26 @@ def run_email_code_resume_flow(
             run_id=run_id,
         )
         if not consumed.get("ok"):
+            consume_reason = str(consumed.get("reason") or "verification_code_not_available")
+            action_sync: dict[str, Any] | None = None
+            if action_id:
+                try:
+                    action_sync = sync_verification_action_after_email_code_resume(
+                        action_id=action_id,
+                        account_id=safe_account_id,
+                        run_id=run_id,
+                        ok=False,
+                        final_outcome="verification_pending",
+                        failure_reason=consume_reason,
+                    )
+                except Exception:
+                    warnings.append("verification_action_sync_failed_safe")
             return _finalize(
                 ok=False,
                 completed=False,
                 final_outcome="verification_pending",
-                reason=str(consumed.get("reason") or "verification_code_not_available"),
-                failure_reason=str(consumed.get("reason") or "verification_code_not_available"),
+                reason=consume_reason,
+                failure_reason=consume_reason,
                 final_login_status="verification_pending",
                 final_provisioning_status="login_verification_pending",
                 final_onboarding_status="verification_pending",
@@ -4390,7 +5144,10 @@ def run_email_code_resume_flow(
                 actions_taken=actions_taken,
                 timings=timings,
                 warnings=warnings,
-                extra_metadata={"resume_mode": "consume_action", "run_id": run_id},
+                extra_metadata={
+                    **resume_extra_base,
+                    "verification_action_sync": action_sync,
+                },
                 total_start=total_start,
                 timer=timer,
                 publisher=publisher,
@@ -4400,6 +5157,35 @@ def run_email_code_resume_flow(
             )
         code_value = SecretValue(str(consumed.get("verification_code") or ""))
 
+    if password_screen_ready and credentials_getter is not None:
+        warnings.append("email_code_entry_skipped_password_screen_ready")
+        actions_taken.append("route:post_email_code_password")
+        return _submit_password_after_email_code(
+            d,
+            account_id=safe_account_id,
+            expected_username=safe_expected_username,
+            credentials_getter=credentials_getter,
+            signals=initial_signals,
+            actions_taken=actions_taken,
+            timings=timings,
+            warnings=warnings,
+            total_start=total_start,
+            timer=timer,
+            publisher=publisher,
+            publish_enabled=publish_enabled,
+            package_name=safe_package_name,
+            run_id=run_id,
+            run_type=safe_run_type,
+            device_id=safe_device_id,
+            expected_app_instance_id=safe_expected_app_instance_id,
+            adb_serial_masked=safe_adb_serial_masked,
+            post_submit_timeout_ms=post_submit_timeout_ms,
+            max_retry_attempts=max_retry_attempts,
+            action_id=action_id,
+            consume_from_action=consume_from_action,
+            resume_extra_metadata={**resume_extra_base, "email_code_entry_skipped": True},
+        )
+
     resume_result = execute_email_code_challenge_resume(
         d,
         verification_code=code_value,
@@ -4408,9 +5194,102 @@ def run_email_code_resume_flow(
         sleeper=sleeper,
     )
     actions_taken.append("email_code_submit")
+    email_code_metadata = {
+        "email_code_result": {
+            "executed": resume_result.executed,
+            "code_entered": resume_result.code_entered,
+            "continue_tapped": resume_result.continue_tapped,
+            "post_submit_outcome": resume_result.post_submit_outcome,
+            "post_submit_screen_type": resume_result.post_submit_screen_type,
+        },
+    }
+
+    if resume_result.ok:
+        action_sync: dict[str, Any] | None = None
+        if consume_from_action and action_id:
+            try:
+                action_sync = sync_verification_action_after_email_code_resume(
+                    action_id=action_id,
+                    account_id=safe_account_id,
+                    run_id=run_id,
+                    ok=True,
+                    final_outcome=str(resume_result.post_submit_outcome or "connected"),
+                    failure_reason=None,
+                    screen_type=str(resume_result.post_submit_screen_type or ""),
+                )
+            except Exception:
+                warnings.append("verification_action_sync_failed_safe")
+        outcome = str(resume_result.post_submit_outcome or "connected")
+        classification = classify_login_probe_outcome(
+            outcome,
+            metadata={
+                **(resume_result.safe_metadata or {}),
+                "screen_type": resume_result.post_submit_screen_type,
+            },
+        )
+        return _finalize(
+            ok=True,
+            completed=True,
+            final_outcome=outcome,
+            reason=resume_result.reason,
+            failure_reason=None,
+            final_login_status=classification.login_status,
+            final_provisioning_status=classification.provisioning_status,
+            final_onboarding_status=classification.onboarding_status,
+            account_id=safe_account_id,
+            expected_username=safe_expected_username,
+            actions_taken=actions_taken,
+            timings=_merge_timings(timings, resume_result.timings),
+            warnings=[*warnings, *resume_result.warnings],
+            extra_metadata={
+                **resume_extra_base,
+                **email_code_metadata,
+                **({"verification_action_sync": action_sync} if action_sync else {}),
+            },
+            total_start=total_start,
+            timer=timer,
+            publisher=publisher,
+            publish_enabled=publish_enabled,
+            should_publish_status=classification.should_publish,
+        )
+
+    observe_start = timer()
+    password_signals = _observe_login_signals(d, expected_username=safe_expected_username)
+    timings["observe_ms"] += _elapsed_ms(observe_start, timer())
     outcome = str(resume_result.post_submit_outcome or resume_result.reason or "unknown")
     if resume_result.failure_reason and not resume_result.post_submit_outcome:
         outcome = "verification_pending" if resume_result.failure_reason.startswith("verification_code") else "unknown"
+    should_submit_password = credentials_getter is not None and _should_chain_password_after_email_code_resume(
+        resume_result,
+        password_signals,
+    )
+    if should_submit_password:
+        actions_taken.append("route:post_email_code_password")
+        return _submit_password_after_email_code(
+            d,
+            account_id=safe_account_id,
+            expected_username=safe_expected_username,
+            credentials_getter=credentials_getter,
+            signals=password_signals,
+            actions_taken=actions_taken,
+            timings=timings,
+            warnings=[*warnings, *resume_result.warnings],
+            total_start=total_start,
+            timer=timer,
+            publisher=publisher,
+            publish_enabled=publish_enabled,
+            package_name=safe_package_name,
+            run_id=run_id,
+            run_type=safe_run_type,
+            device_id=safe_device_id,
+            expected_app_instance_id=safe_expected_app_instance_id,
+            adb_serial_masked=safe_adb_serial_masked,
+            post_submit_timeout_ms=post_submit_timeout_ms,
+            max_retry_attempts=max_retry_attempts,
+            action_id=action_id,
+            consume_from_action=consume_from_action,
+            resume_extra_metadata={**resume_extra_base, **email_code_metadata},
+        )
 
     classification = classify_login_probe_outcome(
         outcome,
@@ -4424,12 +5303,28 @@ def run_email_code_resume_flow(
         challenge_type=str((resume_result.safe_metadata or {}).get("challenge_type") or ""),
         post_submit_screen_type=str(resume_result.post_submit_screen_type or ""),
     )
+    if not dashboard_action_type and outcome in {"unknown", "unsupported_post_submit_challenge"}:
+        dashboard_action_type = "review_login_challenge"
+    action_sync = None
+    if consume_from_action and action_id:
+        try:
+            action_sync = sync_verification_action_after_email_code_resume(
+                action_id=action_id,
+                account_id=safe_account_id,
+                run_id=run_id,
+                ok=False,
+                final_outcome=outcome,
+                failure_reason=resume_result.failure_reason or outcome,
+                screen_type=str(resume_result.post_submit_screen_type or password_signals.get("screen_type") or ""),
+            )
+        except Exception:
+            warnings.append("verification_action_sync_failed_safe")
     return _finalize(
-        ok=bool(resume_result.ok),
+        ok=False,
         completed=bool(resume_result.executed),
         final_outcome=outcome,
         reason=resume_result.reason,
-        failure_reason=resume_result.failure_reason,
+        failure_reason=resume_result.failure_reason or outcome,
         final_login_status=classification.login_status,
         final_provisioning_status=classification.provisioning_status,
         final_onboarding_status=classification.onboarding_status,
@@ -4439,20 +5334,16 @@ def run_email_code_resume_flow(
         timings=_merge_timings(timings, resume_result.timings),
         warnings=[*warnings, *resume_result.warnings],
         extra_metadata={
-            "resume_mode": "consume_action" if consume_from_action else "stdin",
-            "run_id": run_id,
-            "email_code_result": {
-                "executed": resume_result.executed,
-                "code_entered": resume_result.code_entered,
-                "continue_tapped": resume_result.continue_tapped,
-                "post_submit_outcome": resume_result.post_submit_outcome,
-                "post_submit_screen_type": resume_result.post_submit_screen_type,
-            },
+            **resume_extra_base,
+            **email_code_metadata,
+            **({"verification_action_sync": action_sync} if action_sync else {}),
+            "post_email_code_password_submit": False,
+            "post_email_code_screen_type": str(password_signals.get("screen_type") or ""),
         },
         total_start=total_start,
         timer=timer,
         publisher=publisher,
         publish_enabled=publish_enabled,
         dashboard_action_type=dashboard_action_type,
-        should_publish_status=classification.should_publish,
+        should_publish_status=classification.should_publish or bool(dashboard_action_type),
     )

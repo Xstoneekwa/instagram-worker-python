@@ -68,6 +68,19 @@ GOOGLE_SAVE_PASSWORD_PROMPT_XML = (
     '<node text="••••••••••" />'
     '<node text="Continue" clickable="true" />'
 )
+SAMSUNG_PASS_SAVE_PASSWORD_PROMPT_XML = (
+    '<node text="Samsung Pass" />'
+    '<node text="Save password for Instagram?" />'
+    '<node text="cinema_catchup" />'
+    '<node text="••••••••••" />'
+    '<node text="Cancel" clickable="true" />'
+    '<node text="Save" clickable="true" />'
+)
+INSTAGRAM_SAVE_LOGIN_INFO_PROMPT_XML = (
+    '<node text="Save your login info?" />'
+    '<node text="Save" clickable="true" />'
+    '<node text="Not now" clickable="true" />'
+)
 
 
 class TrackingSecretValue(SecretValue):
@@ -128,6 +141,12 @@ class MultiSelector(FakeSelector):
 
     def all(self) -> list[FakeSelector]:
         return list(self._selectors)
+
+
+class CountOnlySelector(FakeSelector):
+    """uiautomator2 selector variant with count()/instance lookup but no all()."""
+
+    pass
 
 
 class TrackingTextSelector(FakeSelector):
@@ -225,6 +244,11 @@ class FakeDevice:
 
     def __call__(self, **kwargs):
         self.selector_calls.append(dict(kwargs))
+        if "className" in kwargs and "instance" in kwargs:
+            return self.selectors.get(
+                ("className_instance", f"{kwargs['className']}:{kwargs['instance']}"),
+                FakeSelector(0),
+            )
         key, value = next(iter(kwargs.items()))
         return self.selectors.get((key, value), FakeSelector(0))
 
@@ -757,6 +781,32 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
         self.assertEqual(result.post_submit_probe_reason, "post_submit_unknown_after_settling")
         self.assertFalse(result.safe_metadata["post_submit_loading_timeout"])
 
+    def test_post_submit_final_recheck_detects_late_email_challenge_after_unknown_transition(self) -> None:
+        device, _username, _password_selector, _login = configured_device()
+        unknown_xml = '<node text="Instagram" />'
+        device.hierarchies = [LOADING_XML, LOGGED_OUT_XML, unknown_xml, EMAIL_CODE_CHALLENGE_XML]
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=LOGIN_FORM_SIGNALS,
+            post_submit_wait_ms=0,
+            post_submit_observation_interval_ms=1,
+            max_post_submit_observations=3,
+            sleeper=Mock(),
+        )
+
+        self.assertEqual(result.post_submit_outcome, "verification_pending")
+        self.assertEqual(result.post_submit_probe_reason, "email_verification_code_required")
+        self.assertEqual(result.post_submit_screen_type, "email_code_challenge")
+        self.assertEqual(
+            result.safe_metadata["post_submit_screens"],
+            ["loading", "logged_out", "unknown", "email_code_challenge"],
+        )
+        self.assertTrue(result.safe_metadata["email_code_challenge_detected"])
+        self.assertIn("post_submit_final_recheck_terminal", result.warnings)
+
     def test_post_submit_password_required_uses_bounded_recovery(self) -> None:
         device, _username, password_selector, login = configured_device()
         ok = device.add_selector("text", "OK", FakeSelector(1))
@@ -886,6 +936,60 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
 
         self.assertEqual(result.post_submit_outcome, "checkpoint")
         self.assertEqual(result.safe_metadata["post_dismiss_screen_type"], "checkpoint")
+
+    def test_samsung_pass_save_password_prompt_taps_cancel_never_save(self) -> None:
+        device, _username, _password_selector, _login = configured_device()
+        cancel = device.add_selector("text", "Cancel", FakeSelector(1))
+        save = device.add_selector("text", "Save", FakeSelector(1))
+        device.hierarchies = [SAMSUNG_PASS_SAVE_PASSWORD_PROMPT_XML, EMAIL_CODE_CHALLENGE_XML]
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=LOGIN_FORM_SIGNALS,
+            post_submit_wait_ms=0,
+            post_submit_observation_interval_ms=1,
+            max_post_submit_observations=4,
+            sleeper=Mock(),
+        )
+
+        self.assertEqual(result.post_submit_outcome, "verification_pending")
+        self.assertTrue(result.safe_metadata["samsung_pass_save_password_prompt_detected"])
+        self.assertTrue(result.safe_metadata["samsung_pass_save_password_prompt_cancelled"])
+        self.assertEqual(result.safe_metadata["dismiss_method"], "cancel")
+        self.assertEqual(cancel.click_calls, 1)
+        self.assertEqual(save.click_calls, 0)
+        self.assertEqual(device.press_calls, [])
+        self.assertIn("samsung_pass_save_password_prompt_detected", result.warnings)
+        self.assertIn("samsung_pass_save_password_prompt_cancelled", result.warnings)
+
+    def test_instagram_save_login_info_prompt_taps_not_now_never_save(self) -> None:
+        device, _username, _password_selector, _login = configured_device()
+        not_now = device.add_selector("text", "Not now", FakeSelector(1))
+        save = device.add_selector("text", "Save", FakeSelector(1))
+        device.hierarchies = [INSTAGRAM_SAVE_LOGIN_INFO_PROMPT_XML, EMAIL_CODE_CHALLENGE_XML]
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=LOGIN_FORM_SIGNALS,
+            post_submit_wait_ms=0,
+            post_submit_observation_interval_ms=1,
+            max_post_submit_observations=4,
+            sleeper=Mock(),
+        )
+
+        self.assertEqual(result.post_submit_outcome, "verification_pending")
+        self.assertTrue(result.safe_metadata["instagram_save_login_info_prompt_detected"])
+        self.assertTrue(result.safe_metadata["instagram_save_login_info_prompt_not_now"])
+        self.assertEqual(result.safe_metadata["dismiss_method"], "not_now")
+        self.assertEqual(not_now.click_calls, 1)
+        self.assertEqual(save.click_calls, 0)
+        self.assertEqual(device.press_calls, [])
+        self.assertIn("instagram_save_login_info_prompt_detected", result.warnings)
+        self.assertIn("instagram_save_login_info_prompt_not_now", result.warnings)
 
     def test_save_password_prompt_still_visible_once_then_dismissed_after_second_attempt(self) -> None:
         device, _username, _password_selector, _login = configured_device()
@@ -1382,7 +1486,13 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
 
         self.assertIn(
             result.failure_reason,
-            {"password_input_not_confirmed", "password_input_failed", "password_input_missing_or_not_accepted"},
+            {
+                "password_input_not_confirmed",
+                "password_input_failed",
+                "password_input_missing_or_not_accepted",
+                "password_input_unavailable",
+                "adb_not_available",
+            },
         )
         self.assertFalse(result.executed)
         self.assertEqual(login.click_calls, 0)
@@ -1415,7 +1525,7 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
 
         with patch.object(password_executor, "is_fast_ime_available", return_value=True), patch.object(
             password_executor,
-            "_run_adb_keyboard_b64_input",
+            "run_adb_keyboard_b64_input",
             return_value=(True, "adb_keyboard_b64", True, True),
         ) as fast_input:
             result = execute_login_form_credentials(
@@ -1450,7 +1560,7 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
 
         with patch.object(password_executor, "is_fast_ime_available", return_value=True), patch.object(
             password_executor,
-            "_run_adb_keyboard_b64_input",
+            "run_adb_keyboard_b64_input",
             return_value=(True, "adb_keyboard_b64", True, True),
         ):
             result = execute_login_form_credentials(
@@ -1489,6 +1599,30 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
         self.assertEqual(password_selector.set_text_calls, [PASSWORD])
         self.assertEqual(login.click_calls, 1)
 
+    def test_password_target_uses_instance_lookup_when_selector_all_unavailable(self) -> None:
+        device = FakeDevice(CONNECTED_XML)
+        username = TrackingTextSelector(text=USERNAME)
+        password_selector = TrackingTextSelector(text="Password")
+        password_selector.info["className"] = "android.widget.EditText"
+        device.add_selector("text", "Username, email or mobile number", username)
+        device.add_selector("className", "android.widget.EditText", CountOnlySelector(2))
+        device.add_selector("className_instance", "android.widget.EditText:0", username)
+        device.add_selector("className_instance", "android.widget.EditText:1", password_selector)
+        login = device.add_selector("text", "Log in", FakeSelector(1))
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=LOGIN_FORM_SIGNALS,
+            dump_after_submit=False,
+            sleeper=Mock(),
+        )
+
+        self.assertTrue(result.executed)
+        self.assertEqual(password_selector.set_text_calls, [PASSWORD])
+        self.assertEqual(login.click_calls, 1)
+
     def test_adb_keyboard_unknown_confirmation_allows_bounded_submit(self) -> None:
         device, _username, password_selector, login = configured_device(CONNECTED_XML)
         device.serial = "emulator-5554"
@@ -1496,7 +1630,7 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
 
         with patch.object(password_executor, "is_fast_ime_available", return_value=True), patch.object(
             password_executor,
-            "_run_adb_keyboard_b64_input",
+            "run_adb_keyboard_b64_input",
             return_value=(True, "adb_keyboard_b64", True, True),
         ):
             result = execute_login_form_credentials(
@@ -1521,7 +1655,7 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
 
         with patch.object(password_executor, "is_fast_ime_available", return_value=True), patch.object(
             password_executor,
-            "_run_adb_keyboard_b64_input",
+            "run_adb_keyboard_b64_input",
             return_value=(True, "adb_keyboard_b64", True, True),
         ):
             result = execute_login_form_credentials(
@@ -1548,7 +1682,7 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
 
         with patch.object(password_executor, "is_fast_ime_available", return_value=True), patch.object(
             password_executor,
-            "_run_adb_keyboard_b64_input",
+            "run_adb_keyboard_b64_input",
             return_value=(True, "adb_keyboard_b64", True, True),
         ):
             result = execute_login_form_credentials(
@@ -1594,7 +1728,7 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
 
         with patch.object(password_executor, "is_fast_ime_available", return_value=False), patch.object(
             password_executor,
-            "_run_adb_keyboard_b64_input",
+            "run_adb_keyboard_b64_input",
         ) as fast_input:
             result = execute_login_form_credentials(
                 device,
@@ -1711,7 +1845,7 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
 
         with patch.object(password_executor, "is_fast_ime_available", return_value=True), patch.object(
             password_executor,
-            "_run_adb_keyboard_b64_input",
+            "run_adb_keyboard_b64_input",
             return_value=(True, "adb_keyboard_b64", True, True),
         ) as fast_input:
             result = execute_login_form_credentials(
@@ -1740,7 +1874,7 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
 
         with patch.object(password_executor, "is_fast_ime_available", return_value=True), patch.object(
             password_executor,
-            "_run_adb_keyboard_b64_input",
+            "run_adb_keyboard_b64_input",
             return_value=(False, "adb_keyboard_b64", False, False),
         ):
             result = execute_login_form_credentials(
@@ -1772,7 +1906,7 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
 
         with patch.object(password_executor, "is_fast_ime_available", return_value=True), patch.object(
             password_executor,
-            "_run_adb_keyboard_b64_input",
+            "run_adb_keyboard_b64_input",
             return_value=(False, "adb_keyboard_b64", False, False),
         ):
             result = execute_login_form_credentials(

@@ -8,16 +8,13 @@ and never stores or logs the password.
 
 from __future__ import annotations
 
-import base64
 import re
-import shlex
-import subprocess
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 import config
-from device import get_current_ime, is_fast_ime_available, set_ime
+from device import adb_available, get_device_serial, is_fast_ime_available, run_adb_keyboard_b64_input
 from instagram_credentials_runtime_access import (
     SecretValue,
     redact_credentials_payload,
@@ -38,6 +35,8 @@ MAX_POST_SUBMIT_OBSERVATIONS = 15
 MAX_POST_SUBMIT_INTERVAL_MS = 1500
 MAX_POST_SUBMIT_TIMEOUT_MS = 15000
 MAX_SAVE_PASSWORD_PROMPT_DISMISS_ATTEMPTS = 2
+POST_SUBMIT_FINAL_RECHECK_OBSERVATIONS = 3
+POST_SUBMIT_FINAL_RECHECK_INTERVAL_MS = 1000
 POST_DISMISS_FINAL_OBSERVATIONS = 4
 POST_DISMISS_FINAL_INTERVAL_MS = 1000
 PASSWORD_CONFIRM_SETTLE_MS = 150
@@ -380,6 +379,10 @@ def execute_login_form_credentials(
     save_password_prompt_dismissed = False
     save_password_prompt_dismiss_method = ""
     save_password_prompt_dismiss_attempt_count = 0
+    samsung_pass_save_password_prompt_detected = False
+    samsung_pass_save_password_prompt_cancelled = False
+    instagram_save_login_info_prompt_detected = False
+    instagram_save_login_info_prompt_not_now = False
     post_dismiss_screen_type = ""
     post_dismiss_final_observation_count = 0
     post_dismiss_final_screens: list[str] = []
@@ -414,6 +417,16 @@ def execute_login_form_credentials(
             save_password_prompt_dismiss_attempt_count = int(
                 observed.get("save_password_prompt_dismiss_attempt_count") or 0
             )
+            samsung_pass_save_password_prompt_detected = bool(
+                observed.get("samsung_pass_save_password_prompt_detected")
+            )
+            samsung_pass_save_password_prompt_cancelled = bool(
+                observed.get("samsung_pass_save_password_prompt_cancelled")
+            )
+            instagram_save_login_info_prompt_detected = bool(
+                observed.get("instagram_save_login_info_prompt_detected")
+            )
+            instagram_save_login_info_prompt_not_now = bool(observed.get("instagram_save_login_info_prompt_not_now"))
             post_dismiss_screen_type = str(observed.get("post_dismiss_screen_type") or "")
             post_dismiss_final_observation_count = int(observed.get("post_dismiss_final_observation_count") or 0)
             post_dismiss_final_screens = list(observed.get("post_dismiss_final_screens") or [])
@@ -478,6 +491,22 @@ def execute_login_form_credentials(
                             )
                             save_password_prompt_dismiss_attempt_count += int(
                                 observed.get("save_password_prompt_dismiss_attempt_count") or 0
+                            )
+                            samsung_pass_save_password_prompt_detected = (
+                                samsung_pass_save_password_prompt_detected
+                                or bool(observed.get("samsung_pass_save_password_prompt_detected"))
+                            )
+                            samsung_pass_save_password_prompt_cancelled = (
+                                samsung_pass_save_password_prompt_cancelled
+                                or bool(observed.get("samsung_pass_save_password_prompt_cancelled"))
+                            )
+                            instagram_save_login_info_prompt_detected = (
+                                instagram_save_login_info_prompt_detected
+                                or bool(observed.get("instagram_save_login_info_prompt_detected"))
+                            )
+                            instagram_save_login_info_prompt_not_now = (
+                                instagram_save_login_info_prompt_not_now
+                                or bool(observed.get("instagram_save_login_info_prompt_not_now"))
                             )
                             post_dismiss_screen_type = (
                                 str(observed.get("post_dismiss_screen_type") or "") or post_dismiss_screen_type
@@ -588,6 +617,10 @@ def execute_login_form_credentials(
         save_password_prompt_dismissed=save_password_prompt_dismissed,
         save_password_prompt_dismiss_attempt_count=save_password_prompt_dismiss_attempt_count,
         save_password_prompt_dismiss_method=save_password_prompt_dismiss_method,
+        samsung_pass_save_password_prompt_detected=samsung_pass_save_password_prompt_detected,
+        samsung_pass_save_password_prompt_cancelled=samsung_pass_save_password_prompt_cancelled,
+        instagram_save_login_info_prompt_detected=instagram_save_login_info_prompt_detected,
+        instagram_save_login_info_prompt_not_now=instagram_save_login_info_prompt_not_now,
         post_dismiss_screen_type=post_dismiss_screen_type,
         post_dismiss_final_observation_count=post_dismiss_final_observation_count,
         post_dismiss_final_screens=post_dismiss_final_screens,
@@ -807,7 +840,30 @@ def _find_password_edit_text_target(d: Any) -> dict[str, Any]:
         resource_name = str(info.get("resourceName") or info.get("resource-id") or "").strip().lower()
         if "password" in resource_name or text in {"password", "mot de passe"} or _looks_like_masked_password(text):
             return {"target": candidates[0], "failure_reason": ""}
+    count = _selector_count(selector)
+    if count >= 2:
+        target = _selector_instance(d, "android.widget.EditText", 1)
+        if target is not None:
+            return {"target": target, "failure_reason": ""}
+    elif count == 1:
+        target = _selector_instance(d, "android.widget.EditText", 0)
+        if target is not None:
+            info = _selector_info(target)
+            text = _target_public_text(target).strip().lower()
+            resource_name = str(info.get("resourceName") or info.get("resource-id") or "").strip().lower()
+            if "password" in resource_name or text in {"password", "mot de passe"} or _looks_like_masked_password(text):
+                return {"target": target, "failure_reason": ""}
     return {"target": None, "failure_reason": "password_field_not_found"}
+
+
+def _selector_instance(d: Any, class_name: str, instance: int) -> Any | None:
+    try:
+        target = d(className=class_name, instance=instance)
+    except Exception:
+        return None
+    if _selector_count(target) > 0 or _selector_info(target):
+        return target
+    return None
 
 
 def _selector_count(selector: Any) -> int:
@@ -1052,7 +1108,7 @@ def _set_username_field_value(d: Any, target: Any, expected_username: str, warni
     fast_ime_id = str(getattr(config, "FAST_IME", "") or "").strip()
     if serial and fast_ime_id and is_fast_ime_available(serial):
         try:
-            command_ok, method_tag, _switch_ok, broadcast_ok = _run_adb_keyboard_b64_input(
+            command_ok, method_tag, _switch_ok, broadcast_ok = run_adb_keyboard_b64_input(
                 serial,
                 expected_username,
                 fast_ime_id=fast_ime_id,
@@ -1273,20 +1329,32 @@ def _attempt_password_adb_keyboard_injection(
 ) -> dict[str, Any]:
     serial = _direct_device_serial(d)
     fast_ime_id = str(getattr(config, "FAST_IME", "") or "").strip()
+    if not adb_available():
+        return _password_input_result(
+            "",
+            focused_before,
+            False,
+            "false",
+            "adb_not_available",
+            target_kind=target_kind,
+            input_result="password_input_empty",
+            confirm_method="adb_not_available",
+            injection_trace=["adb_not_available"],
+        )
     if not (serial and fast_ime_id and is_fast_ime_available(serial)):
         return _password_input_result(
             "",
             focused_before,
             False,
             "false",
-            "password_input_missing_or_not_accepted",
+            "password_input_unavailable",
             target_kind=target_kind,
             input_result="password_input_empty",
             confirm_method="adb_keyboard_unavailable",
             injection_trace=["fast_ime_unavailable"],
         )
     try:
-        command_ok, method_tag, switch_ok, broadcast_ok = _run_adb_keyboard_b64_input(
+        command_ok, method_tag, switch_ok, broadcast_ok = run_adb_keyboard_b64_input(
             serial,
             value,
             fast_ime_id=fast_ime_id,
@@ -1507,34 +1575,8 @@ def _looks_like_masked_password(value: str) -> bool:
 
 
 def _direct_device_serial(d: Any) -> str:
-    serial = getattr(d, "serial", None)
-    return str(serial).strip() if serial else ""
-
-
-def _run_adb_keyboard_b64_input(
-    serial: str,
-    value: str,
-    *,
-    fast_ime_id: str,
-) -> tuple[bool, str, bool, bool]:
-    fast_ime_id = str(fast_ime_id or "").strip()
-    if not serial or not fast_ime_id:
-        return False, "", False, False
-    current_ime = get_current_ime(serial).strip()
-    switch_ok = current_ime == fast_ime_id or set_ime(serial, fast_ime_id)
-    if not switch_ok:
-        return False, "", False, False
-    encoded = base64.b64encode(str(value or "").encode("utf-8")).decode("ascii")
-    # Send via stdin so the secret-derived payload is not exposed in host argv.
-    shell_line = f"am broadcast -a ADB_INPUT_B64 --es msg {shlex.quote(encoded)}\n"
-    proc = subprocess.run(
-        ["adb", "-s", serial, "shell"],
-        input=shell_line,
-        text=True,
-        capture_output=True,
-        timeout=10,
-    )
-    return proc.returncode == 0, "adb_keyboard_b64", True, proc.returncode == 0
+    serial = get_device_serial(d)
+    return str(serial or "").strip()
 
 
 def _password_input_result(
@@ -1692,14 +1734,36 @@ def _classify_post_submit_hierarchy(hierarchy_xml: str) -> dict[str, Any]:
             "screen_label": "password_required_dialog",
         }
     if signals.get("save_password_prompt_present") is True:
+        screen_type = (
+            "samsung_pass_save_password_prompt"
+            if signals.get("samsung_pass_save_password_prompt_present") is True
+            else "google_password_manager_save_prompt"
+        )
+        reason = (
+            "samsung_pass_save_password_prompt"
+            if screen_type == "samsung_pass_save_password_prompt"
+            else "google_password_manager_save_prompt"
+        )
         return {
             "outcome": "unknown",
-            "screen_type": "google_password_manager_save_prompt",
-            "reason": "google_password_manager_save_prompt",
+            "screen_type": screen_type,
+            "reason": reason,
             "password_required_dialog_present": False,
             "save_password_prompt_present": True,
+            "samsung_pass_save_password_prompt_present": screen_type == "samsung_pass_save_password_prompt",
             "terminal": False,
-            "screen_label": "google_password_manager_save_prompt",
+            "screen_label": screen_type,
+        }
+    if signals.get("save_login_info_prompt") is True:
+        return {
+            "outcome": "unknown",
+            "screen_type": "save_login_info_prompt",
+            "reason": "save_login_info_prompt",
+            "password_required_dialog_present": False,
+            "save_password_prompt_present": False,
+            "save_login_info_prompt_present": True,
+            "terminal": False,
+            "screen_label": "save_login_info_prompt",
         }
     if signals.get("email_code_challenge_present") is True:
         return {
@@ -1808,6 +1872,10 @@ def _observe_post_submit_settled(
     save_password_prompt_detected = False
     save_password_prompt_dismissed = False
     save_password_prompt_dismiss_attempt_count = 0
+    samsung_pass_save_password_prompt_detected = False
+    samsung_pass_save_password_prompt_cancelled = False
+    instagram_save_login_info_prompt_detected = False
+    instagram_save_login_info_prompt_not_now = False
     dismiss_method = ""
     post_dismiss_screen_type = ""
     post_dismiss_final_observation_count = 0
@@ -1825,41 +1893,83 @@ def _observe_post_submit_settled(
         timings["post_submit_dump_ms"] += _elapsed_ms(start, timer())
         observed = _classify_post_submit_hierarchy(hierarchy_xml)
         last_observed = observed
-        screens.append(str(observed.get("screen_label") or observed.get("screen_type") or "unknown"))
+        screen_label = str(observed.get("screen_label") or observed.get("screen_type") or "unknown")
+        screens.append(screen_label)
         if observed.get("save_password_prompt_present") is True:
             save_password_prompt_detected = True
+            is_samsung_pass_prompt = screen_label == "samsung_pass_save_password_prompt"
+            if is_samsung_pass_prompt:
+                samsung_pass_save_password_prompt_detected = True
+                warnings.append("samsung_pass_save_password_prompt_detected")
             if save_password_prompt_dismiss_attempt_count >= MAX_SAVE_PASSWORD_PROMPT_DISMISS_ATTEMPTS:
                 last_observed = {
                     **observed,
                     "outcome": "save_password_prompt_blocking",
-                    "screen_type": "google_password_manager_save_prompt",
+                    "screen_type": screen_label,
                     "reason": "save_password_prompt_not_dismissed_after_2_attempts",
                     "terminal": True,
                 }
                 warnings.append("save_password_prompt_blocking")
                 break
-            dismiss_method = "back"
+            dismiss_method = "cancel" if is_samsung_pass_prompt else "back"
             save_password_prompt_dismiss_attempt_count += 1
-            if not _dismiss_save_password_prompt_once(d, warnings):
+            if not _dismiss_save_password_prompt_once(d, observed, warnings):
                 last_observed = {
                     **observed,
                     "outcome": "save_password_prompt_blocking",
-                    "screen_type": "google_password_manager_save_prompt",
+                    "screen_type": screen_label,
                     "reason": "save_password_prompt_dismiss_failed",
                     "terminal": True,
                 }
                 warnings.append("save_password_prompt_dismiss_failed")
                 break
+            if is_samsung_pass_prompt:
+                samsung_pass_save_password_prompt_cancelled = True
+                warnings.append("samsung_pass_save_password_prompt_cancelled")
+            continue
+        if observed.get("save_login_info_prompt_present") is True:
+            instagram_save_login_info_prompt_detected = True
+            warnings.append("instagram_save_login_info_prompt_detected")
+            if save_password_prompt_dismiss_attempt_count >= MAX_SAVE_PASSWORD_PROMPT_DISMISS_ATTEMPTS:
+                last_observed = {
+                    **observed,
+                    "outcome": "save_login_info_prompt_blocking",
+                    "screen_type": "save_login_info_prompt",
+                    "reason": "save_login_info_prompt_not_dismissed_after_2_attempts",
+                    "terminal": True,
+                }
+                warnings.append("save_login_info_prompt_blocking")
+                break
+            dismiss_method = "not_now"
+            save_password_prompt_dismiss_attempt_count += 1
+            if not _dismiss_save_login_info_prompt_once(d, warnings):
+                last_observed = {
+                    **observed,
+                    "outcome": "save_login_info_prompt_blocking",
+                    "screen_type": "save_login_info_prompt",
+                    "reason": "save_login_info_prompt_dismiss_failed",
+                    "terminal": True,
+                }
+                warnings.append("save_login_info_prompt_dismiss_failed")
+                break
+            instagram_save_login_info_prompt_not_now = True
+            warnings.append("instagram_save_login_info_prompt_not_now")
             continue
         if observed.get("password_required_dialog_present") is True:
             break
         if bool(observed.get("terminal")):
             break
-    if save_password_prompt_detected and str(last_observed.get("screen_label") or "") != "google_password_manager_save_prompt":
-        save_password_prompt_dismissed = str(last_observed.get("outcome") or "") != "save_password_prompt_blocking"
+    if (
+        (save_password_prompt_detected or instagram_save_login_info_prompt_detected)
+        and not _is_post_submit_dismissible_prompt_label(str(last_observed.get("screen_label") or ""))
+    ):
+        save_password_prompt_dismissed = str(last_observed.get("outcome") or "") not in {
+            "save_password_prompt_blocking",
+            "save_login_info_prompt_blocking",
+        }
     if save_password_prompt_dismissed and screens:
         for label in reversed(screens):
-            if label != "google_password_manager_save_prompt":
+            if not _is_post_submit_dismissible_prompt_label(label):
                 post_dismiss_screen_type = label
                 break
     if save_password_prompt_dismissed and post_dismiss_screen_type in {"", "loading", "unknown"}:
@@ -1882,6 +1992,23 @@ def _observe_post_submit_settled(
             connected_detected_after_save_prompt_dismiss = outcome == "connected"
             post_dismiss_screen_type = post_dismiss_final_screen_type or post_dismiss_screen_type
     outcome = str(last_observed.get("outcome") or "unknown")
+    if outcome == "unknown" and any(label in {"loading", "logged_out"} for label in screens):
+        final_recheck = _observe_post_submit_final_recheck(
+            d,
+            timings=timings,
+            timer=timer,
+            sleeper=sleeper,
+        )
+        final_recheck_screens = list(final_recheck.get("screens") or [])
+        if final_recheck_screens:
+            screens.extend(final_recheck_screens)
+            wait_total_ms += int(final_recheck.get("wait_total_ms") or 0)
+        final_observed = dict(final_recheck.get("observed") or {})
+        if final_observed.get("terminal") is True or final_observed.get("email_code_challenge_detected") is True:
+            last_observed = final_observed
+            outcome = str(last_observed.get("outcome") or "unknown")
+            warnings.append("post_submit_final_recheck_terminal")
+
     if outcome == "logged_out":
         last_observed = {
             **last_observed,
@@ -1931,13 +2058,51 @@ def _observe_post_submit_settled(
         "save_password_prompt_detected": save_password_prompt_detected,
         "save_password_prompt_dismissed": save_password_prompt_dismissed,
         "save_password_prompt_dismiss_attempt_count": save_password_prompt_dismiss_attempt_count,
-        "dismiss_method": dismiss_method if save_password_prompt_detected else "",
+        "dismiss_method": dismiss_method if (save_password_prompt_detected or instagram_save_login_info_prompt_detected) else "",
+        "samsung_pass_save_password_prompt_detected": samsung_pass_save_password_prompt_detected,
+        "samsung_pass_save_password_prompt_cancelled": samsung_pass_save_password_prompt_cancelled,
+        "instagram_save_login_info_prompt_detected": instagram_save_login_info_prompt_detected,
+        "instagram_save_login_info_prompt_not_now": instagram_save_login_info_prompt_not_now,
         "post_dismiss_screen_type": post_dismiss_screen_type,
         "post_dismiss_final_observation_count": post_dismiss_final_observation_count,
         "post_dismiss_final_screens": post_dismiss_final_screens,
         "post_dismiss_final_wait_total_ms": post_dismiss_final_wait_total_ms,
         "post_dismiss_final_screen_type": post_dismiss_final_screen_type,
         "connected_detected_after_save_prompt_dismiss": connected_detected_after_save_prompt_dismiss,
+    }
+
+
+def _observe_post_submit_final_recheck(
+    d: Any,
+    *,
+    timings: dict[str, int],
+    timer: Timer,
+    sleeper: Sleeper,
+) -> dict[str, Any]:
+    screens: list[str] = []
+    wait_total_ms = 0
+    observed: dict[str, Any] = {
+        "outcome": "unknown",
+        "screen_type": "unknown",
+        "reason": "post_submit_unknown_after_final_recheck",
+        "terminal": False,
+        "screen_label": "unknown",
+    }
+    for _index in range(POST_SUBMIT_FINAL_RECHECK_OBSERVATIONS):
+        sleeper(POST_SUBMIT_FINAL_RECHECK_INTERVAL_MS / 1000.0)
+        wait_total_ms += POST_SUBMIT_FINAL_RECHECK_INTERVAL_MS
+        start = timer()
+        hierarchy_xml = _dump_hierarchy_once(d)
+        timings["post_submit_dump_ms"] += _elapsed_ms(start, timer())
+        observed = _classify_post_submit_hierarchy(hierarchy_xml)
+        screen_label = str(observed.get("screen_label") or observed.get("screen_type") or "unknown")
+        screens.append(screen_label)
+        if observed.get("terminal") is True:
+            break
+    return {
+        "observed": observed,
+        "screens": screens,
+        "wait_total_ms": wait_total_ms,
     }
 
 
@@ -1982,7 +2147,31 @@ def _observe_post_dismiss_final_settled(
     }
 
 
-def _dismiss_save_password_prompt_once(d: Any, warnings: list[str]) -> bool:
+def _is_post_submit_dismissible_prompt_label(label: str) -> bool:
+    return str(label or "") in {
+        "google_password_manager_save_prompt",
+        "samsung_pass_save_password_prompt",
+        "save_login_info_prompt",
+    }
+
+
+def _dismiss_save_password_prompt_once(d: Any, observed: dict[str, Any], warnings: list[str]) -> bool:
+    if str(observed.get("screen_type") or "") == "samsung_pass_save_password_prompt":
+        target = _find_unique_target(
+            d,
+            ({"text": "Cancel"}, {"description": "Cancel"}, {"text": "Annuler"}, {"description": "Annuler"}),
+            missing_reason="cancel_button_not_found",
+        )
+        if target["failure_reason"]:
+            warnings.append(str(target["failure_reason"]))
+            return False
+        try:
+            _click_target(target["target"])
+            return True
+        except Exception:
+            warnings.append("samsung_pass_cancel_tap_failed")
+            return False
+
     press = getattr(d, "press", None)
     if not callable(press):
         warnings.append("save_password_prompt_back_unavailable")
@@ -1993,6 +2182,23 @@ def _dismiss_save_password_prompt_once(d: Any, warnings: list[str]) -> bool:
         return True
     except Exception:
         warnings.append("save_password_prompt_back_failed")
+        return False
+
+
+def _dismiss_save_login_info_prompt_once(d: Any, warnings: list[str]) -> bool:
+    target = _find_unique_target(
+        d,
+        ({"text": "Not now"}, {"description": "Not now"}, {"text": "Pas maintenant"}, {"description": "Pas maintenant"}),
+        missing_reason="not_now_button_not_found",
+    )
+    if target["failure_reason"]:
+        warnings.append(str(target["failure_reason"]))
+        return False
+    try:
+        _click_target(target["target"])
+        return True
+    except Exception:
+        warnings.append("save_login_info_not_now_tap_failed")
         return False
 
 
@@ -2154,6 +2360,10 @@ def _result(
     save_password_prompt_dismissed: bool = False,
     save_password_prompt_dismiss_attempt_count: int = 0,
     save_password_prompt_dismiss_method: str = "",
+    samsung_pass_save_password_prompt_detected: bool = False,
+    samsung_pass_save_password_prompt_cancelled: bool = False,
+    instagram_save_login_info_prompt_detected: bool = False,
+    instagram_save_login_info_prompt_not_now: bool = False,
     post_dismiss_screen_type: str = "",
     post_dismiss_final_observation_count: int = 0,
     post_dismiss_final_screens: list[str] | None = None,
@@ -2210,6 +2420,10 @@ def _result(
                 "save_password_prompt_dismissed": save_password_prompt_dismissed,
                 "save_password_prompt_dismiss_attempt_count": save_password_prompt_dismiss_attempt_count,
                 "dismiss_method": save_password_prompt_dismiss_method,
+                "samsung_pass_save_password_prompt_detected": samsung_pass_save_password_prompt_detected,
+                "samsung_pass_save_password_prompt_cancelled": samsung_pass_save_password_prompt_cancelled,
+                "instagram_save_login_info_prompt_detected": instagram_save_login_info_prompt_detected,
+                "instagram_save_login_info_prompt_not_now": instagram_save_login_info_prompt_not_now,
                 "post_dismiss_screen_type": post_dismiss_screen_type,
                 "post_dismiss_final_observation_count": post_dismiss_final_observation_count,
                 "post_dismiss_final_screens": list(post_dismiss_final_screens or []),

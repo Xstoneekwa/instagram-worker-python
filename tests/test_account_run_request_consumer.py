@@ -342,6 +342,65 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
         self.assertIn("--device-serial", cmd)
         self.assertEqual(cmd[cmd.index("--device-serial") + 1], "emulator-5554")
 
+    def test_login_subprocess_receives_runner_env_with_adb_path(self) -> None:
+        cfg = consumer.DispatcherConfig(
+            enabled=True,
+            health_only=False,
+            launch_enabled=True,
+            worker_id="worker-1",
+            poll_seconds=1.0,
+            lease_seconds=60,
+            heartbeat_seconds=20.0,
+            allowed_run_types=["login_provisioning"],
+            test_account_ids=set(),
+            subprocess_timeout_seconds=120,
+            require_assignment=True,
+            enforce_assignment_window=False,
+        )
+        request = {
+            "id": TEST_REQUEST_ID,
+            "account_id": TEST_ACCOUNT_ID,
+            "requested_run_type": "login_provisioning",
+            "status": "claimed",
+        }
+        dispatch_ctx = {
+            "assignment_found": True,
+            "assignment_id": "assignment-1",
+            "account_id": TEST_ACCOUNT_ID,
+            "assignment_type": "full_cycle",
+            "slot_kind": "full_cycle_6h",
+            "device_id": "device-1",
+            "clone_id": None,
+            "app_instance_id": "app-instance-1",
+            "device_kind": "physical_phone",
+            "adb_serial": "RFGL145VCKE",
+            "package_name": "com.instagram.androie",
+            "source": "account_assignments",
+            "fallback_used": False,
+            "reason": "assignment_resolved",
+            "run_type": "login_provisioning",
+        }
+
+        class FakeProc:
+            def poll(self) -> int:
+                return 0
+
+        fake_env = {"PATH": "/usr/bin", "ADB_PATH": "/tmp/platform-tools/adb"}
+        with (
+            patch.object(consumer, "_account_is_launch_allowed", return_value=(True, None)),
+            patch.object(consumer, "mark_account_run_request_starting", return_value=True),
+            patch.object(consumer, "resolve_account_assignment_runtime_context", return_value=dispatch_ctx),
+            patch.object(consumer, "_heartbeat"),
+            patch.object(consumer, "runner_subprocess_env", return_value=fake_env),
+            patch.object(consumer.subprocess, "Popen", return_value=FakeProc()) as popen,
+            patch.object(consumer, "_finalize_manual_run_after_subprocess"),
+            patch.object(consumer, "_audit"),
+        ):
+            consumer._handle_claimed_request(cfg, request)
+
+        self.assertEqual(popen.call_args.kwargs.get("env"), fake_env)
+        self.assertEqual(fake_env["ADB_PATH"], "/tmp/platform-tools/adb")
+
     def test_build_login_email_code_resume_command(self) -> None:
         with patch.object(consumer, "_load_expected_username", return_value="cinema_catchup"):
             cmd = consumer._build_runner_command(

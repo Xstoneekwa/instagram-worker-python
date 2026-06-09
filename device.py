@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import base64
 import hmac
 import json
+import os
 import random
 import re
+import shlex
+import shutil
 import subprocess
 import time
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
@@ -39,8 +44,69 @@ def get_device_serial(d: u2.Device) -> str | None:
     return config.DEVICE_SERIAL
 
 
+def _adb_candidate_paths() -> list[str]:
+    candidates: list[str] = []
+    env_path = str(os.environ.get("ADB_PATH") or "").strip()
+    if env_path:
+        candidates.append(env_path)
+    for key in ("ANDROID_HOME", "ANDROID_SDK_ROOT"):
+        root = str(os.environ.get(key) or "").strip()
+        if root:
+            candidates.append(str(Path(root).expanduser() / "platform-tools" / "adb"))
+    candidates.extend(
+        [
+            str(Path.home() / "Library" / "Android" / "sdk" / "platform-tools" / "adb"),
+            "/opt/homebrew/bin/adb",
+            "/usr/local/bin/adb",
+        ]
+    )
+    return candidates
+
+
+@lru_cache(maxsize=1)
+def resolve_adb_path() -> str | None:
+    """Resolve adb executable for subprocess use (cached per process)."""
+
+    seen: set[str] = set()
+    for candidate in _adb_candidate_paths():
+        path = Path(candidate).expanduser()
+        path_text = str(path)
+        if not path_text or path_text in seen:
+            continue
+        seen.add(path_text)
+        if path.is_file() and os.access(path, os.X_OK):
+            return path_text
+    path_env = os.environ.get("PATH", "")
+    discovered = shutil.which("adb", path=path_env or None)
+    return discovered if discovered else None
+
+
+def adb_available() -> bool:
+    return resolve_adb_path() is not None
+
+
+def runner_subprocess_env(base: dict[str, str] | None = None) -> dict[str, str]:
+    """Build a subprocess env with adb discoverable under launchd/minimal PATH."""
+
+    env = dict(base or os.environ)
+    adb_path = resolve_adb_path()
+    if not adb_path:
+        return env
+    env["ADB_PATH"] = adb_path
+    adb_dir = str(Path(adb_path).parent)
+    existing_path = str(env.get("PATH") or "")
+    path_parts = [part for part in [adb_dir, existing_path] if part]
+    if path_parts:
+        env["PATH"] = os.pathsep.join(path_parts)
+    return env
+
+
 def _adb_run(serial: str | None, argv: list[str], *, timeout_s: float = 45.0) -> tuple[int, str, str]:
-    cmd = ["adb"]
+    adb_path = resolve_adb_path()
+    if not adb_path:
+        log("warning", "adb_run_failed", argv=argv[:8], error="adb_not_available")
+        return 1, "", "adb_not_available"
+    cmd = [adb_path]
     if serial:
         cmd.extend(["-s", serial])
     cmd.extend(argv)
@@ -50,6 +116,7 @@ def _adb_run(serial: str | None, argv: list[str], *, timeout_s: float = 45.0) ->
             capture_output=True,
             text=True,
             timeout=timeout_s,
+            env=runner_subprocess_env(),
         )
         out = (p.stdout or "").strip()
         err = (p.stderr or "").strip()
@@ -57,6 +124,32 @@ def _adb_run(serial: str | None, argv: list[str], *, timeout_s: float = 45.0) ->
     except Exception as e:
         log("warning", "adb_run_failed", argv=argv[:8], error=str(e))
         return 1, "", str(e)
+
+
+def run_adb_keyboard_b64_input(
+    serial: str,
+    value: str,
+    *,
+    fast_ime_id: str,
+) -> tuple[bool, str, bool, bool]:
+    """Switch to FAST_IME when needed and inject text via ADB_INPUT_B64 broadcast."""
+
+    fast_ime_id = str(fast_ime_id or "").strip()
+    if not serial or not fast_ime_id:
+        return False, "", False, False
+    if not adb_available():
+        return False, "adb_keyboard_b64", False, False
+    current_ime = get_current_ime(serial).strip()
+    switch_ok = current_ime == fast_ime_id or set_ime(serial, fast_ime_id)
+    if not switch_ok:
+        return False, "", False, False
+    encoded = base64.b64encode(str(value or "").encode("utf-8")).decode("ascii")
+    broadcast_code, _, _ = _adb_run(
+        serial,
+        ["shell", "sh", "-c", f"am broadcast -a ADB_INPUT_B64 --es msg {shlex.quote(encoded)}"],
+        timeout_s=10.0,
+    )
+    return broadcast_code == 0, "adb_keyboard_b64", True, broadcast_code == 0
 
 
 def _adb_shell(serial: str | None, *shell_tokens: str) -> tuple[int, str, str]:

@@ -284,8 +284,9 @@ class FakeScrollableSelector(FakeSelector):
 
 
 class FakeDevice:
-    def __init__(self, hierarchies: list[str] | None = None) -> None:
+    def __init__(self, hierarchies: list[str] | None = None, *, foreground_package: str | None = None) -> None:
         self.hierarchies = list(hierarchies or [CONNECTED_XML])
+        self.foreground_package = foreground_package
         self.dump_calls = 0
         self.selector_calls: list[dict] = []
         self.selectors: dict[tuple[str, str], FakeSelector] = {}
@@ -315,6 +316,9 @@ class FakeDevice:
 
     def press(self, key: str) -> None:
         self.press_calls.append(str(key))
+
+    def app_current(self) -> dict:
+        return {"package": self.foreground_package} if self.foreground_package is not None else {}
 
 
 class TrackingSecretValue(SecretValue):
@@ -386,6 +390,39 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertTrue(result.safe_metadata["app_start_attempted"])
         self.assertTrue(result.safe_metadata["app_start_ok"])
         self.assertEqual(result.safe_metadata["screen_after_app_start"], "connected")
+
+    def test_startup_email_code_challenge_creates_dashboard_action_without_credentials(self) -> None:
+        device = FakeDevice([EMAIL_CODE_CHALLENGE_XML])
+        credentials_getter = Mock(return_value=credentials())
+
+        with (
+            patch.object(
+                provisioner_orchestrator,
+                "sync_login_challenge_dashboard_action",
+                return_value={"published": True, "reason": "upserted", "dashboard_action_id": "action-1"},
+            ) as sync_action,
+            patch.object(
+                provisioner_orchestrator,
+                "publish_login_challenge_pending_incident",
+                return_value={"published": True, "reason": "published"},
+            ),
+        ):
+            result = run_login_provisioning_flow(
+                device,
+                account_id=ACCOUNT_ID,
+                expected_username=USERNAME,
+                credentials_getter=credentials_getter,
+                sleeper=Mock(),
+            )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.final_outcome, "verification_pending")
+        self.assertEqual(result.final_login_status, "verification_pending")
+        self.assertEqual(result.dashboard_action_type, "enter_email_verification_code")
+        self.assertEqual(result.safe_metadata["screen_after_app_start"], "email_code_challenge")
+        self.assertEqual(result.safe_metadata["dashboard_action_sync"]["dashboard_action_id"], "action-1")
+        credentials_getter.assert_not_called()
+        sync_action.assert_called_once()
 
     def test_observe_current_screen_only_skips_app_start(self) -> None:
         device = FakeDevice([CONNECTED_XML])
@@ -593,6 +630,375 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertTrue(result.ok)
         device.app_start.assert_called_once_with("com.instagram.android.clone1")
         self.assertEqual(result.safe_metadata["package_name"], "com.instagram.android.clone1")
+
+    def test_provisioning_clone_package_ok_can_continue_to_routing(self) -> None:
+        device = FakeDevice([LOGIN_FORM_XML], foreground_package="com.instagram.androie")
+        result = run_login_provisioning_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username=USERNAME,
+            credentials_getter=Mock(side_effect=AssertionError("dry run must not load credentials")),
+            package_name="com.instagram.androie",
+            dry_run=True,
+            post_start_wait_ms=0,
+            sleeper=Mock(),
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.final_outcome, "dry_run")
+        self.assertEqual(result.safe_metadata["screen_type"], "login_form_empty")
+        device.app_start.assert_called_once_with("com.instagram.androie")
+
+    def test_wrong_package_foreground_stops_before_credentials_or_input_and_reports(self) -> None:
+        device = FakeDevice([LOGIN_FORM_XML], foreground_package="com.instagram.android")
+        credentials_getter = Mock(side_effect=AssertionError("credentials must not load on package mismatch"))
+
+        with (
+            patch.object(
+                provisioner_orchestrator,
+                "publish_login_package_mismatch_incident",
+                return_value={"published": True, "incident_id": "incident-1"},
+            ) as incident,
+            patch.object(
+                provisioner_orchestrator,
+                "sync_login_package_mismatch_dashboard_action",
+                return_value={"published": True, "dashboard_action_id": "action-1"},
+            ) as dashboard,
+            patch.object(
+                provisioner_orchestrator,
+                "dispatch_login_package_mismatch_notifications",
+                return_value={
+                    "dispatched": True,
+                    "enabled_channels": ["slack"],
+                    "skipped_channel_disabled_count": 1,
+                },
+            ) as notifications,
+            patch.object(
+                provisioner_orchestrator,
+                "execute_login_form_credentials",
+                side_effect=AssertionError("password executor must not run"),
+            ) as executor,
+        ):
+            result = run_login_provisioning_flow(
+                device,
+                account_id=ACCOUNT_ID,
+                expected_username=USERNAME,
+                credentials_getter=credentials_getter,
+                package_name="com.instagram.androie",
+                run_id="run-1",
+                run_type="login_provisioning",
+                device_serial="RFGL145VCKE",
+                expected_app_instance_id="7637db9a-3581-4099-8068-d5eb1ed86f96",
+                post_start_wait_ms=0,
+                sleeper=Mock(),
+            )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.final_outcome, "wrong_app_package")
+        self.assertEqual(result.reason, "expected_package_mismatch")
+        self.assertEqual(result.dashboard_action_type, "review_login_package_mismatch")
+        self.assertNotIn("login_form_submit", result.actions_taken)
+        credentials_getter.assert_not_called()
+        executor.assert_not_called()
+        incident.assert_called_once()
+        dashboard.assert_called_once()
+        notifications.assert_called_once()
+        metadata = result.safe_metadata
+        self.assertEqual(metadata["expected_package_name"], "com.instagram.androie")
+        self.assertEqual(metadata["actual_foreground_package"], "com.instagram.android")
+        self.assertTrue(metadata["package_guard_mismatch"])
+        self.assertFalse(metadata["would_submit_password"])
+        self.assertFalse(metadata["password_input"])
+        self.assertFalse(metadata["submit_executed"])
+        rendered = json.dumps(metadata, sort_keys=True)
+        self.assertNotIn(PASSWORD, rendered)
+        self.assertNotIn(SECRET_REF, rendered)
+        self.assertNotIn(VAULT_ID, rendered)
+        self.assertIn("RFGL***VCKE", rendered)
+
+    def test_resume_email_wrong_package_stops_before_consuming_code(self) -> None:
+        device = FakeDevice([EMAIL_CODE_CHALLENGE_XML], foreground_package="com.instagram.android")
+        with (
+            patch.object(
+                provisioner_orchestrator,
+                "consume_verification_code_for_worker",
+                side_effect=AssertionError("code must not be consumed"),
+            ) as consume,
+            patch.object(
+                provisioner_orchestrator,
+                "execute_email_code_challenge_resume",
+                side_effect=AssertionError("email code executor must not run"),
+            ) as executor,
+            patch.object(
+                provisioner_orchestrator,
+                "publish_login_package_mismatch_incident",
+                return_value={"published": True, "incident_id": "incident-1"},
+            ),
+            patch.object(
+                provisioner_orchestrator,
+                "sync_login_package_mismatch_dashboard_action",
+                return_value={"published": True, "dashboard_action_id": "action-1"},
+            ),
+            patch.object(
+                provisioner_orchestrator,
+                "dispatch_login_package_mismatch_notifications",
+                return_value={"dispatched": True, "enabled_channels": ["discord"]},
+            ),
+        ):
+            result = provisioner_orchestrator.run_email_code_resume_flow(
+                device,
+                account_id=ACCOUNT_ID,
+                expected_username=USERNAME,
+                verification_code=SecretValue("123456"),
+                action_id="action-1",
+                consume_from_action=True,
+                run_id="run-1",
+                package_name="com.instagram.androie",
+                device_serial="RFGL145VCKE",
+            )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.final_outcome, "wrong_app_package")
+        self.assertEqual(result.reason, "resume_email_code_wrong_package")
+        consume.assert_not_called()
+        executor.assert_not_called()
+        self.assertNotIn("email_code_submit", result.actions_taken)
+
+    def test_email_code_resume_chains_password_after_post_code_password_required(self) -> None:
+        device = FakeDevice([PASSWORD_ONLY_OVERLAY_XML, CONNECTED_XML])
+        secret = TrackingSecretValue(PASSWORD)
+        from instagram_login_email_code_executor import EmailCodeResumeResult
+
+        resume_result = EmailCodeResumeResult(
+            ok=False,
+            executed=True,
+            action="email_code_submit",
+            reason="post_code_password_required",
+            failure_reason=None,
+            post_submit_outcome="post_code_password_required",
+            post_submit_probe_reason="post_code_password_required",
+            post_submit_screen_type="continue_password_only",
+            code_entered=True,
+            continue_tapped=False,
+            timings={},
+            warnings=[],
+            safe_metadata={"post_code_password_required": True, "screen_type": "continue_password_only"},
+        )
+        password_result = type(
+            "PasswordResult",
+            (),
+            {
+                "failure_reason": None,
+                "post_submit_outcome": "connected",
+                "post_submit_probe_reason": "connected",
+                "post_submit_screen_type": "connected",
+                "executed": True,
+                "submit_tapped": True,
+                "timings": {},
+                "warnings": [],
+                "safe_metadata": {"post_submit_screen_type": "connected"},
+            },
+        )()
+        with (
+            patch.object(
+                provisioner_orchestrator,
+                "consume_verification_code_for_worker",
+                return_value={"ok": True, "verification_code": "123456"},
+            ),
+            patch.object(
+                provisioner_orchestrator,
+                "execute_email_code_challenge_resume",
+                return_value=resume_result,
+            ) as email_executor,
+            patch.object(
+                provisioner_orchestrator,
+                "execute_login_form_credentials",
+                return_value=password_result,
+            ) as password_executor,
+            patch.object(
+                provisioner_orchestrator,
+                "_observe_login_signals",
+                side_effect=[
+                    {
+                        "screen_type": "email_code_challenge",
+                        "email_code_challenge_present": True,
+                    },
+                    {
+                        "screen_type": "continue_password_only",
+                        "suggested_username": USERNAME,
+                        "has_password_field": True,
+                        "has_login_button": True,
+                    },
+                ],
+            ),
+        ):
+            result = provisioner_orchestrator.run_email_code_resume_flow(
+                device,
+                account_id=ACCOUNT_ID,
+                expected_username=USERNAME,
+                verification_code=SecretValue(""),
+                credentials_getter=Mock(return_value={"username": USERNAME, "password": secret}),
+                action_id="action-1",
+                consume_from_action=True,
+                run_id="run-1",
+            )
+
+        self.assertTrue(result.ok)
+        email_executor.assert_called_once()
+        password_executor.assert_called_once()
+        self.assertIn("route:post_email_code_password", result.actions_taken)
+        self.assertIn("login_form_submit", result.actions_taken)
+        rendered = json.dumps(result.safe_metadata, sort_keys=True)
+        self.assertNotIn(PASSWORD, rendered)
+        self.assertNotIn("123456", rendered)
+
+    def test_email_code_resume_chains_password_after_code_input_empty_on_password_screen(self) -> None:
+        device = FakeDevice([PASSWORD_ONLY_OVERLAY_XML, CONNECTED_XML])
+        from instagram_login_email_code_executor import EmailCodeResumeResult
+
+        resume_result = EmailCodeResumeResult(
+            ok=False,
+            executed=True,
+            action="email_code_submit",
+            reason="verification_code_input_empty",
+            failure_reason="verification_code_input_empty",
+            post_submit_outcome=None,
+            post_submit_probe_reason="verification_code_input_empty",
+            post_submit_screen_type="",
+            code_entered=False,
+            continue_tapped=False,
+            timings={},
+            warnings=["verification_code_input_fallback_adb_keyboard_b64_attempted"],
+            safe_metadata={"stage": "email_code_resume"},
+        )
+        password_result = type(
+            "PasswordResult",
+            (),
+            {
+                "failure_reason": None,
+                "post_submit_outcome": "connected",
+                "post_submit_probe_reason": "connected",
+                "post_submit_screen_type": "connected",
+                "executed": True,
+                "submit_tapped": True,
+                "timings": {},
+                "warnings": [],
+                "safe_metadata": {
+                    "post_submit_screen_type": "connected",
+                    "password_input_method": "adb_keyboard_b64",
+                    "password_field_non_empty_confirmed": "true",
+                },
+            },
+        )()
+        password_signals = {
+            "screen_type": "continue_password_only",
+            "suggested_username": USERNAME,
+            "has_password_field": True,
+            "has_login_button": True,
+            "email_code_challenge_present": False,
+        }
+        with (
+            patch.object(
+                provisioner_orchestrator,
+                "consume_verification_code_for_worker",
+                return_value={"ok": True, "verification_code": "123456"},
+            ),
+            patch.object(
+                provisioner_orchestrator,
+                "execute_email_code_challenge_resume",
+                return_value=resume_result,
+            ),
+            patch.object(
+                provisioner_orchestrator,
+                "execute_login_form_credentials",
+                return_value=password_result,
+            ) as password_executor,
+            patch.object(
+                provisioner_orchestrator,
+                "_observe_login_signals",
+                side_effect=[
+                    {"screen_type": "email_code_challenge", "email_code_challenge_present": True},
+                    password_signals,
+                ],
+            ),
+        ):
+            result = provisioner_orchestrator.run_email_code_resume_flow(
+                device,
+                account_id=ACCOUNT_ID,
+                expected_username=USERNAME,
+                verification_code=SecretValue(""),
+                credentials_getter=Mock(return_value={"username": USERNAME, "password": SecretValue("x")}),
+                action_id="action-1",
+                consume_from_action=True,
+                run_id="run-1",
+            )
+
+        self.assertTrue(result.ok)
+        password_executor.assert_called_once()
+        self.assertIn("route:post_email_code_password", result.actions_taken)
+
+    def test_email_code_resume_skips_code_entry_when_password_screen_ready(self) -> None:
+        device = FakeDevice([PASSWORD_ONLY_OVERLAY_XML, CONNECTED_XML])
+        secret = TrackingSecretValue(PASSWORD)
+        password_result = type(
+            "PasswordResult",
+            (),
+            {
+                "failure_reason": None,
+                "post_submit_outcome": "connected",
+                "post_submit_probe_reason": "connected",
+                "post_submit_screen_type": "connected",
+                "executed": True,
+                "submit_tapped": True,
+                "timings": {},
+                "warnings": [],
+                "safe_metadata": {"post_submit_screen_type": "connected"},
+            },
+        )()
+        password_signals = {
+            "screen_type": "continue_password_only",
+            "suggested_username": USERNAME,
+            "has_password_field": True,
+            "has_login_button": True,
+        }
+        with (
+            patch.object(
+                provisioner_orchestrator,
+                "consume_verification_code_for_worker",
+                return_value={"ok": True, "verification_code": "123456"},
+            ),
+            patch.object(
+                provisioner_orchestrator,
+                "execute_email_code_challenge_resume",
+                side_effect=AssertionError("email code executor must not run"),
+            ) as email_executor,
+            patch.object(
+                provisioner_orchestrator,
+                "execute_login_form_credentials",
+                return_value=password_result,
+            ) as password_executor,
+            patch.object(
+                provisioner_orchestrator,
+                "_observe_login_signals",
+                return_value=password_signals,
+            ),
+        ):
+            result = provisioner_orchestrator.run_email_code_resume_flow(
+                device,
+                account_id=ACCOUNT_ID,
+                expected_username=USERNAME,
+                verification_code=SecretValue(""),
+                credentials_getter=Mock(return_value={"username": USERNAME, "password": secret}),
+                action_id="action-1",
+                consume_from_action=True,
+                run_id="run-1",
+            )
+
+        self.assertTrue(result.ok)
+        email_executor.assert_not_called()
+        password_executor.assert_called_once()
+        self.assertIn("route:post_email_code_password", result.actions_taken)
+        self.assertTrue(result.safe_metadata.get("email_code_entry_skipped"))
 
     def test_app_start_account_picker_can_prepare_password_only_then_submit(self) -> None:
         account_picker = (
@@ -1061,6 +1467,49 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
 
         self.assertEqual(result.final_outcome, "save_password_prompt_blocking")
         self.assertEqual(result.reason, "save_password_prompt_blocking")
+        self.assertFalse(result.retry_attempted)
+        patched.assert_called_once()
+
+    def test_save_login_info_prompt_blocking_final_outcome_no_retry(self) -> None:
+        device, _selectors = configured_device(CONNECTED_XML)
+        password_result = type(
+            "PasswordResult",
+            (),
+            {
+                "failure_reason": None,
+                "post_submit_outcome": "save_login_info_prompt_blocking",
+                "post_submit_probe_reason": "save_login_info_prompt_not_dismissed_after_2_attempts",
+                "executed": True,
+                "submit_tapped": True,
+                "timings": {},
+                "warnings": ["save_login_info_prompt_blocking"],
+                "safe_metadata": {
+                    "instagram_save_login_info_prompt_detected": True,
+                    "instagram_save_login_info_prompt_not_now": False,
+                    "save_password_prompt_dismiss_attempt_count": 2,
+                    "dismiss_method": "not_now",
+                    "post_submit_observation_count": 2,
+                    "post_submit_wait_total_ms": 2000,
+                    "post_submit_screens": [
+                        "save_login_info_prompt",
+                        "save_login_info_prompt",
+                    ],
+                    "final_terminal_screen": "save_login_info_prompt",
+                },
+            },
+        )()
+
+        with patch.object(provisioner_orchestrator, "execute_login_form_credentials", return_value=password_result) as patched:
+            result = self.run_flow(
+                device,
+                account_id=ACCOUNT_ID,
+                expected_username=USERNAME,
+                credentials_getter=Mock(return_value=credentials()),
+                initial_signals=LOGIN_FORM_SIGNALS,
+            )
+
+        self.assertEqual(result.final_outcome, "save_login_info_prompt_blocking")
+        self.assertEqual(result.reason, "save_login_info_prompt_blocking")
         self.assertFalse(result.retry_attempted)
         patched.assert_called_once()
 

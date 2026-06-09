@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import config
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from device import adb_available, get_device_serial, is_fast_ime_available, run_adb_keyboard_b64_input
 from instagram_credentials_runtime_access import SecretValue, redact_credentials_payload
 from instagram_login_status_classifier import LoginProbeOutcome, clean_login_probe_metadata
 from instagram_login_ui_probe import extract_login_screen_signals_from_hierarchy, probe_login_ui_from_hierarchy
@@ -14,6 +17,7 @@ ACTION_EMAIL_CODE_SUBMIT = "email_code_submit"
 DEFAULT_POST_SUBMIT_OBSERVATIONS = 4
 DEFAULT_POST_SUBMIT_INTERVAL_MS = 1000
 DEFAULT_INITIAL_WAIT_MS = 750
+CODE_CONFIRM_SETTLE_MS = 200
 
 Timer = Callable[[], float]
 Sleeper = Callable[[float], None]
@@ -54,6 +58,30 @@ def execute_email_code_challenge_resume(
 
     screen = _observe_current_screen(d, warnings=warnings)
     if not screen.get("email_code_challenge_present"):
+        if _password_screen_ready_after_code(d):
+            observed = _observe_current_screen(d, warnings=warnings)
+            screen_type = str(observed.get("screen_type") or "continue_password_only")
+            return _result(
+                ok=False,
+                executed=True,
+                reason="post_code_password_required",
+                failure_reason=None,
+                post_submit_outcome="post_code_password_required",
+                post_submit_probe_reason="post_code_password_required",
+                post_submit_screen_type=screen_type,
+                timings=_finish_timings(timings, total_start, timer),
+                warnings=[*warnings, "email_code_resume_password_screen_ready"],
+                safe_metadata=clean_login_probe_metadata(
+                    redact_credentials_payload(
+                        {
+                            "stage": "email_code_resume",
+                            "screen_type": screen_type,
+                            "post_code_password_required": True,
+                            "email_code_challenge_present": False,
+                        }
+                    )
+                ),
+            )
         return _result(
             ok=False,
             executed=False,
@@ -101,23 +129,93 @@ def execute_email_code_challenge_resume(
         )
 
     input_start = timer()
-    try:
-        _focus_and_set_text(code_target["target"], revealed_code.strip(), d=d, sleeper=sleeper)
-        code_entered = True
-    except Exception:
+    input_result = _input_code_robust(d, code_target["target"], revealed_code.strip(), warnings, sleeper=sleeper)
+    code_entered = bool(input_result.get("confirmed"))
+    if not code_entered:
         return _result(
             ok=False,
             executed=False,
-            reason="verification_code_input_failed",
-            failure_reason="verification_code_input_failed",
+            reason=str(input_result.get("reason") or "verification_code_input_failed"),
+            failure_reason=str(input_result.get("reason") or "verification_code_input_failed"),
             timings=_finish_timings(timings, total_start, timer),
             warnings=warnings,
-            safe_metadata={"screen_type": "email_code_challenge", "stage": "email_code_resume"},
+            safe_metadata={
+                "screen_type": "email_code_challenge",
+                "stage": "email_code_resume",
+                "code_input_method": input_result.get("method"),
+                "code_input_confirmed": False,
+                "code_input_confirm_method": input_result.get("confirm_method"),
+            },
         )
     timings["code_input_ms"] = _elapsed_ms(input_start, timer)
 
+    skip_continue = bool(input_result.get("skip_continue"))
+    continue_tapped = False
+    if skip_continue:
+        warnings.append("email_code_continue_skipped_password_screen_ready")
+        observed = _observe_current_screen(d, warnings=warnings)
+        screen_type = str(observed.get("screen_type") or "continue_password_only")
+        return _result(
+            ok=False,
+            executed=True,
+            reason="post_code_password_required",
+            failure_reason=None,
+            code_entered=code_entered,
+            continue_tapped=False,
+            post_submit_outcome="post_code_password_required",
+            post_submit_probe_reason="post_code_password_required",
+            post_submit_screen_type=screen_type,
+            timings=_finish_timings(timings, total_start, timer),
+            warnings=warnings,
+            safe_metadata=clean_login_probe_metadata(
+                redact_credentials_payload(
+                    {
+                        "stage": "email_code_resume",
+                        "screen_type": screen_type,
+                        "post_submit_outcome": "post_code_password_required",
+                        "post_submit_probe_reason": "post_code_password_required",
+                        "post_submit_screen_type": screen_type,
+                        "code_entered": code_entered,
+                        "code_input_method": input_result.get("method"),
+                        "code_input_confirmed": code_entered,
+                        "code_input_confirm_method": input_result.get("confirm_method"),
+                        "continue_tapped": False,
+                        "post_code_password_required": True,
+                    }
+                )
+            ),
+        )
+
     continue_target = _find_continue_target(d)
     if continue_target.get("failure_reason"):
+        if _password_screen_ready_after_code(d):
+            warnings.append("email_code_continue_missing_password_screen_ready")
+            observed = _observe_current_screen(d, warnings=warnings)
+            screen_type = str(observed.get("screen_type") or "continue_password_only")
+            return _result(
+                ok=False,
+                executed=True,
+                reason="post_code_password_required",
+                failure_reason=None,
+                code_entered=code_entered,
+                continue_tapped=False,
+                post_submit_outcome="post_code_password_required",
+                post_submit_probe_reason="post_code_password_required",
+                post_submit_screen_type=screen_type,
+                timings=_finish_timings(timings, total_start, timer),
+                warnings=warnings,
+                safe_metadata=clean_login_probe_metadata(
+                    redact_credentials_payload(
+                        {
+                            "stage": "email_code_resume",
+                            "screen_type": screen_type,
+                            "post_code_password_required": True,
+                            "code_entered": code_entered,
+                            "continue_tapped": False,
+                        }
+                    )
+                ),
+            )
         return _result(
             ok=False,
             executed=True,
@@ -191,7 +289,13 @@ def execute_email_code_challenge_resume(
                     "post_submit_observation_count": observed.get("observation_count"),
                     "post_submit_screens": observed.get("screens"),
                     "final_terminal_screen": observed.get("screen_label"),
+                    "save_login_info_prompt_detected": observed.get("save_login_info_prompt_detected"),
+                    "save_login_info_not_now_tapped": observed.get("save_login_info_not_now_tapped"),
+                    "save_login_info_dismiss_attempt_count": observed.get("save_login_info_dismiss_attempt_count"),
                     "code_entered": code_entered,
+                    "code_input_method": input_result.get("method"),
+                    "code_input_confirmed": code_entered,
+                    "code_input_confirm_method": input_result.get("confirm_method"),
                     "continue_tapped": continue_tapped,
                 }
             )
@@ -226,6 +330,9 @@ def _observe_post_submit_settled(
 
     screens: list[str] = []
     wait_total_ms = 0
+    save_login_info_prompt_detected = False
+    save_login_info_not_now_tapped = False
+    save_login_info_dismiss_attempt_count = 0
     last_observed: dict[str, Any] = {
         "outcome": "unknown",
         "screen_type": "unknown",
@@ -251,6 +358,33 @@ def _observe_post_submit_settled(
         screen_label = str(observed.get("screen_label") or observed.get("screen_type") or "unknown")
         screens.append(screen_label)
         last_observed = {**observed, "screen_label": screen_label}
+        if observed.get("save_login_info_prompt_present") is True:
+            save_login_info_prompt_detected = True
+            warnings.append("instagram_save_login_info_prompt_detected")
+            if save_login_info_dismiss_attempt_count >= 2:
+                last_observed = {
+                    **last_observed,
+                    "outcome": "save_login_info_prompt_blocking",
+                    "screen_type": "save_login_info_prompt",
+                    "reason": "save_login_info_prompt_not_dismissed_after_2_attempts",
+                    "terminal": True,
+                }
+                warnings.append("save_login_info_prompt_blocking")
+                break
+            save_login_info_dismiss_attempt_count += 1
+            if not _dismiss_save_login_info_prompt_once(d, warnings):
+                last_observed = {
+                    **last_observed,
+                    "outcome": "save_login_info_prompt_blocking",
+                    "screen_type": "save_login_info_prompt",
+                    "reason": "save_login_info_prompt_dismiss_failed",
+                    "terminal": True,
+                }
+                warnings.append("save_login_info_prompt_dismiss_failed")
+                break
+            save_login_info_not_now_tapped = True
+            warnings.append("instagram_save_login_info_prompt_not_now")
+            continue
         if observed.get("terminal"):
             break
 
@@ -260,6 +394,9 @@ def _observe_post_submit_settled(
         **last_observed,
         "screens": screens,
         "observation_count": len(screens),
+        "save_login_info_prompt_detected": save_login_info_prompt_detected,
+        "save_login_info_not_now_tapped": save_login_info_not_now_tapped,
+        "save_login_info_dismiss_attempt_count": save_login_info_dismiss_attempt_count,
     }
 
 
@@ -294,26 +431,199 @@ def _find_unique_target(d: Any, selectors: tuple[dict[str, str], ...], *, missin
     return {"target": None, "failure_reason": missing_reason}
 
 
-def _focus_and_set_text(target: Any, value: str, *, d: Any, sleeper: Sleeper) -> None:
+def _input_code_robust(d: Any, target: Any, value: str, warnings: list[str], *, sleeper: Sleeper) -> dict[str, Any]:
     target.click()
     sleeper(0.15)
     clear = getattr(target, "clear_text", None)
     if callable(clear):
         clear()
+        sleeper(0.1)
+
+    warnings.append("verification_code_input_method_attempted:set_text")
     set_text = getattr(target, "set_text", None)
-    if not callable(set_text):
-        raise RuntimeError("set_text_unavailable")
-    set_text(value)
-    info = getattr(target, "info", None)
-    current = ""
-    if isinstance(info, dict):
-        current = str(info.get("text") or "")
-    if not current.strip():
-        raise RuntimeError("verification_code_input_empty")
+    if callable(set_text):
+        try:
+            set_text(value)
+            sleeper(CODE_CONFIRM_SETTLE_MS / 1000.0)
+            if _code_input_confirmed(d):
+                return {
+                    "confirmed": True,
+                    "method": "set_text",
+                    "confirm_method": "hierarchy_code_field_non_empty",
+                    "reason": "",
+                }
+            warnings.append("verification_code_set_text_not_confirmed")
+            if _password_screen_ready_after_code(d):
+                return {
+                    "confirmed": True,
+                    "method": "set_text",
+                    "confirm_method": "post_code_password_screen_detected",
+                    "reason": "",
+                    "skip_continue": True,
+                }
+        except Exception:
+            warnings.append("verification_code_set_text_failed")
+    else:
+        warnings.append("verification_code_set_text_unavailable")
+
+    target.click()
+    sleeper(0.1)
+    clear = getattr(target, "clear_text", None)
+    if callable(clear):
+        clear()
+        sleeper(0.1)
+
+    warnings.append("verification_code_input_fallback_adb_keyboard_b64_attempted")
+    serial = _direct_device_serial(d)
+    fast_ime_id = str(getattr(config, "FAST_IME", "") or "").strip()
+    if not adb_available():
+        warnings.append("verification_code_adb_not_available")
+        if _password_screen_ready_after_code(d):
+            return {
+                "confirmed": True,
+                "method": "set_text",
+                "confirm_method": "post_code_password_screen_detected",
+                "reason": "",
+                "skip_continue": True,
+            }
+        return {
+            "confirmed": False,
+            "method": "set_text",
+            "confirm_method": "adb_not_available",
+            "reason": "adb_not_available",
+        }
+    if not (serial and fast_ime_id and is_fast_ime_available(serial)):
+        warnings.append("verification_code_fast_ime_unavailable")
+        if _password_screen_ready_after_code(d):
+            return {
+                "confirmed": True,
+                "method": "set_text",
+                "confirm_method": "post_code_password_screen_detected",
+                "reason": "",
+                "skip_continue": True,
+            }
+        return {
+            "confirmed": False,
+            "method": "set_text",
+            "confirm_method": "hierarchy_code_field_empty",
+            "reason": "verification_code_input_empty",
+        }
+    try:
+        command_ok, method, switch_ok, broadcast_ok = run_adb_keyboard_b64_input(
+            serial,
+            value,
+            fast_ime_id=fast_ime_id,
+        )
+    except Exception:
+        command_ok, method, switch_ok, broadcast_ok = False, "adb_keyboard_b64", False, False
+    if not (command_ok and switch_ok and broadcast_ok):
+        warnings.append("verification_code_adb_keyboard_b64_failed")
+        return {
+            "confirmed": False,
+            "method": method or "adb_keyboard_b64",
+            "confirm_method": "adb_keyboard_broadcast_failed" if command_ok else "adb_keyboard_command_failed",
+            "reason": "verification_code_input_failed",
+        }
+    sleeper(CODE_CONFIRM_SETTLE_MS / 1000.0)
+    if _code_input_confirmed(d):
+        warnings.append("verification_code_input_confirmed_after_fallback")
+        return {
+            "confirmed": True,
+            "method": method or "adb_keyboard_b64",
+            "confirm_method": "hierarchy_code_field_non_empty",
+            "reason": "",
+        }
+    warnings.append("verification_code_adb_keyboard_b64_not_confirmed")
+    if _password_screen_ready_after_code(d):
+        return {
+            "confirmed": True,
+            "method": method or "adb_keyboard_b64",
+            "confirm_method": "post_code_password_screen_detected",
+            "reason": "",
+            "skip_continue": True,
+        }
+    return {
+        "confirmed": False,
+        "method": method or "adb_keyboard_b64",
+        "confirm_method": "hierarchy_code_field_empty",
+        "reason": "verification_code_input_empty",
+    }
+
+
+def _password_screen_ready_after_code(d: Any) -> bool:
+    try:
+        try:
+            hierarchy_xml = d.dump_hierarchy(compressed=False)
+        except TypeError:
+            hierarchy_xml = d.dump_hierarchy()
+    except Exception:
+        return False
+    signals = extract_login_screen_signals_from_hierarchy(str(hierarchy_xml or ""))
+    screen_type = str(signals.get("screen_type") or "")
+    if screen_type in {"continue_password_only", "login_form_empty", "login_form_prefilled_username"}:
+        return bool(signals.get("has_password_field")) and bool(signals.get("has_login_button"))
+    return False
+
+
+def _code_input_confirmed(d: Any) -> bool:
+    try:
+        try:
+            hierarchy_xml = d.dump_hierarchy(compressed=False)
+        except TypeError:
+            hierarchy_xml = d.dump_hierarchy()
+    except Exception:
+        return False
+    signals = extract_login_screen_signals_from_hierarchy(str(hierarchy_xml or ""))
+    if signals.get("email_code_challenge_present") is not True:
+        return True
+    return _hierarchy_has_filled_code_field(str(hierarchy_xml or ""))
+
+
+def _hierarchy_has_filled_code_field(hierarchy_xml: str) -> bool:
+    text = str(hierarchy_xml or "")
+    placeholders = ("enter code", "code", "security code", "confirmation code")
+    for node in re.findall(r"<node\b[^>]*>", text, flags=re.I):
+        if not re.search(r"""class\s*=\s*['"]android\.widget\.EditText['"]""", node, flags=re.I):
+            continue
+        for attr in ("text", "content-desc"):
+            match = re.search(rf"""{attr}\s*=\s*(['"])(.*?)\1""", node, flags=re.I)
+            if not match:
+                continue
+            value = match.group(2).strip().lower()
+            if value and all(placeholder not in value for placeholder in placeholders):
+                return True
+    return False
+
+
+def _direct_device_serial(d: Any) -> str:
+    serial = get_device_serial(d)
+    return str(serial or getattr(config, "DEVICE_SERIAL", "") or "")
 
 
 def _click_target(target: Any) -> None:
     target.click()
+
+
+def _dismiss_save_login_info_prompt_once(d: Any, warnings: list[str]) -> bool:
+    selectors = (
+        {"text": "Not now"},
+        {"description": "Not now"},
+        {"text": "Pas maintenant"},
+        {"description": "Pas maintenant"},
+    )
+    for selector in selectors:
+        try:
+            obj = d(**selector)
+        except Exception:
+            continue
+        try:
+            if obj.exists(timeout=0):
+                obj.click()
+                return True
+        except Exception:
+            continue
+    warnings.append("not_now_button_not_found")
+    return False
 
 
 def _elapsed_ms(start: float, timer: Timer) -> int:

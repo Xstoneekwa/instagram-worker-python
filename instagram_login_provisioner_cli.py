@@ -13,13 +13,16 @@ import json
 import sys
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable, Optional
 
 from instagram_account_status_publisher import publish_instagram_account_status
 from instagram_credentials_runtime_access import get_instagram_credentials_for_login, redact_credentials_payload
+from instagram_login_ui_probe import extract_login_screen_signals_from_hierarchy
 from instagram_login_provisioner_orchestrator import (
     DEFAULT_INSTAGRAM_PACKAGE_NAME,
     DEFAULT_POST_APP_START_WAIT_MS,
+    POST_EMAIL_CODE_PASSWORD_SCREENS,
     run_email_code_resume_flow,
     run_login_provisioning_flow,
 )
@@ -56,7 +59,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device-serial", default=None, help="Optional explicit adb/uiautomator2 serial.")
     parser.add_argument("--expected-username", required=True, help="Expected Instagram username.")
     parser.add_argument("--account-id", required=True, help="Instagram account UUID used for credential lookup.")
-    parser.add_argument("--package-name", default=DEFAULT_INSTAGRAM_PACKAGE_NAME, help="Instagram package to start.")
+    parser.add_argument("--package-name", default=None, help="Instagram package to start.")
+    parser.add_argument("--expected-app-instance-id", default="", help="Optional safe app instance id for guard metadata.")
     parser.add_argument(
         "--start-app-before-probe",
         action="store_true",
@@ -144,6 +148,11 @@ def run_cli_command(
 ) -> tuple[int, dict[str, Any]]:
     run_id = _safe_run_id(getattr(args, "run_id", "") or str(uuid.uuid4()))
     _load_dotenv_if_present()
+    package_required_reason = _package_name_required_reason(args)
+    if package_required_reason:
+        summary = _safe_summary_from_error(package_required_reason, args=args, run_id=run_id)
+        _append_safe_jsonl(summary, args=args)
+        return 1, summary
     try:
         device = (connect_func or _connect_uiautomator2)(str(args.device_serial or "") or None)
     except Exception:
@@ -172,6 +181,34 @@ def run_cli_command(
     if bool(getattr(args, "resume_email_code_stdin", False)) or bool(getattr(args, "resume_email_code_from_action", False)):
         from instagram_credentials_runtime_access import SecretValue
 
+        package_guard_result = _preflight_expected_package(device, args=args, run_id=run_id, resume=True)
+        if package_guard_result is not None:
+            summary = _safe_summary_from_result(package_guard_result, args=args, run_id=run_id)
+            _append_safe_jsonl(summary, args=args)
+            return 1, summary
+
+        preflight_result = _preflight_email_code_resume(device, args=args, run_id=run_id)
+        if preflight_result is not None:
+            action_id = str(getattr(args, "verification_action_id", "") or "").strip()
+            if bool(getattr(args, "resume_email_code_from_action", False)) and action_id:
+                try:
+                    from login_challenge_runtime import sync_verification_action_after_email_code_resume
+
+                    sync_verification_action_after_email_code_resume(
+                        action_id=action_id,
+                        account_id=str(args.account_id or ""),
+                        run_id=run_id,
+                        ok=False,
+                        final_outcome=str(getattr(preflight_result, "final_outcome", "") or ""),
+                        failure_reason=str(getattr(preflight_result, "failure_reason", "") or ""),
+                        screen_type=str((getattr(preflight_result, "safe_metadata", {}) or {}).get("screen_type") or ""),
+                    )
+                except Exception:
+                    pass
+            summary = _safe_summary_from_result(preflight_result, args=args, run_id=run_id)
+            _append_safe_jsonl(summary, args=args)
+            return 1, summary
+
         verification_code = SecretValue("")
         if bool(getattr(args, "resume_email_code_stdin", False)):
             verification_code = SecretValue(sys.stdin.readline().strip())
@@ -180,11 +217,16 @@ def run_cli_command(
             account_id=str(args.account_id or ""),
             expected_username=str(args.expected_username or ""),
             verification_code=verification_code,
+            credentials_getter=getter,
             action_id=str(getattr(args, "verification_action_id", "") or "").strip() or None,
             consume_from_action=bool(getattr(args, "resume_email_code_from_action", False)),
             run_id=run_id,
             publish_enabled=publish_enabled,
             publisher=publisher,
+            package_name=_effective_package_name(args),
+            run_type="login_email_code_resume",
+            device_serial=str(getattr(args, "device_serial", "") or ""),
+            expected_app_instance_id=str(getattr(args, "expected_app_instance_id", "") or ""),
             post_submit_timeout_ms=int(args.post_submit_timeout_ms or 0),
         )
         summary = _safe_summary_from_result(result, args=args, run_id=run_id)
@@ -200,10 +242,14 @@ def run_cli_command(
         operator_smoke_active_account_username=operator_smoke_active_username or None,
         publish_enabled=publish_enabled,
         publisher=publisher,
-        dry_run=bool(args.dry_run or args.no_submit),
+        dry_run=bool(args.dry_run or args.no_submit or args.observe_current_screen_only),
         start_app_before_probe=bool(args.start_app_before_probe),
         observe_current_screen_only=bool(args.observe_current_screen_only),
-        package_name=str(args.package_name or DEFAULT_INSTAGRAM_PACKAGE_NAME),
+        package_name=_effective_package_name(args),
+        run_id=run_id,
+        run_type="login_provisioning",
+        device_serial=str(getattr(args, "device_serial", "") or ""),
+        expected_app_instance_id=str(getattr(args, "expected_app_instance_id", "") or ""),
         post_start_wait_ms=int(args.post_start_wait_ms or DEFAULT_POST_APP_START_WAIT_MS),
         post_submit_timeout_ms=int(args.post_submit_timeout_ms or 0),
         operator_smoke_allow_logout_fallback=_parse_bool_choice(
@@ -213,6 +259,209 @@ def run_cli_command(
     summary = _safe_summary_from_result(result, args=args, run_id=run_id)
     _append_safe_jsonl(summary, args=args)
     return (0 if bool(getattr(result, "ok", False)) else 1), summary
+
+
+def _preflight_email_code_resume(
+    device: Any,
+    *,
+    args: argparse.Namespace,
+    run_id: str,
+) -> Any | None:
+    """Return a terminal safe result when resume preconditions are not met."""
+
+    try:
+        hierarchy = device.dump_hierarchy(compressed=False)
+        signals = extract_login_screen_signals_from_hierarchy(
+            hierarchy,
+            expected_username=str(getattr(args, "expected_username", "") or ""),
+        )
+    except Exception:
+        return _resume_preflight_result(
+            run_id=run_id,
+            reason="resume_email_code_screen_not_active",
+            screen_type="unknown",
+            safe_metadata={"resume_preflight_error": "screen_observe_failed"},
+        )
+
+    screen_type = str(signals.get("screen_type") or "unknown").strip() or "unknown"
+    if screen_type in POST_EMAIL_CODE_PASSWORD_SCREENS:
+        if bool(getattr(args, "resume_email_code_from_action", False)):
+            code_state = _verification_code_action_state(
+                action_id=str(getattr(args, "verification_action_id", "") or "").strip(),
+                account_id=str(getattr(args, "account_id", "") or "").strip(),
+            )
+            if not code_state.get("ready"):
+                return _resume_preflight_result(
+                    run_id=run_id,
+                    reason="code_missing",
+                    screen_type=screen_type,
+                    safe_metadata={
+                        "resume_preflight_post_code_password_screen": True,
+                        "verification_action_status": str(code_state.get("action_status") or ""),
+                        "verification_submission_present": bool(code_state.get("submission_present")),
+                    },
+                )
+        return None
+    if screen_type != "email_code_challenge":
+        return _resume_preflight_result(
+            run_id=run_id,
+            reason="resume_email_code_screen_not_active",
+            screen_type=screen_type,
+            safe_metadata={
+                "resume_preflight_email_code_challenge_present": False,
+                "resume_preflight_recommended_next_run": (
+                    "full_login_retry" if screen_type in {"login_form_empty", "login_form_prefilled_username"} else ""
+                ),
+            },
+        )
+
+    if bool(getattr(args, "resume_email_code_from_action", False)):
+        code_state = _verification_code_action_state(
+            action_id=str(getattr(args, "verification_action_id", "") or "").strip(),
+            account_id=str(getattr(args, "account_id", "") or "").strip(),
+        )
+        if not code_state.get("ready"):
+            return _resume_preflight_result(
+                run_id=run_id,
+                reason="code_missing",
+                screen_type=screen_type,
+                safe_metadata={
+                    "resume_preflight_email_code_challenge_present": True,
+                    "verification_action_status": str(code_state.get("action_status") or ""),
+                    "verification_submission_present": bool(code_state.get("submission_present")),
+                },
+            )
+
+    return None
+
+
+def _effective_package_name(args: argparse.Namespace) -> str:
+    text = str(getattr(args, "package_name", "") or "").strip()
+    return text or DEFAULT_INSTAGRAM_PACKAGE_NAME
+
+
+def _package_name_required_reason(args: argparse.Namespace) -> str:
+    serial = str(getattr(args, "device_serial", "") or "").strip()
+    if not serial:
+        return ""
+    if serial.lower().startswith("emulator-"):
+        return ""
+    if bool(getattr(args, "observe_current_screen_only", False)):
+        return ""
+    if str(getattr(args, "package_name", "") or "").strip():
+        return ""
+    return "package_name_required_for_physical_clone"
+
+
+def _foreground_package(device: Any) -> str:
+    try:
+        app_current = getattr(device, "app_current", None)
+        if callable(app_current):
+            current = app_current() or {}
+            if isinstance(current, dict):
+                return str(current.get("package") or current.get("packageName") or "").strip()
+    except Exception:
+        return ""
+    return ""
+
+
+def _preflight_expected_package(
+    device: Any,
+    *,
+    args: argparse.Namespace,
+    run_id: str,
+    resume: bool,
+) -> Any | None:
+    expected = _effective_package_name(args)
+    actual = _foreground_package(device)
+    if not expected or not actual or expected == actual:
+        return None
+    from instagram_credentials_runtime_access import SecretValue
+
+    return run_email_code_resume_flow(
+        device,
+        account_id=str(getattr(args, "account_id", "") or ""),
+        expected_username=str(getattr(args, "expected_username", "") or ""),
+        verification_code=SecretValue(""),
+        action_id=str(getattr(args, "verification_action_id", "") or "").strip() or None,
+        consume_from_action=False,
+        run_id=run_id,
+        publish_enabled=False,
+        publisher=None,
+        package_name=expected,
+        run_type="login_email_code_resume" if resume else "login_provisioning",
+        device_serial=str(getattr(args, "device_serial", "") or ""),
+        expected_app_instance_id=str(getattr(args, "expected_app_instance_id", "") or ""),
+        post_submit_timeout_ms=0,
+    )
+
+
+def _verification_code_action_state(*, action_id: str, account_id: str) -> dict[str, Any]:
+    if not action_id or not account_id:
+        return {"ready": False, "reason": "missing_action_or_account"}
+    actions = _request_json(
+        "GET",
+        "account_dashboard_actions",
+        query={
+            "select": "id,status,action_type",
+            "id": f"eq.{action_id}",
+            "account_id": f"eq.{account_id}",
+            "limit": "1",
+        },
+    ) or []
+    submissions = _request_json(
+        "GET",
+        "account_verification_code_submissions",
+        query={
+            "select": "id,status,expires_at",
+            "action_id": f"eq.{action_id}",
+            "account_id": f"eq.{account_id}",
+            "status": "in.(code_submitted,ready_for_resume)",
+            "order": "updated_at.desc",
+            "limit": "1",
+        },
+    ) or []
+    action_status = str(actions[0].get("status") or "") if actions else ""
+    return {
+        "ready": action_status == "code_submitted" and bool(submissions),
+        "action_status": action_status,
+        "submission_present": bool(submissions),
+    }
+
+
+def _resume_preflight_result(
+    *,
+    run_id: str,
+    reason: str,
+    screen_type: str,
+    safe_metadata: dict[str, Any] | None = None,
+) -> Any:
+    safe_screen_type = str(screen_type or "unknown").strip() or "unknown"
+    return SimpleNamespace(
+        ok=False,
+        completed=False,
+        final_outcome="verification_pending" if reason == "code_missing" else safe_screen_type,
+        final_login_status="verification_pending" if reason == "code_missing" else "logged_out",
+        final_provisioning_status="login_verification_pending" if reason == "code_missing" else "login_pending",
+        final_onboarding_status="verification_pending" if reason == "code_missing" else "credentials_required",
+        reason=reason,
+        failure_reason=reason,
+        retry_count=0,
+        actions_taken=["route:email_code_resume_preflight"],
+        published=False,
+        publish_reason="disabled",
+        should_publish_status=False,
+        timings={"total_ms": 0},
+        warnings=[],
+        safe_metadata={
+            "run_id": run_id,
+            "screen_type": safe_screen_type,
+            "router_decision": "email_code_resume_preflight",
+            "selected_route": "email_code_resume_preflight",
+            "selected_route_reason": reason,
+            **(safe_metadata or {}),
+        },
+    )
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -453,7 +702,11 @@ def _safe_summary_from_error(reason: str, *, args: argparse.Namespace, run_id: s
             "timings": {},
             "warnings": [],
             "no_leak_summary": _no_leak_summary(),
-            "package_name": str(args.package_name or DEFAULT_INSTAGRAM_PACKAGE_NAME),
+            "package_name": _effective_package_name(args),
+            "expected_package_name": _effective_package_name(args),
+            "actual_foreground_package": "",
+            "package_guard_checked": False,
+            "package_guard_mismatch": False,
             "log_jsonl": str(getattr(args, "log_jsonl", DEFAULT_LOG_JSONL) or DEFAULT_LOG_JSONL),
         }
     )
@@ -606,6 +859,18 @@ def _safe_summary_from_result(result: Any, *, args: argparse.Namespace, run_id: 
             password_result.get("save_password_prompt_dismiss_attempt_count") or 0
         ),
         "dismiss_method": str(password_result.get("dismiss_method") or ""),
+        "samsung_pass_save_password_prompt_detected": bool(
+            password_result.get("samsung_pass_save_password_prompt_detected")
+        ),
+        "samsung_pass_save_password_prompt_cancelled": bool(
+            password_result.get("samsung_pass_save_password_prompt_cancelled")
+        ),
+        "instagram_save_login_info_prompt_detected": bool(
+            password_result.get("instagram_save_login_info_prompt_detected")
+        ),
+        "instagram_save_login_info_prompt_not_now": bool(
+            password_result.get("instagram_save_login_info_prompt_not_now")
+        ),
         "post_dismiss_screen_type": str(password_result.get("post_dismiss_screen_type") or ""),
         "post_dismiss_final_observation_count": int(
             password_result.get("post_dismiss_final_observation_count") or 0
@@ -624,7 +889,14 @@ def _safe_summary_from_result(result: Any, *, args: argparse.Namespace, run_id: 
         "timings": dict(getattr(result, "timings", {}) or {}),
         "warnings": list(getattr(result, "warnings", []) or []),
         "no_leak_summary": _no_leak_summary(),
-        "package_name": str(args.package_name or DEFAULT_INSTAGRAM_PACKAGE_NAME),
+        "package_name": _effective_package_name(args),
+        "expected_package_name": str(metadata.get("expected_package_name") or _effective_package_name(args)),
+        "actual_foreground_package": str(metadata.get("actual_foreground_package") or ""),
+        "package_guard_checked": bool(metadata.get("package_guard_checked")),
+        "package_guard_mismatch": bool(metadata.get("package_guard_mismatch")),
+        "login_package_mismatch_incident": metadata.get("login_package_mismatch_incident"),
+        "login_package_mismatch_dashboard_action": metadata.get("login_package_mismatch_dashboard_action"),
+        "login_package_mismatch_notifications": metadata.get("login_package_mismatch_notifications"),
         "log_jsonl": str(getattr(args, "log_jsonl", DEFAULT_LOG_JSONL) or DEFAULT_LOG_JSONL),
     }
     return _clean_summary(summary)

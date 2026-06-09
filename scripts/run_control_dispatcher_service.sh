@@ -14,6 +14,31 @@ if [[ -f "$ENV_FILE" ]]; then
   set +a
 fi
 
+_resolve_adb_path() {
+  if [[ -n "${ADB_PATH:-}" && -x "${ADB_PATH}" ]]; then
+    printf '%s' "${ADB_PATH}"
+    return 0
+  fi
+  local candidate
+  for candidate in \
+    "${ANDROID_HOME:+$ANDROID_HOME/platform-tools/adb}" \
+    "${ANDROID_SDK_ROOT:+$ANDROID_SDK_ROOT/platform-tools/adb}" \
+    "${HOME}/Library/Android/sdk/platform-tools/adb" \
+    "/opt/homebrew/bin/adb" \
+    "/usr/local/bin/adb"; do
+    if [[ -n "$candidate" && -x "$candidate" ]]; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+if resolved_adb="$(_resolve_adb_path)"; then
+  export ADB_PATH="$resolved_adb"
+  export PATH="$(dirname "$resolved_adb"):${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}"
+fi
+
 export RUN_CONTROL_DISPATCHER_ENABLED="${RUN_CONTROL_DISPATCHER_ENABLED:-true}"
 export RUNTIME_HEARTBEATS_ENABLED="${RUNTIME_HEARTBEATS_ENABLED:-true}"
 export RUN_CONTROL_DISPATCHER_HEALTH_ONLY="${RUN_CONTROL_DISPATCHER_HEALTH_ONLY:-false}"

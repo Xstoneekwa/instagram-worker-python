@@ -18,6 +18,7 @@ from typing import Any
 
 import config
 import runtime_heartbeat
+from device import runner_subprocess_env
 from account_run_control import (
     ACTIVE_REQUEST_STATUSES,
     claim_next_account_run_request,
@@ -767,7 +768,11 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
     )
     _heartbeat(cfg, status="running", metadata={"active_request_id": request_id, "account_id": account_id})
 
-    proc = subprocess.Popen(cmd, cwd=os.path.dirname(os.path.abspath(__file__)))
+    proc = subprocess.Popen(
+        cmd,
+        cwd=os.path.dirname(os.path.abspath(__file__)),
+        env=runner_subprocess_env(),
+    )
     exit_code, timed_out = _wait_for_subprocess(
         cfg,
         proc,
