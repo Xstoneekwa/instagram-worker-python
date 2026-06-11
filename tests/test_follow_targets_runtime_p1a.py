@@ -126,6 +126,7 @@ class FollowTargetsRuntimeP1aTest(unittest.TestCase):
         self.assertEqual(targets[0]["source_profile_username"], "ops_source")
 
     def test_record_follow_interaction_outcome_includes_target_id_payload(self) -> None:
+        target_id = "11111111-2222-4333-8444-555555555555"
         with patch.object(supabase_client, "merge_interacted_user_row", return_value={"ok": True}) as merge:
             supabase_client.record_follow_interaction_outcome(
                 "acct",
@@ -137,11 +138,17 @@ class FollowTargetsRuntimeP1aTest(unittest.TestCase):
                 skipped_tap=True,
                 follow_state_after="following",
                 follow_status="already_following",
-                target_id="target-id",
+                target_id=target_id,
             )
 
         patch_body = merge.call_args.args[3]
-        self.assertEqual(patch_body["payload"]["target_id"], "target-id")
+        self.assertEqual(patch_body["payload"]["target_id"], target_id)
+        self.assertEqual(patch_body["source_target_id"], target_id)
+        self.assertEqual(patch_body["ct_id"], target_id)
+        self.assertEqual(patch_body["source_target_username"], "source")
+        self.assertEqual(patch_body["evidence_source"], "worker_follow_outcome")
+        self.assertEqual(patch_body["evidence_confidence"], "high")
+        self.assertIn("via CT @source", patch_body["evidence_summary"])
 
 
 if __name__ == "__main__":

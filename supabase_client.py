@@ -1425,6 +1425,51 @@ def _nonblank_str(v: Any) -> bool:
     return bool(str(v or "").strip())
 
 
+def _safe_uuid_text(value: Any) -> str:
+    text = str(value or "").strip()
+    if re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", text):
+        return text
+    return ""
+
+
+def _interaction_type_from_event_type(event_type: str | None) -> str:
+    event = str(event_type or "").strip().lower()
+    if "unfollow" in event:
+        return "unfollow"
+    if "followback" in event:
+        return "followback"
+    if "follow" in event:
+        return "follow"
+    if "post_like" in event or "like" in event:
+        return "like"
+    if "dm" in event:
+        return "dm"
+    if "story" in event:
+        return "story_view"
+    if "profile_visit" in event:
+        return "profile_visit"
+    return event[:80] or "unknown"
+
+
+def _safe_interaction_evidence_summary(
+    *,
+    action_type: str,
+    username: str,
+    source_profile: str,
+    run_id: str | None = None,
+) -> str:
+    parts = [
+        f"{str(action_type or 'interaction').replace('_', ' ').title()}",
+        f"for @{_canonical_interaction_username(username)}",
+    ]
+    src = _canonical_source_profile(source_profile)
+    if src:
+        parts.append(f"via CT @{src}")
+    if run_id and str(run_id).strip():
+        parts.append("during recorded run")
+    return " ".join(parts)[:500]
+
+
 def _apply_interacted_user_row_attribution(
     row: dict[str, Any] | None,
     body: dict[str, Any],
@@ -1439,6 +1484,7 @@ def _apply_interacted_user_row_attribution(
         if not _nonblank_str((row or {}).get("first_source_profile")):
             body["first_source_profile"] = source_profile_canonical
         body["source_profile"] = source_profile_canonical
+        body.setdefault("source_target_username", source_profile_canonical)
     rid = body.get("run_id")
     if rid is not None and str(rid).strip():
         rs = str(rid).strip()
@@ -1512,6 +1558,12 @@ def merge_interacted_user_row(
             prev = dict(row["payload"])
         prev.update(body["payload"])
         body["payload"] = prev
+    if "metadata_safe" in body and isinstance(body["metadata_safe"], dict):
+        prev_meta: dict[str, Any] = {}
+        if row and isinstance(row.get("metadata_safe"), dict):
+            prev_meta = dict(row["metadata_safe"])
+        prev_meta.update(body["metadata_safe"])
+        body["metadata_safe"] = prev_meta
     body["updated_at"] = now
     out: dict[str, Any] = {"ok": False, "error": None}
     try:
@@ -1599,6 +1651,7 @@ def record_follow_interaction_outcome(
 
     now = _utc_now_iso()
     payload_delta: dict[str, Any] = {}
+    safe_target_id = _safe_uuid_text(target_id)
     if target_id:
         payload_delta["target_id"] = str(target_id)
     if follow_state_after is not None:
@@ -1613,6 +1666,12 @@ def record_follow_interaction_outcome(
     eligible_unfollow_log_payload: dict[str, Any] | None = None
     if follow_ok:
         fs = (follow_status or ("already_following" if skipped_tap else "following"))[:200]
+        evidence_summary = _safe_interaction_evidence_summary(
+            action_type="follow",
+            username=username,
+            source_profile=source_profile,
+            run_id=run_id,
+        )
         payload_delta = {
             **payload_delta,
             "interaction_lifecycle_state": "active_following",
@@ -1628,7 +1687,18 @@ def record_follow_interaction_outcome(
             "interaction_lifecycle_state": "active_following",
             "followed": True,
             "unfollowed": False,
+            "source_target_username": _canonical_source_profile(source_profile) or None,
+            "evidence_source": "worker_follow_outcome",
+            "evidence_confidence": "high" if safe_target_id else "medium",
+            "evidence_summary": evidence_summary,
+            "metadata_safe": {
+                "source": "worker_follow_outcome",
+                "skipped_tap": bool(skipped_tap),
+            },
         }
+        if safe_target_id:
+            patch["source_target_id"] = safe_target_id
+            patch["ct_id"] = safe_target_id
         if not skipped_tap:
             patch["followed_at"] = now
             patch["followed_by_bot"] = True
@@ -1675,6 +1745,12 @@ def record_follow_interaction_outcome(
         if session_id:
             patch["last_session_id"] = str(session_id)
     else:
+        evidence_summary = _safe_interaction_evidence_summary(
+            action_type="follow_failed",
+            username=username,
+            source_profile=source_profile,
+            run_id=run_id,
+        )
         payload_delta = {
             **payload_delta,
             "interaction_lifecycle_state": "failed",
@@ -1690,7 +1766,18 @@ def record_follow_interaction_outcome(
             "interaction_lifecycle_state": "failed",
             "followed": False,
             "skip_reason": (failure_reason or f"follow_failure_{failure_code}")[:500],
+            "source_target_username": _canonical_source_profile(source_profile) or None,
+            "evidence_source": "worker_follow_outcome",
+            "evidence_confidence": "high" if safe_target_id else "medium",
+            "evidence_summary": evidence_summary,
+            "metadata_safe": {
+                "source": "worker_follow_outcome",
+                "failure_reason": str(failure_reason or "")[:200] or None,
+            },
         }
+        if safe_target_id:
+            patch["source_target_id"] = safe_target_id
+            patch["ct_id"] = safe_target_id
         if run_id:
             patch["run_id"] = str(run_id)
         if session_id:
@@ -2031,13 +2118,26 @@ def record_interaction_event(
         return {"ok": False, "error": "skipped_invalid_interacted_username"}
     now = _utc_now_iso()
     sp = _canonical_source_profile(source_profile)
+    interaction_type = _interaction_type_from_event_type(event_type)
+    safe_target_id = _safe_uuid_text(target_id)
     body: dict[str, Any] = {
         "username": u,
         "event_type": str(event_type or "")[:200],
         "event_status": str(event_status or "success")[:80],
+        "interaction_type": interaction_type,
+        "interaction_status": str(event_status or "success")[:80],
         "event_at": now,
         "created_at": now,
         "payload": dict(payload) if isinstance(payload, dict) else {},
+        "evidence_source": "worker_interaction_event",
+        "evidence_confidence": "high" if safe_target_id and sp else ("medium" if sp else "unknown"),
+        "evidence_summary": _safe_interaction_evidence_summary(
+            action_type=interaction_type,
+            username=username,
+            source_profile=source_profile,
+            run_id=run_id,
+        ),
+        "metadata_safe": {"source": "worker_interaction_event"},
     }
     if str(account_id or "").strip():
         body["account_id"] = str(account_id).strip()
@@ -2045,10 +2145,13 @@ def record_interaction_event(
         body["run_id"] = str(run_id).strip()
     if session_id and str(session_id).strip():
         body["session_id"] = str(session_id).strip()
-    if target_id and str(target_id).strip():
-        body["target_id"] = str(target_id).strip()
+    if safe_target_id:
+        body["target_id"] = safe_target_id
+        body["source_target_id"] = safe_target_id
+        body["ct_id"] = safe_target_id
     if sp:
         body["source_profile"] = sp
+        body["source_target_username"] = sp
     if event_reason:
         body["event_reason"] = str(event_reason)[:500]
     out: dict[str, Any] = {"ok": False, "error": None}
