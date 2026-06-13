@@ -18,6 +18,7 @@ type PhoneDb = {
   phoneDevices: Array<Record<string, any>>;
   appInstances: Array<Record<string, any>>;
   runtimeEvents: Array<Record<string, any>>;
+  deviceHeartbeats?: Array<Record<string, any>>;
 };
 
 const MANAGE_ROW = {
@@ -244,7 +245,9 @@ function makePhoneFetch(db: PhoneDb, calls: FetchCall[] = []) {
       if ((init?.method || "GET") === "GET") {
         const adbEq = parsed.searchParams.get("adb_serial") || "";
         const adbSerial = adbEq.startsWith("eq.") ? adbEq.slice(3) : "";
-        const rows = db.phoneDevices.filter((row) => row.adb_serial === adbSerial);
+        const rows = adbSerial
+          ? db.phoneDevices.filter((row) => row.adb_serial === adbSerial)
+          : db.phoneDevices;
         const limit = Number(parsed.searchParams.get("limit") || rows.length);
         return json(rows.slice(0, limit));
       }
@@ -272,7 +275,9 @@ function makePhoneFetch(db: PhoneDb, calls: FetchCall[] = []) {
       if ((init?.method || "GET") === "GET") {
         const deviceEq = parsed.searchParams.get("device_id") || "";
         const deviceId = deviceEq.startsWith("eq.") ? deviceEq.slice(3) : "";
-        return json(db.appInstances.filter((row) => row.device_id === deviceId));
+        return json(deviceId
+          ? db.appInstances.filter((row) => row.device_id === deviceId)
+          : db.appInstances);
       }
       if (init?.method === "POST") {
         const row = {
@@ -293,6 +298,10 @@ function makePhoneFetch(db: PhoneDb, calls: FetchCall[] = []) {
       };
       db.runtimeEvents.push(row);
       return json([row], 201);
+    }
+
+    if (table === "device_heartbeats" && (init?.method || "GET") === "GET") {
+      return json(db.deviceHeartbeats ?? []);
     }
 
     return json({ error: `unexpected ${href}` }, 500);
@@ -505,6 +514,250 @@ Deno.test(
       throw new Error(`radar params incorrect: ${JSON.stringify(rpc.body)}`);
     }
     assertNoLeak(body);
+  }),
+);
+
+Deno.test(
+  "devices_overview remonte phone_devices et garde items/count compatibles",
+  withEnv(async () => {
+    const db: PhoneDb = {
+      phoneDevices: [{
+        id: "device-1",
+        name: "Samsung A16-01",
+        device_kind: "physical_phone",
+        adb_serial: "RFGL145VCKE",
+        host_machine: "mac-mini-01",
+        hub_label: "hub-a",
+        hub_port: "1",
+        pool_type: "full_cycle",
+        max_clones: 3,
+        status: "available",
+        metadata: { model: "SM-A165F", product: "a16nsxx", device: "a16" },
+        created_at: "2026-06-02T00:00:00Z",
+        updated_at: "2026-06-02T00:00:00Z",
+      }],
+      appInstances: [],
+      runtimeEvents: [],
+    };
+    const res = await handleRequest(request({ action: "devices_overview" }), {
+      fetch: makePhoneFetch(db),
+    });
+    const body = await res.json();
+    if (res.status !== 200 || body.ok !== true || body.action !== "devices_overview") {
+      throw new Error(`devices_overview failed: ${JSON.stringify(body)}`);
+    }
+    if (body.count !== 1 || body.items?.length !== 1 || body.phone_devices?.length !== 1) {
+      throw new Error(`devices_overview missing compatibility fields: ${JSON.stringify(body)}`);
+    }
+    const phone = body.phone_devices[0];
+    if (
+      phone.device_id !== "device-1" ||
+      phone.display_name !== "Samsung A16-01" ||
+      phone.adb_serial !== "RFGL145VCKE" ||
+      phone.pool !== "full_cycle" ||
+      phone.host_label !== "mac-mini-01" ||
+      phone.hub_label !== "hub-a" ||
+      phone.hub_port !== "1" ||
+      phone.model !== "SM-A165F"
+    ) {
+      throw new Error(`phone projection incorrect: ${JSON.stringify(phone)}`);
+    }
+  }),
+);
+
+Deno.test(
+  "devices_overview calcule les compteurs app_instances",
+  withEnv(async () => {
+    const db: PhoneDb = {
+      phoneDevices: [{
+        id: "device-1",
+        name: "Samsung A16-01",
+        device_kind: "physical_phone",
+        adb_serial: "RFGL145VCKE",
+        pool_type: "full_cycle",
+        max_clones: 3,
+        status: "available",
+        metadata: {},
+      }],
+      appInstances: [
+        {
+          id: "app-0",
+          device_id: "device-1",
+          instance_type: "primary_app",
+          instance_index: 0,
+          package_name: "com.instagram.android",
+          status: "available",
+          current_account_id: null,
+          metadata: { adb_package_verified: false },
+        },
+        {
+          id: "app-1",
+          device_id: "device-1",
+          instance_type: "clone",
+          instance_index: 1,
+          package_name: "com.instagram.androie",
+          status: "occupied",
+          current_account_id: "00000000-0000-4000-8000-000000000001",
+          metadata: { adb_package_verified: true },
+        },
+        {
+          id: "app-2",
+          device_id: "device-1",
+          instance_type: "clone",
+          instance_index: 2,
+          package_name: "com.instagram.androif",
+          status: "available",
+          current_account_id: null,
+          metadata: { adb_package_verified: true },
+        },
+        {
+          id: "app-3",
+          device_id: "device-1",
+          instance_type: "clone",
+          instance_index: 3,
+          package_name: "com.instagram.androig",
+          status: "available",
+          current_account_id: null,
+          metadata: { adb_package_verified: true },
+        },
+      ],
+      runtimeEvents: [],
+    };
+    const res = await handleRequest(request({ action: "devices_overview" }), {
+      fetch: makePhoneFetch(db),
+    });
+    const body = await res.json();
+    const phone = body.phone_devices?.[0];
+    if (
+      phone?.app_instances_count !== 4 ||
+      phone.app_instances_available_count !== 3 ||
+      phone.app_instances_occupied_count !== 1 ||
+      phone.primary_package_present_in_db !== true ||
+      phone.clone_packages_registered_count !== 3 ||
+      body.phone_inventory_summary?.total_app_instances !== 4 ||
+      body.phone_inventory_summary?.available_app_instances !== 3 ||
+      body.phone_inventory_summary?.occupied_app_instances !== 1
+    ) {
+      throw new Error(`app instance counts incorrect: ${JSON.stringify(body)}`);
+    }
+  }),
+);
+
+Deno.test(
+  "devices_overview signale les app instances standard manquantes",
+  withEnv(async () => {
+    const db: PhoneDb = {
+      phoneDevices: [{
+        id: "device-1",
+        name: "Samsung A16-01",
+        device_kind: "physical_phone",
+        adb_serial: "RFGL145VCKE",
+        pool_type: "full_cycle",
+        max_clones: 3,
+        status: "available",
+        metadata: {},
+      }],
+      appInstances: [{
+        id: "app-1",
+        device_id: "device-1",
+        instance_type: "clone",
+        instance_index: 1,
+        package_name: "com.instagram.androie",
+        status: "available",
+        current_account_id: null,
+        metadata: {},
+      }],
+      runtimeEvents: [],
+    };
+    const res = await handleRequest(request({ action: "devices_overview" }), {
+      fetch: makePhoneFetch(db),
+    });
+    const body = await res.json();
+    const issues = body.phone_devices?.[0]?.issues ?? [];
+    if (
+      !issues.includes("missing_primary_instance") ||
+      !issues.includes("missing_standard_clone_package")
+    ) {
+      throw new Error(`missing instance issues not computed: ${JSON.stringify(body)}`);
+    }
+  }),
+);
+
+Deno.test(
+  "devices_overview sans heartbeat reste unknown et ne pretend pas online",
+  withEnv(async () => {
+    const db: PhoneDb = {
+      phoneDevices: [{
+        id: "device-1",
+        name: "Samsung A16-01",
+        device_kind: "physical_phone",
+        adb_serial: "RFGL145VCKE",
+        pool_type: "full_cycle",
+        max_clones: 3,
+        status: "available",
+        metadata: {},
+      }],
+      appInstances: [],
+      runtimeEvents: [],
+      deviceHeartbeats: [],
+    };
+    const res = await handleRequest(request({ action: "devices_overview" }), {
+      fetch: makePhoneFetch(db),
+    });
+    const body = await res.json();
+    const phone = body.phone_devices?.[0];
+    if (
+      phone?.heartbeat_status !== "unknown" ||
+      !phone.issues.includes("adb_status_unknown") ||
+      body.phone_inventory_summary?.adb_status_unknown_count !== 1
+    ) {
+      throw new Error(`heartbeat unknown not preserved: ${JSON.stringify(body)}`);
+    }
+  }),
+);
+
+Deno.test(
+  "devices_overview ne fuit pas metadata sensible",
+  withEnv(async () => {
+    const db: PhoneDb = {
+      phoneDevices: [{
+        id: "device-1",
+        name: "Samsung A16-01",
+        device_kind: "physical_phone",
+        adb_serial: "RFGL145VCKE",
+        pool_type: "full_cycle",
+        max_clones: 3,
+        status: "available",
+        metadata: {
+          model: "SM-A165F",
+          secret_ref: "redacted-fixture",
+          password: "redacted-fixture",
+          token: "redacted-fixture",
+        },
+      }],
+      appInstances: [{
+        id: "app-0",
+        device_id: "device-1",
+        instance_type: "primary_app",
+        instance_index: 0,
+        package_name: "com.instagram.android",
+        status: "available",
+        current_account_id: null,
+        metadata: {
+          adb_package_verified: false,
+          secret_ref: "redacted-fixture",
+        },
+      }],
+      runtimeEvents: [],
+    };
+    const res = await handleRequest(request({ action: "devices_overview" }), {
+      fetch: makePhoneFetch(db),
+    });
+    const body = await res.json();
+    assertNoSecretLeakAllowOps(body);
+    if (JSON.stringify(body).includes("redacted-fixture")) {
+      throw new Error(`secret metadata leaked: ${JSON.stringify(body)}`);
+    }
   }),
 );
 

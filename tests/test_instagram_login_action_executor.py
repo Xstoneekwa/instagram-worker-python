@@ -19,6 +19,17 @@ CONTINUE_AS_XML = (
     '<node text="Use another profile" clickable="false" bounds="[371,1215][710,1280]" />'
     '<node text="Create new account" clickable="true" bounds="[100,2000][980,2190]" />'
 )
+JOIN_INSTAGRAM_XML = (
+    '<node text="Join Instagram" />'
+    '<node text="Share what you&apos;re into with the people who get you." />'
+    '<node text="Get started" clickable="true" bounds="[100,1480][980,1600]" />'
+    '<node text="I already have a profile" clickable="true" bounds="[100,1640][980,1760]" />'
+)
+JOIN_INSTAGRAM_WITHOUT_EXISTING_XML = (
+    '<node text="Join Instagram" />'
+    '<node text="Share what you&apos;re into with the people who get you." />'
+    '<node text="Get started" clickable="true" bounds="[100,1480][980,1600]" />'
+)
 ACCOUNT_PICKER_XML = (
     '<node clickable="true" bounds="[100,300][980,500]" class="android.view.ViewGroup" />'
     '<node text="random_expected" clickable="false" bounds="[260,350][560,400]" />'
@@ -226,6 +237,13 @@ def _account_picker_decision(
     )
 
 
+def _join_instagram_decision():
+    return route_login_screen(
+        expected_username="new_account",
+        screen_type="join_instagram_landing",
+    )
+
+
 class InstagramLoginActionExecutorTest(unittest.TestCase):
     def test_continue_expected_account_taps_continue_once(self) -> None:
         device = FakeDevice()
@@ -249,6 +267,27 @@ class InstagramLoginActionExecutorTest(unittest.TestCase):
         self.assertEqual(result.action, "tap_use_another_profile")
         self.assertEqual(device.bounds_clicks, [(540, 1247)])
         self.assertEqual(device.dump_calls, 2)
+
+    def test_join_instagram_landing_taps_already_have_profile_once(self) -> None:
+        device = FakeDevice(hierarchy=JOIN_INSTAGRAM_XML)
+
+        result = execute_login_screen_decision(device, _join_instagram_decision(), sleeper=Mock())
+
+        self.assertTrue(result.ok)
+        self.assertTrue(result.executed)
+        self.assertEqual(result.action, "tap_already_have_profile")
+        self.assertEqual(device.bounds_clicks, [(540, 1700)])
+        self.assertNotIn((540, 1540), device.bounds_clicks)
+
+    def test_join_instagram_landing_missing_existing_button_stops_safe(self) -> None:
+        device = FakeDevice(hierarchy=JOIN_INSTAGRAM_WITHOUT_EXISTING_XML)
+
+        result = execute_login_screen_decision(device, _join_instagram_decision())
+
+        self.assertFalse(result.ok)
+        self.assertFalse(result.executed)
+        self.assertEqual(result.failure_reason, "unsupported_login_landing")
+        self.assertEqual(device.bounds_clicks, [])
 
     def test_block_wrong_suggested_account_does_not_tap(self) -> None:
         decision = route_login_screen(

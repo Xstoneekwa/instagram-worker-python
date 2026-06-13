@@ -16,6 +16,7 @@ CONTINUE_AS_CANDIDATE = "continue_as_candidate"
 CONTINUE_PASSWORD_ONLY = "continue_password_only"
 ACCOUNT_PICKER = "account_picker"
 ACTIVE_ACCOUNT_PROFILE = "active_account_profile"
+JOIN_INSTAGRAM_LANDING = "join_instagram_landing"
 LOGIN_FORM_EMPTY = "login_form_empty"
 LOGIN_FORM_PREFILLED_USERNAME = "login_form_prefilled_username"
 UNKNOWN_SCREEN = "unknown"
@@ -41,6 +42,7 @@ class LoginScreenRouteDecision:
     should_escalate: bool = False
     should_tap_continue: bool = False
     should_tap_use_another_profile: bool = False
+    should_tap_already_have_profile: bool = False
     should_tap_expected_account: bool = False
     should_recover_old_logged_in_account: bool = False
     should_start_login_form_flow: bool = False
@@ -75,6 +77,21 @@ def route_login_screen(
         if normalize_instagram_username(username)
     ]
     safe_screen_type = str(screen_type or UNKNOWN_SCREEN).strip() or UNKNOWN_SCREEN
+
+    if safe_screen_type == JOIN_INSTAGRAM_LANDING:
+        return _decision(
+            ok=True,
+            screen_type=safe_screen_type,
+            decision="open_existing_profile_from_join_landing",
+            expected_username=expected_username,
+            suggested_username=suggested_username or "",
+            normalized_expected_username=normalized_expected,
+            normalized_suggested_username=normalized_suggested,
+            next_action="tap_already_have_profile_then_login_form",
+            reason="join_instagram_landing_existing_profile_required",
+            should_tap_already_have_profile=True,
+            clone_reuse_allowed=clone_reuse_allowed,
+        )
 
     if safe_screen_type == LOGIN_FORM_EMPTY:
         return _decision(
@@ -413,6 +430,7 @@ def _decision(
     should_escalate: bool = False,
     should_tap_continue: bool = False,
     should_tap_use_another_profile: bool = False,
+    should_tap_already_have_profile: bool = False,
     should_tap_expected_account: bool = False,
     should_recover_old_logged_in_account: bool = False,
     should_start_login_form_flow: bool = False,
@@ -452,6 +470,7 @@ def _decision(
         should_escalate=should_escalate,
         should_tap_continue=should_tap_continue,
         should_tap_use_another_profile=should_tap_use_another_profile,
+        should_tap_already_have_profile=should_tap_already_have_profile,
         should_tap_expected_account=should_tap_expected_account,
         should_recover_old_logged_in_account=should_recover_old_logged_in_account,
         should_start_login_form_flow=should_start_login_form_flow,

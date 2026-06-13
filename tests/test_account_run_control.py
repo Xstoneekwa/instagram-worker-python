@@ -32,6 +32,31 @@ class AccountRunControlTest(unittest.TestCase):
             row = account_run_control.claim_next_account_run_request("run-dispatcher:test")
         self.assertIsNone(row)
 
+    def test_claim_next_account_run_request_rejects_row_without_uuid(self) -> None:
+        with patch.object(
+            account_run_control.supabase_client,
+            "call_rpc",
+            return_value={"status": "claimed"},
+        ):
+            row = account_run_control.claim_next_account_run_request("run-dispatcher:test")
+        self.assertIsNone(row)
+
+    def test_complete_account_run_request_skips_empty_request_id(self) -> None:
+        with patch.object(account_run_control.supabase_client, "call_rpc") as rpc:
+            row = account_run_control.complete_account_run_request(
+                "",
+                "run-dispatcher:test",
+                "failed",
+            )
+        self.assertIsNone(row)
+        rpc.assert_not_called()
+
+    def test_normalize_request_uuid_accepts_canonical_value(self) -> None:
+        value = account_run_control.normalize_request_uuid(
+            "00000000-0000-4000-8000-000000000099"
+        )
+        self.assertEqual(value, "00000000-0000-4000-8000-000000000099")
+
     def test_is_account_run_request_cancel_requested(self) -> None:
         with patch.object(account_run_control.supabase_client, "call_rpc", return_value=True):
             self.assertTrue(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from typing import Any
 
 import supabase_client
@@ -18,6 +19,17 @@ def _row_or_none(value: Any) -> dict[str, Any] | None:
     if isinstance(value, list) and value and isinstance(value[0], dict):
         return dict(value[0])
     return None
+
+
+def normalize_request_uuid(value: str | None) -> str | None:
+    """Return canonical UUID string or None when value is missing/invalid."""
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        return str(uuid.UUID(raw))
+    except (TypeError, ValueError):
+        return None
 
 
 def create_account_run_request(
@@ -61,26 +73,38 @@ def claim_next_account_run_request(
     }
     if allowed_run_types:
         params["p_allowed_run_types"] = allowed_run_types
-    return _row_or_none(supabase_client.call_rpc("claim_next_account_run_request", params))
+    row = _row_or_none(supabase_client.call_rpc("claim_next_account_run_request", params))
+    if not row:
+        return None
+    if not normalize_request_uuid(row.get("id")):
+        return None
+    return row
 
 
 def mark_account_run_request_starting(request_id: str, worker_id: str) -> dict[str, Any] | None:
+    normalized_request_id = normalize_request_uuid(request_id)
+    if not normalized_request_id:
+        return None
     return _row_or_none(
         supabase_client.call_rpc(
             "mark_account_run_request_starting",
-            {"p_request_id": request_id, "p_worker_id": worker_id},
+            {"p_request_id": normalized_request_id, "p_worker_id": worker_id},
         )
     )
 
 
 def link_account_run_request_run(request_id: str, worker_id: str, run_id: str) -> dict[str, Any] | None:
+    normalized_request_id = normalize_request_uuid(request_id)
+    normalized_run_id = normalize_request_uuid(run_id)
+    if not normalized_request_id or not normalized_run_id:
+        return None
     return _row_or_none(
         supabase_client.call_rpc(
             "link_account_run_request_run",
             {
-                "p_request_id": request_id,
+                "p_request_id": normalized_request_id,
                 "p_worker_id": worker_id,
-                "p_run_id": run_id,
+                "p_run_id": normalized_run_id,
             },
         )
     )
@@ -94,8 +118,11 @@ def complete_account_run_request(
     error_code: str | None = None,
     error_message_safe: str | None = None,
 ) -> dict[str, Any] | None:
+    normalized_request_id = normalize_request_uuid(request_id)
+    if not normalized_request_id:
+        return None
     params: dict[str, Any] = {
-        "p_request_id": request_id,
+        "p_request_id": normalized_request_id,
         "p_worker_id": worker_id,
         "p_status": status,
     }
@@ -114,10 +141,12 @@ def cancel_account_run_request(
     reason: str = "manual_stop",
 ) -> dict[str, Any] | None:
     params: dict[str, Any] = {"p_reason": reason}
-    if request_id:
-        params["p_request_id"] = request_id
-    if account_id:
-        params["p_account_id"] = account_id
+    normalized_request_id = normalize_request_uuid(request_id)
+    if normalized_request_id:
+        params["p_request_id"] = normalized_request_id
+    normalized_account_id = normalize_request_uuid(account_id)
+    if normalized_account_id:
+        params["p_account_id"] = normalized_account_id
     if actor_id:
         params["p_actor_id"] = actor_id
     return _row_or_none(supabase_client.call_rpc("cancel_account_run_request", params))
@@ -135,18 +164,24 @@ def reclaim_stale_account_run_requests(worker_id: str | None = None) -> int:
 
 
 def is_account_run_request_cancel_requested(request_id: str) -> bool:
+    normalized_request_id = normalize_request_uuid(request_id)
+    if not normalized_request_id:
+        return False
     value = supabase_client.call_rpc(
         "is_account_run_request_cancel_requested",
-        {"p_request_id": request_id},
+        {"p_request_id": normalized_request_id},
     )
     return bool(value)
 
 
 def get_account_run_request(request_id: str) -> dict[str, Any] | None:
+    normalized_request_id = normalize_request_uuid(request_id)
+    if not normalized_request_id:
+        return None
     rows = supabase_client._request_json(
         "GET",
         "account_run_requests",
-        query={"select": "*", "id": f"eq.{request_id}", "limit": "1"},
+        query={"select": "*", "id": f"eq.{normalized_request_id}", "limit": "1"},
     ) or []
     if not rows:
         return None

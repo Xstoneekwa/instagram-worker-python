@@ -5,11 +5,158 @@ from __future__ import annotations
 import json
 import os
 import re
+import socket
+import time
 from typing import Any
 from urllib import error, parse, request
 from datetime import datetime, timedelta, timezone
 
 from logs import log
+
+
+class SupabaseRestError(RuntimeError):
+    """Structured Supabase REST failure without leaking secrets."""
+
+    def __init__(
+        self,
+        reason: str,
+        *,
+        method: str = "",
+        path: str = "",
+        status: int | None = None,
+        latency_ms: int | None = None,
+        detail: str = "",
+    ) -> None:
+        self.reason = str(reason or "supabase_queue_read_failed")
+        self.method = str(method or "")
+        self.path = str(path or "")
+        self.status = status
+        self.latency_ms = latency_ms
+        self.detail = str(detail or "")
+        parts = [self.reason]
+        if self.status is not None:
+            parts.append(f"status={self.status}")
+        if self.latency_ms is not None:
+            parts.append(f"latency_ms={self.latency_ms}")
+        if self.detail:
+            parts.append(self.detail[:200])
+        super().__init__(" ".join(parts))
+
+
+def _rest_timeout_seconds() -> float:
+    raw = (os.getenv("SUPABASE_REST_TIMEOUT_SECONDS") or "15").strip()
+    try:
+        return max(1.0, float(raw))
+    except ValueError:
+        return 15.0
+
+
+def _rest_max_retries() -> int:
+    raw = (os.getenv("SUPABASE_REST_MAX_RETRIES") or "2").strip()
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 2
+
+
+def _rest_retry_backoff_seconds() -> float:
+    raw = (os.getenv("SUPABASE_REST_RETRY_BACKOFF_SECONDS") or "0.75").strip()
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 0.75
+
+
+def _classify_request_error(exc: BaseException) -> str:
+    if isinstance(exc, TimeoutError):
+        return "supabase_rest_timeout"
+    if isinstance(exc, socket.timeout):
+        return "supabase_network_timeout"
+    if isinstance(exc, error.HTTPError):
+        if exc.code == 401:
+            return "supabase_auth_401"
+        if exc.code == 403:
+            return "supabase_auth_403"
+        if exc.code in {408, 504}:
+            return "supabase_rest_timeout"
+        if exc.code in {502, 503, 522, 524}:
+            return "supabase_network_timeout"
+    if isinstance(exc, error.URLError):
+        reason = getattr(exc, "reason", exc)
+        if isinstance(reason, socket.gaierror):
+            return "supabase_dns_failed"
+        reason_text = str(reason).lower()
+        if "timed out" in reason_text:
+            return "supabase_network_timeout"
+        if "ssl" in reason_text or "tls" in reason_text or "certificate" in reason_text:
+            return "supabase_tls_failed"
+    err_text = str(exc).lower()
+    if "timed out" in err_text:
+        return "supabase_rest_timeout"
+    return "supabase_queue_read_failed"
+
+
+def _request_urlopen(
+    req: request.Request,
+    *,
+    op: str,
+    timeout: float | None = None,
+) -> bytes:
+    """Issue a Supabase REST request with bounded retries and safe errors."""
+    timeout_s = float(timeout if timeout is not None else _rest_timeout_seconds())
+    max_retries = _rest_max_retries()
+    backoff_s = _rest_retry_backoff_seconds()
+    last_exc: BaseException | None = None
+
+    for attempt in range(max_retries + 1):
+        started = time.monotonic()
+        try:
+            with request.urlopen(req, timeout=timeout_s) as resp:
+                return resp.read()
+        except error.HTTPError as exc:
+            latency_ms = int((time.monotonic() - started) * 1000)
+            detail = exc.read().decode("utf-8", errors="replace")
+            reason = _classify_request_error(exc)
+            rest_exc = SupabaseRestError(
+                reason,
+                method=str(getattr(req, "method", "") or ""),
+                path=op,
+                status=int(exc.code),
+                latency_ms=latency_ms,
+                detail=detail[:200],
+            )
+            if reason in {"supabase_auth_401", "supabase_auth_403"} or attempt >= max_retries:
+                raise rest_exc from exc
+            last_exc = rest_exc
+        except (error.URLError, TimeoutError, socket.timeout) as exc:
+            latency_ms = int((time.monotonic() - started) * 1000)
+            reason = _classify_request_error(exc)
+            rest_exc = SupabaseRestError(
+                reason,
+                method=str(getattr(req, "method", "") or ""),
+                path=op,
+                latency_ms=latency_ms,
+                detail=str(getattr(exc, "reason", exc))[:200],
+            )
+            if attempt >= max_retries:
+                raise rest_exc from exc
+            last_exc = rest_exc
+
+        log(
+            "warning",
+            "supabase_rest_retry",
+            op=op,
+            attempt=attempt + 1,
+            max_retries=max_retries,
+            reason=getattr(last_exc, "reason", "supabase_queue_read_failed"),
+            latency_ms=getattr(last_exc, "latency_ms", None),
+        )
+        if backoff_s > 0:
+            time.sleep(backoff_s * (attempt + 1))
+
+    if last_exc is not None:
+        raise last_exc
+    raise SupabaseRestError("supabase_queue_read_failed", path=op)
 
 _LOG_CONTEXT_ACCOUNT_ID: str | None = None
 _LOG_CONTEXT_RUN_ID: str | None = None
@@ -62,16 +209,19 @@ def _request_json(
 
     req = request.Request(url=url, method=method, headers=headers, data=data)
     try:
-        with request.urlopen(req, timeout=15) as resp:
-            raw = resp.read()
-            if not raw:
-                return None
-            return json.loads(raw.decode("utf-8"))
-    except error.HTTPError as e:
-        detail = e.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"Supabase {method} {table} failed: {e.code} {detail}") from e
-    except error.URLError as e:
-        raise RuntimeError(f"Supabase request error: {e}") from e
+        raw = _request_urlopen(req, op=f"{method} {table}")
+        if not raw:
+            return None
+        return json.loads(raw.decode("utf-8"))
+    except SupabaseRestError:
+        raise
+    except Exception as e:
+        raise SupabaseRestError(
+            _classify_request_error(e),
+            method=method,
+            path=table,
+            detail=str(e)[:200],
+        ) from e
 
 
 def _strip_one_unknown_column(body: dict[str, Any], err: str) -> dict[str, Any] | None:
@@ -2357,16 +2507,19 @@ def call_rpc(function_name: str, params: dict[str, Any] | None = None) -> Any:
     data = json.dumps(body, separators=(",", ":")).encode("utf-8")
     req = request.Request(url=url, method="POST", headers=headers, data=data)
     try:
-        with request.urlopen(req, timeout=30) as resp:
-            raw = resp.read()
-            if not raw:
-                return None
-            return json.loads(raw.decode("utf-8"))
-    except error.HTTPError as e:
-        detail = e.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"Supabase RPC {fn} failed: {e.code} {detail}") from e
-    except error.URLError as e:
-        raise RuntimeError(f"Supabase RPC request error: {e}") from e
+        raw = _request_urlopen(req, op=f"RPC {fn}", timeout=max(30.0, _rest_timeout_seconds()))
+        if not raw:
+            return None
+        return json.loads(raw.decode("utf-8"))
+    except SupabaseRestError:
+        raise
+    except Exception as e:
+        raise SupabaseRestError(
+            _classify_request_error(e),
+            method="POST",
+            path=f"rpc/{fn}",
+            detail=str(e)[:200],
+        ) from e
 
 
 def ensure_account_dm_settings(account_id: str) -> dict[str, Any]:

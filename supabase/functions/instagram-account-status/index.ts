@@ -272,6 +272,27 @@ function safeActionList(value: unknown): Array<Record<string, unknown>> {
   });
 }
 
+function safeRuntimeSettingsSync(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const input = value as Record<string, unknown>;
+  return {
+    ok: input.ok === true,
+    applied: input.applied === true,
+    reason: typeof input.reason === "string" ? input.reason : null,
+    package_name: typeof input.package_name === "string" ? input.package_name : null,
+    settings_updated: input.settings_updated === true,
+    dm_settings_updated: input.dm_settings_updated === true,
+    unfollow_settings_updated: input.unfollow_settings_updated === true,
+    follow_enabled: input.follow_enabled === true,
+    like_enabled: input.like_enabled === true,
+    mute_posts_after_follow: input.mute_posts_after_follow === true,
+    mute_stories_after_follow: input.mute_stories_after_follow === true,
+    welcome_enabled: input.welcome_enabled === true,
+    outreach_enabled: input.outreach_enabled === true,
+    unfollow_enabled: input.unfollow_enabled === true,
+  };
+}
+
 function safeRpcResponse(body: Record<string, unknown>, requestIdValue: string): Record<string, unknown> {
   return {
     ok: body.ok === true,
@@ -285,6 +306,7 @@ function safeRpcResponse(body: Record<string, unknown>, requestIdValue: string):
     reauth_reason: typeof body.reauth_reason === "string" ? body.reauth_reason : null,
     actions_upserted: safeActionList(body.actions_upserted),
     actions_resolved: safeActionList(body.actions_resolved),
+    runtime_settings_sync: safeRuntimeSettingsSync(body.runtime_settings_sync),
   };
 }
 

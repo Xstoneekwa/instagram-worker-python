@@ -50,6 +50,22 @@ POST_LOGIN_LOCATION_SERVICES_PROMPT_XML = (
     '<node text="How you can control this" />'
     '<node text="Continue" clickable="true" />'
 )
+INSTAGRAM_TURN_ON_NOTIFICATIONS_NEXT_ONLY_XML = (
+    '<node text="Turn on notifications" />'
+    '<node text="Find out right away when people follow you or like and comment on your posts." />'
+    '<node text="Next" clickable="true" />'
+)
+INSTAGRAM_TURN_ON_NOTIFICATIONS_SKIP_XML = (
+    '<node text="Turn on notifications" />'
+    '<node text="Find out right away when people follow you or like and comment on your posts." />'
+    '<node text="Next" clickable="true" />'
+    '<node text="Skip" clickable="true" />'
+)
+ANDROID_INSTAGRAM_NOTIFICATION_SETTINGS_XML = (
+    '<node text="Instagram" />'
+    '<node text="Allow notifications" clickable="true" />'
+    '<node text="All notifications from this app are blocked." />'
+)
 NEEDS_2FA_XML = '<node text="Enter code" /><node text="authentication code" />'
 CHECKPOINT_XML = '<node text="Help us confirm it’s you" /><node text="Verify your account" />'
 LOGIN_FAILED_XML = '<node text="Sorry, your password was incorrect. Please try again." />'
@@ -786,6 +802,89 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
         self.assertEqual(result.safe_metadata["post_login_location_services_prompt_dismiss_method"], "back")
         self.assertEqual(device.press_calls, ["back"])
         self.assertEqual(continue_button.click_calls, 0)
+        self.assertEqual(login.click_calls, 1)
+
+    def test_post_submit_notifications_skip_direct_is_connected(self) -> None:
+        device, _username, _password_selector, login = configured_device()
+        skip_button = device.add_selector("text", "Skip", FakeSelector(1))
+        device.hierarchies = [INSTAGRAM_TURN_ON_NOTIFICATIONS_SKIP_XML, CONNECTED_XML]
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=LOGIN_FORM_SIGNALS,
+            post_submit_wait_ms=0,
+            post_submit_observation_interval_ms=1,
+            max_post_submit_observations=4,
+            sleeper=Mock(),
+        )
+
+        self.assertEqual(result.post_submit_outcome, "connected")
+        self.assertEqual(result.post_submit_probe_reason, "connected_ui_signal")
+        self.assertTrue(result.safe_metadata["notifications_prompt_detected"])
+        self.assertTrue(result.safe_metadata["notifications_skip_tap_sent"])
+        self.assertFalse(result.safe_metadata["notifications_next_tap_sent"])
+        self.assertFalse(result.safe_metadata["notifications_skip_after_settings_sent"])
+        self.assertEqual(skip_button.click_calls, 1)
+        self.assertEqual(login.click_calls, 1)
+
+    def test_post_submit_notifications_next_android_back_skip_flow(self) -> None:
+        device, _username, _password_selector, login = configured_device()
+        next_button = device.add_selector("text", "Next", FakeSelector(1))
+        skip_button = device.add_selector("text", "Skip", FakeSelector(1))
+        allow_toggle = device.add_selector("text", "Allow notifications", FakeSelector(1))
+        device.hierarchies = [
+            INSTAGRAM_TURN_ON_NOTIFICATIONS_NEXT_ONLY_XML,
+            ANDROID_INSTAGRAM_NOTIFICATION_SETTINGS_XML,
+            INSTAGRAM_TURN_ON_NOTIFICATIONS_SKIP_XML,
+            CONNECTED_XML,
+        ]
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=LOGIN_FORM_SIGNALS,
+            post_submit_wait_ms=0,
+            post_submit_observation_interval_ms=1,
+            max_post_submit_observations=8,
+            sleeper=Mock(),
+        )
+
+        self.assertEqual(result.post_submit_outcome, "connected")
+        self.assertTrue(result.safe_metadata["notifications_prompt_detected"])
+        self.assertTrue(result.safe_metadata["notifications_next_tap_sent"])
+        self.assertTrue(result.safe_metadata["android_notification_settings_detected"])
+        self.assertTrue(result.safe_metadata["android_back_from_notification_settings_sent"])
+        self.assertTrue(result.safe_metadata["notifications_skip_after_settings_sent"])
+        self.assertEqual(next_button.click_calls, 1)
+        self.assertEqual(skip_button.click_calls, 1)
+        self.assertEqual(allow_toggle.click_calls, 0)
+        self.assertEqual(device.press_calls, ["back"])
+        self.assertEqual(login.click_calls, 1)
+
+    def test_post_submit_notifications_prompt_does_not_mark_failed(self) -> None:
+        device, _username, _password_selector, login = configured_device()
+        device.add_selector("text", "Next", FakeSelector(1))
+        device.hierarchies = [INSTAGRAM_TURN_ON_NOTIFICATIONS_NEXT_ONLY_XML]
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=LOGIN_FORM_SIGNALS,
+            post_submit_wait_ms=0,
+            post_submit_observation_interval_ms=1,
+            max_post_submit_observations=2,
+            sleeper=Mock(),
+        )
+
+        self.assertEqual(result.post_submit_outcome, "connected")
+        self.assertEqual(result.post_submit_screen_type, "instagram_turn_on_notifications_prompt")
+        self.assertEqual(result.post_submit_probe_reason, "instagram_turn_on_notifications_prompt")
+        self.assertTrue(result.safe_metadata["notifications_prompt_detected"])
+        self.assertTrue(result.safe_metadata["notifications_next_tap_sent"])
         self.assertEqual(login.click_calls, 1)
 
     def test_post_submit_all_loading_returns_still_loading_timeout(self) -> None:

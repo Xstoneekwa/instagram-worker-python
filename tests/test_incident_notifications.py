@@ -37,6 +37,28 @@ def _incident(
     }
 
 
+def _package_mismatch_incident(incident_id: str) -> dict:
+    return {
+        **_incident(incident_id),
+        "incident_type": "login_package_mismatch",
+        "account_username": "i_m_your_traker",
+        "action_required": "Review device assignment and Instagram clone before retry.",
+        "assistant_message": "Wrong app/clone detected for this account. Review device assignment before retry.",
+        "admin_message": (
+            "Login package mismatch detected. Expected package com.instagram.androie, "
+            "actual foreground package com.instagram.android. Device RFGL***VCKE."
+        ),
+        "metadata": {
+            "expected_package_name": "com.instagram.androie",
+            "actual_foreground_package": "com.instagram.android",
+            "adb_serial_masked": "RFGL***VCKE",
+            "password": "do-not-leak",
+            "secret_ref": "do-not-leak",
+            "raw_xml": "<node />",
+        },
+    }
+
+
 class IncidentNotificationsTest(unittest.TestCase):
     def test_disabled_no_op(self) -> None:
         with (
@@ -67,6 +89,7 @@ class IncidentNotificationsTest(unittest.TestCase):
         with (
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_ENABLED", True, create=True),
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_DRY_RUN", True, create=True),
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_CHANNELS", "slack", create=True),
             patch.object(
                 incident_notifications.supabase_client,
                 "load_account_incidents_to_notify",
@@ -99,6 +122,7 @@ class IncidentNotificationsTest(unittest.TestCase):
         with (
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_ENABLED", True, create=True),
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_DRY_RUN", True, create=True),
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_CHANNELS", "slack", create=True),
             patch.object(
                 incident_notifications.supabase_client,
                 "load_account_incidents_to_notify",
@@ -197,6 +221,16 @@ class IncidentNotificationsTest(unittest.TestCase):
         self.assertNotIn("service_role token should not leak", text)
         self.assertNotIn("<node", text)
 
+    def test_package_mismatch_notification_payload_safe_for_dry_run(self) -> None:
+        payload = incident_notifications.build_incident_notification_payload(_package_mismatch_incident("incident-1"))
+        text = json.dumps(payload, sort_keys=True)
+        self.assertIn("login_package_mismatch", text)
+        self.assertIn("com.instagram.androie", text)
+        self.assertIn("com.instagram.android", text)
+        self.assertIn("RFGL***VCKE", text)
+        self.assertNotIn("do-not-leak", text)
+        self.assertNotIn("<node", text)
+
     def test_slack_payload_builder(self) -> None:
         payload = incident_notifications.build_slack_payload({"title": "T", "text": "hello"})
         self.assertEqual(payload, {"text": "hello"})
@@ -252,6 +286,7 @@ class IncidentNotificationsTest(unittest.TestCase):
         with (
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_ENABLED", True, create=True),
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_DRY_RUN", False, create=True),
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_CHANNELS", "slack", create=True),
             patch.object(incident_notifications.config, "SLACK_WEBHOOK_URL", "", create=True),
             patch.object(
                 incident_notifications.supabase_client,
@@ -284,6 +319,7 @@ class IncidentNotificationsTest(unittest.TestCase):
         with (
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_ENABLED", True, create=True),
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_DRY_RUN", False, create=True),
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_CHANNELS", "slack", create=True),
             patch.object(
                 incident_notifications.config,
                 "SLACK_WEBHOOK_URL",
@@ -376,6 +412,7 @@ class IncidentNotificationsTest(unittest.TestCase):
         with (
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_ENABLED", True, create=True),
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_DRY_RUN", False, create=True),
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_CHANNELS", "slack", create=True),
             patch.object(incident_notifications.config, "SLACK_WEBHOOK_URL", "https://hooks.slack.com/services/SECRET", create=True),
             patch.object(incident_notifications.supabase_client, "load_account_incidents_to_notify", return_value=[incident]),
             patch.object(incident_notifications.supabase_client, "load_existing_incident_notifications_by_delivery_keys", return_value={}),
@@ -620,6 +657,7 @@ class IncidentNotificationsTest(unittest.TestCase):
         with (
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_ENABLED", True, create=True),
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_DRY_RUN", False, create=True),
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_CHANNELS", "slack", create=True),
             patch.object(incident_notifications.config, "SLACK_WEBHOOK_URL", "https://hooks.slack.com/services/SECRET", create=True),
             patch.object(incident_notifications.supabase_client, "load_account_incidents_to_notify", return_value=[incident]),
             patch.object(

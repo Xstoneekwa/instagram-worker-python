@@ -25,6 +25,7 @@ ACTION_OPEN_HOME_FROM_PROFILE = "tap_home_bottom_nav"
 ACTION_OPEN_ACCOUNT_SWITCHER = "tap_account_switcher"
 ACTION_ADD_INSTAGRAM_ACCOUNT = "tap_add_instagram_account"
 ACTION_LOG_INTO_EXISTING_ACCOUNT = "tap_log_into_existing_account"
+ACTION_ALREADY_HAVE_PROFILE = "tap_already_have_profile"
 ACTION_OPEN_PROFILE_MENU = "tap_profile_menu"
 ACTION_OPEN_SETTINGS_AND_ACTIVITY = "tap_settings_and_activity"
 ACTION_TAP_LOGOUT = "tap_logout"
@@ -38,6 +39,7 @@ ALLOWED_DECISION_ACTIONS = {
     "open_account_switcher": ("", ACTION_OPEN_ACCOUNT_SWITCHER),
     "tap_add_instagram_account": ("Add Instagram account", ACTION_ADD_INSTAGRAM_ACCOUNT),
     "tap_log_into_existing_account": ("Log into existing account", ACTION_LOG_INTO_EXISTING_ACCOUNT),
+    "open_existing_profile_from_join_landing": ("I already have a profile", ACTION_ALREADY_HAVE_PROFILE),
     "open_profile_menu": ("", ACTION_OPEN_PROFILE_MENU),
     "tap_settings_and_activity": ("Settings and activity", ACTION_OPEN_SETTINGS_AND_ACTIVITY),
     "tap_logout": ("Log out", ACTION_TAP_LOGOUT),
@@ -191,6 +193,7 @@ def execute_login_screen_decision(
         in {
             ACTION_ADD_INSTAGRAM_ACCOUNT,
             ACTION_LOG_INTO_EXISTING_ACCOUNT,
+            ACTION_ALREADY_HAVE_PROFILE,
             ACTION_OPEN_SETTINGS_AND_ACTIVITY,
             ACTION_TAP_NOT_NOW,
             ACTION_CONFIRM_LOGOUT,
@@ -203,14 +206,17 @@ def execute_login_screen_decision(
     action_metadata = dict(selector_result.get("metadata") or {})
 
     if selector_result["failure_reason"]:
+        failure_reason = selector_result["failure_reason"]
+        if action == ACTION_ALREADY_HAVE_PROFILE and failure_reason == "target_button_not_found":
+            failure_reason = "unsupported_login_landing"
         timings["total_ms"] = _elapsed_ms(total_start, timer())
         return _result(
             ok=False,
             executed=False,
             action=action,
             decision=decision_value,
-            reason=selector_result["failure_reason"],
-            failure_reason=selector_result["failure_reason"],
+            reason=failure_reason,
+            failure_reason=failure_reason,
             timings=timings,
             warnings=warnings,
             metadata=action_metadata,
@@ -361,6 +367,8 @@ def _target_aliases_for_action(action: str, target_text: str) -> tuple[str, ...]
             "Pas maintenant",
             "Plus tard",
         )
+    if action == ACTION_ALREADY_HAVE_PROFILE:
+        return ("I already have a profile",)
     return (target_text,)
 
 

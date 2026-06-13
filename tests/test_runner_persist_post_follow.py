@@ -1,0 +1,76 @@
+from __future__ import annotations
+
+import unittest
+from unittest import mock
+
+import runner
+
+
+class RunnerPersistPostFollowTest(unittest.TestCase):
+    def test_account_session_performance_summary_includes_session_counters(self) -> None:
+        with mock.patch.dict(
+            runner._SESSION_COUNTERS,
+            {"follows": 1, "likes": 0, "interactions": 1, "successful_interactions": 1},
+            clear=False,
+        ):
+            summary = runner._build_account_session_completion_performance_summary(
+                exit_code=0,
+                account_username="i_m_your_traker",
+                followers_source_username="vipbeach",
+                target_id="target-1",
+                target_selection_source="ig_targets",
+            )
+
+        self.assertEqual(summary["run_type"], "account_session")
+        self.assertEqual(summary["session_counters"]["follows"], 1)
+        self.assertEqual(summary["session_counters"]["likes"], 0)
+
+    def test_persist_after_post_follow_does_not_use_eng_log(self) -> None:
+        with mock.patch.object(runner, "_safe_supabase_call") as supa, mock.patch.object(
+            runner, "log"
+        ) as log_fn:
+            supa.side_effect = [
+                {"ok": True},
+                None,
+            ]
+            runner._persist_verified_follow_success_to_supabase(
+                supabase_mode=True,
+                account_id="acct-1",
+                follower_un="cand_user",
+                source_profile_username="ct_user",
+                run_id="run-1",
+                follow_out={"ok": True, "skipped_tap": False, "follow_state_after": "following"},
+                fs_af="following",
+                f_st="following",
+                target_id="tgt-1",
+                phase="after_post_follow",
+            )
+        self.assertGreaterEqual(supa.call_count, 1)
+        first_call = supa.call_args_list[0]
+        self.assertEqual(first_call[0][0], "record_follow_interaction_outcome")
+        logged_kinds = [
+            (c.kwargs or {}).get("kind")
+            for c in log_fn.call_args_list
+            if len(c.args) >= 2 and c.args[1] == "social_memory_updated"
+        ]
+        self.assertIn("follow_success", logged_kinds)
+
+    def test_persist_noop_when_not_supabase(self) -> None:
+        with mock.patch.object(runner, "_safe_supabase_call") as supa:
+            runner._persist_verified_follow_success_to_supabase(
+                supabase_mode=False,
+                account_id="acct-1",
+                follower_un="cand_user",
+                source_profile_username="ct_user",
+                run_id="run-1",
+                follow_out={"ok": True},
+                fs_af="following",
+                f_st="following",
+                target_id=None,
+                phase="after_post_follow",
+            )
+        supa.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()

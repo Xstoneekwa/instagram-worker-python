@@ -455,6 +455,25 @@ Deno.test("list filtre account_id status audience", withEnv(async () => {
   }
 }));
 
+Deno.test("list expose action email code pending avec bouton safe", withEnv(async () => {
+  const res = await handleRequest(request({ action: "list", account_id: ACCOUNT_ID, status: "pending", audience: "client" }), {
+    fetch: makeFetch(),
+    log: () => {},
+  });
+  const body = await res.json();
+  const row = body.actions.find((item: Record<string, unknown>) =>
+    item.action_type === "enter_email_verification_code"
+  );
+  const text = JSON.stringify(row);
+  if (!row) throw new Error("action email code absente");
+  if (row.title !== "Email verification code required" || row.action_label !== "Enter code") {
+    throw new Error("action email code pas assez visible");
+  }
+  for (const forbidden of [FAKE_SECRET, "123456", "secret_ref", "supabase_vault://", "metadata"]) {
+    if (text.includes(forbidden)) throw new Error(`action email code expose ${forbidden}`);
+  }
+}));
+
 Deno.test("limit est clampe et offset fonctionne", withEnv(async () => {
   if (clampLimit(500) !== 100 || clampLimit(0) !== 1 || normalizeOffset(-1) !== 0) {
     throw new Error("clamp helpers incorrects");

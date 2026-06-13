@@ -301,11 +301,7 @@ begin
   limit 1
   for update;
 
-  if v_submission.id is not null and v_submission.status = 'consumed' then
-    raise exception 'verification_code_already_consumed';
-  end if;
-
-  if v_submission.id is null then
+  if v_submission.id is null or v_submission.status in ('consumed', 'expired', 'failed') then
     insert into public.account_verification_code_submissions (
       action_id,
       account_id,

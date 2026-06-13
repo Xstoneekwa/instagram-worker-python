@@ -167,6 +167,7 @@ POST_ADD_EXISTING_RESUME_SCREENS = frozenset(
         "continue_as_candidate",
         "account_picker",
         "continue_password_only",
+        "join_instagram_landing",
         "checkpoint",
         "needs_2fa",
         "login_failed",
@@ -178,6 +179,7 @@ ROUTING_SCREEN_TYPES = {
     "login_form_empty",
     "login_form_prefilled_username",
     "continue_password_only",
+    "join_instagram_landing",
     "active_account_profile",
 }
 DEFAULT_USE_ANOTHER_PROFILE_INTERVAL_MS = 1000
@@ -1232,6 +1234,15 @@ def run_login_provisioning_flow(
                 ),
             }
         )
+    if routing_signals.get("screen_type") == "join_instagram_landing":
+        route_metadata.update(
+            {
+                "join_instagram_landing_detected": True,
+                "join_instagram_progress_event": "join_instagram_landing_detected",
+                "has_already_have_profile_button": bool(routing_signals.get("has_already_have_profile_button")),
+                "has_get_started_button": bool(routing_signals.get("has_get_started_button")),
+            }
+        )
     if route.decision == "select_expected_account_from_picker":
         route_metadata["selected_account_username"] = _safe_public_text(
             getattr(route, "target_username", "") or safe_expected_username
@@ -1370,6 +1381,7 @@ def run_login_provisioning_flow(
         "continue_expected_account",
         "select_expected_account_from_picker",
         "use_another_profile_previous_account_stopped",
+        "open_existing_profile_from_join_landing",
     }:
         guard = _check_expected_foreground_package(d, expected_package_name=safe_package_name)
         old_logged_in_metadata.update(guard)
@@ -1397,6 +1409,15 @@ def run_login_provisioning_flow(
         action_result = execute_login_screen_decision(d, route, post_action_wait_ms=0)
         timings["action_ms"] += _elapsed_ms(start, timer())
         actions_taken.append(action_result.action)
+        if action_result.action == "tap_already_have_profile":
+            old_logged_in_metadata.update(
+                {
+                    "join_instagram_landing_detected": True,
+                    "join_instagram_progress_event": "join_instagram_landing_detected",
+                    "already_have_profile_tap_sent": bool(action_result.executed),
+                    "join_instagram_existing_profile_path_used": bool(action_result.executed),
+                }
+            )
         if action_result.action == "tap_expected_account":
             old_logged_in_metadata.update(
                 {
@@ -1435,20 +1456,35 @@ def run_login_provisioning_flow(
                 publish_enabled=publish_enabled,
             )
         signals = dict(action_result.post_action_signals or {})
-        if _signals_confirm_login_form(signals) and action_result.action == "tap_use_another_profile":
+        if _signals_confirm_login_form(signals) and action_result.action in {
+            "tap_use_another_profile",
+            "tap_already_have_profile",
+        }:
             final_screen = _preparation_screen_label(signals)
-            post_continue_metadata.update(
-                {
-                    "post_use_another_profile_observation_count": 1,
-                    "post_use_another_profile_screens": [final_screen],
-                    "post_use_another_profile_wait_total_ms": 0,
-                    "screen_after_use_another_profile_final": final_screen,
-                }
-            )
+            if action_result.action == "tap_already_have_profile":
+                post_continue_metadata.update(
+                    {
+                        "post_join_instagram_landing_observation_count": 1,
+                        "post_join_instagram_landing_screens": [final_screen],
+                        "post_join_instagram_landing_wait_total_ms": 0,
+                        "screen_after_join_instagram_landing_final": final_screen,
+                        "login_form_after_join_landing_detected": True,
+                        "join_instagram_progress_event_after": "login_form_after_join_landing_detected",
+                    }
+                )
+            else:
+                post_continue_metadata.update(
+                    {
+                        "post_use_another_profile_observation_count": 1,
+                        "post_use_another_profile_screens": [final_screen],
+                        "post_use_another_profile_wait_total_ms": 0,
+                        "screen_after_use_another_profile_final": final_screen,
+                    }
+                )
         if not _signals_confirm_login_form(signals):
             metadata_prefix = _post_action_metadata_prefix(action_result.action)
             should_settle = bool(metadata_prefix) and (
-                action_result.action == "tap_use_another_profile"
+                action_result.action in {"tap_use_another_profile", "tap_already_have_profile"}
                 or _should_reobserve_post_action_transition(action_result.action, signals)
             )
             if should_settle:
@@ -1483,6 +1519,19 @@ def run_login_provisioning_flow(
                         "post_use_another_profile_wait_total_ms": settled["wait_total_ms"],
                         "screen_after_use_another_profile_final": settled["final_screen_type"],
                     }
+                elif action_result.action == "tap_already_have_profile":
+                    post_continue_metadata = {
+                        "post_join_instagram_landing_initial_screen": initial_screen,
+                        "post_join_instagram_landing_reobserve": True,
+                        "post_join_instagram_landing_reobserve_count": settled["observation_count"],
+                        "post_join_instagram_landing_screens": settled["screens"],
+                        "post_join_instagram_landing_wait_total_ms": settled["wait_total_ms"],
+                        "screen_after_join_instagram_landing_final": settled["final_screen_type"],
+                        "login_form_after_join_landing_detected": _signals_confirm_login_form(signals),
+                        "join_instagram_progress_event_after": "login_form_after_join_landing_detected"
+                        if _signals_confirm_login_form(signals)
+                        else "",
+                    }
                 else:
                     post_continue_metadata = {
                         f"{metadata_prefix}_initial_screen": initial_screen,
@@ -1510,9 +1559,20 @@ def run_login_provisioning_flow(
                     final_key = (
                         "screen_after_use_another_profile_final"
                         if action_result.action == "tap_use_another_profile"
+                        else "screen_after_join_instagram_landing_final"
+                        if action_result.action == "tap_already_have_profile"
                         else f"{metadata_prefix}_final_screen_type"
                     )
                     post_continue_metadata[final_key] = _preparation_screen_label(signals)
+                    if action_result.action == "tap_already_have_profile":
+                        post_continue_metadata.update(
+                            {
+                                "login_form_after_join_landing_detected": _signals_confirm_login_form(signals),
+                                "join_instagram_progress_event_after": "login_form_after_join_landing_detected"
+                                if _signals_confirm_login_form(signals)
+                                else "",
+                            }
+                        )
                     if action_result.action == "tap_expected_account":
                         final_screen = _preparation_screen_label(signals)
                         post_continue_metadata.update(
@@ -2734,6 +2794,8 @@ def _central_selected_route(decision: str, signals: dict[str, Any]) -> str:
         return "use_another_profile"
     if safe_decision == "select_expected_account_from_picker":
         return "account_picker"
+    if safe_decision == "open_existing_profile_from_join_landing":
+        return "join_instagram_existing_profile"
     if safe_decision == "start_login_form_flow_prefilled_expected":
         return "login_form_prefilled_expected"
     if safe_decision == "start_login_form_flow_replace_username":
@@ -3265,6 +3327,7 @@ def _startup_screen_is_exploitable(signals: dict[str, Any]) -> bool:
         "login_form_empty",
         "login_form_prefilled_username",
         "continue_password_only",
+        "join_instagram_landing",
         "email_code_challenge",
         "active_account_home",
         "active_account_profile",
@@ -3487,6 +3550,8 @@ def _post_action_metadata_prefix(action: str) -> str:
         return "post_account_picker"
     if action == "tap_use_another_profile":
         return "post_use_another_profile"
+    if action == "tap_already_have_profile":
+        return "post_join_instagram_landing"
     return ""
 
 
@@ -3546,6 +3611,8 @@ def _should_reobserve_post_action_transition(action: str, signals: dict[str, Any
     if action == "tap_continue":
         return _signals_show_loading_transition(signals)
     if action == "tap_expected_account":
+        return True
+    if action == "tap_already_have_profile":
         return True
     return False
 
@@ -4154,6 +4221,12 @@ def _safe_password_result_metadata(result: Any) -> dict[str, Any]:
             "post_login_location_services_prompt_detected",
             "post_login_location_services_prompt_dismissed",
             "post_login_location_services_prompt_dismiss_method",
+            "notifications_prompt_detected",
+            "notifications_next_tap_sent",
+            "notifications_skip_tap_sent",
+            "notifications_skip_after_settings_sent",
+            "android_notification_settings_detected",
+            "android_back_from_notification_settings_sent",
             "post_dismiss_screen_type",
             "post_dismiss_final_observation_count",
             "post_dismiss_final_screens",
@@ -4551,6 +4624,10 @@ def _publish_payload(
     dashboard_action_type: str | None,
     extra_metadata: dict[str, Any],
 ) -> dict[str, Any]:
+    final_reauth_required = False if str(final_login_status or "") == "connected" else None
+    final_reauth_reason = None
+    run_id = str(extra_metadata.get("run_id") or "").strip()
+    external_request_id = f"login_provisioner:{run_id}" if run_id else None
     publish_metadata = clean_login_probe_metadata(
         {
             "source": "login_provisioner_orchestrator",
@@ -4566,7 +4643,10 @@ def _publish_payload(
             "login_status": final_login_status,
             "provisioning_status": final_provisioning_status,
             "onboarding_status": final_onboarding_status,
+            "reauth_required": final_reauth_required,
+            "reauth_reason": final_reauth_reason,
             "reason": reason,
+            "external_request_id": external_request_id,
             "metadata": publish_metadata,
         }
     )
@@ -4596,6 +4676,8 @@ def _publish_result_error_code(publish_result: dict[str, Any]) -> str:
         "status_update_failed": "publisher_rpc_error",
         "invalid_status": "publisher_rpc_error",
         "account_not_found": "publisher_rpc_error",
+        "disabled": "publisher_disabled",
+        "not_configured": "publisher_not_configured",
     }
     if reason.startswith("publisher_"):
         return reason

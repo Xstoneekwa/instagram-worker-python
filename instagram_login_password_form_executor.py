@@ -392,6 +392,12 @@ def execute_login_form_credentials(
     post_login_location_services_prompt_detected = False
     post_login_location_services_prompt_dismissed = False
     post_login_location_services_prompt_dismiss_method = ""
+    notifications_prompt_detected = False
+    notifications_next_tap_sent = False
+    notifications_skip_tap_sent = False
+    notifications_skip_after_settings_sent = False
+    android_notification_settings_detected = False
+    android_back_from_notification_settings_sent = False
     post_dismiss_screen_type = ""
     post_dismiss_final_observation_count = 0
     post_dismiss_final_screens: list[str] = []
@@ -444,6 +450,14 @@ def execute_login_form_credentials(
             )
             post_login_location_services_prompt_dismiss_method = str(
                 observed.get("post_login_location_services_prompt_dismiss_method") or ""
+            )
+            notifications_prompt_detected = bool(observed.get("notifications_prompt_detected"))
+            notifications_next_tap_sent = bool(observed.get("notifications_next_tap_sent"))
+            notifications_skip_tap_sent = bool(observed.get("notifications_skip_tap_sent"))
+            notifications_skip_after_settings_sent = bool(observed.get("notifications_skip_after_settings_sent"))
+            android_notification_settings_detected = bool(observed.get("android_notification_settings_detected"))
+            android_back_from_notification_settings_sent = bool(
+                observed.get("android_back_from_notification_settings_sent")
             )
             post_dismiss_screen_type = str(observed.get("post_dismiss_screen_type") or "")
             post_dismiss_final_observation_count = int(observed.get("post_dismiss_final_observation_count") or 0)
@@ -537,6 +551,25 @@ def execute_login_form_credentials(
                             post_login_location_services_prompt_dismiss_method = (
                                 str(observed.get("post_login_location_services_prompt_dismiss_method") or "")
                                 or post_login_location_services_prompt_dismiss_method
+                            )
+                            notifications_prompt_detected = notifications_prompt_detected or bool(
+                                observed.get("notifications_prompt_detected")
+                            )
+                            notifications_next_tap_sent = notifications_next_tap_sent or bool(
+                                observed.get("notifications_next_tap_sent")
+                            )
+                            notifications_skip_tap_sent = notifications_skip_tap_sent or bool(
+                                observed.get("notifications_skip_tap_sent")
+                            )
+                            notifications_skip_after_settings_sent = notifications_skip_after_settings_sent or bool(
+                                observed.get("notifications_skip_after_settings_sent")
+                            )
+                            android_notification_settings_detected = android_notification_settings_detected or bool(
+                                observed.get("android_notification_settings_detected")
+                            )
+                            android_back_from_notification_settings_sent = (
+                                android_back_from_notification_settings_sent
+                                or bool(observed.get("android_back_from_notification_settings_sent"))
                             )
                             post_dismiss_screen_type = (
                                 str(observed.get("post_dismiss_screen_type") or "") or post_dismiss_screen_type
@@ -654,6 +687,12 @@ def execute_login_form_credentials(
         post_login_location_services_prompt_detected=post_login_location_services_prompt_detected,
         post_login_location_services_prompt_dismissed=post_login_location_services_prompt_dismissed,
         post_login_location_services_prompt_dismiss_method=post_login_location_services_prompt_dismiss_method,
+        notifications_prompt_detected=notifications_prompt_detected,
+        notifications_next_tap_sent=notifications_next_tap_sent,
+        notifications_skip_tap_sent=notifications_skip_tap_sent,
+        notifications_skip_after_settings_sent=notifications_skip_after_settings_sent,
+        android_notification_settings_detected=android_notification_settings_detected,
+        android_back_from_notification_settings_sent=android_back_from_notification_settings_sent,
         post_dismiss_screen_type=post_dismiss_screen_type,
         post_dismiss_final_observation_count=post_dismiss_final_observation_count,
         post_dismiss_final_screens=post_dismiss_final_screens,
@@ -1858,6 +1897,30 @@ def _classify_post_submit_hierarchy(hierarchy_xml: str) -> dict[str, Any]:
             "terminal": True,
             "screen_label": "connected_post_login_location_services_prompt",
         }
+    if signals.get("android_instagram_notification_settings") is True:
+        return {
+            "outcome": "connected",
+            "screen_type": "android_instagram_notification_settings",
+            "reason": "android_instagram_notification_settings",
+            "password_required_dialog_present": False,
+            "save_password_prompt_present": False,
+            "android_notification_settings_present": True,
+            "terminal": False,
+            "screen_label": "android_instagram_notification_settings",
+        }
+    if signals.get("instagram_turn_on_notifications_prompt") is True:
+        return {
+            "outcome": "connected",
+            "screen_type": "instagram_turn_on_notifications_prompt",
+            "reason": "instagram_turn_on_notifications_prompt",
+            "password_required_dialog_present": False,
+            "save_password_prompt_present": False,
+            "instagram_turn_on_notifications_prompt_present": True,
+            "notifications_skip_visible": bool(signals.get("has_notifications_skip_button")),
+            "notifications_next_visible": bool(signals.get("has_notifications_next_button")),
+            "terminal": False,
+            "screen_label": "instagram_turn_on_notifications_prompt",
+        }
     if signals.get("email_code_challenge_present") is True:
         return {
             "outcome": "verification_pending",
@@ -1972,6 +2035,12 @@ def _observe_post_submit_settled(
     post_login_location_services_prompt_detected = False
     post_login_location_services_prompt_dismissed = False
     post_login_location_services_prompt_dismiss_method = ""
+    notifications_prompt_detected = False
+    notifications_next_tap_sent = False
+    notifications_skip_tap_sent = False
+    notifications_skip_after_settings_sent = False
+    android_notification_settings_detected = False
+    android_back_from_notification_settings_sent = False
     dismiss_method = ""
     post_dismiss_screen_type = ""
     post_dismiss_final_observation_count = 0
@@ -2061,6 +2130,38 @@ def _observe_post_submit_settled(
             else:
                 warnings.append("post_login_location_services_prompt_back_unavailable")
             break
+        if observed.get("android_notification_settings_present") is True:
+            android_notification_settings_detected = True
+            warnings.append("android_notification_settings_detected")
+            if _android_back_from_notification_settings_once(d, warnings):
+                android_back_from_notification_settings_sent = True
+                warnings.append("android_back_from_notification_settings_sent")
+            else:
+                warnings.append("android_back_from_notification_settings_unavailable")
+            continue
+        if observed.get("instagram_turn_on_notifications_prompt_present") is True:
+            notifications_prompt_detected = True
+            warnings.append("notifications_prompt_detected")
+            if observed.get("notifications_skip_visible") is True:
+                if _tap_notifications_skip_once(d, warnings):
+                    notifications_skip_tap_sent = True
+                    if android_notification_settings_detected:
+                        notifications_skip_after_settings_sent = True
+                        warnings.append("notifications_skip_after_settings_sent")
+                    else:
+                        warnings.append("notifications_skip_tap_sent")
+                else:
+                    warnings.append("notifications_skip_tap_failed")
+                continue
+            if observed.get("notifications_next_visible") is True:
+                if _tap_notifications_next_once(d, warnings):
+                    notifications_next_tap_sent = True
+                    warnings.append("notifications_next_tap_sent")
+                else:
+                    warnings.append("notifications_next_tap_failed")
+                continue
+            warnings.append("notifications_prompt_no_action_target")
+            continue
         if observed.get("password_required_dialog_present") is True:
             break
         if bool(observed.get("terminal")):
@@ -2172,6 +2273,12 @@ def _observe_post_submit_settled(
         "post_login_location_services_prompt_detected": post_login_location_services_prompt_detected,
         "post_login_location_services_prompt_dismissed": post_login_location_services_prompt_dismissed,
         "post_login_location_services_prompt_dismiss_method": post_login_location_services_prompt_dismiss_method,
+        "notifications_prompt_detected": notifications_prompt_detected,
+        "notifications_next_tap_sent": notifications_next_tap_sent,
+        "notifications_skip_tap_sent": notifications_skip_tap_sent,
+        "notifications_skip_after_settings_sent": notifications_skip_after_settings_sent,
+        "android_notification_settings_detected": android_notification_settings_detected,
+        "android_back_from_notification_settings_sent": android_back_from_notification_settings_sent,
         "post_dismiss_screen_type": post_dismiss_screen_type,
         "post_dismiss_final_observation_count": post_dismiss_final_observation_count,
         "post_dismiss_final_screens": post_dismiss_final_screens,
@@ -2320,6 +2427,53 @@ def _dismiss_post_login_location_services_prompt_once(d: Any, warnings: list[str
         return True
     except Exception:
         warnings.append("post_login_location_services_prompt_back_failed")
+        return False
+
+
+def _tap_notifications_next_once(d: Any, warnings: list[str]) -> bool:
+    target = _find_unique_target(
+        d,
+        ({"text": "Next"}, {"description": "Next"}, {"text": "Suivant"}, {"description": "Suivant"}),
+        missing_reason="notifications_next_button_not_found",
+    )
+    if target["failure_reason"]:
+        warnings.append(str(target["failure_reason"]))
+        return False
+    try:
+        _click_target(target["target"])
+        return True
+    except Exception:
+        warnings.append("notifications_next_tap_failed")
+        return False
+
+
+def _tap_notifications_skip_once(d: Any, warnings: list[str]) -> bool:
+    target = _find_unique_target(
+        d,
+        ({"text": "Skip"}, {"description": "Skip"}, {"text": "Ignorer"}, {"description": "Ignorer"}),
+        missing_reason="notifications_skip_button_not_found",
+    )
+    if target["failure_reason"]:
+        warnings.append(str(target["failure_reason"]))
+        return False
+    try:
+        _click_target(target["target"])
+        return True
+    except Exception:
+        warnings.append("notifications_skip_tap_failed")
+        return False
+
+
+def _android_back_from_notification_settings_once(d: Any, warnings: list[str]) -> bool:
+    press = getattr(d, "press", None)
+    if not callable(press):
+        warnings.append("android_notification_settings_back_unavailable")
+        return False
+    try:
+        press("back")
+        return True
+    except Exception:
+        warnings.append("android_notification_settings_back_failed")
         return False
 
 
@@ -2494,6 +2648,12 @@ def _result(
     post_login_location_services_prompt_detected: bool = False,
     post_login_location_services_prompt_dismissed: bool = False,
     post_login_location_services_prompt_dismiss_method: str = "",
+    notifications_prompt_detected: bool = False,
+    notifications_next_tap_sent: bool = False,
+    notifications_skip_tap_sent: bool = False,
+    notifications_skip_after_settings_sent: bool = False,
+    android_notification_settings_detected: bool = False,
+    android_back_from_notification_settings_sent: bool = False,
     username_replaced: bool = False,
     username_input_confirmed: str = "unknown",
     username_input_result: str = "",
@@ -2551,6 +2711,12 @@ def _result(
                 "post_login_location_services_prompt_detected": post_login_location_services_prompt_detected,
                 "post_login_location_services_prompt_dismissed": post_login_location_services_prompt_dismissed,
                 "post_login_location_services_prompt_dismiss_method": post_login_location_services_prompt_dismiss_method,
+                "notifications_prompt_detected": notifications_prompt_detected,
+                "notifications_next_tap_sent": notifications_next_tap_sent,
+                "notifications_skip_tap_sent": notifications_skip_tap_sent,
+                "notifications_skip_after_settings_sent": notifications_skip_after_settings_sent,
+                "android_notification_settings_detected": android_notification_settings_detected,
+                "android_back_from_notification_settings_sent": android_back_from_notification_settings_sent,
                 "post_dismiss_screen_type": post_dismiss_screen_type,
                 "post_dismiss_final_observation_count": post_dismiss_final_observation_count,
                 "post_dismiss_final_screens": list(post_dismiss_final_screens or []),

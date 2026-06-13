@@ -6,7 +6,9 @@ RunControl-4: claim + controlled subprocess launch when explicitly enabled.
 
 from __future__ import annotations
 
+import contextlib
 import os
+import json
 import signal
 import socket
 import subprocess
@@ -25,6 +27,7 @@ from account_run_control import (
     complete_account_run_request,
     get_account_run_request,
     insert_manual_run_audit,
+    link_account_run_request_run,
     mark_account_run_request_starting,
     normalize_request_uuid,
     reconcile_linked_ig_run_terminal,
@@ -52,6 +55,7 @@ class DispatcherConfig:
     subprocess_timeout_seconds: int
     require_assignment: bool
     enforce_assignment_window: bool
+    max_consecutive_loop_errors: int = 10
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -119,6 +123,7 @@ def load_dispatcher_config() -> DispatcherConfig:
         subprocess_timeout_seconds=max(60, _env_int("RUN_CONTROL_DISPATCHER_SUBPROCESS_TIMEOUT_SECONDS", 7200)),
         require_assignment=_env_bool("RUN_CONTROL_DISPATCHER_REQUIRE_ASSIGNMENT", False),
         enforce_assignment_window=_env_bool("RUN_CONTROL_DISPATCHER_ENFORCE_ASSIGNMENT_WINDOW", False),
+        max_consecutive_loop_errors=max(1, _env_int("RUN_CONTROL_DISPATCHER_MAX_CONSECUTIVE_LOOP_ERRORS", 5)),
     )
 
 
@@ -178,6 +183,24 @@ def count_active_account_run_requests() -> int:
     return len(rows)
 
 
+def _classify_queue_read_failure(exc: Exception) -> tuple[str, str]:
+    if isinstance(exc, supabase_client.SupabaseRestError):
+        return str(exc.reason or "active_queue_read_failed"), str(exc)[:200]
+    err = str(exc)
+    lowered = err.lower()
+    if "timed out" in lowered:
+        return "supabase_rest_timeout", err[:200]
+    if "401" in err:
+        return "supabase_auth_401", err[:200]
+    if "403" in err:
+        return "supabase_auth_403", err[:200]
+    if "dns" in lowered or "name or service not known" in lowered:
+        return "supabase_dns_failed", err[:200]
+    if "ssl" in lowered or "tls" in lowered:
+        return "supabase_tls_failed", err[:200]
+    return "active_queue_read_failed", err[:200]
+
+
 def summarize_active_account_run_requests(limit: int = 20) -> dict[str, Any]:
     """Safe startup summary without secrets or device identifiers."""
     try:
@@ -192,11 +215,13 @@ def summarize_active_account_run_requests(limit: int = 20) -> dict[str, Any]:
             },
         ) or []
     except Exception as exc:
+        reason, err = _classify_queue_read_failure(exc)
         return {
             "active_count": -1,
             "requests": [],
             "read_failed": True,
-            "error": str(exc)[:200],
+            "error": err,
+            "supabase_reason": reason,
         }
     safe_rows: list[dict[str, Any]] = []
     for row in rows:
@@ -234,10 +259,11 @@ def evaluate_launch_mode_startup_preflight(cfg: DispatcherConfig) -> dict[str, A
     if summary.get("read_failed"):
         return {
             "ok": False,
-            "reason": "active_queue_read_failed",
+            "reason": str(summary.get("supabase_reason") or "active_queue_read_failed"),
             "active_count": active_count,
             "allow_existing_queue": _allow_existing_queue_on_startup(),
             "requests": [],
+            "error": summary.get("error"),
         }
 
     if active_count > 0 and not _allow_existing_queue_on_startup():
@@ -340,7 +366,7 @@ def _build_login_provisioner_command(
         account_id,
         "--expected-username",
         expected_username or "unknown",
-        "--no-publish",
+        "--publish",
         "--json",
         "--run-id",
         request_id,
@@ -398,6 +424,87 @@ def _build_runner_command(
     if serial:
         cmd.extend(["--device-serial", serial])
     return cmd
+
+
+def _login_provisioner_env() -> dict[str, str]:
+    env = runner_subprocess_env()
+    env["LOGIN_PROVISIONER_PUBLISH_ENABLED"] = "true"
+    return env
+
+
+def _create_and_link_login_run(account_id: str, request_id: str, worker_id: str) -> str | None:
+    try:
+        run = supabase_client.create_run(account_id=account_id)
+        run_id = str(run.get("id") or "").strip()
+        if not run_id:
+            return None
+        linked = link_account_run_request_run(request_id, worker_id, run_id)
+        if not linked:
+            return None
+        _audit(
+            account_id=account_id,
+            action_type="manual_run_started",
+            status="success",
+            message="Manual login run linked to ig_runs.",
+            run_id=run_id,
+            payload={"request_id": request_id, "run_type": "login_provisioning"},
+        )
+        return run_id
+    except Exception as exc:
+        log(
+            "warning",
+            "login_run_link_create_failed",
+            account_id=account_id,
+            request_id=request_id,
+            error=str(exc)[:200],
+        )
+        return None
+
+
+def _safe_login_provisioner_summary_for_audit(run_id: str | None) -> dict[str, Any]:
+    safe_run_id = str(run_id or "").strip()
+    if not safe_run_id:
+        return {}
+    log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "instagram_login_provisioner.jsonl")
+    try:
+        with open(log_path, "r", encoding="utf-8") as handle:
+            matches = [
+                json.loads(line)
+                for line in handle
+                if line.strip() and f'"run_id":"{safe_run_id}"' in line
+            ]
+    except Exception as exc:
+        log("warning", "login_provisioner_summary_read_failed", run_id=safe_run_id, error=str(exc)[:200])
+        return {}
+    if not matches:
+        return {}
+    summary = dict(matches[-1])
+    allowed_keys = {
+        "run_id",
+        "ok",
+        "completed",
+        "final_outcome",
+        "reason",
+        "status_candidate",
+        "published",
+        "publish_enabled",
+        "publish_result",
+        "publish_reason",
+        "publish_error_code",
+        "app_start_attempted",
+        "app_start_ok",
+        "package_name",
+        "expected_package_name",
+        "actual_foreground_package",
+        "screen_after_app_start",
+        "screen_after_app_start_initial",
+        "screen_after_app_start_final",
+        "screen_type",
+        "final_terminal_screen",
+        "post_submit_screens",
+        "warnings",
+    }
+    return {key: summary.get(key) for key in allowed_keys if key in summary}
 
 
 def _safe_complete_account_run_request(
@@ -537,13 +644,18 @@ def _finalize_manual_run_after_subprocess(
             request_id=request_id,
             exit_code=exit_code,
         )
+        summary = _safe_login_provisioner_summary_for_audit(run_id or request_id)
         _audit(
             account_id=account_id,
             action_type="manual_run_completed",
             status="success",
             message="Manual run completed.",
             run_id=run_id,
-            payload={"request_id": request_id, "exit_code": exit_code},
+            payload={
+                "request_id": request_id,
+                "exit_code": exit_code,
+                **({"login_provisioner_summary": summary} if summary else {}),
+            },
         )
         return
 
@@ -746,10 +858,14 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
                     error=str(exc)[:200],
                 )
 
+    linked_login_run_id = None
+    if _is_login_run_type(run_type):
+        linked_login_run_id = _create_and_link_login_run(account_id, request_id, cfg.worker_id)
+
     cmd = _build_runner_command(
         account_id,
         run_type,
-        request_id,
+        linked_login_run_id or request_id,
         device_serial=adb_serial,
         package_name=dispatch_ctx.get("package_name") or dispatch_ctx.get("app_package") or dispatch_ctx.get("package"),
         app_instance_id=dispatch_ctx.get("app_instance_id"),
@@ -771,7 +887,7 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
     proc = subprocess.Popen(
         cmd,
         cwd=os.path.dirname(os.path.abspath(__file__)),
-        env=runner_subprocess_env(),
+        env=_login_provisioner_env() if _is_login_run_type(run_type) else runner_subprocess_env(),
     )
     exit_code, timed_out = _wait_for_subprocess(
         cfg,
@@ -829,23 +945,68 @@ def run_once(cfg: DispatcherConfig | None = None) -> dict[str, Any]:
     }
 
 
+def evaluate_launch_mode_startup_preflight_with_retries(cfg: DispatcherConfig) -> dict[str, Any]:
+    max_attempts = max(1, _env_int("RUN_CONTROL_DISPATCHER_PREFLIGHT_RETRIES", 3))
+    backoff_s = max(0.0, _env_float("RUN_CONTROL_DISPATCHER_PREFLIGHT_RETRY_SECONDS", 2.0))
+    last: dict[str, Any] = {"ok": False, "reason": "active_queue_read_failed"}
+    for attempt in range(1, max_attempts + 1):
+        last = evaluate_launch_mode_startup_preflight(cfg)
+        if last.get("ok"):
+            return last
+        reason = str(last.get("reason") or "")
+        if reason == "active_queue_present":
+            return last
+        if not reason.startswith("supabase_"):
+            return last
+        if attempt < max_attempts:
+            log(
+                "warning",
+                "run_control_dispatcher_preflight_retry",
+                worker_id=cfg.worker_id,
+                attempt=attempt,
+                max_attempts=max_attempts,
+                reason=reason,
+                error=str(last.get("error") or "")[:200],
+            )
+            if backoff_s > 0:
+                time.sleep(backoff_s * attempt)
+    return last
+
+
 def run_forever(cfg: DispatcherConfig | None = None) -> int:
     cfg = cfg or load_dispatcher_config()
     if not cfg.enabled:
         log("error", "run_control_dispatcher_disabled")
         return 2
 
-    preflight = evaluate_launch_mode_startup_preflight(cfg)
+    preflight = evaluate_launch_mode_startup_preflight_with_retries(cfg)
     if not preflight.get("ok"):
+        reason = str(preflight.get("reason") or "blocked")
         log(
             "error",
             "run_control_dispatcher_launch_preflight_blocked",
             worker_id=cfg.worker_id,
-            reason=str(preflight.get("reason") or "blocked"),
+            reason=reason,
             active_count=int(preflight.get("active_count") or 0),
             allow_existing_queue=bool(preflight.get("allow_existing_queue")),
             active_requests=list(preflight.get("requests") or [])[:5],
+            error=str(preflight.get("error") or "")[:200],
         )
+        if reason.startswith("supabase_"):
+            try:
+                _heartbeat(
+                    cfg,
+                    status=f"unhealthy:{reason}",
+                    metadata={"preflight_blocked": True, "supabase_reason": reason},
+                )
+            except Exception as heartbeat_exc:
+                log(
+                    "warning",
+                    "run_control_dispatcher_unhealthy_heartbeat_failed",
+                    worker_id=cfg.worker_id,
+                    reason=reason,
+                    error=str(heartbeat_exc)[:200],
+                )
         return 3
 
     log(
@@ -873,18 +1034,35 @@ def run_forever(cfg: DispatcherConfig | None = None) -> int:
     last_heartbeat = 0.0
     last_loop_error_key = ""
     last_loop_error_logged_at = 0.0
+    consecutive_loop_errors = 0
     while not stop:
         try:
             run_once(cfg)
             last_loop_error_key = ""
+            consecutive_loop_errors = 0
         except Exception as exc:
+            consecutive_loop_errors += 1
             err = str(exc)[:500]
             now = time.monotonic()
             err_key = err[:200]
             if err_key != last_loop_error_key or (now - last_loop_error_logged_at) >= 60.0:
-                log("error", "run_control_dispatcher_loop_failed", error=err)
+                log(
+                    "error",
+                    "run_control_dispatcher_loop_failed",
+                    error=err,
+                    consecutive_loop_errors=consecutive_loop_errors,
+                    max_consecutive_loop_errors=cfg.max_consecutive_loop_errors,
+                )
                 last_loop_error_key = err_key
                 last_loop_error_logged_at = now
+            if consecutive_loop_errors >= cfg.max_consecutive_loop_errors:
+                log(
+                    "error",
+                    "run_control_dispatcher_exit_after_repeated_loop_errors",
+                    worker_id=cfg.worker_id,
+                    consecutive_loop_errors=consecutive_loop_errors,
+                )
+                return 4
         now = time.monotonic()
         if now - last_heartbeat >= cfg.heartbeat_seconds:
             _heartbeat(cfg, status="idle")
@@ -900,8 +1078,13 @@ def main(argv: list[str] | None = None) -> int:
     args = list(argv or sys.argv[1:])
     if args and args[0] in {"--preflight", "preflight"}:
         cfg = load_dispatcher_config()
-        result = evaluate_launch_mode_startup_preflight(cfg)
-        print(result)
+        if "--json" in args:
+            with contextlib.redirect_stdout(sys.stderr):
+                result = evaluate_launch_mode_startup_preflight_with_retries(cfg)
+            print(json.dumps(result, default=str, sort_keys=True))
+        else:
+            result = evaluate_launch_mode_startup_preflight_with_retries(cfg)
+            print(result)
         return 0 if result.get("ok") else 3
     if args and args[0] in {"--once", "once"}:
         result = run_once()

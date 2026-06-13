@@ -19,17 +19,28 @@ FAKE_PASSWORD = "fake-password-for-unit-tests"
 SECRET_REF = "supabase_vault://" + "11111111-2222-4333-8444-" + "555555555555"
 LOGIN_FORM_XML = '<node text="Username, email or mobile number" /><node text="Password" /><node text="Log in" />'
 UNKNOWN_XML = '<node text="Instagram" />'
+EMAIL_CODE_XML = (
+    '<node text="Check your email" />'
+    '<node text="Enter the code we sent to m*******e@hotmail.com" />'
+    '<node class="android.widget.EditText" text="Enter code" editable="true" />'
+    '<node text="Continue" />'
+    '<node text="Try another way" />'
+)
 
 
 class FakeDevice:
-    def __init__(self, hierarchy: str = UNKNOWN_XML) -> None:
+    def __init__(self, hierarchy: str = UNKNOWN_XML, *, foreground_package: str | None = None) -> None:
         self.hierarchy = hierarchy
+        self.foreground_package = foreground_package
         self.app_start = Mock()
         self.dump_calls = 0
 
     def dump_hierarchy(self, compressed: bool = False) -> str:
         self.dump_calls += 1
         return self.hierarchy
+
+    def app_current(self) -> dict:
+        return {"package": self.foreground_package} if self.foreground_package is not None else {}
 
 
 def _args(*items: str) -> argparse.Namespace:
@@ -69,6 +80,20 @@ def _fake_result(**overrides):
 
 
 class InstagramLoginProvisionerCliTest(unittest.TestCase):
+    def test_physical_device_requires_explicit_package_name(self) -> None:
+        connect = Mock(side_effect=AssertionError("device should not be connected before package preflight"))
+        with tempfile.TemporaryDirectory() as tmp:
+            code, summary = cli.run_cli_command(
+                _args_with_log(f"{tmp}/login.jsonl", "--device-serial", "RFGL145VCKE", "--json"),
+                connect_func=connect,
+            )
+
+        self.assertEqual(code, 1)
+        self.assertEqual(summary["reason"], "package_name_required_for_physical_clone")
+        self.assertFalse(summary["submit_executed"])
+        self.assertFalse(summary["package_guard_checked"])
+        connect.assert_not_called()
+
     def test_no_submit_does_not_read_vault_when_login_form_is_observed(self) -> None:
         device = FakeDevice(LOGIN_FORM_XML)
         credentials_lookup = Mock(return_value={"unexpected": "should_not_be_used"})
@@ -102,11 +127,115 @@ class InstagramLoginProvisionerCliTest(unittest.TestCase):
             )
 
         self.assertEqual(code, 1)
-        self.assertEqual(summary["final_outcome"], "unknown")
+        self.assertEqual(summary["final_outcome"], "dry_run")
         self.assertFalse(summary["submit_executed"])
         self.assertEqual(summary["screen_before_submit"], "")
         credentials_lookup.assert_not_called()
         secret_reader.assert_not_called()
+
+    def test_resume_from_action_refuses_login_form_screen_before_consuming_code(self) -> None:
+        device = FakeDevice(LOGIN_FORM_XML)
+        resume_flow = Mock(side_effect=AssertionError("resume flow should not run"))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            code, summary = cli.run_cli_command(
+                _args_with_log(
+                    f"{tmp}/login.jsonl",
+                    "--resume-email-code-from-action",
+                    "--verification-action-id",
+                    "action-id",
+                    "--json",
+                ),
+                connect_func=lambda _serial: device,
+                run_flow_func=resume_flow,
+            )
+
+        self.assertEqual(code, 1)
+        self.assertEqual(summary["reason"], "resume_email_code_screen_not_active")
+        self.assertEqual(summary["screen_type"], "login_form_empty")
+        self.assertEqual(summary["router_decision"], "email_code_resume_preflight")
+        self.assertFalse(summary["submit_executed"])
+        resume_flow.assert_not_called()
+
+    def test_resume_wrong_package_stops_before_code_state_or_consume(self) -> None:
+        device = FakeDevice(EMAIL_CODE_XML, foreground_package="com.instagram.android")
+        resume_flow = Mock(side_effect=AssertionError("resume flow injection should not run"))
+
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.object(cli, "_request_json", side_effect=AssertionError("code state should not be read")),
+            patch.object(
+                cli,
+                "run_email_code_resume_flow",
+                return_value=_fake_result(
+                    final_outcome="wrong_app_package",
+                    reason="resume_email_code_wrong_package",
+                    safe_metadata={
+                        "package_guard_checked": True,
+                        "package_guard_mismatch": True,
+                        "expected_package_name": "com.instagram.androie",
+                        "actual_foreground_package": "com.instagram.android",
+                        "login_package_mismatch_incident": {"published": True},
+                        "login_package_mismatch_dashboard_action": {"published": True},
+                        "login_package_mismatch_notifications": {"dispatched": True},
+                    },
+                ),
+            ) as package_guard_flow,
+        ):
+            code, summary = cli.run_cli_command(
+                _args_with_log(
+                    f"{tmp}/login.jsonl",
+                    "--device-serial",
+                    "RFGL145VCKE",
+                    "--package-name",
+                    "com.instagram.androie",
+                    "--resume-email-code-from-action",
+                    "--verification-action-id",
+                    "action-id",
+                    "--json",
+                ),
+                connect_func=lambda _serial: device,
+                run_flow_func=resume_flow,
+            )
+
+        self.assertEqual(code, 1)
+        self.assertEqual(summary["reason"], "resume_email_code_wrong_package")
+        self.assertEqual(summary["final_outcome"], "wrong_app_package")
+        self.assertTrue(summary["package_guard_mismatch"])
+        self.assertEqual(summary["actual_foreground_package"], "com.instagram.android")
+        resume_flow.assert_not_called()
+        package_guard_flow.assert_called_once()
+
+    def test_resume_from_action_email_challenge_without_submission_returns_code_missing(self) -> None:
+        device = FakeDevice(EMAIL_CODE_XML)
+        resume_flow = Mock(side_effect=AssertionError("resume flow should not run"))
+
+        def fake_request(_method, table, *, query=None, **_kwargs):
+            if table == "account_dashboard_actions":
+                return [{"id": "action-id", "status": "pending", "action_type": "enter_email_verification_code"}]
+            if table == "account_verification_code_submissions":
+                return []
+            raise AssertionError(f"unexpected table {table}")
+
+        with tempfile.TemporaryDirectory() as tmp, patch.object(cli, "_request_json", side_effect=fake_request):
+            code, summary = cli.run_cli_command(
+                _args_with_log(
+                    f"{tmp}/login.jsonl",
+                    "--resume-email-code-from-action",
+                    "--verification-action-id",
+                    "action-id",
+                    "--json",
+                ),
+                connect_func=lambda _serial: device,
+                run_flow_func=resume_flow,
+            )
+
+        self.assertEqual(code, 1)
+        self.assertEqual(summary["reason"], "code_missing")
+        self.assertEqual(summary["final_outcome"], "verification_pending")
+        self.assertEqual(summary["screen_type"], "email_code_challenge")
+        self.assertFalse(summary["submit_executed"])
+        resume_flow.assert_not_called()
 
     def test_submit_uses_app_start_by_default(self) -> None:
         device = FakeDevice()

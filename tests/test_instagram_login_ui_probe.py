@@ -33,6 +33,26 @@ class InstagramLoginUiProbeTest(unittest.TestCase):
         self.assertEqual(result.outcome, LoginProbeOutcome.LOGGED_OUT)
         self.assertEqual(result.reason, "login_screen_signal")
 
+    def test_detects_join_instagram_landing(self) -> None:
+        xml = (
+            '<node text="Join Instagram" />'
+            '<node text="Share what you&apos;re into with the people who get you." />'
+            '<node text="Get started" clickable="true" />'
+            '<node text="I already have a profile" clickable="true" />'
+            '<node text="Meta" />'
+        )
+
+        result = probe_login_ui_from_hierarchy(xml)
+        signals = extract_login_screen_signals_from_hierarchy(xml)
+
+        self.assertEqual(result.outcome, LoginProbeOutcome.UNKNOWN)
+        self.assertEqual(result.reason, "join_instagram_landing_detected")
+        self.assertEqual(result.metadata["screen_type"], "join_instagram_landing")
+        self.assertEqual(signals["screen_type"], "join_instagram_landing")
+        self.assertTrue(signals["join_instagram_landing_detected"])
+        self.assertTrue(signals["has_already_have_profile_button"])
+        self.assertTrue(signals["has_get_started_button"])
+
     def test_detects_needs_2fa(self) -> None:
         xml = '<node text="Enter code" /><node text="authentication code" />'
 
@@ -209,6 +229,60 @@ class InstagramLoginUiProbeTest(unittest.TestCase):
         self.assertEqual(result.metadata["screen_type"], "connected_post_login_location_services_prompt")
         self.assertEqual(signals["screen_type"], "connected_post_login_location_services_prompt")
         self.assertTrue(signals["post_login_location_services_prompt"])
+        self.assertTrue(signals["connected_post_login_setup"])
+
+    def test_detects_instagram_turn_on_notifications_prompt_as_connected(self) -> None:
+        xml = (
+            '<node text="Turn on notifications" />'
+            '<node text="Find out right away when people follow you or like and comment on your posts." />'
+            '<node text="Next" clickable="true" />'
+        )
+
+        result = probe_login_ui_from_hierarchy(xml, stage="post_submit")
+        signals = extract_login_screen_signals_from_hierarchy(xml)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.outcome, LoginProbeOutcome.CONNECTED)
+        self.assertEqual(result.reason, "instagram_turn_on_notifications_prompt")
+        self.assertEqual(result.metadata["screen_type"], "instagram_turn_on_notifications_prompt")
+        self.assertTrue(signals["instagram_turn_on_notifications_prompt"])
+        self.assertTrue(signals["notifications_prompt_detected"])
+        self.assertTrue(signals["has_notifications_next_button"])
+        self.assertFalse(signals["has_notifications_skip_button"])
+        self.assertTrue(signals["connected_post_login_setup"])
+
+    def test_detects_instagram_turn_on_notifications_prompt_with_skip_as_connected(self) -> None:
+        xml = (
+            '<node text="Turn on notifications" />'
+            '<node text="Find out right away when people follow you or like and comment on your posts." />'
+            '<node text="Next" clickable="true" />'
+            '<node text="Skip" clickable="true" />'
+        )
+
+        result = probe_login_ui_from_hierarchy(xml, stage="post_submit")
+        signals = extract_login_screen_signals_from_hierarchy(xml)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.outcome, LoginProbeOutcome.CONNECTED)
+        self.assertTrue(signals["has_notifications_skip_button"])
+        self.assertTrue(signals["has_notifications_next_button"])
+
+    def test_detects_android_instagram_notification_settings_as_connected(self) -> None:
+        xml = (
+            '<node text="Instagram" />'
+            '<node text="Allow notifications" />'
+            '<node text="All notifications from this app are blocked." />'
+        )
+
+        result = probe_login_ui_from_hierarchy(xml, stage="post_submit")
+        signals = extract_login_screen_signals_from_hierarchy(xml)
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.outcome, LoginProbeOutcome.CONNECTED)
+        self.assertEqual(result.reason, "android_instagram_notification_settings")
+        self.assertEqual(result.metadata["screen_type"], "android_instagram_notification_settings")
+        self.assertTrue(signals["android_instagram_notification_settings"])
+        self.assertTrue(signals["android_notification_settings_detected"])
         self.assertTrue(signals["connected_post_login_setup"])
 
     def test_empty_xml_is_unknown(self) -> None:

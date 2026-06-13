@@ -26,10 +26,15 @@ LOGIN_CHALLENGE_ACTIONS = {
         "requires_client_action": False,
         "severity": "warning",
     },
+    "review_login_package_mismatch": {
+        "title": "Mauvaise app Instagram détectée",
+        "safe_client_message": "Wrong app/clone detected for this account. Review device assignment before retry.",
+        "action_label": "Revoir l'assignation du device",
+        "audience": "admin",
+        "requires_client_action": False,
+        "severity": "critical",
+    },
 }
-
-EMAIL_CODE_ACTION_TTL_MINUTES = 10
-
 
 FORBIDDEN_METADATA_KEYS = {
     "password",
@@ -49,6 +54,8 @@ FORBIDDEN_METADATA_KEYS = {
     "adb_serial",
     "device_udid",
 }
+
+EMAIL_CODE_ACTION_TTL_MINUTES = 10
 
 
 def _enabled() -> bool:
@@ -141,6 +148,17 @@ def upsert_login_challenge_dashboard_action(
         }
     except Exception as exc:
         reason = "dashboard_action_upsert_failed"
+        fallback = _fallback_upsert_login_challenge_dashboard_action(
+            account_id=aid,
+            action_type=atype,
+            spec=spec,
+            safe_metadata=safe_metadata,
+            dedupe_key=dedupe_key,
+            deep_link=deep_link,
+            client_id=client_id,
+        )
+        if fallback.get("published"):
+            return fallback
         if not _fail_open():
             raise
         log(
@@ -152,3 +170,86 @@ def upsert_login_challenge_dashboard_action(
             error_type=type(exc).__name__,
         )
         return {"published": False, "reason": reason, "action_type": atype}
+
+
+def _fallback_upsert_login_challenge_dashboard_action(
+    *,
+    account_id: str,
+    action_type: str,
+    spec: dict[str, Any],
+    safe_metadata: dict[str, Any],
+    dedupe_key: str,
+    deep_link: str,
+    client_id: str | None,
+) -> dict[str, Any]:
+    """Direct safe upsert when the RPC path is slow or unavailable."""
+
+    from supabase_client import _request_json
+
+    existing_rows = _request_json(
+        "GET",
+        "account_dashboard_actions",
+        query={
+            "select": "id,status",
+            "account_id": f"eq.{account_id}",
+            "dedupe_key": f"eq.{dedupe_key}",
+            "status": "in.(pending,acknowledged,pending_verification,code_submitted)",
+            "order": "created_at.desc",
+            "limit": "1",
+        },
+    ) or []
+    body = {
+        "account_id": account_id,
+        "client_id": client_id,
+        "action_type": action_type,
+        "status": "pending",
+        "severity": spec["severity"],
+        "audience": spec["audience"],
+        "requires_client_action": spec["requires_client_action"],
+        "blocking_campaign": True,
+        "title": spec["title"],
+        "safe_client_message": spec["safe_client_message"],
+        "action_label": spec["action_label"],
+        "action_deep_link": deep_link,
+        "dedupe_key": dedupe_key,
+        "metadata": safe_metadata,
+    }
+    try:
+        if existing_rows:
+            action_id = str(existing_rows[0].get("id") or "").strip()
+            if not action_id:
+                return {"published": False, "reason": "fallback_missing_action_id"}
+            rows = _request_json(
+                "PATCH",
+                "account_dashboard_actions",
+                query={"id": f"eq.{action_id}"},
+                body={
+                    "status": "pending",
+                    "metadata": safe_metadata,
+                },
+                prefer_representation=True,
+            ) or []
+            patched_id = str((rows[0] or {}).get("id") or action_id) if rows else action_id
+            return {
+                "published": True,
+                "reason": "fallback_patched",
+                "action_type": action_type,
+                "dashboard_action_id": patched_id,
+            }
+        rows = _request_json(
+            "POST",
+            "account_dashboard_actions",
+            body=body,
+            prefer_representation=True,
+        ) or []
+        action_id = str((rows[0] or {}).get("id") or "") if rows else ""
+        if not action_id:
+            return {"published": False, "reason": "fallback_insert_failed"}
+        return {
+            "published": True,
+            "reason": "fallback_inserted",
+            "action_type": action_type,
+            "dashboard_action_id": action_id,
+        }
+    except Exception:
+        return {"published": False, "reason": "fallback_upsert_failed"}

@@ -392,6 +392,8 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
             patch.object(consumer, "resolve_account_assignment_runtime_context", return_value=dispatch_ctx),
             patch.object(consumer, "_heartbeat"),
             patch.object(consumer, "runner_subprocess_env", return_value=fake_env),
+            patch.object(consumer, "_create_and_link_login_run", return_value=TEST_RUN_ID),
+            patch.object(consumer, "_load_expected_username", return_value="cinema_catchup"),
             patch.object(consumer.subprocess, "Popen", return_value=FakeProc()) as popen,
             patch.object(consumer, "_finalize_manual_run_after_subprocess"),
             patch.object(consumer, "_audit"),
@@ -400,6 +402,7 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
 
         self.assertEqual(popen.call_args.kwargs.get("env"), fake_env)
         self.assertEqual(fake_env["ADB_PATH"], "/tmp/platform-tools/adb")
+        self.assertEqual(fake_env["LOGIN_PROVISIONER_PUBLISH_ENABLED"], "true")
 
     def test_build_login_email_code_resume_command(self) -> None:
         with patch.object(consumer, "_load_expected_username", return_value="cinema_catchup"):
@@ -419,7 +422,8 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
         self.assertEqual(cmd[cmd.index("--verification-action-id") + 1], "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
         self.assertEqual(cmd[cmd.index("--package-name") + 1], "com.instagram.androie")
         self.assertEqual(cmd[cmd.index("--expected-app-instance-id") + 1], "7637db9a-3581-4099-8068-d5eb1ed86f96")
-        self.assertIn("--no-publish", cmd)
+        self.assertIn("--publish", cmd)
+        self.assertNotIn("--no-publish", cmd)
         self.assertNotIn("verification_code", " ".join(cmd))
 
     def test_build_login_provisioning_command(self) -> None:
@@ -434,9 +438,17 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
             )
         self.assertIn("instagram_login_provisioner_cli", cmd)
         self.assertNotIn("--resume-email-code-from-action", cmd)
+        self.assertIn("--publish", cmd)
+        self.assertNotIn("--no-publish", cmd)
         self.assertIn("--expected-username", cmd)
         self.assertEqual(cmd[cmd.index("--package-name") + 1], "com.instagram.androie")
         self.assertEqual(cmd[cmd.index("--expected-app-instance-id") + 1], "7637db9a-3581-4099-8068-d5eb1ed86f96")
+
+    def test_login_provisioner_env_enables_controlled_publish(self) -> None:
+        with patch.object(consumer, "runner_subprocess_env", return_value={"PATH": "/usr/bin"}):
+            env = consumer._login_provisioner_env()
+        self.assertEqual(env["LOGIN_PROVISIONER_PUBLISH_ENABLED"], "true")
+        self.assertEqual(env["PATH"], "/usr/bin")
 
     def test_handle_claimed_request_blocks_assignment_device_without_serial(self) -> None:
         cfg = consumer.DispatcherConfig(

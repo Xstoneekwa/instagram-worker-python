@@ -35,6 +35,14 @@ CONTINUE_SIGNALS = {
     "has_continue_button": True,
     "has_use_another_profile": True,
 }
+JOIN_INSTAGRAM_SIGNALS = {
+    "screen_type": "join_instagram_landing",
+    "join_instagram_landing_detected": True,
+    "has_join_instagram_title": True,
+    "has_join_instagram_subtitle": True,
+    "has_get_started_button": True,
+    "has_already_have_profile_button": True,
+}
 WRONG_CONTINUE_SIGNALS = {
     "screen_type": "continue_as_candidate",
     "suggested_username": "random_old_profile",
@@ -66,6 +74,19 @@ CONTINUE_AS_XML = (
     '<node text="Continue" clickable="true" bounds="[100,1000][980,1120]" />'
     '<node text="Use another profile" clickable="false" bounds="[371,1215][710,1280]" />'
     '<node text="Create new account" clickable="true" bounds="[100,2000][980,2190]" />'
+)
+JOIN_INSTAGRAM_XML = (
+    '<node text="Join Instagram" />'
+    '<node text="Share what you&apos;re into with the people who get you." />'
+    '<node text="Get started" clickable="true" bounds="[100,1480][980,1600]" />'
+    '<node text="I already have a profile" clickable="true" bounds="[100,1640][980,1760]" />'
+    '<node text="Meta" />'
+)
+JOIN_INSTAGRAM_WITHOUT_EXISTING_XML = (
+    '<node text="Join Instagram" />'
+    '<node text="Share what you&apos;re into with the people who get you." />'
+    '<node text="Get started" clickable="true" bounds="[100,1480][980,1600]" />'
+    '<node text="Meta" />'
 )
 ACCOUNT_PICKER_XML = (
     '<node clickable="true" bounds="[100,300][980,500]" class="android.view.ViewGroup" />'
@@ -1062,6 +1083,61 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertTrue(secret.revealed)
         self.assertTrue(selectors["password"].set_text_calls)
         self.assertEqual(result.safe_metadata["screen_after_app_start"], "continue_as_candidate")
+
+    def test_join_instagram_landing_uses_existing_profile_then_submits_login_form(self) -> None:
+        device, selectors = configured_device(CONNECTED_XML)
+        device.hierarchies = [
+            JOIN_INSTAGRAM_XML,
+            LOGIN_FORM_XML,
+            LOGIN_FORM_XML,
+            CONNECTED_XML,
+            CONNECTED_XML,
+        ]
+        secret = TrackingSecretValue(PASSWORD)
+
+        result = self.run_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username=USERNAME,
+            credentials_getter=Mock(return_value={"username": USERNAME, "password": secret}),
+            initial_signals=JOIN_INSTAGRAM_SIGNALS,
+            sleeper=Mock(),
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.final_outcome, "connected")
+        self.assertIn("route:open_existing_profile_from_join_landing", result.actions_taken)
+        self.assertIn("tap_already_have_profile", result.actions_taken)
+        self.assertIn("route:start_login_form_flow", result.actions_taken)
+        self.assertIn("login_form_submit", result.actions_taken)
+        self.assertEqual(device.bounds_clicks, [(540, 1700)])
+        self.assertTrue(result.safe_metadata["join_instagram_landing_detected"])
+        self.assertTrue(result.safe_metadata["already_have_profile_tap_sent"])
+        self.assertTrue(result.safe_metadata["login_form_after_join_landing_detected"])
+        self.assertEqual(result.safe_metadata["selected_route"], "join_instagram_existing_profile")
+        self.assertTrue(secret.revealed)
+        self.assertTrue(selectors["username"].set_text_calls)
+        self.assertTrue(selectors["password"].set_text_calls)
+
+    def test_join_instagram_landing_missing_existing_profile_stops_safe(self) -> None:
+        device, selectors = configured_device(CONNECTED_XML)
+        device.hierarchies = [JOIN_INSTAGRAM_WITHOUT_EXISTING_XML]
+
+        result = self.run_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username=USERNAME,
+            credentials_getter=Mock(return_value=credentials()),
+            initial_signals=JOIN_INSTAGRAM_SIGNALS,
+            sleeper=Mock(),
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.final_outcome, "action_failed")
+        self.assertEqual(result.failure_reason, "unsupported_login_landing")
+        self.assertEqual(device.bounds_clicks, [])
+        self.assertEqual(selectors["login"].click_calls, 0)
+        self.assertNotIn("login_form_submit", result.actions_taken)
 
     def test_login_form_credentials_ok_connected_success(self) -> None:
         device, selectors = configured_device(CONNECTED_XML)

@@ -106,6 +106,10 @@ SAVE_PASSWORD_FOR_INSTAGRAM_PATTERNS = (
     "enregistrer le mot de passe pour instagram",
     "enregistrer votre mot de passe pour instagram",
 )
+JOIN_INSTAGRAM_LANDING_TITLE = "join instagram"
+JOIN_INSTAGRAM_LANDING_SUBTITLE = "share what you're into with the people who get you"
+JOIN_INSTAGRAM_EXISTING_PROFILE_BUTTON = "i already have a profile"
+JOIN_INSTAGRAM_GET_STARTED_BUTTON = "get started"
 LOGGED_OUT_PATTERNS = (
     "log in to instagram",
     "username",
@@ -130,6 +134,17 @@ POST_LOGIN_LOCATION_SERVICES_PROMPT_MARKERS = (
     "how you can use location services",
     "how we'll use this information",
     "how you can control this",
+)
+INSTAGRAM_TURN_ON_NOTIFICATIONS_TITLE = "turn on notifications"
+INSTAGRAM_TURN_ON_NOTIFICATIONS_SUBTITLE_MARKERS = (
+    "find out right away",
+    "people follow you",
+    "like and comment on your posts",
+)
+ANDROID_INSTAGRAM_NOTIFICATION_SETTINGS_MARKERS = (
+    "allow notifications",
+    "all notifications from this app are blocked",
+    "notifications from this app are blocked",
 )
 COMMON_NON_USERNAME_TEXTS = {
     "continue",
@@ -253,6 +268,15 @@ def extract_login_screen_signals_from_hierarchy(
         or _has_phrase(text, "suggested for you")
         or ("instagram" in text and _has_phrase(text, "follow"))
     )
+    has_join_instagram_title = _has_phrase(text, JOIN_INSTAGRAM_LANDING_TITLE)
+    has_join_instagram_subtitle = JOIN_INSTAGRAM_LANDING_SUBTITLE in text
+    has_join_instagram_get_started = _has_phrase(text, JOIN_INSTAGRAM_GET_STARTED_BUTTON)
+    has_join_instagram_existing_profile = _has_phrase(text, JOIN_INSTAGRAM_EXISTING_PROFILE_BUTTON)
+    has_join_instagram_landing = (
+        has_join_instagram_title
+        and has_join_instagram_get_started
+        and has_join_instagram_existing_profile
+    )
     has_username_field = "username, email or mobile number" in text or (
         "username" in text and ("email" in text or "mobile" in text)
     )
@@ -267,6 +291,10 @@ def extract_login_screen_signals_from_hierarchy(
     has_samsung_save_password_prompt = has_samsung_pass and has_save_password_for_instagram and has_cancel and has_save_button
     has_email_code_challenge = _is_email_code_challenge_text(text)
     has_post_login_location_services_prompt = _is_post_login_location_services_prompt_text(text)
+    has_instagram_turn_on_notifications_prompt = _is_instagram_turn_on_notifications_prompt_text(text)
+    has_android_instagram_notification_settings = _is_android_instagram_notification_settings_text(text)
+    has_notifications_next_button = _has_phrase(text, "next")
+    has_notifications_skip_button = _has_phrase(text, "skip")
     masked_email_present = _has_masked_email_signal(text)
     suggested_username = _extract_suggested_username(text)
     available_usernames = _extract_available_usernames(text)
@@ -293,6 +321,10 @@ def extract_login_screen_signals_from_hierarchy(
         screen_type = "password_required_dialog"
     elif has_post_login_location_services_prompt:
         screen_type = "connected_post_login_location_services_prompt"
+    elif has_android_instagram_notification_settings:
+        screen_type = "android_instagram_notification_settings"
+    elif has_instagram_turn_on_notifications_prompt:
+        screen_type = "instagram_turn_on_notifications_prompt"
     elif has_logout_confirmation_prompt and has_log_out and has_cancel:
         screen_type = "logout_confirmation_prompt"
     elif has_save_login_info_prompt and has_not_now and has_save_button:
@@ -319,6 +351,8 @@ def extract_login_screen_signals_from_hierarchy(
         screen_type = "continue_as_candidate"
     elif has_home_feed_markers:
         screen_type = "active_account_home"
+    elif has_join_instagram_landing:
+        screen_type = "join_instagram_landing"
     elif len(available_usernames) >= 2 and has_use_another_profile and has_create_new_account:
         screen_type = "account_picker"
     elif username_prefilled_present and has_password_field and has_login_button:
@@ -393,7 +427,24 @@ def extract_login_screen_signals_from_hierarchy(
         "has_cancel_button": has_cancel,
         "active_account_home": screen_type == "active_account_home",
         "active_account_profile": screen_type == "active_account_profile",
-        "connected_post_login_setup": screen_type == "connected_post_login_location_services_prompt",
+        "join_instagram_landing": screen_type == "join_instagram_landing",
+        "join_instagram_landing_detected": screen_type == "join_instagram_landing",
+        "has_join_instagram_title": has_join_instagram_title,
+        "has_join_instagram_subtitle": has_join_instagram_subtitle,
+        "has_get_started_button": has_join_instagram_get_started,
+        "has_already_have_profile_button": has_join_instagram_existing_profile,
+        "connected_post_login_setup": screen_type
+        in {
+            "connected_post_login_location_services_prompt",
+            "instagram_turn_on_notifications_prompt",
+            "android_instagram_notification_settings",
+        },
+        "instagram_turn_on_notifications_prompt": screen_type == "instagram_turn_on_notifications_prompt",
+        "notifications_prompt_detected": screen_type == "instagram_turn_on_notifications_prompt",
+        "has_notifications_next_button": has_notifications_next_button,
+        "has_notifications_skip_button": has_notifications_skip_button,
+        "android_instagram_notification_settings": screen_type == "android_instagram_notification_settings",
+        "android_notification_settings_detected": screen_type == "android_instagram_notification_settings",
         "account_switcher_sheet": screen_type == "account_switcher_sheet",
         "add_account_sheet": screen_type == "add_account_sheet",
         "continue_password_only": screen_type == "continue_password_only",
@@ -490,6 +541,55 @@ def probe_login_ui_from_hierarchy(
                 "screen_type": "connected_post_login_location_services_prompt",
                 "post_login_location_services_prompt": True,
                 "connected_post_login_setup": True,
+            },
+        )
+
+    if _is_android_instagram_notification_settings_text(text):
+        return LoginUiProbeResult(
+            outcome=LoginProbeOutcome.CONNECTED,
+            ok=True,
+            reason="android_instagram_notification_settings",
+            metadata={
+                **metadata,
+                "detection_reason": "android_instagram_notification_settings",
+                "screen_type": "android_instagram_notification_settings",
+                "android_notification_settings_detected": True,
+                "connected_post_login_setup": True,
+            },
+        )
+
+    if _is_instagram_turn_on_notifications_prompt_text(text):
+        return LoginUiProbeResult(
+            outcome=LoginProbeOutcome.CONNECTED,
+            ok=True,
+            reason="instagram_turn_on_notifications_prompt",
+            metadata={
+                **metadata,
+                "detection_reason": "instagram_turn_on_notifications_prompt",
+                "screen_type": "instagram_turn_on_notifications_prompt",
+                "notifications_prompt_detected": True,
+                "has_notifications_skip_button": _has_phrase(text, "skip"),
+                "has_notifications_next_button": _has_phrase(text, "next"),
+                "connected_post_login_setup": True,
+            },
+        )
+
+    if (
+        _has_phrase(text, JOIN_INSTAGRAM_LANDING_TITLE)
+        and _has_phrase(text, JOIN_INSTAGRAM_GET_STARTED_BUTTON)
+        and _has_phrase(text, JOIN_INSTAGRAM_EXISTING_PROFILE_BUTTON)
+    ):
+        return LoginUiProbeResult(
+            outcome=LoginProbeOutcome.UNKNOWN,
+            ok=False,
+            reason="join_instagram_landing_detected",
+            metadata={
+                **metadata,
+                "detection_reason": "join_instagram_landing_detected",
+                "screen_type": "join_instagram_landing",
+                "join_instagram_landing_detected": True,
+                "has_get_started_button": True,
+                "has_already_have_profile_button": True,
             },
         )
 
@@ -710,6 +810,16 @@ def _is_post_login_location_services_prompt_text(text: str) -> bool:
         and _has_phrase(text, "continue")
         and "location" in text
     )
+
+
+def _is_instagram_turn_on_notifications_prompt_text(text: str) -> bool:
+    if not _has_phrase(text, INSTAGRAM_TURN_ON_NOTIFICATIONS_TITLE):
+        return False
+    return _contains_any(text, INSTAGRAM_TURN_ON_NOTIFICATIONS_SUBTITLE_MARKERS)
+
+
+def _is_android_instagram_notification_settings_text(text: str) -> bool:
+    return _contains_any(text, ANDROID_INSTAGRAM_NOTIFICATION_SETTINGS_MARKERS)
 
 
 def _has_masked_email_signal(text: str) -> bool:

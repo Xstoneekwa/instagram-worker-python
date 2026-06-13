@@ -19,6 +19,7 @@ type AdminDashboardAction =
   | "health"
   | "manage_overview"
   | "radar_overview"
+  | "devices_overview"
   | "add_physical_phone";
 type OverviewDashboardAction = Exclude<AdminDashboardAction, "add_physical_phone">;
 type Fetcher = (
@@ -123,6 +124,7 @@ const ACTIONS = new Set([
   "health",
   "manage_overview",
   "radar_overview",
+  "devices_overview",
   "add_physical_phone",
 ]);
 const ADD_PHONE_POOLS = new Set(["full_cycle", "outreach_only"]);
@@ -1128,6 +1130,221 @@ async function addPhysicalPhone(
   };
 }
 
+function safeMetadataBoolean(
+  metadata: unknown,
+  key: string,
+): boolean | null {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    return null;
+  }
+  const value = (metadata as Record<string, unknown>)[key];
+  return typeof value === "boolean" ? value : null;
+}
+
+function safeMetadataString(
+  metadata: unknown,
+  key: string,
+): string | null {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    return null;
+  }
+  const value = (metadata as Record<string, unknown>)[key];
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function standardClonePackages() {
+  return STANDARD_INSTAGRAM_APP_INSTANCES
+    .filter((item) => item.instanceType === "clone")
+    .map((item) => item.packageName);
+}
+
+async function parseJsonArrayOptional(res: Response): Promise<Array<Record<string, any>>> {
+  if (!res.ok) return [];
+  try {
+    const body = await res.json();
+    return Array.isArray(body) ? body as Array<Record<string, any>> : [];
+  } catch {
+    return [];
+  }
+}
+
+function heartbeatProjection(row: Record<string, any> | undefined) {
+  if (!row) {
+    return {
+      last_seen_at: null,
+      heartbeat_status: "unknown",
+      heartbeat_issue: "adb_status_unknown",
+    };
+  }
+
+  const lastSeenAt = typeof row.last_seen_at === "string" ? row.last_seen_at : null;
+  const status = typeof row.status === "string" && row.status.trim()
+    ? row.status.trim()
+    : "unknown";
+  const lastSeenMs = lastSeenAt ? new Date(lastSeenAt).getTime() : NaN;
+  const stale = Number.isFinite(lastSeenMs) &&
+    Date.now() - lastSeenMs > 15 * 60 * 1000;
+
+  if (stale) {
+    return {
+      last_seen_at: lastSeenAt,
+      heartbeat_status: "stale",
+      heartbeat_issue: "stale_heartbeat",
+    };
+  }
+
+  if (status === "online" || status === "busy") {
+    return { last_seen_at: lastSeenAt, heartbeat_status: "online", heartbeat_issue: null };
+  }
+  if (["offline", "unauthorized", "maintenance", "error"].includes(status)) {
+    return { last_seen_at: lastSeenAt, heartbeat_status: status, heartbeat_issue: null };
+  }
+  return {
+    last_seen_at: lastSeenAt,
+    heartbeat_status: "unknown",
+    heartbeat_issue: "adb_status_unknown",
+  };
+}
+
+function buildDeviceInventory(
+  phoneRows: Array<Record<string, any>>,
+  appRows: Array<Record<string, any>>,
+  heartbeatRows: Array<Record<string, any>>,
+) {
+  const appsByDevice = new Map<string, Array<Record<string, any>>>();
+  for (const row of appRows) {
+    const deviceId = typeof row.device_id === "string" ? row.device_id : "";
+    if (!deviceId) continue;
+    appsByDevice.set(deviceId, [...(appsByDevice.get(deviceId) ?? []), row]);
+  }
+
+  const heartbeatByDevice = new Map<string, Record<string, any>>();
+  for (const row of heartbeatRows) {
+    if (typeof row.device_id === "string") heartbeatByDevice.set(row.device_id, row);
+  }
+
+  const adbSerialCounts = new Map<string, number>();
+  for (const row of phoneRows) {
+    const adbSerial = typeof row.adb_serial === "string" ? row.adb_serial.trim() : "";
+    if (adbSerial) adbSerialCounts.set(adbSerial, (adbSerialCounts.get(adbSerial) ?? 0) + 1);
+  }
+
+  const expectedClones = standardClonePackages();
+  const phoneDevices = phoneRows.map((row) => {
+    const deviceId = String(row.id || "");
+    const metadata = row.metadata && typeof row.metadata === "object" ? row.metadata : {};
+    const apps = (appsByDevice.get(deviceId) ?? [])
+      .slice()
+      .sort((a, b) => Number(a.instance_index ?? 0) - Number(b.instance_index ?? 0));
+    const heartbeat = heartbeatProjection(heartbeatByDevice.get(deviceId));
+    const adbSerial = typeof row.adb_serial === "string" ? row.adb_serial.trim() : "";
+    const status = typeof row.status === "string" ? row.status : "unknown";
+    const packages = new Set(apps.map((app) => String(app.package_name || "")).filter(Boolean));
+    const primaryPresent = apps.some((app) =>
+      Number(app.instance_index) === 0 &&
+      app.instance_type === "primary_app" &&
+      app.package_name === "com.instagram.android"
+    );
+    const registeredClonePackages = expectedClones.filter((pkg) => packages.has(pkg));
+    const occupiedCount = apps.filter((app) =>
+      app.status === "occupied" || Boolean(app.current_account_id)
+    ).length;
+    const availableCount = apps.filter((app) =>
+      app.status === "available" && !app.current_account_id
+    ).length;
+    const unavailableDevice = !["available", "active", "reserved"].includes(status);
+
+    const issues: string[] = [];
+    if (!adbSerial) issues.push("missing_adb_serial");
+    if (adbSerial && (adbSerialCounts.get(adbSerial) ?? 0) > 1) {
+      issues.push("duplicate_adb_serial");
+    }
+    if (apps.length === 0) issues.push("no_app_instances");
+    if (!primaryPresent) issues.push("missing_primary_instance");
+    if (registeredClonePackages.length < expectedClones.length) {
+      issues.push("missing_standard_clone_package");
+    }
+    if (unavailableDevice && occupiedCount > 0) {
+      issues.push("occupied_instance_on_unavailable_device");
+    }
+    if (heartbeat.heartbeat_issue) issues.push(heartbeat.heartbeat_issue);
+
+    return {
+      device_id: deviceId,
+      display_name: String(row.name || row.device_name || "Unknown phone"),
+      name: String(row.name || row.device_name || "Unknown phone"),
+      adb_serial: adbSerial || null,
+      device_kind: String(row.device_kind || "unknown"),
+      kind: String(row.device_kind || "unknown"),
+      status,
+      pool: String(row.pool_type || "unknown"),
+      max_clones: Number.isFinite(Number(row.max_clones)) ? Number(row.max_clones) : null,
+      host_label: typeof row.host_machine === "string" ? row.host_machine : null,
+      host: typeof row.host_machine === "string" ? row.host_machine : null,
+      hub_label: typeof row.hub_label === "string" ? row.hub_label : null,
+      hub_port: typeof row.hub_port === "string" ? row.hub_port : null,
+      model: safeMetadataString(metadata, "model"),
+      product: safeMetadataString(metadata, "product"),
+      device: safeMetadataString(metadata, "device"),
+      created_at: typeof row.created_at === "string" ? row.created_at : null,
+      updated_at: typeof row.updated_at === "string" ? row.updated_at : null,
+      last_seen_at: heartbeat.last_seen_at,
+      heartbeat_status: heartbeat.heartbeat_status,
+      app_instances_count: apps.length,
+      app_instances_available_count: availableCount,
+      app_instances_occupied_count: occupiedCount,
+      primary_package_present_in_db: primaryPresent,
+      clone_packages_expected_count: expectedClones.length,
+      clone_packages_registered_count: registeredClonePackages.length,
+      issues,
+      app_instances: apps.map((app) => ({
+        app_instance_id: String(app.id || ""),
+        instance_index: Number.isFinite(Number(app.instance_index))
+          ? Number(app.instance_index)
+          : null,
+        instance_kind: String(app.instance_type || "unknown"),
+        app_role: String(app.instance_type || "unknown"),
+        package_name: typeof app.package_name === "string" ? app.package_name : null,
+        status: typeof app.status === "string" ? app.status : "unknown",
+        current_account_id: typeof app.current_account_id === "string"
+          ? app.current_account_id
+          : null,
+        adb_package_verified: safeMetadataBoolean(app.metadata, "adb_package_verified"),
+      })),
+    };
+  });
+
+  const summary = {
+    total_phone_devices: phoneDevices.length,
+    physical_phone_count: phoneDevices.filter((phone) => phone.device_kind === "physical_phone").length,
+    emulator_count: phoneDevices.filter((phone) => phone.device_kind === "emulator").length,
+    available_phone_count: phoneDevices.filter((phone) => phone.status === "available").length,
+    unavailable_phone_count: phoneDevices.filter((phone) => phone.status !== "available").length,
+    total_app_instances: phoneDevices.reduce((sum, phone) => sum + phone.app_instances_count, 0),
+    available_app_instances: phoneDevices.reduce((sum, phone) => sum + phone.app_instances_available_count, 0),
+    occupied_app_instances: phoneDevices.reduce((sum, phone) => sum + phone.app_instances_occupied_count, 0),
+    problem_phone_count: phoneDevices.filter((phone) => phone.issues.length > 0).length,
+    adb_status_unknown_count: phoneDevices.filter((phone) => phone.heartbeat_status === "unknown").length,
+  };
+
+  return { phoneDevices, summary };
+}
+
+async function devicesOverview(deps: Dependencies) {
+  const rest = createServiceRoleRestClient(deps);
+  const phoneRows = await parseJsonArray(await rest.select("phone_devices", {
+    select: "id,name,device_name,device_kind,adb_serial,host_machine,hub_label,hub_port,pool_type,max_clones,status,metadata,created_at,updated_at",
+    order: "created_at.desc",
+  }));
+  const appRows = await parseJsonArray(await rest.select("phone_app_instances", {
+    select: "id,device_id,instance_type,instance_index,package_name,status,current_account_id,metadata",
+  }));
+  const heartbeatRows = await parseJsonArrayOptional(await rest.select("device_heartbeats", {
+    select: "device_id,status,last_seen_at",
+  }));
+  return buildDeviceInventory(phoneRows, appRows, heartbeatRows);
+}
+
 export async function handleRequest(
   req: Request,
   deps: Dependencies = {},
@@ -1284,6 +1501,38 @@ export async function handleRequest(
         actionError.status,
         actionError.code,
         actionError.message,
+        headers,
+      );
+    }
+  }
+  if (payload.action === "devices_overview") {
+    try {
+      const result = await devicesOverview(deps);
+      logEvent(deps, "admin_dashboard_devices_overview_succeeded", {
+        request_id: rid,
+        action: payload.action,
+        count: result.phoneDevices.length,
+        status: 200,
+      });
+      return jsonResponse(200, {
+        ok: true,
+        action: payload.action,
+        count: result.phoneDevices.length,
+        phone_devices: result.phoneDevices,
+        items: result.phoneDevices,
+        phone_inventory_summary: result.summary,
+      }, headers);
+    } catch {
+      logEvent(deps, "admin_dashboard_devices_overview_failed", {
+        request_id: rid,
+        action: payload.action,
+        status: 502,
+        error: "devices_overview_failed",
+      });
+      return errorResponse(
+        502,
+        "rpc_failed",
+        "Device inventory projection failed.",
         headers,
       );
     }

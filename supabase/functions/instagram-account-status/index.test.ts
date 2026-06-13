@@ -75,6 +75,24 @@ function rpcSuccess(body: Record<string, unknown> = {}) {
     credentials_configured: true,
     reauth_required: false,
     reauth_reason: null,
+    runtime_settings_sync: {
+      ok: true,
+      applied: true,
+      reason: "runtime_settings_synced_after_provisioning",
+      package_name: "com.instagram.androif",
+      settings_updated: true,
+      dm_settings_updated: true,
+      unfollow_settings_updated: false,
+      follow_enabled: true,
+      like_enabled: true,
+      mute_posts_after_follow: true,
+      mute_stories_after_follow: true,
+      welcome_enabled: false,
+      outreach_enabled: false,
+      unfollow_enabled: false,
+      device_id: "must-not-return",
+      app_instance_id: "must-not-return",
+    },
     actions_upserted: [],
     actions_resolved: [],
     secret_ref: "supabase_vault://11111111-1111-4111-8111-111111111111",
@@ -244,6 +262,22 @@ Deno.test("réponse safe exclut secret_ref password vault", withEnv(async () => 
   }
   const body = JSON.parse(text);
   if (body.request_id !== "req-status-1") throw new Error("missing request_id");
+}));
+
+Deno.test("réponse safe inclut runtime_settings_sync sans ids internes", withEnv(async () => {
+  const res = await handleRequest(request(validBody()), { fetch: makeFetch() });
+  const body = await res.json();
+  const sync = body.runtime_settings_sync;
+  if (!sync?.applied) throw new Error("expected runtime settings sync applied");
+  if (sync.package_name !== "com.instagram.androif") throw new Error("expected synced package name");
+  if (sync.follow_enabled !== true || sync.like_enabled !== true) throw new Error("expected follow/like enabled");
+  if (sync.mute_posts_after_follow !== true || sync.mute_stories_after_follow !== true) {
+    throw new Error("expected mute settings enabled");
+  }
+  const text = JSON.stringify(body);
+  if (text.includes("must-not-return") || text.includes("device_id") || text.includes("app_instance_id")) {
+    throw new Error(`unsafe runtime sync response: ${text}`);
+  }
 }));
 
 Deno.test("RPC account not found -> 404 account_not_found", withEnv(async () => {

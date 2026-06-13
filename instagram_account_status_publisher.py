@@ -7,6 +7,7 @@ instagram-account-status Edge Function. It is not wired into the runtime yet.
 from __future__ import annotations
 
 import json
+import os
 import socket
 import uuid
 from typing import Any
@@ -42,7 +43,9 @@ class InstagramAccountStatusPublishError(RuntimeError):
 
 
 def _enabled() -> bool:
-    return bool(getattr(config, "INSTAGRAM_ACCOUNT_STATUS_PUBLISH_ENABLED", False))
+    return bool(getattr(config, "INSTAGRAM_ACCOUNT_STATUS_PUBLISH_ENABLED", False)) or str(
+        os.getenv("LOGIN_PROVISIONER_PUBLISH_ENABLED") or ""
+    ).strip().lower() in {"1", "true", "yes", "on", "enabled"}
 
 
 def _fail_open() -> bool:
@@ -62,6 +65,15 @@ def _timeout_seconds() -> float:
         return max(0.1, float(getattr(config, "INSTAGRAM_ACCOUNT_STATUS_TIMEOUT_SECONDS", 10.0)))
     except (TypeError, ValueError):
         return 10.0
+
+
+def _service_role_rpc_configured() -> bool:
+    return bool(
+        str(os.getenv("LOGIN_PROVISIONER_PUBLISH_ENABLED") or "").strip().lower()
+        in {"1", "true", "yes", "on", "enabled"}
+        and (os.getenv("SUPABASE_URL") or "").strip()
+        and (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
+    )
 
 
 def _safe_fail(reason: str, *, status_code: int | None = None, error_message: str | None = None) -> dict:
@@ -109,6 +121,70 @@ def _clean_metadata(metadata: dict | None) -> dict:
     if "source" not in clean or not str(clean.get("source") or "").strip():
         clean["source"] = "python_status_publisher"
     return clean
+
+
+def _rpc_error_reason(exc: Exception) -> str:
+    text = str(exc or "").lower()
+    mapping = {
+        "client_instagram_account_not_found": "account_not_found",
+        "invalid_status": "invalid_status",
+        "check constraint": "invalid_status",
+        "metadata contains a forbidden key": "forbidden_metadata",
+        "metadata must be a json object": "metadata_must_be_object",
+        "reason too long": "reason_too_long",
+        "supabase_auth_401": "status_update_failed",
+        "supabase_auth_403": "status_update_failed",
+        "supabase_rest_timeout": "timeout",
+        "supabase_network_timeout": "network_error",
+        "supabase_dns_failed": "network_error",
+        "supabase_tls_failed": "network_error",
+    }
+    for marker, reason in mapping.items():
+        if marker in text:
+            return reason
+    return "status_update_failed"
+
+
+def _publish_via_service_role_rpc(
+    *,
+    account_id: str,
+    login_status: str | None,
+    provisioning_status: str | None,
+    onboarding_status: str | None,
+    reauth_required: bool | None,
+    reauth_reason: str | None,
+    reason: str | None,
+    external_request_id: str | None,
+    metadata: dict | None,
+) -> dict:
+    try:
+        from supabase_client import call_rpc
+
+        source = str((_clean_metadata(metadata).get("source") or "")).strip().lower()
+        actor_type = "provisioner" if "provisioner" in source else "worker" if source == "worker" else "internal"
+        body = call_rpc(
+            "update_client_instagram_account_status",
+            {
+                "p_account_id": account_id,
+                "p_login_status": login_status,
+                "p_provisioning_status": provisioning_status,
+                "p_onboarding_status": onboarding_status,
+                "p_reauth_required": reauth_required,
+                "p_reauth_reason": reauth_reason,
+                "p_actor_type": actor_type,
+                "p_reason": reason,
+                "p_external_request_id": external_request_id,
+                "p_metadata": _clean_metadata(metadata),
+            },
+        )
+        return {
+            "published": True,
+            "status_code": 200,
+            "response": body or {},
+            "transport": "service_role_rpc",
+        }
+    except Exception as exc:
+        return _safe_fail(_rpc_error_reason(exc), error_message=type(exc).__name__)
 
 
 def _log_publish_result(
@@ -178,7 +254,32 @@ def publish_instagram_account_status(
     url = _api_url()
     token = _token()
     if not url or not token:
-        return _safe_fail("not_configured")
+        if not _service_role_rpc_configured():
+            return _safe_fail("url_missing" if not url else "token_missing")
+        result = _publish_via_service_role_rpc(
+            account_id=aid,
+            login_status=login_status,
+            provisioning_status=provisioning_status,
+            onboarding_status=onboarding_status,
+            reauth_required=reauth_required,
+            reauth_reason=reauth_reason,
+            reason=reason,
+            external_request_id=external_request_id,
+            metadata=metadata,
+        )
+        _log_publish_result(
+            account_id=aid,
+            login_status=login_status,
+            provisioning_status=provisioning_status,
+            onboarding_status=onboarding_status,
+            published=bool(result.get("published")),
+            reason="published" if result.get("published") else str(result.get("reason") or "publisher_not_configured"),
+            status_code=result.get("status_code") if isinstance(result.get("status_code"), int) else None,
+            external_request_id=external_request_id,
+        )
+        if result.get("published"):
+            return result
+        return result
 
     body: dict[str, Any] = {
         "action": "update_status",
@@ -198,20 +299,37 @@ def publish_instagram_account_status(
             body[key] = value
 
     data = json.dumps(body, separators=(",", ":")).encode("utf-8")
-    req = request.Request(
-        url=url,
-        method="POST",
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-        },
-        data=data,
-    )
+    try:
+        req = request.Request(
+            url=url,
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+            data=data,
+        )
+    except (TypeError, ValueError):
+        return _safe_fail("request_build_failed")
 
     try:
         with request.urlopen(req, timeout=_timeout_seconds()) as resp:
             raw = resp.read()
-            parsed = json.loads(raw.decode("utf-8")) if raw else {}
+            try:
+                parsed = json.loads(raw.decode("utf-8")) if raw else {}
+            except json.JSONDecodeError:
+                result = _safe_fail("response_not_json")
+                _log_publish_result(
+                    account_id=aid,
+                    login_status=login_status,
+                    provisioning_status=provisioning_status,
+                    onboarding_status=onboarding_status,
+                    published=False,
+                    reason="response_not_json",
+                    status_code=int(getattr(resp, "status", 200)),
+                    external_request_id=external_request_id,
+                )
+                return result
             out = {
                 "published": True,
                 "status_code": int(getattr(resp, "status", 200)),

@@ -121,6 +121,21 @@ class InstagramLoginScreenRouterTest(unittest.TestCase):
         self.assertFalse(decision.should_escalate)
         self.assertEqual(decision.next_action, "secure_credentials_required_later")
 
+    def test_join_instagram_landing_uses_existing_profile_path(self) -> None:
+        decision = route_login_screen(
+            expected_username="new_account",
+            screen_type="join_instagram_landing",
+        )
+
+        self.assertTrue(decision.ok)
+        self.assertEqual(decision.decision, "open_existing_profile_from_join_landing")
+        self.assertTrue(decision.should_tap_already_have_profile)
+        self.assertFalse(decision.should_tap_continue)
+        self.assertFalse(decision.should_tap_use_another_profile)
+        self.assertFalse(decision.should_start_login_form_flow)
+        self.assertEqual(decision.next_action, "tap_already_have_profile_then_login_form")
+        self.assertEqual(decision.reason, "join_instagram_landing_existing_profile_required")
+
     def test_prefilled_wrong_username_starts_replace_username_flow(self) -> None:
         decision = route_login_screen(
             expected_username="cinema_catchup",

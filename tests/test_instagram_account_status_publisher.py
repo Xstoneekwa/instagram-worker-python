@@ -9,6 +9,7 @@ from urllib import error
 from unittest.mock import patch
 
 import instagram_account_status_publisher as publisher
+import supabase_client
 
 
 ACCOUNT_ID = "42c625c2-e761-4100-8a9d-7ae1373de97d"
@@ -22,6 +23,21 @@ class FakeResponse:
         self.status = status
 
     def __enter__(self) -> "FakeResponse":
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return self.body
+
+
+class FakeRawResponse:
+    def __init__(self, body: bytes, status: int = 200) -> None:
+        self.body = body
+        self.status = status
+
+    def __enter__(self) -> "FakeRawResponse":
         return self
 
     def __exit__(self, *_args: object) -> None:
@@ -70,10 +86,26 @@ class InstagramAccountStatusPublisherTest(unittest.TestCase):
         self.assertEqual(out["reason"], "disabled")
         urlopen.assert_not_called()
 
-    def test_missing_url_or_token_returns_not_configured_without_http(self) -> None:
+    def test_missing_url_returns_url_missing_without_http(self) -> None:
         with (
             patch.object(publisher.config, "INSTAGRAM_ACCOUNT_STATUS_PUBLISH_ENABLED", True, create=True),
             patch.object(publisher.config, "INSTAGRAM_ACCOUNT_STATUS_API_URL", "", create=True),
+            patch.object(publisher.config, "INSTAGRAM_ACCOUNT_STATUS_INTERNAL_API_TOKEN", TOKEN, create=True),
+            patch.object(publisher.config, "INSTAGRAM_ACCOUNT_STATUS_FAIL_OPEN", True, create=True),
+            patch.object(publisher.request, "urlopen") as urlopen,
+        ):
+            out = publisher.publish_instagram_account_status(
+                ACCOUNT_ID,
+                login_status="connected",
+            )
+        self.assertFalse(out["published"])
+        self.assertEqual(out["reason"], "url_missing")
+        urlopen.assert_not_called()
+
+    def test_missing_token_returns_token_missing_without_http(self) -> None:
+        with (
+            patch.object(publisher.config, "INSTAGRAM_ACCOUNT_STATUS_PUBLISH_ENABLED", True, create=True),
+            patch.object(publisher.config, "INSTAGRAM_ACCOUNT_STATUS_API_URL", API_URL, create=True),
             patch.object(publisher.config, "INSTAGRAM_ACCOUNT_STATUS_INTERNAL_API_TOKEN", "", create=True),
             patch.object(publisher.config, "INSTAGRAM_ACCOUNT_STATUS_FAIL_OPEN", True, create=True),
             patch.object(publisher.request, "urlopen") as urlopen,
@@ -83,7 +115,7 @@ class InstagramAccountStatusPublisherTest(unittest.TestCase):
                 login_status="connected",
             )
         self.assertFalse(out["published"])
-        self.assertEqual(out["reason"], "not_configured")
+        self.assertEqual(out["reason"], "token_missing")
         urlopen.assert_not_called()
 
     def test_success_post_has_authorization_header_and_safe_payload(self) -> None:
@@ -251,6 +283,23 @@ class InstagramAccountStatusPublisherTest(unittest.TestCase):
         self.assertEqual(out["status_code"], 200)
         self.assertTrue(out["response"]["ok"])
 
+    def test_http_200_non_json_returns_safe_response_not_json(self) -> None:
+        with (
+            self._enabled_config(),
+            patch.object(
+                publisher.request,
+                "urlopen",
+                return_value=FakeRawResponse(b"not-json"),
+            ),
+        ):
+            out = publisher.publish_instagram_account_status(
+                ACCOUNT_ID,
+                login_status="connected",
+            )
+        self.assertFalse(out["published"])
+        self.assertEqual(out["reason"], "response_not_json")
+        self.assertNotIn(TOKEN, json.dumps(out))
+
     def test_http_400_fail_open_returns_status_code(self) -> None:
         http_error = error.HTTPError(API_URL, 400, "Bad Request", {}, io.BytesIO(b'{"error":"bad"}'))
         with (
@@ -298,6 +347,53 @@ class InstagramAccountStatusPublisherTest(unittest.TestCase):
         body = json.loads(calls[0].data.decode("utf-8"))
         self.assertTrue(body["reauth_required"])
         self.assertEqual(body["reauth_reason"], "credentials_invalid")
+
+    def test_missing_edge_config_falls_back_to_service_role_rpc_when_available(self) -> None:
+        rpc_calls = []
+
+        def fake_rpc(name, params=None):  # type: ignore[no-untyped-def]
+            rpc_calls.append((name, params))
+            return {
+                "ok": True,
+                "account_id": ACCOUNT_ID,
+                "login_status": "connected",
+                "provisioning_status": "ready",
+                "onboarding_status": "ready",
+                "actions_resolved": [{"action_type": "submit_instagram_credentials", "status": "resolved"}],
+            }
+
+        with (
+            patch.object(publisher.config, "INSTAGRAM_ACCOUNT_STATUS_PUBLISH_ENABLED", True, create=True),
+            patch.object(publisher.config, "INSTAGRAM_ACCOUNT_STATUS_API_URL", "", create=True),
+            patch.object(publisher.config, "INSTAGRAM_ACCOUNT_STATUS_INTERNAL_API_TOKEN", "", create=True),
+            patch.dict(
+                "os.environ",
+                {
+                    "LOGIN_PROVISIONER_PUBLISH_ENABLED": "true",
+                    "SUPABASE_URL": "https://example.supabase.co",
+                    "SUPABASE_SERVICE_ROLE_KEY": "service-role-not-real",
+                },
+            ),
+            patch.object(supabase_client, "call_rpc", side_effect=fake_rpc),
+            patch.object(publisher.request, "urlopen") as urlopen,
+        ):
+            out = publisher.publish_instagram_account_status(
+                ACCOUNT_ID,
+                login_status="connected",
+                provisioning_status="ready",
+                onboarding_status="ready",
+                reauth_required=False,
+                reason="login_connected",
+                metadata={"source": "login_provisioner", "stage": "status_sync"},
+            )
+
+        self.assertTrue(out["published"])
+        self.assertEqual(out["transport"], "service_role_rpc")
+        self.assertEqual(rpc_calls[0][0], "update_client_instagram_account_status")
+        self.assertEqual(rpc_calls[0][1]["p_login_status"], "connected")
+        self.assertFalse(rpc_calls[0][1]["p_reauth_required"])
+        self.assertEqual(rpc_calls[0][1]["p_actor_type"], "provisioner")
+        urlopen.assert_not_called()
 
     def test_fail_open_false_http_error_raises_controlled_error(self) -> None:
         http_error = error.HTTPError(API_URL, 500, "Server Error", {}, io.BytesIO(b"{}"))

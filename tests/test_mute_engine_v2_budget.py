@@ -153,6 +153,53 @@ class MuteEngineV2BudgetTest(unittest.TestCase):
         self.assertGreaterEqual(nav._POST_FOLLOW_LIKE_OVERLAY_PHASE_CAP_S, 10.5)
         self.assertGreaterEqual(nav._MUTE_ENGINE_V2_EFFECTIVE_TOTAL_S, 13.0)
 
+    def test_axis_reason_maps_stories_budget_to_stable_skip_reason(self) -> None:
+        self.assertEqual(
+            nav._mute_engine_v2_axis_reason("stories", "budget"),
+            "stories_axis_skipped_budget_exhausted",
+        )
+        self.assertEqual(
+            nav._mute_engine_v2_axis_reason("stories", "toggle_label_not_found"),
+            "stories_axis_skipped_toggle_not_found",
+        )
+        self.assertEqual(
+            nav._mute_engine_v2_axis_reason("stories", "", already_on=True),
+            "stories_axis_skipped_already_muted",
+        )
+
+    @mock.patch("instagram_navigation._mute_engine_v2_verify_toggle_on_from_xml_dump")
+    @mock.patch("instagram_navigation._mute_engine_v2_tap_toggle_short")
+    def test_compact_axis_toggle_passes_axis_budget_to_tap(
+        self, tap_short: mock.MagicMock, xml_dump: mock.MagicMock
+    ) -> None:
+        import time as time_mod
+
+        xml_dump.return_value = (False, {})
+        tap_short.return_value = (False, False, "toggle_label_not_found")
+        device = mock.MagicMock()
+        axis_t0 = time_mod.perf_counter()
+
+        nav._mute_engine_v2_compact_axis_toggle(
+            device,
+            axis="stories",
+            labels=("Stories",),
+            ww=1080,
+            t0=axis_t0,
+            toggle_stage_deadline=axis_t0 + 2.0,
+            axis_budget_s=1.25,
+        )
+
+        self.assertEqual(tap_short.call_args.kwargs.get("axis_budget_s"), 1.25)
+
+    def test_axis_remaining_uses_axis_budget_not_engine_total(self) -> None:
+        import time as time_mod
+
+        axis_t0 = time_mod.perf_counter()
+        remaining = nav._mute_engine_v2_axis_remaining_s(axis_t0, 1.25)
+
+        self.assertGreater(remaining, 0.0)
+        self.assertLessEqual(remaining, 1.25)
+
 
 if __name__ == "__main__":
     unittest.main()
