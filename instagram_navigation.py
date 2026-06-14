@@ -20007,6 +20007,26 @@ _POST_FOLLOW_NO_POSTS_TIER1_ZERO_POSTS_RE = (
     r"(?i)^\s*0\s+(posts?|publications?|publicaci[oó]n(?:es)?|"
     r"beitr[aä]ge|pubblicazioni)\s*$"
 )
+_POST_FOLLOW_NO_POSTS_TEXT_NEEDLES = (
+    "No Posts Yet",
+    "No posts yet",
+    "No posts",
+    "No Posts",
+    "Aucune publication",
+    "Aucune photo",
+    "Pas encore de publication",
+    "Pas encore de photo",
+    "Sin publicaciones",
+    "Sin publicaciones aún",
+    "Keine Beiträge",
+    "Keine Beiträge vorhanden",
+    "Nessun post",
+    "Nessuna pubblicazione",
+    "Sem publicações",
+    "Sem publicações ainda",
+    "投稿なし",
+    "投稿がありません",
+)
 
 
 def _visual_profile_no_posts_tier1_direct_check(
@@ -20028,6 +20048,32 @@ def _visual_profile_no_posts_tier1_direct_check(
         "source_profile_username": source_profile_username or "",
         "tier1_detected": False,
     }
+
+    for needle in _POST_FOLLOW_NO_POSTS_TEXT_NEEDLES:
+        try:
+            if d(textContains=needle).exists(timeout=0.08) is True:
+                out = dict(base_out)
+                out["no_posts_detected"] = True
+                out["tier1_detected"] = True
+                out["detection_method"] = f"tier1_ui_textContains:{needle[:48]}"
+                out["confidence"] = 0.91
+                out["selector_kind"] = "textContains"
+                return out
+        except Exception:
+            continue
+
+    for needle in _POST_FOLLOW_NO_POSTS_TEXT_NEEDLES:
+        try:
+            if d(descriptionContains=needle).exists(timeout=0.06) is True:
+                out = dict(base_out)
+                out["no_posts_detected"] = True
+                out["tier1_detected"] = True
+                out["detection_method"] = f"tier1_ui_descriptionContains:{needle[:48]}"
+                out["confidence"] = 0.89
+                out["selector_kind"] = "descriptionContains"
+                return out
+        except Exception:
+            continue
 
     for selector_kind, selector_kwargs, method, confidence, timeout_s in (
         (
@@ -20086,28 +20132,7 @@ def visual_profile_has_no_posts(
         "source_profile_username": source_profile_username or "",
     }
 
-    ui_needles = (
-        "No Posts Yet",
-        "No posts yet",
-        "No posts",
-        "No Posts",
-        "Aucune publication",
-        "Aucune photo",
-        "Pas encore de publication",
-        "Pas encore de photo",
-        "Sin publicaciones",
-        "Sin publicaciones aún",
-        "Keine Beiträge",
-        "Keine Beiträge vorhanden",
-        "Nessun post",
-        "Nessuna pubblicazione",
-        "Sem publicações",
-        "Sem publicações ainda",
-        "投稿なし",
-        "投稿がありません",
-    )
-
-    for needle in ui_needles:
+    for needle in _POST_FOLLOW_NO_POSTS_TEXT_NEEDLES:
         try:
             if d(textContains=needle).exists(timeout=0.1) is True:
                 out = dict(base_out)
@@ -20687,6 +20712,8 @@ def _post_follow_likes_open_top_left_legacy_visual_safe(
     It only considers row=0,col=0 below profile tabs and requires viewer confirmation.
     """
     t0 = time.perf_counter()
+    strict_grid_proof_ok = False
+    strict_grid_proof_source = ""
 
     def _log_timing(event: str, started_at: float, **extra: Any) -> None:
         try:
@@ -20714,8 +20741,12 @@ def _post_follow_likes_open_top_left_legacy_visual_safe(
                     (time.perf_counter() - t0) * 1000.0, 2
                 ),
                 "failure_reason": str(reason or "legacy_visual_top_left_failed"),
+                "strict_grid_proof_ok": bool(strict_grid_proof_ok),
+                "strict_grid_proof_source": str(strict_grid_proof_source or ""),
                 **extra,
             },
+            "strict_grid_proof_ok": bool(strict_grid_proof_ok),
+            "strict_grid_proof_source": str(strict_grid_proof_source or ""),
             **extra,
         }
         try:
@@ -20904,6 +20935,8 @@ def _post_follow_likes_open_top_left_legacy_visual_safe(
                 strict_grid_proof.get("failure_reason") or ""
             ),
         )
+    strict_grid_proof_ok = True
+    strict_grid_proof_source = str(strict_grid_proof.get("source") or "")
 
     _ensure_debug_dirs()
     shot_path = str(
@@ -43729,7 +43762,7 @@ def run_post_follow_post_likes_phase(
 
         def _skip_no_posts(no_posts_check: dict[str, Any]) -> dict[str, Any]:
             meta_np = _followers_current_pkg_activity(d)
-            reason_np = "post_follow_like_skipped_no_posts_yet"
+            reason_np = "post_like_skipped_no_posts_yet"
             post_rec["outcome"] = "no_posts"
             post_rec["failure_reason"] = reason_np
             per_post.append(post_rec)
@@ -43812,6 +43845,41 @@ def run_post_follow_post_likes_phase(
                 pass
             return no_posts_visual
 
+        def _skip_no_post_grid_open(
+            raw_failure_reason: str,
+            *,
+            grid_state_before: Any = None,
+            grid_state_after: Any = None,
+        ) -> dict[str, Any]:
+            post_rec["outcome"] = "skipped"
+            post_rec["failure_reason"] = "post_like_skipped_no_post_grid"
+            per_post.append(post_rec)
+            _likes_perf_ctx["failure_reason"] = "post_like_skipped_no_post_grid"
+            _likes_perf_ctx["likes_failure_kind"] = "post_like_skipped_no_post_grid"
+            log(
+                "warning",
+                "post_follow_post_like_open_skipped_no_post_grid",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                follower_username=cand,
+                failure_reason="post_like_skipped_no_post_grid",
+                raw_failure_reason=str(raw_failure_reason or ""),
+                grid_state_before=grid_state_before,
+                grid_state_after=grid_state_after,
+                strict_grid_proof_required=True,
+            )
+            return _finish(
+                phase_outcome="skipped",
+                skipped_reason="post_like_skipped_no_post_grid",
+                skipped=True,
+                ok=True,
+                attempted_count=attempted_count,
+                liked_count=liked_count,
+                skipped_already_liked_count=skipped_already,
+                failed_navigation_count=failed_nav,
+                per_post=per_post,
+            )
+
         def _no_posts_weak_hint_present(check: dict[str, Any]) -> bool:
             method = str(check.get("detection_method") or "").strip().lower()
             if not method or method in ("none", "not_detected"):
@@ -43840,7 +43908,7 @@ def run_post_follow_post_likes_phase(
             if post_cells_visible:
                 return False, "posts_visible", fields
             if bool(surface_profile_ok) and bool(grid_tab_visible) and not no_posts_hint_present:
-                return False, "normal_grid_surface_confirmed", fields
+                return True, "grid_tab_without_post_cells", fields
             if not bool(surface_profile_ok):
                 return False, "profile_surface_not_confirmed", fields
             if no_posts_hint_present:
@@ -43972,7 +44040,12 @@ def run_post_follow_post_likes_phase(
 
         full_check_used = False
         no_posts_check: dict[str, Any] = dict(tier1_check)
-        if surface_profile_ok and grid_tab_visible:
+        post_cells_visible_before_open = bool(
+            surface_precheck.get("post_cells_visible")
+            or surface_precheck.get("post_grid_visible")
+            or surface_precheck.get("grid_cells_visible")
+        )
+        if surface_profile_ok and grid_tab_visible and post_cells_visible_before_open:
             try:
                 log(
                     "info",
@@ -43982,10 +44055,11 @@ def run_post_follow_post_likes_phase(
                     visual_candidate_id=vcid,
                     tier1_detected=False,
                     full_check_used=False,
-                    reason="surface_profile_and_grid_tabs_confirmed",
+                    reason="surface_profile_grid_tabs_and_post_cells_confirmed",
                     duration_ms=0.0,
                     surface_profile_ok=surface_profile_ok,
                     grid_tab_visible=grid_tab_visible,
+                    post_cells_visible=True,
                 )
             except Exception:
                 pass
@@ -44001,8 +44075,11 @@ def run_post_follow_post_likes_phase(
                     visual_candidate_id=vcid,
                     surface_profile_ok=surface_profile_ok,
                     grid_tab_visible=grid_tab_visible,
+                    post_cells_visible=post_cells_visible_before_open,
                     reason=(
-                        "surface_profile_or_grid_tabs_ambiguous"
+                        "grid_tab_visible_without_post_cells"
+                        if surface_profile_ok and grid_tab_visible and not post_cells_visible_before_open
+                        else "surface_profile_or_grid_tabs_ambiguous"
                         if not surface_profile_ok or not grid_tab_visible
                         else "full_cheap_required"
                     ),
@@ -44029,6 +44106,7 @@ def run_post_follow_post_likes_phase(
                     duration_ms=round((time.perf_counter() - t_np_full) * 1000.0, 2),
                     surface_profile_ok=surface_profile_ok,
                     grid_tab_visible=grid_tab_visible,
+                    post_cells_visible=post_cells_visible_before_open,
                 )
             except Exception:
                 pass
@@ -44459,6 +44537,25 @@ def run_post_follow_post_likes_phase(
                 legacy_first_out.get("failure_reason")
                 or "legacy_visual_top_left_failed"
             )
+            legacy_first_strict_grid_ok = bool(legacy_first_out.get("strict_grid_proof_ok"))
+            if (
+                legacy_first_failure_reason
+                in {
+                    "legacy_visual_top_left_candidate_ambiguous",
+                    "legacy_visual_top_left_variance_insufficient",
+                }
+                and not legacy_first_strict_grid_ok
+            ):
+                no_posts_visual = _run_deferred_visual_no_posts_fallback(
+                    legacy_first_failure_reason
+                )
+                if no_posts_visual.get("no_posts_detected") is True:
+                    return _skip_no_posts(no_posts_visual)
+                return _skip_no_post_grid_open(
+                    legacy_first_failure_reason,
+                    grid_state_before=grid_out.get("grid_state_before"),
+                    grid_state_after=grid_out.get("grid_state_after"),
+                )
             if legacy_first_failure_reason in {
                 "legacy_visual_top_left_candidate_ambiguous",
                 "profile_tabs_bottom_unknown",
@@ -44740,6 +44837,17 @@ def run_post_follow_post_likes_phase(
                     2,
                 )
             else:
+                if "post_like_skipped_no_post_grid" in legacy_first_failure_reason:
+                    no_posts_visual = _run_deferred_visual_no_posts_fallback(
+                        legacy_first_failure_reason
+                    )
+                    if no_posts_visual.get("no_posts_detected") is True:
+                        return _skip_no_posts(no_posts_visual)
+                    return _skip_no_post_grid_open(
+                        legacy_first_failure_reason,
+                        grid_state_before=grid_out.get("grid_state_before"),
+                        grid_state_after=grid_out.get("grid_state_after"),
+                    )
                 try:
                     log(
                         "info",
@@ -44822,32 +44930,12 @@ def run_post_follow_post_likes_phase(
                 no_posts_visual = _run_deferred_visual_no_posts_fallback(fr_grid)
                 if no_posts_visual.get("no_posts_detected") is True:
                     return _skip_no_posts(no_posts_visual)
-                if fr_grid == "post_like_skipped_no_post_grid":
-                    post_rec["outcome"] = "skipped"
-                    post_rec["failure_reason"] = fr_grid
-                    per_post.append(post_rec)
-                    _likes_perf_ctx["failure_reason"] = fr_grid
-                    _likes_perf_ctx["likes_failure_kind"] = fr_grid
-                    log(
-                        "warning",
-                        "post_follow_post_like_open_skipped_no_post_grid",
-                        visual_candidate_id=vcid,
-                        source_profile_username=src,
-                        follower_username=cand,
-                        failure_reason=fr_grid,
+                if "post_like_skipped_no_post_grid" in fr_grid:
+                    fr_grid_raw = fr_grid
+                    return _skip_no_post_grid_open(
+                        fr_grid_raw,
                         grid_state_before=grid_out.get("grid_state_before"),
                         grid_state_after=grid_out.get("grid_state_after"),
-                    )
-                    return _finish(
-                        phase_outcome="skipped",
-                        skipped_reason="post_like_skipped_no_post_grid",
-                        skipped=True,
-                        ok=True,
-                        attempted_count=attempted_count,
-                        liked_count=liked_count,
-                        skipped_already_liked_count=skipped_already,
-                        failed_navigation_count=failed_nav,
-                        per_post=per_post,
                     )
                 failed_nav += 1
                 _likes_perf_ctx["grid"] = dict(_grid_perf)
@@ -45203,15 +45291,36 @@ def run_post_follow_post_likes_phase(
                 per_post=per_post,
             )
 
-        fb_detected, fb_method = _ui_post_viewer_facebook_shared_content_detected(d)
-        if fb_detected:
-            return _skip_unusable_post_like_surface(
-                skipped_reason="post_like_skipped_facebook_shared_content",
-                detection_method=fb_method,
-                outcome="skipped_facebook_shared_content",
-            )
-
         story_detected, story_method = _ui_story_or_highlight_viewer_detected(d)
+        like_surface_ok, like_surface_method = _ui_post_viewer_like_action_bar_exploitable(
+            d,
+            pkg=pkg,
+        )
+        opened_surface_kind = "unknown"
+        if story_detected:
+            opened_surface_kind = (
+                "highlight" if "highlight" in str(story_method or "").lower() else "story"
+            )
+        elif like_surface_ok:
+            opened_surface_kind = "post"
+        try:
+            log(
+                "info" if opened_surface_kind == "post" else "warning",
+                "post_open_surface_audit",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                follower_username=cand,
+                opened_surface_kind=opened_surface_kind,
+                story_or_highlight_detected=bool(story_detected),
+                story_or_highlight_method=str(story_method or ""),
+                like_surface_ok=bool(like_surface_ok),
+                like_surface_method=str(like_surface_method or ""),
+                viewer_detect_path=open_out.get("viewer_detect_path"),
+                tap_x=open_out.get("tap_x"),
+                tap_y=open_out.get("tap_y"),
+            )
+        except Exception:
+            pass
         if story_detected:
             log(
                 "warning",
@@ -45229,10 +45338,14 @@ def run_post_follow_post_likes_phase(
                 outcome="wrong_surface_story_highlight_recovered",
             )
 
-        like_surface_ok, like_surface_method = _ui_post_viewer_like_action_bar_exploitable(
-            d,
-            pkg=pkg,
-        )
+        fb_detected, fb_method = _ui_post_viewer_facebook_shared_content_detected(d)
+        if fb_detected:
+            return _skip_unusable_post_like_surface(
+                skipped_reason="post_like_skipped_facebook_shared_content",
+                detection_method=fb_method,
+                outcome="skipped_facebook_shared_content",
+            )
+
         if not like_surface_ok:
             return _skip_unusable_post_like_surface(
                 skipped_reason="post_like_skipped_no_like_button",

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import inspect
 import os
 import time
@@ -3589,6 +3590,38 @@ class CtCheckpointV1Tests(unittest.TestCase):
                 follows_goal_effective=3,
                 scroll_used=0,
                 max_scroll=12,
+            )
+        )
+
+    def test_runtime_follow_cap_check_accepts_resolved_db_cap(self) -> None:
+        old_count = runner._RUNTIME_FOLLOW_COUNT
+        try:
+            runner._RUNTIME_FOLLOW_COUNT = 2
+            with patch.object(runner.config, "FOLLOW_MAX_PER_RUN", 2, create=True):
+                self.assertTrue(runner._runtime_follow_cap_exceeded())
+                self.assertFalse(runner._runtime_follow_cap_exceeded(6))
+                runner._RUNTIME_FOLLOW_COUNT = 6
+                self.assertTrue(runner._runtime_follow_cap_exceeded(6))
+        finally:
+            runner._RUNTIME_FOLLOW_COUNT = old_count
+
+    def test_follow_session_cap_checkpoints_all_use_resolved_cap(self) -> None:
+        tree = ast.parse(inspect.getsource(runner._run_followers_list_engine_session))
+        calls: list[ast.Call] = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_runtime_follow_cap_exceeded"
+        ]
+
+        self.assertGreaterEqual(len(calls), 5)
+        self.assertTrue(all(len(call.args) == 1 for call in calls))
+        self.assertTrue(
+            all(
+                isinstance(call.args[0], ast.Name)
+                and call.args[0].id == "_follow_max_per_run"
+                for call in calls
             )
         )
 

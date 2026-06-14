@@ -983,8 +983,8 @@ def _session_follow_quota_exceeded() -> bool:
     return _SESSION_COUNTERS["follows"] >= min(pos)
 
 
-def _runtime_follow_cap_exceeded() -> bool:
-    cap = int(getattr(config, "FOLLOW_MAX_PER_RUN", 5) or 0)
+def _runtime_follow_cap_exceeded(cap: int | None = None) -> bool:
+    cap = int(cap if cap is not None else (getattr(config, "FOLLOW_MAX_PER_RUN", 5) or 0))
     return cap > 0 and _RUNTIME_FOLLOW_COUNT >= cap
 
 
@@ -9673,8 +9673,46 @@ def _run_followers_list_engine_session(
             payload={**base, **payload},
         )
 
+    follow_runtime_inputs: dict[str, Any] = {}
+    if account_id:
+        try:
+            follow_runtime_inputs = supabase_client.get_follow_runtime_cap_inputs(str(account_id))
+        except Exception as e:
+            log(
+                "warning",
+                "follow_runtime_cap_inputs_unavailable",
+                account_id=str(account_id or ""),
+                run_id=str(run_id or ""),
+                reason=str(e)[:240],
+            )
+            follow_runtime_inputs = {}
+    follow_limits = resolve_follow_runtime_limits(
+        db_follow_per_session_limit=follow_runtime_inputs.get("db_follow_per_session_limit"),
+        db_max_follow_per_run=follow_runtime_inputs.get("db_max_follow_per_run"),
+        follow_day_remaining_today=follow_runtime_inputs.get("follow_day_remaining_today"),
+        package_follow_day_cap=follow_runtime_inputs.get("package_follow_day_cap"),
+        warmup_follow_day_cap=follow_runtime_inputs.get("warmup_follow_day_cap"),
+    )
+    global_follow_goal_effective = int(follow_limits["effective_iterations_max"])
+    _runtime_follow_cap = int(getattr(config, "FOLLOW_MAX_PER_RUN", 0) or 0)
+    if bool(follow_limits.get("env_follow_cap_present")) and _runtime_follow_cap > 0:
+        global_follow_goal_effective = min(global_follow_goal_effective, _runtime_follow_cap)
+    target_follow_budget_effective = (
+        max(1, int(target_follow_budget))
+        if target_follow_budget is not None and int(target_follow_budget) > 0
+        else None
+    )
+    max_iter = min(global_follow_goal_effective, target_follow_budget_effective) if target_follow_budget_effective else global_follow_goal_effective
+    _follow_max_per_run = min(
+        int(follow_limits["effective_follow_max"]),
+        _runtime_follow_cap
+        if bool(follow_limits.get("env_follow_cap_present")) and _runtime_follow_cap > 0
+        else int(follow_limits["effective_follow_max"]),
+    )
+    global_follow_stop_cap_for_logs = int(_follow_max_per_run or 0)
+
     def _global_follow_cap_payload() -> dict[str, Any]:
-        cap = int(getattr(config, "FOLLOW_MAX_PER_RUN", 0) or 0)
+        cap = int(global_follow_stop_cap_for_logs or 0)
         return {
             "account_id": str(account_id or ""),
             "run_id": str(run_id or ""),
@@ -9863,7 +9901,7 @@ def _run_followers_list_engine_session(
         run_id=str(run_id or "") or None,
         start_from_current_followers_list=bool(start_from_current_followers_list),
     )
-    if _runtime_follow_cap_exceeded():
+    if _runtime_follow_cap_exceeded(_follow_max_per_run):
         _target_rejection_record(
             target_scan_tracker,
             reason="global_follow_cap_reached",
@@ -10206,42 +10244,6 @@ def _run_followers_list_engine_session(
             },
         )
 
-    follow_runtime_inputs: dict[str, Any] = {}
-    if account_id:
-        try:
-            follow_runtime_inputs = supabase_client.get_follow_runtime_cap_inputs(str(account_id))
-        except Exception as e:
-            log(
-                "warning",
-                "follow_runtime_cap_inputs_unavailable",
-                account_id=str(account_id or ""),
-                run_id=str(run_id or ""),
-                reason=str(e)[:240],
-            )
-            follow_runtime_inputs = {}
-    follow_limits = resolve_follow_runtime_limits(
-        db_follow_per_session_limit=follow_runtime_inputs.get("db_follow_per_session_limit"),
-        db_max_follow_per_run=follow_runtime_inputs.get("db_max_follow_per_run"),
-        follow_day_remaining_today=follow_runtime_inputs.get("follow_day_remaining_today"),
-        package_follow_day_cap=follow_runtime_inputs.get("package_follow_day_cap"),
-        warmup_follow_day_cap=follow_runtime_inputs.get("warmup_follow_day_cap"),
-    )
-    global_follow_goal_effective = int(follow_limits["effective_iterations_max"])
-    _runtime_follow_cap = int(getattr(config, "FOLLOW_MAX_PER_RUN", 0) or 0)
-    if bool(follow_limits.get("env_follow_cap_present")) and _runtime_follow_cap > 0:
-        global_follow_goal_effective = min(global_follow_goal_effective, _runtime_follow_cap)
-    target_follow_budget_effective = (
-        max(1, int(target_follow_budget))
-        if target_follow_budget is not None and int(target_follow_budget) > 0
-        else None
-    )
-    max_iter = min(global_follow_goal_effective, target_follow_budget_effective) if target_follow_budget_effective else global_follow_goal_effective
-    _follow_max_per_run = min(
-        int(follow_limits["effective_follow_max"]),
-        _runtime_follow_cap
-        if bool(follow_limits.get("env_follow_cap_present")) and _runtime_follow_cap > 0
-        else int(follow_limits["effective_follow_max"]),
-    )
     _followers_iter_attr = getattr(config, "FOLLOWERS_LIST_MAX_ITERATIONS_PER_RUN", None)
     _publish_followers_session_summary(
         follows_goal_effective=max_iter,
@@ -11137,7 +11139,7 @@ def _run_followers_list_engine_session(
     try:
         while processed < max_iter:
             _log_target_budget_check("before_candidate_selection")
-            if _runtime_follow_cap_exceeded():
+            if _runtime_follow_cap_exceeded(_follow_max_per_run):
                 _mark_global_follow_cap_reached(phase="before_candidate_selection")
                 break
             if is_follow_target_rotation_pending(target_username=source_profile_username):
@@ -14946,7 +14948,7 @@ def _run_followers_list_engine_session(
                             )
                         return 42
                     continue
-                runtime_follow_cap_hit = _runtime_follow_cap_exceeded()
+                runtime_follow_cap_hit = _runtime_follow_cap_exceeded(_follow_max_per_run)
                 if (
                     runtime_follow_cap_hit
                     or _session_follow_quota_exceeded()
@@ -16904,7 +16906,7 @@ def _run_followers_list_engine_session(
                 _critical_persist_t0 = time.perf_counter()
                 _critical_persist_ok = True
                 _post_return_next_action = "same_target_next_candidate"
-                if _runtime_follow_cap_exceeded():
+                if _runtime_follow_cap_exceeded(_follow_max_per_run):
                     _post_return_next_action = "finish_run"
                 elif _target_budget_reached():
                     _post_return_next_action = "rotate_next_target"
@@ -16943,7 +16945,7 @@ def _run_followers_list_engine_session(
                     if _target_budget_reached():
                         _mark_target_budget_reached("target_budget_reached_after_follow_verified")
                 _post_return_next_action = "same_target_next_candidate"
-                if _runtime_follow_cap_exceeded():
+                if _runtime_follow_cap_exceeded(_follow_max_per_run):
                     _post_return_next_action = "finish_run"
                 elif _target_budget_reached():
                     _post_return_next_action = "rotate_next_target"
@@ -17392,7 +17394,7 @@ def _run_followers_list_engine_session(
                 _RUNTIME_FOLLOWERS_POST_RESOLVE_STREAK.pop(fk_session, None)
 
             processed += 1
-            if _runtime_follow_cap_exceeded():
+            if _runtime_follow_cap_exceeded(_follow_max_per_run):
                 _mark_global_follow_cap_reached(phase="after_follow_candidate")
                 break
             if _target_budget_reached():
