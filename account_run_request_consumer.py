@@ -485,6 +485,7 @@ def _safe_login_provisioner_summary_for_audit(run_id: str | None) -> dict[str, A
         "completed",
         "final_outcome",
         "reason",
+        "failure_reason",
         "status_candidate",
         "published",
         "publish_enabled",
@@ -496,12 +497,33 @@ def _safe_login_provisioner_summary_for_audit(run_id: str | None) -> dict[str, A
         "package_name",
         "expected_package_name",
         "actual_foreground_package",
+        "package_guard_mismatch",
+        "package_guard_checked",
+        "transient_foreground_recovery_attempted",
+        "transient_foreground_recovery_succeeded",
+        "transient_foreground_packages_seen",
         "screen_after_app_start",
         "screen_after_app_start_initial",
         "screen_after_app_start_final",
         "screen_type",
+        "screen_before_submit",
+        "selected_route",
+        "selected_route_reason",
         "final_terminal_screen",
         "post_submit_screens",
+        "submit_executed",
+        "would_submit_password",
+        "login_form_empty_detected",
+        "login_form_after_join_landing_detected",
+        "credentials_error_code",
+        "credentials_stage",
+        "credentials_invalid_reason",
+        "credential_metadata_found",
+        "secret_loaded",
+        "username_input_result",
+        "password_input_result",
+        "username_field_focused_before_input",
+        "password_field_focused_before_input",
         "warnings",
     }
     return {key: summary.get(key) for key in allowed_keys if key in summary}
@@ -692,13 +714,18 @@ def _finalize_manual_run_after_subprocess(
         request_id=request_id,
         exit_code=exit_code,
     )
+    summary = _safe_login_provisioner_summary_for_audit(run_id or request_id)
     _audit(
         account_id=account_id,
         action_type="manual_run_failed",
         status="failed",
         message=f"Manual run failed with exit code {exit_code}.",
         run_id=run_id,
-        payload={"request_id": request_id, "exit_code": exit_code},
+        payload={
+            "request_id": request_id,
+            "exit_code": exit_code,
+            **({"login_provisioner_summary": summary} if summary else {}),
+        },
     )
 
 

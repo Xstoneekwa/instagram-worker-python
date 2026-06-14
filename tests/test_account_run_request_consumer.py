@@ -589,6 +589,45 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
         audit.assert_called_once()
         self.assertEqual(audit.call_args.kwargs["action_type"], "manual_run_failed")
 
+    def test_finalize_subprocess_nonzero_attaches_login_provisioner_summary_when_available(self) -> None:
+        cfg = consumer.DispatcherConfig(
+            enabled=True,
+            health_only=False,
+            launch_enabled=True,
+            worker_id="run-dispatcher:test",
+            poll_seconds=5.0,
+            lease_seconds=120,
+            heartbeat_seconds=20.0,
+            allowed_run_types=["login_provisioning"],
+            test_account_ids=set(),
+            subprocess_timeout_seconds=7200,
+            require_assignment=False,
+            enforce_assignment_window=False,
+        )
+        request = {
+            "id": TEST_REQUEST_ID,
+            "account_id": TEST_ACCOUNT_ID,
+            "run_id": TEST_RUN_ID,
+            "status": "running",
+        }
+        summary = {"run_id": TEST_RUN_ID, "final_outcome": "wrong_app_package", "submit_executed": False}
+        with (
+            patch.object(consumer, "get_account_run_request", return_value=request),
+            patch.object(consumer, "complete_account_run_request"),
+            patch.object(consumer, "_reconcile_linked_run", return_value={"reconciled": True}),
+            patch.object(consumer, "_safe_login_provisioner_summary_for_audit", return_value=summary),
+            patch.object(consumer, "_audit") as audit,
+        ):
+            consumer._finalize_manual_run_after_subprocess(
+                cfg,
+                request_id=TEST_REQUEST_ID,
+                account_id=TEST_ACCOUNT_ID,
+                exit_code=1,
+            )
+        payload = audit.call_args.kwargs["payload"]
+        self.assertEqual(payload["login_provisioner_summary"]["final_outcome"], "wrong_app_package")
+        self.assertFalse(payload["login_provisioner_summary"]["submit_executed"])
+
     def test_finalize_subprocess_without_linked_run_skips_reconcile_patch(self) -> None:
         cfg = consumer.DispatcherConfig(
             enabled=True,
