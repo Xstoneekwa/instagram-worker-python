@@ -17027,6 +17027,100 @@ def _post_follow_merge_grid_probe_meta(
     out["grid_probe_source"] = "post_follow_likes_grid_probe_same_capture"
 
 
+_POST_LIKE_GRID_REUSE_PROOF_MAX_AGE_MS = 2500.0
+
+
+def _post_like_grid_reuse_proof_age_ms(proof: dict[str, Any]) -> float | None:
+    captured = proof.get("captured_at_perf")
+    try:
+        return max(0.0, (time.perf_counter() - float(captured)) * 1000.0)
+    except (TypeError, ValueError):
+        return None
+
+
+def _post_like_validate_grid_reuse_proof(
+    proof: dict[str, Any] | None,
+    *,
+    expected_follower_username: str,
+    max_age_ms: float | None = None,
+) -> tuple[bool, str, dict[str, Any]]:
+    if not isinstance(proof, dict):
+        return False, "proof_absent", {}
+    cell = proof.get("cell")
+    if not isinstance(cell, dict):
+        return False, "post_candidate_bounds_absent", {}
+    age_ms = _post_like_grid_reuse_proof_age_ms(proof)
+    max_age = float(max_age_ms or _POST_LIKE_GRID_REUSE_PROOF_MAX_AGE_MS)
+    if age_ms is None or age_ms > max_age:
+        return False, "stale", {"proof_age_ms": age_ms, "proof_max_age_ms": max_age}
+    if not bool(proof.get("profile_surface_confirmed")):
+        return False, "profile_surface_not_confirmed", {"proof_age_ms": age_ms}
+    if not bool(proof.get("grid_visible")):
+        return False, "grid_not_visible", {"proof_age_ms": age_ms}
+    if not bool(proof.get("post_candidate_visible")):
+        return False, "post_candidate_not_visible", {"proof_age_ms": age_ms}
+    if not bool(proof.get("post_candidate_bounds_proven")):
+        return False, "post_candidate_bounds_absent", {"proof_age_ms": age_ms}
+    if not bool(proof.get("tap_safe")):
+        return False, str(proof.get("tap_safe_reason") or "post_candidate_not_tap_safe"), {
+            "proof_age_ms": age_ms
+        }
+    proof_user = str(proof.get("follower_username") or "").strip().lstrip("@")
+    exp_user = str(expected_follower_username or "").strip().lstrip("@")
+    if proof_user and exp_user and _normalize_handle(proof_user) != _normalize_handle(exp_user):
+        return False, "candidate_mismatch", {"proof_age_ms": age_ms}
+    try:
+        for key in ("left", "top", "right", "bottom", "center_x", "center_y"):
+            int(cell.get(key))
+    except (TypeError, ValueError):
+        return False, "post_candidate_bounds_invalid", {"proof_age_ms": age_ms}
+    return True, "", {"proof_age_ms": age_ms, "proof_max_age_ms": max_age}
+
+
+def _post_like_build_grid_reuse_proof_from_cell(
+    cell_meta: dict[str, Any],
+    *,
+    source_profile_username: str,
+    follower_username: str,
+    visual_candidate_id: str,
+    surface_precheck: dict[str, Any],
+    pre_reveal_out: dict[str, Any],
+    ww: int,
+    wh: int,
+) -> dict[str, Any]:
+    cell = cell_meta.get("cell") if isinstance(cell_meta, dict) else None
+    reason = str((cell_meta or {}).get("reason") or "")
+    y_min_px = (cell_meta or {}).get("y_min_px")
+    tap_safe, tap_safe_reason = _post_follow_likes_evaluate_post_cell_tap_safe(
+        cell if isinstance(cell, dict) else None,
+        reason=reason,
+        ww=int(ww),
+        wh=int(wh),
+        y_min_px=int(y_min_px) if y_min_px is not None else None,
+    )
+    reliable = bool((cell_meta or {}).get("reliable"))
+    proof = {
+        "profile_surface_confirmed": bool(surface_precheck.get("profile_candidate_visible")),
+        "grid_visible": bool(surface_precheck.get("grid_tab_visible")) and reliable,
+        "post_candidate_visible": reliable,
+        "post_candidate_bounds_proven": isinstance(cell, dict),
+        "tap_safe": bool(tap_safe),
+        "tap_safe_reason": str(tap_safe_reason or ""),
+        "cell": dict(cell) if isinstance(cell, dict) else None,
+        "cell_source": reason,
+        "follower_username": str(follower_username or ""),
+        "source_profile_username": str(source_profile_username or ""),
+        "visual_candidate_id": str(visual_candidate_id or ""),
+        "captured_at_perf": time.perf_counter(),
+        "pre_reveal_used": bool(pre_reveal_out.get("pre_reveal_used")),
+        "pre_reveal_reason": str(pre_reveal_out.get("reason") or ""),
+        "tabs_bottom_y": cell_meta.get("y_min_px"),
+        "screen_width": int(ww),
+        "screen_height": int(wh),
+    }
+    return proof
+
+
 def _post_follow_like_partial_suggested_overlay(probe: dict[str, Any]) -> bool:
     st = str(probe.get("grid_state") or "").strip().lower()
     return st == "partial" and bool(probe.get("suggested_for_you"))
@@ -20599,6 +20693,7 @@ def _post_follow_likes_open_top_left_legacy_visual_safe(
     visual_candidate_id: str,
     post_index: int,
     likes_perf_phase_t0: float | None = None,
+    grid_reuse_proof: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Safe, targeted reuse of the emulator-era visual open path.
@@ -20713,6 +20808,183 @@ def _post_follow_likes_open_top_left_legacy_visual_safe(
         ww, wh = d.window_size()
     except Exception:
         ww, wh = 1080, 2340
+    proof_ok, proof_reject, proof_meta = _post_like_validate_grid_reuse_proof(
+        grid_reuse_proof,
+        expected_follower_username=expected_follower_username,
+    )
+    if proof_ok and isinstance(grid_reuse_proof, dict):
+        cell = dict(grid_reuse_proof.get("cell") or {})
+        try:
+            tap_x = int(cell.get("center_x"))
+            tap_y = int(cell.get("center_y"))
+        except (TypeError, ValueError):
+            tap_x = tap_y = 0
+            proof_ok = False
+            proof_reject = "post_candidate_bounds_invalid"
+        if proof_ok and tap_x > 0 and tap_y > 0:
+            try:
+                log(
+                    "info",
+                    "post_like_legacy_safe_double_grid_probe_skipped",
+                    visual_candidate_id=visual_candidate_id,
+                    source_profile_username=source_profile_username,
+                    follower_username=expected_follower_username,
+                    post_index=int(post_index),
+                    proof_age_ms=proof_meta.get("proof_age_ms"),
+                    cell_source=str(grid_reuse_proof.get("cell_source") or ""),
+                    tap_x=int(tap_x),
+                    tap_y=int(tap_y),
+                )
+                log(
+                    "info",
+                    "post_like_reuse_post_candidate_bounds",
+                    visual_candidate_id=visual_candidate_id,
+                    source_profile_username=source_profile_username,
+                    follower_username=expected_follower_username,
+                    post_index=int(post_index),
+                    proof_age_ms=proof_meta.get("proof_age_ms"),
+                    cell_source=str(grid_reuse_proof.get("cell_source") or ""),
+                    bounds=cell,
+                    tap_safe=True,
+                )
+            except Exception:
+                pass
+            try:
+                time.sleep(float(_POST_FOLLOW_RECENT_POST_OPEN_PRE_TAP_SETTLE_S))
+            except Exception:
+                pass
+            try:
+                log(
+                    "info",
+                    "like_post_open_attempted",
+                    visual_candidate_id=visual_candidate_id,
+                    source_profile_username=source_profile_username,
+                    follower_username=expected_follower_username,
+                    post_index=int(post_index),
+                    tap_x=int(tap_x),
+                    tap_y=int(tap_y),
+                    action="legacy_visual_top_left_safe_reused_grid_proof",
+                    cell_source=str(grid_reuse_proof.get("cell_source") or "reused_grid_proof"),
+                    scroll_attempts=1 if bool(grid_reuse_proof.get("pre_reveal_used")) else 0,
+                    grid_exposure="reused_grid_proof",
+                )
+                d.click(int(tap_x), int(tap_y))
+                log(
+                    "info",
+                    "vision_open_top_left_legacy_safe_tap_sent",
+                    visual_candidate_id=visual_candidate_id,
+                    source_profile_username=source_profile_username,
+                    follower_username=expected_follower_username,
+                    post_index=int(post_index),
+                    tap_x=int(tap_x),
+                    tap_y=int(tap_y),
+                    selected_col=0,
+                    selected_row=0,
+                    reused_grid_proof=True,
+                )
+            except Exception as e:
+                return _finish(
+                    "legacy_visual_top_left_failed",
+                    tap_x=int(tap_x),
+                    tap_y=int(tap_y),
+                    error=str(e)[:160],
+                    reused_grid_proof=True,
+                )
+            viewer = _visual_wait_post_viewer_opened_after_tap(
+                d,
+                pkg=pkg,
+                expected_follower_username=str(expected_follower_username or "").strip().lstrip("@"),
+                act_before=meta0.get("current_activity"),
+                poll_label="legacy_top_left_reused_grid_tap",
+                post_follow_fast=True,
+            )
+            try:
+                log(
+                    "info",
+                    "vision_open_top_left_legacy_safe_viewer_poll_completed",
+                    visual_candidate_id=visual_candidate_id,
+                    source_profile_username=source_profile_username,
+                    follower_username=expected_follower_username,
+                    post_index=int(post_index),
+                    post_detected=bool(viewer.get("post_detected")),
+                    detect_reason=viewer.get("detect_reason"),
+                    viewer_detect_path=viewer.get("viewer_detect_path"),
+                    viewer_open_poll_wait_ms=viewer.get("viewer_open_poll_wait_ms"),
+                    viewer_detect_total_ms=viewer.get("viewer_detect_total_ms"),
+                    reused_grid_proof=True,
+                )
+            except Exception:
+                pass
+            if not bool(viewer.get("post_detected")):
+                return _finish(
+                    "legacy_visual_top_left_viewer_not_confirmed",
+                    tap_x=int(tap_x),
+                    tap_y=int(tap_y),
+                    viewer_detect_path=viewer.get("viewer_detect_path"),
+                    detect_reason=viewer.get("detect_reason"),
+                    reused_grid_proof=True,
+                )
+            _stash_post_follow_open_like_proof(
+                dict(viewer),
+                source_profile_username=source_profile_username,
+                follower_username=expected_follower_username,
+                proof_source="legacy_safe_reused_grid_proof",
+            )
+            perf = {
+                **dict(viewer),
+                "legacy_visual_top_left_total_ms": round((time.perf_counter() - t0) * 1000.0, 2),
+                "legacy_visual_top_left": True,
+                "open_strategy": "vision_open_top_left_legacy_safe",
+                "selected_col": 0,
+                "selected_row": 0,
+                "reused_grid_proof": True,
+                "proof_age_ms": proof_meta.get("proof_age_ms"),
+                "elapsed_from_phase_start_ms": _likes_perf_elapsed_ms(likes_perf_phase_t0),
+            }
+            try:
+                log(
+                    "info",
+                    "vision_open_top_left_legacy_safe_success",
+                    visual_candidate_id=visual_candidate_id,
+                    source_profile_username=source_profile_username,
+                    follower_username=expected_follower_username,
+                    post_index=int(post_index),
+                    tap_x=int(tap_x),
+                    tap_y=int(tap_y),
+                    detect_reason=viewer.get("detect_reason"),
+                    viewer_detect_path=viewer.get("viewer_detect_path"),
+                    reused_grid_proof=True,
+                )
+            except Exception:
+                pass
+            return {
+                "ok": True,
+                "post_detected": True,
+                "failure_reason": "",
+                "open_strategy": "vision_open_top_left_legacy_safe",
+                "tap_x": int(tap_x),
+                "tap_y": int(tap_y),
+                "detect_reason": viewer.get("detect_reason"),
+                "viewer_detect_path": viewer.get("viewer_detect_path"),
+                "likes_perf_post_open": perf,
+                "tap_to_viewer_detected_ms": viewer.get("viewer_detect_total_ms"),
+                "reused_grid_proof": True,
+            }
+    elif isinstance(grid_reuse_proof, dict):
+        try:
+            log(
+                "info",
+                "post_like_reuse_skipped_stale" if proof_reject == "stale" else "post_like_reuse_grid_proof_skipped",
+                visual_candidate_id=visual_candidate_id,
+                source_profile_username=source_profile_username,
+                follower_username=expected_follower_username,
+                post_index=int(post_index),
+                reason=str(proof_reject or "proof_rejected"),
+                proof_age_ms=proof_meta.get("proof_age_ms"),
+                proof_max_age_ms=proof_meta.get("proof_max_age_ms"),
+            )
+        except Exception:
+            pass
     _t_ui_hints = time.perf_counter()
     _prev_timing_ctx = _LEGACY_SAFE_TIMING_CONTEXT
     try:
@@ -44224,6 +44496,70 @@ def run_post_follow_post_likes_phase(
             str(pre_reveal_out.get("reason") or "") == "profile_tabs_bottom_unknown"
             and not bool(pre_reveal_out.get("pre_reveal_used"))
         )
+        grid_reuse_proof: dict[str, Any] | None = None
+        if bool(pre_reveal_out.get("pre_reveal_used")) and bool(pre_reveal_out.get("swipe_ok")):
+            try:
+                ww_reuse, wh_reuse = d.window_size()
+            except Exception:
+                ww_reuse, wh_reuse = 1080, 2340
+            try:
+                log(
+                    "info",
+                    "post_like_reuse_profile_surface_proof",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    follower_username=cand,
+                    post_index=post_idx,
+                    profile_surface_confirmed=bool(
+                        surface_precheck.get("profile_candidate_visible")
+                    ),
+                    source="post_like_surface_precheck_after_mute",
+                    pre_reveal_used=True,
+                )
+            except Exception:
+                pass
+            t_reuse_probe = time.perf_counter()
+            cell_meta = _post_follow_likes_probe_top_left_xml_cell_meta(
+                d,
+                ww=int(ww_reuse),
+                wh=int(wh_reuse),
+                budget_deadline=time.perf_counter() + 1.25,
+                profile_tabs_visible=bool(surface_precheck.get("grid_tab_visible")),
+            )
+            grid_reuse_proof = _post_like_build_grid_reuse_proof_from_cell(
+                cell_meta,
+                source_profile_username=src,
+                follower_username=cand,
+                visual_candidate_id=vcid,
+                surface_precheck=surface_precheck,
+                pre_reveal_out=pre_reveal_out,
+                ww=int(ww_reuse),
+                wh=int(wh_reuse),
+            )
+            try:
+                log(
+                    "info",
+                    "post_like_reuse_grid_proof",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    follower_username=cand,
+                    post_index=post_idx,
+                    reliable=bool(cell_meta.get("reliable")),
+                    reason=str(cell_meta.get("reason") or ""),
+                    proof_ms=round((time.perf_counter() - t_reuse_probe) * 1000.0, 2),
+                    grid_visible=bool(grid_reuse_proof.get("grid_visible")),
+                    post_candidate_visible=bool(
+                        grid_reuse_proof.get("post_candidate_visible")
+                    ),
+                    post_candidate_bounds_proven=bool(
+                        grid_reuse_proof.get("post_candidate_bounds_proven")
+                    ),
+                    tap_safe=bool(grid_reuse_proof.get("tap_safe")),
+                    tap_safe_reason=str(grid_reuse_proof.get("tap_safe_reason") or ""),
+                    cell=cell_meta.get("cell"),
+                )
+            except Exception:
+                pass
         t_open_legacy_first = time.perf_counter()
         if scroll_first_unknown_tabs:
             legacy_first_out = {
@@ -44278,6 +44614,7 @@ def run_post_follow_post_likes_phase(
                 visual_candidate_id=vcid,
                 post_index=post_idx,
                 likes_perf_phase_t0=_likes_perf_ctx.get("phase_t0"),
+                grid_reuse_proof=grid_reuse_proof,
             )
             try:
                 log(
@@ -44464,6 +44801,76 @@ def run_post_follow_post_likes_phase(
                         )
                     except Exception:
                         pass
+                    retry_grid_reuse_proof: dict[str, Any] | None = None
+                    try:
+                        ww_reuse_retry, wh_reuse_retry = d.window_size()
+                    except Exception:
+                        ww_reuse_retry, wh_reuse_retry = 1080, 2340
+                    try:
+                        log(
+                            "info",
+                            "post_like_reuse_profile_surface_proof",
+                            visual_candidate_id=vcid,
+                            source_profile_username=src,
+                            follower_username=cand,
+                            post_index=post_idx,
+                            profile_surface_confirmed=bool(
+                                surface_precheck.get("profile_candidate_visible")
+                            ),
+                            source="post_like_surface_precheck_after_retry_reveal",
+                            pre_reveal_used=True,
+                        )
+                    except Exception:
+                        pass
+                    t_retry_reuse_probe = time.perf_counter()
+                    retry_cell_meta = _post_follow_likes_probe_top_left_xml_cell_meta(
+                        d,
+                        ww=int(ww_reuse_retry),
+                        wh=int(wh_reuse_retry),
+                        budget_deadline=time.perf_counter() + 1.25,
+                        profile_tabs_visible=bool(surface_precheck.get("grid_tab_visible")),
+                    )
+                    retry_pre_reveal_out = {
+                        "pre_reveal_used": True,
+                        "reason": scroll_reason,
+                        "swipe_ok": bool(sw_retry.get("swipe_ok")),
+                    }
+                    retry_grid_reuse_proof = _post_like_build_grid_reuse_proof_from_cell(
+                        retry_cell_meta,
+                        source_profile_username=src,
+                        follower_username=cand,
+                        visual_candidate_id=vcid,
+                        surface_precheck=surface_precheck,
+                        pre_reveal_out=retry_pre_reveal_out,
+                        ww=int(ww_reuse_retry),
+                        wh=int(wh_reuse_retry),
+                    )
+                    try:
+                        log(
+                            "info",
+                            "post_like_reuse_grid_proof",
+                            visual_candidate_id=vcid,
+                            source_profile_username=src,
+                            follower_username=cand,
+                            post_index=post_idx,
+                            reliable=bool(retry_cell_meta.get("reliable")),
+                            reason=str(retry_cell_meta.get("reason") or ""),
+                            proof_ms=round((time.perf_counter() - t_retry_reuse_probe) * 1000.0, 2),
+                            grid_visible=bool(retry_grid_reuse_proof.get("grid_visible")),
+                            post_candidate_visible=bool(
+                                retry_grid_reuse_proof.get("post_candidate_visible")
+                            ),
+                            post_candidate_bounds_proven=bool(
+                                retry_grid_reuse_proof.get("post_candidate_bounds_proven")
+                            ),
+                            tap_safe=bool(retry_grid_reuse_proof.get("tap_safe")),
+                            tap_safe_reason=str(
+                                retry_grid_reuse_proof.get("tap_safe_reason") or ""
+                            ),
+                            cell=retry_cell_meta.get("cell"),
+                        )
+                    except Exception:
+                        pass
                     t_open_legacy_retry = time.perf_counter()
                     preopened_out = _post_follow_likes_open_top_left_legacy_visual_safe(
                         d,
@@ -44473,6 +44880,7 @@ def run_post_follow_post_likes_phase(
                         visual_candidate_id=vcid,
                         post_index=post_idx,
                         likes_perf_phase_t0=_likes_perf_ctx.get("phase_t0"),
+                        grid_reuse_proof=retry_grid_reuse_proof,
                     )
                     timings[f"open_post_{post_idx}_ms"] = round(
                         (time.perf_counter() - t_open_legacy_retry) * 1000,

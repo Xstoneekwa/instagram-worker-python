@@ -1370,6 +1370,227 @@ class PostMuteGapTrackingTest(unittest.TestCase):
         self.assertIn("post_like_legacy_safe_candidate_timing", logs)
         self.assertIn("post_like_surface_to_scroll_gap_completed", logs)
 
+    def _fresh_grid_reuse_proof(self, *, cell: dict[str, int] | None = None) -> dict[str, object]:
+        cell = cell or {
+            "left": 0,
+            "top": 920,
+            "right": 360,
+            "bottom": 1280,
+            "center_x": 180,
+            "center_y": 1080,
+        }
+        return {
+            "profile_surface_confirmed": True,
+            "grid_visible": True,
+            "post_candidate_visible": True,
+            "post_candidate_bounds_proven": True,
+            "tap_safe": True,
+            "cell": dict(cell),
+            "cell_source": "xml_thumbnail_top_left",
+            "follower_username": "cand",
+            "source_profile_username": "ct",
+            "visual_candidate_id": "vc-1",
+            "captured_at_perf": time.perf_counter(),
+        }
+
+    def test_legacy_safe_reuses_fresh_grid_proof_and_skips_double_grid_probe(self) -> None:
+        device = mock.MagicMock()
+        device.window_size.return_value = (1080, 2340)
+        logs: list[tuple[str, dict[str, object]]] = []
+        with mock.patch.object(
+            nav, "_followers_current_pkg_activity", return_value={"current_activity": "ProfileActivity"}
+        ), mock.patch.object(
+            nav, "visual_target_profile_lock_verify", return_value={"ok": True}
+        ), mock.patch.object(
+            nav, "_post_follow_likes_grid_ui_surface_hints", side_effect=AssertionError("ui hints should be skipped")
+        ), mock.patch.object(
+            nav, "_followers_profile_tabs_bottom_y_px", side_effect=AssertionError("tabs probe should be skipped")
+        ), mock.patch.object(
+            nav, "screenshot", side_effect=AssertionError("screenshot should be skipped")
+        ), mock.patch.object(
+            nav,
+            "_visual_wait_post_viewer_opened_after_tap",
+            return_value={
+                "post_detected": True,
+                "detect_reason": "like_unlike_ui",
+                "viewer_detect_path": "phase_a2_exact_like_desc_fast",
+                "viewer_detect_total_ms": 180.0,
+            },
+        ) as viewer, mock.patch.object(
+            nav, "_stash_post_follow_open_like_proof"
+        ) as stash, mock.patch.object(
+            nav, "log", side_effect=lambda _level, event, **kw: logs.append((str(event), dict(kw)))
+        ), mock.patch.object(nav, "time") as tmock:
+            tmock.perf_counter = time.perf_counter
+            tmock.time = time.time
+            tmock.sleep = lambda *_a, **_k: None
+            out = nav._post_follow_likes_open_top_left_legacy_visual_safe(
+                device,
+                pkg="com.instagram.android",
+                source_profile_username="ct",
+                expected_follower_username="cand",
+                visual_candidate_id="vc-1",
+                post_index=1,
+                grid_reuse_proof=self._fresh_grid_reuse_proof(),
+            )
+
+        self.assertTrue(out["ok"])
+        self.assertTrue(out["post_detected"])
+        self.assertTrue(out["reused_grid_proof"])
+        device.click.assert_called_once_with(180, 1080)
+        viewer.assert_called_once()
+        stash.assert_called_once()
+        events = [event for event, _kw in logs]
+        self.assertIn("post_like_legacy_safe_double_grid_probe_skipped", events)
+        self.assertIn("post_like_reuse_post_candidate_bounds", events)
+
+    def test_legacy_safe_stale_grid_proof_falls_back_to_full_probe(self) -> None:
+        device = mock.MagicMock()
+        device.window_size.return_value = (1080, 2340)
+        proof = self._fresh_grid_reuse_proof()
+        proof["captured_at_perf"] = time.perf_counter() - 10.0
+        logs: list[tuple[str, dict[str, object]]] = []
+        with mock.patch.object(
+            nav, "_followers_current_pkg_activity", return_value={"current_activity": "ProfileActivity"}
+        ), mock.patch.object(
+            nav, "visual_target_profile_lock_verify", return_value={"ok": True}
+        ), mock.patch.object(
+            nav, "_post_follow_likes_grid_ui_surface_hints", return_value={"profile_tabs_visible": True}
+        ) as ui_hints, mock.patch.object(
+            nav, "_followers_profile_tabs_bottom_y_px", return_value=(None, "")
+        ), mock.patch.object(
+            nav, "log", side_effect=lambda _level, event, **kw: logs.append((str(event), dict(kw)))
+        ), mock.patch.object(nav, "time") as tmock:
+            tmock.perf_counter = time.perf_counter
+            tmock.time = time.time
+            tmock.sleep = lambda *_a, **_k: None
+            out = nav._post_follow_likes_open_top_left_legacy_visual_safe(
+                device,
+                pkg="com.instagram.android",
+                source_profile_username="ct",
+                expected_follower_username="cand",
+                visual_candidate_id="vc-1",
+                post_index=1,
+                grid_reuse_proof=proof,
+            )
+
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["failure_reason"], "legacy_visual_top_left_candidate_ambiguous")
+        ui_hints.assert_called_once()
+        device.click.assert_not_called()
+        stale = [kw for event, kw in logs if event == "post_like_reuse_skipped_stale"]
+        self.assertTrue(stale)
+
+    def test_legacy_safe_grid_proof_without_bounds_does_not_direct_open(self) -> None:
+        device = mock.MagicMock()
+        device.window_size.return_value = (1080, 2340)
+        proof = self._fresh_grid_reuse_proof()
+        proof["cell"] = None
+        proof["post_candidate_bounds_proven"] = False
+        logs: list[tuple[str, dict[str, object]]] = []
+        with mock.patch.object(
+            nav, "_followers_current_pkg_activity", return_value={"current_activity": "ProfileActivity"}
+        ), mock.patch.object(
+            nav, "visual_target_profile_lock_verify", return_value={"ok": True}
+        ), mock.patch.object(
+            nav, "_post_follow_likes_grid_ui_surface_hints", return_value={"profile_tabs_visible": True}
+        ), mock.patch.object(
+            nav, "_followers_profile_tabs_bottom_y_px", return_value=(None, "")
+        ), mock.patch.object(
+            nav, "log", side_effect=lambda _level, event, **kw: logs.append((str(event), dict(kw)))
+        ), mock.patch.object(nav, "time") as tmock:
+            tmock.perf_counter = time.perf_counter
+            tmock.time = time.time
+            tmock.sleep = lambda *_a, **_k: None
+            out = nav._post_follow_likes_open_top_left_legacy_visual_safe(
+                device,
+                pkg="com.instagram.android",
+                source_profile_username="ct",
+                expected_follower_username="cand",
+                visual_candidate_id="vc-1",
+                post_index=1,
+                grid_reuse_proof=proof,
+            )
+
+        self.assertFalse(out["ok"])
+        device.click.assert_not_called()
+        skipped = [kw for event, kw in logs if event == "post_like_reuse_grid_proof_skipped"]
+        self.assertTrue(skipped)
+        self.assertEqual(skipped[-1]["reason"], "post_candidate_bounds_absent")
+
+    def test_reuse_grid_proof_rejects_story_highlight_ambiguous_cell(self) -> None:
+        proof = nav._post_like_build_grid_reuse_proof_from_cell(
+            {
+                "reliable": True,
+                "reason": "xml_thumbnail_top_left",
+                "cell": {
+                    "left": 0,
+                    "top": 2040,
+                    "right": 360,
+                    "bottom": 2320,
+                    "center_x": 180,
+                    "center_y": 2180,
+                },
+                "y_min_px": 2000,
+            },
+            source_profile_username="ct",
+            follower_username="cand",
+            visual_candidate_id="vc-1",
+            surface_precheck={"profile_candidate_visible": True, "grid_tab_visible": True},
+            pre_reveal_out={"pre_reveal_used": True, "reason": "tabs_too_low_before_legacy_safe"},
+            ww=1080,
+            wh=2340,
+        )
+
+        ok, reason, _meta = nav._post_like_validate_grid_reuse_proof(
+            proof,
+            expected_follower_username="cand",
+        )
+
+        self.assertFalse(ok)
+        self.assertIn(
+            reason,
+            {"highlights_blocking_post_grid", "post_cell_too_low_for_safe_tap"},
+        )
+        self.assertFalse(proof["tap_safe"])
+
+    def test_legacy_safe_reused_grid_proof_requires_viewer_confirmation(self) -> None:
+        device = mock.MagicMock()
+        device.window_size.return_value = (1080, 2340)
+        with mock.patch.object(
+            nav, "_followers_current_pkg_activity", return_value={"current_activity": "ProfileActivity"}
+        ), mock.patch.object(
+            nav, "visual_target_profile_lock_verify", return_value={"ok": True}
+        ), mock.patch.object(
+            nav,
+            "_visual_wait_post_viewer_opened_after_tap",
+            return_value={
+                "post_detected": False,
+                "detect_reason": "still_profile_grid",
+                "viewer_detect_path": "",
+            },
+        ), mock.patch.object(
+            nav, "_stash_post_follow_open_like_proof"
+        ) as stash, mock.patch.object(nav, "log"), mock.patch.object(nav, "time") as tmock:
+            tmock.perf_counter = time.perf_counter
+            tmock.time = time.time
+            tmock.sleep = lambda *_a, **_k: None
+            out = nav._post_follow_likes_open_top_left_legacy_visual_safe(
+                device,
+                pkg="com.instagram.android",
+                source_profile_username="ct",
+                expected_follower_username="cand",
+                visual_candidate_id="vc-1",
+                post_index=1,
+                grid_reuse_proof=self._fresh_grid_reuse_proof(),
+            )
+
+        self.assertFalse(out["ok"])
+        self.assertFalse(out["post_detected"])
+        self.assertEqual(out["failure_reason"], "legacy_visual_top_left_viewer_not_confirmed")
+        device.click.assert_called_once_with(180, 1080)
+        stash.assert_not_called()
+
 
 def _probe_sequence_from_visible_fn(
     visible_fn: object,
@@ -2567,6 +2788,7 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
         self.assertTrue(scroll_attempts)
         self.assertEqual(scroll_attempts[-1].get("scroll_reason"), "profile_tabs_bottom_unknown_scroll_first")
         self.assertIn("legacy_safe_retry_after_reveal_completed", order)
+        self.assertTrue(legacy_open.call_args.kwargs.get("grid_reuse_proof"))
 
     def test_pre_reveal_tabs_too_low_runs_before_first_legacy_safe(self) -> None:
         device = mock.MagicMock()
@@ -2666,6 +2888,8 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
         self.assertTrue(invalidated)
         self.assertEqual(invalidated[-1].get("known_tabs_bottom_y_px"), 1777)
         self.assertFalse(invalidated[-1].get("reused"))
+        self.assertTrue(legacy_open.call_args.kwargs.get("grid_reuse_proof"))
+        self.assertIn("post_like_reuse_grid_proof", order)
 
     def test_pre_reveal_tabs_normal_keeps_first_legacy_safe_direct(self) -> None:
         device = mock.MagicMock()
@@ -2810,6 +3034,7 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
         self.assertIn("post_follow_like_pre_reveal_needed", log_events)
         self.assertIn("legacy_safe_first_failed_to_retry_started", log_events)
         self.assertIn("legacy_safe_retry_after_reveal_completed", log_events)
+        self.assertTrue(legacy_open.call_args.kwargs.get("grid_reuse_proof"))
 
     def test_legacy_ambiguous_reveals_and_retries_without_xml_probe(self) -> None:
         device = mock.MagicMock()
