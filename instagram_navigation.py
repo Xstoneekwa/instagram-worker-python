@@ -8913,10 +8913,61 @@ def perform_follow_safe(
             source_profile_username=source_profile_username,
         )
     )
+    _ctx_reuse_block_reason = ""
+    if profile_already_open and isinstance(pre_follow_context, dict) and not _ctx_reuse:
+        _ctx_reuse_block_reason = _pre_follow_tap_context_reuse_block_reason(
+            pre_follow_context,
+            follower_username=username,
+            source_profile_username=source_profile_username,
+        )
+        log(
+            "info",
+            "proof_reuse_skipped_stale",
+            caller="perform_follow_safe_initial",
+            target_username=str(username or ""),
+            visual_candidate_id=str(visual_candidate_id or ""),
+            source_profile_username=str(source_profile_username or ""),
+            reason=_ctx_reuse_block_reason,
+            context_age_ms=round(
+                (time.monotonic() - float((pre_follow_context or {}).get("captured_at_mono") or 0.0))
+                * 1000.0,
+                2,
+            )
+            if (pre_follow_context or {}).get("captured_at_mono") is not None
+            else None,
+        )
     _state_before_t0 = time.perf_counter()
     if _ctx_reuse:
         state_before = str((pre_follow_context or {}).get("follow_header_state") or "follow")
         _state_before_ms = round((time.perf_counter() - _state_before_t0) * 1000.0, 2)
+        log(
+            "info",
+            "proof_reuse_follow_state",
+            caller="perform_follow_safe_initial",
+            target_username=str(username or ""),
+            visual_candidate_id=str(visual_candidate_id or ""),
+            source_profile_username=str(source_profile_username or ""),
+            follow_header_state=state_before,
+            requested=bool((pre_follow_context or {}).get("requested")),
+            following=bool((pre_follow_context or {}).get("following")),
+            context_age_ms=round(
+                (time.monotonic() - float((pre_follow_context or {}).get("captured_at_mono") or 0.0))
+                * 1000.0,
+                2,
+            ),
+            reused_signals=["follow_header_state", "requested", "following"],
+        )
+        log(
+            "info",
+            "proof_reuse_pending_requested",
+            caller="perform_follow_safe_initial",
+            target_username=str(username or ""),
+            visual_candidate_id=str(visual_candidate_id or ""),
+            source_profile_username=str(source_profile_username or ""),
+            requested=False,
+            following=False,
+            reused_signals=["requested", "following"],
+        )
         log(
             "info",
             "pre_follow_tap_context_reused",
@@ -8925,11 +8976,6 @@ def perform_follow_safe(
             visual_candidate_id=str(visual_candidate_id or ""),
             source_profile_username=str(source_profile_username or ""),
             follow_header_state=state_before,
-            context_age_ms=round(
-                (time.monotonic() - float((pre_follow_context or {}).get("captured_at_mono") or 0.0))
-                * 1000.0,
-                2,
-            ),
             reused_signals=["follow_header_state"],
         )
     else:
@@ -9165,6 +9211,16 @@ def perform_follow_safe(
             _priv_terminal = dict(_priv_reuse)
             log(
                 "info",
+                "proof_reuse_private",
+                caller="perform_follow_safe_terminal_private_gate",
+                target_username=str(username or ""),
+                visual_candidate_id=str(visual_candidate_id or ""),
+                source_profile_username=_src_prof or None,
+                reused_signals=["private_probe_payload"],
+                private_profile_probe_ms=float(_priv_terminal.get("probe_ms") or 0.0),
+            )
+            log(
+                "info",
                 "pre_follow_tap_context_reused",
                 caller="perform_follow_safe_terminal_private_gate",
                 target_username=str(username or ""),
@@ -9242,6 +9298,7 @@ def perform_follow_safe(
         phase="tap_ready",
         blocking_step="follow_button_detect_to_tap_ready",
         duration_ms=round((time.perf_counter() - t_all) * 1000.0, 2),
+        opened_to_follow_tap_ms=round((time.perf_counter() - t_all) * 1000.0, 2),
         probe_count=None,
         used_cached_context=bool(_ctx_reuse),
         fallback_used=not bool(tap_exact),
@@ -46932,6 +46989,9 @@ def build_pre_follow_tap_context(
             "probe_ms": float(pg.get("probe_ms") or 0.0),
             "hierarchy_fallback_used": bool(pg.get("hierarchy_fallback_used")),
         }
+    follow_header_state = str(sg.get("follow_header_state") or "")
+    requested = bool(sg.get("requested", follow_header_state == "requested"))
+    following = bool(sg.get("following", follow_header_state == "following"))
     return {
         "kind": _PRE_FOLLOW_TAP_CONTEXT_KIND,
         "follower_username": str(follower_username or "").strip().lstrip("@"),
@@ -46942,7 +47002,9 @@ def build_pre_follow_tap_context(
         "navigation_confidence": float(sg.get("navigation_confidence") or 0.0),
         "raw_follow_invite_visible": bool(sg.get("raw_follow_invite_visible")),
         "followers_list_xml_hint": bool(sg.get("followers_list_xml_hint")),
-        "follow_header_state": str(sg.get("follow_header_state") or ""),
+        "follow_header_state": follow_header_state,
+        "requested": requested,
+        "following": following,
         "screen_guard_ok": bool(sg.get("ok", True)),
         "private_gate": {
             "reject": bool(pg.get("reject")),
@@ -46956,44 +47018,69 @@ def build_pre_follow_tap_context(
     }
 
 
+def _pre_follow_tap_context_reuse_block_reason(
+    ctx: dict[str, Any] | None,
+    *,
+    follower_username: str,
+    source_profile_username: str | None = None,
+) -> str:
+    if not isinstance(ctx, dict) or ctx.get("kind") != _PRE_FOLLOW_TAP_CONTEXT_KIND:
+        return "missing_or_wrong_kind"
+    if _norm_follow_username(ctx.get("follower_username")) != _norm_follow_username(
+        follower_username
+    ):
+        return "candidate_mismatch"
+    req_src = _norm_follow_username(source_profile_username)
+    ctx_src = str(ctx.get("source_profile_username") or "").strip().lower()
+    if req_src and ctx_src and ctx_src != req_src:
+        return "source_mismatch"
+    try:
+        age_s = time.monotonic() - float(ctx.get("captured_at_mono") or 0.0)
+    except (TypeError, ValueError):
+        return "invalid_captured_at"
+    if age_s < 0.0 or age_s > _PRE_FOLLOW_TAP_CONTEXT_MAX_AGE_S:
+        return "context_stale"
+    if str(ctx.get("navigation_state") or "") != "CANDIDATE_PROFILE":
+        return "navigation_state_not_candidate_profile"
+    if _norm_follow_username(ctx.get("action_bar_title")) != _norm_follow_username(
+        follower_username
+    ):
+        return "action_bar_candidate_mismatch"
+    if str(ctx.get("follow_header_state") or "") != "follow":
+        return "follow_header_state_not_follow"
+    if bool(ctx.get("requested")) or bool(ctx.get("following")):
+        return "already_connected_or_requested"
+    if not bool(ctx.get("screen_guard_ok", True)):
+        return "screen_guard_not_ok"
+    pg = ctx.get("private_gate") or {}
+    if not isinstance(pg, dict):
+        return "missing_private_gate"
+    if pg.get("reject") or pg.get("private_profile_detected"):
+        return "private_detected_or_rejected"
+    if float(pg.get("probe_ms") or 0.0) <= 0.0:
+        return "private_probe_missing_duration"
+    priv_payload = ctx.get("private_probe_payload")
+    if not _is_reusable_prior_private_probe(priv_payload):
+        return "private_probe_payload_not_reusable"
+    if bool(priv_payload.get("private_profile_detected")):
+        return "private_probe_detected_private"
+    return ""
+
+
 def _is_reusable_pre_follow_tap_context(
     ctx: dict[str, Any] | None,
     *,
     follower_username: str,
     source_profile_username: str | None = None,
 ) -> bool:
-    if not isinstance(ctx, dict) or ctx.get("kind") != _PRE_FOLLOW_TAP_CONTEXT_KIND:
-        return False
-    if _norm_follow_username(ctx.get("follower_username")) != _norm_follow_username(
-        follower_username
-    ):
-        return False
-    req_src = _norm_follow_username(source_profile_username)
-    ctx_src = str(ctx.get("source_profile_username") or "").strip().lower()
-    if req_src and ctx_src and ctx_src != req_src:
-        return False
-    age_s = time.monotonic() - float(ctx.get("captured_at_mono") or 0.0)
-    if age_s < 0.0 or age_s > _PRE_FOLLOW_TAP_CONTEXT_MAX_AGE_S:
-        return False
-    if str(ctx.get("follow_header_state") or "") != "follow":
-        return False
-    if not bool(ctx.get("screen_guard_ok", True)):
-        return False
-    pg = ctx.get("private_gate") or {}
-    if not isinstance(pg, dict):
-        return False
-    if pg.get("reject") or pg.get("private_profile_detected"):
-        return False
-    if bool(pg.get("probe_reused")):
-        return False
-    if float(pg.get("probe_ms") or 0.0) <= 0.0:
-        return False
-    priv_payload = ctx.get("private_probe_payload")
-    if not _is_reusable_prior_private_probe(priv_payload):
-        return False
-    if bool(priv_payload.get("private_profile_detected")):
-        return False
-    return True
+    return (
+        _pre_follow_tap_context_reuse_block_reason(
+            ctx,
+            follower_username=follower_username,
+            source_profile_username=source_profile_username,
+        )
+        == ""
+    )
 
 
 def _reusable_private_probe_from_pre_follow_context(

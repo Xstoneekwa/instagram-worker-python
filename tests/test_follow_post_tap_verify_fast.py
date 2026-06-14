@@ -57,7 +57,12 @@ def _context(username: str = "public_user") -> dict:
         follower_username=username,
         source_profile_username="source_user",
         visual_candidate_id="vc-1",
-        screen_guard={"ok": True, "follow_header_state": "follow"},
+        screen_guard={
+            "ok": True,
+            "follow_header_state": "follow",
+            "navigation_state": "CANDIDATE_PROFILE",
+            "action_bar_title": username,
+        },
         private_gate={
             "reject": False,
             "private_profile_detected": False,

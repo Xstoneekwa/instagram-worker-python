@@ -1030,6 +1030,8 @@ def _pre_follow_context_has_strong_profile_proof(
         return False
     if str(ctx.get("follow_header_state") or "") != "follow":
         return False
+    if bool(ctx.get("requested")) or bool(ctx.get("following")):
+        return False
     pg = ctx.get("private_gate") or {}
     if not isinstance(pg, dict):
         return False
@@ -2099,6 +2101,27 @@ def follow_action_surface_wait_and_select_element(
         _raw_ms = round((time.perf_counter() - _raw_t0) * 1000.0, 2)
 
         _exact_t0 = time.perf_counter()
+        _opened_to_exact_probe_ms = None
+        try:
+            captured_at = float((pre_follow_context or {}).get("captured_at_mono") or 0.0)
+            if captured_at > 0.0:
+                _opened_to_exact_probe_ms = round((time.monotonic() - captured_at) * 1000.0, 2)
+        except (TypeError, ValueError):
+            _opened_to_exact_probe_ms = None
+        _emit(
+            "exact_probe_started",
+            {
+                "caller": "follow_action_surface_wait_and_select_element",
+                "visual_candidate_id": str(visual_candidate_id or ""),
+                "source_profile_username": str(source_profile_username or ""),
+                "attempt": attempt,
+                "follow_header_state": ui_q,
+                "follow_header_state_reused": _ui_reused,
+                "raw_follow_invite_visible": bool(raw_q),
+                "strong_profile_context": bool(strong_profile_context),
+                "opened_to_exact_probe_ms": _opened_to_exact_probe_ms,
+            },
+        )
         probe_el, probe_meta = try_select_exact_profile_header_follow_fast(
             d,
             ign,
@@ -2129,8 +2152,22 @@ def follow_action_surface_wait_and_select_element(
                 "follow_header_state": ui_q,
                 "raw_follow_invite_visible": bool(raw_q),
                 "raw_invite_duration_ms": _raw_ms,
+                "opened_to_exact_probe_ms": _opened_to_exact_probe_ms,
                 "attempt": attempt,
                 "fallback_used": probe_el is None,
+            },
+        )
+        _emit(
+            "exact_probe_found" if probe_el is not None else "exact_probe_absent",
+            {
+                "caller": "follow_action_surface_wait_and_select_element",
+                "visual_candidate_id": str(visual_candidate_id or ""),
+                "source_profile_username": str(source_profile_username or ""),
+                "attempt": attempt,
+                "bounds": dict((probe_meta or {}).get("bounds") or {}),
+                "bounds_present": bool((probe_meta or {}).get("bounds")),
+                "exact_follow_fast_path": bool(probe_el is not None),
+                "opened_to_exact_probe_ms": _opened_to_exact_probe_ms,
             },
         )
         if probe_el is not None and strong_profile_context:

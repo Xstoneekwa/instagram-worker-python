@@ -312,6 +312,8 @@ class PreFollowTapContextTest(unittest.TestCase):
             screen_guard={
                 "ok": True,
                 "follow_header_state": "follow",
+                "navigation_state": "CANDIDATE_PROFILE",
+                "action_bar_title": "public_user",
                 "fast_path": True,
             },
             private_gate={
@@ -493,7 +495,12 @@ class PerformFollowSafePrivateGateTest(unittest.TestCase):
             follower_username="public_user",
             source_profile_username="healthup.sw",
             visual_candidate_id="vc-1",
-            screen_guard={"ok": True, "follow_header_state": "follow"},
+            screen_guard={
+                "ok": True,
+                "follow_header_state": "follow",
+                "navigation_state": "CANDIDATE_PROFILE",
+                "action_bar_title": "public_user",
+            },
             private_gate={
                 "reject": False,
                 "private_profile_detected": False,
