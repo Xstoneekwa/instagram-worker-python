@@ -3799,6 +3799,193 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
                 self.assertFalse(rejected[-1].get("reused"))
                 self.assertTrue(rejected[-1].get("reject_reason"))
 
+    def test_return_ct_candidate_action_bar_never_succeeds_without_ct_proof(self) -> None:
+        device = mock.MagicMock()
+        logs: list[tuple[str, dict[str, object]]] = []
+        stale_candidate_det = {
+            "is_followers_list": True,
+            "action_bar_title": "caroline.christmann.pro",
+            "current_screen_guess": "likely_profile",
+            "open_detection_method": "own_unified_follow_list",
+            "own_unified_followers_list_detected": True,
+            "follow_list_username_count": 8,
+            "has_tab_layout": True,
+        }
+
+        with mock.patch.object(
+            nav,
+            "detect_followers_list_screen",
+            return_value=stale_candidate_det,
+        ) as detect, mock.patch.object(
+            nav, "verify_followers_list_surface_is_ct_account", return_value=False
+        ), mock.patch(
+            "navigation_engine.observe_instagram_state",
+            return_value={
+                "state": "FOLLOWERS_LIST",
+                "confidence": 0.72,
+                "reason": "det_is_followers_list+relaxed_list_open+has_xml_candidates",
+                "xml_guess": "likely_profile",
+            },
+        ), mock.patch.object(
+            nav, "verify_app_foreground", return_value=True
+        ), mock.patch.object(
+            nav.time, "monotonic", side_effect=[100.0, 106.0]
+        ), mock.patch.object(
+            nav.time, "sleep", side_effect=lambda *_a, **_k: None
+        ), mock.patch.object(
+            nav,
+            "log",
+            side_effect=lambda level, event, **kw: logs.append((str(event), dict(kw))),
+        ):
+            ok, how, fail = nav.post_follow_controlled_return_to_followers_list(
+                device,
+                pkg="com.instagram.android",
+                source_profile_username="bodyhit_colmar",
+                follower_username="caroline.christmann.pro",
+                visual_candidate_id="xml_list:caroline.christmann.pro",
+                det={},
+                max_rounds=1,
+                compact_after_follow_verified_mute=True,
+                compact_reason="follow_verified_mute_success",
+            )
+
+        self.assertFalse(ok)
+        self.assertEqual(how, "compact_abort_no_list_confirmed")
+        self.assertEqual(fail, "post_follow_return_ct_compact_abort_no_list_confirmed")
+        device.press.assert_called_once_with("back")
+        self.assertGreaterEqual(detect.call_count, 4)
+        events = [event for event, _kw in logs]
+        self.assertIn(
+            "post_follow_return_ct_compact_ambiguous_list_safe_back_recovery",
+            events,
+        )
+        self.assertNotIn("post_follow_return_ct_success", events)
+        self.assertNotIn("post_follow_return_ct_visual_confirmed", events)
+        self.assertNotIn(
+            "post_follow_return_ct_compact_strong_list_confirmed",
+            events,
+        )
+
+    def test_return_ct_ambiguous_initial_list_succeeds_only_after_post_back_ct_proof(self) -> None:
+        device = mock.MagicMock()
+        logs: list[tuple[str, dict[str, object]]] = []
+        stale_candidate_det = {
+            "is_followers_list": True,
+            "action_bar_title": "luizfernandoribeiro1610",
+            "current_screen_guess": "likely_profile",
+            "open_detection_method": "own_unified_follow_list",
+            "own_unified_followers_list_detected": True,
+            "follow_list_username_count": 8,
+            "has_tab_layout": True,
+        }
+        ct_det = {
+            "is_followers_list": True,
+            "action_bar_title": "letournant",
+            "current_screen_guess": "followers_list",
+            "open_detection_method": "own_unified_follow_list",
+            "own_unified_followers_list_detected": True,
+            "follow_list_username_count": 8,
+            "has_tab_layout": True,
+        }
+
+        def _verify_ct(
+            _d: object,
+            *,
+            source_profile_username: str,
+            follower_candidate_username: str | None = None,
+            det: dict[str, object] | None = None,
+        ) -> bool:
+            return bool(det and det.get("action_bar_title") == source_profile_username)
+
+        with mock.patch.object(
+            nav,
+            "detect_followers_list_screen",
+            side_effect=[
+                stale_candidate_det,
+                stale_candidate_det,
+                stale_candidate_det,
+                ct_det,
+            ],
+        ) as detect, mock.patch.object(
+            nav, "verify_followers_list_surface_is_ct_account", side_effect=_verify_ct
+        ), mock.patch(
+            "navigation_engine.observe_instagram_state",
+            return_value={
+                "state": "FOLLOWERS_LIST",
+                "confidence": 0.72,
+                "reason": "det_is_followers_list+relaxed_list_open+has_xml_candidates",
+                "xml_guess": "likely_profile",
+            },
+        ), mock.patch.object(
+            nav, "verify_app_foreground", return_value=True
+        ), mock.patch.object(
+            nav.time, "monotonic", side_effect=[100.0, 106.0]
+        ), mock.patch.object(
+            nav.time, "perf_counter", return_value=100.0
+        ), mock.patch.object(
+            nav.time, "sleep", side_effect=lambda *_a, **_k: None
+        ), mock.patch.object(
+            nav,
+            "log",
+            side_effect=lambda level, event, **kw: logs.append((str(event), dict(kw))),
+        ):
+            ok, how, fail = nav.post_follow_controlled_return_to_followers_list(
+                device,
+                pkg="com.instagram.android",
+                source_profile_username="letournant",
+                follower_username="luizfernandoribeiro1610",
+                visual_candidate_id="xml_list:luizfernandoribeiro1610",
+                det={},
+                max_rounds=1,
+                compact_after_follow_verified_mute=True,
+                compact_reason="follow_verified_mute_success",
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(how, "compact_safe_back_then_list")
+        self.assertIsNone(fail)
+        self.assertEqual(detect.call_count, 4)
+        device.press.assert_called_once_with("back")
+        events = [event for event, _kw in logs]
+        self.assertIn(
+            "post_follow_return_ct_compact_ambiguous_list_safe_back_recovery",
+            events,
+        )
+        self.assertIn("post_follow_return_ct_post_back_det_reused", events)
+        self.assertIn("post_follow_return_ct_visual_confirmed", events)
+
+    def test_return_ct_compact_initial_strict_ct_proof_succeeds(self) -> None:
+        device = mock.MagicMock()
+        ct_det = {
+            "is_followers_list": True,
+            "action_bar_title": "bodyhit_colmar",
+            "current_screen_guess": "followers_list",
+            "open_detection_method": "own_unified_follow_list",
+            "own_unified_followers_list_detected": True,
+        }
+
+        with mock.patch.object(
+            nav, "detect_followers_list_screen", return_value=ct_det
+        ), mock.patch.object(
+            nav, "verify_followers_list_surface_is_ct_account", return_value=True
+        ):
+            ok, how, fail = nav.post_follow_controlled_return_to_followers_list(
+                device,
+                pkg="com.instagram.android",
+                source_profile_username="bodyhit_colmar",
+                follower_username="caroline.christmann.pro",
+                visual_candidate_id="xml_list:caroline.christmann.pro",
+                det={},
+                max_rounds=1,
+                compact_after_follow_verified_mute=True,
+                compact_reason="follow_verified_mute_success",
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(how, "already_on_followers_list")
+        self.assertIsNone(fail)
+        device.press.assert_not_called()
+
     def test_return_ct_noncompact_path_does_not_use_post_back_det_reuse(self) -> None:
         device = mock.MagicMock()
         logs: list[tuple[str, dict[str, object]]] = []
