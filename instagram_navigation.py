@@ -37444,7 +37444,29 @@ def post_follow_controlled_return_to_followers_list(
         int(getattr(config, "POST_FOLLOW_RETURN_CT_BACK_MAX_RETRIES", 1) or 1),
     )
 
-    def _list_confirmed() -> tuple[bool, dict[str, Any]]:
+    def _strong_own_unified_list_with_stale_candidate_action_bar(det_l: dict[str, Any]) -> bool:
+        if not bool(det_l.get("is_followers_list")):
+            return False
+        ab_norm = _normalize_handle(str(det_l.get("action_bar_title") or ""))
+        cand_norm = _normalize_handle(cand or "")
+        if not cand_norm or ab_norm != cand_norm:
+            return False
+        signals = list(det_l.get("signals") or [])
+        return (
+            (
+                bool(det_l.get("own_unified_followers_list_detected"))
+                or str(det_l.get("open_detection_method") or "") == "own_unified_follow_list"
+            )
+            and int(det_l.get("follow_list_username_count") or det_l.get("candidate_username_count") or 0) > 0
+            and (
+                bool(det_l.get("has_tab_layout"))
+                or bool(det_l.get("recycler_present"))
+                or bool(det_l.get("listview_present"))
+                or "selected_followers_tab" in signals
+            )
+        )
+
+    def _list_confirmed(*, allow_stale_candidate_action_bar: bool = False) -> tuple[bool, dict[str, Any]]:
         try:
             det_l = detect_followers_list_screen(
                 d, source_profile_username=src
@@ -37461,6 +37483,31 @@ def post_follow_controlled_return_to_followers_list(
             )
         except Exception:
             ct_ok = is_list
+        if (
+            is_list
+            and not ct_ok
+            and allow_stale_candidate_action_bar
+            and _strong_own_unified_list_with_stale_candidate_action_bar(det_l)
+        ):
+            try:
+                log(
+                    "info",
+                    "post_follow_return_ct_accept_stale_candidate_action_bar_own_unified",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    follower_username=cand or None,
+                    action_bar_title=str(det_l.get("action_bar_title") or "")[:120],
+                    open_detection_method=str(det_l.get("open_detection_method") or ""),
+                    candidate_username_count=int(
+                        det_l.get("follow_list_username_count")
+                        or det_l.get("candidate_username_count")
+                        or 0
+                    ),
+                    allow_scope="compact_return_ct_only",
+                )
+            except Exception:
+                pass
+            ct_ok = True
         return bool(is_list and ct_ok), det_l
 
     def _over_budget(round_t0: float) -> bool:
@@ -37608,7 +37655,7 @@ def post_follow_controlled_return_to_followers_list(
             xml_guess=str(nav.get("xml_guess") or ""),
         )
 
-        ok_list_now, det_now = _list_confirmed()
+        ok_list_now, det_now = _list_confirmed(allow_stale_candidate_action_bar=True)
         if ok_list_now:
             log(
                 "info",
@@ -37682,7 +37729,7 @@ def post_follow_controlled_return_to_followers_list(
                     except Exception:
                         pass
                 else:
-                    ok_fb, det_fb = _list_confirmed()
+                    ok_fb, det_fb = _list_confirmed(allow_stale_candidate_action_bar=True)
                 if ok_fb:
                     log(
                         "info",
@@ -37818,7 +37865,7 @@ def post_follow_controlled_return_to_followers_list(
                 fb_ok, fb_how = return_to_followers_list(d, src, pkg)
             except Exception as e:
                 fb_how = f"exception:{type(e).__name__}"
-            ok_fin, det_fin = _list_confirmed()
+            ok_fin, det_fin = _list_confirmed(allow_stale_candidate_action_bar=True)
             _fb_repoll_max = 3
             _fb_repoll_sleep_s = min(0.35, max(0.2, 0.28))
             if (
@@ -37844,7 +37891,7 @@ def post_follow_controlled_return_to_followers_list(
                         time.sleep(_fb_repoll_sleep_s)
                     except Exception:
                         pass
-                    ok_fin, det_fin = _list_confirmed()
+                    ok_fin, det_fin = _list_confirmed(allow_stale_candidate_action_bar=True)
                     try:
                         log(
                             "info",
@@ -38053,7 +38100,7 @@ def post_follow_controlled_return_to_followers_list(
             duration_saved_estimate_ms=0.0,
         )
 
-        ok_after, det_after = _list_confirmed()
+        ok_after, det_after = _list_confirmed(allow_stale_candidate_action_bar=True)
         if ok_after:
             log(
                 "info",

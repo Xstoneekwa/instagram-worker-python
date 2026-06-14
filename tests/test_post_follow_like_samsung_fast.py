@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import time
 import unittest
 from contextlib import ExitStack
@@ -20,6 +21,38 @@ def _like_phase_contract_ctx() -> mock.MagicMock:
     contract_ctx = mock.MagicMock()
     contract_ctx.current_state.value = "sheet_dismissed"
     return contract_ctx
+
+
+def _patch_post_viewer_like_surface_gates_normal(stack: ExitStack) -> None:
+    """Post-open viewer gates call u2 selectors; MagicMock makes exists() truthy by default."""
+    stack.enter_context(
+        mock.patch.object(
+            nav,
+            "_ui_post_viewer_facebook_shared_content_detected",
+            return_value=(False, ""),
+        )
+    )
+    stack.enter_context(
+        mock.patch.object(
+            nav,
+            "_ui_post_viewer_like_action_bar_exploitable",
+            return_value=(True, "like_unlike_ui"),
+        )
+    )
+
+
+@contextlib.contextmanager
+def _normal_post_viewer_surface_gates():
+    with mock.patch.object(
+        nav,
+        "_ui_post_viewer_facebook_shared_content_detected",
+        return_value=(False, ""),
+    ), mock.patch.object(
+        nav,
+        "_ui_post_viewer_like_action_bar_exploitable",
+        return_value=(True, "like_unlike_ui"),
+    ):
+        yield
 
 
 def _patch_like_phase_common(
@@ -89,10 +122,26 @@ def _patch_like_phase_common(
             return_value=(contract_ctx, True, ""),
         )
     )
+    _patch_post_viewer_like_surface_gates_normal(stack)
     tmock = stack.enter_context(mock.patch.object(nav, "time"))
     tmock.perf_counter = time.perf_counter
     tmock.time = time.time
     tmock.sleep = lambda *_a, **_k: None
+
+
+def _patch_pre_reveal_like_phase_common(
+    stack: ExitStack,
+    *,
+    contract_ctx: mock.MagicMock,
+) -> None:
+    _patch_like_phase_common(stack, contract_ctx=contract_ctx)
+    stack.enter_context(
+        mock.patch.object(
+            nav,
+            "_visual_profile_no_posts_tier1_direct_check",
+            return_value={"no_posts_detected": False, "detection_method": "none", "confidence": 0.0},
+        )
+    )
 
 
 class _TabsNode:
@@ -554,7 +603,7 @@ class PostMuteGapTrackingTest(unittest.TestCase):
             nav.config, "POST_FOLLOW_POST_LIKES_COUNT_RANGE", "1-1", create=True
         ), mock.patch.object(
             nav.config, "POST_FOLLOW_TOTAL_LIKES_LIMIT", 150, create=True
-        ), mock.patch.object(
+        ), _normal_post_viewer_surface_gates(), mock.patch.object(
             nav, "_followers_current_pkg_activity",
             return_value={"current_package": "com.instagram.android"},
         ), mock.patch.object(
@@ -1387,7 +1436,7 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
             nav.config, "POST_FOLLOW_POST_LIKES_COUNT_RANGE", "1-1", create=True
         ), mock.patch.object(
             nav.config, "POST_FOLLOW_TOTAL_LIKES_LIMIT", 150, create=True
-        ), mock.patch.object(
+        ), _normal_post_viewer_surface_gates(), mock.patch.object(
             nav, "read_current_profile_username_for_follow_gate", return_value="cand"
         ), mock.patch(
             "navigation_engine.observe_instagram_state",
@@ -1678,7 +1727,7 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
             nav.config, "ENABLE_REAL_VISUAL_POST_LIKE", True, create=True
         ), mock.patch.object(nav.config, "POST_FOLLOW_POST_LIKES_PERCENTAGE", 100, create=True), mock.patch.object(
             nav.config, "POST_FOLLOW_POST_LIKES_COUNT_RANGE", "1-1", create=True
-        ), mock.patch.object(nav.config, "POST_FOLLOW_TOTAL_LIKES_LIMIT", 150, create=True), mock.patch.object(
+        ), mock.patch.object(nav.config, "POST_FOLLOW_TOTAL_LIKES_LIMIT", 150, create=True), _normal_post_viewer_surface_gates(), mock.patch.object(
             nav, "read_current_profile_username_for_follow_gate", return_value="cand"
         ), mock.patch(
             "navigation_engine.observe_instagram_state",
@@ -1763,47 +1812,57 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
             order.append("pre_reveal_swipe")
             return {"swipe_ok": True, "y_start": 1684, "y_end": 936, "scroll_distance_px": 748}
 
-        with mock.patch.object(nav.config, "POST_FOLLOW_POST_LIKES_ENABLED", True, create=True), mock.patch.object(
-            nav.config, "ENABLE_REAL_VISUAL_POST_LIKE", True, create=True
-        ), mock.patch.object(nav.config, "POST_FOLLOW_POST_LIKES_PERCENTAGE", 100, create=True), mock.patch.object(
-            nav.config, "POST_FOLLOW_POST_LIKES_COUNT_RANGE", "1-1", create=True
-        ), mock.patch.object(nav.config, "POST_FOLLOW_TOTAL_LIKES_LIMIT", 150, create=True), mock.patch.object(
-            nav, "read_current_profile_username_for_follow_gate", return_value="cand"
-        ), mock.patch(
-            "navigation_engine.observe_instagram_state",
-            return_value={"state": "CANDIDATE_PROFILE", "confidence": 0.9},
-        ), mock.patch.object(
-            nav, "_post_follow_like_precheck_mute_sheet", return_value={"skip_like": False, "precheck_ms": 1.0}
-        ), mock.patch.object(
-            nav, "_post_follow_like_precheck_surface",
-            return_value={"skip_like": False, "precheck_ms": 1.0, "profile_candidate_visible": True, "grid_tab_visible": True},
-        ), mock.patch(
-            "follow_state_contract.evaluate_like_precheck_contract",
-            return_value=(contract_ctx, True, ""),
-        ), mock.patch.object(
-            nav, "_visual_profile_no_posts_tier1_direct_check",
-            return_value={"no_posts_detected": False, "detection_method": "none", "confidence": 0.0},
-        ), mock.patch.object(
-            nav, "_followers_profile_tabs_bottom_y_px", return_value=(None, "")
-        ), mock.patch.object(
-            nav, "_post_follow_likes_profile_scroll_swipe", side_effect=_pre_reveal_swipe
-        ) as reveal_swipe, mock.patch.object(
-            nav, "_post_follow_likes_open_top_left_legacy_visual_safe", side_effect=_legacy_open
-        ) as legacy_open, mock.patch.object(
-            nav, "visual_post_already_liked",
-            return_value={"already_liked": False, "detection_method": "hierarchy_like_hint"},
-        ), mock.patch.object(
-            nav, "visual_like_open_post",
-            return_value={"ok": True, "already_liked": False, "real_tap_sent": True, "likes_perf_like": {}},
-        ), mock.patch.object(
-            nav, "visual_verify_post_liked",
-            return_value={"liked_verified": True, "verification_method": "visual", "verify_attempts_count": 1},
-        ), mock.patch.object(
-            nav, "visual_return_to_profile_from_post", return_value={"ok": True}
-        ), mock.patch.object(nav, "log", side_effect=_fake_log), mock.patch.object(nav, "time") as tmock:
-            tmock.perf_counter = time.perf_counter
-            tmock.time = time.time
-            tmock.sleep = lambda *_a, **_k: None
+        with ExitStack() as stack:
+            _patch_pre_reveal_like_phase_common(stack, contract_ctx=contract_ctx)
+            stack.enter_context(
+                mock.patch.object(nav, "_followers_profile_tabs_bottom_y_px", return_value=(None, ""))
+            )
+            reveal_swipe = stack.enter_context(
+                mock.patch.object(
+                    nav, "_post_follow_likes_profile_scroll_swipe", side_effect=_pre_reveal_swipe
+                )
+            )
+            legacy_open = stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "_post_follow_likes_open_top_left_legacy_visual_safe",
+                    side_effect=_legacy_open,
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "visual_post_already_liked",
+                    return_value={"already_liked": False, "detection_method": "hierarchy_like_hint"},
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "visual_like_open_post",
+                    return_value={
+                        "ok": True,
+                        "already_liked": False,
+                        "real_tap_sent": True,
+                        "likes_perf_like": {},
+                    },
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "visual_verify_post_liked",
+                    return_value={
+                        "liked_verified": True,
+                        "verification_method": "visual",
+                        "verify_attempts_count": 1,
+                    },
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(nav, "visual_return_to_profile_from_post", return_value={"ok": True})
+            )
+            stack.enter_context(mock.patch.object(nav, "log", side_effect=_fake_log))
             out = nav.run_post_follow_post_likes_phase(
                 device,
                 pkg="com.instagram.android",
@@ -1869,47 +1928,61 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
             order.append("pre_reveal_swipe")
             return {"swipe_ok": True, "y_start": 1684, "y_end": 936, "scroll_distance_px": 748}
 
-        with mock.patch.object(nav.config, "POST_FOLLOW_POST_LIKES_ENABLED", True, create=True), mock.patch.object(
-            nav.config, "ENABLE_REAL_VISUAL_POST_LIKE", True, create=True
-        ), mock.patch.object(nav.config, "POST_FOLLOW_POST_LIKES_PERCENTAGE", 100, create=True), mock.patch.object(
-            nav.config, "POST_FOLLOW_POST_LIKES_COUNT_RANGE", "1-1", create=True
-        ), mock.patch.object(nav.config, "POST_FOLLOW_TOTAL_LIKES_LIMIT", 150, create=True), mock.patch.object(
-            nav, "read_current_profile_username_for_follow_gate", return_value="cand"
-        ), mock.patch(
-            "navigation_engine.observe_instagram_state",
-            return_value={"state": "CANDIDATE_PROFILE", "confidence": 0.9},
-        ), mock.patch.object(
-            nav, "_post_follow_like_precheck_mute_sheet", return_value={"skip_like": False, "precheck_ms": 1.0}
-        ), mock.patch.object(
-            nav, "_post_follow_like_precheck_surface",
-            return_value={"skip_like": False, "precheck_ms": 1.0, "profile_candidate_visible": True, "grid_tab_visible": True},
-        ), mock.patch(
-            "follow_state_contract.evaluate_like_precheck_contract",
-            return_value=(contract_ctx, True, ""),
-        ), mock.patch.object(
-            nav, "_visual_profile_no_posts_tier1_direct_check",
-            return_value={"no_posts_detected": False, "detection_method": "none", "confidence": 0.0},
-        ), mock.patch.object(
-            nav, "_followers_profile_tabs_bottom_y_px", return_value=(1777, "resourceId:profile_tabs_container")
-        ), mock.patch.object(
-            nav, "_post_follow_likes_profile_scroll_swipe", side_effect=_pre_reveal_swipe
-        ) as reveal_swipe, mock.patch.object(
-            nav, "_post_follow_likes_open_top_left_legacy_visual_safe", side_effect=_legacy_open
-        ) as legacy_open, mock.patch.object(
-            nav, "visual_post_already_liked",
-            return_value={"already_liked": False, "detection_method": "hierarchy_like_hint"},
-        ), mock.patch.object(
-            nav, "visual_like_open_post",
-            return_value={"ok": True, "already_liked": False, "real_tap_sent": True, "likes_perf_like": {}},
-        ), mock.patch.object(
-            nav, "visual_verify_post_liked",
-            return_value={"liked_verified": True, "verification_method": "visual", "verify_attempts_count": 1},
-        ), mock.patch.object(
-            nav, "visual_return_to_profile_from_post", return_value={"ok": True}
-        ), mock.patch.object(nav, "log", side_effect=_fake_log), mock.patch.object(nav, "time") as tmock:
-            tmock.perf_counter = time.perf_counter
-            tmock.time = time.time
-            tmock.sleep = lambda *_a, **_k: None
+        with ExitStack() as stack:
+            _patch_pre_reveal_like_phase_common(stack, contract_ctx=contract_ctx)
+            stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "_followers_profile_tabs_bottom_y_px",
+                    return_value=(1777, "resourceId:profile_tabs_container"),
+                )
+            )
+            reveal_swipe = stack.enter_context(
+                mock.patch.object(
+                    nav, "_post_follow_likes_profile_scroll_swipe", side_effect=_pre_reveal_swipe
+                )
+            )
+            legacy_open = stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "_post_follow_likes_open_top_left_legacy_visual_safe",
+                    side_effect=_legacy_open,
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "visual_post_already_liked",
+                    return_value={"already_liked": False, "detection_method": "hierarchy_like_hint"},
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "visual_like_open_post",
+                    return_value={
+                        "ok": True,
+                        "already_liked": False,
+                        "real_tap_sent": True,
+                        "likes_perf_like": {},
+                    },
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "visual_verify_post_liked",
+                    return_value={
+                        "liked_verified": True,
+                        "verification_method": "visual",
+                        "verify_attempts_count": 1,
+                    },
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(nav, "visual_return_to_profile_from_post", return_value={"ok": True})
+            )
+            stack.enter_context(mock.patch.object(nav, "log", side_effect=_fake_log))
             out = nav.run_post_follow_post_likes_phase(
                 device,
                 pkg="com.instagram.android",
@@ -1945,48 +2018,72 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
         contract_ctx.current_state.value = "sheet_dismissed"
         logs: list[tuple[str, dict[str, object]]] = []
 
-        with mock.patch.object(nav.config, "POST_FOLLOW_POST_LIKES_ENABLED", True, create=True), mock.patch.object(
-            nav.config, "ENABLE_REAL_VISUAL_POST_LIKE", True, create=True
-        ), mock.patch.object(nav.config, "POST_FOLLOW_POST_LIKES_PERCENTAGE", 100, create=True), mock.patch.object(
-            nav.config, "POST_FOLLOW_POST_LIKES_COUNT_RANGE", "1-1", create=True
-        ), mock.patch.object(nav.config, "POST_FOLLOW_TOTAL_LIKES_LIMIT", 150, create=True), mock.patch.object(
-            nav, "read_current_profile_username_for_follow_gate", return_value="cand"
-        ), mock.patch(
-            "navigation_engine.observe_instagram_state",
-            return_value={"state": "CANDIDATE_PROFILE", "confidence": 0.9},
-        ), mock.patch.object(
-            nav, "_post_follow_like_precheck_mute_sheet", return_value={"skip_like": False, "precheck_ms": 1.0}
-        ), mock.patch.object(
-            nav, "_post_follow_like_precheck_surface",
-            return_value={"skip_like": False, "precheck_ms": 1.0, "profile_candidate_visible": True, "grid_tab_visible": True},
-        ), mock.patch(
-            "follow_state_contract.evaluate_like_precheck_contract",
-            return_value=(contract_ctx, True, ""),
-        ), mock.patch.object(
-            nav, "_visual_profile_no_posts_tier1_direct_check",
-            return_value={"no_posts_detected": False, "detection_method": "none", "confidence": 0.0},
-        ), mock.patch.object(
-            nav, "_followers_profile_tabs_bottom_y_px", return_value=(1200, "resourceId:profile_tabs_container")
-        ), mock.patch.object(
-            nav, "_post_follow_likes_profile_scroll_swipe"
-        ) as reveal_swipe, mock.patch.object(
-            nav, "_post_follow_likes_open_top_left_legacy_visual_safe",
-            return_value={"ok": True, "post_detected": True, "failure_reason": "", "tap_x": 180, "tap_y": 1056, "likes_perf_post_open": {}},
-        ) as legacy_open, mock.patch.object(
-            nav, "visual_post_already_liked",
-            return_value={"already_liked": False, "detection_method": "hierarchy_like_hint"},
-        ), mock.patch.object(
-            nav, "visual_like_open_post",
-            return_value={"ok": True, "already_liked": False, "real_tap_sent": True, "likes_perf_like": {}},
-        ), mock.patch.object(
-            nav, "visual_verify_post_liked",
-            return_value={"liked_verified": True, "verification_method": "visual", "verify_attempts_count": 1},
-        ), mock.patch.object(
-            nav, "visual_return_to_profile_from_post", return_value={"ok": True}
-        ), mock.patch.object(nav, "log", side_effect=lambda _level, event, **kw: logs.append((str(event), dict(kw)))), mock.patch.object(nav, "time") as tmock:
-            tmock.perf_counter = time.perf_counter
-            tmock.time = time.time
-            tmock.sleep = lambda *_a, **_k: None
+        with ExitStack() as stack:
+            _patch_pre_reveal_like_phase_common(stack, contract_ctx=contract_ctx)
+            stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "_followers_profile_tabs_bottom_y_px",
+                    return_value=(1200, "resourceId:profile_tabs_container"),
+                )
+            )
+            reveal_swipe = stack.enter_context(
+                mock.patch.object(nav, "_post_follow_likes_profile_scroll_swipe")
+            )
+            legacy_open = stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "_post_follow_likes_open_top_left_legacy_visual_safe",
+                    return_value={
+                        "ok": True,
+                        "post_detected": True,
+                        "failure_reason": "",
+                        "tap_x": 180,
+                        "tap_y": 1056,
+                        "likes_perf_post_open": {},
+                    },
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "visual_post_already_liked",
+                    return_value={"already_liked": False, "detection_method": "hierarchy_like_hint"},
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "visual_like_open_post",
+                    return_value={
+                        "ok": True,
+                        "already_liked": False,
+                        "real_tap_sent": True,
+                        "likes_perf_like": {},
+                    },
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "visual_verify_post_liked",
+                    return_value={
+                        "liked_verified": True,
+                        "verification_method": "visual",
+                        "verify_attempts_count": 1,
+                    },
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(nav, "visual_return_to_profile_from_post", return_value={"ok": True})
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "log",
+                    side_effect=lambda _level, event, **kw: logs.append((str(event), dict(kw))),
+                )
+            )
             out = nav.run_post_follow_post_likes_phase(
                 device,
                 pkg="com.instagram.android",
@@ -2022,47 +2119,67 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
         ]
         log_events: list[str] = []
 
-        with mock.patch.object(nav.config, "POST_FOLLOW_POST_LIKES_ENABLED", True, create=True), mock.patch.object(
-            nav.config, "ENABLE_REAL_VISUAL_POST_LIKE", True, create=True
-        ), mock.patch.object(nav.config, "POST_FOLLOW_POST_LIKES_PERCENTAGE", 100, create=True), mock.patch.object(
-            nav.config, "POST_FOLLOW_POST_LIKES_COUNT_RANGE", "1-1", create=True
-        ), mock.patch.object(nav.config, "POST_FOLLOW_TOTAL_LIKES_LIMIT", 150, create=True), mock.patch.object(
-            nav, "read_current_profile_username_for_follow_gate", return_value="cand"
-        ), mock.patch(
-            "navigation_engine.observe_instagram_state",
-            return_value={"state": "CANDIDATE_PROFILE", "confidence": 0.9},
-        ), mock.patch.object(
-            nav, "_post_follow_like_precheck_mute_sheet", return_value={"skip_like": False, "precheck_ms": 1.0}
-        ), mock.patch.object(
-            nav, "_post_follow_like_precheck_surface",
-            return_value={"skip_like": False, "precheck_ms": 1.0, "profile_candidate_visible": True, "grid_tab_visible": True},
-        ), mock.patch(
-            "follow_state_contract.evaluate_like_precheck_contract",
-            return_value=(contract_ctx, True, ""),
-        ), mock.patch.object(
-            nav, "_visual_profile_no_posts_tier1_direct_check",
-            return_value={"no_posts_detected": False, "detection_method": "none", "confidence": 0.0},
-        ), mock.patch.object(
-            nav, "_followers_profile_tabs_bottom_y_px", return_value=(1777, "resourceId:profile_tabs_container")
-        ), mock.patch.object(
-            nav, "_post_follow_likes_profile_scroll_swipe", side_effect=swipe_outputs
-        ) as reveal_swipe, mock.patch.object(
-            nav, "_post_follow_likes_open_top_left_legacy_visual_safe", side_effect=legacy_outputs
-        ) as legacy_open, mock.patch.object(
-            nav, "visual_post_already_liked",
-            return_value={"already_liked": False, "detection_method": "hierarchy_like_hint"},
-        ), mock.patch.object(
-            nav, "visual_like_open_post",
-            return_value={"ok": True, "already_liked": False, "real_tap_sent": True, "likes_perf_like": {}},
-        ), mock.patch.object(
-            nav, "visual_verify_post_liked",
-            return_value={"liked_verified": True, "verification_method": "visual", "verify_attempts_count": 1},
-        ), mock.patch.object(
-            nav, "visual_return_to_profile_from_post", return_value={"ok": True}
-        ), mock.patch.object(nav, "log", side_effect=lambda _level, event, **_kw: log_events.append(str(event))), mock.patch.object(nav, "time") as tmock:
-            tmock.perf_counter = time.perf_counter
-            tmock.time = time.time
-            tmock.sleep = lambda *_a, **_k: None
+        with ExitStack() as stack:
+            _patch_pre_reveal_like_phase_common(stack, contract_ctx=contract_ctx)
+            stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "_followers_profile_tabs_bottom_y_px",
+                    return_value=(1777, "resourceId:profile_tabs_container"),
+                )
+            )
+            reveal_swipe = stack.enter_context(
+                mock.patch.object(
+                    nav, "_post_follow_likes_profile_scroll_swipe", side_effect=swipe_outputs
+                )
+            )
+            legacy_open = stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "_post_follow_likes_open_top_left_legacy_visual_safe",
+                    side_effect=legacy_outputs,
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "visual_post_already_liked",
+                    return_value={"already_liked": False, "detection_method": "hierarchy_like_hint"},
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "visual_like_open_post",
+                    return_value={
+                        "ok": True,
+                        "already_liked": False,
+                        "real_tap_sent": True,
+                        "likes_perf_like": {},
+                    },
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "visual_verify_post_liked",
+                    return_value={
+                        "liked_verified": True,
+                        "verification_method": "visual",
+                        "verify_attempts_count": 1,
+                    },
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(nav, "visual_return_to_profile_from_post", return_value={"ok": True})
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "log",
+                    side_effect=lambda _level, event, **_kw: log_events.append(str(event)),
+                )
+            )
             out = nav.run_post_follow_post_likes_phase(
                 device,
                 pkg="com.instagram.android",
@@ -2115,98 +2232,95 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
             },
         ]
 
-        with mock.patch.object(
-            nav.config, "POST_FOLLOW_POST_LIKES_ENABLED", True, create=True
-        ), mock.patch.object(
-            nav.config, "ENABLE_REAL_VISUAL_POST_LIKE", True, create=True
-        ), mock.patch.object(
-            nav.config, "POST_FOLLOW_POST_LIKES_PERCENTAGE", 100, create=True
-        ), mock.patch.object(
-            nav.config, "POST_FOLLOW_POST_LIKES_COUNT_RANGE", "1-1", create=True
-        ), mock.patch.object(
-            nav.config, "POST_FOLLOW_TOTAL_LIKES_LIMIT", 150, create=True
-        ), mock.patch.object(
-            nav.config, "POST_FOLLOW_POST_LIKES_BUDGET_S", 20.0, create=True
-        ), mock.patch.object(
-            nav, "read_current_profile_username_for_follow_gate", return_value="cand"
-        ), mock.patch(
-            "navigation_engine.observe_instagram_state",
-            return_value={"state": "CANDIDATE_PROFILE", "confidence": 0.9},
-        ), mock.patch.object(
-            nav, "_post_follow_like_precheck_mute_sheet",
-            return_value={"skip_like": False, "precheck_ms": 1.0},
-        ), mock.patch.object(
-            nav,
-            "_post_follow_like_precheck_surface",
-            return_value={
-                "skip_like": False,
-                "skip_reason": "",
-                "precheck_ms": 1.0,
-                "profile_candidate_visible": True,
-            },
-        ), mock.patch(
-            "follow_state_contract.evaluate_like_precheck_contract",
-            return_value=(contract_ctx, True, ""),
-        ), mock.patch.object(
-            nav,
-            "_post_follow_likes_open_top_left_legacy_visual_safe",
-            side_effect=legacy_outputs,
-        ) as legacy_open, mock.patch.object(
-            nav,
-            "_post_follow_likes_profile_scroll_swipe",
-            return_value={
-                "swipe_ok": True,
-                "scroll_profile": "reveal_moderate",
-                "y_start": 1684,
-                "y_end": 936,
-                "scroll_distance_px": 748,
-            },
-        ) as reveal_swipe, mock.patch.object(
-            nav, "ensure_post_grid_visible_for_post_follow_likes"
-        ) as xml_probe, mock.patch.object(
-            nav,
-            "visual_post_already_liked",
-            return_value={
-                "already_liked": False,
-                "detection_method": "hierarchy_like_hint",
-                "confidence": 0.7,
-                "semantic_like_state": "like",
-                "already_liked_decision_reason": "hierarchy_like_confirmed_not_liked",
-            },
-        ), mock.patch.object(
-            nav,
-            "visual_like_open_post",
-            return_value={
-                "ok": True,
-                "already_liked": False,
-                "real_tap_sent": True,
-                "tap_x": 79,
-                "tap_y": 2017,
-                "confidence": 0.8,
-                "like_button_bounds": {
-                    "left": 43,
-                    "top": 1951,
-                    "right": 115,
-                    "bottom": 2084,
-                },
-                "likes_perf_like": {"like_tap_dispatch_ms": 1.0},
-            },
-        ), mock.patch.object(
-            nav,
-            "visual_verify_post_liked",
-            return_value={
-                "liked_verified": True,
-                "verification_method": "visual_filled_heart_red_ratio_verify_post_tap_reuse",
-                "verify_attempts_count": 1,
-            },
-        ), mock.patch.object(
-            nav, "visual_return_to_profile_from_post", return_value={"ok": True}
-        ), mock.patch.object(nav, "log", side_effect=_fake_log), mock.patch.object(
-            nav, "time"
-        ) as tmock:
-            tmock.perf_counter = time.perf_counter
-            tmock.time = time.time
-            tmock.sleep = lambda *_a, **_k: None
+        with ExitStack() as stack:
+            _patch_like_phase_common(stack, contract_ctx=contract_ctx)
+            stack.enter_context(
+                mock.patch.object(nav.config, "POST_FOLLOW_POST_LIKES_BUDGET_S", 20.0, create=True)
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "_post_follow_like_precheck_surface",
+                    return_value={
+                        "skip_like": False,
+                        "skip_reason": "",
+                        "precheck_ms": 1.0,
+                        "profile_candidate_visible": True,
+                    },
+                )
+            )
+            legacy_open = stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "_post_follow_likes_open_top_left_legacy_visual_safe",
+                    side_effect=legacy_outputs,
+                )
+            )
+            reveal_swipe = stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "_post_follow_likes_profile_scroll_swipe",
+                    return_value={
+                        "swipe_ok": True,
+                        "scroll_profile": "reveal_moderate",
+                        "y_start": 1684,
+                        "y_end": 936,
+                        "scroll_distance_px": 748,
+                    },
+                )
+            )
+            xml_probe = stack.enter_context(
+                mock.patch.object(nav, "ensure_post_grid_visible_for_post_follow_likes")
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "visual_post_already_liked",
+                    return_value={
+                        "already_liked": False,
+                        "detection_method": "hierarchy_like_hint",
+                        "confidence": 0.7,
+                        "semantic_like_state": "like",
+                        "already_liked_decision_reason": "hierarchy_like_confirmed_not_liked",
+                    },
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "visual_like_open_post",
+                    return_value={
+                        "ok": True,
+                        "already_liked": False,
+                        "real_tap_sent": True,
+                        "tap_x": 79,
+                        "tap_y": 2017,
+                        "confidence": 0.8,
+                        "like_button_bounds": {
+                            "left": 43,
+                            "top": 1951,
+                            "right": 115,
+                            "bottom": 2084,
+                        },
+                        "likes_perf_like": {"like_tap_dispatch_ms": 1.0},
+                    },
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "visual_verify_post_liked",
+                    return_value={
+                        "liked_verified": True,
+                        "verification_method": "visual_filled_heart_red_ratio_verify_post_tap_reuse",
+                        "verify_attempts_count": 1,
+                    },
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(nav, "visual_return_to_profile_from_post", return_value={"ok": True})
+            )
+            stack.enter_context(mock.patch.object(nav, "log", side_effect=_fake_log))
             out = nav.run_post_follow_post_likes_phase(
                 device,
                 pkg="com.instagram.android",
@@ -3678,6 +3792,48 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
             [event for event, _kw in logs],
         )
 
+    def test_return_ct_accepts_own_unified_list_with_stale_candidate_action_bar(self) -> None:
+        device = mock.MagicMock()
+        logs: list[tuple[str, dict[str, object]]] = []
+        stale_list_det = {
+            "is_followers_list": True,
+            "own_unified_followers_list_detected": True,
+            "open_detection_method": "own_unified_follow_list",
+            "action_bar_title": "mobi_voyage",
+            "follow_list_username_count": 8,
+            "has_tab_layout": True,
+            "signals": [
+                "own_unified_followers_list_detected",
+                "selected_followers_tab",
+                "follow_list_username",
+            ],
+        }
+
+        with mock.patch.object(
+            nav, "detect_followers_list_screen", return_value=stale_list_det
+        ), mock.patch.object(
+            nav, "log", side_effect=lambda level, event, **kw: logs.append((str(event), dict(kw)))
+        ):
+            ok_return, how, fail = nav.post_follow_controlled_return_to_followers_list(
+                device,
+                pkg="com.instagram.android",
+                source_profile_username="reveaustral",
+                follower_username="mobi_voyage",
+                visual_candidate_id="vc-1",
+                det={},
+                max_rounds=1,
+                compact_after_follow_verified_mute=True,
+                compact_reason="follow_verified_mute_success",
+            )
+
+        self.assertTrue(ok_return)
+        self.assertEqual(how, "compact_initial_list_confirmed")
+        self.assertIsNone(fail)
+        self.assertIn(
+            "post_follow_return_ct_accept_stale_candidate_action_bar_own_unified",
+            [event for event, _kw in logs],
+        )
+
     def test_return_ct_post_back_det_rejects_and_falls_back_to_final_confirm(self) -> None:
         cases: list[tuple[str, dict[str, object] | None, list[float] | None]] = [
             ("absent", {}, None),
@@ -4593,6 +4749,122 @@ class PostViewerUnusableSurfaceTests(unittest.TestCase):
             )
         self.assertFalse(exploitable)
         self.assertEqual(method, "post_like_action_bar_missing")
+
+    def test_post_like_phase_skips_facebook_shared_content_surface(self) -> None:
+        device = mock.MagicMock()
+        contract_ctx = _like_phase_contract_ctx()
+        logs: list[str] = []
+        with ExitStack() as stack:
+            _patch_like_phase_common(stack, contract_ctx=contract_ctx)
+            stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "_ui_post_viewer_facebook_shared_content_detected",
+                    return_value=(True, "ui_text_contains_facebook_shared_banner"),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "_post_follow_likes_open_top_left_legacy_visual_safe",
+                    return_value={
+                        "ok": True,
+                        "post_detected": True,
+                        "failure_reason": "",
+                        "open_strategy": "vision_open_top_left_legacy_safe",
+                        "tap_x": 180,
+                        "tap_y": 1282,
+                        "likes_perf_post_open": {},
+                    },
+                )
+            )
+            like_open = stack.enter_context(mock.patch.object(nav, "visual_like_open_post"))
+            verify = stack.enter_context(mock.patch.object(nav, "visual_verify_post_liked"))
+            stack.enter_context(
+                mock.patch.object(
+                    nav, "visual_return_to_profile_from_post", return_value={"ok": True}
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    nav, "log", side_effect=lambda _level, event, **_kw: logs.append(str(event))
+                )
+            )
+            out = nav.run_post_follow_post_likes_phase(
+                device,
+                pkg="com.instagram.android",
+                source_profile_username="ct",
+                follower_username="cand",
+                visual_candidate_id="vc-1",
+                follow_success_verified=True,
+                follow_state_after="following",
+                skipped_tap=False,
+            )
+
+        self.assertEqual(out.get("phase_outcome"), "skipped")
+        self.assertEqual(out.get("skipped_reason"), "post_like_skipped_facebook_shared_content")
+        like_open.assert_not_called()
+        verify.assert_not_called()
+        self.assertIn("post_follow_post_like_skipped_unusable_surface", logs)
+
+    def test_post_like_phase_skips_when_like_action_bar_missing(self) -> None:
+        device = mock.MagicMock()
+        contract_ctx = _like_phase_contract_ctx()
+        logs: list[str] = []
+        with ExitStack() as stack:
+            _patch_like_phase_common(stack, contract_ctx=contract_ctx)
+            stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "_ui_post_viewer_like_action_bar_exploitable",
+                    return_value=(False, "post_like_action_bar_missing"),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "_post_follow_likes_open_top_left_legacy_visual_safe",
+                    return_value={
+                        "ok": True,
+                        "post_detected": True,
+                        "failure_reason": "",
+                        "open_strategy": "vision_open_top_left_legacy_safe",
+                        "tap_x": 180,
+                        "tap_y": 1282,
+                        "likes_perf_post_open": {},
+                    },
+                )
+            )
+            already_liked = stack.enter_context(mock.patch.object(nav, "visual_post_already_liked"))
+            like_open = stack.enter_context(mock.patch.object(nav, "visual_like_open_post"))
+            verify = stack.enter_context(mock.patch.object(nav, "visual_verify_post_liked"))
+            stack.enter_context(
+                mock.patch.object(
+                    nav, "visual_return_to_profile_from_post", return_value={"ok": True}
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    nav, "log", side_effect=lambda _level, event, **_kw: logs.append(str(event))
+                )
+            )
+            out = nav.run_post_follow_post_likes_phase(
+                device,
+                pkg="com.instagram.android",
+                source_profile_username="ct",
+                follower_username="cand",
+                visual_candidate_id="vc-1",
+                follow_success_verified=True,
+                follow_state_after="following",
+                skipped_tap=False,
+            )
+
+        self.assertEqual(out.get("phase_outcome"), "skipped")
+        self.assertEqual(out.get("skipped_reason"), "post_like_skipped_no_like_button")
+        already_liked.assert_not_called()
+        like_open.assert_not_called()
+        verify.assert_not_called()
+        self.assertIn("post_follow_post_like_skipped_unusable_surface", logs)
 
 
 if __name__ == "__main__":
