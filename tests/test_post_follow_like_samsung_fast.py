@@ -4568,5 +4568,32 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
         self.assertEqual(out.get("phase_outcome"), "failed_safe_continue")
 
 
+class PostViewerUnusableSurfaceTests(unittest.TestCase):
+    def test_facebook_shared_content_banner_detected_from_ui_text(self) -> None:
+        device = mock.MagicMock()
+        pred = mock.MagicMock()
+        pred.exists.return_value = True
+        device.textContains.return_value = pred
+        detected, method = nav._ui_post_viewer_facebook_shared_content_detected(device)
+        self.assertTrue(detected)
+        self.assertEqual(method, "ui_text_contains_facebook_shared_banner")
+
+    def test_like_action_bar_missing_when_fast_probes_miss(self) -> None:
+        device = mock.MagicMock()
+        with mock.patch.object(
+            nav, "_ui_post_viewer_open_like_unlike_fast", return_value=(False, "", [], {})
+        ), mock.patch.object(
+            nav,
+            "_ui_post_viewer_open_exact_like_desc_fast",
+            return_value=(False, "", [], "", "", {}),
+        ):
+            exploitable, method = nav._ui_post_viewer_like_action_bar_exploitable(
+                device,
+                pkg="com.instagram.android",
+            )
+        self.assertFalse(exploitable)
+        self.assertEqual(method, "post_like_action_bar_missing")
+
+
 if __name__ == "__main__":
     unittest.main()

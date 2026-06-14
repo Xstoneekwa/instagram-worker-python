@@ -24891,6 +24891,45 @@ def _visual_post_viewer_action_bar_is_post_viewer_mode(title_raw: str) -> bool:
     return False
 
 
+_FACEBOOK_SHARED_CONTENT_MARKERS = (
+    "interacting with content shared from facebook",
+    "content shared from facebook",
+)
+
+
+def _ui_post_viewer_facebook_shared_content_detected(d: u2.Device) -> tuple[bool, str]:
+    """Detect Instagram post surfaces shared from Facebook that hide the normal like action bar."""
+    for marker in _FACEBOOK_SHARED_CONTENT_MARKERS:
+        try:
+            if d(textContains=marker).exists(timeout=0.12):
+                return True, "ui_text_contains_facebook_shared_banner"
+        except Exception:
+            continue
+    hier = ""
+    try:
+        hier = str(d.dump_hierarchy(compressed=False)).lower()
+    except Exception:
+        try:
+            hier = str(d.dump_hierarchy()).lower()
+        except Exception:
+            hier = ""
+    for marker in _FACEBOOK_SHARED_CONTENT_MARKERS:
+        if marker in hier:
+            return True, "hierarchy_facebook_shared_banner"
+    return False, ""
+
+
+def _ui_post_viewer_like_action_bar_exploitable(d: u2.Device, *, pkg: str) -> tuple[bool, str]:
+    """Confirm a trusted like/unlike control exists before attempting post-like."""
+    like_a1, reason_a1, _, _ = _ui_post_viewer_open_like_unlike_fast(d)
+    if like_a1:
+        return True, reason_a1 or "like_unlike_ui"
+    like_a2, reason_a2, _, _, _, _ = _ui_post_viewer_open_exact_like_desc_fast(d, pkg=pkg)
+    if like_a2:
+        return True, reason_a2 or "like_unlike_ui"
+    return False, "post_like_action_bar_missing"
+
+
 def _is_plausible_ig_username_handle(handle: str) -> bool:
     u = _normalize_handle(handle)
     if not u or len(u) < 2 or len(u) > 30:
@@ -44875,6 +44914,80 @@ def run_post_follow_post_likes_phase(
             tap_x=open_out.get("tap_x"),
             tap_y=open_out.get("tap_y"),
         )
+
+        def _skip_unusable_post_like_surface(
+            *,
+            skipped_reason: str,
+            detection_method: str,
+            outcome: str,
+        ) -> dict[str, Any]:
+            post_rec["outcome"] = outcome
+            post_rec["failure_reason"] = skipped_reason
+            per_post.append(post_rec)
+            _likes_perf_ctx["failure_reason"] = skipped_reason
+            _likes_perf_ctx["likes_failure_kind"] = detection_method
+            log(
+                "info",
+                "post_follow_post_like_skipped_unusable_surface",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                follower_username=cand,
+                reason=skipped_reason,
+                detection_method=detection_method,
+            )
+            _t_ret_skip0 = time.perf_counter()
+            ret_skip = visual_return_to_profile_from_post(d, source_profile_username=src)
+            _likes_perf_ctx["return_to_profile_ms"] = round(
+                (time.perf_counter() - _t_ret_skip0) * 1000.0, 2
+            )
+            _likes_perf_ctx["return_success"] = bool(ret_skip.get("ok"))
+            if ret_skip.get("ok"):
+                log(
+                    "info",
+                    "post_follow_post_likes_return_to_profile_success",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    skipped_reason=skipped_reason,
+                )
+            else:
+                log(
+                    "warning",
+                    "post_follow_post_likes_return_to_profile_failed",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    failure_reason=ret_skip.get("failure_reason"),
+                    skipped_reason=skipped_reason,
+                )
+            return _finish(
+                phase_outcome="skipped",
+                skipped_reason=skipped_reason,
+                skipped=True,
+                ok=True,
+                attempted_count=attempted_count,
+                liked_count=0,
+                skipped_already_liked_count=skipped_already,
+                failed_navigation_count=failed_nav,
+                per_post=per_post,
+            )
+
+        fb_detected, fb_method = _ui_post_viewer_facebook_shared_content_detected(d)
+        if fb_detected:
+            return _skip_unusable_post_like_surface(
+                skipped_reason="post_like_skipped_facebook_shared_content",
+                detection_method=fb_method,
+                outcome="skipped_facebook_shared_content",
+            )
+
+        like_surface_ok, like_surface_method = _ui_post_viewer_like_action_bar_exploitable(
+            d,
+            pkg=pkg,
+        )
+        if not like_surface_ok:
+            return _skip_unusable_post_like_surface(
+                skipped_reason="post_like_skipped_no_like_button",
+                detection_method=like_surface_method,
+                outcome="skipped_no_like_button",
+            )
 
         t_al_run0 = time.perf_counter()
         al_pre = visual_post_already_liked(
