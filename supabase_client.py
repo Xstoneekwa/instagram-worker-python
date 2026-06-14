@@ -2704,7 +2704,11 @@ def get_follow_runtime_cap_inputs(account_id: str) -> dict[str, Any]:
     rows = _request_json(
         "GET",
         "ig_account_settings",
-        query={"select": "account_id,follow_limit,max_actions_per_day", "account_id": f"eq.{aid}", "limit": "1"},
+        query={
+            "select": "account_id,follow_limit,max_follow_per_run,max_actions_per_day",
+            "account_id": f"eq.{aid}",
+            "limit": "1",
+        },
     )
     if rows and isinstance(rows, list):
         settings = rows[0]
@@ -2712,21 +2716,36 @@ def get_follow_runtime_cap_inputs(account_id: str) -> dict[str, Any]:
     package_caps = summary.get("package_caps") if isinstance(summary.get("package_caps"), dict) else {}
     preview = summary.get("effective_caps_preview") if isinstance(summary.get("effective_caps_preview"), dict) else {}
     manual_session = (settings or {}).get("follow_limit")
+    legacy_session = (settings or {}).get("max_follow_per_run")
     manual_day = (settings or {}).get("max_actions_per_day")
     package_day = package_caps.get("follow_day")
     warmup_day_cap = preview.get("warmup_follow_day_cap")
     effective_day = preview.get("follow_day")
     follows_done_today = count_successful_follows_today(aid)
+    day_candidates = []
+    for value in (manual_day, effective_day, package_day):
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            parsed = 0
+        if parsed > 0:
+            day_candidates.append(parsed)
     try:
-        day_cap = int(effective_day if effective_day is not None else manual_day or package_day or 0)
+        day_cap = min(day_candidates) if day_candidates else 0
     except (TypeError, ValueError):
         day_cap = 0
     return {
         "db_follow_per_session_limit": manual_session,
+        "db_max_follow_per_run": legacy_session,
+        "follow_limit_from_db": manual_session,
+        "max_follow_per_run_from_db": legacy_session,
+        "max_actions_per_day_from_db": manual_day,
         "follow_day_remaining_today": max(0, day_cap - follows_done_today),
         "package_follow_day_cap": package_day,
         "warmup_follow_day_cap": warmup_day_cap,
         "follows_done_today": follows_done_today,
+        "follow_day_cap_resolved": day_cap,
+        "follow_cap_source": "min(max_actions_per_day,effective_preview_follow_day,package_follow_day)",
         "warmup_status": summary.get("warmup_status"),
         "warmup_day": summary.get("warmup_day"),
     }

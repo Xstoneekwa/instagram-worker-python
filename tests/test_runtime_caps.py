@@ -69,6 +69,42 @@ class RuntimeCapsTest(unittest.TestCase):
         self.assertFalse(out["env_follow_cap_present"])
         self.assertFalse(out["env_iterations_cap_present"])
 
+    def test_follow_db_caps_are_not_limited_by_code_defaults(self) -> None:
+        cfg = types.SimpleNamespace(
+            FOLLOW_MAX_PER_RUN=2,
+            FOLLOWERS_LIST_MAX_ITERATIONS_PER_RUN=5,
+        )
+        out = resolve_follow_runtime_limits(
+            db_follow_per_session_limit=12,
+            db_max_follow_per_run=10,
+            follow_day_remaining_today=10,
+            package_follow_day_cap=80,
+            warmup_follow_day_cap=None,
+            config_module=cfg,
+            environ={},
+        )
+
+        self.assertEqual(out["effective_follow_max"], 10)
+        self.assertEqual(out["effective_iterations_max"], 10)
+        self.assertFalse(out["follow_code_cap_applied"])
+        self.assertFalse(out["iterations_code_cap_applied"])
+
+    def test_follow_env_cap_can_intentionally_limit_db_caps(self) -> None:
+        cfg = types.SimpleNamespace(
+            FOLLOW_MAX_PER_RUN=2,
+            FOLLOWERS_LIST_MAX_ITERATIONS_PER_RUN=5,
+        )
+        out = resolve_follow_runtime_limits(
+            db_follow_per_session_limit=12,
+            follow_day_remaining_today=10,
+            package_follow_day_cap=80,
+            config_module=cfg,
+            environ={"FOLLOW_MAX_PER_RUN": "2"},
+        )
+
+        self.assertEqual(out["effective_follow_max"], 2)
+        self.assertTrue(out["follow_code_cap_applied"])
+
     def test_follow_uses_minimum_of_db_package_warmup_and_remaining(self) -> None:
         cfg = types.SimpleNamespace(
             FOLLOW_MAX_PER_RUN=120,

@@ -10139,13 +10139,14 @@ def _run_followers_list_engine_session(
             follow_runtime_inputs = {}
     follow_limits = resolve_follow_runtime_limits(
         db_follow_per_session_limit=follow_runtime_inputs.get("db_follow_per_session_limit"),
+        db_max_follow_per_run=follow_runtime_inputs.get("db_max_follow_per_run"),
         follow_day_remaining_today=follow_runtime_inputs.get("follow_day_remaining_today"),
         package_follow_day_cap=follow_runtime_inputs.get("package_follow_day_cap"),
         warmup_follow_day_cap=follow_runtime_inputs.get("warmup_follow_day_cap"),
     )
     global_follow_goal_effective = int(follow_limits["effective_iterations_max"])
     _runtime_follow_cap = int(getattr(config, "FOLLOW_MAX_PER_RUN", 0) or 0)
-    if _runtime_follow_cap > 0:
+    if bool(follow_limits.get("env_follow_cap_present")) and _runtime_follow_cap > 0:
         global_follow_goal_effective = min(global_follow_goal_effective, _runtime_follow_cap)
     target_follow_budget_effective = (
         max(1, int(target_follow_budget))
@@ -10155,7 +10156,9 @@ def _run_followers_list_engine_session(
     max_iter = min(global_follow_goal_effective, target_follow_budget_effective) if target_follow_budget_effective else global_follow_goal_effective
     _follow_max_per_run = min(
         int(follow_limits["effective_follow_max"]),
-        _runtime_follow_cap if _runtime_follow_cap > 0 else int(follow_limits["effective_follow_max"]),
+        _runtime_follow_cap
+        if bool(follow_limits.get("env_follow_cap_present")) and _runtime_follow_cap > 0
+        else int(follow_limits["effective_follow_max"]),
     )
     _followers_iter_attr = getattr(config, "FOLLOWERS_LIST_MAX_ITERATIONS_PER_RUN", None)
     _publish_followers_session_summary(
@@ -10178,7 +10181,18 @@ def _run_followers_list_engine_session(
         global_follow_goal_effective=global_follow_goal_effective,
         target_follow_budget_effective=target_follow_budget_effective,
         db_follow_per_session_limit=follow_limits.get("db_follow_per_session_limit"),
+        follow_limit_from_db=follow_runtime_inputs.get("follow_limit_from_db"),
+        max_follow_per_run_from_db=follow_runtime_inputs.get("max_follow_per_run_from_db"),
+        max_actions_per_day_from_db=follow_runtime_inputs.get("max_actions_per_day_from_db"),
+        follows_today=follow_runtime_inputs.get("follows_done_today"),
         follow_day_remaining_today=follow_limits.get("follow_day_remaining_today"),
+        remaining_daily_follow_quota=follow_limits.get("follow_day_remaining_today"),
+        effective_follow_cap_this_run=_follow_max_per_run,
+        cap_reason_source=follow_limits.get("source"),
+        follow_day_cap_resolved=follow_runtime_inputs.get("follow_day_cap_resolved"),
+        follow_cap_source=follow_runtime_inputs.get("follow_cap_source"),
+        follow_code_cap_applied=follow_limits.get("follow_code_cap_applied"),
+        iterations_code_cap_applied=follow_limits.get("iterations_code_cap_applied"),
         package_follow_day_cap=follow_limits.get("package_follow_day_cap"),
         warmup_follow_day_cap=follow_limits.get("warmup_follow_day_cap"),
         warmup_status=follow_runtime_inputs.get("warmup_status"),
@@ -16887,6 +16901,7 @@ def _run_followers_list_engine_session(
                     _liked_n = int(_likes_pf.get("liked_count") or 0)
                     if _likes_phase in ("success", "partial_success") and _liked_n > 0:
                         _SESSION_COUNTERS["likes"] = int(_SESSION_COUNTERS.get("likes") or 0) + _liked_n
+                        _SESSION_COUNTERS["interactions"] = int(_SESSION_COUNTERS.get("interactions") or 0) + _liked_n
                         _schedule_deferred_post_return_supabase_step(
                             step="record_post_like_interaction_success",
                             fn_name="record_post_like_interaction_success",
