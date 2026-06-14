@@ -9021,7 +9021,7 @@ def perform_follow_safe(
             visual_candidate_id=str(visual_candidate_id or ""),
             source_profile_username=_src_prof,
             initial_ui_state=state_before if _ctx_reuse else None,
-            pre_follow_context=pre_follow_context if _ctx_reuse else None,
+            pre_follow_context=pre_follow_context if profile_already_open else None,
         )
     else:
         btn, meta = wait_for_follow_button_safe(

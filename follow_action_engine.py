@@ -311,17 +311,63 @@ def try_select_exact_profile_header_follow_fast(
     ui_snap: str,
     raw_inv: bool,
     screen_class: str | None,
+    candidate_username: str = "",
+    action_bar_title: str = "",
+    navigation_state: str = "",
 ) -> tuple[Any | None, dict[str, Any] | None]:
     """
     One-shot resolve of the official header Follow control by resource-id + exact label.
     Returns (proxy, pick_meta) or (None, None).
     """
-    if screen_class is not None and str(screen_class) != "profile_like":
+    screen_class_s = str(screen_class or "")
+    if screen_class is not None and screen_class_s != "profile_like":
+        log(
+            "info",
+            "follow_action_exact_probe_skipped",
+            reason="screen_class_not_profile_like",
+            candidate_username=str(candidate_username or ""),
+            action_bar_title=str(action_bar_title or ""),
+            navigation_state=str(navigation_state or ""),
+            screen_class=screen_class_s,
+            resource_id_exact_attempted=False,
+            resource_id_matches_attempted=False,
+            found=False,
+            bounds_present=False,
+            tap_allowed=False,
+        )
         return None, None
     if ui_snap != "follow" and not raw_inv:
+        log(
+            "info",
+            "follow_action_exact_probe_skipped",
+            reason="follow_header_not_invite",
+            candidate_username=str(candidate_username or ""),
+            action_bar_title=str(action_bar_title or ""),
+            navigation_state=str(navigation_state or ""),
+            screen_class=screen_class_s,
+            resource_id_exact_attempted=False,
+            resource_id_matches_attempted=False,
+            found=False,
+            bounds_present=False,
+            tap_allowed=False,
+        )
         return None, None
     pkg_use = (pkg or str(getattr(ign.config, "INSTAGRAM_PACKAGE", "") or "")).strip()
     if not pkg_use:
+        log(
+            "info",
+            "follow_action_exact_probe_skipped",
+            reason="missing_package",
+            candidate_username=str(candidate_username or ""),
+            action_bar_title=str(action_bar_title or ""),
+            navigation_state=str(navigation_state or ""),
+            screen_class=screen_class_s,
+            resource_id_exact_attempted=False,
+            resource_id_matches_attempted=False,
+            found=False,
+            bounds_present=False,
+            tap_allowed=False,
+        )
         return None, None
 
     def _select_exact(sel: Any) -> tuple[Any | None, dict[str, Any] | None]:
@@ -356,6 +402,10 @@ def try_select_exact_profile_header_follow_fast(
             "info",
             "follow_action_exact_follow_fast_path_selected",
             visual_candidate_id=str(visual_candidate_id or ""),
+            candidate_username=str(candidate_username or ""),
+            action_bar_title=str(action_bar_title or ""),
+            navigation_state=str(navigation_state or ""),
+            screen_class=screen_class_s,
             bounds=dict(bd_i),
             derived_click_target=[sx, sy],
             center_x=sx,
@@ -371,11 +421,45 @@ def try_select_exact_profile_header_follow_fast(
         )
 
     rid_full = f"{pkg_use}:id/{PROFILE_HEADER_FOLLOW_BUTTON_RES_TOKEN}"
+    exact_attempted = False
+    matches_attempted = False
     try:
+        log(
+            "info",
+            "follow_action_exact_probe_attempted",
+            reason="candidate_profile_proof_exact_control_lookup",
+            candidate_username=str(candidate_username or ""),
+            action_bar_title=str(action_bar_title or ""),
+            navigation_state=str(navigation_state or ""),
+            screen_class=screen_class_s,
+            resource_id_exact=rid_full,
+            resource_id_matches=(
+                r".*:id/" + re.escape(PROFILE_HEADER_FOLLOW_BUTTON_RES_TOKEN) + r"$"
+            ),
+            resource_id_exact_attempted=True,
+            resource_id_matches_attempted=True,
+            raw_follow_invite=bool(raw_inv),
+            follow_header_state=str(ui_snap or ""),
+        )
         sel = d(resourceId=rid_full)
+        exact_attempted = True
         if sel.exists(timeout=0.1):
             picked, meta = _select_exact(sel)
             if picked is not None:
+                log(
+                    "info",
+                    "follow_action_exact_probe_selector_result",
+                    reason="exact_resource_id_found",
+                    candidate_username=str(candidate_username or ""),
+                    action_bar_title=str(action_bar_title or ""),
+                    navigation_state=str(navigation_state or ""),
+                    screen_class=screen_class_s,
+                    resource_id_exact_attempted=exact_attempted,
+                    resource_id_matches_attempted=False,
+                    found=True,
+                    bounds_present=True,
+                    tap_allowed=True,
+                )
                 return picked, meta
         # Some clone/layout snapshots expose the same official token with a
         # package-qualified resourceName that differs from the expected package.
@@ -385,10 +469,55 @@ def try_select_exact_profile_header_follow_fast(
                 r".*:id/" + re.escape(PROFILE_HEADER_FOLLOW_BUTTON_RES_TOKEN) + r"$"
             )
         )
+        matches_attempted = True
         if sel_rx.exists(timeout=0.08):
-            return _select_exact(sel_rx)
+            picked, meta = _select_exact(sel_rx)
+            if picked is not None:
+                log(
+                    "info",
+                    "follow_action_exact_probe_selector_result",
+                    reason="resource_id_matches_found",
+                    candidate_username=str(candidate_username or ""),
+                    action_bar_title=str(action_bar_title or ""),
+                    navigation_state=str(navigation_state or ""),
+                    screen_class=screen_class_s,
+                    resource_id_exact_attempted=exact_attempted,
+                    resource_id_matches_attempted=matches_attempted,
+                    found=True,
+                    bounds_present=True,
+                    tap_allowed=True,
+                )
+                return picked, meta
     except Exception:
+        log(
+            "info",
+            "follow_action_exact_probe_selector_result",
+            reason="exact_probe_exception",
+            candidate_username=str(candidate_username or ""),
+            action_bar_title=str(action_bar_title or ""),
+            navigation_state=str(navigation_state or ""),
+            screen_class=screen_class_s,
+            resource_id_exact_attempted=exact_attempted,
+            resource_id_matches_attempted=matches_attempted,
+            found=False,
+            bounds_present=False,
+            tap_allowed=False,
+        )
         return None, None
+    log(
+        "info",
+        "follow_action_exact_probe_selector_result",
+        reason="exact_follow_control_not_found",
+        candidate_username=str(candidate_username or ""),
+        action_bar_title=str(action_bar_title or ""),
+        navigation_state=str(navigation_state or ""),
+        screen_class=screen_class_s,
+        resource_id_exact_attempted=exact_attempted,
+        resource_id_matches_attempted=matches_attempted,
+        found=False,
+        bounds_present=False,
+        tap_allowed=False,
+    )
     return None, None
 
 
@@ -1978,6 +2107,9 @@ def follow_action_surface_wait_and_select_element(
             ui_snap=ui_q,
             raw_inv=raw_q,
             screen_class="profile_like" if strong_profile_context else "__unproved_profile__",
+            candidate_username=str(username or ""),
+            action_bar_title=str((pre_follow_context or {}).get("action_bar_title") or ""),
+            navigation_state=str((pre_follow_context or {}).get("navigation_state") or ""),
         )
         _exact_ms = round((time.perf_counter() - _exact_t0) * 1000.0, 2)
         _emit(
@@ -2039,7 +2171,6 @@ def follow_action_surface_wait_and_select_element(
         if (
             probe_el is None
             and strong_profile_context
-            and bool((pre_follow_context or {}).get("followers_list_xml_hint"))
             and (ui_q == "follow" or raw_q)
         ):
             reason_exact_absent = "profile_proof_exact_follow_control_absent"
