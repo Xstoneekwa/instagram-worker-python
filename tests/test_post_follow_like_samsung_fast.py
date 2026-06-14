@@ -1552,6 +1552,88 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
         self.assertIn("visual_profile_no_posts_full_cheap_check_completed", logs)
         self.assertNotIn("visual_profile_no_posts_full_cheap_check_skipped", logs)
 
+    def test_grid_tab_without_cells_and_no_no_posts_text_skips_no_grid_fast(self) -> None:
+        device = mock.MagicMock()
+        contract_ctx = _like_phase_contract_ctx()
+        logs: list[str] = []
+
+        with ExitStack() as stack:
+            _patch_like_phase_common(stack, contract_ctx=contract_ctx)
+            stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "_post_follow_like_precheck_surface",
+                    return_value={
+                        "skip_like": False,
+                        "precheck_ms": 1.0,
+                        "profile_candidate_visible": True,
+                        "grid_tab_visible": True,
+                        "followers_list_visible": False,
+                        "post_cells_visible": False,
+                        "post_grid_visible": False,
+                        "grid_cells_visible": False,
+                    },
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "_visual_profile_no_posts_tier1_direct_check",
+                    return_value={
+                        "no_posts_detected": False,
+                        "detection_method": "none",
+                        "confidence": 0.0,
+                    },
+                )
+            )
+            cheap_no_posts = stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "visual_profile_has_no_posts",
+                    return_value={
+                        "no_posts_detected": False,
+                        "detection_method": "none",
+                        "confidence": 0.0,
+                    },
+                )
+            )
+            legacy_open = stack.enter_context(
+                mock.patch.object(nav, "_post_follow_likes_open_top_left_legacy_visual_safe")
+            )
+            grid_probe = stack.enter_context(
+                mock.patch.object(nav, "ensure_post_grid_visible_for_post_follow_likes")
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "log",
+                    side_effect=lambda _level, event, **_kw: logs.append(str(event)),
+                )
+            )
+
+            out = nav.run_post_follow_post_likes_phase(
+                device,
+                pkg="com.instagram.android",
+                source_profile_username="ct",
+                follower_username="cand",
+                visual_candidate_id="vc-1",
+                follow_success_verified=True,
+                follow_state_after="following",
+                skipped_tap=False,
+            )
+
+        cheap_no_posts.assert_called_once_with(
+            device,
+            source_profile_username="ct",
+            include_visual_fallback=False,
+        )
+        legacy_open.assert_not_called()
+        grid_probe.assert_not_called()
+        self.assertEqual(out.get("phase_outcome"), "skipped")
+        self.assertEqual(out.get("skipped_reason"), "post_like_skipped_no_post_grid")
+        self.assertIn("post_follow_post_like_open_skipped_no_post_grid", logs)
+        self.assertNotIn("visual_profile_no_posts_early_visual_check_started", logs)
+
     def test_strict_no_post_grid_does_not_fallback_to_visual_grid_open(self) -> None:
         device = mock.MagicMock()
         contract_ctx = mock.MagicMock()
@@ -1845,6 +1927,9 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
                 "precheck_ms": 1.0,
                 "profile_candidate_visible": True,
                 "grid_tab_visible": True,
+                "post_cells_visible": False,
+                "post_grid_visible": False,
+                "grid_cells_visible": False,
                 "followers_list_visible": False,
             },
         ), mock.patch(
@@ -1999,11 +2084,9 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
         self.assertEqual(no_posts.call_count, 2)
         self.assertIn("visual_profile_no_posts_early_visual_check_started", logs)
         self.assertIn("visual_profile_no_posts_early_visual_check_completed", logs)
-        self.assertIn("visual_profile_no_posts_full_cheap_check_completed", logs)
-        self.assertIn("visual_profile_no_posts_early_visual_check_started", logs)
-        self.assertIn("visual_profile_no_posts_early_visual_check_completed", logs)
-        self.assertNotIn("visual_profile_no_posts_early_visual_check_rejected", logs)
-        self.assertNotIn("visual_profile_no_posts_visual_fallback_started", logs)
+        self.assertIn("visual_profile_no_posts_early_visual_check_rejected", logs)
+        self.assertIn("visual_profile_no_posts_visual_fallback_started", logs)
+        self.assertIn("visual_profile_no_posts_visual_fallback_completed", logs)
 
     def test_no_posts_visual_fallback_false_preserves_open_failure(self) -> None:
         device = mock.MagicMock()

@@ -43893,22 +43893,40 @@ def run_post_follow_post_likes_phase(
             tier1_check: dict[str, Any],
             surface_precheck: dict[str, Any],
         ) -> tuple[bool, str, dict[str, bool]]:
+            post_cell_signal_present = any(
+                key in surface_precheck
+                for key in ("post_cells_visible", "post_grid_visible", "grid_cells_visible")
+            )
             post_cells_visible = bool(
-                surface_precheck.get("post_cells_visible")
-                or surface_precheck.get("post_grid_visible")
-                or surface_precheck.get("grid_cells_visible")
+                post_cell_signal_present
+                and (
+                    surface_precheck.get("post_cells_visible")
+                    or surface_precheck.get("post_grid_visible")
+                    or surface_precheck.get("grid_cells_visible")
+                )
+            )
+            post_cells_confirmed_absent = bool(
+                post_cell_signal_present and not post_cells_visible
             )
             no_posts_hint_present = _no_posts_weak_hint_present(tier1_check)
             fields = {
                 "grid_tab_visible": bool(grid_tab_visible),
                 "profile_tabs_visible": bool(grid_tab_visible),
                 "post_cells_visible": bool(post_cells_visible),
+                "post_cell_signal_present": bool(post_cell_signal_present),
                 "no_posts_hint_present": bool(no_posts_hint_present),
             }
             if post_cells_visible:
                 return False, "posts_visible", fields
-            if bool(surface_profile_ok) and bool(grid_tab_visible) and not no_posts_hint_present:
+            if (
+                bool(surface_profile_ok)
+                and bool(grid_tab_visible)
+                and post_cells_confirmed_absent
+                and not no_posts_hint_present
+            ):
                 return True, "grid_tab_without_post_cells", fields
+            if bool(surface_profile_ok) and bool(grid_tab_visible) and not no_posts_hint_present:
+                return False, "normal_grid_surface_confirmed", fields
             if not bool(surface_profile_ok):
                 return False, "profile_surface_not_confirmed", fields
             if no_posts_hint_present:
@@ -44040,12 +44058,26 @@ def run_post_follow_post_likes_phase(
 
         full_check_used = False
         no_posts_check: dict[str, Any] = dict(tier1_check)
-        post_cells_visible_before_open = bool(
-            surface_precheck.get("post_cells_visible")
-            or surface_precheck.get("post_grid_visible")
-            or surface_precheck.get("grid_cells_visible")
+        post_cell_signal_present = any(
+            key in surface_precheck
+            for key in ("post_cells_visible", "post_grid_visible", "grid_cells_visible")
         )
-        if surface_profile_ok and grid_tab_visible and post_cells_visible_before_open:
+        post_cells_visible_before_open = bool(
+            post_cell_signal_present
+            and (
+                surface_precheck.get("post_cells_visible")
+                or surface_precheck.get("post_grid_visible")
+                or surface_precheck.get("grid_cells_visible")
+            )
+        )
+        post_cells_confirmed_absent_before_open = bool(
+            post_cell_signal_present and not post_cells_visible_before_open
+        )
+        if (
+            surface_profile_ok
+            and grid_tab_visible
+            and not post_cells_confirmed_absent_before_open
+        ):
             try:
                 log(
                     "info",
@@ -44055,11 +44087,16 @@ def run_post_follow_post_likes_phase(
                     visual_candidate_id=vcid,
                     tier1_detected=False,
                     full_check_used=False,
-                    reason="surface_profile_grid_tabs_and_post_cells_confirmed",
+                    reason=(
+                        "surface_profile_grid_tabs_and_post_cells_confirmed"
+                        if post_cells_visible_before_open
+                        else "surface_profile_and_grid_tabs_confirmed_cells_unknown"
+                    ),
                     duration_ms=0.0,
                     surface_profile_ok=surface_profile_ok,
                     grid_tab_visible=grid_tab_visible,
-                    post_cells_visible=True,
+                    post_cells_visible=post_cells_visible_before_open,
+                    post_cell_signal_present=post_cell_signal_present,
                 )
             except Exception:
                 pass
@@ -44078,7 +44115,7 @@ def run_post_follow_post_likes_phase(
                     post_cells_visible=post_cells_visible_before_open,
                     reason=(
                         "grid_tab_visible_without_post_cells"
-                        if surface_profile_ok and grid_tab_visible and not post_cells_visible_before_open
+                        if surface_profile_ok and grid_tab_visible and post_cells_confirmed_absent_before_open
                         else "surface_profile_or_grid_tabs_ambiguous"
                         if not surface_profile_ok or not grid_tab_visible
                         else "full_cheap_required"
@@ -44107,6 +44144,7 @@ def run_post_follow_post_likes_phase(
                     surface_profile_ok=surface_profile_ok,
                     grid_tab_visible=grid_tab_visible,
                     post_cells_visible=post_cells_visible_before_open,
+                    post_cell_signal_present=post_cell_signal_present,
                 )
             except Exception:
                 pass
@@ -44128,6 +44166,12 @@ def run_post_follow_post_likes_phase(
                 pass
         if no_posts_check.get("no_posts_detected") is True:
             return _skip_no_posts(no_posts_check)
+        if surface_profile_ok and grid_tab_visible and post_cells_confirmed_absent_before_open:
+            return _skip_no_post_grid_open(
+                "grid_tab_visible_without_post_cells",
+                grid_state_before="grid_tab_visible_without_post_cells",
+                grid_state_after="no_post_cells_confirmed_before_legacy",
+            )
         _early_ok, _early_reason, _early_fields = _early_visual_no_posts_gate(
             surface_profile_ok=surface_profile_ok,
             grid_tab_visible=grid_tab_visible,
@@ -45303,24 +45347,25 @@ def run_post_follow_post_likes_phase(
             )
         elif like_surface_ok:
             opened_surface_kind = "post"
-        try:
-            log(
-                "info" if opened_surface_kind == "post" else "warning",
-                "post_open_surface_audit",
-                visual_candidate_id=vcid,
-                source_profile_username=src,
-                follower_username=cand,
-                opened_surface_kind=opened_surface_kind,
-                story_or_highlight_detected=bool(story_detected),
-                story_or_highlight_method=str(story_method or ""),
-                like_surface_ok=bool(like_surface_ok),
-                like_surface_method=str(like_surface_method or ""),
-                viewer_detect_path=open_out.get("viewer_detect_path"),
-                tap_x=open_out.get("tap_x"),
-                tap_y=open_out.get("tap_y"),
-            )
-        except Exception:
-            pass
+        if opened_surface_kind != "post":
+            try:
+                log(
+                    "warning",
+                    "post_open_surface_audit",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    follower_username=cand,
+                    opened_surface_kind=opened_surface_kind,
+                    story_or_highlight_detected=bool(story_detected),
+                    story_or_highlight_method=str(story_method or ""),
+                    like_surface_ok=bool(like_surface_ok),
+                    like_surface_method=str(like_surface_method or ""),
+                    viewer_detect_path=open_out.get("viewer_detect_path"),
+                    tap_x=open_out.get("tap_x"),
+                    tap_y=open_out.get("tap_y"),
+                )
+            except Exception:
+                pass
         if story_detected:
             log(
                 "warning",
