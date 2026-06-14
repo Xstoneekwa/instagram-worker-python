@@ -9021,6 +9021,7 @@ def perform_follow_safe(
             visual_candidate_id=str(visual_candidate_id or ""),
             source_profile_username=_src_prof,
             initial_ui_state=state_before if _ctx_reuse else None,
+            pre_follow_context=pre_follow_context if _ctx_reuse else None,
         )
     else:
         btn, meta = wait_for_follow_button_safe(
@@ -9091,10 +9092,14 @@ def perform_follow_safe(
             )
             if _reco_none is not None:
                 return _reco_none
+            _missing_reason = str(
+                meta.get("visual_follow_failure_reason")
+                or "visual_follow_button_not_found_on_open_profile"
+            )
             log(
                 "info",
                 "visual_follow_direct_profile_action_failed",
-                reason="visual_follow_button_not_found_on_open_profile",
+                reason=_missing_reason,
                 failure_code=33,
                 target_username=str(username or ""),
                 visual_candidate_id=str(visual_candidate_id or ""),
@@ -9107,7 +9112,7 @@ def perform_follow_safe(
                 "follow_state_after": meta.get("last_ui_state"),
                 "verify_attempts": 0,
                 "events": events,
-                "visual_follow_failure_reason": "visual_follow_button_not_found_on_open_profile",
+                "visual_follow_failure_reason": _missing_reason,
             }
         return {
             "ok": False,
@@ -46932,6 +46937,11 @@ def build_pre_follow_tap_context(
         "follower_username": str(follower_username or "").strip().lstrip("@"),
         "source_profile_username": str(source_profile_username or "").strip(),
         "visual_candidate_id": str(visual_candidate_id or "").strip(),
+        "action_bar_title": str(sg.get("action_bar_title") or "").strip().lstrip("@"),
+        "navigation_state": str(sg.get("navigation_state") or ""),
+        "navigation_confidence": float(sg.get("navigation_confidence") or 0.0),
+        "raw_follow_invite_visible": bool(sg.get("raw_follow_invite_visible")),
+        "followers_list_xml_hint": bool(sg.get("followers_list_xml_hint")),
         "follow_header_state": str(sg.get("follow_header_state") or ""),
         "screen_guard_ok": bool(sg.get("ok", True)),
         "private_gate": {
