@@ -283,8 +283,8 @@ Post-submit policy future :
 - `checkpoint` -> action dashboard `resolve_checkpoint`;
 - `login_failed` -> `update_password` ou `review_login_failure`, sans retry avec
   le meme password;
-- `unknown` -> re-observe possible 1 fois, puis `retry_later` ou
-  `support_required`.
+- `unknown` -> re-observe possible 1 fois, puis `retry_later` ou `blocked`
+  avec reason/action precise.
 - 2E-5J ne lance aucun smoke reel; toute execution device future exige une
   fenetre device idle, un lock UI exclusif et un compte test dedie.
 - 2E-5J-2A autorise uniquement un smoke prep sans password : app_start,
@@ -1329,28 +1329,30 @@ Current diagnosis before Patch 2C-3:
   filters and credential ingestion completed;
 - settings and filters were not created inside a database transaction with the
   account row;
-- credential ingestion failure already marked `ig_accounts.status` as
-  `support_required`, but earlier settings/filter failures could leave partial
-  rows or raw DB error messages;
+- credential ingestion failure used to mark `ig_accounts.status` as
+  `support_required`; this is now deprecated in favor of
+  `admin_lifecycle_status='needs_assistance'` plus a precise dashboard action;
+  earlier settings/filter failures could leave partial rows or raw DB error messages;
 - no unique username invariant existed on `ig_accounts`, so a double-submit or
   retry could create duplicate account rows for the same normalized username.
 
 Patch behavior:
 
-- new Add Profile accounts start as `support_required`;
-- settings start with `account_status='support_required'` and `password=''`;
+- new Add Profile accounts start with primary status `active`;
+- settings start with `account_status='active'` and `password=''`;
 - settings/filter failures before credential ingestion trigger targeted
   compensation by deleting only the newly created account id. Cascading foreign
   keys clean up just-created settings/filters rows;
-- credential ingestion failure keeps the account/settings in `support_required`,
-  creates a best-effort safe `review_credentials` dashboard action, and returns
-  a safe UI error;
+- credential ingestion failure keeps the primary account/settings status `active`,
+  marks `admin_lifecycle_status='needs_assistance'`, creates a best-effort safe
+  `review_credentials` dashboard action, and returns a safe UI error;
 - credentials success is accepted only when the Edge response reports active
   credentials;
 - only after active credentials are confirmed does the route finalize
   `ig_accounts.status='active'` and `ig_account_settings.account_status='active'`;
 - if finalization fails after credentials are active, the route reports a safe
-  failure and leaves the account in `support_required`.
+  failure and uses the same precise assistance/action model instead of a generic
+  primary status.
 
 Idempotency:
 

@@ -93,7 +93,7 @@ class InstagramLoginProvisionerTest(unittest.TestCase):
         kwargs = publisher.call_args.kwargs
         self.assertEqual(kwargs["login_status"], "failed")
         self.assertEqual(kwargs["provisioning_status"], "failed")
-        self.assertEqual(kwargs["onboarding_status"], "support_required")
+        self.assertEqual(kwargs["onboarding_status"], "blocked")
         self.assertTrue(kwargs["reauth_required"])
         self.assertEqual(kwargs["reauth_reason"], "credentials_invalid")
 

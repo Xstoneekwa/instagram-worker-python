@@ -188,7 +188,7 @@ def classify_login_probe_outcome(
             outcome=normalized,
             login_status="failed",
             provisioning_status="failed",
-            onboarding_status="support_required",
+            onboarding_status="blocked",
             reauth_required=True,
             reauth_reason=reauth_reason,
             reason="login_failed",

@@ -586,7 +586,7 @@ Status legend: `ready` means current source is consumed and reasonably represent
 | 64 | Send enabled | legacy `send_enabled` | domain real-send envs | DM | legacy | legacy | ops status only | no | `/settings`/Growth | admin | duplicate | misleading | hide |
 | 65 | Session quotas | legacy settings | config session caps | Quotas | all | mixed | package quota resolver | partial | `/settings` | admin | needs wiring | quota policy | resolver |
 | 66 | Daily quotas | legacy/domain | counters | Quotas | all | mixed | package/domain/counter | partial | multiple | admin/client later | needs wiring | remaining proof | resolver |
-| 67 | Login challenge gates | `account_dashboard_actions`, credentials/status | recovery signals | Safety | all | DB/status | DB/status | preflight/worker | `/runs/start` | admin/client status | ready/partial | support_required | keep |
+| 67 | Login challenge gates | `account_dashboard_actions`, credentials/status | recovery signals | Safety | all | DB/status | DB/status | preflight/worker | `/runs/start` | admin/client status | ready/partial | precise login/action reasons | keep |
 | 68 | Identity mismatch gate | incidents/actions/status | worker incident publisher | Safety | all | DB action | DB action | preflight | `/runs/start` | admin | needs wiring | review action | keep |
 | 69 | Recovery/auto-restart | incidents/events | `AUTO_RESTART_*` | Safety | all | env | ops preset | recovery/resume | none | ops | ops-only | bounded retries | hide |
 | 70 | Runtime events/incidents | runtime tables/events | `RUNTIME_*` | Observability | all | env | ops preset | publishers | projections | ops/admin status | ops-only | observability | read-only |
@@ -806,7 +806,7 @@ Before `create_account_run_request`, start must block with HTTP 403, no `request
 | RunControl | `play_disabled`, `dispatcher_unhealthy`, `dispatcher_launch_disabled`, `invalid_run_type`, `already_running`, `already_requested` |
 | Package/entitlement | `package_preset_incomplete`, `package_entitlement_missing`, `outreach_entitlement_missing` |
 | Assignment/device | `assignment_missing`, `assignment_window_expired`, `device_assignment_unavailable` |
-| Credentials/status | `credentials_review_required`, `reauth_required`, `support_required`, `identity_mismatch_review_required` |
+| Credentials/status | `credentials_review_required`, `reauth_required`, `login_verification_required`, `identity_mismatch_review_required`, `eligibility_query_failed` |
 | Welcome | `welcome_real_send_disabled`, `welcome_template_missing`, `welcome_cap_unproven`, `welcome_baseline_missing` |
 | Follow | `follow_targets_missing`, `follow_cap_unproven`, `follow_iterations_unproven`, `filter_policy_not_wired` |
 | Unfollow | `real_handoff_disabled`, `unfollow_any_not_supported`, `unfollow_cap_unproven`, `no_safe_unfollow_strategy` |

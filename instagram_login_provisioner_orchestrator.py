@@ -85,6 +85,15 @@ POST_CONTINUE_REOBSERVE_WAIT_MS = 1500
 PROFILE_MENU_REOBSERVE_WAIT_MS = 1500
 PROFILE_REFRESH_WAIT_MS = 500
 DEFAULT_INSTAGRAM_PACKAGE_NAME = "com.instagram.android"
+TRANSIENT_FOREGROUND_PACKAGES = frozenset(
+    {
+        "com.android.credentialmanager",
+        "com.google.android.gms",
+        "com.samsung.android.samsungpassautofill",
+    }
+)
+TRANSIENT_FOREGROUND_RECOVERY_ATTEMPTS = 2
+TRANSIENT_FOREGROUND_RECOVERY_WAIT_MS = 500
 DEFAULT_POST_APP_START_WAIT_MS = 1500
 MAX_POST_APP_START_WAIT_MS = 3000
 DEFAULT_STARTUP_OBSERVATIONS = 4
@@ -849,7 +858,7 @@ def run_login_provisioning_flow(
                     failure_reason="mismatch",
                     final_login_status="mismatch",
                     final_provisioning_status="blocked",
-                    final_onboarding_status="support_required",
+                    final_onboarding_status="blocked",
                     dashboard_action_type=recovery_route.dashboard_action_type or "review_logged_in_account_mismatch",
                     should_publish_status=False,
                     account_id=safe_account_id,
@@ -1272,7 +1281,7 @@ def run_login_provisioning_flow(
             failure_reason="mismatch",
             final_login_status="mismatch",
             final_provisioning_status="blocked",
-            final_onboarding_status="support_required",
+            final_onboarding_status="blocked",
             dashboard_action_type="review_account_mismatch",
             should_publish_status=True,
             account_id=safe_account_id,
@@ -1296,7 +1305,7 @@ def run_login_provisioning_flow(
             failure_reason="mismatch",
             final_login_status="mismatch",
             final_provisioning_status="blocked",
-            final_onboarding_status="support_required",
+            final_onboarding_status="blocked",
             dashboard_action_type=route.dashboard_action_type or "review_account_picker_missing_expected",
             should_publish_status=False,
             account_id=safe_account_id,
@@ -1719,7 +1728,16 @@ def run_login_provisioning_flow(
             publish_enabled=publish_enabled,
         )
 
-    guard = _check_expected_foreground_package(d, expected_package_name=safe_package_name)
+    if str(signals.get("screen_type") or "") == "login_form_empty":
+        actions_taken.append("login_form_empty_detected")
+        old_logged_in_metadata["login_form_empty_detected"] = True
+
+    guard = _guard_foreground_package_for_login_input(
+        d,
+        expected_package_name=safe_package_name,
+        timer=timer,
+        sleeper=sleeper,
+    )
     old_logged_in_metadata.update(guard)
     if guard.get("package_guard_mismatch"):
         return _finalize_package_mismatch(
@@ -1747,12 +1765,14 @@ def run_login_provisioning_flow(
             publish_enabled=publish_enabled,
         )
 
+    actions_taken.append("credential_runtime_read_started")
     credentials = _load_credentials(
         credentials_getter,
         safe_account_id,
         expected_username=safe_expected_username,
     )
     if not credentials["ok"]:
+        actions_taken.append("credential_runtime_read_failed")
         return _credentials_failure_result(
             credentials,
             account_id=safe_account_id,
@@ -1772,9 +1792,16 @@ def run_login_provisioning_flow(
             publish_enabled=publish_enabled,
         )
 
+    actions_taken.append("credential_runtime_read_ok")
+
     retry_count = 0
     retry_attempted = False
-    guard = _check_expected_foreground_package(d, expected_package_name=safe_package_name)
+    guard = _guard_foreground_package_for_login_input(
+        d,
+        expected_package_name=safe_package_name,
+        timer=timer,
+        sleeper=sleeper,
+    )
     old_logged_in_metadata.update(guard)
     if guard.get("package_guard_mismatch"):
         return _finalize_package_mismatch(
@@ -1821,7 +1848,12 @@ def run_login_provisioning_flow(
         if not _signals_confirm_login_form(signals):
             warnings.append("retry_aborted_login_form_not_validated")
             break
-        guard = _check_expected_foreground_package(d, expected_package_name=safe_package_name)
+        guard = _guard_foreground_package_for_login_input(
+            d,
+            expected_package_name=safe_package_name,
+            timer=timer,
+            sleeper=sleeper,
+        )
         old_logged_in_metadata.update(guard)
         if guard.get("package_guard_mismatch"):
             return _finalize_package_mismatch(
@@ -3147,6 +3179,70 @@ def _check_expected_foreground_package(d: Any, *, expected_package_name: str) ->
     }
 
 
+def _recover_transient_foreground_package(
+    d: Any,
+    *,
+    expected_package_name: str,
+    timer: Timer,
+    sleeper: Sleeper,
+    max_attempts: int = TRANSIENT_FOREGROUND_RECOVERY_ATTEMPTS,
+) -> dict[str, Any]:
+    metadata = {
+        "transient_foreground_recovery_attempted": False,
+        "transient_foreground_recovery_count": 0,
+        "transient_foreground_packages_seen": [],
+        "transient_foreground_recovery_succeeded": False,
+    }
+    guard = _check_expected_foreground_package(d, expected_package_name=expected_package_name)
+    if not guard.get("package_guard_mismatch"):
+        return {**guard, **metadata}
+
+    actual = str(guard.get("actual_foreground_package") or "").strip()
+    if actual not in TRANSIENT_FOREGROUND_PACKAGES:
+        return {**guard, **metadata}
+
+    press = getattr(d, "press", None)
+    for attempt in range(max_attempts):
+        metadata["transient_foreground_recovery_attempted"] = True
+        metadata["transient_foreground_recovery_count"] = attempt + 1
+        seen = [str(item) for item in list(metadata["transient_foreground_packages_seen"] or [])]
+        if actual and actual not in seen:
+            seen.append(actual)
+        metadata["transient_foreground_packages_seen"] = seen
+        if callable(press):
+            try:
+                press("back")
+            except Exception:
+                pass
+        if TRANSIENT_FOREGROUND_RECOVERY_WAIT_MS > 0:
+            sleeper(TRANSIENT_FOREGROUND_RECOVERY_WAIT_MS / 1000.0)
+        guard = _check_expected_foreground_package(d, expected_package_name=expected_package_name)
+        if not guard.get("package_guard_mismatch"):
+            metadata["transient_foreground_recovery_succeeded"] = True
+            return {**guard, **metadata}
+        actual = str(guard.get("actual_foreground_package") or "").strip()
+        if actual not in TRANSIENT_FOREGROUND_PACKAGES:
+            return {**guard, **metadata}
+
+    metadata["transient_foreground_recovery_succeeded"] = not guard.get("package_guard_mismatch")
+    return {**guard, **metadata}
+
+
+def _guard_foreground_package_for_login_input(
+    d: Any,
+    *,
+    expected_package_name: str,
+    timer: Timer,
+    sleeper: Sleeper,
+) -> dict[str, Any]:
+    return _recover_transient_foreground_package(
+        d,
+        expected_package_name=expected_package_name,
+        timer=timer,
+        sleeper=sleeper,
+    )
+
+
 def _retry_app_start_once(
     d: Any,
     *,
@@ -4402,7 +4498,7 @@ def _finalize_package_mismatch(
         failure_reason=reason,
         final_login_status="logged_out",
         final_provisioning_status="blocked",
-        final_onboarding_status="support_required",
+        final_onboarding_status="blocked",
         dashboard_action_type="review_login_package_mismatch",
         should_publish_status=False,
         account_id=account_id,
@@ -4906,6 +5002,7 @@ def _submit_password_after_email_code(
     warnings: list[str],
     total_start: float,
     timer: Timer,
+    sleeper: Sleeper,
     publisher: Publisher | None,
     publish_enabled: bool,
     package_name: str,
@@ -4941,7 +5038,7 @@ def _submit_password_after_email_code(
             failure_reason="mismatch",
             final_login_status="mismatch",
             final_provisioning_status="blocked",
-            final_onboarding_status="support_required",
+            final_onboarding_status="blocked",
             dashboard_action_type="review_account_mismatch",
             should_publish_status=True,
             account_id=safe_account_id,
@@ -4984,7 +5081,12 @@ def _submit_password_after_email_code(
             publish_enabled=publish_enabled,
         )
 
-    guard = _check_expected_foreground_package(d, expected_package_name=safe_package_name)
+    guard = _guard_foreground_package_for_login_input(
+        d,
+        expected_package_name=safe_package_name,
+        timer=timer,
+        sleeper=sleeper,
+    )
     if guard.get("package_guard_mismatch"):
         return _finalize_package_mismatch(
             account_id=safe_account_id,
@@ -5158,7 +5260,12 @@ def run_email_code_resume_flow(
         "run_id": run_id,
     }
 
-    guard = _check_expected_foreground_package(d, expected_package_name=safe_package_name)
+    guard = _guard_foreground_package_for_login_input(
+        d,
+        expected_package_name=safe_package_name,
+        timer=timer,
+        sleeper=sleeper,
+    )
     if guard.get("package_guard_mismatch"):
         return _finalize_package_mismatch(
             account_id=safe_account_id,
@@ -5256,6 +5363,7 @@ def run_email_code_resume_flow(
             warnings=warnings,
             total_start=total_start,
             timer=timer,
+            sleeper=sleeper,
             publisher=publisher,
             publish_enabled=publish_enabled,
             package_name=safe_package_name,
@@ -5361,6 +5469,7 @@ def run_email_code_resume_flow(
             warnings=[*warnings, *resume_result.warnings],
             total_start=total_start,
             timer=timer,
+            sleeper=sleeper,
             publisher=publisher,
             publish_enabled=publish_enabled,
             package_name=safe_package_name,

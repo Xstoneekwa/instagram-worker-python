@@ -193,7 +193,7 @@ def _publish_identity_mismatch_status(
             account_id=str(account_id or ""),
             login_status="mismatch",
             provisioning_status="blocked",
-            onboarding_status="support_required",
+            onboarding_status="blocked",
             reason="account_identity_mismatch",
             external_request_id=external_request_id,
             metadata=metadata,

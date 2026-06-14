@@ -222,6 +222,8 @@ def execute_login_form_credentials(
             username_input_method = str(username_result.get("username_input_method") or "")
             username_placeholder_ignored = bool(username_result.get("username_placeholder_ignored"))
             username_entered = username_input_result in {"username_input_confirmed", "username_input_assumed"}
+            if username_entered:
+                warnings.append("username_field_fill_sent")
             if not username_entered:
                 raise RuntimeError(username_input_result or "username_input_failed")
 
@@ -248,6 +250,8 @@ def execute_login_form_credentials(
         password_field_non_empty_confirmed = input_result["password_field_non_empty_confirmed"]
         password_input_failure_reason = input_result["reason"]
         password_entered = bool(input_call_reported_success)
+        if password_entered:
+            warnings.append("password_field_fill_sent")
         timings["password_input_ms"] = _elapsed_ms(start, timer())
         if not input_call_reported_success:
             raise RuntimeError("password_input_failed")
@@ -325,6 +329,7 @@ def execute_login_form_credentials(
         start = timer()
         _click_target(targets["login_button"])
         submit_tapped = True
+        warnings.append("login_submit_tap_sent")
         timings["submit_tap_ms"] = _elapsed_ms(start, timer())
     except Exception:
         if overlay_recovery_allowed and _safe_overlay_recovery_once(d, targets, warnings):
@@ -412,6 +417,7 @@ def execute_login_form_credentials(
 
     if dump_after_submit:
         try:
+            warnings.append("post_submit_observe_started")
             observed = _observe_post_submit_settled(
                 d,
                 timings=timings,

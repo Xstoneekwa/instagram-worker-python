@@ -103,7 +103,7 @@ class AccountIdentityGuardIncidentsTest(unittest.TestCase):
         self.assertEqual(kwargs["account_id"], "42c625c2-e761-4100-8a9d-7ae1373de97d")
         self.assertEqual(kwargs["login_status"], "mismatch")
         self.assertEqual(kwargs["provisioning_status"], "blocked")
-        self.assertEqual(kwargs["onboarding_status"], "support_required")
+        self.assertEqual(kwargs["onboarding_status"], "blocked")
         self.assertEqual(kwargs["reason"], "account_identity_mismatch")
         self.assertEqual(
             kwargs["external_request_id"],

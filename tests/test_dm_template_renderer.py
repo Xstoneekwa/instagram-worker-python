@@ -127,6 +127,33 @@ class DmTemplateRendererTest(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(result.rendered_body, "Salut Élodie, ravi d'échanger ici 😊")
 
+    def test_variation_selector_hearts_are_preserved(self) -> None:
+        template = "Salut {{username}} et merci du follow ❤️❤️!"
+        result = render_dm_template(
+            template,
+            {
+                "recipient_username": "justperfect.eu",
+                "account_username": "j_automatise_pour_toi",
+            },
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.rendered_body, "Salut justperfect.eu et merci du follow ❤️❤️!")
+        self.assertEqual([hex(ord(char)) for char in result.rendered_body[-3:]], ["0x2764", "0xfe0f", "0x21"])
+
+    def test_full_emoji_matrix_is_preserved(self) -> None:
+        matrix = "Emoji matrix: ✅ ❤️ 🔄 🔥 🚀 🙏 😄 ✨ 👍 🥰 👨‍💻 👩‍💻 ❤️‍🔥 👍🏽 🙏🏾 🇫🇷 🇺🇸 👋 🎀"
+        result = render_dm_template(
+            f"Salut {{username}}. {matrix}",
+            {
+                "recipient_username": "justperfect.eu",
+                "account_username": "j_automatise_pour_toi",
+            },
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.rendered_body, f"Salut justperfect.eu. {matrix}")
+
     def test_unresolved_token_detector(self) -> None:
         self.assertTrue(has_unresolved_template_tokens("Salut {username}"))
         self.assertEqual(find_template_tokens("Salut {{ username }} et {name}"), ["username", "name"])
@@ -159,6 +186,32 @@ class DmTemplateEnqueueIntegrationTest(unittest.TestCase):
         payload = rpc.call_args.args[1]
         self.assertEqual(payload["p_message_body"], "Salut justperfect.eu, c'est j_automatise_pour_toi.")
         self.assertEqual(payload["p_template_id"], "tpl-1")
+
+    def test_welcome_enqueue_preserves_emoji_template_body(self) -> None:
+        with (
+            patch.object(
+                supabase_client,
+                "_resolve_dm_template_for_enqueue",
+                return_value={
+                    "body": "Salut {{username}} et merci du follow ❤️❤️!",
+                    "active": True,
+                    "template_type": "welcome",
+                },
+            ),
+            patch.object(supabase_client, "get_account_username", return_value="j_automatise_pour_toi"),
+            patch.object(supabase_client, "call_rpc", return_value={"id": "job-emoji", "status": "pending"}) as rpc,
+        ):
+            row = supabase_client.enqueue_welcome_dm_job_if_eligible(
+                "acct-1",
+                "justperfect.eu",
+                template_id="tpl-emoji",
+                account_username="j_automatise_pour_toi",
+            )
+
+        self.assertEqual(row["id"], "job-emoji")
+        payload = rpc.call_args.args[1]
+        self.assertEqual(payload["p_message_body"], "Salut justperfect.eu et merci du follow ❤️❤️!")
+        self.assertEqual(payload["p_template_id"], "tpl-emoji")
 
     def test_outreach_enqueue_freezes_rendered_message_body_with_name_fallback(self) -> None:
         with (
@@ -226,6 +279,14 @@ class DmTemplateEnqueueIntegrationTest(unittest.TestCase):
 
 
 class DmTemplateSenderGuardTest(unittest.TestCase):
+    def test_sender_selects_set_text_for_emoji_message(self) -> None:
+        flags = dm_sender_engine._dm_message_typing_flags(
+            "Emoji matrix: ✅ ❤️ 🔄 🔥 🚀 🙏 😄 ✨ 👍 🥰 👨‍💻 👩‍💻 ❤️‍🔥 👍🏽 🙏🏾 🇫🇷 🇺🇸 👋 🎀"
+        )
+
+        self.assertTrue(flags["contains_non_ascii"])
+        self.assertEqual(dm_sender_engine._select_dm_typing_strategy(flags), "set_text")
+
     def test_sender_refuses_unresolved_template_token_before_ui_probe(self) -> None:
         with patch.object(dm_sender_engine, "dm_thread_shows_outgoing_message") as probe:
             sent_ok, send_out, failure_reason = dm_sender_engine._perform_real_welcome_dm_send(

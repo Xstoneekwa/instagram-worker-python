@@ -34,7 +34,7 @@ class InstagramLoginScreenRouterTest(unittest.TestCase):
         self.assertTrue(decision.should_escalate)
         self.assertEqual(decision.publish_login_status, "mismatch")
         self.assertEqual(decision.provisioning_status, "blocked")
-        self.assertEqual(decision.onboarding_status, "support_required")
+        self.assertEqual(decision.onboarding_status, "blocked")
         self.assertEqual(decision.dashboard_action_type, "review_account_mismatch")
         self.assertFalse(decision.should_tap_continue)
         self.assertFalse(decision.should_tap_use_another_profile)

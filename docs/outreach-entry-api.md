@@ -1092,31 +1092,31 @@ Status contract:
 
 - `active` means the Add Profile flow has completed account, settings, filters
   and active credential metadata;
-- `support_required` is the safe state for a newly created Add Profile row until
-  credentials are active, and remains the controlled failure state for credential
-  ingestion or final status failures;
+- `support_required` must not be used as a primary account status. New Add
+  Profile rows keep primary status `active`; credential ingestion failures use
+  `admin_lifecycle_status='needs_assistance'` plus a precise
+  `review_credentials` dashboard action;
 - `ig_account_settings.password` must remain `''` for new Add Profile rows in
   both success and failure paths.
 
 Route hardening:
 
-- `accounts/create` creates the account initially as `support_required`;
-- settings are inserted with `account_status='support_required'` and
-  `password=''`;
+- `accounts/create` creates the account initially as `active`;
+- settings are inserted with `account_status='active'` and `password=''`;
 - settings and filters failures before credential ingestion trigger a targeted
   compensation delete of the newly created account id. Foreign keys cascade the
   just-created settings/filters rows. This compensation is only for the current
   Add Profile account id, before credentials exist;
-- credential ingestion failure keeps the account/settings in
-  `support_required`, creates a best-effort safe credential support action, and
-  returns only safe UI errors such as `credentials_ingestion_failed` or
-  `credentials_ingestion_timeout`;
+- credential ingestion failure keeps the primary account/settings status
+  `active`, marks `admin_lifecycle_status='needs_assistance'`, creates a
+  best-effort safe `review_credentials` action, and returns only safe UI errors
+  such as `credentials_ingestion_failed` or `credentials_ingestion_timeout`;
 - successful credential ingestion is accepted only when the safe credentials
   response reports active credentials, then the route finalizes `ig_accounts` and
   `ig_account_settings.account_status` to `active`;
 - if final status activation fails after credentials are active, the route does
-  not report success. It marks the account back to `support_required` and raises
-  a safe support action.
+  not report success and raises a precise support action instead of reverting to
+  a generic primary status.
 
 Idempotency guard:
 
@@ -2306,7 +2306,8 @@ et sans modifier les donnees.
 - `verification_pending` : verification login/provisioning en attente;
 - `ready` : onboarding pret;
 - `blocked` : onboarding bloque;
-- `support_required` : intervention support requise.
+- `support_required` : valeur legacy de compatibilite, ne pas utiliser comme
+  statut principal; afficher un badge derive si une action humaine precise existe.
 
 Mapping vers actions dashboard :
 
@@ -2614,7 +2615,7 @@ Resultat : upsert `resolve_checkpoint`.
 {
   "login_status": "failed",
   "provisioning_status": "failed",
-  "onboarding_status": "support_required",
+  "onboarding_status": "blocked",
   "reason": "login_failed"
 }
 ```
@@ -2627,7 +2628,7 @@ Resultat : upsert `review_login_failure`.
 {
   "login_status": "mismatch",
   "provisioning_status": "blocked",
-  "onboarding_status": "support_required",
+  "onboarding_status": "blocked",
   "reason": "account_identity_mismatch"
 }
 ```
@@ -2789,10 +2790,10 @@ Mappings runtime futurs :
   `provisioning_status='login_verification_pending'`,
   `onboarding_status='verification_pending'`;
 - `login_failed` -> `login_status='failed'`,
-  `provisioning_status='failed'`, `onboarding_status='support_required'`,
+  `provisioning_status='failed'`, `onboarding_status='blocked'`,
   `reauth_required=true`;
 - `account_identity_mismatch` -> `login_status='mismatch'`,
-  `provisioning_status='blocked'`, `onboarding_status='support_required'`;
+  `provisioning_status='blocked'`, `onboarding_status='blocked'`;
 - `session_expired` -> `login_status='logged_out'`,
   `provisioning_status='login_pending'`.
 
@@ -2829,7 +2830,7 @@ Payload status publie :
 ```text
 login_status=mismatch
 provisioning_status=blocked
-onboarding_status=support_required
+onboarding_status=blocked
 reason=account_identity_mismatch
 external_request_id=identity_guard:<run_id|unknown>:<account_id|unknown>:mismatch
 ```
@@ -2932,7 +2933,7 @@ checkpoint -> login_status=checkpoint,
   onboarding_status=verification_pending, reason=checkpoint_required
 
 login_failed -> login_status=failed, provisioning_status=failed,
-  onboarding_status=support_required, reauth_required=true,
+  onboarding_status=blocked, reauth_required=true,
   reauth_reason=credentials_invalid, reason=login_failed
 
 logged_out -> login_status=logged_out, provisioning_status=login_pending,
@@ -3247,7 +3248,7 @@ Decisions V1 :
 - `continue_as_candidate` + suggested != expected + lifecycle actif, paused,
   onboarding, unknown, lookup error ou clone non reusable ->
   `block_wrong_suggested_account`, `login_status=mismatch`,
-  `provisioning_status=blocked`, `onboarding_status=support_required`,
+  `provisioning_status=blocked`, `onboarding_status=blocked`,
   `dashboard_action_type=review_account_mismatch`;
 - `login_form_empty` -> `start_login_form_flow`,
   `next_action=secure_credentials_required_later`;
@@ -3906,7 +3907,7 @@ Post-submit policy future :
 - `login_failed` -> `update_password` ou `review_login_failure`, pas retry avec
   le meme password;
 - `unknown` -> re-observe possible 1 fois, puis `retry_later` ou
-  `support_required` selon contexte.
+  `blocked` + reason/action precise selon contexte.
 
 Prochaine etape apres 2E-5I :
 
@@ -3944,7 +3945,7 @@ Decisions V1 supportees :
 - `use_another_profile_previous_account_stopped` -> tap Use another profile,
   re-observe, login form flow;
 - `block_wrong_suggested_account` -> stop safe, status `mismatch` /
-  `blocked` / `support_required`, action dashboard `review_account_mismatch`;
+  `blocked` / `blocked`, action dashboard `review_account_mismatch`;
 - `unknown_no_action` -> stop safe, pas d'escalade directe V1;
 - `start_login_form_flow` -> credentials + password form executor.
 
@@ -3971,10 +3972,10 @@ Mapping status/dashboard futur :
   `verification_pending`, action dashboard `complete_two_factor`;
 - `checkpoint` -> `checkpoint` / `login_verification_pending` /
   `verification_pending`, action dashboard `resolve_checkpoint`;
-- `login_failed` -> `failed` / `failed` / `support_required`, action dashboard
+- `login_failed` -> `failed` / `failed` / `blocked`, action dashboard
   `update_instagram_password`;
 - `unknown` -> stop safe, re-observe possible une fois, puis `retry_later` ou
-  `support_required` selon orchestrateur futur.
+  `blocked` + reason/action precise selon orchestrateur futur.
 
 Publish V1 :
 

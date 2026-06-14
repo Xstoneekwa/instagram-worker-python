@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import inspect
+import time
 import unittest
 from dataclasses import asdict
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from instagram_credentials_runtime_access import InstagramLoginCredentialsResult, SecretValue
@@ -348,6 +350,13 @@ class FakeDevice:
 
     def app_current(self) -> dict:
         return {"package": self.foreground_package} if self.foreground_package is not None else {}
+
+
+class TransientCredentialManagerDevice(FakeDevice):
+    def press(self, key: str) -> None:
+        super().press(key)
+        if key == "back" and self.foreground_package == "com.android.credentialmanager":
+            self.foreground_package = "com.instagram.android"
 
 
 class TrackingSecretValue(SecretValue):
@@ -744,6 +753,22 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertNotIn(SECRET_REF, rendered)
         self.assertNotIn(VAULT_ID, rendered)
         self.assertIn("RFGL***VCKE", rendered)
+
+    def test_transient_credential_manager_overlay_recovers_before_credentials_and_submits(self) -> None:
+        device = TransientCredentialManagerDevice(
+            [LOGIN_FORM_XML],
+            foreground_package="com.android.credentialmanager",
+        )
+        recovered = provisioner_orchestrator._recover_transient_foreground_package(
+            device,
+            expected_package_name="com.instagram.android",
+            timer=time.perf_counter,
+            sleeper=Mock(),
+        )
+        self.assertIn("back", device.press_calls)
+        self.assertTrue(recovered.get("transient_foreground_recovery_attempted"))
+        self.assertTrue(recovered.get("transient_foreground_recovery_succeeded"))
+        self.assertFalse(recovered.get("package_guard_mismatch"))
 
     def test_resume_email_wrong_package_stops_before_consuming_code(self) -> None:
         device = FakeDevice([EMAIL_CODE_CHALLENGE_XML], foreground_package="com.instagram.android")
@@ -2682,7 +2707,16 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
     def test_actions_taken_order_for_direct_login_form(self) -> None:
         result = self._run_login_form(CONNECTED_XML)
 
-        self.assertEqual(result.actions_taken, ["route:start_login_form_flow", "login_form_submit"])
+        self.assertEqual(
+            result.actions_taken,
+            [
+                "route:start_login_form_flow",
+                "login_form_empty_detected",
+                "credential_runtime_read_started",
+                "credential_runtime_read_ok",
+                "login_form_submit",
+            ],
+        )
 
     def test_dry_run_login_form_does_not_request_credentials_or_submit(self) -> None:
         device, selectors = configured_device()

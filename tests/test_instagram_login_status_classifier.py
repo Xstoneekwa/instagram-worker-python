@@ -51,7 +51,7 @@ class InstagramLoginStatusClassifierTest(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertEqual(result.login_status, "failed")
         self.assertEqual(result.provisioning_status, "failed")
-        self.assertEqual(result.onboarding_status, "support_required")
+        self.assertEqual(result.onboarding_status, "blocked")
         self.assertTrue(result.reauth_required)
         self.assertEqual(result.reauth_reason, "credentials_invalid")
         self.assertEqual(result.reason, "login_failed")

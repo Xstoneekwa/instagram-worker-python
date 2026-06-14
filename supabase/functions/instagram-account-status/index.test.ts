@@ -235,11 +235,11 @@ Deno.test("failed appelle RPC correctement", withEnv(async () => {
   await handleRequest(request(validBody({
     login_status: "failed",
     provisioning_status: "failed",
-    onboarding_status: "support_required",
+    onboarding_status: "blocked",
     reason: "login_failed",
   })), { fetch: makeFetch({ calls }) });
   if (calls[0].body?.p_login_status !== "failed") throw new Error("expected failed");
-  if (calls[0].body?.p_onboarding_status !== "support_required") throw new Error("expected support_required");
+  if (calls[0].body?.p_onboarding_status !== "blocked") throw new Error("expected blocked");
 }));
 
 Deno.test("metadata.source=provisioner donne p_actor_type=provisioner", withEnv(async () => {
