@@ -5452,16 +5452,8 @@ _DM_SEND_POSITION_NOISE: tuple[str, ...] = (
     "stickers",
     "gif",
     "like",
-    "systemui",
-    "menu_container",
     "row_thread_right_composer_button_write_with_ai",
     "row_thread_composer_button_sticker_shortcut",
-)
-
-_DM_SEND_RID_PRIORITY: tuple[tuple[str, int], ...] = (
-    ("row_thread_composer_send_button_container", 100),
-    ("row_thread_composer_send_button_background", 80),
-    ("row_thread_composer_send_button_icon", 70),
 )
 
 
@@ -5471,58 +5463,6 @@ def _dm_position_fallback_obvious_noise(rid: str, desc: str, txt: str) -> bool:
         if frag in blob:
             return True
     return False
-
-
-def _dm_send_rid_is_noise(rid: str) -> bool:
-    r = (rid or "").lower()
-    return "systemui" in r or "menu_container" in r
-
-
-def _dm_is_send_specific_candidate(candidate: dict[str, Any]) -> bool:
-    rid = str(candidate.get("resourceId") or "").lower()
-    if _dm_send_rid_is_noise(rid):
-        return False
-    if any(frag in rid for frag, _ in _DM_SEND_RID_PRIORITY):
-        return True
-    desc = str(candidate.get("contentDescription") or "").strip().lower()
-    return desc in {"send", "envoyer"}
-
-
-def _dm_send_candidate_score(candidate: dict[str, Any]) -> int:
-    rid = str(candidate.get("resourceId") or "").lower()
-    if _dm_send_rid_is_noise(rid):
-        return -1
-    score = 0
-    for frag, pts in _DM_SEND_RID_PRIORITY:
-        if frag in rid:
-            score = max(score, pts)
-    desc = str(candidate.get("contentDescription") or "").strip().lower()
-    if desc in {"send", "envoyer"}:
-        score += 50
-    if bool(candidate.get("clickable")):
-        score += 10
-    if bool(candidate.get("right_of_composer")):
-        score += 5
-    if bool(candidate.get("near_composer_vertical")):
-        score += 3
-    return score
-
-
-def _dm_select_best_send_candidate(
-    candidates: list[dict[str, Any]],
-) -> dict[str, Any] | None:
-    best: dict[str, Any] | None = None
-    best_score = -1
-    for candidate in candidates:
-        score = _dm_send_candidate_score(candidate)
-        if score < 0:
-            continue
-        if not _dm_is_send_specific_candidate(candidate) and score < 50:
-            continue
-        if score > best_score:
-            best_score = score
-            best = candidate
-    return best
 
 
 def _dm_position_fallback_class_ok(class_name: str) -> bool:
@@ -5757,21 +5697,6 @@ def _dm_find_exact_instagram_send_candidate(
         target["in_composer_vertical_band"] = in_vertical_band
 
         if reject_reason:
-            if rid.endswith("row_thread_composer_send_button_background") or rid.endswith(
-                "row_thread_composer_send_button_icon"
-            ):
-                if (
-                    right_of_composer
-                    and in_vertical_band
-                    and lower_half
-                    and not _dm_send_rid_is_noise(rid)
-                ):
-                    raw["matched_resource_id"] = rid
-                    raw["right_of_composer"] = right_of_composer
-                    raw["lower_screen_half"] = lower_half
-                    raw["in_composer_vertical_band"] = in_vertical_band
-                    out["selected"] = raw
-                    return out
             out["rejected"].append({"candidate": target, "reject_reason": reject_reason})
             continue
 
@@ -5797,7 +5722,7 @@ def _dm_visual_send_candidates_from_hierarchy_xml(
         "rejection_breakdown": {},
     }
     raw = _dm_gather_send_raw_candidates(xml_text, screen_w, screen_h)
-    out["raw_candidates"] = raw
+    out["surviving_candidates"] = raw
     survivors: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
     reasons_count: dict[str, int] = {}
@@ -5850,7 +5775,6 @@ def _dm_visual_send_candidates_from_hierarchy_xml(
         survivors.append(c)
 
     out["candidates"] = survivors
-    out["surviving_candidates"] = survivors
     out["visual_candidates_rejected"] = rejected
     out["rejection_breakdown"] = reasons_count
     return out
@@ -5941,142 +5865,6 @@ def _dm_try_unique_send_resource_u2(d: u2.Device) -> Any | None:
     return None
 
 
-def _dm_resolve_send_button_from_hierarchy(
-    d: u2.Device,
-    hier: str,
-    *,
-    composer_bounds: dict[str, int],
-    screen_w: int,
-    screen_h: int,
-    thread_state: str,
-) -> tuple[Any | None, str, dict[str, Any]]:
-    """Pick best Send tap target from hierarchy XML (exact id path, then visual survivors)."""
-    meta: dict[str, Any] = {
-        "send_button_candidate_count": 0,
-        "send_button_position_fallback": False,
-        "filtered_send_candidates": [],
-        "surviving_candidates": [],
-        "visual_candidates_rejected": [],
-        "rejection_breakdown": {},
-        "send_button_selection_score": 0,
-    }
-    exact = _dm_find_exact_instagram_send_candidate(hier, composer_bounds, screen_h)
-    for s in list(exact.get("seen") or []):
-        log(
-            "info",
-            "dm_send_exact_instagram_candidate_seen",
-            matched_resource_id=s.get("matched_resource_id"),
-            used_click_target_resource_id=s.get("resourceId"),
-            used_click_target_class=s.get("className"),
-            used_click_target_bounds=s.get("bounds"),
-            composer_bounds=composer_bounds,
-            thread_state=thread_state,
-        )
-    for rej in list(exact.get("rejected") or []):
-        c = rej.get("candidate") or {}
-        log(
-            "info",
-            "dm_send_exact_instagram_candidate_rejected",
-            reject_reason=rej.get("reject_reason"),
-            matched_resource_id=c.get("matched_resource_id"),
-            used_click_target_resource_id=c.get("resourceId"),
-            used_click_target_class=c.get("className"),
-            used_click_target_bounds=c.get("bounds"),
-            composer_bounds=composer_bounds,
-            thread_state=thread_state,
-        )
-    ex_sel = exact.get("selected")
-    if isinstance(ex_sel, dict):
-        log(
-            "info",
-            "dm_send_exact_instagram_candidate_selected",
-            matched_resource_id=ex_sel.get("matched_resource_id"),
-            used_click_target_resource_id=ex_sel.get("resourceId"),
-            used_click_target_class=ex_sel.get("className"),
-            used_click_target_bounds=ex_sel.get("bounds"),
-            composer_bounds=composer_bounds,
-            thread_state=thread_state,
-        )
-        log(
-            "info",
-            "dm_send_button_candidate_selected",
-            path="exact_instagram",
-            resourceId=ex_sel.get("resourceId"),
-            contentDescription=ex_sel.get("contentDescription"),
-            center_x=ex_sel.get("center_x"),
-            center_y=ex_sel.get("center_y"),
-            thread_state=thread_state,
-        )
-        meta["send_button_candidate_count"] = 1
-        meta["send_button_position_fallback"] = True
-        meta["send_button_selection_score"] = _dm_send_candidate_score(ex_sel)
-        return (
-            _DmSendTapOnce(d, int(ex_sel["center_x"]), int(ex_sel["center_y"])),
-            "ok",
-            meta,
-        )
-
-    info = _dm_visual_send_candidates_from_hierarchy_xml(
-        hier, composer_bounds, screen_w, screen_h
-    )
-    filtered = list(info.get("candidates") or [])
-    meta["filtered_send_candidates"] = filtered
-    meta["surviving_candidates"] = list(info.get("surviving_candidates") or [])
-    meta["visual_candidates_rejected"] = list(info.get("visual_candidates_rejected") or [])
-    meta["rejection_breakdown"] = dict(info.get("rejection_breakdown") or {})
-    meta["send_button_candidate_count"] = len(filtered)
-
-    best = _dm_select_best_send_candidate(filtered)
-    if best is None and not filtered:
-        raw_send = [
-            c
-            for c in list(info.get("raw_candidates") or [])
-            if _dm_is_send_specific_candidate(c)
-        ]
-        best = _dm_select_best_send_candidate(raw_send)
-        if best is not None:
-            filtered = [best]
-            meta["filtered_send_candidates"] = filtered
-            meta["send_button_candidate_count"] = 1
-
-    if best is not None:
-        log(
-            "info",
-            "dm_send_button_candidate_selected",
-            path="visual_survivor",
-            className=best.get("className"),
-            resourceId=best.get("resourceId"),
-            contentDescription=best.get("contentDescription"),
-            bounds=best.get("bounds"),
-            center_x=best.get("center_x"),
-            center_y=best.get("center_y"),
-            right_of_composer=best.get("right_of_composer"),
-            lower_screen_half=best.get("lower_screen_half"),
-            near_composer_vertical=best.get("near_composer_vertical"),
-            selection_score=_dm_send_candidate_score(best),
-            surviving_count=len(filtered),
-            thread_state=thread_state,
-        )
-        meta["send_button_position_fallback"] = True
-        meta["send_button_selection_score"] = _dm_send_candidate_score(best)
-        return (
-            _DmSendTapOnce(d, int(best["center_x"]), int(best["center_y"])),
-            "ok",
-            meta,
-        )
-
-    log(
-        "info",
-        "dm_send_candidate_summary",
-        thread_state=thread_state,
-        candidate_count=len(filtered),
-        surviving_candidates=meta.get("surviving_candidates"),
-        rejection_breakdown=meta.get("rejection_breakdown"),
-        visual_candidates_rejected=meta.get("visual_candidates_rejected"),
-    )
-    return None, "missing", meta
-
-
 def wait_for_dm_send_button_after_draft(
     d: u2.Device,
     composer,
@@ -6126,36 +5914,168 @@ def wait_for_dm_send_button_after_draft(
                 hier = d.dump_hierarchy(compressed=False)
             except Exception:
                 hier = d.dump_hierarchy()
-            tap, status, resolved = _dm_resolve_send_button_from_hierarchy(
-                d,
-                hier,
-                composer_bounds=composer_bounds,
-                screen_w=w,
-                screen_h=h,
-                thread_state=thread_state,
+            exact = _dm_find_exact_instagram_send_candidate(hier, composer_bounds, h)
+            for s in list(exact.get("seen") or []):
+                log(
+                    "info",
+                    "dm_send_exact_instagram_candidate_seen",
+                    matched_resource_id=s.get("matched_resource_id"),
+                    used_click_target_resource_id=s.get("resourceId"),
+                    used_click_target_class=s.get("className"),
+                    used_click_target_bounds=s.get("bounds"),
+                    composer_bounds=composer_bounds,
+                    thread_state=thread_state,
+                )
+            for rej in list(exact.get("rejected") or []):
+                c = rej.get("candidate") or {}
+                log(
+                    "info",
+                    "dm_send_exact_instagram_candidate_rejected",
+                    reject_reason=rej.get("reject_reason"),
+                    matched_resource_id=c.get("matched_resource_id"),
+                    used_click_target_resource_id=c.get("resourceId"),
+                    used_click_target_class=c.get("className"),
+                    used_click_target_bounds=c.get("bounds"),
+                    composer_bounds=composer_bounds,
+                    thread_state=thread_state,
+                )
+            ex_sel = exact.get("selected")
+            if isinstance(ex_sel, dict):
+                log(
+                    "info",
+                    "dm_send_exact_instagram_candidate_selected",
+                    matched_resource_id=ex_sel.get("matched_resource_id"),
+                    used_click_target_resource_id=ex_sel.get("resourceId"),
+                    used_click_target_class=ex_sel.get("className"),
+                    used_click_target_bounds=ex_sel.get("bounds"),
+                    composer_bounds=composer_bounds,
+                    thread_state=thread_state,
+                )
+                meta["send_button_candidate_count"] = 1
+                meta["send_button_position_fallback"] = True
+                return _DmSendTapOnce(d, ex_sel["center_x"], ex_sel["center_y"]), "ok", meta
+            info = _dm_visual_send_candidates_from_hierarchy_xml(
+                hier, composer_bounds, w, h
             )
-            meta.update(resolved)
-            if status == "ok" and tap is not None:
+            pos = list(info.get("candidates") or [])
+            meta["send_button_candidate_count"] = len(pos)
+            meta["surviving_candidates"] = list(info.get("surviving_candidates") or [])
+            meta["visual_candidates_rejected"] = list(
+                info.get("visual_candidates_rejected") or []
+            )
+            meta["rejection_breakdown"] = dict(info.get("rejection_breakdown") or {})
+            if len(pos) == 1:
+                c = pos[0]
+                log(
+                    "info",
+                    "dm_send_button_detected_visual_only",
+                    className=c.get("className"),
+                    resourceId=c.get("resourceId"),
+                    text=c.get("text"),
+                    contentDescription=c.get("contentDescription"),
+                    bounds=c.get("bounds"),
+                    center_x=c.get("center_x"),
+                    center_y=c.get("center_y"),
+                    width=c.get("width"),
+                    height=c.get("height"),
+                    right_of_composer=c.get("right_of_composer"),
+                    lower_screen_half=c.get("lower_screen_half"),
+                    candidate=c,
+                    thread_state=thread_state,
+                )
+                meta["send_button_position_fallback"] = True
+                tap = _DmSendTapOnce(d, c["center_x"], c["center_y"])
                 return tap, "ok", meta
         time.sleep(poll_s)
 
+    meta["send_button_candidate_count"] = 0
     try:
         hier = d.dump_hierarchy(compressed=False)
     except Exception:
         hier = d.dump_hierarchy()
     if allow_pos and composer_bounds:
-        tap, status, resolved = _dm_resolve_send_button_from_hierarchy(
-            d,
-            hier,
-            composer_bounds=composer_bounds,
-            screen_w=w,
-            screen_h=h,
-            thread_state=thread_state,
+        exact = _dm_find_exact_instagram_send_candidate(hier, composer_bounds, h)
+        for s in list(exact.get("seen") or []):
+            log(
+                "info",
+                "dm_send_exact_instagram_candidate_seen",
+                matched_resource_id=s.get("matched_resource_id"),
+                used_click_target_resource_id=s.get("resourceId"),
+                used_click_target_class=s.get("className"),
+                used_click_target_bounds=s.get("bounds"),
+                composer_bounds=composer_bounds,
+                thread_state=thread_state,
+            )
+        for rej in list(exact.get("rejected") or []):
+            c = rej.get("candidate") or {}
+            log(
+                "info",
+                "dm_send_exact_instagram_candidate_rejected",
+                reject_reason=rej.get("reject_reason"),
+                matched_resource_id=c.get("matched_resource_id"),
+                used_click_target_resource_id=c.get("resourceId"),
+                used_click_target_class=c.get("className"),
+                used_click_target_bounds=c.get("bounds"),
+                composer_bounds=composer_bounds,
+                thread_state=thread_state,
+            )
+        ex_sel = exact.get("selected")
+        if isinstance(ex_sel, dict):
+            log(
+                "info",
+                "dm_send_exact_instagram_candidate_selected",
+                matched_resource_id=ex_sel.get("matched_resource_id"),
+                used_click_target_resource_id=ex_sel.get("resourceId"),
+                used_click_target_class=ex_sel.get("className"),
+                used_click_target_bounds=ex_sel.get("bounds"),
+                composer_bounds=composer_bounds,
+                thread_state=thread_state,
+            )
+            meta["send_button_candidate_count"] = 1
+            meta["send_button_position_fallback"] = True
+            return _DmSendTapOnce(d, ex_sel["center_x"], ex_sel["center_y"]), "ok", meta
+        info = _dm_visual_send_candidates_from_hierarchy_xml(
+            hier, composer_bounds, w, h
         )
-        meta.update(resolved)
-        if status == "ok" and tap is not None:
+        pos = list(info.get("candidates") or [])
+        meta["send_button_candidate_count"] = len(pos)
+        meta["surviving_candidates"] = list(info.get("surviving_candidates") or [])
+        meta["visual_candidates_rejected"] = list(
+            info.get("visual_candidates_rejected") or []
+        )
+        meta["rejection_breakdown"] = dict(info.get("rejection_breakdown") or {})
+        if len(pos) == 1:
+            c = pos[0]
+            log(
+                "info",
+                "dm_send_button_detected_visual_only",
+                className=c.get("className"),
+                resourceId=c.get("resourceId"),
+                text=c.get("text"),
+                contentDescription=c.get("contentDescription"),
+                bounds=c.get("bounds"),
+                center_x=c.get("center_x"),
+                center_y=c.get("center_y"),
+                width=c.get("width"),
+                height=c.get("height"),
+                right_of_composer=c.get("right_of_composer"),
+                lower_screen_half=c.get("lower_screen_half"),
+                candidate=c,
+                thread_state=thread_state,
+            )
+            meta["send_button_position_fallback"] = True
+            tap = _DmSendTapOnce(d, c["center_x"], c["center_y"])
             return tap, "ok", meta
-        if int(resolved.get("send_button_candidate_count") or 0) == 0:
+        log(
+            "info",
+            "dm_send_candidate_summary",
+            thread_state=thread_state,
+            candidate_count=len(pos),
+            surviving_candidates=meta.get("surviving_candidates"),
+            rejection_breakdown=meta.get("rejection_breakdown"),
+            visual_candidates_rejected=meta.get("visual_candidates_rejected"),
+        )
+        if len(pos) == 0:
             rx, ry = _dm_coordinate_send_point_from_composer(composer_bounds, w)
             log(
                 "info",
@@ -6184,7 +6104,7 @@ def read_dm_composer_text(d: u2.Device) -> str:
 
 
 def dm_thread_shows_outgoing_message(d: u2.Device, expected_text: str) -> bool:
-    """Best-effort: outgoing bubble text appears in thread hierarchy (not composer-only)."""
+    """Best-effort compatibility helper for current DM sender imports."""
     needle = str(expected_text or "").strip()
     if not needle:
         return False
@@ -6213,7 +6133,13 @@ def dm_thread_shows_outgoing_message(d: u2.Device, expected_text: str) -> bool:
 
 
 def _dm_read_composer_text_len(d: u2.Device) -> int:
-    return len(read_dm_composer_text(d))
+    try:
+        cur = _dm_find_focus_composer(d)
+        if cur is None:
+            return 0
+        return len(str(cur.get_text() or ""))
+    except Exception:
+        return 0
 
 
 def _dm_post_send_signal_poll(
@@ -6510,7 +6436,6 @@ def return_welcome_list_from_dm_to_followers(
     *,
     source_profile_username: str = "",
     pre_send_composer_text_len: int = 0,
-    send_already_confirmed: bool = False,
 ) -> dict[str, Any]:
     """
   Welcome list-native post-send / post-skip: DM → action-bar back → profile → action-bar back → followers.
@@ -6526,30 +6451,19 @@ def return_welcome_list_from_dm_to_followers(
         "followers_surface_ok": False,
     }
 
-    if send_already_confirmed:
-        sig_ok, sig_reason = True, "already_confirmed_before_return"
-        log(
-            "info",
-            "welcome_list_sender_post_send_return_fast_path_started",
-            username=username,
-            source_profile_username=src or None,
-            reason=sig_reason,
-        )
-    else:
-        sig_ok, sig_reason = _dm_post_send_signal_poll(
-            d, pre_send_text_len=int(pre_send_composer_text_len or 0)
-        )
+    sig_ok, sig_reason = _dm_post_send_signal_poll(
+        d, pre_send_text_len=int(pre_send_composer_text_len or 0)
+    )
     out["post_send_signal_ok"] = bool(sig_ok)
     out["post_send_signal_reason"] = sig_reason
-    if not send_already_confirmed:
-        try:
-            clear_dm_draft(d)
-        except Exception:
-            pass
-        try:
-            finalize_dm_draft_before_back(d)
-        except Exception:
-            pass
+    try:
+        clear_dm_draft(d)
+    except Exception:
+        pass
+    try:
+        finalize_dm_draft_before_back(d)
+    except Exception:
+        pass
 
     log(
         "info",
@@ -18198,64 +18112,6 @@ def _post_follow_likes_visible_grid_cell_under_suggested(
     return out
 
 
-def _post_follow_likes_strict_top_left_xml_grid_proof(
-    d: u2.Device,
-    *,
-    ui_hints: dict[str, Any],
-    budget_deadline: float | None,
-    ww: int,
-    wh: int,
-    visual_candidate_id: str = "",
-    source_profile_username: str = "",
-    follower_username: str = "",
-) -> dict[str, Any]:
-    """Require a fresh XML thumbnail below profile tabs before legacy visual tap."""
-    cell_meta, reveal_state = _post_follow_likes_run_top_left_xml_probe_sequence(
-        d,
-        ui_hints=ui_hints,
-        budget_deadline=budget_deadline,
-        ww=int(ww),
-        wh=int(wh),
-        visual_candidate_id=visual_candidate_id,
-        source_profile_username=source_profile_username,
-        follower_username=follower_username,
-        after_reveal_scroll=True,
-        skip_estimate_fallback=True,
-    )
-    source = str(cell_meta.get("reason") or "")
-    ok = bool(reveal_state.get("top_left_post_tap_safe")) and source in {
-        "xml_thumbnail_top_left",
-        "xml_thumbnail_top_left_relaxed",
-    }
-    out = {
-        "ok": bool(ok),
-        "cell_meta": dict(cell_meta),
-        "reveal_state": dict(reveal_state),
-        "source": source,
-        "failure_reason": "",
-    }
-    if not ok:
-        out["failure_reason"] = "post_like_skipped_no_post_grid"
-    try:
-        log(
-            "info" if ok else "warning",
-            "post_follow_like_strict_post_grid_proof_completed",
-            visual_candidate_id=visual_candidate_id,
-            source_profile_username=source_profile_username,
-            follower_username=follower_username,
-            ok=bool(ok),
-            cell_source=source,
-            failure_reason=str(out["failure_reason"] or ""),
-            top_left_post_tap_safe=bool(reveal_state.get("top_left_post_tap_safe")),
-            top_left_post_visible=bool(reveal_state.get("top_left_post_visible")),
-            grid_exposure=str(reveal_state.get("grid_exposure") or ""),
-            tap_safe_reason=str(reveal_state.get("tap_safe_reason") or ""),
-        )
-    except Exception:
-        pass
-    return out
-
-
 def _post_follow_likes_finish_overlay_fast_skip(
     out: dict[str, Any],
     *,
@@ -20007,26 +19863,6 @@ _POST_FOLLOW_NO_POSTS_TIER1_ZERO_POSTS_RE = (
     r"(?i)^\s*0\s+(posts?|publications?|publicaci[oó]n(?:es)?|"
     r"beitr[aä]ge|pubblicazioni)\s*$"
 )
-_POST_FOLLOW_NO_POSTS_TEXT_NEEDLES = (
-    "No Posts Yet",
-    "No posts yet",
-    "No posts",
-    "No Posts",
-    "Aucune publication",
-    "Aucune photo",
-    "Pas encore de publication",
-    "Pas encore de photo",
-    "Sin publicaciones",
-    "Sin publicaciones aún",
-    "Keine Beiträge",
-    "Keine Beiträge vorhanden",
-    "Nessun post",
-    "Nessuna pubblicazione",
-    "Sem publicações",
-    "Sem publicações ainda",
-    "投稿なし",
-    "投稿がありません",
-)
 
 
 def _visual_profile_no_posts_tier1_direct_check(
@@ -20048,32 +19884,6 @@ def _visual_profile_no_posts_tier1_direct_check(
         "source_profile_username": source_profile_username or "",
         "tier1_detected": False,
     }
-
-    for needle in _POST_FOLLOW_NO_POSTS_TEXT_NEEDLES:
-        try:
-            if d(textContains=needle).exists(timeout=0.08) is True:
-                out = dict(base_out)
-                out["no_posts_detected"] = True
-                out["tier1_detected"] = True
-                out["detection_method"] = f"tier1_ui_textContains:{needle[:48]}"
-                out["confidence"] = 0.91
-                out["selector_kind"] = "textContains"
-                return out
-        except Exception:
-            continue
-
-    for needle in _POST_FOLLOW_NO_POSTS_TEXT_NEEDLES:
-        try:
-            if d(descriptionContains=needle).exists(timeout=0.06) is True:
-                out = dict(base_out)
-                out["no_posts_detected"] = True
-                out["tier1_detected"] = True
-                out["detection_method"] = f"tier1_ui_descriptionContains:{needle[:48]}"
-                out["confidence"] = 0.89
-                out["selector_kind"] = "descriptionContains"
-                return out
-        except Exception:
-            continue
 
     for selector_kind, selector_kwargs, method, confidence, timeout_s in (
         (
@@ -20132,7 +19942,28 @@ def visual_profile_has_no_posts(
         "source_profile_username": source_profile_username or "",
     }
 
-    for needle in _POST_FOLLOW_NO_POSTS_TEXT_NEEDLES:
+    ui_needles = (
+        "No Posts Yet",
+        "No posts yet",
+        "No posts",
+        "No Posts",
+        "Aucune publication",
+        "Aucune photo",
+        "Pas encore de publication",
+        "Pas encore de photo",
+        "Sin publicaciones",
+        "Sin publicaciones aún",
+        "Keine Beiträge",
+        "Keine Beiträge vorhanden",
+        "Nessun post",
+        "Nessuna pubblicazione",
+        "Sem publicações",
+        "Sem publicações ainda",
+        "投稿なし",
+        "投稿がありません",
+    )
+
+    for needle in ui_needles:
         try:
             if d(textContains=needle).exists(timeout=0.1) is True:
                 out = dict(base_out)
@@ -20712,8 +20543,6 @@ def _post_follow_likes_open_top_left_legacy_visual_safe(
     It only considers row=0,col=0 below profile tabs and requires viewer confirmation.
     """
     t0 = time.perf_counter()
-    strict_grid_proof_ok = False
-    strict_grid_proof_source = ""
 
     def _log_timing(event: str, started_at: float, **extra: Any) -> None:
         try:
@@ -20741,12 +20570,8 @@ def _post_follow_likes_open_top_left_legacy_visual_safe(
                     (time.perf_counter() - t0) * 1000.0, 2
                 ),
                 "failure_reason": str(reason or "legacy_visual_top_left_failed"),
-                "strict_grid_proof_ok": bool(strict_grid_proof_ok),
-                "strict_grid_proof_source": str(strict_grid_proof_source or ""),
                 **extra,
             },
-            "strict_grid_proof_ok": bool(strict_grid_proof_ok),
-            "strict_grid_proof_source": str(strict_grid_proof_source or ""),
             **extra,
         }
         try:
@@ -20914,37 +20739,6 @@ def _post_follow_likes_open_top_left_legacy_visual_safe(
             profile_tabs_bottom_y_px=int(tabs_bt),
             dynamic_first_row_search_y_min_px=int(y_floor),
         )
-
-    strict_grid_proof = _post_follow_likes_strict_top_left_xml_grid_proof(
-        d,
-        ui_hints=ui_hints,
-        budget_deadline=time.perf_counter() + 1.2,
-        ww=int(ww),
-        wh=int(wh),
-        visual_candidate_id=visual_candidate_id,
-        source_profile_username=source_profile_username,
-        follower_username=expected_follower_username,
-    )
-    if bool(strict_grid_proof.get("ok")):
-        strict_grid_proof_ok = True
-        strict_grid_proof_source = str(strict_grid_proof.get("source") or "")
-    else:
-        try:
-            log(
-                "info",
-                "legacy_safe_strict_grid_proof_advisory_continue",
-                visual_candidate_id=visual_candidate_id,
-                source_profile_username=source_profile_username,
-                follower_username=expected_follower_username,
-                post_index=int(post_index),
-                strict_grid_proof_source=str(strict_grid_proof.get("source") or ""),
-                strict_grid_proof_failure_reason=str(
-                    strict_grid_proof.get("failure_reason") or ""
-                ),
-                reason="strict_xml_proof_failed_continue_visual_dynamic_open",
-            )
-        except Exception:
-            pass
 
     _ensure_debug_dirs()
     shot_path = str(
@@ -25009,45 +24803,6 @@ def _visual_post_viewer_action_bar_is_post_viewer_mode(title_raw: str) -> bool:
     if len(t) <= 28 and any(mk in t for mk in ("posts", "publications", "reels", "beitr")):
         return True
     return False
-
-
-_FACEBOOK_SHARED_CONTENT_MARKERS = (
-    "interacting with content shared from facebook",
-    "content shared from facebook",
-)
-
-
-def _ui_post_viewer_facebook_shared_content_detected(d: u2.Device) -> tuple[bool, str]:
-    """Detect Instagram post surfaces shared from Facebook that hide the normal like action bar."""
-    for marker in _FACEBOOK_SHARED_CONTENT_MARKERS:
-        try:
-            if d(textContains=marker).exists(timeout=0.12):
-                return True, "ui_text_contains_facebook_shared_banner"
-        except Exception:
-            continue
-    hier = ""
-    try:
-        hier = str(d.dump_hierarchy(compressed=False)).lower()
-    except Exception:
-        try:
-            hier = str(d.dump_hierarchy()).lower()
-        except Exception:
-            hier = ""
-    for marker in _FACEBOOK_SHARED_CONTENT_MARKERS:
-        if marker in hier:
-            return True, "hierarchy_facebook_shared_banner"
-    return False, ""
-
-
-def _ui_post_viewer_like_action_bar_exploitable(d: u2.Device, *, pkg: str) -> tuple[bool, str]:
-    """Confirm a trusted like/unlike control exists before attempting post-like."""
-    like_a1, reason_a1, _, _ = _ui_post_viewer_open_like_unlike_fast(d)
-    if like_a1:
-        return True, reason_a1 or "like_unlike_ui"
-    like_a2, reason_a2, _, _, _, _ = _ui_post_viewer_open_exact_like_desc_fast(d, pkg=pkg)
-    if like_a2:
-        return True, reason_a2 or "like_unlike_ui"
-    return False, "post_like_action_bar_missing"
 
 
 def _is_plausible_ig_username_handle(handle: str) -> bool:
@@ -36321,13 +36076,6 @@ def open_follower_profile_from_list(
         an = _normalize_handle(ab or "")
         return bool(sn and an and sn == an)
 
-    def _is_ambiguous_stale_candidate_action_bar(ab: str) -> bool:
-        an = _normalize_handle(ab or "")
-        un_norm = _normalize_handle(un or "")
-        if not an or not un_norm:
-            return False
-        return an != un_norm and not _is_source_action_bar(ab)
-
     def _tap_inside_follow_bounds(tx: int, ty: int, fb: dict[str, Any]) -> bool:
         if not fb:
             return False
@@ -36351,26 +36099,6 @@ def open_follower_profile_from_list(
                 source_profile_username=source_profile_username,
                 action_bar_title=ab_open,
                 visual_candidate_id=vcid or None,
-            )
-            return False
-        if _is_ambiguous_stale_candidate_action_bar(ab_open):
-            log(
-                "error",
-                "candidate_open_blocked_ambiguous_stale_action_bar",
-                follower_username=un,
-                source_profile_username=source_profile_username,
-                action_bar_title=ab_open,
-                visual_candidate_id=vcid or None,
-                reason="candidate_selection_skipped_stale_profile_context",
-            )
-            log(
-                "error",
-                "follower_profile_open_failed",
-                follower_username=un,
-                source_profile_username=source_profile_username,
-                action_bar_title=ab_open,
-                visual_candidate_id=vcid or None,
-                reason="candidate_selection_skipped_stale_profile_context",
             )
             return False
         log(
@@ -37591,29 +37319,7 @@ def post_follow_controlled_return_to_followers_list(
         int(getattr(config, "POST_FOLLOW_RETURN_CT_BACK_MAX_RETRIES", 1) or 1),
     )
 
-    def _strong_own_unified_list_with_stale_candidate_action_bar(det_l: dict[str, Any]) -> bool:
-        if not bool(det_l.get("is_followers_list")):
-            return False
-        ab_norm = _normalize_handle(str(det_l.get("action_bar_title") or ""))
-        cand_norm = _normalize_handle(cand or "")
-        if not cand_norm or ab_norm != cand_norm:
-            return False
-        signals = list(det_l.get("signals") or [])
-        return (
-            (
-                bool(det_l.get("own_unified_followers_list_detected"))
-                or str(det_l.get("open_detection_method") or "") == "own_unified_follow_list"
-            )
-            and int(det_l.get("follow_list_username_count") or det_l.get("candidate_username_count") or 0) > 0
-            and (
-                bool(det_l.get("has_tab_layout"))
-                or bool(det_l.get("recycler_present"))
-                or bool(det_l.get("listview_present"))
-                or "selected_followers_tab" in signals
-            )
-        )
-
-    def _list_confirmed(*, allow_stale_candidate_action_bar: bool = False) -> tuple[bool, dict[str, Any]]:
+    def _list_confirmed() -> tuple[bool, dict[str, Any]]:
         try:
             det_l = detect_followers_list_screen(
                 d, source_profile_username=src
@@ -37630,55 +37336,6 @@ def post_follow_controlled_return_to_followers_list(
             )
         except Exception:
             ct_ok = is_list
-        if (
-            is_list
-            and not ct_ok
-            and allow_stale_candidate_action_bar
-            and _strong_own_unified_list_with_stale_candidate_action_bar(det_l)
-        ):
-            try:
-                log(
-                    "info",
-                    "post_follow_return_ct_accept_stale_candidate_action_bar_own_unified",
-                    visual_candidate_id=vcid,
-                    source_profile_username=src,
-                    follower_username=cand or None,
-                    action_bar_title=str(det_l.get("action_bar_title") or "")[:120],
-                    open_detection_method=str(det_l.get("open_detection_method") or ""),
-                    candidate_username_count=int(
-                        det_l.get("follow_list_username_count")
-                        or det_l.get("candidate_username_count")
-                        or 0
-                    ),
-                    allow_scope="compact_return_ct_only",
-                )
-            except Exception:
-                pass
-            try:
-                log(
-                    "info",
-                    "post_return_ct_stale_action_bar_ignored_with_confirmed_list",
-                    visual_candidate_id=vcid,
-                    source_profile_username=src,
-                    follower_username=cand or None,
-                    action_bar_title=str(det_l.get("action_bar_title") or "")[:120],
-                    open_detection_method=str(det_l.get("open_detection_method") or ""),
-                    reason="post_return_ct_stale_action_bar_ignored_with_confirmed_list",
-                    allow_scope="compact_return_ct_only",
-                )
-                log(
-                    "info",
-                    "followers_list_context_reconfirmed_after_stale_title",
-                    visual_candidate_id=vcid,
-                    source_profile_username=src,
-                    follower_username=cand or None,
-                    action_bar_title=str(det_l.get("action_bar_title") or "")[:120],
-                    reason="followers_list_context_reconfirmed_after_stale_title",
-                    allow_scope="compact_return_ct_only",
-                )
-            except Exception:
-                pass
-            ct_ok = True
         return bool(is_list and ct_ok), det_l
 
     def _over_budget(round_t0: float) -> bool:
@@ -37826,7 +37483,7 @@ def post_follow_controlled_return_to_followers_list(
             xml_guess=str(nav.get("xml_guess") or ""),
         )
 
-        ok_list_now, det_now = _list_confirmed(allow_stale_candidate_action_bar=True)
+        ok_list_now, det_now = _list_confirmed()
         if ok_list_now:
             log(
                 "info",
@@ -37900,7 +37557,7 @@ def post_follow_controlled_return_to_followers_list(
                     except Exception:
                         pass
                 else:
-                    ok_fb, det_fb = _list_confirmed(allow_stale_candidate_action_bar=True)
+                    ok_fb, det_fb = _list_confirmed()
                 if ok_fb:
                     log(
                         "info",
@@ -38036,7 +37693,7 @@ def post_follow_controlled_return_to_followers_list(
                 fb_ok, fb_how = return_to_followers_list(d, src, pkg)
             except Exception as e:
                 fb_how = f"exception:{type(e).__name__}"
-            ok_fin, det_fin = _list_confirmed(allow_stale_candidate_action_bar=True)
+            ok_fin, det_fin = _list_confirmed()
             _fb_repoll_max = 3
             _fb_repoll_sleep_s = min(0.35, max(0.2, 0.28))
             if (
@@ -38062,7 +37719,7 @@ def post_follow_controlled_return_to_followers_list(
                         time.sleep(_fb_repoll_sleep_s)
                     except Exception:
                         pass
-                    ok_fin, det_fin = _list_confirmed(allow_stale_candidate_action_bar=True)
+                    ok_fin, det_fin = _list_confirmed()
                     try:
                         log(
                             "info",
@@ -38271,7 +37928,7 @@ def post_follow_controlled_return_to_followers_list(
             duration_saved_estimate_ms=0.0,
         )
 
-        ok_after, det_after = _list_confirmed(allow_stale_candidate_action_bar=True)
+        ok_after, det_after = _list_confirmed()
         if ok_after:
             log(
                 "info",
@@ -43023,35 +42680,6 @@ def _post_follow_post_likes_count_from_range(spec: str) -> int:
     return int(random.randint(lo, hi))
 
 
-def _ui_story_or_highlight_viewer_detected(d: u2.Device) -> tuple[bool, str]:
-    """Best-effort guard for story/highlight viewers after a post-open tap."""
-    probes = (
-        ("textMatches", {"textMatches": r"(?i)^\s*(reply|send message|message)\s*$"}, 0.08),
-        (
-            "descriptionMatches",
-            {"descriptionMatches": r"(?i).*(reply|send message|story controls|story viewer).*"},
-            0.08,
-        ),
-        (
-            "textMatches",
-            {"textMatches": r"(?i).*(story|highlight).*"},
-            0.04,
-        ),
-        (
-            "descriptionMatches",
-            {"descriptionMatches": r"(?i).*(story|highlight).*"},
-            0.04,
-        ),
-    )
-    for selector_kind, selector_kwargs, timeout_s in probes:
-        try:
-            if d(**selector_kwargs).exists(timeout=float(timeout_s)) is True:
-                return True, f"{selector_kind}:story_highlight_viewer"
-        except Exception:
-            continue
-    return False, ""
-
-
 def _post_follow_post_likes_out_template() -> dict[str, Any]:
     return {
         "ok": False,
@@ -43770,7 +43398,7 @@ def run_post_follow_post_likes_phase(
 
         def _skip_no_posts(no_posts_check: dict[str, Any]) -> dict[str, Any]:
             meta_np = _followers_current_pkg_activity(d)
-            reason_np = "post_like_skipped_no_posts_yet"
+            reason_np = "post_follow_like_skipped_no_posts_yet"
             post_rec["outcome"] = "no_posts"
             post_rec["failure_reason"] = reason_np
             per_post.append(post_rec)
@@ -43853,41 +43481,6 @@ def run_post_follow_post_likes_phase(
                 pass
             return no_posts_visual
 
-        def _skip_no_post_grid_open(
-            raw_failure_reason: str,
-            *,
-            grid_state_before: Any = None,
-            grid_state_after: Any = None,
-        ) -> dict[str, Any]:
-            post_rec["outcome"] = "skipped"
-            post_rec["failure_reason"] = "post_like_skipped_no_post_grid"
-            per_post.append(post_rec)
-            _likes_perf_ctx["failure_reason"] = "post_like_skipped_no_post_grid"
-            _likes_perf_ctx["likes_failure_kind"] = "post_like_skipped_no_post_grid"
-            log(
-                "warning",
-                "post_follow_post_like_open_skipped_no_post_grid",
-                visual_candidate_id=vcid,
-                source_profile_username=src,
-                follower_username=cand,
-                failure_reason="post_like_skipped_no_post_grid",
-                raw_failure_reason=str(raw_failure_reason or ""),
-                grid_state_before=grid_state_before,
-                grid_state_after=grid_state_after,
-                strict_grid_proof_required=True,
-            )
-            return _finish(
-                phase_outcome="skipped",
-                skipped_reason="post_like_skipped_no_post_grid",
-                skipped=True,
-                ok=True,
-                attempted_count=attempted_count,
-                liked_count=liked_count,
-                skipped_already_liked_count=skipped_already,
-                failed_navigation_count=failed_nav,
-                per_post=per_post,
-            )
-
         def _no_posts_weak_hint_present(check: dict[str, Any]) -> bool:
             method = str(check.get("detection_method") or "").strip().lower()
             if not method or method in ("none", "not_detected"):
@@ -43901,38 +43494,20 @@ def run_post_follow_post_likes_phase(
             tier1_check: dict[str, Any],
             surface_precheck: dict[str, Any],
         ) -> tuple[bool, str, dict[str, bool]]:
-            post_cell_signal_present = any(
-                key in surface_precheck
-                for key in ("post_cells_visible", "post_grid_visible", "grid_cells_visible")
-            )
             post_cells_visible = bool(
-                post_cell_signal_present
-                and (
-                    surface_precheck.get("post_cells_visible")
-                    or surface_precheck.get("post_grid_visible")
-                    or surface_precheck.get("grid_cells_visible")
-                )
-            )
-            post_cells_confirmed_absent = bool(
-                post_cell_signal_present and not post_cells_visible
+                surface_precheck.get("post_cells_visible")
+                or surface_precheck.get("post_grid_visible")
+                or surface_precheck.get("grid_cells_visible")
             )
             no_posts_hint_present = _no_posts_weak_hint_present(tier1_check)
             fields = {
                 "grid_tab_visible": bool(grid_tab_visible),
                 "profile_tabs_visible": bool(grid_tab_visible),
                 "post_cells_visible": bool(post_cells_visible),
-                "post_cell_signal_present": bool(post_cell_signal_present),
                 "no_posts_hint_present": bool(no_posts_hint_present),
             }
             if post_cells_visible:
                 return False, "posts_visible", fields
-            if (
-                bool(surface_profile_ok)
-                and bool(grid_tab_visible)
-                and post_cells_confirmed_absent
-                and not no_posts_hint_present
-            ):
-                return True, "grid_tab_without_post_cells", fields
             if bool(surface_profile_ok) and bool(grid_tab_visible) and not no_posts_hint_present:
                 return False, "normal_grid_surface_confirmed", fields
             if not bool(surface_profile_ok):
@@ -44066,26 +43641,7 @@ def run_post_follow_post_likes_phase(
 
         full_check_used = False
         no_posts_check: dict[str, Any] = dict(tier1_check)
-        post_cell_signal_present = any(
-            key in surface_precheck
-            for key in ("post_cells_visible", "post_grid_visible", "grid_cells_visible")
-        )
-        post_cells_visible_before_open = bool(
-            post_cell_signal_present
-            and (
-                surface_precheck.get("post_cells_visible")
-                or surface_precheck.get("post_grid_visible")
-                or surface_precheck.get("grid_cells_visible")
-            )
-        )
-        post_cells_confirmed_absent_before_open = bool(
-            post_cell_signal_present and not post_cells_visible_before_open
-        )
-        if (
-            surface_profile_ok
-            and grid_tab_visible
-            and not post_cells_confirmed_absent_before_open
-        ):
+        if surface_profile_ok and grid_tab_visible:
             try:
                 log(
                     "info",
@@ -44095,16 +43651,10 @@ def run_post_follow_post_likes_phase(
                     visual_candidate_id=vcid,
                     tier1_detected=False,
                     full_check_used=False,
-                    reason=(
-                        "surface_profile_grid_tabs_and_post_cells_confirmed"
-                        if post_cells_visible_before_open
-                        else "surface_profile_and_grid_tabs_confirmed_cells_unknown"
-                    ),
+                    reason="surface_profile_and_grid_tabs_confirmed",
                     duration_ms=0.0,
                     surface_profile_ok=surface_profile_ok,
                     grid_tab_visible=grid_tab_visible,
-                    post_cells_visible=post_cells_visible_before_open,
-                    post_cell_signal_present=post_cell_signal_present,
                 )
             except Exception:
                 pass
@@ -44120,11 +43670,8 @@ def run_post_follow_post_likes_phase(
                     visual_candidate_id=vcid,
                     surface_profile_ok=surface_profile_ok,
                     grid_tab_visible=grid_tab_visible,
-                    post_cells_visible=post_cells_visible_before_open,
                     reason=(
-                        "grid_tab_visible_without_post_cells"
-                        if surface_profile_ok and grid_tab_visible and post_cells_confirmed_absent_before_open
-                        else "surface_profile_or_grid_tabs_ambiguous"
+                        "surface_profile_or_grid_tabs_ambiguous"
                         if not surface_profile_ok or not grid_tab_visible
                         else "full_cheap_required"
                     ),
@@ -44151,8 +43698,6 @@ def run_post_follow_post_likes_phase(
                     duration_ms=round((time.perf_counter() - t_np_full) * 1000.0, 2),
                     surface_profile_ok=surface_profile_ok,
                     grid_tab_visible=grid_tab_visible,
-                    post_cells_visible=post_cells_visible_before_open,
-                    post_cell_signal_present=post_cell_signal_present,
                 )
             except Exception:
                 pass
@@ -44174,20 +43719,6 @@ def run_post_follow_post_likes_phase(
                 pass
         if no_posts_check.get("no_posts_detected") is True:
             return _skip_no_posts(no_posts_check)
-
-        def _hard_skip_no_post_grid_allowed() -> bool:
-            return bool(
-                surface_profile_ok
-                and grid_tab_visible
-                and post_cells_confirmed_absent_before_open
-            )
-
-        if _hard_skip_no_post_grid_allowed():
-            return _skip_no_post_grid_open(
-                "grid_tab_visible_without_post_cells",
-                grid_state_before="grid_tab_visible_without_post_cells",
-                grid_state_after="no_post_cells_confirmed_before_legacy",
-            )
         _early_ok, _early_reason, _early_fields = _early_visual_no_posts_gate(
             surface_profile_ok=surface_profile_ok,
             grid_tab_visible=grid_tab_visible,
@@ -44597,26 +44128,6 @@ def run_post_follow_post_likes_phase(
                 legacy_first_out.get("failure_reason")
                 or "legacy_visual_top_left_failed"
             )
-            legacy_first_strict_grid_ok = bool(legacy_first_out.get("strict_grid_proof_ok"))
-            if (
-                legacy_first_failure_reason
-                in {
-                    "legacy_visual_top_left_candidate_ambiguous",
-                    "legacy_visual_top_left_variance_insufficient",
-                }
-                and not legacy_first_strict_grid_ok
-                and _hard_skip_no_post_grid_allowed()
-            ):
-                no_posts_visual = _run_deferred_visual_no_posts_fallback(
-                    legacy_first_failure_reason
-                )
-                if no_posts_visual.get("no_posts_detected") is True:
-                    return _skip_no_posts(no_posts_visual)
-                return _skip_no_post_grid_open(
-                    legacy_first_failure_reason,
-                    grid_state_before=grid_out.get("grid_state_before"),
-                    grid_state_after=grid_out.get("grid_state_after"),
-                )
             if legacy_first_failure_reason in {
                 "legacy_visual_top_left_candidate_ambiguous",
                 "profile_tabs_bottom_unknown",
@@ -44980,15 +44491,6 @@ def run_post_follow_post_likes_phase(
                 no_posts_visual = _run_deferred_visual_no_posts_fallback(fr_grid)
                 if no_posts_visual.get("no_posts_detected") is True:
                     return _skip_no_posts(no_posts_visual)
-                if (
-                    "post_like_skipped_no_post_grid" in fr_grid
-                    and _hard_skip_no_post_grid_allowed()
-                ):
-                    return _skip_no_post_grid_open(
-                        fr_grid,
-                        grid_state_before=grid_out.get("grid_state_before"),
-                        grid_state_after=grid_out.get("grid_state_after"),
-                    )
                 failed_nav += 1
                 _likes_perf_ctx["grid"] = dict(_grid_perf)
                 _likes_perf_ctx["failure_reason"] = fr_grid
@@ -45287,124 +44789,6 @@ def run_post_follow_post_likes_phase(
             tap_x=open_out.get("tap_x"),
             tap_y=open_out.get("tap_y"),
         )
-
-        def _skip_unusable_post_like_surface(
-            *,
-            skipped_reason: str,
-            detection_method: str,
-            outcome: str,
-        ) -> dict[str, Any]:
-            post_rec["outcome"] = outcome
-            post_rec["failure_reason"] = skipped_reason
-            per_post.append(post_rec)
-            _likes_perf_ctx["failure_reason"] = skipped_reason
-            _likes_perf_ctx["likes_failure_kind"] = detection_method
-            log(
-                "info",
-                "post_follow_post_like_skipped_unusable_surface",
-                visual_candidate_id=vcid,
-                source_profile_username=src,
-                follower_username=cand,
-                reason=skipped_reason,
-                detection_method=detection_method,
-            )
-            _t_ret_skip0 = time.perf_counter()
-            ret_skip = visual_return_to_profile_from_post(d, source_profile_username=src)
-            _likes_perf_ctx["return_to_profile_ms"] = round(
-                (time.perf_counter() - _t_ret_skip0) * 1000.0, 2
-            )
-            _likes_perf_ctx["return_success"] = bool(ret_skip.get("ok"))
-            if ret_skip.get("ok"):
-                log(
-                    "info",
-                    "post_follow_post_likes_return_to_profile_success",
-                    visual_candidate_id=vcid,
-                    source_profile_username=src,
-                    skipped_reason=skipped_reason,
-                )
-            else:
-                log(
-                    "warning",
-                    "post_follow_post_likes_return_to_profile_failed",
-                    visual_candidate_id=vcid,
-                    source_profile_username=src,
-                    failure_reason=ret_skip.get("failure_reason"),
-                    skipped_reason=skipped_reason,
-                )
-            return _finish(
-                phase_outcome="skipped",
-                skipped_reason=skipped_reason,
-                skipped=True,
-                ok=True,
-                attempted_count=attempted_count,
-                liked_count=0,
-                skipped_already_liked_count=skipped_already,
-                failed_navigation_count=failed_nav,
-                per_post=per_post,
-            )
-
-        story_detected, story_method = _ui_story_or_highlight_viewer_detected(d)
-        like_surface_ok, like_surface_method = _ui_post_viewer_like_action_bar_exploitable(
-            d,
-            pkg=pkg,
-        )
-        opened_surface_kind = "unknown"
-        if story_detected:
-            opened_surface_kind = (
-                "highlight" if "highlight" in str(story_method or "").lower() else "story"
-            )
-        elif like_surface_ok:
-            opened_surface_kind = "post"
-        if opened_surface_kind != "post":
-            try:
-                log(
-                    "warning",
-                    "post_open_surface_audit",
-                    visual_candidate_id=vcid,
-                    source_profile_username=src,
-                    follower_username=cand,
-                    opened_surface_kind=opened_surface_kind,
-                    story_or_highlight_detected=bool(story_detected),
-                    story_or_highlight_method=str(story_method or ""),
-                    like_surface_ok=bool(like_surface_ok),
-                    like_surface_method=str(like_surface_method or ""),
-                    viewer_detect_path=open_out.get("viewer_detect_path"),
-                    tap_x=open_out.get("tap_x"),
-                    tap_y=open_out.get("tap_y"),
-                )
-            except Exception:
-                pass
-        if story_detected:
-            log(
-                "warning",
-                "post_follow_post_like_wrong_surface_story_highlight_detected",
-                visual_candidate_id=vcid,
-                source_profile_username=src,
-                follower_username=cand,
-                detection_method=story_method,
-                tap_x=open_out.get("tap_x"),
-                tap_y=open_out.get("tap_y"),
-            )
-            return _skip_unusable_post_like_surface(
-                skipped_reason="post_like_wrong_surface_story_highlight_recovered",
-                detection_method=story_method,
-                outcome="wrong_surface_story_highlight_recovered",
-            )
-
-        fb_detected, fb_method = _ui_post_viewer_facebook_shared_content_detected(d)
-        if fb_detected:
-            return _skip_unusable_post_like_surface(
-                skipped_reason="post_like_skipped_facebook_shared_content",
-                detection_method=fb_method,
-                outcome="skipped_facebook_shared_content",
-            )
-
-        if not like_surface_ok:
-            return _skip_unusable_post_like_surface(
-                skipped_reason="post_like_skipped_no_like_button",
-                detection_method=like_surface_method,
-                outcome="skipped_no_like_button",
-            )
 
         t_al_run0 = time.perf_counter()
         al_pre = visual_post_already_liked(
@@ -48035,28 +47419,13 @@ def send_dm_safe(
         _LAST_DM_SEND_RESULT = dict(out)
         return out
 
-    cur = read_dm_composer_text(d)
+    try:
+        cur = composer.get_text() or ""
+    except Exception:
+        cur = ""
     out["composer_text_len_before_send"] = len(cur)
     draft_ok = cur.strip() == msg.strip()
     out["draft_matches_before_send"] = draft_ok
-    out["composer_text_before_send"] = cur[:120] if cur else ""
-    log(
-        "info",
-        "dm_sender_draft_present_before_send",
-        target_username=username,
-        draft_len=len(cur),
-        draft_matches_expected=bool(draft_ok),
-        thread_state=dm_state,
-    )
-    if msg.strip() and not draft_ok:
-        log(
-            "warning",
-            "dm_sender_draft_disappeared_before_send",
-            target_username=username,
-            expected_len=len(msg.strip()),
-            actual_len=len(cur),
-            thread_state=dm_state,
-        )
 
     btn, status, meta = wait_for_dm_send_button_after_draft(
         d,
@@ -48066,18 +47435,12 @@ def send_dm_safe(
     )
     out["send_button_candidate_count"] = meta.get("send_button_candidate_count", 0)
     out["coordinate_fallback_used"] = bool(meta.get("send_button_coordinate_fallback"))
-    out["send_button_selection_score"] = meta.get("send_button_selection_score", 0)
-    out["filtered_send_candidates_count"] = len(meta.get("filtered_send_candidates") or [])
     w, h = _dm_screen_size_for_dm(d)
     cb = _dm_composer_bounds_u2(composer)
 
     if status != "ok" or btn is None:
         out["precheck_ok"] = False
-        filtered = list(meta.get("filtered_send_candidates") or [])
-        if _dm_select_best_send_candidate(filtered):
-            out["reason"] = "send_button_selection_failed"
-        else:
-            out["reason"] = "send_button_missing"
+        out["reason"] = "send_button_missing"
         try:
             _ensure_debug_dirs()
             stem = f"dm_send_missing_{int(time.time() * 1000)}"
@@ -48099,57 +47462,17 @@ def send_dm_safe(
                 debug_xml_path=xml_path,
             )
             out.update(art)
-            out["composer_text_at_failure"] = read_dm_composer_text(d)[:120]
         except Exception as e:
             out["debug_screenshot_error"] = str(e)
         _LAST_DM_SEND_RESULT = dict(out)
         return out
 
-    pre_send_len = int(out.get("composer_text_len_before_send") or 0)
-    log(
-        "info",
-        "dm_send_button_tap_started",
-        target_username=username,
-        thread_state=dm_state,
-        send_button_candidate_count=out.get("send_button_candidate_count"),
-    )
     try:
         btn.click()
-        log(
-            "info",
-            "dm_send_button_tap_sent",
-            target_username=username,
-            thread_state=dm_state,
-        )
+        out["sent"] = True
     except Exception as e:
         out["failure_event"] = "dm_sent_failed"
-        out["reason"] = "send_button_tap_failed"
-        out["tap_error"] = str(e)
-        _LAST_DM_SEND_RESULT = dict(out)
-        return out
-
-    sig_ok, sig_reason = _dm_post_send_signal_poll(d, pre_send_text_len=pre_send_len)
-    if sig_ok:
-        out["sent"] = True
-        out["post_send_signal_reason"] = sig_reason
-        log(
-            "info",
-            "dm_send_button_tap_confirmed",
-            target_username=username,
-            thread_state=dm_state,
-            reason=sig_reason,
-        )
-    else:
-        out["sent"] = False
-        out["reason"] = "send_confirmation_failed"
-        out["post_send_signal_reason"] = sig_reason
-        log(
-            "warning",
-            "dm_send_button_tap_unconfirmed",
-            target_username=username,
-            thread_state=dm_state,
-            reason=sig_reason,
-        )
+        out["reason"] = str(e)
     _LAST_DM_SEND_RESULT = dict(out)
     return out
 
@@ -48230,8 +47553,6 @@ def cleanup_dm_after_send_button_missing(d, pkg=None) -> bool:
     - return True/False but never raise
     """
     try:
-        if read_dm_composer_text(d):
-            log("info", "dm_sender_draft_cleared_by_restore")
         clear_dm_draft(d)
     except Exception:
         pass
