@@ -20925,18 +20925,26 @@ def _post_follow_likes_open_top_left_legacy_visual_safe(
         source_profile_username=source_profile_username,
         follower_username=expected_follower_username,
     )
-    if not bool(strict_grid_proof.get("ok")):
-        return _finish(
-            "post_like_skipped_no_post_grid",
-            profile_tabs_bottom_y_px=int(tabs_bt),
-            dynamic_first_row_search_y_min_px=int(y_floor),
-            strict_grid_proof_source=str(strict_grid_proof.get("source") or ""),
-            strict_grid_proof_failure_reason=str(
-                strict_grid_proof.get("failure_reason") or ""
-            ),
-        )
-    strict_grid_proof_ok = True
-    strict_grid_proof_source = str(strict_grid_proof.get("source") or "")
+    if bool(strict_grid_proof.get("ok")):
+        strict_grid_proof_ok = True
+        strict_grid_proof_source = str(strict_grid_proof.get("source") or "")
+    else:
+        try:
+            log(
+                "info",
+                "legacy_safe_strict_grid_proof_advisory_continue",
+                visual_candidate_id=visual_candidate_id,
+                source_profile_username=source_profile_username,
+                follower_username=expected_follower_username,
+                post_index=int(post_index),
+                strict_grid_proof_source=str(strict_grid_proof.get("source") or ""),
+                strict_grid_proof_failure_reason=str(
+                    strict_grid_proof.get("failure_reason") or ""
+                ),
+                reason="strict_xml_proof_failed_continue_visual_dynamic_open",
+            )
+        except Exception:
+            pass
 
     _ensure_debug_dirs()
     shot_path = str(
@@ -44166,7 +44174,15 @@ def run_post_follow_post_likes_phase(
                 pass
         if no_posts_check.get("no_posts_detected") is True:
             return _skip_no_posts(no_posts_check)
-        if surface_profile_ok and grid_tab_visible and post_cells_confirmed_absent_before_open:
+
+        def _hard_skip_no_post_grid_allowed() -> bool:
+            return bool(
+                surface_profile_ok
+                and grid_tab_visible
+                and post_cells_confirmed_absent_before_open
+            )
+
+        if _hard_skip_no_post_grid_allowed():
             return _skip_no_post_grid_open(
                 "grid_tab_visible_without_post_cells",
                 grid_state_before="grid_tab_visible_without_post_cells",
@@ -44589,6 +44605,7 @@ def run_post_follow_post_likes_phase(
                     "legacy_visual_top_left_variance_insufficient",
                 }
                 and not legacy_first_strict_grid_ok
+                and _hard_skip_no_post_grid_allowed()
             ):
                 no_posts_visual = _run_deferred_visual_no_posts_fallback(
                     legacy_first_failure_reason
@@ -44881,17 +44898,6 @@ def run_post_follow_post_likes_phase(
                     2,
                 )
             else:
-                if "post_like_skipped_no_post_grid" in legacy_first_failure_reason:
-                    no_posts_visual = _run_deferred_visual_no_posts_fallback(
-                        legacy_first_failure_reason
-                    )
-                    if no_posts_visual.get("no_posts_detected") is True:
-                        return _skip_no_posts(no_posts_visual)
-                    return _skip_no_post_grid_open(
-                        legacy_first_failure_reason,
-                        grid_state_before=grid_out.get("grid_state_before"),
-                        grid_state_after=grid_out.get("grid_state_after"),
-                    )
                 try:
                     log(
                         "info",
@@ -44974,10 +44980,12 @@ def run_post_follow_post_likes_phase(
                 no_posts_visual = _run_deferred_visual_no_posts_fallback(fr_grid)
                 if no_posts_visual.get("no_posts_detected") is True:
                     return _skip_no_posts(no_posts_visual)
-                if "post_like_skipped_no_post_grid" in fr_grid:
-                    fr_grid_raw = fr_grid
+                if (
+                    "post_like_skipped_no_post_grid" in fr_grid
+                    and _hard_skip_no_post_grid_allowed()
+                ):
                     return _skip_no_post_grid_open(
-                        fr_grid_raw,
+                        fr_grid,
                         grid_state_before=grid_out.get("grid_state_before"),
                         grid_state_after=grid_out.get("grid_state_after"),
                     )
