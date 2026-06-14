@@ -39385,6 +39385,7 @@ def _mute_engine_v2_dismiss_mute_sheets_level_aware(
     *,
     visual_candidate_id: str = "",
     source_profile_username: str = "",
+    confirmed_sheet_level: str = "",
 ) -> tuple[bool, float]:
     """Dismiss mute toggles sheet then Following options sheet if still open."""
     t0 = time.perf_counter()
@@ -39419,30 +39420,45 @@ def _mute_engine_v2_dismiss_mute_sheets_level_aware(
         )
     except Exception:
         pass
-    t_probe = time.perf_counter()
-    try:
-        log(
-            "info",
-            "mute_sheet_dismiss_level2_probe_started",
-            visual_candidate_id=visual_candidate_id,
-            source_profile_username=source_profile_username,
-            probe_sequence="initial",
-        )
-    except Exception:
-        pass
-    level, _meta = _mute_engine_v2_detect_sheet_level(d)
-    try:
-        log(
-            "info",
-            "mute_sheet_dismiss_level2_probe_completed",
-            visual_candidate_id=visual_candidate_id,
-            source_profile_username=source_profile_username,
-            probe_sequence="initial",
-            sheet_level=level,
-            duration_ms=round((time.perf_counter() - t_probe) * 1000.0, 2),
-        )
-    except Exception:
-        pass
+    if str(confirmed_sheet_level or "") == "mute_toggles":
+        level = "mute_toggles"
+        _meta: dict[str, Any] = {"confirmed_sheet_level_reused": True}
+        try:
+            log(
+                "info",
+                "mute_dismiss_reuse_confirmed_sheet_level",
+                visual_candidate_id=visual_candidate_id,
+                source_profile_username=source_profile_username,
+                sheet_level=level,
+                elapsed_ms=round((time.perf_counter() - t0) * 1000.0, 2),
+            )
+        except Exception:
+            pass
+    else:
+        t_probe = time.perf_counter()
+        try:
+            log(
+                "info",
+                "mute_sheet_dismiss_level2_probe_started",
+                visual_candidate_id=visual_candidate_id,
+                source_profile_username=source_profile_username,
+                probe_sequence="initial",
+            )
+        except Exception:
+            pass
+        level, _meta = _mute_engine_v2_detect_sheet_level(d)
+        try:
+            log(
+                "info",
+                "mute_sheet_dismiss_level2_probe_completed",
+                visual_candidate_id=visual_candidate_id,
+                source_profile_username=source_profile_username,
+                probe_sequence="initial",
+                sheet_level=level,
+                duration_ms=round((time.perf_counter() - t_probe) * 1000.0, 2),
+            )
+        except Exception:
+            pass
     if level == "unknown" and not _mute_engine_v2_mute_sheet_still_visible(d):
         ms = round((time.perf_counter() - t0) * 1000.0, 2)
         try:
@@ -39458,7 +39474,12 @@ def _mute_engine_v2_dismiss_mute_sheets_level_aware(
             pass
         return True, ms
     ok = True
-    if level in ("mute_toggles", "unknown") and _mute_engine_v2_is_mute_toggles_sheet(d):
+    level_after: str | None = None
+    reused_following_options_after_first_back = False
+    should_send_first_back = level == "mute_toggles"
+    if not should_send_first_back and level == "unknown":
+        should_send_first_back = _mute_engine_v2_is_mute_toggles_sheet(d)
+    if should_send_first_back:
         try:
             d.press("back")
             log(
@@ -39467,6 +39488,14 @@ def _mute_engine_v2_dismiss_mute_sheets_level_aware(
                 visual_candidate_id=visual_candidate_id,
                 source_profile_username=source_profile_username,
                 back_index=1,
+                from_sheet_level="mute_toggles",
+                elapsed_ms=round((time.perf_counter() - t0) * 1000.0, 2),
+            )
+            log(
+                "info",
+                "mute_dismiss_first_back_sent",
+                visual_candidate_id=visual_candidate_id,
+                source_profile_username=source_profile_username,
                 from_sheet_level="mute_toggles",
                 elapsed_ms=round((time.perf_counter() - t0) * 1000.0, 2),
             )
@@ -39542,61 +39571,82 @@ def _mute_engine_v2_dismiss_mute_sheets_level_aware(
             )
         except Exception:
             pass
-        t_level2 = time.perf_counter()
+        if (
+            str(fast_meta.get("reason") or "") == "following_options_still_visible"
+            and bool(fast_meta.get("following_options_marker_visible"))
+            and not bool(fast_meta.get("toggles_visible"))
+        ):
+            level_after = "following_options"
+            reused_following_options_after_first_back = True
+            try:
+                log(
+                    "info",
+                    "mute_dismiss_following_options_fast_proof_reused",
+                    visual_candidate_id=visual_candidate_id,
+                    source_profile_username=source_profile_username,
+                    sheet_level=level_after,
+                    elapsed_ms=round((time.perf_counter() - t0) * 1000.0, 2),
+                    **fast_meta,
+                )
+            except Exception:
+                pass
+        else:
+            t_level2 = time.perf_counter()
+            try:
+                log(
+                    "info",
+                    "mute_sheet_dismiss_level2_probe_started",
+                    visual_candidate_id=visual_candidate_id,
+                    source_profile_username=source_profile_username,
+                    probe_sequence="after_first_back",
+                )
+            except Exception:
+                pass
+            still_toggles = _mute_engine_v2_is_mute_toggles_sheet(d)
+            try:
+                log(
+                    "info",
+                    "mute_dismiss_level2_completed",
+                    visual_candidate_id=visual_candidate_id,
+                    source_profile_username=source_profile_username,
+                    still_toggles=still_toggles,
+                )
+                log(
+                    "info",
+                    "mute_sheet_dismiss_level2_probe_completed",
+                    visual_candidate_id=visual_candidate_id,
+                    source_profile_username=source_profile_username,
+                    probe_sequence="after_first_back",
+                    still_toggles=still_toggles,
+                    duration_ms=round((time.perf_counter() - t_level2) * 1000.0, 2),
+                )
+            except Exception:
+                pass
+    if level_after is None:
+        t_level1 = time.perf_counter()
         try:
             log(
                 "info",
-                "mute_sheet_dismiss_level2_probe_started",
+                "mute_sheet_dismiss_level1_probe_started",
                 visual_candidate_id=visual_candidate_id,
                 source_profile_username=source_profile_username,
-                probe_sequence="after_first_back",
+                probe_sequence="after_level2",
             )
         except Exception:
             pass
-        still_toggles = _mute_engine_v2_is_mute_toggles_sheet(d)
+        level_after, _ = _mute_engine_v2_detect_sheet_level(d)
         try:
             log(
                 "info",
-                "mute_dismiss_level2_completed",
+                "mute_sheet_dismiss_level1_probe_completed",
                 visual_candidate_id=visual_candidate_id,
                 source_profile_username=source_profile_username,
-                still_toggles=still_toggles,
-            )
-            log(
-                "info",
-                "mute_sheet_dismiss_level2_probe_completed",
-                visual_candidate_id=visual_candidate_id,
-                source_profile_username=source_profile_username,
-                probe_sequence="after_first_back",
-                still_toggles=still_toggles,
-                duration_ms=round((time.perf_counter() - t_level2) * 1000.0, 2),
+                probe_sequence="after_level2",
+                sheet_level=level_after,
+                duration_ms=round((time.perf_counter() - t_level1) * 1000.0, 2),
             )
         except Exception:
             pass
-    t_level1 = time.perf_counter()
-    try:
-        log(
-            "info",
-            "mute_sheet_dismiss_level1_probe_started",
-            visual_candidate_id=visual_candidate_id,
-            source_profile_username=source_profile_username,
-            probe_sequence="after_level2",
-        )
-    except Exception:
-        pass
-    level_after, _ = _mute_engine_v2_detect_sheet_level(d)
-    try:
-        log(
-            "info",
-            "mute_sheet_dismiss_level1_probe_completed",
-            visual_candidate_id=visual_candidate_id,
-            source_profile_username=source_profile_username,
-            probe_sequence="after_level2",
-            sheet_level=level_after,
-            duration_ms=round((time.perf_counter() - t_level1) * 1000.0, 2),
-        )
-    except Exception:
-        pass
     if level_after == "following_options":
         try:
             d.press("back")
@@ -39606,6 +39656,14 @@ def _mute_engine_v2_dismiss_mute_sheets_level_aware(
                 visual_candidate_id=visual_candidate_id,
                 source_profile_username=source_profile_username,
                 back_index=2,
+                from_sheet_level="following_options",
+                elapsed_ms=round((time.perf_counter() - t0) * 1000.0, 2),
+            )
+            log(
+                "info",
+                "mute_dismiss_second_back_sent",
+                visual_candidate_id=visual_candidate_id,
+                source_profile_username=source_profile_username,
                 from_sheet_level="following_options",
                 elapsed_ms=round((time.perf_counter() - t0) * 1000.0, 2),
             )
@@ -39628,6 +39686,15 @@ def _mute_engine_v2_dismiss_mute_sheets_level_aware(
                 log(
                     "info",
                     "mute_sheet_dismiss_fast_path_used",
+                    visual_candidate_id=visual_candidate_id,
+                    source_profile_username=source_profile_username,
+                    stage="after_second_back",
+                    elapsed_ms=ms,
+                    **fast_meta_after_second,
+                )
+                log(
+                    "info",
+                    "mute_dismiss_final_profile_visible",
                     visual_candidate_id=visual_candidate_id,
                     source_profile_username=source_profile_username,
                     stage="after_second_back",
@@ -39661,6 +39728,21 @@ def _mute_engine_v2_dismiss_mute_sheets_level_aware(
             except Exception:
                 pass
             return True, ms
+        if reused_following_options_after_first_back:
+            ms = round((time.perf_counter() - t0) * 1000.0, 2)
+            try:
+                log(
+                    "warning",
+                    "mute_sheet_dismiss_failed",
+                    visual_candidate_id=visual_candidate_id,
+                    source_profile_username=source_profile_username,
+                    elapsed_ms=ms,
+                    failure_reason="final_profile_proof_absent_after_reused_following_options",
+                    **fast_meta_after_second,
+                )
+            except Exception:
+                pass
+            return False, ms
         try:
             log(
                 "info",
@@ -41317,12 +41399,14 @@ def run_mute_engine_v2(
         *,
         result: str,
         skip_reason: str | None = None,
+        confirmed_sheet_level: str = "",
     ) -> None:
         try:
             _dismiss_ok, _dismiss_ms = _mute_engine_v2_dismiss_mute_sheets_level_aware(
                 d,
                 visual_candidate_id=vcid,
                 source_profile_username=src,
+                confirmed_sheet_level=confirmed_sheet_level,
             )
             timings["sheet_dismiss_ms"] = _dismiss_ms
             timings["mute_sheet_dismiss_ok"] = bool(_dismiss_ok)
@@ -42526,7 +42610,11 @@ def run_mute_engine_v2(
 
     if want_posts and want_stories:
         if posts_ok and stories_ok:
-            _emit_mute_perf_summary(result="success", skip_reason="")
+            _emit_mute_perf_summary(
+                result="success",
+                skip_reason="",
+                confirmed_sheet_level="mute_toggles",
+            )
             _emit_final_mute_state("final_mute_state_verified")
             log(
                 "info",
@@ -42686,7 +42774,11 @@ def run_mute_engine_v2(
 
     # only one of want_posts / want_stories
     if (want_posts and posts_ok) or (want_stories and stories_ok):
-        _emit_mute_perf_summary(result="success", skip_reason="")
+        _emit_mute_perf_summary(
+            result="success",
+            skip_reason="",
+            confirmed_sheet_level="mute_toggles",
+        )
         _emit_final_mute_state("final_mute_state_verified")
         log(
             "info",
