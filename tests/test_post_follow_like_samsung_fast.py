@@ -134,7 +134,12 @@ class FakeCloneHeaderDevice:
 
 
 class PreFollowTapInstrumentationTest(unittest.TestCase):
-    def _pre_follow_context(self, username: str = "public_user") -> dict[str, object]:
+    def _pre_follow_context(
+        self,
+        username: str = "public_user",
+        *,
+        followers_list_xml_hint: bool = False,
+    ) -> dict[str, object]:
         return nav.build_pre_follow_tap_context(
             follower_username=username,
             source_profile_username="source_ct",
@@ -146,7 +151,7 @@ class PreFollowTapInstrumentationTest(unittest.TestCase):
                 "action_bar_title": username,
                 "follow_header_state": "follow",
                 "raw_follow_invite_visible": True,
-                "followers_list_xml_hint": False,
+                "followers_list_xml_hint": followers_list_xml_hint,
             },
             private_gate={
                 "reject": False,
@@ -229,6 +234,144 @@ class PreFollowTapInstrumentationTest(unittest.TestCase):
         mock_surface.assert_not_called()
         mock_private.assert_not_called()
         self.assertIn("pre_follow_tap_context_reused", [event for event, _kw in logs])
+
+    def test_pre_follow_profile_proof_with_followers_list_hint_uses_exact_bounds_only(self) -> None:
+        device = mock.MagicMock()
+        device.click = mock.MagicMock()
+        button = self._exact_button()
+
+        with mock.patch.object(
+            nav, "_follow_state_from_header_button_rid_fast", return_value=("following", {"rid_found": True})
+        ), mock.patch.object(
+            nav, "verify_app_foreground", return_value=True
+        ), mock.patch(
+            "follow_action_engine.try_select_exact_profile_header_follow_fast",
+            return_value=(
+                button,
+                {
+                    "resource_id": "com.instagram.android:id/profile_header_follow_button",
+                    "text": "Follow",
+                    "bounds": dict(button.info["bounds"]),
+                    "derived_click_target": [120, 140],
+                    "center_x": 120,
+                    "center_y": 140,
+                    "exact_follow_fast_path": True,
+                },
+            ),
+        ) as mock_exact, mock.patch(
+            "follow_action_engine.detect_follow_action_surface"
+        ) as mock_surface, mock.patch.object(
+            nav, "_try_review_before_follow_popup_confirm", return_value=False
+        ), mock.patch.object(
+            nav, "_review_before_follow_popup_visible", return_value=False
+        ), mock.patch(
+            "instagram_navigation.time.sleep"
+        ):
+            out = nav.perform_follow_safe(
+                device,
+                "public_user",
+                "com.instagram.android",
+                profile_already_open=True,
+                source_profile_username="source_ct",
+                visual_candidate_id="vc-1",
+                dont_follow_private_accounts=True,
+                pre_follow_context=self._pre_follow_context(
+                    "public_user", followers_list_xml_hint=True
+                ),
+            )
+
+        self.assertTrue(out["ok"])
+        self.assertTrue(out["tapped"])
+        device.click.assert_called_once_with(120, 140)
+        mock_exact.assert_called_once()
+        mock_surface.assert_not_called()
+
+    def test_pre_follow_profile_proof_with_followers_list_hint_no_bounds_fails_fast_before_surface(self) -> None:
+        device = mock.MagicMock()
+        device.click = mock.MagicMock()
+
+        with mock.patch.object(
+            nav, "_follow_ui_state_snapshot", return_value="follow"
+        ), mock.patch.object(
+            nav, "verify_app_foreground", return_value=True
+        ), mock.patch.object(
+            nav, "_visual_raw_follow_invite_visible_quick", return_value=True
+        ), mock.patch(
+            "follow_action_engine.try_select_exact_profile_header_follow_fast",
+            return_value=(None, None),
+        ), mock.patch(
+            "follow_action_engine.detect_follow_action_surface"
+        ) as mock_surface, mock.patch.object(
+            nav, "visual_follow_post_action_reconcile", return_value={"inferred_follow_success": False}
+        ), mock.patch(
+            "instagram_navigation.time.sleep"
+        ):
+            out = nav.perform_follow_safe(
+                device,
+                "public_user",
+                "com.instagram.android",
+                profile_already_open=True,
+                source_profile_username="source_ct",
+                visual_candidate_id="vc-no-bounds",
+                dont_follow_private_accounts=True,
+                pre_follow_context=self._pre_follow_context(
+                    "public_user", followers_list_xml_hint=True
+                ),
+            )
+
+        self.assertFalse(out["ok"])
+        self.assertFalse(out["tapped"])
+        device.click.assert_not_called()
+        mock_surface.assert_not_called()
+        self.assertEqual(
+            out["visual_follow_failure_reason"],
+            "profile_proof_exact_follow_control_absent",
+        )
+
+    def test_exact_follow_probe_accepts_resource_id_match_with_bounds(self) -> None:
+        import follow_action_engine as fae
+
+        class Selector:
+            def __init__(self, present: bool) -> None:
+                self.present = present
+                self.info = {
+                    "text": "Follow",
+                    "contentDescription": "",
+                    "resourceName": "com.instagram.android.clone:id/profile_header_follow_button",
+                    "bounds": {"left": 40, "top": 120, "right": 240, "bottom": 200},
+                }
+
+            def exists(self, timeout: float = 0.0) -> bool:
+                return self.present
+
+        class Device:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, object]] = []
+                self.clicks: list[tuple[int, int]] = []
+
+            def __call__(self, **kwargs: object) -> Selector:
+                self.calls.append(dict(kwargs))
+                return Selector(bool(kwargs.get("resourceIdMatches")))
+
+            def click(self, x: int, y: int) -> None:
+                self.clicks.append((int(x), int(y)))
+
+        device = Device()
+        with mock.patch.object(nav, "_follow_safe_info", side_effect=lambda sel: sel.info):
+            button, meta = fae.try_select_exact_profile_header_follow_fast(
+                device,
+                nav,
+                "com.instagram.android",
+                visual_candidate_id="vc-rx",
+                ui_snap="follow",
+                raw_inv=False,
+                screen_class="profile_like",
+            )
+
+        self.assertIsNotNone(button)
+        self.assertEqual((meta or {}).get("center_x"), 140)
+        self.assertEqual((meta or {}).get("center_y"), 160)
+        self.assertTrue(any("resourceIdMatches" in call for call in device.calls))
 
     def test_pre_follow_ambiguous_raw_follow_only_fails_fast_without_tap(self) -> None:
         device = mock.MagicMock()

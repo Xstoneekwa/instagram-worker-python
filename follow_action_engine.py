@@ -323,11 +323,8 @@ def try_select_exact_profile_header_follow_fast(
     pkg_use = (pkg or str(getattr(ign.config, "INSTAGRAM_PACKAGE", "") or "")).strip()
     if not pkg_use:
         return None, None
-    rid_full = f"{pkg_use}:id/{PROFILE_HEADER_FOLLOW_BUTTON_RES_TOKEN}"
-    try:
-        sel = d(resourceId=rid_full)
-        if not sel.exists(timeout=0.1):
-            return None, None
+
+    def _select_exact(sel: Any) -> tuple[Any | None, dict[str, Any] | None]:
         inf = ign._follow_safe_info(sel)
         tx = str(inf.get("text") or "")
         dc = str(inf.get("contentDescription") or "")
@@ -372,8 +369,27 @@ def try_select_exact_profile_header_follow_fast(
             ),
             meta,
         )
+
+    rid_full = f"{pkg_use}:id/{PROFILE_HEADER_FOLLOW_BUTTON_RES_TOKEN}"
+    try:
+        sel = d(resourceId=rid_full)
+        if sel.exists(timeout=0.1):
+            picked, meta = _select_exact(sel)
+            if picked is not None:
+                return picked, meta
+        # Some clone/layout snapshots expose the same official token with a
+        # package-qualified resourceName that differs from the expected package.
+        # Keep this exact: same token, exact Follow label, valid bounds.
+        sel_rx = d(
+            resourceIdMatches=(
+                r".*:id/" + re.escape(PROFILE_HEADER_FOLLOW_BUTTON_RES_TOKEN) + r"$"
+            )
+        )
+        if sel_rx.exists(timeout=0.08):
+            return _select_exact(sel_rx)
     except Exception:
         return None, None
+    return None, None
 
 
 def _parse_android_bounds_attr(bounds: str | None) -> dict[str, int] | None:
@@ -880,8 +896,6 @@ def _pre_follow_context_has_strong_profile_proof(
     if not bool(ctx.get("screen_guard_ok", True)):
         return False
     if str(ctx.get("navigation_state") or "") != "CANDIDATE_PROFILE":
-        return False
-    if bool(ctx.get("followers_list_xml_hint")):
         return False
     if _norm_follow_handle(ctx.get("action_bar_title")) != _norm_follow_handle(username):
         return False
@@ -2021,6 +2035,58 @@ def follow_action_surface_wait_and_select_element(
                 "surface": None,
                 "exact_follow_fast_path": True,
                 "prefollow_profile_proof_reused": True,
+            }
+        if (
+            probe_el is None
+            and strong_profile_context
+            and bool((pre_follow_context or {}).get("followers_list_xml_hint"))
+            and (ui_q == "follow" or raw_q)
+        ):
+            reason_exact_absent = "profile_proof_exact_follow_control_absent"
+            _emit(
+                "follow_action_ambiguous_surface_fail_fast",
+                {
+                    "visual_candidate_id": str(visual_candidate_id or ""),
+                    "source_profile_username": str(source_profile_username or ""),
+                    "reason": reason_exact_absent,
+                    "surface_reason": "followers_list_hint_with_candidate_profile_proof",
+                    "signals": {
+                        "ui_snapshot": ui_q,
+                        "raw_follow_invite": bool(raw_q),
+                        "nav_state": str((pre_follow_context or {}).get("navigation_state") or ""),
+                        "screen_class": "followers_list_strong",
+                        "followers_list_xml_hint": True,
+                        "action_bar_title": str((pre_follow_context or {}).get("action_bar_title") or ""),
+                        "candidate_username": str(username or ""),
+                        "exact_follow_fast_path": False,
+                    },
+                    "safe_to_tap": False,
+                    "exact_follow_fast_path": False,
+                    "attempt": attempt,
+                },
+            )
+            _emit(
+                "follow_action_timing_surface_selection_completed",
+                {
+                    "duration_ms": round((time.perf_counter() - started_at) * 1000.0, 2),
+                    "caller": "follow_action_surface_wait_and_select_element",
+                    "result": "not_found",
+                    "reason": reason_exact_absent,
+                    "visual_candidate_id": str(visual_candidate_id or ""),
+                    "source_profile_username": str(source_profile_username or ""),
+                    "attempt": attempt,
+                    "fallback_used": False,
+                    "exact_follow_fast_path": False,
+                    "safe_to_tap": False,
+                },
+            )
+            return None, {
+                "outcome": "not_found",
+                "last_ui_state": ui_q,
+                "events": events,
+                "surface": None,
+                "visual_follow_failure_reason": reason_exact_absent,
+                "safe_to_tap": False,
             }
 
         _surface_t0 = time.perf_counter()
