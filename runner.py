@@ -6,6 +6,7 @@ import argparse
 import os
 import random
 import re
+import signal
 import socket
 import time
 import uuid
@@ -2667,6 +2668,7 @@ def _ct_list_bypass_runtime_duplicate_social_memory(
 
 _DEFERRED_FOLLOW_ACTION_LOG_FLUSHES: list[dict[str, Any]] = []
 _DEFERRED_POST_RETURN_PERSIST_STEPS: list[dict[str, Any]] = []
+_MANUAL_STOP_FLUSH_IN_PROGRESS = False
 
 
 def _pending_deferred_follow_action_log_count() -> int:
@@ -2981,6 +2983,86 @@ def _flush_deferred_follow_action_log_persists(*, reason: str) -> bool:
     return ok_all
 
 
+def _flush_deferred_persists_for_manual_stop(
+    *,
+    run_id: str = "",
+    account_id: str = "",
+    signal_number: int | None = None,
+) -> bool:
+    global _MANUAL_STOP_FLUSH_IN_PROGRESS
+    pending_before = _pending_deferred_follow_action_log_count()
+    if pending_before <= 0:
+        log(
+            "info",
+            "manual_stop_graceful_flush_completed",
+            run_id=run_id or None,
+            account_id=account_id or None,
+            signal=signal_number,
+            pending_deferred_count=0,
+            flushed=False,
+            reason="manual_stop_no_pending_deferred_persist",
+        )
+        return True
+    if _MANUAL_STOP_FLUSH_IN_PROGRESS:
+        log(
+            "warning",
+            "manual_stop_flush_partial",
+            run_id=run_id or None,
+            account_id=account_id or None,
+            signal=signal_number,
+            pending_deferred_count=pending_before,
+            reason="manual_stop_flush_already_in_progress",
+        )
+        return False
+    _MANUAL_STOP_FLUSH_IN_PROGRESS = True
+    t0 = time.perf_counter()
+    had_verified_post_like = any(
+        str(item.get("fn_name") or "") == "record_post_like_interaction_success"
+        for item in _DEFERRED_POST_RETURN_PERSIST_STEPS
+    )
+    try:
+        log(
+            "warning",
+            "manual_stop_graceful_flush_started",
+            run_id=run_id or None,
+            account_id=account_id or None,
+            signal=signal_number,
+            pending_deferred_count=pending_before,
+            reason="manual_stop_flush_before_worker_exit",
+        )
+        steps_ok = _flush_deferred_post_return_supabase_steps(
+            reason="manual_stop_graceful_shutdown"
+        )
+        logs_ok = _flush_deferred_follow_action_log_persists(
+            reason="manual_stop_graceful_shutdown"
+        )
+        ok = bool(steps_ok and logs_ok)
+        event = "manual_stop_graceful_flush_completed" if ok else "manual_stop_flush_partial"
+        log(
+            "info" if ok else "error",
+            event,
+            run_id=run_id or None,
+            account_id=account_id or None,
+            signal=signal_number,
+            pending_before=pending_before,
+            pending_deferred_count=_pending_deferred_follow_action_log_count(),
+            duration_ms=round((time.perf_counter() - t0) * 1000.0, 2),
+            reason=event,
+        )
+        if ok and had_verified_post_like:
+            log(
+                "info",
+                "post_like_verified_persisted_before_stop",
+                run_id=run_id or None,
+                account_id=account_id or None,
+                signal=signal_number,
+                reason="post_like_verified_persisted_before_stop",
+            )
+        return ok
+    finally:
+        _MANUAL_STOP_FLUSH_IN_PROGRESS = False
+
+
 def _persist_verified_follow_success_to_supabase(
     *,
     supabase_mode: bool,
@@ -3242,7 +3324,7 @@ def _update_run_status_safe(
     totals: dict,
     performance_summary: dict,
 ) -> None:
-    if status in {"completed", "failed"}:
+    if status in {"completed", "failed", "stopped"}:
         deferred_steps_ok = _flush_deferred_post_return_supabase_steps(
             reason=f"before_run_status_{status}"
         )
@@ -17766,6 +17848,46 @@ def main() -> int:
         run_id=run_id or None,
         metadata={"run_type": _parse_run_type(args) or None},
     )
+
+    def _handle_manual_stop_signal(signum: int, _frame: Any) -> None:
+        log(
+            "warning",
+            "manual_stop_signal_received",
+            signal=signum,
+            run_id=run_id or None,
+            account_id=account_id or None,
+            pending_deferred_count=_pending_deferred_follow_action_log_count(),
+        )
+        flush_ok = _flush_deferred_persists_for_manual_stop(
+            run_id=run_id or "",
+            account_id=account_id or "",
+            signal_number=signum,
+        )
+        if supabase_mode and run_id:
+            perf_summary = _build_run_perf_summary()
+            perf_summary["reason"] = (
+                "manual_stop_graceful_flush_completed"
+                if flush_ok
+                else "manual_stop_flush_partial"
+            )
+            perf_summary["session_counters"] = dict(_SESSION_COUNTERS)
+            perf_summary["manual_stop_signal"] = signum
+            _update_run_status_safe(
+                run_id=run_id,
+                status="stopped",
+                totals={
+                    "total": int(_SESSION_COUNTERS.get("interactions") or 0),
+                    "success": int(_SESSION_COUNTERS.get("successful_interactions") or 0)
+                    + int(_SESSION_COUNTERS.get("likes") or 0),
+                    "failed": 0,
+                },
+                performance_summary=perf_summary,
+            )
+        raise SystemExit(143)
+
+    signal.signal(signal.SIGTERM, _handle_manual_stop_signal)
+    signal.signal(signal.SIGINT, _handle_manual_stop_signal)
+
     reset_dm_send_run_state()
     global _RUNTIME_REAL_DM_SENT_COUNT, _RUNTIME_FOLLOW_COUNT, _RUNTIME_FOLLOWED_USERNAMES
     global _RUNTIME_SEEN_FOLLOWER_USERNAMES, _RUNTIME_INTERACTED_USERNAMES, _RUNTIME_UNFOLLOWED_USERNAMES

@@ -18198,6 +18198,64 @@ def _post_follow_likes_visible_grid_cell_under_suggested(
     return out
 
 
+def _post_follow_likes_strict_top_left_xml_grid_proof(
+    d: u2.Device,
+    *,
+    ui_hints: dict[str, Any],
+    budget_deadline: float | None,
+    ww: int,
+    wh: int,
+    visual_candidate_id: str = "",
+    source_profile_username: str = "",
+    follower_username: str = "",
+) -> dict[str, Any]:
+    """Require a fresh XML thumbnail below profile tabs before legacy visual tap."""
+    cell_meta, reveal_state = _post_follow_likes_run_top_left_xml_probe_sequence(
+        d,
+        ui_hints=ui_hints,
+        budget_deadline=budget_deadline,
+        ww=int(ww),
+        wh=int(wh),
+        visual_candidate_id=visual_candidate_id,
+        source_profile_username=source_profile_username,
+        follower_username=follower_username,
+        after_reveal_scroll=True,
+        skip_estimate_fallback=True,
+    )
+    source = str(cell_meta.get("reason") or "")
+    ok = bool(reveal_state.get("top_left_post_tap_safe")) and source in {
+        "xml_thumbnail_top_left",
+        "xml_thumbnail_top_left_relaxed",
+    }
+    out = {
+        "ok": bool(ok),
+        "cell_meta": dict(cell_meta),
+        "reveal_state": dict(reveal_state),
+        "source": source,
+        "failure_reason": "",
+    }
+    if not ok:
+        out["failure_reason"] = "post_like_skipped_no_post_grid"
+    try:
+        log(
+            "info" if ok else "warning",
+            "post_follow_like_strict_post_grid_proof_completed",
+            visual_candidate_id=visual_candidate_id,
+            source_profile_username=source_profile_username,
+            follower_username=follower_username,
+            ok=bool(ok),
+            cell_source=source,
+            failure_reason=str(out["failure_reason"] or ""),
+            top_left_post_tap_safe=bool(reveal_state.get("top_left_post_tap_safe")),
+            top_left_post_visible=bool(reveal_state.get("top_left_post_visible")),
+            grid_exposure=str(reveal_state.get("grid_exposure") or ""),
+            tap_safe_reason=str(reveal_state.get("tap_safe_reason") or ""),
+        )
+    except Exception:
+        pass
+    return out
+
+
 def _post_follow_likes_finish_overlay_fast_skip(
     out: dict[str, Any],
     *,
@@ -20824,6 +20882,27 @@ def _post_follow_likes_open_top_left_legacy_visual_safe(
             "legacy_visual_top_left_candidate_ambiguous",
             profile_tabs_bottom_y_px=int(tabs_bt),
             dynamic_first_row_search_y_min_px=int(y_floor),
+        )
+
+    strict_grid_proof = _post_follow_likes_strict_top_left_xml_grid_proof(
+        d,
+        ui_hints=ui_hints,
+        budget_deadline=time.perf_counter() + 1.2,
+        ww=int(ww),
+        wh=int(wh),
+        visual_candidate_id=visual_candidate_id,
+        source_profile_username=source_profile_username,
+        follower_username=expected_follower_username,
+    )
+    if not bool(strict_grid_proof.get("ok")):
+        return _finish(
+            "post_like_skipped_no_post_grid",
+            profile_tabs_bottom_y_px=int(tabs_bt),
+            dynamic_first_row_search_y_min_px=int(y_floor),
+            strict_grid_proof_source=str(strict_grid_proof.get("source") or ""),
+            strict_grid_proof_failure_reason=str(
+                strict_grid_proof.get("failure_reason") or ""
+            ),
         )
 
     _ensure_debug_dirs()
@@ -36201,6 +36280,13 @@ def open_follower_profile_from_list(
         an = _normalize_handle(ab or "")
         return bool(sn and an and sn == an)
 
+    def _is_ambiguous_stale_candidate_action_bar(ab: str) -> bool:
+        an = _normalize_handle(ab or "")
+        un_norm = _normalize_handle(un or "")
+        if not an or not un_norm:
+            return False
+        return an != un_norm and not _is_source_action_bar(ab)
+
     def _tap_inside_follow_bounds(tx: int, ty: int, fb: dict[str, Any]) -> bool:
         if not fb:
             return False
@@ -36224,6 +36310,26 @@ def open_follower_profile_from_list(
                 source_profile_username=source_profile_username,
                 action_bar_title=ab_open,
                 visual_candidate_id=vcid or None,
+            )
+            return False
+        if _is_ambiguous_stale_candidate_action_bar(ab_open):
+            log(
+                "error",
+                "candidate_open_blocked_ambiguous_stale_action_bar",
+                follower_username=un,
+                source_profile_username=source_profile_username,
+                action_bar_title=ab_open,
+                visual_candidate_id=vcid or None,
+                reason="candidate_selection_skipped_stale_profile_context",
+            )
+            log(
+                "error",
+                "follower_profile_open_failed",
+                follower_username=un,
+                source_profile_username=source_profile_username,
+                action_bar_title=ab_open,
+                visual_candidate_id=vcid or None,
+                reason="candidate_selection_skipped_stale_profile_context",
             )
             return False
         log(
@@ -37503,6 +37609,30 @@ def post_follow_controlled_return_to_followers_list(
                         or det_l.get("candidate_username_count")
                         or 0
                     ),
+                    allow_scope="compact_return_ct_only",
+                )
+            except Exception:
+                pass
+            try:
+                log(
+                    "info",
+                    "post_return_ct_stale_action_bar_ignored_with_confirmed_list",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    follower_username=cand or None,
+                    action_bar_title=str(det_l.get("action_bar_title") or "")[:120],
+                    open_detection_method=str(det_l.get("open_detection_method") or ""),
+                    reason="post_return_ct_stale_action_bar_ignored_with_confirmed_list",
+                    allow_scope="compact_return_ct_only",
+                )
+                log(
+                    "info",
+                    "followers_list_context_reconfirmed_after_stale_title",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    follower_username=cand or None,
+                    action_bar_title=str(det_l.get("action_bar_title") or "")[:120],
+                    reason="followers_list_context_reconfirmed_after_stale_title",
                     allow_scope="compact_return_ct_only",
                 )
             except Exception:
@@ -42852,6 +42982,35 @@ def _post_follow_post_likes_count_from_range(spec: str) -> int:
     return int(random.randint(lo, hi))
 
 
+def _ui_story_or_highlight_viewer_detected(d: u2.Device) -> tuple[bool, str]:
+    """Best-effort guard for story/highlight viewers after a post-open tap."""
+    probes = (
+        ("textMatches", {"textMatches": r"(?i)^\s*(reply|send message|message)\s*$"}, 0.08),
+        (
+            "descriptionMatches",
+            {"descriptionMatches": r"(?i).*(reply|send message|story controls|story viewer).*"},
+            0.08,
+        ),
+        (
+            "textMatches",
+            {"textMatches": r"(?i).*(story|highlight).*"},
+            0.04,
+        ),
+        (
+            "descriptionMatches",
+            {"descriptionMatches": r"(?i).*(story|highlight).*"},
+            0.04,
+        ),
+    )
+    for selector_kind, selector_kwargs, timeout_s in probes:
+        try:
+            if d(**selector_kwargs).exists(timeout=float(timeout_s)) is True:
+                return True, f"{selector_kind}:story_highlight_viewer"
+        except Exception:
+            continue
+    return False, ""
+
+
 def _post_follow_post_likes_out_template() -> dict[str, Any]:
     return {
         "ok": False,
@@ -44663,6 +44822,33 @@ def run_post_follow_post_likes_phase(
                 no_posts_visual = _run_deferred_visual_no_posts_fallback(fr_grid)
                 if no_posts_visual.get("no_posts_detected") is True:
                     return _skip_no_posts(no_posts_visual)
+                if fr_grid == "post_like_skipped_no_post_grid":
+                    post_rec["outcome"] = "skipped"
+                    post_rec["failure_reason"] = fr_grid
+                    per_post.append(post_rec)
+                    _likes_perf_ctx["failure_reason"] = fr_grid
+                    _likes_perf_ctx["likes_failure_kind"] = fr_grid
+                    log(
+                        "warning",
+                        "post_follow_post_like_open_skipped_no_post_grid",
+                        visual_candidate_id=vcid,
+                        source_profile_username=src,
+                        follower_username=cand,
+                        failure_reason=fr_grid,
+                        grid_state_before=grid_out.get("grid_state_before"),
+                        grid_state_after=grid_out.get("grid_state_after"),
+                    )
+                    return _finish(
+                        phase_outcome="skipped",
+                        skipped_reason="post_like_skipped_no_post_grid",
+                        skipped=True,
+                        ok=True,
+                        attempted_count=attempted_count,
+                        liked_count=liked_count,
+                        skipped_already_liked_count=skipped_already,
+                        failed_navigation_count=failed_nav,
+                        per_post=per_post,
+                    )
                 failed_nav += 1
                 _likes_perf_ctx["grid"] = dict(_grid_perf)
                 _likes_perf_ctx["failure_reason"] = fr_grid
@@ -45023,6 +45209,24 @@ def run_post_follow_post_likes_phase(
                 skipped_reason="post_like_skipped_facebook_shared_content",
                 detection_method=fb_method,
                 outcome="skipped_facebook_shared_content",
+            )
+
+        story_detected, story_method = _ui_story_or_highlight_viewer_detected(d)
+        if story_detected:
+            log(
+                "warning",
+                "post_follow_post_like_wrong_surface_story_highlight_detected",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                follower_username=cand,
+                detection_method=story_method,
+                tap_x=open_out.get("tap_x"),
+                tap_y=open_out.get("tap_y"),
+            )
+            return _skip_unusable_post_like_surface(
+                skipped_reason="post_like_wrong_surface_story_highlight_recovered",
+                detection_method=story_method,
+                outcome="wrong_surface_story_highlight_recovered",
             )
 
         like_surface_ok, like_surface_method = _ui_post_viewer_like_action_bar_exploitable(

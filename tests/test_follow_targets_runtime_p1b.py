@@ -3267,6 +3267,84 @@ class DeferredPostReturnPersistTests(unittest.TestCase):
         self.assertIn("post_return_deferred_step_failed", events)
         self.assertIn("run_completed_blocked_deferred_persist_failed", events)
 
+    def test_stopped_status_flushes_deferred_verified_post_like(self) -> None:
+        logs: list[tuple[str, str, dict]] = []
+        runner._schedule_deferred_post_return_supabase_step(
+            step="record_post_like_interaction_success",
+            fn_name="record_post_like_interaction_success",
+            args=("acct", "cand_one", "ct_one"),
+            kwargs={"run_id": "run", "liked_count": 1},
+            run_id="run",
+            account_id="acct",
+            source_profile_username="ct_one",
+            candidate_username="cand_one",
+            reason="post_like_persist_can_flush_before_completed",
+            log_record_count=1,
+            success_event="post_likes_persisted",
+            success_payload={"target_username": "cand_one", "liked_count": 1},
+        )
+
+        with patch.object(
+            runner, "log", side_effect=lambda level, event, **kw: logs.append((level, event, kw))
+        ), patch.object(
+            runner.supabase_client,
+            "record_post_like_interaction_success",
+            return_value={"ok": True},
+            create=True,
+        ) as like_persist, patch.object(
+            runner.supabase_client, "update_run_status", return_value={"ok": True}
+        ) as update_status:
+            runner._update_run_status_safe(
+                run_id="run",
+                status="stopped",
+                totals={"total": 1, "success": 1, "failed": 0},
+                performance_summary={"reason": "manual_stop_graceful_flush_completed"},
+            )
+
+        like_persist.assert_called_once()
+        update_status.assert_called_once()
+        self.assertEqual(update_status.call_args.kwargs["status"], "stopped")
+        events = [event for _level, event, _kw in logs]
+        self.assertIn("post_return_deferred_step_started", events)
+        self.assertIn("post_return_deferred_step_completed", events)
+        self.assertIn("post_likes_persisted", events)
+
+    def test_manual_stop_flush_logs_post_like_persisted_before_stop(self) -> None:
+        logs: list[tuple[str, str, dict]] = []
+        runner._schedule_deferred_post_return_supabase_step(
+            step="record_post_like_interaction_success",
+            fn_name="record_post_like_interaction_success",
+            args=("acct", "cand_one", "ct_one"),
+            kwargs={"run_id": "run", "liked_count": 1},
+            run_id="run",
+            account_id="acct",
+            source_profile_username="ct_one",
+            candidate_username="cand_one",
+            reason="post_like_persist_can_flush_before_completed",
+            log_record_count=1,
+        )
+
+        with patch.object(
+            runner, "log", side_effect=lambda level, event, **kw: logs.append((level, event, kw))
+        ), patch.object(
+            runner.supabase_client,
+            "record_post_like_interaction_success",
+            return_value={"ok": True},
+            create=True,
+        ) as like_persist:
+            ok = runner._flush_deferred_persists_for_manual_stop(
+                run_id="run",
+                account_id="acct",
+                signal_number=15,
+            )
+
+        self.assertTrue(ok)
+        like_persist.assert_called_once()
+        events = [event for _level, event, _kw in logs]
+        self.assertIn("manual_stop_graceful_flush_started", events)
+        self.assertIn("manual_stop_graceful_flush_completed", events)
+        self.assertIn("post_like_verified_persisted_before_stop", events)
+
     def test_follow_source_success_is_deferred_until_completed_flush(self) -> None:
         logs: list[tuple[str, str, dict]] = []
         follow_out = {"ok": True, "skipped_tap": False}
