@@ -1369,6 +1369,314 @@ class PostMuteGapTrackingTest(unittest.TestCase):
         self.assertIn("post_like_pre_reveal_timing", logs)
         self.assertIn("post_like_legacy_safe_candidate_timing", logs)
         self.assertIn("post_like_surface_to_scroll_gap_completed", logs)
+        self.assertNotIn("post_follow_like_no_like_button_safe_continue", logs)
+        self.assertNotIn("post_follow_like_non_likable_surface_detected", logs)
+
+    def test_hansulrich17_fast_miss_still_grid_without_explicit_evidence_falls_back(self) -> None:
+        device = mock.MagicMock()
+        device.window_size.return_value = (1080, 2340)
+        device.dump_hierarchy.return_value = (
+            '<hierarchy><node text="hansulrich17" content-desc="Profile grid"/></hierarchy>'
+        )
+        contract_ctx = _like_phase_contract_ctx()
+        logs: list[str] = []
+
+        with ExitStack() as stack:
+            _patch_like_phase_common(stack, contract_ctx=contract_ctx)
+            stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "_visual_profile_no_posts_tier1_direct_check",
+                    return_value={
+                        "no_posts_detected": False,
+                        "detection_method": "none",
+                        "confidence": 0.0,
+                    },
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    nav, "_followers_profile_tabs_bottom_y_px", return_value=(900, "unit")
+                )
+            )
+            legacy_safe = stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "_post_follow_likes_open_top_left_legacy_visual_safe",
+                    return_value={
+                        "ok": False,
+                        "post_detected": False,
+                        "failure_reason": "legacy_visual_top_left_viewer_not_confirmed",
+                        "viewer_detect_path": "post_follow_fast_miss",
+                        "viewer_detect_checked_signals": ["still_profile_grid"],
+                        "viewer_detect_exact_desc_guard_result": "no_exact_chrome",
+                        "viewer_detect_a2_guard_result": "no_exact_chrome",
+                        "still_profile_grid": True,
+                        "like_ui_present": False,
+                        "posts_action_bar": False,
+                        "tap_x": 180,
+                        "tap_y": 978,
+                        "likes_perf_post_open": {
+                            "viewer_detect_path": "post_follow_fast_miss",
+                            "viewer_detect_total_ms": 6200.0,
+                        },
+                    },
+                )
+            )
+            no_posts = stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "visual_profile_has_no_posts",
+                    return_value={
+                        "no_posts_detected": False,
+                        "detection_method": "none",
+                        "confidence": 0.0,
+                    },
+                )
+            )
+            grid_probe = stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "ensure_post_grid_visible_for_post_follow_likes",
+                    return_value={
+                        "ok": False,
+                        "grid_state_after": "not_visible",
+                        "failure_reason": "post_grid_not_visible_before_open",
+                        "likes_perf_grid": {},
+                    },
+                )
+            )
+            like_open = stack.enter_context(mock.patch.object(nav, "visual_like_open_post"))
+            stack.enter_context(
+                mock.patch.object(
+                    nav, "log", side_effect=lambda _level, event, **_kw: logs.append(str(event))
+                )
+            )
+
+            out = nav.run_post_follow_post_likes_phase(
+                device,
+                pkg="com.instagram.android",
+                source_profile_username="ct",
+                follower_username="cand",
+                visual_candidate_id="vc-1",
+                follow_success_verified=True,
+                follow_state_after="following",
+                skipped_tap=False,
+            )
+
+        self.assertEqual(out.get("phase_outcome"), "failed_safe_continue")
+        self.assertEqual(out.get("liked_count"), 0)
+        self.assertEqual(out.get("failed_navigation_count"), 1)
+        legacy_safe.assert_called_once()
+        grid_probe.assert_called_once()
+        no_posts.assert_called_once()
+        like_open.assert_not_called()
+        self.assertIn("post_follow_like_non_likable_mini_probe_started", logs)
+        self.assertIn("post_follow_like_non_likable_mini_probe_no_match", logs)
+        self.assertIn("post_follow_like_non_likable_probe_rejected", logs)
+        self.assertNotIn("post_follow_like_no_like_button_safe_continue", logs)
+
+    def test_hansulrich17_still_grid_with_facebook_word_only_stays_ambiguous(self) -> None:
+        device = mock.MagicMock()
+        device.window_size.return_value = (1080, 2340)
+        device.dump_hierarchy.return_value = (
+            '<hierarchy><node text="Facebook" content-desc="Profile bio link"/></hierarchy>'
+        )
+        contract_ctx = _like_phase_contract_ctx()
+        logs: list[str] = []
+
+        with ExitStack() as stack:
+            _patch_like_phase_common(stack, contract_ctx=contract_ctx)
+            stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "_visual_profile_no_posts_tier1_direct_check",
+                    return_value={
+                        "no_posts_detected": False,
+                        "detection_method": "none",
+                        "confidence": 0.0,
+                    },
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    nav, "_followers_profile_tabs_bottom_y_px", return_value=(900, "unit")
+                )
+            )
+            legacy_safe = stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "_post_follow_likes_open_top_left_legacy_visual_safe",
+                    return_value={
+                        "ok": False,
+                        "post_detected": False,
+                        "failure_reason": "legacy_visual_top_left_viewer_not_confirmed",
+                        "viewer_detect_path": "post_follow_fast_miss",
+                        "viewer_detect_checked_signals": ["still_profile_grid"],
+                        "viewer_detect_exact_desc_guard_result": "no_exact_chrome",
+                        "viewer_detect_a2_guard_result": "no_exact_chrome",
+                        "still_profile_grid": True,
+                        "like_ui_present": False,
+                        "posts_action_bar": False,
+                    },
+                )
+            )
+            grid_probe = stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "ensure_post_grid_visible_for_post_follow_likes",
+                    return_value={
+                        "ok": False,
+                        "grid_state_after": "not_visible",
+                        "failure_reason": "post_grid_not_visible_before_open",
+                        "likes_perf_grid": {},
+                    },
+                )
+            )
+            no_posts = stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "visual_profile_has_no_posts",
+                    return_value={
+                        "no_posts_detected": False,
+                        "detection_method": "none",
+                        "confidence": 0.0,
+                    },
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    nav, "log", side_effect=lambda _level, event, **_kw: logs.append(str(event))
+                )
+            )
+
+            out = nav.run_post_follow_post_likes_phase(
+                device,
+                pkg="com.instagram.android",
+                source_profile_username="ct",
+                follower_username="cand",
+                visual_candidate_id="vc-1",
+                follow_success_verified=True,
+                follow_state_after="following",
+                skipped_tap=False,
+            )
+
+        self.assertEqual(out.get("phase_outcome"), "failed_safe_continue")
+        legacy_safe.assert_called_once()
+        grid_probe.assert_called_once()
+        no_posts.assert_called_once()
+        self.assertIn("post_follow_like_non_likable_mini_probe_no_match", logs)
+        self.assertIn("post_follow_like_non_likable_probe_rejected", logs)
+        self.assertNotIn("post_follow_like_no_like_button_safe_continue", logs)
+
+    def test_hansulrich17_fast_miss_still_grid_with_facebook_evidence_safe_continues(self) -> None:
+        device = mock.MagicMock()
+        device.window_size.return_value = (1080, 2340)
+        device.dump_hierarchy.return_value = (
+            '<hierarchy><node text="Shared from Facebook" '
+            'content-desc="Shared from Facebook post"/></hierarchy>'
+        )
+        contract_ctx = _like_phase_contract_ctx()
+        logs: list[tuple[str, dict[str, object]]] = []
+
+        def _fake_log(_level: str, event: str, **kw: object) -> None:
+            logs.append((str(event), dict(kw)))
+
+        with ExitStack() as stack:
+            _patch_like_phase_common(stack, contract_ctx=contract_ctx)
+            stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "_visual_profile_no_posts_tier1_direct_check",
+                    return_value={
+                        "no_posts_detected": False,
+                        "detection_method": "none",
+                        "confidence": 0.0,
+                    },
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    nav, "_followers_profile_tabs_bottom_y_px", return_value=(900, "unit")
+                )
+            )
+            legacy_safe = stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "_post_follow_likes_open_top_left_legacy_visual_safe",
+                    return_value={
+                        "ok": False,
+                        "post_detected": False,
+                        "failure_reason": "legacy_visual_top_left_viewer_not_confirmed",
+                        "viewer_detect_path": "post_follow_fast_miss",
+                        "viewer_detect_checked_signals": ["still_profile_grid"],
+                        "viewer_detect_exact_desc_guard_result": "no_exact_chrome",
+                        "viewer_detect_a2_guard_result": "no_exact_chrome",
+                        "still_profile_grid": True,
+                        "like_ui_present": False,
+                        "posts_action_bar": False,
+                        "tap_x": 180,
+                        "tap_y": 978,
+                        "likes_perf_post_open": {
+                            "viewer_detect_path": "post_follow_fast_miss",
+                            "viewer_detect_total_ms": 6200.0,
+                        },
+                    },
+                )
+            )
+            grid_probe = stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "ensure_post_grid_visible_for_post_follow_likes",
+                    side_effect=AssertionError("explicit Facebook evidence should skip grid fallback"),
+                )
+            )
+            no_posts = stack.enter_context(
+                mock.patch.object(
+                    nav,
+                    "visual_profile_has_no_posts",
+                    side_effect=AssertionError("explicit Facebook evidence should skip no-post fallback"),
+                )
+            )
+            like_open = stack.enter_context(mock.patch.object(nav, "visual_like_open_post"))
+            stack.enter_context(mock.patch.object(nav, "log", side_effect=_fake_log))
+
+            out = nav.run_post_follow_post_likes_phase(
+                device,
+                pkg="com.instagram.android",
+                source_profile_username="ct",
+                follower_username="cand",
+                visual_candidate_id="vc-1",
+                follow_success_verified=True,
+                follow_state_after="following",
+                skipped_tap=False,
+            )
+
+        events = [event for event, _kw in logs]
+        self.assertEqual(out.get("phase_outcome"), "failed_safe_continue")
+        self.assertEqual(out.get("liked_count"), 0)
+        self.assertEqual(out.get("failed_navigation_count"), 1)
+        legacy_safe.assert_called_once()
+        grid_probe.assert_not_called()
+        no_posts.assert_not_called()
+        like_open.assert_not_called()
+        self.assertIn("post_follow_like_non_likable_mini_probe_started", events)
+        self.assertIn("post_follow_like_non_likable_mini_probe_explicit_match", events)
+        self.assertIn("post_follow_like_non_likable_surface_detected", events)
+        self.assertIn("post_follow_like_unsupported_surface_fast_continue", events)
+        self.assertIn("post_follow_like_no_like_button_safe_continue", events)
+        self.assertNotIn("post_follow_like_non_likable_probe_rejected", events)
+        safe_payload = [
+            kw
+            for event, kw in logs
+            if event == "post_follow_like_no_like_button_safe_continue"
+        ][0]
+        self.assertFalse(safe_payload["like_persisted"])
+        self.assertFalse(safe_payload["has_like_button"])
+        self.assertTrue(safe_payload["is_non_likable_surface"])
+        self.assertTrue(safe_payload["is_facebook_shared_surface"])
+        self.assertEqual(safe_payload["explicit_evidence_type"], "facebook_shared")
+        self.assertIn("Shared from Facebook", safe_payload["evidence_text_sanitized"])
 
 
 def _probe_sequence_from_visible_fn(

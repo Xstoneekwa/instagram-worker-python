@@ -21052,6 +21052,22 @@ def _post_follow_likes_open_top_left_legacy_visual_safe(
             tap_y=int(tap_y),
             viewer_detect_path=viewer.get("viewer_detect_path"),
             detect_reason=viewer.get("detect_reason"),
+            viewer_detect_checked_signals=list(
+                viewer.get("viewer_detect_checked_signals") or []
+            )[:24],
+            viewer_detect_exact_desc_guard_result=viewer.get(
+                "viewer_detect_exact_desc_guard_result"
+            ),
+            viewer_detect_a2_guard_result=viewer.get("viewer_detect_a2_guard_result"),
+            still_profile_grid=bool(viewer.get("still_profile_grid")),
+            like_ui_present=bool(viewer.get("like_ui_present")),
+            posts_action_bar=bool(viewer.get("posts_action_bar")),
+            is_non_likable_surface=(
+                str(viewer.get("viewer_detect_path") or "") == "post_follow_fast_miss"
+                and not bool(viewer.get("still_profile_grid"))
+                and not bool(viewer.get("like_ui_present"))
+                and not bool(viewer.get("posts_action_bar"))
+            ),
         )
     _stash_post_follow_open_like_proof(
         dict(viewer),
@@ -43737,6 +43753,282 @@ def run_post_follow_post_likes_phase(
                 return False
             return "no_post" in method or "no posts" in method or "0_posts" in method
 
+        def _classify_non_likable_open_failure(
+            open_failure: dict[str, Any] | None,
+        ) -> tuple[bool, str, dict[str, Any]]:
+            det = open_failure if isinstance(open_failure, dict) else {}
+            reason = str(det.get("failure_reason") or "")
+            viewer_path = str(det.get("viewer_detect_path") or "")
+            checked_signals = list(det.get("viewer_detect_checked_signals") or [])
+            like_ui_present = bool(det.get("like_ui_present"))
+            posts_action_bar = bool(det.get("posts_action_bar"))
+            still_profile_grid = bool(det.get("still_profile_grid"))
+            exact_desc_guard = str(
+                det.get("viewer_detect_exact_desc_guard_result") or ""
+            )
+            a2_guard = str(det.get("viewer_detect_a2_guard_result") or "")
+            post_detected = bool(det.get("post_detected"))
+            explicit_fast_miss = (
+                reason == "legacy_visual_top_left_viewer_not_confirmed"
+                and viewer_path == "post_follow_fast_miss"
+                and not post_detected
+                and not still_profile_grid
+                and not like_ui_present
+                and not posts_action_bar
+            )
+            mini_probe: dict[str, Any] = {
+                "matched": False,
+                "explicit_evidence_type": "",
+                "evidence_text_sanitized": "",
+                "duration_ms": 0.0,
+                "fallback_used": True,
+            }
+            if (
+                not explicit_fast_miss
+                and reason == "legacy_visual_top_left_viewer_not_confirmed"
+                and viewer_path == "post_follow_fast_miss"
+                and not post_detected
+                and not like_ui_present
+                and not posts_action_bar
+                and (still_profile_grid or "still_profile_grid" in checked_signals)
+                and (
+                    exact_desc_guard == "no_exact_chrome"
+                    or a2_guard == "no_exact_chrome"
+                )
+            ):
+                mini_probe = _run_non_likable_mini_probe(
+                    viewer_detect_path=viewer_path,
+                    checked_signals=checked_signals,
+                    still_profile_grid=still_profile_grid,
+                    exact_desc_guard=exact_desc_guard,
+                    a2_guard=a2_guard,
+                )
+                explicit_fast_miss = bool(mini_probe.get("matched"))
+            evidence = {
+                "viewer_detect_path": viewer_path,
+                "checked_signals": checked_signals[:24],
+                "has_like_button": like_ui_present,
+                "has_comment_or_share_controls": False,
+                "is_facebook_shared_surface": str(
+                    mini_probe.get("explicit_evidence_type") or ""
+                )
+                == "facebook_shared",
+                "is_non_likable_surface": explicit_fast_miss,
+                "still_profile_grid": still_profile_grid,
+                "exact_desc_guard": exact_desc_guard,
+                "a2_guard": a2_guard,
+                "posts_action_bar": posts_action_bar,
+                "post_detected": post_detected,
+                "reason": (
+                    str(mini_probe.get("reason") or "")
+                    if bool(mini_probe.get("matched"))
+                    else (
+                        "post_follow_fast_miss_without_like_or_posts_chrome"
+                        if explicit_fast_miss
+                        else "non_likable_surface_not_explicit"
+                    )
+                ),
+                "failure_reason": reason,
+                "fallback_used": not explicit_fast_miss,
+                "like_persisted": False,
+                "explicit_evidence_type": str(
+                    mini_probe.get("explicit_evidence_type") or ""
+                ),
+                "evidence_text_sanitized": str(
+                    mini_probe.get("evidence_text_sanitized") or ""
+                )[:180],
+                "mini_probe_duration_ms": mini_probe.get("duration_ms"),
+            }
+            return explicit_fast_miss, str(evidence["reason"]), evidence
+
+        def _run_non_likable_mini_probe(
+            *,
+            viewer_detect_path: str,
+            checked_signals: list[Any],
+            still_profile_grid: bool,
+            exact_desc_guard: str,
+            a2_guard: str,
+        ) -> dict[str, Any]:
+            t_probe = time.perf_counter()
+            base = {
+                "visual_candidate_id": vcid,
+                "source_profile_username": src,
+                "follower_username": cand,
+                "username": cand,
+                "post_index": post_idx,
+                "viewer_detect_path": str(viewer_detect_path or ""),
+                "checked_signals": list(checked_signals or [])[:24],
+                "still_profile_grid": bool(still_profile_grid),
+                "exact_desc_guard": str(exact_desc_guard or ""),
+                "a2_guard": str(a2_guard or ""),
+                "like_persisted": False,
+            }
+            try:
+                log(
+                    "info",
+                    "post_follow_like_non_likable_mini_probe_started",
+                    **base,
+                    fallback_used=True,
+                )
+            except Exception:
+                pass
+            try:
+                try:
+                    hier_raw = d.dump_hierarchy(compressed=False)
+                except TypeError:
+                    hier_raw = d.dump_hierarchy()
+                hier = str(hier_raw or "")
+            except Exception as e:
+                out = {
+                    "matched": False,
+                    "reason": "non_likable_mini_probe_dump_failed",
+                    "explicit_evidence_type": "",
+                    "evidence_text_sanitized": "",
+                    "duration_ms": round((time.perf_counter() - t_probe) * 1000.0, 2),
+                    "fallback_used": True,
+                    "error": str(e)[:120],
+                }
+                try:
+                    log(
+                        "info",
+                        "post_follow_like_non_likable_mini_probe_no_match",
+                        **base,
+                        duration_ms=out["duration_ms"],
+                        reason=out["reason"],
+                        explicit_evidence_type="",
+                        evidence_text_sanitized="",
+                    )
+                except Exception:
+                    pass
+                return out
+            hay = re.sub(r"\s+", " ", hier).strip()
+            hay_l = hay.lower()
+            marker_specs = (
+                ("facebook_shared", "shared from facebook"),
+                ("facebook_shared", "from facebook"),
+                ("unsupported_surface", "unsupported"),
+                ("unsupported_surface", "not available"),
+                ("unsupported_surface", "couldn't load"),
+                ("unsupported_surface", "could not load"),
+            )
+            evidence_type = ""
+            marker = ""
+            for etype, needle in marker_specs:
+                if needle in hay_l:
+                    evidence_type = etype
+                    marker = needle
+                    break
+            duration_ms = round((time.perf_counter() - t_probe) * 1000.0, 2)
+            if evidence_type:
+                idx = max(0, hay_l.find(marker))
+                snippet = hay[max(0, idx - 80) : min(len(hay), idx + 120)]
+                sanitized = re.sub(r"[^A-Za-z0-9@._: /'\\-]+", " ", snippet)
+                sanitized = re.sub(r"\s+", " ", sanitized).strip()[:180]
+                out = {
+                    "matched": True,
+                    "reason": "post_follow_like_explicit_non_likable_surface",
+                    "explicit_evidence_type": evidence_type,
+                    "evidence_text_sanitized": sanitized,
+                    "duration_ms": duration_ms,
+                    "fallback_used": False,
+                }
+                try:
+                    log(
+                        "info",
+                        "post_follow_like_non_likable_mini_probe_explicit_match",
+                        **base,
+                        duration_ms=duration_ms,
+                        reason=out["reason"],
+                        explicit_evidence_type=evidence_type,
+                        evidence_text_sanitized=sanitized,
+                        fallback_used=False,
+                    )
+                except Exception:
+                    pass
+                return out
+            out = {
+                "matched": False,
+                "reason": "non_likable_mini_probe_no_explicit_evidence",
+                "explicit_evidence_type": "",
+                "evidence_text_sanitized": "",
+                "duration_ms": duration_ms,
+                "fallback_used": True,
+            }
+            try:
+                log(
+                    "info",
+                    "post_follow_like_non_likable_mini_probe_no_match",
+                    **base,
+                    duration_ms=duration_ms,
+                    reason=out["reason"],
+                    explicit_evidence_type="",
+                    evidence_text_sanitized="",
+                )
+            except Exception:
+                pass
+            return out
+
+        def _finish_non_likable_safe_continue(
+            *,
+            open_failure: dict[str, Any],
+            reason: str,
+            evidence: dict[str, Any],
+        ) -> dict[str, Any]:
+            nonlocal failed_nav
+            failed_nav += 1
+            post_rec["outcome"] = "non_likable_surface_safe_continue"
+            post_rec["failure_reason"] = "post_follow_like_non_likable_surface_safe_continue"
+            post_rec["non_likable_reason"] = reason
+            per_post.append(post_rec)
+            _likes_perf_ctx["post_open"] = dict(
+                open_failure.get("likes_perf_post_open") or {}
+            )
+            _likes_perf_ctx["failure_reason"] = (
+                "post_follow_like_non_likable_surface_safe_continue"
+            )
+            _likes_perf_ctx["likes_failure_kind"] = (
+                "post_follow_like_non_likable_surface_safe_continue"
+            )
+            duration_ms = round((time.perf_counter() - t_surface_to_scroll) * 1000.0, 2)
+            common = {
+                "visual_candidate_id": vcid,
+                "source_profile_username": src,
+                "follower_username": cand,
+                "username": cand,
+                "post_index": post_idx,
+                "duration_ms": duration_ms,
+                **evidence,
+            }
+            try:
+                log("info", "post_follow_like_non_likable_surface_detected", **common)
+                log("info", "post_follow_like_unsupported_surface_fast_continue", **common)
+                log("info", "post_follow_like_no_like_button_safe_continue", **common)
+                log(
+                    "warning",
+                    "post_follow_post_like_open_failed",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    follower_username=cand,
+                    failure_reason="post_follow_like_non_likable_surface_safe_continue",
+                    tap_x=open_failure.get("tap_x"),
+                    tap_y=open_failure.get("tap_y"),
+                    viewer_detect_path=evidence.get("viewer_detect_path"),
+                    like_persisted=False,
+                )
+            except Exception:
+                pass
+            return _finish(
+                phase_outcome="failed_safe_continue",
+                skipped_reason="likes_failed_open_post_safe_continue",
+                skipped=False,
+                ok=False,
+                attempted_count=attempted_count,
+                liked_count=liked_count,
+                skipped_already_liked_count=skipped_already,
+                failed_navigation_count=failed_nav,
+                per_post=per_post,
+            )
+
         def _early_visual_no_posts_gate(
             *,
             surface_profile_ok: bool,
@@ -44378,6 +44670,33 @@ def run_post_follow_post_likes_phase(
                 legacy_first_out.get("failure_reason")
                 or "legacy_visual_top_left_failed"
             )
+            non_likable_ok, non_likable_reason, non_likable_evidence = (
+                _classify_non_likable_open_failure(legacy_first_out)
+            )
+            if non_likable_ok:
+                return _finish_non_likable_safe_continue(
+                    open_failure=legacy_first_out,
+                    reason=non_likable_reason,
+                    evidence=non_likable_evidence,
+                )
+            if legacy_first_failure_reason == "legacy_visual_top_left_viewer_not_confirmed":
+                try:
+                    log(
+                        "info",
+                        "post_follow_like_non_likable_probe_rejected",
+                        visual_candidate_id=vcid,
+                        source_profile_username=src,
+                        follower_username=cand,
+                        username=cand,
+                        post_index=post_idx,
+                        duration_ms=round(
+                            (time.perf_counter() - t_open_legacy_first) * 1000.0,
+                            2,
+                        ),
+                        **non_likable_evidence,
+                    )
+                except Exception:
+                    pass
             if legacy_first_failure_reason in {
                 "legacy_visual_top_left_candidate_ambiguous",
                 "profile_tabs_bottom_unknown",
@@ -44989,6 +45308,29 @@ def run_post_follow_post_likes_phase(
             )
 
         if not open_out.get("ok") or not open_out.get("post_detected"):
+            non_likable_ok, non_likable_reason, non_likable_evidence = (
+                _classify_non_likable_open_failure(open_out)
+            )
+            if non_likable_ok:
+                return _finish_non_likable_safe_continue(
+                    open_failure=open_out,
+                    reason=non_likable_reason,
+                    evidence=non_likable_evidence,
+                )
+            try:
+                log(
+                    "info",
+                    "post_follow_like_non_likable_probe_rejected",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    follower_username=cand,
+                    username=cand,
+                    post_index=post_idx,
+                    duration_ms=round((time.perf_counter() - t_open) * 1000.0, 2),
+                    **non_likable_evidence,
+                )
+            except Exception:
+                pass
             no_posts_visual = _run_deferred_visual_no_posts_fallback(
                 str(open_out.get("failure_reason") or "post_open_failed")
             )
