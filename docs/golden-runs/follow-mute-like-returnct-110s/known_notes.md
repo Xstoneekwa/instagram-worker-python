@@ -8,6 +8,14 @@ In the `fc65bace` golden validation run, `villan.brorslund` was opened after man
 
 The rollback reference run `272f6925` included a Facebook shared / no-like button case. It was handled with safe-continue and did not stop the run. Do not optimize this until after the golden flow remains protected.
 
+### Post-golden approved patch `6922d90` (2026-06-15)
+
+- **Scope**: Facebook/no-like explicit non-likable safe-continue (read-only mini-probe; `still_profile_grid` alone never triggers fast safe-continue).
+- **Authorization**: explicit user GO after Golden checkpoint; Golden tag **not** moved.
+- **Non-regression run**: `a3265248-2545-4b2c-b2fe-005dd66ab4d6` (`lorielebras_autom` / `RFGL145LZHE`) — 3 complete candidates, 3 follows/mutes/likes/Return CT OK, productive avg `101.66s/candidate`, Return CT avg `15.35s`.
+- **Limitation**: no real Facebook/no-like surface encountered on that run; fast path acceleration vs `hansulrich17` (~82.45s post-like) still to validate when a natural case reappears.
+- **Golden tag remains**: `golden-follow-mute-like-returnct-110s-20260615` → `86a01a6`.
+
 ## No Posts Yet
 
 No Posts Yet handling remains deferred until after golden checkpoint stabilization.
