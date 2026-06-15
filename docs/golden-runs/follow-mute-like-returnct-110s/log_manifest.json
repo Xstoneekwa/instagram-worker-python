@@ -1,0 +1,56 @@
+[
+  {
+    "run_id": "fc65bace-78f9-4d20-bd4d-c6ec29da583e",
+    "commit": "fb3dbc0",
+    "role": "Return CT patch validation",
+    "source_path": "runs/run_20260615T104237_764090Z_fc65bace-78f9-4d20-bd4d-c6ec29da583e.log",
+    "archived_path": "docs/golden-runs/follow-mute-like-returnct-110s/logs/fc65bace-78f9-4d20-bd4d-c6ec29da583e.critical-events.jsonl.gz",
+    "archive_type": "sanitized critical-events jsonl.gz",
+    "source_size_bytes": 567645,
+    "event_count": 168,
+    "gzip_size_bytes": 6681,
+    "source_sha256": "f34bd396c38f50f2d5da00a61290c91de809011ebf100be440888c9a593a9209",
+    "gzip_sha256": "b0168c094900eb0ae6c51f06c25468cf3c7e7a14be3c9c4a41229f59c7fd36d2",
+    "redactions": [
+      "account_id/client_id/device_id/assignment_id/app_instance_id/source_account_context UUIDs",
+      "secret-like keys if present"
+    ],
+    "secret_scan": "passed on sanitized critical-events extract"
+  },
+  {
+    "run_id": "272f6925-acc0-4228-b5e9-da95eb7adafd",
+    "commit": "b935653",
+    "role": "post-like rollback reference",
+    "source_path": "runs/run_20260615T001052_656571Z_272f6925-acc0-4228-b5e9-da95eb7adafd.log",
+    "archived_path": "docs/golden-runs/follow-mute-like-returnct-110s/logs/272f6925-acc0-4228-b5e9-da95eb7adafd.critical-events.jsonl.gz",
+    "archive_type": "sanitized critical-events jsonl.gz",
+    "source_size_bytes": 392006,
+    "event_count": 103,
+    "gzip_size_bytes": 5405,
+    "source_sha256": "c936c274dbdc97e8453bcfa3b78fc421bcaf8fa30634c90c420c69b1c3dfecab",
+    "gzip_sha256": "c177e7f1769f85d849ecccd757dbedd183b798ca5cb1bdf6544af9688ead1554",
+    "redactions": [
+      "account_id/client_id/device_id/assignment_id/app_instance_id/source_account_context UUIDs",
+      "secret-like keys if present"
+    ],
+    "secret_scan": "passed on sanitized critical-events extract"
+  },
+  {
+    "run_id": "bebf74a7-b66f-44d1-a040-0a83806db967",
+    "commit": "7fbe001",
+    "role": "mute/flow stable reference",
+    "source_path": "runs/run_20260614T222529_856357Z_bebf74a7-b66f-44d1-a040-0a83806db967.log",
+    "archived_path": "docs/golden-runs/follow-mute-like-returnct-110s/logs/bebf74a7-b66f-44d1-a040-0a83806db967.critical-events.jsonl.gz",
+    "archive_type": "sanitized critical-events jsonl.gz",
+    "source_size_bytes": 555718,
+    "event_count": 160,
+    "gzip_size_bytes": 6528,
+    "source_sha256": "86a299bdc199814551fdc1304003fdb10dbf6493a16f58165c61c3885f15ad37",
+    "gzip_sha256": "f69a4834330357c6ae686b5fae99b257dcac11f0dbf9dd23eeb63d20fa2df0ca",
+    "redactions": [
+      "account_id/client_id/device_id/assignment_id/app_instance_id/source_account_context UUIDs",
+      "secret-like keys if present"
+    ],
+    "secret_scan": "passed on sanitized critical-events extract"
+  }
+]

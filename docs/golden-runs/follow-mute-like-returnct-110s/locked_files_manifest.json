@@ -1,0 +1,79 @@
+{
+  "golden_name": "GOLDEN FLOW 110S: lock follow mute like return-CT state machine",
+  "golden_commit": "fb3dbc0",
+  "golden_branch": "rollback-follow-flow-9x3x3",
+  "stable_branch": "stable-golden-follow-mute-like-returnct-110s",
+  "tag": "golden-follow-mute-like-returnct-110s-20260615",
+  "protected_zones": [
+    "exact Follow detection",
+    "pre-follow proof reuse",
+    "mute engine v2 sheet/dismiss",
+    "post-like legacy safe open",
+    "viewer proof before like",
+    "like verify",
+    "return CT strict state-machine",
+    "next candidate gate",
+    "private skip safety",
+    "max 1 like/candidate"
+  ],
+  "protected_files": [
+    {
+      "path": "follow_action_engine.py",
+      "functions": [
+        "try_select_exact_profile_header_follow_fast",
+        "_pre_follow_context_has_strong_profile_proof",
+        "follow_action_surface_wait_and_select_element"
+      ]
+    },
+    {
+      "path": "instagram_navigation.py",
+      "functions": [
+        "perform_follow_safe",
+        "post_follow_controlled_return_to_followers_list",
+        "verify_followers_list_surface_is_ct_account",
+        "_mute_engine_v2_dismiss_mute_sheets_level_aware",
+        "_post_follow_likes_open_top_left_legacy_visual_safe",
+        "run_post_follow_post_likes_phase",
+        "build_pre_follow_tap_context",
+        "_is_reusable_pre_follow_tap_context"
+      ]
+    },
+    {
+      "path": "tests/test_post_follow_like_samsung_fast.py",
+      "functions": [
+        "Return CT proof reuse/reject tests",
+        "post-follow like max/profile guard tests"
+      ]
+    },
+    {
+      "path": "tests/test_mute_engine_v2_sheet_levels.py",
+      "functions": [
+        "mute dismiss sheet-level proof reuse tests"
+      ]
+    },
+    {
+      "path": "tests/test_follow_targets_runtime_p1b.py",
+      "functions": [
+        "runtime return/next-candidate gates"
+      ]
+    },
+    {
+      "path": "tests/test_runtime_caps.py",
+      "functions": [
+        "runtime caps"
+      ]
+    }
+  ],
+  "future_modification_rule": [
+    "STOP",
+    "justify the protected area touch",
+    "obtain explicit GO",
+    "keep patch minimal",
+    "run targeted tests",
+    "compare to golden run references"
+  ],
+  "forbidden_markers": [
+    "stale_candidate_action_bar_ignored_with_strong_list"
+  ],
+  "log_manifest": "log_manifest.json"
+}
