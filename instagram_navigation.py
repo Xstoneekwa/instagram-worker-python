@@ -37969,36 +37969,42 @@ def post_follow_controlled_return_to_followers_list(
         except Exception:
             last_det = {}
         post_back_det_observed_at = time.perf_counter()
-        nav_ctx2 = dict(nav_ctx)
-        nav_ctx2["det"] = last_det
-        try:
-            nav2 = observe_instagram_state(
-                d,
-                expected_package=pkg,
-                last_known_state=NavigationEngineState.CANDIDATE_PROFILE.value,
-                context=nav_ctx2,
-            )
-        except Exception as e2:
-            nav2 = {"state": "UNKNOWN", "confidence": 0.0, "reason": str(e2)}
-        log(
-            "info",
-            "post_follow_return_ct_state_observed",
-            visual_candidate_id=vcid,
-            source_profile_username=src,
-            attempt=round_idx,
-            observe_sequence="after_safe_back",
-            navigation_state=str(nav2.get("state") or ""),
-            navigation_confidence=float(nav2.get("confidence") or 0.0),
-            navigation_reason=str(nav2.get("reason") or ""),
-            xml_guess=str(nav2.get("xml_guess") or ""),
-        )
-
         reuse_ok, det_reuse, reuse_reason, det_age_ms = _try_reuse_post_back_det(
             last_det,
             det_observed_at=post_back_det_observed_at,
         )
         if reuse_ok:
             action_bar_title = str(det_reuse.get("action_bar_title") or "")[:120]
+            current_screen_guess = str(det_reuse.get("current_screen_guess") or "")
+            log(
+                "info",
+                "return_ct_fast_proof_reused",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                expected_ct_username=src,
+                follower_username=cand or None,
+                action_bar_title=action_bar_title,
+                is_followers_list=bool(det_reuse.get("is_followers_list")),
+                current_screen_guess=current_screen_guess,
+                navigation_state="",
+                proof_age_ms=det_age_ms,
+                rejection_reason="",
+                duration_saved_estimate_ms=3200.0,
+            )
+            log(
+                "info",
+                "return_ct_wait_reduced_after_explicit_ct_proof",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                expected_ct_username=src,
+                follower_username=cand or None,
+                action_bar_title=action_bar_title,
+                is_followers_list=bool(det_reuse.get("is_followers_list")),
+                current_screen_guess=current_screen_guess,
+                navigation_state="",
+                proof_age_ms=det_age_ms,
+                duration_saved_estimate_ms=3200.0,
+            )
             log(
                 "info",
                 "post_follow_return_ct_post_back_det_reused",
@@ -38024,6 +38030,22 @@ def post_follow_controlled_return_to_followers_list(
                 action_bar_title=action_bar_title,
             )
             return True, "compact_safe_back_then_list", None
+
+        log(
+            "info",
+            "return_ct_fast_proof_rejected",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            expected_ct_username=src,
+            follower_username=cand or None,
+            action_bar_title=str((det_reuse or {}).get("action_bar_title") or "")[:120],
+            is_followers_list=bool((det_reuse or {}).get("is_followers_list")),
+            current_screen_guess=str((det_reuse or {}).get("current_screen_guess") or ""),
+            navigation_state="",
+            proof_age_ms=det_age_ms,
+            rejection_reason=reuse_reason,
+            duration_saved_estimate_ms=0.0,
+        )
         log(
             "info",
             "post_follow_return_ct_post_back_det_reuse_rejected",
@@ -38038,6 +38060,30 @@ def post_follow_controlled_return_to_followers_list(
             reject_reason=reuse_reason,
             method="compact_safe_back_then_list",
             duration_saved_estimate_ms=0.0,
+        )
+
+        nav_ctx2 = dict(nav_ctx)
+        nav_ctx2["det"] = last_det
+        try:
+            nav2 = observe_instagram_state(
+                d,
+                expected_package=pkg,
+                last_known_state=NavigationEngineState.CANDIDATE_PROFILE.value,
+                context=nav_ctx2,
+            )
+        except Exception as e2:
+            nav2 = {"state": "UNKNOWN", "confidence": 0.0, "reason": str(e2)}
+        log(
+            "info",
+            "post_follow_return_ct_state_observed",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            attempt=round_idx,
+            observe_sequence="after_safe_back",
+            navigation_state=str(nav2.get("state") or ""),
+            navigation_confidence=float(nav2.get("confidence") or 0.0),
+            navigation_reason=str(nav2.get("reason") or ""),
+            xml_guess=str(nav2.get("xml_guess") or ""),
         )
 
         ok_after, det_after = _list_confirmed()

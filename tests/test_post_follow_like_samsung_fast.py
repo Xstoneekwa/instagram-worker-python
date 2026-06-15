@@ -4370,7 +4370,7 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
                 "reason": "det_is_followers_list",
                 "xml_guess": "likely_profile",
             },
-        ), mock.patch.object(
+        ) as observe, mock.patch.object(
             nav, "verify_app_foreground", return_value=True
         ), mock.patch.object(
             nav, "log", side_effect=lambda level, event, **kw: logs.append((str(event), dict(kw)))
@@ -4393,7 +4393,20 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
         self.assertEqual(how, "compact_safe_back_then_list")
         self.assertIsNone(fail)
         self.assertEqual(detect.call_count, 4)
+        self.assertEqual(observe.call_count, 1)
         device.press.assert_called_once_with("back")
+        fast_reused = [
+            kw for event, kw in logs if event == "return_ct_fast_proof_reused"
+        ]
+        self.assertTrue(fast_reused)
+        self.assertEqual(fast_reused[-1].get("expected_ct_username"), "reveaustral")
+        self.assertEqual(fast_reused[-1].get("action_bar_title"), "reveaustral")
+        self.assertTrue(fast_reused[-1].get("is_followers_list"))
+        self.assertEqual(fast_reused[-1].get("rejection_reason"), "")
+        self.assertIn(
+            "return_ct_wait_reduced_after_explicit_ct_proof",
+            [event for event, _kw in logs],
+        )
         reused = [
             kw
             for event, kw in logs
@@ -4423,6 +4436,25 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
             (
                 "ambiguous",
                 {"is_followers_list": False, "action_bar_title": "reveaustral"},
+                None,
+            ),
+            (
+                "own_unified_only",
+                {
+                    "is_followers_list": True,
+                    "action_bar_title": "",
+                    "open_detection_method": "own_unified_follow_list",
+                    "own_unified_followers_list_detected": True,
+                },
+                None,
+            ),
+            (
+                "followers_list_only",
+                {
+                    "is_followers_list": True,
+                    "action_bar_title": "",
+                    "current_screen_guess": "followers_list",
+                },
                 None,
             ),
         ]
@@ -4519,6 +4551,13 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
                 self.assertEqual(how, "compact_safe_back_then_list")
                 self.assertIsNone(fail)
                 self.assertEqual(detect.call_count, 5)
+                fast_rejected = [
+                    kw for event, kw in logs if event == "return_ct_fast_proof_rejected"
+                ]
+                self.assertTrue(fast_rejected)
+                if label == "ambiguous":
+                    self.assertFalse(fast_rejected[-1].get("is_followers_list"))
+                self.assertTrue(fast_rejected[-1].get("rejection_reason"))
                 rejected = [
                     kw
                     for event, kw in logs
@@ -4594,6 +4633,7 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
             "post_follow_return_ct_compact_strong_list_confirmed",
             events,
         )
+        self.assertIn("return_ct_fast_proof_rejected", events)
 
     def test_return_ct_ambiguous_initial_list_succeeds_only_after_post_back_ct_proof(self) -> None:
         device = mock.MagicMock()
