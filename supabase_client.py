@@ -3290,6 +3290,8 @@ def mark_followbacks_from_seen_followers(
             "duration_ms": duration_ms,
         }
         log("info", "followback_memory_mark_completed", **out)
+        if matched_usernames:
+            out["target_followbacks_sync"] = sync_account_target_followbacks_count(aid)
         return out
     except Exception as exc:
         duration_ms = round((datetime.now(timezone.utc) - started).total_seconds() * 1000.0, 2)
@@ -3307,6 +3309,50 @@ def mark_followbacks_from_seen_followers(
         }
         log("warning", "followback_memory_mark_failed", **out)
         return out
+
+
+def sync_target_followbacks_count(target_id: str) -> dict[str, Any]:
+    """Recompute ig_targets.followbacks_count from ig_interacted_users and certify metrics."""
+    tid = str(target_id or "").strip()
+    if not tid:
+        return {"ok": False, "reason": "missing_target_id"}
+    try:
+        row = call_rpc("sync_ig_target_followbacks_count", {"p_target_id": tid})
+    except Exception as exc:
+        log(
+            "warning",
+            "sync_target_followbacks_count_failed",
+            target_id=tid,
+            error=str(exc)[:300],
+        )
+        return {"ok": False, "target_id": tid, "error": str(exc)[:300]}
+    if isinstance(row, dict):
+        return row
+    if isinstance(row, list) and row and isinstance(row[0], dict):
+        return row[0]
+    return {"ok": False, "target_id": tid, "error": "unexpected_rpc_response"}
+
+
+def sync_account_target_followbacks_count(account_id: str) -> dict[str, Any]:
+    """Batch sync followbacks_count for all CT rows on an account with follows sent."""
+    aid = str(account_id or "").strip()
+    if not aid:
+        return {"ok": False, "reason": "missing_account_id"}
+    try:
+        row = call_rpc("sync_ig_account_target_followbacks", {"p_account_id": aid})
+    except Exception as exc:
+        log(
+            "warning",
+            "sync_account_target_followbacks_failed",
+            account_id=aid,
+            error=str(exc)[:300],
+        )
+        return {"ok": False, "account_id": aid, "error": str(exc)[:300]}
+    if isinstance(row, dict):
+        return row
+    if isinstance(row, list) and row and isinstance(row[0], dict):
+        return row[0]
+    return {"ok": False, "account_id": aid, "error": "unexpected_rpc_response"}
 
 
 def upsert_account_follower_seen_scan(

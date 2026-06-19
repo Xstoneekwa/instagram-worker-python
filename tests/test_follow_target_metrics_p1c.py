@@ -307,6 +307,47 @@ class FollowTargetMetricsP1cTest(unittest.TestCase):
             "target_exhausted",
         ])
 
+    def test_sync_followbacks_migration_contract(self) -> None:
+        root = pathlib.Path(__file__).resolve().parents[1]
+        sql = (root / "supabase/migrations/20260615190000_sync_target_followbacks_count.sql").read_text()
+        for fragment in [
+            "sync_ig_target_followbacks_count",
+            "sync_ig_account_target_followbacks",
+            "backfill_ig_target_followbacks",
+            "followbacks_metrics_reliable_at",
+            "source_target_id",
+            "source_target_username",
+        ]:
+            self.assertIn(fragment, sql)
+
+    def test_sync_target_followbacks_count_calls_rpc(self) -> None:
+        with patch.object(
+            supabase_client,
+            "call_rpc",
+            return_value={"ok": True, "target_id": "target-id", "followbacks_count": 3},
+        ) as rpc:
+            out = supabase_client.sync_target_followbacks_count("target-id")
+        self.assertTrue(out["ok"])
+        rpc.assert_called_once_with(
+            "sync_ig_target_followbacks_count",
+            {"p_target_id": "target-id"},
+        )
+
+    def test_mark_followbacks_triggers_account_sync_when_matches(self) -> None:
+        with (
+            patch.object(supabase_client, "_request_json_tolerate_unknown_columns") as patch_rows,
+            patch.object(supabase_client, "sync_account_target_followbacks_count", return_value={"ok": True, "synced_targets": 1}) as sync,
+        ):
+            patch_rows.return_value = [{"id": "iu-1", "username": "follower_one"}]
+            out = supabase_client.mark_followbacks_from_seen_followers(
+                "acct",
+                ["follower_one"],
+                source="followers_scan",
+            )
+        self.assertTrue(out["ok"])
+        sync.assert_called_once_with("acct")
+        self.assertEqual(out["target_followbacks_sync"]["synced_targets"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
