@@ -102,7 +102,7 @@ begin
   end if;
 
   for v_target in
-    select distinct t.id
+    select t.id
     from public.ig_targets t
     where t.account_id = p_account_id
       and coalesce(t.follows_sent_count, 0) > 0
@@ -124,7 +124,7 @@ begin
             )
           )
       )
-    order by t.id
+    order by t.follows_sent_count desc, t.id
   loop
     v_one := public.sync_ig_target_followbacks_count(v_target.id, false);
     v_results := v_results || jsonb_build_array(v_one);
@@ -164,7 +164,7 @@ declare
   v_limit integer := greatest(1, least(coalesce(p_limit, 500), 5000));
 begin
   for v_target in
-    select distinct t.id
+    select t.id
     from public.ig_targets t
     where coalesce(t.follows_sent_count, 0) > 0
       and t.followbacks_metrics_reliable_at is null
