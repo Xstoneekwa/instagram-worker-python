@@ -312,41 +312,99 @@ class FollowTargetMetricsP1cTest(unittest.TestCase):
         sql = (root / "supabase/migrations/20260615190000_sync_target_followbacks_count.sql").read_text()
         for fragment in [
             "sync_ig_target_followbacks_count",
+            "p_certify_zero_coverage",
             "sync_ig_account_target_followbacks",
             "backfill_ig_target_followbacks",
-            "followbacks_metrics_reliable_at",
+            "certified_targets",
+            "no_positive_attribution_without_scan_coverage",
+            "Positive-only",
             "source_target_id",
             "source_target_username",
         ]:
             self.assertIn(fragment, sql)
+        self.assertNotIn("followbacks_metrics_reliable_at = v_now\n  where id = p_target_id;\n\n  return jsonb_build_object(\n    'ok', true,\n    'target_id', p_target_id,\n    'account_id', v_target.account_id,\n    'normalized_username', v_target.normalized_username,\n    'follows_sent_count', v_target.follows_sent_count,\n    'followbacks_count', v_count,\n    'followbacks_metrics_reliable_at', v_now\n  );\nend;", sql)
 
     def test_sync_target_followbacks_count_calls_rpc(self) -> None:
         with patch.object(
             supabase_client,
             "call_rpc",
-            return_value={"ok": True, "target_id": "target-id", "followbacks_count": 3},
+            return_value={"ok": True, "target_id": "target-id", "followbacks_count": 3, "certified": True},
         ) as rpc:
             out = supabase_client.sync_target_followbacks_count("target-id")
         self.assertTrue(out["ok"])
         rpc.assert_called_once_with(
             "sync_ig_target_followbacks_count",
-            {"p_target_id": "target-id"},
+            {"p_target_id": "target-id", "p_certify_zero_coverage": False},
         )
 
-    def test_mark_followbacks_triggers_account_sync_when_matches(self) -> None:
+    def test_sync_target_followbacks_count_skips_zero_without_coverage(self) -> None:
+        with patch.object(
+            supabase_client,
+            "call_rpc",
+            return_value={
+                "ok": True,
+                "target_id": "target-id",
+                "followbacks_count": 0,
+                "certified": False,
+                "reason": "no_positive_attribution_without_scan_coverage",
+            },
+        ):
+            out = supabase_client.sync_target_followbacks_count("target-id")
+        self.assertFalse(out.get("certified"))
+
+    def test_mark_followbacks_syncs_only_touched_targets(self) -> None:
         with (
             patch.object(supabase_client, "_request_json_tolerate_unknown_columns") as patch_rows,
-            patch.object(supabase_client, "sync_account_target_followbacks_count", return_value={"ok": True, "synced_targets": 1}) as sync,
+            patch.object(
+                supabase_client,
+                "sync_touched_target_followbacks_from_mark",
+                return_value={"ok": True, "touched_targets": 1, "certified_targets": 1},
+            ) as sync,
         ):
-            patch_rows.return_value = [{"id": "iu-1", "username": "follower_one"}]
+            patch_rows.return_value = [{
+                "id": "iu-1",
+                "username": "follower_one",
+                "source_target_id": "target-1",
+            }]
             out = supabase_client.mark_followbacks_from_seen_followers(
                 "acct",
                 ["follower_one"],
                 source="followers_scan",
             )
         self.assertTrue(out["ok"])
-        sync.assert_called_once_with("acct")
-        self.assertEqual(out["target_followbacks_sync"]["synced_targets"], 1)
+        sync.assert_called_once()
+        self.assertEqual(sync.call_args.args[0], "acct")
+        self.assertEqual(out["target_followbacks_sync"]["certified_targets"], 1)
+
+    def test_resolve_touch_target_ids_scoped_to_account(self) -> None:
+        with patch.object(
+            supabase_client,
+            "_request_json",
+            return_value=[{"id": "target-lookup", "normalized_username": "ct_user"}],
+        ) as lookup:
+            target_ids = supabase_client._resolve_touch_target_ids_from_interacted_rows(
+                "acct-a",
+                [{"source_target_username": "ct_user"}],
+            )
+        self.assertEqual(target_ids, ["target-lookup"])
+        self.assertEqual(lookup.call_args.kwargs["query"]["account_id"], "eq.acct-a")
+
+    def test_sync_touched_target_followbacks_does_not_certify_unrelated_targets(self) -> None:
+        with patch.object(
+            supabase_client,
+            "sync_target_followbacks_count",
+            side_effect=[
+                {"ok": True, "target_id": "target-1", "certified": True, "followbacks_count": 2},
+                {"ok": True, "target_id": "target-2", "certified": False, "followbacks_count": 0},
+            ],
+        ) as sync_one:
+            out = supabase_client.sync_touched_target_followbacks_count(
+                "acct",
+                ["target-1", "target-2"],
+            )
+        self.assertEqual(sync_one.call_count, 2)
+        self.assertEqual(out["touched_targets"], 2)
+        self.assertEqual(out["certified_targets"], 1)
 
 
 if __name__ == "__main__":

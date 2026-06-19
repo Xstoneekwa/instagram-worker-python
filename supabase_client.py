@@ -3230,13 +3230,14 @@ def mark_followbacks_from_seen_followers(
 
     now = _utc_now_iso()
     matched_usernames: set[str] = set()
+    touched_rows: list[dict[str, Any]] = []
     chunk_size = 100
     try:
         for i in range(0, len(keys), chunk_size):
             chunk = keys[i : i + chunk_size]
             in_clause = ",".join(chunk)
             base_query = {
-                "select": "id,username",
+                "select": "id,username,source_target_id,source_target_username",
                 "account_id": f"eq.{aid}",
                 "username": f"in.({in_clause})",
                 "followed_by_bot": "eq.true",
@@ -3260,6 +3261,7 @@ def mark_followbacks_from_seen_followers(
                         username = _canonical_interaction_username(str(row.get("username") or ""))
                         if username:
                             matched_usernames.add(username)
+                        touched_rows.append(row)
 
             rows = _request_json_tolerate_unknown_columns(
                 "PATCH",
@@ -3277,6 +3279,7 @@ def mark_followbacks_from_seen_followers(
                         username = _canonical_interaction_username(str(row.get("username") or ""))
                         if username:
                             matched_usernames.add(username)
+                        touched_rows.append(row)
         duration_ms = round((datetime.now(timezone.utc) - started).total_seconds() * 1000.0, 2)
         out = {
             "ok": True,
@@ -3291,7 +3294,7 @@ def mark_followbacks_from_seen_followers(
         }
         log("info", "followback_memory_mark_completed", **out)
         if matched_usernames:
-            out["target_followbacks_sync"] = sync_account_target_followbacks_count(aid)
+            out["target_followbacks_sync"] = sync_touched_target_followbacks_from_mark(aid, touched_rows)
         return out
     except Exception as exc:
         duration_ms = round((datetime.now(timezone.utc) - started).total_seconds() * 1000.0, 2)
@@ -3311,13 +3314,60 @@ def mark_followbacks_from_seen_followers(
         return out
 
 
-def sync_target_followbacks_count(target_id: str) -> dict[str, Any]:
-    """Recompute ig_targets.followbacks_count from ig_interacted_users and certify metrics."""
+def _resolve_touch_target_ids_from_interacted_rows(
+    account_id: str,
+    rows: list[dict[str, Any]],
+) -> list[str]:
+    aid = str(account_id or "").strip()
+    target_ids: set[str] = set()
+    username_fallbacks: set[str] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        tid = str(row.get("source_target_id") or "").strip()
+        if tid:
+            target_ids.add(tid)
+            continue
+        ct_username = _canonical_interaction_username(str(row.get("source_target_username") or ""))
+        if ct_username:
+            username_fallbacks.add(ct_username)
+    if username_fallbacks and aid:
+        in_clause = ",".join(sorted(username_fallbacks))
+        lookup_rows = _request_json(
+            "GET",
+            "ig_targets",
+            query={
+                "select": "id,normalized_username",
+                "account_id": f"eq.{aid}",
+                "normalized_username": f"in.({in_clause})",
+            },
+        )
+        if isinstance(lookup_rows, list):
+            for target in lookup_rows:
+                if isinstance(target, dict):
+                    lookup_id = str(target.get("id") or "").strip()
+                    if lookup_id:
+                        target_ids.add(lookup_id)
+    return sorted(target_ids)
+
+
+def sync_target_followbacks_count(
+    target_id: str,
+    *,
+    certify_zero_coverage: bool = False,
+) -> dict[str, Any]:
+    """Recompute ig_targets.followbacks_count; certifies only when attribution is positive unless explicitly requested."""
     tid = str(target_id or "").strip()
     if not tid:
         return {"ok": False, "reason": "missing_target_id"}
     try:
-        row = call_rpc("sync_ig_target_followbacks_count", {"p_target_id": tid})
+        row = call_rpc(
+            "sync_ig_target_followbacks_count",
+            {
+                "p_target_id": tid,
+                "p_certify_zero_coverage": certify_zero_coverage,
+            },
+        )
     except Exception as exc:
         log(
             "warning",
@@ -3333,8 +3383,48 @@ def sync_target_followbacks_count(target_id: str) -> dict[str, Any]:
     return {"ok": False, "target_id": tid, "error": "unexpected_rpc_response"}
 
 
+def sync_touched_target_followbacks_count(
+    account_id: str,
+    target_ids: list[str],
+    *,
+    certify_zero_coverage: bool = False,
+) -> dict[str, Any]:
+    aid = str(account_id or "").strip()
+    unique_ids = sorted({str(tid or "").strip() for tid in target_ids if str(tid or "").strip()})
+    results: list[dict[str, Any]] = []
+    certified = 0
+    for tid in unique_ids:
+        out = sync_target_followbacks_count(tid, certify_zero_coverage=certify_zero_coverage)
+        results.append(out)
+        if out.get("certified") is True:
+            certified += 1
+    return {
+        "ok": True,
+        "account_id": aid,
+        "touched_targets": len(unique_ids),
+        "certified_targets": certified,
+        "results": results,
+    }
+
+
+def sync_touched_target_followbacks_from_mark(
+    account_id: str,
+    touched_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    target_ids = _resolve_touch_target_ids_from_interacted_rows(account_id, touched_rows)
+    if not target_ids:
+        return {
+            "ok": True,
+            "account_id": account_id,
+            "touched_targets": 0,
+            "certified_targets": 0,
+            "results": [],
+        }
+    return sync_touched_target_followbacks_count(account_id, target_ids)
+
+
 def sync_account_target_followbacks_count(account_id: str) -> dict[str, Any]:
-    """Batch sync followbacks_count for all CT rows on an account with follows sent."""
+    """Positive-only account sync via RPC; never certifies zero-followback CT rows without coverage proof."""
     aid = str(account_id or "").strip()
     if not aid:
         return {"ok": False, "reason": "missing_account_id"}
