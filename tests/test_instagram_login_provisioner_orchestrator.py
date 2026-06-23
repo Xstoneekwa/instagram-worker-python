@@ -2627,16 +2627,20 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         publisher = Mock(return_value={"published": True})
 
         for xml, expected_reason in (
-            (NEEDS_2FA_XML, "deferred_until_dashboard"),
-            (CHECKPOINT_XML, "deferred_until_dashboard"),
+            (NEEDS_2FA_XML, "published_connected"),
+            (CHECKPOINT_XML, "published_connected"),
             (LOGIN_FAILED_XML, "deferred_until_dashboard"),
         ):
             with self.subTest(xml=xml):
                 result = self._run_login_form(xml, publisher=publisher, publish_enabled=True)
-                self.assertFalse(result.published)
-                self.assertEqual(result.publish_reason, expected_reason)
+                if expected_reason == "published_connected":
+                    self.assertTrue(result.published)
+                    self.assertEqual(result.publish_reason, expected_reason)
+                else:
+                    self.assertFalse(result.published)
+                    self.assertEqual(result.publish_reason, expected_reason)
 
-        publisher.assert_not_called()
+        self.assertEqual(publisher.call_count, 2)
 
     def test_publish_missing_account_id_skips_publisher(self) -> None:
         publisher = Mock(return_value={"published": True})

@@ -589,6 +589,97 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
         audit.assert_called_once()
         self.assertEqual(audit.call_args.kwargs["action_type"], "manual_run_failed")
 
+    def test_finalize_subprocess_verification_pending_keeps_request_active(self) -> None:
+        cfg = consumer.DispatcherConfig(
+            enabled=True,
+            health_only=False,
+            launch_enabled=True,
+            worker_id="run-dispatcher:test",
+            poll_seconds=5.0,
+            lease_seconds=120,
+            heartbeat_seconds=20.0,
+            allowed_run_types=["login_provisioning"],
+            test_account_ids=set(),
+            subprocess_timeout_seconds=7200,
+            require_assignment=False,
+            enforce_assignment_window=False,
+        )
+        request = {
+            "id": TEST_REQUEST_ID,
+            "account_id": TEST_ACCOUNT_ID,
+            "run_id": TEST_RUN_ID,
+            "status": "running",
+        }
+        summary = {
+            "run_id": TEST_RUN_ID,
+            "final_outcome": "verification_pending",
+            "dashboard_action_type": "enter_email_verification_code",
+            "final_login_status": "verification_pending",
+            "final_provisioning_status": "login_verification_pending",
+        }
+        with (
+            patch.object(consumer, "get_account_run_request", return_value=request),
+            patch.object(consumer, "complete_account_run_request") as complete,
+            patch.object(consumer, "_reconcile_linked_run", return_value={"reconciled": True}) as reconcile,
+            patch.object(consumer, "_safe_login_provisioner_summary_for_audit", return_value=summary),
+            patch.object(consumer, "_audit") as audit,
+        ):
+            consumer._finalize_manual_run_after_subprocess(
+                cfg,
+                request_id=TEST_REQUEST_ID,
+                account_id=TEST_ACCOUNT_ID,
+                exit_code=1,
+            )
+        complete.assert_not_called()
+        reconcile.assert_not_called()
+        audit.assert_called_once()
+        self.assertEqual(audit.call_args.kwargs["action_type"], "manual_run_verification_paused")
+        self.assertEqual(audit.call_args.kwargs["payload"]["login_provisioner_summary"]["final_outcome"], "verification_pending")
+
+    def test_finalize_subprocess_real_failure_still_marks_failed(self) -> None:
+        cfg = consumer.DispatcherConfig(
+            enabled=True,
+            health_only=False,
+            launch_enabled=True,
+            worker_id="run-dispatcher:test",
+            poll_seconds=5.0,
+            lease_seconds=120,
+            heartbeat_seconds=20.0,
+            allowed_run_types=["login_provisioning"],
+            test_account_ids=set(),
+            subprocess_timeout_seconds=7200,
+            require_assignment=False,
+            enforce_assignment_window=False,
+        )
+        request = {
+            "id": TEST_REQUEST_ID,
+            "account_id": TEST_ACCOUNT_ID,
+            "run_id": TEST_RUN_ID,
+            "status": "running",
+        }
+        summary = {
+            "run_id": TEST_RUN_ID,
+            "final_outcome": "wrong_app_package",
+            "submit_executed": False,
+        }
+        with (
+            patch.object(consumer, "get_account_run_request", return_value=request),
+            patch.object(consumer, "complete_account_run_request") as complete,
+            patch.object(consumer, "_reconcile_linked_run", return_value={"reconciled": True}) as reconcile,
+            patch.object(consumer, "_safe_login_provisioner_summary_for_audit", return_value=summary),
+            patch.object(consumer, "_audit") as audit,
+        ):
+            consumer._finalize_manual_run_after_subprocess(
+                cfg,
+                request_id=TEST_REQUEST_ID,
+                account_id=TEST_ACCOUNT_ID,
+                exit_code=1,
+            )
+        complete.assert_called_once()
+        self.assertEqual(complete.call_args.args[2], "failed")
+        reconcile.assert_called_once()
+        self.assertEqual(audit.call_args.kwargs["action_type"], "manual_run_failed")
+
     def test_finalize_subprocess_nonzero_attaches_login_provisioner_summary_when_available(self) -> None:
         cfg = consumer.DispatcherConfig(
             enabled=True,

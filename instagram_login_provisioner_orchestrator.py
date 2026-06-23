@@ -4617,6 +4617,11 @@ def _finalize(
         final_login_status=final_login_status,
         account_id=account_id,
         extra_metadata=extra_metadata or {},
+    ) or _verification_status_publishable(
+        should_publish_status=should_publish_status,
+        final_outcome=final_outcome,
+        final_login_status=final_login_status,
+        account_id=account_id,
     )
     effective_should_publish = bool(should_publish_status) and publish_allowed
     publish_reason = _publish_skip_reason(
@@ -4818,6 +4823,26 @@ def _connected_status_publishable(
         "logout_fallback",
     }
     return bool(selected_route in safe_routes or router_decision or extra_metadata.get("central_orchestrator_used"))
+
+
+def _verification_status_publishable(
+    *,
+    should_publish_status: bool,
+    final_outcome: str,
+    final_login_status: str | None,
+    account_id: str,
+) -> bool:
+    if not should_publish_status or not str(account_id or "").strip():
+        return False
+    outcome = str(final_outcome or "").strip().lower()
+    if outcome not in {
+        LoginProbeOutcome.VERIFICATION_PENDING.value,
+        LoginProbeOutcome.NEEDS_2FA.value,
+        LoginProbeOutcome.CHECKPOINT.value,
+        LoginProbeOutcome.UNSUPPORTED_POST_SUBMIT_CHALLENGE.value,
+    }:
+        return False
+    return bool(str(final_login_status or "").strip())
 
 
 def _publish_skip_reason(

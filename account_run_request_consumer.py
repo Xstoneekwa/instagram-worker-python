@@ -525,8 +525,43 @@ def _safe_login_provisioner_summary_for_audit(run_id: str | None) -> dict[str, A
         "username_field_focused_before_input",
         "password_field_focused_before_input",
         "warnings",
+        "dashboard_action_type",
+        "final_login_status",
+        "final_provisioning_status",
+        "final_onboarding_status",
+        "email_code_challenge_detected",
+        "challenge_type",
     }
     return {key: summary.get(key) for key in allowed_keys if key in summary}
+
+
+LOGIN_VERIFICATION_PAUSE_OUTCOMES = frozenset(
+    {
+        "verification_pending",
+        "needs_2fa",
+        "checkpoint",
+        "unsupported_post_submit_challenge",
+    }
+)
+
+LOGIN_VERIFICATION_PAUSE_ACTIONS = frozenset(
+    {
+        "enter_email_verification_code",
+        "complete_two_factor",
+        "resolve_checkpoint",
+        "review_login_challenge",
+    }
+)
+
+
+def _is_login_verification_pause_summary(summary: dict[str, Any]) -> bool:
+    if not summary:
+        return False
+    final_outcome = str(summary.get("final_outcome") or "").strip().lower()
+    if final_outcome in LOGIN_VERIFICATION_PAUSE_OUTCOMES:
+        return True
+    dashboard_action_type = str(summary.get("dashboard_action_type") or "").strip()
+    return dashboard_action_type in LOGIN_VERIFICATION_PAUSE_ACTIONS
 
 
 def _safe_complete_account_run_request(
@@ -700,6 +735,33 @@ def _finalize_manual_run_after_subprocess(
         )
         return
 
+    summary = _safe_login_provisioner_summary_for_audit(run_id or request_id)
+    if _is_login_verification_pause_summary(summary):
+        _audit(
+            account_id=account_id,
+            action_type="manual_run_verification_paused",
+            status="paused",
+            message="Login provisioning paused awaiting client verification.",
+            run_id=run_id,
+            payload={
+                "request_id": request_id,
+                "exit_code": exit_code,
+                **({"login_provisioner_summary": summary} if summary else {}),
+            },
+        )
+        log(
+            "info",
+            "manual_run_verification_paused",
+            account_id=account_id,
+            request_id=request_id,
+            run_id=run_id,
+            worker_id=cfg.worker_id,
+            exit_code=exit_code,
+            final_outcome=str(summary.get("final_outcome") or ""),
+            dashboard_action_type=str(summary.get("dashboard_action_type") or ""),
+        )
+        return
+
     _safe_complete_account_run_request(
         request_id,
         cfg.worker_id,
@@ -714,7 +776,6 @@ def _finalize_manual_run_after_subprocess(
         request_id=request_id,
         exit_code=exit_code,
     )
-    summary = _safe_login_provisioner_summary_for_audit(run_id or request_id)
     _audit(
         account_id=account_id,
         action_type="manual_run_failed",
