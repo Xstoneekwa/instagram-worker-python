@@ -39,6 +39,7 @@ import supabase_client
 
 
 LOGIN_RUN_TYPES = frozenset({"login_provisioning", "login_email_code_resume"})
+ORPHAN_RECOVERY_RUN_TYPE = "login_orphan_challenge_recovery"
 
 
 @dataclass
@@ -105,7 +106,7 @@ def load_dispatcher_config() -> DispatcherConfig:
     configured_worker_id = _env_str("RUN_CONTROL_DISPATCHER_WORKER_ID", default_worker_id)
     allowed_raw = _env_str(
         "RUN_CONTROL_DISPATCHER_ALLOWED_RUN_TYPES",
-        "account_session,outreach_session,login_provisioning,login_email_code_resume",
+        "account_session,outreach_session,login_provisioning,login_email_code_resume,login_orphan_challenge_recovery",
     )
     allowed = [part.strip().lower() for part in allowed_raw.split(",") if part.strip()]
     test_ids_raw = _env_str("RUN_CONTROL_DISPATCHER_TEST_ACCOUNT_IDS", "")
@@ -340,6 +341,10 @@ def _is_login_run_type(run_type: str) -> bool:
     return str(run_type or "").strip().lower() in LOGIN_RUN_TYPES
 
 
+def _is_orphan_recovery_run_type(run_type: str) -> bool:
+    return str(run_type or "").strip().lower() == ORPHAN_RECOVERY_RUN_TYPE
+
+
 def _load_expected_username(account_id: str) -> str:
     account = supabase_client.load_account(account_id=account_id)
     if not account:
@@ -389,6 +394,47 @@ def _build_login_provisioner_command(
     return cmd
 
 
+def _build_orphan_recovery_command(
+    account_id: str,
+    request_id: str,
+    *,
+    device_serial: str | None = None,
+    package_name: str | None = None,
+    app_instance_id: str | None = None,
+    assignment_id: str | None = None,
+    credentials_version: int | None = None,
+    assignment_updated_at: str | None = None,
+) -> list[str]:
+    cmd = [
+        sys.executable,
+        "-m",
+        "login_orphan_challenge_recovery_cli",
+        "--account-id",
+        account_id,
+        "--run-id",
+        request_id,
+        "--json",
+    ]
+    serial = str(device_serial or "").strip()
+    if serial:
+        cmd.extend(["--device-serial", serial])
+    package = str(package_name or "").strip()
+    if package:
+        cmd.extend(["--package-name", package])
+    app_instance = str(app_instance_id or "").strip()
+    if app_instance:
+        cmd.extend(["--expected-app-instance-id", app_instance])
+    assignment = str(assignment_id or "").strip()
+    if assignment:
+        cmd.extend(["--assignment-id", assignment])
+    if credentials_version is not None:
+        cmd.extend(["--credentials-version", str(int(credentials_version))])
+    updated_at = str(assignment_updated_at or "").strip()
+    if updated_at:
+        cmd.extend(["--assignment-updated-at", updated_at])
+    return cmd
+
+
 def _build_runner_command(
     account_id: str,
     run_type: str,
@@ -408,6 +454,19 @@ def _build_runner_command(
             package_name=package_name,
             app_instance_id=app_instance_id,
             metadata_safe=metadata_safe,
+        )
+    if _is_orphan_recovery_run_type(run_type):
+        meta = dict(metadata_safe or {})
+        credentials_version = meta.get("credentials_version")
+        return _build_orphan_recovery_command(
+            account_id,
+            request_id,
+            device_serial=device_serial,
+            package_name=package_name,
+            app_instance_id=app_instance_id,
+            assignment_id=str(meta.get("assignment_id") or ""),
+            credentials_version=int(credentials_version) if credentials_version is not None else None,
+            assignment_updated_at=str(meta.get("assignment_updated_at") or ""),
         )
     runner_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "runner.py")
     cmd = [
@@ -553,6 +612,23 @@ LOGIN_VERIFICATION_PAUSE_ACTIONS = frozenset(
     }
 )
 
+LOGIN_PROVISIONING_BLOCKED_REASONS = frozenset(
+    {
+        "orphan_challenge_provenance_weak",
+        "pre_input_challenge_orphan",
+        "historical_provenance_partial",
+        "historical_app_instance_mismatch",
+        "historical_assignment_mismatch",
+        "historical_run_mismatch",
+        "historical_challenge_expired",
+        "assignment_changed_since_challenge",
+    }
+)
+
+CLIENT_SAFE_ORPHAN_CHALLENGE_MESSAGE = (
+    "La connexion nécessite une vérification de sécurité avant de pouvoir continuer."
+)
+
 
 def _is_login_verification_pause_summary(summary: dict[str, Any]) -> bool:
     if not summary:
@@ -562,6 +638,15 @@ def _is_login_verification_pause_summary(summary: dict[str, Any]) -> bool:
         return True
     dashboard_action_type = str(summary.get("dashboard_action_type") or "").strip()
     return dashboard_action_type in LOGIN_VERIFICATION_PAUSE_ACTIONS
+
+
+def _is_login_provisioning_blocked_summary(summary: dict[str, Any]) -> bool:
+    if not summary:
+        return False
+    if str(summary.get("final_outcome") or "").strip().lower() != "blocked":
+        return False
+    reason = str(summary.get("reason") or summary.get("failure_reason") or "").strip().lower()
+    return reason in LOGIN_PROVISIONING_BLOCKED_REASONS or reason.startswith("orphan_challenge")
 
 
 def _safe_complete_account_run_request(
@@ -665,6 +750,11 @@ def _finalize_manual_run_after_subprocess(
 ) -> None:
     latest = get_account_run_request(request_id) or request_snapshot or {}
     run_id = str(latest.get("run_id") or "").strip() or None
+    run_type = str(
+        latest.get("requested_run_type")
+        or (request_snapshot or {}).get("requested_run_type")
+        or ""
+    ).strip().lower()
     canceled = bool(latest.get("cancel_requested_at")) or str(latest.get("status") or "").strip().lower() == "canceled"
 
     if timed_out:
@@ -693,6 +783,23 @@ def _finalize_manual_run_after_subprocess(
         return
 
     if exit_code == 0:
+        if _is_orphan_recovery_run_type(run_type):
+            _safe_complete_account_run_request(
+                request_id,
+                cfg.worker_id,
+                "completed",
+                error_code="login_surface_restored",
+                error_message_safe="Login surface restored.",
+            )
+            _audit(
+                account_id=account_id,
+                action_type="login_orphan_recovery_completed",
+                status="success",
+                message="Orphan login challenge recovery restored login surface.",
+                run_id=run_id,
+                payload={"request_id": request_id, "exit_code": exit_code, "recovery_state": "login_surface_restored"},
+            )
+            return
         _safe_complete_account_run_request(request_id, cfg.worker_id, "completed")
         _reconcile_linked_run(
             account_id=account_id,
@@ -736,6 +843,31 @@ def _finalize_manual_run_after_subprocess(
         return
 
     summary = _safe_login_provisioner_summary_for_audit(run_id or request_id)
+    if _is_orphan_recovery_run_type(run_type):
+        from login_orphan_recovery_state import resolve_orphan_recovery_state
+
+        recovery_state = resolve_orphan_recovery_state(account_id)
+        terminal_status = "blocked" if recovery_state.get("state") != "login_surface_restored" else "completed"
+        _safe_complete_account_run_request(
+            request_id,
+            cfg.worker_id,
+            terminal_status,
+            error_code=str(recovery_state.get("state") or "recovery_blocked"),
+            error_message_safe="Orphan login challenge recovery stopped without restoring login surface.",
+        )
+        _audit(
+            account_id=account_id,
+            action_type="login_orphan_recovery_blocked",
+            status="blocked",
+            message="Orphan login challenge recovery blocked.",
+            run_id=run_id,
+            payload={
+                "request_id": request_id,
+                "exit_code": exit_code,
+                "recovery_state": recovery_state,
+            },
+        )
+        return
     if _is_login_verification_pause_summary(summary):
         _audit(
             account_id=account_id,
@@ -759,6 +891,37 @@ def _finalize_manual_run_after_subprocess(
             exit_code=exit_code,
             final_outcome=str(summary.get("final_outcome") or ""),
             dashboard_action_type=str(summary.get("dashboard_action_type") or ""),
+        )
+        return
+
+    if _is_login_provisioning_blocked_summary(summary):
+        blocked_reason = str(summary.get("failure_reason") or summary.get("reason") or "orphan_challenge_provenance_weak")
+        _safe_complete_account_run_request(
+            request_id,
+            cfg.worker_id,
+            "blocked",
+            error_code="orphan_challenge_provenance_weak",
+            error_message_safe=CLIENT_SAFE_ORPHAN_CHALLENGE_MESSAGE,
+        )
+        _reconcile_linked_run(
+            account_id=account_id,
+            run_id=run_id,
+            terminal_status="failed",
+            request_id=request_id,
+            exit_code=exit_code,
+        )
+        _audit(
+            account_id=account_id,
+            action_type="manual_run_blocked",
+            status="blocked",
+            message="Login provisioning blocked pending canonical challenge recovery.",
+            run_id=run_id,
+            payload={
+                "request_id": request_id,
+                "exit_code": exit_code,
+                "blocked_reason": blocked_reason,
+                **({"login_provisioner_summary": summary} if summary else {}),
+            },
         )
         return
 
@@ -907,7 +1070,7 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
     )
 
     request_metadata = dict(request.get("metadata_safe") or {})
-    if _is_login_run_type(run_type) and not adb_serial:
+    if (_is_login_run_type(run_type) or _is_orphan_recovery_run_type(run_type)) and not adb_serial:
         _safe_complete_account_run_request(
             request_id,
             cfg.worker_id,
@@ -957,7 +1120,12 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
         device_serial=adb_serial,
         package_name=dispatch_ctx.get("package_name") or dispatch_ctx.get("app_package") or dispatch_ctx.get("package"),
         app_instance_id=dispatch_ctx.get("app_instance_id"),
-        metadata_safe=request_metadata,
+        metadata_safe={
+            **request_metadata,
+            "assignment_id": dispatch_ctx.get("assignment_id"),
+            "assignment_updated_at": dispatch_ctx.get("assignment_updated_at"),
+            "credentials_version": dispatch_ctx.get("credentials_version"),
+        },
     )
     log(
         "info",
@@ -975,7 +1143,9 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
     proc = subprocess.Popen(
         cmd,
         cwd=os.path.dirname(os.path.abspath(__file__)),
-        env=_login_provisioner_env() if _is_login_run_type(run_type) else runner_subprocess_env(),
+        env=_login_provisioner_env()
+        if _is_login_run_type(run_type) or _is_orphan_recovery_run_type(run_type)
+        else runner_subprocess_env(),
     )
     exit_code, timed_out = _wait_for_subprocess(
         cfg,

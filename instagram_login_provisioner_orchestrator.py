@@ -19,7 +19,13 @@ from instagram_credentials_runtime_access import (
     credential_result_safe_dict,
     redact_credentials_payload,
 )
-from instagram_login_action_executor import execute_login_screen_decision
+from login_challenge_provenance import (
+    ChallengeProvenanceLoader,
+    default_challenge_provenance_loader,
+    evaluate_pre_input_email_challenge,
+    PROVENANCE_KIND_ACTIVE_RUN,
+)
+from login_orphan_recovery_state import ORPHAN_RECOVERY_EVENT_DETECTED, record_orphan_recovery_event
 from instagram_login_email_code_executor import execute_email_code_challenge_resume
 from instagram_login_password_form_executor import execute_login_form_credentials
 from instagram_login_screen_router import normalize_instagram_username, route_login_screen
@@ -243,6 +249,10 @@ def run_login_provisioning_flow(
     device_serial: str | None = None,
     device_id: str | None = None,
     expected_app_instance_id: str | None = None,
+    assignment_id: str | None = None,
+    credentials_version: int | None = None,
+    assignment_updated_at: str | None = None,
+    challenge_provenance_loader: ChallengeProvenanceLoader | None = None,
     timer: Timer | None = None,
     sleeper: Sleeper | None = None,
 ) -> LoginProvisioningFlowResult:
@@ -269,6 +279,9 @@ def run_login_provisioning_flow(
     safe_run_type = str(run_type or "login_provisioning").strip() or "login_provisioning"
     safe_device_id = str(device_id or "").strip() or None
     safe_expected_app_instance_id = str(expected_app_instance_id or "").strip() or None
+    safe_assignment_id = str(assignment_id or "").strip() or None
+    safe_assignment_updated_at = str(assignment_updated_at or "").strip() or None
+    provenance_loader = challenge_provenance_loader or default_challenge_provenance_loader
     safe_adb_serial_masked = _mask_adb_serial(device_serial)
     safe_operator_smoke_active_username = _normalize_identity_username(operator_smoke_active_account_username)
     max_retries = min(MAX_RETRY_ATTEMPTS, max(0, int(max_retry_attempts or 0)))
@@ -285,6 +298,8 @@ def run_login_provisioning_flow(
         "run_type": safe_run_type,
         "expected_package_name": safe_package_name,
         "expected_app_instance_id": safe_expected_app_instance_id,
+        "assignment_id": safe_assignment_id,
+        "credentials_version": credentials_version,
         "device_id": safe_device_id,
         **({"adb_serial_masked": safe_adb_serial_masked} if safe_adb_serial_masked else {}),
         "observe_current_screen_only": bool(observe_current_screen_only),
@@ -1323,6 +1338,69 @@ def run_login_provisioning_flow(
     if route.decision == "unknown_no_action":
         post_action_outcome = _post_action_outcome_from_signals(routing_signals)
         if post_action_outcome:
+            if (
+                post_action_outcome == LoginProbeOutcome.VERIFICATION_PENDING.value
+                and str(routing_signals.get("screen_type") or "") == "email_code_challenge"
+            ):
+                historical_action = provenance_loader(safe_account_id)
+                provenance = evaluate_pre_input_email_challenge(
+                    routing_signals=routing_signals,
+                    package_guard_mismatch=bool(screen_preparation_metadata.get("package_guard_mismatch")),
+                    account_id=safe_account_id,
+                    run_id=safe_run_id,
+                    expected_app_instance_id=safe_expected_app_instance_id,
+                    assignment_id=safe_assignment_id,
+                    credentials_version=credentials_version,
+                    assignment_updated_at=safe_assignment_updated_at,
+                    historical_action=historical_action,
+                )
+                old_logged_in_metadata["challenge_provenance_accepted"] = provenance.accepted
+                old_logged_in_metadata["challenge_provenance_reason"] = provenance.reason
+                old_logged_in_metadata["challenge_provenance_proof_kind"] = provenance.proof_kind
+                if not provenance.accepted:
+                    try:
+                        record_orphan_recovery_event(
+                            account_id=safe_account_id,
+                            event_type=ORPHAN_RECOVERY_EVENT_DETECTED,
+                            run_id=safe_run_id or "",
+                            status="detected",
+                            message=provenance.reason,
+                            metadata={
+                                "failure_reason": provenance.reason,
+                                "screen_type": str(routing_signals.get("screen_type") or ""),
+                            },
+                        )
+                    except Exception:
+                        pass
+                    return _finalize(
+                        ok=False,
+                        completed=True,
+                        final_outcome="blocked",
+                        reason="orphan_challenge_provenance_weak",
+                        failure_reason=provenance.reason,
+                        final_login_status="blocked",
+                        final_provisioning_status="blocked",
+                        final_onboarding_status="blocked",
+                        should_publish_status=False,
+                        account_id=safe_account_id,
+                        expected_username=safe_expected_username,
+                        actions_taken=actions_taken,
+                        timings=timings,
+                        warnings=warnings,
+                        extra_metadata={
+                            **_flow_metadata(previous_account_lifecycle),
+                            **old_logged_in_metadata,
+                            **route_metadata,
+                            "selected_route": "orphan_email_challenge_blocked",
+                            "selected_route_reason": provenance.reason,
+                        },
+                        total_start=total_start,
+                        timer=timer,
+                        publisher=publisher,
+                        publish_enabled=publish_enabled,
+                    )
+                old_logged_in_metadata["selected_route"] = "orphan_email_challenge_resume"
+                old_logged_in_metadata["selected_route_reason"] = provenance.reason
             classification = classify_login_probe_outcome(post_action_outcome)
             return _finalize(
                 ok=post_action_outcome == LoginProbeOutcome.CONNECTED.value,
@@ -4950,6 +5028,14 @@ def _sync_login_challenge_side_effects(
             screen_type=str(challenge_meta.get("post_submit_screen_type") or challenge_meta.get("screen_type") or ""),
             masked_email_present=bool(challenge_meta.get("masked_email_present")),
             human_review_required=dashboard_action_type == "review_login_challenge",
+            stage="post_submit",
+            metadata={
+                "provenance_kind": PROVENANCE_KIND_ACTIVE_RUN,
+                "expected_app_instance_id": extra_metadata.get("expected_app_instance_id"),
+                "assignment_id": extra_metadata.get("assignment_id"),
+                "credentials_version": extra_metadata.get("credentials_version"),
+                "request_id": extra_metadata.get("request_id"),
+            },
         )
     except Exception:
         warnings.append("dashboard_action_sync_failed_safe")

@@ -187,8 +187,10 @@ def sync_login_challenge_dashboard_action(
     run_id: str | None = None,
     challenge_type: str | None = None,
     screen_type: str | None = None,
+    stage: str = "post_submit",
     masked_email_present: bool | None = None,
     human_review_required: bool | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not dashboard_action_type:
         return {"published": False, "reason": "no_action_type"}
@@ -199,8 +201,10 @@ def sync_login_challenge_dashboard_action(
         run_id=run_id,
         challenge_type=challenge_type,
         screen_type=screen_type,
+        stage=stage,
         masked_email_present=masked_email_present,
         human_review_required=human_review_required,
+        metadata=metadata,
     )
 
 

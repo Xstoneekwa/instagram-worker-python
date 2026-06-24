@@ -5,6 +5,7 @@ import inspect
 import time
 import unittest
 from dataclasses import asdict
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -429,9 +430,51 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertTrue(result.safe_metadata["app_start_ok"])
         self.assertEqual(result.safe_metadata["screen_after_app_start"], "connected")
 
-    def test_startup_email_code_challenge_creates_dashboard_action_without_credentials(self) -> None:
+    def test_startup_email_code_challenge_without_provenance_is_blocked(self) -> None:
         device = FakeDevice([EMAIL_CODE_CHALLENGE_XML])
         credentials_getter = Mock(return_value=credentials())
+
+        result = run_login_provisioning_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username=USERNAME,
+            credentials_getter=credentials_getter,
+            expected_app_instance_id="7637db9a-3581-4099-8068-d5eb1ed86f96",
+            assignment_id="assignment-1",
+            credentials_version=1,
+            challenge_provenance_loader=lambda _account_id: None,
+            sleeper=Mock(),
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.final_outcome, "blocked")
+        self.assertEqual(result.reason, "orphan_challenge_provenance_weak")
+        self.assertEqual(result.failure_reason, "pre_input_challenge_orphan")
+        self.assertIsNone(result.dashboard_action_type)
+        credentials_getter.assert_not_called()
+
+    def test_startup_email_code_challenge_resumes_with_strong_historical_provenance(self) -> None:
+        device = FakeDevice([EMAIL_CODE_CHALLENGE_XML])
+        credentials_getter = Mock(return_value=credentials())
+        recent_challenge_at = (
+            datetime.now(timezone.utc) - timedelta(minutes=2)
+        ).isoformat()
+        historical_action = {
+            "id": "action-1",
+            "account_id": ACCOUNT_ID,
+            "action_type": "enter_email_verification_code",
+            "status": "pending_verification",
+            "created_at": recent_challenge_at,
+            "updated_at": recent_challenge_at,
+            "metadata": {
+                "provenance_kind": "active_run_post_submit",
+                "stage": "post_submit",
+                "run_id": "run-active-1",
+                "expected_app_instance_id": "7637db9a-3581-4099-8068-d5eb1ed86f96",
+                "assignment_id": "assignment-1",
+                "credentials_version": 1,
+            },
+        }
 
         with (
             patch.object(
@@ -450,17 +493,80 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
                 account_id=ACCOUNT_ID,
                 expected_username=USERNAME,
                 credentials_getter=credentials_getter,
+                expected_app_instance_id="7637db9a-3581-4099-8068-d5eb1ed86f96",
+                assignment_id="assignment-1",
+                credentials_version=1,
+                assignment_updated_at="2026-06-23T10:00:00+00:00",
+                run_id="run-active-1",
+                challenge_provenance_loader=lambda _account_id: historical_action,
                 sleeper=Mock(),
             )
 
         self.assertFalse(result.ok)
         self.assertEqual(result.final_outcome, "verification_pending")
-        self.assertEqual(result.final_login_status, "verification_pending")
         self.assertEqual(result.dashboard_action_type, "enter_email_verification_code")
-        self.assertEqual(result.safe_metadata["screen_after_app_start"], "email_code_challenge")
-        self.assertEqual(result.safe_metadata["dashboard_action_sync"]["dashboard_action_id"], "action-1")
         credentials_getter.assert_not_called()
         sync_action.assert_called_once()
+
+    def test_startup_email_code_challenge_blocks_when_assigned_clone_missing(self) -> None:
+        device = FakeDevice([EMAIL_CODE_CHALLENGE_XML])
+        credentials_getter = Mock(return_value=credentials())
+
+        result = run_login_provisioning_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username=USERNAME,
+            credentials_getter=credentials_getter,
+            challenge_provenance_loader=lambda _account_id: None,
+            sleeper=Mock(),
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.final_outcome, "blocked")
+        self.assertEqual(result.reason, "orphan_challenge_provenance_weak")
+        self.assertEqual(result.failure_reason, "pre_input_challenge_orphan")
+        self.assertIsNone(result.dashboard_action_type)
+        credentials_getter.assert_not_called()
+
+    def test_startup_email_code_challenge_blocks_when_hinted_username_mismatches(self) -> None:
+        device = FakeDevice([EMAIL_CODE_CHALLENGE_XML])
+        credentials_getter = Mock(return_value=credentials())
+
+        with patch.object(
+            provisioner_orchestrator,
+            "_observe_startup_screen_settled",
+            return_value={
+                "signals": {
+                    "screen_type": "email_code_challenge",
+                    "email_code_challenge_present": True,
+                    "challenge_type": "email",
+                    "suggested_username": "other_account",
+                },
+                "observation_count": 1,
+                "wait_total_ms": 0,
+                "screens": ["email_code_challenge"],
+                "initial_screen_type": "email_code_challenge",
+                "final_screen_type": "email_code_challenge",
+            },
+        ):
+            result = run_login_provisioning_flow(
+                device,
+                account_id=ACCOUNT_ID,
+                expected_username=USERNAME,
+                credentials_getter=credentials_getter,
+                expected_app_instance_id="7637db9a-3581-4099-8068-d5eb1ed86f96",
+                challenge_provenance_loader=lambda _account_id: None,
+                sleeper=Mock(),
+            )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.final_outcome, "blocked")
+        self.assertEqual(result.reason, "orphan_challenge_provenance_weak")
+        self.assertEqual(
+            result.failure_reason,
+            "pre_input_challenge_orphan",
+        )
+        credentials_getter.assert_not_called()
 
     def test_observe_current_screen_only_skips_app_start(self) -> None:
         device = FakeDevice([CONNECTED_XML])

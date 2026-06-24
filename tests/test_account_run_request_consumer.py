@@ -636,6 +636,52 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
         self.assertEqual(audit.call_args.kwargs["action_type"], "manual_run_verification_paused")
         self.assertEqual(audit.call_args.kwargs["payload"]["login_provisioner_summary"]["final_outcome"], "verification_pending")
 
+    def test_finalize_subprocess_orphan_challenge_blocked_marks_request_blocked(self) -> None:
+        cfg = consumer.DispatcherConfig(
+            enabled=True,
+            health_only=False,
+            launch_enabled=True,
+            worker_id="run-dispatcher:test",
+            poll_seconds=5.0,
+            lease_seconds=120,
+            heartbeat_seconds=20.0,
+            allowed_run_types=["login_provisioning"],
+            test_account_ids=set(),
+            subprocess_timeout_seconds=7200,
+            require_assignment=False,
+            enforce_assignment_window=False,
+        )
+        request = {
+            "id": TEST_REQUEST_ID,
+            "account_id": TEST_ACCOUNT_ID,
+            "run_id": TEST_RUN_ID,
+            "status": "running",
+        }
+        summary = {
+            "run_id": TEST_RUN_ID,
+            "final_outcome": "blocked",
+            "reason": "orphan_challenge_provenance_weak",
+            "failure_reason": "pre_input_challenge_orphan",
+        }
+        with (
+            patch.object(consumer, "get_account_run_request", return_value=request),
+            patch.object(consumer, "complete_account_run_request") as complete,
+            patch.object(consumer, "_reconcile_linked_run", return_value={"reconciled": True}) as reconcile,
+            patch.object(consumer, "_safe_login_provisioner_summary_for_audit", return_value=summary),
+            patch.object(consumer, "_audit") as audit,
+        ):
+            consumer._finalize_manual_run_after_subprocess(
+                cfg,
+                request_id=TEST_REQUEST_ID,
+                account_id=TEST_ACCOUNT_ID,
+                exit_code=1,
+            )
+        complete.assert_called_once()
+        self.assertEqual(complete.call_args.args[2], "blocked")
+        self.assertEqual(complete.call_args.kwargs["error_code"], "orphan_challenge_provenance_weak")
+        reconcile.assert_called_once()
+        self.assertEqual(audit.call_args.kwargs["action_type"], "manual_run_blocked")
+
     def test_finalize_subprocess_real_failure_still_marks_failed(self) -> None:
         cfg = consumer.DispatcherConfig(
             enabled=True,
@@ -811,6 +857,21 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
         self.assertTrue(proc.terminated)
         self.assertEqual(exit_code, -15)
         self.assertFalse(timed_out)
+
+
+    def test_build_orphan_recovery_command_uses_recovery_cli(self) -> None:
+        cmd = consumer._build_orphan_recovery_command(
+            TEST_ACCOUNT_ID,
+            TEST_REQUEST_ID,
+            device_serial="RFGL145LZHE",
+            package_name="com.instagram.androie",
+            app_instance_id="clone-1",
+            assignment_id="assignment-1",
+            credentials_version=1,
+        )
+        self.assertIn("login_orphan_challenge_recovery_cli", cmd)
+        self.assertIn("--json", cmd)
+        self.assertIn(TEST_ACCOUNT_ID, cmd)
 
 
 if __name__ == "__main__":
