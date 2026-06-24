@@ -26,9 +26,14 @@ from login_challenge_provenance import (
     PROVENANCE_KIND_ACTIVE_RUN,
 )
 from login_orphan_recovery_state import ORPHAN_RECOVERY_EVENT_DETECTED, record_orphan_recovery_event
+from instagram_login_action_executor import execute_login_screen_decision
 from instagram_login_email_code_executor import execute_email_code_challenge_resume
 from instagram_login_password_form_executor import execute_login_form_credentials
-from instagram_login_screen_router import normalize_instagram_username, route_login_screen
+from instagram_login_screen_router import (
+    JOIN_INSTAGRAM_PROVISIONING_NEXT_ACTION,
+    normalize_instagram_username,
+    route_login_screen,
+)
 from instagram_login_status_classifier import (
     LoginProbeOutcome,
     classify_login_probe_outcome,
@@ -1265,6 +1270,7 @@ def run_login_provisioning_flow(
                 "join_instagram_progress_event": "join_instagram_landing_detected",
                 "has_already_have_profile_button": bool(routing_signals.get("has_already_have_profile_button")),
                 "has_get_started_button": bool(routing_signals.get("has_get_started_button")),
+                "required_navigation_action": JOIN_INSTAGRAM_PROVISIONING_NEXT_ACTION,
             }
         )
     if route.decision == "select_expected_account_from_picker":
@@ -1782,6 +1788,34 @@ def run_login_provisioning_flow(
                     "password_required": False,
                     "ready_for_password_smoke": False,
                     "would_submit_password": False,
+                },
+                total_start=total_start,
+                timer=timer,
+                publisher=publisher,
+                publish_enabled=publish_enabled,
+            )
+        if str(signals.get("screen_type") or "") == "join_instagram_landing":
+            return _finalize(
+                ok=False,
+                completed=True,
+                final_outcome="blocked",
+                reason="join_instagram_landing_unresolved",
+                failure_reason="continue_to_existing_profile_login_required",
+                final_login_status="logged_out",
+                final_provisioning_status="blocked",
+                final_onboarding_status="credentials_required",
+                should_publish_status=False,
+                account_id=safe_account_id,
+                expected_username=safe_expected_username,
+                actions_taken=actions_taken,
+                timings=timings,
+                warnings=[*warnings, "join_instagram_landing_blocked_before_credentials"],
+                extra_metadata={
+                    **_flow_metadata(previous_account_lifecycle),
+                    **old_logged_in_metadata,
+                    **post_continue_metadata,
+                    "required_navigation_action": JOIN_INSTAGRAM_PROVISIONING_NEXT_ACTION,
+                    "join_instagram_landing_detected": True,
                 },
                 total_start=total_start,
                 timer=timer,

@@ -133,7 +133,7 @@ class InstagramLoginScreenRouterTest(unittest.TestCase):
         self.assertFalse(decision.should_tap_continue)
         self.assertFalse(decision.should_tap_use_another_profile)
         self.assertFalse(decision.should_start_login_form_flow)
-        self.assertEqual(decision.next_action, "tap_already_have_profile_then_login_form")
+        self.assertEqual(decision.next_action, "continue_to_existing_profile_login")
         self.assertEqual(decision.reason, "join_instagram_landing_existing_profile_required")
 
     def test_prefilled_wrong_username_starts_replace_username_flow(self) -> None:

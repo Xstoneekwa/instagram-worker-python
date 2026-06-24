@@ -23,6 +23,7 @@ STABLE_LOGIN_SURFACES = frozenset(
         "login_form_prefilled_username",
         "continue_password_only",
         "logged_out",
+        "join_instagram_landing",
     }
 )
 CONNECTED_LIKE_SURFACES = frozenset({"connected", "continue_as_candidate"})

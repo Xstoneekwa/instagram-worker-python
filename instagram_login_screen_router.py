@@ -17,6 +17,7 @@ CONTINUE_PASSWORD_ONLY = "continue_password_only"
 ACCOUNT_PICKER = "account_picker"
 ACTIVE_ACCOUNT_PROFILE = "active_account_profile"
 JOIN_INSTAGRAM_LANDING = "join_instagram_landing"
+JOIN_INSTAGRAM_PROVISIONING_NEXT_ACTION = "continue_to_existing_profile_login"
 LOGIN_FORM_EMPTY = "login_form_empty"
 LOGIN_FORM_PREFILLED_USERNAME = "login_form_prefilled_username"
 UNKNOWN_SCREEN = "unknown"
@@ -87,7 +88,7 @@ def route_login_screen(
             suggested_username=suggested_username or "",
             normalized_expected_username=normalized_expected,
             normalized_suggested_username=normalized_suggested,
-            next_action="tap_already_have_profile_then_login_form",
+            next_action=JOIN_INSTAGRAM_PROVISIONING_NEXT_ACTION,
             reason="join_instagram_landing_existing_profile_required",
             should_tap_already_have_profile=True,
             clone_reuse_allowed=clone_reuse_allowed,

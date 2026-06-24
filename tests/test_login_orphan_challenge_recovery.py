@@ -26,6 +26,14 @@ LOGIN_FORM_XML = (
     '<node text="Log in" clickable="true" />'
 )
 
+JOIN_INSTAGRAM_XML = (
+    '<node text="Join Instagram" />'
+    '<node text="Share what you&apos;re into with the people who get you." />'
+    '<node text="Get started" clickable="true" bounds="[100,1480][980,1600]" />'
+    '<node text="I already have a profile" clickable="true" bounds="[100,1640][980,1760]" />'
+    '<node text="Meta" />'
+)
+
 
 class FakeDevice:
     def __init__(self, hierarchies: list[str], *, package: str = "com.instagram.androie") -> None:
@@ -48,6 +56,30 @@ class FakeDevice:
 class LoginOrphanChallengeRecoveryTest(unittest.TestCase):
     def test_stable_login_surface_recognizes_login_form(self) -> None:
         self.assertTrue(is_stable_login_surface({"screen_type": "login_form_empty", "ready_for_credentials_flow": True}))
+
+    def test_stable_login_surface_recognizes_join_instagram_for_recovery(self) -> None:
+        self.assertTrue(is_stable_login_surface({"screen_type": "join_instagram_landing", "join_instagram_landing_detected": True}))
+
+    def test_back_to_join_instagram_landing_restores_for_recovery(self) -> None:
+        device = FakeDevice([EMAIL_CHALLENGE_XML, JOIN_INSTAGRAM_XML])
+        with patch("login_orphan_challenge_recovery.record_orphan_recovery_event") as record_event:
+            result = run_orphan_challenge_recovery_flow(
+                device,
+                account_id="account-1",
+                expected_username="xstonekwa_backup_acc",
+                expected_package="com.instagram.androie",
+                expected_app_instance_id="clone-1",
+                assignment_id="assignment-1",
+                credentials_version=1,
+                run_id="request-1",
+                challenge_provenance_loader=lambda _aid: None,
+                sleeper=Mock(),
+            )
+        self.assertTrue(result.ok)
+        self.assertEqual(result.final_outcome, "restored")
+        self.assertEqual(result.screen_type_after, "join_instagram_landing")
+        event_types = [call.kwargs["event_type"] for call in record_event.call_args_list]
+        self.assertIn(ORPHAN_RECOVERY_EVENT_RESTORED, event_types)
 
     def test_back_to_login_surface_restores_without_credentials(self) -> None:
         device = FakeDevice([EMAIL_CHALLENGE_XML, LOGIN_FORM_XML])

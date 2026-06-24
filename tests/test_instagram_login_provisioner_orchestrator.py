@@ -1270,6 +1270,37 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertEqual(selectors["login"].click_calls, 0)
         self.assertNotIn("login_form_submit", result.actions_taken)
 
+    def test_join_instagram_landing_unresolved_blocks_without_credentials(self) -> None:
+        device, selectors = configured_device(CONNECTED_XML)
+        device.hierarchies = [
+            JOIN_INSTAGRAM_XML,
+            JOIN_INSTAGRAM_XML,
+            JOIN_INSTAGRAM_XML,
+            JOIN_INSTAGRAM_XML,
+            JOIN_INSTAGRAM_XML,
+        ]
+        credentials_getter = Mock(return_value=credentials())
+
+        result = self.run_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username=USERNAME,
+            credentials_getter=credentials_getter,
+            initial_signals=JOIN_INSTAGRAM_SIGNALS,
+            sleeper=Mock(),
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.final_outcome, "blocked")
+        self.assertEqual(result.failure_reason, "continue_to_existing_profile_login_required")
+        self.assertEqual(result.safe_metadata.get("required_navigation_action"), "continue_to_existing_profile_login")
+        self.assertIn("tap_already_have_profile", result.actions_taken)
+        self.assertNotIn("login_form_submit", result.actions_taken)
+        self.assertNotIn("credential_runtime_read_started", result.actions_taken)
+        credentials_getter.assert_not_called()
+        self.assertFalse(selectors["username"].set_text_calls)
+        self.assertFalse(selectors["password"].set_text_calls)
+
     def test_login_form_credentials_ok_connected_success(self) -> None:
         device, selectors = configured_device(CONNECTED_XML)
         selectors["username"] = device.add_selector(
