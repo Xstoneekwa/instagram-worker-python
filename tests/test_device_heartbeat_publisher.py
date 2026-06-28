@@ -85,6 +85,44 @@ emulator-5554 offline transport_id:9
         self.assertEqual(summary["published_count"], 1)
         heartbeat.assert_not_called()
 
+    def test_write_cycle_state_persists_json(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            state_file = f"{tmp}/state.json"
+            publisher.write_cycle_state(state_file, {"ok": True, "published_count": 2})
+            payload = Path(state_file).read_text(encoding="utf-8")
+            self.assertIn('"ok": true', payload)
+            self.assertIn('"published_count": 2', payload)
+
+    def test_serve_forever_runs_initial_cycle_and_respects_shutdown(self) -> None:
+        publisher._shutdown_requested = False
+        calls: list[dict[str, object]] = []
+        monotonic_values = iter([0.0, 0.0, 1.0, 1.0, 2.0, 62.0, 62.0, 63.0])
+
+        def fake_cycle(**kwargs):
+            calls.append(kwargs)
+            publisher._shutdown_requested = len(calls) >= 2
+            return {"ok": True, "published_count": 1, "observed_count": 1}
+
+        with patch.object(publisher, "run_publish_cycle", side_effect=fake_cycle):
+            with patch.object(publisher.time, "sleep", return_value=None):
+                with patch.object(publisher.time, "monotonic", side_effect=lambda: next(monotonic_values, 100.0)):
+                    exit_code = publisher.serve_forever(
+                        adb_path="adb",
+                        host_label="mac-a",
+                        include_battery=False,
+                        allowed_serials=None,
+                        interval_seconds=60,
+                        state_file="/tmp/state.json",
+                    )
+
+        self.assertEqual(exit_code, 0)
+        self.assertGreaterEqual(len(calls), 2)
+        publisher._shutdown_requested = False
+
 
 if __name__ == "__main__":
     unittest.main()
+

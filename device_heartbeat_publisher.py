@@ -10,8 +10,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import socket
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -25,6 +27,10 @@ ADB_TO_HEARTBEAT_STATUS = {
     "unauthorized": "unauthorized",
 }
 SAFE_ADB_DETAIL_KEYS = {"model", "product", "device", "transport_id"}
+DEFAULT_SERVE_INTERVAL_SECONDS = 60
+MIN_SERVE_INTERVAL_SECONDS = 15
+MAX_SERVE_INTERVAL_SECONDS = 300
+_shutdown_requested = False
 
 
 @dataclass(frozen=True)
@@ -156,6 +162,129 @@ def build_heartbeat_metadata(observation: AdbDeviceObservation) -> dict[str, str
     return metadata
 
 
+def write_cycle_state(state_file: str | None, payload: dict[str, Any]) -> None:
+    if not state_file:
+        return
+    path = Path(state_file)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(path.suffix + ".tmp")
+    temp_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    temp_path.replace(path)
+
+
+def run_publish_cycle(
+    *,
+    adb_path: str = "adb",
+    host_label: str,
+    include_battery: bool = False,
+    allowed_serials: set[str] | None = None,
+    dry_run: bool = False,
+    state_file: str | None = None,
+) -> dict[str, Any]:
+    observations = adb_devices_l(adb_path=adb_path)
+    if allowed_serials:
+        observations = [item for item in observations if item.adb_serial in allowed_serials]
+
+    if include_battery:
+        observations = [
+            AdbDeviceObservation(
+                **{
+                    **item.__dict__,
+                    "battery_pct": read_battery_level(item.adb_serial, adb_path=adb_path) if item.adb_state == "device" else None,
+                }
+            )
+            for item in observations
+        ]
+
+    try:
+        phone_rows = supabase_client.list_phone_devices_for_heartbeat()
+    except Exception as exc:
+        summary = {
+            "ok": False,
+            "reason": "backend_unavailable",
+            "error": str(exc),
+            "observed_count": len(observations),
+            "published_count": 0,
+            "skipped_count": 0,
+            "published": [],
+            "skipped": [],
+        }
+        write_cycle_state(state_file, {
+            "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "ok": False,
+            "reason": "backend_unavailable",
+            "observed_count": len(observations),
+            "published_count": 0,
+            "skipped_count": 0,
+            "physical_phones_seen": 0,
+        })
+        return summary
+
+    summary = publish_observations(
+        observations,
+        phone_rows,
+        host_label=host_label,
+        dry_run=dry_run,
+    )
+    summary["ok"] = True
+    physical_seen = sum(
+        1
+        for item in summary.get("published", [])
+        if str(item.get("heartbeat_status") or "") == "online"
+    )
+    write_cycle_state(state_file, {
+        "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "ok": True,
+        "reason": "cycle_completed",
+        "observed_count": int(summary.get("observed_count") or 0),
+        "published_count": int(summary.get("published_count") or 0),
+        "skipped_count": int(summary.get("skipped_count") or 0),
+        "physical_phones_seen": physical_seen,
+    })
+    return summary
+
+
+def _handle_shutdown(signum: int, _frame: object | None) -> None:
+    del signum
+    global _shutdown_requested
+    _shutdown_requested = True
+
+
+def serve_forever(
+    *,
+    adb_path: str,
+    host_label: str,
+    include_battery: bool,
+    allowed_serials: set[str] | None,
+    interval_seconds: int,
+    state_file: str | None,
+) -> int:
+    global _shutdown_requested
+    _shutdown_requested = False
+    signal.signal(signal.SIGTERM, _handle_shutdown)
+    signal.signal(signal.SIGINT, _handle_shutdown)
+
+    interval = max(MIN_SERVE_INTERVAL_SECONDS, min(MAX_SERVE_INTERVAL_SECONDS, int(interval_seconds or DEFAULT_SERVE_INTERVAL_SECONDS)))
+    while not _shutdown_requested:
+        started = time.monotonic()
+        summary = run_publish_cycle(
+            adb_path=adb_path,
+            host_label=host_label,
+            include_battery=include_battery,
+            allowed_serials=allowed_serials,
+            state_file=state_file,
+        )
+        print(json.dumps({"mode": "serve", **summary}, sort_keys=True), flush=True)
+        if _shutdown_requested:
+            break
+        elapsed = time.monotonic() - started
+        sleep_for = max(1.0, interval - elapsed)
+        deadline = time.monotonic() + sleep_for
+        while time.monotonic() < deadline and not _shutdown_requested:
+            time.sleep(min(1.0, deadline - time.monotonic()))
+    return 0
+
+
 def publish_observations(
     observations: list[AdbDeviceObservation],
     phone_rows: list[dict[str, Any]],
@@ -227,33 +356,36 @@ def main() -> int:
     parser.add_argument("--serial", action="append", default=[], help="Only publish these ADB serials. Repeatable.")
     parser.add_argument("--include-battery", action="store_true", help="Also read safe battery level via dumpsys battery for online devices.")
     parser.add_argument("--dry-run", action="store_true", help="Read ADB and DB mapping but do not write heartbeats.")
+    parser.add_argument("--serve", action="store_true", help="Run as a persistent publisher loop for local supervision.")
+    parser.add_argument("--interval-seconds", type=int, default=DEFAULT_SERVE_INTERVAL_SECONDS, help="Serve loop interval in seconds.")
+    parser.add_argument("--state-file", default="", help="Optional JSON state file updated after each serve cycle.")
     args = parser.parse_args()
 
     load_env_file(args.env_file)
-    observations = adb_devices_l(adb_path=args.adb)
-    allowed_serials = {str(serial).strip() for serial in args.serial if str(serial).strip()}
-    if allowed_serials:
-        observations = [item for item in observations if item.adb_serial in allowed_serials]
+    allowed_serials = {str(serial).strip() for serial in args.serial if str(serial).strip()} or None
+    host_label = str(args.host_label).strip() or socket.gethostname()
+    state_file = str(args.state_file).strip() or None
 
-    if args.include_battery:
-        observations = [
-            AdbDeviceObservation(
-                **{
-                    **item.__dict__,
-                    "battery_pct": read_battery_level(item.adb_serial, adb_path=args.adb) if item.adb_state == "device" else None,
-                }
-            )
-            for item in observations
-        ]
+    if args.serve:
+        return serve_forever(
+            adb_path=args.adb,
+            host_label=host_label,
+            include_battery=bool(args.include_battery),
+            allowed_serials=allowed_serials,
+            interval_seconds=int(args.interval_seconds or DEFAULT_SERVE_INTERVAL_SECONDS),
+            state_file=state_file,
+        )
 
-    summary = publish_observations(
-        observations,
-        supabase_client.list_phone_devices_for_heartbeat(),
-        host_label=str(args.host_label).strip() or socket.gethostname(),
+    summary = run_publish_cycle(
+        adb_path=args.adb,
+        host_label=host_label,
+        include_battery=bool(args.include_battery),
+        allowed_serials=allowed_serials,
         dry_run=bool(args.dry_run),
+        state_file=state_file,
     )
     print(json.dumps(summary, sort_keys=True))
-    return 0
+    return 0 if summary.get("ok", True) else 1
 
 
 if __name__ == "__main__":
