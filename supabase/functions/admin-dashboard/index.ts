@@ -117,6 +117,7 @@ type AppInstanceRow = {
   package_name: string | null;
   status: string | null;
   current_account_id: string | null;
+  metadata?: Record<string, unknown> | null;
 };
 type AddPhysicalPhoneResult = {
   deviceId: string;
@@ -1131,7 +1132,7 @@ async function loadAppInstances(
   deviceId: string,
 ): Promise<AppInstanceRow[]> {
   const rows = await parseJsonArray(await rest.select("phone_app_instances", {
-    select: "id,instance_type,instance_index,package_name,status,current_account_id",
+    select: "id,instance_type,instance_index,package_name,status,current_account_id,metadata",
     device_id: `eq.${deviceId}`,
   }));
   return rows as AppInstanceRow[];
@@ -1308,6 +1309,8 @@ type DeletePreflightSummary = {
   occupiedCloneCount: number;
   activeAssignmentCount: number;
   assignmentHistoryCount: number;
+  releasedAssignmentCount: number;
+  releasedAssignmentsInfoFr: string | null;
   linkedInstagramAccountCount: number;
   activeRunRequestCount: number;
   activeLiveViewCount: number;
@@ -1316,12 +1319,24 @@ type DeletePreflightSummary = {
   blockingReasonsFr: string[];
 };
 
+function isOperationalPhoneStatus(status: string) {
+  return String(status || "").toLowerCase() !== "retired";
+}
+
+function releasedAssignmentsInfoFr(count: number): string | null {
+  if (count <= 0) return null;
+  if (count === 1) {
+    return "1 ancienne assignation terminée sera conservée dans l'historique.";
+  }
+  return `${count} anciennes assignations terminées seront conservées dans l'historique.`;
+}
+
 async function findPhoneById(
   rest: RestClient,
   deviceId: string,
 ): Promise<Record<string, any> | null> {
   const rows = await parseJsonArray(await rest.select("phone_devices", {
-    select: "id,name,device_kind,status,adb_serial",
+    select: "id,name,device_kind,status,adb_serial,metadata,retired_at",
     id: `eq.${deviceId}`,
     limit: "1",
   }));
@@ -1332,12 +1347,12 @@ function blockingReasonLabelsFr(reasons: string[]): string[] {
   const labels: Record<string, string> = {
     occupied_clone: "Un clone est occupé ou réservé sur ce téléphone",
     active_assignment: "Une assignation active est en cours sur ce téléphone",
-    assignment_history: "Un historique d'assignations est conservé sur ce téléphone",
     linked_instagram_account: "Un compte Instagram est encore lié à ce téléphone",
     active_run_request: "Une demande de run est active pour un compte de ce téléphone",
     active_live_view: "Une session live view est active sur ce téléphone",
     active_credential: "Un identifiant Vault non révoqué est lié à un compte de ce téléphone",
     not_physical_phone: "Seuls les téléphones physiques peuvent être retirés de l'inventaire",
+    already_retired: "Ce téléphone est déjà retiré de l'inventaire opérationnel",
   };
   return reasons.map((reason) => labels[reason] || reason);
 }
@@ -1353,6 +1368,7 @@ async function buildDeletePhysicalPhonePreflight(
 
   const deviceKind = String(phone.device_kind || "physical_phone");
   const displayName = String(phone.name || phone.device_name || "Unknown phone");
+  const inventoryStatus = String(phone.status || "unknown");
   const adbSerial = String(phone.adb_serial || "");
   const appInstances = await loadAppInstances(rest, deviceId);
   const occupiedCloneCount = appInstances.filter((row) =>
@@ -1374,6 +1390,9 @@ async function buildDeletePhysicalPhonePreflight(
     ACTIVE_ASSIGNMENT_STATUSES.has(String(row.status || "").toLowerCase())
   ).length;
   const assignmentHistoryCount = assignmentRows.length;
+  const releasedAssignmentCount = assignmentRows.filter((row) =>
+    String(row.status || "").toLowerCase() === "released"
+  ).length;
 
   let activeRunRequestCount = 0;
   let activeCredentialCount = 0;
@@ -1408,10 +1427,10 @@ async function buildDeletePhysicalPhonePreflight(
   ).length;
 
   const blockingReasons: string[] = [];
+  if (!isOperationalPhoneStatus(inventoryStatus)) blockingReasons.push("already_retired");
   if (deviceKind !== "physical_phone") blockingReasons.push("not_physical_phone");
   if (occupiedCloneCount > 0) blockingReasons.push("occupied_clone");
   if (activeAssignmentCount > 0) blockingReasons.push("active_assignment");
-  if (assignmentHistoryCount > 0) blockingReasons.push("assignment_history");
   if (linkedAccountIds.size > 0) blockingReasons.push("linked_instagram_account");
   if (activeRunRequestCount > 0) blockingReasons.push("active_run_request");
   if (activeLiveViewCount > 0) blockingReasons.push("active_live_view");
@@ -1421,12 +1440,14 @@ async function buildDeletePhysicalPhonePreflight(
     deviceId,
     displayName,
     deviceKind,
-    inventoryStatus: String(phone.status || "unknown"),
+    inventoryStatus,
     adbSerialSuffix: adbSerial ? adbSerial.slice(-4) : null,
     cloneCount: appInstances.length,
     occupiedCloneCount,
     activeAssignmentCount,
     assignmentHistoryCount,
+    releasedAssignmentCount,
+    releasedAssignmentsInfoFr: releasedAssignmentsInfoFr(releasedAssignmentCount),
     linkedInstagramAccountCount: linkedAccountIds.size,
     activeRunRequestCount,
     activeLiveViewCount,
@@ -1436,28 +1457,29 @@ async function buildDeletePhysicalPhonePreflight(
   };
 }
 
-async function publishPhoneDeletedAuditEvent(
+async function publishPhoneRetiredAuditEvent(
   rest: RestClient,
   payload: DeletePhysicalPhonePayload,
   summary: DeletePreflightSummary,
 ): Promise<{ attempted: boolean; published: boolean; reason: string | null }> {
   try {
     const res = await rest.insert("runtime_events", {
-      event_type: "phone_deleted",
+      event_type: "phone_retired",
       severity: "warning",
       visibility: "admin_only",
-      device_id: null,
+      device_id: summary.deviceId,
       source: "admin_dashboard",
-      reason: "delete_physical_phone_v1",
-      message: "Physical phone removed from operational inventory.",
+      reason: "operational_retirement_v1",
+      message: "Physical phone retired from operational inventory.",
       metadata: {
         safe_audit: true,
         display_name: summary.displayName,
         adb_serial_suffix: summary.adbSerialSuffix,
         clone_count: summary.cloneCount,
+        released_assignment_count: summary.releasedAssignmentCount,
         actor_type: payload.actorType,
         actor_id: payload.actorId,
-        delete_physical_phone_v1: true,
+        operational_retirement_v1: true,
       },
     });
     if (!res.ok) return { attempted: true, published: false, reason: "insert_failed" };
@@ -1467,35 +1489,98 @@ async function publishPhoneDeletedAuditEvent(
   }
 }
 
-async function deletePhysicalPhoneInventory(
+async function retirePhysicalPhoneInventory(
   payload: DeletePhysicalPhonePayload,
   deps: Dependencies,
-): Promise<{ summary: DeletePreflightSummary; audit: { attempted: boolean; published: boolean; reason: string | null } }> {
+): Promise<{
+  summary: DeletePreflightSummary;
+  audit: { attempted: boolean; published: boolean; reason: string | null };
+  idempotent: boolean;
+}> {
   const rest = createServiceRoleRestClient(deps);
+  const phone = await findPhoneById(rest, payload.deviceId);
+  if (!phone) {
+    throw new AdminActionError(404, "validation_error", "device_not_found");
+  }
+
   const summary = await buildDeletePhysicalPhonePreflight(rest, payload.deviceId);
   if (summary.displayName !== payload.confirmationName) {
     throw new AdminActionError(400, "validation_error", "confirmation_name_mismatch");
   }
+
+  if (!isOperationalPhoneStatus(String(phone.status || ""))) {
+    return {
+      summary,
+      audit: { attempted: false, published: false, reason: "already_retired" },
+      idempotent: true,
+    };
+  }
+
   if (!summary.deletable) {
     throw new AdminActionError(409, "conflict", "device_delete_blocked");
   }
 
-  const deleteSteps: Array<[string, Record<string, string>]> = [
-    ["device_heartbeats", { device_id: `eq.${payload.deviceId}` }],
-    ["phone_app_instances", { device_id: `eq.${payload.deviceId}` }],
-    ["phone_clones", { device_id: `eq.${payload.deviceId}` }],
-    ["phone_devices", { id: `eq.${payload.deviceId}` }],
-  ];
+  const retiredAt = new Date().toISOString();
+  const existingMetadata = phone.metadata && typeof phone.metadata === "object"
+    ? phone.metadata as Record<string, unknown>
+    : {};
 
-  for (const [tableName, query] of deleteSteps) {
-    const res = await rest.delete(tableName, query);
-    if (!res.ok) {
-      throw new AdminActionError(502, "rpc_failed", "device_delete_failed");
+  const deviceRows = await parseJsonArray(await rest.update("phone_devices", {
+    id: `eq.${payload.deviceId}`,
+  }, {
+    status: "retired",
+    retired_at: retiredAt,
+    status_reason: "operational_retirement",
+    metadata: {
+      ...existingMetadata,
+      operational_retired_at: retiredAt,
+      operational_retirement_v1: true,
+    },
+  }));
+  if (deviceRows.length !== 1 || String(deviceRows[0]?.status || "") !== "retired") {
+    throw new AdminActionError(502, "rpc_failed", "device_retire_failed");
+  }
+
+  const appInstances = await loadAppInstances(rest, payload.deviceId);
+  for (const appInstance of appInstances) {
+    const appMetadata = appInstance.metadata && typeof appInstance.metadata === "object"
+      ? appInstance.metadata as Record<string, unknown>
+      : {};
+    const appRows = await parseJsonArray(await rest.update("phone_app_instances", {
+      id: `eq.${appInstance.id}`,
+    }, {
+      status: "disabled",
+      usable_for_auto_login: false,
+      is_launchable: false,
+      metadata: {
+        ...appMetadata,
+        operational_retired_at: retiredAt,
+        operational_retirement_v1: true,
+      },
+    }));
+    if (appRows.length !== 1) {
+      throw new AdminActionError(502, "rpc_failed", "device_retire_failed");
     }
   }
 
-  const audit = await publishPhoneDeletedAuditEvent(rest, payload, summary);
-  return { summary, audit };
+  const cloneDisable = await rest.update("phone_clones", {
+    device_id: `eq.${payload.deviceId}`,
+  }, {
+    status: "disabled",
+  });
+  if (!cloneDisable.ok) {
+    throw new AdminActionError(502, "rpc_failed", "device_retire_failed");
+  }
+
+  const heartbeatDelete = await rest.delete("device_heartbeats", {
+    device_id: `eq.${payload.deviceId}`,
+  });
+  if (!heartbeatDelete.ok) {
+    throw new AdminActionError(502, "rpc_failed", "device_retire_failed");
+  }
+
+  const audit = await publishPhoneRetiredAuditEvent(rest, payload, summary);
+  return { summary, audit, idempotent: false };
 }
 
 async function deletePhysicalPhonePreflight(
@@ -1710,6 +1795,7 @@ async function devicesOverview(deps: Dependencies) {
   const rest = createServiceRoleRestClient(deps);
   const phoneRows = await parseJsonArray(await rest.select("phone_devices", {
     select: "id,name,device_name,device_kind,adb_serial,host_machine,hub_label,hub_port,pool_type,max_clones,status,metadata,created_at,updated_at",
+    status: "neq.retired",
     order: "created_at.desc",
   }));
   const appRows = await parseJsonArray(await rest.select("phone_app_instances", {
@@ -1916,20 +2002,27 @@ export async function handleRequest(
   }
   if (payload.action === "delete_physical_phone") {
     try {
-      const result = await deletePhysicalPhoneInventory(payload, deps);
+      const result = await retirePhysicalPhoneInventory(payload, deps);
       logEvent(deps, "admin_dashboard_delete_physical_phone_succeeded", {
         request_id: rid,
         action: payload.action,
         device_id: result.summary.deviceId,
+        idempotent: result.idempotent,
         status: 200,
       });
       return jsonResponse(200, {
         ok: true,
         action: payload.action,
+        retired: {
+          device_id: result.summary.deviceId,
+          display_name: result.summary.displayName,
+          operational_status: "retired",
+        },
         deleted: {
           device_id: result.summary.deviceId,
           display_name: result.summary.displayName,
         },
+        idempotent: result.idempotent,
         audit: result.audit,
       }, headers);
     } catch (error) {

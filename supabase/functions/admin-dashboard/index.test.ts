@@ -302,6 +302,14 @@ function makePhoneFetch(db: PhoneDb, calls: FetchCall[] = []) {
         db.appInstances.push(row);
         return json([row], 201);
       }
+      if (init?.method === "PATCH") {
+        const idEq = parsed.searchParams.get("id") || "";
+        const id = idEq.startsWith("eq.") ? idEq.slice(3) : "";
+        const index = db.appInstances.findIndex((row) => row.id === id);
+        if (index < 0) return json([], 200);
+        db.appInstances[index] = { ...db.appInstances[index], ...body };
+        return json([db.appInstances[index]]);
+      }
       if (init?.method === "DELETE") {
         const deviceEq = parsed.searchParams.get("device_id") || "";
         const deviceId = deviceEq.startsWith("eq.") ? deviceEq.slice(3) : "";
@@ -336,11 +344,21 @@ function makePhoneFetch(db: PhoneDb, calls: FetchCall[] = []) {
       return json(rows);
     }
 
-    if (table === "phone_clones" && init?.method === "DELETE") {
-      const deviceEq = parsed.searchParams.get("device_id") || "";
-      const deviceId = deviceEq.startsWith("eq.") ? deviceEq.slice(3) : "";
-      db.phoneClones = (db.phoneClones ?? []).filter((row) => row.device_id !== deviceId);
-      return json([]);
+    if (table === "phone_clones") {
+      if (init?.method === "PATCH") {
+        const deviceEq = parsed.searchParams.get("device_id") || "";
+        const deviceId = deviceEq.startsWith("eq.") ? deviceEq.slice(3) : "";
+        db.phoneClones = (db.phoneClones ?? []).map((row) => (
+          row.device_id === deviceId ? { ...row, ...body } : row
+        ));
+        return json((db.phoneClones ?? []).filter((row) => row.device_id === deviceId));
+      }
+      if (init?.method === "DELETE") {
+        const deviceEq = parsed.searchParams.get("device_id") || "";
+        const deviceId = deviceEq.startsWith("eq.") ? deviceEq.slice(3) : "";
+        db.phoneClones = (db.phoneClones ?? []).filter((row) => row.device_id !== deviceId);
+        return json([]);
+      }
     }
 
     if (table === "device_heartbeats") {
@@ -1112,7 +1130,56 @@ Deno.test(
 );
 
 Deno.test(
-  "delete_physical_phone supprime un device vide avec confirmation exacte",
+  "delete_physical_phone_preflight autorise un device avec historique released",
+  withEnv(async () => {
+    const db: PhoneDb = {
+      phoneDevices: [{
+        id: "device-legacy",
+        name: "Entry 2C Physical Outreach Phone",
+        device_kind: "physical_phone",
+        status: "available",
+        adb_serial: "phys-001",
+      }],
+      appInstances: [{
+        id: "app-1",
+        device_id: "device-legacy",
+        instance_type: "primary_app",
+        instance_index: 0,
+        package_name: "com.instagram.android",
+        status: "available",
+        current_account_id: null,
+      }],
+      runtimeEvents: [],
+      accountAssignments: Array.from({ length: 5 }, (_value, index) => ({
+        id: `assign-${index + 1}`,
+        device_id: "device-legacy",
+        status: "released",
+        account_id: "42c625c2-e761-4100-8a9d-7ae1373de97d",
+      })),
+    };
+    const res = await handleRequest(request({
+      action: "delete_physical_phone_preflight",
+      device_id: "device-legacy",
+    }), {
+      fetch: makePhoneFetch(db),
+      log: () => {},
+    });
+    const body = await res.json();
+    if (res.status !== 200 || body.preflight?.deletable !== true) {
+      throw new Error(`released history should allow retire: ${JSON.stringify(body)}`);
+    }
+    if (body.preflight?.releasedAssignmentCount !== 5) {
+      throw new Error("released assignment count missing");
+    }
+    if (!String(body.preflight?.releasedAssignmentsInfoFr || "").includes("5 anciennes assignations")) {
+      throw new Error("released info copy missing");
+    }
+    assertNoSecretLeakAllowOps(body);
+  }),
+);
+
+Deno.test(
+  "delete_physical_phone retire un device vide avec confirmation exacte",
   withEnv(async () => {
     const db: PhoneDb = {
       phoneDevices: [{
@@ -1121,6 +1188,7 @@ Deno.test(
         device_kind: "physical_phone",
         status: "available",
         adb_serial: "RFGL000EMPTY",
+        metadata: {},
       }],
       appInstances: [{
         id: "app-1",
@@ -1146,15 +1214,55 @@ Deno.test(
     });
     const body = await res.json();
     if (res.status !== 200 || body.ok !== true) {
-      throw new Error(`delete failed: ${JSON.stringify(body)}`);
+      throw new Error(`retire failed: ${JSON.stringify(body)}`);
     }
-    if (db.phoneDevices.length !== 0 || db.appInstances.length !== 0) {
-      throw new Error("device or app instances not removed");
+    if (db.phoneDevices.length !== 1 || db.phoneDevices[0].status !== "retired") {
+      throw new Error("device should remain archived as retired");
     }
-    if (!db.runtimeEvents.some((event) => event.event_type === "phone_deleted")) {
+    if (db.appInstances[0].status !== "disabled") {
+      throw new Error("app instances should be disabled not deleted");
+    }
+    if ((db.accountAssignments ?? []).length !== 0) {
+      throw new Error("assignments must remain untouched");
+    }
+    if (!db.runtimeEvents.some((event) => event.event_type === "phone_retired")) {
       throw new Error("audit event missing");
     }
     assertNoSecretLeakAllowOps(body);
+  }),
+);
+
+Deno.test(
+  "delete_physical_phone est idempotent apres retrait",
+  withEnv(async () => {
+    const db: PhoneDb = {
+      phoneDevices: [{
+        id: "device-empty",
+        name: "Empty Phone",
+        device_kind: "physical_phone",
+        status: "retired",
+        adb_serial: "RFGL000EMPTY",
+        metadata: { operational_retirement_v1: true },
+      }],
+      appInstances: [],
+      runtimeEvents: [{ id: "event-1", event_type: "phone_retired" }],
+      accountAssignments: [],
+    };
+    const res = await handleRequest(request({
+      action: "delete_physical_phone",
+      device_id: "device-empty",
+      confirmation_name: "Empty Phone",
+    }), {
+      fetch: makePhoneFetch(db),
+      log: () => {},
+    });
+    const body = await res.json();
+    if (res.status !== 200 || body.idempotent !== true) {
+      throw new Error(`idempotent retire expected: ${JSON.stringify(body)}`);
+    }
+    if (db.runtimeEvents.length !== 1) {
+      throw new Error("duplicate audit event emitted");
+    }
   }),
 );
 
