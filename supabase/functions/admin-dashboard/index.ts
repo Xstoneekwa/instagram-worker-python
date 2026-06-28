@@ -715,19 +715,6 @@ function requiredUuid(
   return { ok: true, value: normalized };
 }
 
-function requiredBoundedString(
-  value: unknown,
-  fieldName: string,
-  maxLength: number,
-): { ok: true; value: string } | { ok: false; error: string } {
-  const normalized = typeof value === "string" ? value.trim() : "";
-  if (!normalized) return { ok: false, error: `${fieldName}_required` };
-  if (normalized.length > maxLength) {
-    return { ok: false, error: `${fieldName}_too_long` };
-  }
-  return { ok: true, value: normalized };
-}
-
 export function validatePayload(
   payload: Record<string, unknown>,
 ): { ok: true; payload: ParsedPayload } | {

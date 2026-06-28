@@ -8,6 +8,13 @@ import {
 
 const SECRET_TOKEN = "admin-dashboard-token-not-real";
 const SERVICE_ROLE = "service-role-not-real-admin-dashboard";
+const TEST_DEVICE_ID_PRIMARY = "00000000-0000-4000-8000-000000000001";
+const TEST_DEVICE_ID_LEGACY = "00000000-0000-4000-8000-000000000002";
+const TEST_DEVICE_ID_EMPTY = "00000000-0000-4000-8000-000000000003";
+
+function testDeviceUuidFromSequence(sequence: number): string {
+  return `00000000-0000-4000-8000-${String(sequence).padStart(12, "0")}`;
+}
 
 type FetchCall = {
   url: string;
@@ -260,7 +267,7 @@ function makePhoneFetch(db: PhoneDb, calls: FetchCall[] = []) {
       }
       if (init?.method === "POST") {
         const row = {
-          id: `device-${db.phoneDevices.length + 1}`,
+          id: testDeviceUuidFromSequence(db.phoneDevices.length + 1),
           created_at: "2026-06-02T00:00:00Z",
           updated_at: "2026-06-02T00:00:00Z",
           ...body,
@@ -371,6 +378,16 @@ function makePhoneFetch(db: PhoneDb, calls: FetchCall[] = []) {
         db.deviceHeartbeats = (db.deviceHeartbeats ?? []).filter((row) => row.device_id !== deviceId);
         return json([]);
       }
+    }
+
+    if (table === "runtime_events" && init?.method === "POST") {
+      const row = {
+        id: testDeviceUuidFromSequence(9000 + db.runtimeEvents.length),
+        created_at: "2026-06-02T00:00:00Z",
+        ...body,
+      };
+      db.runtimeEvents.push(row);
+      return json([row], 201);
     }
 
     return json({ error: `unexpected ${href}` }, 500);
@@ -591,7 +608,7 @@ Deno.test(
   withEnv(async () => {
     const db: PhoneDb = {
       phoneDevices: [{
-        id: "device-1",
+        id: TEST_DEVICE_ID_PRIMARY,
         name: "Samsung A16-01",
         device_kind: "physical_phone",
         adb_serial: "RFGL145VCKE",
@@ -620,7 +637,7 @@ Deno.test(
     }
     const phone = body.phone_devices[0];
     if (
-      phone.device_id !== "device-1" ||
+      phone.device_id !== TEST_DEVICE_ID_PRIMARY ||
       phone.display_name !== "Samsung A16-01" ||
       phone.adb_serial !== "RFGL145VCKE" ||
       phone.pool !== "full_cycle" ||
@@ -639,7 +656,7 @@ Deno.test(
   withEnv(async () => {
     const db: PhoneDb = {
       phoneDevices: [{
-        id: "device-1",
+        id: TEST_DEVICE_ID_PRIMARY,
         name: "Samsung A16-01",
         device_kind: "physical_phone",
         adb_serial: "RFGL145VCKE",
@@ -651,7 +668,7 @@ Deno.test(
       appInstances: [
         {
           id: "app-0",
-          device_id: "device-1",
+          device_id: TEST_DEVICE_ID_PRIMARY,
           instance_type: "primary_app",
           instance_index: 0,
           package_name: "com.instagram.android",
@@ -661,7 +678,7 @@ Deno.test(
         },
         {
           id: "app-1",
-          device_id: "device-1",
+          device_id: TEST_DEVICE_ID_PRIMARY,
           instance_type: "clone",
           instance_index: 1,
           package_name: "com.instagram.androie",
@@ -671,7 +688,7 @@ Deno.test(
         },
         {
           id: "app-2",
-          device_id: "device-1",
+          device_id: TEST_DEVICE_ID_PRIMARY,
           instance_type: "clone",
           instance_index: 2,
           package_name: "com.instagram.androif",
@@ -681,7 +698,7 @@ Deno.test(
         },
         {
           id: "app-3",
-          device_id: "device-1",
+          device_id: TEST_DEVICE_ID_PRIMARY,
           instance_type: "clone",
           instance_index: 3,
           package_name: "com.instagram.androig",
@@ -717,7 +734,7 @@ Deno.test(
   withEnv(async () => {
     const db: PhoneDb = {
       phoneDevices: [{
-        id: "device-1",
+        id: TEST_DEVICE_ID_PRIMARY,
         name: "Samsung A16-01",
         device_kind: "physical_phone",
         adb_serial: "RFGL145VCKE",
@@ -728,7 +745,7 @@ Deno.test(
       }],
       appInstances: [{
         id: "app-1",
-        device_id: "device-1",
+        device_id: TEST_DEVICE_ID_PRIMARY,
         instance_type: "clone",
         instance_index: 1,
         package_name: "com.instagram.androie",
@@ -757,7 +774,7 @@ Deno.test(
   withEnv(async () => {
     const db: PhoneDb = {
       phoneDevices: [{
-        id: "device-1",
+        id: TEST_DEVICE_ID_PRIMARY,
         name: "Samsung A16-01",
         device_kind: "physical_phone",
         adb_serial: "RFGL145VCKE",
@@ -790,7 +807,7 @@ Deno.test(
   withEnv(async () => {
     const db: PhoneDb = {
       phoneDevices: [{
-        id: "device-1",
+        id: TEST_DEVICE_ID_PRIMARY,
         name: "Samsung A16-01",
         device_kind: "physical_phone",
         adb_serial: "RFGL145VCKE",
@@ -806,7 +823,7 @@ Deno.test(
       }],
       appInstances: [{
         id: "app-0",
-        device_id: "device-1",
+        device_id: TEST_DEVICE_ID_PRIMARY,
         instance_type: "primary_app",
         instance_index: 0,
         package_name: "com.instagram.android",
@@ -981,7 +998,7 @@ Deno.test(
   withEnv(async () => {
     const db: PhoneDb = {
       phoneDevices: [{
-        id: "device-1",
+        id: TEST_DEVICE_ID_PRIMARY,
         name: "Samsung A16-03",
         adb_serial: "RFGL145TEST",
         hub_port: "usb:2-1",
@@ -989,7 +1006,7 @@ Deno.test(
       }],
       appInstances: [{
         id: "app-1",
-        device_id: "device-1",
+        device_id: TEST_DEVICE_ID_PRIMARY,
         instance_type: "primary_app",
         instance_index: 0,
         package_name: "com.instagram.android",
@@ -1055,7 +1072,7 @@ Deno.test(
   withEnv(async () => {
     const db: PhoneDb = {
       phoneDevices: [{
-        id: "device-legacy",
+        id: TEST_DEVICE_ID_LEGACY,
         name: "Entry 2C Physical Outreach Phone",
         device_kind: "physical_phone",
         status: "available",
@@ -1063,7 +1080,7 @@ Deno.test(
       }],
       appInstances: [{
         id: "app-1",
-        device_id: "device-legacy",
+        device_id: TEST_DEVICE_ID_LEGACY,
         instance_type: "primary_app",
         instance_index: 0,
         package_name: "com.instagram.android",
@@ -1073,14 +1090,14 @@ Deno.test(
       runtimeEvents: [],
       accountAssignments: [{
         id: "assign-1",
-        device_id: "device-legacy",
+        device_id: TEST_DEVICE_ID_LEGACY,
         status: "active",
         account_id: "42c625c2-e761-4100-8a9d-7ae1373de97d",
       }],
     };
     const res = await handleRequest(request({
       action: "delete_physical_phone_preflight",
-      device_id: "device-legacy",
+      device_id: TEST_DEVICE_ID_LEGACY,
     }), {
       fetch: makePhoneFetch(db),
       log: () => {},
@@ -1101,7 +1118,7 @@ Deno.test(
   withEnv(async () => {
     const db: PhoneDb = {
       phoneDevices: [{
-        id: "device-empty",
+        id: TEST_DEVICE_ID_EMPTY,
         name: "Empty Phone",
         device_kind: "physical_phone",
         status: "available",
@@ -1113,7 +1130,7 @@ Deno.test(
     };
     const res = await handleRequest(request({
       action: "delete_physical_phone",
-      device_id: "device-empty",
+      device_id: TEST_DEVICE_ID_EMPTY,
       confirmation_name: "Wrong Name",
     }), {
       fetch: makePhoneFetch(db),
@@ -1134,7 +1151,7 @@ Deno.test(
   withEnv(async () => {
     const db: PhoneDb = {
       phoneDevices: [{
-        id: "device-legacy",
+        id: TEST_DEVICE_ID_LEGACY,
         name: "Entry 2C Physical Outreach Phone",
         device_kind: "physical_phone",
         status: "available",
@@ -1142,7 +1159,7 @@ Deno.test(
       }],
       appInstances: [{
         id: "app-1",
-        device_id: "device-legacy",
+        device_id: TEST_DEVICE_ID_LEGACY,
         instance_type: "primary_app",
         instance_index: 0,
         package_name: "com.instagram.android",
@@ -1152,14 +1169,14 @@ Deno.test(
       runtimeEvents: [],
       accountAssignments: Array.from({ length: 5 }, (_value, index) => ({
         id: `assign-${index + 1}`,
-        device_id: "device-legacy",
+        device_id: TEST_DEVICE_ID_LEGACY,
         status: "released",
         account_id: "42c625c2-e761-4100-8a9d-7ae1373de97d",
       })),
     };
     const res = await handleRequest(request({
       action: "delete_physical_phone_preflight",
-      device_id: "device-legacy",
+      device_id: TEST_DEVICE_ID_LEGACY,
     }), {
       fetch: makePhoneFetch(db),
       log: () => {},
@@ -1183,7 +1200,7 @@ Deno.test(
   withEnv(async () => {
     const db: PhoneDb = {
       phoneDevices: [{
-        id: "device-empty",
+        id: TEST_DEVICE_ID_EMPTY,
         name: "Empty Phone",
         device_kind: "physical_phone",
         status: "available",
@@ -1192,7 +1209,7 @@ Deno.test(
       }],
       appInstances: [{
         id: "app-1",
-        device_id: "device-empty",
+        device_id: TEST_DEVICE_ID_EMPTY,
         instance_type: "primary_app",
         instance_index: 0,
         package_name: "com.instagram.android",
@@ -1201,12 +1218,12 @@ Deno.test(
       }],
       runtimeEvents: [],
       accountAssignments: [],
-      deviceHeartbeats: [{ device_id: "device-empty", status: "offline" }],
-      phoneClones: [{ id: "clone-1", device_id: "device-empty", status: "available" }],
+      deviceHeartbeats: [{ device_id: TEST_DEVICE_ID_EMPTY, status: "offline" }],
+      phoneClones: [{ id: "clone-1", device_id: TEST_DEVICE_ID_EMPTY, status: "available" }],
     };
     const res = await handleRequest(request({
       action: "delete_physical_phone",
-      device_id: "device-empty",
+      device_id: TEST_DEVICE_ID_EMPTY,
       confirmation_name: "Empty Phone",
     }), {
       fetch: makePhoneFetch(db),
@@ -1237,7 +1254,7 @@ Deno.test(
   withEnv(async () => {
     const db: PhoneDb = {
       phoneDevices: [{
-        id: "device-empty",
+        id: TEST_DEVICE_ID_EMPTY,
         name: "Empty Phone",
         device_kind: "physical_phone",
         status: "retired",
@@ -1250,7 +1267,7 @@ Deno.test(
     };
     const res = await handleRequest(request({
       action: "delete_physical_phone",
-      device_id: "device-empty",
+      device_id: TEST_DEVICE_ID_EMPTY,
       confirmation_name: "Empty Phone",
     }), {
       fetch: makePhoneFetch(db),
