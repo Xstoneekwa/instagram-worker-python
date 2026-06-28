@@ -20,8 +20,13 @@ type AdminDashboardAction =
   | "manage_overview"
   | "radar_overview"
   | "devices_overview"
-  | "add_physical_phone";
-type OverviewDashboardAction = Exclude<AdminDashboardAction, "add_physical_phone">;
+  | "add_physical_phone"
+  | "delete_physical_phone_preflight"
+  | "delete_physical_phone";
+type OverviewDashboardAction = Exclude<
+  AdminDashboardAction,
+  "add_physical_phone" | "delete_physical_phone_preflight" | "delete_physical_phone"
+>;
 type Fetcher = (
   input: string | URL | Request,
   init?: RequestInit,
@@ -51,6 +56,10 @@ type RestClient = {
     query: Record<string, string>,
     body: Record<string, unknown>,
   ) => Promise<Response>;
+  delete: (
+    tableName: string,
+    query: Record<string, string>,
+  ) => Promise<Response>;
 };
 type OverviewPayload = {
   action: OverviewDashboardAction;
@@ -76,7 +85,24 @@ type AddPhysicalPhonePayload = {
   actorType: string | null;
   actorId: string | null;
 };
-type ParsedPayload = OverviewPayload | AddPhysicalPhonePayload;
+type DeletePhysicalPhonePreflightPayload = {
+  action: "delete_physical_phone_preflight";
+  deviceId: string;
+  actorType: string | null;
+  actorId: string | null;
+};
+type DeletePhysicalPhonePayload = {
+  action: "delete_physical_phone";
+  deviceId: string;
+  confirmationName: string;
+  actorType: string | null;
+  actorId: string | null;
+};
+type ParsedPayload =
+  | OverviewPayload
+  | AddPhysicalPhonePayload
+  | DeletePhysicalPhonePreflightPayload
+  | DeletePhysicalPhonePayload;
 type PhoneDeviceRow = {
   id: string;
   name: string | null;
@@ -126,7 +152,22 @@ const ACTIONS = new Set([
   "radar_overview",
   "devices_overview",
   "add_physical_phone",
+  "delete_physical_phone_preflight",
+  "delete_physical_phone",
 ]);
+const ACTIVE_ASSIGNMENT_STATUSES = new Set(["pending", "reserved", "active"]);
+const ACTIVE_RUN_REQUEST_STATUSES = new Set([
+  "queued",
+  "claimed",
+  "starting",
+  "running",
+]);
+const ACTIVE_LIVE_VIEW_STATUSES = new Set([
+  "pending",
+  "starting",
+  "active",
+]);
+const OCCUPIED_APP_INSTANCE_STATUSES = new Set(["occupied", "reserved"]);
 const ADD_PHONE_POOLS = new Set(["full_cycle", "outreach_only"]);
 const STANDARD_INSTAGRAM_APP_INSTANCES = [
   {
@@ -570,6 +611,122 @@ function validateAddPhysicalPhonePayload(
   };
 }
 
+function validateDeletePhysicalPhonePreflightPayload(
+  payload: Record<string, unknown>,
+): { ok: true; payload: DeletePhysicalPhonePreflightPayload } | {
+  ok: false;
+  error: string;
+  code: ErrorCode;
+  status: number;
+} {
+  const deviceId = requiredUuid(payload.device_id ?? payload.deviceId, "device_id");
+  if (!deviceId.ok) {
+    return { ok: false, error: deviceId.error, code: "validation_error", status: 400 };
+  }
+  const actorType = optionalBoundedString(
+    payload.actor_type ?? payload.actorType,
+    "actor_type",
+    MAX_FILTER_LENGTH,
+  );
+  if (!actorType.ok) {
+    return { ok: false, error: actorType.error, code: "validation_error", status: 400 };
+  }
+  const actorId = optionalBoundedString(
+    payload.actor_id ?? payload.actorId,
+    "actor_id",
+    MAX_METADATA_FIELD_LENGTH,
+  );
+  if (!actorId.ok) {
+    return { ok: false, error: actorId.error, code: "validation_error", status: 400 };
+  }
+  return {
+    ok: true,
+    payload: {
+      action: "delete_physical_phone_preflight",
+      deviceId: deviceId.value,
+      actorType: actorType.value,
+      actorId: actorId.value,
+    },
+  };
+}
+
+function validateDeletePhysicalPhonePayload(
+  payload: Record<string, unknown>,
+): { ok: true; payload: DeletePhysicalPhonePayload } | {
+  ok: false;
+  error: string;
+  code: ErrorCode;
+  status: number;
+} {
+  const deviceId = requiredUuid(payload.device_id ?? payload.deviceId, "device_id");
+  if (!deviceId.ok) {
+    return { ok: false, error: deviceId.error, code: "validation_error", status: 400 };
+  }
+  const confirmationName = requiredBoundedString(
+    payload.confirmation_name ?? payload.confirmationName,
+    "confirmation_name",
+    MAX_PHONE_FIELD_LENGTH,
+  );
+  if (!confirmationName.ok) {
+    return { ok: false, error: confirmationName.error, code: "validation_error", status: 400 };
+  }
+  const actorType = optionalBoundedString(
+    payload.actor_type ?? payload.actorType,
+    "actor_type",
+    MAX_FILTER_LENGTH,
+  );
+  if (!actorType.ok) {
+    return { ok: false, error: actorType.error, code: "validation_error", status: 400 };
+  }
+  const actorId = optionalBoundedString(
+    payload.actor_id ?? payload.actorId,
+    "actor_id",
+    MAX_METADATA_FIELD_LENGTH,
+  );
+  if (!actorId.ok) {
+    return { ok: false, error: actorId.error, code: "validation_error", status: 400 };
+  }
+  return {
+    ok: true,
+    payload: {
+      action: "delete_physical_phone",
+      deviceId: deviceId.value,
+      confirmationName: confirmationName.value,
+      actorType: actorType.value,
+      actorId: actorId.value,
+    },
+  };
+}
+
+function requiredUuid(
+  value: unknown,
+  fieldName: string,
+): { ok: true; value: string } | { ok: false; error: string } {
+  const normalized = typeof value === "string" ? value.trim() : "";
+  if (!normalized) return { ok: false, error: `${fieldName}_required` };
+  if (
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      normalized,
+    )
+  ) {
+    return { ok: false, error: `${fieldName}_invalid` };
+  }
+  return { ok: true, value: normalized };
+}
+
+function requiredBoundedString(
+  value: unknown,
+  fieldName: string,
+  maxLength: number,
+): { ok: true; value: string } | { ok: false; error: string } {
+  const normalized = typeof value === "string" ? value.trim() : "";
+  if (!normalized) return { ok: false, error: `${fieldName}_required` };
+  if (normalized.length > maxLength) {
+    return { ok: false, error: `${fieldName}_too_long` };
+  }
+  return { ok: true, value: normalized };
+}
+
 export function validatePayload(
   payload: Record<string, unknown>,
 ): { ok: true; payload: ParsedPayload } | {
@@ -600,6 +757,12 @@ export function validatePayload(
 
   if (rawAction === "add_physical_phone") {
     return validateAddPhysicalPhonePayload(payload);
+  }
+  if (rawAction === "delete_physical_phone_preflight") {
+    return validateDeletePhysicalPhonePreflightPayload(payload);
+  }
+  if (rawAction === "delete_physical_phone") {
+    return validateDeletePhysicalPhonePayload(payload);
   }
 
   const search = optionalBoundedString(
@@ -768,6 +931,11 @@ function createServiceRoleRestClient(deps: Dependencies = {}): RestClient {
         method: "PATCH",
         headers: headers(true),
         body: JSON.stringify(body),
+      }),
+    delete: (tableName: string, query: Record<string, string>) =>
+      fetcher(tableUrl(tableName, query), {
+        method: "DELETE",
+        headers: headers(true),
       }),
   };
 }
@@ -1128,6 +1296,218 @@ async function addPhysicalPhone(
     warnings,
     audit,
   };
+}
+
+type DeletePreflightSummary = {
+  deviceId: string;
+  displayName: string;
+  deviceKind: string;
+  inventoryStatus: string;
+  adbSerialSuffix: string | null;
+  cloneCount: number;
+  occupiedCloneCount: number;
+  activeAssignmentCount: number;
+  assignmentHistoryCount: number;
+  linkedInstagramAccountCount: number;
+  activeRunRequestCount: number;
+  activeLiveViewCount: number;
+  activeCredentialCount: number;
+  deletable: boolean;
+  blockingReasonsFr: string[];
+};
+
+async function findPhoneById(
+  rest: RestClient,
+  deviceId: string,
+): Promise<Record<string, any> | null> {
+  const rows = await parseJsonArray(await rest.select("phone_devices", {
+    select: "id,name,device_kind,status,adb_serial",
+    id: `eq.${deviceId}`,
+    limit: "1",
+  }));
+  return rows.length === 1 ? rows[0] : null;
+}
+
+function blockingReasonLabelsFr(reasons: string[]): string[] {
+  const labels: Record<string, string> = {
+    occupied_clone: "Un clone est occupé ou réservé sur ce téléphone",
+    active_assignment: "Une assignation active est en cours sur ce téléphone",
+    assignment_history: "Un historique d'assignations est conservé sur ce téléphone",
+    linked_instagram_account: "Un compte Instagram est encore lié à ce téléphone",
+    active_run_request: "Une demande de run est active pour un compte de ce téléphone",
+    active_live_view: "Une session live view est active sur ce téléphone",
+    active_credential: "Un identifiant Vault non révoqué est lié à un compte de ce téléphone",
+    not_physical_phone: "Seuls les téléphones physiques peuvent être retirés de l'inventaire",
+  };
+  return reasons.map((reason) => labels[reason] || reason);
+}
+
+async function buildDeletePhysicalPhonePreflight(
+  rest: RestClient,
+  deviceId: string,
+): Promise<DeletePreflightSummary> {
+  const phone = await findPhoneById(rest, deviceId);
+  if (!phone) {
+    throw new AdminActionError(404, "validation_error", "device_not_found");
+  }
+
+  const deviceKind = String(phone.device_kind || "physical_phone");
+  const displayName = String(phone.name || phone.device_name || "Unknown phone");
+  const adbSerial = String(phone.adb_serial || "");
+  const appInstances = await loadAppInstances(rest, deviceId);
+  const occupiedCloneCount = appInstances.filter((row) =>
+    Boolean(row.current_account_id) ||
+    OCCUPIED_APP_INSTANCE_STATUSES.has(String(row.status || "").toLowerCase())
+  ).length;
+  const linkedAccountIds = new Set(
+    appInstances
+      .map((row) => String(row.current_account_id || "").trim())
+      .filter(Boolean),
+  );
+
+  const assignmentRows = await parseJsonArray(await rest.select("account_assignments", {
+    select: "id,status,account_id",
+    device_id: `eq.${deviceId}`,
+    limit: "1000",
+  }));
+  const activeAssignmentCount = assignmentRows.filter((row) =>
+    ACTIVE_ASSIGNMENT_STATUSES.has(String(row.status || "").toLowerCase())
+  ).length;
+  const assignmentHistoryCount = assignmentRows.length;
+  for (const row of assignmentRows) {
+    const accountId = String(row.account_id || "").trim();
+    if (accountId) linkedAccountIds.add(accountId);
+  }
+
+  let activeRunRequestCount = 0;
+  let activeCredentialCount = 0;
+  if (linkedAccountIds.size) {
+    const accountFilter = `in.(${Array.from(linkedAccountIds).join(",")})`;
+    const runRows = await parseJsonArray(await rest.select("account_run_requests", {
+      select: "id,status,account_id",
+      account_id: accountFilter,
+      limit: "1000",
+    }));
+    activeRunRequestCount = runRows.filter((row) =>
+      ACTIVE_RUN_REQUEST_STATUSES.has(String(row.status || "").toLowerCase())
+    ).length;
+
+    const credentialRows = await parseJsonArray(await rest.select("account_credentials", {
+      select: "id,account_id,status",
+      account_id: accountFilter,
+      limit: "1000",
+    }));
+    activeCredentialCount = credentialRows.filter((row) =>
+      String(row.status || "").toLowerCase() === "active"
+    ).length;
+  }
+
+  const liveRows = await parseJsonArray(await rest.select("live_view_sessions", {
+    select: "id,status",
+    device_id: `eq.${deviceId}`,
+    limit: "1000",
+  }));
+  const activeLiveViewCount = liveRows.filter((row) =>
+    ACTIVE_LIVE_VIEW_STATUSES.has(String(row.status || "").toLowerCase())
+  ).length;
+
+  const blockingReasons: string[] = [];
+  if (deviceKind !== "physical_phone") blockingReasons.push("not_physical_phone");
+  if (occupiedCloneCount > 0) blockingReasons.push("occupied_clone");
+  if (activeAssignmentCount > 0) blockingReasons.push("active_assignment");
+  if (assignmentHistoryCount > 0) blockingReasons.push("assignment_history");
+  if (linkedAccountIds.size > 0) blockingReasons.push("linked_instagram_account");
+  if (activeRunRequestCount > 0) blockingReasons.push("active_run_request");
+  if (activeLiveViewCount > 0) blockingReasons.push("active_live_view");
+  if (activeCredentialCount > 0) blockingReasons.push("active_credential");
+
+  return {
+    deviceId,
+    displayName,
+    deviceKind,
+    inventoryStatus: String(phone.status || "unknown"),
+    adbSerialSuffix: adbSerial ? adbSerial.slice(-4) : null,
+    cloneCount: appInstances.length,
+    occupiedCloneCount,
+    activeAssignmentCount,
+    assignmentHistoryCount,
+    linkedInstagramAccountCount: linkedAccountIds.size,
+    activeRunRequestCount,
+    activeLiveViewCount,
+    activeCredentialCount,
+    deletable: blockingReasons.length === 0,
+    blockingReasonsFr: blockingReasonLabelsFr(blockingReasons),
+  };
+}
+
+async function publishPhoneDeletedAuditEvent(
+  rest: RestClient,
+  payload: DeletePhysicalPhonePayload,
+  summary: DeletePreflightSummary,
+): Promise<{ attempted: boolean; published: boolean; reason: string | null }> {
+  try {
+    const res = await rest.insert("runtime_events", {
+      event_type: "phone_deleted",
+      severity: "warning",
+      visibility: "admin_only",
+      device_id: null,
+      source: "admin_dashboard",
+      reason: "delete_physical_phone_v1",
+      message: "Physical phone removed from operational inventory.",
+      metadata: {
+        safe_audit: true,
+        display_name: summary.displayName,
+        adb_serial_suffix: summary.adbSerialSuffix,
+        clone_count: summary.cloneCount,
+        actor_type: payload.actorType,
+        actor_id: payload.actorId,
+        delete_physical_phone_v1: true,
+      },
+    });
+    if (!res.ok) return { attempted: true, published: false, reason: "insert_failed" };
+    return { attempted: true, published: true, reason: null };
+  } catch {
+    return { attempted: true, published: false, reason: "insert_failed" };
+  }
+}
+
+async function deletePhysicalPhoneInventory(
+  payload: DeletePhysicalPhonePayload,
+  deps: Dependencies,
+): Promise<{ summary: DeletePreflightSummary; audit: { attempted: boolean; published: boolean; reason: string | null } }> {
+  const rest = createServiceRoleRestClient(deps);
+  const summary = await buildDeletePhysicalPhonePreflight(rest, payload.deviceId);
+  if (summary.displayName !== payload.confirmationName) {
+    throw new AdminActionError(400, "validation_error", "confirmation_name_mismatch");
+  }
+  if (!summary.deletable) {
+    throw new AdminActionError(409, "conflict", "device_delete_blocked");
+  }
+
+  const deleteSteps: Array<[string, Record<string, string>]> = [
+    ["device_heartbeats", { device_id: `eq.${payload.deviceId}` }],
+    ["phone_app_instances", { device_id: `eq.${payload.deviceId}` }],
+    ["phone_clones", { device_id: `eq.${payload.deviceId}` }],
+    ["phone_devices", { id: `eq.${payload.deviceId}` }],
+  ];
+
+  for (const [tableName, query] of deleteSteps) {
+    const res = await rest.delete(tableName, query);
+    if (!res.ok) {
+      throw new AdminActionError(502, "rpc_failed", "device_delete_failed");
+    }
+  }
+
+  const audit = await publishPhoneDeletedAuditEvent(rest, payload, summary);
+  return { summary, audit };
+}
+
+async function deletePhysicalPhonePreflight(
+  payload: DeletePhysicalPhonePreflightPayload,
+  deps: Dependencies,
+): Promise<DeletePreflightSummary> {
+  const rest = createServiceRoleRestClient(deps);
+  return await buildDeletePhysicalPhonePreflight(rest, payload.deviceId);
 }
 
 function safeMetadataBoolean(
@@ -1492,6 +1872,75 @@ export async function handleRequest(
         ? error
         : new AdminActionError(500, "internal_error", "add_physical_phone_failed");
       logEvent(deps, "admin_dashboard_add_physical_phone_failed", {
+        request_id: rid,
+        action: payload.action,
+        status: actionError.status,
+        error: actionError.message,
+      });
+      return errorResponse(
+        actionError.status,
+        actionError.code,
+        actionError.message,
+        headers,
+      );
+    }
+  }
+  if (payload.action === "delete_physical_phone_preflight") {
+    try {
+      const summary = await deletePhysicalPhonePreflight(payload, deps);
+      logEvent(deps, "admin_dashboard_delete_physical_phone_preflight_succeeded", {
+        request_id: rid,
+        action: payload.action,
+        device_id: summary.deviceId,
+        deletable: summary.deletable,
+        status: 200,
+      });
+      return jsonResponse(200, {
+        ok: true,
+        action: payload.action,
+        preflight: summary,
+      }, headers);
+    } catch (error) {
+      const actionError = error instanceof AdminActionError
+        ? error
+        : new AdminActionError(500, "internal_error", "delete_physical_phone_preflight_failed");
+      logEvent(deps, "admin_dashboard_delete_physical_phone_preflight_failed", {
+        request_id: rid,
+        action: payload.action,
+        status: actionError.status,
+        error: actionError.message,
+      });
+      return errorResponse(
+        actionError.status,
+        actionError.code,
+        actionError.message,
+        headers,
+      );
+    }
+  }
+  if (payload.action === "delete_physical_phone") {
+    try {
+      const result = await deletePhysicalPhoneInventory(payload, deps);
+      logEvent(deps, "admin_dashboard_delete_physical_phone_succeeded", {
+        request_id: rid,
+        action: payload.action,
+        device_id: result.summary.deviceId,
+        status: 200,
+      });
+      return jsonResponse(200, {
+        ok: true,
+        action: payload.action,
+        deleted: {
+          device_id: result.summary.deviceId,
+          display_name: result.summary.displayName,
+        },
+        audit: result.audit,
+      }, headers);
+    } catch (error) {
+      const actionError = error instanceof AdminActionError
+        ? error
+        : new AdminActionError(500, "internal_error", "delete_physical_phone_failed");
+      logEvent(deps, "admin_dashboard_delete_physical_phone_failed", {
         request_id: rid,
         action: payload.action,
         status: actionError.status,

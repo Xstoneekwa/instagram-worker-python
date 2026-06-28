@@ -19,6 +19,11 @@ type PhoneDb = {
   appInstances: Array<Record<string, any>>;
   runtimeEvents: Array<Record<string, any>>;
   deviceHeartbeats?: Array<Record<string, any>>;
+  accountAssignments?: Array<Record<string, any>>;
+  accountRunRequests?: Array<Record<string, any>>;
+  accountCredentials?: Array<Record<string, any>>;
+  liveViewSessions?: Array<Record<string, any>>;
+  phoneClones?: Array<Record<string, any>>;
 };
 
 const MANAGE_ROW = {
@@ -244,10 +249,12 @@ function makePhoneFetch(db: PhoneDb, calls: FetchCall[] = []) {
     if (table === "phone_devices") {
       if ((init?.method || "GET") === "GET") {
         const adbEq = parsed.searchParams.get("adb_serial") || "";
+        const idEq = parsed.searchParams.get("id") || "";
         const adbSerial = adbEq.startsWith("eq.") ? adbEq.slice(3) : "";
-        const rows = adbSerial
-          ? db.phoneDevices.filter((row) => row.adb_serial === adbSerial)
-          : db.phoneDevices;
+        const id = idEq.startsWith("eq.") ? idEq.slice(3) : "";
+        let rows = db.phoneDevices;
+        if (adbSerial) rows = rows.filter((row) => row.adb_serial === adbSerial);
+        if (id) rows = rows.filter((row) => row.id === id);
         const limit = Number(parsed.searchParams.get("limit") || rows.length);
         return json(rows.slice(0, limit));
       }
@@ -269,6 +276,12 @@ function makePhoneFetch(db: PhoneDb, calls: FetchCall[] = []) {
         db.phoneDevices[index] = { ...db.phoneDevices[index], ...body };
         return json([db.phoneDevices[index]]);
       }
+      if (init?.method === "DELETE") {
+        const idEq = parsed.searchParams.get("id") || "";
+        const id = idEq.startsWith("eq.") ? idEq.slice(3) : "";
+        db.phoneDevices = db.phoneDevices.filter((row) => row.id !== id);
+        return json(db.phoneDevices.filter((row) => row.id === id));
+      }
     }
 
     if (table === "phone_app_instances") {
@@ -289,19 +302,57 @@ function makePhoneFetch(db: PhoneDb, calls: FetchCall[] = []) {
         db.appInstances.push(row);
         return json([row], 201);
       }
+      if (init?.method === "DELETE") {
+        const deviceEq = parsed.searchParams.get("device_id") || "";
+        const deviceId = deviceEq.startsWith("eq.") ? deviceEq.slice(3) : "";
+        db.appInstances = db.appInstances.filter((row) => row.device_id !== deviceId);
+        return json([]);
+      }
     }
 
-    if (table === "runtime_events" && init?.method === "POST") {
-      const row = {
-        id: `event-${db.runtimeEvents.length + 1}`,
-        ...body,
-      };
-      db.runtimeEvents.push(row);
-      return json([row], 201);
+    if (table === "account_assignments" && (init?.method || "GET") === "GET") {
+      const deviceEq = parsed.searchParams.get("device_id") || "";
+      const deviceId = deviceEq.startsWith("eq.") ? deviceEq.slice(3) : "";
+      const rows = deviceId
+        ? (db.accountAssignments ?? []).filter((row) => row.device_id === deviceId)
+        : (db.accountAssignments ?? []);
+      return json(rows);
     }
 
-    if (table === "device_heartbeats" && (init?.method || "GET") === "GET") {
-      return json(db.deviceHeartbeats ?? []);
+    if (table === "account_run_requests" && (init?.method || "GET") === "GET") {
+      return json(db.accountRunRequests ?? []);
+    }
+
+    if (table === "account_credentials" && (init?.method || "GET") === "GET") {
+      return json(db.accountCredentials ?? []);
+    }
+
+    if (table === "live_view_sessions" && (init?.method || "GET") === "GET") {
+      const deviceEq = parsed.searchParams.get("device_id") || "";
+      const deviceId = deviceEq.startsWith("eq.") ? deviceEq.slice(3) : "";
+      const rows = deviceId
+        ? (db.liveViewSessions ?? []).filter((row) => row.device_id === deviceId)
+        : (db.liveViewSessions ?? []);
+      return json(rows);
+    }
+
+    if (table === "phone_clones" && init?.method === "DELETE") {
+      const deviceEq = parsed.searchParams.get("device_id") || "";
+      const deviceId = deviceEq.startsWith("eq.") ? deviceEq.slice(3) : "";
+      db.phoneClones = (db.phoneClones ?? []).filter((row) => row.device_id !== deviceId);
+      return json([]);
+    }
+
+    if (table === "device_heartbeats") {
+      if ((init?.method || "GET") === "GET") {
+        return json(db.deviceHeartbeats ?? []);
+      }
+      if (init?.method === "DELETE") {
+        const deviceEq = parsed.searchParams.get("device_id") || "";
+        const deviceId = deviceEq.startsWith("eq.") ? deviceEq.slice(3) : "";
+        db.deviceHeartbeats = (db.deviceHeartbeats ?? []).filter((row) => row.device_id !== deviceId);
+        return json([]);
+      }
     }
 
     return json({ error: `unexpected ${href}` }, 500);
@@ -978,6 +1029,132 @@ Deno.test(
     if (body.phone.adb_serial !== "RFGL145TEST") {
       throw new Error("runtime serial missing from response");
     }
+  }),
+);
+
+Deno.test(
+  "delete_physical_phone_preflight refuse un device avec assignation active",
+  withEnv(async () => {
+    const db: PhoneDb = {
+      phoneDevices: [{
+        id: "device-legacy",
+        name: "Entry 2C Physical Outreach Phone",
+        device_kind: "physical_phone",
+        status: "available",
+        adb_serial: "phys-001",
+      }],
+      appInstances: [{
+        id: "app-1",
+        device_id: "device-legacy",
+        instance_type: "primary_app",
+        instance_index: 0,
+        package_name: "com.instagram.android",
+        status: "available",
+        current_account_id: null,
+      }],
+      runtimeEvents: [],
+      accountAssignments: [{
+        id: "assign-1",
+        device_id: "device-legacy",
+        status: "active",
+        account_id: "42c625c2-e761-4100-8a9d-7ae1373de97d",
+      }],
+    };
+    const res = await handleRequest(request({
+      action: "delete_physical_phone_preflight",
+      device_id: "device-legacy",
+    }), {
+      fetch: makePhoneFetch(db),
+      log: () => {},
+    });
+    const body = await res.json();
+    if (res.status !== 200 || body.preflight?.deletable !== false) {
+      throw new Error(`preflight should block: ${JSON.stringify(body)}`);
+    }
+    if (!body.preflight?.blockingReasonsFr?.length) {
+      throw new Error("blocking reasons missing");
+    }
+    assertNoSecretLeakAllowOps(body);
+  }),
+);
+
+Deno.test(
+  "delete_physical_phone refuse sans confirmation exacte",
+  withEnv(async () => {
+    const db: PhoneDb = {
+      phoneDevices: [{
+        id: "device-empty",
+        name: "Empty Phone",
+        device_kind: "physical_phone",
+        status: "available",
+        adb_serial: "RFGL000EMPTY",
+      }],
+      appInstances: [],
+      runtimeEvents: [],
+      accountAssignments: [],
+    };
+    const res = await handleRequest(request({
+      action: "delete_physical_phone",
+      device_id: "device-empty",
+      confirmation_name: "Wrong Name",
+    }), {
+      fetch: makePhoneFetch(db),
+      log: () => {},
+    });
+    const body = await res.json();
+    if (res.status !== 400 || body.error?.message !== "confirmation_name_mismatch") {
+      throw new Error(`confirmation mismatch not enforced: ${JSON.stringify(body)}`);
+    }
+    if (db.phoneDevices.length !== 1) {
+      throw new Error("device mutated on mismatch");
+    }
+  }),
+);
+
+Deno.test(
+  "delete_physical_phone supprime un device vide avec confirmation exacte",
+  withEnv(async () => {
+    const db: PhoneDb = {
+      phoneDevices: [{
+        id: "device-empty",
+        name: "Empty Phone",
+        device_kind: "physical_phone",
+        status: "available",
+        adb_serial: "RFGL000EMPTY",
+      }],
+      appInstances: [{
+        id: "app-1",
+        device_id: "device-empty",
+        instance_type: "primary_app",
+        instance_index: 0,
+        package_name: "com.instagram.android",
+        status: "available",
+        current_account_id: null,
+      }],
+      runtimeEvents: [],
+      accountAssignments: [],
+      deviceHeartbeats: [{ device_id: "device-empty", status: "offline" }],
+      phoneClones: [{ id: "clone-1", device_id: "device-empty", status: "available" }],
+    };
+    const res = await handleRequest(request({
+      action: "delete_physical_phone",
+      device_id: "device-empty",
+      confirmation_name: "Empty Phone",
+    }), {
+      fetch: makePhoneFetch(db),
+      log: () => {},
+    });
+    const body = await res.json();
+    if (res.status !== 200 || body.ok !== true) {
+      throw new Error(`delete failed: ${JSON.stringify(body)}`);
+    }
+    if (db.phoneDevices.length !== 0 || db.appInstances.length !== 0) {
+      throw new Error("device or app instances not removed");
+    }
+    if (!db.runtimeEvents.some((event) => event.event_type === "phone_deleted")) {
+      throw new Error("audit event missing");
+    }
+    assertNoSecretLeakAllowOps(body);
   }),
 );
 
