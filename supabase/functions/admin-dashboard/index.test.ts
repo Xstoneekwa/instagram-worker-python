@@ -1137,7 +1137,7 @@ Deno.test(
       log: () => {},
     });
     const body = await res.json();
-    if (res.status !== 400 || body.error?.message !== "confirmation_name_mismatch") {
+    if (res.status !== 400 || body.error?.message !== "device_delete_confirmation_mismatch") {
       throw new Error(`confirmation mismatch not enforced: ${JSON.stringify(body)}`);
     }
     if (db.phoneDevices.length !== 1) {
@@ -1250,6 +1250,84 @@ Deno.test(
 );
 
 Deno.test(
+  "delete_physical_phone refuse sans confirmation requise",
+  withEnv(async () => {
+    const db: PhoneDb = {
+      phoneDevices: [{
+        id: TEST_DEVICE_ID_EMPTY,
+        name: "Empty Phone",
+        device_kind: "physical_phone",
+        status: "available",
+        adb_serial: "RFGL000EMPTY",
+      }],
+      appInstances: [],
+      runtimeEvents: [],
+      accountAssignments: [],
+    };
+    const res = await handleRequest(request({
+      action: "delete_physical_phone",
+      device_id: TEST_DEVICE_ID_EMPTY,
+    }), {
+      fetch: makePhoneFetch(db),
+      log: () => {},
+    });
+    const body = await res.json();
+    if (res.status !== 400 || body.error?.message !== "device_delete_confirmation_required") {
+      throw new Error(`confirmation required not enforced: ${JSON.stringify(body)}`);
+    }
+    if (db.phoneDevices[0].status !== "available") {
+      throw new Error("device mutated without confirmation");
+    }
+  }),
+);
+
+Deno.test(
+  "delete_physical_phone refuse si dependance active au moment final",
+  withEnv(async () => {
+    const db: PhoneDb = {
+      phoneDevices: [{
+        id: TEST_DEVICE_ID_LEGACY,
+        name: "Entry 2C Physical Outreach Phone",
+        device_kind: "physical_phone",
+        status: "available",
+        adb_serial: "phys-001",
+      }],
+      appInstances: [{
+        id: "app-1",
+        device_id: TEST_DEVICE_ID_LEGACY,
+        instance_type: "primary_app",
+        instance_index: 0,
+        package_name: "com.instagram.android",
+        status: "available",
+        current_account_id: null,
+      }],
+      runtimeEvents: [],
+      accountAssignments: [{
+        id: "assign-1",
+        device_id: TEST_DEVICE_ID_LEGACY,
+        status: "active",
+        account_id: "42c625c2-e761-4100-8a9d-7ae1373de97d",
+      }],
+    };
+    const res = await handleRequest(request({
+      action: "delete_physical_phone",
+      device_id: TEST_DEVICE_ID_LEGACY,
+      confirmation_name: "Entry 2C Physical Outreach Phone",
+    }), {
+      fetch: makePhoneFetch(db),
+      log: () => {},
+    });
+    const body = await res.json();
+    if (res.status !== 409 || body.error?.message !== "device_delete_blocked_by_active_dependency") {
+      throw new Error(`active dependency should block delete: ${JSON.stringify(body)}`);
+    }
+    if (db.phoneDevices[0].status !== "available") {
+      throw new Error("device mutated while blocked");
+    }
+  }),
+);
+
+Deno.test(
   "delete_physical_phone est idempotent apres retrait",
   withEnv(async () => {
     const db: PhoneDb = {
@@ -1276,6 +1354,9 @@ Deno.test(
     const body = await res.json();
     if (res.status !== 200 || body.idempotent !== true) {
       throw new Error(`idempotent retire expected: ${JSON.stringify(body)}`);
+    }
+    if (body.reason !== "device_already_retired") {
+      throw new Error(`idempotent reason missing: ${JSON.stringify(body)}`);
     }
     if (db.runtimeEvents.length !== 1) {
       throw new Error("duplicate audit event emitted");

@@ -669,7 +669,10 @@ function validateDeletePhysicalPhonePayload(
     MAX_PHONE_FIELD_LENGTH,
   );
   if (!confirmationName.ok) {
-    return { ok: false, error: confirmationName.error, code: "validation_error", status: 400 };
+    const error = confirmationName.error === "confirmation_name_required"
+      ? "device_delete_confirmation_required"
+      : confirmationName.error;
+    return { ok: false, error, code: "validation_error", status: 400 };
   }
   const actorType = optionalBoundedString(
     payload.actor_type ?? payload.actorType,
@@ -1490,21 +1493,26 @@ async function retirePhysicalPhoneInventory(
     throw new AdminActionError(404, "validation_error", "device_not_found");
   }
 
-  const summary = await buildDeletePhysicalPhonePreflight(rest, payload.deviceId);
-  if (summary.displayName !== payload.confirmationName) {
-    throw new AdminActionError(400, "validation_error", "confirmation_name_mismatch");
+  const canonicalDisplayName = String(phone.name || phone.device_name || "").trim();
+  if (!payload.confirmationName.trim()) {
+    throw new AdminActionError(400, "validation_error", "device_delete_confirmation_required");
   }
+  if (payload.confirmationName !== canonicalDisplayName) {
+    throw new AdminActionError(400, "validation_error", "device_delete_confirmation_mismatch");
+  }
+
+  const summary = await buildDeletePhysicalPhonePreflight(rest, payload.deviceId);
 
   if (!isOperationalPhoneStatus(String(phone.status || ""))) {
     return {
       summary,
-      audit: { attempted: false, published: false, reason: "already_retired" },
+      audit: { attempted: false, published: false, reason: "device_already_retired" },
       idempotent: true,
     };
   }
 
   if (!summary.deletable) {
-    throw new AdminActionError(409, "conflict", "device_delete_blocked");
+    throw new AdminActionError(409, "conflict", "device_delete_blocked_by_active_dependency");
   }
 
   const retiredAt = new Date().toISOString();
@@ -1972,7 +1980,7 @@ export async function handleRequest(
     } catch (error) {
       const actionError = error instanceof AdminActionError
         ? error
-        : new AdminActionError(500, "internal_error", "delete_physical_phone_preflight_failed");
+        : new AdminActionError(500, "internal_error", "device_delete_preflight_failed");
       logEvent(deps, "admin_dashboard_delete_physical_phone_preflight_failed", {
         request_id: rid,
         action: payload.action,
@@ -2010,6 +2018,7 @@ export async function handleRequest(
           display_name: result.summary.displayName,
         },
         idempotent: result.idempotent,
+        reason: result.idempotent ? (result.audit.reason || "device_already_retired") : null,
         audit: result.audit,
       }, headers);
     } catch (error) {
