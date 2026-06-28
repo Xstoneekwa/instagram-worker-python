@@ -1374,10 +1374,6 @@ async function buildDeletePhysicalPhonePreflight(
     ACTIVE_ASSIGNMENT_STATUSES.has(String(row.status || "").toLowerCase())
   ).length;
   const assignmentHistoryCount = assignmentRows.length;
-  for (const row of assignmentRows) {
-    const accountId = String(row.account_id || "").trim();
-    if (accountId) linkedAccountIds.add(accountId);
-  }
 
   let activeRunRequestCount = 0;
   let activeCredentialCount = 0;
