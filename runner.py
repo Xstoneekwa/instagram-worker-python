@@ -19350,6 +19350,9 @@ def main() -> int:
             log("error", "run_aborted", reason="no_eligible_targets", account_id=account_id)
             return _return_with_cleanup(d, 11)
         from account_session_orchestrator import dispatch_account_session
+        from auto_restart_runtime import load_resume_policy_from_env
+
+        auto_restart_resume_policy = load_resume_policy_from_env()
 
         _t_account_session_target = time.perf_counter()
         log(
@@ -19420,6 +19423,7 @@ def main() -> int:
             supabase_mode=supabase_mode,
             warm_session_used=warm_session_used,
             force_stop_used=force_stop_used,
+            auto_restart_resume_policy=auto_restart_resume_policy,
         )
         if supabase_mode and run_id:
             _update_run_status_safe(

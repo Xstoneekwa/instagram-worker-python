@@ -34,12 +34,55 @@ from account_run_control import (
     reclaim_stale_account_run_requests,
 )
 from assignment_dispatch_resolver import resolve_account_assignment_runtime_context, sensitive_log_fields
+from auto_restart_dispatcher_tick import run_auto_restart_dispatcher_tick, should_run_auto_restart_tick
+from auto_restart_device_lock import acquire_device_lock, release_device_lock, release_device_lock_for_request, renew_device_lock, transfer_device_lock
+from auto_restart_runtime import (
+    is_auto_restart_request,
+    is_hard_stop_reason,
+    log_auto_restart_claim_validation,
+    runner_env_for_resume_policy,
+    validate_auto_restart_request_at_claim,
+)
 from logs import log
 import supabase_client
 
-
 LOGIN_RUN_TYPES = frozenset({"login_provisioning", "login_email_code_resume"})
 ORPHAN_RECOVERY_RUN_TYPE = "login_orphan_challenge_recovery"
+DEVICE_BOUND_RUN_TYPES = frozenset({"account_session", "outreach_session"})
+_last_integration_noop_proof: dict[str, Any] | None = None
+
+
+def _integration_mode_enabled() -> bool:
+    return _env_bool("RUN_CONTROL_INTEGRATION_MODE", False)
+
+
+def _integration_noop_runner_enabled() -> bool:
+    return _integration_mode_enabled() and _env_bool("RUN_CONTROL_INTEGRATION_NOOP_RUNNER", False)
+
+
+def _is_loopback_supabase_url(url: str) -> bool:
+    lowered = str(url or "").strip().lower()
+    return any(host in lowered for host in ("127.0.0.1", "localhost", "[::1]", "::1"))
+
+
+def _assert_integration_safety() -> None:
+    if not _integration_mode_enabled():
+        return
+    url = str(os.environ.get("SUPABASE_URL") or os.environ.get("NEXT_PUBLIC_SUPABASE_URL") or "").strip()
+    if not url or not _is_loopback_supabase_url(url):
+        raise RuntimeError("integration mode requires loopback SUPABASE_URL")
+    if _integration_noop_runner_enabled():
+        for forbidden in ("ANDROID_SERIAL", "ADB_SERIAL", "U2_DEVICE"):
+            if str(os.environ.get(forbidden) or "").strip():
+                raise RuntimeError(f"integration noop forbids env {forbidden}")
+
+
+def _is_device_bound_run_type(run_type: str) -> bool:
+    return str(run_type or "").strip().lower() in DEVICE_BOUND_RUN_TYPES
+
+
+def _pending_manual_lock_worker_id(request_id: str) -> str:
+    return f"pending-request:{request_id}"
 
 
 @dataclass
@@ -330,6 +373,10 @@ def _validate_assignment(account_id: str, run_type: str, cfg: DispatcherConfig) 
     )
     reason = str(ctx.get("reason") or "")
     if reason == "assignment_device_missing_adb_serial":
+        if _integration_noop_runner_enabled():
+            ctx = dict(ctx)
+            ctx["adb_serial"] = "integration-noop"
+            return True, None, ctx
         return False, reason, ctx
     if cfg.require_assignment and not bool(ctx.get("assignment_found")):
         reason = str(ctx.get("reason") or "assignment_not_found")
@@ -445,6 +492,18 @@ def _build_runner_command(
     app_instance_id: str | None = None,
     metadata_safe: dict[str, Any] | None = None,
 ) -> list[str]:
+    if _integration_noop_runner_enabled():
+        if _is_login_run_type(run_type) or _is_orphan_recovery_run_type(run_type):
+            raise RuntimeError("integration noop runner cannot execute login flows")
+        noop_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "auto_restart_integration_noop_runner.py")
+        return [
+            sys.executable,
+            noop_path,
+            "--request-id",
+            request_id,
+            "--account-id",
+            account_id,
+        ]
     if _is_login_run_type(run_type):
         return _build_login_provisioner_command(
             account_id,
@@ -968,8 +1027,12 @@ def _wait_for_subprocess(
     *,
     request_id: str,
     account_id: str,
+    device_id: str | None = None,
+    device_lock_renewal: bool = False,
 ) -> tuple[int, bool]:
     deadline = time.monotonic() + cfg.subprocess_timeout_seconds
+    next_lock_renew = time.monotonic()
+    lock_renew_interval = max(30.0, float(cfg.heartbeat_seconds) * 2.0)
     while True:
         exit_code = proc.poll()
         if exit_code is not None:
@@ -985,6 +1048,14 @@ def _wait_for_subprocess(
                 worker_id=cfg.worker_id,
             )
             return _terminate_subprocess(proc), False
+
+        if device_lock_renewal and device_id and time.monotonic() >= next_lock_renew:
+            renew_device_lock(
+                device_id=device_id,
+                worker_id=cfg.worker_id,
+                request_id=request_id,
+            )
+            next_lock_renew = time.monotonic() + lock_renew_interval
 
         if time.monotonic() >= deadline:
             return _terminate_subprocess(proc), True
@@ -1070,6 +1141,101 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
     )
 
     request_metadata = dict(request.get("metadata_safe") or {})
+    auto_restart_policy: dict[str, Any] | None = None
+    device_id = str(dispatch_ctx.get("device_id") or "").strip()
+    device_lock_active = False
+    lock_owner_worker_id = cfg.worker_id
+    if is_auto_restart_request(request_metadata):
+        ok_resume, resume_reason, auto_restart_policy = validate_auto_restart_request_at_claim(
+            account_id=account_id,
+            metadata=request_metadata,
+        )
+        log_auto_restart_claim_validation(
+            account_id=account_id,
+            request_id=request_id,
+            ok=ok_resume,
+            reason=resume_reason,
+        )
+        if not ok_resume:
+            if is_hard_stop_reason(resume_reason):
+                from auto_restart_hard_stop import execute_auto_restart_hard_stop
+
+                execute_auto_restart_hard_stop(
+                    account_id=account_id,
+                    reason=resume_reason,
+                    request_id=request_id,
+                    device_id=device_id or None,
+                    app_instance_id=str(dispatch_ctx.get("app_instance_id") or "").strip() or None,
+                    execution_worker_id=str(request_metadata.get("execution_worker_id") or "").strip() or None,
+                    trigger_source=str(request_metadata.get("trigger_source") or "").strip() or None,
+                    worker_id=cfg.worker_id,
+                    evidence={"metadata_redacted": True, "claim_validation": resume_reason, "execution_worker_id": cfg.worker_id, "worker_id": cfg.worker_id},
+                    cancel_pending=False,
+                )
+            _safe_complete_account_run_request(
+                request_id,
+                cfg.worker_id,
+                "blocked",
+                error_code=resume_reason or "resume_runtime_not_supported",
+                error_message_safe=f"Auto Restart blocked: {resume_reason or 'resume_runtime_not_supported'}.",
+            )
+            if device_id:
+                tick_worker = str(request_metadata.get("worker_id") or "").strip() or cfg.worker_id
+                release_device_lock(device_id=device_id, worker_id=tick_worker, request_id=request_id)
+            else:
+                tick_worker = str(request_metadata.get("worker_id") or "").strip() or cfg.worker_id
+                release_device_lock_for_request(request_id=request_id, worker_id=tick_worker)
+            return
+        if device_id:
+            transfer_device_lock(
+                device_id=device_id,
+                request_id=request_id,
+                new_worker_id=cfg.worker_id,
+            )
+            renew_device_lock(device_id=device_id, worker_id=cfg.worker_id, request_id=request_id)
+            device_lock_active = True
+            lock_owner_worker_id = cfg.worker_id
+    elif device_id and _is_device_bound_run_type(run_type):
+        transfer_result = transfer_device_lock(
+            device_id=device_id,
+            request_id=request_id,
+            new_worker_id=cfg.worker_id,
+        )
+        if not bool((transfer_result or {}).get("transferred")):
+            pending_worker = _pending_manual_lock_worker_id(request_id)
+            acquired = acquire_device_lock(
+                device_id=device_id,
+                worker_id=cfg.worker_id,
+                account_id=account_id,
+                app_instance_id=str(dispatch_ctx.get("app_instance_id") or "").strip() or None,
+                reason="manual_run",
+            )
+            if not bool((acquired or {}).get("acquired")):
+                _safe_complete_account_run_request(
+                    request_id,
+                    cfg.worker_id,
+                    "blocked",
+                    error_code="device_lock_held",
+                    error_message_safe="Manual run blocked: assigned phone is reserved by another active session.",
+                )
+                _audit(
+                    account_id=account_id,
+                    action_type="manual_run_blocked",
+                    status="blocked",
+                    message="Manual run blocked because the assigned phone is reserved.",
+                    payload={"request_id": request_id, "run_type": run_type, "device_id": device_id},
+                )
+                release_device_lock(device_id=device_id, worker_id=pending_worker, request_id=request_id)
+                return
+            transfer_device_lock(
+                device_id=device_id,
+                request_id=request_id,
+                new_worker_id=cfg.worker_id,
+            )
+        renew_device_lock(device_id=device_id, worker_id=cfg.worker_id, request_id=request_id)
+        device_lock_active = True
+        lock_owner_worker_id = cfg.worker_id
+
     if (_is_login_run_type(run_type) or _is_orphan_recovery_run_type(run_type)) and not adb_serial:
         _safe_complete_account_run_request(
             request_id,
@@ -1140,19 +1306,61 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
     )
     _heartbeat(cfg, status="running", metadata={"active_request_id": request_id, "account_id": account_id})
 
-    proc = subprocess.Popen(
-        cmd,
-        cwd=os.path.dirname(os.path.abspath(__file__)),
-        env=_login_provisioner_env()
+    subprocess_env = (
+        _login_provisioner_env()
         if _is_login_run_type(run_type) or _is_orphan_recovery_run_type(run_type)
-        else runner_subprocess_env(),
+        else runner_subprocess_env()
     )
-    exit_code, timed_out = _wait_for_subprocess(
-        cfg,
-        proc,
-        request_id=request_id,
-        account_id=account_id,
-    )
+    if auto_restart_policy:
+        subprocess_env = {**subprocess_env, **runner_env_for_resume_policy(auto_restart_policy)}
+
+    global _last_integration_noop_proof
+    _last_integration_noop_proof = None
+    if _integration_noop_runner_enabled():
+        subprocess_env = {
+            **os.environ,
+            **subprocess_env,
+            "RUN_CONTROL_INTEGRATION_MODE": "1",
+            "RUN_CONTROL_INTEGRATION_NOOP_RUNNER": "1",
+            "RUN_CONTROL_INTEGRATION_NO_ADB": "1",
+        }
+        completed = subprocess.run(
+            cmd,
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+            env=subprocess_env,
+            capture_output=True,
+            text=True,
+        )
+        for line in (completed.stdout or "").splitlines():
+            stripped = line.strip()
+            if not stripped.startswith("{"):
+                continue
+            try:
+                parsed = json.loads(stripped)
+                if parsed.get("runner") == "auto_restart_integration_noop":
+                    _last_integration_noop_proof = parsed
+                    break
+            except json.JSONDecodeError:
+                continue
+        exit_code = int(completed.returncode)
+        timed_out = False
+    else:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+            env=subprocess_env,
+        )
+        exit_code, timed_out = _wait_for_subprocess(
+            cfg,
+            proc,
+            request_id=request_id,
+            account_id=account_id,
+            device_id=device_id if device_lock_active else None,
+            device_lock_renewal=device_lock_active,
+        )
+
+    if device_id and device_lock_active:
+        release_device_lock(device_id=device_id, worker_id=lock_owner_worker_id, request_id=request_id)
 
     _finalize_manual_run_after_subprocess(
         cfg,
@@ -1165,6 +1373,7 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
 
 
 def run_once(cfg: DispatcherConfig | None = None) -> dict[str, Any]:
+    _assert_integration_safety()
     cfg = cfg or load_dispatcher_config()
     if not cfg.enabled:
         return {"ok": False, "reason": "disabled"}
@@ -1194,13 +1403,16 @@ def run_once(cfg: DispatcherConfig | None = None) -> dict[str, Any]:
 
     account_id = normalize_request_uuid(request.get("account_id"))
     _handle_claimed_request(cfg, request)
-    return {
+    result: dict[str, Any] = {
         "ok": True,
         "mode": "processed",
         "request_id": request_id,
         "account_id": account_id,
         "reclaimed": reclaimed,
     }
+    if _last_integration_noop_proof:
+        result["noop_proof"] = _last_integration_noop_proof
+    return result
 
 
 def evaluate_launch_mode_startup_preflight_with_retries(cfg: DispatcherConfig) -> dict[str, Any]:
@@ -1290,11 +1502,28 @@ def run_forever(cfg: DispatcherConfig | None = None) -> int:
     signal.signal(signal.SIGTERM, _handle_signal)
 
     last_heartbeat = 0.0
+    last_auto_restart_tick = 0.0
+    auto_restart_check_every_minutes = max(1, _env_int("AUTO_RESTART_CHECK_EVERY_MINUTES", 15))
     last_loop_error_key = ""
     last_loop_error_logged_at = 0.0
     consecutive_loop_errors = 0
     while not stop:
         try:
+            now_loop = time.monotonic()
+            if should_run_auto_restart_tick(
+                last_tick_monotonic=last_auto_restart_tick,
+                check_every_minutes=auto_restart_check_every_minutes,
+                now_monotonic=now_loop,
+            ):
+                tick_result = run_auto_restart_dispatcher_tick(worker_id=cfg.worker_id)
+                last_auto_restart_tick = now_loop
+                if tick_result.get("ok"):
+                    log(
+                        "info",
+                        "auto_restart_dispatcher_tick_observed",
+                        worker_id=cfg.worker_id,
+                        skipped=bool(tick_result.get("skipped")),
+                    )
             run_once(cfg)
             last_loop_error_key = ""
             consecutive_loop_errors = 0

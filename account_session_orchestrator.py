@@ -2530,6 +2530,7 @@ def run_account_session(
     max_follow_targets_per_run: int | None = None,
     max_follows_per_target_per_run: int | None = None,
     fast_rotate_to_next_target_from_followers: FastRotationRunner | None = None,
+    auto_restart_resume_policy: dict[str, Any] | None = None,
 ) -> int:
     t0 = time.perf_counter()
     aid = str(account_id or "").strip()
@@ -2586,6 +2587,18 @@ def run_account_session(
     )
 
     welcome_enabled = bool(settings.get("welcome_enabled"))
+    if auto_restart_resume_policy:
+        from auto_restart_runtime import phase_enabled
+
+        welcome_enabled = phase_enabled("welcome", default=welcome_enabled, policy=auto_restart_resume_policy)
+        log(
+            "info",
+            "auto_restart_resume_policy_applied",
+            account_id=aid,
+            run_id=run_id,
+            prior_run_id=auto_restart_resume_policy.get("prior_run_id"),
+            phases_to_run=auto_restart_resume_policy.get("phases_to_run"),
+        )
     real_send_enabled, real_send_source = resolve_welcome_dm_real_send_enabled()
 
     welcome_phase_executed = False
@@ -2716,6 +2729,12 @@ def run_account_session(
         sender_summary=sender_summary,
         welcome_session_status=welcome_session_status,
     )
+    if auto_restart_resume_policy:
+        from auto_restart_runtime import phase_enabled
+
+        if not phase_enabled("follow", default=run_follow, policy=auto_restart_resume_policy):
+            run_follow = False
+            follow_phase_skipped_reason = "auto_restart_resume_skip_follow"
 
     welcome_blocked_follow = not run_follow and welcome_enabled
 
@@ -2863,6 +2882,11 @@ def run_account_session(
             )
             probe_enabled = _follow_to_unfollow_probe_enabled()
             real_enabled = _follow_to_unfollow_real_enabled(aid)
+            if auto_restart_resume_policy:
+                from auto_restart_runtime import phase_enabled
+
+                if not phase_enabled("unfollow", default=real_enabled, policy=auto_restart_resume_policy):
+                    real_enabled = False
             if real_enabled:
                 if probe_enabled:
                     follow_to_unfollow_probe = _skip_follow_to_unfollow_probe(
@@ -3017,7 +3041,7 @@ def run_account_session(
         follow_to_unfollow_real.get("executed")
         and int(follow_to_unfollow_real.get("unfollow_actions_sent") or 0) > 0
     )
-    auto_restart_v1b_dry_run = True
+    auto_restart_v1b_dry_run = auto_restart_resume_policy is None
     auto_restart_v1b_enabled = bool(getattr(config, "AUTO_RESTART_ENABLED", False))
     auto_restart_resume_plan: dict[str, Any] | None = None
     auto_restart_resume_plan_error: str | None = None
@@ -3383,6 +3407,7 @@ def dispatch_account_session(
     max_follow_targets_per_run: int | None = None,
     max_follows_per_target_per_run: int | None = None,
     fast_rotate_to_next_target_from_followers: FastRotationRunner | None = None,
+    auto_restart_resume_policy: dict[str, Any] | None = None,
 ) -> int:
     return run_account_session(
         d,
@@ -3399,4 +3424,5 @@ def dispatch_account_session(
         supabase_mode=supabase_mode,
         warm_session_used=warm_session_used,
         force_stop_used=force_stop_used,
+        auto_restart_resume_policy=auto_restart_resume_policy,
     )
