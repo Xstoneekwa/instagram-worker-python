@@ -1503,7 +1503,6 @@ def run_forever(cfg: DispatcherConfig | None = None) -> int:
 
     last_heartbeat = 0.0
     last_auto_restart_tick = 0.0
-    auto_restart_check_every_minutes = max(1, _env_int("AUTO_RESTART_CHECK_EVERY_MINUTES", 15))
     last_loop_error_key = ""
     last_loop_error_logged_at = 0.0
     consecutive_loop_errors = 0
@@ -1512,17 +1511,26 @@ def run_forever(cfg: DispatcherConfig | None = None) -> int:
             now_loop = time.monotonic()
             if should_run_auto_restart_tick(
                 last_tick_monotonic=last_auto_restart_tick,
-                check_every_minutes=auto_restart_check_every_minutes,
                 now_monotonic=now_loop,
             ):
-                tick_result = run_auto_restart_dispatcher_tick(worker_id=cfg.worker_id)
                 last_auto_restart_tick = now_loop
+                tick_result = run_auto_restart_dispatcher_tick(
+                    worker_id=cfg.worker_id,
+                    dispatcher_reliable=consecutive_loop_errors == 0,
+                )
                 if tick_result.get("ok"):
                     log(
                         "info",
                         "auto_restart_dispatcher_tick_observed",
                         worker_id=cfg.worker_id,
                         skipped=bool(tick_result.get("skipped")),
+                    )
+                elif tick_result.get("skipped"):
+                    log(
+                        "info",
+                        "auto_restart_dispatcher_tick_skipped",
+                        worker_id=cfg.worker_id,
+                        reason=str(tick_result.get("reason") or "skipped"),
                     )
             run_once(cfg)
             last_loop_error_key = ""
