@@ -8,6 +8,7 @@ ENV_FILE="${RUN_CONTROL_DISPATCHER_ENV_FILE:-$ROOT_DIR/.env.run-control-dispatch
 LOG_DIR="${RUN_CONTROL_DISPATCHER_LOG_DIR:-$ROOT_DIR/logs/run-control-dispatcher}"
 RUN_DIR="${RUN_CONTROL_DISPATCHER_RUN_DIR:-$ROOT_DIR/.local/run-control-dispatcher}"
 LOCK_DIR="$RUN_DIR/dispatcher.lock"
+LOCK_OWNER_FILE="$LOCK_DIR/owner.pid"
 PID_FILE="$RUN_DIR/dispatcher.pid"
 PAUSE_FILE="$RUN_DIR/paused"
 PLIST_SOURCE="$ROOT_DIR/ops/launchd/com.boost.phonefarm.dispatcher.plist"
@@ -72,6 +73,7 @@ export RUNTIME_HEARTBEATS_ENABLED="${RUNTIME_HEARTBEATS_ENABLED:-true}"
 export RUN_CONTROL_DISPATCHER_HEALTH_ONLY="${RUN_CONTROL_DISPATCHER_HEALTH_ONLY:-false}"
 export RUN_CONTROL_DISPATCHER_LAUNCH_ENABLED="${RUN_CONTROL_DISPATCHER_LAUNCH_ENABLED:-true}"
 export RUN_CONTROL_DISPATCHER_ALLOW_EXISTING_QUEUE="${RUN_CONTROL_DISPATCHER_ALLOW_EXISTING_QUEUE:-false}"
+export RUN_CONTROL_DISPATCHER_STOP_TIMEOUT_SECONDS="${RUN_CONTROL_DISPATCHER_STOP_TIMEOUT_SECONDS:-15}"
 
 if [[ -z "${RUN_CONTROL_DISPATCHER_WORKER_ID:-}" ]]; then
   HOST_NAME="$(hostname -s 2>/dev/null || hostname)"
@@ -91,12 +93,27 @@ _pid_command_line() {
   ps -p "$pid" -o command= 2>/dev/null || true
 }
 
+_pid_cwd() {
+  local pid="${1:-}"
+  [[ -n "$pid" ]] || return 1
+  local line
+  while IFS= read -r line; do
+    if [[ "$line" == n* ]]; then
+      printf '%s' "${line#n}"
+      return 0
+    fi
+  done < <(lsof -a -d cwd -p "$pid" -Fn 2>/dev/null || true)
+  return 1
+}
+
 _pid_is_consumer() {
   local pid="${1:-}"
   [[ -n "$pid" ]] || return 1
-  local command_line
+  local command_line process_cwd
   command_line="$(_pid_command_line "$pid")"
-  [[ "$command_line" == *"account_run_request_consumer.py"* ]]
+  [[ "$command_line" == *"account_run_request_consumer.py"* ]] || return 1
+  process_cwd="$(_pid_cwd "$pid")"
+  [[ "$process_cwd" == "$ROOT_DIR" ]]
 }
 
 _pid_is_wrapper() {
@@ -112,16 +129,26 @@ _record_pid() {
   printf '%s\n' "$pid" > "$PID_FILE"
 }
 
+_record_lock_owner() {
+  printf '%s\n' "$$" > "$LOCK_OWNER_FILE"
+}
+
+_pid_file_value() {
+  if [[ -f "$PID_FILE" ]]; then
+    tr -dc '0-9' < "$PID_FILE" || true
+  fi
+}
+
+_lock_owner_value() {
+  if [[ -f "$LOCK_OWNER_FILE" ]]; then
+    tr -dc '0-9' < "$LOCK_OWNER_FILE" || true
+  fi
+}
+
 _kill_pid_gracefully() {
   local pid="${1:-}"
   [[ -n "$pid" ]] || return 0
   kill "$pid" 2>/dev/null || true
-}
-
-_kill_pid_force() {
-  local pid="${1:-}"
-  [[ -n "$pid" ]] || return 0
-  kill -9 "$pid" 2>/dev/null || true
 }
 
 _kill_all_dispatcher_processes() {
@@ -129,12 +156,6 @@ _kill_all_dispatcher_processes() {
   while read -r pid; do
     if _pid_is_consumer "$pid"; then
       _kill_pid_gracefully "$pid"
-    fi
-  done < <(pgrep -f "account_run_request_consumer\\.py" 2>/dev/null || true)
-  sleep 1
-  while read -r pid; do
-    if _pid_is_consumer "$pid" && _pid_alive "$pid"; then
-      _kill_pid_force "$pid"
     fi
   done < <(pgrep -f "account_run_request_consumer\\.py" 2>/dev/null || true)
   while read -r pid; do
@@ -146,16 +167,59 @@ _kill_all_dispatcher_processes() {
 
 _clear_pid_and_lock() {
   rm -f "$PID_FILE"
+  rm -f "$LOCK_OWNER_FILE"
   rmdir "$LOCK_DIR" 2>/dev/null || true
+}
+
+_clear_owned_pid_and_lock() {
+  local recorded owner
+  recorded="$(_pid_file_value)"
+  if [[ -n "${recorded:-}" && ( "$recorded" == "$$" || "${consumer_pid:-}" == "$recorded" ) ]]; then
+    rm -f "$PID_FILE"
+  fi
+  owner="$(_lock_owner_value)"
+  if [[ -n "${owner:-}" && "$owner" == "$$" ]]; then
+    rm -f "$LOCK_OWNER_FILE"
+    rmdir "$LOCK_DIR" 2>/dev/null || true
+  fi
+}
+
+_clear_stale_pid_file() {
+  local recorded
+  recorded="$(_pid_file_value)"
+  if [[ -n "${recorded:-}" ]]; then
+    if ! _pid_alive "$recorded"; then
+      rm -f "$PID_FILE"
+    fi
+  fi
+}
+
+_clear_stale_lock_dir() {
+  local owner
+  owner="$(_lock_owner_value)"
+  if [[ -z "${owner:-}" ]]; then
+    rm -f "$LOCK_OWNER_FILE"
+    rmdir "$LOCK_DIR" 2>/dev/null || true
+  elif ! _pid_alive "$owner"; then
+    rm -f "$LOCK_OWNER_FILE"
+    rmdir "$LOCK_DIR" 2>/dev/null || true
+  fi
 }
 
 _existing_dispatcher_pid() {
   if [[ -f "$PID_FILE" ]]; then
     local recorded
-    recorded="$(tr -dc '0-9' < "$PID_FILE" || true)"
-    if _pid_alive "$recorded" && _pid_is_consumer "$recorded"; then
-      printf '%s' "$recorded"
-      return 0
+    recorded="$(_pid_file_value)"
+    if [[ -n "$recorded" ]]; then
+      if _pid_alive "$recorded"; then
+        if _pid_is_consumer "$recorded"; then
+          printf '%s' "$recorded"
+          return 0
+        fi
+        echo "dispatcher_pid_file_conflict pid=$recorded" >&2
+        return 3
+      fi
+      rm -f "$PID_FILE"
     fi
   fi
   local pid
@@ -165,6 +229,68 @@ _existing_dispatcher_pid() {
       return 0
     fi
   done < <(pgrep -f "account_run_request_consumer\\.py" 2>/dev/null || true)
+  return 1
+}
+
+_acquire_dispatcher_lock() {
+  if mkdir "$LOCK_DIR" 2>/dev/null; then
+    _record_lock_owner
+    return 0
+  fi
+  local existing_pid existing_status
+  if existing_pid="$(_existing_dispatcher_pid)"; then
+    if [[ -n "$existing_pid" && "$existing_pid" != "$$" ]]; then
+      echo "dispatcher_lock_held path=$LOCK_DIR"
+      return 1
+    fi
+  else
+    existing_status="$?"
+    if [[ "$existing_status" == "3" ]]; then
+      return 3
+    fi
+  fi
+  _clear_stale_lock_dir
+  if mkdir "$LOCK_DIR" 2>/dev/null; then
+    _record_lock_owner
+    return 0
+  fi
+  echo "dispatcher_lock_held path=$LOCK_DIR"
+  return 1
+}
+
+_wait_for_consumer_stop() {
+  local pid="${1:-}"
+  local deadline
+  deadline=$((SECONDS + ${RUN_CONTROL_DISPATCHER_STOP_TIMEOUT_SECONDS:-15}))
+  [[ -n "$pid" ]] || return 0
+  while _pid_alive "$pid"; do
+    if (( SECONDS >= deadline )); then
+      echo "dispatcher_consumer_stop_timeout pid=$pid" >&2
+      return 1
+    fi
+    sleep 1
+  done
+  return 0
+}
+
+_signal_consumer_gracefully() {
+  local signal_name="${1:-TERM}"
+  local pid="${consumer_pid:-}"
+  [[ -n "$pid" ]] || return 0
+  if _pid_alive "$pid" && _pid_is_consumer "$pid"; then
+    kill "-$signal_name" "$pid" 2>/dev/null || true
+    _wait_for_consumer_stop "$pid"
+  fi
+}
+
+_handle_start_signal() {
+  local signal_name="${1:-TERM}"
+  local exit_code=143
+  [[ "$signal_name" == "INT" ]] && exit_code=130
+  trap - INT TERM
+  _signal_consumer_gracefully "$signal_name" || true
+  _clear_owned_pid_and_lock
+  exit "$exit_code"
 }
 
 _dispatcher_process_count() {
@@ -361,29 +487,40 @@ _require_start_preconditions() {
 
 _start_foreground() {
   _require_start_preconditions
+  local existing_pid existing_status consumer_pid consumer_exit
   if existing_pid="$(_existing_dispatcher_pid)"; then
     if [[ -n "$existing_pid" && "$existing_pid" != "$$" ]]; then
       echo "dispatcher_already_running pid=$existing_pid"
       exit 0
     fi
-  fi
-  if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-    if existing_pid="$(_existing_dispatcher_pid)" && [[ -n "$existing_pid" && "$existing_pid" != "$$" ]]; then
-      echo "dispatcher_lock_held path=$LOCK_DIR"
-      exit 0
-    fi
-    rmdir "$LOCK_DIR" 2>/dev/null || true
-    if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-      echo "dispatcher_lock_held path=$LOCK_DIR"
-      exit 0
+  else
+    existing_status="$?"
+    if [[ "$existing_status" == "3" ]]; then
+      exit 3
     fi
   fi
-  trap _clear_pid_and_lock EXIT INT TERM
+  _acquire_dispatcher_lock
+  existing_status="$?"
+  if [[ "$existing_status" != "0" ]]; then
+    if [[ "$existing_status" == "3" ]]; then
+      exit 3
+    fi
+    exit 0
+  fi
+  trap _clear_owned_pid_and_lock EXIT
+  trap '_handle_start_signal TERM' TERM
+  trap '_handle_start_signal INT' INT
   _record_pid "$$"
   "$PYTHON_BIN" account_run_request_consumer.py >>"$LOG_DIR/dispatcher.log" 2>&1 &
   consumer_pid="$!"
   _record_pid "$consumer_pid"
+  set +e
   wait "$consumer_pid"
+  consumer_exit="$?"
+  set -e
+  _clear_owned_pid_and_lock
+  trap - EXIT INT TERM
+  return "$consumer_exit"
 }
 
 usage() {

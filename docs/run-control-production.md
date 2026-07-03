@@ -67,7 +67,7 @@ Artifacts:
 
 - Wrapper: `scripts/run_control_dispatcher_service.sh`
 - Env template: `docs/run-control-dispatcher.env.example`
-- launchd template: `ops/launchd/com.instagram.run-control-dispatcher.plist`
+- launchd template: `ops/launchd/com.boost.phonefarm.dispatcher.plist`
 
 ### One-time setup
 
@@ -125,6 +125,66 @@ Logs:
 - `logs/run-control-dispatcher/dispatcher.log`
 - `logs/run-control-dispatcher/launchd.stdout.log`
 - `logs/run-control-dispatcher/launchd.stderr.log`
+
+### Dispatcher lifecycle ownership
+
+The production chain is:
+
+```text
+launchd com.boost.phonefarm.dispatcher
+-> scripts/run_control_dispatcher_service.sh start
+-> account_run_request_consumer.py
+```
+
+The wrapper remains the real supervisor. It owns:
+
+- `RUN_CONTROL_DISPATCHER_RUN_DIR/dispatcher.lock`
+- `RUN_CONTROL_DISPATCHER_RUN_DIR/dispatcher.lock/owner.pid`
+- `RUN_CONTROL_DISPATCHER_RUN_DIR/dispatcher.pid`
+
+`dispatcher.pid` points to the consumer after startup. The lock owner points to
+the wrapper. On normal child exit or wrapper `SIGTERM`/`SIGINT`, the wrapper
+forwards the signal to the verified consumer, waits for it to stop, and removes
+only the PID/lock files it owns. It does not kill unrelated PIDs.
+
+Anti-double-consumer rules:
+
+- If `dispatcher.pid` points to a live `account_run_request_consumer.py`, `start`
+  is idempotent and prints `dispatcher_already_running`.
+- If `dispatcher.pid` points to an absent process, it is stale and may be
+  removed before startup.
+- If `dispatcher.pid` points to a live process that is not the expected consumer,
+  startup stops with `dispatcher_pid_file_conflict`; do not adopt or kill it.
+- A held lock without a live owner may be removed; a held lock with a live
+  owner blocks startup.
+
+Safe restart preconditions:
+
+- Auto Restart is off.
+- Queue is empty.
+- No active run exists.
+- No device lock exists.
+- No dispatcher lease exists.
+- There is only one wrapper -> consumer chain.
+
+Safe restart sequence:
+
+```bash
+# After the preconditions above are verified.
+kill -TERM -<dispatcher_pgid>
+# Wait until both wrapper and consumer are gone.
+launchctl kickstart gui/$(id -u)/com.boost.phonefarm.dispatcher
+```
+
+Do not use `kill -9`. Do not start Python directly. Do not create a parallel
+wrapper. After restart, verify a fresh dispatcher heartbeat, `health_only=false`,
+`launch_enabled=true`, queue/runs/locks still empty, and the new process start
+time after the deployed commit.
+
+Known UI limitation: BotApp Runtime Health can still display an unhealthy state
+if it interprets an `idle` dispatcher as not running. Treat the backend
+heartbeat and wrapper status as the source of truth until that UI contract is
+changed separately.
 
 ### Intentionally processing an existing queue
 
