@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import supabase_client
+from assignment_dispatch_resolver import sensitive_log_fields
 from logs import log
 
 
