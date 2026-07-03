@@ -109,10 +109,12 @@ _pid_cwd() {
 _pid_is_consumer() {
   local pid="${1:-}"
   [[ -n "$pid" ]] || return 1
-  local command_line process_cwd
+  local command_line executable_name process_cwd
   command_line="$(_pid_command_line "$pid")"
   [[ "$command_line" == *"account_run_request_consumer.py"* ]] || return 1
-  [[ "$command_line" == *"python"* || "$command_line" == *"Python"* ]] || return 1
+  executable_name="${command_line%% *}"
+  executable_name="${executable_name##*/}"
+  [[ "$executable_name" == *"python"* || "$executable_name" == *"Python"* ]] || return 1
   process_cwd="$(_pid_cwd "$pid")"
   [[ "$process_cwd" == "$ROOT_DIR" ]]
 }
