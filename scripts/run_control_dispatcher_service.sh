@@ -112,6 +112,7 @@ _pid_is_consumer() {
   local command_line process_cwd
   command_line="$(_pid_command_line "$pid")"
   [[ "$command_line" == *"account_run_request_consumer.py"* ]] || return 1
+  [[ "$command_line" == *"python"* || "$command_line" == *"Python"* ]] || return 1
   process_cwd="$(_pid_cwd "$pid")"
   [[ "$process_cwd" == "$ROOT_DIR" ]]
 }
