@@ -88,6 +88,27 @@ def _redact_for_log(value: str, token: str) -> str:
     return text.replace(token, "[REDACTED]")[:500]
 
 
+def extract_tick_result_payload(parsed: Any) -> dict[str, Any]:
+    if not isinstance(parsed, dict):
+        return {}
+    data = parsed.get("data")
+    if isinstance(data, dict):
+        return data
+    return parsed
+
+
+def summarize_tick_metrics(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "skipped": payload.get("skipped"),
+        "reason": payload.get("reason"),
+        "deduplicated_count": payload.get("deduplicated_count"),
+        "evaluated_count": payload.get("scanned_candidates"),
+        "eligible_count": payload.get("eligible_candidates"),
+        "blocked_count": payload.get("blocked_count"),
+        "enqueued_count": payload.get("enqueued_count"),
+    }
+
+
 def build_auto_restart_tick_request(
     *,
     worker_id: str,
@@ -143,13 +164,15 @@ def run_auto_restart_dispatcher_tick(
         with opener(request, timeout=AUTO_RESTART_TICK_HTTP_TIMEOUT_SECONDS) as response:
             body = response.read().decode("utf-8")
             parsed = json.loads(body) if body else {}
+            tick_payload = extract_tick_result_payload(parsed)
+            metrics = summarize_tick_metrics(tick_payload)
             log(
                 "info",
                 "auto_restart_dispatcher_tick_completed",
                 worker_id=resolved_worker_id,
                 dry_run=dry_run,
                 status=getattr(response, "status", None),
-                enqueued_count=(parsed.get("enqueued_count") if isinstance(parsed, dict) else None),
+                **metrics,
             )
             return {"ok": True, "status": getattr(response, "status", None), "result": parsed}
     except urllib.error.HTTPError as exc:

@@ -107,6 +107,71 @@ class AutoRestartDispatcherTickTests(unittest.TestCase):
         body = json.loads(request.data.decode("utf-8"))
         self.assertEqual(body, {"dry_run": False})
 
+    def test_extract_tick_result_payload_reads_nested_data(self) -> None:
+        nested = {"ok": True, "data": {"enqueued_count": 2, "scanned_candidates": 5}}
+        payload = tick.extract_tick_result_payload(nested)
+        self.assertEqual(payload.get("enqueued_count"), 2)
+        self.assertEqual(payload.get("scanned_candidates"), 5)
+
+    def test_summarize_tick_metrics_maps_backend_fields(self) -> None:
+        metrics = tick.summarize_tick_metrics(
+            {
+                "skipped": False,
+                "reason": None,
+                "deduplicated_count": 1,
+                "scanned_candidates": 4,
+                "eligible_candidates": 2,
+                "blocked_count": 1,
+                "enqueued_count": 1,
+            }
+        )
+        self.assertEqual(metrics["evaluated_count"], 4)
+        self.assertEqual(metrics["eligible_count"], 2)
+        self.assertEqual(metrics["enqueued_count"], 1)
+
+    def test_nested_success_response_logs_business_metrics(self) -> None:
+        response = mock.Mock()
+        response.status = 200
+        response.read.return_value = json.dumps(
+            {
+                "ok": True,
+                "data": {
+                    "skipped": False,
+                    "deduplicated_count": 0,
+                    "scanned_candidates": 3,
+                    "eligible_candidates": 1,
+                    "blocked_count": 2,
+                    "enqueued_count": 1,
+                },
+            }
+        ).encode("utf-8")
+        response.__enter__ = mock.Mock(return_value=response)
+        response.__exit__ = mock.Mock(return_value=False)
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "INSTAGRAM_DASHBOARD_API_BASE_URL": "https://dashboard.example.com",
+                "INSTAGRAM_AUTO_RESTART_TICK_TOKEN": "secret-token-value",
+            },
+            clear=False,
+        ):
+            with mock.patch("auto_restart_dispatcher_tick.urllib.request.urlopen", return_value=response):
+                with mock.patch("auto_restart_dispatcher_tick.log") as log_mock:
+                    tick.run_auto_restart_dispatcher_tick(worker_id="run-dispatcher:host-a")
+
+        completed = [call for call in log_mock.call_args_list if call.kwargs.get("enqueued_count") is not None]
+        self.assertTrue(completed)
+        last = completed[-1].kwargs
+        self.assertEqual(last.get("enqueued_count"), 1)
+        self.assertEqual(last.get("evaluated_count"), 3)
+        self.assertNotIn("secret-token-value", str(last))
+
+    def test_response_without_data_remains_safe(self) -> None:
+        payload = tick.extract_tick_result_payload({"ok": True})
+        metrics = tick.summarize_tick_metrics(payload)
+        self.assertIsNone(metrics.get("enqueued_count"))
+
     def test_successful_tick_posts_to_backend(self) -> None:
         response = mock.Mock()
         response.status = 200
