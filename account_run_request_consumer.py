@@ -33,7 +33,9 @@ from account_run_control import (
     reconcile_linked_ig_run_terminal,
     reclaim_stale_account_run_requests,
 )
-from assignment_dispatch_resolver import resolve_account_assignment_runtime_context, sensitive_log_fields
+from assignment_dispatch_resolver import resolve_account_assignment_runtime_context
+from account_commercial_policy import evaluate_queued_run_commercial_policy
+from account_commercial_policy import evaluate_queued_run_commercial_policy, sensitive_log_fields
 from auto_restart_dispatcher_tick import run_auto_restart_dispatcher_tick, should_run_auto_restart_tick
 from auto_restart_device_lock import acquire_device_lock, release_device_lock, release_device_lock_for_request, renew_device_lock, transfer_device_lock
 from auto_restart_runtime import (
@@ -1119,6 +1121,29 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
         )
         return
 
+    request_metadata = dict(request.get("metadata_safe") or {})
+    policy_ok, policy_reason, policy_ctx = evaluate_queued_run_commercial_policy(
+        account_id,
+        request_metadata,
+        request_created_at=str(request.get("created_at") or "").strip() or None,
+    )
+    if not policy_ok:
+        _safe_complete_account_run_request(
+            request_id,
+            cfg.worker_id,
+            "blocked",
+            error_code=policy_reason or "commercial_policy_revision_changed",
+            error_message_safe="Run request blocked: commercial package changed since queue.",
+        )
+        _audit(
+            account_id=account_id,
+            action_type="manual_run_blocked",
+            status="blocked",
+            message="Run request blocked: commercial package changed since queue.",
+            payload={"request_id": request_id, "policy": policy_ctx},
+        )
+        return
+
     adb_serial = str(dispatch_ctx.get("adb_serial") or "").strip()
     log(
         "info",
@@ -1137,10 +1162,10 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
             "worker_id": cfg.worker_id,
             "assignment": safe_dispatch,
             "adb_serial_present": bool(adb_serial),
+            "commercial_policy": policy_ctx,
         },
     )
 
-    request_metadata = dict(request.get("metadata_safe") or {})
     auto_restart_policy: dict[str, Any] | None = None
     device_id = str(dispatch_ctx.get("device_id") or "").strip()
     device_lock_active = False

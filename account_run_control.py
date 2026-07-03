@@ -6,6 +6,7 @@ import uuid
 from typing import Any
 
 import supabase_client
+from account_commercial_policy import stamp_commercial_policy_metadata
 
 ACTIVE_RUN_STATUSES = {"running", "queued", "pending", "in_progress", "active", "starting"}
 ACTIVE_REQUEST_STATUSES = {"queued", "claimed", "starting", "running"}
@@ -49,7 +50,7 @@ def create_account_run_request(
         "p_source_surface": source_surface,
         "p_requested_run_type": requested_run_type,
         "p_priority": int(priority),
-        "p_metadata_safe": metadata_safe or {},
+        "p_metadata_safe": stamp_commercial_policy_metadata(account_id, metadata_safe),
     }
     if requested_by:
         params["p_requested_by"] = requested_by

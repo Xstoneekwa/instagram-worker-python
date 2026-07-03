@@ -36,6 +36,10 @@ from unfollow_settings import UNFOLLOW_MODE_ANY, UNFOLLOW_MODES_DB_STRICT, load_
 from welcome_list_sender import get_last_welcome_list_sender_summary
 from welcome_scan_producer import get_last_welcome_scan_summary
 from welcome_session_orchestrator import dispatch_welcome_session_send
+from account_commercial_policy import (
+    commercial_policy_boundary_blocks_phase,
+    load_account_commercial_policy_revision,
+)
 
 FollowEngineRunner = Callable[..., int]
 FastRotationRunner = Callable[..., dict[str, Any]]
@@ -2548,6 +2552,10 @@ def run_account_session(
         target_id=tid or None,
     )
 
+    session_policy_revision = str(
+        (load_account_commercial_policy_revision(aid) or {}).get("revision_token") or ""
+    ).strip() or None
+
     t_settings_load = time.perf_counter()
     if not src:
         log("error", "account_session_aborted", reason="missing_followers_source_username")
@@ -2611,6 +2619,21 @@ def run_account_session(
 
     if not welcome_enabled:
         welcome_bypass_reason = "welcome_disabled"
+        log(
+            "info",
+            "account_session_welcome_bypassed",
+            account_id=aid,
+            run_id=run_id,
+            reason=welcome_bypass_reason,
+        )
+    elif commercial_policy_boundary_blocks_phase(
+        aid,
+        bound_revision=session_policy_revision,
+        run_id=run_id,
+        boundary="before_welcome_phase",
+    ):
+        welcome_bypass_reason = "commercial_policy_revision_changed"
+        welcome_session_status = "skipped"
         log(
             "info",
             "account_session_welcome_bypassed",
@@ -2782,6 +2805,14 @@ def run_account_session(
                     prior_transition_reason=transition_reason,
                 )
         if follow_ready:
+            if commercial_policy_boundary_blocks_phase(
+                aid,
+                bound_revision=session_policy_revision,
+                run_id=run_id,
+                boundary="before_follow_phase",
+            ):
+                follow_ready = False
+                follow_phase_skipped_reason = "commercial_policy_revision_changed"
             log(
                 "info",
                 "account_session_follow_phase_started",
@@ -2888,25 +2919,44 @@ def run_account_session(
                 if not phase_enabled("unfollow", default=real_enabled, policy=auto_restart_resume_policy):
                     real_enabled = False
             if real_enabled:
-                if probe_enabled:
-                    follow_to_unfollow_probe = _skip_follow_to_unfollow_probe(
+                if commercial_policy_boundary_blocks_phase(
+                    aid,
+                    bound_revision=session_policy_revision,
+                    run_id=run_id,
+                    boundary="before_unfollow_phase",
+                ):
+                    follow_to_unfollow_real = _skip_follow_to_unfollow_real(
                         account_id=aid,
                         account_username=uname,
                         run_id=run_id,
-                        probe_enabled=True,
-                        skip_reason="real_handoff_enabled",
+                        real_enabled=False,
+                        skip_reason="commercial_policy_revision_changed",
+                        diagnostic=follow_to_unfollow_diagnostic,
+                        follow_exit_code=follow_exit_code,
+                        real_max_actions_requested=_follow_to_unfollow_real_max_actions_requested(),
+                        real_max_actions_effective=_follow_to_unfollow_real_max_actions_effective(aid),
+                        real_hard_max=_follow_to_unfollow_real_hard_max(),
+                    )
+                else:
+                    if probe_enabled:
+                        follow_to_unfollow_probe = _skip_follow_to_unfollow_probe(
+                            account_id=aid,
+                            account_username=uname,
+                            run_id=run_id,
+                            probe_enabled=True,
+                            skip_reason="real_handoff_enabled",
+                            diagnostic=follow_to_unfollow_diagnostic,
+                        )
+                        follow_to_unfollow_probe["probe_bypassed_reason"] = "real_handoff_enabled"
+                    follow_to_unfollow_real = _run_follow_to_unfollow_real(
+                        d,
+                        account_id=aid,
+                        account_username=uname,
+                        run_id=run_id,
+                        follow_exit_code=follow_exit_code,
+                        follow_total_ms=(follow_t1 - follow_t0) * 1000.0,
                         diagnostic=follow_to_unfollow_diagnostic,
                     )
-                    follow_to_unfollow_probe["probe_bypassed_reason"] = "real_handoff_enabled"
-                follow_to_unfollow_real = _run_follow_to_unfollow_real(
-                    d,
-                    account_id=aid,
-                    account_username=uname,
-                    run_id=run_id,
-                    follow_exit_code=follow_exit_code,
-                    follow_total_ms=(follow_t1 - follow_t0) * 1000.0,
-                    diagnostic=follow_to_unfollow_diagnostic,
-                )
             else:
                 real_skip_reason = (
                     "unfollow_any_handoff_disabled"
@@ -2973,12 +3023,24 @@ def run_account_session(
                 max_jobs=_account_session_outreach_addon_max_jobs(),
             )
         else:
-            account_session_outreach_addon = _run_account_session_outreach_addon(
-                d,
-                account_id=aid,
-                account_username=uname,
+            if commercial_policy_boundary_blocks_phase(
+                aid,
+                bound_revision=session_policy_revision,
                 run_id=run_id,
-            )
+                boundary="before_outreach_phase",
+            ):
+                account_session_outreach_addon = _skip_account_session_outreach_addon(
+                    enabled=True,
+                    reason="commercial_policy_revision_changed",
+                    max_jobs=_account_session_outreach_addon_max_jobs(),
+                )
+            else:
+                account_session_outreach_addon = _run_account_session_outreach_addon(
+                    d,
+                    account_id=aid,
+                    account_username=uname,
+                    run_id=run_id,
+                )
 
     session_status = _account_session_status(
         transition_reason=transition_reason,

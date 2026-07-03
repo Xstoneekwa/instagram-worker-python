@@ -1136,6 +1136,33 @@ def update_account_incident_notification(
     return row[0]
 
 
+def load_incident_notification_channel_settings(
+    channels: list[str] | tuple[str, ...] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Load canonical incident notification channel settings (service-role only)."""
+    selected = [
+        str(channel or "").strip().lower()
+        for channel in (channels or ("slack", "discord"))
+        if str(channel or "").strip().lower() in {"slack", "discord"}
+    ]
+    if not selected:
+        selected = ["slack", "discord"]
+    rows = _request_json(
+        "GET",
+        "incident_notification_channel_settings",
+        query={
+            "select": "channel,enabled,configured,webhook_ciphertext,updated_at,metadata",
+            "channel": f"in.({','.join(selected)})",
+        },
+    )
+    out: dict[str, dict[str, Any]] = {}
+    for row in rows or []:
+        channel = str(row.get("channel") or "").strip().lower()
+        if channel:
+            out[channel] = dict(row)
+    return out
+
+
 def insert_action_log(
     run_id: str,
     account_id: str,
@@ -2692,6 +2719,56 @@ def get_account_package_summary(account_id: str) -> dict[str, Any] | None:
     )
     if rows and isinstance(rows, list):
         return rows[0]
+    return None
+
+
+def get_account_commercial_policy_revision(account_id: str) -> dict[str, Any] | None:
+    """Latest per-account commercial policy revision (plan change / package writer)."""
+    aid = str(account_id or "").strip()
+    if not aid:
+        return None
+    rows = _request_json(
+        "GET",
+        "account_commercial_policy_revisions",
+        query={
+            "select": "account_id,client_id,package_code,entitlement_id,revision_token,created_at",
+            "account_id": f"eq.{aid}",
+            "order": "created_at.desc",
+            "limit": "1",
+        },
+    )
+    if rows and isinstance(rows, list):
+        row = rows[0]
+        if isinstance(row, dict):
+            row = dict(row)
+            row.setdefault(
+                "package_starts_at",
+                row.get("created_at"),
+            )
+            return row
+    package_row = _request_json(
+        "GET",
+        "account_commercial_packages",
+        query={
+            "select": "account_id,package_code,updated_at,starts_at",
+            "account_id": f"eq.{aid}",
+            "status": "eq.active",
+            "ends_at": "is.null",
+            "order": "starts_at.desc",
+            "limit": "1",
+        },
+    )
+    if package_row and isinstance(package_row, list) and package_row[0]:
+        row = package_row[0]
+        code = str(row.get("package_code") or "").strip()
+        updated = str(row.get("updated_at") or row.get("starts_at") or "").strip()
+        if code:
+            return {
+                "account_id": aid,
+                "package_code": code,
+                "package_starts_at": str(row.get("starts_at") or row.get("updated_at") or "").strip() or None,
+                "revision_token": f"package:{code}:{updated}" if updated else f"package:{code}",
+            }
     return None
 
 

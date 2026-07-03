@@ -9654,6 +9654,20 @@ def _run_followers_list_engine_session(
         account_id=str(account_id or ""),
     )
 
+    session_commercial_policy_revision: str | None = None
+    if account_id:
+        try:
+            from account_commercial_policy import load_account_commercial_policy_revision
+
+            session_commercial_policy_revision = str(
+                (load_account_commercial_policy_revision(str(account_id)) or {}).get(
+                    "revision_token"
+                )
+                or ""
+            ).strip() or None
+        except Exception:
+            session_commercial_policy_revision = None
+
     def _eng_log(action_type: str, status: str, message: str, payload: dict) -> None:
         if not (supabase_mode and run_id and account_id):
             return
@@ -16902,6 +16916,7 @@ def _run_followers_list_engine_session(
                     own_unified_xml_list=bool(_pf_xml_list and not _pf_vcid),
                     follow_context=_pf_follow_context,
                     candidate_pick=pick if isinstance(pick, dict) else None,
+                    bound_commercial_policy_revision=session_commercial_policy_revision,
                 )
                 _critical_persist_t0 = time.perf_counter()
                 _critical_persist_ok = True

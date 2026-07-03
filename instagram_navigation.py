@@ -43114,6 +43114,9 @@ def run_post_follow_post_likes_phase(
     skipped_tap: bool,
     session_likes_used: int = 0,
     follow_context: Any | None = None,
+    account_id: str | None = None,
+    bound_commercial_policy_revision: str | None = None,
+    run_id: str | None = None,
 ) -> dict[str, Any]:
     """
     Post-follow: like recent post(s) on the open candidate profile (V1: single post).
@@ -43385,6 +43388,50 @@ def run_post_follow_post_likes_phase(
             skipped_reason="private_follow_request_pending",
             log_early_exit=True,
         )
+
+    likes_account_id = str(account_id or "").strip()
+    likes_run_id = str(run_id or "").strip() or None
+    if not likes_account_id:
+        try:
+            import supabase_client as _likes_sc
+
+            likes_account_id = str(
+                getattr(_likes_sc, "_LOG_CONTEXT_ACCOUNT_ID", "") or ""
+            ).strip()
+            if not likes_run_id:
+                likes_run_id = (
+                    str(getattr(_likes_sc, "_LOG_CONTEXT_RUN_ID", "") or "").strip()
+                    or None
+                )
+        except Exception:
+            likes_account_id = ""
+    if likes_account_id:
+        from account_commercial_policy import commercial_policy_boundary_blocks_phase
+
+        if commercial_policy_boundary_blocks_phase(
+            likes_account_id,
+            bound_revision=bound_commercial_policy_revision,
+            run_id=likes_run_id,
+            boundary="before_post_follow_likes_phase",
+        ):
+            try:
+                log(
+                    "info",
+                    "post_follow_like_skipped_commercial_policy_revision_changed",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    follower_username=cand,
+                    account_id=likes_account_id,
+                    run_id=likes_run_id,
+                    reason="commercial_policy_revision_changed",
+                )
+            except Exception:
+                pass
+            return _finish(
+                phase_outcome="skipped",
+                skipped_reason="commercial_policy_revision_changed",
+                log_early_exit=True,
+            )
 
     if not _cfg_snap["post_follow_enabled"]:
         return _finish(
@@ -46124,6 +46171,7 @@ def run_visual_candidate_post_follow_phase(
     own_unified_xml_list: bool = False,
     follow_context: Any | None = None,
     candidate_pick: dict[str, Any] | None = None,
+    bound_commercial_policy_revision: str | None = None,
 ) -> dict[str, Any]:
     """
     Post-follow: observe UI, optional real mute, controlled return to CT followers list.
@@ -46699,18 +46747,70 @@ def run_visual_candidate_post_follow_phase(
             reason="post_follow_candidate_profile_lost",
         )
     elif follow_success_verified and cand:
-        likes_out = run_post_follow_post_likes_phase(
-            d,
-            pkg=pkg,
-            source_profile_username=src,
-            follower_username=cand,
-            visual_candidate_id=vcid,
-            follow_success_verified=follow_success_verified,
-            follow_state_after=fs_after,
-            skipped_tap=skipped_tap,
-            session_likes_used=int(session_likes_used or 0),
-            follow_context=post_follow_ctx,
-        )
+        likes_account_id = ""
+        likes_run_id: str | None = None
+        try:
+            import supabase_client as _pf_likes_sc
+
+            likes_account_id = str(
+                getattr(_pf_likes_sc, "_LOG_CONTEXT_ACCOUNT_ID", "") or ""
+            ).strip()
+            likes_run_id = (
+                str(getattr(_pf_likes_sc, "_LOG_CONTEXT_RUN_ID", "") or "").strip()
+                or None
+            )
+        except Exception:
+            likes_account_id = ""
+        likes_policy_blocked = False
+        if likes_account_id:
+            from account_commercial_policy import commercial_policy_boundary_blocks_phase
+
+            likes_policy_blocked = commercial_policy_boundary_blocks_phase(
+                likes_account_id,
+                bound_revision=bound_commercial_policy_revision,
+                run_id=likes_run_id,
+                boundary="before_post_follow_likes_phase",
+            )
+        if likes_policy_blocked:
+            post_follow_ctx.mark_like_done_or_skipped(
+                reason="commercial_policy_revision_changed"
+            )
+            likes_out.update(
+                {
+                    "ok": False,
+                    "skipped": True,
+                    "phase_outcome": "skipped",
+                    "skipped_reason": "commercial_policy_revision_changed",
+                    "liked_count": 0,
+                    "attempted_count": 0,
+                }
+            )
+            log(
+                "info",
+                "post_follow_like_skipped_commercial_policy_revision_changed",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                follower_username=cand,
+                account_id=likes_account_id,
+                run_id=likes_run_id,
+                reason="commercial_policy_revision_changed",
+            )
+        else:
+            likes_out = run_post_follow_post_likes_phase(
+                d,
+                pkg=pkg,
+                source_profile_username=src,
+                follower_username=cand,
+                visual_candidate_id=vcid,
+                follow_success_verified=follow_success_verified,
+                follow_state_after=fs_after,
+                skipped_tap=skipped_tap,
+                session_likes_used=int(session_likes_used or 0),
+                follow_context=post_follow_ctx,
+                account_id=likes_account_id or None,
+                bound_commercial_policy_revision=bound_commercial_policy_revision,
+                run_id=likes_run_id,
+            )
     likes_recoverable_failure = bool(
         str(likes_out.get("phase_outcome") or "") == "failed_safe_continue"
         or int(likes_out.get("post_follow_likes_recoverable_failure_count") or 0) > 0
