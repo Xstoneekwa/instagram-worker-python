@@ -61,21 +61,41 @@ Play remains disabled if any of these are missing or the dispatcher heartbeat is
 
 ## Permanent Dispatcher Service
 
-Production default: supervised dispatcher service, not manual heartbeat commands.
+Production default: supervised dispatcher service through the canonical runtime
+controller, not manual heartbeat commands and not a mutable checkout.
 
 Artifacts:
 
-- Wrapper: `scripts/run_control_dispatcher_service.sh`
+- Active root symlink: `/Users/admin/phonefarm-worker-current`
+- Immutable releases: `/Users/admin/phonefarm-worker-releases/<commit>`
+- Stable controller: `/Users/admin/phonefarm-runtime/bin/phonefarm-runtimectl`
+- Wrapper inside the active release: `scripts/run_control_dispatcher_service.sh`
 - Env template: `docs/run-control-dispatcher.env.example`
 - launchd template: `ops/launchd/com.boost.phonefarm.dispatcher.plist`
+
+Runtime invariants:
+
+- LaunchAgents call only `/Users/admin/phonefarm-runtime/bin/phonefarm-runtimectl`.
+- The controller resolves `/Users/admin/phonefarm-worker-current` on every call.
+- `/Users/admin/instagram-worker-python` is never a service root.
+- If the symlink is missing, points outside releases, points to the legacy root,
+  or lacks required worker files, status is `runtime_root_invalid`.
+- If a process is alive but from a non-active root, status is
+  `runtime_root_mismatch`.
+- Logs and PID/lock files live under `/Users/admin/phonefarm-runtime`, outside
+  immutable releases.
 
 ### One-time setup
 
 ```bash
-cd /Users/admin/instagram-worker-python
-cp docs/run-control-dispatcher.env.example .env.run-control-dispatcher
-# edit .env.run-control-dispatcher with SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY
-chmod +x scripts/run_control_dispatcher_service.sh
+mkdir -p /Users/admin/phonefarm-runtime/{bin,env,logs,run}
+# Provision secrets out of band; never copy them from a mutable checkout.
+# Required files:
+#   /Users/admin/phonefarm-runtime/env/run-control-dispatcher.env
+#   /Users/admin/phonefarm-runtime/env/device-heartbeat.env
+ln -sfn /Users/admin/phonefarm-worker-releases/<commit> /Users/admin/phonefarm-worker-current
+cp /Users/admin/phonefarm-worker-current/scripts/phonefarm-runtimectl /Users/admin/phonefarm-runtime/bin/phonefarm-runtimectl
+chmod +x /Users/admin/phonefarm-runtime/bin/phonefarm-runtimectl
 ```
 
 Set the same worker id on the dashboard host:
@@ -97,34 +117,34 @@ Before launch mode starts, the dispatcher checks active `account_run_requests`
 Commands:
 
 ```bash
-./scripts/run_control_dispatcher_service.sh status
-./scripts/run_control_dispatcher_service.sh preflight
-./scripts/run_control_dispatcher_service.sh once
-./scripts/run_control_dispatcher_service.sh start
+/Users/admin/phonefarm-runtime/bin/phonefarm-runtimectl status --json
+/Users/admin/phonefarm-runtime/bin/phonefarm-runtimectl dispatcher status --json
+/Users/admin/phonefarm-runtime/bin/phonefarm-runtimectl dispatcher start
 ```
 
 ### launchd install (macOS)
 
 ```bash
-cp ops/launchd/com.instagram.run-control-dispatcher.plist ~/Library/LaunchAgents/
-launchctl unload ~/Library/LaunchAgents/com.instagram.run-control-dispatcher.plist 2>/dev/null || true
-launchctl load ~/Library/LaunchAgents/com.instagram.run-control-dispatcher.plist
-launchctl start com.instagram.run-control-dispatcher
-launchctl print gui/$(id -u)/com.instagram.run-control-dispatcher | head
+cp /Users/admin/phonefarm-worker-current/ops/launchd/com.boost.phonefarm.dispatcher.plist ~/Library/LaunchAgents/
+launchctl bootout "gui/$(id -u)" ~/Library/LaunchAgents/com.boost.phonefarm.dispatcher.plist 2>/dev/null || true
+launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.boost.phonefarm.dispatcher.plist
+launchctl enable "gui/$(id -u)/com.boost.phonefarm.dispatcher"
+launchctl kickstart -k "gui/$(id -u)/com.boost.phonefarm.dispatcher"
+launchctl print "gui/$(id -u)/com.boost.phonefarm.dispatcher"
 ```
 
 Stop / restart:
 
 ```bash
-launchctl stop com.instagram.run-control-dispatcher
-launchctl unload ~/Library/LaunchAgents/com.instagram.run-control-dispatcher.plist
+/Users/admin/phonefarm-runtime/bin/phonefarm-runtimectl dispatcher stop
+/Users/admin/phonefarm-runtime/bin/phonefarm-runtimectl dispatcher restart
 ```
 
 Logs:
 
-- `logs/run-control-dispatcher/dispatcher.log`
-- `logs/run-control-dispatcher/launchd.stdout.log`
-- `logs/run-control-dispatcher/launchd.stderr.log`
+- `/Users/admin/phonefarm-runtime/logs/run-control-dispatcher/dispatcher.log`
+- `/Users/admin/phonefarm-runtime/logs/run-control-dispatcher/launchd.stdout.log`
+- `/Users/admin/phonefarm-runtime/logs/run-control-dispatcher/launchd.stderr.log`
 
 ### Dispatcher lifecycle ownership
 
@@ -132,6 +152,8 @@ The production chain is:
 
 ```text
 launchd com.boost.phonefarm.dispatcher
+-> /Users/admin/phonefarm-runtime/bin/phonefarm-runtimectl dispatcher start
+-> /Users/admin/phonefarm-worker-current
 -> scripts/run_control_dispatcher_service.sh start
 -> account_run_request_consumer.py
 ```
@@ -181,10 +203,8 @@ wrapper. After restart, verify a fresh dispatcher heartbeat, `health_only=false`
 `launch_enabled=true`, queue/runs/locks still empty, and the new process start
 time after the deployed commit.
 
-Known UI limitation: BotApp Runtime Health can still display an unhealthy state
-if it interprets an `idle` dispatcher as not running. Treat the backend
-heartbeat and wrapper status as the source of truth until that UI contract is
-changed separately.
+BotApp must call the same stable controller. It must not hardcode a release
+hash, guess a checkout, or silently fall back to `/Users/admin/instagram-worker-python`.
 
 ### Intentionally processing an existing queue
 
@@ -205,13 +225,91 @@ Recommended first deployment:
 
 Example launchd label:
 
-- `com.instagram.run-control-dispatcher`
+- `com.boost.phonefarm.dispatcher`
 
 Restart policy:
 
 - Always restart dispatcher process
 - Do not blindly replay child runs if `run_id` is already linked
 - Safe-start blocks launch mode when active queue exists unless explicitly overridden
+
+## Device Heartbeat Service
+
+Production phone backend heartbeats are a separate launchd service, but they use
+the same canonical root contract:
+
+```text
+launchd com.boost.phonefarm.device-heartbeat
+-> /Users/admin/phonefarm-runtime/bin/phonefarm-runtimectl heartbeat start
+-> /Users/admin/phonefarm-worker-current
+-> scripts/device_heartbeat_service.sh start
+-> device_heartbeat_publisher.py --serve
+```
+
+Current configured cadence is `DEVICE_HEARTBEAT_INTERVAL_SECONDS=60` unless the
+external env file overrides it. Keep this value unless operational evidence
+shows the assignment backend needs a shorter freshness window.
+
+The publisher reads local ADB inventory and publishes per registered device. A
+missing emulator must be reported as that emulator's stale/offline state, not as
+Samsung A16 phone failure. The service status distinguishes:
+
+- service alive/stopped/degraded;
+- local ADB visibility;
+- backend heartbeat freshness;
+- publish/backend errors;
+- root mismatch.
+
+Heartbeat logs are external to releases:
+
+- `/Users/admin/phonefarm-runtime/logs/device-heartbeat-service/heartbeat.log`
+- `/Users/admin/phonefarm-runtime/logs/device-heartbeat-service/heartbeat.log.1`
+- `/Users/admin/phonefarm-runtime/logs/device-heartbeat-service/launchd.stdout.log`
+- `/Users/admin/phonefarm-runtime/logs/device-heartbeat-service/launchd.stderr.log`
+
+`device_heartbeat_publisher.py --serve` owns the heartbeat log write and rotates
+it at `DEVICE_HEARTBEAT_LOG_MAX_BYTES` (default 10 MiB). Avoid shell append
+redirection for the persistent heartbeat loop because it can keep writing to a
+renamed inode and hide disk-pressure incidents.
+
+## Embedded Scheduler
+
+Auto Restart scheduling is embedded in `account_run_request_consumer.py`; do not
+create a second scheduler service. The dispatcher calls the canonical backend
+route `/api/instagram-dashboard/auto-restart/tick` at most once per minute via
+`auto_restart_dispatcher_tick.py`.
+
+Scheduler operator status is derived from the dispatcher tick logs:
+
+- `disabled_by_config` when backend returns `scheduler_disabled`;
+- `no_eligible_accounts` when the backend evaluated candidates but selected none;
+- `running` when the backend enqueued work;
+- `error` when the tick request fails.
+
+The backend route owns account selection, schedule windows, commercial gates and
+`manual_only` exclusion. Never modify caps, schedules, packages or account
+settings to force a scheduler smoke test.
+
+## Release And Rollback
+
+Release flow:
+
+1. Commit and push worker changes.
+2. Create `/Users/admin/phonefarm-worker-releases/<commit>` from that commit.
+3. Verify the release contains `phonefarm_runtime_control.py`, wrappers and
+   launchd templates.
+4. Save the previous `/Users/admin/phonefarm-worker-current` target.
+5. Atomically repoint `/Users/admin/phonefarm-worker-current`.
+6. Copy `scripts/phonefarm-runtimectl` to
+   `/Users/admin/phonefarm-runtime/bin/phonefarm-runtimectl`.
+7. Install LaunchAgents from the active root.
+8. Restart only dispatcher/heartbeat services and verify roots.
+
+Rollback is the same symlink operation in reverse: repoint
+`/Users/admin/phonefarm-worker-current` to the saved release and restart only the
+affected LaunchAgents. Roll back immediately if any service starts from the
+legacy checkout, reports `runtime_root_mismatch`, fails to publish heartbeat, or
+BotApp reports a contradictory runtime root.
 
 ## Staging Smoke Checklist
 

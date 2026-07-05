@@ -96,6 +96,20 @@ emulator-5554 offline transport_id:9
             self.assertIn('"ok": true', payload)
             self.assertIn('"published_count": 2', payload)
 
+    def test_append_rotating_json_log_rotates_existing_large_file(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "heartbeat.log"
+            log_path.write_text("x" * 1024 * 1024, encoding="utf-8")
+
+            publisher.append_rotating_json_log(str(log_path), {"ok": True}, max_bytes=1024)
+
+            self.assertTrue(log_path.exists())
+            self.assertTrue(log_path.with_suffix(".log.1").exists())
+            self.assertIn('"ok": true', log_path.read_text(encoding="utf-8"))
+
     def test_serve_forever_runs_initial_cycle_and_respects_shutdown(self) -> None:
         publisher._shutdown_requested = False
         calls: list[dict[str, object]] = []

@@ -30,6 +30,7 @@ SAFE_ADB_DETAIL_KEYS = {"model", "product", "device", "transport_id"}
 DEFAULT_SERVE_INTERVAL_SECONDS = 60
 MIN_SERVE_INTERVAL_SECONDS = 15
 MAX_SERVE_INTERVAL_SECONDS = 300
+DEFAULT_LOG_MAX_BYTES = 10 * 1024 * 1024
 _shutdown_requested = False
 
 
@@ -172,6 +173,24 @@ def write_cycle_state(state_file: str | None, payload: dict[str, Any]) -> None:
     temp_path.replace(path)
 
 
+def append_rotating_json_log(log_file: str | None, payload: dict[str, Any], *, max_bytes: int = DEFAULT_LOG_MAX_BYTES) -> None:
+    if not log_file:
+        print(json.dumps(payload, sort_keys=True), flush=True)
+        return
+    path = Path(log_file)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    limit = max(1024 * 1024, int(max_bytes or DEFAULT_LOG_MAX_BYTES))
+    if path.exists() and path.stat().st_size >= limit:
+        rotated = path.with_suffix(path.suffix + ".1")
+        if rotated.exists():
+            rotated.unlink()
+        path.replace(rotated)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, sort_keys=True))
+        handle.write("\n")
+        handle.flush()
+
+
 def run_publish_cycle(
     *,
     adb_path: str = "adb",
@@ -258,6 +277,8 @@ def serve_forever(
     allowed_serials: set[str] | None,
     interval_seconds: int,
     state_file: str | None,
+    log_file: str | None = None,
+    log_max_bytes: int = DEFAULT_LOG_MAX_BYTES,
 ) -> int:
     global _shutdown_requested
     _shutdown_requested = False
@@ -274,7 +295,7 @@ def serve_forever(
             allowed_serials=allowed_serials,
             state_file=state_file,
         )
-        print(json.dumps({"mode": "serve", **summary}, sort_keys=True), flush=True)
+        append_rotating_json_log(log_file, {"mode": "serve", **summary}, max_bytes=log_max_bytes)
         if _shutdown_requested:
             break
         elapsed = time.monotonic() - started
@@ -359,6 +380,8 @@ def main() -> int:
     parser.add_argument("--serve", action="store_true", help="Run as a persistent publisher loop for local supervision.")
     parser.add_argument("--interval-seconds", type=int, default=DEFAULT_SERVE_INTERVAL_SECONDS, help="Serve loop interval in seconds.")
     parser.add_argument("--state-file", default="", help="Optional JSON state file updated after each serve cycle.")
+    parser.add_argument("--log-file", default="", help="Optional serve log path with built-in size rotation.")
+    parser.add_argument("--log-max-bytes", type=int, default=DEFAULT_LOG_MAX_BYTES, help="Maximum serve log size before .1 rotation.")
     args = parser.parse_args()
 
     load_env_file(args.env_file)
@@ -374,6 +397,8 @@ def main() -> int:
             allowed_serials=allowed_serials,
             interval_seconds=int(args.interval_seconds or DEFAULT_SERVE_INTERVAL_SECONDS),
             state_file=state_file,
+            log_file=str(args.log_file or "").strip() or None,
+            log_max_bytes=int(args.log_max_bytes or DEFAULT_LOG_MAX_BYTES),
         )
 
     summary = run_publish_cycle(

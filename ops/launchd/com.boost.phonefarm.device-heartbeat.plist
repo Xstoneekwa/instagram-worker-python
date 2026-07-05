@@ -8,27 +8,25 @@
     <array>
       <string>/bin/bash</string>
       <string>-lc</string>
-      <string>/Users/admin/instagram-worker-python/scripts/device_heartbeat_service.sh start</string>
+      <string>/Users/admin/phonefarm-runtime/bin/phonefarm-runtimectl heartbeat start</string>
     </array>
     <key>WorkingDirectory</key>
-    <string>/Users/admin/instagram-worker-python</string>
+    <string>/Users/admin/phonefarm-runtime</string>
     <key>EnvironmentVariables</key>
     <dict>
-      <key>DEVICE_HEARTBEAT_ENV_FILE</key>
-      <string>/Users/admin/instagram-worker-python/.env</string>
-      <key>DEVICE_HEARTBEAT_LOG_DIR</key>
-      <string>/Users/admin/instagram-worker-python/logs/device-heartbeat-service</string>
-      <key>DEVICE_HEARTBEAT_INTERVAL_SECONDS</key>
-      <string>60</string>
+      <key>PHONEFARM_RUNTIME_HOME</key>
+      <string>/Users/admin/phonefarm-runtime</string>
+      <key>PHONEFARM_RUNTIME_CURRENT_LINK</key>
+      <string>/Users/admin/phonefarm-worker-current</string>
     </dict>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>/Users/admin/instagram-worker-python/logs/device-heartbeat-service/launchd.stdout.log</string>
+    <string>/Users/admin/phonefarm-runtime/logs/device-heartbeat-service/launchd.stdout.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/admin/instagram-worker-python/logs/device-heartbeat-service/launchd.stderr.log</string>
+    <string>/Users/admin/phonefarm-runtime/logs/device-heartbeat-service/launchd.stderr.log</string>
     <key>ThrottleInterval</key>
     <integer>15</integer>
   </dict>

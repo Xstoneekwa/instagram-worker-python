@@ -16,6 +16,7 @@ PLIST_TARGET="$HOME/Library/LaunchAgents/com.boost.phonefarm.device-heartbeat.pl
 LAUNCHD_LABEL="com.boost.phonefarm.device-heartbeat"
 PUBLISHER="$ROOT_DIR/device_heartbeat_publisher.py"
 INTERVAL_SECONDS="${DEVICE_HEARTBEAT_INTERVAL_SECONDS:-60}"
+LOG_MAX_BYTES="${DEVICE_HEARTBEAT_LOG_MAX_BYTES:-10485760}"
 
 if [[ -f "$ENV_FILE" ]]; then
   chmod 600 "$ENV_FILE" 2>/dev/null || true
@@ -376,7 +377,9 @@ _start_foreground() {
     --include-battery \
     --serve \
     --interval-seconds "$INTERVAL_SECONDS" \
-    --state-file "$STATE_FILE" >>"$LOG_DIR/heartbeat.log" 2>&1 &
+    --state-file "$STATE_FILE" \
+    --log-file "$LOG_DIR/heartbeat.log" \
+    --log-max-bytes "$LOG_MAX_BYTES" &
   publisher_pid="$!"
   _record_pid "$publisher_pid"
   wait "$publisher_pid"
