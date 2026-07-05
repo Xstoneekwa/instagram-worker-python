@@ -155,9 +155,12 @@ def _run_wrapper(component: str, command: str, args: list[str], *, timeout: int 
     wrapper_name = "run_control_dispatcher_service.sh" if component == "dispatcher" else "device_heartbeat_service.sh"
     wrapper = Path(root.resolved_root) / "scripts" / wrapper_name
     env = _component_env(paths, root, component)
+    wrapper_args = list(args)
+    if command == "status" and "--json" not in wrapper_args:
+        wrapper_args.append("--json")
     try:
         proc = subprocess.run(
-            [str(wrapper), command, *args],
+            [str(wrapper), command, *wrapper_args],
             cwd=root.resolved_root,
             env=env,
             text=True,
