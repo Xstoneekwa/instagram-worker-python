@@ -130,7 +130,8 @@ Timer = Callable[[], float]
 Sleeper = Callable[[float], None]
 
 REUSABLE_PREVIOUS_ACCOUNT_LIFECYCLES = {"canceled", "stopped", "archived"}
-LOGOUT_FALLBACK_LIFECYCLE_SOURCES = {"operator_smoke_override", "lifecycle_lookup_safe"}
+STALE_SESSION_LIFECYCLE_SOURCE = "stale_replacement_safety_check"
+LOGOUT_FALLBACK_LIFECYCLE_SOURCES = {"operator_smoke_override", "lifecycle_lookup_safe", STALE_SESSION_LIFECYCLE_SOURCE}
 CONNECTED_HOME_IDENTITY_SCREENS = frozenset(
     {
         "active_account_home",
@@ -899,8 +900,15 @@ def run_login_provisioning_flow(
                 previous_account_lifecycle=previous_account_lifecycle,
                 explicitly_allowed=bool(operator_smoke_allow_logout_fallback),
             )
+            stale_replacement_metadata = _stale_session_replacement_metadata(
+                previous_account_lifecycle,
+                actual_username=actual_username,
+                expected_username=safe_expected_username,
+                allowed=logout_fallback_allowed and logout_fallback_reason == "stale_session_replacement_allowed",
+            )
             old_logged_in_metadata.update(
                 {
+                    **stale_replacement_metadata,
                     "logout_fallback_allowed": logout_fallback_allowed,
                     "logout_fallback_reason": logout_fallback_reason,
                     "add_existing_attempted": False,
@@ -951,6 +959,11 @@ def run_login_provisioning_flow(
                     ),
                 }
                 if not logout_result.ok:
+                    merged_logout_metadata["controlled_logout_status"] = "failed"
+                    if stale_replacement_metadata:
+                        merged_logout_metadata["replacement_safety_status"] = "allowed"
+                        merged_logout_metadata["target_login_status"] = "not_started"
+                        merged_logout_metadata["identity_verification_status"] = "not_started"
                     return replace(
                         logout_result,
                         actions_taken=[*actions_taken, *logout_result.actions_taken],
@@ -985,6 +998,18 @@ def run_login_provisioning_flow(
                     timer=timer,
                     sleeper=sleeper,
                 )
+                resume_metadata = dict(resume_result.safe_metadata or {})
+                if stale_replacement_metadata:
+                    resume_connected = resume_result.final_outcome == LoginProbeOutcome.CONNECTED.value
+                    resume_metadata.update(
+                        {
+                            **stale_replacement_metadata,
+                            "controlled_logout_status": "completed",
+                            "target_login_status": "connected" if resume_connected else "failed",
+                            "identity_verification_status": "verified" if resume_connected else "failed",
+                            "replacement_safety_status": "allowed",
+                        }
+                    )
                 return replace(
                     resume_result,
                     actions_taken=[*actions_taken, *logout_result.actions_taken, *resume_result.actions_taken],
@@ -993,7 +1018,7 @@ def run_login_provisioning_flow(
                         redact_credentials_payload(
                             _merge_logout_resume_metadata(
                                 merged_logout_metadata,
-                                dict(resume_result.safe_metadata or {}),
+                                resume_metadata,
                                 logout_fallback_reason=logout_fallback_reason,
                             )
                         )
@@ -3725,7 +3750,8 @@ def _logout_fallback_gate(
     previous_account_lifecycle: dict[str, Any],
     explicitly_allowed: bool,
 ) -> tuple[bool, str]:
-    if not explicitly_allowed:
+    stale_replacement_allowed = _previous_account_allows_stale_replacement(previous_account_lifecycle)
+    if not explicitly_allowed and not stale_replacement_allowed:
         return False, "logout_fallback_not_explicitly_allowed"
     normalized_actual = _normalize_identity_username(actual_username)
     normalized_expected = _normalize_identity_username(expected_username)
@@ -3741,7 +3767,55 @@ def _logout_fallback_gate(
     source = str(previous_account_lifecycle.get("source") or "").strip()
     if source not in LOGOUT_FALLBACK_LIFECYCLE_SOURCES:
         return False, "lifecycle_source_not_safe_for_logout"
+    if stale_replacement_allowed:
+        return True, "stale_session_replacement_allowed"
     return True, "operator_smoke_logout_fallback_allowed"
+
+
+def _previous_account_allows_stale_replacement(previous_account_lifecycle: dict[str, Any]) -> bool:
+    return (
+        str(previous_account_lifecycle.get("source") or "").strip() == STALE_SESSION_LIFECYCLE_SOURCE
+        and bool(previous_account_lifecycle.get("clone_reuse_allowed"))
+        and bool(previous_account_lifecycle.get("stale_session_replacement_allowed"))
+        and str(previous_account_lifecycle.get("replacement_safety_status") or "").strip().lower() == "allowed"
+    )
+
+
+def _stale_session_replacement_metadata(
+    previous_account_lifecycle: dict[str, Any],
+    *,
+    actual_username: str,
+    expected_username: str,
+    allowed: bool,
+) -> dict[str, Any]:
+    if not _previous_account_allows_stale_replacement(previous_account_lifecycle):
+        return {}
+    return {
+        "replacement_flow": "previous_account_replacement",
+        "selected_route": "logout_fallback",
+        "replacement_route": "logout_fallback",
+        "stale_session_replacement_allowed": bool(allowed),
+        "replacement_safety_status": "allowed" if allowed else "blocked",
+        "connected_account_state": _safe_public_text(
+            previous_account_lifecycle.get("connected_account_state")
+            or previous_account_lifecycle.get("stale_account_state")
+            or previous_account_lifecycle.get("lifecycle_status")
+        ),
+        "previous_account_state": _safe_public_text(
+            previous_account_lifecycle.get("previous_account_state")
+            or previous_account_lifecycle.get("stale_account_state")
+            or previous_account_lifecycle.get("lifecycle_status")
+        ),
+        "stale_account_state": _safe_public_text(
+            previous_account_lifecycle.get("stale_account_state")
+            or previous_account_lifecycle.get("lifecycle_status")
+        ),
+        "connected_username": _safe_public_text(actual_username),
+        "target_username": _safe_public_text(expected_username),
+        "controlled_logout_status": "not_started",
+        "target_login_status": "not_started",
+        "identity_verification_status": "not_started",
+    }
 
 
 def _preparation_screen_label(signals: dict[str, Any]) -> str:
@@ -3923,6 +3997,11 @@ def _resolve_previous_account_lifecycle(
         "source": _safe_public_text(raw.get("source")),
         "reason": _safe_public_text(raw.get("reason")),
         "lookup_failed": False,
+        "stale_session_replacement_allowed": bool(raw.get("stale_session_replacement_allowed")),
+        "replacement_safety_status": _safe_public_text(raw.get("replacement_safety_status")),
+        "stale_account_state": _safe_public_text(raw.get("stale_account_state")),
+        "connected_account_state": _safe_public_text(raw.get("connected_account_state")),
+        "previous_account_state": _safe_public_text(raw.get("previous_account_state")),
     }
 
 
@@ -3963,6 +4042,11 @@ def _flow_metadata(previous_account_lifecycle: dict[str, Any]) -> dict[str, Any]
             "clone_reuse_allowed": bool(previous_account_lifecycle.get("clone_reuse_allowed")),
             "source": _safe_public_text(previous_account_lifecycle.get("source")),
             "reason": _safe_public_text(previous_account_lifecycle.get("reason")),
+            "stale_session_replacement_allowed": bool(
+                previous_account_lifecycle.get("stale_session_replacement_allowed")
+            ),
+            "replacement_safety_status": _safe_public_text(previous_account_lifecycle.get("replacement_safety_status")),
+            "stale_account_state": _safe_public_text(previous_account_lifecycle.get("stale_account_state")),
         }
     }
 

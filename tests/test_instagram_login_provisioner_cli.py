@@ -450,6 +450,96 @@ class InstagramLoginProvisionerCliTest(unittest.TestCase):
         self.assertIs(payload["clone_reuse_allowed"], True)
         self.assertEqual(payload["source"], "operator_smoke_override")
 
+    def test_stale_deleted_unmanaged_account_allows_replacement_lookup(self) -> None:
+        queries: list[tuple[str, dict[str, str]]] = []
+
+        def fake_request_json(_method, table, *, query=None, **_kwargs):
+            queries.append((table, dict(query or {})))
+            if table == "account_assignments" and query.get("account_id") == f"eq.{ACCOUNT_ID}":
+                return [{"id": "assignment-1", "status": "active"}]
+            if table == "ig_accounts":
+                return []
+            return []
+
+        with patch.object(cli, "_request_json", side_effect=fake_request_json):
+            lookup = cli._build_previous_account_lifecycle_lookup(
+                _args("--expected-app-instance-id", "clone-1")
+            )
+            self.assertIsNotNone(lookup)
+            payload = lookup("growth_with_bmb", {"expected_username": USERNAME})
+
+        self.assertTrue(payload["clone_reuse_allowed"])
+        self.assertTrue(payload["stale_session_replacement_allowed"])
+        self.assertEqual(payload["replacement_safety_status"], "allowed")
+        self.assertEqual(payload["stale_account_state"], "deleted")
+        self.assertEqual(payload["source"], "stale_replacement_safety_check")
+        self.assertEqual(queries[0][0], "account_assignments")
+
+    def test_stale_present_without_active_dependency_allows_replacement_lookup(self) -> None:
+        old_account_id = "11111111-2222-4333-8444-555555555555"
+
+        def fake_request_json(_method, table, *, query=None, **_kwargs):
+            if table == "account_assignments" and query.get("account_id") == f"eq.{ACCOUNT_ID}":
+                return [{"id": "assignment-1", "status": "active"}]
+            if table == "ig_accounts":
+                return [{"id": old_account_id, "username": "growth_with_bmb"}]
+            return []
+
+        with patch.object(cli, "_request_json", side_effect=fake_request_json):
+            lookup = cli._build_previous_account_lifecycle_lookup(
+                _args("--expected-app-instance-id", "clone-1")
+            )
+            payload = lookup("growth_with_bmb", {"expected_username": USERNAME})
+
+        self.assertTrue(payload["clone_reuse_allowed"])
+        self.assertTrue(payload["stale_session_replacement_allowed"])
+        self.assertEqual(payload["stale_account_state"], "unmanaged")
+        self.assertEqual(payload["reason"], "stale_account_present_without_active_dependency")
+
+    def test_stale_active_assignment_blocks_replacement_lookup(self) -> None:
+        old_account_id = "11111111-2222-4333-8444-555555555555"
+
+        def fake_request_json(_method, table, *, query=None, **_kwargs):
+            if table == "account_assignments" and query.get("account_id") == f"eq.{ACCOUNT_ID}":
+                return [{"id": "assignment-1", "status": "active"}]
+            if table == "ig_accounts":
+                return [{"id": old_account_id, "username": "growth_with_bmb"}]
+            if table == "account_assignments" and query.get("account_id") == f"eq.{old_account_id}":
+                return [{"id": "old-assignment", "status": "active"}]
+            return []
+
+        with patch.object(cli, "_request_json", side_effect=fake_request_json):
+            lookup = cli._build_previous_account_lifecycle_lookup(
+                _args("--expected-app-instance-id", "clone-1")
+            )
+            payload = lookup("growth_with_bmb", {"expected_username": USERNAME})
+
+        self.assertFalse(payload["clone_reuse_allowed"])
+        self.assertFalse(payload["stale_session_replacement_allowed"])
+        self.assertEqual(payload["replacement_safety_status"], "blocked")
+        self.assertEqual(payload["reason"], "old_account_has_open_assignment")
+
+    def test_stale_active_run_request_blocks_replacement_lookup(self) -> None:
+        old_account_id = "11111111-2222-4333-8444-555555555555"
+
+        def fake_request_json(_method, table, *, query=None, **_kwargs):
+            if table == "account_assignments" and query.get("account_id") == f"eq.{ACCOUNT_ID}":
+                return [{"id": "assignment-1", "status": "active"}]
+            if table == "ig_accounts":
+                return [{"id": old_account_id, "username": "growth_with_bmb"}]
+            if table == "account_run_requests":
+                return [{"id": "request-1", "status": "running"}]
+            return []
+
+        with patch.object(cli, "_request_json", side_effect=fake_request_json):
+            lookup = cli._build_previous_account_lifecycle_lookup(
+                _args("--expected-app-instance-id", "clone-1")
+            )
+            payload = lookup("growth_with_bmb", {"expected_username": USERNAME})
+
+        self.assertFalse(payload["clone_reuse_allowed"])
+        self.assertEqual(payload["reason"], "old_account_has_active_run_request")
+
     def test_preparation_flow_used_maps_use_another_profile_action(self) -> None:
         summary = cli._safe_summary_from_result(
             _fake_result(

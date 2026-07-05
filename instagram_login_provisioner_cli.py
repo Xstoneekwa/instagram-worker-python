@@ -166,7 +166,7 @@ def run_cli_command(
     )
     flow = run_flow_func or run_login_provisioning_flow
     resume_flow = run_email_code_resume_flow
-    previous_account_lifecycle_lookup = _build_operator_smoke_previous_account_lifecycle_lookup(args)
+    previous_account_lifecycle_lookup = _build_previous_account_lifecycle_lookup(args)
     operator_smoke_active_username = _normalize_public_username(
         getattr(args, "operator_smoke_active_account_username", "")
         or getattr(args, "operator_smoke_previous_account_username", "")
@@ -291,6 +291,17 @@ def _preflight_email_code_resume(
                 account_id=str(getattr(args, "account_id", "") or "").strip(),
             )
             if not code_state.get("ready"):
+                if screen_type in {"login_form_empty", "login_form_prefilled_username"}:
+                    return _resume_preflight_result(
+                        run_id=run_id,
+                        reason="resume_email_code_screen_not_active",
+                        screen_type=screen_type,
+                        safe_metadata={
+                            "resume_preflight_email_code_challenge_present": False,
+                            "verification_action_status": str(code_state.get("action_status") or ""),
+                            "verification_submission_present": bool(code_state.get("submission_present")),
+                        },
+                    )
                 return _resume_preflight_result(
                     run_id=run_id,
                     reason="code_missing",
@@ -399,28 +410,31 @@ def _preflight_expected_package(
 def _verification_code_action_state(*, action_id: str, account_id: str) -> dict[str, Any]:
     if not action_id or not account_id:
         return {"ready": False, "reason": "missing_action_or_account"}
-    actions = _request_json(
-        "GET",
-        "account_dashboard_actions",
-        query={
-            "select": "id,status,action_type",
-            "id": f"eq.{action_id}",
-            "account_id": f"eq.{account_id}",
-            "limit": "1",
-        },
-    ) or []
-    submissions = _request_json(
-        "GET",
-        "account_verification_code_submissions",
-        query={
-            "select": "id,status,expires_at",
-            "action_id": f"eq.{action_id}",
-            "account_id": f"eq.{account_id}",
-            "status": "in.(code_submitted,ready_for_resume)",
-            "order": "updated_at.desc",
-            "limit": "1",
-        },
-    ) or []
+    try:
+        actions = _request_json(
+            "GET",
+            "account_dashboard_actions",
+            query={
+                "select": "id,status,action_type",
+                "id": f"eq.{action_id}",
+                "account_id": f"eq.{account_id}",
+                "limit": "1",
+            },
+        ) or []
+        submissions = _request_json(
+            "GET",
+            "account_verification_code_submissions",
+            query={
+                "select": "id,status,expires_at",
+                "action_id": f"eq.{action_id}",
+                "account_id": f"eq.{account_id}",
+                "status": "in.(code_submitted,ready_for_resume)",
+                "order": "updated_at.desc",
+                "limit": "1",
+            },
+        ) or []
+    except Exception:
+        return {"ready": False, "reason": "verification_action_lookup_failed"}
     action_status = str(actions[0].get("status") or "") if actions else ""
     return {
         "ready": action_status == "code_submitted" and bool(submissions),
@@ -584,6 +598,159 @@ def _build_operator_smoke_previous_account_lifecycle_lookup(args: argparse.Names
         }
 
     return _lookup
+
+
+def _build_previous_account_lifecycle_lookup(args: argparse.Namespace) -> Callable[[str, dict[str, Any]], dict[str, Any]] | None:
+    operator_lookup = _build_operator_smoke_previous_account_lifecycle_lookup(args)
+    if operator_lookup is not None:
+        return operator_lookup
+    return _build_stale_session_previous_account_lifecycle_lookup(args)
+
+
+OPEN_ASSIGNMENT_STATUSES = "pending,reserved,active"
+ACTIVE_REQUEST_STATUSES = "queued,claimed,starting,running"
+ACTIVE_RUN_STATUSES = "queued,claimed,starting,running,active"
+ACTIVE_SUBSCRIPTION_ACCOUNT_STATUSES = "active,paused"
+
+
+def _build_stale_session_previous_account_lifecycle_lookup(
+    args: argparse.Namespace,
+) -> Callable[[str, dict[str, Any]], dict[str, Any]] | None:
+    expected_app_instance_id = str(getattr(args, "expected_app_instance_id", "") or "").strip()
+    target_account_id = str(getattr(args, "account_id", "") or "").strip()
+    if not expected_app_instance_id or not target_account_id:
+        return None
+
+    def _lookup(candidate_username: str, context: dict[str, Any]) -> dict[str, Any]:
+        candidate = _normalize_public_username(candidate_username)
+        expected_username = _normalize_public_username(context.get("expected_username"))
+        if not candidate or candidate == expected_username:
+            return _stale_lifecycle_block("candidate_not_stale_previous_account")
+        target_assignment = _first_row(
+            "account_assignments",
+            {
+                "select": "id,account_id,app_instance_id,status",
+                "account_id": f"eq.{target_account_id}",
+                "app_instance_id": f"eq.{expected_app_instance_id}",
+                "status": "eq.active",
+                "limit": "1",
+            },
+        )
+        if not target_assignment:
+            return _stale_lifecycle_block("target_assignment_not_verified")
+
+        old_account = _first_row(
+            "ig_accounts",
+            {
+                "select": "id,username",
+                "username": f"ilike.{candidate}",
+                "limit": "1",
+            },
+        )
+        if not old_account:
+            return _stale_lifecycle_allow("deleted", "stale_account_unmanaged_or_deleted")
+
+        old_account_id = str(old_account.get("id") or "").strip()
+        if not old_account_id:
+            return _stale_lifecycle_block("old_account_id_missing")
+        if old_account_id == target_account_id:
+            return _stale_lifecycle_block("old_account_is_target")
+
+        protection_reason = _stale_account_protection_reason(
+            old_account_id=old_account_id,
+            expected_app_instance_id=expected_app_instance_id,
+        )
+        if protection_reason:
+            return _stale_lifecycle_block(protection_reason)
+        return _stale_lifecycle_allow("unmanaged", "stale_account_present_without_active_dependency")
+
+    return _lookup
+
+
+def _stale_account_protection_reason(*, old_account_id: str, expected_app_instance_id: str) -> str:
+    if _first_row(
+        "account_assignments",
+        {
+            "select": "id,status,app_instance_id",
+            "account_id": f"eq.{old_account_id}",
+            "status": f"in.({OPEN_ASSIGNMENT_STATUSES})",
+            "limit": "1",
+        },
+    ):
+        return "old_account_has_open_assignment"
+    if _first_row(
+        "client_instagram_accounts",
+        {
+            "select": "id,client_id,account_id",
+            "account_id": f"eq.{old_account_id}",
+            "limit": "1",
+        },
+    ):
+        return "old_account_has_client_ownership"
+    if _first_row(
+        "client_subscription_accounts",
+        {
+            "select": "id,account_id,status",
+            "account_id": f"eq.{old_account_id}",
+            "status": f"in.({ACTIVE_SUBSCRIPTION_ACCOUNT_STATUSES})",
+            "limit": "1",
+        },
+    ):
+        return "old_account_has_active_subscription_scope"
+    if _first_row(
+        "account_run_requests",
+        {
+            "select": "id,status,account_id",
+            "account_id": f"eq.{old_account_id}",
+            "status": f"in.({ACTIVE_REQUEST_STATUSES})",
+            "limit": "1",
+        },
+    ):
+        return "old_account_has_active_run_request"
+    if _first_row(
+        "ig_runs",
+        {
+            "select": "id,status,account_id",
+            "account_id": f"eq.{old_account_id}",
+            "status": f"in.({ACTIVE_RUN_STATUSES})",
+            "limit": "1",
+        },
+    ):
+        return "old_account_has_active_run"
+    return ""
+
+
+def _stale_lifecycle_allow(stale_account_state: str, reason: str) -> dict[str, Any]:
+    return {
+        "lifecycle_status": "archived",
+        "clone_reuse_allowed": True,
+        "source": "stale_replacement_safety_check",
+        "reason": reason,
+        "stale_session_replacement_allowed": True,
+        "replacement_safety_status": "allowed",
+        "stale_account_state": stale_account_state,
+        "connected_account_state": stale_account_state,
+        "previous_account_state": stale_account_state,
+    }
+
+
+def _stale_lifecycle_block(reason: str) -> dict[str, Any]:
+    return {
+        "lifecycle_status": "unknown",
+        "clone_reuse_allowed": False,
+        "source": "stale_replacement_safety_check",
+        "reason": reason,
+        "stale_session_replacement_allowed": False,
+        "replacement_safety_status": "blocked",
+    }
+
+
+def _first_row(table: str, query: dict[str, str]) -> dict[str, Any] | None:
+    rows = _request_json("GET", table, query=query)
+    if isinstance(rows, list) and rows:
+        row = rows[0]
+        return row if isinstance(row, dict) else None
+    return None
 
 
 def _normalize_public_username(value: Any) -> str:
@@ -771,6 +938,18 @@ def _safe_summary_from_result(result: Any, *, args: argparse.Namespace, run_id: 
         "active_account_lifecycle_source": str(metadata.get("active_account_lifecycle_source") or ""),
         "active_account_lifecycle_status": str(metadata.get("active_account_lifecycle_status") or ""),
         "recovery_path": str(metadata.get("recovery_path") or ""),
+        "replacement_flow": str(metadata.get("replacement_flow") or ""),
+        "replacement_route": str(metadata.get("replacement_route") or ""),
+        "stale_session_replacement_allowed": bool(metadata.get("stale_session_replacement_allowed")),
+        "replacement_safety_status": str(metadata.get("replacement_safety_status") or ""),
+        "connected_account_state": str(metadata.get("connected_account_state") or ""),
+        "previous_account_state": str(metadata.get("previous_account_state") or ""),
+        "stale_account_state": str(metadata.get("stale_account_state") or ""),
+        "connected_username": str(metadata.get("connected_username") or ""),
+        "target_username": str(metadata.get("target_username") or ""),
+        "controlled_logout_status": str(metadata.get("controlled_logout_status") or ""),
+        "target_login_status": str(metadata.get("target_login_status") or ""),
+        "identity_verification_status": str(metadata.get("identity_verification_status") or ""),
         "logout_fallback_allowed": bool(metadata.get("logout_fallback_allowed")),
         "logout_fallback_reason": str(metadata.get("logout_fallback_reason") or ""),
         "add_existing_attempted": bool(metadata.get("add_existing_attempted")),
