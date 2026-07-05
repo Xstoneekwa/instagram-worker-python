@@ -4152,29 +4152,20 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertTrue(result.safe_metadata["add_existing_attempted"])
         self.assertNotIn("tap_logout", result.actions_taken)
 
-    def test_login_flow_stale_session_lookup_uses_existing_logout_then_target_login(self) -> None:
+    def test_login_flow_stale_session_lookup_uses_add_existing_without_fallback(self) -> None:
         device, _selectors = configured_device()
         getter = Mock(return_value=credentials())
         device.hierarchies = [
-            ACTIVE_PROFILE_OLD_MENU_XML,
-            PROFILE_MENU_SHEET_XML,
-            PROFILE_MENU_SHEET_XML,
-            PROFILE_MENU_SHEET_XML,
-            SETTINGS_AND_ACTIVITY_XML,
-            SETTINGS_AND_ACTIVITY_XML,
-            SETTINGS_AND_ACTIVITY_XML,
-            SETTINGS_AND_ACTIVITY_XML,
-            SAVE_LOGIN_INFO_PROMPT_XML,
-            SAVE_LOGIN_INFO_PROMPT_XML,
-            LOGOUT_CONFIRMATION_PROMPT_XML,
-            LOGOUT_CONFIRMATION_PROMPT_XML,
-            LOGOUT_CONFIRMATION_PROMPT_XML,
-            LOGIN_FORM_XML,
-            LOGIN_FORM_XML,
-            LOGIN_FORM_XML,
-            LOGIN_FORM_XML,
-            LOGIN_FORM_XML,
-            LOGIN_FORM_XML,
+            ACTIVE_PROFILE_OLD_XML,
+            ACTIVE_PROFILE_OLD_XML,
+            ACCOUNT_SWITCHER_XML,
+            ACCOUNT_SWITCHER_XML,
+            ACCOUNT_SWITCHER_XML,
+            ACCOUNT_PICKER_XML,
+            ACCOUNT_PICKER_XML,
+            ACCOUNT_PICKER_XML,
+            CONNECTED_XML,
+            CONNECTED_XML,
             CONNECTED_XML,
         ]
         lookup = Mock(
@@ -4196,40 +4187,100 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
             account_id=ACCOUNT_ID,
             expected_username="random_expected",
             credentials_getter=getter,
-            initial_signals=self._logout_initial_signals(ACTIVE_PROFILE_OLD_MENU_XML),
+            initial_signals=self._logout_initial_signals(ACTIVE_PROFILE_OLD_XML),
             previous_account_lifecycle_lookup=lookup,
         )
 
         self.assertTrue(result.ok)
         self.assertEqual(result.final_outcome, "connected")
-        self.assertEqual(result.safe_metadata["recovery_path"], "logout_fallback")
+        self.assertEqual(result.safe_metadata["recovery_path"], "add_existing_account")
         self.assertEqual(result.safe_metadata["replacement_flow"], "previous_account_replacement")
+        self.assertEqual(result.safe_metadata["replacement_route"], "add_existing_account")
         self.assertTrue(result.safe_metadata["stale_session_replacement_allowed"])
         self.assertEqual(result.safe_metadata["replacement_safety_status"], "allowed")
+        self.assertEqual(result.safe_metadata["controlled_logout_status"], "not_started")
+        self.assertEqual(result.safe_metadata["target_login_status"], "connected")
+        self.assertEqual(result.safe_metadata["identity_verification_status"], "verified")
+        self.assertEqual(result.safe_metadata["primary_replacement_status"], "completed")
+        self.assertTrue(result.safe_metadata["add_existing_attempted"])
+        self.assertIn("tap_add_instagram_account", result.actions_taken)
+        self.assertNotIn("tap_logout", result.actions_taken)
+        self.assertIn("route:select_expected_account_from_picker", result.actions_taken)
+        self.assertNotIn("fake-password-for-unit-tests", json.dumps(result.safe_metadata))
+
+    def test_login_flow_stale_add_existing_recoverable_failure_then_fallback_success(self) -> None:
+        device, _selectors = configured_device()
+        getter = Mock(return_value=credentials())
+        device.hierarchies = [
+            CONNECTED_XML,
+            CONNECTED_XML,
+            CONNECTED_XML,
+            CONNECTED_XML,
+            CONNECTED_XML,
+        ]
+        fallback_result = provisioner_orchestrator.LoginProvisioningFlowResult(
+            ok=True,
+            completed=True,
+            final_outcome="login_form_empty",
+            final_login_status="logged_out",
+            final_provisioning_status="provisioning",
+            final_onboarding_status="pending",
+            reason="logout_fallback_completed",
+            actions_taken=["tap_logout", "tap_confirm_logout"],
+            safe_metadata={
+                "screen_after_logout_final": "login_form_empty",
+                "post_logout_final_signals": LOGIN_FORM_SIGNALS,
+            },
+        )
+
+        with patch.object(
+            provisioner_orchestrator,
+            "run_old_account_logout_fallback_flow",
+            return_value=fallback_result,
+        ) as fallback:
+            result = self.run_flow(
+                device,
+                account_id=ACCOUNT_ID,
+                expected_username="random_expected",
+                credentials_getter=getter,
+                initial_signals=self._logout_initial_signals(ACTIVE_PROFILE_OLD_MENU_XML),
+                previous_account_lifecycle_lookup=Mock(
+                    return_value={
+                        "lifecycle_status": "archived",
+                        "clone_reuse_allowed": True,
+                        "source": "stale_replacement_safety_check",
+                        "reason": "stale_account_unmanaged_or_deleted",
+                        "stale_session_replacement_allowed": True,
+                        "replacement_safety_status": "allowed",
+                        "stale_account_state": "deleted",
+                    }
+                ),
+            )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.final_outcome, "connected")
+        fallback.assert_called_once()
+        self.assertEqual(result.safe_metadata["primary_replacement_status"], "failed_recoverable")
+        self.assertEqual(result.safe_metadata["primary_replacement_failure_reason"], "open_account_switcher_failed")
+        self.assertEqual(result.safe_metadata["fallback_replacement_status"], "completed")
+        self.assertEqual(result.safe_metadata["recovery_path"], "logout_fallback")
+        self.assertEqual(result.safe_metadata["replacement_route"], "logout_fallback")
         self.assertEqual(result.safe_metadata["controlled_logout_status"], "completed")
         self.assertEqual(result.safe_metadata["target_login_status"], "connected")
         self.assertEqual(result.safe_metadata["identity_verification_status"], "verified")
-        self.assertIn("tap_logout", result.actions_taken)
+        self.assertLess(result.actions_taken.index("tap_account_switcher"), result.actions_taken.index("tap_logout"))
         self.assertIn("login_form_submit", result.actions_taken)
         self.assertNotIn("fake-password-for-unit-tests", json.dumps(result.safe_metadata))
 
-    def test_login_flow_stale_logout_ok_login_ko_remains_recoverable_with_progress(self) -> None:
+    def test_login_flow_stale_add_existing_nonrecoverable_login_failure_never_fallbacks(self) -> None:
         device, _selectors = configured_device()
         getter = Mock(return_value=None)
         device.hierarchies = [
-            ACTIVE_PROFILE_OLD_MENU_XML,
-            PROFILE_MENU_SHEET_XML,
-            PROFILE_MENU_SHEET_XML,
-            PROFILE_MENU_SHEET_XML,
-            SETTINGS_AND_ACTIVITY_XML,
-            SETTINGS_AND_ACTIVITY_XML,
-            SETTINGS_AND_ACTIVITY_XML,
-            SETTINGS_AND_ACTIVITY_XML,
-            SAVE_LOGIN_INFO_PROMPT_XML,
-            SAVE_LOGIN_INFO_PROMPT_XML,
-            LOGOUT_CONFIRMATION_PROMPT_XML,
-            LOGOUT_CONFIRMATION_PROMPT_XML,
-            LOGOUT_CONFIRMATION_PROMPT_XML,
+            ACTIVE_PROFILE_OLD_XML,
+            ACTIVE_PROFILE_OLD_XML,
+            ACCOUNT_SWITCHER_XML,
+            ACCOUNT_SWITCHER_XML,
+            ACCOUNT_SWITCHER_XML,
             LOGIN_FORM_XML,
             LOGIN_FORM_XML,
             LOGIN_FORM_XML,
@@ -4240,7 +4291,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
             account_id=ACCOUNT_ID,
             expected_username="random_expected",
             credentials_getter=getter,
-            initial_signals=self._logout_initial_signals(ACTIVE_PROFILE_OLD_MENU_XML),
+            initial_signals=self._logout_initial_signals(ACTIVE_PROFILE_OLD_XML),
             previous_account_lifecycle_lookup=Mock(
                 return_value={
                     "lifecycle_status": "archived",
@@ -4256,11 +4307,60 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
 
         self.assertFalse(result.ok)
         self.assertEqual(result.final_outcome, "credentials_missing")
-        self.assertEqual(result.safe_metadata["controlled_logout_status"], "completed")
+        self.assertEqual(result.safe_metadata["primary_replacement_status"], "failed")
+        self.assertEqual(result.safe_metadata["controlled_logout_status"], "not_started")
         self.assertEqual(result.safe_metadata["target_login_status"], "failed")
         self.assertEqual(result.safe_metadata["identity_verification_status"], "failed")
         self.assertTrue(result.safe_metadata["stale_session_replacement_allowed"])
-        self.assertIn("tap_logout", result.actions_taken)
+        self.assertIn("tap_add_instagram_account", result.actions_taken)
+        self.assertNotIn("tap_logout", result.actions_taken)
+
+    def test_login_flow_stale_recoverable_main_failure_then_fallback_failure(self) -> None:
+        device, _selectors = configured_device()
+        getter = Mock(return_value=credentials())
+        device.hierarchies = [
+            ACTIVE_PROFILE_OLD_XML,
+            PROFILE_MENU_SHEET_XML,
+            PROFILE_MENU_SHEET_XML,
+            PROFILE_MENU_SHEET_XML,
+            SETTINGS_AND_ACTIVITY_TOP_XML,
+            SETTINGS_AND_ACTIVITY_TOP_XML,
+            SETTINGS_AND_ACTIVITY_TOP_XML,
+            SETTINGS_AND_ACTIVITY_TOP_XML,
+            SETTINGS_AND_ACTIVITY_TOP_XML,
+            SETTINGS_AND_ACTIVITY_TOP_XML,
+            SETTINGS_AND_ACTIVITY_TOP_XML,
+            SETTINGS_AND_ACTIVITY_TOP_XML,
+        ]
+
+        result = self.run_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username="random_expected",
+            credentials_getter=getter,
+            initial_signals=self._logout_initial_signals(ACTIVE_PROFILE_OLD_XML),
+            previous_account_lifecycle_lookup=Mock(
+                return_value={
+                    "lifecycle_status": "archived",
+                    "clone_reuse_allowed": True,
+                    "source": "stale_replacement_safety_check",
+                    "reason": "stale_account_unmanaged_or_deleted",
+                    "stale_session_replacement_allowed": True,
+                    "replacement_safety_status": "allowed",
+                    "stale_account_state": "deleted",
+                }
+            ),
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.safe_metadata["primary_replacement_status"], "failed_recoverable")
+        self.assertEqual(result.safe_metadata["fallback_replacement_status"], "failed")
+        self.assertEqual(result.safe_metadata["controlled_logout_status"], "failed")
+        self.assertEqual(result.safe_metadata["target_login_status"], "not_started")
+        self.assertEqual(result.safe_metadata["identity_verification_status"], "not_started")
+        self.assertTrue(result.safe_metadata["stale_session_replacement_allowed"])
+        self.assertIn("tap_account_switcher", result.actions_taken)
+        self.assertNotIn("login_form_submit", result.actions_taken)
 
     def test_login_flow_logout_fallback_flag_resumes_login_form_empty(self) -> None:
         device, _selectors = configured_device()

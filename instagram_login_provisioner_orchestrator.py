@@ -132,6 +132,14 @@ Sleeper = Callable[[float], None]
 REUSABLE_PREVIOUS_ACCOUNT_LIFECYCLES = {"canceled", "stopped", "archived"}
 STALE_SESSION_LIFECYCLE_SOURCE = "stale_replacement_safety_check"
 LOGOUT_FALLBACK_LIFECYCLE_SOURCES = {"operator_smoke_override", "lifecycle_lookup_safe", STALE_SESSION_LIFECYCLE_SOURCE}
+STALE_ADD_EXISTING_FALLBACK_RECOVERABLE_REASONS = {
+    "account_switcher_sheet_not_validated",
+    "add_account_sheet_not_validated",
+    "post_add_existing_unknown",
+    "open_account_switcher_failed",
+    "tap_add_instagram_account_failed",
+    "tap_log_into_existing_account_failed",
+}
 CONNECTED_HOME_IDENTITY_SCREENS = frozenset(
     {
         "active_account_home",
@@ -900,28 +908,47 @@ def run_login_provisioning_flow(
                 previous_account_lifecycle=previous_account_lifecycle,
                 explicitly_allowed=bool(operator_smoke_allow_logout_fallback),
             )
+            stale_replacement_allowed = _previous_account_allows_stale_replacement(previous_account_lifecycle)
+            stale_selected_route = "add_existing_account" if stale_replacement_allowed else "logout_fallback"
             stale_replacement_metadata = _stale_session_replacement_metadata(
                 previous_account_lifecycle,
                 actual_username=actual_username,
                 expected_username=safe_expected_username,
-                allowed=logout_fallback_allowed and logout_fallback_reason == "stale_session_replacement_allowed",
+                allowed=stale_replacement_allowed,
+                selected_route=stale_selected_route,
+                controlled_logout_status="not_started",
+                target_login_status="in_progress" if stale_replacement_allowed else "not_started",
+                identity_verification_status="in_progress" if stale_replacement_allowed else "not_started",
             )
             old_logged_in_metadata.update(
                 {
                     **stale_replacement_metadata,
-                    "logout_fallback_allowed": logout_fallback_allowed,
-                    "logout_fallback_reason": logout_fallback_reason,
+                    "logout_fallback_allowed": logout_fallback_allowed and not stale_replacement_allowed,
+                    "logout_fallback_reason": "" if stale_replacement_allowed else logout_fallback_reason,
                     "add_existing_attempted": False,
                     "add_existing_failed_reason": "",
-                    "selected_route": "logout_fallback" if logout_fallback_allowed else "add_existing_account",
+                    **({"primary_replacement_status": "started"} if stale_replacement_allowed else {}),
+                    "selected_route": "add_existing_account" if stale_replacement_allowed else (
+                        "logout_fallback" if logout_fallback_allowed else "add_existing_account"
+                    ),
                     "selected_route_reason": (
-                        "operator_smoke_logout_fallback_allowed"
-                        if logout_fallback_allowed
-                        else "old_active_account_reusable_add_existing_default"
+                        "stale_session_replacement_try_add_existing_first"
+                        if stale_replacement_allowed
+                        else (
+                            "operator_smoke_logout_fallback_allowed"
+                            if logout_fallback_allowed
+                            else "old_active_account_reusable_add_existing_default"
+                        )
                     ),
                 }
             )
-            if logout_fallback_allowed:
+            logout_fallback_initial_signals = dict(signals)
+
+            def _run_logout_fallback_after_old_account(
+                parent_metadata: dict[str, Any],
+                *,
+                reason: str,
+            ) -> LoginProvisioningFlowResult:
                 logout_result = run_old_account_logout_fallback_flow(
                     d,
                     account_id=safe_account_id,
@@ -929,7 +956,7 @@ def run_login_provisioning_flow(
                     previous_account_lifecycle_lookup=previous_account_lifecycle_lookup,
                     publisher=publisher,
                     publish_enabled=False,
-                    initial_signals=signals,
+                    initial_signals=logout_fallback_initial_signals,
                     timer=timer,
                     sleeper=sleeper,
                 )
@@ -946,13 +973,13 @@ def run_login_provisioning_flow(
                     )
                     post_logout_signals = dict(post_logout_settled.get("signals") or {})
                 merged_logout_metadata = {
-                    **old_logged_in_metadata,
+                    **parent_metadata,
                     **dict(logout_result.safe_metadata or {}),
                     "recovery_path": "logout_fallback",
                     "logout_fallback_allowed": True,
-                    "logout_fallback_reason": logout_fallback_reason,
+                    "logout_fallback_reason": reason,
                     "add_existing_attempted": False,
-                    "add_existing_failed_reason": "operator_smoke_logout_fallback_requested",
+                    "fallback_replacement_status": "started",
                     "post_logout_final_suggested_username": _safe_public_text(
                         post_logout_signals.get("suggested_username")
                         or logout_result.safe_metadata.get("post_logout_final_suggested_username")
@@ -964,6 +991,7 @@ def run_login_provisioning_flow(
                         merged_logout_metadata["replacement_safety_status"] = "allowed"
                         merged_logout_metadata["target_login_status"] = "not_started"
                         merged_logout_metadata["identity_verification_status"] = "not_started"
+                        merged_logout_metadata["fallback_replacement_status"] = "failed"
                     return replace(
                         logout_result,
                         actions_taken=[*actions_taken, *logout_result.actions_taken],
@@ -1003,11 +1031,21 @@ def run_login_provisioning_flow(
                     resume_connected = resume_result.final_outcome == LoginProbeOutcome.CONNECTED.value
                     resume_metadata.update(
                         {
-                            **stale_replacement_metadata,
+                            **_stale_session_replacement_metadata(
+                                previous_account_lifecycle,
+                                actual_username=actual_username,
+                                expected_username=safe_expected_username,
+                                allowed=True,
+                                selected_route="logout_fallback",
+                                controlled_logout_status="completed",
+                                target_login_status="connected" if resume_connected else "failed",
+                                identity_verification_status="verified" if resume_connected else "failed",
+                            ),
                             "controlled_logout_status": "completed",
                             "target_login_status": "connected" if resume_connected else "failed",
                             "identity_verification_status": "verified" if resume_connected else "failed",
                             "replacement_safety_status": "allowed",
+                            "fallback_replacement_status": "completed" if resume_connected else "failed",
                         }
                     )
                 return replace(
@@ -1019,10 +1057,19 @@ def run_login_provisioning_flow(
                             _merge_logout_resume_metadata(
                                 merged_logout_metadata,
                                 resume_metadata,
-                                logout_fallback_reason=logout_fallback_reason,
+                                logout_fallback_reason=reason,
                             )
                         )
                     ),
+                )
+
+            if logout_fallback_allowed and not stale_replacement_allowed:
+                return _run_logout_fallback_after_old_account(
+                    {
+                        **old_logged_in_metadata,
+                        "add_existing_failed_reason": "operator_smoke_logout_fallback_requested",
+                    },
+                    reason=logout_fallback_reason,
                 )
 
             old_logged_in_metadata["old_logged_in_recovery_attempted"] = True
@@ -1069,12 +1116,33 @@ def run_login_provisioning_flow(
                 timings["action_ms"] += _elapsed_ms(start, timer())
                 actions_taken.append(action_result.action)
                 if not action_result.ok:
+                    raw_failure_reason = action_result.failure_reason or action_result.reason
+                    failure_reason = (
+                        "open_account_switcher_failed"
+                        if step_decision.decision == "open_account_switcher"
+                        else (
+                            "tap_add_instagram_account_failed"
+                            if step_decision.decision == "tap_add_instagram_account"
+                            else raw_failure_reason
+                        )
+                    )
+                    if _stale_add_existing_failure_is_recoverable(failure_reason, previous_account_lifecycle):
+                        return _run_logout_fallback_after_old_account(
+                            {
+                                **old_logged_in_metadata,
+                                "primary_replacement_status": "failed_recoverable",
+                                "primary_replacement_failure_reason": _safe_public_text(failure_reason),
+                                "add_existing_failed_reason": _safe_public_text(failure_reason),
+                                "fallback_replacement_status": "started",
+                            },
+                            reason="stale_add_existing_failed_recoverable",
+                        )
                     return _finalize(
                         ok=False,
                         completed=False,
                         final_outcome="action_failed",
-                        reason=action_result.failure_reason or action_result.reason,
-                        failure_reason=action_result.failure_reason or action_result.reason,
+                        reason=failure_reason,
+                        failure_reason=failure_reason,
                         account_id=safe_account_id,
                         expected_username=safe_expected_username,
                         actions_taken=actions_taken,
@@ -1098,12 +1166,24 @@ def run_login_provisioning_flow(
                 if step_decision.decision == "open_account_switcher":
                     old_logged_in_metadata["account_switcher_opened"] = signals.get("screen_type") == "account_switcher_sheet"
                     if expected_screen and signals.get("screen_type") != expected_screen:
+                        failure_reason = f"{expected_screen}_not_validated"
+                        if _stale_add_existing_failure_is_recoverable(failure_reason, previous_account_lifecycle):
+                            return _run_logout_fallback_after_old_account(
+                                {
+                                    **old_logged_in_metadata,
+                                    "primary_replacement_status": "failed_recoverable",
+                                    "primary_replacement_failure_reason": failure_reason,
+                                    "add_existing_failed_reason": failure_reason,
+                                    "fallback_replacement_status": "started",
+                                },
+                                reason="stale_add_existing_failed_recoverable",
+                            )
                         return _finalize(
                             ok=False,
                             completed=False,
                             final_outcome="unknown",
-                            reason=f"{expected_screen}_not_validated",
-                            failure_reason=f"{expected_screen}_not_validated",
+                            reason=failure_reason,
+                            failure_reason=failure_reason,
                             account_id=safe_account_id,
                             expected_username=safe_expected_username,
                             actions_taken=actions_taken,
@@ -1164,12 +1244,24 @@ def run_login_provisioning_flow(
                 timings["action_ms"] += _elapsed_ms(start, timer())
                 actions_taken.append(log_into_result.action)
                 if not log_into_result.ok:
+                    failure_reason = "tap_log_into_existing_account_failed"
+                    if _stale_add_existing_failure_is_recoverable(failure_reason, previous_account_lifecycle):
+                        return _run_logout_fallback_after_old_account(
+                            {
+                                **old_logged_in_metadata,
+                                "primary_replacement_status": "failed_recoverable",
+                                "primary_replacement_failure_reason": _safe_public_text(failure_reason),
+                                "add_existing_failed_reason": _safe_public_text(failure_reason),
+                                "fallback_replacement_status": "started",
+                            },
+                            reason="stale_add_existing_failed_recoverable",
+                        )
                     return _finalize(
                         ok=False,
                         completed=False,
                         final_outcome="action_failed",
-                        reason=log_into_result.failure_reason or log_into_result.reason,
-                        failure_reason=log_into_result.failure_reason or log_into_result.reason,
+                        reason=failure_reason,
+                        failure_reason=failure_reason,
                         account_id=safe_account_id,
                         expected_username=safe_expected_username,
                         actions_taken=actions_taken,
@@ -1212,12 +1304,24 @@ def run_login_provisioning_flow(
                 old_logged_in_metadata["screen_after_add_existing_final"] = final_screen
 
             if not _post_add_existing_screen_is_routable(signals):
+                failure_reason = "post_add_existing_unknown"
+                if _stale_add_existing_failure_is_recoverable(failure_reason, previous_account_lifecycle):
+                    return _run_logout_fallback_after_old_account(
+                        {
+                            **old_logged_in_metadata,
+                            "primary_replacement_status": "failed_recoverable",
+                            "primary_replacement_failure_reason": failure_reason,
+                            "add_existing_failed_reason": failure_reason,
+                            "fallback_replacement_status": "started",
+                        },
+                        reason="stale_add_existing_failed_recoverable",
+                    )
                 return _finalize(
                     ok=False,
                     completed=False,
                     final_outcome="unknown",
-                    reason="post_add_existing_unknown",
-                    failure_reason="post_add_existing_unknown",
+                    reason=failure_reason,
+                    failure_reason=failure_reason,
                     account_id=safe_account_id,
                     expected_username=safe_expected_username,
                     actions_taken=actions_taken,
@@ -3787,13 +3891,17 @@ def _stale_session_replacement_metadata(
     actual_username: str,
     expected_username: str,
     allowed: bool,
+    selected_route: str,
+    controlled_logout_status: str = "not_started",
+    target_login_status: str = "not_started",
+    identity_verification_status: str = "not_started",
 ) -> dict[str, Any]:
     if not _previous_account_allows_stale_replacement(previous_account_lifecycle):
         return {}
     return {
         "replacement_flow": "previous_account_replacement",
-        "selected_route": "logout_fallback",
-        "replacement_route": "logout_fallback",
+        "selected_route": _safe_public_text(selected_route),
+        "replacement_route": _safe_public_text(selected_route),
         "stale_session_replacement_allowed": bool(allowed),
         "replacement_safety_status": "allowed" if allowed else "blocked",
         "connected_account_state": _safe_public_text(
@@ -3812,10 +3920,41 @@ def _stale_session_replacement_metadata(
         ),
         "connected_username": _safe_public_text(actual_username),
         "target_username": _safe_public_text(expected_username),
-        "controlled_logout_status": "not_started",
-        "target_login_status": "not_started",
-        "identity_verification_status": "not_started",
+        "controlled_logout_status": _safe_public_text(controlled_logout_status),
+        "target_login_status": _safe_public_text(target_login_status),
+        "identity_verification_status": _safe_public_text(identity_verification_status),
     }
+
+
+def _stale_add_existing_failure_is_recoverable(reason: Any, previous_account_lifecycle: dict[str, Any]) -> bool:
+    return (
+        _previous_account_allows_stale_replacement(previous_account_lifecycle)
+        and str(reason or "").strip() in STALE_ADD_EXISTING_FALLBACK_RECOVERABLE_REASONS
+    )
+
+
+def _replacement_progress_metadata_for_final_outcome(
+    metadata: dict[str, Any],
+    *,
+    final_outcome: str,
+) -> dict[str, Any]:
+    if not bool(metadata.get("stale_session_replacement_allowed")):
+        return metadata
+    updated = dict(metadata)
+    primary_status = str(updated.get("primary_replacement_status") or "").strip()
+    if not primary_status or primary_status == "started":
+        updated["primary_replacement_status"] = (
+            "completed" if final_outcome == LoginProbeOutcome.CONNECTED.value else "failed"
+        )
+    if str(updated.get("target_login_status") or "") in {"", "not_started", "in_progress"}:
+        updated["target_login_status"] = "connected" if final_outcome == LoginProbeOutcome.CONNECTED.value else "failed"
+    if str(updated.get("identity_verification_status") or "") in {"", "not_started", "in_progress"}:
+        updated["identity_verification_status"] = (
+            "verified" if final_outcome == LoginProbeOutcome.CONNECTED.value else "failed"
+        )
+    if str(updated.get("controlled_logout_status") or "") == "":
+        updated["controlled_logout_status"] = "not_started"
+    return updated
 
 
 def _preparation_screen_label(signals: dict[str, Any]) -> str:
@@ -4791,6 +4930,10 @@ def _finalize(
     should_publish_status: bool = False,
 ) -> LoginProvisioningFlowResult:
     timings["total_ms"] = _elapsed_ms(total_start, timer())
+    extra_metadata = _replacement_progress_metadata_for_final_outcome(
+        dict(extra_metadata or {}),
+        final_outcome=final_outcome,
+    )
     publish_payload = _publish_payload(
         account_id=account_id,
         final_login_status=final_login_status,
@@ -4800,7 +4943,7 @@ def _finalize(
         final_outcome=final_outcome,
         retry_count=retry_count,
         dashboard_action_type=dashboard_action_type,
-        extra_metadata=extra_metadata or {},
+        extra_metadata=extra_metadata,
     )
     published = False
     publish_attempted = False
@@ -4812,7 +4955,7 @@ def _finalize(
         final_outcome=final_outcome,
         final_login_status=final_login_status,
         account_id=account_id,
-        extra_metadata=extra_metadata or {},
+        extra_metadata=extra_metadata,
     ) or _verification_status_publishable(
         should_publish_status=should_publish_status,
         final_outcome=final_outcome,
@@ -4858,7 +5001,7 @@ def _finalize(
         dashboard_action_type=dashboard_action_type,
         final_outcome=final_outcome,
         reason=reason,
-        extra_metadata=extra_metadata or {},
+        extra_metadata=extra_metadata,
         publish_warnings=publish_warnings,
     )
     if challenge_side_effects.get("warnings"):
@@ -4882,7 +5025,7 @@ def _finalize(
                 "publish_error_code": publish_error_code,
                 "dashboard_action_sync": challenge_side_effects.get("dashboard_action_sync"),
                 "login_challenge_incident": challenge_side_effects.get("login_challenge_incident"),
-                **(extra_metadata or {}),
+                **extra_metadata,
             }
         )
     )
