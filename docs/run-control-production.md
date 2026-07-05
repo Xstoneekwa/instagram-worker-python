@@ -122,6 +122,33 @@ Commands:
 /Users/admin/phonefarm-runtime/bin/phonefarm-runtimectl dispatcher start
 ```
 
+### `serve` vs `start` vs `status` (contract)
+
+- `dispatcher serve` / `heartbeat serve` — **launchd-only** entry point for the
+  long-lived services. The controller resolves the canonical root, then
+  `exec`s the release wrapper in foreground mode. There is **no Python parent
+  with a timeout** left in the chain; launchd is the only supervisor. Never
+  call `serve` from BotApp or an interactive shell.
+- `dispatcher start` / `heartbeat start` — short, idempotent, **bounded**
+  control command for BotApp/operators. If the service is running it returns
+  `running`; otherwise it issues `launchctl kickstart` on the canonical label
+  and returns a structured state. It never spawns the worker itself and never
+  becomes the consumer's parent.
+- `dispatcher status` / `heartbeat status` — strictly read-only. It must never
+  start, stop, or kill anything, and short-lived diagnostic subprocesses
+  (`preflight`, `once`) are never counted as real dispatchers/publishers.
+
+**Never wrap a long-lived service in a bounded timeout.** The historical
+defect (fixed here) was `subprocess.run(..., timeout=60)` around
+`dispatcher start` in the controller: the controller killed its own service
+every 60 s, launchd relaunched it after `ThrottleInterval` (30 s), producing a
+permanent ~60 s running → SIGTERM → ~30 s stopped loop, visible in
+`dispatcher.log` as `run_control_dispatcher_stop_signal signal=15` every
+~90 s and in `launchd.stdout.log` as `dispatcher_command_timeout`. The same
+defect existed for the heartbeat publisher (`heartbeat_command_timeout`).
+Diagnostic signature of a regression: launchd `runs` counter climbing, PID
+changing every minute, consumer receiving periodic SIGTERM.
+
 ### launchd install (macOS)
 
 ```bash
@@ -152,11 +179,19 @@ The production chain is:
 
 ```text
 launchd com.boost.phonefarm.dispatcher
--> /Users/admin/phonefarm-runtime/bin/phonefarm-runtimectl dispatcher start
--> /Users/admin/phonefarm-worker-current
--> scripts/run_control_dispatcher_service.sh start
+-> exec /Users/admin/phonefarm-runtime/bin/phonefarm-runtimectl dispatcher serve
+-> (exec) /Users/admin/phonefarm-worker-current/scripts/run_control_dispatcher_service.sh start
 -> account_run_request_consumer.py
 ```
+
+Every arrow is an `exec` (no intermediate parent survives): the launchd job
+PID is the wrapper itself, which traps SIGTERM and forwards it to the
+verified consumer. The same shape applies to
+`com.boost.phonefarm.device-heartbeat` with `heartbeat serve` and
+`device_heartbeat_service.sh`.
+
+The legacy root `/Users/admin/instagram-worker-python` must never appear in
+this chain; the controller refuses to resolve it.
 
 The wrapper remains the real supervisor. It owns:
 
@@ -310,6 +345,24 @@ Rollback is the same symlink operation in reverse: repoint
 affected LaunchAgents. Roll back immediately if any service starts from the
 legacy checkout, reports `runtime_root_mismatch`, fails to publish heartbeat, or
 BotApp reports a contradictory runtime root.
+
+### Mandatory 12-minute stability validation
+
+After any release switch or launchd reload, observe **at least 12 minutes**
+without manual action before declaring the deployment healthy:
+
+- dispatcher: same PID for the whole window, stable launchd `runs` counter,
+  no periodic `stop_signal 15`, no `dispatcher_command_timeout`, continuous
+  `running` status, no `duplicate_dispatcher_processes`;
+- heartbeat: same publisher PID, no `heartbeat_command_timeout`, devices
+  publishing on their expected ~60 s cadence, no periodic publisher restart;
+- scheduler: backend state read without change; `scheduler_disabled` (an
+  embedded-tick skip reason) stays fully distinct from dispatcher health and
+  never flips the dispatcher banner;
+- opening or closing BotApp must not affect either service.
+
+If any check fails, roll the pointer back to the saved release and reload only
+the affected services.
 
 ## Staging Smoke Checklist
 

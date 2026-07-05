@@ -102,6 +102,112 @@ class PhoneFarmRuntimeControlTest(TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["status"], "runtime_root_mismatch")
 
+    def _make_valid_runtime(self, tmp: Path) -> dict[str, Path]:
+        releases = tmp / "releases"
+        release = releases / "abc1234"
+        legacy = tmp / "legacy"
+        current = tmp / "current"
+        _worker_release(release)
+        legacy.mkdir()
+        current.symlink_to(release)
+        return {"tmp": tmp, "releases": releases, "release": release, "legacy": legacy, "current": current}
+
+    def test_serve_execs_wrapper_without_timeout_parent(self) -> None:
+        import tempfile
+
+        for component, wrapper_name in (
+            ("dispatcher", "run_control_dispatcher_service.sh"),
+            ("heartbeat", "device_heartbeat_service.sh"),
+        ):
+            with self.subTest(component=component):
+                with tempfile.TemporaryDirectory() as raw:
+                    layout = self._make_valid_runtime(Path(raw))
+                    env_patch = self._env(layout["tmp"], layout["current"], layout["releases"], layout["legacy"])
+                    with mock.patch.dict(os.environ, env_patch, clear=False):
+                        with mock.patch.object(ctl, "_git_commit", return_value="abc1234"):
+                            with mock.patch.object(ctl.os, "execve") as execve:
+                                with mock.patch.object(ctl.subprocess, "run") as sub_run:
+                                    with mock.patch.object(ctl.os, "chdir") as chdir:
+                                        ctl.serve_component(component)
+                # exec real du wrapper : pas de subprocess parent avec timeout.
+                sub_run.assert_not_called()
+                execve.assert_called_once()
+                argv0, argv, env = execve.call_args.args
+                self.assertTrue(str(argv0).endswith(f"scripts/{wrapper_name}"))
+                self.assertEqual(argv[1], "start")
+                self.assertEqual(env["PHONEFARM_ACTIVE_COMMIT"], "abc1234")
+                self.assertEqual(env["PHONEFARM_ACTIVE_ROOT"], str(layout["release"].resolve()))
+                chdir.assert_called_once_with(str(layout["release"].resolve()))
+
+    def test_serve_refuses_invalid_root_without_exec(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            releases = tmp / "releases"
+            releases.mkdir()
+            legacy = tmp / "legacy"
+            legacy.mkdir()
+            current = tmp / "current"  # lien absent
+            with mock.patch.dict(os.environ, self._env(tmp, current, releases, legacy), clear=False):
+                with mock.patch.object(ctl.os, "execve") as execve:
+                    code = ctl.serve_component("dispatcher")
+        self.assertEqual(code, 2)
+        execve.assert_not_called()
+
+    def test_run_wrapper_rejects_long_lived_commands(self) -> None:
+        result = ctl._run_wrapper("dispatcher", "serve", [])
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["lastError"], "long_lived_command_requires_exec")
+
+    def test_control_start_is_idempotent_when_running(self) -> None:
+        running = {"ok": True, "status": "running", "processRunning": True, "pid": 4242}
+        with mock.patch.object(ctl, "_run_wrapper", return_value=running) as run_wrapper:
+            with mock.patch.object(ctl, "_launchctl_kickstart") as kickstart:
+                with mock.patch.object(ctl.os, "execve") as execve:
+                    result = ctl.control_start("dispatcher")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "running")
+        self.assertIn("already_running", result["message"])
+        # start court : un seul status lecture seule, aucun kickstart, aucun exec.
+        run_wrapper.assert_called_once_with("dispatcher", "status", [], timeout=20)
+        kickstart.assert_not_called()
+        execve.assert_not_called()
+
+    def test_control_start_requests_launchd_when_stopped(self) -> None:
+        stopped = {"ok": True, "status": "starting", "processRunning": False, "pid": None}
+        with mock.patch.object(ctl, "_run_wrapper", return_value=stopped) as run_wrapper:
+            with mock.patch.object(ctl, "_launchctl_kickstart", return_value=(True, "")) as kickstart:
+                with mock.patch.object(ctl.os, "execve") as execve:
+                    result = ctl.control_start("heartbeat")
+        self.assertTrue(result["launchdKickstart"])
+        self.assertIn("start_requested", result["message"])
+        kickstart.assert_called_once_with("com.boost.phonefarm.device-heartbeat")
+        # Jamais parent du worker : uniquement status + kickstart launchd.
+        self.assertEqual(run_wrapper.call_count, 2)
+        for call in run_wrapper.call_args_list:
+            self.assertEqual(call.args[1], "status")
+        execve.assert_not_called()
+
+    def test_status_stays_read_only(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as raw:
+            layout = self._make_valid_runtime(Path(raw))
+            wrapper = layout["release"] / "scripts" / "run_control_dispatcher_service.sh"
+            wrapper.write_text('#!/bin/bash\necho \'{"ok": true, "status": "stopped", "processRunning": false}\'\n', encoding="utf-8")
+            wrapper.chmod(0o755)
+            env_patch = self._env(layout["tmp"], layout["current"], layout["releases"], layout["legacy"])
+            with mock.patch.dict(os.environ, env_patch, clear=False):
+                with mock.patch.object(ctl, "_git_commit", return_value="abc1234"):
+                    with mock.patch.object(ctl, "_ps_rows", return_value=[]):
+                        with mock.patch.object(ctl, "_launchctl_kickstart") as kickstart:
+                            with mock.patch.object(ctl.os, "execve") as execve:
+                                result = ctl._run_wrapper("dispatcher", "status", [])
+        self.assertEqual(result["status"], "stopped")
+        kickstart.assert_not_called()
+        execve.assert_not_called()
+
     def test_scheduler_status_reports_backend_disabled_reason(self) -> None:
         import tempfile
 

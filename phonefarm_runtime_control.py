@@ -146,13 +146,34 @@ def _component_env(paths: RuntimePaths, root: RuntimeRoot, component: str) -> di
     return env
 
 
+def _component_wrapper_name(component: str) -> str:
+    return "run_control_dispatcher_service.sh" if component == "dispatcher" else "device_heartbeat_service.sh"
+
+
+def _component_launchd_label(component: str) -> str:
+    return DISPATCHER_LABEL if component == "dispatcher" else HEARTBEAT_LABEL
+
+
+# Long-lived service commands must never run under the bounded control
+# timeout: doing so kills the foreground service every `timeout` seconds
+# (observed as the ~60s running -> SIGTERM -> ~30s stopped launchd loop).
+LONG_LIVED_COMMANDS = {"serve", "start-foreground"}
+
+
 def _run_wrapper(component: str, command: str, args: list[str], *, timeout: int = 60) -> dict[str, Any]:
+    if command in LONG_LIVED_COMMANDS:
+        return {
+            "ok": False,
+            "status": "unknown",
+            "lastError": "long_lived_command_requires_exec",
+            "message": f"Command '{command}' is long-lived; use serve_component() (exec), never a timed subprocess.",
+        }
     paths = runtime_paths()
     root = resolve_runtime_root(paths)
     if not root.ok:
         return _runtime_root_payload(root, component=component, command=command)
 
-    wrapper_name = "run_control_dispatcher_service.sh" if component == "dispatcher" else "device_heartbeat_service.sh"
+    wrapper_name = _component_wrapper_name(component)
     wrapper = Path(root.resolved_root) / "scripts" / wrapper_name
     env = _component_env(paths, root, component)
     wrapper_args = list(args)
@@ -186,6 +207,71 @@ def _run_wrapper(component: str, command: str, args: list[str], *, timeout: int 
     if command == "status":
         enriched = _detect_component_mismatch(component, enriched, root)
     return enriched
+
+
+def serve_component(component: str) -> int:
+    """launchd entry point for long-lived services.
+
+    Resolves the canonical runtime root, then *exec*s the release wrapper in
+    foreground mode. There is no Python parent left to expire: the wrapper
+    (and its consumer/publisher child) lives until launchd stops it.
+    """
+    paths = runtime_paths()
+    root = resolve_runtime_root(paths)
+    if not root.ok:
+        print(json.dumps(_runtime_root_payload(root, component=component, command="serve"), sort_keys=True))
+        return 2
+    wrapper = Path(root.resolved_root) / "scripts" / _component_wrapper_name(component)
+    env = _component_env(paths, root, component)
+    os.chdir(root.resolved_root)
+    os.execve(str(wrapper), [str(wrapper), "start"], env)
+    return 2  # unreachable; keeps the signature honest for tests
+
+
+def _launchctl_kickstart(label: str) -> tuple[bool, str]:
+    try:
+        proc = subprocess.run(
+            ["launchctl", "kickstart", f"gui/{os.getuid()}/{label}"],
+            check=False,
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+    except Exception as exc:  # includes TimeoutExpired
+        return False, str(exc)[:200]
+    return proc.returncode == 0, (proc.stderr or proc.stdout or "").strip()[:200]
+
+
+def control_start(component: str) -> dict[str, Any]:
+    """Short, idempotent start used by BotApp and operators.
+
+    Never spawns the foreground worker itself: if the service is already
+    running it reports `running`; otherwise it asks launchd to (re)start the
+    long-lived `serve` job and returns a structured, non-blocking state.
+    """
+    status = _run_wrapper(component, "status", [], timeout=20)
+    if status.get("processRunning"):
+        return {
+            **status,
+            "ok": True,
+            "command": "start",
+            "message": f"{component}_already_running pid={status.get('pid')}",
+        }
+    label = _component_launchd_label(component)
+    kicked, kick_detail = _launchctl_kickstart(label)
+    refreshed = _run_wrapper(component, "status", [], timeout=20)
+    launch_requested_ok = kicked or bool(refreshed.get("processRunning"))
+    return {
+        **refreshed,
+        "ok": bool(refreshed.get("ok")) and launch_requested_ok,
+        "command": "start",
+        "launchdKickstart": kicked,
+        "message": (
+            f"{component}_start_requested label={label}"
+            if launch_requested_ok
+            else f"{component}_start_request_failed detail={kick_detail}"
+        ),
+    }
 
 
 def _runtime_root_payload(root: RuntimeRoot, *, component: str = "runtime", command: str = "status") -> dict[str, Any]:
@@ -362,10 +448,15 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.target in {"status", "validate"}:
         return _print(runtime_status(), args.json)
-    if args.target == "dispatcher":
-        return _print(_run_wrapper("dispatcher", args.command, args.extra), args.json)
-    if args.target == "heartbeat":
-        return _print(_run_wrapper("heartbeat", args.command, args.extra), args.json)
+    if args.target in {"dispatcher", "heartbeat"}:
+        if args.command == "serve":
+            # launchd-only entry point: exec the release wrapper, no timeout.
+            return serve_component(args.target)
+        if args.command == "start":
+            # Short idempotent control command (BotApp/operator): delegates the
+            # actual long-lived process to the launchd `serve` job.
+            return _print(control_start(args.target), args.json)
+        return _print(_run_wrapper(args.target, args.command, args.extra), args.json)
     if args.target == "scheduler":
         return _print(scheduler_status(), args.json)
     if args.target == "switch-release":

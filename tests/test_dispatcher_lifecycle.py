@@ -69,6 +69,8 @@ def emit(event):
         handle.flush()
 
 if len(sys.argv) > 1 and sys.argv[1] == "preflight":
+    if "linger" in sys.argv:
+        time.sleep(float(os.environ.get("DUMMY_PREFLIGHT_LINGER_SECONDS", "5")))
     print(json.dumps({"ok": True, "reason": "dummy", "active_count": 0, "mode": "test"}))
     raise SystemExit(0)
 
@@ -243,6 +245,45 @@ def test_double_start_is_idempotent(tmp_path):
         assert _pid_alive(child_pid)
     finally:
         _terminate_process(first)
+
+
+def test_status_ignores_short_lived_diagnostic_subcommands(tmp_path):
+    """Un sous-processus `preflight`/`once` ne doit jamais être compté comme
+    un dispatcher réel (sinon status peut rapporter duplicate_dispatcher_processes
+    à cause de son propre enfant)."""
+    harness = _make_harness(tmp_path)
+    events = tmp_path / "events.log"
+    process = _start_wrapper(harness, events)
+    try:
+        child_pid = _wait_for_consumer_pid(harness, process.pid)
+        # Simule un preflight de diagnostic vivant pendant le status.
+        lingering_preflight = subprocess.Popen(
+            [sys.executable, "account_run_request_consumer.py", "preflight", "linger"],
+            cwd=harness["root"],
+            env=_env(harness, events, DUMMY_PREFLIGHT_LINGER_SECONDS="10"),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            status = subprocess.run(
+                [str(harness["wrapper"]), "status", "--json"],
+                cwd=harness["root"],
+                env=_env(harness, events),
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            payload = json.loads(status.stdout.strip().splitlines()[-1])
+            assert payload["status"] == "running"
+            assert payload["processCount"] == 1
+            assert payload["duplicateProcess"] is False
+            assert payload["pid"] == child_pid
+        finally:
+            lingering_preflight.terminate()
+            lingering_preflight.wait(timeout=5)
+    finally:
+        _terminate_process(process)
 
 
 def test_normal_child_exit_cleans_pid_and_lock(tmp_path):

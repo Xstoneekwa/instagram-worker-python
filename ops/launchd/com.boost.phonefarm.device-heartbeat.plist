@@ -8,7 +8,7 @@
     <array>
       <string>/bin/bash</string>
       <string>-lc</string>
-      <string>/Users/admin/phonefarm-runtime/bin/phonefarm-runtimectl heartbeat start</string>
+      <string>exec /Users/admin/phonefarm-runtime/bin/phonefarm-runtimectl heartbeat serve</string>
     </array>
     <key>WorkingDirectory</key>
     <string>/Users/admin/phonefarm-runtime</string>

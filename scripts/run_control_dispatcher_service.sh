@@ -112,6 +112,14 @@ _pid_is_consumer() {
   local command_line executable_name process_cwd
   command_line="$(_pid_command_line "$pid")"
   [[ "$command_line" == *"account_run_request_consumer.py"* ]] || return 1
+  # Short-lived diagnostic subcommands (status preflight, one-shot cycles)
+  # must never be counted as real dispatchers, otherwise a status call can
+  # report duplicate_dispatcher_processes about its own child.
+  case "$command_line" in
+    *"account_run_request_consumer.py preflight"*|*"account_run_request_consumer.py once"*)
+      return 1
+      ;;
+  esac
   executable_name="${command_line%% *}"
   executable_name="${executable_name##*/}"
   [[ "$executable_name" == *"python"* || "$executable_name" == *"Python"* ]] || return 1
