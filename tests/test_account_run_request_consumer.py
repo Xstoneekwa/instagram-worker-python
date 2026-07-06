@@ -317,6 +317,7 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
             "app_instance_id": "app-instance-1",
             "device_kind": "emulator",
             "adb_serial": "emulator-5554",
+            "package_name": "com.instagram.androif",
             "source": "account_assignments",
             "fallback_used": False,
             "reason": "assignment_resolved",
@@ -341,6 +342,39 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
         cmd = popen.call_args.args[0]
         self.assertIn("--device-serial", cmd)
         self.assertEqual(cmd[cmd.index("--device-serial") + 1], "emulator-5554")
+        self.assertIn("--package-name", cmd)
+        self.assertEqual(cmd[cmd.index("--package-name") + 1], "com.instagram.androif")
+        self.assertIn("--expected-app-instance-id", cmd)
+        self.assertEqual(cmd[cmd.index("--expected-app-instance-id") + 1], "app-instance-1")
+
+    def test_build_account_session_runner_command_includes_clone_package(self) -> None:
+        cmd = consumer._build_runner_command(
+            TEST_ACCOUNT_ID,
+            "account_session",
+            TEST_REQUEST_ID,
+            device_serial="RFGL145LZHE",
+            package_name="com.instagram.androif",
+            app_instance_id="59f82a36-155c-4073-9765-28dac46b56ff",
+        )
+        self.assertIn("runner.py", cmd[1])
+        self.assertEqual(cmd[cmd.index("--device-serial") + 1], "RFGL145LZHE")
+        self.assertEqual(cmd[cmd.index("--package-name") + 1], "com.instagram.androif")
+        self.assertEqual(
+            cmd[cmd.index("--expected-app-instance-id") + 1],
+            "59f82a36-155c-4073-9765-28dac46b56ff",
+        )
+
+    def test_build_account_session_runner_command_omits_package_when_unresolved(self) -> None:
+        cmd = consumer._build_runner_command(
+            TEST_ACCOUNT_ID,
+            "account_session",
+            TEST_REQUEST_ID,
+            device_serial="RFGL145LZHE",
+            package_name=None,
+            app_instance_id=None,
+        )
+        self.assertNotIn("--package-name", cmd)
+        self.assertNotIn("--expected-app-instance-id", cmd)
 
     def test_login_subprocess_receives_runner_env_with_adb_path(self) -> None:
         cfg = consumer.DispatcherConfig(

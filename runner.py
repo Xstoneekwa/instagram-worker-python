@@ -17617,6 +17617,18 @@ def main() -> int:
         default="",
         help="Explicit ADB serial selected by scheduler/dispatcher.",
     )
+    parser.add_argument(
+        "--package-name",
+        type=str,
+        default="",
+        help="Instagram package (clone) resolved from the account assignment by the dispatcher.",
+    )
+    parser.add_argument(
+        "--expected-app-instance-id",
+        type=str,
+        default="",
+        help="phone_app_instances.id resolved by the dispatcher (observability only).",
+    )
     args = parser.parse_args()
     supabase_mode = _is_supabase_mode(args)
     welcome_baseline_run = _is_welcome_baseline_run(args)
@@ -17926,6 +17938,23 @@ def main() -> int:
     device_serial = str(args.device_serial or "").strip() or config.DEVICE_SERIAL
 
     dispatch_run_type = _parse_run_type(args)
+    # Dispatcher-resolved clone package (assignment DB -> app_instance -> package).
+    # Applied before app readiness so the worker only ever opens the assigned
+    # clone; the identity guard then proves the username inside that clone.
+    cli_package_name = str(getattr(args, "package_name", "") or "").strip()
+    if cli_package_name:
+        previous_package = str(config.INSTAGRAM_PACKAGE or "")
+        config.INSTAGRAM_PACKAGE = cli_package_name
+        log(
+            "info",
+            "runner_package_resolved_from_dispatcher",
+            account_id=account_id or None,
+            run_type=dispatch_run_type or None,
+            package=cli_package_name,
+            previous_package=previous_package or None,
+            expected_app_instance_id=str(getattr(args, "expected_app_instance_id", "") or "").strip() or None,
+            source="dispatcher_cli_package_name",
+        )
     dispatch_ctx: dict[str, Any] = {}
     dispatch_log_fields: dict[str, Any] = {}
     _t_assignment = time.perf_counter()
@@ -17961,6 +17990,19 @@ def main() -> int:
                 device_serial = str(dispatch_ctx.get("adb_serial") or "").strip() or device_serial
                 assignment_package = str(dispatch_ctx.get("package_name") or "").strip()
                 if assignment_package:
+                    if cli_package_name and assignment_package != cli_package_name:
+                        # Divergence between the dispatcher claim-time package and the
+                        # fresh assignment read: keep the fresher assignment value; the
+                        # identity guard remains the final safe-stop either way.
+                        log(
+                            "warning",
+                            "runner_package_dispatch_mismatch",
+                            account_id=account_id or None,
+                            run_type=dispatch_run_type or None,
+                            cli_package=cli_package_name,
+                            assignment_package=assignment_package,
+                            resolution="assignment_package_used",
+                        )
                     config.INSTAGRAM_PACKAGE = assignment_package
                 log("info", "account_assignment_dispatch_resolved", **dispatch_log_fields)
                 _orf_set_runtime_context(

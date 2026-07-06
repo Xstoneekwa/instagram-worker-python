@@ -543,6 +543,15 @@ def _build_runner_command(
     serial = str(device_serial or "").strip()
     if serial:
         cmd.extend(["--device-serial", serial])
+    # Assignment-resolved clone package must reach the runner explicitly:
+    # without it the runner falls back to the primary com.instagram.android
+    # and the identity preflight safe-stops (exit 75) on clone-assigned accounts.
+    package = str(package_name or "").strip()
+    if package:
+        cmd.extend(["--package-name", package])
+    app_instance = str(app_instance_id or "").strip()
+    if app_instance:
+        cmd.extend(["--expected-app-instance-id", app_instance])
     return cmd
 
 
