@@ -2,6 +2,42 @@
 
 *Document volatil : à mettre à jour après les prochains jalons produit / tech.*
 
+## P0 package clone → runner — checkpoint 2026-07-07
+
+- **Cause prouvée corrigée** : pour un `account_session`, le dispatcher
+  résolvait le bon clone (`app_instance` → `package_name`) mais
+  `_build_runner_command` ne transmettait que `--device-serial`. Le runner
+  retombait sur `com.instagram.android` (app primaire, sans compte) et
+  l'identity guard safe-stoppait avec exit 75
+  (`actual_logged_in_username_not_detected`) — cas réel : cold start Scheduler
+  `mythyl_fitness` / A16-02 / run `622f457c` (2026-07-06 22:01 UTC).
+- **Fix (commit `cb2bd14`)** :
+  - `account_run_request_consumer._build_runner_command` transmet désormais
+    `--package-name` et `--expected-app-instance-id` au runner pour tous les
+    run types runner.py (dont `account_session`) ;
+  - `runner.py` accepte ces arguments et applique le package dispatcher
+    **avant** l'app readiness (log `runner_package_resolved_from_dispatcher`) ;
+  - si le résolveur d'assignment interne (opt-in env) trouve un package
+    différent, il gagne (lecture plus fraîche) et un warning
+    `runner_package_dispatch_mismatch` est émis ;
+  - **identity guard inchangé** : match exact du pseudo, safe-stop exit 75.
+- **Tests** : `tests/test_runner_package_dispatch.py` (nouveau, 3 cas :
+  application CLI, défaut sans CLI, précédence resolver) +
+  `test_account_run_request_consumer.py` étendu (commande `account_session`
+  avec/sans package). Échecs préexistants de la suite (réseau/env) identiques
+  à la baseline 52d76e7 — non liés au patch.
+- **Déploiement** : release immuable
+  `/Users/admin/phonefarm-worker-releases/cb2bd14` (worktree, `lock_state.json`
+  copié), pointeur `phonefarm-worker-current` basculé 52d76e7 → cb2bd14,
+  dispatcher + device-heartbeat relancés (roots vérifiés cb2bd14, heartbeat
+  cycle OK 2 phones). Scheduler resté **OFF** pendant toute l'opération :
+  0 request active, 0 run, dernière request = celle de l'incident 22:00 UTC.
+- **Reste à faire avant le prochain cold start `mythyl_fitness`** :
+  fermer la modale de consentement Meta affichée dans `com.instagram.androif`
+  (clone 2 A16-02), sinon le préflight échouera même avec le bon package ;
+  décision sur l'observabilité incident (`RUNTIME_INCIDENTS_ENABLED`, reason
+  `actual_logged_in_username_not_detected` non publiée en incident).
+
 ## Full-cycle minimum physique — checkpoint 2026-06-08
 
 - **Validation fonctionnelle complète sur téléphone physique** :
