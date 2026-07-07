@@ -18091,6 +18091,36 @@ def main() -> int:
         run_type=dispatch_run_type or None,
     )
 
+    # P3: canonical resume plan created EARLY, before any device/UI action.
+    # Covers every dispatched account_session regardless of trigger
+    # (scheduler, manual Play, auto restart resume). Best-effort by contract.
+    if account_session_run and supabase_mode and run_id:
+        try:
+            from account_session_resume_plan_store import create_early_resume_plan
+
+            create_early_resume_plan(
+                run_id=run_id,
+                run_request_id=run_request_id or None,
+                account_id=account_id,
+                assignment_id=dispatch_ctx.get("assignment_id"),
+                device_id=dispatch_ctx.get("device_id"),
+                app_instance_id=dispatch_ctx.get("clone_id")
+                or str(getattr(args, "expected_app_instance_id", "") or "").strip()
+                or None,
+                expected_username=account_username,
+                expected_package=str(config.INSTAGRAM_PACKAGE or "") or None,
+                scheduled_window_start=dispatch_ctx.get("starts_at"),
+                scheduled_window_end=dispatch_ctx.get("ends_at"),
+            )
+        except Exception as exc:
+            log(
+                "warning",
+                "resume_plan_early_create_unexpected_error",
+                account_id=account_id or None,
+                run_id=run_id or None,
+                error=str(exc)[:300],
+            )
+
     if _abort_if_run_request_canceled(
         run_request_id=run_request_id,
         run_id=run_id or None,

@@ -814,6 +814,75 @@ def _reconcile_linked_run(
     return result
 
 
+def _update_incident_recovery_state(
+    incident_id: str,
+    *,
+    state: str,
+    resolve: bool = False,
+    extra: dict[str, Any] | None = None,
+) -> None:
+    """Best-effort: merge a recovery state block into one incident's metadata.
+
+    Used by the P3 human-confirmed resume flow to keep the operator-visible
+    recovery state (`resume_requested` / `reintervention_required` /
+    `resume_succeeded`) on the original incident. Never raises.
+    """
+    iid = str(incident_id or "").strip()
+    if not iid:
+        return
+    try:
+        rows = supabase_client._request_json(
+            "GET",
+            "account_incidents",
+            query={"select": "id,metadata,status", "id": f"eq.{iid}", "limit": "1"},
+        ) or []
+        if not rows:
+            return
+        current = dict(rows[0])
+        metadata = dict(current.get("metadata") or {})
+        recovery = dict(metadata.get("recovery") or {})
+        recovery.update(
+            {
+                "state": state,
+                "updated_at": _utc_now_iso(),
+                **(extra or {}),
+            }
+        )
+        metadata["recovery"] = recovery
+        patch: dict[str, Any] = {
+            "metadata": metadata,
+            "updated_at": _utc_now_iso(),
+        }
+        if resolve and str(current.get("status") or "") in {"open", "acknowledged"}:
+            patch["status"] = "resolved"
+            patch["resolved_at"] = _utc_now_iso()
+        supabase_client._request_json(
+            "PATCH",
+            "account_incidents",
+            query={"id": f"eq.{iid}"},
+            body=patch,
+        )
+        log(
+            "info",
+            "incident_recovery_state_updated",
+            incident_id=iid,
+            recovery_state=state,
+            resolved=bool(patch.get("status") == "resolved"),
+        )
+    except Exception as exc:
+        log(
+            "warning",
+            "incident_recovery_state_update_failed",
+            incident_id=iid,
+            recovery_state=state,
+            error=str(exc)[:300],
+        )
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 def _publish_run_failure_incident(
     *,
     request_id: str,
@@ -823,6 +892,7 @@ def _publish_run_failure_incident(
     exit_code: int,
     timed_out: bool,
     canceled: bool,
+    request_metadata: dict[str, Any] | None = None,
 ) -> None:
     """Canonical incident publication point for terminal run failures (P2).
 
@@ -830,6 +900,10 @@ def _publish_run_failure_incident(
     linked run (never raw text logs), classifies the true reason via the
     canonical matrix, and upserts one deduplicated ``account_incidents`` row.
     Best-effort: any failure here is logged and never affects run finalization.
+
+    P3: a failed human-confirmed resume run enriches the ORIGINAL incident
+    (same dedupe key) instead of opening a new one, and flips its recovery
+    state to ``reintervention_required``. No automatic loop ever follows.
     """
     try:
         run_status: str | None = None
@@ -870,16 +944,33 @@ def _publish_run_failure_incident(
         )
         if not decision.should_publish:
             return
+        meta = dict(request_metadata or {})
+        recovery_resume = (
+            str(meta.get("recovery_mode") or "") == "human_confirmed_resume"
+        )
+        original_run_id = str(
+            meta.get("original_run_id") or meta.get("prior_run_id") or ""
+        ).strip()
+        original_incident_id = str(meta.get("incident_id") or "").strip()
         account_username: str | None = None
         try:
             account_username = supabase_client.get_account_username(account_id) or None
         except Exception:
             account_username = None
+        incident_run_id = run_id
+        if recovery_resume and original_run_id:
+            # Enrich the original incident: same dedupe key, resume run kept
+            # visible in metadata. Notifier dedupe per incident prevents any
+            # duplicate Slack/Discord spam.
+            incident_run_id = original_run_id
+            if run_id and run_id != original_run_id:
+                decision.metadata_safe["resume_run_id"] = str(run_id)
+            decision.metadata_safe["recovery_mode"] = "human_confirmed_resume"
         payload = build_run_failure_incident_payload(
             decision,
             account_id=account_id,
             account_username=account_username,
-            run_id=run_id,
+            run_id=incident_run_id,
             run_request_id=request_id,
             run_type=run_type,
         )
@@ -896,7 +987,44 @@ def _publish_run_failure_incident(
             publish_reason=result.get("reason"),
             incident_id=result.get("incident_id"),
             occurrence_count=result.get("occurrence_count"),
+            recovery_resume=recovery_resume or None,
         )
+        # P3: keep the canonical per-run resume plan aligned with the terminal
+        # outcome (best-effort, account_session scope only).
+        if str(run_type or "").strip().lower() == "account_session":
+            try:
+                from account_session_resume_plan_store import (
+                    mark_resume_outcome,
+                    record_terminal_failure,
+                )
+
+                if recovery_resume and original_run_id:
+                    mark_resume_outcome(
+                        original_run_id=original_run_id,
+                        succeeded=False,
+                        reason_code=decision.reason_code,
+                    )
+                    _update_incident_recovery_state(
+                        original_incident_id or str(result.get("incident_id") or ""),
+                        state="reintervention_required",
+                        extra={"last_resume_run_id": run_id or None},
+                    )
+                elif run_id:
+                    record_terminal_failure(
+                        run_id=run_id,
+                        incident_type=decision.incident_type,
+                        reason_code=decision.reason_code,
+                        incident_id=str(result.get("incident_id") or "") or None,
+                    )
+            except Exception as exc:
+                log(
+                    "warning",
+                    "resume_plan_terminal_sync_failed",
+                    account_id=account_id,
+                    request_id=request_id,
+                    run_id=run_id,
+                    error=str(exc)[:300],
+                )
     except Exception as exc:
         log(
             "warning",
@@ -925,6 +1053,11 @@ def _finalize_manual_run_after_subprocess(
         or ""
     ).strip().lower()
     canceled = bool(latest.get("cancel_requested_at")) or str(latest.get("status") or "").strip().lower() == "canceled"
+    request_metadata = dict(
+        latest.get("metadata_safe")
+        or (request_snapshot or {}).get("metadata_safe")
+        or {}
+    )
 
     if timed_out:
         _safe_complete_account_run_request(
@@ -957,6 +1090,7 @@ def _finalize_manual_run_after_subprocess(
             exit_code=exit_code,
             timed_out=True,
             canceled=canceled,
+            request_metadata=request_metadata,
         )
         return
 
@@ -986,6 +1120,39 @@ def _finalize_manual_run_after_subprocess(
             request_id=request_id,
             exit_code=exit_code,
         )
+        # P3: a successful human-confirmed resume closes the recovery loop:
+        # the resume plan is marked succeeded and the original incident is
+        # resolved with an auditable recovery state. Best-effort.
+        if str(request_metadata.get("recovery_mode") or "") == "human_confirmed_resume":
+            original_run_id = str(
+                request_metadata.get("original_run_id")
+                or request_metadata.get("prior_run_id")
+                or ""
+            ).strip()
+            original_incident_id = str(request_metadata.get("incident_id") or "").strip()
+            try:
+                from account_session_resume_plan_store import mark_resume_outcome
+
+                if original_run_id:
+                    mark_resume_outcome(
+                        original_run_id=original_run_id,
+                        succeeded=True,
+                    )
+                _update_incident_recovery_state(
+                    original_incident_id,
+                    state="resume_succeeded",
+                    resolve=True,
+                    extra={"last_resume_run_id": run_id or None},
+                )
+            except Exception as exc:
+                log(
+                    "warning",
+                    "resume_success_sync_failed",
+                    account_id=account_id,
+                    request_id=request_id,
+                    run_id=run_id,
+                    error=str(exc)[:300],
+                )
         summary = _safe_login_provisioner_summary_for_audit(run_id or request_id)
         _audit(
             account_id=account_id,
@@ -1137,6 +1304,7 @@ def _finalize_manual_run_after_subprocess(
         exit_code=exit_code,
         timed_out=False,
         canceled=canceled,
+        request_metadata=request_metadata,
     )
 
 

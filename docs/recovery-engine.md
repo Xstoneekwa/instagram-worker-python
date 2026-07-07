@@ -50,3 +50,23 @@ Pendant recovery **critique** (surtout post-follow) :
 ## Reasons explicites
 
 Toute sortie d’échec ou d’abandon doit porter une **reason** lisible et stable (pas seulement `False` / code numérique opaque côté métier). Les PR doivent documenter les **nouvelles** reasons ajoutées.
+
+## Reprise contrôlée après intervention humaine (P3)
+
+- Chaque run `account_session` crée **tôt** (avant toute action UI) un resume
+  plan canonique dans `account_session_resume_plans`
+  (`account_session_resume_plan_store.py`) ; le dispatcher y conserve la
+  reason terminale exacte, l'orchestrateur y persiste le verdict de fin de
+  session. Les runs historiques sans plan restent `resume_plan_missing`.
+- Un échec actionnable (identity guard, package, login, device, crash) laisse
+  le plan en `awaiting_human_resume_authorization` : **aucun retry
+  automatique** sans clic humain « Prêt à relancer ».
+- L'autorisation humaine (`incident_resume_authorizations`, backend) est
+  consommée **atomiquement** par le tick Auto Restart : 1 clic → 1 request de
+  reprise max → 1 fenêtre active. Reasons stables :
+  `awaiting_human_resume_authorization`, `resume_authorization_expired`,
+  `resume_authorization_consumed`, `resume_retry_window_exhausted`,
+  `resume_plan_not_recoverable`, `resume_window_closed`.
+- L'identity guard reste le safe-stop final inchangé sur la reprise ; un
+  nouvel échec enrichit l'incident original (« Nouvelle intervention
+  requise ») sans boucle ni spam de notifications.

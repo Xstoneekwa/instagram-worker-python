@@ -2,6 +2,73 @@
 
 *Document volatil : à mettre à jour après les prochains jalons produit / tech.*
 
+## P3 auto restart après intervention humaine — checkpoint 2026-07-07
+
+- **Flow canonique livré** : run interrompu (reason actionnable) → incident P2
+  → humain corrige sur le téléphone → clic « Prêt à relancer » (BotApp) →
+  autorisation durable armée → le tick Auto Restart canonique consomme
+  l'autorisation **atomiquement** et crée exactement **une** request de reprise
+  dans la fenêtre active → dispatcher → runner → identity guard inchangé.
+  Scheduler resté **OFF** pendant tout P3 ; zéro run, zéro run request.
+- **Resume plan créé tôt** : table `account_session_resume_plans` (une ligne
+  par run `account_session`, worker-owned). Créée par le runner
+  (`account_session_resume_plan_store.create_early_resume_plan`) **avant toute
+  action device/UI**, dès que compte/assignment/device/clone/package/fenêtre
+  sont connus — pour Scheduler, Play manuel et reprises Auto Restart (même
+  chemin runner). Mise à jour par le dispatcher au terminal
+  (`record_terminal_failure` : reason exacte conservée,
+  `resume_state=awaiting_human_resume_authorization` si l'incident est
+  recovery-eligible, sinon `not_recoverable`) et par l'orchestrateur en fin de
+  session (`record_end_of_session`, verdict V1A). Les anciens runs sans plan
+  restent `resume_plan_missing` : aucun plan rétroactif inventé.
+- **Run types** : seuls les `account_session` participent au flow P3.
+  `outreach_session` exclu (pas de plan précoce pour l'instant),
+  login/provisioning conservent leurs mécanismes validés
+  (`login_provisioning`, `login_email_code_resume`), non mélangés.
+- **Autorisation humaine** : table backend `incident_resume_authorizations`
+  (armed/consumed/expired/revoked). Index uniques partiels : 1 seule `armed`
+  par incident, 1 seule `armed|consumed` par (compte, fenêtre) → `1 clic → 1
+  request max → 1 fenêtre`, jamais ré-armable après consommation dans la même
+  fenêtre. Action backend `ready_to_resume` (relay/admin, auditée,
+  status/recovery only, `runCreated:false`) ; refusée hors fenêtre
+  (`resume_window_closed`) ou plan non récupérable.
+- **Consommation par le tick** (`processHumanConfirmedResumes` dans
+  `auto-restart-tick.ts`) : fenêtre encore active sinon expiration
+  (`resume_authorization_expired`), gates canoniques
+  (`evaluateRunStartEligibility` trigger scheduler → `manual_only` exclu,
+  aucune run/request active), claim atomique `armed→consumed` AVANT la
+  création (2 ticks concurrents → `resume_authorization_consumed` pour le
+  perdant), puis `create_account_run_request` (CP0) avec metadata
+  `recovery_mode=human_confirmed_resume` + `incident_id` + `original_run_id` +
+  `resume_plan_id` + `resume_window_key`. Échec de création après claim :
+  autorisation reste consommée (anti-boucle), incident →
+  `reintervention_required`. Décisions auditées dans `auto_restart_decisions`
+  (`human_confirmed_resume_enqueued` / `_evaluated`).
+- **Claim worker** : `validate_auto_restart_request_at_claim` route
+  `recovery_mode=human_confirmed_resume` vers la validation par la table plans
+  (état `resume_requested`, compte/run/fenêtre cohérents) — reprise depuis le
+  préflight, session complète, quotas normaux ; identity guard **inchangé**
+  (match exact, safe-stop exit 75). Un nouvel échec de reprise **enrichit
+  l'incident original** (même dedupe key run original, `resume_run_id` en
+  metadata, pas de spam Slack/Discord) et repasse le plan en
+  `awaiting_human_resume_authorization` sans nouvelle reprise automatique.
+  Une reprise réussie marque `resume_succeeded` et résout l'incident.
+- **États visibles** (Admin + BotApp, dérivés de `metadata.recovery.state` +
+  autorisation) : Action requise / Prêt à relancer / Reprise demandée /
+  Nouvelle intervention requise / Résolu. BotApp : bouton « Prêt à relancer »
+  (libellé exact) seulement si `recovery.eligible` prouvé par le backend ;
+  drawer affiche fenêtre active/fermée, autorisation armée/consommée/expirée ;
+  aucun Manual Retry ; le flag mort `resume_scheduling` a été retiré.
+- **Reasons stables ajoutées** : `awaiting_human_resume_authorization`,
+  `resume_authorization_expired`, `resume_authorization_consumed`,
+  `resume_retry_window_exhausted`, `resume_plan_not_recoverable`,
+  `resume_window_closed`, `resume_plan_missing` (déjà existante, réutilisée).
+- **Hors périmètre P3 (inchangé)** : pas de détection/fermeture automatique
+  des popups Meta/interstitials ; pas de classification de la popup Meta sans
+  détecteur dédié ; Scheduler OFF bloque toujours toute reprise (gate tick +
+  CP0). Prochain checkpoint : détecteur popup/interstitial, validation réelle
+  d'un cycle humain → prêt à relancer → reprise contrôlée.
+
 ## P2 incidents runtime canoniques — checkpoint 2026-07-07
 
 - **Pipeline livré** : échec runtime → incident canonique `account_incidents`

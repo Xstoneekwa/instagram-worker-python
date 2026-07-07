@@ -343,14 +343,26 @@ def build_run_failure_incident_payload(
     run_request_id: str | None = None,
     run_type: str | None = None,
     source: str = "run_dispatcher",
+    dedupe_run_ref: str | None = None,
 ) -> dict[str, Any]:
-    """Pure builder: IncidentDecision -> upsert_account_incident payload."""
-    run_ref = str(run_id or "").strip() or str(run_request_id or "").strip()
+    """Pure builder: IncidentDecision -> upsert_account_incident payload.
+
+    ``dedupe_run_ref`` lets a failed human-confirmed resume run enrich the
+    ORIGINAL incident (deduped on the original run) instead of opening a new
+    one; the new run id stays visible in metadata.
+    """
+    run_ref = (
+        str(dedupe_run_ref or "").strip()
+        or str(run_id or "").strip()
+        or str(run_request_id or "").strip()
+    )
     metadata = dict(decision.metadata_safe)
     if run_request_id:
         metadata["run_request_id"] = str(run_request_id)
     if run_type:
         metadata.setdefault("run_type", str(run_type))
+    if dedupe_run_ref and run_id and str(dedupe_run_ref).strip() != str(run_id).strip():
+        metadata["resume_run_id"] = str(run_id)
     metadata["operator_label"] = decision.operator_label
     return {
         "incident_type": decision.incident_type,

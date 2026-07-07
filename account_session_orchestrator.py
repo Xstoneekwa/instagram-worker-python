@@ -3218,6 +3218,26 @@ def run_account_session(
             error=auto_restart_resume_plan_error,
         )
 
+    # P3: persist the end-of-session restart verdict on the canonical
+    # per-run resume plan row (created early by the runner). Best-effort.
+    if run_id:
+        try:
+            from account_session_resume_plan_store import record_end_of_session
+
+            record_end_of_session(
+                run_id=run_id,
+                session_plan=auto_restart_resume_plan,
+                session_status=session_status,
+            )
+        except Exception as e:
+            log(
+                "warning",
+                "resume_plan_end_of_session_persist_failed",
+                account_id=aid,
+                run_id=run_id,
+                error=str(e)[:300],
+            )
+
     reliability_v1d_enabled = True
     reliability_v1d_dry_run = True
     admin_reliability_snapshot: dict[str, Any] | None = None

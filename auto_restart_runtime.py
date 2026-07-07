@@ -49,9 +49,20 @@ def is_hard_stop_reason(reason: str) -> bool:
     return normalize_hard_stop_reason(reason) in HARD_STOP_REASONS
 
 
+HUMAN_CONFIRMED_RESUME_MODE = "human_confirmed_resume"
+
+
 def is_auto_restart_request(metadata: dict[str, Any] | None) -> bool:
     meta = dict(metadata or {})
     return bool(meta.get("auto_restart")) and str(meta.get("source") or "") == AUTO_RESTART_TICK_SOURCE
+
+
+def is_human_confirmed_resume_request(metadata: dict[str, Any] | None) -> bool:
+    meta = dict(metadata or {})
+    return (
+        is_auto_restart_request(meta)
+        and str(meta.get("recovery_mode") or "") == HUMAN_CONFIRMED_RESUME_MODE
+    )
 
 
 def _read_record(value: Any) -> dict[str, Any]:
@@ -160,6 +171,76 @@ def load_prior_run_summary(account_id: str, prior_run_id: str) -> dict[str, Any]
     }
 
 
+def _validate_human_confirmed_resume_at_claim(
+    *,
+    account_id: str,
+    meta: dict[str, Any],
+) -> tuple[bool, str, dict[str, Any] | None]:
+    """Validate a P3 human-confirmed resume request against the canonical
+    per-run resume plan row (not the legacy quota resume-plan contract).
+
+    The prior run typically failed at preflight, so quotas are unknown by
+    design: the session resumes from the preflight stage with a full plan.
+    The identity guard remains the unchanged final safe-stop.
+    """
+    from account_session_resume_plan_store import (
+        RESUME_STATE_RESUME_REQUESTED,
+        load_resume_plan,
+    )
+
+    resume_plan_id = str(meta.get("resume_plan_id") or "").strip()
+    original_run_id = str(
+        meta.get("original_run_id") or meta.get("prior_run_id") or ""
+    ).strip()
+    incident_id = str(meta.get("incident_id") or "").strip()
+    if not resume_plan_id or not original_run_id or not incident_id:
+        return False, "resume_plan_invalid", None
+
+    try:
+        plan_row = load_resume_plan(resume_plan_id=resume_plan_id)
+    except Exception:
+        return False, "resume_plan_invalid", None
+    if not plan_row:
+        return False, "resume_plan_invalid", None
+    if str(plan_row.get("account_id") or "").strip() != str(account_id or "").strip():
+        return False, "resume_plan_invalid", None
+    if str(plan_row.get("run_id") or "").strip() != original_run_id:
+        return False, "resume_plan_invalid", None
+    if str(plan_row.get("resume_state") or "").strip() != RESUME_STATE_RESUME_REQUESTED:
+        return False, "resume_authorization_consumed", None
+
+    window_end = str(plan_row.get("scheduled_window_end") or "").strip()
+    if window_end:
+        from datetime import datetime, timezone
+
+        try:
+            end_dt = datetime.fromisoformat(window_end.replace("Z", "+00:00"))
+            if end_dt <= datetime.now(timezone.utc):
+                return False, "resume_authorization_expired", None
+        except ValueError:
+            return False, "resume_plan_invalid", None
+
+    policy = {
+        "schema": AUTO_RESTART_RESUME_PLAN_SCHEMA,
+        "resume_plan_version": RESUME_PLAN_VERSION,
+        "prior_run_id": original_run_id,
+        "recovery_mode": HUMAN_CONFIRMED_RESUME_MODE,
+        "resume_plan_id": resume_plan_id,
+        "incident_id": incident_id,
+        # Preflight-stage resume: run the full planned session again; the
+        # orchestrator's own gates and quotas apply as on a normal session.
+        "phases_to_run": {"welcome": True, "follow": True, "unfollow": True},
+        "restart_allowed": True,
+        "request_metadata": {
+            "source": AUTO_RESTART_TICK_SOURCE,
+            "recovery_mode": HUMAN_CONFIRMED_RESUME_MODE,
+            "trigger_source": meta.get("trigger_source"),
+            "execution_worker_id": meta.get("execution_worker_id"),
+        },
+    }
+    return True, "", policy
+
+
 def validate_auto_restart_request_at_claim(
     *,
     account_id: str,
@@ -168,6 +249,12 @@ def validate_auto_restart_request_at_claim(
     meta = dict(metadata or {})
     if not is_auto_restart_request(meta):
         return True, "", None
+
+    if is_human_confirmed_resume_request(meta):
+        return _validate_human_confirmed_resume_at_claim(
+            account_id=account_id,
+            meta=meta,
+        )
 
     prior_run_id = str(meta.get("prior_run_id") or "").strip()
     if not prior_run_id:
