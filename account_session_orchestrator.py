@@ -116,6 +116,38 @@ def _transition_buffer_blocks_business_actions() -> bool:
     return not business_actions_allowed_now(business_action_deadline=deadline)
 
 
+def _operator_stop_cancel_requested() -> bool:
+    request_id = str(os.environ.get("ACCOUNT_RUN_REQUEST_ID") or "").strip()
+    if not request_id:
+        return False
+    try:
+        from account_run_control import is_account_run_request_cancel_requested
+
+        return bool(is_account_run_request_cancel_requested(request_id))
+    except Exception as exc:
+        log("warning", "operator_stop_cancel_check_failed", run_request_id=request_id, error=str(exc)[:200])
+        return False
+
+
+def _abort_if_operator_stop_requested(
+    *,
+    account_id: str | None,
+    run_id: str | None,
+    phase: str,
+) -> int | None:
+    if not _operator_stop_cancel_requested():
+        return None
+    log(
+        "info",
+        "operator_stop_detected",
+        account_id=account_id,
+        run_id=run_id,
+        phase=phase,
+        run_request_id=os.environ.get("ACCOUNT_RUN_REQUEST_ID"),
+    )
+    return 143
+
+
 def _is_unfollow_any_mode(mode: str) -> bool:
     return str(mode or "").strip().lower() == UNFOLLOW_MODE_ANY
 
@@ -2569,6 +2601,20 @@ def run_account_session(
         target_id=tid or None,
     )
 
+    stop_code = _abort_if_operator_stop_requested(account_id=aid, run_id=run_id, phase="session_start")
+    if stop_code is not None:
+        log(
+            "info",
+            "account_session_summary",
+            account_id=aid,
+            account_username=uname,
+            run_id=run_id,
+            total_ms=round((time.perf_counter() - t0) * 1000.0, 2),
+            session_status="stopped",
+            transition_reason="operator_stop_requested",
+        )
+        return stop_code
+
     session_policy_revision = str(
         (load_account_commercial_policy_revision(aid) or {}).get("revision_token") or ""
     ).strip() or None
@@ -2796,6 +2842,29 @@ def run_account_session(
             account_id=aid,
             run_id=run_id,
             reason=transition_reason,
+        )
+    elif _operator_stop_cancel_requested():
+        run_follow = False
+        follow_phase_skipped_reason = "operator_stop_requested"
+        stop_code = _abort_if_operator_stop_requested(account_id=aid, run_id=run_id, phase="before_follow")
+        if stop_code is not None:
+            log(
+                "info",
+                "account_session_summary",
+                account_id=aid,
+                account_username=uname,
+                run_id=run_id,
+                total_ms=round((time.perf_counter() - t0) * 1000.0, 2),
+                session_status="stopped",
+                transition_reason="operator_stop_requested",
+            )
+            return stop_code
+        log(
+            "info",
+            "account_session_follow_phase_skipped",
+            account_id=aid,
+            run_id=run_id,
+            reason=follow_phase_skipped_reason,
         )
     elif _transition_buffer_blocks_business_actions():
         run_follow = False

@@ -2,6 +2,20 @@
 
 *Document volatil : à mettre à jour après les prochains jalons produit / tech.*
 
+## CP5 operator Stop — checkpoint 2026-07-08
+
+- **Stop source-agnostique** : `POST /api/instagram-dashboard/stop` accepte
+  Scheduler, Auto Restart, P3 resume, Play, queued/claimed/running.
+- **Suppression fenêtre** : table `operator_stop_suppressions`, reason
+  `operator_stop_suppressed`, expiration à `scheduled_window_end`.
+- **Cleanup avant Play** : pas de réconciliation `ig_runs` prématurée ;
+  `stop_cleanup_in_progress` bloque Play ; lease libérée après terminal worker.
+- **Worker** : `ACCOUNT_RUN_REQUEST_ID` en env subprocess ; orchestrator vérifie
+  cancel aux frontières session/welcome/follow.
+- **BotApp** : Stop inchangé côté visibilité (déjà source-agnostic via
+  profiles) ; labels `Stopping…`, `Stopped by operator — manual restart required`.
+- **Hors scope CP5** : provisioning client CP6, classifier popup Meta.
+
 ## CP4 buffer T-10 + préflight planifié — checkpoint 2026-07-07
 
 - **Contrat livré** : pour chaque fenêtre CP2 matérialisée,

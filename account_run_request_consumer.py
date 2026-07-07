@@ -1696,6 +1696,8 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
         deadline = resolve_business_action_deadline(request_metadata, dispatch_ctx)
         if deadline:
             subprocess_env = {**subprocess_env, "BUSINESS_ACTION_DEADLINE": deadline}
+    if request_id:
+        subprocess_env = {**subprocess_env, "ACCOUNT_RUN_REQUEST_ID": request_id}
     if auto_restart_policy:
         subprocess_env = {**subprocess_env, **runner_env_for_resume_policy(auto_restart_policy)}
 
