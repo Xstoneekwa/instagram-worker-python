@@ -27,6 +27,11 @@ from instagram_navigation import verify_app_foreground
 from logs import log
 from own_profile_navigation import open_own_profile_from_bottom_nav, verify_own_profile
 from runtime_caps import resolve_unfollow_runtime_cap
+from session_transition_buffer import (
+    SESSION_TRANSITION_BUFFER_ACTIVE_REASON,
+    business_actions_allowed_now,
+    resolve_business_action_deadline,
+)
 from unfollow_session_orchestrator import (
     get_last_unfollow_session_probe_summary,
     run_unfollow_session,
@@ -97,6 +102,18 @@ def _startup_timing_log(
         )
     except Exception:
         pass
+
+
+def _transition_buffer_blocks_business_actions() -> bool:
+    deadline = resolve_business_action_deadline(
+        {},
+        {
+            "business_action_deadline": os.environ.get("BUSINESS_ACTION_DEADLINE"),
+            "ends_at": os.environ.get("SCHEDULED_SESSION_END"),
+            "starts_at": os.environ.get("SCHEDULED_SESSION_START"),
+        },
+    )
+    return not business_actions_allowed_now(business_action_deadline=deadline)
 
 
 def _is_unfollow_any_mode(mode: str) -> bool:
@@ -2626,6 +2643,16 @@ def run_account_session(
             run_id=run_id,
             reason=welcome_bypass_reason,
         )
+    elif _transition_buffer_blocks_business_actions():
+        welcome_bypass_reason = SESSION_TRANSITION_BUFFER_ACTIVE_REASON
+        welcome_session_status = "skipped"
+        log(
+            "info",
+            "account_session_welcome_bypassed",
+            account_id=aid,
+            run_id=run_id,
+            reason=welcome_bypass_reason,
+        )
     elif commercial_policy_boundary_blocks_phase(
         aid,
         bound_revision=session_policy_revision,
@@ -2769,6 +2796,16 @@ def run_account_session(
             account_id=aid,
             run_id=run_id,
             reason=transition_reason,
+        )
+    elif _transition_buffer_blocks_business_actions():
+        run_follow = False
+        follow_phase_skipped_reason = SESSION_TRANSITION_BUFFER_ACTIVE_REASON
+        log(
+            "info",
+            "account_session_follow_phase_skipped",
+            account_id=aid,
+            run_id=run_id,
+            reason=follow_phase_skipped_reason,
         )
     else:
         follow_ready = True

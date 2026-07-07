@@ -61,7 +61,9 @@ DEVICE_BOUND_RUN_TYPES = frozenset({
     "login_provisioning",
     "login_email_code_resume",
     "login_orphan_challenge_recovery",
+    "scheduled_session_preflight",
 })
+PREFLIGHT_RUN_TYPE = "scheduled_session_preflight"
 _last_integration_noop_proof: dict[str, Any] | None = None
 
 
@@ -162,7 +164,7 @@ def load_dispatcher_config() -> DispatcherConfig:
     configured_worker_id = _env_str("RUN_CONTROL_DISPATCHER_WORKER_ID", default_worker_id)
     allowed_raw = _env_str(
         "RUN_CONTROL_DISPATCHER_ALLOWED_RUN_TYPES",
-        "account_session,outreach_session,login_provisioning,login_email_code_resume,login_orphan_challenge_recovery",
+        "account_session,outreach_session,login_provisioning,login_email_code_resume,login_orphan_challenge_recovery,scheduled_session_preflight",
     )
     allowed = [part.strip().lower() for part in allowed_raw.split(",") if part.strip()]
     test_ids_raw = _env_str("RUN_CONTROL_DISPATCHER_TEST_ACCOUNT_IDS", "")
@@ -405,6 +407,50 @@ def _is_orphan_recovery_run_type(run_type: str) -> bool:
     return str(run_type or "").strip().lower() == ORPHAN_RECOVERY_RUN_TYPE
 
 
+def _is_scheduled_session_preflight_run_type(run_type: str) -> bool:
+    return str(run_type or "").strip().lower() == PREFLIGHT_RUN_TYPE
+
+
+def _build_scheduled_session_preflight_command(
+    account_id: str,
+    request_id: str,
+    *,
+    device_serial: str | None = None,
+    package_name: str | None = None,
+    expected_username: str | None = None,
+    metadata_safe: dict[str, Any] | None = None,
+) -> list[str]:
+    meta = dict(metadata_safe or {})
+    username = str(expected_username or meta.get("expected_username") or "").strip()
+    if not username:
+        try:
+            from supabase_client import get_account_username
+
+            username = str(get_account_username(account_id) or "").strip()
+        except Exception:
+            username = ""
+    runner_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scheduled_session_preflight_runner.py")
+    cmd = [
+        sys.executable,
+        runner_path,
+        "--account-id",
+        account_id,
+        "--request-id",
+        request_id,
+        "--device-serial",
+        str(device_serial or "").strip(),
+        "--package-name",
+        str(package_name or "").strip(),
+        "--expected-username",
+        username,
+        "--preflight-id",
+        str(meta.get("preflight_id") or "").strip(),
+        "--metadata-json",
+        json.dumps(meta, separators=(",", ":"), sort_keys=True),
+    ]
+    return cmd
+
+
 def _load_expected_username(account_id: str) -> str:
     account = supabase_client.load_account(account_id=account_id)
     if not account:
@@ -525,6 +571,14 @@ def _build_runner_command(
             device_serial=device_serial,
             package_name=package_name,
             app_instance_id=app_instance_id,
+            metadata_safe=metadata_safe,
+        )
+    if _is_scheduled_session_preflight_run_type(run_type):
+        return _build_scheduled_session_preflight_command(
+            account_id,
+            request_id,
+            device_serial=device_serial,
+            package_name=package_name,
             metadata_safe=metadata_safe,
         )
     if _is_orphan_recovery_run_type(run_type):
@@ -1636,6 +1690,12 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
         if _is_login_run_type(run_type) or _is_orphan_recovery_run_type(run_type)
         else runner_subprocess_env()
     )
+    if run_type == "account_session":
+        from session_transition_buffer import resolve_business_action_deadline
+
+        deadline = resolve_business_action_deadline(request_metadata, dispatch_ctx)
+        if deadline:
+            subprocess_env = {**subprocess_env, "BUSINESS_ACTION_DEADLINE": deadline}
     if auto_restart_policy:
         subprocess_env = {**subprocess_env, **runner_env_for_resume_policy(auto_restart_policy)}
 
@@ -1685,7 +1745,14 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
         )
 
     if device_id and device_lock_active:
-        release_device_lock(device_id=device_id, worker_id=lock_owner_worker_id, request_id=request_id)
+        if _is_scheduled_session_preflight_run_type(run_type) and int(exit_code) == 0:
+            renew_device_lock(
+                device_id=device_id,
+                worker_id=lock_owner_worker_id,
+                request_id=request_id,
+            )
+        else:
+            release_device_lock(device_id=device_id, worker_id=lock_owner_worker_id, request_id=request_id)
 
     _finalize_manual_run_after_subprocess(
         cfg,
