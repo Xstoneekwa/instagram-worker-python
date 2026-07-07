@@ -15,6 +15,30 @@
   `operator_stop_suppressed` hors scope).
 - **Hors scope CP3 :** buffer T-10, provisioning slots CP6, popup classifier.
 
+## CP3.1 clôture lease UI — checkpoint 2026-07-07
+
+- **Objectif :** fermer les derniers flows UI qui ne bindaient le lease qu'au
+  claim Worker (ou pas du tout). Contrat final : *aucune request UI visible par
+  un Worker sans lease device-level bindé*.
+- **Worker : aucun changement de code.** Le commit `131aef3` couvre déjà tous
+  les `DEVICE_BOUND_RUN_TYPES` (dont `login_provisioning`,
+  `login_email_code_resume`, `login_orphan_challenge_recovery`) au claim
+  (transfer/acquire du lock `pending-request:<id>` puis renew), plus le
+  `reconcile_stale_device_ui_leases(grace=0)` en tête de `run_once`. C'est le
+  filet de sécurité ; la correction CP3.1 est **backend-only** (bind à
+  l'enqueue). → Release canonique construite depuis `131aef3`.
+- **Backend (scheduler-canonical-control) — gaps corrigés :**
+  - `readiness-now` (connect_enqueue), `enqueue-client-connect`,
+    `login-preflight-cron`, et le chemin retry-après-handoff de
+    `login_email_code_resume` : acquisition + bind du lease *immédiatement après*
+    la création de la request (`leaseRequestOrCancel`), sinon
+    `cancel_account_run_request` + release et refus `device_lease_unavailable`.
+  - `restore-login-screen` : bind lease avant que le Worker puisse claim la
+    request `login_orphan_challenge_recovery`.
+- **Classification :** readiness passive (`readiness_only`/`dryRun`),
+  `check-readiness` client, heartbeat/notifier, scrcpy/Open Phone (manuel) =
+  lecture seule, aucun lease.
+
 ## P3 auto restart après intervention humaine — checkpoint 2026-07-07
 
 - **Flow canonique livré** : run interrompu (reason actionnable) → incident P2
