@@ -2,6 +2,31 @@
 
 *Document volatil : à mettre à jour après les prochains jalons produit / tech.*
 
+## CP4 buffer T-10 + préflight planifié — checkpoint 2026-07-07
+
+- **Contrat livré** : pour chaque fenêtre CP2 matérialisée,
+  `business_action_deadline = session_end - 10 min`,
+  `preflight_start = session_start - 10 min`. Calcul timezone IANA, minuit et DST
+  couverts (`session_transition_buffer.py` + tests backend).
+- **Worker (`d406831`)** :
+  - `account_session_orchestrator` vérifie `business_action_deadline` avant toute
+    nouvelle phase business ; terminal reason `session_transition_buffer_active` ;
+  - `scheduled_session_preflight_runner.py` : verification-only (package
+    foreground + identity guard), pas login/logout/action business ;
+  - consumer : `scheduled_session_preflight` device-bound ; lease conservé après
+    préflight OK jusqu'au handoff Scheduler.
+- **Backend (`0941a3d` + `63b9663`)** :
+  - table `scheduled_session_preflights` + RPCs bind/complete/get_valid/handoff ;
+  - `login-preflight-cron` refondu CP4 (gate Scheduler ON avant Android) ;
+  - `schedule-session-cron` : cutoff T-10 + gate `preflight_ready` + handoff lease ;
+  - `auto-restart-tick` / `run-control` : P3 et Play bloqués après cutoff /
+    pendant réservation préflight.
+- **Scheduler OFF** pendant tout CP4 ; cron préflight techniquement actif
+  (`INSTAGRAM_LOGIN_PREFLIGHT_CRON_ENABLED=true`, `DRY_RUN=false`) mais lecture
+  seule tant que Scheduler OFF.
+- **Hors scope CP4** : `operator_stop_suppressed` (CP5), provisioning client
+  (CP6), classifier popup Meta.
+
 ## CP3 device UI lease — checkpoint 2026-07-07
 
 - **Règle :** 1 téléphone physique = 1 opération UI active (phone-level, pas
