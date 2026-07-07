@@ -9,6 +9,7 @@ from urllib import error as urlerror
 from urllib import request as urlrequest
 
 import config
+import incident_notification_channel_config as channel_config
 import supabase_client
 from logs import log
 from runtime_events import redact_metadata
@@ -85,6 +86,8 @@ def parse_notification_channels(value: str | list[str] | tuple[str, ...] | None)
 
 
 def _channel_toggle_enabled(channel: str) -> bool:
+    if bool(getattr(config, "INCIDENT_NOTIFICATIONS_CANONICAL_SETTINGS", True)):
+        return channel_config.channel_enabled_for_dispatch(channel)
     normalized = str(channel or "").strip().lower()
     if normalized == "slack":
         return bool(getattr(config, "INCIDENT_NOTIFICATIONS_SLACK_ENABLED", True))
@@ -185,6 +188,16 @@ def _sanitize_error(value: Any) -> str:
     return text or "webhook_request_failed"
 
 
+def _incident_dashboard_url(incident: dict) -> str | None:
+    """Secure internal link to the Admin incidents view (never a webhook)."""
+    base = str(getattr(config, "INCIDENT_NOTIFICATIONS_DASHBOARD_BASE_URL", "") or "").strip().rstrip("/")
+    if not base:
+        return None
+    incident_id = str(incident.get("id") or "").strip()
+    suffix = f"?incident_id={incident_id}" if incident_id else ""
+    return f"{base}/instagram-dashboard/incidents{suffix}"
+
+
 def build_incident_notification_payload(incident: dict) -> dict:
     severity = str(incident.get("severity") or "warning").strip().lower()
     incident_type = str(incident.get("incident_type") or "unknown_incident").strip()
@@ -209,7 +222,9 @@ def build_incident_notification_payload(incident: dict) -> dict:
         message_parts.append(f"Action: {action_required}")
     if run_id:
         message_parts.append(f"Run: {_short_id(run_id) or run_id}")
-    message_parts.append("Dashboard: DASHBOARD_URL_PLACEHOLDER")
+    dashboard_url = _incident_dashboard_url(incident)
+    if dashboard_url:
+        message_parts.append(f"Dashboard: {dashboard_url}")
 
     payload = {
         "title": title,
@@ -225,7 +240,7 @@ def build_incident_notification_payload(incident: dict) -> dict:
         "assistant_message": assistant_message,
         "admin_message": admin_message,
         "run_id": run_id,
-        "dashboard_url": "DASHBOARD_URL_PLACEHOLDER",
+        "dashboard_url": dashboard_url,
     }
     return _redact_payload({k: v for k, v in payload.items() if v is not None})
 
@@ -303,26 +318,22 @@ def send_discord_webhook(payload: dict, webhook_url: str) -> dict:
 
 def send_notification_webhook(channel: str, channel_payload: dict) -> dict:
     normalized = str(channel or "").strip().lower()
+    effective = channel_config.resolve_effective_channel_config(normalized)
+    if not effective.get("send_allowed"):
+        return {
+            "ok": False,
+            "reason": effective.get("reason") or "channel_not_configured",
+        }
+    webhook_url = str(effective.get("webhook_url") or "").strip()
     if normalized == "slack":
-        return send_slack_webhook(
-            channel_payload,
-            str(getattr(config, "SLACK_WEBHOOK_URL", "") or ""),
-        )
+        return send_slack_webhook(channel_payload, webhook_url)
     if normalized == "discord":
-        return send_discord_webhook(
-            channel_payload,
-            str(getattr(config, "DISCORD_WEBHOOK_URL", "") or ""),
-        )
+        return send_discord_webhook(channel_payload, webhook_url)
     return {"ok": False, "reason": "invalid_channel"}
 
 
 def _webhook_configured(channel: str) -> bool:
-    normalized = str(channel or "").strip().lower()
-    if normalized == "slack":
-        return bool(str(getattr(config, "SLACK_WEBHOOK_URL", "") or "").strip())
-    if normalized == "discord":
-        return bool(str(getattr(config, "DISCORD_WEBHOOK_URL", "") or "").strip())
-    return False
+    return channel_config.webhook_configured_for_dispatch(channel)
 
 
 def _sort_incidents(incidents: list[dict]) -> list[dict]:
@@ -345,6 +356,8 @@ def _empty_summary(*, dry_run: bool | None = None) -> dict[str, Any]:
         "attempted_count": 0,
         "sent_count": 0,
         "failed_count": 0,
+        "retried_count": 0,
+        "retry_exhausted_count": 0,
         "skipped_duplicate_count": 0,
         "skipped_disabled_count": 0,
         "skipped_channel_disabled_count": 0,
@@ -414,6 +427,27 @@ def _failure_update(send_result: dict) -> dict:
     }
 
 
+def _max_attempts() -> int:
+    try:
+        return max(1, int(getattr(config, "INCIDENT_NOTIFICATIONS_MAX_ATTEMPTS", 3)))
+    except (TypeError, ValueError):
+        return 3
+
+
+def _retry_eligible(existing_row: dict, *, dry_run: bool) -> bool:
+    """Failed/stuck-pending rows are retried with a bounded attempt budget."""
+    if dry_run:
+        return False
+    status = str(existing_row.get("status") or "").strip().lower()
+    if status not in {"failed", "pending"}:
+        return False
+    try:
+        attempts = int(existing_row.get("attempt_count") or 0)
+    except (TypeError, ValueError):
+        attempts = 0
+    return attempts < _max_attempts()
+
+
 def dispatch_account_incident_notifications(
     *,
     channels: str | list[str] | tuple[str, ...] | None = None,
@@ -473,8 +507,46 @@ def dispatch_account_incident_notifications(
                     summary["skipped_channel_disabled_count"] += 1
                     continue
                 delivery_key = build_delivery_key(channel, str(incident.get("id")))
-                if delivery_key in existing:
-                    summary["skipped_duplicate_count"] += 1
+                existing_row = existing.get(delivery_key)
+                if existing_row is not None:
+                    if not _retry_eligible(existing_row, dry_run=dry_run):
+                        existing_status = str(existing_row.get("status") or "").strip().lower()
+                        if existing_status in {"failed", "pending"} and not dry_run:
+                            summary["retry_exhausted_count"] += 1
+                        else:
+                            summary["skipped_duplicate_count"] += 1
+                        continue
+                    # Bounded retry: re-attempt this channel delivery in place.
+                    notification_id = str(existing_row.get("id") or "").strip()
+                    try:
+                        previous_attempts = int(existing_row.get("attempt_count") or 0)
+                    except (TypeError, ValueError):
+                        previous_attempts = 0
+                    summary["attempted_count"] += 1
+                    summary["retried_count"] += 1
+                    send_result = send_notification_webhook(channel, base_payload)
+                    if send_result.get("ok"):
+                        update = {
+                            "status": "sent",
+                            "delivered_at": _utc_now_iso(),
+                            "response_status": send_result.get("response_status"),
+                            "response_body_preview": _truncate_redact(
+                                send_result.get("response_body_preview")
+                            ),
+                            "last_error": None,
+                        }
+                        summary["sent_count"] += 1
+                    else:
+                        update = _failure_update(send_result)
+                        summary["failed_count"] += 1
+                    update["attempt_count"] = previous_attempts + 1
+                    update["last_attempt_at"] = _utc_now_iso()
+                    if notification_id:
+                        supabase_client.update_account_incident_notification(
+                            notification_id,
+                            update,
+                        )
+                    existing[delivery_key] = {**existing_row, **update}
                     continue
                 audit_payload = _audit_payload(channel, base_payload)
                 if dry_run:
@@ -496,6 +568,10 @@ def dispatch_account_incident_notifications(
 
                 summary["attempted_count"] += 1
                 if not _webhook_configured(channel):
+                    effective = channel_config.resolve_effective_channel_config(channel)
+                    failure_reason = str(
+                        effective.get("reason") or "channel_not_configured"
+                    )
                     failed_row = _base_notification_row(
                         incident=incident,
                         channel=channel,
@@ -505,12 +581,12 @@ def dispatch_account_incident_notifications(
                         attempt_count=1,
                         payload=audit_payload,
                         dry_run=False,
-                        metadata_reason="config_missing_webhook",
+                        metadata_reason=failure_reason,
                     )
                     failed_row.update(
                         {
                             "last_attempt_at": _utc_now_iso(),
-                            "last_error": "config_missing_webhook",
+                            "last_error": failure_reason,
                         }
                     )
                     supabase_client.create_account_incident_notification(failed_row)

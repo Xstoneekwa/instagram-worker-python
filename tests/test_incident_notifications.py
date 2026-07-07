@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import incident_notification_channel_config as channel_config
 import incident_notifications
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -60,6 +61,20 @@ def _package_mismatch_incident(incident_id: str) -> dict:
 
 
 class IncidentNotificationsTest(unittest.TestCase):
+    def setUp(self) -> None:
+        # Default the suite to legacy env-webhook mode so pre-P2 tests keep
+        # exercising the env toggles; canonical-settings tests opt back in.
+        self._canonical_patch = patch.object(
+            incident_notifications.config,
+            "INCIDENT_NOTIFICATIONS_CANONICAL_SETTINGS",
+            False,
+            create=True,
+        )
+        self._canonical_patch.start()
+
+    def tearDown(self) -> None:
+        self._canonical_patch.stop()
+
     def test_disabled_no_op(self) -> None:
         with (
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_ENABLED", False, create=True),
@@ -187,6 +202,7 @@ class IncidentNotificationsTest(unittest.TestCase):
         with (
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_ENABLED", True, create=True),
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_DRY_RUN", True, create=True),
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_CHANNELS", "slack", create=True),
             patch.object(
                 incident_notifications.supabase_client,
                 "load_account_incidents_to_notify",
@@ -230,6 +246,31 @@ class IncidentNotificationsTest(unittest.TestCase):
         self.assertIn("RFGL***VCKE", text)
         self.assertNotIn("do-not-leak", text)
         self.assertNotIn("<node", text)
+
+    def test_dashboard_link_included_when_base_url_configured(self) -> None:
+        with patch.object(
+            incident_notifications.config,
+            "INCIDENT_NOTIFICATIONS_DASHBOARD_BASE_URL",
+            "https://admin.example.com",
+            create=True,
+        ):
+            payload = incident_notifications.build_incident_notification_payload(_incident("incident-1"))
+        self.assertEqual(
+            payload["dashboard_url"],
+            "https://admin.example.com/instagram-dashboard/incidents?incident_id=incident-1",
+        )
+        self.assertIn("Dashboard: https://admin.example.com/instagram-dashboard/incidents", payload["text"])
+
+    def test_dashboard_link_omitted_without_base_url(self) -> None:
+        with patch.object(
+            incident_notifications.config,
+            "INCIDENT_NOTIFICATIONS_DASHBOARD_BASE_URL",
+            "",
+            create=True,
+        ):
+            payload = incident_notifications.build_incident_notification_payload(_incident("incident-1"))
+        self.assertNotIn("dashboard_url", payload)
+        self.assertNotIn("PLACEHOLDER", payload["text"])
 
     def test_slack_payload_builder(self) -> None:
         payload = incident_notifications.build_slack_payload({"title": "T", "text": "hello"})
@@ -284,6 +325,12 @@ class IncidentNotificationsTest(unittest.TestCase):
     def test_dry_run_false_missing_webhook_creates_failed_without_http(self) -> None:
         incident = _incident("incident-1")
         with (
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_CANONICAL_SETTINGS", True, create=True),
+            patch.object(
+                channel_config,
+                "load_channel_settings_row",
+                return_value={"enabled": True, "configured": False, "webhook_ciphertext": None},
+            ),
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_ENABLED", True, create=True),
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_DRY_RUN", False, create=True),
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_CHANNELS", "slack", create=True),
@@ -311,7 +358,7 @@ class IncidentNotificationsTest(unittest.TestCase):
         self.assertEqual(out["failed_count"], 1)
         row = create.call_args.args[0]
         self.assertEqual(row["status"], "failed")
-        self.assertEqual(row["last_error"], "config_missing_webhook")
+        self.assertEqual(row["last_error"], "channel_not_configured")
         post.assert_not_called()
 
     def test_real_send_slack_success_marks_sent(self) -> None:
@@ -443,6 +490,7 @@ class IncidentNotificationsTest(unittest.TestCase):
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_ENABLED", True, create=True),
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_DRY_RUN", False, create=True),
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_FAIL_OPEN", True, create=True),
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_CHANNELS", "slack", create=True),
             patch.object(incident_notifications.config, "SLACK_WEBHOOK_URL", "https://hooks.slack.com/services/SECRET", create=True),
             patch.object(incident_notifications.supabase_client, "load_account_incidents_to_notify", return_value=[incident]),
             patch.object(incident_notifications.supabase_client, "load_existing_incident_notifications_by_delivery_keys", return_value={}),
@@ -670,6 +718,149 @@ class IncidentNotificationsTest(unittest.TestCase):
         ):
             out = incident_notifications.dispatch_account_incident_notifications()
         self.assertEqual(out["skipped_duplicate_count"], 1)
+        create.assert_not_called()
+        post.assert_not_called()
+
+
+class CanonicalNotifierP2Test(unittest.TestCase):
+    """P2: canonical channel settings, dual-channel delivery, bounded retries."""
+
+    def _canonical_channel_rows(self):
+        return patch.object(
+            channel_config,
+            "resolve_effective_channel_config",
+            side_effect=lambda channel: {
+                "channel": channel,
+                "row_present": True,
+                "enabled": True,
+                "configured": True,
+                "webhook_url": f"https://example.invalid/{channel}",
+                "source": "canonical",
+                "send_allowed": True,
+                "reason": None,
+            },
+        )
+
+    def test_slack_and_discord_each_delivered_once(self) -> None:
+        incident = _incident("incident-1")
+        with (
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_CANONICAL_SETTINGS", True, create=True),
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_ENABLED", True, create=True),
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_DRY_RUN", False, create=True),
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_CHANNELS", "slack,discord", create=True),
+            self._canonical_channel_rows(),
+            patch.object(incident_notifications.supabase_client, "load_account_incidents_to_notify", return_value=[incident]),
+            patch.object(incident_notifications.supabase_client, "load_existing_incident_notifications_by_delivery_keys", return_value={}),
+            patch.object(
+                incident_notifications.supabase_client,
+                "create_account_incident_notification",
+                side_effect=[{"id": "n-slack"}, {"id": "n-discord"}],
+            ) as create,
+            patch.object(incident_notifications.supabase_client, "update_account_incident_notification", return_value={}) as update,
+            patch.object(
+                incident_notifications,
+                "_post_json_webhook",
+                return_value={"ok": True, "response_status": 200, "response_body_preview": "ok"},
+            ) as post,
+        ):
+            out = incident_notifications.dispatch_account_incident_notifications()
+        self.assertEqual(out["sent_count"], 2)
+        self.assertEqual(out["failed_count"], 0)
+        self.assertEqual(out["skipped_duplicate_count"], 0)
+        self.assertEqual(create.call_count, 2)
+        self.assertEqual(post.call_count, 2)
+        channels = sorted(row.args[0]["channel"] for row in create.call_args_list)
+        self.assertEqual(channels, ["discord", "slack"])
+        for call in update.call_args_list:
+            self.assertEqual(call.args[1]["status"], "sent")
+
+    def test_failed_row_retried_within_attempt_budget(self) -> None:
+        incident = _incident("incident-1")
+        key = incident_notifications.build_delivery_key("slack", "incident-1")
+        existing = {
+            key: {
+                "id": "n-slack",
+                "delivery_key": key,
+                "status": "failed",
+                "attempt_count": 1,
+            }
+        }
+        with (
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_CANONICAL_SETTINGS", True, create=True),
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_ENABLED", True, create=True),
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_DRY_RUN", False, create=True),
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_CHANNELS", "slack", create=True),
+            self._canonical_channel_rows(),
+            patch.object(incident_notifications.supabase_client, "load_account_incidents_to_notify", return_value=[incident]),
+            patch.object(incident_notifications.supabase_client, "load_existing_incident_notifications_by_delivery_keys", return_value=existing),
+            patch.object(incident_notifications.supabase_client, "create_account_incident_notification") as create,
+            patch.object(incident_notifications.supabase_client, "update_account_incident_notification", return_value={}) as update,
+            patch.object(
+                incident_notifications,
+                "_post_json_webhook",
+                return_value={"ok": True, "response_status": 200, "response_body_preview": "ok"},
+            ),
+        ):
+            out = incident_notifications.dispatch_account_incident_notifications()
+        self.assertEqual(out["retried_count"], 1)
+        self.assertEqual(out["sent_count"], 1)
+        create.assert_not_called()
+        update_payload = update.call_args.args[1]
+        self.assertEqual(update.call_args.args[0], "n-slack")
+        self.assertEqual(update_payload["status"], "sent")
+        self.assertEqual(update_payload["attempt_count"], 2)
+
+    def test_failed_row_beyond_attempt_budget_not_retried(self) -> None:
+        incident = _incident("incident-1")
+        key = incident_notifications.build_delivery_key("slack", "incident-1")
+        existing = {
+            key: {
+                "id": "n-slack",
+                "delivery_key": key,
+                "status": "failed",
+                "attempt_count": 3,
+            }
+        }
+        with (
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_CANONICAL_SETTINGS", True, create=True),
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_ENABLED", True, create=True),
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_DRY_RUN", False, create=True),
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_CHANNELS", "slack", create=True),
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_MAX_ATTEMPTS", 3, create=True),
+            self._canonical_channel_rows(),
+            patch.object(incident_notifications.supabase_client, "load_account_incidents_to_notify", return_value=[incident]),
+            patch.object(incident_notifications.supabase_client, "load_existing_incident_notifications_by_delivery_keys", return_value=existing),
+            patch.object(incident_notifications.supabase_client, "create_account_incident_notification") as create,
+            patch.object(incident_notifications, "_post_json_webhook") as post,
+        ):
+            out = incident_notifications.dispatch_account_incident_notifications()
+        self.assertEqual(out["retry_exhausted_count"], 1)
+        self.assertEqual(out["retried_count"], 0)
+        create.assert_not_called()
+        post.assert_not_called()
+
+    def test_sent_row_never_duplicated_per_channel(self) -> None:
+        incident = _incident("incident-1")
+        slack_key = incident_notifications.build_delivery_key("slack", "incident-1")
+        discord_key = incident_notifications.build_delivery_key("discord", "incident-1")
+        existing = {
+            slack_key: {"id": "n-slack", "delivery_key": slack_key, "status": "sent", "attempt_count": 1},
+            discord_key: {"id": "n-discord", "delivery_key": discord_key, "status": "sent", "attempt_count": 1},
+        }
+        with (
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_CANONICAL_SETTINGS", True, create=True),
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_ENABLED", True, create=True),
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_DRY_RUN", False, create=True),
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_CHANNELS", "slack,discord", create=True),
+            self._canonical_channel_rows(),
+            patch.object(incident_notifications.supabase_client, "load_account_incidents_to_notify", return_value=[incident]),
+            patch.object(incident_notifications.supabase_client, "load_existing_incident_notifications_by_delivery_keys", return_value=existing),
+            patch.object(incident_notifications.supabase_client, "create_account_incident_notification") as create,
+            patch.object(incident_notifications, "_post_json_webhook") as post,
+        ):
+            out = incident_notifications.dispatch_account_incident_notifications()
+        self.assertEqual(out["skipped_duplicate_count"], 2)
+        self.assertEqual(out["sent_count"], 0)
         create.assert_not_called()
         post.assert_not_called()
 

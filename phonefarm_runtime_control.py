@@ -18,6 +18,7 @@ DEFAULT_LEGACY_ROOT = Path("/Users/admin/instagram-worker-python")
 
 DISPATCHER_LABEL = "com.boost.phonefarm.dispatcher"
 HEARTBEAT_LABEL = "com.boost.phonefarm.device-heartbeat"
+NOTIFIER_LABEL = "com.boost.phonefarm.incident-notifier"
 
 
 @dataclass(frozen=True)
@@ -141,17 +142,30 @@ def _component_env(paths: RuntimePaths, root: RuntimeRoot, component: str) -> di
         env["DEVICE_HEARTBEAT_LOG_DIR"] = str(paths.log_dir / "device-heartbeat-service")
         env["DEVICE_HEARTBEAT_RUN_DIR"] = str(paths.run_dir / "device-heartbeat-service")
         env.setdefault("DEVICE_HEARTBEAT_INTERVAL_SECONDS", "60")
+    elif component == "notifier":
+        env.setdefault("INCIDENT_NOTIFIER_ENV_FILE", str(paths.env_dir / "incident-notifier.env"))
+        env["INCIDENT_NOTIFIER_LOG_DIR"] = str(paths.log_dir / "incident-notifier")
+        env["INCIDENT_NOTIFIER_RUN_DIR"] = str(paths.run_dir / "incident-notifier")
+        env.setdefault("INCIDENT_NOTIFIER_INTERVAL_SECONDS", "60")
     env["PHONEFARM_ACTIVE_ROOT"] = root.resolved_root
     env["PHONEFARM_ACTIVE_COMMIT"] = root.commit
     return env
 
 
 def _component_wrapper_name(component: str) -> str:
-    return "run_control_dispatcher_service.sh" if component == "dispatcher" else "device_heartbeat_service.sh"
+    if component == "dispatcher":
+        return "run_control_dispatcher_service.sh"
+    if component == "notifier":
+        return "incident_notifier_service.sh"
+    return "device_heartbeat_service.sh"
 
 
 def _component_launchd_label(component: str) -> str:
-    return DISPATCHER_LABEL if component == "dispatcher" else HEARTBEAT_LABEL
+    if component == "dispatcher":
+        return DISPATCHER_LABEL
+    if component == "notifier":
+        return NOTIFIER_LABEL
+    return HEARTBEAT_LABEL
 
 
 # Long-lived service commands must never run under the bounded control
@@ -222,6 +236,17 @@ def serve_component(component: str) -> int:
         print(json.dumps(_runtime_root_payload(root, component=component, command="serve"), sort_keys=True))
         return 2
     wrapper = Path(root.resolved_root) / "scripts" / _component_wrapper_name(component)
+    if not wrapper.exists():
+        # Older releases may not ship this component's wrapper (e.g. notifier
+        # before P2): report a structured error instead of an execve crash loop.
+        print(json.dumps({
+            "ok": False,
+            "status": "runtime_root_invalid",
+            "component": component,
+            "command": "serve",
+            "lastError": f"missing_component_wrapper:{wrapper.name}",
+        }, sort_keys=True))
+        return 2
     env = _component_env(paths, root, component)
     os.chdir(root.resolved_root)
     os.execve(str(wrapper), [str(wrapper), "start"], env)
@@ -328,7 +353,12 @@ def _pid_cwd(pid: int) -> str:
 
 
 def _detect_component_mismatch(component: str, payload: dict[str, Any], root: RuntimeRoot) -> dict[str, Any]:
-    needle = "account_run_request_consumer.py" if component == "dispatcher" else "device_heartbeat_publisher.py"
+    if component == "dispatcher":
+        needle = "account_run_request_consumer.py"
+    elif component == "notifier":
+        needle = "incident_notification_service.py"
+    else:
+        needle = "device_heartbeat_publisher.py"
     matching: list[dict[str, Any]] = []
     for pid, ppid, command in _ps_rows():
         if needle not in command:
@@ -440,7 +470,7 @@ def _print(payload: dict[str, Any], json_mode: bool) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Canonical Phone Farm runtime controller.")
-    parser.add_argument("target", nargs="?", default="status", choices=["status", "validate", "dispatcher", "heartbeat", "scheduler", "switch-release"])
+    parser.add_argument("target", nargs="?", default="status", choices=["status", "validate", "dispatcher", "heartbeat", "notifier", "scheduler", "switch-release"])
     parser.add_argument("command", nargs="?", default="status")
     parser.add_argument("extra", nargs="*")
     parser.add_argument("--json", action="store_true")
@@ -448,7 +478,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.target in {"status", "validate"}:
         return _print(runtime_status(), args.json)
-    if args.target in {"dispatcher", "heartbeat"}:
+    if args.target in {"dispatcher", "heartbeat", "notifier"}:
         if args.command == "serve":
             # launchd-only entry point: exec the release wrapper, no timeout.
             return serve_component(args.target)

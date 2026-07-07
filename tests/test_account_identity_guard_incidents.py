@@ -66,8 +66,12 @@ class AccountIdentityGuardIncidentsTest(unittest.TestCase):
         kwargs = publish.call_args.kwargs
         self.assertEqual(kwargs["incident_type"], "active_instagram_account_mismatch")
         self.assertEqual(
+            # P2 canonical run-scoped key: shared with the dispatcher's
+            # run-terminal incident so both publishers enrich the same row.
             kwargs["dedupe_key"],
-            "account:42c625c2-e761-4100-8a9d-7ae1373de97d:identity:mismatch:transfers",
+            "account:42c625c2-e761-4100-8a9d-7ae1373de97d"
+            ":run:00000000-0000-4000-8000-000000000123"
+            ":active_instagram_account_mismatch",
         )
         self.assertEqual(kwargs["severity"], "critical")
         self.assertEqual(kwargs["metadata"]["expected_account_username"], "cinema_catchup")

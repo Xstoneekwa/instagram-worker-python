@@ -134,7 +134,17 @@ class RuntimeIncidentsTest(unittest.TestCase):
         )
         self.assertEqual(payload["incident_type"], "active_instagram_account_mismatch")
         self.assertEqual(
+            # P2: run-scoped canonical key when a run id is available.
             payload["dedupe_key"],
+            "account:00000000-0000-4000-8000-000000000001:run:run-1:active_instagram_account_mismatch",
+        )
+        payload_no_run = runtime_incidents.build_identity_mismatch_incident(
+            account_id="00000000-0000-4000-8000-000000000001",
+            expected_username="expected_user",
+            actual_username="actual_user",
+        )
+        self.assertEqual(
+            payload_no_run["dedupe_key"],
             "account:00000000-0000-4000-8000-000000000001:identity:mismatch:actual_user",
         )
         self.assertEqual(payload["severity"], "critical")

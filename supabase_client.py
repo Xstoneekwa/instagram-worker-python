@@ -921,6 +921,26 @@ def create_run(account_id: str) -> dict[str, Any]:
     return row[0]
 
 
+def load_run_row(run_id: str) -> dict[str, Any] | None:
+    """Load one ig_runs row (status + structured performance_summary) by id."""
+    rid = str(run_id or "").strip()
+    if not rid:
+        return None
+    rows = _request_json(
+        "GET",
+        "ig_runs",
+        query={
+            "select": "id,account_id,status,performance_summary,started_at,updated_at",
+            "id": f"eq.{rid}",
+            "limit": "1",
+        },
+    ) or []
+    for row in rows:
+        if isinstance(row, dict):
+            return dict(row)
+    return None
+
+
 def insert_runtime_event(payload: dict[str, Any]) -> dict[str, Any]:
     """Insert one ORF runtime event via service-role REST."""
     row = _request_json(

@@ -181,9 +181,17 @@ def build_identity_mismatch_incident(
     )
     meta = {k: v for k, v in meta.items() if v is not None}
     expected_label = expected or "unknown"
+    # Canonical run-scoped dedupe key (P2): must match the dispatcher's
+    # run-terminal incident key so guard-published and dispatcher-published
+    # incidents for the same run enrich a single row instead of duplicating.
+    run_ref = str(run_id or "").strip()
+    if run_ref:
+        dedupe_key = f"account:{aid}:run:{run_ref}:active_instagram_account_mismatch"
+    else:
+        dedupe_key = f"account:{aid}:identity:mismatch:{actual}"
     return {
         "incident_type": "active_instagram_account_mismatch",
-        "dedupe_key": f"account:{aid}:identity:mismatch:{actual}",
+        "dedupe_key": dedupe_key,
         "severity": "critical",
         "status": "open",
         "account_id": aid or None,

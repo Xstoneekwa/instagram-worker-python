@@ -46,7 +46,12 @@ from auto_restart_runtime import (
     validate_auto_restart_request_at_claim,
 )
 from logs import log
+import runtime_incidents
 import supabase_client
+from runtime_incident_matrix import (
+    build_run_failure_incident_payload,
+    classify_terminal_run_failure,
+)
 
 LOGIN_RUN_TYPES = frozenset({"login_provisioning", "login_email_code_resume"})
 ORPHAN_RECOVERY_RUN_TYPE = "login_orphan_challenge_recovery"
@@ -809,6 +814,100 @@ def _reconcile_linked_run(
     return result
 
 
+def _publish_run_failure_incident(
+    *,
+    request_id: str,
+    account_id: str,
+    run_id: str | None,
+    run_type: str | None,
+    exit_code: int,
+    timed_out: bool,
+    canceled: bool,
+) -> None:
+    """Canonical incident publication point for terminal run failures (P2).
+
+    Reads the structured ``performance_summary`` the runner persisted on the
+    linked run (never raw text logs), classifies the true reason via the
+    canonical matrix, and upserts one deduplicated ``account_incidents`` row.
+    Best-effort: any failure here is logged and never affects run finalization.
+    """
+    try:
+        run_status: str | None = None
+        performance_summary: dict[str, Any] | None = None
+        if run_id:
+            try:
+                run_row = supabase_client.load_run_row(run_id) or {}
+                run_status = str(run_row.get("status") or "").strip() or None
+                raw_summary = run_row.get("performance_summary")
+                if isinstance(raw_summary, dict):
+                    performance_summary = raw_summary
+            except Exception as exc:
+                log(
+                    "warning",
+                    "run_incident_summary_load_failed",
+                    account_id=account_id,
+                    request_id=request_id,
+                    run_id=run_id,
+                    error=str(exc)[:300],
+                )
+        decision = classify_terminal_run_failure(
+            exit_code=exit_code,
+            timed_out=timed_out,
+            run_status=run_status,
+            canceled=canceled,
+            performance_summary=performance_summary,
+        )
+        log(
+            "info",
+            "run_incident_classified",
+            account_id=account_id,
+            request_id=request_id,
+            run_id=run_id,
+            run_type=run_type or None,
+            exit_code=exit_code,
+            timed_out=timed_out,
+            **decision.to_log_fields(),
+        )
+        if not decision.should_publish:
+            return
+        account_username: str | None = None
+        try:
+            account_username = supabase_client.get_account_username(account_id) or None
+        except Exception:
+            account_username = None
+        payload = build_run_failure_incident_payload(
+            decision,
+            account_id=account_id,
+            account_username=account_username,
+            run_id=run_id,
+            run_request_id=request_id,
+            run_type=run_type,
+        )
+        result = runtime_incidents.publish_account_incident(**payload)
+        log(
+            "info",
+            "run_incident_publish_result",
+            account_id=account_id,
+            request_id=request_id,
+            run_id=run_id,
+            incident_type=decision.incident_type,
+            reason_code=decision.reason_code,
+            published=bool(result.get("published")),
+            publish_reason=result.get("reason"),
+            incident_id=result.get("incident_id"),
+            occurrence_count=result.get("occurrence_count"),
+        )
+    except Exception as exc:
+        log(
+            "warning",
+            "run_incident_publish_unexpected_error",
+            account_id=account_id,
+            request_id=request_id,
+            run_id=run_id,
+            error=str(exc)[:300],
+        )
+
+
 def _finalize_manual_run_after_subprocess(
     cfg: DispatcherConfig,
     *,
@@ -849,6 +948,15 @@ def _finalize_manual_run_after_subprocess(
             message="Worker subprocess exceeded dispatcher timeout.",
             run_id=run_id,
             payload={"request_id": request_id},
+        )
+        _publish_run_failure_incident(
+            request_id=request_id,
+            account_id=account_id,
+            run_id=run_id,
+            run_type=run_type,
+            exit_code=exit_code,
+            timed_out=True,
+            canceled=canceled,
         )
         return
 
@@ -1020,6 +1128,15 @@ def _finalize_manual_run_after_subprocess(
             "exit_code": exit_code,
             **({"login_provisioner_summary": summary} if summary else {}),
         },
+    )
+    _publish_run_failure_incident(
+        request_id=request_id,
+        account_id=account_id,
+        run_id=run_id,
+        run_type=run_type,
+        exit_code=exit_code,
+        timed_out=False,
+        canceled=canceled,
     )
 
 
