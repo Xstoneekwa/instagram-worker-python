@@ -37,7 +37,7 @@ from assignment_dispatch_resolver import resolve_account_assignment_runtime_cont
 from account_commercial_policy import evaluate_queued_run_commercial_policy
 from account_commercial_policy import evaluate_queued_run_commercial_policy, sensitive_log_fields
 from auto_restart_dispatcher_tick import run_auto_restart_dispatcher_tick, should_run_auto_restart_tick
-from auto_restart_device_lock import acquire_device_lock, release_device_lock, release_device_lock_for_request, renew_device_lock, transfer_device_lock
+from auto_restart_device_lock import acquire_device_lock, release_device_lock, release_device_lock_for_request, renew_device_lock, transfer_device_lock, reconcile_stale_device_ui_leases
 from auto_restart_runtime import (
     is_auto_restart_request,
     is_hard_stop_reason,
@@ -55,7 +55,13 @@ from runtime_incident_matrix import (
 
 LOGIN_RUN_TYPES = frozenset({"login_provisioning", "login_email_code_resume"})
 ORPHAN_RECOVERY_RUN_TYPE = "login_orphan_challenge_recovery"
-DEVICE_BOUND_RUN_TYPES = frozenset({"account_session", "outreach_session"})
+DEVICE_BOUND_RUN_TYPES = frozenset({
+    "account_session",
+    "outreach_session",
+    "login_provisioning",
+    "login_email_code_resume",
+    "login_orphan_challenge_recovery",
+})
 _last_integration_noop_proof: dict[str, Any] | None = None
 
 
@@ -1534,7 +1540,7 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
                     request_id,
                     cfg.worker_id,
                     "blocked",
-                    error_code="device_lock_held",
+                    error_code="device_lease_unavailable",
                     error_message_safe="Manual run blocked: assigned phone is reserved by another active session.",
                 )
                 _audit(
@@ -1699,6 +1705,10 @@ def run_once(cfg: DispatcherConfig | None = None) -> dict[str, Any]:
 
     _heartbeat(cfg, status="idle")
     reclaimed = reclaim_stale_account_run_requests(cfg.worker_id)
+    try:
+        reconcile_stale_device_ui_leases(grace_seconds=0)
+    except Exception as exc:
+        log("warning", "device_ui_lease_reconcile_failed", error=str(exc))
 
     if cfg.health_only or not cfg.launch_enabled:
         return {"ok": True, "mode": "health_only", "reclaimed": reclaimed}

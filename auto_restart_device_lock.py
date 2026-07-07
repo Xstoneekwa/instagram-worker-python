@@ -146,3 +146,19 @@ def release_device_lock_for_request(
     if not did:
         return {"ok": False, "released": False, "reason": "device_lock_missing"}
     return release_device_lock(device_id=did, worker_id=wid, request_id=rid)
+
+
+def reconcile_stale_device_ui_leases(*, grace_seconds: int = 0) -> dict[str, Any]:
+    payload = supabase_client.call_rpc(
+        "reconcile_stale_device_ui_leases",
+        {"p_grace_seconds": grace_seconds},
+    )
+    result = payload if isinstance(payload, dict) else {"ok": False, "reconciled": 0}
+    if int(result.get("reconciled") or 0) > 0:
+        log(
+            "info",
+            "device_ui_lease_stale_reconciled",
+            reconciled=result.get("reconciled"),
+            skipped_active=result.get("skipped_active"),
+        )
+    return result

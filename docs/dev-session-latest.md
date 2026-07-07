@@ -2,6 +2,19 @@
 
 *Document volatil : à mettre à jour après les prochains jalons produit / tech.*
 
+## CP3 device UI lease — checkpoint 2026-07-07
+
+- **Règle :** 1 téléphone physique = 1 opération UI active (phone-level, pas
+  clone-level). Table canonique `auto_restart_device_locks` + RPC
+  `acquire_device_ui_lease` / `release_device_ui_lease` /
+  `reconcile_stale_device_ui_leases`.
+- **Worker** (`runtime-serve-longlived`) : `DEVICE_BOUND_RUN_TYPES` étendu aux
+  flows login ; renew/release inchangés ; reconcile stale au début de chaque
+  `run_once` dispatcher. Reason refus : `device_lease_unavailable`.
+- **Pas de préemption** ; Stop conserve le lease jusqu’au terminal (CP5 :
+  `operator_stop_suppressed` hors scope).
+- **Hors scope CP3 :** buffer T-10, provisioning slots CP6, popup classifier.
+
 ## P3 auto restart après intervention humaine — checkpoint 2026-07-07
 
 - **Flow canonique livré** : run interrompu (reason actionnable) → incident P2
