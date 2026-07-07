@@ -2,6 +2,59 @@
 
 *Document volatil : à mettre à jour après les prochains jalons produit / tech.*
 
+## P2 incidents runtime canoniques — checkpoint 2026-07-07
+
+- **Pipeline livré** : échec runtime → incident canonique `account_incidents`
+  → outbox `account_incident_notifications` → Slack + Discord → vue Incidents
+  Admin (`/instagram-dashboard/incidents`) → vue Incidents BotApp (candidat).
+  Scheduler resté **OFF** pendant tout P2 ; zéro run, zéro run request.
+- **Taxonomy / matrice** (`runtime_incident_matrix.py`) : la vraie reason
+  d'abord, `worker_exit_nonzero` uniquement en dernier fallback. Incidents
+  notifiés dès le premier échec : `run_identity_verification_failed`
+  (`actual_logged_in_username_not_detected`, `active_instagram_account_mismatch`),
+  `assigned_instagram_package_unavailable`, login requis / challenge,
+  crash/exit non-zero d'un run démarré, device indisponible en run.
+  Jamais notifiés : `scheduler_disabled`, `resume_plan_missing`,
+  `manual_only_requires_manual_trigger`, gates Scheduler normaux, stop manuel
+  propre. Cas Mythyl : `run_identity_verification_failed` /
+  `actual_logged_in_username_not_detected`, label opérateur « Impossible de
+  confirmer le compte Instagram actif. Intervention humaine requise avant
+  reprise. », état affiché `action_required`.
+- **Point de publication canonique** : le dispatcher
+  (`account_run_request_consumer._publish_run_failure_incident`) publie à la
+  finalisation des runs `timed_out`/`failed` ; l'identity guard garde son
+  payload mais partage la même dedupe key run-scopée
+  (`incident_type:run:<run_id>`) → un seul incident par run+type, occurrences
+  enrichies (`runtime_incidents.py`).
+- **Notifier canonique** : service long-lived
+  (`incident_notification_service.py` + `scripts/incident_notifier_service.sh`),
+  composant `notifier` de `phonefarm-runtimectl`, launchd
+  `com.boost.phonefarm.incident-notifier` exécuté via le pointeur
+  `phonefarm-worker-current`. Legacy
+  `com.openai.phonefarm.incident-notifications` désactivé (plist sauvegardé
+  dans `phonefarm-runtime/run/launchd-backups`) — aucun doublon possible.
+  Webhooks résolus depuis `incident_notification_channel_settings` (AES-GCM,
+  `incident_notification_channel_config.py`), fallback env désactivé.
+  Retries bornés (`INCIDENT_NOTIFICATIONS_MAX_ATTEMPTS=3`), déduplication par
+  `delivery_key` (canal+incident), heartbeat worker, état outbox
+  sent/failed/pending visible en interne. Lien interne sécurisé dans les
+  messages via `INCIDENT_NOTIFICATIONS_DASHBOARD_BASE_URL` ; jamais de secret,
+  package, serial ni log brut dans Slack/Discord.
+- **Activation runtime** : `RUNTIME_INCIDENTS_ENABLED=true` dans
+  `run-control-dispatcher.env` ; `incident-notifier.env` créé (canonical
+  settings, dry_run=false, slack+discord). Release immuable `5717352`
+  (branche `runtime-serve-longlived`, contient `cb2bd14`), pointeur basculé,
+  dispatcher + heartbeat + notifier relancés et vérifiés sur ce root.
+- **Validation production sans run client** : incident interne
+  `system_test_incident` (`c26fbb8e…`, `metadata.test=true`, aucun compte
+  client) → livraison Slack (HTTP 200) + Discord (HTTP 204), 1 tentative
+  chacun, cycles suivants `skipped_duplicate_count=2` (aucun doublon). Le test
+  est exclu par défaut des listes/compteurs (`include_test=1` pour le voir).
+- **Limites réservées au prochain checkpoint** : détection spécifique popup
+  Meta/interstitial, resume plan universel, bouton « Prêt à relancer »,
+  Auto Restart après intervention humaine (l'action `manual_retry` est
+  volontairement rejetée côté backend et retirée du drawer BotApp).
+
 ## P0 package clone → runner — checkpoint 2026-07-07
 
 - **Cause prouvée corrigée** : pour un `account_session`, le dispatcher
