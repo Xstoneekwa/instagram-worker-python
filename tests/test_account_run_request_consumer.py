@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 from datetime import datetime, timedelta, timezone
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import account_run_request_consumer as consumer
 
@@ -858,6 +858,49 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
         self.assertEqual(exit_code, -15)
         self.assertFalse(timed_out)
 
+
+    def test_build_login_provisioner_command_does_not_cap_bounded_deadline_via_cli(self) -> None:
+        cmd = consumer._build_login_provisioner_command(
+            TEST_ACCOUNT_ID,
+            "login_provisioning",
+            TEST_REQUEST_ID,
+            device_serial="RFGL145LZHE",
+            package_name="com.instagram.androie",
+        )
+        self.assertIn("instagram_login_provisioner_cli", cmd)
+        self.assertNotIn("--post-submit-bounded-deadline-ms", cmd)
+        self.assertNotIn("--post-submit-timeout-ms", cmd)
+
+    def test_login_provisioning_subprocess_wait_allows_sixty_second_post_submit_window(self) -> None:
+        cfg = consumer.DispatcherConfig(
+            enabled=True,
+            health_only=False,
+            launch_enabled=True,
+            worker_id="run-dispatcher:test",
+            poll_seconds=5.0,
+            lease_seconds=120,
+            heartbeat_seconds=20.0,
+            allowed_run_types=["login_provisioning"],
+            test_account_ids=set(),
+            subprocess_timeout_seconds=7200,
+            require_assignment=False,
+            enforce_assignment_window=False,
+        )
+        proc = Mock()
+        proc.poll = Mock(side_effect=[None] * 100 + [0])
+        tick = iter(range(0, 200))
+        with patch.object(consumer, "get_account_run_request", return_value={"status": "running"}):
+            with patch.object(consumer.time, "monotonic", side_effect=lambda: float(next(tick))):
+                with patch.object(consumer.time, "sleep", return_value=None):
+                    exit_code, timed_out = consumer._wait_for_subprocess(
+                        cfg,
+                        proc,  # type: ignore[arg-type]
+                        request_id=TEST_REQUEST_ID,
+                        account_id=TEST_ACCOUNT_ID,
+                    )
+        self.assertEqual(exit_code, 0)
+        self.assertFalse(timed_out)
+        self.assertGreaterEqual(proc.poll.call_count, 6)
 
     def test_build_orphan_recovery_command_uses_recovery_cli(self) -> None:
         cmd = consumer._build_orphan_recovery_command(

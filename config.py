@@ -75,7 +75,7 @@ RUN_CONTROL_DISPATCHER_LEASE_SECONDS = _env_int("RUN_CONTROL_DISPATCHER_LEASE_SE
 RUN_CONTROL_DISPATCHER_HEARTBEAT_SECONDS = _env_float("RUN_CONTROL_DISPATCHER_HEARTBEAT_SECONDS", 20.0)
 RUN_CONTROL_DISPATCHER_ALLOWED_RUN_TYPES = _env_str(
     "RUN_CONTROL_DISPATCHER_ALLOWED_RUN_TYPES",
-    "account_session,outreach_session,login_provisioning,login_email_code_resume",
+    "account_session,outreach_session,login_provisioning,login_email_code_resume,login_orphan_challenge_recovery,scheduled_session_preflight",
 )
 RUN_CONTROL_DISPATCHER_TEST_ACCOUNT_IDS = _env_str("RUN_CONTROL_DISPATCHER_TEST_ACCOUNT_IDS", "")
 RUN_CONTROL_DISPATCHER_SUBPROCESS_TIMEOUT_SECONDS = _env_int(

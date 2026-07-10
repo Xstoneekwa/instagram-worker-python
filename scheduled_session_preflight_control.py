@@ -27,12 +27,70 @@ TERMINAL_PREFLIGHT_DASHBOARD_STATUSES = {
 }
 
 
+IDENTITY_PREFLIGHT_BLOCKED_REASONS = {
+    "own_profile_open_failed",
+    "active_instagram_account_mismatch",
+    "identity_mismatch",
+    "possible_username_rename_detected",
+    "login_challenge",
+    "checkpoint",
+}
+ACTIVE_DASHBOARD_ACTION_STATUSES = ("pending", "acknowledged", "pending_verification")
+
+
 def _preflight_dashboard_dedupe_key(account_id: str, assignment_id: str, starts_at: str) -> str:
     return f"account:{account_id}:scheduled_preflight:{assignment_id}:{starts_at}"
 
 
 def _preflight_dashboard_action_status(preflight_status: str) -> str:
-    return "action_required" if str(preflight_status or "").strip().lower() == "preflight_blocked" else "completed"
+    """Map terminal preflight statuses to statuses accepted by upsert_account_dashboard_action."""
+    return "pending" if str(preflight_status or "").strip().lower() == "preflight_blocked" else "resolved"
+
+
+def _preflight_dashboard_action_severity(preflight_status: str, reason_code: str | None) -> str:
+    if str(preflight_status or "").strip().lower() != "preflight_blocked":
+        return "info"
+    reason = str(reason_code or "").strip().lower()
+    return "error" if reason in IDENTITY_PREFLIGHT_BLOCKED_REASONS else "warning"
+
+
+def _find_active_preflight_dashboard_action_id(dedupe_key: str) -> str | None:
+    rows = supabase_client._request_json(
+        "GET",
+        "account_dashboard_actions",
+        query={
+            "select": "id,status",
+            "dedupe_key": f"eq.{dedupe_key}",
+            "status": f"in.({','.join(ACTIVE_DASHBOARD_ACTION_STATUSES)})",
+            "order": "created_at.desc",
+            "limit": "1",
+        },
+    ) or []
+    return str(rows[0].get("id") or "").strip() or None if rows else None
+
+
+def _resolve_active_preflight_dashboard_action(
+    *,
+    dedupe_key: str,
+    preflight_status: str,
+    reason_code: str | None,
+    metadata: dict[str, Any],
+) -> None:
+    """Transition an existing active CP4 action to resolved (audited RPC path)."""
+    action_id = _find_active_preflight_dashboard_action_id(dedupe_key)
+    if not action_id:
+        return
+    supabase_client.call_rpc(
+        "transition_account_dashboard_action",
+        {
+            "p_action_id": action_id,
+            "p_new_status": "resolved",
+            "p_actor_type": "system",
+            "p_actor_id": None,
+            "p_reason": f"preflight_terminal:{preflight_status}" + (f":{reason_code}" if reason_code else ""),
+            "p_metadata": metadata,
+        },
+    )
 
 
 def _resolve_preflight_dashboard_context(
@@ -98,7 +156,23 @@ def reconcile_preflight_dashboard_action(
     }
     if reason_code:
         metadata["reason_code"] = reason_code
+    dedupe_key = _preflight_dashboard_dedupe_key(
+        resolved_account_id,
+        resolved_assignment_id,
+        resolved_starts_at,
+    )
     try:
+        if action_status == "resolved":
+            # Non-blocked terminals resolve any active CP4 action instead of
+            # upserting an invalid status (upsert RPC only accepts active statuses
+            # for existing rows and would reject "completed"/"action_required").
+            _resolve_active_preflight_dashboard_action(
+                dedupe_key=dedupe_key,
+                preflight_status=status,
+                reason_code=reason_code,
+                metadata=metadata,
+            )
+            return
         supabase_client.call_rpc(
             "upsert_account_dashboard_action",
             {
@@ -108,19 +182,15 @@ def reconcile_preflight_dashboard_action(
                 "p_action_type": PREFLIGHT_DASHBOARD_ACTION_TYPE,
                 "p_status": action_status,
                 "p_title": "Scheduled session preflight",
-                "p_dedupe_key": _preflight_dashboard_dedupe_key(
-                    resolved_account_id,
-                    resolved_assignment_id,
-                    resolved_starts_at,
-                ),
+                "p_dedupe_key": dedupe_key,
                 "p_safe_client_message": None,
-                "p_admin_message": f"Scheduled session preflight terminalized: {status}{reason_suffix}.",
+                "p_admin_message": f"Scheduled session preflight blocked: {reason_code or status}.",
                 "p_assistant_message": None,
-                "p_action_label": "Review preflight" if action_status == "action_required" else "Monitor",
+                "p_action_label": "Review preflight",
                 "p_action_deep_link": "/instagram-dashboard/devices",
-                "p_severity": "warning" if action_status == "action_required" else "info",
+                "p_severity": _preflight_dashboard_action_severity(status, reason_code),
                 "p_audience": "admin",
-                "p_requires_client_action": action_status == "action_required",
+                "p_requires_client_action": True,
                 "p_blocking_campaign": False,
                 "p_metadata": metadata,
             },
@@ -160,7 +230,7 @@ def _load_preflight_row(preflight_id: str) -> dict[str, Any] | None:
         "GET",
         "scheduled_session_preflights",
         query={
-            "select": "id,account_id,assignment_id,device_id,status,expires_at,request_id,scheduled_window_start,scheduled_window_end,business_action_deadline,metadata_safe",
+            "select": "id,account_id,assignment_id,device_id,status,reason_code,expires_at,request_id,scheduled_window_start,scheduled_window_end,business_action_deadline,metadata_safe",
             "id": f"eq.{pid}",
             "limit": "1",
         },

@@ -226,6 +226,44 @@ class AssignmentDispatchResolverTest(unittest.TestCase):
         self.assertEqual(ctx["reason"], "assignment_type_incompatible")
         self.assertFalse(ctx["fallback_used"])
 
+    def test_full_cycle_account_session_accepted(self) -> None:
+        ctx = self._resolve(
+            _assignment(assignment_type="full_cycle"),
+            run_type="account_session",
+        )
+        self.assertTrue(ctx["assignment_found"])
+        self.assertEqual(ctx["adb_serial"], "emulator-5554")
+        self.assertEqual(ctx["reason"], "assignment_resolved")
+
+    def test_full_cycle_scheduled_session_preflight_resolves_adb_serial(self) -> None:
+        ctx = self._resolve(
+            _assignment(
+                assignment_type="full_cycle",
+                adb_serial="RFGL145LZHE",
+                package_name="com.instagram.android",
+            ),
+            run_type="scheduled_session_preflight",
+            require_assignment=False,
+            enforce_window=False,
+        )
+        self.assertTrue(ctx["assignment_found"])
+        self.assertEqual(ctx["assignment_type"], "full_cycle")
+        self.assertEqual(ctx["run_type"], "scheduled_session_preflight")
+        self.assertEqual(ctx["reason"], "assignment_resolved")
+        self.assertEqual(ctx["adb_serial"], "RFGL145LZHE")
+        self.assertEqual(ctx["package_name"], "com.instagram.android")
+        self.assertFalse(ctx["fallback_used"])
+
+    def test_scheduled_session_preflight_missing_adb_serial_blocks(self) -> None:
+        ctx = self._resolve(
+            _assignment(assignment_type="full_cycle", adb_serial=""),
+            run_type="scheduled_session_preflight",
+            require_assignment=False,
+        )
+        self.assertFalse(ctx["assignment_found"])
+        self.assertEqual(ctx["reason"], "assignment_device_missing_adb_serial")
+        self.assertFalse(ctx["fallback_used"])
+
     def test_outreach_only_account_session_incompatible(self) -> None:
         ctx = self._resolve(
             _assignment(assignment_type="outreach_only"),

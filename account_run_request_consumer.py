@@ -50,7 +50,12 @@ import supabase_client
 
 LOGIN_RUN_TYPES = frozenset({"login_provisioning", "login_email_code_resume"})
 ORPHAN_RECOVERY_RUN_TYPE = "login_orphan_challenge_recovery"
-DEVICE_BOUND_RUN_TYPES = frozenset({"account_session", "outreach_session"})
+DEVICE_BOUND_RUN_TYPES = frozenset({
+    "account_session",
+    "outreach_session",
+    "scheduled_session_preflight",
+})
+PREFLIGHT_RUN_TYPE = "scheduled_session_preflight"
 _last_integration_noop_proof: dict[str, Any] | None = None
 
 
@@ -151,7 +156,7 @@ def load_dispatcher_config() -> DispatcherConfig:
     configured_worker_id = _env_str("RUN_CONTROL_DISPATCHER_WORKER_ID", default_worker_id)
     allowed_raw = _env_str(
         "RUN_CONTROL_DISPATCHER_ALLOWED_RUN_TYPES",
-        "account_session,outreach_session,login_provisioning,login_email_code_resume,login_orphan_challenge_recovery",
+        "account_session,outreach_session,login_provisioning,login_email_code_resume,login_orphan_challenge_recovery,scheduled_session_preflight",
     )
     allowed = [part.strip().lower() for part in allowed_raw.split(",") if part.strip()]
     test_ids_raw = _env_str("RUN_CONTROL_DISPATCHER_TEST_ACCOUNT_IDS", "")
@@ -394,6 +399,44 @@ def _is_orphan_recovery_run_type(run_type: str) -> bool:
     return str(run_type or "").strip().lower() == ORPHAN_RECOVERY_RUN_TYPE
 
 
+def _is_scheduled_session_preflight_run_type(run_type: str) -> bool:
+    return str(run_type or "").strip().lower() == PREFLIGHT_RUN_TYPE
+
+
+def _build_scheduled_session_preflight_command(
+    account_id: str,
+    request_id: str,
+    *,
+    device_serial: str | None = None,
+    package_name: str | None = None,
+    expected_username: str | None = None,
+    metadata_safe: dict[str, Any] | None = None,
+) -> list[str]:
+    meta = dict(metadata_safe or {})
+    username = str(expected_username or meta.get("expected_username") or "").strip()
+    if not username:
+        username = _load_expected_username(account_id)
+    runner_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scheduled_session_preflight_runner.py")
+    return [
+        sys.executable,
+        runner_path,
+        "--account-id",
+        account_id,
+        "--request-id",
+        request_id,
+        "--device-serial",
+        str(device_serial or "").strip(),
+        "--package-name",
+        str(package_name or "").strip(),
+        "--expected-username",
+        username,
+        "--preflight-id",
+        str(meta.get("preflight_id") or "").strip(),
+        "--metadata-json",
+        json.dumps(meta, separators=(",", ":"), sort_keys=True),
+    ]
+
+
 def _load_expected_username(account_id: str) -> str:
     account = supabase_client.load_account(account_id=account_id)
     if not account:
@@ -516,6 +559,14 @@ def _build_runner_command(
             app_instance_id=app_instance_id,
             metadata_safe=metadata_safe,
         )
+    if _is_scheduled_session_preflight_run_type(run_type):
+        return _build_scheduled_session_preflight_command(
+            account_id,
+            request_id,
+            device_serial=device_serial,
+            package_name=package_name,
+            metadata_safe=metadata_safe,
+        )
     if _is_orphan_recovery_run_type(run_type):
         meta = dict(metadata_safe or {})
         credentials_version = meta.get("credentials_version")
@@ -543,6 +594,12 @@ def _build_runner_command(
     serial = str(device_serial or "").strip()
     if serial:
         cmd.extend(["--device-serial", serial])
+    package = str(package_name or "").strip()
+    if package:
+        cmd.extend(["--package-name", package])
+    app_instance = str(app_instance_id or "").strip()
+    if app_instance:
+        cmd.extend(["--expected-app-instance-id", app_instance])
     return cmd
 
 
@@ -1105,18 +1162,32 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
     ok_assignment, assignment_reason, dispatch_ctx = _validate_assignment(account_id, run_type, cfg)
     safe_dispatch = sensitive_log_fields(dispatch_ctx)
     if not ok_assignment:
+        error_code = assignment_reason or "assignment_blocked"
+        if (
+            _is_scheduled_session_preflight_run_type(run_type)
+            and error_code == "assignment_device_missing_adb_serial"
+        ):
+            from scheduled_session_preflight_control import terminalize_scheduled_session_preflight_request
+
+            terminalize_scheduled_session_preflight_request(
+                request=request,
+                worker_id=cfg.worker_id,
+                preflight_status="preflight_blocked",
+                reason_code="device_serial_missing",
+            )
+            error_code = "device_serial_missing"
         _safe_complete_account_run_request(
             request_id,
             cfg.worker_id,
             "blocked",
-            error_code=assignment_reason or "assignment_blocked",
-            error_message_safe=f"Assignment blocked: {assignment_reason or 'assignment_blocked'}.",
+            error_code=error_code,
+            error_message_safe=f"Assignment blocked: {error_code}.",
         )
         _audit(
             account_id=account_id,
             action_type="manual_run_blocked",
             status="blocked",
-            message=f"Assignment blocked: {assignment_reason or 'assignment_blocked'}.",
+            message=f"Assignment blocked: {error_code}.",
             payload={"request_id": request_id, "assignment": safe_dispatch},
         )
         return
@@ -1143,6 +1214,29 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
             payload={"request_id": request_id, "policy": policy_ctx},
         )
         return
+
+    if _is_scheduled_session_preflight_run_type(run_type):
+        from scheduled_session_preflight_control import (
+            evaluate_scheduled_session_preflight_claim,
+            terminalize_scheduled_session_preflight_request,
+        )
+
+        ok_preflight, terminal_status, terminal_reason = evaluate_scheduled_session_preflight_claim(request=request)
+        if not ok_preflight:
+            terminalize_scheduled_session_preflight_request(
+                request=request,
+                worker_id=cfg.worker_id,
+                preflight_status=str(terminal_status or "preflight_invalidated"),
+                reason_code=str(terminal_reason or "preflight_unavailable"),
+            )
+            _audit(
+                account_id=account_id,
+                action_type="manual_run_blocked",
+                status="blocked",
+                message=f"Scheduled session preflight terminalized: {terminal_reason or terminal_status}.",
+                payload={"request_id": request_id, "run_type": run_type, "reason": terminal_reason},
+            )
+            return
 
     adb_serial = str(dispatch_ctx.get("adb_serial") or "").strip()
     log(
@@ -1278,6 +1372,33 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
         )
         return
 
+    if _is_scheduled_session_preflight_run_type(run_type) and not adb_serial:
+        from scheduled_session_preflight_control import terminalize_scheduled_session_preflight_request
+
+        terminalize_scheduled_session_preflight_request(
+            request=request,
+            worker_id=cfg.worker_id,
+            preflight_status="preflight_blocked",
+            reason_code="device_serial_missing",
+        )
+        _safe_complete_account_run_request(
+            request_id,
+            cfg.worker_id,
+            "blocked",
+            error_code="device_serial_missing",
+            error_message_safe="Scheduled session preflight blocked: device serial missing.",
+        )
+        _audit(
+            account_id=account_id,
+            action_type="manual_run_blocked",
+            status="blocked",
+            message="Scheduled session preflight blocked: device serial missing.",
+            payload={"request_id": request_id, "run_type": run_type, "assignment": safe_dispatch},
+        )
+        if device_lock_active and device_id:
+            release_device_lock(device_id=device_id, worker_id=lock_owner_worker_id, request_id=request_id)
+        return
+
     if run_type == "login_email_code_resume":
         action_id = str(
             request_metadata.get("action_id") or request_metadata.get("verification_action_id") or ""
@@ -1385,7 +1506,14 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
         )
 
     if device_id and device_lock_active:
-        release_device_lock(device_id=device_id, worker_id=lock_owner_worker_id, request_id=request_id)
+        if _is_scheduled_session_preflight_run_type(run_type) and int(exit_code) == 0:
+            renew_device_lock(
+                device_id=device_id,
+                worker_id=lock_owner_worker_id,
+                request_id=request_id,
+            )
+        else:
+            release_device_lock(device_id=device_id, worker_id=lock_owner_worker_id, request_id=request_id)
 
     _finalize_manual_run_after_subprocess(
         cfg,
@@ -1405,6 +1533,27 @@ def run_once(cfg: DispatcherConfig | None = None) -> dict[str, Any]:
 
     _heartbeat(cfg, status="idle")
     reclaimed = reclaim_stale_account_run_requests(cfg.worker_id)
+    try:
+        from scheduled_session_preflight_control import reconcile_stale_scheduled_session_preflight_requests
+
+        reconciled = reconcile_stale_scheduled_session_preflight_requests(
+            worker_id=cfg.worker_id,
+            allowed_run_types=cfg.allowed_run_types,
+        )
+        if reconciled:
+            log(
+                "info",
+                "scheduled_session_preflight_stale_reconciled",
+                worker_id=cfg.worker_id,
+                reconciled_count=reconciled,
+            )
+    except Exception as exc:
+        log(
+            "warning",
+            "scheduled_session_preflight_reconcile_failed",
+            worker_id=cfg.worker_id,
+            error=str(exc)[:200],
+        )
 
     if cfg.health_only or not cfg.launch_enabled:
         return {"ok": True, "mode": "health_only", "reclaimed": reclaimed}
