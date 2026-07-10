@@ -2,6 +2,57 @@
 
 *Document volatil : à mettre à jour après les prochains jalons produit / tech.*
 
+## Scheduler / CP4 / Preflight / BotApp observability — interim 2026-07-10
+
+```text
+Status: INTERIM CHECKPOINT — block not fully closed yet.
+```
+
+- **Checkpoint canonique:** [`docs/checkpoints/2026-07-10-scheduler-cp4-observability-checkpoint.md`](checkpoints/2026-07-10-scheduler-cp4-observability-checkpoint.md)
+- **Scheduler ON**, `dry_run=false`, BotApp runtime gate passing, dispatcher `run-dispatcher:mac-admin-01`.
+- **Comptes fenêtres:** `mythyl_fitness` 12:00–18:00 ; `i_m_your_traker` 18:00–00:00.
+- **Deploys actifs:** backend `dpl_2rXNt8A1eebFRdV5PSgdMudkrVF2` ; worker release `b6fedca-preflight-keyguard` ; BotApp `daily-scheduler-observability-20260710T145509Z.app`.
+- **Validé:** chaîne diagnostique tick→preflight visible ; CP4.1 late expiry/retry ; stale lock reconcile ; keyguard preflight ; BotApp pipeline UI.
+- **Ouvert:** positive path prod `preflight_ready` → `account_session` → run terminal ; T-10 P1/P2 ; Guard B/C ; dedup `resume_plan_missing`.
+
+## Stop responsiveness BotApp — état courant 2026-06-15
+
+- **Verdict officiel `f101560`** : **NO-GO complet / non validé**. Ne pas
+  push, ne pas marquer terminé, ne pas considérer Stop responsiveness comme
+  sécurisé et ne pas avancer Auto Restart en dépendant de ce patch.
+- **Golden Flow normal** : reste OK sur les cycles observés avant stop
+  (follow, mute, like, return CT fonctionnels sur les cycles complets).
+- **Stop manuel Play non fiable côté guards coopératifs** : les runs de
+  validation ont montré `stop_guard_*` absents, exit `-9` au lieu de `97`,
+  actions critiques horodatées après `cancel_requested_at`, et absence de
+  preuve `stop_requested_observed` / `stop_guard_exit_clean`.
+- **Dernier run manuel analysé** : `lorielebras_autom`, request
+  `648a4112-3876-471d-8842-60d5a1eaed3d`, run
+  `242533a6-e603-4fa5-b3da-207bfc6a452d`, source `messodie_creations`,
+  device `RFGL145LZHE`, final DB `stopped`, audit exit `-9`. Aucun profil
+  ouvert ni nouveau candidat sélectionné après stop, mais follow/mute/like et
+  Return CT ont encore des timestamps après `cancel_requested_at`.
+- **Observation scheduler uniquement pour l'instant** : ne pas lancer de nouveau
+  run manuel pour ce sujet. Pour chaque prochain run scheduler, relever
+  `request_id`, `run_id`, `started_at`, source du stop/cancel
+  (`scheduler` / `manual` / `timeout`), `cancel_requested_at`, `finished_at`,
+  status final, exit code, dernier candidat complet avant stop et premier event
+  après stop.
+- **Checklist scheduler obligatoire** : chercher
+  `stop_requested_observed`, `stop_guard_blocked_before_next_candidate`,
+  `stop_guard_blocked_before_profile_open`, `stop_guard_exit_clean`; vérifier
+  après `cancel_requested_at` qu'il n'y a aucun
+  `follower_profile_open_started`, follow, mute, post-open, like ni nouveau
+  candidat sélectionné.
+- **Patch complémentaire à prévoir seulement si nécessaire et avec GO** : si le
+  scheduler montre encore profil ouvert après stop, action critique post-stop,
+  exit `-9` ou guards absents, revenir avec un patch ciblé qui poll cancel
+  pendant graceful flush / persist, mappe stop scheduler/manual vers
+  `stopped` + exit code propre, rend les guards réellement observables dans la
+  loop runner, et ne touche pas au Golden Flow métier.
+- **Priorité produit** : passer à la suite BotApp seulement sur des parties qui
+  ne dépendent pas de la fiabilité Auto Restart / Stop.
+
 ## Full-cycle minimum physique — checkpoint 2026-06-08
 
 - **Validation fonctionnelle complète sur téléphone physique** :
