@@ -12795,10 +12795,31 @@ _POST_FOLLOW_LIKE_TOP_LEFT_XML_PROBE_MAX_ATTEMPTS = 2
 _POST_FOLLOW_LIKE_TOP_LEFT_XML_PROBE_RESERVED_S = 2.8
 _POST_FOLLOW_LIKE_TOP_LEFT_XML_SETTLE_S = 0.06
 _POST_FOLLOW_LIKE_TOP_LEFT_XML_RETRY_SETTLE_S = 0.05
+_POST_FOLLOW_LIKE_STRICT_GRID_PROOF_MODES = frozenset({"off", "fallback", "always"})
 _LEGACY_SAFE_TIMING_CONTEXT: dict[str, Any] | None = None
 _LEGACY_SAFE_LAST_TABS_BOTTOM_BY_KEY: dict[str, int | None] = {}
 _LEGACY_SAFE_LAST_UI_HINTS_BY_KEY: dict[str, dict[str, bool]] = {}
 _LEGACY_SAFE_ATTEMPT_COUNT_BY_KEY: dict[str, int] = {}
+
+
+def _post_follow_like_strict_grid_proof_mode(raw: Any | None = None) -> str:
+    mode = str(
+        raw
+        if raw is not None
+        else getattr(config, "POST_FOLLOW_LIKE_STRICT_GRID_PROOF_MODE", "fallback")
+    ).strip().lower()
+    if mode in _POST_FOLLOW_LIKE_STRICT_GRID_PROOF_MODES:
+        return mode
+    try:
+        log(
+            "warning",
+            "post_follow_like_strict_grid_proof_mode_invalid",
+            configured_mode=mode,
+            fallback_mode="fallback",
+        )
+    except Exception:
+        pass
+    return "fallback"
 
 
 def _legacy_safe_timing_context() -> dict[str, Any] | None:
@@ -20706,6 +20727,7 @@ def _post_follow_likes_open_top_left_legacy_visual_safe(
     visual_candidate_id: str,
     post_index: int,
     likes_perf_phase_t0: float | None = None,
+    strict_grid_proof_mode: str | None = None,
 ) -> dict[str, Any]:
     """
     Safe, targeted reuse of the emulator-era visual open path.
@@ -20714,6 +20736,7 @@ def _post_follow_likes_open_top_left_legacy_visual_safe(
     t0 = time.perf_counter()
     strict_grid_proof_ok = False
     strict_grid_proof_source = ""
+    strict_grid_mode = _post_follow_like_strict_grid_proof_mode(strict_grid_proof_mode)
 
     def _log_timing(event: str, started_at: float, **extra: Any) -> None:
         try:
@@ -20747,6 +20770,7 @@ def _post_follow_likes_open_top_left_legacy_visual_safe(
             },
             "strict_grid_proof_ok": bool(strict_grid_proof_ok),
             "strict_grid_proof_source": str(strict_grid_proof_source or ""),
+            "strict_grid_proof_mode": strict_grid_mode,
             **extra,
         }
         try:
@@ -20763,6 +20787,74 @@ def _post_follow_likes_open_top_left_legacy_visual_safe(
         except Exception:
             pass
         return out
+
+    def _run_strict_grid_proof(trigger: str, *, ui_hints: dict[str, Any], ww: int, wh: int) -> dict[str, Any]:
+        nonlocal strict_grid_proof_ok, strict_grid_proof_source
+        is_fallback = str(trigger or "") != "always"
+        if is_fallback:
+            try:
+                log(
+                    "info",
+                    "post_follow_like_strict_grid_proof_fallback_started",
+                    visual_candidate_id=visual_candidate_id,
+                    source_profile_username=source_profile_username,
+                    follower_username=expected_follower_username,
+                    post_index=int(post_index),
+                    trigger=str(trigger or ""),
+                    mode=str(strict_grid_mode),
+                )
+            except Exception:
+                pass
+        strict_grid_proof = _post_follow_likes_strict_top_left_xml_grid_proof(
+            d,
+            ui_hints=ui_hints,
+            budget_deadline=time.perf_counter() + 1.2,
+            ww=int(ww),
+            wh=int(wh),
+            visual_candidate_id=visual_candidate_id,
+            source_profile_username=source_profile_username,
+            follower_username=expected_follower_username,
+        )
+        if bool(strict_grid_proof.get("ok")):
+            strict_grid_proof_ok = True
+            strict_grid_proof_source = str(strict_grid_proof.get("source") or "")
+        elif not is_fallback:
+            try:
+                log(
+                    "info",
+                    "legacy_safe_strict_grid_proof_advisory_continue",
+                    visual_candidate_id=visual_candidate_id,
+                    source_profile_username=source_profile_username,
+                    follower_username=expected_follower_username,
+                    post_index=int(post_index),
+                    strict_grid_proof_source=str(strict_grid_proof.get("source") or ""),
+                    strict_grid_proof_failure_reason=str(
+                        strict_grid_proof.get("failure_reason") or ""
+                    ),
+                    reason="strict_xml_proof_failed_continue_visual_dynamic_open",
+                )
+            except Exception:
+                pass
+        if is_fallback:
+            try:
+                log(
+                    "info" if bool(strict_grid_proof.get("ok")) else "warning",
+                    "post_follow_like_strict_grid_proof_fallback_result",
+                    visual_candidate_id=visual_candidate_id,
+                    source_profile_username=source_profile_username,
+                    follower_username=expected_follower_username,
+                    post_index=int(post_index),
+                    trigger=str(trigger or ""),
+                    mode=str(strict_grid_mode),
+                    ok=bool(strict_grid_proof.get("ok")),
+                    strict_grid_proof_source=str(strict_grid_proof.get("source") or ""),
+                    strict_grid_proof_failure_reason=str(
+                        strict_grid_proof.get("failure_reason") or ""
+                    ),
+                )
+            except Exception:
+                pass
+        return strict_grid_proof
 
     try:
         meta0 = _followers_current_pkg_activity(d)
@@ -20915,36 +21007,8 @@ def _post_follow_likes_open_top_left_legacy_visual_safe(
             dynamic_first_row_search_y_min_px=int(y_floor),
         )
 
-    strict_grid_proof = _post_follow_likes_strict_top_left_xml_grid_proof(
-        d,
-        ui_hints=ui_hints,
-        budget_deadline=time.perf_counter() + 1.2,
-        ww=int(ww),
-        wh=int(wh),
-        visual_candidate_id=visual_candidate_id,
-        source_profile_username=source_profile_username,
-        follower_username=expected_follower_username,
-    )
-    if bool(strict_grid_proof.get("ok")):
-        strict_grid_proof_ok = True
-        strict_grid_proof_source = str(strict_grid_proof.get("source") or "")
-    else:
-        try:
-            log(
-                "info",
-                "legacy_safe_strict_grid_proof_advisory_continue",
-                visual_candidate_id=visual_candidate_id,
-                source_profile_username=source_profile_username,
-                follower_username=expected_follower_username,
-                post_index=int(post_index),
-                strict_grid_proof_source=str(strict_grid_proof.get("source") or ""),
-                strict_grid_proof_failure_reason=str(
-                    strict_grid_proof.get("failure_reason") or ""
-                ),
-                reason="strict_xml_proof_failed_continue_visual_dynamic_open",
-            )
-        except Exception:
-            pass
+    if strict_grid_mode == "always":
+        _run_strict_grid_proof("always", ui_hints=ui_hints, ww=int(ww), wh=int(wh))
 
     _ensure_debug_dirs()
     shot_path = str(
@@ -21048,6 +21112,13 @@ def _post_follow_likes_open_top_left_legacy_visual_safe(
         dynamic_first_row_solid_count=dyn.get("solid_count"),
     )
     if not bool(dyn.get("ok")):
+        if strict_grid_mode == "fallback":
+            _run_strict_grid_proof(
+                "dynamic_row_scan_failed",
+                ui_hints=ui_hints,
+                ww=int(ww),
+                wh=int(wh),
+            )
         return _finish(
             "legacy_visual_top_left_variance_insufficient",
             screenshot_path=shot_path,
@@ -21079,6 +21150,13 @@ def _post_follow_likes_open_top_left_legacy_visual_safe(
     except Exception:
         variance = 0.0
     if float(variance) < float(_POST_FOLLOW_LIKES_GRID_VAR_THR):
+        if strict_grid_mode == "fallback":
+            _run_strict_grid_proof(
+                "variance_insufficient",
+                ui_hints=ui_hints,
+                ww=int(ww),
+                wh=int(wh),
+            )
         return _finish(
             "legacy_visual_top_left_variance_insufficient",
             selected_variance=round(float(variance), 2),
@@ -21236,6 +21314,9 @@ def _post_follow_likes_open_top_left_legacy_visual_safe(
         "open_strategy": "vision_open_top_left_legacy_safe",
         "tap_x": int(tap_x),
         "tap_y": int(tap_y),
+        "strict_grid_proof_mode": strict_grid_mode,
+        "strict_grid_proof_ok": bool(strict_grid_proof_ok),
+        "strict_grid_proof_source": str(strict_grid_proof_source or ""),
         "detect_reason": viewer.get("detect_reason"),
         "viewer_detect_path": viewer.get("viewer_detect_path"),
         "likes_perf_post_open": perf,

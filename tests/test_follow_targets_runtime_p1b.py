@@ -2544,6 +2544,80 @@ class FollowTargetsRuntimeP1bTest(unittest.TestCase):
         self.assertEqual(settings["max_follows_per_target_per_run"], 30)
         self.assertEqual(settings["max_targets_per_run"], 4)
 
+    def test_follow_source_rotation_contract_logs_default_source(self) -> None:
+        logs: list[tuple[str, str, dict]] = []
+        rotation_settings = {
+            "settings_source": "default",
+            "max_follows_per_target_per_run": 2,
+            "max_targets_per_run": 3,
+        }
+
+        with patch.object(session, "log", side_effect=lambda level, event, **kw: logs.append((level, event, kw))):
+            emitted = session._log_follow_source_rotation_contract_if_needed(
+                account_id="acct-mythyl-like",
+                account_username="mythyl_like",
+                run_id="run-1",
+                rotation_settings=rotation_settings,
+                supabase_mode=True,
+            )
+
+        self.assertTrue(emitted)
+        self.assertEqual(len(logs), 1)
+        level, event, fields = logs[0]
+        self.assertEqual(level, "warning")
+        self.assertEqual(event, "follow_source_rotation_contract_missing_account_settings")
+        self.assertEqual(fields["expected_max_follows_per_target_per_run"], 30)
+        self.assertEqual(fields["expected_max_targets_per_run"], 4)
+        self.assertEqual(fields["actual_settings_source"], "default")
+        self.assertEqual(fields["actual_max_follows_per_target_per_run"], 2)
+        self.assertEqual(fields["actual_max_targets_per_run"], 3)
+        self.assertEqual(fields["account_id"], "acct-mythyl-like")
+        self.assertEqual(fields["account_username"], "mythyl_like")
+        self.assertFalse(fields["db_mutation_performed"])
+
+    def test_follow_source_rotation_contract_logs_partial_account_fallback(self) -> None:
+        logs: list[tuple[str, str, dict]] = []
+        rotation_settings = {
+            "settings_source": "account_with_fallback",
+            "max_follows_per_target_per_run": 2,
+            "max_targets_per_run": 4,
+        }
+
+        with patch.object(session, "log", side_effect=lambda level, event, **kw: logs.append((level, event, kw))):
+            emitted = session._log_follow_source_rotation_contract_if_needed(
+                account_id="acct",
+                account_username="account",
+                run_id="run",
+                rotation_settings=rotation_settings,
+                supabase_mode=True,
+            )
+
+        self.assertTrue(emitted)
+        self.assertEqual(logs[0][1], "follow_source_rotation_contract_missing_account_settings")
+        self.assertEqual(logs[0][2]["actual_settings_source"], "account_with_fallback")
+        self.assertEqual(logs[0][2]["actual_max_follows_per_target_per_run"], 2)
+        self.assertEqual(logs[0][2]["actual_max_targets_per_run"], 4)
+
+    def test_follow_source_rotation_contract_accepts_account_30_4(self) -> None:
+        logs: list[tuple[str, str, dict]] = []
+        rotation_settings = {
+            "settings_source": "account",
+            "max_follows_per_target_per_run": 30,
+            "max_targets_per_run": 4,
+        }
+
+        with patch.object(session, "log", side_effect=lambda level, event, **kw: logs.append((level, event, kw))):
+            emitted = session._log_follow_source_rotation_contract_if_needed(
+                account_id="acct",
+                account_username="account",
+                run_id="run",
+                rotation_settings=rotation_settings,
+                supabase_mode=True,
+            )
+
+        self.assertFalse(emitted)
+        self.assertEqual(logs, [])
+
     def test_follow_source_rotation_settings_env_fallback_when_no_account_row(self) -> None:
         with patch.dict(os.environ, {
             "FOLLOW_TARGET_MAX_FOLLOWS_PER_TARGET_PER_RUN": "8",

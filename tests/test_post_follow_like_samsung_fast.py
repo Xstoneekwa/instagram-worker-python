@@ -5167,6 +5167,7 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
                     visual_candidate_id="vc-1",
                     post_index=0,
                     likes_perf_phase_t0=time.perf_counter(),
+                    strict_grid_proof_mode="always",
                 )
 
         self.assertTrue(out.get("ok"))
@@ -5174,6 +5175,263 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
         self.assertFalse(out.get("strict_grid_proof_ok"))
         shot.assert_called_once()
         device.click.assert_called_once()
+
+    def test_legacy_visual_top_left_default_fallback_mode_skips_strict_probe_on_nominal_success(
+        self,
+    ) -> None:
+        device = mock.MagicMock()
+        device.window_size.return_value = (1080, 2340)
+        log_events: list[str] = []
+
+        def _fake_screenshot(_d: object, path: str) -> None:
+            from PIL import Image
+
+            Image.new("RGB", (1080, 2340), "black").save(path)
+
+        with mock.patch.object(
+            nav, "visual_target_profile_lock_verify", return_value={"ok": True}
+        ), mock.patch.object(
+            nav,
+            "_followers_current_pkg_activity",
+            return_value={"current_activity": "profile", "current_package": "pkg"},
+        ), mock.patch.object(
+            nav,
+            "_post_follow_likes_grid_ui_surface_hints",
+            return_value={"profile_tabs_visible": True},
+        ), mock.patch.object(
+            nav, "_followers_profile_tabs_bottom_y_px", return_value=(900, "tabs")
+        ), mock.patch.object(
+            nav, "screenshot", side_effect=_fake_screenshot
+        ), mock.patch.object(
+            nav,
+            "_post_follow_likes_strict_top_left_xml_grid_proof",
+            return_value={"ok": True, "source": "xml_thumbnail_top_left"},
+        ) as strict_probe, mock.patch.object(
+            nav,
+            "_dynamic_first_post_grid_row_from_image",
+            return_value={
+                "ok": True,
+                "first_row_top": 1000,
+                "first_row_bottom": 1360,
+                "solid_count": 1,
+                "cell_h": 360,
+            },
+        ), mock.patch.object(
+            nav, "_visual_image_cell_luma_variance", return_value=180.0
+        ), mock.patch.object(
+            nav,
+            "_visual_wait_post_viewer_opened_after_tap",
+            return_value={
+                "post_detected": True,
+                "detect_reason": "like_unlike_ui",
+                "viewer_detect_path": "phase_a_like_unlike_fast",
+                "viewer_detect_total_ms": 120.0,
+            },
+        ), mock.patch.object(
+            nav, "log", side_effect=lambda _level, event, **_kw: log_events.append(str(event))
+        ), mock.patch.object(
+            nav.config, "POST_FOLLOW_LIKE_STRICT_GRID_PROOF_MODE", "fallback", create=True
+        ), mock.patch.object(nav, "time") as tmock:
+            tmock.perf_counter = time.perf_counter
+            tmock.time = time.time
+            tmock.sleep = lambda *_a, **_k: None
+            out = nav._post_follow_likes_open_top_left_legacy_visual_safe(
+                device,
+                pkg="pkg",
+                source_profile_username="ct",
+                expected_follower_username="cand",
+                visual_candidate_id="vc-1",
+                post_index=0,
+                likes_perf_phase_t0=time.perf_counter(),
+            )
+
+        self.assertTrue(out.get("ok"))
+        strict_probe.assert_not_called()
+        self.assertNotIn("like_top_left_xml_probe_started", log_events)
+        self.assertNotIn("like_top_left_xml_probe_completed", log_events)
+        self.assertNotIn("post_follow_like_strict_post_grid_proof_completed", log_events)
+        self.assertNotIn("legacy_safe_strict_grid_proof_advisory_continue", log_events)
+
+    def test_legacy_visual_top_left_fallback_mode_runs_strict_probe_once_after_nominal_failure(
+        self,
+    ) -> None:
+        device = mock.MagicMock()
+        device.window_size.return_value = (1080, 2340)
+        log_events: list[str] = []
+
+        def _fake_screenshot(_d: object, path: str) -> None:
+            from PIL import Image
+
+            Image.new("RGB", (1080, 2340), "black").save(path)
+
+        with mock.patch.object(
+            nav, "visual_target_profile_lock_verify", return_value={"ok": True}
+        ), mock.patch.object(
+            nav,
+            "_followers_current_pkg_activity",
+            return_value={"current_activity": "profile", "current_package": "pkg"},
+        ), mock.patch.object(
+            nav,
+            "_post_follow_likes_grid_ui_surface_hints",
+            return_value={"profile_tabs_visible": True},
+        ), mock.patch.object(
+            nav, "_followers_profile_tabs_bottom_y_px", return_value=(900, "tabs")
+        ), mock.patch.object(
+            nav, "screenshot", side_effect=_fake_screenshot
+        ), mock.patch.object(
+            nav,
+            "_post_follow_likes_strict_top_left_xml_grid_proof",
+            return_value={"ok": True, "source": "xml_thumbnail_top_left"},
+        ) as strict_probe, mock.patch.object(
+            nav,
+            "_dynamic_first_post_grid_row_from_image",
+            return_value={"ok": False, "solid_count": 0},
+        ), mock.patch.object(
+            nav, "log", side_effect=lambda _level, event, **_kw: log_events.append(str(event))
+        ), mock.patch.object(
+            nav.config, "POST_FOLLOW_LIKE_STRICT_GRID_PROOF_MODE", "fallback", create=True
+        ), mock.patch.object(nav, "time") as tmock:
+            tmock.perf_counter = time.perf_counter
+            tmock.time = time.time
+            tmock.sleep = lambda *_a, **_k: None
+            out = nav._post_follow_likes_open_top_left_legacy_visual_safe(
+                device,
+                pkg="pkg",
+                source_profile_username="ct",
+                expected_follower_username="cand",
+                visual_candidate_id="vc-1",
+                post_index=0,
+                likes_perf_phase_t0=time.perf_counter(),
+            )
+
+        self.assertFalse(out.get("ok"))
+        self.assertTrue(out.get("strict_grid_proof_ok"))
+        strict_probe.assert_called_once()
+        self.assertIn("post_follow_like_strict_grid_proof_fallback_started", log_events)
+        self.assertIn("post_follow_like_strict_grid_proof_fallback_result", log_events)
+
+    def test_legacy_visual_top_left_off_mode_never_runs_strict_probe_after_nominal_failure(
+        self,
+    ) -> None:
+        device = mock.MagicMock()
+        device.window_size.return_value = (1080, 2340)
+
+        def _fake_screenshot(_d: object, path: str) -> None:
+            from PIL import Image
+
+            Image.new("RGB", (1080, 2340), "black").save(path)
+
+        with mock.patch.object(
+            nav, "visual_target_profile_lock_verify", return_value={"ok": True}
+        ), mock.patch.object(
+            nav,
+            "_followers_current_pkg_activity",
+            return_value={"current_activity": "profile", "current_package": "pkg"},
+        ), mock.patch.object(
+            nav,
+            "_post_follow_likes_grid_ui_surface_hints",
+            return_value={"profile_tabs_visible": True},
+        ), mock.patch.object(
+            nav, "_followers_profile_tabs_bottom_y_px", return_value=(900, "tabs")
+        ), mock.patch.object(
+            nav, "screenshot", side_effect=_fake_screenshot
+        ), mock.patch.object(
+            nav,
+            "_post_follow_likes_strict_top_left_xml_grid_proof",
+            return_value={"ok": True, "source": "xml_thumbnail_top_left"},
+        ) as strict_probe, mock.patch.object(
+            nav,
+            "_dynamic_first_post_grid_row_from_image",
+            return_value={"ok": False, "solid_count": 0},
+        ), mock.patch.object(nav, "log"), mock.patch.object(
+            nav.config, "POST_FOLLOW_LIKE_STRICT_GRID_PROOF_MODE", "off", create=True
+        ), mock.patch.object(nav, "time") as tmock:
+            tmock.perf_counter = time.perf_counter
+            tmock.time = time.time
+            tmock.sleep = lambda *_a, **_k: None
+            out = nav._post_follow_likes_open_top_left_legacy_visual_safe(
+                device,
+                pkg="pkg",
+                source_profile_username="ct",
+                expected_follower_username="cand",
+                visual_candidate_id="vc-1",
+                post_index=0,
+                likes_perf_phase_t0=time.perf_counter(),
+            )
+
+        self.assertFalse(out.get("ok"))
+        self.assertFalse(out.get("strict_grid_proof_ok"))
+        strict_probe.assert_not_called()
+
+    def test_legacy_visual_top_left_always_mode_runs_strict_probe_before_nominal_success(
+        self,
+    ) -> None:
+        device = mock.MagicMock()
+        device.window_size.return_value = (1080, 2340)
+
+        def _fake_screenshot(_d: object, path: str) -> None:
+            from PIL import Image
+
+            Image.new("RGB", (1080, 2340), "black").save(path)
+
+        with mock.patch.object(
+            nav, "visual_target_profile_lock_verify", return_value={"ok": True}
+        ), mock.patch.object(
+            nav,
+            "_followers_current_pkg_activity",
+            return_value={"current_activity": "profile", "current_package": "pkg"},
+        ), mock.patch.object(
+            nav,
+            "_post_follow_likes_grid_ui_surface_hints",
+            return_value={"profile_tabs_visible": True},
+        ), mock.patch.object(
+            nav, "_followers_profile_tabs_bottom_y_px", return_value=(900, "tabs")
+        ), mock.patch.object(
+            nav, "screenshot", side_effect=_fake_screenshot
+        ), mock.patch.object(
+            nav,
+            "_post_follow_likes_strict_top_left_xml_grid_proof",
+            return_value={"ok": True, "source": "xml_thumbnail_top_left"},
+        ) as strict_probe, mock.patch.object(
+            nav,
+            "_dynamic_first_post_grid_row_from_image",
+            return_value={
+                "ok": True,
+                "first_row_top": 1000,
+                "first_row_bottom": 1360,
+                "solid_count": 1,
+                "cell_h": 360,
+            },
+        ), mock.patch.object(
+            nav, "_visual_image_cell_luma_variance", return_value=180.0
+        ), mock.patch.object(
+            nav,
+            "_visual_wait_post_viewer_opened_after_tap",
+            return_value={
+                "post_detected": True,
+                "detect_reason": "like_unlike_ui",
+                "viewer_detect_path": "phase_a_like_unlike_fast",
+                "viewer_detect_total_ms": 120.0,
+            },
+        ), mock.patch.object(nav, "log"), mock.patch.object(
+            nav.config, "POST_FOLLOW_LIKE_STRICT_GRID_PROOF_MODE", "always", create=True
+        ), mock.patch.object(nav, "time") as tmock:
+            tmock.perf_counter = time.perf_counter
+            tmock.time = time.time
+            tmock.sleep = lambda *_a, **_k: None
+            out = nav._post_follow_likes_open_top_left_legacy_visual_safe(
+                device,
+                pkg="pkg",
+                source_profile_username="ct",
+                expected_follower_username="cand",
+                visual_candidate_id="vc-1",
+                post_index=0,
+                likes_perf_phase_t0=time.perf_counter(),
+            )
+
+        self.assertTrue(out.get("ok"))
+        self.assertTrue(out.get("strict_grid_proof_ok"))
+        strict_probe.assert_called_once()
 
     def test_top_left_xml_probe_retries_before_fail_on_estimate(self) -> None:
         device = mock.MagicMock()

@@ -52,6 +52,8 @@ FastRotationRunner = Callable[..., dict[str, Any]]
 H3_SUPPORTED_UNFOLLOW_MODES = frozenset({*UNFOLLOW_MODES_DB_STRICT, UNFOLLOW_MODE_ANY})
 FOLLOW_TARGET_MAX_TARGETS_PER_RUN_ENV = "FOLLOW_TARGET_ROTATION_MAX_TARGETS_PER_RUN"
 FOLLOW_TARGET_MAX_FOLLOWS_PER_TARGET_ENV = "FOLLOW_TARGET_MAX_FOLLOWS_PER_TARGET_PER_RUN"
+FOLLOW_SOURCE_ROTATION_CONTRACT_MAX_FOLLOWS_PER_TARGET_PER_RUN = 30
+FOLLOW_SOURCE_ROTATION_CONTRACT_MAX_TARGETS_PER_RUN = 4
 FOLLOW_TARGET_EXHAUSTION_EXIT_CODES = frozenset({66})
 FOLLOW_TARGET_EXHAUSTION_TOKENS = frozenset(
     {
@@ -347,6 +349,52 @@ def _resolve_follow_source_rotation_settings(account_id: str) -> dict[str, Any]:
         ),
         "bounds": fallback["bounds"],
     }
+
+
+def _log_follow_source_rotation_contract_if_needed(
+    *,
+    account_id: str,
+    account_username: str,
+    run_id: str,
+    rotation_settings: dict[str, Any],
+    supabase_mode: bool,
+) -> bool:
+    if not bool(supabase_mode):
+        return False
+    settings_source = str(rotation_settings.get("settings_source") or "").strip()
+    try:
+        actual_max_follows = int(rotation_settings.get("max_follows_per_target_per_run") or 0)
+    except (TypeError, ValueError):
+        actual_max_follows = 0
+    try:
+        actual_max_targets = int(rotation_settings.get("max_targets_per_run") or 0)
+    except (TypeError, ValueError):
+        actual_max_targets = 0
+    expected_max_follows = int(FOLLOW_SOURCE_ROTATION_CONTRACT_MAX_FOLLOWS_PER_TARGET_PER_RUN)
+    expected_max_targets = int(FOLLOW_SOURCE_ROTATION_CONTRACT_MAX_TARGETS_PER_RUN)
+    contract_ok = (
+        settings_source == "account"
+        and actual_max_follows == expected_max_follows
+        and actual_max_targets == expected_max_targets
+    )
+    if contract_ok:
+        return False
+    log(
+        "warning",
+        "follow_source_rotation_contract_missing_account_settings",
+        account_id=str(account_id or ""),
+        account_username=str(account_username or ""),
+        run_id=str(run_id or ""),
+        expected_max_follows_per_target_per_run=expected_max_follows,
+        expected_max_targets_per_run=expected_max_targets,
+        actual_settings_source=settings_source,
+        actual_max_follows_per_target_per_run=actual_max_follows,
+        actual_max_targets_per_run=actual_max_targets,
+        repair_table="account_follow_source_settings",
+        repair_required=True,
+        db_mutation_performed=False,
+    )
+    return True
 
 
 def _last_follow_engine_summary(run_followers_list_engine_session: FollowEngineRunner) -> dict[str, Any]:
@@ -2963,6 +3011,13 @@ def run_account_session(
                 max_targets_per_run=rotation_settings["max_targets_per_run"],
                 settings_source=rotation_settings["settings_source"],
                 bounds=rotation_settings["bounds"],
+            )
+            _log_follow_source_rotation_contract_if_needed(
+                account_id=aid,
+                account_username=uname,
+                run_id=run_id,
+                rotation_settings=rotation_settings,
+                supabase_mode=supabase_mode,
             )
             _startup_timing_log(
                 "startup_timing_target_selection_completed",
