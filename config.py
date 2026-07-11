@@ -75,7 +75,7 @@ RUN_CONTROL_DISPATCHER_LEASE_SECONDS = _env_int("RUN_CONTROL_DISPATCHER_LEASE_SE
 RUN_CONTROL_DISPATCHER_HEARTBEAT_SECONDS = _env_float("RUN_CONTROL_DISPATCHER_HEARTBEAT_SECONDS", 20.0)
 RUN_CONTROL_DISPATCHER_ALLOWED_RUN_TYPES = _env_str(
     "RUN_CONTROL_DISPATCHER_ALLOWED_RUN_TYPES",
-    "account_session,outreach_session,login_provisioning,login_email_code_resume",
+    "account_session,outreach_session,login_provisioning,login_email_code_resume,login_orphan_challenge_recovery,scheduled_session_preflight",
 )
 RUN_CONTROL_DISPATCHER_TEST_ACCOUNT_IDS = _env_str("RUN_CONTROL_DISPATCHER_TEST_ACCOUNT_IDS", "")
 RUN_CONTROL_DISPATCHER_SUBPROCESS_TIMEOUT_SECONDS = _env_int(
@@ -146,9 +146,7 @@ INSTAGRAM_ACCOUNT_STATUS_TIMEOUT_SECONDS = _env_float(
 INCIDENT_NOTIFICATIONS_ENABLED = _env_bool("INCIDENT_NOTIFICATIONS_ENABLED", False)
 INCIDENT_NOTIFICATIONS_FAIL_OPEN = _env_bool("INCIDENT_NOTIFICATIONS_FAIL_OPEN", True)
 INCIDENT_NOTIFICATIONS_DRY_RUN = _env_bool("INCIDENT_NOTIFICATIONS_DRY_RUN", True)
-# P2: Slack AND Discord are both candidates by default; actual enablement is
-# governed by the canonical incident_notification_channel_settings rows.
-INCIDENT_NOTIFICATIONS_CHANNELS = _env_str("INCIDENT_NOTIFICATIONS_CHANNELS", "slack,discord")
+INCIDENT_NOTIFICATIONS_CHANNELS = _env_str("INCIDENT_NOTIFICATIONS_CHANNELS", "slack")
 INCIDENT_NOTIFICATIONS_SLACK_ENABLED = _env_bool(
     "INCIDENT_NOTIFICATIONS_SLACK_ENABLED",
     True,
@@ -168,13 +166,6 @@ INCIDENT_NOTIFICATIONS_COOLDOWN_MINUTES = _env_int(
 )
 SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL", "").strip()
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
-INCIDENT_NOTIFICATIONS_HTTP_TIMEOUT_SECONDS = _env_int(
-    "INCIDENT_NOTIFICATIONS_HTTP_TIMEOUT_SECONDS",
-    10,
-)
-# P2 canonical channel settings: webhooks live encrypted in
-# incident_notification_channel_settings (managed by the admin dashboard).
-# Env webhooks are only a legacy fallback and are disabled by default.
 INCIDENT_NOTIFICATIONS_CANONICAL_SETTINGS = _env_bool(
     "INCIDENT_NOTIFICATIONS_CANONICAL_SETTINGS",
     True,
@@ -187,16 +178,11 @@ INCIDENT_NOTIFICATION_WEBHOOK_ENCRYPTION_KEY = os.getenv(
     "INCIDENT_NOTIFICATION_WEBHOOK_ENCRYPTION_KEY",
     "",
 ).strip()
-# Bounded webhook retries for the canonical notifier outbox.
-INCIDENT_NOTIFICATIONS_MAX_ATTEMPTS = _env_int("INCIDENT_NOTIFICATIONS_MAX_ATTEMPTS", 3)
-# Secure internal link base for Slack/Discord messages (admin dashboard origin,
-# e.g. https://example.com). Empty => the dashboard link line is omitted.
-INCIDENT_NOTIFICATIONS_DASHBOARD_BASE_URL = os.getenv(
-    "INCIDENT_NOTIFICATIONS_DASHBOARD_BASE_URL",
-    "",
-).strip().rstrip("/")
-# Long-lived canonical notifier service loop interval.
-INCIDENT_NOTIFIER_INTERVAL_SECONDS = _env_int("INCIDENT_NOTIFIER_INTERVAL_SECONDS", 60)
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+INCIDENT_NOTIFICATIONS_HTTP_TIMEOUT_SECONDS = _env_int(
+    "INCIDENT_NOTIFICATIONS_HTTP_TIMEOUT_SECONDS",
+    10,
+)
 
 # ADBKeyboard (optional). Low-latency ADB_INPUT_TEXT broadcast when installed.
 FAST_IME = "com.android.adbkeyboard/.AdbIME"

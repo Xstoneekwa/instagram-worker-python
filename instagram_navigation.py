@@ -34945,6 +34945,247 @@ def _followers_entry_v2_raw_metric_tap_strategies(
     return out
 
 
+_FOLLOWERS_ENTRY_SEARCH_RECOVERY_FAILURE_REASONS = (
+    "exact_search_row_not_found",
+    "exact_search_row_tap_failed",
+    "profile_not_confirmed_after_search_row_tap",
+)
+
+
+def _followers_entry_hierarchy_xml_has_row_search_marker(hierarchy_xml: str) -> bool:
+    xml_l = (hierarchy_xml or "").lower()
+    return "row_search_" in xml_l or ROW_SEARCH_USER_USERNAME_RES_NAME in xml_l
+
+
+def _followers_entry_hierarchy_has_search_bar_active(hierarchy_xml: str) -> bool:
+    xml_l = (hierarchy_xml or "").lower()
+    for marker in (
+        "action_bar_search_edit_text",
+        "row_search_edit_text",
+        "search_bar",
+        "tab_bar_search",
+    ):
+        if marker in xml_l:
+            return True
+    return False
+
+
+def _followers_entry_hierarchy_profile_stats_band_present(hierarchy_xml: str) -> bool:
+    xml_l = (hierarchy_xml or "").lower()
+    return any(
+        marker in xml_l
+        for marker in (
+            "profile_header_followers",
+            "profile_header_following",
+            "profile_header_post_count",
+            "profile_header_familiar_followers",
+        )
+    )
+
+
+def _followers_entry_profile_stats_band_present(
+    d: u2.Device,
+    *,
+    w: int,
+    h: int,
+) -> bool:
+    try:
+        band = _collect_profile_stats_band_texts(d, w, h)
+    except Exception:
+        return False
+    for row in band:
+        label = (
+            str(row.get("raw_text") or row.get("text") or row.get("content_desc") or "")
+            .strip()
+        )
+        if _followers_label_match(label):
+            return True
+    return False
+
+
+def _followers_entry_search_surface_detected_before_profile_entry(
+    d: u2.Device,
+    *,
+    source_profile_username: str,
+    pkg: str,
+    hierarchy_xml: str | None = None,
+) -> tuple[bool, dict[str, Any]]:
+    """
+    True when the UI looks like global Search results instead of a confirmed CT profile.
+    Requires row_search markers, an active search bar signal, and no profile stats band.
+    """
+    hier = (hierarchy_xml or "").strip()
+    if not hier:
+        try:
+            hier = d.dump_hierarchy(compressed=True) or ""
+        except Exception:
+            hier = ""
+
+    has_row_search = _followers_entry_hierarchy_xml_has_row_search_marker(hier)
+    if not has_row_search:
+        try:
+            has_row_search = bool(
+                find_username_elements_by_resource_id(d, source_profile_username)
+            )
+        except Exception:
+            has_row_search = False
+
+    stats_present = _followers_entry_hierarchy_profile_stats_band_present(hier)
+    if not stats_present:
+        try:
+            w, h = d.window_size()
+        except Exception:
+            w, h = 1080, 2340
+        stats_present = _followers_entry_profile_stats_band_present(d, w=int(w), h=int(h))
+
+    search_bar_active = _followers_entry_hierarchy_has_search_bar_active(hier)
+    if not search_bar_active:
+        try:
+            search_bar_active = _wait_search_edittext(d) is not None
+        except Exception:
+            search_bar_active = False
+
+    action_bar_title = ""
+    if hier:
+        action_bar_title = _followers_entry_v2_action_bar_title_from_hierarchy_xml(hier)
+    srcn = _normalize_handle(str(source_profile_username or ""))
+    abn = _normalize_handle(action_bar_title) if action_bar_title else ""
+    if stats_present and abn and srcn and abn == srcn:
+        return False, {
+            "reason": "profile_already_confirmed",
+            "action_bar_title": action_bar_title,
+            "has_row_search": bool(has_row_search),
+            "stats_band_present": True,
+            "search_bar_active": bool(search_bar_active),
+        }
+
+    detected = bool(has_row_search and not stats_present and search_bar_active)
+    if not detected:
+        return False, {
+            "reason": "search_surface_not_detected",
+            "action_bar_title": action_bar_title,
+            "has_row_search": bool(has_row_search),
+            "stats_band_present": bool(stats_present),
+            "search_bar_active": bool(search_bar_active),
+        }
+
+    return True, {
+        "reason": "search_surface_before_profile_entry",
+        "action_bar_title": action_bar_title,
+        "has_row_search": True,
+        "stats_band_present": False,
+        "search_bar_active": True,
+    }
+
+
+def _followers_entry_recover_source_profile_from_search_surface(
+    d: u2.Device,
+    source_profile_username: str,
+    pkg: str,
+    *,
+    phase: str,
+    detection_meta: dict[str, Any] | None = None,
+) -> tuple[bool, str]:
+    log(
+        "info",
+        "followers_entry_profile_recovery_attempted",
+        source_profile_username=source_profile_username,
+        package=pkg,
+        phase=phase,
+        detection_reason=str((detection_meta or {}).get("reason") or "")[:120],
+        action_bar_title=str((detection_meta or {}).get("action_bar_title") or "")[:120],
+    )
+    target_el = find_first_row_search_username_hot(d, source_profile_username)
+    if target_el is None:
+        try:
+            matches = find_username_elements_by_resource_id(d, source_profile_username)
+        except Exception:
+            matches = []
+        if matches:
+            target_el = matches[0][0]
+    if target_el is None:
+        log(
+            "warning",
+            "followers_entry_profile_recovery_failed",
+            source_profile_username=source_profile_username,
+            package=pkg,
+            phase=phase,
+            reason="exact_search_row_not_found",
+        )
+        return False, "exact_search_row_not_found"
+
+    try:
+        target_el.click()
+    except Exception as e:
+        log(
+            "warning",
+            "followers_entry_profile_recovery_failed",
+            source_profile_username=source_profile_username,
+            package=pkg,
+            phase=phase,
+            reason="exact_search_row_tap_failed",
+            error=str(e)[:160],
+        )
+        return False, "exact_search_row_tap_failed"
+
+    if verify_profile(d, source_profile_username):
+        log(
+            "info",
+            "followers_entry_profile_recovery_confirmed",
+            source_profile_username=source_profile_username,
+            package=pkg,
+            phase=phase,
+        )
+        return True, "profile_recovery_confirmed"
+
+    log(
+        "warning",
+        "followers_entry_profile_recovery_failed",
+        source_profile_username=source_profile_username,
+        package=pkg,
+        phase=phase,
+        reason="profile_not_confirmed_after_search_row_tap",
+    )
+    return False, "profile_not_confirmed_after_search_row_tap"
+
+
+def _followers_entry_maybe_recover_ct_profile_from_search_surface(
+    d: u2.Device,
+    source_profile_username: str,
+    pkg: str,
+    *,
+    phase: str,
+    hierarchy_xml: str | None = None,
+) -> tuple[bool, str]:
+    detected, detection_meta = _followers_entry_search_surface_detected_before_profile_entry(
+        d,
+        source_profile_username=source_profile_username,
+        pkg=pkg,
+        hierarchy_xml=hierarchy_xml,
+    )
+    if not detected:
+        return False, str(detection_meta.get("reason") or "search_surface_not_detected")
+
+    log(
+        "info",
+        "followers_entry_search_surface_detected_before_profile_entry",
+        source_profile_username=source_profile_username,
+        package=pkg,
+        phase=phase,
+        action_bar_title=str(detection_meta.get("action_bar_title") or "")[:120],
+        has_row_search=bool(detection_meta.get("has_row_search")),
+        stats_band_present=bool(detection_meta.get("stats_band_present")),
+        search_bar_active=bool(detection_meta.get("search_bar_active")),
+    )
+    return _followers_entry_recover_source_profile_from_search_surface(
+        d,
+        source_profile_username,
+        pkg,
+        phase=phase,
+        detection_meta=detection_meta,
+    )
+
+
 def _followers_entry_v2_still_on_source_profile_surface(
     det: dict[str, Any],
     *,
@@ -35985,6 +36226,42 @@ def open_followers_list_from_profile(
         )
         _followers_open_emit_failure(fmeta)
         return False, fmeta
+
+    search_rec_ok, search_rec_reason = _followers_entry_maybe_recover_ct_profile_from_search_surface(
+        d,
+        source_profile_username,
+        pkg,
+        phase="open_followers_list_from_profile",
+    )
+    if search_rec_ok:
+        profile_verified = True
+        screen_guess = _guess_profile_screen(d, pkg, source_profile_username)
+    elif search_rec_reason not in (
+        "search_surface_not_detected",
+        "profile_already_confirmed",
+    ):
+        cap = _followers_debug_capture(d, "followers_entry_search_profile_recovery_failed")
+        tap_diag_rec: dict[str, Any] = {
+            "stats_band_texts": [],
+            "profile_stats_visible": [],
+            "followers_stat_text_dump": [],
+            "search_profile_recovery_reason": search_rec_reason,
+        }
+        fmeta_rec = _followers_open_build_failure_meta(
+            source_profile_username=source_profile_username,
+            failure_reason="followers_entry_profile_recovery_failed",
+            profile_verified=profile_verified,
+            pkg_meta=pkg_meta,
+            screen_guess=screen_guess,
+            tap_diag=tap_diag_rec,
+            after_tap_screen_snapshot={},
+            last_poll_snapshot={},
+            cap=cap,
+            open_method="search_profile_recovery_abort",
+            used_coord_fallback=False,
+        )
+        _followers_open_emit_failure(fmeta_rec)
+        return False, fmeta_rec
 
     if (
         bool(getattr(config, "ENABLE_FOLLOWERS_ENTRY_ENGINE_V2", False))
@@ -47093,6 +47370,33 @@ def return_to_followers_list(
         "followers_list_reopen_fallback",
         source_profile_username=source_profile_username,
     )
+    search_rec_ok, search_rec_reason = _followers_entry_maybe_recover_ct_profile_from_search_surface(
+        d,
+        source_profile_username,
+        pkg,
+        phase="return_to_followers_list",
+    )
+    if search_rec_ok:
+        followers_session_clear_list_committed_open(source_profile_username)
+        ok_reopen, _reopen_meta = open_followers_list_from_profile(
+            d, source_profile_username, pkg, profile_verified=True
+        )
+        if ok_reopen:
+            log(
+                "info",
+                "followers_list_recovered",
+                source_profile_username=source_profile_username,
+                method="reopen_after_search_profile_recovery",
+            )
+            return True, "reopen_after_search_profile_recovery"
+    elif search_rec_reason in _FOLLOWERS_ENTRY_SEARCH_RECOVERY_FAILURE_REASONS:
+        log(
+            "error",
+            "followers_list_return_failed",
+            source_profile_username=source_profile_username,
+            recovery_reason=search_rec_reason,
+        )
+        return False, "search_profile_recovery_failed"
     if verify_profile(d, source_profile_username):
         followers_session_clear_list_committed_open(source_profile_username)
         ok_reopen, _reopen_meta = open_followers_list_from_profile(

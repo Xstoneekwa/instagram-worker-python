@@ -37,7 +37,7 @@ from assignment_dispatch_resolver import resolve_account_assignment_runtime_cont
 from account_commercial_policy import evaluate_queued_run_commercial_policy
 from account_commercial_policy import evaluate_queued_run_commercial_policy, sensitive_log_fields
 from auto_restart_dispatcher_tick import run_auto_restart_dispatcher_tick, should_run_auto_restart_tick
-from auto_restart_device_lock import acquire_device_lock, release_device_lock, release_device_lock_for_request, renew_device_lock, transfer_device_lock, reconcile_stale_device_ui_leases
+from auto_restart_device_lock import acquire_device_lock, release_device_lock, release_device_lock_for_request, renew_device_lock, transfer_device_lock
 from auto_restart_runtime import (
     is_auto_restart_request,
     is_hard_stop_reason,
@@ -46,21 +46,13 @@ from auto_restart_runtime import (
     validate_auto_restart_request_at_claim,
 )
 from logs import log
-import runtime_incidents
 import supabase_client
-from runtime_incident_matrix import (
-    build_run_failure_incident_payload,
-    classify_terminal_run_failure,
-)
 
 LOGIN_RUN_TYPES = frozenset({"login_provisioning", "login_email_code_resume"})
 ORPHAN_RECOVERY_RUN_TYPE = "login_orphan_challenge_recovery"
 DEVICE_BOUND_RUN_TYPES = frozenset({
     "account_session",
     "outreach_session",
-    "login_provisioning",
-    "login_email_code_resume",
-    "login_orphan_challenge_recovery",
     "scheduled_session_preflight",
 })
 PREFLIGHT_RUN_TYPE = "scheduled_session_preflight"
@@ -423,14 +415,9 @@ def _build_scheduled_session_preflight_command(
     meta = dict(metadata_safe or {})
     username = str(expected_username or meta.get("expected_username") or "").strip()
     if not username:
-        try:
-            from supabase_client import get_account_username
-
-            username = str(get_account_username(account_id) or "").strip()
-        except Exception:
-            username = ""
+        username = _load_expected_username(account_id)
     runner_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scheduled_session_preflight_runner.py")
-    cmd = [
+    return [
         sys.executable,
         runner_path,
         "--account-id",
@@ -448,7 +435,6 @@ def _build_scheduled_session_preflight_command(
         "--metadata-json",
         json.dumps(meta, separators=(",", ":"), sort_keys=True),
     ]
-    return cmd
 
 
 def _load_expected_username(account_id: str) -> str:
@@ -608,9 +594,6 @@ def _build_runner_command(
     serial = str(device_serial or "").strip()
     if serial:
         cmd.extend(["--device-serial", serial])
-    # Assignment-resolved clone package must reach the runner explicitly:
-    # without it the runner falls back to the primary com.instagram.android
-    # and the identity preflight safe-stops (exit 75) on clone-assigned accounts.
     package = str(package_name or "").strip()
     if package:
         cmd.extend(["--package-name", package])
@@ -874,228 +857,6 @@ def _reconcile_linked_run(
     return result
 
 
-def _update_incident_recovery_state(
-    incident_id: str,
-    *,
-    state: str,
-    resolve: bool = False,
-    extra: dict[str, Any] | None = None,
-) -> None:
-    """Best-effort: merge a recovery state block into one incident's metadata.
-
-    Used by the P3 human-confirmed resume flow to keep the operator-visible
-    recovery state (`resume_requested` / `reintervention_required` /
-    `resume_succeeded`) on the original incident. Never raises.
-    """
-    iid = str(incident_id or "").strip()
-    if not iid:
-        return
-    try:
-        rows = supabase_client._request_json(
-            "GET",
-            "account_incidents",
-            query={"select": "id,metadata,status", "id": f"eq.{iid}", "limit": "1"},
-        ) or []
-        if not rows:
-            return
-        current = dict(rows[0])
-        metadata = dict(current.get("metadata") or {})
-        recovery = dict(metadata.get("recovery") or {})
-        recovery.update(
-            {
-                "state": state,
-                "updated_at": _utc_now_iso(),
-                **(extra or {}),
-            }
-        )
-        metadata["recovery"] = recovery
-        patch: dict[str, Any] = {
-            "metadata": metadata,
-            "updated_at": _utc_now_iso(),
-        }
-        if resolve and str(current.get("status") or "") in {"open", "acknowledged"}:
-            patch["status"] = "resolved"
-            patch["resolved_at"] = _utc_now_iso()
-        supabase_client._request_json(
-            "PATCH",
-            "account_incidents",
-            query={"id": f"eq.{iid}"},
-            body=patch,
-        )
-        log(
-            "info",
-            "incident_recovery_state_updated",
-            incident_id=iid,
-            recovery_state=state,
-            resolved=bool(patch.get("status") == "resolved"),
-        )
-    except Exception as exc:
-        log(
-            "warning",
-            "incident_recovery_state_update_failed",
-            incident_id=iid,
-            recovery_state=state,
-            error=str(exc)[:300],
-        )
-
-
-def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _publish_run_failure_incident(
-    *,
-    request_id: str,
-    account_id: str,
-    run_id: str | None,
-    run_type: str | None,
-    exit_code: int,
-    timed_out: bool,
-    canceled: bool,
-    request_metadata: dict[str, Any] | None = None,
-) -> None:
-    """Canonical incident publication point for terminal run failures (P2).
-
-    Reads the structured ``performance_summary`` the runner persisted on the
-    linked run (never raw text logs), classifies the true reason via the
-    canonical matrix, and upserts one deduplicated ``account_incidents`` row.
-    Best-effort: any failure here is logged and never affects run finalization.
-
-    P3: a failed human-confirmed resume run enriches the ORIGINAL incident
-    (same dedupe key) instead of opening a new one, and flips its recovery
-    state to ``reintervention_required``. No automatic loop ever follows.
-    """
-    try:
-        run_status: str | None = None
-        performance_summary: dict[str, Any] | None = None
-        if run_id:
-            try:
-                run_row = supabase_client.load_run_row(run_id) or {}
-                run_status = str(run_row.get("status") or "").strip() or None
-                raw_summary = run_row.get("performance_summary")
-                if isinstance(raw_summary, dict):
-                    performance_summary = raw_summary
-            except Exception as exc:
-                log(
-                    "warning",
-                    "run_incident_summary_load_failed",
-                    account_id=account_id,
-                    request_id=request_id,
-                    run_id=run_id,
-                    error=str(exc)[:300],
-                )
-        decision = classify_terminal_run_failure(
-            exit_code=exit_code,
-            timed_out=timed_out,
-            run_status=run_status,
-            canceled=canceled,
-            performance_summary=performance_summary,
-        )
-        log(
-            "info",
-            "run_incident_classified",
-            account_id=account_id,
-            request_id=request_id,
-            run_id=run_id,
-            run_type=run_type or None,
-            exit_code=exit_code,
-            timed_out=timed_out,
-            **decision.to_log_fields(),
-        )
-        if not decision.should_publish:
-            return
-        meta = dict(request_metadata or {})
-        recovery_resume = (
-            str(meta.get("recovery_mode") or "") == "human_confirmed_resume"
-        )
-        original_run_id = str(
-            meta.get("original_run_id") or meta.get("prior_run_id") or ""
-        ).strip()
-        original_incident_id = str(meta.get("incident_id") or "").strip()
-        account_username: str | None = None
-        try:
-            account_username = supabase_client.get_account_username(account_id) or None
-        except Exception:
-            account_username = None
-        incident_run_id = run_id
-        if recovery_resume and original_run_id:
-            # Enrich the original incident: same dedupe key, resume run kept
-            # visible in metadata. Notifier dedupe per incident prevents any
-            # duplicate Slack/Discord spam.
-            incident_run_id = original_run_id
-            if run_id and run_id != original_run_id:
-                decision.metadata_safe["resume_run_id"] = str(run_id)
-            decision.metadata_safe["recovery_mode"] = "human_confirmed_resume"
-        payload = build_run_failure_incident_payload(
-            decision,
-            account_id=account_id,
-            account_username=account_username,
-            run_id=incident_run_id,
-            run_request_id=request_id,
-            run_type=run_type,
-        )
-        result = runtime_incidents.publish_account_incident(**payload)
-        log(
-            "info",
-            "run_incident_publish_result",
-            account_id=account_id,
-            request_id=request_id,
-            run_id=run_id,
-            incident_type=decision.incident_type,
-            reason_code=decision.reason_code,
-            published=bool(result.get("published")),
-            publish_reason=result.get("reason"),
-            incident_id=result.get("incident_id"),
-            occurrence_count=result.get("occurrence_count"),
-            recovery_resume=recovery_resume or None,
-        )
-        # P3: keep the canonical per-run resume plan aligned with the terminal
-        # outcome (best-effort, account_session scope only).
-        if str(run_type or "").strip().lower() == "account_session":
-            try:
-                from account_session_resume_plan_store import (
-                    mark_resume_outcome,
-                    record_terminal_failure,
-                )
-
-                if recovery_resume and original_run_id:
-                    mark_resume_outcome(
-                        original_run_id=original_run_id,
-                        succeeded=False,
-                        reason_code=decision.reason_code,
-                    )
-                    _update_incident_recovery_state(
-                        original_incident_id or str(result.get("incident_id") or ""),
-                        state="reintervention_required",
-                        extra={"last_resume_run_id": run_id or None},
-                    )
-                elif run_id:
-                    record_terminal_failure(
-                        run_id=run_id,
-                        incident_type=decision.incident_type,
-                        reason_code=decision.reason_code,
-                        incident_id=str(result.get("incident_id") or "") or None,
-                    )
-            except Exception as exc:
-                log(
-                    "warning",
-                    "resume_plan_terminal_sync_failed",
-                    account_id=account_id,
-                    request_id=request_id,
-                    run_id=run_id,
-                    error=str(exc)[:300],
-                )
-    except Exception as exc:
-        log(
-            "warning",
-            "run_incident_publish_unexpected_error",
-            account_id=account_id,
-            request_id=request_id,
-            run_id=run_id,
-            error=str(exc)[:300],
-        )
-
-
 def _finalize_manual_run_after_subprocess(
     cfg: DispatcherConfig,
     *,
@@ -1113,11 +874,6 @@ def _finalize_manual_run_after_subprocess(
         or ""
     ).strip().lower()
     canceled = bool(latest.get("cancel_requested_at")) or str(latest.get("status") or "").strip().lower() == "canceled"
-    request_metadata = dict(
-        latest.get("metadata_safe")
-        or (request_snapshot or {}).get("metadata_safe")
-        or {}
-    )
 
     if timed_out:
         _safe_complete_account_run_request(
@@ -1141,16 +897,6 @@ def _finalize_manual_run_after_subprocess(
             message="Worker subprocess exceeded dispatcher timeout.",
             run_id=run_id,
             payload={"request_id": request_id},
-        )
-        _publish_run_failure_incident(
-            request_id=request_id,
-            account_id=account_id,
-            run_id=run_id,
-            run_type=run_type,
-            exit_code=exit_code,
-            timed_out=True,
-            canceled=canceled,
-            request_metadata=request_metadata,
         )
         return
 
@@ -1180,39 +926,6 @@ def _finalize_manual_run_after_subprocess(
             request_id=request_id,
             exit_code=exit_code,
         )
-        # P3: a successful human-confirmed resume closes the recovery loop:
-        # the resume plan is marked succeeded and the original incident is
-        # resolved with an auditable recovery state. Best-effort.
-        if str(request_metadata.get("recovery_mode") or "") == "human_confirmed_resume":
-            original_run_id = str(
-                request_metadata.get("original_run_id")
-                or request_metadata.get("prior_run_id")
-                or ""
-            ).strip()
-            original_incident_id = str(request_metadata.get("incident_id") or "").strip()
-            try:
-                from account_session_resume_plan_store import mark_resume_outcome
-
-                if original_run_id:
-                    mark_resume_outcome(
-                        original_run_id=original_run_id,
-                        succeeded=True,
-                    )
-                _update_incident_recovery_state(
-                    original_incident_id,
-                    state="resume_succeeded",
-                    resolve=True,
-                    extra={"last_resume_run_id": run_id or None},
-                )
-            except Exception as exc:
-                log(
-                    "warning",
-                    "resume_success_sync_failed",
-                    account_id=account_id,
-                    request_id=request_id,
-                    run_id=run_id,
-                    error=str(exc)[:300],
-                )
         summary = _safe_login_provisioner_summary_for_audit(run_id or request_id)
         _audit(
             account_id=account_id,
@@ -1356,16 +1069,6 @@ def _finalize_manual_run_after_subprocess(
             **({"login_provisioner_summary": summary} if summary else {}),
         },
     )
-    _publish_run_failure_incident(
-        request_id=request_id,
-        account_id=account_id,
-        run_id=run_id,
-        run_type=run_type,
-        exit_code=exit_code,
-        timed_out=False,
-        canceled=canceled,
-        request_metadata=request_metadata,
-    )
 
 
 def _terminate_subprocess(proc: subprocess.Popen[Any]) -> int:
@@ -1459,18 +1162,32 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
     ok_assignment, assignment_reason, dispatch_ctx = _validate_assignment(account_id, run_type, cfg)
     safe_dispatch = sensitive_log_fields(dispatch_ctx)
     if not ok_assignment:
+        error_code = assignment_reason or "assignment_blocked"
+        if (
+            _is_scheduled_session_preflight_run_type(run_type)
+            and error_code == "assignment_device_missing_adb_serial"
+        ):
+            from scheduled_session_preflight_control import terminalize_scheduled_session_preflight_request
+
+            terminalize_scheduled_session_preflight_request(
+                request=request,
+                worker_id=cfg.worker_id,
+                preflight_status="preflight_blocked",
+                reason_code="device_serial_missing",
+            )
+            error_code = "device_serial_missing"
         _safe_complete_account_run_request(
             request_id,
             cfg.worker_id,
             "blocked",
-            error_code=assignment_reason or "assignment_blocked",
-            error_message_safe=f"Assignment blocked: {assignment_reason or 'assignment_blocked'}.",
+            error_code=error_code,
+            error_message_safe=f"Assignment blocked: {error_code}.",
         )
         _audit(
             account_id=account_id,
             action_type="manual_run_blocked",
             status="blocked",
-            message=f"Assignment blocked: {assignment_reason or 'assignment_blocked'}.",
+            message=f"Assignment blocked: {error_code}.",
             payload={"request_id": request_id, "assignment": safe_dispatch},
         )
         return
@@ -1497,6 +1214,29 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
             payload={"request_id": request_id, "policy": policy_ctx},
         )
         return
+
+    if _is_scheduled_session_preflight_run_type(run_type):
+        from scheduled_session_preflight_control import (
+            evaluate_scheduled_session_preflight_claim,
+            terminalize_scheduled_session_preflight_request,
+        )
+
+        ok_preflight, terminal_status, terminal_reason = evaluate_scheduled_session_preflight_claim(request=request)
+        if not ok_preflight:
+            terminalize_scheduled_session_preflight_request(
+                request=request,
+                worker_id=cfg.worker_id,
+                preflight_status=str(terminal_status or "preflight_invalidated"),
+                reason_code=str(terminal_reason or "preflight_unavailable"),
+            )
+            _audit(
+                account_id=account_id,
+                action_type="manual_run_blocked",
+                status="blocked",
+                message=f"Scheduled session preflight terminalized: {terminal_reason or terminal_status}.",
+                payload={"request_id": request_id, "run_type": run_type, "reason": terminal_reason},
+            )
+            return
 
     adb_serial = str(dispatch_ctx.get("adb_serial") or "").strip()
     log(
@@ -1594,7 +1334,7 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
                     request_id,
                     cfg.worker_id,
                     "blocked",
-                    error_code="device_lease_unavailable",
+                    error_code="device_lock_held",
                     error_message_safe="Manual run blocked: assigned phone is reserved by another active session.",
                 )
                 _audit(
@@ -1630,6 +1370,33 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
             message="Login run blocked: assigned device serial is required.",
             payload={"request_id": request_id, "run_type": run_type},
         )
+        return
+
+    if _is_scheduled_session_preflight_run_type(run_type) and not adb_serial:
+        from scheduled_session_preflight_control import terminalize_scheduled_session_preflight_request
+
+        terminalize_scheduled_session_preflight_request(
+            request=request,
+            worker_id=cfg.worker_id,
+            preflight_status="preflight_blocked",
+            reason_code="device_serial_missing",
+        )
+        _safe_complete_account_run_request(
+            request_id,
+            cfg.worker_id,
+            "blocked",
+            error_code="device_serial_missing",
+            error_message_safe="Scheduled session preflight blocked: device serial missing.",
+        )
+        _audit(
+            account_id=account_id,
+            action_type="manual_run_blocked",
+            status="blocked",
+            message="Scheduled session preflight blocked: device serial missing.",
+            payload={"request_id": request_id, "run_type": run_type, "assignment": safe_dispatch},
+        )
+        if device_lock_active and device_id:
+            release_device_lock(device_id=device_id, worker_id=lock_owner_worker_id, request_id=request_id)
         return
 
     if run_type == "login_email_code_resume":
@@ -1690,14 +1457,6 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
         if _is_login_run_type(run_type) or _is_orphan_recovery_run_type(run_type)
         else runner_subprocess_env()
     )
-    if run_type == "account_session":
-        from session_transition_buffer import resolve_business_action_deadline
-
-        deadline = resolve_business_action_deadline(request_metadata, dispatch_ctx)
-        if deadline:
-            subprocess_env = {**subprocess_env, "BUSINESS_ACTION_DEADLINE": deadline}
-    if request_id:
-        subprocess_env = {**subprocess_env, "ACCOUNT_RUN_REQUEST_ID": request_id}
     if auto_restart_policy:
         subprocess_env = {**subprocess_env, **runner_env_for_resume_policy(auto_restart_policy)}
 
@@ -1775,9 +1534,26 @@ def run_once(cfg: DispatcherConfig | None = None) -> dict[str, Any]:
     _heartbeat(cfg, status="idle")
     reclaimed = reclaim_stale_account_run_requests(cfg.worker_id)
     try:
-        reconcile_stale_device_ui_leases(grace_seconds=0)
+        from scheduled_session_preflight_control import reconcile_stale_scheduled_session_preflight_requests
+
+        reconciled = reconcile_stale_scheduled_session_preflight_requests(
+            worker_id=cfg.worker_id,
+            allowed_run_types=cfg.allowed_run_types,
+        )
+        if reconciled:
+            log(
+                "info",
+                "scheduled_session_preflight_stale_reconciled",
+                worker_id=cfg.worker_id,
+                reconciled_count=reconciled,
+            )
     except Exception as exc:
-        log("warning", "device_ui_lease_reconcile_failed", error=str(exc))
+        log(
+            "warning",
+            "scheduled_session_preflight_reconcile_failed",
+            worker_id=cfg.worker_id,
+            error=str(exc)[:200],
+        )
 
     if cfg.health_only or not cfg.launch_enabled:
         return {"ok": True, "mode": "health_only", "reclaimed": reclaimed}
