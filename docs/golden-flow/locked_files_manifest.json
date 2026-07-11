@@ -1,0 +1,66 @@
+{
+  "name": "modern-worker-golden-flow-guard",
+  "version": 1,
+  "purpose": "Protect the modern production worker baseline from accidental Golden Flow regressions.",
+  "sanctuary_reference": {
+    "name": "Golden Flow 110s",
+    "mode": "read_only_reference",
+    "tag": "golden-follow-mute-like-returnct-110s-20260615",
+    "runtime_baseline_commit": "fb3dbc0",
+    "documentation_guard_commit": "7821803",
+    "evidence_commit": "86a01a6",
+    "physical_baseline_commit": "37c0cf1"
+  },
+  "modern_worker_baseline": {
+    "release_label": "b6fedca-preflight-keyguard",
+    "commit": "7224ccdafca39e4ab68bae3299e7004103f8071f",
+    "mode": "production_base"
+  },
+  "rules": [
+    "Do not modify Golden Flow 110s artifacts.",
+    "Do not cherry-pick, merge, or copy Golden Flow files into the modern worker.",
+    "Do not modify protected files without explicit Liam GO.",
+    "Keep any approved patch minimal and local.",
+    "Run the required non-regression tests before creating a worker release."
+  ],
+  "protected_files": [
+    {
+      "path": "instagram_navigation.py",
+      "reason": "Navigation, followers entry, follow, mute, post-follow likes, return CT, and recovery behavior."
+    },
+    {
+      "path": "follow_action_engine.py",
+      "reason": "Exact follow detection and follow action safety."
+    },
+    {
+      "path": "runner.py",
+      "reason": "Account session loop, run accounting, caps, cancellation, summaries, and continuation gates."
+    },
+    {
+      "path": "account_session_orchestrator.py",
+      "reason": "Modern account_session orchestration, Scheduler path, warmup, and product flow ordering."
+    },
+    {
+      "path": "tests/test_post_follow_like_samsung_fast.py",
+      "reason": "Post-follow like and return CT proof regression coverage."
+    },
+    {
+      "path": "tests/test_mute_engine_v2_sheet_levels.py",
+      "reason": "Mute sheet and dismiss proof regression coverage."
+    },
+    {
+      "path": "tests/test_follow_targets_runtime_p1b.py",
+      "reason": "Follow target runtime and next-candidate gate coverage."
+    },
+    {
+      "path": "tests/test_runtime_caps.py",
+      "reason": "Runtime cap and safety ceiling coverage."
+    }
+  ],
+  "required_tests_before_worker_release": [
+    "python -m unittest tests.test_post_follow_like_samsung_fast",
+    "python -m unittest tests.test_mute_engine_v2_sheet_levels",
+    "python -m unittest tests.test_follow_targets_runtime_p1b",
+    "python -m unittest tests.test_runtime_caps"
+  ]
+}
