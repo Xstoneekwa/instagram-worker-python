@@ -1,0 +1,114 @@
+{
+  "name": "golden-flow-prod-main-default-checkpoint",
+  "version": 1,
+  "checkpoint_date": "2026-07-11",
+  "purpose": "Lock the restored Golden Flow as production main default on b6fedca-plus-search-surface-recovery.",
+  "active_release": {
+    "label": "b6fedca-plus-search-surface-recovery",
+    "path": "/Users/admin/phonefarm-worker-releases/b6fedca-plus-search-surface-recovery",
+    "symlink": "/Users/admin/phonefarm-worker-current",
+    "phase1_commit": "4f7f8730a1fc5b6b27987616acfe0bca4df3e809",
+    "phase2_commit": "0a6f62d0452f34ae43e884497d496a116b06ff53",
+    "active_runtime_commit": "0a6f62d0452f34ae43e884497d496a116b06ff53",
+    "branch": "release/b6fedca-plus-search-surface-recovery"
+  },
+  "sanctuary_reference": {
+    "name": "Golden Flow 110s",
+    "mode": "read_only_reference",
+    "tag": "golden-follow-mute-like-returnct-110s-20260615",
+    "evidence_run_id": "fc65bace",
+    "do_not_modify": true
+  },
+  "rules": [
+    "Golden Follow/Mute/Like/Return CT is the main default flow.",
+    "Non-Golden additions remain fallback-only unless explicitly documented and approved.",
+    "Do not modify locked files without explicit Liam GO.",
+    "Do not modify _run_follow_target_rotation without explicit Liam GO.",
+    "Do not silently fall back to default 2/3 CT rotation for prod/scheduled accounts.",
+    "Run required_tests_before_release after any locked-file change.",
+    "Update this checkpoint manifest if core file hashes change."
+  ],
+  "locked_files": [
+    {
+      "path": "instagram_navigation.py",
+      "sha256": "9f2c77913e3c639ab4d8c06c6521794d4d1308a4d8807bc43740217486bc7b0e",
+      "role": "Golden open/follow/mute/like/return CT nominal path and documented fallbacks.",
+      "anti_regression_rule": "Search Recovery must not run pre-entry on profile_verified=True when mode=fallback. Return CT stale action bar must not be nominal when mode=off."
+    },
+    {
+      "path": "account_session_orchestrator.py",
+      "sha256": "4e1050fb5b8a1f8104cf2d69aa811ab54e82bbaf50deee0cf26a98459fe95a11",
+      "role": "Modern account_session orchestration, rotation settings load, CT contract log guard.",
+      "anti_regression_rule": "Do not modify _run_follow_target_rotation. Keep follow_source_rotation_contract_missing_account_settings logging."
+    },
+    {
+      "path": "follow_source_rotation_settings.py",
+      "sha256": "d01f305c2af6c5c8bc551f8b8d90f332edc8719417dee29bb67c93af95abe46c",
+      "role": "CT contract audit, idempotent provisioning, controlled repair.",
+      "anti_regression_rule": "No silent DB mutation during account_session runs. Repair requires repair_go=True."
+    },
+    {
+      "path": "supabase_client.py",
+      "sha256": "38080a3d42e04f61add5df13c06a6c73cb0f9510815a20e2e891a298f6cfd44f",
+      "role": "account_follow_source_settings read/ensure/upsert helpers.",
+      "anti_regression_rule": "ensure creates missing rows only; upsert reserved for explicit repair_go."
+    },
+    {
+      "path": "instagram_login_provisioner_orchestrator.py",
+      "sha256": "f5fb707e4057376892fed6cb459ee8e99b1790a55048b9393b23396e8e59c6b2",
+      "role": "Provisioning ready hook for CT contract row creation.",
+      "anti_regression_rule": "Provisioning ready must attempt idempotent 30/4 row creation without touching other settings tables."
+    },
+    {
+      "path": "config.py",
+      "sha256": "54d133fd2fabaa6accbe1a91e9cd4857b935a632dfe24645e8ceacdd19dbb40c",
+      "role": "Golden fallback mode defaults.",
+      "anti_regression_rule": "Defaults must remain: like strict=fallback, search recovery=fallback, return CT stale=off."
+    },
+    {
+      "path": "tests/test_golden_flow_open_follow_mute_return.py",
+      "sha256": "ecc1952b93911aab95cb4bc230c3add9cec1cc0c63a6d3d11be552c18bf98f4c",
+      "role": "Golden nominal path and mode helper regression tests.",
+      "anti_regression_rule": "Must pass before any navigation checkpoint change."
+    },
+    {
+      "path": "tests/test_follow_source_rotation_contract.py",
+      "sha256": "010b068dcf65117ee100ae5c955b376334f64211fa3f8a0a60755aafd1f3d311",
+      "role": "CT contract audit/provisioning/repair tests.",
+      "anti_regression_rule": "Must pass before any CT settings helper change."
+    },
+    {
+      "path": "tests/test_post_follow_like_samsung_fast.py",
+      "sha256": "b92130a6b96061200c92665cefd87a0eac2c8dcb6506722b9109a11e6ca8dd61",
+      "role": "Like Phase 1 fallback and return CT regression coverage.",
+      "anti_regression_rule": "Nominal like path must not require strict grid proof."
+    },
+    {
+      "path": "tests/test_followers_entry_search_surface_recovery.py",
+      "sha256": "e0faf25b3b4d28a41096564fb7537e5784f5eb64b282fbe2d4805ac9a840fddc",
+      "role": "Search Recovery fallback behavior tests.",
+      "anti_regression_rule": "Golden reopen must precede search recovery in return_to_followers_list."
+    },
+    {
+      "path": "tests/test_follow_targets_runtime_p1b.py",
+      "sha256": "9a84df017efe6fc9fe370358150768ac7158c15ea5b0b9d60439cd08fa99bbe9",
+      "role": "Rotation settings resolution and Phase 1 CT contract log tests.",
+      "anti_regression_rule": "Must pass before any rotation settings or orchestrator contract change."
+    }
+  ],
+  "required_tests_before_release": [
+    "python3 -m pytest tests/test_golden_flow_open_follow_mute_return.py",
+    "python3 -m pytest tests/test_follow_source_rotation_contract.py",
+    "python3 -m pytest tests/test_post_follow_like_samsung_fast.py",
+    "python3 -m pytest tests/test_followers_entry_search_surface_recovery.py",
+    "python3 -m pytest tests/test_follow_targets_runtime_p1b.py",
+    "python3 -m pytest tests/test_preflight_keyguard_handling.py tests/test_scheduled_session_preflight_runner.py tests/test_scheduled_session_preflight_dispatcher.py"
+  ],
+  "expected_env_defaults": {
+    "POST_FOLLOW_LIKE_STRICT_GRID_PROOF_MODE": "fallback",
+    "FOLLOWERS_ENTRY_SEARCH_SURFACE_RECOVERY_MODE": "fallback",
+    "POST_FOLLOW_RETURN_CT_STALE_ACTION_BAR_MODE": "off",
+    "CT_CONTRACT_MAX_FOLLOWS_PER_TARGET_PER_RUN": 30,
+    "CT_CONTRACT_MAX_TARGETS_PER_RUN": 4
+  }
+}
