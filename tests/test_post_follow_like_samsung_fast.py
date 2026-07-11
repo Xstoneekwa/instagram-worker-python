@@ -7,6 +7,7 @@ from contextlib import ExitStack
 from unittest import mock
 
 import instagram_navigation as nav
+import config
 
 _SURFACE_PRECHECK_OK: dict[str, object] = {
     "skip_like": False,
@@ -4546,6 +4547,8 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
             nav, "detect_followers_list_screen", return_value=stale_list_det
         ), mock.patch.object(
             nav, "log", side_effect=lambda level, event, **kw: logs.append((str(event), dict(kw)))
+        ), mock.patch.object(
+            config, "POST_FOLLOW_RETURN_CT_STALE_ACTION_BAR_MODE", "always"
         ):
             ok_return, how, fail = nav.post_follow_controlled_return_to_followers_list(
                 device,

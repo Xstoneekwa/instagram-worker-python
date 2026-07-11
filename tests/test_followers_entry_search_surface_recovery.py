@@ -132,10 +132,12 @@ class FollowersEntrySearchSurfaceRecoveryTest(unittest.TestCase):
     @patch.object(nav, "open_followers_list_from_profile", return_value=(True, {"open_method": "followers_entry_engine_v2"}))
     @patch.object(nav, "followers_session_clear_list_committed_open")
     @patch.object(nav, "_followers_entry_maybe_recover_ct_profile_from_search_surface", return_value=(True, "profile_recovery_confirmed"))
+    @patch.object(nav, "verify_profile", return_value=False)
     @patch.object(nav, "detect_followers_list_screen", return_value={"is_followers_list": False})
     def test_return_to_followers_list_reopens_after_search_recovery(
         self,
         _mock_detect,
+        _mock_verify,
         _mock_recover,
         _mock_clear,
         mock_open,

@@ -522,6 +522,74 @@ def load_account_follow_source_settings(account_id: str) -> dict[str, Any] | Non
     return dict(row) if isinstance(row, dict) else None
 
 
+def ensure_account_follow_source_settings(
+    account_id: str,
+    *,
+    max_follows_per_target_per_run: int,
+    max_targets_per_run: int,
+    updated_by: str | None = None,
+) -> dict[str, Any]:
+    """Create account_follow_source_settings when missing. Does not update existing rows."""
+    aid = str(account_id or "").strip()
+    if not aid:
+        raise ValueError("account_id is required")
+    existing = load_account_follow_source_settings(aid)
+    if existing:
+        return existing
+    now = _utc_now_iso()
+    body: dict[str, Any] = {
+        "account_id": aid,
+        "max_follows_per_target_per_run": int(max_follows_per_target_per_run),
+        "max_targets_per_run": int(max_targets_per_run),
+        "updated_at": now,
+        "metadata": {"source": "worker_follow_source_rotation_contract"},
+    }
+    if updated_by:
+        body["updated_by"] = str(updated_by)
+    created = _request_json(
+        "POST",
+        "account_follow_source_settings",
+        body=body,
+        prefer_representation=True,
+    )
+    if not created:
+        raise RuntimeError("ensure_account_follow_source_settings: empty insert response")
+    return created[0]
+
+
+def upsert_account_follow_source_settings(
+    account_id: str,
+    *,
+    max_follows_per_target_per_run: int,
+    max_targets_per_run: int,
+    updated_by: str | None = None,
+) -> dict[str, Any]:
+    """Explicit repair upsert for follow-source rotation contract values."""
+    aid = str(account_id or "").strip()
+    if not aid:
+        raise ValueError("account_id is required")
+    now = _utc_now_iso()
+    body: dict[str, Any] = {
+        "account_id": aid,
+        "max_follows_per_target_per_run": int(max_follows_per_target_per_run),
+        "max_targets_per_run": int(max_targets_per_run),
+        "updated_at": now,
+        "metadata": {"source": "worker_follow_source_rotation_contract_repair"},
+    }
+    if updated_by:
+        body["updated_by"] = str(updated_by)
+    rows = _request_json(
+        "POST",
+        "account_follow_source_settings",
+        body=body,
+        prefer_representation=True,
+        prefer_resolution="resolution=merge-duplicates",
+    )
+    if not rows:
+        raise RuntimeError("upsert_account_follow_source_settings: empty upsert response")
+    return rows[0]
+
+
 def load_target_by_id(target_id: str) -> dict[str, Any] | None:
     rows = _request_json(
         "GET",

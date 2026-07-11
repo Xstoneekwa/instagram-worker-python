@@ -35033,6 +35033,44 @@ _FOLLOWERS_ENTRY_SEARCH_RECOVERY_FAILURE_REASONS = (
 )
 
 
+def _golden_flow_mode_value(mode_name: str, *, default: str) -> str:
+    raw = str(getattr(config, mode_name, default) or default).strip().lower()
+    if raw not in {"off", "fallback", "always"}:
+        return default
+    return raw
+
+
+def _followers_entry_search_surface_recovery_mode() -> str:
+    return _golden_flow_mode_value(
+        "FOLLOWERS_ENTRY_SEARCH_SURFACE_RECOVERY_MODE",
+        default="fallback",
+    )
+
+
+def _followers_entry_search_surface_recovery_pre_entry_enabled() -> bool:
+    return _followers_entry_search_surface_recovery_mode() == "always"
+
+
+def _followers_entry_search_surface_recovery_fallback_enabled() -> bool:
+    return _followers_entry_search_surface_recovery_mode() in {"fallback", "always"}
+
+
+def _post_follow_return_ct_stale_action_bar_mode() -> str:
+    return _golden_flow_mode_value(
+        "POST_FOLLOW_RETURN_CT_STALE_ACTION_BAR_MODE",
+        default="off",
+    )
+
+
+def _post_follow_return_ct_allow_stale_action_bar(*, golden_strict_failed: bool = False) -> bool:
+    mode = _post_follow_return_ct_stale_action_bar_mode()
+    if mode == "always":
+        return True
+    if mode == "fallback" and golden_strict_failed:
+        return True
+    return False
+
+
 def _followers_entry_hierarchy_xml_has_row_search_marker(hierarchy_xml: str) -> bool:
     xml_l = (hierarchy_xml or "").lower()
     return "row_search_" in xml_l or ROW_SEARCH_USER_USERNAME_RES_NAME in xml_l
@@ -36308,41 +36346,63 @@ def open_followers_list_from_profile(
         _followers_open_emit_failure(fmeta)
         return False, fmeta
 
-    search_rec_ok, search_rec_reason = _followers_entry_maybe_recover_ct_profile_from_search_surface(
-        d,
-        source_profile_username,
-        pkg,
-        phase="open_followers_list_from_profile",
-    )
-    if search_rec_ok:
-        profile_verified = True
-        screen_guess = _guess_profile_screen(d, pkg, source_profile_username)
-    elif search_rec_reason not in (
-        "search_surface_not_detected",
-        "profile_already_confirmed",
-    ):
-        cap = _followers_debug_capture(d, "followers_entry_search_profile_recovery_failed")
-        tap_diag_rec: dict[str, Any] = {
-            "stats_band_texts": [],
-            "profile_stats_visible": [],
-            "followers_stat_text_dump": [],
-            "search_profile_recovery_reason": search_rec_reason,
-        }
-        fmeta_rec = _followers_open_build_failure_meta(
-            source_profile_username=source_profile_username,
-            failure_reason="followers_entry_profile_recovery_failed",
-            profile_verified=profile_verified,
-            pkg_meta=pkg_meta,
-            screen_guess=screen_guess,
-            tap_diag=tap_diag_rec,
-            after_tap_screen_snapshot={},
-            last_poll_snapshot={},
-            cap=cap,
-            open_method="search_profile_recovery_abort",
-            used_coord_fallback=False,
+    if _followers_entry_search_surface_recovery_pre_entry_enabled():
+        search_rec_ok, search_rec_reason = _followers_entry_maybe_recover_ct_profile_from_search_surface(
+            d,
+            source_profile_username,
+            pkg,
+            phase="open_followers_list_from_profile",
         )
-        _followers_open_emit_failure(fmeta_rec)
-        return False, fmeta_rec
+        if search_rec_ok:
+            profile_verified = True
+            screen_guess = _guess_profile_screen(d, pkg, source_profile_username)
+        elif search_rec_reason not in (
+            "search_surface_not_detected",
+            "profile_already_confirmed",
+        ):
+            cap = _followers_debug_capture(d, "followers_entry_search_profile_recovery_failed")
+            tap_diag_rec: dict[str, Any] = {
+                "stats_band_texts": [],
+                "profile_stats_visible": [],
+                "followers_stat_text_dump": [],
+                "search_profile_recovery_reason": search_rec_reason,
+            }
+            fmeta_rec = _followers_open_build_failure_meta(
+                source_profile_username=source_profile_username,
+                failure_reason="followers_entry_profile_recovery_failed",
+                profile_verified=profile_verified,
+                pkg_meta=pkg_meta,
+                screen_guess=screen_guess,
+                tap_diag=tap_diag_rec,
+                after_tap_screen_snapshot={},
+                last_poll_snapshot={},
+                cap=cap,
+                open_method="search_profile_recovery_abort",
+                used_coord_fallback=False,
+            )
+            _followers_open_emit_failure(fmeta_rec)
+            return False, fmeta_rec
+    elif (
+        not profile_verified
+        and _followers_entry_search_surface_recovery_fallback_enabled()
+    ):
+        search_rec_ok, search_rec_reason = _followers_entry_maybe_recover_ct_profile_from_search_surface(
+            d,
+            source_profile_username,
+            pkg,
+            phase="open_followers_list_from_profile_fallback",
+        )
+        if search_rec_ok:
+            profile_verified = True
+            screen_guess = _guess_profile_screen(d, pkg, source_profile_username)
+            log(
+                "info",
+                "followers_entry_search_surface_recovery_fallback_succeeded",
+                source_profile_username=source_profile_username,
+                package=pkg,
+                phase="open_followers_list_from_profile",
+                recovery_reason=search_rec_reason,
+            )
 
     if (
         bool(getattr(config, "ENABLE_FOLLOWERS_ENTRY_ENGINE_V2", False))
@@ -38039,6 +38099,14 @@ def post_follow_controlled_return_to_followers_list(
             ct_ok = True
         return bool(is_list and ct_ok), det_l
 
+    def _list_confirmed_nominal_or_stale_fallback() -> tuple[bool, dict[str, Any]]:
+        ok_strict, det_strict = _list_confirmed(allow_stale_candidate_action_bar=False)
+        if ok_strict:
+            return ok_strict, det_strict
+        if _post_follow_return_ct_allow_stale_action_bar(golden_strict_failed=True):
+            return _list_confirmed(allow_stale_candidate_action_bar=True)
+        return False, det_strict
+
     def _over_budget(round_t0: float) -> bool:
         return (time.monotonic() - round_t0) >= budget_s
 
@@ -38184,7 +38252,7 @@ def post_follow_controlled_return_to_followers_list(
             xml_guess=str(nav.get("xml_guess") or ""),
         )
 
-        ok_list_now, det_now = _list_confirmed(allow_stale_candidate_action_bar=True)
+        ok_list_now, det_now = _list_confirmed_nominal_or_stale_fallback()
         if ok_list_now:
             log(
                 "info",
@@ -38258,7 +38326,7 @@ def post_follow_controlled_return_to_followers_list(
                     except Exception:
                         pass
                 else:
-                    ok_fb, det_fb = _list_confirmed(allow_stale_candidate_action_bar=True)
+                    ok_fb, det_fb = _list_confirmed_nominal_or_stale_fallback()
                 if ok_fb:
                     log(
                         "info",
@@ -38394,7 +38462,7 @@ def post_follow_controlled_return_to_followers_list(
                 fb_ok, fb_how = return_to_followers_list(d, src, pkg)
             except Exception as e:
                 fb_how = f"exception:{type(e).__name__}"
-            ok_fin, det_fin = _list_confirmed(allow_stale_candidate_action_bar=True)
+            ok_fin, det_fin = _list_confirmed_nominal_or_stale_fallback()
             _fb_repoll_max = 3
             _fb_repoll_sleep_s = min(0.35, max(0.2, 0.28))
             if (
@@ -38420,7 +38488,7 @@ def post_follow_controlled_return_to_followers_list(
                         time.sleep(_fb_repoll_sleep_s)
                     except Exception:
                         pass
-                    ok_fin, det_fin = _list_confirmed(allow_stale_candidate_action_bar=True)
+                    ok_fin, det_fin = _list_confirmed_nominal_or_stale_fallback()
                     try:
                         log(
                             "info",
@@ -38588,6 +38656,36 @@ def post_follow_controlled_return_to_followers_list(
         )
         if reuse_ok:
             action_bar_title = str(det_reuse.get("action_bar_title") or "")[:120]
+            current_screen_guess = str(det_reuse.get("current_screen_guess") or "")
+            log(
+                "info",
+                "return_ct_fast_proof_reused",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                expected_ct_username=src,
+                follower_username=cand or None,
+                action_bar_title=action_bar_title,
+                is_followers_list=bool(det_reuse.get("is_followers_list")),
+                current_screen_guess=current_screen_guess,
+                navigation_state="",
+                proof_age_ms=det_age_ms,
+                rejection_reason="",
+                duration_saved_estimate_ms=3200.0,
+            )
+            log(
+                "info",
+                "return_ct_wait_reduced_after_explicit_ct_proof",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                expected_ct_username=src,
+                follower_username=cand or None,
+                action_bar_title=action_bar_title,
+                is_followers_list=bool(det_reuse.get("is_followers_list")),
+                current_screen_guess=current_screen_guess,
+                navigation_state="",
+                proof_age_ms=det_age_ms,
+                duration_saved_estimate_ms=3200.0,
+            )
             log(
                 "info",
                 "post_follow_return_ct_post_back_det_reused",
@@ -38615,6 +38713,21 @@ def post_follow_controlled_return_to_followers_list(
             return True, "compact_safe_back_then_list", None
         log(
             "info",
+            "return_ct_fast_proof_rejected",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            expected_ct_username=src,
+            follower_username=cand or None,
+            action_bar_title=str((det_reuse or {}).get("action_bar_title") or "")[:120],
+            is_followers_list=bool((det_reuse or {}).get("is_followers_list")),
+            current_screen_guess=str((det_reuse or {}).get("current_screen_guess") or ""),
+            navigation_state="",
+            proof_age_ms=det_age_ms,
+            rejection_reason=reuse_reason,
+            duration_saved_estimate_ms=0.0,
+        )
+        log(
+            "info",
             "post_follow_return_ct_post_back_det_reuse_rejected",
             visual_candidate_id=vcid,
             source_profile_username=src,
@@ -38629,7 +38742,7 @@ def post_follow_controlled_return_to_followers_list(
             duration_saved_estimate_ms=0.0,
         )
 
-        ok_after, det_after = _list_confirmed(allow_stale_candidate_action_bar=True)
+        ok_after, det_after = _list_confirmed_nominal_or_stale_fallback()
         if ok_after:
             log(
                 "info",
@@ -47451,33 +47564,6 @@ def return_to_followers_list(
         "followers_list_reopen_fallback",
         source_profile_username=source_profile_username,
     )
-    search_rec_ok, search_rec_reason = _followers_entry_maybe_recover_ct_profile_from_search_surface(
-        d,
-        source_profile_username,
-        pkg,
-        phase="return_to_followers_list",
-    )
-    if search_rec_ok:
-        followers_session_clear_list_committed_open(source_profile_username)
-        ok_reopen, _reopen_meta = open_followers_list_from_profile(
-            d, source_profile_username, pkg, profile_verified=True
-        )
-        if ok_reopen:
-            log(
-                "info",
-                "followers_list_recovered",
-                source_profile_username=source_profile_username,
-                method="reopen_after_search_profile_recovery",
-            )
-            return True, "reopen_after_search_profile_recovery"
-    elif search_rec_reason in _FOLLOWERS_ENTRY_SEARCH_RECOVERY_FAILURE_REASONS:
-        log(
-            "error",
-            "followers_list_return_failed",
-            source_profile_username=source_profile_username,
-            recovery_reason=search_rec_reason,
-        )
-        return False, "search_profile_recovery_failed"
     if verify_profile(d, source_profile_username):
         followers_session_clear_list_committed_open(source_profile_username)
         ok_reopen, _reopen_meta = open_followers_list_from_profile(
@@ -47491,6 +47577,36 @@ def return_to_followers_list(
                 method="reopen_from_source_profile",
             )
             return True, "reopen_from_source_profile"
+    search_rec_ok = False
+    search_rec_reason = "search_recovery_not_attempted"
+    if _followers_entry_search_surface_recovery_fallback_enabled():
+        search_rec_ok, search_rec_reason = _followers_entry_maybe_recover_ct_profile_from_search_surface(
+            d,
+            source_profile_username,
+            pkg,
+            phase="return_to_followers_list_fallback",
+        )
+        if search_rec_ok:
+            followers_session_clear_list_committed_open(source_profile_username)
+            ok_reopen, _reopen_meta = open_followers_list_from_profile(
+                d, source_profile_username, pkg, profile_verified=True
+            )
+            if ok_reopen:
+                log(
+                    "info",
+                    "followers_list_recovered",
+                    source_profile_username=source_profile_username,
+                    method="reopen_after_search_profile_recovery",
+                )
+                return True, "reopen_after_search_profile_recovery"
+        elif search_rec_reason in _FOLLOWERS_ENTRY_SEARCH_RECOVERY_FAILURE_REASONS:
+            log(
+                "error",
+                "followers_list_return_failed",
+                source_profile_username=source_profile_username,
+                recovery_reason=search_rec_reason,
+            )
+            return False, "search_profile_recovery_failed"
     log("error", "followers_list_return_failed", source_profile_username=source_profile_username)
     return False, "failed"
 

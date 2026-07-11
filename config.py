@@ -403,6 +403,16 @@ POST_FOLLOW_LIKE_STRICT_GRID_PROOF_MODE = _env_str(
     "POST_FOLLOW_LIKE_STRICT_GRID_PROOF_MODE",
     "fallback",
 ).strip().lower()
+# Golden nominal by default: search recovery only after Golden followers-entry failure.
+FOLLOWERS_ENTRY_SEARCH_SURFACE_RECOVERY_MODE = _env_str(
+    "FOLLOWERS_ENTRY_SEARCH_SURFACE_RECOVERY_MODE",
+    "fallback",
+).strip().lower()
+# Golden nominal by default: strict CT verify; stale candidate action bar only in fallback/always.
+POST_FOLLOW_RETURN_CT_STALE_ACTION_BAR_MODE = _env_str(
+    "POST_FOLLOW_RETURN_CT_STALE_ACTION_BAR_MODE",
+    "off",
+).strip().lower()
 POST_FOLLOW_LIKE_PARTIAL_GRID_DETECT_CAP_S = _env_float(
     "POST_FOLLOW_LIKE_PARTIAL_GRID_DETECT_CAP_S", 4.5
 )

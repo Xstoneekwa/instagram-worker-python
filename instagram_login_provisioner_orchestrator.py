@@ -5007,6 +5007,27 @@ def _finalize(
     if challenge_side_effects.get("warnings"):
         publish_warnings.extend(challenge_side_effects["warnings"])
 
+    follow_source_rotation_provision: dict[str, Any] = {"skipped": True, "db_mutation_performed": False}
+    if account_id and str(final_provisioning_status or "") == "ready":
+        try:
+            from follow_source_rotation_settings import maybe_provision_follow_source_rotation_on_ready
+
+            follow_source_rotation_provision = maybe_provision_follow_source_rotation_on_ready(
+                account_id=account_id,
+                account_username=expected_username,
+                final_provisioning_status=final_provisioning_status,
+                context="login_provisioning_ready",
+            )
+        except Exception as exc:
+            follow_source_rotation_provision = {
+                "ok": False,
+                "skipped": False,
+                "reason": "follow_source_rotation_provision_failed",
+                "error": str(exc)[:200],
+                "db_mutation_performed": False,
+            }
+            publish_warnings.append("follow_source_rotation_provision_failed_safe")
+
     safe_metadata = clean_login_probe_metadata(
         redact_credentials_payload(
             {
@@ -5025,6 +5046,7 @@ def _finalize(
                 "publish_error_code": publish_error_code,
                 "dashboard_action_sync": challenge_side_effects.get("dashboard_action_sync"),
                 "login_challenge_incident": challenge_side_effects.get("login_challenge_incident"),
+                "follow_source_rotation_provision": follow_source_rotation_provision,
                 **extra_metadata,
             }
         )
