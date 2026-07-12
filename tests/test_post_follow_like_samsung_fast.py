@@ -4526,6 +4526,107 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
             [event for event, _kw in logs],
         )
 
+    def test_return_ct_over_budget_ambiguous_own_unified_list_still_safe_backs(self) -> None:
+        device = mock.MagicMock()
+        logs: list[tuple[str, dict[str, object]]] = []
+        candidate_det = {
+            "is_followers_list": True,
+            "action_bar_title": "mobi_voyage",
+            "own_unified_followers_list_detected": True,
+            "open_detection_method": "own_unified_follow_list",
+            "recycler_present": True,
+            "listview_present": True,
+            "candidate_username_count": 8,
+            "current_screen_guess": "likely_profile",
+        }
+        ct_det = {
+            "is_followers_list": True,
+            "action_bar_title": "reveaustral",
+            "own_unified_followers_list_detected": True,
+            "open_detection_method": "own_unified_follow_list",
+            "recycler_present": True,
+            "listview_present": True,
+            "candidate_username_count": 8,
+            "current_screen_guess": "likely_profile",
+        }
+        detect_calls = {"count": 0}
+        mono_now = [100.0]
+
+        def _detect_followers_list(
+            _d: object, *, source_profile_username: str
+        ) -> dict[str, object]:
+            detect_calls["count"] += 1
+            if detect_calls["count"] < 4:
+                return candidate_det
+            return ct_det
+
+        def _verify_ct(
+            _d: object,
+            *,
+            source_profile_username: str,
+            follower_candidate_username: str | None = None,
+            det: dict[str, object] | None = None,
+        ) -> bool:
+            return bool(det and det.get("action_bar_title") == source_profile_username)
+
+        def _monotonic() -> float:
+            mono_now[0] += 6.0
+            return mono_now[0]
+
+        with mock.patch.object(
+            nav,
+            "detect_followers_list_screen",
+            side_effect=_detect_followers_list,
+        ), mock.patch.object(
+            nav,
+            "verify_followers_list_surface_is_ct_account",
+            side_effect=_verify_ct,
+        ), mock.patch(
+            "navigation_engine.observe_instagram_state",
+            return_value={
+                "state": "FOLLOWERS_LIST",
+                "confidence": 0.72,
+                "reason": "det_is_followers_list+relaxed_list_open+has_xml_candidates",
+                "xml_guess": "likely_profile",
+            },
+        ), mock.patch.object(
+            nav, "verify_app_foreground", return_value=True
+        ), mock.patch.object(
+            nav,
+            "log",
+            side_effect=lambda level, event, **kw: logs.append((str(event), dict(kw))),
+        ), mock.patch.object(
+            nav.time, "monotonic", side_effect=_monotonic
+        ), mock.patch.object(
+            nav.time, "sleep", side_effect=lambda *_a, **_k: None
+        ):
+            ok, how, fail = nav.post_follow_controlled_return_to_followers_list(
+                device,
+                pkg="com.instagram.android",
+                source_profile_username="reveaustral",
+                follower_username="mobi_voyage",
+                visual_candidate_id="vc-1",
+                det={},
+                max_rounds=1,
+                compact_after_follow_verified_mute=True,
+                compact_reason="follow_verified_mute_success",
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(how, "compact_safe_back_then_list")
+        self.assertIsNone(fail)
+        device.press.assert_called_once_with("back")
+        events = [event for event, _kw in logs]
+        self.assertIn(
+            "post_follow_return_ct_compact_ambiguous_list_safe_back_recovery",
+            events,
+        )
+        self.assertIn("post_follow_return_ct_post_back_det_reused", events)
+        self.assertNotIn(
+            "post_follow_return_ct_accept_stale_candidate_action_bar_own_unified",
+            events,
+        )
+
     def test_return_ct_accepts_own_unified_list_with_stale_candidate_action_bar(self) -> None:
         device = mock.MagicMock()
         logs: list[tuple[str, dict[str, object]]] = []

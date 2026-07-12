@@ -38129,6 +38129,35 @@ def post_follow_controlled_return_to_followers_list(
                 return False
         return False
 
+    def _compact_ambiguous_list_recovery_reason(
+        det_l: dict[str, Any],
+        nav_l: dict[str, Any],
+    ) -> str:
+        if not isinstance(det_l, dict):
+            return ""
+        is_list = bool(det_l.get("is_followers_list"))
+        st_l = str(nav_l.get("state") or "")
+        if not is_list and st_l != NavigationEngineState.FOLLOWERS_LIST.value:
+            return ""
+        method = str(det_l.get("open_detection_method") or "")
+        own_unified = bool(det_l.get("own_unified_followers_list_detected"))
+        screen_guess = str(det_l.get("current_screen_guess") or nav_l.get("xml_guess") or "")
+        ab_raw_l = str(det_l.get("action_bar_title") or "").strip()
+        ab_l = _normalize_handle(ab_raw_l) if ab_raw_l else ""
+        src_l = _normalize_handle(src)
+        cand_l = _normalize_handle(cand or "")
+        if cand_l and ab_l == cand_l:
+            return "followers_list_candidate_action_bar"
+        if screen_guess == "likely_profile":
+            return "followers_list_likely_profile_guess"
+        if st_l == NavigationEngineState.FOLLOWERS_LIST.value and (
+            own_unified or method == "own_unified_follow_list"
+        ):
+            return "followers_list_unknown_own_unified"
+        if ab_l and src_l and ab_l != src_l:
+            return "followers_list_foreign_action_bar"
+        return ""
+
     def _try_reuse_post_back_det(
         det_reuse: dict[str, Any],
         *,
@@ -38568,19 +38597,40 @@ def post_follow_controlled_return_to_followers_list(
             )
 
         if _over_budget(round_t0):
-            log(
-                "warning",
-                "post_follow_return_ct_compact_abort_no_list_confirmed",
-                visual_candidate_id=vcid,
-                source_profile_username=src,
-                phase="before_compact_safe_back",
-                budget_s=budget_s,
-            )
-            return (
-                False,
-                "compact_abort_no_list_confirmed",
-                "post_follow_return_ct_compact_abort_no_list_confirmed",
-            )
+            ambiguous_reason = _compact_ambiguous_list_recovery_reason(last_det, nav)
+            if ambiguous_reason:
+                log(
+                    "warning",
+                    "post_follow_return_ct_compact_ambiguous_list_safe_back_recovery",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    follower_username=cand or None,
+                    attempt=round_idx,
+                    phase="before_compact_safe_back",
+                    budget_s=budget_s,
+                    recovery_reason=ambiguous_reason,
+                    action_bar_title=str(last_det.get("action_bar_title") or "")[:120],
+                    navigation_state=str(nav.get("state") or ""),
+                    xml_guess=str(nav.get("xml_guess") or ""),
+                    open_detection_method=str(last_det.get("open_detection_method") or ""),
+                    own_unified_followers_list_detected=bool(
+                        last_det.get("own_unified_followers_list_detected")
+                    ),
+                )
+            else:
+                log(
+                    "warning",
+                    "post_follow_return_ct_compact_abort_no_list_confirmed",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    phase="before_compact_safe_back",
+                    budget_s=budget_s,
+                )
+                return (
+                    False,
+                    "compact_abort_no_list_confirmed",
+                    "post_follow_return_ct_compact_abort_no_list_confirmed",
+                )
 
         log(
             "info",
