@@ -576,6 +576,71 @@ def _verify_followers_surface(
     return ok, obs
 
 
+def _ensure_sender_entry_followers_surface(
+    d: u2.Device,
+    *,
+    account_username: str,
+    pkg: str,
+) -> tuple[bool, dict[str, Any]]:
+    from own_profile_navigation import open_own_followers_list_from_own_profile
+
+    log(
+        "info",
+        "welcome_sender_entry_surface_check_started",
+        account_username=account_username,
+    )
+    ok, obs = _verify_followers_surface(
+        d, account_username=account_username, context="welcome_list_sender_start"
+    )
+    if ok:
+        return True, {"recovered": False, "obs": obs}
+
+    log(
+        "info",
+        "welcome_sender_entry_surface_recovery_attempted",
+        account_username=account_username,
+    )
+    followers_session_clear_list_committed_open(account_username)
+    opened, open_meta = open_own_followers_list_from_own_profile(
+        d, account_username, pkg=pkg
+    )
+    if opened:
+        followers_clear_detect_hierarchy_cache()
+        det, obs2 = detect_followers_list_screen_fresh(
+            d, source_profile_username=account_username
+        )
+        if bool(det.get("is_followers_list")):
+            log(
+                "info",
+                "welcome_sender_entry_surface_recovered",
+                account_username=account_username,
+                open_detection_method=det.get("open_detection_method"),
+            )
+            return True, {"recovered": True, "open_meta": open_meta, "obs": obs2}
+
+    log(
+        "error",
+        "welcome_sender_entry_surface_recovery_failed",
+        account_username=account_username,
+        opened=bool(opened),
+        failure_reason=str((open_meta or {}).get("failure_reason") or ""),
+    )
+    return False, {"recovered": False, "open_meta": open_meta, "obs": obs}
+
+
+def _welcome_send_has_strong_outbound_proof(
+    send_out: dict[str, Any],
+    fail_reason: str | None,
+) -> bool:
+    if fail_reason not in (None, "post_finalize_partial"):
+        return False
+    if not bool(send_out.get("sent")):
+        return False
+    if bool(send_out.get("duplicate_prevented")):
+        return False
+    return True
+
+
 def _skip_current_scan_session_jobs(
     scan_summary: dict[str, Any],
     *,
@@ -958,7 +1023,10 @@ def execute_welcome_list_job(
                     source_profile_username=account_username,
                 )
                 dm_send_ms = (time.perf_counter() - t_send) * 1000.0
-                if sent_ok and fail_reason in (None, "post_finalize_partial"):
+                strong_send_proof = _welcome_send_has_strong_outbound_proof(
+                    send_out, fail_reason
+                )
+                if sent_ok and strong_send_proof:
                     followers_surface_restored_by_send_finalize = fail_reason is None
                     updated_job = supabase_client.complete_dm_job(
                         job_id,
@@ -969,6 +1037,8 @@ def execute_welcome_list_job(
                             "message_len": len(message_body),
                             "welcome_list_native": True,
                             "post_finalize_partial": fail_reason == "post_finalize_partial",
+                            "send_verification_status": "verified",
+                            "outbound_bubble_evidence_found": True,
                         },
                     )
                     outcome = "sent"
@@ -983,9 +1053,12 @@ def execute_welcome_list_job(
                         dm_send_ms=round(dm_send_ms, 2),
                     )
                 else:
+                    unverified_reason = str(fail_reason or "send_unverified")
+                    if sent_ok and not strong_send_proof:
+                        unverified_reason = "send_without_strong_outbound_proof"
                     updated_job, outcome = _complete_job_failed_retry(
                         job,
-                        last_error=str(fail_reason or "real_send_failed"),
+                        last_error=unverified_reason,
                         thread_state=thread_state,
                     )
                     final_status = str((updated_job or {}).get("status") or "pending")
@@ -994,7 +1067,7 @@ def execute_welcome_list_job(
                         "welcome_list_sender_job_failed_retry_scheduled",
                         job_id=job_id,
                         recipient_username=recipient,
-                        reason=str(fail_reason or "real_send_failed"),
+                        reason=unverified_reason,
                     )
     finally:
         if followers_surface_restored_by_send_finalize:
@@ -1115,12 +1188,13 @@ def run_welcome_list_sender(
         scan_jobs_total=len(session_scan_jobs),
     )
 
-    followers_ok, _obs = _verify_followers_surface(
-        d, account_username=acct_user, context="welcome_list_sender_start"
+    followers_ok, entry_meta = _ensure_sender_entry_followers_surface(
+        d, account_username=acct_user, pkg=pkg
     )
     if followers_ok:
         scan_final_idx = int(scan.get("scan_final_screen_index") or 0)
         followers_refresh_detect_hierarchy_cache(d, screen_index=scan_final_idx)
+    summary["entry_surface_recovered"] = bool(entry_meta.get("recovered"))
 
     scan_anchors = _scan_row_anchors_by_username(scan)
 

@@ -59,6 +59,57 @@ class WelcomeListSenderRestoreTest(unittest.TestCase):
         scroll_mock.assert_not_called()
         clear_mock.assert_called_once_with("cinema_catchup")
 
+    def test_sender_entry_recovers_followers_surface_before_planning(self) -> None:
+        device = MagicMock()
+        det_followers = {
+            "is_followers_list": True,
+            "open_detection_method": "own_unified_follow_list",
+        }
+        with (
+            patch.object(
+                sender,
+                "_verify_followers_surface",
+                side_effect=[(False, {}), (True, {})],
+            ) as verify_mock,
+            patch.object(sender, "detect_followers_list_screen_fresh", return_value=(det_followers, {})),
+            patch.object(sender, "followers_session_clear_list_committed_open") as clear_mock,
+            patch.object(sender, "followers_clear_detect_hierarchy_cache"),
+            patch(
+                "own_profile_navigation.open_own_followers_list_from_own_profile",
+                return_value=(True, {"method": "canonical"}),
+            ) as open_mock,
+        ):
+            ok, meta = sender._ensure_sender_entry_followers_surface(
+                device,
+                account_username="cinema_catchup",
+                pkg="com.instagram.android",
+            )
+
+        self.assertTrue(ok)
+        self.assertTrue(meta["recovered"])
+        verify_mock.assert_called_once()
+        clear_mock.assert_called_once_with("cinema_catchup")
+        open_mock.assert_called_once()
+
+    def test_sender_entry_fails_closed_when_recovery_cannot_reopen_followers(self) -> None:
+        device = MagicMock()
+        with (
+            patch.object(sender, "_verify_followers_surface", return_value=(False, {})),
+            patch.object(sender, "followers_session_clear_list_committed_open"),
+            patch(
+                "own_profile_navigation.open_own_followers_list_from_own_profile",
+                return_value=(False, {"failure_reason": "profile_not_open"}),
+            ),
+        ):
+            ok, meta = sender._ensure_sender_entry_followers_surface(
+                device,
+                account_username="cinema_catchup",
+                pkg="com.instagram.android",
+            )
+
+        self.assertFalse(ok)
+        self.assertFalse(meta["recovered"])
+
     def test_skip_current_scan_session_jobs_targets_scan_enqueued_only(self) -> None:
         scan_summary = {
             "new_follower_job_ids_enqueued": [
@@ -215,7 +266,7 @@ class WelcomeListSenderRestoreTest(unittest.TestCase):
             patch.object(sender, "_navigate_followers_row_to_dm", return_value=("empty_new_thread", True, {})),
             patch.object(sender, "_evaluate_welcome_sendability", return_value=(True, None)),
             patch.object(sender, "_perform_real_welcome_dm_send", return_value=(True, {"sent": True}, failure_reason)),
-            patch.object(sender.supabase_client, "complete_dm_job", return_value={**job, "status": "sent"}),
+            patch.object(sender.supabase_client, "complete_dm_job", return_value={**job, "status": "sent"}) as complete_mock,
             patch.object(sender, "_restore_followers_after_job", restore_mock),
         ):
             result = sender.execute_welcome_list_job(
@@ -226,6 +277,7 @@ class WelcomeListSenderRestoreTest(unittest.TestCase):
                 account_username="j_automatise_pour_toi",
                 scan_anchors={},
             )
+        self._last_complete_dm_job_mock = complete_mock
         return result, restore_mock
 
     def test_execute_sent_job_skips_final_restore_when_send_finalize_restored_followers(self) -> None:
@@ -235,6 +287,15 @@ class WelcomeListSenderRestoreTest(unittest.TestCase):
         self.assertTrue(result["followers_surface_restored"])
         restore_mock.assert_not_called()
 
+    def test_execute_sent_job_records_strong_outbound_proof_metadata(self) -> None:
+        result, _restore_mock = self._execute_job_with_send_finalize(None)
+
+        self.assertEqual(result["outcome"], "sent")
+        complete_call = self._last_complete_dm_job_mock.call_args
+        metadata_patch = complete_call.kwargs["metadata_patch"]
+        self.assertEqual(metadata_patch["send_verification_status"], "verified")
+        self.assertTrue(metadata_patch["outbound_bubble_evidence_found"])
+
     def test_execute_sent_job_keeps_final_restore_when_send_finalize_partial(self) -> None:
         result, restore_mock = self._execute_job_with_send_finalize("post_finalize_partial")
 
@@ -242,6 +303,47 @@ class WelcomeListSenderRestoreTest(unittest.TestCase):
         self.assertTrue(result["post_finalize_partial"])
         self.assertFalse(result["followers_surface_restored"])
         restore_mock.assert_called_once()
+
+    def test_execute_duplicate_prevented_does_not_complete_sent_job(self) -> None:
+        job = {
+            "id": "job-1",
+            "recipient_username": "recipient",
+            "dm_type": "welcome",
+            "message_body": "Salut",
+        }
+        with (
+            patch.object(sender.supabase_client, "mark_dm_job_running", return_value=job),
+            patch.object(sender, "_check_dm_sender_permission_blocker", return_value=False),
+            patch.object(sender, "_navigate_followers_row_to_dm", return_value=("empty_new_thread", True, {})),
+            patch.object(sender, "_evaluate_welcome_sendability", return_value=(True, None)),
+            patch.object(
+                sender,
+                "_perform_real_welcome_dm_send",
+                return_value=(True, {"sent": True, "duplicate_prevented": True}, None),
+            ),
+            patch.object(
+                sender,
+                "_complete_job_failed_retry",
+                return_value=({**job, "status": "pending"}, "failed_retry"),
+            ) as retry_mock,
+            patch.object(sender.supabase_client, "complete_dm_job") as complete_mock,
+            patch.object(sender, "_restore_followers_after_job", return_value=True),
+        ):
+            result = sender.execute_welcome_list_job(
+                MagicMock(),
+                job,
+                settings={},
+                account_id="acct-1",
+                account_username="j_automatise_pour_toi",
+                scan_anchors={},
+            )
+
+        self.assertEqual(result["outcome"], "failed_retry")
+        self.assertEqual(
+            retry_mock.call_args.kwargs.get("last_error"),
+            "send_without_strong_outbound_proof",
+        )
+        complete_mock.assert_not_called()
 
     def test_execute_unverified_send_does_not_complete_sent_job(self) -> None:
         job = {
