@@ -243,6 +243,49 @@ class WelcomeListSenderRestoreTest(unittest.TestCase):
         self.assertFalse(result["followers_surface_restored"])
         restore_mock.assert_called_once()
 
+    def test_execute_unverified_send_does_not_complete_sent_job(self) -> None:
+        job = {
+            "id": "job-1",
+            "recipient_username": "recipient",
+            "dm_type": "welcome",
+            "message_body": "Salut",
+        }
+        with (
+            patch.object(sender.supabase_client, "mark_dm_job_running", return_value=job),
+            patch.object(sender, "_check_dm_sender_permission_blocker", return_value=False),
+            patch.object(
+                sender,
+                "_navigate_followers_row_to_dm",
+                return_value=("empty_new_thread", True, {}),
+            ),
+            patch.object(sender, "_evaluate_welcome_sendability", return_value=(True, None)),
+            patch.object(
+                sender,
+                "_perform_real_welcome_dm_send",
+                return_value=(False, {"sent": False, "reason": "send_unverified"}, "send_unverified"),
+            ),
+            patch.object(
+                sender,
+                "_complete_job_failed_retry",
+                return_value=({**job, "status": "pending"}, "failed_retry"),
+            ) as retry_mock,
+            patch.object(sender.supabase_client, "complete_dm_job") as complete_mock,
+            patch.object(sender, "_restore_followers_after_job", return_value=True),
+        ):
+            result = sender.execute_welcome_list_job(
+                MagicMock(),
+                job,
+                settings={},
+                account_id="acct-1",
+                account_username="j_automatise_pour_toi",
+                scan_anchors={},
+            )
+
+        self.assertEqual(result["outcome"], "failed_retry")
+        retry_mock.assert_called_once()
+        self.assertEqual(retry_mock.call_args.kwargs.get("last_error"), "send_unverified")
+        complete_mock.assert_not_called()
+
     def test_sender_all_non_dmable_skips_is_not_false_success(self) -> None:
         code, summary, execute_mock = self._run_sender_with_results(
             [

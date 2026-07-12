@@ -6212,6 +6212,116 @@ def dm_thread_shows_outgoing_message(d: u2.Device, expected_text: str) -> bool:
     return any(m in blob for m in markers)
 
 
+_DM_MESSAGE_MARKERS = (
+    "row_thread_message",
+    "direct_message_text",
+    "message_content",
+    "thread_message",
+    "inbox_message",
+    "message_bubble",
+)
+
+
+def _dm_dump_thread_hierarchy(d: u2.Device) -> str:
+    try:
+        return str(d.dump_hierarchy(compressed=False) or "")
+    except Exception:
+        try:
+            return str(d.dump_hierarchy() or "")
+        except Exception:
+            return ""
+
+
+def _dm_thread_message_signature(
+    d: u2.Device,
+    expected_text: str,
+    *,
+    hierarchy_xml: str | None = None,
+) -> dict[str, Any]:
+    text = str(expected_text or "").strip()
+    hier = str(hierarchy_xml if hierarchy_xml is not None else _dm_dump_thread_hierarchy(d))
+    blob = hier.lower()
+    return {
+        "hierarchy_hash": hashlib.sha256(hier.encode("utf-8", errors="ignore")).hexdigest()
+        if hier
+        else "",
+        "hierarchy_len": len(hier),
+        "expected_text_present": bool(text and text in hier),
+        "message_marker_count": sum(blob.count(marker) for marker in _DM_MESSAGE_MARKERS),
+        "composer_text_len": _dm_read_composer_text_len(d),
+    }
+
+
+def _dm_outbound_signature_advanced(
+    pre_sig: dict[str, Any],
+    post_sig: dict[str, Any],
+) -> bool:
+    pre_hash = str(pre_sig.get("hierarchy_hash") or "")
+    post_hash = str(post_sig.get("hierarchy_hash") or "")
+    marker_delta = int(post_sig.get("message_marker_count") or 0) - int(
+        pre_sig.get("message_marker_count") or 0
+    )
+    expected_became_present = bool(post_sig.get("expected_text_present")) and not bool(
+        pre_sig.get("expected_text_present")
+    )
+    return bool(post_hash and post_hash != pre_hash and (marker_delta > 0 or expected_became_present))
+
+
+def _dm_verify_outbound_message_after_send(
+    d: u2.Device,
+    expected_text: str,
+    *,
+    pre_signature: dict[str, Any],
+) -> tuple[bool, str, dict[str, Any]]:
+    """
+    A send is verified only by a new outgoing message bubble after tap.
+    Composer clearing, shrinking, or delivery labels are secondary hints and are
+    intentionally insufficient because they can happen without a sent message.
+    """
+    max_s = float(getattr(config, "DM_OUTBOUND_SEND_VERIFY_MAX_S", 4.0))
+    poll_s = float(getattr(config, "DM_OUTBOUND_SEND_VERIFY_POLL_S", 0.2))
+    deadline = time.monotonic() + max_s
+    last_sig: dict[str, Any] = {}
+    log(
+        "info",
+        "dm_outbound_send_verification_started",
+        pre_message_marker_count=int(pre_signature.get("message_marker_count") or 0),
+        pre_expected_text_present=bool(pre_signature.get("expected_text_present")),
+        pre_hierarchy_len=int(pre_signature.get("hierarchy_len") or 0),
+    )
+    while time.monotonic() < deadline:
+        hier = _dm_dump_thread_hierarchy(d)
+        last_sig = _dm_thread_message_signature(d, expected_text, hierarchy_xml=hier)
+        if dm_thread_shows_outgoing_message(d, expected_text) and _dm_outbound_signature_advanced(
+            pre_signature, last_sig
+        ):
+            log(
+                "info",
+                "dm_outbound_send_verification_succeeded",
+                reason="outbound_bubble_after_tap",
+                post_message_marker_count=int(last_sig.get("message_marker_count") or 0),
+                post_hierarchy_len=int(last_sig.get("hierarchy_len") or 0),
+            )
+            return True, "outbound_bubble_after_tap", last_sig
+        time.sleep(poll_s)
+    reason = "thread_signature_unchanged"
+    if bool(last_sig.get("expected_text_present")) and not _dm_outbound_signature_advanced(
+        pre_signature, last_sig
+    ):
+        reason = "outbound_bubble_not_new"
+    elif not bool(last_sig.get("expected_text_present")):
+        reason = "outbound_bubble_not_verified"
+    log(
+        "warning",
+        "dm_outbound_send_verification_failed",
+        reason=reason,
+        post_message_marker_count=int(last_sig.get("message_marker_count") or 0),
+        post_expected_text_present=bool(last_sig.get("expected_text_present")),
+        post_hierarchy_len=int(last_sig.get("hierarchy_len") or 0),
+    )
+    return False, reason, last_sig
+
+
 def _dm_read_composer_text_len(d: u2.Device) -> int:
     return len(read_dm_composer_text(d))
 
@@ -48757,6 +48867,13 @@ def send_dm_safe(
         return out
 
     pre_send_len = int(out.get("composer_text_len_before_send") or 0)
+    pre_send_signature = _dm_thread_message_signature(d, msg)
+    out["pre_send_thread_marker_count"] = int(
+        pre_send_signature.get("message_marker_count") or 0
+    )
+    out["pre_send_expected_text_present"] = bool(
+        pre_send_signature.get("expected_text_present")
+    )
     log(
         "info",
         "dm_send_button_tap_started",
@@ -48780,26 +48897,43 @@ def send_dm_safe(
         return out
 
     sig_ok, sig_reason = _dm_post_send_signal_poll(d, pre_send_text_len=pre_send_len)
-    if sig_ok:
+    out["post_send_secondary_signal_ok"] = bool(sig_ok)
+    out["post_send_secondary_signal_reason"] = sig_reason
+    verified, verify_reason, post_send_signature = _dm_verify_outbound_message_after_send(
+        d,
+        msg,
+        pre_signature=pre_send_signature,
+    )
+    out["post_send_thread_marker_count"] = int(
+        post_send_signature.get("message_marker_count") or 0
+    )
+    out["post_send_expected_text_present"] = bool(
+        post_send_signature.get("expected_text_present")
+    )
+    if verified:
         out["sent"] = True
-        out["post_send_signal_reason"] = sig_reason
+        out["post_send_signal_reason"] = verify_reason
+        out["post_send_signal_method"] = "outbound_bubble"
         log(
             "info",
             "dm_send_button_tap_confirmed",
             target_username=username,
             thread_state=dm_state,
-            reason=sig_reason,
+            reason=verify_reason,
+            secondary_reason=sig_reason,
         )
     else:
         out["sent"] = False
-        out["reason"] = "send_confirmation_failed"
-        out["post_send_signal_reason"] = sig_reason
+        out["reason"] = "send_unverified"
+        out["post_send_signal_reason"] = verify_reason
+        out["post_send_signal_method"] = "outbound_bubble"
         log(
             "warning",
             "dm_send_button_tap_unconfirmed",
             target_username=username,
             thread_state=dm_state,
-            reason=sig_reason,
+            reason=verify_reason,
+            secondary_reason=sig_reason,
         )
     _LAST_DM_SEND_RESULT = dict(out)
     return out
@@ -48909,4 +49043,3 @@ def verify_app_foreground(d: u2.Device, package: str | None = None) -> bool:
     except Exception as e:
         log("error", "app_foreground_check_failed", error=str(e))
         return False
-
