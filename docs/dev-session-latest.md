@@ -2,6 +2,30 @@
 
 *Document volatil : à mettre à jour après les prochains jalons produit / tech.*
 
+## Return CT ambiguous own_unified — checkpoint 2026-07-12
+
+- **Incident d'intégrité traité d'abord** : `instagram_navigation.py` était
+  tronqué dans le worktree. Sauvegardes forensiques hors repo :
+  `/tmp/instagram_navigation.py.truncated.<timestamp>` et
+  `/tmp/instagram_navigation.py.truncated.<timestamp>.diff`.
+- **Restauration ciblée** : baseline `HEAD:instagram_navigation.py` vérifiée
+  complète avant restore, avec les symboles
+  `post_follow_controlled_return_to_followers_list`,
+  `return_to_followers_list`, `detect_followers_list_screen` et
+  `run_mute_engine_v2`. Aucun reset global, checkout global ou stash global.
+- **Patch** : commit
+  `26cd04cd816c8b358397e5e9d4224360fb5ea54f`
+  (`fix(worker): recover ambiguous followers list return`) ; le chemin
+  `post_follow_return_ct_compact_ambiguous_list_safe_back_recovery` réutilise
+  `post_back_det` après `compact_safe_back` et conclut
+  `compact_safe_back_then_list` sur liste CT confirmée.
+- **Tests Golden Flow** : py_compile, test Return CT ciblé, Golden Flow
+  (`tests/test_golden_flow_open_follow_mute_return.py -q`), suite worker,
+  `git diff --check` et no-leak scan passés dans le checkpoint.
+- **Statut** : diagnosed / patched / tested. **Runtime pending** : aucun run
+  device, Welcome validation ou Busy projection runtime ne doit être déduit de
+  ce checkpoint.
+
 ## CP5 operator Stop — checkpoint 2026-07-08
 
 - **Stop source-agnostique** : `POST /api/instagram-dashboard/stop` accepte

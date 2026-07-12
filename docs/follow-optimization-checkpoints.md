@@ -4,6 +4,30 @@ Ce registre fige les decisions de la sequence d'optimisation
 follow / mute / like / return CT / accounting. Il ne decrit aucun patch runtime
 nouveau.
 
+## Checkpoint: Return CT ambiguous own_unified recovery
+
+- Commit: `26cd04cd816c8b358397e5e9d4224360fb5ea54f`
+- Message: `fix(worker): recover ambiguous followers list return`
+- Status: **patched / tested**, **runtime pending**
+- Incident prealable: `instagram_navigation.py` etait tronque dans le
+  worktree. Le fichier tronque et son diff complet ont ete sauvegardes hors
+  repo (`/tmp/instagram_navigation.py.truncated.<timestamp>` et `.diff`) avant
+  restauration ciblee depuis `HEAD`.
+- Baseline verifiee avant restauration: `HEAD:instagram_navigation.py` complet,
+  contenant `post_follow_controlled_return_to_followers_list`,
+  `return_to_followers_list`, `detect_followers_list_screen` et
+  `run_mute_engine_v2`.
+- Patch: le chemin
+  `post_follow_return_ct_compact_ambiguous_list_safe_back_recovery` passe par
+  `compact_safe_back`, reutilise `post_back_det`, puis conclut
+  `compact_safe_back_then_list` quand la liste CT est confirmee.
+- Scope preserve: aucun changement Like, Search Surface Recovery, rotation CT,
+  stale action bar generique, reglages production ou refactor.
+- Validations: py_compile, test Return CT cible, Golden Flow, suite worker,
+  `git diff --check`, no-leak scan.
+- Limite: la validation runtime device/Welcome reste a faire separement; ne pas
+  marquer ce checkpoint comme runtime validated.
+
 ## Checkpoint: Welcome -> Follow handoff production
 
 - Scope: validation du vrai chemin `account_session` après Welcome DM

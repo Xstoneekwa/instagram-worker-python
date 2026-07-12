@@ -42,6 +42,48 @@ Le **return CT** ramène l’UI vers la liste followers du **profil source (CT)*
 - garde-fous **anti-dérive** (surfaces dangereuses : story, reel, composer, DM, etc.) ;
 - **budget temps** par round et **abort** propre si la surface reste dangereuse ou incertaine.
 
+### Checkpoint 2026-07-12 — ambiguous own_unified compact return
+
+Status: **patched / tested**, **runtime pending**.
+
+Incident traité avant patch fonctionnel :
+
+1. `instagram_navigation.py` a été trouvé tronqué dans le worktree.
+2. Le fichier tronqué et son diff complet ont été sauvegardés hors repo sous
+   `/tmp/instagram_navigation.py.truncated.<timestamp>` et
+   `/tmp/instagram_navigation.py.truncated.<timestamp>.diff`.
+3. La baseline `HEAD:instagram_navigation.py` a été vérifiée complète avant
+   restauration ciblée : présence de
+   `post_follow_controlled_return_to_followers_list`,
+   `return_to_followers_list`, `detect_followers_list_screen` et
+   `run_mute_engine_v2`.
+4. Restauration limitée à `instagram_navigation.py`, sans `git reset --hard`,
+   sans checkout global et sans stash global.
+
+Patch documenté :
+
+- Commit worker :
+  `26cd04cd816c8b358397e5e9d4224360fb5ea54f`
+  (`fix(worker): recover ambiguous followers list return`).
+- Le cas `post_follow_return_ct_compact_ambiguous_list_safe_back_recovery`
+  réutilise la détection `post_back_det` après `compact_safe_back`.
+- Conclusion attendue : `compact_safe_back_then_list`.
+- Scope strict : aucun changement Like, Search Surface Recovery, rotation CT,
+  stale action bar générique, réglage production ou refactor hors Return CT.
+
+Validation sans device :
+
+- `python3 -m py_compile instagram_navigation.py`
+- test ciblé Return CT
+- tests Golden Flow, dont
+  `tests/test_golden_flow_open_follow_mute_return.py -q`
+- suite worker complète applicable au checkpoint
+- `git diff --check`
+- no-leak scan
+
+La validation runtime réelle reste en attente : ne pas présenter Return CT,
+Welcome ou Busy projection comme runtime validated par ce checkpoint.
+
 ## Partial success
 
 Si le follow est **validé** mais le retour CT **échoue** ou est **abandonné** pour dérive / budget :
