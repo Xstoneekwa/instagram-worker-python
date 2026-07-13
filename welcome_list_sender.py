@@ -576,6 +576,118 @@ def _verify_followers_surface(
     return ok, obs
 
 
+def _recovered_followers_snapshot_strong(
+    open_meta: dict[str, Any],
+    *,
+    account_username: str,
+    pkg: str,
+) -> tuple[bool, str, dict[str, Any]]:
+    snapshot = open_meta.get("after_tap_screen_snapshot") or {}
+    if not isinstance(snapshot, dict) or not bool(snapshot.get("is_followers_list")):
+        return False, "snapshot_not_followers_list", {}
+    if str(snapshot.get("open_detection_method") or "") != "visual_fallback":
+        return False, "snapshot_not_visual_fallback", snapshot
+    if str(open_meta.get("open_detection_method") or "") != "visual_fallback":
+        return False, "canonical_open_not_visual_fallback", snapshot
+    source = str(open_meta.get("source_profile_username") or "").strip().lower()
+    if source != str(account_username or "").strip().lower():
+        return False, "canonical_open_account_mismatch", snapshot
+
+    visual = snapshot.get("visual_fallback_detail") or {}
+    if not isinstance(visual, dict) or not bool(visual.get("visual_match")):
+        return False, "snapshot_visual_match_missing", snapshot
+    min_confidence = float(
+        getattr(config, "FOLLOWERS_VISUAL_FALLBACK_MIN_CONFIDENCE", 0.65) or 0.65
+    )
+    min_follow_buttons = int(
+        getattr(config, "FOLLOWERS_VISUAL_MIN_FOLLOW_BUTTONS", 3) or 3
+    )
+    confidence = float(visual.get("visual_confidence") or 0.0)
+    rows = int(visual.get("visual_user_rows_detected") or 0)
+    follow_buttons = int(visual.get("visual_follow_button_count") or 0)
+    search_strip = bool(visual.get("visual_search_area_detected"))
+    if confidence < min_confidence:
+        return False, "snapshot_visual_confidence_weak", snapshot
+    if follow_buttons < min_follow_buttons:
+        return False, "snapshot_follow_buttons_weak", snapshot
+    if rows < 2:
+        return False, "snapshot_rows_weak", snapshot
+    if not search_strip:
+        return False, "snapshot_search_strip_missing", snapshot
+
+    snapshot_pkg = str(snapshot.get("current_package") or "").strip()
+    expected_pkg = str(pkg or "").strip()
+    if snapshot_pkg and expected_pkg and snapshot_pkg != expected_pkg:
+        return False, "snapshot_package_mismatch", snapshot
+    return True, "strong_visual_snapshot", snapshot
+
+
+def _fresh_followers_surface_contradiction(
+    fresh_det: dict[str, Any],
+    fresh_xml: str,
+    *,
+    recovered_snapshot: dict[str, Any],
+    pkg: str,
+) -> str:
+    fresh_pkg = str(fresh_det.get("current_package") or "").strip()
+    expected_pkg = str(pkg or "").strip()
+    if fresh_pkg and expected_pkg and fresh_pkg != expected_pkg:
+        return "foreground_package_changed"
+    prior_activity = str(recovered_snapshot.get("current_activity") or "").strip()
+    fresh_activity = str(fresh_det.get("current_activity") or "").strip()
+    if prior_activity and fresh_activity and prior_activity != fresh_activity:
+        return "foreground_activity_changed"
+    if bool(fresh_det.get("navigation_since_snapshot")):
+        return "navigation_since_snapshot"
+
+    recognized_surface = str(
+        fresh_det.get("recognized_surface") or fresh_det.get("surface") or ""
+    ).strip().lower()
+    if recognized_surface in {
+        "login",
+        "challenge",
+        "checkpoint",
+        "dm_thread",
+        "profile",
+        "home",
+        "search",
+        "post",
+        "story",
+    }:
+        return f"recognized_surface:{recognized_surface}"
+
+    xml = str(fresh_xml or "").lower()
+    marker_groups = (
+        (
+            "login_or_challenge",
+            (
+                "challenge_required",
+                "challenge_webview",
+                "checkpoint",
+                "login_password",
+                "login_username",
+            ),
+        ),
+        ("dm_thread", ("row_thread_composer", "direct_thread", "message_composer")),
+        ("home", ("feed_timeline", "feed_view_pager")),
+        ("search", ("explore_grid", "search_tab_selected")),
+        ("story", ("reel_viewer", "story_viewer")),
+    )
+    for reason, markers in marker_groups:
+        if any(marker in xml for marker in markers):
+            return f"fresh_xml:{reason}"
+
+    guess = str(fresh_det.get("current_screen_guess") or "").strip().lower()
+    profile_header = "profile_header" in xml
+    profile_structure = any(
+        marker in xml
+        for marker in ("profile_grid", "profile_tab", "profile_header_followers")
+    )
+    if guess == "profile_header_rid" and profile_header and profile_structure:
+        return "fresh_xml:profile_confirmed"
+    return ""
+
+
 def _ensure_sender_entry_followers_surface(
     d: u2.Device,
     *,
@@ -593,7 +705,11 @@ def _ensure_sender_entry_followers_surface(
         d, account_username=account_username, context="welcome_list_sender_start"
     )
     if ok:
-        return True, {"recovered": False, "obs": obs}
+        return True, {
+            "recovered": False,
+            "surface_decision": "fresh_detection_confirmed",
+            "obs": obs,
+        }
 
     log(
         "info",
@@ -604,19 +720,65 @@ def _ensure_sender_entry_followers_surface(
     opened, open_meta = open_own_followers_list_from_own_profile(
         d, account_username, pkg=pkg
     )
+    failure_obs = obs
     if opened:
         followers_clear_detect_hierarchy_cache()
         det, obs2 = detect_followers_list_screen_fresh(
             d, source_profile_username=account_username
         )
+        failure_obs = obs2
         if bool(det.get("is_followers_list")):
             log(
                 "info",
                 "welcome_sender_entry_surface_recovered",
                 account_username=account_username,
                 open_detection_method=det.get("open_detection_method"),
+                surface_decision="fresh_detection_confirmed",
             )
-            return True, {"recovered": True, "open_meta": open_meta, "obs": obs2}
+            return True, {
+                "recovered": True,
+                "surface_decision": "fresh_detection_confirmed",
+                "open_meta": open_meta,
+                "obs": obs2,
+            }
+        strong, snapshot_reason, snapshot = _recovered_followers_snapshot_strong(
+            open_meta,
+            account_username=account_username,
+            pkg=pkg,
+        )
+        contradiction = _fresh_followers_surface_contradiction(
+            det,
+            obs2,
+            recovered_snapshot=snapshot,
+            pkg=pkg,
+        )
+        if strong and not contradiction:
+            visual = snapshot.get("visual_fallback_detail") or {}
+            log(
+                "info",
+                "welcome_sender_entry_surface_recovered",
+                account_username=account_username,
+                open_detection_method="visual_fallback",
+                surface_decision="recovered_snapshot_preserved",
+                visual_confidence=visual.get("visual_confidence"),
+                visual_user_rows_detected=visual.get("visual_user_rows_detected"),
+                visual_follow_button_count=visual.get("visual_follow_button_count"),
+            )
+            return True, {
+                "recovered": True,
+                "surface_decision": "recovered_snapshot_preserved",
+                "open_meta": open_meta,
+                "obs": obs2,
+            }
+        log(
+            "warning",
+            "welcome_sender_entry_recovered_snapshot_rejected",
+            account_username=account_username,
+            surface_decision="recovered_snapshot_rejected",
+            snapshot_reason=snapshot_reason,
+            contradiction=contradiction or None,
+            current_screen_guess=det.get("current_screen_guess"),
+        )
 
     log(
         "error",
@@ -624,8 +786,14 @@ def _ensure_sender_entry_followers_surface(
         account_username=account_username,
         opened=bool(opened),
         failure_reason=str((open_meta or {}).get("failure_reason") or ""),
+        surface_decision="recovered_snapshot_rejected",
     )
-    return False, {"recovered": False, "open_meta": open_meta, "obs": obs}
+    return False, {
+        "recovered": False,
+        "surface_decision": "recovered_snapshot_rejected",
+        "open_meta": open_meta,
+        "obs": failure_obs,
+    }
 
 
 def _welcome_send_has_strong_outbound_proof(
@@ -1245,6 +1413,7 @@ def run_welcome_list_sender(
         "list_navigation_total_ms": 0.0,
         "dm_send_total_ms": 0.0,
         "sender_status": "not_started",
+        "session_scan_jobs_count_before_planning": len(session_scan_jobs),
     }
 
     real_enabled, real_source = resolve_welcome_dm_real_send_enabled()
@@ -1280,6 +1449,7 @@ def run_welcome_list_sender(
         scan_final_idx = int(scan.get("scan_final_screen_index") or 0)
         followers_refresh_detect_hierarchy_cache(d, screen_index=scan_final_idx)
     summary["entry_surface_recovered"] = bool(entry_meta.get("recovered"))
+    summary["entry_surface_decision"] = str(entry_meta.get("surface_decision") or "")
 
     scan_anchors = _scan_row_anchors_by_username(scan)
 
@@ -1302,10 +1472,14 @@ def run_welcome_list_sender(
             )
         else:
             planned_session_jobs = []
-            selection_strategy = "no_current_scan_jobs"
+            selection_strategy = (
+                "current_scan_jobs_blocked_by_surface"
+                if session_scan_jobs
+                else "no_current_scan_jobs"
+            )
             position_meta = {
                 "scan_final_screen_index": int(scan.get("scan_final_screen_index") or 0),
-                "scan_jobs_total": 0,
+                "scan_jobs_total": len(session_scan_jobs),
             }
         summary["planned_session_jobs"] = list(planned_session_jobs)
         summary["recipients_planned"] = [
