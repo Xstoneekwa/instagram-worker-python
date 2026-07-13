@@ -249,6 +249,102 @@ class DmSendButtonSelectionTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(reason, "outbound_bubble_not_verified")
 
+    def test_outbound_send_verification_accepts_pending_bubble(self) -> None:
+        device = MagicMock()
+        pre = {"hierarchy_hash": "before", "message_marker_count": 0, "expected_text_present": False}
+        device.dump_hierarchy.return_value = """
+        <hierarchy>
+          <node resource-id="com.instagram.android:id/row_thread_message"
+                text="Sending" />
+        </hierarchy>
+        """
+        with (
+            patch.object(nav.config, "DM_OUTBOUND_SEND_VERIFY_MAX_S", 0.01, create=True),
+            patch.object(nav.config, "DM_OUTBOUND_SEND_VERIFY_POLL_S", 0, create=True),
+            patch.object(nav, "read_dm_composer_text", return_value=""),
+        ):
+            ok, reason, sig = nav._dm_verify_outbound_message_after_send(
+                device,
+                "Salut",
+                pre_signature=pre,
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(reason, "outbound_pending_bubble_after_tap")
+        self.assertTrue(sig.get("pending_outbound_signal_present"))
+
+    def test_outbound_send_verification_accepts_normalized_emoji_text(self) -> None:
+        device = MagicMock()
+        pre = {"hierarchy_hash": "before", "message_marker_count": 0, "expected_text_present": False}
+        expected = "Salut 👋\nBienvenue chez nous"
+        device.dump_hierarchy.return_value = """
+        <hierarchy>
+          <node resource-id="com.instagram.android:id/row_thread_message"
+                text="Salut 👋 Bienvenue chez nous" />
+        </hierarchy>
+        """
+        with (
+            patch.object(nav.config, "DM_OUTBOUND_SEND_VERIFY_MAX_S", 0.01, create=True),
+            patch.object(nav.config, "DM_OUTBOUND_SEND_VERIFY_POLL_S", 0, create=True),
+            patch.object(nav, "read_dm_composer_text", return_value=""),
+        ):
+            ok, reason, sig = nav._dm_verify_outbound_message_after_send(
+                device,
+                expected,
+                pre_signature=pre,
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(reason, "outbound_bubble_after_tap")
+        self.assertTrue(sig.get("expected_text_present"))
+
+    def test_outbound_send_verification_rejects_wrong_thread_text(self) -> None:
+        device = MagicMock()
+        pre = {"hierarchy_hash": "before", "message_marker_count": 0, "expected_text_present": False}
+        device.dump_hierarchy.return_value = """
+        <hierarchy>
+          <node resource-id="com.instagram.android:id/row_thread_message"
+                text="Different conversation" />
+        </hierarchy>
+        """
+        with (
+            patch.object(nav.config, "DM_OUTBOUND_SEND_VERIFY_MAX_S", 0.01, create=True),
+            patch.object(nav.config, "DM_OUTBOUND_SEND_VERIFY_POLL_S", 0, create=True),
+            patch.object(nav, "read_dm_composer_text", return_value=""),
+        ):
+            ok, reason, _sig = nav._dm_verify_outbound_message_after_send(
+                device,
+                "Salut",
+                pre_signature=pre,
+            )
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "outbound_bubble_not_verified")
+
+    def test_outbound_send_verification_rejects_retry_icon_without_text(self) -> None:
+        device = MagicMock()
+        pre = {"hierarchy_hash": "before", "message_marker_count": 0, "expected_text_present": False}
+        device.dump_hierarchy.return_value = """
+        <hierarchy>
+          <node resource-id="com.instagram.android:id/row_thread_message"
+                text="Retry" />
+        </hierarchy>
+        """
+        with (
+            patch.object(nav.config, "DM_OUTBOUND_SEND_VERIFY_MAX_S", 0.01, create=True),
+            patch.object(nav.config, "DM_OUTBOUND_SEND_VERIFY_POLL_S", 0, create=True),
+            patch.object(nav, "read_dm_composer_text", return_value=""),
+        ):
+            ok, reason, sig = nav._dm_verify_outbound_message_after_send(
+                device,
+                "Salut",
+                pre_signature=pre,
+            )
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "outbound_bubble_not_verified")
+        self.assertFalse(sig.get("pending_outbound_signal_present"))
+
     def test_outbound_send_verification_rejects_existing_bubble_only(self) -> None:
         device = MagicMock()
         existing = """

@@ -110,6 +110,79 @@ class WelcomeListSenderRestoreTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertFalse(meta["recovered"])
 
+    def test_post_job_recovery_opens_own_followers_after_send_failure_profile_drift(self) -> None:
+        device = MagicMock()
+        det_lost = {
+            "is_followers_list": False,
+            "action_bar_title": "verslaresilience_",
+            "current_screen_guess": "likely_profile",
+        }
+        det_followers = {
+            "is_followers_list": True,
+            "action_bar_title": "Followers",
+            "open_detection_method": "own_unified_follow_list",
+        }
+        with (
+            patch.object(sender, "is_dm_thread_screen", return_value=False),
+            patch.object(
+                sender,
+                "detect_followers_list_screen_fresh",
+                side_effect=[
+                    (det_lost, {}),
+                    (det_lost, {}),
+                    (det_lost, {}),
+                    (det_followers, {}),
+                ],
+            ),
+            patch("instagram_navigation.tap_instagram_action_bar_back_button", return_value=(True, "action_bar")),
+            patch.object(sender, "followers_session_clear_list_committed_open") as clear_mock,
+            patch("own_profile_navigation.open_own_profile_from_bottom_nav", return_value=True) as profile_mock,
+            patch(
+                "own_profile_navigation.open_own_followers_list_from_own_profile",
+                return_value=(True, {"open_method": "canonical"}),
+            ) as followers_mock,
+            patch.object(sender, "followers_clear_detect_hierarchy_cache"),
+            patch.object(sender, "followers_refresh_detect_hierarchy_cache"),
+        ):
+            ok = sender._restore_followers_after_job(
+                device,
+                "avoga_aventure_travel",
+                pkg="com.instagram.android",
+                account_username="i_m_your_traker",
+            )
+
+        self.assertTrue(ok)
+        clear_mock.assert_called_once_with("i_m_your_traker")
+        profile_mock.assert_called_once()
+        followers_mock.assert_called_once()
+
+    def test_post_job_recovery_fails_closed_when_followers_cannot_be_restored(self) -> None:
+        device = MagicMock()
+        det_lost = {
+            "is_followers_list": False,
+            "action_bar_title": "verslaresilience_",
+            "current_screen_guess": "likely_profile",
+        }
+        with (
+            patch.object(sender, "is_dm_thread_screen", return_value=False),
+            patch.object(sender, "detect_followers_list_screen_fresh", return_value=(det_lost, {})),
+            patch("instagram_navigation.tap_instagram_action_bar_back_button", return_value=(False, "missing")),
+            patch.object(sender, "followers_session_clear_list_committed_open"),
+            patch("own_profile_navigation.open_own_profile_from_bottom_nav", return_value=True),
+            patch(
+                "own_profile_navigation.open_own_followers_list_from_own_profile",
+                return_value=(False, {"failure_reason": "followers_list_not_detected"}),
+            ),
+        ):
+            ok = sender._restore_followers_after_job(
+                device,
+                "avoga_aventure_travel",
+                pkg="com.instagram.android",
+                account_username="i_m_your_traker",
+            )
+
+        self.assertFalse(ok)
+
     def test_skip_current_scan_session_jobs_targets_scan_enqueued_only(self) -> None:
         scan_summary = {
             "new_follower_job_ids_enqueued": [

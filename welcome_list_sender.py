@@ -807,14 +807,65 @@ def _restore_followers_after_job(
 ) -> bool:
     """Ensure we end on followers list (from DM, profile, or already on list)."""
     src = str(account_username or "").strip()
+    from own_profile_navigation import (
+        open_own_followers_list_from_own_profile,
+        open_own_profile_from_bottom_nav,
+    )
+
+    def _confirm_followers(stage: str) -> bool:
+        det, _ = detect_followers_list_screen_fresh(d, source_profile_username=src)
+        ok = bool(det.get("is_followers_list"))
+        log(
+            "info" if ok else "warning",
+            "welcome_post_job_return_surface_check",
+            username=username,
+            source_profile_username=src or None,
+            stage=stage,
+            followers_surface_ok=ok,
+            action_bar_title=det.get("action_bar_title"),
+            current_screen_guess=det.get("current_screen_guess"),
+            open_detection_method=det.get("open_detection_method"),
+        )
+        return ok
+
+    log(
+        "info",
+        "welcome_post_job_return_started",
+        username=username,
+        source_profile_username=src or None,
+    )
+    if _confirm_followers("initial"):
+        log(
+            "info",
+            "welcome_post_job_return_succeeded",
+            username=username,
+            source_profile_username=src or None,
+            method="already_on_followers",
+        )
+        return True
+
     if is_dm_thread_screen(d, pkg):
+        log(
+            "info",
+            "welcome_post_job_thread_to_profile",
+            username=username,
+            source_profile_username=src or None,
+        )
         fin = return_welcome_list_from_dm_to_followers(
             d,
             username,
             pkg,
             source_profile_username=src,
         )
-        return bool(fin.get("followers_surface_ok"))
+        if bool(fin.get("followers_surface_ok")) and _confirm_followers("thread_return"):
+            log(
+                "info",
+                "welcome_post_job_return_succeeded",
+                username=username,
+                source_profile_username=src or None,
+                method="thread_to_profile_to_followers",
+            )
+            return True
 
     from instagram_navigation import tap_instagram_action_bar_back_button
 
@@ -822,19 +873,53 @@ def _restore_followers_after_job(
         getattr(config, "WELCOME_LIST_SENDER_BACK_SETTLE_S", 0.45) or 0.45
     )
     for step in range(2):
-        det, _ = detect_followers_list_screen_fresh(d, source_profile_username=src)
-        if bool(det.get("is_followers_list")):
-            if step > 0:
-                log(
-                    "info",
-                    "welcome_list_sender_followers_surface_restored",
-                    username=username,
-                    via=f"action_bar_back_step_{step}",
-                )
+        if _confirm_followers(f"back_step_{step}"):
+            log(
+                "info",
+                "welcome_post_job_return_succeeded",
+                username=username,
+                source_profile_username=src or None,
+                method=f"action_bar_back_step_{step}",
+            )
             return True
         tapped, _ = tap_instagram_action_bar_back_button(d, pkg)
         if tapped and settle_s > 0:
             time.sleep(settle_s)
+
+    log(
+        "info",
+        "welcome_post_job_profile_to_followers",
+        username=username,
+        source_profile_username=src or None,
+        method="own_profile_canonical_reopen",
+    )
+    followers_session_clear_list_committed_open(src)
+    profile_ok = open_own_profile_from_bottom_nav(d)
+    opened = False
+    open_meta: dict[str, Any] = {}
+    if profile_ok:
+        opened, open_meta = open_own_followers_list_from_own_profile(d, src, pkg=pkg)
+    if opened and _confirm_followers("own_profile_reopen"):
+        followers_clear_detect_hierarchy_cache()
+        followers_refresh_detect_hierarchy_cache(d, screen_index=0)
+        log(
+            "info",
+            "welcome_post_job_return_succeeded",
+            username=username,
+            source_profile_username=src or None,
+            method="own_profile_to_followers",
+        )
+        return True
+
+    log(
+        "error",
+        "welcome_post_job_return_failed",
+        username=username,
+        source_profile_username=src or None,
+        own_profile_opened=bool(profile_ok),
+        followers_opened=bool(opened),
+        failure_reason=str((open_meta or {}).get("failure_reason") or "followers_recovery_failed"),
+    )
     return False
 
 

@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import hashlib
+import html
 import json
 import os
 import random
 import re
 import time
+import unicodedata
 from pathlib import Path
 from typing import Any, Callable
 import xml.etree.ElementTree as ET
@@ -6195,7 +6197,7 @@ def dm_thread_shows_outgoing_message(d: u2.Device, expected_text: str) -> bool:
             hier = d.dump_hierarchy()
         except Exception:
             return False
-    if needle not in hier:
+    if not _dm_expected_text_present(hier, needle):
         return False
     composer_text = read_dm_composer_text(d)
     if composer_text.strip() == needle and not _dm_hierarchy_suggests_existing_thread(hier):
@@ -6221,6 +6223,40 @@ _DM_MESSAGE_MARKERS = (
     "message_bubble",
 )
 
+_DM_PENDING_OUTBOUND_MARKERS = (
+    "sending",
+    "sent",
+    "delivered",
+    "envoy",
+    "envoi",
+    "spinner",
+    "progress",
+)
+
+
+def _normalize_dm_message_text(value: str | None) -> str:
+    raw = html.unescape(str(value or ""))
+    raw = raw.replace("\u2026", "...")
+    normalized = unicodedata.normalize("NFKC", raw)
+    return " ".join(normalized.split()).strip().casefold()
+
+
+def _dm_expected_text_present(hierarchy_xml: str, expected_text: str) -> bool:
+    expected = _normalize_dm_message_text(expected_text)
+    if not expected:
+        return False
+    normalized_hierarchy = _normalize_dm_message_text(hierarchy_xml)
+    if expected in normalized_hierarchy:
+        return True
+    compact_expected = re.sub(r"\s+", "", expected)
+    compact_hierarchy = re.sub(r"\s+", "", normalized_hierarchy)
+    return bool(compact_expected and compact_expected in compact_hierarchy)
+
+
+def _dm_pending_outbound_signal_present(hierarchy_xml: str) -> bool:
+    blob = _normalize_dm_message_text(hierarchy_xml)
+    return any(marker in blob for marker in _DM_PENDING_OUTBOUND_MARKERS)
+
 
 def _dm_dump_thread_hierarchy(d: u2.Device) -> str:
     try:
@@ -6241,14 +6277,16 @@ def _dm_thread_message_signature(
     text = str(expected_text or "").strip()
     hier = str(hierarchy_xml if hierarchy_xml is not None else _dm_dump_thread_hierarchy(d))
     blob = hier.lower()
+    expected_text_present = _dm_expected_text_present(hier, text)
     return {
         "hierarchy_hash": hashlib.sha256(hier.encode("utf-8", errors="ignore")).hexdigest()
         if hier
         else "",
         "hierarchy_len": len(hier),
-        "expected_text_present": bool(text and text in hier),
+        "expected_text_present": expected_text_present,
         "message_marker_count": sum(blob.count(marker) for marker in _DM_MESSAGE_MARKERS),
         "composer_text_len": _dm_read_composer_text_len(d),
+        "pending_outbound_signal_present": _dm_pending_outbound_signal_present(hier),
     }
 
 
@@ -6264,7 +6302,14 @@ def _dm_outbound_signature_advanced(
     expected_became_present = bool(post_sig.get("expected_text_present")) and not bool(
         pre_sig.get("expected_text_present")
     )
-    return bool(post_hash and post_hash != pre_hash and (marker_delta > 0 or expected_became_present))
+    pending_became_present = bool(post_sig.get("pending_outbound_signal_present")) and not bool(
+        pre_sig.get("pending_outbound_signal_present")
+    )
+    return bool(
+        post_hash
+        and post_hash != pre_hash
+        and (marker_delta > 0 or expected_became_present or pending_became_present)
+    )
 
 
 def _dm_verify_outbound_message_after_send(
@@ -6292,17 +6337,30 @@ def _dm_verify_outbound_message_after_send(
     while time.monotonic() < deadline:
         hier = _dm_dump_thread_hierarchy(d)
         last_sig = _dm_thread_message_signature(d, expected_text, hierarchy_xml=hier)
-        if dm_thread_shows_outgoing_message(d, expected_text) and _dm_outbound_signature_advanced(
-            pre_signature, last_sig
-        ):
+        advanced = _dm_outbound_signature_advanced(pre_signature, last_sig)
+        marker_delta = int(last_sig.get("message_marker_count") or 0) - int(
+            pre_signature.get("message_marker_count") or 0
+        )
+        exact_or_normalized_text = dm_thread_shows_outgoing_message(d, expected_text)
+        pending_outbound = bool(last_sig.get("pending_outbound_signal_present")) and marker_delta > 0
+        if advanced and (exact_or_normalized_text or pending_outbound):
+            reason = (
+                "outbound_bubble_after_tap"
+                if exact_or_normalized_text
+                else "outbound_pending_bubble_after_tap"
+            )
             log(
                 "info",
                 "dm_outbound_send_verification_succeeded",
-                reason="outbound_bubble_after_tap",
+                reason=reason,
                 post_message_marker_count=int(last_sig.get("message_marker_count") or 0),
+                post_expected_text_present=bool(last_sig.get("expected_text_present")),
+                post_pending_outbound_signal_present=bool(
+                    last_sig.get("pending_outbound_signal_present")
+                ),
                 post_hierarchy_len=int(last_sig.get("hierarchy_len") or 0),
             )
-            return True, "outbound_bubble_after_tap", last_sig
+            return True, reason, last_sig
         time.sleep(poll_s)
     reason = "thread_signature_unchanged"
     if bool(last_sig.get("expected_text_present")) and not _dm_outbound_signature_advanced(
@@ -6317,6 +6375,9 @@ def _dm_verify_outbound_message_after_send(
         reason=reason,
         post_message_marker_count=int(last_sig.get("message_marker_count") or 0),
         post_expected_text_present=bool(last_sig.get("expected_text_present")),
+        post_pending_outbound_signal_present=bool(
+            last_sig.get("pending_outbound_signal_present")
+        ),
         post_hierarchy_len=int(last_sig.get("hierarchy_len") or 0),
     )
     return False, reason, last_sig
@@ -6324,6 +6385,32 @@ def _dm_verify_outbound_message_after_send(
 
 def _dm_read_composer_text_len(d: u2.Device) -> int:
     return len(read_dm_composer_text(d))
+
+
+def _dm_capture_send_debug_artifact(d: u2.Device, label: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    safe_label = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(label or "dm_send"))[:80]
+    stem = f"{safe_label}_{int(time.time() * 1000)}"
+    try:
+        _ensure_debug_dirs()
+        ss_path = str(_SCREENSHOTS_DIR / f"{stem}.png")
+        xml_path = str(_XML_DIR / f"{stem}.xml")
+        try:
+            screenshot(d, ss_path)
+            out["screenshot_path"] = ss_path
+        except Exception as exc:
+            out["screenshot_error"] = str(exc)[:200]
+        try:
+            hier = _dm_dump_thread_hierarchy(d)
+            with open(xml_path, "w", encoding="utf-8") as fh:
+                fh.write(hier)
+            out["xml_path"] = xml_path
+            out["xml_len"] = str(len(hier))
+        except Exception as exc:
+            out["xml_error"] = str(exc)[:200]
+    except Exception as exc:
+        out["artifact_error"] = str(exc)[:200]
+    return out
 
 
 def _dm_post_send_signal_poll(
@@ -48874,6 +48961,7 @@ def send_dm_safe(
     out["pre_send_expected_text_present"] = bool(
         pre_send_signature.get("expected_text_present")
     )
+    out["pre_send_artifacts"] = _dm_capture_send_debug_artifact(d, "dm_send_before_tap")
     log(
         "info",
         "dm_send_button_tap_started",
@@ -48888,6 +48976,9 @@ def send_dm_safe(
             "dm_send_button_tap_sent",
             target_username=username,
             thread_state=dm_state,
+        )
+        out["post_tap_artifacts"] = _dm_capture_send_debug_artifact(
+            d, "dm_send_immediate_after_tap"
         )
     except Exception as e:
         out["failure_event"] = "dm_sent_failed"
@@ -48927,6 +49018,9 @@ def send_dm_safe(
         out["reason"] = "send_unverified"
         out["post_send_signal_reason"] = verify_reason
         out["post_send_signal_method"] = "outbound_bubble"
+        out["post_verify_artifacts"] = _dm_capture_send_debug_artifact(
+            d, "dm_send_after_verify_failed"
+        )
         log(
             "warning",
             "dm_send_button_tap_unconfirmed",
