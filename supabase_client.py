@@ -7,6 +7,7 @@ import os
 import re
 import socket
 import time
+import uuid
 from typing import Any
 from urllib import error, parse, request
 from datetime import datetime, timedelta, timezone
@@ -244,6 +245,7 @@ def _request_json_tolerate_unknown_columns(
     query: dict[str, str] | None = None,
     body: dict[str, Any] | None = None,
     prefer_representation: bool = False,
+    prefer_resolution: str | None = None,
 ) -> Any:
     """Same as _request_json but retries after dropping columns the server does not have."""
     if body is None:
@@ -253,6 +255,7 @@ def _request_json_tolerate_unknown_columns(
             query=query,
             body=None,
             prefer_representation=prefer_representation,
+            prefer_resolution=prefer_resolution,
         )
     cur = dict(body)
     last_err: RuntimeError | None = None
@@ -264,6 +267,7 @@ def _request_json_tolerate_unknown_columns(
                 query=query,
                 body=cur,
                 prefer_representation=prefer_representation,
+                prefer_resolution=prefer_resolution,
             )
         except RuntimeError as e:
             last_err = e
@@ -2084,6 +2088,7 @@ def record_follow_interaction_outcome(
                 "skipped_tap": bool(skipped_tap),
                 "follow_state_after": str(follow_state_after or ""),
             },
+            idempotency_key=verified_progress_key(run_id, _ev, username),
         )
     return mout
 
@@ -2358,6 +2363,7 @@ def record_interaction_event(
     event_status: str = "success",
     event_reason: str | None = None,
     payload: dict[str, Any] | None = None,
+    idempotency_key: str | None = None,
 ) -> dict[str, Any]:
     """
     Append-only ig_interaction_events row. Skips invalid usernames (same rules as ig_interacted_users).
@@ -2385,6 +2391,10 @@ def record_interaction_event(
     sp = _canonical_source_profile(source_profile)
     interaction_type = _interaction_type_from_event_type(event_type)
     safe_target_id = _safe_uuid_text(target_id)
+    safe_payload = dict(payload) if isinstance(payload, dict) else {}
+    stable_key = str(idempotency_key or "").strip()
+    if stable_key:
+        safe_payload["progress_key"] = stable_key
     body: dict[str, Any] = {
         "username": u,
         "event_type": str(event_type or "")[:200],
@@ -2393,7 +2403,7 @@ def record_interaction_event(
         "interaction_status": str(event_status or "success")[:80],
         "event_at": now,
         "created_at": now,
-        "payload": dict(payload) if isinstance(payload, dict) else {},
+        "payload": safe_payload,
         "evidence_source": "worker_interaction_event",
         "evidence_confidence": "high" if safe_target_id and sp else ("medium" if sp else "unknown"),
         "evidence_summary": _safe_interaction_evidence_summary(
@@ -2404,6 +2414,8 @@ def record_interaction_event(
         ),
         "metadata_safe": {"source": "worker_interaction_event"},
     }
+    if stable_key:
+        body["id"] = str(uuid.uuid5(uuid.NAMESPACE_URL, f"phonefarm:verified-progress:{stable_key}"))
     if str(account_id or "").strip():
         body["account_id"] = str(account_id).strip()
     if run_id and str(run_id).strip():
@@ -2426,12 +2438,51 @@ def record_interaction_event(
             "ig_interaction_events",
             body=body,
             prefer_representation=False,
+            prefer_resolution="resolution=ignore-duplicates" if stable_key else None,
         )
         out["ok"] = True
         return out
     except RuntimeError as e:
         out["error"] = str(e)
         return out
+
+
+def verified_progress_key(run_id: str | None, action_type: str, username: str) -> str:
+    return ":".join(
+        (
+            str(run_id or "no_run").strip(),
+            str(action_type or "unknown").strip().lower(),
+            _canonical_interaction_username(username),
+        )
+    )
+
+
+def record_verified_progress_event(
+    account_id: str,
+    username: str,
+    source_profile: str,
+    *,
+    run_id: str | None,
+    session_id: str | None = None,
+    target_id: str | None = None,
+    action_type: str,
+    event_status: str = "success",
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Publish one append-only, idempotent progress event after canonical UI proof."""
+    key = verified_progress_key(run_id, action_type, username)
+    return record_interaction_event(
+        account_id,
+        username,
+        source_profile,
+        run_id=run_id,
+        session_id=session_id,
+        target_id=target_id,
+        event_type=action_type,
+        event_status=event_status,
+        payload=payload,
+        idempotency_key=key,
+    )
 
 
 def record_mute_interaction_success(
@@ -2601,6 +2652,7 @@ def record_post_like_interaction_success(
                 "timings_ms": timings_ms or {},
                 "per_post": list(per_post) if per_post else [],
             },
+            idempotency_key=verified_progress_key(run_id, "post_like_success", username),
         )
     return mout
 

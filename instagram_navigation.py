@@ -47529,6 +47529,45 @@ def run_visual_candidate_post_follow_phase(
                 bound_commercial_policy_revision=bound_commercial_policy_revision,
                 run_id=likes_run_id,
             )
+            liked_n = int(likes_out.get("liked_count") or 0)
+            likes_outcome = str(likes_out.get("phase_outcome") or "")
+            if (
+                likes_account_id
+                and likes_run_id
+                and liked_n > 0
+                and likes_outcome in ("success", "partial_success")
+            ):
+                try:
+                    _pf_likes_sc.record_verified_progress_event(
+                        likes_account_id,
+                        cand,
+                        src,
+                        run_id=likes_run_id,
+                        action_type="post_like_success",
+                        event_status="success" if likes_outcome == "success" else "partial",
+                        payload={
+                            "liked_count": liked_n,
+                            "proof_source": "post_follow_post_like_verify_success",
+                            "visual_candidate_id": vcid,
+                        },
+                    )
+                    log(
+                        "info",
+                        "verified_progress_published",
+                        run_id=likes_run_id,
+                        action_type="post_like_success",
+                        verified_count=liked_n,
+                        follower_username=cand,
+                    )
+                except Exception as exc:
+                    log(
+                        "warning",
+                        "verified_progress_publish_failed",
+                        run_id=likes_run_id,
+                        action_type="post_like_success",
+                        follower_username=cand,
+                        error=str(exc)[:200],
+                    )
     likes_recoverable_failure = bool(
         str(likes_out.get("phase_outcome") or "") == "failed_safe_continue"
         or int(likes_out.get("post_follow_likes_recoverable_failure_count") or 0) > 0

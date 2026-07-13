@@ -16873,6 +16873,32 @@ def _run_followers_list_engine_session(
                 f"xml_list:{_norm_ig_handle(follower_un)}" if _pf_xml_list else ""
             )
             if _pf_run_full:
+                if (
+                    _pf_follow_ok
+                    and supabase_mode
+                    and account_id
+                    and str(follower_un or "").strip()
+                    and not bool((follow_out or {}).get("skipped_tap"))
+                ):
+                    _timed_safe_supabase_call(
+                        "verified_progress_published",
+                        "record_verified_progress_event",
+                        account_id,
+                        str(follower_un or ""),
+                        source_profile_username,
+                        log_run_id=run_id or None,
+                        log_account_id=account_id,
+                        run_id=run_id or None,
+                        session_id=_SESSION_SOCIAL_ID or None,
+                        target_id=target_id or None,
+                        action_type="follow_verified",
+                        event_status="success",
+                        payload={
+                            "follow_state_after": str((follow_out or {}).get("follow_state_after") or ""),
+                            "proof_source": "perform_follow_safe_follow_verify_success",
+                            "verified_count": 1,
+                        },
+                    )
                 _pf_follow_context = None
                 if _pf_follow_ok:
                     try:
