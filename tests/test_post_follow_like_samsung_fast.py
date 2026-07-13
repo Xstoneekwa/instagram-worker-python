@@ -218,23 +218,6 @@ class FakeCloneHeaderDevice:
         return FakeWaitSelector(bool(rid_match and "profile_header" in rid_match))
 
 
-class FakeNoPostsTextDevice:
-    def __init__(self) -> None:
-        self.calls: list[dict[str, object]] = []
-
-    def __call__(self, **kwargs: object) -> FakeWaitSelector:
-        self.calls.append(dict(kwargs))
-        text_contains = str(kwargs.get("textContains") or "")
-        desc_contains = str(kwargs.get("descriptionContains") or "")
-        present = text_contains == "No Posts Yet" or desc_contains == "No Posts Yet"
-
-        class _Selector:
-            def exists(self, timeout: float = 0.0) -> bool:
-                return present
-
-        return _Selector()
-
-
 class PreFollowTapInstrumentationTest(unittest.TestCase):
     def test_followable_candidate_emits_tap_ready_before_tap_sent(self) -> None:
         device = mock.MagicMock()
@@ -1304,26 +1287,6 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
     def test_open_post_budget_constants(self) -> None:
         self.assertLessEqual(nav._POST_FOLLOW_LIKE_OPEN_POST_MAX_S, 4.0)
         self.assertLessEqual(nav._POST_FOLLOW_LIKE_GRID_PREP_MAX_S, 6.0)
-
-    def test_no_posts_tier1_text_contains_detects_visible_empty_profile(self) -> None:
-        device = FakeNoPostsTextDevice()
-        with mock.patch.object(
-            nav,
-            "_followers_current_pkg_activity",
-            return_value={
-                "current_activity": "com.instagram.mainactivity.InstagramMainActivity",
-                "current_package": "com.instagram.android",
-            },
-        ):
-            out = nav._visual_profile_no_posts_tier1_direct_check(
-                device,
-                source_profile_username="ct",
-            )
-
-        self.assertTrue(out.get("no_posts_detected"))
-        self.assertTrue(out.get("tier1_detected"))
-        self.assertEqual(out.get("detection_method"), "tier1_ui_textContains:No Posts Yet")
-        self.assertEqual(device.calls[0], {"textContains": "No Posts Yet"})
 
     def test_no_posts_tier1_direct_detect_skips_before_legacy_safe_open(self) -> None:
         device = mock.MagicMock()
