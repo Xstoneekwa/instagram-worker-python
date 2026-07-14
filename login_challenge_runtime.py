@@ -58,9 +58,9 @@ def publish_login_challenge_pending_incident(
         reason=reason,
         action_required=dashboard_action_type,
         safe_client_message=(
-            "Instagram demande un code email pour continuer la connexion."
+            "Instagram requires an email code to continue signing in."
             if dashboard_action_type == "enter_email_verification_code"
-            else "Instagram affiche une vérification qui nécessite une revue humaine."
+            else "Instagram is showing a verification challenge that requires human review."
         ),
         admin_message=(
             "Email verification challenge detected after password submit."

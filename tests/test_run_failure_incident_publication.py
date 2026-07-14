@@ -24,7 +24,7 @@ def _identity_run_row() -> dict:
 
 
 class PublishRunFailureIncidentTest(unittest.TestCase):
-    def test_welcome_failure_upserts_canonical_operator_review_action(self) -> None:
+    def test_reviewable_failure_upserts_canonical_operator_review_action(self) -> None:
         run_row = {
             "id": RUN_ID,
             "status": "failed",
@@ -51,6 +51,7 @@ class PublishRunFailureIncidentTest(unittest.TestCase):
                 consumer.incident_notifications,
                 "dispatch_operator_review_action_notification",
             ) as notify,
+            patch.object(consumer, "_audit") as audit,
         ):
             consumer._publish_run_failure_incident(
                 request_id=REQUEST_ID,
@@ -70,8 +71,42 @@ class PublishRunFailureIncidentTest(unittest.TestCase):
         self.assertEqual(params["p_incident_id"], "inc-welcome")
         self.assertTrue(params["p_blocking_campaign"])
         notify.assert_called_once()
+        audit.assert_called_once()
+        self.assertEqual(audit.call_args.kwargs["payload"]["dashboard_action_id"], "action-welcome")
         self.assertEqual(notify.call_args.kwargs["action_id"], "action-welcome")
         self.assertEqual(notify.call_args.kwargs["incident_id"], "inc-welcome")
+
+    def test_unknown_worker_failure_uses_the_same_operator_review_workflow(self) -> None:
+        run_row = {"id": RUN_ID, "status": "failed", "performance_summary": {}}
+        with (
+            patch.object(consumer.supabase_client, "load_run_row", return_value=run_row),
+            patch.object(consumer.supabase_client, "get_account_username", return_value="mythyl_fitness"),
+            patch.object(
+                consumer.runtime_incidents,
+                "publish_account_incident",
+                return_value={"published": True, "incident_id": "inc-worker", "occurrence_count": 1},
+            ),
+            patch.object(consumer.supabase_client, "call_rpc", return_value={"id": "action-worker"}) as call_rpc,
+            patch.object(consumer.incident_notifications, "dispatch_operator_review_action_notification") as notify,
+            patch.object(consumer, "_audit") as audit,
+        ):
+            consumer._publish_run_failure_incident(
+                request_id=REQUEST_ID,
+                account_id=ACCOUNT_ID,
+                run_id=RUN_ID,
+                run_type="account_session",
+                exit_code=1,
+                timed_out=False,
+                canceled=False,
+            )
+
+        params = call_rpc.call_args.args[1]
+        self.assertEqual(params["p_incident_id"], "inc-worker")
+        self.assertEqual(params["p_action_type"], "operator_review_required")
+        self.assertEqual(params["p_metadata"]["incident_type"], "run_worker_failure")
+        self.assertEqual(params["p_metadata"]["reason"], "worker_exit_nonzero")
+        notify.assert_called_once()
+        audit.assert_called_once()
 
     def test_identity_failure_publishes_true_reason_incident(self) -> None:
         with (
@@ -86,6 +121,16 @@ class PublishRunFailureIncidentTest(unittest.TestCase):
                 "publish_account_incident",
                 return_value={"published": True, "incident_id": "inc-1", "occurrence_count": 1},
             ) as publish,
+            patch.object(
+                consumer.supabase_client,
+                "call_rpc",
+                return_value={"id": "action-identity"},
+            ),
+            patch.object(
+                consumer.incident_notifications,
+                "dispatch_operator_review_action_notification",
+            ),
+            patch.object(consumer, "_audit"),
         ):
             consumer._publish_run_failure_incident(
                 request_id=REQUEST_ID,

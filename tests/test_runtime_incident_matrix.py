@@ -28,6 +28,8 @@ class ClassifyTerminalRunFailureTest(unittest.TestCase):
         self.assertEqual(decision.reason_code, "actual_logged_in_username_not_detected")
         self.assertEqual(decision.severity, "critical")
         self.assertTrue(decision.notify_channels)
+        self.assertTrue(decision.requires_operator_review)
+        self.assertTrue(decision.blocking_campaign)
         self.assertIn("active Instagram account could not be confirmed", decision.action_required)
         self.assertIn("Human review", decision.action_required)
 
@@ -133,7 +135,18 @@ class ClassifyTerminalRunFailureTest(unittest.TestCase):
             self.assertEqual(decision.incident_type, "welcome_surface_unstable")
             self.assertEqual(decision.reason_code, reason)
             self.assertEqual(decision.severity, "critical")
-            self.assertEqual(decision.action_required, "operator_review_required")
+            self.assertTrue(decision.requires_operator_review)
+            self.assertTrue(decision.blocking_campaign)
+            self.assertIn("Welcome followers-surface evidence", decision.action_required)
+
+    def test_non_incident_control_flow_never_requires_operator_review(self) -> None:
+        decision = classify_terminal_run_failure(
+            exit_code=1,
+            performance_summary={"reason": "schedule_window_closed"},
+        )
+        self.assertFalse(decision.should_publish)
+        self.assertFalse(decision.requires_operator_review)
+        self.assertFalse(decision.blocking_campaign)
 
     def test_metadata_never_contains_raw_material(self) -> None:
         decision = classify_terminal_run_failure(

@@ -108,6 +108,8 @@ class IncidentDecision:
     severity: str = "error"
     operator_label: str = ""
     action_required: str = ""
+    requires_operator_review: bool = False
+    blocking_campaign: bool = False
     admin_message: str = ""
     notify_channels: bool = False
     skip_reason: str = ""
@@ -120,6 +122,8 @@ class IncidentDecision:
             "reason_code": self.reason_code or None,
             "severity": self.severity or None,
             "skip_reason": self.skip_reason or None,
+            "requires_operator_review": self.requires_operator_review,
+            "blocking_campaign": self.blocking_campaign,
         }
 
 
@@ -219,6 +223,8 @@ def classify_terminal_run_failure(
                 severity="critical",
                 operator_label="Instagram identity could not be verified",
                 action_required=MYTHYL_OPERATOR_MESSAGE,
+                requires_operator_review=True,
+                blocking_campaign=True,
                 admin_message=(
                     "Identity preflight could not verify the active username "
                     f"({code}). The run stopped before any business action."
@@ -236,6 +242,8 @@ def classify_terminal_run_failure(
                 "A different Instagram account is signed in on the assigned clone. "
                 "Verify the active account before resuming."
             ),
+            requires_operator_review=True,
+            blocking_campaign=True,
             admin_message=(
                 "Identity preflight detected a username different from the expected "
                 "account. The run stopped before any business action."
@@ -251,7 +259,9 @@ def classify_terminal_run_failure(
             reason_code=reason,
             severity="critical",
             operator_label="Welcome followers surface unstable",
-            action_required="operator_review_required",
+            action_required="Review the Welcome followers-surface evidence before the next launch.",
+            requires_operator_review=True,
+            blocking_campaign=True,
             admin_message=(
                 "Welcome stopped safely because the followers surface proof became unstable "
                 f"({reason}). Review the run evidence before the next launch."
@@ -273,6 +283,8 @@ def classify_terminal_run_failure(
                 "The assigned Instagram clone could not be used. "
                 "Verify the device and app instance before resuming."
             ),
+            requires_operator_review=True,
+            blocking_campaign=True,
             admin_message=f"Assigned package unusable ({code}), exit code {exit_code}.",
             notify_channels=True,
             metadata_safe=metadata_safe,
@@ -290,6 +302,8 @@ def classify_terminal_run_failure(
                 "The Instagram account is signed out or a challenge is displayed. "
                 "Human review is required before resuming."
             ),
+            requires_operator_review=True,
+            blocking_campaign=True,
             admin_message=f"Login/challenge surface detected ({reason}).",
             notify_channels=True,
             metadata_safe=metadata_safe,
@@ -307,6 +321,8 @@ def classify_terminal_run_failure(
                 "The assigned phone became unavailable during the run. "
                 "Verify the device connection."
             ),
+            requires_operator_review=True,
+            blocking_campaign=True,
             admin_message=f"Device unavailable during run ({reason}).",
             notify_channels=True,
             metadata_safe=metadata_safe,
@@ -324,6 +340,8 @@ def classify_terminal_run_failure(
                 "The run exceeded the dispatcher timeout and was stopped. "
                 "Verify the device and account state."
             ),
+            requires_operator_review=True,
+            blocking_campaign=True,
             admin_message="Worker subprocess exceeded dispatcher timeout.",
             notify_channels=True,
             metadata_safe=metadata_safe,
@@ -341,6 +359,8 @@ def classify_terminal_run_failure(
                 "The run failed with a structured runtime error. "
                 "Review the internal details before resuming."
             ),
+            requires_operator_review=True,
+            blocking_campaign=True,
             admin_message=f"Structured worker failure ({reason}), exit code {exit_code}.",
             notify_channels=True,
             metadata_safe=metadata_safe,
@@ -357,6 +377,8 @@ def classify_terminal_run_failure(
             "The worker exited with an error and no structured reason. "
             "Review the internal run logs."
         ),
+        requires_operator_review=True,
+        blocking_campaign=True,
         admin_message=f"Worker subprocess exited with code {exit_code} and no structured reason.",
         notify_channels=True,
         metadata_safe=metadata_safe,
