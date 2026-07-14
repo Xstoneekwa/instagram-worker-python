@@ -26,7 +26,10 @@ Ce document fixe la **direction technique obligatoire** pour tout développement
 ### Recovery Engine (centralisé ou réutilisable)
 
 - **Rôle** : récupération automatique, retries intelligents, retour vers un **état stable**, gestion des erreurs silencieuses, **anti-boucle**, **anti-faux positifs**, auto-healing.
-- **Principe** : aucun flow critique ne doit dépendre d’un **seul signal fragile**. Fallback + recovery sont attendus là où l’échec a un impact métier ou sécurité.
+- **Principe** : aucun flow critique ne doit dépendre d’un **seul signal fragile**.
+  Fallback + recovery sont attendus là où ils sont déjà autorisés par les
+  décisions verrouillées ; ils ne doivent jamais être inventés pour contourner
+  la preuve Golden préalable.
 
 ### Scalabilité / production
 
@@ -60,9 +63,14 @@ L’ordre n’implique pas l’exclusion : plusieurs couches peuvent et doivent 
 - **Pas** de logique fragile **one-shot** (un seul tap, une seule assertion, un seul timeout sans branche de secours).
 - **Pas** de validation basée sur **un seul signal** lorsque l’action est critique ou irréversible.
 - Toute **navigation importante** doit combiner **plusieurs signaux** lorsque c’est possible : typiquement **XML + vision + validation d’état** (ou équivalent documenté).
-- Toute **action critique** doit prévoir **fallback** et **recovery** (chemins explicites, pas seulement un log d’erreur).
-- Toute **nouvelle feature** doit respecter cette architecture et documenter les signaux utilisés et les chemins de recovery.
-- **Cursor / agents** : avant de modifier le moteur, **consulter d’abord** les fichiers pertinents sous [`docs/`](docs/) (carte en section 8) plutôt que de s’appuyer uniquement sur le contexte du chat.
+- Toute **action critique** doit prévoir les fallbacks et recoveries déjà autorisés
+  par le flow protégé. Pour Follow/latence, aucun nouveau timeout, fallback ou
+  recovery ne peut être ajouté avant la preuve sous-étape Golden exigée dans
+  [`docs/LOCKED_DECISIONS.md`](docs/LOCKED_DECISIONS.md).
+- Toute **nouvelle feature** doit respecter cette architecture, les décisions
+  verrouillées et documenter les signaux utilisés et les chemins de recovery
+  autorisés.
+- **Codex / contributeurs** : avant de modifier le moteur, **consulter d’abord** les fichiers pertinents sous [`docs/`](docs/) (carte en section 8) plutôt que de s’appuyer uniquement sur le contexte du chat. Codex est l'agent de développement unique depuis le 2026-07-14.
 
 ---
 
@@ -70,7 +78,9 @@ L’ordre n’implique pas l’exclusion : plusieurs couches peuvent et doivent 
 
 - [ ] La feature n’assume pas le XML comme vérité unique pour les décisions critiques.
 - [ ] Les chemins sensibles utilisent **plusieurs signaux** (XML, vision, état) quand c’est raisonnable.
-- [ ] Les actions critiques ont **fallback** et/ou **recovery** identifiables.
+- [ ] Les actions critiques utilisent uniquement des **fallbacks** et/ou
+  **recoveries** autorisés et identifiables ; Follow/latence respecte le gate
+  de preuve Golden.
 - [ ] Les échecs exposent une **reason explicite** (chaîne stable ou enum documentée), pas un échec opaque.
 - [ ] Les points importants produisent des **logs structurés** (champs clairs : phase, `reason`, identifiants compte/candidat, etc.).
 - [ ] Pas d’anti-boucle oublié sur les retries (limites, compteurs, abandon propre).
@@ -121,7 +131,7 @@ Construire une navigation **production-grade** capable de :
 
 ## 9. Règle documentation-first (futurs changements)
 
-Pour les **futures modifications** sur ce dépôt, l’agent Cursor (ou tout contributeur) doit **lire en priorité** les documents `docs/` applicables au périmètre touché, puis le code source. Le contexte seul du chat **ne suffit pas** comme seule source de vérité sur l’architecture hybride (XML + vision + état + recovery).
+Pour les **futures modifications** sur ce dépôt, Codex (ou tout contributeur explicitement autorisé) doit **lire en priorité** les documents `docs/` applicables au périmètre touché, puis le code source. Le contexte seul du chat **ne suffit pas** comme seule source de vérité sur l’architecture hybride (XML + vision + état + recovery).
 
 ---
 

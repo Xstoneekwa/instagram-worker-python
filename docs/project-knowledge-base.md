@@ -4,6 +4,19 @@ Ce document est la verite globale de handoff du projet Phone Farm Instagram.
 Il ne remplace pas `docs/outreach-entry-api.md`, qui reste la documentation
 technique detaillee des Entries, APIs, RPC, credentials et provisioning.
 
+> **Routing documentaire depuis le 2026-07-14** — Ce fichier conserve
+> l'historique long. Il ne doit plus être utilisé seul pour déduire l'état live.
+> Utiliser, dans cet ordre :
+>
+> 1. [`CURRENT_PRODUCTION_STATE.md`](CURRENT_PRODUCTION_STATE.md) pour le snapshot daté ;
+> 2. [`RELEASE_REGISTRY.md`](RELEASE_REGISTRY.md) pour les promotions/remplacements ;
+> 3. [`LOCKED_DECISIONS.md`](LOCKED_DECISIONS.md) pour les règles actuelles ;
+> 4. [`FEATURE_STATUS_MATRIX.md`](FEATURE_STATUS_MATRIX.md) pour la maturité réelle ;
+> 5. [`golden-evidence/README.md`](golden-evidence/README.md) pour le Golden.
+>
+> Les anciennes sections « état courant » ci-dessous sont historiques et
+> peuvent être `STALE` lorsqu'une preuve plus récente existe dans ces registres.
+
 ## 1. Big Picture
 
 Le projet construit une Phone Farm Instagram production-grade :
