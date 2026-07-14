@@ -25,6 +25,29 @@ class RunnerPersistPostFollowTest(unittest.TestCase):
         self.assertEqual(summary["session_counters"]["follows"], 1)
         self.assertEqual(summary["session_counters"]["likes"], 0)
 
+    def test_account_session_persists_exact_welcome_surface_failure(self) -> None:
+        with mock.patch(
+            "welcome_list_sender.get_last_welcome_list_sender_summary",
+            return_value={
+                "failure_reason": "followers_surface_missing_at_start",
+                "entry_surface_decision": "recovered_snapshot_rejected",
+            },
+        ), mock.patch(
+            "welcome_scan_producer.get_last_welcome_scan_summary",
+            return_value={"stop_reason": "followers_surface_lost", "jobs_enqueued_count": 4},
+        ):
+            summary = runner._build_account_session_completion_performance_summary(
+                exit_code=1,
+                account_username="i_m_your_traker",
+                followers_source_username="dr_dlimi",
+                target_id="target-1",
+                target_selection_source="ig_targets",
+            )
+
+        self.assertEqual(summary["reason"], "recovered_snapshot_rejected")
+        self.assertEqual(summary["welcome_sender_failure_reason"], "followers_surface_missing_at_start")
+        self.assertEqual(summary["welcome_scan_jobs_enqueued_count"], 4)
+
     def test_persist_after_post_follow_does_not_use_eng_log(self) -> None:
         with mock.patch.object(runner, "_safe_supabase_call") as supa, mock.patch.object(
             runner, "log"

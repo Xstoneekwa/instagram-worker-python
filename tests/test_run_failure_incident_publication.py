@@ -24,6 +24,48 @@ def _identity_run_row() -> dict:
 
 
 class PublishRunFailureIncidentTest(unittest.TestCase):
+    def test_welcome_failure_upserts_canonical_operator_review_action(self) -> None:
+        run_row = {
+            "id": RUN_ID,
+            "status": "failed",
+            "performance_summary": {
+                "reason": "recovered_snapshot_rejected",
+                "run_type": "account_session",
+                "welcome_scan_jobs_enqueued_count": 4,
+            },
+        }
+        with (
+            patch.object(consumer.supabase_client, "load_run_row", return_value=run_row),
+            patch.object(consumer.supabase_client, "get_account_username", return_value="i_m_your_traker"),
+            patch.object(
+                consumer.runtime_incidents,
+                "publish_account_incident",
+                return_value={"published": True, "incident_id": "inc-welcome", "occurrence_count": 1},
+            ) as publish,
+            patch.object(
+                consumer.supabase_client,
+                "call_rpc",
+                return_value={"id": "action-welcome"},
+            ) as call_rpc,
+        ):
+            consumer._publish_run_failure_incident(
+                request_id=REQUEST_ID,
+                account_id=ACCOUNT_ID,
+                run_id=RUN_ID,
+                run_type="account_session",
+                exit_code=1,
+                timed_out=False,
+                canceled=False,
+            )
+
+        self.assertEqual(publish.call_args.kwargs["incident_type"], "welcome_surface_unstable")
+        self.assertEqual(publish.call_args.kwargs["reason"], "recovered_snapshot_rejected")
+        rpc_name, params = call_rpc.call_args.args
+        self.assertEqual(rpc_name, "upsert_account_dashboard_action")
+        self.assertEqual(params["p_action_type"], "operator_review_required")
+        self.assertEqual(params["p_incident_id"], "inc-welcome")
+        self.assertTrue(params["p_blocking_campaign"])
+
     def test_identity_failure_publishes_true_reason_incident(self) -> None:
         with (
             patch.object(

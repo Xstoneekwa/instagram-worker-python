@@ -83,6 +83,14 @@ DEVICE_UNAVAILABLE_REASONS = frozenset(
     }
 )
 
+WELCOME_SURFACE_FAILURE_REASONS = frozenset(
+    {
+        "welcome_surface_unstable",
+        "followers_surface_missing_at_start",
+        "recovered_snapshot_rejected",
+    }
+)
+
 MYTHYL_OPERATOR_MESSAGE = (
     "Impossible de confirmer le compte Instagram actif. "
     "Intervention humaine requise avant reprise."
@@ -139,6 +147,10 @@ _SAFE_METADATA_KEYS = (
     "account_identity_verification_method",
     "expected_account_username",
     "actual_logged_in_username",
+    "welcome_scan_stop_reason",
+    "welcome_scan_jobs_enqueued_count",
+    "welcome_sender_failure_reason",
+    "welcome_entry_surface_decision",
 )
 
 
@@ -226,6 +238,22 @@ def classify_terminal_run_failure(
             admin_message=(
                 "Le préflight identité a détecté un pseudo différent du compte "
                 "attendu. Le run a été arrêté avant toute action."
+            ),
+            notify_channels=True,
+            metadata_safe=metadata_safe,
+        )
+
+    if reason in WELCOME_SURFACE_FAILURE_REASONS:
+        return IncidentDecision(
+            should_publish=True,
+            incident_type="welcome_surface_unstable",
+            reason_code=reason,
+            severity="critical",
+            operator_label="Welcome followers surface unstable",
+            action_required="operator_review_required",
+            admin_message=(
+                "Welcome stopped safely because the followers surface proof became unstable "
+                f"({reason}). Review the run evidence before the next launch."
             ),
             notify_channels=True,
             metadata_safe=metadata_safe,

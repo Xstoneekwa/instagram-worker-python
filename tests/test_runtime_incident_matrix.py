@@ -118,6 +118,22 @@ class ClassifyTerminalRunFailureTest(unittest.TestCase):
         self.assertEqual(decision.incident_type, "run_worker_failure")
         self.assertEqual(decision.reason_code, "subprocess_timeout")
 
+    def test_welcome_surface_failures_require_operator_review(self) -> None:
+        for reason in (
+            "welcome_surface_unstable",
+            "followers_surface_missing_at_start",
+            "recovered_snapshot_rejected",
+        ):
+            decision = classify_terminal_run_failure(
+                exit_code=1,
+                performance_summary={"reason": reason},
+            )
+            self.assertTrue(decision.should_publish, msg=reason)
+            self.assertEqual(decision.incident_type, "welcome_surface_unstable")
+            self.assertEqual(decision.reason_code, reason)
+            self.assertEqual(decision.severity, "critical")
+            self.assertEqual(decision.action_required, "operator_review_required")
+
     def test_metadata_never_contains_raw_material(self) -> None:
         decision = classify_terminal_run_failure(
             exit_code=75,

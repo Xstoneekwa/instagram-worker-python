@@ -55,6 +55,19 @@ class WelcomeListSenderRestoreTest(unittest.TestCase):
             ],
         }
 
+    def _committed_visual_merge_open_meta(self) -> dict:
+        return {
+            "open_meta": self._real_recovered_open_meta(),
+            "det": {
+                "is_followers_list": True,
+                "current_package": "com.instagram.androie",
+                "current_activity": "com.instagram.mainactivity.InstagramMainActivity",
+                "current_screen_guess": "likely_profile",
+                "open_detection_method": "visual_fallback",
+                "signals": ["committed_visual_surface_merge"],
+            },
+        }
+
     def test_real_gate_artifacts_match_reference_hashes_and_visual_signals(self) -> None:
         self.assertEqual(
             hashlib.sha256(self._REAL_SCREENSHOT.read_bytes()).hexdigest(),
@@ -321,6 +334,58 @@ class WelcomeListSenderRestoreTest(unittest.TestCase):
         self.assertEqual(summary["session_scan_jobs_count_before_planning"], 4)
         self.assertEqual(len(summary["planned_session_jobs"]), 4)
         self.assertEqual(summary["entry_surface_decision"], "recovered_snapshot_preserved")
+
+    def test_committed_visual_merge_survives_transient_xml_miss_and_plans_four_jobs(self) -> None:
+        scan_summary = self._scan_summary(4)
+        usernames = [entry["username"] for entry in scan_summary["new_follower_job_ids_enqueued"]]
+        fresh_det = {
+            "is_followers_list": False,
+            "current_package": "com.instagram.androie",
+            "current_activity": "com.instagram.mainactivity.InstagramMainActivity",
+            "current_screen_guess": "likely_profile",
+            "candidate_username_count": 0,
+        }
+        with (
+            patch.object(sender, "resolve_welcome_dm_real_send_enabled", return_value=(True, "test")),
+            patch.object(sender, "_reset_dm_sender_session_abort"),
+            patch.object(sender, "_resolve_reserved_by", return_value="RFGL145VCKE"),
+            patch.object(sender, "_resolve_dm_sender_only_job_id", return_value=("", "none")),
+            patch.object(sender.config, "INSTAGRAM_PACKAGE", "com.instagram.androie"),
+            patch.object(sender, "_verify_followers_surface", return_value=(False, {})),
+            patch.object(sender, "followers_session_clear_list_committed_open"),
+            patch.object(sender, "followers_clear_detect_hierarchy_cache"),
+            patch.object(
+                sender,
+                "detect_followers_list_screen_fresh",
+                return_value=(fresh_det, "<hierarchy />"),
+            ),
+            patch(
+                "own_profile_navigation.open_own_followers_list_from_own_profile",
+                return_value=(True, self._committed_visual_merge_open_meta()),
+            ),
+            patch.object(sender, "followers_refresh_detect_hierarchy_cache"),
+            patch.object(
+                sender,
+                "_sender_start_visible_usernames",
+                return_value=(usernames, {"hierarchy_source": "fixture"}),
+            ),
+            patch.object(sender.supabase_client, "get_account_dm_settings", return_value={}),
+            patch.object(sender, "_claim_job_for_run", return_value=None),
+            patch.object(sender, "_dm_sender_session_should_abort", return_value=False),
+        ):
+            code, summary = sender.run_welcome_list_sender(
+                MagicMock(),
+                account_id="acct-1",
+                account_username="i_m_your_traker",
+                run_id="b985883f-0a3f-40f2-8721-ed6df24b24ee",
+                max_jobs=3,
+                scan_summary=scan_summary,
+            )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(summary["entry_surface_decision"], "recovered_snapshot_preserved")
+        self.assertEqual(summary["session_scan_jobs_count_before_planning"], 4)
+        self.assertEqual(len(summary["planned_session_jobs"]), 4)
 
     def test_unknown_surface_reports_current_scan_jobs_blocked_without_claim(self) -> None:
         claim_mock = MagicMock()

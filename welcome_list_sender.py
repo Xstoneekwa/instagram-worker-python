@@ -582,14 +582,25 @@ def _recovered_followers_snapshot_strong(
     account_username: str,
     pkg: str,
 ) -> tuple[bool, str, dict[str, Any]]:
-    snapshot = open_meta.get("after_tap_screen_snapshot") or {}
+    canonical_open_meta = open_meta
+    nested_open_meta = open_meta.get("open_meta")
+    if isinstance(nested_open_meta, dict):
+        merged_det = open_meta.get("det") or {}
+        merged_signals = list(merged_det.get("signals") or []) if isinstance(merged_det, dict) else []
+        if not bool(merged_det.get("is_followers_list")):
+            return False, "committed_merge_not_followers_list", {}
+        if "committed_visual_surface_merge" not in merged_signals:
+            return False, "committed_visual_surface_merge_missing", {}
+        canonical_open_meta = nested_open_meta
+
+    snapshot = canonical_open_meta.get("after_tap_screen_snapshot") or {}
     if not isinstance(snapshot, dict) or not bool(snapshot.get("is_followers_list")):
         return False, "snapshot_not_followers_list", {}
     if str(snapshot.get("open_detection_method") or "") != "visual_fallback":
         return False, "snapshot_not_visual_fallback", snapshot
-    if str(open_meta.get("open_detection_method") or "") != "visual_fallback":
+    if str(canonical_open_meta.get("open_detection_method") or "") != "visual_fallback":
         return False, "canonical_open_not_visual_fallback", snapshot
-    source = str(open_meta.get("source_profile_username") or "").strip().lower()
+    source = str(canonical_open_meta.get("source_profile_username") or "").strip().lower()
     if source != str(account_username or "").strip().lower():
         return False, "canonical_open_account_mismatch", snapshot
 

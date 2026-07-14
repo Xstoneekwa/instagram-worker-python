@@ -961,7 +961,7 @@ def _build_account_session_completion_performance_summary(
     target_id: str | None,
     target_selection_source: str | None,
 ) -> dict[str, Any]:
-    return {
+    summary = {
         "run_type": "account_session",
         "exit_code": int(exit_code),
         "account_username": account_username,
@@ -970,6 +970,25 @@ def _build_account_session_completion_performance_summary(
         "target_selection_source": target_selection_source,
         "session_counters": dict(_SESSION_COUNTERS),
     }
+    if int(exit_code) != 0:
+        from welcome_list_sender import get_last_welcome_list_sender_summary
+        from welcome_scan_producer import get_last_welcome_scan_summary
+
+        sender_summary = get_last_welcome_list_sender_summary()
+        scan_summary = get_last_welcome_scan_summary()
+        entry_decision = str(sender_summary.get("entry_surface_decision") or "").strip()
+        sender_reason = str(sender_summary.get("failure_reason") or "").strip()
+        if entry_decision == "recovered_snapshot_rejected":
+            summary["reason"] = entry_decision
+        elif sender_reason:
+            summary["reason"] = sender_reason
+        elif str(scan_summary.get("stop_reason") or "").strip() == "followers_surface_lost":
+            summary["reason"] = "welcome_surface_unstable"
+        summary["welcome_scan_stop_reason"] = scan_summary.get("stop_reason")
+        summary["welcome_scan_jobs_enqueued_count"] = scan_summary.get("jobs_enqueued_count")
+        summary["welcome_sender_failure_reason"] = sender_reason or None
+        summary["welcome_entry_surface_decision"] = entry_decision or None
+    return summary
 
 
 def _session_follow_quota_exceeded() -> bool:

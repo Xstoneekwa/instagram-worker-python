@@ -46,7 +46,12 @@ from auto_restart_runtime import (
     validate_auto_restart_request_at_claim,
 )
 from logs import log
+import runtime_incidents
 import supabase_client
+from runtime_incident_matrix import (
+    build_run_failure_incident_payload,
+    classify_terminal_run_failure,
+)
 
 LOGIN_RUN_TYPES = frozenset({"login_provisioning", "login_email_code_resume"})
 ORPHAN_RECOVERY_RUN_TYPE = "login_orphan_challenge_recovery"
@@ -857,6 +862,142 @@ def _reconcile_linked_run(
     return result
 
 
+def _upsert_welcome_operator_review_action(
+    *,
+    incident_id: str,
+    account_id: str,
+    request_id: str,
+    run_id: str | None,
+    reason: str,
+) -> dict[str, Any]:
+    return supabase_client.call_rpc(
+        "upsert_account_dashboard_action",
+        {
+            "p_account_id": account_id,
+            "p_client_id": None,
+            "p_incident_id": incident_id,
+            "p_action_type": "operator_review_required",
+            "p_status": "pending_verification",
+            "p_title": "Welcome run requires operator review",
+            "p_dedupe_key": f"account:{account_id}:run:{run_id or request_id}:dashboard_action:operator_review_required",
+            "p_safe_client_message": None,
+            "p_admin_message": f"Review the Welcome followers-surface failure ({reason}) before the next launch.",
+            "p_assistant_message": "Welcome followers surface evidence requires human review.",
+            "p_action_label": "Mark reviewed",
+            "p_action_deep_link": "/instagram-dashboard/incidents",
+            "p_severity": "critical",
+            "p_audience": "admin",
+            "p_requires_client_action": False,
+            "p_blocking_campaign": True,
+            "p_metadata": {
+                "source": "run_dispatcher",
+                "request_id": request_id,
+                "run_id": run_id,
+                "reason": reason,
+                "review_workflow": "canonical_operator_review",
+            },
+        },
+    )
+
+
+def _publish_run_failure_incident(
+    *,
+    request_id: str,
+    account_id: str,
+    run_id: str | None,
+    run_type: str | None,
+    exit_code: int,
+    timed_out: bool,
+    canceled: bool,
+) -> None:
+    try:
+        run_status: str | None = None
+        performance_summary: dict[str, Any] | None = None
+        if run_id:
+            try:
+                run_row = supabase_client.load_run_row(run_id) or {}
+                run_status = str(run_row.get("status") or "").strip() or None
+                raw_summary = run_row.get("performance_summary")
+                if isinstance(raw_summary, dict):
+                    performance_summary = raw_summary
+            except Exception as exc:
+                log(
+                    "warning",
+                    "run_incident_summary_load_failed",
+                    account_id=account_id,
+                    request_id=request_id,
+                    run_id=run_id,
+                    error=str(exc)[:300],
+                )
+        decision = classify_terminal_run_failure(
+            exit_code=exit_code,
+            timed_out=timed_out,
+            run_status=run_status,
+            canceled=canceled,
+            performance_summary=performance_summary,
+        )
+        log(
+            "info",
+            "run_incident_classified",
+            account_id=account_id,
+            request_id=request_id,
+            run_id=run_id,
+            run_type=run_type or None,
+            exit_code=exit_code,
+            timed_out=timed_out,
+            **decision.to_log_fields(),
+        )
+        if not decision.should_publish:
+            return
+        try:
+            account_username = supabase_client.get_account_username(account_id) or None
+        except Exception:
+            account_username = None
+        payload = build_run_failure_incident_payload(
+            decision,
+            account_id=account_id,
+            account_username=account_username,
+            run_id=run_id,
+            run_request_id=request_id,
+            run_type=run_type,
+        )
+        result = runtime_incidents.publish_account_incident(**payload)
+        incident_id = str(result.get("incident_id") or "").strip()
+        action_id = None
+        if incident_id and decision.incident_type == "welcome_surface_unstable":
+            action = _upsert_welcome_operator_review_action(
+                incident_id=incident_id,
+                account_id=account_id,
+                request_id=request_id,
+                run_id=run_id,
+                reason=decision.reason_code,
+            )
+            action_id = action.get("id") if isinstance(action, dict) else None
+        log(
+            "info",
+            "run_incident_publish_result",
+            account_id=account_id,
+            request_id=request_id,
+            run_id=run_id,
+            incident_type=decision.incident_type,
+            reason_code=decision.reason_code,
+            published=bool(result.get("published")),
+            publish_reason=result.get("reason"),
+            incident_id=incident_id or None,
+            dashboard_action_id=action_id,
+            occurrence_count=result.get("occurrence_count"),
+        )
+    except Exception as exc:
+        log(
+            "warning",
+            "run_incident_publish_unexpected_error",
+            account_id=account_id,
+            request_id=request_id,
+            run_id=run_id,
+            error=str(exc)[:300],
+        )
+
+
 def _finalize_manual_run_after_subprocess(
     cfg: DispatcherConfig,
     *,
@@ -897,6 +1038,15 @@ def _finalize_manual_run_after_subprocess(
             message="Worker subprocess exceeded dispatcher timeout.",
             run_id=run_id,
             payload={"request_id": request_id},
+        )
+        _publish_run_failure_incident(
+            request_id=request_id,
+            account_id=account_id,
+            run_id=run_id,
+            run_type=run_type,
+            exit_code=exit_code,
+            timed_out=True,
+            canceled=canceled,
         )
         return
 
@@ -1068,6 +1218,15 @@ def _finalize_manual_run_after_subprocess(
             "exit_code": exit_code,
             **({"login_provisioner_summary": summary} if summary else {}),
         },
+    )
+    _publish_run_failure_incident(
+        request_id=request_id,
+        account_id=account_id,
+        run_id=run_id,
+        run_type=run_type,
+        exit_code=exit_code,
+        timed_out=False,
+        canceled=canceled,
     )
 
 
