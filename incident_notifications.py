@@ -34,6 +34,7 @@ DISPATCHER_NAME = "incident_notifications"
 DISPATCHER_VERSION = "orf-4d"
 DRY_RUN_DISPATCHER_VERSION = "orf-4b"
 WEBHOOK_USER_AGENT = "PhoneFarmIncidentNotifier/1.0 (+https://localhost)"
+ACTION_CTA_LABEL = "Open Incidents/Actions"
 
 
 def _notifications_enabled() -> bool:
@@ -223,9 +224,6 @@ def build_incident_notification_payload(incident: dict) -> dict:
     if run_id:
         message_parts.append(f"Run: {_short_id(run_id) or run_id}")
     dashboard_url = _incident_dashboard_url(incident)
-    if dashboard_url:
-        message_parts.append(f"Dashboard: {dashboard_url}")
-
     payload = {
         "title": title,
         "text": "\n".join(message_parts),
@@ -247,12 +245,100 @@ def build_incident_notification_payload(incident: dict) -> dict:
 
 def build_slack_payload(payload: dict) -> dict:
     safe = _redact_payload(dict(payload or {}))
-    return {"text": str(safe.get("text") or safe.get("title") or "Incident notification")}
+    text = str(safe.get("text") or safe.get("title") or "Incident notification")
+    dashboard_url = str(safe.get("dashboard_url") or "").strip()
+    if dashboard_url:
+        text = f"{text}\n<{dashboard_url}|{ACTION_CTA_LABEL}>"
+    return {"text": text}
 
 
 def build_discord_payload(payload: dict) -> dict:
     safe = _redact_payload(dict(payload or {}))
-    return {"content": str(safe.get("text") or safe.get("title") or "Incident notification")}
+    text = str(safe.get("text") or safe.get("title") or "Incident notification")
+    dashboard_url = str(safe.get("dashboard_url") or "").strip()
+    if dashboard_url:
+        text = f"{text}\n[{ACTION_CTA_LABEL}]({dashboard_url})"
+    return {"content": text}
+
+
+def dispatch_operator_review_action_notification(
+    *,
+    event: str,
+    action_id: str,
+    incident_id: str,
+    account_id: str,
+    account_username: str,
+    reason: str,
+    final_status: str,
+    operator_id: str = "system",
+) -> dict[str, Any]:
+    """Send one idempotent operator-review notification per configured channel."""
+    normalized_event = str(event or "").strip().lower()
+    if normalized_event not in {"created", "resolved"}:
+        return {"sent_count": 0, "failed_count": 0, "reason": "invalid_event"}
+    if not _notifications_enabled() or _dry_run_enabled():
+        return {"sent_count": 0, "failed_count": 0, "reason": "disabled_or_dry_run"}
+
+    title = "Operator review required" if normalized_event == "created" else "Operator review resolved"
+    payload = {
+        "title": title,
+        "text": "\n".join(
+            [
+                title,
+                f"Account: @{account_username or 'unknown'} ({_short_id(account_id) or 'unknown'})",
+                f"Reason: {reason or 'operator_review_required'}",
+                f"State: {final_status}",
+                f"Operator: {operator_id or 'system'}",
+                f"Action: {_short_id(action_id) or 'unknown'}",
+            ]
+        ),
+        "dashboard_url": _incident_dashboard_url({"id": incident_id}),
+        "cta_label": ACTION_CTA_LABEL,
+        "action_id": action_id,
+    }
+    allowed_channels, selected_channels = resolve_dispatch_channels()
+    summary = {"sent_count": 0, "failed_count": 0, "skipped_count": 0, "reason": "real_send"}
+    for channel in allowed_channels:
+        if channel not in selected_channels:
+            summary["skipped_count"] += 1
+            continue
+        delivery_key = f"{channel}:{incident_id}:operator_review_{normalized_event}:{action_id}"
+        existing = supabase_client.load_existing_incident_notifications_by_delivery_keys([delivery_key]).get(delivery_key)
+        if str((existing or {}).get("status") or "").strip().lower() == "sent":
+            summary["skipped_count"] += 1
+            continue
+        row = {
+            "incident_id": incident_id,
+            "channel": channel,
+            "status": "pending",
+            "target": "redacted",
+            "delivery_key": delivery_key,
+            "attempt_count": 1,
+            "last_attempt_at": _utc_now_iso(),
+            "payload": _audit_payload(channel, payload),
+            "metadata": {
+                "dispatcher": DISPATCHER_NAME,
+                "notification_type": f"operator_review_{normalized_event}",
+                "redacted": True,
+            },
+        }
+        created = existing or supabase_client.create_account_incident_notification(row)
+        result = send_notification_webhook(channel, payload)
+        notification_id = str(created.get("id") or "").strip()
+        if result.get("ok"):
+            update = {
+                "status": "sent",
+                "delivered_at": _utc_now_iso(),
+                "response_status": result.get("response_status"),
+                "last_error": None,
+            }
+            summary["sent_count"] += 1
+        else:
+            update = _failure_update(result)
+            summary["failed_count"] += 1
+        if notification_id:
+            supabase_client.update_account_incident_notification(notification_id, update)
+    return summary
 
 
 def _post_json_webhook(url: str, body: dict, timeout: int) -> dict:

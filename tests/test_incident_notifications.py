@@ -259,7 +259,9 @@ class IncidentNotificationsTest(unittest.TestCase):
             payload["dashboard_url"],
             "https://admin.example.com/instagram-dashboard/incidents?incident_id=incident-1",
         )
-        self.assertIn("Dashboard: https://admin.example.com/instagram-dashboard/incidents", payload["text"])
+        self.assertNotIn("https://admin.example.com", payload["text"])
+        slack = incident_notifications.build_slack_payload(payload)
+        self.assertIn("<https://admin.example.com/instagram-dashboard/incidents?incident_id=incident-1|Open Incidents/Actions>", slack["text"])
 
     def test_dashboard_link_omitted_without_base_url(self) -> None:
         with patch.object(
@@ -273,12 +275,26 @@ class IncidentNotificationsTest(unittest.TestCase):
         self.assertNotIn("PLACEHOLDER", payload["text"])
 
     def test_slack_payload_builder(self) -> None:
-        payload = incident_notifications.build_slack_payload({"title": "T", "text": "hello"})
-        self.assertEqual(payload, {"text": "hello"})
+        payload = incident_notifications.build_slack_payload({
+            "title": "T",
+            "text": "hello",
+            "dashboard_url": "https://www.boostmybusinesses.com/instagram-dashboard/incidents",
+        })
+        self.assertEqual(
+            payload,
+            {"text": "hello\n<https://www.boostmybusinesses.com/instagram-dashboard/incidents|Open Incidents/Actions>"},
+        )
 
     def test_discord_payload_builder(self) -> None:
-        payload = incident_notifications.build_discord_payload({"title": "T", "text": "hello"})
-        self.assertEqual(payload, {"content": "hello"})
+        payload = incident_notifications.build_discord_payload({
+            "title": "T",
+            "text": "hello",
+            "dashboard_url": "https://www.boostmybusinesses.com/instagram-dashboard/incidents",
+        })
+        self.assertEqual(
+            payload,
+            {"content": "hello\n[Open Incidents/Actions](https://www.boostmybusinesses.com/instagram-dashboard/incidents)"},
+        )
 
     def test_fail_open_on_supabase_error(self) -> None:
         with (

@@ -47,6 +47,10 @@ class PublishRunFailureIncidentTest(unittest.TestCase):
                 "call_rpc",
                 return_value={"id": "action-welcome"},
             ) as call_rpc,
+            patch.object(
+                consumer.incident_notifications,
+                "dispatch_operator_review_action_notification",
+            ) as notify,
         ):
             consumer._publish_run_failure_incident(
                 request_id=REQUEST_ID,
@@ -65,6 +69,9 @@ class PublishRunFailureIncidentTest(unittest.TestCase):
         self.assertEqual(params["p_action_type"], "operator_review_required")
         self.assertEqual(params["p_incident_id"], "inc-welcome")
         self.assertTrue(params["p_blocking_campaign"])
+        notify.assert_called_once()
+        self.assertEqual(notify.call_args.kwargs["action_id"], "action-welcome")
+        self.assertEqual(notify.call_args.kwargs["incident_id"], "inc-welcome")
 
     def test_identity_failure_publishes_true_reason_incident(self) -> None:
         with (

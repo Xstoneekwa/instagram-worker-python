@@ -46,6 +46,7 @@ from auto_restart_runtime import (
     validate_auto_restart_request_at_claim,
 )
 from logs import log
+import incident_notifications
 import runtime_incidents
 import supabase_client
 from runtime_incident_matrix import (
@@ -973,6 +974,17 @@ def _publish_run_failure_incident(
                 reason=decision.reason_code,
             )
             action_id = action.get("id") if isinstance(action, dict) else None
+            if action_id:
+                incident_notifications.dispatch_operator_review_action_notification(
+                    event="created",
+                    action_id=str(action_id),
+                    incident_id=incident_id,
+                    account_id=account_id,
+                    account_username=account_username or "unknown",
+                    reason=decision.admin_message or decision.reason_code,
+                    final_status="pending_verification",
+                    operator_id="system",
+                )
         log(
             "info",
             "run_incident_publish_result",
