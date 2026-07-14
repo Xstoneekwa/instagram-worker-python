@@ -7,8 +7,10 @@ No DM UI, no thread open, no send.
 from __future__ import annotations
 
 import os
+import re
 import time
 import uuid
+import xml.etree.ElementTree as ET
 from typing import Any, Literal
 
 import uiautomator2 as u2
@@ -22,6 +24,7 @@ from instagram_navigation import (
     followers_session_list_committed_open_for,
     followers_session_merge_det_for_committed_visual_surface,
     harvest_visible_followers_rows,
+    scroll_followers_list_backward,
     scroll_followers_list_forward,
 )
 from logs import log
@@ -65,6 +68,56 @@ def _emit_run_summary(**kwargs: Any) -> None:
     global _LAST_WELCOME_SCAN_SUMMARY
     _LAST_WELCOME_SCAN_SUMMARY = dict(kwargs)
     log("info", "welcome_scan_run_summary", **kwargs)
+
+
+def _followers_suggestions_boundary(
+    hierarchy_xml: str,
+    *,
+    previously_valid_followers_rows: bool,
+) -> dict[str, Any]:
+    signals = {
+        "selected_followers_tab": False,
+        "see_all_suggestions": False,
+        "suggestion_follow_rows": 0,
+        "dismiss_controls": 0,
+        "loading_indicator": False,
+    }
+    try:
+        root = ET.fromstring(str(hierarchy_xml or ""))
+    except ET.ParseError:
+        return {"is_boundary": False, **signals}
+
+    for node in root.iter():
+        text = str(node.attrib.get("text") or "").strip()
+        content_desc = str(node.attrib.get("content-desc") or "").strip()
+        resource_id = str(node.attrib.get("resource-id") or "").lower()
+        class_name = str(node.attrib.get("class") or "").lower()
+        normalized = " ".join((text or content_desc).lower().split())
+        if node.attrib.get("selected") == "true" and re.fullmatch(r"\d+\s+followers", normalized):
+            signals["selected_followers_tab"] = True
+        if normalized == "see all suggestions":
+            signals["see_all_suggestions"] = True
+        if text.lower() in {"follow", "follow back"}:
+            signals["suggestion_follow_rows"] += 1
+        if (
+            text in {"x", "X", "×"}
+            or normalized in {"remove", "dismiss", "close"}
+            or any(token in resource_id for token in ("dismiss", "remove", "close"))
+        ):
+            signals["dismiss_controls"] += 1
+        if class_name.endswith("progressbar") or any(token in resource_id for token in ("progress", "loading", "spinner")):
+            signals["loading_indicator"] = True
+
+    suggestions_rows = (
+        signals["suggestion_follow_rows"] > 0
+        and signals["dismiss_controls"] > 0
+    )
+    explicit_boundary = signals["see_all_suggestions"] or suggestions_rows
+    transient_boundary = previously_valid_followers_rows and signals["loading_indicator"]
+    return {
+        "is_boundary": bool(signals["selected_followers_tab"] and (explicit_boundary or transient_boundary)),
+        **signals,
+    }
 
 
 def run_welcome_scan_producer(
@@ -129,6 +182,8 @@ def run_welcome_scan_producer(
     new_follower_job_ids_enqueued: list[dict[str, Any]] = []
     enqueue_blocked_global = False
     enqueue_block_reason: str | None = None
+    suggestions_boundary_detected = False
+    suggestions_boundary_backtrack_attempted = False
 
     def _elapsed_ms() -> float:
         return (time.perf_counter() - t0) * 1000.0
@@ -173,6 +228,8 @@ def run_welcome_scan_producer(
             consecutive_known_stop_count=consecutive_known if stop_reason == "consecutive_known_stop" else consecutive_known,
             stop_reason=stop_reason,
             failure_reason=failure_reason,
+            followers_suggestions_boundary_detected=suggestions_boundary_detected,
+            followers_suggestions_boundary_backtrack_attempted=suggestions_boundary_backtrack_attempted,
             total_ms=round(_elapsed_ms(), 2),
         )
         return code
@@ -761,6 +818,62 @@ def run_welcome_scan_producer(
             hierarchy_xml=hier or None,
         )
         if not bool(det_scroll.get("is_followers_list")):
+            boundary = _followers_suggestions_boundary(
+                hier,
+                previously_valid_followers_rows=bool(runtime_seen),
+            )
+            if bool(boundary.get("is_boundary")):
+                suggestions_boundary_detected = True
+                log(
+                    "info",
+                    "followers_suggestions_boundary",
+                    account_id=aid,
+                    run_id=scan_run_id,
+                    screen_index=scrolls_done,
+                    jobs_enqueued_count=jobs_enqueued_count,
+                    **{key: value for key, value in boundary.items() if key != "is_boundary"},
+                )
+                if jobs_enqueued_count > 0:
+                    stop_reason = "followers_suggestions_boundary"
+                    break
+
+                suggestions_boundary_backtrack_attempted = True
+                backtracked = scroll_followers_list_backward(
+                    d,
+                    source_profile_username=uname,
+                    bypass_post_tap_capture_gate=True,
+                    bypass_scroll_xml_guards=True,
+                )
+                followers_clear_detect_hierarchy_cache()
+                stable_hierarchy = followers_refresh_detect_hierarchy_cache(
+                    d,
+                    screen_index=max(0, scrolls_done - 1),
+                ) if backtracked else ""
+                stable_det = detect_followers_list_screen(
+                    d,
+                    source_profile_username=uname,
+                    hierarchy_xml=stable_hierarchy or None,
+                ) if backtracked else {}
+                if backtracked and bool(stable_det.get("is_followers_list")):
+                    log(
+                        "info",
+                        "followers_suggestions_boundary_stable_zone_revalidated",
+                        account_id=aid,
+                        run_id=scan_run_id,
+                        screen_index=max(0, scrolls_done - 1),
+                    )
+                    stop_reason = "followers_suggestions_boundary"
+                else:
+                    log(
+                        "error",
+                        "followers_suggestions_boundary_revalidation_failed",
+                        account_id=aid,
+                        run_id=scan_run_id,
+                        backtracked=backtracked,
+                    )
+                    stop_reason = "followers_suggestions_boundary_revalidation_failed"
+                break
+
             stop_reason = "followers_surface_lost"
             break
 
@@ -796,5 +909,7 @@ def run_welcome_scan_producer(
 
     if enqueue_blocked_global and jobs_enqueued_count == 0:
         return _finish("failed", 1, enqueue_block_reason or "no_welcome_template")
+    if stop_reason == "followers_suggestions_boundary_revalidation_failed":
+        return _finish("failed", 1, stop_reason)
 
     return _finish("success", 0)

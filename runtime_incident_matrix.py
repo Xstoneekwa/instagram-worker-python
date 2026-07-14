@@ -88,6 +88,7 @@ WELCOME_SURFACE_FAILURE_REASONS = frozenset(
         "welcome_surface_unstable",
         "followers_surface_missing_at_start",
         "recovered_snapshot_rejected",
+        "followers_suggestions_boundary_revalidation_failed",
     }
 )
 

@@ -123,6 +123,7 @@ class ClassifyTerminalRunFailureTest(unittest.TestCase):
             "welcome_surface_unstable",
             "followers_surface_missing_at_start",
             "recovered_snapshot_rejected",
+            "followers_suggestions_boundary_revalidation_failed",
         ):
             decision = classify_terminal_run_failure(
                 exit_code=1,

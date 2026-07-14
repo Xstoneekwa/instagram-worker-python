@@ -978,10 +978,13 @@ def _build_account_session_completion_performance_summary(
         scan_summary = get_last_welcome_scan_summary()
         entry_decision = str(sender_summary.get("entry_surface_decision") or "").strip()
         sender_reason = str(sender_summary.get("failure_reason") or "").strip()
+        scan_failure_reason = str(scan_summary.get("failure_reason") or "").strip()
         if entry_decision == "recovered_snapshot_rejected":
             summary["reason"] = entry_decision
         elif sender_reason:
             summary["reason"] = sender_reason
+        elif scan_failure_reason:
+            summary["reason"] = scan_failure_reason
         elif str(scan_summary.get("stop_reason") or "").strip() == "followers_surface_lost":
             summary["reason"] = "welcome_surface_unstable"
         summary["welcome_scan_stop_reason"] = scan_summary.get("stop_reason")
