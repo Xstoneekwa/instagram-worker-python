@@ -1,0 +1,718 @@
+{
+  "steps": [
+    {
+      "action": "cancel_account_run_request",
+      "request_id": "23052d91-f49c-418e-884d-250229136037",
+      "result": {
+        "id": "23052d91-f49c-418e-884d-250229136037",
+        "account_id": "871c5836-0fb4-4afb-a5c7-b8bb3fc6b74c",
+        "requested_by": "f2072cd8-98bb-42cf-9590-0d1507a23d2d",
+        "actor_type": "system",
+        "source_surface": "instagram_dashboard",
+        "requested_run_type": "login_email_code_resume",
+        "status": "running",
+        "priority": 1,
+        "idempotency_key": "login_email_code_resume:0edfabda-26de-45b8-8412-836d9a63b897:246bb279-fced-49ac-b07a-4c3337b13741",
+        "run_id": "a4654833-32a6-410f-a4c5-1c8389a03b40",
+        "claimed_by": "run-dispatcher:mac-admin-01",
+        "lease_expires_at": "2026-06-25T10:38:25.104283+00:00",
+        "cancel_requested_at": "2026-06-25T11:25:03.793374+00:00",
+        "cancel_reason": "client_connect_cancel_restart_liam_post_code_fix",
+        "created_at": "2026-06-25T10:33:16.807369+00:00",
+        "updated_at": "2026-06-25T11:25:03.793374+00:00",
+        "claimed_at": "2026-06-25T10:33:21.621464+00:00",
+        "started_at": "2026-06-25T10:33:25.104283+00:00",
+        "completed_at": null,
+        "canceled_at": null,
+        "metadata_safe": {
+          "source": "dashboard_code_submit",
+          "action_id": "0edfabda-26de-45b8-8412-836d9a63b897",
+          "account_id": "871c5836-0fb4-4afb-a5c7-b8bb3fc6b74c",
+          "submission_id": "246bb279-fced-49ac-b07a-4c3337b13741",
+          "challenge_type": "email_code_challenge",
+          "parent_request_id": "182c9a74-bd90-46dd-a565-45d4b96ac70b",
+          "connect_attempt_id": "098a9c94-7719-474d-bbd0-05cbfe6c309b"
+        },
+        "error_code": null,
+        "error_message_safe": null
+      }
+    },
+    {
+      "action": "stop_ig_run",
+      "run_id": "a4654833-32a6-410f-a4c5-1c8389a03b40",
+      "updated": false
+    },
+    {
+      "action": "dismiss_challenge_action",
+      "action_id": "0edfabda-26de-45b8-8412-836d9a63b897",
+      "updated": false
+    },
+    {
+      "action": "dismiss_challenge_action",
+      "action_id": "3b701809-e2b4-4624-9408-84fbbefba5ad",
+      "updated": false
+    }
+  ],
+  "before": {
+    "requests": [
+      {
+        "id": "23052d91-f49c-418e-884d-250229136037",
+        "status": "running",
+        "requested_run_type": "login_email_code_resume",
+        "run_id": "a4654833-32a6-410f-a4c5-1c8389a03b40",
+        "updated_at": "2026-06-25T10:33:25.104283+00:00"
+      },
+      {
+        "id": "182c9a74-bd90-46dd-a565-45d4b96ac70b",
+        "status": "canceled",
+        "requested_run_type": "login_provisioning",
+        "run_id": "d679f83a-96e4-4ae1-b658-d43294e37379",
+        "updated_at": "2026-06-25T10:33:16.056567+00:00"
+      },
+      {
+        "id": "4dad9d52-905a-4290-b46f-c68c6b31e1aa",
+        "status": "canceled",
+        "requested_run_type": "login_provisioning",
+        "run_id": "f72d1559-3ae0-4fb1-91c7-f6f0916a1b75",
+        "updated_at": "2026-06-25T10:16:46.347517+00:00"
+      },
+      {
+        "id": "3f8040f2-a413-44b8-9a3f-e9cc72a2efbc",
+        "status": "canceled",
+        "requested_run_type": "login_provisioning",
+        "run_id": "7bcc9e53-dc12-4bd2-8e5a-73d8f10b3c4e",
+        "updated_at": "2026-06-25T08:35:15.897759+00:00"
+      },
+      {
+        "id": "e4841109-e9f1-49b9-939b-a391950a8f50",
+        "status": "canceled",
+        "requested_run_type": "login_provisioning",
+        "run_id": "bb248f97-e649-45ad-a437-5d9ee67f51d2",
+        "updated_at": "2026-06-24T22:49:12.280283+00:00"
+      },
+      {
+        "id": "9566321d-bc00-422f-ae5a-edf712b569e8",
+        "status": "failed",
+        "requested_run_type": "login_provisioning",
+        "run_id": "08ef6e89-f9da-4dca-a8cc-d0a46ba7207b",
+        "updated_at": "2026-06-24T21:24:58.674252+00:00"
+      },
+      {
+        "id": "4565e2dd-5ff6-42fa-9275-8db756693a20",
+        "status": "failed",
+        "requested_run_type": "login_provisioning",
+        "run_id": "cfe8999d-187a-40fb-9ead-78eb5c4e7b44",
+        "updated_at": "2026-06-24T20:38:22.780272+00:00"
+      },
+      {
+        "id": "372a5177-9b96-4d38-8255-eb2aca510bee",
+        "status": "failed",
+        "requested_run_type": "login_provisioning",
+        "run_id": "ef0e6c27-b7e6-4182-88a0-23a0655d53e5",
+        "updated_at": "2026-06-24T11:59:24.14301+00:00"
+      },
+      {
+        "id": "e1f23311-edf6-40cb-95ea-3cc0704d97c3",
+        "status": "failed",
+        "requested_run_type": "login_provisioning",
+        "run_id": "0851c1cb-3a41-4b67-a399-055e9c3a5e93",
+        "updated_at": "2026-06-22T22:58:31.365463+00:00"
+      }
+    ],
+    "runs": [
+      {
+        "id": "a4654833-32a6-410f-a4c5-1c8389a03b40",
+        "status": "running",
+        "updated_at": "2026-06-25T10:33:24.476301+00:00"
+      },
+      {
+        "id": "d679f83a-96e4-4ae1-b658-d43294e37379",
+        "status": "stopped",
+        "updated_at": "2026-06-25T10:33:15.386+00:00"
+      },
+      {
+        "id": "f72d1559-3ae0-4fb1-91c7-f6f0916a1b75",
+        "status": "stopped",
+        "updated_at": "2026-06-25T09:00:02.638+00:00"
+      },
+      {
+        "id": "7bcc9e53-dc12-4bd2-8e5a-73d8f10b3c4e",
+        "status": "stopped",
+        "updated_at": "2026-06-25T08:35:15.128+00:00"
+      },
+      {
+        "id": "bb248f97-e649-45ad-a437-5d9ee67f51d2",
+        "status": "stopped",
+        "updated_at": "2026-06-24T22:49:11.715657+00:00"
+      }
+    ],
+    "actions": [
+      {
+        "id": "0edfabda-26de-45b8-8412-836d9a63b897",
+        "action_type": "enter_email_verification_code",
+        "status": "pending",
+        "updated_at": "2026-06-25T10:33:50.233147+00:00",
+        "metadata": {
+          "stage": "post_submit",
+          "run_id": "a4654833-32a6-410f-a4c5-1c8389a03b40",
+          "source": "login_dashboard_action_publisher",
+          "request_id": null,
+          "screen_type": "",
+          "ttl_minutes": 10,
+          "assignment_id": null,
+          "resume_status": "needs_new_code",
+          "challenge_type": "",
+          "provenance_kind": "active_run_post_submit",
+          "action_expires_at": "2026-06-25T10:43:49.917198+00:00",
+          "resume_request_id": "23052d91-f49c-418e-884d-250229136037",
+          "credentials_version": null,
+          "masked_email_present": false,
+          "resume_submission_id": "246bb279-fced-49ac-b07a-4c3337b13741",
+          "human_review_required": false,
+          "resume_failure_reason": "verification_code_still_required",
+          "expected_app_instance_id": null,
+          "verification_submission_id": "246bb279-fced-49ac-b07a-4c3337b13741",
+          "verification_code_expires_at": "2026-06-25T10:48:12.435992+00:00",
+          "verification_code_submitted_at": "2026-06-25T10:33:12.435992+00:00"
+        }
+      },
+      {
+        "id": "3b701809-e2b4-4624-9408-84fbbefba5ad",
+        "action_type": "update_instagram_password",
+        "status": "pending",
+        "updated_at": "2026-06-25T10:33:49.916344+00:00",
+        "metadata": {
+          "stage": "login_probe",
+          "reason": "verification_code_still_required",
+          "run_id": "a4654833-32a6-410f-a4c5-1c8389a03b40",
+          "source": "status_sync",
+          "flow_name": "entry2e5p5_login_provisioner",
+          "actor_type": "provisioner",
+          "retry_count": 0,
+          "screen_type": "login_form_empty",
+          "login_status": "verification_pending",
+          "final_outcome": "verification_pending",
+          "probe_version": "v1",
+          "selected_route": "join_instagram_existing_profile",
+          "onboarding_status": "verification_pending",
+          "external_request_id": "login_provisioner:a4654833-32a6-410f-a4c5-1c8389a03b40",
+          "provisioning_status": "login_verification_pending",
+          "dashboard_action_type": "enter_email_verification_code",
+          "central_orchestrator_used": true,
+          "central_orchestrator_version": "entry2e5p19-central-v1"
+        }
+      },
+      {
+        "id": "5406aa2e-869f-437f-bb72-76cacefb4b2c",
+        "action_type": "update_instagram_password",
+        "status": "dismissed",
+        "updated_at": "2026-06-25T10:16:47.56792+00:00",
+        "metadata": {
+          "stage": "login_probe",
+          "reason": "email_verification_code_required",
+          "run_id": "f72d1559-3ae0-4fb1-91c7-f6f0916a1b75",
+          "source": "status_sync",
+          "flow_name": "entry2e5p5_login_provisioner",
+          "actor_type": "provisioner",
+          "retry_count": 0,
+          "screen_type": "login_form_empty",
+          "login_status": "verification_pending",
+          "final_outcome": "verification_pending",
+          "probe_version": "v1",
+          "selected_route": "join_instagram_existing_profile",
+          "onboarding_status": "verification_pending",
+          "external_request_id": "login_provisioner:f72d1559-3ae0-4fb1-91c7-f6f0916a1b75",
+          "provisioning_status": "login_verification_pending",
+          "dashboard_action_type": "enter_email_verification_code",
+          "central_orchestrator_used": true,
+          "central_orchestrator_version": "entry2e5p19-central-v1"
+        }
+      },
+      {
+        "id": "b57e2b13-2e0b-420c-ab86-15f2a3c074e2",
+        "action_type": "enter_email_verification_code",
+        "status": "dismissed",
+        "updated_at": "2026-06-25T10:16:47.301726+00:00",
+        "metadata": {
+          "stage": "post_submit",
+          "run_id": "f72d1559-3ae0-4fb1-91c7-f6f0916a1b75",
+          "source": "login_dashboard_action_publisher",
+          "request_id": null,
+          "screen_type": "email_code_challenge",
+          "ttl_minutes": 10,
+          "assignment_id": null,
+          "challenge_type": "email",
+          "provenance_kind": "active_run_post_submit",
+          "action_expires_at": "2026-06-25T09:09:30.565035+00:00",
+          "credentials_version": null,
+          "masked_email_present": true,
+          "human_review_required": false,
+          "expected_app_instance_id": "75906e49-d96a-4018-95a9-5df6a5ec81f2",
+          "verification_submission_id": "7bc4b251-9976-4b6a-b804-08b3fbf8f788",
+          "verification_code_expires_at": "2026-06-25T09:14:59.964805+00:00",
+          "verification_code_submitted_at": "2026-06-25T08:59:59.964805+00:00"
+        }
+      },
+      {
+        "id": "9cc12286-3ab1-4b59-912d-35fe9bafb261",
+        "action_type": "enter_email_verification_code",
+        "status": "dismissed",
+        "updated_at": "2026-06-25T08:35:16.551111+00:00",
+        "metadata": {
+          "stage": "post_submit",
+          "run_id": "7bcc9e53-dc12-4bd2-8e5a-73d8f10b3c4e",
+          "source": "login_dashboard_action_publisher",
+          "request_id": null,
+          "screen_type": "email_code_challenge",
+          "ttl_minutes": 10,
+          "assignment_id": null,
+          "challenge_type": "email",
+          "provenance_kind": "active_run_post_submit",
+          "action_expires_at": "2026-06-25T08:14:20.031985+00:00",
+          "credentials_version": null,
+          "masked_email_present": true,
+          "human_review_required": false,
+          "expected_app_instance_id": "75906e49-d96a-4018-95a9-5df6a5ec81f2",
+          "verification_submission_id": "564127bf-7fc0-4094-b13c-d043f0e764cc",
+          "verification_code_expires_at": "2026-06-25T08:19:54.244126+00:00",
+          "verification_code_submitted_at": "2026-06-25T08:04:54.244126+00:00"
+        }
+      },
+      {
+        "id": "2f05de1b-345f-42d7-bc13-c073386668fe",
+        "action_type": "update_instagram_password",
+        "status": "dismissed",
+        "updated_at": "2026-06-25T08:35:16.551111+00:00",
+        "metadata": {
+          "stage": "login_probe",
+          "reason": "email_verification_code_required",
+          "run_id": "7bcc9e53-dc12-4bd2-8e5a-73d8f10b3c4e",
+          "source": "status_sync",
+          "flow_name": "entry2e5p5_login_provisioner",
+          "actor_type": "provisioner",
+          "retry_count": 0,
+          "screen_type": "login_form_empty",
+          "login_status": "verification_pending",
+          "final_outcome": "verification_pending",
+          "probe_version": "v1",
+          "selected_route": "join_instagram_existing_profile",
+          "onboarding_status": "verification_pending",
+          "external_request_id": "login_provisioner:7bcc9e53-dc12-4bd2-8e5a-73d8f10b3c4e",
+          "provisioning_status": "login_verification_pending",
+          "dashboard_action_type": "enter_email_verification_code",
+          "central_orchestrator_used": true,
+          "central_orchestrator_version": "entry2e5p19-central-v1"
+        }
+      },
+      {
+        "id": "a189eeb5-64d5-4e87-91b3-cfb1bdefe3f7",
+        "action_type": "update_instagram_password",
+        "status": "dismissed",
+        "updated_at": "2026-06-24T22:49:13.415447+00:00",
+        "metadata": {
+          "stage": "login_probe",
+          "reason": "email_verification_code_required",
+          "run_id": "bb248f97-e649-45ad-a437-5d9ee67f51d2",
+          "source": "status_sync",
+          "flow_name": "entry2e5p5_login_provisioner",
+          "actor_type": "provisioner",
+          "retry_count": 0,
+          "screen_type": "login_form_empty",
+          "login_status": "verification_pending",
+          "final_outcome": "verification_pending",
+          "probe_version": "v1",
+          "selected_route": "join_instagram_existing_profile",
+          "onboarding_status": "verification_pending",
+          "external_request_id": "login_provisioner:bb248f97-e649-45ad-a437-5d9ee67f51d2",
+          "provisioning_status": "login_verification_pending",
+          "dashboard_action_type": "enter_email_verification_code",
+          "central_orchestrator_used": true,
+          "central_orchestrator_version": "entry2e5p19-central-v1"
+        }
+      },
+      {
+        "id": "9944f85e-1879-41a9-86a6-7895e838dc3d",
+        "action_type": "enter_email_verification_code",
+        "status": "dismissed",
+        "updated_at": "2026-06-24T22:49:13.140457+00:00",
+        "metadata": {
+          "stage": "post_submit",
+          "run_id": "bb248f97-e649-45ad-a437-5d9ee67f51d2",
+          "source": "login_dashboard_action_publisher",
+          "request_id": null,
+          "screen_type": "email_code_challenge",
+          "ttl_minutes": 10,
+          "assignment_id": null,
+          "challenge_type": "email",
+          "provenance_kind": "active_run_post_submit",
+          "action_expires_at": "2026-06-24T22:34:26.817215+00:00",
+          "credentials_version": null,
+          "masked_email_present": true,
+          "human_review_required": false,
+          "expected_app_instance_id": "75906e49-d96a-4018-95a9-5df6a5ec81f2",
+          "verification_submission_id": "b18adaa0-7b03-4aab-b3eb-bda2b521d5cf",
+          "verification_code_expires_at": "2026-06-24T22:41:02.642525+00:00",
+          "verification_code_submitted_at": "2026-06-24T22:26:02.642525+00:00"
+        }
+      },
+      {
+        "id": "a8576326-ae92-46b4-be06-39f0f13b5292",
+        "action_type": "submit_instagram_credentials",
+        "status": "pending_verification",
+        "updated_at": "2026-06-22T14:48:08.432549+00:00",
+        "metadata": {
+          "flow": "client_add_account",
+          "action": "submit",
+          "source": "add_profile",
+          "actor_type": "client",
+          "request_id": "bc84a004-0970-466a-871c-ebcf313f3b36",
+          "source_surface": "instagram_client",
+          "credentials_version": 1,
+          "external_request_id": "ee5050ce-0d3a-4a1d-b7d5-3486e3603c2f"
+        }
+      }
+    ],
+    "projection": {
+      "login_status": "verification_pending",
+      "provisioning_status": "login_verification_pending",
+      "onboarding_status": "verification_pending",
+      "updated_at": "2026-06-25T10:33:49.916344+00:00"
+    }
+  },
+  "after": {
+    "requests": [
+      {
+        "id": "23052d91-f49c-418e-884d-250229136037",
+        "status": "running",
+        "requested_run_type": "login_email_code_resume",
+        "run_id": "a4654833-32a6-410f-a4c5-1c8389a03b40",
+        "updated_at": "2026-06-25T11:25:03.793374+00:00"
+      },
+      {
+        "id": "182c9a74-bd90-46dd-a565-45d4b96ac70b",
+        "status": "canceled",
+        "requested_run_type": "login_provisioning",
+        "run_id": "d679f83a-96e4-4ae1-b658-d43294e37379",
+        "updated_at": "2026-06-25T10:33:16.056567+00:00"
+      },
+      {
+        "id": "4dad9d52-905a-4290-b46f-c68c6b31e1aa",
+        "status": "canceled",
+        "requested_run_type": "login_provisioning",
+        "run_id": "f72d1559-3ae0-4fb1-91c7-f6f0916a1b75",
+        "updated_at": "2026-06-25T10:16:46.347517+00:00"
+      },
+      {
+        "id": "3f8040f2-a413-44b8-9a3f-e9cc72a2efbc",
+        "status": "canceled",
+        "requested_run_type": "login_provisioning",
+        "run_id": "7bcc9e53-dc12-4bd2-8e5a-73d8f10b3c4e",
+        "updated_at": "2026-06-25T08:35:15.897759+00:00"
+      },
+      {
+        "id": "e4841109-e9f1-49b9-939b-a391950a8f50",
+        "status": "canceled",
+        "requested_run_type": "login_provisioning",
+        "run_id": "bb248f97-e649-45ad-a437-5d9ee67f51d2",
+        "updated_at": "2026-06-24T22:49:12.280283+00:00"
+      },
+      {
+        "id": "9566321d-bc00-422f-ae5a-edf712b569e8",
+        "status": "failed",
+        "requested_run_type": "login_provisioning",
+        "run_id": "08ef6e89-f9da-4dca-a8cc-d0a46ba7207b",
+        "updated_at": "2026-06-24T21:24:58.674252+00:00"
+      },
+      {
+        "id": "4565e2dd-5ff6-42fa-9275-8db756693a20",
+        "status": "failed",
+        "requested_run_type": "login_provisioning",
+        "run_id": "cfe8999d-187a-40fb-9ead-78eb5c4e7b44",
+        "updated_at": "2026-06-24T20:38:22.780272+00:00"
+      },
+      {
+        "id": "372a5177-9b96-4d38-8255-eb2aca510bee",
+        "status": "failed",
+        "requested_run_type": "login_provisioning",
+        "run_id": "ef0e6c27-b7e6-4182-88a0-23a0655d53e5",
+        "updated_at": "2026-06-24T11:59:24.14301+00:00"
+      },
+      {
+        "id": "e1f23311-edf6-40cb-95ea-3cc0704d97c3",
+        "status": "failed",
+        "requested_run_type": "login_provisioning",
+        "run_id": "0851c1cb-3a41-4b67-a399-055e9c3a5e93",
+        "updated_at": "2026-06-22T22:58:31.365463+00:00"
+      }
+    ],
+    "runs": [
+      {
+        "id": "a4654833-32a6-410f-a4c5-1c8389a03b40",
+        "status": "stopped",
+        "updated_at": "2026-06-25T11:25:03.7909+00:00"
+      },
+      {
+        "id": "d679f83a-96e4-4ae1-b658-d43294e37379",
+        "status": "stopped",
+        "updated_at": "2026-06-25T10:33:15.386+00:00"
+      },
+      {
+        "id": "f72d1559-3ae0-4fb1-91c7-f6f0916a1b75",
+        "status": "stopped",
+        "updated_at": "2026-06-25T09:00:02.638+00:00"
+      },
+      {
+        "id": "7bcc9e53-dc12-4bd2-8e5a-73d8f10b3c4e",
+        "status": "stopped",
+        "updated_at": "2026-06-25T08:35:15.128+00:00"
+      },
+      {
+        "id": "bb248f97-e649-45ad-a437-5d9ee67f51d2",
+        "status": "stopped",
+        "updated_at": "2026-06-24T22:49:11.715657+00:00"
+      }
+    ],
+    "actions": [
+      {
+        "id": "3b701809-e2b4-4624-9408-84fbbefba5ad",
+        "action_type": "update_instagram_password",
+        "status": "dismissed",
+        "updated_at": "2026-06-25T11:25:04.826718+00:00",
+        "metadata": {
+          "stage": "login_probe",
+          "reason": "verification_code_still_required",
+          "run_id": "a4654833-32a6-410f-a4c5-1c8389a03b40",
+          "source": "status_sync",
+          "flow_name": "entry2e5p5_login_provisioner",
+          "actor_type": "provisioner",
+          "retry_count": 0,
+          "screen_type": "login_form_empty",
+          "login_status": "verification_pending",
+          "final_outcome": "verification_pending",
+          "probe_version": "v1",
+          "selected_route": "join_instagram_existing_profile",
+          "onboarding_status": "verification_pending",
+          "external_request_id": "login_provisioner:a4654833-32a6-410f-a4c5-1c8389a03b40",
+          "provisioning_status": "login_verification_pending",
+          "dashboard_action_type": "enter_email_verification_code",
+          "central_orchestrator_used": true,
+          "central_orchestrator_version": "entry2e5p19-central-v1"
+        }
+      },
+      {
+        "id": "0edfabda-26de-45b8-8412-836d9a63b897",
+        "action_type": "enter_email_verification_code",
+        "status": "dismissed",
+        "updated_at": "2026-06-25T11:25:04.422362+00:00",
+        "metadata": {
+          "stage": "post_submit",
+          "run_id": "a4654833-32a6-410f-a4c5-1c8389a03b40",
+          "source": "login_dashboard_action_publisher",
+          "request_id": null,
+          "screen_type": "",
+          "ttl_minutes": 10,
+          "assignment_id": null,
+          "resume_status": "needs_new_code",
+          "challenge_type": "",
+          "provenance_kind": "active_run_post_submit",
+          "action_expires_at": "2026-06-25T10:43:49.917198+00:00",
+          "resume_request_id": "23052d91-f49c-418e-884d-250229136037",
+          "credentials_version": null,
+          "masked_email_present": false,
+          "resume_submission_id": "246bb279-fced-49ac-b07a-4c3337b13741",
+          "human_review_required": false,
+          "resume_failure_reason": "verification_code_still_required",
+          "expected_app_instance_id": null,
+          "verification_submission_id": "246bb279-fced-49ac-b07a-4c3337b13741",
+          "verification_code_expires_at": "2026-06-25T10:48:12.435992+00:00",
+          "verification_code_submitted_at": "2026-06-25T10:33:12.435992+00:00"
+        }
+      },
+      {
+        "id": "5406aa2e-869f-437f-bb72-76cacefb4b2c",
+        "action_type": "update_instagram_password",
+        "status": "dismissed",
+        "updated_at": "2026-06-25T10:16:47.56792+00:00",
+        "metadata": {
+          "stage": "login_probe",
+          "reason": "email_verification_code_required",
+          "run_id": "f72d1559-3ae0-4fb1-91c7-f6f0916a1b75",
+          "source": "status_sync",
+          "flow_name": "entry2e5p5_login_provisioner",
+          "actor_type": "provisioner",
+          "retry_count": 0,
+          "screen_type": "login_form_empty",
+          "login_status": "verification_pending",
+          "final_outcome": "verification_pending",
+          "probe_version": "v1",
+          "selected_route": "join_instagram_existing_profile",
+          "onboarding_status": "verification_pending",
+          "external_request_id": "login_provisioner:f72d1559-3ae0-4fb1-91c7-f6f0916a1b75",
+          "provisioning_status": "login_verification_pending",
+          "dashboard_action_type": "enter_email_verification_code",
+          "central_orchestrator_used": true,
+          "central_orchestrator_version": "entry2e5p19-central-v1"
+        }
+      },
+      {
+        "id": "b57e2b13-2e0b-420c-ab86-15f2a3c074e2",
+        "action_type": "enter_email_verification_code",
+        "status": "dismissed",
+        "updated_at": "2026-06-25T10:16:47.301726+00:00",
+        "metadata": {
+          "stage": "post_submit",
+          "run_id": "f72d1559-3ae0-4fb1-91c7-f6f0916a1b75",
+          "source": "login_dashboard_action_publisher",
+          "request_id": null,
+          "screen_type": "email_code_challenge",
+          "ttl_minutes": 10,
+          "assignment_id": null,
+          "challenge_type": "email",
+          "provenance_kind": "active_run_post_submit",
+          "action_expires_at": "2026-06-25T09:09:30.565035+00:00",
+          "credentials_version": null,
+          "masked_email_present": true,
+          "human_review_required": false,
+          "expected_app_instance_id": "75906e49-d96a-4018-95a9-5df6a5ec81f2",
+          "verification_submission_id": "7bc4b251-9976-4b6a-b804-08b3fbf8f788",
+          "verification_code_expires_at": "2026-06-25T09:14:59.964805+00:00",
+          "verification_code_submitted_at": "2026-06-25T08:59:59.964805+00:00"
+        }
+      },
+      {
+        "id": "9cc12286-3ab1-4b59-912d-35fe9bafb261",
+        "action_type": "enter_email_verification_code",
+        "status": "dismissed",
+        "updated_at": "2026-06-25T08:35:16.551111+00:00",
+        "metadata": {
+          "stage": "post_submit",
+          "run_id": "7bcc9e53-dc12-4bd2-8e5a-73d8f10b3c4e",
+          "source": "login_dashboard_action_publisher",
+          "request_id": null,
+          "screen_type": "email_code_challenge",
+          "ttl_minutes": 10,
+          "assignment_id": null,
+          "challenge_type": "email",
+          "provenance_kind": "active_run_post_submit",
+          "action_expires_at": "2026-06-25T08:14:20.031985+00:00",
+          "credentials_version": null,
+          "masked_email_present": true,
+          "human_review_required": false,
+          "expected_app_instance_id": "75906e49-d96a-4018-95a9-5df6a5ec81f2",
+          "verification_submission_id": "564127bf-7fc0-4094-b13c-d043f0e764cc",
+          "verification_code_expires_at": "2026-06-25T08:19:54.244126+00:00",
+          "verification_code_submitted_at": "2026-06-25T08:04:54.244126+00:00"
+        }
+      },
+      {
+        "id": "2f05de1b-345f-42d7-bc13-c073386668fe",
+        "action_type": "update_instagram_password",
+        "status": "dismissed",
+        "updated_at": "2026-06-25T08:35:16.551111+00:00",
+        "metadata": {
+          "stage": "login_probe",
+          "reason": "email_verification_code_required",
+          "run_id": "7bcc9e53-dc12-4bd2-8e5a-73d8f10b3c4e",
+          "source": "status_sync",
+          "flow_name": "entry2e5p5_login_provisioner",
+          "actor_type": "provisioner",
+          "retry_count": 0,
+          "screen_type": "login_form_empty",
+          "login_status": "verification_pending",
+          "final_outcome": "verification_pending",
+          "probe_version": "v1",
+          "selected_route": "join_instagram_existing_profile",
+          "onboarding_status": "verification_pending",
+          "external_request_id": "login_provisioner:7bcc9e53-dc12-4bd2-8e5a-73d8f10b3c4e",
+          "provisioning_status": "login_verification_pending",
+          "dashboard_action_type": "enter_email_verification_code",
+          "central_orchestrator_used": true,
+          "central_orchestrator_version": "entry2e5p19-central-v1"
+        }
+      },
+      {
+        "id": "a189eeb5-64d5-4e87-91b3-cfb1bdefe3f7",
+        "action_type": "update_instagram_password",
+        "status": "dismissed",
+        "updated_at": "2026-06-24T22:49:13.415447+00:00",
+        "metadata": {
+          "stage": "login_probe",
+          "reason": "email_verification_code_required",
+          "run_id": "bb248f97-e649-45ad-a437-5d9ee67f51d2",
+          "source": "status_sync",
+          "flow_name": "entry2e5p5_login_provisioner",
+          "actor_type": "provisioner",
+          "retry_count": 0,
+          "screen_type": "login_form_empty",
+          "login_status": "verification_pending",
+          "final_outcome": "verification_pending",
+          "probe_version": "v1",
+          "selected_route": "join_instagram_existing_profile",
+          "onboarding_status": "verification_pending",
+          "external_request_id": "login_provisioner:bb248f97-e649-45ad-a437-5d9ee67f51d2",
+          "provisioning_status": "login_verification_pending",
+          "dashboard_action_type": "enter_email_verification_code",
+          "central_orchestrator_used": true,
+          "central_orchestrator_version": "entry2e5p19-central-v1"
+        }
+      },
+      {
+        "id": "9944f85e-1879-41a9-86a6-7895e838dc3d",
+        "action_type": "enter_email_verification_code",
+        "status": "dismissed",
+        "updated_at": "2026-06-24T22:49:13.140457+00:00",
+        "metadata": {
+          "stage": "post_submit",
+          "run_id": "bb248f97-e649-45ad-a437-5d9ee67f51d2",
+          "source": "login_dashboard_action_publisher",
+          "request_id": null,
+          "screen_type": "email_code_challenge",
+          "ttl_minutes": 10,
+          "assignment_id": null,
+          "challenge_type": "email",
+          "provenance_kind": "active_run_post_submit",
+          "action_expires_at": "2026-06-24T22:34:26.817215+00:00",
+          "credentials_version": null,
+          "masked_email_present": true,
+          "human_review_required": false,
+          "expected_app_instance_id": "75906e49-d96a-4018-95a9-5df6a5ec81f2",
+          "verification_submission_id": "b18adaa0-7b03-4aab-b3eb-bda2b521d5cf",
+          "verification_code_expires_at": "2026-06-24T22:41:02.642525+00:00",
+          "verification_code_submitted_at": "2026-06-24T22:26:02.642525+00:00"
+        }
+      },
+      {
+        "id": "a8576326-ae92-46b4-be06-39f0f13b5292",
+        "action_type": "submit_instagram_credentials",
+        "status": "pending_verification",
+        "updated_at": "2026-06-22T14:48:08.432549+00:00",
+        "metadata": {
+          "flow": "client_add_account",
+          "action": "submit",
+          "source": "add_profile",
+          "actor_type": "client",
+          "request_id": "bc84a004-0970-466a-871c-ebcf313f3b36",
+          "source_surface": "instagram_client",
+          "credentials_version": 1,
+          "external_request_id": "ee5050ce-0d3a-4a1d-b7d5-3486e3603c2f"
+        }
+      }
+    ],
+    "projection": {
+      "login_status": "verification_pending",
+      "provisioning_status": "login_verification_pending",
+      "onboarding_status": "verification_pending",
+      "updated_at": "2026-06-25T10:33:49.916344+00:00"
+    }
+  },
+  "active_login_requests": [
+    {
+      "id": "23052d91-f49c-418e-884d-250229136037",
+      "status": "running",
+      "requested_run_type": "login_email_code_resume",
+      "run_id": "a4654833-32a6-410f-a4c5-1c8389a03b40",
+      "updated_at": "2026-06-25T11:25:03.793374+00:00"
+    }
+  ],
+  "active_challenge_actions": []
+}

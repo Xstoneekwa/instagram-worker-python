@@ -86,9 +86,49 @@ class LoginChallengeRuntimeTests(unittest.TestCase):
                 ok=False,
                 final_outcome="verification_pending",
                 failure_reason="verification_code_still_required",
+                screen_type="email_code_challenge",
             )
         self.assertTrue(out["updated"])
         reopen.assert_called_once()
+
+    def test_sync_verification_action_keeps_running_on_stale_still_required_with_post_login_progress(self) -> None:
+        with patch.object(runtime, "reopen_verification_action_pending") as reopen, patch.object(
+            runtime, "_merge_dashboard_action_metadata", return_value={"updated": True}
+        ) as merge:
+            out = runtime.sync_verification_action_after_email_code_resume(
+                action_id="22222222-2222-4222-8222-222222222222",
+                account_id="11111111-1111-4111-8111-111111111111",
+                run_id="run-1",
+                ok=False,
+                final_outcome="verification_pending",
+                failure_reason="verification_code_still_required",
+                screen_type="email_code_challenge",
+                safe_metadata={
+                    "save_login_info_prompt_detected": True,
+                    "post_submit_screens": ["email_code_challenge_stale", "save_login_info_prompt"],
+                },
+            )
+        self.assertTrue(out["updated"])
+        reopen.assert_not_called()
+        merge.assert_called_once()
+        self.assertEqual(merge.call_args.kwargs["metadata"]["resume_status"], "running")
+
+    def test_sync_verification_action_keeps_running_on_post_submit_finalization_pending(self) -> None:
+        with patch.object(runtime, "reopen_verification_action_pending") as reopen, patch.object(
+            runtime, "_merge_dashboard_action_metadata", return_value={"updated": True}
+        ) as merge:
+            out = runtime.sync_verification_action_after_email_code_resume(
+                action_id="22222222-2222-4222-8222-222222222222",
+                account_id="11111111-1111-4111-8111-111111111111",
+                run_id="run-1",
+                ok=False,
+                final_outcome="post_submit_finalization_pending",
+                failure_reason="post_submit_finalization_pending",
+                screen_type="email_code_challenge",
+            )
+        self.assertTrue(out["updated"])
+        reopen.assert_not_called()
+        self.assertEqual(merge.call_args.kwargs["metadata"]["resume_status"], "running")
 
     def test_mark_verification_action_resume_queued_patches_metadata(self) -> None:
         with patch.object(runtime, "_merge_dashboard_action_metadata", return_value={"id": "action-1"}) as merge:

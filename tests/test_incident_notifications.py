@@ -8,10 +8,20 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import incident_notification_channel_config as channel_config
 import incident_notifications
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CLI_SCRIPT = REPO_ROOT / "scripts" / "dispatch_incident_notifications.py"
+
+
+def _legacy_env_notification_mode():
+    return patch.object(
+        incident_notifications.config,
+        "INCIDENT_NOTIFICATIONS_CANONICAL_SETTINGS",
+        False,
+        create=True,
+    )
 
 
 def _incident(
@@ -60,6 +70,18 @@ def _package_mismatch_incident(incident_id: str) -> dict:
 
 
 class IncidentNotificationsTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._canonical_patch = patch.object(
+            incident_notifications.config,
+            "INCIDENT_NOTIFICATIONS_CANONICAL_SETTINGS",
+            False,
+            create=True,
+        )
+        self._canonical_patch.start()
+
+    def tearDown(self) -> None:
+        self._canonical_patch.stop()
+
     def test_disabled_no_op(self) -> None:
         with (
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_ENABLED", False, create=True),
@@ -284,6 +306,12 @@ class IncidentNotificationsTest(unittest.TestCase):
     def test_dry_run_false_missing_webhook_creates_failed_without_http(self) -> None:
         incident = _incident("incident-1")
         with (
+            patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_CANONICAL_SETTINGS", True, create=True),
+            patch.object(
+                channel_config,
+                "load_channel_settings_row",
+                return_value={"enabled": True, "configured": False, "webhook_ciphertext": None},
+            ),
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_ENABLED", True, create=True),
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_DRY_RUN", False, create=True),
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_CHANNELS", "slack", create=True),
@@ -311,12 +339,13 @@ class IncidentNotificationsTest(unittest.TestCase):
         self.assertEqual(out["failed_count"], 1)
         row = create.call_args.args[0]
         self.assertEqual(row["status"], "failed")
-        self.assertEqual(row["last_error"], "config_missing_webhook")
+        self.assertEqual(row["last_error"], "channel_not_configured")
         post.assert_not_called()
 
     def test_real_send_slack_success_marks_sent(self) -> None:
         incident = _incident("incident-1")
         with (
+            _legacy_env_notification_mode(),
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_ENABLED", True, create=True),
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_DRY_RUN", False, create=True),
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_CHANNELS", "slack", create=True),
@@ -373,6 +402,7 @@ class IncidentNotificationsTest(unittest.TestCase):
     def test_real_send_discord_204_marks_sent(self) -> None:
         incident = _incident("incident-1")
         with (
+            _legacy_env_notification_mode(),
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_ENABLED", True, create=True),
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_DRY_RUN", False, create=True),
             patch.object(incident_notifications.config, "DISCORD_WEBHOOK_URL", "https://discord.com/api/webhooks/SECRET", create=True),
@@ -410,6 +440,7 @@ class IncidentNotificationsTest(unittest.TestCase):
     def test_real_send_http_500_marks_failed(self) -> None:
         incident = _incident("incident-1")
         with (
+            _legacy_env_notification_mode(),
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_ENABLED", True, create=True),
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_DRY_RUN", False, create=True),
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_CHANNELS", "slack", create=True),
@@ -440,6 +471,7 @@ class IncidentNotificationsTest(unittest.TestCase):
     def test_real_send_exception_marks_failed_fail_open(self) -> None:
         incident = _incident("incident-1")
         with (
+            _legacy_env_notification_mode(),
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_ENABLED", True, create=True),
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_DRY_RUN", False, create=True),
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_FAIL_OPEN", True, create=True),
@@ -495,6 +527,7 @@ class IncidentNotificationsTest(unittest.TestCase):
 
     def test_resolve_dispatch_channels_applies_toggles(self) -> None:
         with (
+            _legacy_env_notification_mode(),
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_CHANNELS", "slack,discord", create=True),
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_SLACK_ENABLED", True, create=True),
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_DISCORD_ENABLED", False, create=True),
@@ -506,6 +539,7 @@ class IncidentNotificationsTest(unittest.TestCase):
     def test_slack_toggle_off_skips_slack_without_delivery_row(self) -> None:
         incident = _incident("incident-1")
         with (
+            _legacy_env_notification_mode(),
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_ENABLED", True, create=True),
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_DRY_RUN", False, create=True),
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_CHANNELS", "slack,discord", create=True),
@@ -532,6 +566,7 @@ class IncidentNotificationsTest(unittest.TestCase):
     def test_discord_toggle_off_sends_slack_only(self) -> None:
         incident = _incident("incident-1")
         with (
+            _legacy_env_notification_mode(),
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_ENABLED", True, create=True),
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_DRY_RUN", False, create=True),
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_CHANNELS", "slack,discord", create=True),
@@ -557,6 +592,7 @@ class IncidentNotificationsTest(unittest.TestCase):
     def test_both_channel_toggles_off_no_send(self) -> None:
         incident = _incident("incident-1")
         with (
+            _legacy_env_notification_mode(),
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_ENABLED", True, create=True),
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_DRY_RUN", False, create=True),
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_CHANNELS", "slack,discord", create=True),
@@ -579,6 +615,7 @@ class IncidentNotificationsTest(unittest.TestCase):
         incident = _incident("incident-1")
         slack_key = incident_notifications.build_delivery_key("slack", "incident-1")
         with (
+            _legacy_env_notification_mode(),
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_ENABLED", True, create=True),
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_DRY_RUN", False, create=True),
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_CHANNELS", "slack", create=True),
@@ -592,6 +629,7 @@ class IncidentNotificationsTest(unittest.TestCase):
         self.assertEqual(out["reason"], "channels_disabled")
         create.assert_not_called()
         with (
+            _legacy_env_notification_mode(),
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_ENABLED", True, create=True),
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_DRY_RUN", False, create=True),
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_CHANNELS", "slack", create=True),
@@ -655,6 +693,7 @@ class IncidentNotificationsTest(unittest.TestCase):
         incident = _incident("incident-1")
         key = incident_notifications.build_delivery_key("slack", "incident-1")
         with (
+            _legacy_env_notification_mode(),
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_ENABLED", True, create=True),
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_DRY_RUN", False, create=True),
             patch.object(incident_notifications.config, "INCIDENT_NOTIFICATIONS_CHANNELS", "slack", create=True),

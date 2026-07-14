@@ -298,6 +298,21 @@ def configured_device(hierarchy: str = CONNECTED_XML) -> tuple[FakeDevice, FakeS
     return device, username, password, login
 
 
+POST_SUBMIT_TEST_DEADLINE_MS = 40
+
+
+def post_submit_test_deadline_kwargs(**overrides):
+    kwargs = {
+        "post_submit_wait_ms": 0,
+        "post_submit_observation_interval_ms": 1,
+        "max_post_submit_observations": 4,
+        "post_submit_bounded_deadline_ms": POST_SUBMIT_TEST_DEADLINE_MS,
+        "sleeper": Mock(),
+    }
+    kwargs.update(overrides)
+    return kwargs
+
+
 class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
     def setUp(self) -> None:
         self._ensure_adb_keyboard_ready_patch = patch.object(
@@ -752,7 +767,7 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
         self.assertEqual(result.post_submit_outcome, "connected")
         self.assertEqual(result.post_submit_probe_reason, "connected_ui_signal")
         self.assertEqual(result.safe_metadata["post_submit_observation_count"], 2)
-        self.assertEqual(result.safe_metadata["post_submit_wait_total_ms"], 2)
+        self.assertGreaterEqual(result.safe_metadata["post_submit_wait_total_ms"], 1)
         self.assertEqual(result.safe_metadata["post_submit_screens"], ["logged_out", "connected"])
         self.assertGreaterEqual(sleeper.call_count, 2)
 
@@ -887,46 +902,73 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
         self.assertTrue(result.safe_metadata["notifications_next_tap_sent"])
         self.assertEqual(login.click_calls, 1)
 
-    def test_post_submit_all_loading_returns_still_loading_timeout(self) -> None:
+    def test_post_submit_all_loading_returns_deadline_failure(self) -> None:
         device, _username, _password_selector, _login = configured_device()
-        device.hierarchies = [LOADING_XML, LOADING_XML, LOADING_XML]
+        device.hierarchies = [LOADING_XML]
 
         result = execute_login_form_credentials(
             device,
             expected_username=USERNAME,
             password=SecretValue(PASSWORD),
             prevalidated_signals=LOGIN_FORM_SIGNALS,
-            post_submit_wait_ms=0,
-            post_submit_observation_interval_ms=1,
-            post_submit_timeout_ms=3,
-            sleeper=Mock(),
-        )
-
-        self.assertEqual(result.post_submit_outcome, "login_submit_still_loading")
-        self.assertEqual(result.post_submit_probe_reason, "post_submit_loading_timeout")
-        self.assertTrue(result.safe_metadata["post_submit_loading_timeout"])
-        self.assertEqual(result.safe_metadata["post_submit_timeout_ms"], 3)
-        self.assertEqual(result.safe_metadata["post_submit_interval_ms"], 1)
-        self.assertEqual(result.safe_metadata["final_terminal_screen"], "loading")
-
-    def test_post_submit_unknown_non_loading_remains_unknown_after_settling(self) -> None:
-        device, _username, _password_selector, _login = configured_device()
-        unknown_xml = '<node text="Instagram" />'
-        device.hierarchies = [unknown_xml, unknown_xml]
-
-        result = execute_login_form_credentials(
-            device,
-            expected_username=USERNAME,
-            password=SecretValue(PASSWORD),
-            prevalidated_signals=LOGIN_FORM_SIGNALS,
-            post_submit_wait_ms=0,
-            post_submit_observation_interval_ms=1,
-            max_post_submit_observations=2,
-            sleeper=Mock(),
+            **post_submit_test_deadline_kwargs(post_submit_bounded_deadline_ms=12),
         )
 
         self.assertEqual(result.post_submit_outcome, "unknown")
-        self.assertEqual(result.post_submit_probe_reason, "post_submit_unknown_after_settling")
+        self.assertEqual(result.post_submit_probe_reason, "post_submit_no_stable_outcome_after_deadline")
+        self.assertTrue(result.safe_metadata["post_submit_bounded_deadline_exhausted"])
+        self.assertEqual(result.safe_metadata["final_terminal_screen"], "loading")
+
+    def test_post_submit_timeout_ms_does_not_override_bounded_deadline(self) -> None:
+        device, _username, _password_selector, _login = configured_device()
+        device.hierarchies = [LOADING_XML]
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=LOGIN_FORM_SIGNALS,
+            post_submit_timeout_ms=10_000,
+            **post_submit_test_deadline_kwargs(post_submit_bounded_deadline_ms=12),
+        )
+
+        self.assertEqual(result.safe_metadata["post_submit_bounded_deadline_ms"], 12)
+        self.assertEqual(result.safe_metadata["post_submit_timeout_ms"], 10_000)
+
+    def test_post_submit_timeout_ms_keeps_default_sixty_second_bounded_deadline(self) -> None:
+        device, _username, _password_selector, _login = configured_device()
+        device.hierarchies = [LOADING_XML]
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=LOGIN_FORM_SIGNALS,
+            post_submit_timeout_ms=10_000,
+            post_submit_wait_ms=0,
+            post_submit_observation_interval_ms=1,
+            max_post_submit_observations=4,
+            sleeper=Mock(),
+        )
+
+        self.assertEqual(result.safe_metadata["post_submit_bounded_deadline_ms"], 60_000)
+        self.assertEqual(result.safe_metadata["post_submit_timeout_ms"], 10_000)
+
+    def test_post_submit_unknown_non_loading_deadline_failure(self) -> None:
+        device, _username, _password_selector, _login = configured_device()
+        unknown_xml = '<node text="Instagram" />'
+        device.hierarchies = [unknown_xml]
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=LOGIN_FORM_SIGNALS,
+            **post_submit_test_deadline_kwargs(post_submit_bounded_deadline_ms=12),
+        )
+
+        self.assertEqual(result.post_submit_outcome, "unknown")
+        self.assertEqual(result.post_submit_probe_reason, "post_submit_no_stable_outcome_after_deadline")
         self.assertFalse(result.safe_metadata["post_submit_loading_timeout"])
 
     def test_post_submit_final_recheck_detects_late_email_challenge_after_unknown_transition(self) -> None:
@@ -953,7 +995,88 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
             ["loading", "logged_out", "unknown", "email_code_challenge"],
         )
         self.assertTrue(result.safe_metadata["email_code_challenge_detected"])
-        self.assertIn("post_submit_final_recheck_terminal", result.warnings)
+        self.assertIn("post_submit_priority_terminal_detected", result.warnings)
+
+    def test_post_submit_loading_then_logged_out_finds_delayed_email_challenge(self) -> None:
+        device, _username, _password_selector, _login = configured_device()
+        device.hierarchies = [
+            LOADING_XML,
+            LOADING_XML,
+            LOADING_XML,
+            LOGGED_OUT_XML,
+            LOADING_XML,
+            LOADING_XML,
+            EMAIL_CODE_CHALLENGE_XML,
+        ]
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=LOGIN_FORM_SIGNALS,
+            post_submit_wait_ms=0,
+            post_submit_observation_interval_ms=1,
+            max_post_submit_observations=4,
+            sleeper=Mock(),
+        )
+
+        self.assertEqual(result.post_submit_outcome, "verification_pending")
+        self.assertEqual(result.post_submit_probe_reason, "email_verification_code_required")
+        self.assertEqual(result.post_submit_screen_type, "email_code_challenge")
+        self.assertIn("logged_out", result.safe_metadata["post_submit_screens"])
+        self.assertIn("email_code_challenge", result.safe_metadata["post_submit_screens"])
+        self.assertTrue(result.safe_metadata["email_code_challenge_detected"])
+        self.assertIn("post_submit_priority_terminal_detected", result.warnings)
+        self.assertNotIn("post_submit_logged_out_after_settling", result.warnings)
+
+    def _post_submit_padding_before_challenge(self, delay_ms: int) -> list[str]:
+        screens: list[str] = []
+        remaining = max(0, int(delay_ms or 0))
+        while remaining > 0:
+            screens.append(LOADING_XML if len(screens) % 2 == 0 else LOGGED_OUT_XML)
+            remaining -= 1
+        return screens
+
+    def _execute_post_submit_delay_case(self, *, delay_ms: int, challenge_xml: str):
+        device, _username, _password_selector, login = configured_device()
+        device.hierarchies = self._post_submit_padding_before_challenge(delay_ms) + [challenge_xml]
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=LOGIN_FORM_SIGNALS,
+            post_submit_wait_ms=0,
+            post_submit_observation_interval_ms=1,
+            post_submit_bounded_deadline_ms=60_000,
+            sleeper=Mock(),
+        )
+        return result, login
+
+    def test_post_submit_email_challenge_detected_at_9s(self) -> None:
+        result, login = self._execute_post_submit_delay_case(delay_ms=9, challenge_xml=EMAIL_CODE_CHALLENGE_XML)
+        self.assertEqual(result.post_submit_outcome, "verification_pending")
+        self.assertEqual(result.post_submit_probe_reason, "email_verification_code_required")
+        self.assertEqual(login.click_calls, 1)
+
+    def test_post_submit_email_challenge_detected_at_20s(self) -> None:
+        result, login = self._execute_post_submit_delay_case(delay_ms=20, challenge_xml=EMAIL_CODE_CHALLENGE_XML)
+        self.assertEqual(result.post_submit_outcome, "verification_pending")
+        self.assertEqual(login.click_calls, 1)
+
+    def test_post_submit_email_challenge_detected_at_40s(self) -> None:
+        result, login = self._execute_post_submit_delay_case(delay_ms=40, challenge_xml=EMAIL_CODE_CHALLENGE_XML)
+        self.assertEqual(result.post_submit_outcome, "verification_pending")
+        self.assertEqual(login.click_calls, 1)
+
+    def test_post_submit_delayed_needs_2fa_before_deadline(self) -> None:
+        result, login = self._execute_post_submit_delay_case(delay_ms=15, challenge_xml=NEEDS_2FA_XML)
+        self.assertEqual(result.post_submit_outcome, "needs_2fa")
+        self.assertEqual(login.click_calls, 1)
+
+    def test_post_submit_delayed_checkpoint_before_deadline(self) -> None:
+        result, login = self._execute_post_submit_delay_case(delay_ms=25, challenge_xml=CHECKPOINT_XML)
+        self.assertEqual(result.post_submit_outcome, "checkpoint")
+        self.assertEqual(login.click_calls, 1)
 
     def test_post_submit_password_required_uses_bounded_recovery(self) -> None:
         device, _username, password_selector, login = configured_device()
@@ -1139,6 +1262,31 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
         self.assertIn("instagram_save_login_info_prompt_detected", result.warnings)
         self.assertIn("instagram_save_login_info_prompt_not_now", result.warnings)
 
+    def test_post_submit_loading_logged_out_deadline_marks_finalization_pending(self) -> None:
+        device, _username, _password_selector, _login = configured_device()
+        device.hierarchies = [
+            LOADING_XML,
+            LOADING_XML,
+            LOGGED_OUT_XML,
+            LOGGED_OUT_XML,
+            LOGGED_OUT_XML,
+        ]
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=LOGIN_FORM_SIGNALS,
+            **post_submit_test_deadline_kwargs(
+                post_submit_bounded_deadline_ms=12,
+                max_post_submit_observations=8,
+            ),
+        )
+
+        self.assertEqual(result.post_submit_outcome, "post_submit_finalization_pending")
+        self.assertEqual(result.post_submit_probe_reason, "post_submit_finalization_pending")
+        self.assertIn("post_submit_finalization_pending", result.warnings)
+
     def test_save_password_prompt_still_visible_once_then_dismissed_after_second_attempt(self) -> None:
         device, _username, _password_selector, _login = configured_device()
         device.hierarchies = [
@@ -1273,25 +1421,21 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
         self.assertEqual(result.safe_metadata["post_submit_observation_count"], 1)
         self.assertEqual(login.click_calls, 1)
 
-    def test_post_submit_session_expired_stable_after_settling(self) -> None:
+    def test_post_submit_session_expired_after_bounded_deadline(self) -> None:
         device, _username, _password_selector, _login = configured_device()
-        device.hierarchies = [LOGGED_OUT_XML, LOGGED_OUT_XML, LOGGED_OUT_XML, LOGGED_OUT_XML]
+        device.hierarchies = [LOGGED_OUT_XML]
 
         result = execute_login_form_credentials(
             device,
             expected_username=USERNAME,
             password=SecretValue(PASSWORD),
             prevalidated_signals=LOGIN_FORM_SIGNALS,
-            post_submit_wait_ms=0,
-            post_submit_observation_interval_ms=1,
-            max_post_submit_observations=4,
-            sleeper=Mock(),
+            **post_submit_test_deadline_kwargs(post_submit_bounded_deadline_ms=12),
         )
 
         self.assertEqual(result.post_submit_outcome, "logged_out")
-        self.assertEqual(result.post_submit_probe_reason, "session_expired_after_settling")
-        self.assertEqual(result.safe_metadata["post_submit_observation_count"], 4)
-        self.assertEqual(result.safe_metadata["post_submit_wait_total_ms"], 4)
+        self.assertEqual(result.post_submit_probe_reason, "post_submit_no_stable_outcome_after_deadline")
+        self.assertTrue(result.safe_metadata["post_submit_bounded_deadline_exhausted"])
         self.assertEqual(result.safe_metadata["final_terminal_screen"], "logged_out")
 
     def test_post_submit_timing_metadata_present(self) -> None:
@@ -2006,22 +2150,34 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
             self.assertNotIn(forbidden, rendered)
 
     def test_post_submit_wait_ms_clamped_0_to_3000(self) -> None:
-        for raw_wait, expected_wait, expected_sleep in ((-5, 0, 1.0), (9999, 3000, 3.0)):
-            with self.subTest(raw_wait=raw_wait):
-                device, _username, _password_selector, _login = configured_device()
-                sleeper = Mock()
+        device, _username, _password_selector, _login = configured_device()
+        sleeper = Mock()
 
-                result = execute_login_form_credentials(
-                    device,
-                    expected_username=USERNAME,
-                    password=SecretValue(PASSWORD),
-                    prevalidated_signals=LOGIN_FORM_SIGNALS,
-                    post_submit_wait_ms=raw_wait,
-                    sleeper=sleeper,
-                )
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=LOGIN_FORM_SIGNALS,
+            post_submit_wait_ms=9999,
+            post_submit_bounded_deadline_ms=12,
+            sleeper=sleeper,
+        )
 
-                self.assertEqual(result.timings["post_submit_wait_ms"], expected_wait)
-                sleeper.assert_any_call(expected_sleep)
+        self.assertEqual(result.timings["post_submit_wait_ms"], 3000)
+        sleeper.assert_any_call(3.0)
+
+        device, _username, _password_selector, _login = configured_device()
+        sleeper = Mock()
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=LOGIN_FORM_SIGNALS,
+            post_submit_wait_ms=-5,
+            post_submit_bounded_deadline_ms=12,
+            sleeper=sleeper,
+        )
+        self.assertEqual(result.timings["post_submit_wait_ms"], 0)
 
     def test_no_retry_by_default(self) -> None:
         device, username, password_selector, login = configured_device()

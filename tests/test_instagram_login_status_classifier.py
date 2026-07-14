@@ -21,6 +21,17 @@ class InstagramLoginStatusClassifierTest(unittest.TestCase):
         self.assertEqual(result.reason, "login_connected")
         self.assertTrue(result.should_publish)
 
+    def test_connected_status_replaces_client_ready_to_connect_projection(self) -> None:
+        connected = classify_login_probe_outcome(LoginProbeOutcome.CONNECTED)
+        not_started = classify_login_probe_outcome("unknown")
+
+        self.assertEqual(connected.login_status, "connected")
+        self.assertEqual(connected.provisioning_status, "ready")
+        self.assertEqual(connected.onboarding_status, "ready")
+        self.assertTrue(connected.should_publish)
+        self.assertNotEqual(not_started.login_status, "connected")
+        self.assertNotEqual(not_started.provisioning_status, "ready")
+
     def test_needs_2fa_mapping_complete(self) -> None:
         result = classify_login_probe_outcome("needs_2fa")
 

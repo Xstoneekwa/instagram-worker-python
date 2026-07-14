@@ -9,6 +9,7 @@ from urllib import error as urlerror
 from urllib import request as urlrequest
 
 import config
+import incident_notification_channel_config as channel_config
 import supabase_client
 from logs import log
 from runtime_events import redact_metadata
@@ -85,6 +86,8 @@ def parse_notification_channels(value: str | list[str] | tuple[str, ...] | None)
 
 
 def _channel_toggle_enabled(channel: str) -> bool:
+    if bool(getattr(config, "INCIDENT_NOTIFICATIONS_CANONICAL_SETTINGS", True)):
+        return channel_config.channel_enabled_for_dispatch(channel)
     normalized = str(channel or "").strip().lower()
     if normalized == "slack":
         return bool(getattr(config, "INCIDENT_NOTIFICATIONS_SLACK_ENABLED", True))
@@ -303,26 +306,22 @@ def send_discord_webhook(payload: dict, webhook_url: str) -> dict:
 
 def send_notification_webhook(channel: str, channel_payload: dict) -> dict:
     normalized = str(channel or "").strip().lower()
+    effective = channel_config.resolve_effective_channel_config(normalized)
+    if not effective.get("send_allowed"):
+        return {
+            "ok": False,
+            "reason": effective.get("reason") or "channel_not_configured",
+        }
+    webhook_url = str(effective.get("webhook_url") or "").strip()
     if normalized == "slack":
-        return send_slack_webhook(
-            channel_payload,
-            str(getattr(config, "SLACK_WEBHOOK_URL", "") or ""),
-        )
+        return send_slack_webhook(channel_payload, webhook_url)
     if normalized == "discord":
-        return send_discord_webhook(
-            channel_payload,
-            str(getattr(config, "DISCORD_WEBHOOK_URL", "") or ""),
-        )
+        return send_discord_webhook(channel_payload, webhook_url)
     return {"ok": False, "reason": "invalid_channel"}
 
 
 def _webhook_configured(channel: str) -> bool:
-    normalized = str(channel or "").strip().lower()
-    if normalized == "slack":
-        return bool(str(getattr(config, "SLACK_WEBHOOK_URL", "") or "").strip())
-    if normalized == "discord":
-        return bool(str(getattr(config, "DISCORD_WEBHOOK_URL", "") or "").strip())
-    return False
+    return channel_config.webhook_configured_for_dispatch(channel)
 
 
 def _sort_incidents(incidents: list[dict]) -> list[dict]:
@@ -496,6 +495,10 @@ def dispatch_account_incident_notifications(
 
                 summary["attempted_count"] += 1
                 if not _webhook_configured(channel):
+                    effective = channel_config.resolve_effective_channel_config(channel)
+                    failure_reason = str(
+                        effective.get("reason") or "channel_not_configured"
+                    )
                     failed_row = _base_notification_row(
                         incident=incident,
                         channel=channel,
@@ -505,12 +508,12 @@ def dispatch_account_incident_notifications(
                         attempt_count=1,
                         payload=audit_payload,
                         dry_run=False,
-                        metadata_reason="config_missing_webhook",
+                        metadata_reason=failure_reason,
                     )
                     failed_row.update(
                         {
                             "last_attempt_at": _utc_now_iso(),
-                            "last_error": "config_missing_webhook",
+                            "last_error": failure_reason,
                         }
                     )
                     supabase_client.create_account_incident_notification(failed_row)

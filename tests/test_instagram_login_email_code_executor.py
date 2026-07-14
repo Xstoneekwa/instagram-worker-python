@@ -23,8 +23,27 @@ EMAIL_CODE_FILLED_XML = (
 )
 SAVE_LOGIN_INFO_PROMPT_XML = (
     '<node text="Save your login info?" />'
+    '<node text="We will save the login info for xstonekwa_backup_acc" />'
     '<node text="Save" clickable="true" />'
     '<node text="Not now" clickable="true" />'
+)
+SAVE_LOGIN_INFO_WRONG_ACCOUNT_XML = (
+    '<node text="Save your login info?" />'
+    '<node text="We will save the login info for other_account" />'
+    '<node text="Save" clickable="true" />'
+    '<node text="Not now" clickable="true" />'
+)
+STALE_EMAIL_CODE_AFTER_SUBMIT_XML = (
+    '<node text="Check your email" />'
+    '<node text="Enter the code we sent to m*******e@hotmail.com" />'
+    '<node class="android.widget.EditText" text="123456" editable="true" />'
+    '<node text="Continue" clickable="true" />'
+)
+INVALID_EMAIL_CODE_XML = (
+    '<node text="Check your email" />'
+    '<node text="The code you entered is incorrect." />'
+    '<node class="android.widget.EditText" text="Enter code" editable="true" />'
+    '<node text="Continue" clickable="true" />'
 )
 CONNECTED_XML = (
     '<node content-desc="Home" />'
@@ -115,9 +134,10 @@ class EmailCodeExecutorTests(unittest.TestCase):
         result = execute_email_code_challenge_resume(
             device,
             verification_code=SecretValue("123456"),
+            expected_username="xstonekwa_backup_acc",
             post_submit_wait_ms=0,
             post_submit_observation_interval_ms=1,
-            max_post_submit_observations=3,
+            max_post_submit_observations=4,
             sleeper=Mock(),
         )
 
@@ -126,6 +146,101 @@ class EmailCodeExecutorTests(unittest.TestCase):
         self.assertTrue(result.safe_metadata["save_login_info_prompt_detected"])
         self.assertTrue(result.safe_metadata["save_login_info_not_now_tapped"])
         self.assertIn("instagram_save_login_info_prompt_not_now", result.warnings)
+
+    def test_resume_connected_without_save_login_info_prompt(self) -> None:
+        device = FakeDevice([EMAIL_CODE_CHALLENGE_XML, EMAIL_CODE_FILLED_XML, CONNECTED_XML])
+        result = execute_email_code_challenge_resume(
+            device,
+            verification_code=SecretValue("123456"),
+            post_submit_wait_ms=0,
+            post_submit_observation_interval_ms=1,
+            max_post_submit_observations=3,
+            sleeper=Mock(),
+        )
+        self.assertTrue(result.ok)
+        self.assertEqual(result.post_submit_outcome, "connected")
+        self.assertFalse(device.not_now_target.clicked)
+
+    def test_resume_stale_email_code_then_save_login_info_reaches_connected(self) -> None:
+        device = FakeDevice(
+            [
+                EMAIL_CODE_CHALLENGE_XML,
+                EMAIL_CODE_FILLED_XML,
+                STALE_EMAIL_CODE_AFTER_SUBMIT_XML,
+                SAVE_LOGIN_INFO_PROMPT_XML,
+                CONNECTED_XML,
+            ]
+        )
+        result = execute_email_code_challenge_resume(
+            device,
+            verification_code=SecretValue("123456"),
+            expected_username="xstonekwa_backup_acc",
+            post_submit_wait_ms=0,
+            post_submit_observation_interval_ms=1,
+            max_post_submit_observations=6,
+            sleeper=Mock(),
+        )
+        self.assertTrue(result.ok)
+        self.assertTrue(result.safe_metadata["save_login_info_not_now_tapped"])
+        self.assertEqual(result.post_submit_outcome, "connected")
+        self.assertNotEqual(result.reason, "verification_code_still_required")
+
+    def test_resume_save_login_not_now_uses_post_dismiss_final_settling_when_main_observations_exhaust(
+        self,
+    ) -> None:
+        device = FakeDevice(
+            [
+                EMAIL_CODE_CHALLENGE_XML,
+                EMAIL_CODE_FILLED_XML,
+                SAVE_LOGIN_INFO_PROMPT_XML,
+                STALE_EMAIL_CODE_AFTER_SUBMIT_XML,
+                CONNECTED_XML,
+                CONNECTED_XML,
+                CONNECTED_XML,
+            ]
+        )
+        result = execute_email_code_challenge_resume(
+            device,
+            verification_code=SecretValue("123456"),
+            expected_username="xstonekwa_backup_acc",
+            post_submit_wait_ms=0,
+            post_submit_observation_interval_ms=1,
+            max_post_submit_observations=2,
+            sleeper=Mock(),
+        )
+        self.assertTrue(result.ok)
+        self.assertTrue(device.not_now_target.clicked)
+        self.assertEqual(result.post_submit_outcome, "connected")
+        self.assertTrue(result.safe_metadata["save_login_info_not_now_tapped"])
+
+    def test_resume_invalid_code_reports_verification_code_invalid(self) -> None:
+        device = FakeDevice([EMAIL_CODE_CHALLENGE_XML, EMAIL_CODE_FILLED_XML, INVALID_EMAIL_CODE_XML, INVALID_EMAIL_CODE_XML])
+        result = execute_email_code_challenge_resume(
+            device,
+            verification_code=SecretValue("123456"),
+            post_submit_wait_ms=0,
+            post_submit_observation_interval_ms=1,
+            max_post_submit_observations=3,
+            sleeper=Mock(),
+        )
+        self.assertFalse(result.ok)
+        self.assertEqual(result.failure_reason, "verification_code_invalid")
+
+    def test_resume_blocks_ambiguous_save_login_info_identity(self) -> None:
+        device = FakeDevice([EMAIL_CODE_CHALLENGE_XML, EMAIL_CODE_FILLED_XML, SAVE_LOGIN_INFO_WRONG_ACCOUNT_XML])
+        result = execute_email_code_challenge_resume(
+            device,
+            verification_code=SecretValue("123456"),
+            expected_username="xstonekwa_backup_acc",
+            post_submit_wait_ms=0,
+            post_submit_observation_interval_ms=1,
+            max_post_submit_observations=3,
+            sleeper=Mock(),
+        )
+        self.assertFalse(result.ok)
+        self.assertFalse(device.not_now_target.clicked)
+        self.assertEqual(result.post_submit_outcome, "save_login_info_prompt_blocking")
+        self.assertEqual(result.failure_reason, "save_login_info_identity_not_confirmed")
 
     def test_resume_uses_adb_keyboard_fallback_when_set_text_not_confirmed(self) -> None:
         device = FakeDevice(

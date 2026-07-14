@@ -39,10 +39,25 @@ DEFAULT_POST_SUBMIT_INTERVAL_MS = 1000
 DEFAULT_POST_SUBMIT_TIMEOUT_MS = 8000
 MAX_POST_SUBMIT_OBSERVATIONS = 15
 MAX_POST_SUBMIT_INTERVAL_MS = 1500
-MAX_POST_SUBMIT_TIMEOUT_MS = 15000
+MAX_POST_SUBMIT_TIMEOUT_MS = 60_000
+POST_SUBMIT_BOUNDED_DEADLINE_MS = 60_000
+POST_SUBMIT_FINALIZATION_GRACE_MS = 20_000
+POST_SUBMIT_PROGRESSIVE_INTERVAL_TIERS_MS = (
+    (15_000, 1_000),
+    (30_000, 2_000),
+    (60_000, 3_000),
+)
+POST_SUBMIT_IMMEDIATE_TERMINAL_OUTCOMES = frozenset({
+    "connected",
+    "verification_pending",
+    "needs_2fa",
+    "checkpoint",
+    "login_failed",
+    "unsupported_post_submit_challenge",
+    "save_password_prompt_blocking",
+    "save_login_info_prompt_blocking",
+})
 MAX_SAVE_PASSWORD_PROMPT_DISMISS_ATTEMPTS = 2
-POST_SUBMIT_FINAL_RECHECK_OBSERVATIONS = 3
-POST_SUBMIT_FINAL_RECHECK_INTERVAL_MS = 1000
 POST_DISMISS_FINAL_OBSERVATIONS = 4
 POST_DISMISS_FINAL_INTERVAL_MS = 1000
 PASSWORD_CONFIRM_SETTLE_MS = 150
@@ -100,6 +115,7 @@ def execute_login_form_credentials(
     max_post_submit_observations: int = DEFAULT_POST_SUBMIT_OBSERVATIONS,
     post_submit_observation_interval_ms: int = DEFAULT_POST_SUBMIT_INTERVAL_MS,
     post_submit_timeout_ms: Optional[int] = None,
+    post_submit_bounded_deadline_ms: Optional[int] = None,
     timer: Timer | None = None,
     sleeper: Sleeper | None = None,
 ) -> LoginPasswordExecutionResult:
@@ -121,8 +137,9 @@ def execute_login_form_credentials(
     observation_limit = _clamp_count(max_post_submit_observations, MAX_POST_SUBMIT_OBSERVATIONS)
     observation_interval_ms = _clamp_ms(post_submit_observation_interval_ms, MAX_POST_SUBMIT_INTERVAL_MS)
     timeout_ms = _clamp_ms(post_submit_timeout_ms, MAX_POST_SUBMIT_TIMEOUT_MS) if post_submit_timeout_ms is not None else 0
-    if timeout_ms > 0:
-        observation_limit = _observation_count_for_timeout(timeout_ms, observation_interval_ms)
+    bounded_deadline_ms = POST_SUBMIT_BOUNDED_DEADLINE_MS
+    if post_submit_bounded_deadline_ms is not None:
+        bounded_deadline_ms = _clamp_ms(post_submit_bounded_deadline_ms, MAX_POST_SUBMIT_TIMEOUT_MS)
 
     username = str(expected_username or "").strip()
     if not username:
@@ -410,6 +427,8 @@ def execute_login_form_credentials(
     post_dismiss_final_screen_type = ""
     connected_detected_after_save_prompt_dismiss = False
     post_submit_loading_timeout = False
+    post_submit_bounded_deadline_ms_export = bounded_deadline_ms
+    post_submit_bounded_deadline_exhausted = False
     post_submit_challenge_type = ""
     post_submit_masked_email_present = False
     email_code_challenge_detected = False
@@ -427,6 +446,7 @@ def execute_login_form_credentials(
                 initial_wait_ms=wait_ms,
                 interval_ms=observation_interval_ms,
                 max_observations=observation_limit,
+                bounded_deadline_ms=bounded_deadline_ms,
             )
             post_submit_observation_count = int(observed.get("observation_count") or 0)
             post_submit_wait_total_ms = int(observed.get("wait_total_ms") or 0)
@@ -474,6 +494,10 @@ def execute_login_form_credentials(
                 observed.get("connected_detected_after_save_prompt_dismiss")
             )
             post_submit_loading_timeout = bool(observed.get("post_submit_loading_timeout"))
+            post_submit_bounded_deadline_ms_export = int(
+                observed.get("post_submit_bounded_deadline_ms") or bounded_deadline_ms
+            )
+            post_submit_bounded_deadline_exhausted = bool(observed.get("post_submit_bounded_deadline_exhausted"))
             email_code_challenge_detected = bool(observed.get("email_code_challenge_detected"))
             post_submit_challenge_type = str(observed.get("challenge_type") or "")
             post_submit_masked_email_present = bool(observed.get("masked_email_present"))
@@ -513,6 +537,7 @@ def execute_login_form_credentials(
                                 initial_wait_ms=observation_interval_ms,
                                 interval_ms=observation_interval_ms,
                                 max_observations=observation_limit,
+                                bounded_deadline_ms=bounded_deadline_ms,
                             )
                             post_submit_observation_count += int(observed.get("observation_count") or 0)
                             post_submit_wait_total_ms += int(observed.get("wait_total_ms") or 0)
@@ -678,6 +703,8 @@ def execute_login_form_credentials(
         final_terminal_screen=final_terminal_screen,
         post_submit_timeout_ms=timeout_ms,
         post_submit_interval_ms=observation_interval_ms,
+        post_submit_bounded_deadline_ms=post_submit_bounded_deadline_ms_export,
+        post_submit_bounded_deadline_exhausted=post_submit_bounded_deadline_exhausted,
         post_submit_loading_timeout=post_submit_loading_timeout,
         email_code_challenge_detected=email_code_challenge_detected,
         challenge_type=post_submit_challenge_type,
@@ -2015,6 +2042,7 @@ def _observe_post_submit_settled(
     initial_wait_ms: int,
     interval_ms: int,
     max_observations: int,
+    bounded_deadline_ms: int = POST_SUBMIT_BOUNDED_DEADLINE_MS,
 ) -> dict[str, Any]:
     screens: list[str] = []
     wait_total_ms = 0
@@ -2030,7 +2058,6 @@ def _observe_post_submit_settled(
         "terminal": False,
         "screen_label": "unknown",
     }
-    observations = max(1, int(max_observations or 1))
     save_password_prompt_detected = False
     save_password_prompt_dismissed = False
     save_password_prompt_dismiss_attempt_count = 0
@@ -2054,8 +2081,25 @@ def _observe_post_submit_settled(
     post_dismiss_final_wait_total_ms = 0
     post_dismiss_final_screen_type = ""
     connected_detected_after_save_prompt_dismiss = False
-    for index in range(observations):
-        delay_ms = int(initial_wait_ms if index == 0 and initial_wait_ms > 0 else interval_ms)
+    loop_start = timer()
+    deadline_ms = _clamp_ms(bounded_deadline_ms, MAX_POST_SUBMIT_TIMEOUT_MS)
+    min_poll_ms = POST_SUBMIT_PROGRESSIVE_INTERVAL_TIERS_MS[0][1]
+    safety_cap = max(32, (deadline_ms + min_poll_ms - 1) // max(1, min_poll_ms) + 8)
+    warnings.append("post_submit_bounded_observation_started")
+    observation_index = 0
+    while True:
+        elapsed_budget_ms = _post_submit_elapsed_budget_ms(loop_start, timer(), wait_total_ms)
+        if observation_index > 0 and elapsed_budget_ms >= deadline_ms:
+            warnings.append("post_submit_bounded_deadline_exhausted")
+            break
+        if observation_index >= safety_cap:
+            warnings.append("post_submit_bounded_observation_cap_reached")
+            break
+        delay_ms = int(initial_wait_ms if observation_index == 0 and initial_wait_ms > 0 else 0)
+        if observation_index > 0:
+            delay_ms = _post_submit_progressive_interval_ms(elapsed_budget_ms, fallback_ms=interval_ms)
+            remaining_ms = max(0, deadline_ms - elapsed_budget_ms)
+            delay_ms = min(delay_ms, remaining_ms) if remaining_ms > 0 else delay_ms
         if delay_ms > 0:
             sleeper(delay_ms / 1000.0)
             wait_total_ms += delay_ms
@@ -2066,6 +2110,8 @@ def _observe_post_submit_settled(
         last_observed = observed
         screen_label = str(observed.get("screen_label") or observed.get("screen_type") or "unknown")
         screens.append(screen_label)
+        observation_index += 1
+        outcome = str(observed.get("outcome") or "unknown")
         if observed.get("save_password_prompt_present") is True:
             save_password_prompt_detected = True
             is_samsung_pass_prompt = screen_label == "samsung_pass_save_password_prompt"
@@ -2170,7 +2216,8 @@ def _observe_post_submit_settled(
             continue
         if observed.get("password_required_dialog_present") is True:
             break
-        if bool(observed.get("terminal")):
+        if _is_post_submit_priority_terminal(observed, outcome):
+            warnings.append("post_submit_priority_terminal_detected")
             break
     if (
         (save_password_prompt_detected or instagram_save_login_info_prompt_detected)
@@ -2185,6 +2232,15 @@ def _observe_post_submit_settled(
             if not _is_post_submit_dismissible_prompt_label(label):
                 post_dismiss_screen_type = label
                 break
+    if save_password_prompt_dismissed and not post_dismiss_final_screens:
+        trailing_screens = _post_dismiss_trailing_screens(screens)
+        terminal_outcome = str(last_observed.get("outcome") or "unknown")
+        if terminal_outcome == "connected" and trailing_screens:
+            post_dismiss_final_screens = [trailing_screens[-1]]
+            post_dismiss_final_screen_type = trailing_screens[-1]
+            post_dismiss_final_observation_count = len(trailing_screens)
+            connected_detected_after_save_prompt_dismiss = True
+            post_dismiss_screen_type = post_dismiss_final_screen_type or post_dismiss_screen_type
     if save_password_prompt_dismissed and post_dismiss_screen_type in {"", "loading", "unknown"}:
         final_observed = _observe_post_dismiss_final_settled(
             d,
@@ -2205,31 +2261,69 @@ def _observe_post_submit_settled(
             connected_detected_after_save_prompt_dismiss = outcome == "connected"
             post_dismiss_screen_type = post_dismiss_final_screen_type or post_dismiss_screen_type
     outcome = str(last_observed.get("outcome") or "unknown")
-    if outcome == "unknown" and any(label in {"loading", "logged_out"} for label in screens):
-        final_recheck = _observe_post_submit_final_recheck(
+    deadline_exhausted = (
+        "post_submit_bounded_deadline_exhausted" in warnings
+        or "post_submit_bounded_observation_cap_reached" in warnings
+    )
+    if deadline_exhausted and _screens_indicate_post_submit_finalization_pending(screens):
+        grace_observed = _observe_post_submit_finalization_grace(
             d,
             timings=timings,
+            warnings=warnings,
             timer=timer,
             sleeper=sleeper,
+            interval_ms=interval_ms,
         )
-        final_recheck_screens = list(final_recheck.get("screens") or [])
-        if final_recheck_screens:
-            screens.extend(final_recheck_screens)
-            wait_total_ms += int(final_recheck.get("wait_total_ms") or 0)
-        final_observed = dict(final_recheck.get("observed") or {})
-        if final_observed.get("terminal") is True or final_observed.get("email_code_challenge_detected") is True:
-            last_observed = final_observed
+        if grace_observed and (
+            grace_observed.get("instagram_save_login_info_prompt_detected")
+            or grace_observed.get("connected_detected_after_save_prompt_dismiss")
+            or _is_post_submit_priority_terminal(
+                dict(grace_observed.get("observed") or {}),
+                str((grace_observed.get("observed") or {}).get("outcome") or "unknown"),
+            )
+        ):
+            screens.extend(list(grace_observed.get("screens") or []))
+            wait_total_ms += int(grace_observed.get("wait_total_ms") or 0)
+            last_observed = dict(grace_observed.get("observed") or last_observed)
             outcome = str(last_observed.get("outcome") or "unknown")
-            warnings.append("post_submit_final_recheck_terminal")
-
-    if outcome == "logged_out":
-        last_observed = {
-            **last_observed,
-            "reason": "session_expired_after_settling",
-            "terminal": True,
-        }
-        warnings.append("post_submit_logged_out_after_settling")
-    elif outcome == "unknown":
+            if grace_observed.get("instagram_save_login_info_prompt_detected"):
+                instagram_save_login_info_prompt_detected = True
+            if grace_observed.get("instagram_save_login_info_prompt_not_now"):
+                instagram_save_login_info_prompt_not_now = True
+            if grace_observed.get("save_password_prompt_detected"):
+                save_password_prompt_detected = True
+            if grace_observed.get("save_password_prompt_dismissed"):
+                save_password_prompt_dismissed = True
+            if grace_observed.get("post_dismiss_final_screens"):
+                post_dismiss_final_screens = list(grace_observed.get("post_dismiss_final_screens") or [])
+                post_dismiss_final_screen_type = str(grace_observed.get("post_dismiss_final_screen_type") or "")
+                post_dismiss_final_observation_count = int(grace_observed.get("post_dismiss_final_observation_count") or 0)
+                post_dismiss_final_wait_total_ms = int(grace_observed.get("post_dismiss_final_wait_total_ms") or 0)
+            if grace_observed.get("connected_detected_after_save_prompt_dismiss"):
+                connected_detected_after_save_prompt_dismiss = True
+            deadline_exhausted = False
+            warnings = [item for item in warnings if item != "post_submit_bounded_deadline_exhausted"]
+    if (
+        deadline_exhausted
+        and not _is_post_submit_priority_terminal(last_observed, outcome)
+    ):
+        if _screens_indicate_post_submit_finalization_pending(screens):
+            last_observed = {
+                **last_observed,
+                "outcome": "post_submit_finalization_pending",
+                "reason": "post_submit_finalization_pending",
+                "terminal": True,
+            }
+            warnings.append("post_submit_finalization_pending")
+        else:
+            last_observed = {
+                **last_observed,
+                "outcome": outcome if outcome in {"logged_out", "unknown"} else "unknown",
+                "reason": "post_submit_no_stable_outcome_after_deadline",
+                "terminal": True,
+            }
+            warnings.append("post_submit_no_stable_outcome_after_deadline")
+    elif outcome == "unknown" and not deadline_exhausted:
         final_loading = bool(
             post_dismiss_final_observation_count
             and post_dismiss_final_screens
@@ -2264,6 +2358,8 @@ def _observe_post_submit_settled(
         "wait_total_ms": wait_total_ms,
         "screens": screens,
         "final_terminal_screen": screens[-1] if screens else "",
+        "post_submit_bounded_deadline_ms": deadline_ms,
+        "post_submit_bounded_deadline_exhausted": "post_submit_bounded_deadline_exhausted" in warnings,
         "post_submit_loading_timeout": str(last_observed.get("reason") or "") == "post_submit_loading_timeout",
         "email_code_challenge_detected": bool(last_observed.get("email_code_challenge_detected")),
         "challenge_type": str(last_observed.get("challenge_type") or ""),
@@ -2294,38 +2390,138 @@ def _observe_post_submit_settled(
     }
 
 
-def _observe_post_submit_final_recheck(
+def _post_submit_progressive_interval_ms(elapsed_ms: int, *, fallback_ms: int = DEFAULT_POST_SUBMIT_INTERVAL_MS) -> int:
+    elapsed = max(0, int(elapsed_ms or 0))
+    tier_interval = POST_SUBMIT_PROGRESSIVE_INTERVAL_TIERS_MS[-1][1]
+    for threshold, interval in POST_SUBMIT_PROGRESSIVE_INTERVAL_TIERS_MS:
+        if elapsed < threshold:
+            tier_interval = interval
+            break
+    if elapsed < POST_SUBMIT_PROGRESSIVE_INTERVAL_TIERS_MS[0][0]:
+        return _clamp_ms(
+            min(tier_interval, max(1, int(fallback_ms or DEFAULT_POST_SUBMIT_INTERVAL_MS))),
+            MAX_POST_SUBMIT_INTERVAL_MS,
+        )
+    return _clamp_ms(tier_interval, MAX_POST_SUBMIT_INTERVAL_MS)
+
+
+def _post_submit_elapsed_budget_ms(loop_start: float, timer_now: float, wait_total_ms: int) -> int:
+    return max(int(wait_total_ms or 0), _elapsed_ms(loop_start, timer_now))
+
+
+def _screens_indicate_post_submit_finalization_pending(screens: list[str]) -> bool:
+    if not screens:
+        return False
+    if any(screen == "email_code_challenge" for screen in screens):
+        return False
+    if any(screen == "save_login_info_prompt" for screen in screens):
+        return True
+    loading_seen = any(screen == "loading" for screen in screens)
+    if not loading_seen:
+        return False
+    tail_labels = {str(screen or "") for screen in screens[-4:]}
+    return "logged_out" in tail_labels
+
+
+def _observe_post_submit_finalization_grace(
     d: Any,
     *,
     timings: dict[str, int],
+    warnings: list[str],
     timer: Timer,
     sleeper: Sleeper,
-) -> dict[str, Any]:
-    screens: list[str] = []
-    wait_total_ms = 0
-    observed: dict[str, Any] = {
+    interval_ms: int,
+) -> dict[str, Any] | None:
+    grace_start = timer()
+    grace_screens: list[str] = []
+    grace_wait_total_ms = 0
+    instagram_save_login_info_prompt_detected = False
+    instagram_save_login_info_prompt_not_now = False
+    save_password_prompt_detected = False
+    save_password_prompt_dismissed = False
+    post_dismiss_final_screens: list[str] = []
+    post_dismiss_final_screen_type = ""
+    post_dismiss_final_observation_count = 0
+    post_dismiss_final_wait_total_ms = 0
+    connected_detected_after_save_prompt_dismiss = False
+    last_observed: dict[str, Any] = {
         "outcome": "unknown",
         "screen_type": "unknown",
-        "reason": "post_submit_unknown_after_final_recheck",
-        "terminal": False,
         "screen_label": "unknown",
+        "reason": "post_submit_finalization_grace",
+        "terminal": False,
     }
-    for _index in range(POST_SUBMIT_FINAL_RECHECK_OBSERVATIONS):
-        sleeper(POST_SUBMIT_FINAL_RECHECK_INTERVAL_MS / 1000.0)
-        wait_total_ms += POST_SUBMIT_FINAL_RECHECK_INTERVAL_MS
+    warnings.append("post_submit_finalization_grace_started")
+    while int((timer() - grace_start) * 1000) < POST_SUBMIT_FINALIZATION_GRACE_MS:
+        delay_ms = _clamp_ms(interval_ms, MAX_POST_SUBMIT_INTERVAL_MS)
+        if delay_ms > 0:
+            sleeper(delay_ms / 1000.0)
+            grace_wait_total_ms += delay_ms
         start = timer()
         hierarchy_xml = _dump_hierarchy_once(d)
         timings["post_submit_dump_ms"] += _elapsed_ms(start, timer())
         observed = _classify_post_submit_hierarchy(hierarchy_xml)
+        last_observed = observed
         screen_label = str(observed.get("screen_label") or observed.get("screen_type") or "unknown")
-        screens.append(screen_label)
-        if observed.get("terminal") is True:
+        grace_screens.append(screen_label)
+        outcome = str(observed.get("outcome") or "unknown")
+        if observed.get("save_login_info_prompt_present") is True:
+            instagram_save_login_info_prompt_detected = True
+            warnings.append("instagram_save_login_info_prompt_detected")
+            if _dismiss_save_login_info_prompt_once(d, warnings):
+                instagram_save_login_info_prompt_not_now = True
+                warnings.append("instagram_save_login_info_prompt_not_now")
+                final_observed = _observe_post_dismiss_final_settled(
+                    d,
+                    timings=timings,
+                    timer=timer,
+                    sleeper=sleeper,
+                    interval_ms=POST_DISMISS_FINAL_INTERVAL_MS,
+                    max_observations=POST_DISMISS_FINAL_OBSERVATIONS,
+                )
+                post_dismiss_final_observation_count = int(final_observed.get("observation_count") or 0)
+                post_dismiss_final_screens = list(final_observed.get("screens") or [])
+                post_dismiss_final_wait_total_ms = int(final_observed.get("wait_total_ms") or 0)
+                post_dismiss_final_screen_type = str(final_observed.get("final_screen_type") or "")
+                grace_screens.extend(post_dismiss_final_screens)
+                grace_wait_total_ms += post_dismiss_final_wait_total_ms
+                last_observed = dict(final_observed.get("observed") or last_observed)
+                outcome = str(last_observed.get("outcome") or "unknown")
+                connected_detected_after_save_prompt_dismiss = outcome == "connected"
+                if _is_post_submit_priority_terminal(last_observed, outcome):
+                    break
+            continue
+        if observed.get("save_password_prompt_present") is True:
+            save_password_prompt_detected = True
+            if _dismiss_save_password_prompt_once(d, observed, warnings):
+                save_password_prompt_dismissed = True
+            continue
+        if _is_post_submit_priority_terminal(observed, outcome):
             break
+    if not grace_screens:
+        return None
     return {
-        "observed": observed,
-        "screens": screens,
-        "wait_total_ms": wait_total_ms,
+        "observed": last_observed,
+        "screens": grace_screens,
+        "wait_total_ms": grace_wait_total_ms,
+        "instagram_save_login_info_prompt_detected": instagram_save_login_info_prompt_detected,
+        "instagram_save_login_info_prompt_not_now": instagram_save_login_info_prompt_not_now,
+        "save_password_prompt_detected": save_password_prompt_detected,
+        "save_password_prompt_dismissed": save_password_prompt_dismissed,
+        "post_dismiss_final_screens": post_dismiss_final_screens,
+        "post_dismiss_final_screen_type": post_dismiss_final_screen_type,
+        "post_dismiss_final_observation_count": post_dismiss_final_observation_count,
+        "post_dismiss_final_wait_total_ms": post_dismiss_final_wait_total_ms,
+        "connected_detected_after_save_prompt_dismiss": connected_detected_after_save_prompt_dismiss,
     }
+
+
+def _is_post_submit_priority_terminal(observed: dict[str, Any], outcome: str) -> bool:
+    if observed.get("email_code_challenge_detected") is True:
+        return True
+    if outcome in POST_SUBMIT_IMMEDIATE_TERMINAL_OUTCOMES:
+        return True
+    return bool(observed.get("terminal")) and outcome not in {"logged_out", "unknown", "loading"}
 
 
 def _observe_post_dismiss_final_settled(
@@ -2367,6 +2563,19 @@ def _observe_post_dismiss_final_settled(
         "wait_total_ms": wait_total_ms,
         "final_screen_type": screens[-1] if screens else "",
     }
+
+
+def _post_dismiss_trailing_screens(screens: list[str]) -> list[str]:
+    trailing: list[str] = []
+    seen_dismissible = False
+    for label in screens:
+        if _is_post_submit_dismissible_prompt_label(label):
+            trailing = []
+            seen_dismissible = True
+            continue
+        if seen_dismissible:
+            trailing.append(label)
+    return trailing
 
 
 def _is_post_submit_dismissible_prompt_label(label: str) -> bool:
@@ -2633,6 +2842,8 @@ def _result(
     final_terminal_screen: str = "",
     post_submit_timeout_ms: int = 0,
     post_submit_interval_ms: int = 0,
+    post_submit_bounded_deadline_ms: int = 0,
+    post_submit_bounded_deadline_exhausted: bool = False,
     post_submit_loading_timeout: bool = False,
     email_code_challenge_detected: bool = False,
     challenge_type: str = "",
@@ -2702,6 +2913,10 @@ def _result(
                 "final_terminal_screen": final_terminal_screen,
                 "post_submit_timeout_ms": post_submit_timeout_ms,
                 "post_submit_interval_ms": post_submit_interval_ms,
+                "post_submit_probe_reason": post_submit_probe_reason,
+                "post_submit_outcome": post_submit_outcome,
+                "post_submit_bounded_deadline_ms": post_submit_bounded_deadline_ms,
+                "post_submit_bounded_deadline_exhausted": post_submit_bounded_deadline_exhausted,
                 "post_submit_loading_timeout": post_submit_loading_timeout,
                 "email_code_challenge_detected": email_code_challenge_detected,
                 "challenge_type": challenge_type,

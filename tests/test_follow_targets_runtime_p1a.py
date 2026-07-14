@@ -64,6 +64,15 @@ class FollowTargetsRuntimeP1aTest(unittest.TestCase):
                 "archived_at": "2026-01-03T00:00:00Z",
             },
             {
+                "id": "hygiene_archived",
+                "account_id": "acct",
+                "target_username": "verified_user",
+                "status": "archived",
+                "quality_status": "rejected_verified",
+                "verification_status": "found",
+                "archive_reason": "verified_became_ineligible",
+            },
+            {
                 "id": "poor",
                 "account_id": "acct",
                 "target_username": "poor",

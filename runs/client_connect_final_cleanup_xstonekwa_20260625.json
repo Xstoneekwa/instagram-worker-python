@@ -1,0 +1,398 @@
+{
+  "account_id": "871c5836-0fb4-4afb-a5c7-b8bb3fc6b74c",
+  "username": "xstonekwa_backup_acc",
+  "started_at": "2026-06-25T15:16:27.405664+00:00",
+  "reason": "client_connect_final_cleanup_failed_attempt_20260625",
+  "backend_steps": [
+    {
+      "action": "reconcile_failed_run",
+      "run_id": "2b164f3a-7520-4dc3-a7a7-84e269c7198e",
+      "result": {
+        "reconciled": false,
+        "reason": "already_terminal",
+        "run_id": "2b164f3a-7520-4dc3-a7a7-84e269c7198e",
+        "terminal_status": "failed",
+        "previous_status": "failed"
+      }
+    },
+    {
+      "action": "dismiss_summary",
+      "count": 0
+    },
+    {
+      "action": "expire_summary",
+      "count": 0
+    },
+    {
+      "action": "clear_client_projection",
+      "skipped": true,
+      "current": {
+        "login_status": "unknown",
+        "provisioning_status": "not_started",
+        "onboarding_status": "credentials_submitted"
+      }
+    }
+  ],
+  "before": {
+    "requests": [
+      {
+        "id": "8021f9f9-4e66-4519-abf1-e3c51a48b515",
+        "status": "failed",
+        "requested_run_type": "login_provisioning",
+        "run_id": "2b164f3a-7520-4dc3-a7a7-84e269c7198e",
+        "error_code": "worker_exit_nonzero",
+        "cancel_reason": null,
+        "metadata_safe": {
+          "mode": "login_preflight_now",
+          "source": "client_connect_enqueue",
+          "deadline_at": "2026-06-22T21:59:00.000Z",
+          "assignment_id": "0472ebb3-89d0-487b-a7b1-5d51c338c710",
+          "connect_attempt_id": "cd44e6a8-85bc-4a35-88ad-3be3beb9d9a8"
+        },
+        "updated_at": "2026-06-25T13:01:27.722505+00:00"
+      },
+      {
+        "id": "23052d91-f49c-418e-884d-250229136037",
+        "status": "canceled",
+        "requested_run_type": "login_email_code_resume",
+        "run_id": "a4654833-32a6-410f-a4c5-1c8389a03b40",
+        "error_code": null,
+        "cancel_reason": "client_connect_cancel_restart_liam_post_code_fix",
+        "metadata_safe": {
+          "source": "dashboard_code_submit",
+          "action_id": "0edfabda-26de-45b8-8412-836d9a63b897",
+          "account_id": "871c5836-0fb4-4afb-a5c7-b8bb3fc6b74c",
+          "submission_id": "246bb279-fced-49ac-b07a-4c3337b13741",
+          "challenge_type": "email_code_challenge",
+          "parent_request_id": "182c9a74-bd90-46dd-a565-45d4b96ac70b",
+          "connect_attempt_id": "098a9c94-7719-474d-bbd0-05cbfe6c309b"
+        },
+        "updated_at": "2026-06-25T11:25:58.066182+00:00"
+      },
+      {
+        "id": "182c9a74-bd90-46dd-a565-45d4b96ac70b",
+        "status": "canceled",
+        "requested_run_type": "login_provisioning",
+        "run_id": "d679f83a-96e4-4ae1-b658-d43294e37379",
+        "error_code": null,
+        "cancel_reason": "email_code_resume_handoff",
+        "metadata_safe": {
+          "mode": "login_preflight_now",
+          "source": "client_connect_enqueue",
+          "deadline_at": "2026-06-22T21:59:00.000Z",
+          "assignment_id": "0472ebb3-89d0-487b-a7b1-5d51c338c710",
+          "connect_attempt_id": "098a9c94-7719-474d-bbd0-05cbfe6c309b"
+        },
+        "updated_at": "2026-06-25T10:33:16.056567+00:00"
+      },
+      {
+        "id": "4dad9d52-905a-4290-b46f-c68c6b31e1aa",
+        "status": "canceled",
+        "requested_run_type": "login_provisioning",
+        "run_id": "f72d1559-3ae0-4fb1-91c7-f6f0916a1b75",
+        "error_code": null,
+        "cancel_reason": "client_connect_cancel_restart_liam",
+        "metadata_safe": {
+          "mode": "login_preflight_now",
+          "source": "client_connect_enqueue",
+          "deadline_at": "2026-06-22T21:59:00.000Z",
+          "assignment_id": "0472ebb3-89d0-487b-a7b1-5d51c338c710",
+          "connect_attempt_id": "93439670-df98-4360-9c21-5266df192263"
+        },
+        "updated_at": "2026-06-25T10:16:46.347517+00:00"
+      },
+      {
+        "id": "3f8040f2-a413-44b8-9a3f-e9cc72a2efbc",
+        "status": "canceled",
+        "requested_run_type": "login_provisioning",
+        "run_id": "7bcc9e53-dc12-4bd2-8e5a-73d8f10b3c4e",
+        "error_code": null,
+        "cancel_reason": "client_connect_cancel_restart_liam",
+        "metadata_safe": {
+          "mode": "login_preflight_now",
+          "source": "client_connect_enqueue",
+          "deadline_at": "2026-06-22T21:59:00.000Z",
+          "assignment_id": "0472ebb3-89d0-487b-a7b1-5d51c338c710",
+          "connect_attempt_id": "3efafe32-6aab-4ba7-97d1-f2a54bf1d4dc"
+        },
+        "updated_at": "2026-06-25T08:35:15.897759+00:00"
+      }
+    ],
+    "runs": [
+      {
+        "id": "2b164f3a-7520-4dc3-a7a7-84e269c7198e",
+        "status": "failed",
+        "created_at": "2026-06-25T13:00:59.451263+00:00",
+        "finished_at": "2026-06-25T13:01:27.936136+00:00",
+        "updated_at": "2026-06-25T13:01:27.936136+00:00"
+      },
+      {
+        "id": "a4654833-32a6-410f-a4c5-1c8389a03b40",
+        "status": "stopped",
+        "created_at": "2026-06-25T10:33:24.782523+00:00",
+        "finished_at": null,
+        "updated_at": "2026-06-25T11:25:03.7909+00:00"
+      },
+      {
+        "id": "d679f83a-96e4-4ae1-b658-d43294e37379",
+        "status": "stopped",
+        "created_at": "2026-06-25T10:31:57.480673+00:00",
+        "finished_at": "2026-06-25T10:33:15.386+00:00",
+        "updated_at": "2026-06-25T10:33:15.386+00:00"
+      },
+      {
+        "id": "f72d1559-3ae0-4fb1-91c7-f6f0916a1b75",
+        "status": "stopped",
+        "created_at": "2026-06-25T08:58:56.429721+00:00",
+        "finished_at": "2026-06-25T09:00:02.638+00:00",
+        "updated_at": "2026-06-25T09:00:02.638+00:00"
+      },
+      {
+        "id": "7bcc9e53-dc12-4bd2-8e5a-73d8f10b3c4e",
+        "status": "stopped",
+        "created_at": "2026-06-25T08:03:33.502976+00:00",
+        "finished_at": "2026-06-25T08:35:15.128+00:00",
+        "updated_at": "2026-06-25T08:35:15.128+00:00"
+      }
+    ],
+    "actions": [
+      {
+        "id": "3b701809-e2b4-4624-9408-84fbbefba5ad",
+        "action_type": "update_instagram_password",
+        "status": "dismissed",
+        "updated_at": "2026-06-25T11:25:04.826718+00:00",
+        "metadata": {
+          "stage": "login_probe",
+          "reason": "verification_code_still_required",
+          "run_id": "a4654833-32a6-410f-a4c5-1c8389a03b40",
+          "source": "status_sync",
+          "flow_name": "entry2e5p5_login_provisioner",
+          "actor_type": "provisioner",
+          "retry_count": 0,
+          "screen_type": "login_form_empty",
+          "login_status": "verification_pending",
+          "final_outcome": "verification_pending",
+          "probe_version": "v1",
+          "selected_route": "join_instagram_existing_profile",
+          "onboarding_status": "verification_pending",
+          "external_request_id": "login_provisioner:a4654833-32a6-410f-a4c5-1c8389a03b40",
+          "provisioning_status": "login_verification_pending",
+          "dashboard_action_type": "enter_email_verification_code",
+          "central_orchestrator_used": true,
+          "central_orchestrator_version": "entry2e5p19-central-v1"
+        }
+      },
+      {
+        "id": "0edfabda-26de-45b8-8412-836d9a63b897",
+        "action_type": "enter_email_verification_code",
+        "status": "dismissed",
+        "updated_at": "2026-06-25T11:25:04.422362+00:00",
+        "metadata": {
+          "stage": "post_submit",
+          "run_id": "a4654833-32a6-410f-a4c5-1c8389a03b40",
+          "source": "login_dashboard_action_publisher",
+          "request_id": null,
+          "screen_type": "",
+          "ttl_minutes": 10,
+          "assignment_id": null,
+          "resume_status": "needs_new_code",
+          "challenge_type": "",
+          "provenance_kind": "active_run_post_submit",
+          "action_expires_at": "2026-06-25T10:43:49.917198+00:00",
+          "resume_request_id": "23052d91-f49c-418e-884d-250229136037",
+          "credentials_version": null,
+          "masked_email_present": false,
+          "resume_submission_id": "246bb279-fced-49ac-b07a-4c3337b13741",
+          "human_review_required": false,
+          "resume_failure_reason": "verification_code_still_required",
+          "expected_app_instance_id": null,
+          "verification_submission_id": "246bb279-fced-49ac-b07a-4c3337b13741",
+          "verification_code_expires_at": "2026-06-25T10:48:12.435992+00:00",
+          "verification_code_submitted_at": "2026-06-25T10:33:12.435992+00:00"
+        }
+      },
+      {
+        "id": "5406aa2e-869f-437f-bb72-76cacefb4b2c",
+        "action_type": "update_instagram_password",
+        "status": "dismissed",
+        "updated_at": "2026-06-25T10:16:47.56792+00:00",
+        "metadata": {
+          "stage": "login_probe",
+          "reason": "email_verification_code_required",
+          "run_id": "f72d1559-3ae0-4fb1-91c7-f6f0916a1b75",
+          "source": "status_sync",
+          "flow_name": "entry2e5p5_login_provisioner",
+          "actor_type": "provisioner",
+          "retry_count": 0,
+          "screen_type": "login_form_empty",
+          "login_status": "verification_pending",
+          "final_outcome": "verification_pending",
+          "probe_version": "v1",
+          "selected_route": "join_instagram_existing_profile",
+          "onboarding_status": "verification_pending",
+          "external_request_id": "login_provisioner:f72d1559-3ae0-4fb1-91c7-f6f0916a1b75",
+          "provisioning_status": "login_verification_pending",
+          "dashboard_action_type": "enter_email_verification_code",
+          "central_orchestrator_used": true,
+          "central_orchestrator_version": "entry2e5p19-central-v1"
+        }
+      },
+      {
+        "id": "b57e2b13-2e0b-420c-ab86-15f2a3c074e2",
+        "action_type": "enter_email_verification_code",
+        "status": "dismissed",
+        "updated_at": "2026-06-25T10:16:47.301726+00:00",
+        "metadata": {
+          "stage": "post_submit",
+          "run_id": "f72d1559-3ae0-4fb1-91c7-f6f0916a1b75",
+          "source": "login_dashboard_action_publisher",
+          "request_id": null,
+          "screen_type": "email_code_challenge",
+          "ttl_minutes": 10,
+          "assignment_id": null,
+          "challenge_type": "email",
+          "provenance_kind": "active_run_post_submit",
+          "action_expires_at": "2026-06-25T09:09:30.565035+00:00",
+          "credentials_version": null,
+          "masked_email_present": true,
+          "human_review_required": false,
+          "expected_app_instance_id": "75906e49-d96a-4018-95a9-5df6a5ec81f2",
+          "verification_submission_id": "7bc4b251-9976-4b6a-b804-08b3fbf8f788",
+          "verification_code_expires_at": "2026-06-25T09:14:59.964805+00:00",
+          "verification_code_submitted_at": "2026-06-25T08:59:59.964805+00:00"
+        }
+      },
+      {
+        "id": "9cc12286-3ab1-4b59-912d-35fe9bafb261",
+        "action_type": "enter_email_verification_code",
+        "status": "dismissed",
+        "updated_at": "2026-06-25T08:35:16.551111+00:00",
+        "metadata": {
+          "stage": "post_submit",
+          "run_id": "7bcc9e53-dc12-4bd2-8e5a-73d8f10b3c4e",
+          "source": "login_dashboard_action_publisher",
+          "request_id": null,
+          "screen_type": "email_code_challenge",
+          "ttl_minutes": 10,
+          "assignment_id": null,
+          "challenge_type": "email",
+          "provenance_kind": "active_run_post_submit",
+          "action_expires_at": "2026-06-25T08:14:20.031985+00:00",
+          "credentials_version": null,
+          "masked_email_present": true,
+          "human_review_required": false,
+          "expected_app_instance_id": "75906e49-d96a-4018-95a9-5df6a5ec81f2",
+          "verification_submission_id": "564127bf-7fc0-4094-b13c-d043f0e764cc",
+          "verification_code_expires_at": "2026-06-25T08:19:54.244126+00:00",
+          "verification_code_submitted_at": "2026-06-25T08:04:54.244126+00:00"
+        }
+      },
+      {
+        "id": "2f05de1b-345f-42d7-bc13-c073386668fe",
+        "action_type": "update_instagram_password",
+        "status": "dismissed",
+        "updated_at": "2026-06-25T08:35:16.551111+00:00",
+        "metadata": {
+          "stage": "login_probe",
+          "reason": "email_verification_code_required",
+          "run_id": "7bcc9e53-dc12-4bd2-8e5a-73d8f10b3c4e",
+          "source": "status_sync",
+          "flow_name": "entry2e5p5_login_provisioner",
+          "actor_type": "provisioner",
+          "retry_count": 0,
+          "screen_type": "login_form_empty",
+          "login_status": "verification_pending",
+          "final_outcome": "verification_pending",
+          "probe_version": "v1",
+          "selected_route": "join_instagram_existing_profile",
+          "onboarding_status": "verification_pending",
+          "external_request_id": "login_provisioner:7bcc9e53-dc12-4bd2-8e5a-73d8f10b3c4e",
+          "provisioning_status": "login_verification_pending",
+          "dashboard_action_type": "enter_email_verification_code",
+          "central_orchestrator_used": true,
+          "central_orchestrator_version": "entry2e5p19-central-v1"
+        }
+      },
+      {
+        "id": "a189eeb5-64d5-4e87-91b3-cfb1bdefe3f7",
+        "action_type": "update_instagram_password",
+        "status": "dismissed",
+        "updated_at": "2026-06-24T22:49:13.415447+00:00",
+        "metadata": {
+          "stage": "login_probe",
+          "reason": "email_verification_code_required",
+          "run_id": "bb248f97-e649-45ad-a437-5d9ee67f51d2",
+          "source": "status_sync",
+          "flow_name": "entry2e5p5_login_provisioner",
+          "actor_type": "provisioner",
+          "retry_count": 0,
+          "screen_type": "login_form_empty",
+          "login_status": "verification_pending",
+          "final_outcome": "verification_pending",
+          "probe_version": "v1",
+          "selected_route": "join_instagram_existing_profile",
+          "onboarding_status": "verification_pending",
+          "external_request_id": "login_provisioner:bb248f97-e649-45ad-a437-5d9ee67f51d2",
+          "provisioning_status": "login_verification_pending",
+          "dashboard_action_type": "enter_email_verification_code",
+          "central_orchestrator_used": true,
+          "central_orchestrator_version": "entry2e5p19-central-v1"
+        }
+      },
+      {
+        "id": "9944f85e-1879-41a9-86a6-7895e838dc3d",
+        "action_type": "enter_email_verification_code",
+        "status": "dismissed",
+        "updated_at": "2026-06-24T22:49:13.140457+00:00",
+        "metadata": {
+          "stage": "post_submit",
+          "run_id": "bb248f97-e649-45ad-a437-5d9ee67f51d2",
+          "source": "login_dashboard_action_publisher",
+          "request_id": null,
+          "screen_type": "email_code_challenge",
+          "ttl_minutes": 10,
+          "assignment_id": null,
+          "challenge_type": "email",
+          "provenance_kind": "active_run_post_submit",
+          "action_expires_at": "2026-06-24T22:34:26.817215+00:00",
+          "credentials_version": null,
+          "masked_email_present": true,
+          "human_review_required": false,
+          "expected_app_instance_id": "75906e49-d96a-4018-95a9-5df6a5ec81f2",
+          "verification_submission_id": "b18adaa0-7b03-4aab-b3eb-bda2b521d5cf",
+          "verification_code_expires_at": "2026-06-24T22:41:02.642525+00:00",
+          "verification_code_submitted_at": "2026-06-24T22:26:02.642525+00:00"
+        }
+      }
+    ],
+    "submissions": [],
+    "client": [
+      {
+        "id": "dba47557-4347-4b32-a202-fdb386300b8b",
+        "client_id": "c51267f5-6c0d-46db-8ba0-7f1746a7b4bc",
+        "account_id": "871c5836-0fb4-4afb-a5c7-b8bb3fc6b74c",
+        "label": "Add Profile \u00b7 xstonekwa_backup_acc",
+        "onboarding_status": "credentials_submitted",
+        "provisioning_status": "not_started",
+        "login_status": "unknown",
+        "created_at": "2026-06-22T14:48:09.916998+00:00",
+        "updated_at": "2026-06-25T11:25:58.948292+00:00"
+      }
+    ]
+  },
+  "after": {
+    "requests_active": [],
+    "runs_active": [],
+    "actions_active": [],
+    "submissions_reusable": [],
+    "client": [
+      {
+        "login_status": "unknown",
+        "provisioning_status": "not_started",
+        "onboarding_status": "credentials_submitted",
+        "updated_at": "2026-06-25T11:25:58.948292+00:00"
+      }
+    ]
+  },
+  "finished_at": "2026-06-25T15:16:31.041011+00:00"
+}

@@ -114,6 +114,7 @@ PASSWORD_ONLY_OVERLAY_XML = (
     '<node text="And save to your Google account" />'
 )
 LOADING_XML = '<node text="Loading..." />'
+LOGGED_OUT_XML = '<node text="Log in to Instagram" /><node text="Username" /><node text="Password" />'
 UNKNOWN_XML = '<node text="Instagram" />'
 GOOGLE_SAVE_PASSWORD_PROMPT_XML = (
     '<node text="Google Password Manager" />'
@@ -221,6 +222,12 @@ SETTINGS_AND_ACTIVITY_FRENCH_LOGOUT_XML = (
 )
 SAVE_LOGIN_INFO_PROMPT_XML = (
     '<node text="Save your login info?" />'
+    '<node text="Save" clickable="true" bounds="[100,1600][980,1720]" />'
+    '<node text="Not now" clickable="true" bounds="[100,1760][980,1880]" />'
+)
+SAVE_LOGIN_INFO_PROMPT_WITH_USERNAME_XML = (
+    '<node text="Save your login info?" />'
+    '<node text="We will save the login info for cinema_catchup" />'
     '<node text="Save" clickable="true" bounds="[100,1600][980,1720]" />'
     '<node text="Not now" clickable="true" bounds="[100,1760][980,1880]" />'
 )
@@ -1160,6 +1167,74 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertIn("route:post_email_code_password", result.actions_taken)
         self.assertTrue(result.safe_metadata.get("email_code_entry_skipped"))
 
+    def test_email_code_resume_connected_after_save_login_info_publishes_canonical_status(self) -> None:
+        from instagram_login_email_code_executor import EmailCodeResumeResult
+
+        resume_result = EmailCodeResumeResult(
+            ok=True,
+            executed=True,
+            action="email_code_submit",
+            reason="connected",
+            post_submit_outcome="connected",
+            post_submit_probe_reason="connected",
+            post_submit_screen_type="connected",
+            code_entered=True,
+            continue_tapped=True,
+            timings={},
+            warnings=["instagram_save_login_info_prompt_not_now"],
+            safe_metadata={
+                "stage": "email_code_resume",
+                "post_submit_outcome": "connected",
+                "save_login_info_prompt_detected": True,
+                "save_login_info_not_now_tapped": True,
+                "post_submit_screens": ["save_login_info_prompt", "connected"],
+            },
+        )
+        publisher = Mock(return_value={"published": True, "reason": "published"})
+        with (
+            patch.object(
+                provisioner_orchestrator,
+                "execute_email_code_challenge_resume",
+                return_value=resume_result,
+            ),
+            patch.object(
+                provisioner_orchestrator,
+                "_observe_login_signals",
+                return_value={"screen_type": "email_code_challenge", "email_code_challenge_present": True},
+            ),
+            patch.object(
+                provisioner_orchestrator,
+                "consume_verification_code_for_worker",
+                return_value={"ok": True, "verification_code": "123456"},
+            ),
+            patch.object(
+                provisioner_orchestrator,
+                "sync_verification_action_after_email_code_resume",
+                return_value={"updated": True, "status": "resolved"},
+            ) as sync_action,
+        ):
+            result = provisioner_orchestrator.run_email_code_resume_flow(
+                FakeDevice([CONNECTED_XML]),
+                account_id=ACCOUNT_ID,
+                expected_username=USERNAME,
+                verification_code=SecretValue("123456"),
+                action_id="action-email-save-login",
+                run_id="run-email-save-login",
+                consume_from_action=True,
+                publisher=publisher,
+                publish_enabled=True,
+            )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.final_outcome, "connected")
+        self.assertEqual(result.final_login_status, "connected")
+        self.assertEqual(result.final_provisioning_status, "ready")
+        self.assertEqual(result.final_onboarding_status, "ready")
+        self.assertTrue(result.published)
+        self.assertEqual(result.publish_reason, "published_connected")
+        publisher.assert_called_once()
+        sync_action.assert_called_once()
+
     def test_app_start_account_picker_can_prepare_password_only_then_submit(self) -> None:
         account_picker = (
             '<node clickable="true" enabled="true" visible-to-user="true" bounds="[100,300][980,500]" class="android.view.ViewGroup" />'
@@ -1433,6 +1508,40 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertNotIn(PASSWORD, rendered)
         self.assertNotIn(SECRET_REF, rendered)
 
+    def test_login_form_loading_then_logged_out_defers_to_email_challenge(self) -> None:
+        device, _selectors = configured_device(LOGIN_FORM_XML)
+        device.hierarchies = [
+            LOADING_XML,
+            LOADING_XML,
+            LOADING_XML,
+            LOGGED_OUT_XML,
+            LOADING_XML,
+            LOADING_XML,
+            EMAIL_CODE_CHALLENGE_XML,
+        ]
+
+        result = self.run_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username=USERNAME,
+            credentials_getter=Mock(return_value=credentials()),
+            initial_signals=LOGIN_FORM_SIGNALS,
+            post_submit_timeout_ms=0,
+        )
+
+        self.assertEqual(result.final_outcome, "verification_pending")
+        self.assertEqual(result.reason, "email_verification_code_required")
+        self.assertEqual(result.final_login_status, "verification_pending")
+        self.assertEqual(result.final_provisioning_status, "login_verification_pending")
+        self.assertEqual(result.dashboard_action_type, "enter_email_verification_code")
+        self.assertTrue(result.should_publish_status)
+        self.assertFalse(result.retry_attempted)
+        password_meta = result.safe_metadata["password_result"]
+        self.assertEqual(password_meta["post_submit_screen_type"], "email_code_challenge")
+        self.assertIn("logged_out", password_meta["post_submit_screens"])
+        self.assertIn("email_code_challenge", password_meta["post_submit_screens"])
+        self.assertNotIn("post_submit_logged_out_after_settling", result.warnings)
+
     def test_login_form_login_failed_status_no_retry(self) -> None:
         result = self._run_login_form(LOGIN_FAILED_XML)
 
@@ -1441,6 +1550,81 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertEqual(result.final_provisioning_status, "failed")
         self.assertEqual(result.dashboard_action_type, "update_instagram_password")
         self.assertFalse(result.retry_attempted)
+
+    def test_logged_out_after_bounded_deadline_reason_is_preserved(self) -> None:
+        device, _selectors = configured_device(CONNECTED_XML)
+        password_result = type(
+            "PasswordResult",
+            (),
+            {
+                "failure_reason": None,
+                "post_submit_outcome": "logged_out",
+                "post_submit_probe_reason": "post_submit_no_stable_outcome_after_deadline",
+                "executed": True,
+                "submit_tapped": True,
+                "timings": {},
+                "warnings": ["post_submit_no_stable_outcome_after_deadline"],
+                "safe_metadata": {
+                    "post_submit_observation_count": 44,
+                    "post_submit_wait_total_ms": 40,
+                    "post_submit_bounded_deadline_ms": 40,
+                    "post_submit_bounded_deadline_exhausted": True,
+                    "post_submit_screens": ["logged_out"] * 44,
+                    "final_terminal_screen": "logged_out",
+                },
+            },
+        )()
+
+        with patch.object(provisioner_orchestrator, "execute_login_form_credentials", return_value=password_result):
+            result = self.run_flow(
+                device,
+                account_id=ACCOUNT_ID,
+                expected_username=USERNAME,
+                credentials_getter=Mock(return_value=credentials()),
+                initial_signals=LOGIN_FORM_SIGNALS,
+            )
+
+        self.assertEqual(result.final_outcome, "logged_out")
+        self.assertEqual(result.reason, "post_submit_no_stable_outcome_after_deadline")
+        self.assertEqual(result.final_login_status, "failed")
+        self.assertTrue(result.completed)
+
+    def test_post_submit_finalization_pending_preserves_in_progress_projection(self) -> None:
+        device, _selectors = configured_device(CONNECTED_XML)
+        password_result = type(
+            "PasswordResult",
+            (),
+            {
+                "failure_reason": None,
+                "post_submit_outcome": "post_submit_finalization_pending",
+                "post_submit_probe_reason": "post_submit_finalization_pending",
+                "executed": True,
+                "submit_tapped": True,
+                "timings": {},
+                "warnings": ["post_submit_finalization_pending"],
+                "safe_metadata": {
+                    "post_submit_observation_count": 9,
+                    "post_submit_wait_total_ms": 7097,
+                    "post_submit_screens": ["loading"] * 7 + ["logged_out", "logged_out"],
+                    "final_terminal_screen": "logged_out",
+                },
+            },
+        )()
+
+        with patch.object(provisioner_orchestrator, "execute_login_form_credentials", return_value=password_result):
+            result = self.run_flow(
+                device,
+                account_id=ACCOUNT_ID,
+                expected_username=USERNAME,
+                credentials_getter=Mock(return_value=credentials()),
+                initial_signals=LOGIN_FORM_SIGNALS,
+            )
+
+        self.assertEqual(result.final_outcome, "post_login_finalizing")
+        self.assertEqual(result.reason, "post_submit_finalization_pending")
+        self.assertEqual(result.final_login_status, "unknown")
+        self.assertEqual(result.final_provisioning_status, "provisioning")
+        self.assertFalse(result.should_publish_status)
 
     def test_logged_out_after_settling_reason_is_preserved(self) -> None:
         device, _selectors = configured_device(CONNECTED_XML)
@@ -1599,6 +1783,33 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertEqual(password_meta["post_dismiss_final_screens"], ["connected"])
         self.assertTrue(password_meta["connected_detected_after_save_prompt_dismiss"])
 
+    def test_instagram_save_login_info_dismiss_not_now_then_connected_final_settling(self) -> None:
+        device, _selectors = configured_device(CONNECTED_XML)
+        device.add_selector("text", "Not now", FakeSelector(1))
+        device.hierarchies = [
+            SAVE_LOGIN_INFO_PROMPT_WITH_USERNAME_XML,
+            CONNECTED_XML,
+        ]
+
+        result = self.run_flow(
+            device,
+            account_id=ACCOUNT_ID,
+            expected_username=USERNAME,
+            credentials_getter=Mock(return_value=credentials()),
+            initial_signals=LOGIN_FORM_SIGNALS,
+            post_submit_timeout_ms=2000,
+        )
+
+        password_meta = result.safe_metadata["password_result"]
+        self.assertTrue(result.ok)
+        self.assertEqual(result.final_outcome, "connected")
+        self.assertTrue(password_meta["instagram_save_login_info_prompt_detected"])
+        self.assertTrue(password_meta["instagram_save_login_info_prompt_not_now"])
+        self.assertFalse(password_meta.get("instagram_save_login_info_prompt_save"))
+        self.assertEqual(password_meta["post_dismiss_final_screens"], ["connected"])
+        self.assertTrue(password_meta["connected_detected_after_save_prompt_dismiss"])
+        self.assertNotIn("verification_code_still_required", str(password_meta))
+
     def test_save_password_dismiss_loading_stable_timeout_no_publish(self) -> None:
         publisher = Mock(return_value={"published": True})
         device, _selectors = configured_device(CONNECTED_XML)
@@ -1623,13 +1834,13 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         )
 
         password_meta = result.safe_metadata["password_result"]
-        self.assertEqual(result.final_outcome, "login_submit_still_loading")
-        self.assertEqual(result.reason, "post_submit_loading_timeout")
-        self.assertFalse(result.should_publish_status)
-        self.assertFalse(result.published)
-        publisher.assert_not_called()
-        self.assertEqual(password_meta["post_dismiss_final_screens"], ["loading", "loading", "loading", "loading"])
-        self.assertFalse(password_meta["connected_detected_after_save_prompt_dismiss"])
+        self.assertEqual(result.final_outcome, "logged_out")
+        self.assertEqual(result.reason, "post_submit_no_stable_outcome_after_deadline")
+        self.assertEqual(
+            password_meta.get("post_submit_probe_reason"),
+            "post_submit_no_stable_outcome_after_deadline",
+        )
+        self.assertFalse(password_meta.get("connected_detected_after_save_prompt_dismiss"))
 
     def test_loading_timeout_final_outcome_no_retry(self) -> None:
         device, _selectors = configured_device(CONNECTED_XML)

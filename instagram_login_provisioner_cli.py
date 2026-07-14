@@ -82,7 +82,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--post-submit-timeout-ms",
         type=int,
         default=10000,
-        help="Bounded post-submit settling timeout in milliseconds.",
+        help=(
+            "Legacy post-submit metadata and email-code resume wait hint in milliseconds. "
+            "Does not cap the challenge-aware bounded observation window."
+        ),
+    )
+    parser.add_argument(
+        "--post-submit-bounded-deadline-ms",
+        type=int,
+        default=0,
+        help=(
+            "Challenge-aware post-submit observation deadline in milliseconds. "
+            "Defaults to 60000 when omitted or zero."
+        ),
     )
     parser.add_argument(
         "--operator-smoke-previous-account-username",
@@ -252,6 +264,7 @@ def run_cli_command(
         expected_app_instance_id=str(getattr(args, "expected_app_instance_id", "") or ""),
         post_start_wait_ms=int(args.post_start_wait_ms or DEFAULT_POST_APP_START_WAIT_MS),
         post_submit_timeout_ms=int(args.post_submit_timeout_ms or 0),
+        post_submit_bounded_deadline_ms=_optional_post_submit_bounded_deadline_ms(args),
         operator_smoke_allow_logout_fallback=_parse_bool_choice(
             getattr(args, "operator_smoke_allow_logout_fallback", "false")
         ),
@@ -592,6 +605,11 @@ def _normalize_public_username(value: Any) -> str:
 
 def _parse_bool_choice(value: Any) -> bool:
     return str(value or "").strip().lower() == "true"
+
+
+def _optional_post_submit_bounded_deadline_ms(args: argparse.Namespace) -> int | None:
+    raw = int(getattr(args, "post_submit_bounded_deadline_ms", 0) or 0)
+    return raw if raw > 0 else None
 
 
 def _env_bool(name: str, default: bool = False) -> bool:

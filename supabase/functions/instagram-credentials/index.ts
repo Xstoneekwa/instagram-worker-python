@@ -91,7 +91,7 @@ const FORBIDDEN_TOP_LEVEL_FIELDS = new Set([
   "password_confirm",
   "encrypted_password",
 ]);
-const ADD_PROFILE_ACTOR_TYPES = new Set(["admin", "backend", "system"]);
+const ADD_PROFILE_ACTOR_TYPES = new Set(["admin", "backend", "client", "system"]);
 const STATUS_FORBIDDEN_TOP_LEVEL_FIELDS = new Set([
   "password",
   "secret_ref",

@@ -1,0 +1,746 @@
+{
+  "account_id": "871c5836-0fb4-4afb-a5c7-b8bb3fc6b74c",
+  "username": "xstonekwa_backup_acc",
+  "started_at": "2026-06-25T12:55:22.323843+00:00",
+  "reason": "client_connect_cancel_restart_liam_post_cleanup_20260625",
+  "backend_steps": [
+    {
+      "action": "expire_verification_submission",
+      "submission_id": "7bc4b251-9976-4b6a-b804-08b3fbf8f788",
+      "prior_status": "code_submitted",
+      "result_status": "expired"
+    },
+    {
+      "action": "expire_verification_submission",
+      "submission_id": "564127bf-7fc0-4094-b13c-d043f0e764cc",
+      "prior_status": "code_submitted",
+      "result_status": "expired"
+    },
+    {
+      "action": "expire_verification_submission",
+      "submission_id": "b18adaa0-7b03-4aab-b3eb-bda2b521d5cf",
+      "prior_status": "code_submitted",
+      "result_status": "expired"
+    },
+    {
+      "action": "clear_client_projection",
+      "skipped": true,
+      "current": {
+        "login_status": "unknown",
+        "provisioning_status": "not_started",
+        "onboarding_status": "credentials_submitted",
+        "updated_at": "2026-06-25T11:25:58.948292+00:00"
+      }
+    }
+  ],
+  "device_steps": [],
+  "before": {
+    "requests": [
+      {
+        "id": "23052d91-f49c-418e-884d-250229136037",
+        "status": "canceled",
+        "requested_run_type": "login_email_code_resume",
+        "run_id": "a4654833-32a6-410f-a4c5-1c8389a03b40",
+        "cancel_requested_at": "2026-06-25T11:25:57.785216+00:00",
+        "cancel_reason": "client_connect_cancel_restart_liam_post_code_fix",
+        "updated_at": "2026-06-25T11:25:58.066182+00:00"
+      },
+      {
+        "id": "182c9a74-bd90-46dd-a565-45d4b96ac70b",
+        "status": "canceled",
+        "requested_run_type": "login_provisioning",
+        "run_id": "d679f83a-96e4-4ae1-b658-d43294e37379",
+        "cancel_requested_at": "2026-06-25T10:33:15.595+00:00",
+        "cancel_reason": "email_code_resume_handoff",
+        "updated_at": "2026-06-25T10:33:16.056567+00:00"
+      },
+      {
+        "id": "4dad9d52-905a-4290-b46f-c68c6b31e1aa",
+        "status": "canceled",
+        "requested_run_type": "login_provisioning",
+        "run_id": "f72d1559-3ae0-4fb1-91c7-f6f0916a1b75",
+        "cancel_requested_at": "2026-06-25T10:16:46.077+00:00",
+        "cancel_reason": "client_connect_cancel_restart_liam",
+        "updated_at": "2026-06-25T10:16:46.347517+00:00"
+      },
+      {
+        "id": "3f8040f2-a413-44b8-9a3f-e9cc72a2efbc",
+        "status": "canceled",
+        "requested_run_type": "login_provisioning",
+        "run_id": "7bcc9e53-dc12-4bd2-8e5a-73d8f10b3c4e",
+        "cancel_requested_at": "2026-06-25T08:35:15.128+00:00",
+        "cancel_reason": "client_connect_cancel_restart_liam",
+        "updated_at": "2026-06-25T08:35:15.897759+00:00"
+      },
+      {
+        "id": "e4841109-e9f1-49b9-939b-a391950a8f50",
+        "status": "canceled",
+        "requested_run_type": "login_provisioning",
+        "run_id": "bb248f97-e649-45ad-a437-5d9ee67f51d2",
+        "cancel_requested_at": "2026-06-24T22:49:11.409007+00:00",
+        "cancel_reason": "client_connect_attempt_canceled",
+        "updated_at": "2026-06-24T22:49:12.280283+00:00"
+      },
+      {
+        "id": "9566321d-bc00-422f-ae5a-edf712b569e8",
+        "status": "failed",
+        "requested_run_type": "login_provisioning",
+        "run_id": "08ef6e89-f9da-4dca-a8cc-d0a46ba7207b",
+        "cancel_requested_at": null,
+        "cancel_reason": null,
+        "updated_at": "2026-06-24T21:24:58.674252+00:00"
+      },
+      {
+        "id": "4565e2dd-5ff6-42fa-9275-8db756693a20",
+        "status": "failed",
+        "requested_run_type": "login_provisioning",
+        "run_id": "cfe8999d-187a-40fb-9ead-78eb5c4e7b44",
+        "cancel_requested_at": null,
+        "cancel_reason": null,
+        "updated_at": "2026-06-24T20:38:22.780272+00:00"
+      },
+      {
+        "id": "372a5177-9b96-4d38-8255-eb2aca510bee",
+        "status": "failed",
+        "requested_run_type": "login_provisioning",
+        "run_id": "ef0e6c27-b7e6-4182-88a0-23a0655d53e5",
+        "cancel_requested_at": null,
+        "cancel_reason": null,
+        "updated_at": "2026-06-24T11:59:24.14301+00:00"
+      },
+      {
+        "id": "e1f23311-edf6-40cb-95ea-3cc0704d97c3",
+        "status": "failed",
+        "requested_run_type": "login_provisioning",
+        "run_id": "0851c1cb-3a41-4b67-a399-055e9c3a5e93",
+        "cancel_requested_at": null,
+        "cancel_reason": null,
+        "updated_at": "2026-06-22T22:58:31.365463+00:00"
+      }
+    ],
+    "runs": [
+      {
+        "id": "a4654833-32a6-410f-a4c5-1c8389a03b40",
+        "status": "stopped",
+        "updated_at": "2026-06-25T11:25:03.7909+00:00",
+        "finished_at": null
+      },
+      {
+        "id": "d679f83a-96e4-4ae1-b658-d43294e37379",
+        "status": "stopped",
+        "updated_at": "2026-06-25T10:33:15.386+00:00",
+        "finished_at": "2026-06-25T10:33:15.386+00:00"
+      },
+      {
+        "id": "f72d1559-3ae0-4fb1-91c7-f6f0916a1b75",
+        "status": "stopped",
+        "updated_at": "2026-06-25T09:00:02.638+00:00",
+        "finished_at": "2026-06-25T09:00:02.638+00:00"
+      },
+      {
+        "id": "7bcc9e53-dc12-4bd2-8e5a-73d8f10b3c4e",
+        "status": "stopped",
+        "updated_at": "2026-06-25T08:35:15.128+00:00",
+        "finished_at": "2026-06-25T08:35:15.128+00:00"
+      },
+      {
+        "id": "bb248f97-e649-45ad-a437-5d9ee67f51d2",
+        "status": "stopped",
+        "updated_at": "2026-06-24T22:49:11.715657+00:00",
+        "finished_at": "2026-06-24T22:49:11.715657+00:00"
+      },
+      {
+        "id": "08ef6e89-f9da-4dca-a8cc-d0a46ba7207b",
+        "status": "failed",
+        "updated_at": "2026-06-24T21:24:59.389688+00:00",
+        "finished_at": "2026-06-24T21:24:59.389688+00:00"
+      },
+      {
+        "id": "cfe8999d-187a-40fb-9ead-78eb5c4e7b44",
+        "status": "failed",
+        "updated_at": "2026-06-24T20:38:23.042828+00:00",
+        "finished_at": "2026-06-24T20:38:23.042828+00:00"
+      },
+      {
+        "id": "ef0e6c27-b7e6-4182-88a0-23a0655d53e5",
+        "status": "failed",
+        "updated_at": "2026-06-24T11:59:24.397285+00:00",
+        "finished_at": "2026-06-24T11:59:24.397285+00:00"
+      }
+    ],
+    "actions": [
+      {
+        "id": "3b701809-e2b4-4624-9408-84fbbefba5ad",
+        "action_type": "update_instagram_password",
+        "status": "dismissed",
+        "updated_at": "2026-06-25T11:25:04.826718+00:00"
+      },
+      {
+        "id": "0edfabda-26de-45b8-8412-836d9a63b897",
+        "action_type": "enter_email_verification_code",
+        "status": "dismissed",
+        "updated_at": "2026-06-25T11:25:04.422362+00:00"
+      },
+      {
+        "id": "5406aa2e-869f-437f-bb72-76cacefb4b2c",
+        "action_type": "update_instagram_password",
+        "status": "dismissed",
+        "updated_at": "2026-06-25T10:16:47.56792+00:00"
+      },
+      {
+        "id": "b57e2b13-2e0b-420c-ab86-15f2a3c074e2",
+        "action_type": "enter_email_verification_code",
+        "status": "dismissed",
+        "updated_at": "2026-06-25T10:16:47.301726+00:00"
+      },
+      {
+        "id": "9cc12286-3ab1-4b59-912d-35fe9bafb261",
+        "action_type": "enter_email_verification_code",
+        "status": "dismissed",
+        "updated_at": "2026-06-25T08:35:16.551111+00:00"
+      },
+      {
+        "id": "2f05de1b-345f-42d7-bc13-c073386668fe",
+        "action_type": "update_instagram_password",
+        "status": "dismissed",
+        "updated_at": "2026-06-25T08:35:16.551111+00:00"
+      },
+      {
+        "id": "a189eeb5-64d5-4e87-91b3-cfb1bdefe3f7",
+        "action_type": "update_instagram_password",
+        "status": "dismissed",
+        "updated_at": "2026-06-24T22:49:13.415447+00:00"
+      },
+      {
+        "id": "9944f85e-1879-41a9-86a6-7895e838dc3d",
+        "action_type": "enter_email_verification_code",
+        "status": "dismissed",
+        "updated_at": "2026-06-24T22:49:13.140457+00:00"
+      },
+      {
+        "id": "a8576326-ae92-46b4-be06-39f0f13b5292",
+        "action_type": "submit_instagram_credentials",
+        "status": "pending_verification",
+        "updated_at": "2026-06-22T14:48:08.432549+00:00"
+      }
+    ],
+    "client": [
+      {
+        "login_status": "unknown",
+        "provisioning_status": "not_started",
+        "onboarding_status": "credentials_submitted",
+        "updated_at": "2026-06-25T11:25:58.948292+00:00"
+      }
+    ],
+    "submissions": [
+      {
+        "id": "246bb279-fced-49ac-b07a-4c3337b13741",
+        "status": "consumed",
+        "action_id": "0edfabda-26de-45b8-8412-836d9a63b897",
+        "expires_at": "2026-06-25T10:48:12.435992+00:00",
+        "updated_at": "2026-06-25T10:33:30.754336+00:00"
+      },
+      {
+        "id": "7bc4b251-9976-4b6a-b804-08b3fbf8f788",
+        "status": "code_submitted",
+        "action_id": "b57e2b13-2e0b-420c-ab86-15f2a3c074e2",
+        "expires_at": "2026-06-25T09:14:59.964805+00:00",
+        "updated_at": "2026-06-25T08:59:59.964805+00:00"
+      },
+      {
+        "id": "564127bf-7fc0-4094-b13c-d043f0e764cc",
+        "status": "code_submitted",
+        "action_id": "9cc12286-3ab1-4b59-912d-35fe9bafb261",
+        "expires_at": "2026-06-25T08:19:54.244126+00:00",
+        "updated_at": "2026-06-25T08:04:54.244126+00:00"
+      },
+      {
+        "id": "b18adaa0-7b03-4aab-b3eb-bda2b521d5cf",
+        "status": "code_submitted",
+        "action_id": "9944f85e-1879-41a9-86a6-7895e838dc3d",
+        "expires_at": "2026-06-24T22:41:02.642525+00:00",
+        "updated_at": "2026-06-24T22:26:02.642525+00:00"
+      }
+    ]
+  },
+  "after_backend": {
+    "requests": [
+      {
+        "id": "23052d91-f49c-418e-884d-250229136037",
+        "status": "canceled",
+        "requested_run_type": "login_email_code_resume",
+        "run_id": "a4654833-32a6-410f-a4c5-1c8389a03b40",
+        "cancel_requested_at": "2026-06-25T11:25:57.785216+00:00",
+        "cancel_reason": "client_connect_cancel_restart_liam_post_code_fix",
+        "updated_at": "2026-06-25T11:25:58.066182+00:00"
+      },
+      {
+        "id": "182c9a74-bd90-46dd-a565-45d4b96ac70b",
+        "status": "canceled",
+        "requested_run_type": "login_provisioning",
+        "run_id": "d679f83a-96e4-4ae1-b658-d43294e37379",
+        "cancel_requested_at": "2026-06-25T10:33:15.595+00:00",
+        "cancel_reason": "email_code_resume_handoff",
+        "updated_at": "2026-06-25T10:33:16.056567+00:00"
+      },
+      {
+        "id": "4dad9d52-905a-4290-b46f-c68c6b31e1aa",
+        "status": "canceled",
+        "requested_run_type": "login_provisioning",
+        "run_id": "f72d1559-3ae0-4fb1-91c7-f6f0916a1b75",
+        "cancel_requested_at": "2026-06-25T10:16:46.077+00:00",
+        "cancel_reason": "client_connect_cancel_restart_liam",
+        "updated_at": "2026-06-25T10:16:46.347517+00:00"
+      },
+      {
+        "id": "3f8040f2-a413-44b8-9a3f-e9cc72a2efbc",
+        "status": "canceled",
+        "requested_run_type": "login_provisioning",
+        "run_id": "7bcc9e53-dc12-4bd2-8e5a-73d8f10b3c4e",
+        "cancel_requested_at": "2026-06-25T08:35:15.128+00:00",
+        "cancel_reason": "client_connect_cancel_restart_liam",
+        "updated_at": "2026-06-25T08:35:15.897759+00:00"
+      },
+      {
+        "id": "e4841109-e9f1-49b9-939b-a391950a8f50",
+        "status": "canceled",
+        "requested_run_type": "login_provisioning",
+        "run_id": "bb248f97-e649-45ad-a437-5d9ee67f51d2",
+        "cancel_requested_at": "2026-06-24T22:49:11.409007+00:00",
+        "cancel_reason": "client_connect_attempt_canceled",
+        "updated_at": "2026-06-24T22:49:12.280283+00:00"
+      },
+      {
+        "id": "9566321d-bc00-422f-ae5a-edf712b569e8",
+        "status": "failed",
+        "requested_run_type": "login_provisioning",
+        "run_id": "08ef6e89-f9da-4dca-a8cc-d0a46ba7207b",
+        "cancel_requested_at": null,
+        "cancel_reason": null,
+        "updated_at": "2026-06-24T21:24:58.674252+00:00"
+      },
+      {
+        "id": "4565e2dd-5ff6-42fa-9275-8db756693a20",
+        "status": "failed",
+        "requested_run_type": "login_provisioning",
+        "run_id": "cfe8999d-187a-40fb-9ead-78eb5c4e7b44",
+        "cancel_requested_at": null,
+        "cancel_reason": null,
+        "updated_at": "2026-06-24T20:38:22.780272+00:00"
+      },
+      {
+        "id": "372a5177-9b96-4d38-8255-eb2aca510bee",
+        "status": "failed",
+        "requested_run_type": "login_provisioning",
+        "run_id": "ef0e6c27-b7e6-4182-88a0-23a0655d53e5",
+        "cancel_requested_at": null,
+        "cancel_reason": null,
+        "updated_at": "2026-06-24T11:59:24.14301+00:00"
+      },
+      {
+        "id": "e1f23311-edf6-40cb-95ea-3cc0704d97c3",
+        "status": "failed",
+        "requested_run_type": "login_provisioning",
+        "run_id": "0851c1cb-3a41-4b67-a399-055e9c3a5e93",
+        "cancel_requested_at": null,
+        "cancel_reason": null,
+        "updated_at": "2026-06-22T22:58:31.365463+00:00"
+      }
+    ],
+    "runs": [
+      {
+        "id": "a4654833-32a6-410f-a4c5-1c8389a03b40",
+        "status": "stopped",
+        "updated_at": "2026-06-25T11:25:03.7909+00:00",
+        "finished_at": null
+      },
+      {
+        "id": "d679f83a-96e4-4ae1-b658-d43294e37379",
+        "status": "stopped",
+        "updated_at": "2026-06-25T10:33:15.386+00:00",
+        "finished_at": "2026-06-25T10:33:15.386+00:00"
+      },
+      {
+        "id": "f72d1559-3ae0-4fb1-91c7-f6f0916a1b75",
+        "status": "stopped",
+        "updated_at": "2026-06-25T09:00:02.638+00:00",
+        "finished_at": "2026-06-25T09:00:02.638+00:00"
+      },
+      {
+        "id": "7bcc9e53-dc12-4bd2-8e5a-73d8f10b3c4e",
+        "status": "stopped",
+        "updated_at": "2026-06-25T08:35:15.128+00:00",
+        "finished_at": "2026-06-25T08:35:15.128+00:00"
+      },
+      {
+        "id": "bb248f97-e649-45ad-a437-5d9ee67f51d2",
+        "status": "stopped",
+        "updated_at": "2026-06-24T22:49:11.715657+00:00",
+        "finished_at": "2026-06-24T22:49:11.715657+00:00"
+      },
+      {
+        "id": "08ef6e89-f9da-4dca-a8cc-d0a46ba7207b",
+        "status": "failed",
+        "updated_at": "2026-06-24T21:24:59.389688+00:00",
+        "finished_at": "2026-06-24T21:24:59.389688+00:00"
+      },
+      {
+        "id": "cfe8999d-187a-40fb-9ead-78eb5c4e7b44",
+        "status": "failed",
+        "updated_at": "2026-06-24T20:38:23.042828+00:00",
+        "finished_at": "2026-06-24T20:38:23.042828+00:00"
+      },
+      {
+        "id": "ef0e6c27-b7e6-4182-88a0-23a0655d53e5",
+        "status": "failed",
+        "updated_at": "2026-06-24T11:59:24.397285+00:00",
+        "finished_at": "2026-06-24T11:59:24.397285+00:00"
+      }
+    ],
+    "actions": [
+      {
+        "id": "3b701809-e2b4-4624-9408-84fbbefba5ad",
+        "action_type": "update_instagram_password",
+        "status": "dismissed",
+        "updated_at": "2026-06-25T11:25:04.826718+00:00"
+      },
+      {
+        "id": "0edfabda-26de-45b8-8412-836d9a63b897",
+        "action_type": "enter_email_verification_code",
+        "status": "dismissed",
+        "updated_at": "2026-06-25T11:25:04.422362+00:00"
+      },
+      {
+        "id": "5406aa2e-869f-437f-bb72-76cacefb4b2c",
+        "action_type": "update_instagram_password",
+        "status": "dismissed",
+        "updated_at": "2026-06-25T10:16:47.56792+00:00"
+      },
+      {
+        "id": "b57e2b13-2e0b-420c-ab86-15f2a3c074e2",
+        "action_type": "enter_email_verification_code",
+        "status": "dismissed",
+        "updated_at": "2026-06-25T10:16:47.301726+00:00"
+      },
+      {
+        "id": "9cc12286-3ab1-4b59-912d-35fe9bafb261",
+        "action_type": "enter_email_verification_code",
+        "status": "dismissed",
+        "updated_at": "2026-06-25T08:35:16.551111+00:00"
+      },
+      {
+        "id": "2f05de1b-345f-42d7-bc13-c073386668fe",
+        "action_type": "update_instagram_password",
+        "status": "dismissed",
+        "updated_at": "2026-06-25T08:35:16.551111+00:00"
+      },
+      {
+        "id": "a189eeb5-64d5-4e87-91b3-cfb1bdefe3f7",
+        "action_type": "update_instagram_password",
+        "status": "dismissed",
+        "updated_at": "2026-06-24T22:49:13.415447+00:00"
+      },
+      {
+        "id": "9944f85e-1879-41a9-86a6-7895e838dc3d",
+        "action_type": "enter_email_verification_code",
+        "status": "dismissed",
+        "updated_at": "2026-06-24T22:49:13.140457+00:00"
+      },
+      {
+        "id": "a8576326-ae92-46b4-be06-39f0f13b5292",
+        "action_type": "submit_instagram_credentials",
+        "status": "pending_verification",
+        "updated_at": "2026-06-22T14:48:08.432549+00:00"
+      }
+    ],
+    "client": [
+      {
+        "login_status": "unknown",
+        "provisioning_status": "not_started",
+        "onboarding_status": "credentials_submitted",
+        "updated_at": "2026-06-25T11:25:58.948292+00:00"
+      }
+    ],
+    "submissions": [
+      {
+        "id": "b18adaa0-7b03-4aab-b3eb-bda2b521d5cf",
+        "status": "expired",
+        "action_id": "9944f85e-1879-41a9-86a6-7895e838dc3d",
+        "expires_at": "2026-06-24T22:41:02.642525+00:00",
+        "updated_at": "2026-06-25T12:55:25.09391+00:00"
+      },
+      {
+        "id": "564127bf-7fc0-4094-b13c-d043f0e764cc",
+        "status": "expired",
+        "action_id": "9cc12286-3ab1-4b59-912d-35fe9bafb261",
+        "expires_at": "2026-06-25T08:19:54.244126+00:00",
+        "updated_at": "2026-06-25T12:55:24.817943+00:00"
+      },
+      {
+        "id": "7bc4b251-9976-4b6a-b804-08b3fbf8f788",
+        "status": "expired",
+        "action_id": "b57e2b13-2e0b-420c-ab86-15f2a3c074e2",
+        "expires_at": "2026-06-25T09:14:59.964805+00:00",
+        "updated_at": "2026-06-25T12:55:24.503865+00:00"
+      },
+      {
+        "id": "246bb279-fced-49ac-b07a-4c3337b13741",
+        "status": "consumed",
+        "action_id": "0edfabda-26de-45b8-8412-836d9a63b897",
+        "expires_at": "2026-06-25T10:48:12.435992+00:00",
+        "updated_at": "2026-06-25T10:33:30.754336+00:00"
+      }
+    ]
+  },
+  "device": {
+    "serial": "RFGL145LZHE",
+    "package": "com.instagram.androie",
+    "steps": [
+      {
+        "phase": "initial_observe",
+        "screen_type": "join_instagram_landing",
+        "actual_username": "",
+        "save_login_info": false
+      },
+      {
+        "phase": "already_logged_out_surface",
+        "screen_type": "join_instagram_landing"
+      }
+    ],
+    "stopped": false,
+    "stop_reason": "",
+    "identity_confirmed": false,
+    "actual_username": "",
+    "final_screen_type": "join_instagram_landing"
+  },
+  "after": {
+    "requests": [
+      {
+        "id": "23052d91-f49c-418e-884d-250229136037",
+        "status": "canceled",
+        "requested_run_type": "login_email_code_resume",
+        "run_id": "a4654833-32a6-410f-a4c5-1c8389a03b40",
+        "cancel_requested_at": "2026-06-25T11:25:57.785216+00:00",
+        "cancel_reason": "client_connect_cancel_restart_liam_post_code_fix",
+        "updated_at": "2026-06-25T11:25:58.066182+00:00"
+      },
+      {
+        "id": "182c9a74-bd90-46dd-a565-45d4b96ac70b",
+        "status": "canceled",
+        "requested_run_type": "login_provisioning",
+        "run_id": "d679f83a-96e4-4ae1-b658-d43294e37379",
+        "cancel_requested_at": "2026-06-25T10:33:15.595+00:00",
+        "cancel_reason": "email_code_resume_handoff",
+        "updated_at": "2026-06-25T10:33:16.056567+00:00"
+      },
+      {
+        "id": "4dad9d52-905a-4290-b46f-c68c6b31e1aa",
+        "status": "canceled",
+        "requested_run_type": "login_provisioning",
+        "run_id": "f72d1559-3ae0-4fb1-91c7-f6f0916a1b75",
+        "cancel_requested_at": "2026-06-25T10:16:46.077+00:00",
+        "cancel_reason": "client_connect_cancel_restart_liam",
+        "updated_at": "2026-06-25T10:16:46.347517+00:00"
+      },
+      {
+        "id": "3f8040f2-a413-44b8-9a3f-e9cc72a2efbc",
+        "status": "canceled",
+        "requested_run_type": "login_provisioning",
+        "run_id": "7bcc9e53-dc12-4bd2-8e5a-73d8f10b3c4e",
+        "cancel_requested_at": "2026-06-25T08:35:15.128+00:00",
+        "cancel_reason": "client_connect_cancel_restart_liam",
+        "updated_at": "2026-06-25T08:35:15.897759+00:00"
+      },
+      {
+        "id": "e4841109-e9f1-49b9-939b-a391950a8f50",
+        "status": "canceled",
+        "requested_run_type": "login_provisioning",
+        "run_id": "bb248f97-e649-45ad-a437-5d9ee67f51d2",
+        "cancel_requested_at": "2026-06-24T22:49:11.409007+00:00",
+        "cancel_reason": "client_connect_attempt_canceled",
+        "updated_at": "2026-06-24T22:49:12.280283+00:00"
+      },
+      {
+        "id": "9566321d-bc00-422f-ae5a-edf712b569e8",
+        "status": "failed",
+        "requested_run_type": "login_provisioning",
+        "run_id": "08ef6e89-f9da-4dca-a8cc-d0a46ba7207b",
+        "cancel_requested_at": null,
+        "cancel_reason": null,
+        "updated_at": "2026-06-24T21:24:58.674252+00:00"
+      },
+      {
+        "id": "4565e2dd-5ff6-42fa-9275-8db756693a20",
+        "status": "failed",
+        "requested_run_type": "login_provisioning",
+        "run_id": "cfe8999d-187a-40fb-9ead-78eb5c4e7b44",
+        "cancel_requested_at": null,
+        "cancel_reason": null,
+        "updated_at": "2026-06-24T20:38:22.780272+00:00"
+      },
+      {
+        "id": "372a5177-9b96-4d38-8255-eb2aca510bee",
+        "status": "failed",
+        "requested_run_type": "login_provisioning",
+        "run_id": "ef0e6c27-b7e6-4182-88a0-23a0655d53e5",
+        "cancel_requested_at": null,
+        "cancel_reason": null,
+        "updated_at": "2026-06-24T11:59:24.14301+00:00"
+      },
+      {
+        "id": "e1f23311-edf6-40cb-95ea-3cc0704d97c3",
+        "status": "failed",
+        "requested_run_type": "login_provisioning",
+        "run_id": "0851c1cb-3a41-4b67-a399-055e9c3a5e93",
+        "cancel_requested_at": null,
+        "cancel_reason": null,
+        "updated_at": "2026-06-22T22:58:31.365463+00:00"
+      }
+    ],
+    "runs": [
+      {
+        "id": "a4654833-32a6-410f-a4c5-1c8389a03b40",
+        "status": "stopped",
+        "updated_at": "2026-06-25T11:25:03.7909+00:00",
+        "finished_at": null
+      },
+      {
+        "id": "d679f83a-96e4-4ae1-b658-d43294e37379",
+        "status": "stopped",
+        "updated_at": "2026-06-25T10:33:15.386+00:00",
+        "finished_at": "2026-06-25T10:33:15.386+00:00"
+      },
+      {
+        "id": "f72d1559-3ae0-4fb1-91c7-f6f0916a1b75",
+        "status": "stopped",
+        "updated_at": "2026-06-25T09:00:02.638+00:00",
+        "finished_at": "2026-06-25T09:00:02.638+00:00"
+      },
+      {
+        "id": "7bcc9e53-dc12-4bd2-8e5a-73d8f10b3c4e",
+        "status": "stopped",
+        "updated_at": "2026-06-25T08:35:15.128+00:00",
+        "finished_at": "2026-06-25T08:35:15.128+00:00"
+      },
+      {
+        "id": "bb248f97-e649-45ad-a437-5d9ee67f51d2",
+        "status": "stopped",
+        "updated_at": "2026-06-24T22:49:11.715657+00:00",
+        "finished_at": "2026-06-24T22:49:11.715657+00:00"
+      },
+      {
+        "id": "08ef6e89-f9da-4dca-a8cc-d0a46ba7207b",
+        "status": "failed",
+        "updated_at": "2026-06-24T21:24:59.389688+00:00",
+        "finished_at": "2026-06-24T21:24:59.389688+00:00"
+      },
+      {
+        "id": "cfe8999d-187a-40fb-9ead-78eb5c4e7b44",
+        "status": "failed",
+        "updated_at": "2026-06-24T20:38:23.042828+00:00",
+        "finished_at": "2026-06-24T20:38:23.042828+00:00"
+      },
+      {
+        "id": "ef0e6c27-b7e6-4182-88a0-23a0655d53e5",
+        "status": "failed",
+        "updated_at": "2026-06-24T11:59:24.397285+00:00",
+        "finished_at": "2026-06-24T11:59:24.397285+00:00"
+      }
+    ],
+    "actions": [
+      {
+        "id": "3b701809-e2b4-4624-9408-84fbbefba5ad",
+        "action_type": "update_instagram_password",
+        "status": "dismissed",
+        "updated_at": "2026-06-25T11:25:04.826718+00:00"
+      },
+      {
+        "id": "0edfabda-26de-45b8-8412-836d9a63b897",
+        "action_type": "enter_email_verification_code",
+        "status": "dismissed",
+        "updated_at": "2026-06-25T11:25:04.422362+00:00"
+      },
+      {
+        "id": "5406aa2e-869f-437f-bb72-76cacefb4b2c",
+        "action_type": "update_instagram_password",
+        "status": "dismissed",
+        "updated_at": "2026-06-25T10:16:47.56792+00:00"
+      },
+      {
+        "id": "b57e2b13-2e0b-420c-ab86-15f2a3c074e2",
+        "action_type": "enter_email_verification_code",
+        "status": "dismissed",
+        "updated_at": "2026-06-25T10:16:47.301726+00:00"
+      },
+      {
+        "id": "9cc12286-3ab1-4b59-912d-35fe9bafb261",
+        "action_type": "enter_email_verification_code",
+        "status": "dismissed",
+        "updated_at": "2026-06-25T08:35:16.551111+00:00"
+      },
+      {
+        "id": "2f05de1b-345f-42d7-bc13-c073386668fe",
+        "action_type": "update_instagram_password",
+        "status": "dismissed",
+        "updated_at": "2026-06-25T08:35:16.551111+00:00"
+      },
+      {
+        "id": "a189eeb5-64d5-4e87-91b3-cfb1bdefe3f7",
+        "action_type": "update_instagram_password",
+        "status": "dismissed",
+        "updated_at": "2026-06-24T22:49:13.415447+00:00"
+      },
+      {
+        "id": "9944f85e-1879-41a9-86a6-7895e838dc3d",
+        "action_type": "enter_email_verification_code",
+        "status": "dismissed",
+        "updated_at": "2026-06-24T22:49:13.140457+00:00"
+      },
+      {
+        "id": "a8576326-ae92-46b4-be06-39f0f13b5292",
+        "action_type": "submit_instagram_credentials",
+        "status": "pending_verification",
+        "updated_at": "2026-06-22T14:48:08.432549+00:00"
+      }
+    ],
+    "client": [
+      {
+        "login_status": "unknown",
+        "provisioning_status": "not_started",
+        "onboarding_status": "credentials_submitted",
+        "updated_at": "2026-06-25T11:25:58.948292+00:00"
+      }
+    ],
+    "submissions": [
+      {
+        "id": "b18adaa0-7b03-4aab-b3eb-bda2b521d5cf",
+        "status": "expired",
+        "action_id": "9944f85e-1879-41a9-86a6-7895e838dc3d",
+        "expires_at": "2026-06-24T22:41:02.642525+00:00",
+        "updated_at": "2026-06-25T12:55:25.09391+00:00"
+      },
+      {
+        "id": "564127bf-7fc0-4094-b13c-d043f0e764cc",
+        "status": "expired",
+        "action_id": "9cc12286-3ab1-4b59-912d-35fe9bafb261",
+        "expires_at": "2026-06-25T08:19:54.244126+00:00",
+        "updated_at": "2026-06-25T12:55:24.817943+00:00"
+      },
+      {
+        "id": "7bc4b251-9976-4b6a-b804-08b3fbf8f788",
+        "status": "expired",
+        "action_id": "b57e2b13-2e0b-420c-ab86-15f2a3c074e2",
+        "expires_at": "2026-06-25T09:14:59.964805+00:00",
+        "updated_at": "2026-06-25T12:55:24.503865+00:00"
+      },
+      {
+        "id": "246bb279-fced-49ac-b07a-4c3337b13741",
+        "status": "consumed",
+        "action_id": "0edfabda-26de-45b8-8412-836d9a63b897",
+        "expires_at": "2026-06-25T10:48:12.435992+00:00",
+        "updated_at": "2026-06-25T10:33:30.754336+00:00"
+      }
+    ]
+  },
+  "finished_at": "2026-06-25T12:55:32.389399+00:00"
+}

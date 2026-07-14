@@ -913,6 +913,123 @@ Deno.test(
 );
 
 Deno.test(
+  "submit_add_profile_credentials accepts client actor_type with internal token",
+  withEnv(async () => {
+    const fetchCalls: FetchCall[] = [];
+    const vaultCalls: VaultWriteInput[] = [];
+    const logs: string[] = [];
+    const res = await handleRequest(
+      request(
+        validBody({
+          action: "submit_add_profile_credentials",
+          username: undefined,
+          expected_username: "Muse_Europe",
+          actor_type: "client",
+          metadata_safe: {
+            flow: "client_add_account",
+            external_request_id: "client-add-test",
+            source_surface: "instagram_client",
+          },
+        }),
+        "internal-token-not-real",
+      ),
+      {
+        fetch: makeFetch({ calls: fetchCalls, maxVersion: 0 }),
+        vaultAdapter: mockVault(vaultCalls),
+        log: (event, payload) =>
+          logs.push(JSON.stringify({ event, ...payload })),
+      },
+    );
+    const text = await res.text();
+    const body = JSON.parse(text);
+    if (res.status !== 200 || body.ok !== true) {
+      throw new Error("client add profile credential submit failed");
+    }
+    if (
+      text.includes(FAKE_PASSWORD) || text.includes("supabase_vault://") ||
+      text.includes(VAULT_ID) || text.includes("internal-token-not-real")
+    ) {
+      throw new Error("client add profile response leaked sensitive data");
+    }
+    if (logs.join("").includes(FAKE_PASSWORD) || logs.join("").includes("internal-token-not-real")) {
+      throw new Error("client add profile logs leaked sensitive data");
+    }
+    const dashboardAction = fetchCalls.find((c) =>
+      c.url.includes("upsert_account_dashboard_action")
+    );
+    if (
+      !dashboardAction ||
+      (dashboardAction.body?.p_metadata as Record<string, unknown>)?.source_surface !==
+        "instagram_client"
+    ) {
+      throw new Error("client add profile metadata source_surface missing");
+    }
+    if ((dashboardAction.body?.p_metadata as Record<string, unknown>)?.actor_type !== "client") {
+      throw new Error("client add profile actor attribution missing");
+    }
+  }),
+);
+
+Deno.test(
+  "submit_add_profile_credentials rejects client actor_type without internal token",
+  withEnv(async () => {
+    const vaultCalls: VaultWriteInput[] = [];
+    const res = await handleRequest(
+      request(validBody({
+        action: "submit_add_profile_credentials",
+        expected_username: "muse_europe",
+        actor_type: "client",
+        metadata_safe: {
+          flow: "client_add_account",
+          source_surface: "instagram_client",
+        },
+      })),
+      {
+        fetch: makeFetch(),
+        vaultAdapter: mockVault(vaultCalls),
+        log: () => {},
+      },
+    );
+    const body = await res.json();
+    if (res.status !== 403 || body.error !== "internal_token_required") {
+      throw new Error("client actor_type accepted browser JWT for add profile");
+    }
+    if (vaultCalls.length !== 0) {
+      throw new Error("vault write attempted without internal token");
+    }
+  }),
+);
+
+Deno.test(
+  "submit_add_profile_credentials rejects unknown actor_type",
+  withEnv(() => {
+    const result = validatePayload(validBody({
+      action: "submit_add_profile_credentials",
+      expected_username: "muse_europe",
+      actor_type: "browser",
+    }));
+    if (!result.ok && result.error === "actor_type_invalid") return;
+    throw new Error("unknown actor_type was not rejected");
+  }),
+);
+
+Deno.test(
+  "submit_add_profile_credentials accepts admin backend and system actor types",
+  withEnv(() => {
+    for (const actorType of ["admin", "backend", "system"]) {
+      const result = validatePayload(validBody({
+        action: "submit_add_profile_credentials",
+        expected_username: "muse_europe",
+        actor_type: actorType,
+      }));
+      if (!result.ok) {
+        throw new Error(`${actorType} actor_type was rejected`);
+      }
+    }
+  }),
+);
+
+Deno.test(
   "submit_add_profile_credentials writes Vault and active metadata with safe response",
   withEnv(async () => {
     const fetchCalls: FetchCall[] = [];

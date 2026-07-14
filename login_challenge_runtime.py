@@ -415,6 +415,7 @@ def sync_verification_action_after_email_code_resume(
     final_outcome: str,
     failure_reason: str | None,
     screen_type: str | None = None,
+    safe_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     aid = str(action_id or "").strip()
     acct = str(account_id or "").strip()
@@ -423,6 +424,17 @@ def sync_verification_action_after_email_code_resume(
 
     outcome = str(final_outcome or "").strip().lower()
     reason = str(failure_reason or "").strip().lower()
+    screen = str(screen_type or "").strip().lower()
+    metadata = dict(safe_metadata or {})
+    post_submit_screens = [
+        str(item or "").strip().lower()
+        for item in (metadata.get("post_submit_screens") or [])
+        if str(item or "").strip()
+    ]
+    save_login_info_detected = bool(metadata.get("save_login_info_prompt_detected"))
+    save_login_info_not_now = bool(metadata.get("save_login_info_not_now_tapped"))
+    post_login_progress = save_login_info_detected or save_login_info_not_now or "save_login_info_prompt" in post_submit_screens
+
     connected_outcomes = {
         "connected",
         "active_account_home",
@@ -432,9 +444,85 @@ def sync_verification_action_after_email_code_resume(
     if ok and outcome in connected_outcomes:
         return resolve_verification_action_after_login(action_id=aid, account_id=acct, run_id=run_id)
 
+    if post_login_progress or screen == "save_login_info_prompt" or outcome == "post_login_finalizing":
+        return _merge_dashboard_action_metadata(
+            action_id=aid,
+            account_id=acct,
+            metadata={
+                "resume_status": "running",
+                "resume_failure_reason": reason or "post_login_finalizing",
+                "resume_screen_type": screen or "save_login_info_prompt",
+                "run_id": run_id,
+                "source": "login_email_code_resume",
+            },
+        ) or {"updated": False, "reason": "dashboard_action_patch_failed"}
+
+    if reason in {"post_submit_finalization_pending", "post_login_finalizing", "post_submit_observation_inconclusive"}:
+        return _merge_dashboard_action_metadata(
+            action_id=aid,
+            account_id=acct,
+            metadata={
+                "resume_status": "running",
+                "resume_failure_reason": reason,
+                "resume_screen_type": screen,
+                "run_id": run_id,
+                "source": "login_email_code_resume",
+            },
+        ) or {"updated": False, "reason": "dashboard_action_patch_failed"}
+
+    if screen == "save_login_info_prompt_blocking" or reason.startswith("save_login_info"):
+        return _merge_dashboard_action_metadata(
+            action_id=aid,
+            account_id=acct,
+            metadata={
+                "resume_status": "failed",
+                "resume_failure_reason": reason or "save_login_info_prompt_blocking",
+                "resume_screen_type": screen,
+                "run_id": run_id,
+                "source": "login_email_code_resume",
+            },
+        ) or {"updated": False, "reason": "dashboard_action_patch_failed"}
+
+    needs_new_code_reasons = {
+        "verification_code_invalid",
+        "verification_code_expired",
+        "email_verification_code_required",
+    }
+    if reason in needs_new_code_reasons:
+        if reason == "email_verification_code_required" and screen != "email_code_challenge":
+            return _merge_dashboard_action_metadata(
+                action_id=aid,
+                account_id=acct,
+                metadata={
+                    "resume_status": "running",
+                    "resume_failure_reason": reason,
+                    "resume_screen_type": screen,
+                    "run_id": run_id,
+                    "source": "login_email_code_resume",
+                },
+            ) or {"updated": False, "reason": "dashboard_action_patch_failed"}
+        return reopen_verification_action_pending(
+            action_id=aid,
+            account_id=acct,
+            reason=reason,
+            run_id=run_id,
+        )
+
     if reason == "verification_code_still_required" or (
         not ok and outcome == "verification_pending" and reason.startswith("verification_code")
     ):
+        if screen != "email_code_challenge" or post_login_progress:
+            return _merge_dashboard_action_metadata(
+                action_id=aid,
+                account_id=acct,
+                metadata={
+                    "resume_status": "running",
+                    "resume_failure_reason": reason,
+                    "resume_screen_type": screen,
+                    "run_id": run_id,
+                    "source": "login_email_code_resume",
+                },
+            ) or {"updated": False, "reason": "dashboard_action_patch_failed"}
         return reopen_verification_action_pending(
             action_id=aid,
             account_id=acct,

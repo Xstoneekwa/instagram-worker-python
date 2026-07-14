@@ -20,10 +20,22 @@ from instagram_login_status_classifier import LoginProbeOutcome, clean_login_pro
 from instagram_login_ui_probe import extract_login_screen_signals_from_hierarchy, probe_login_ui_from_hierarchy
 
 ACTION_EMAIL_CODE_SUBMIT = "email_code_submit"
-DEFAULT_POST_SUBMIT_OBSERVATIONS = 4
+DEFAULT_POST_SUBMIT_OBSERVATIONS = 10
 DEFAULT_POST_SUBMIT_INTERVAL_MS = 1000
 DEFAULT_INITIAL_WAIT_MS = 750
+POST_SAVE_LOGIN_DISMISS_OBSERVATIONS = 4
+POST_SAVE_LOGIN_DISMISS_INTERVAL_MS = 1000
 CODE_CONFIRM_SETTLE_MS = 200
+_EMAIL_CODE_INVALID_PATTERNS = (
+    "incorrect code",
+    "invalid code",
+    "code you entered is incorrect",
+    "code isn't correct",
+    "code is not correct",
+    "that code didn't work",
+    "code expired",
+    "expired code",
+)
 
 Timer = Callable[[], float]
 Sleeper = Callable[[float], None]
@@ -50,6 +62,7 @@ def execute_email_code_challenge_resume(
     d: Any,
     *,
     verification_code: SecretValue,
+    expected_username: str | None = None,
     post_submit_wait_ms: int = 0,
     post_submit_observation_interval_ms: int = DEFAULT_POST_SUBMIT_INTERVAL_MS,
     max_post_submit_observations: int = DEFAULT_POST_SUBMIT_OBSERVATIONS,
@@ -252,6 +265,7 @@ def execute_email_code_challenge_resume(
 
     observed = _observe_post_submit_settled(
         d,
+        expected_username=expected_username,
         timings=timings,
         warnings=warnings,
         timer=timer,
@@ -264,7 +278,16 @@ def execute_email_code_challenge_resume(
     ok = outcome == LoginProbeOutcome.CONNECTED.value
     reason = str(observed.get("reason") or outcome)
     if outcome == "verification_pending":
-        reason = "verification_code_still_required"
+        if observed.get("save_login_info_prompt_detected") and not observed.get("save_login_info_not_now_tapped"):
+            outcome = "post_login_finalizing"
+            reason = "post_login_finalizing"
+            ok = False
+        elif str(observed.get("screen_type") or "") == "email_code_challenge":
+            outcome = "post_submit_finalization_pending"
+            reason = "post_submit_finalization_pending"
+            ok = False
+        else:
+            reason = "verification_code_still_required"
     elif outcome == LoginProbeOutcome.LOGIN_FAILED.value:
         reason = "verification_code_invalid"
     elif outcome == LoginProbeOutcome.LOGGED_OUT.value:
@@ -321,9 +344,57 @@ def _observe_current_screen(d: Any, *, warnings: list[str]) -> dict[str, Any]:
     return extract_login_screen_signals_from_hierarchy(str(hierarchy_xml or ""))
 
 
+def _normalize_hierarchy_text(hierarchy_xml: str) -> str:
+    return re.sub(r"\s+", " ", str(hierarchy_xml or "")).lower()
+
+
+def _hierarchy_has_invalid_email_code_signal(hierarchy_xml: str) -> bool:
+    text = _normalize_hierarchy_text(hierarchy_xml)
+    return any(pattern in text for pattern in _EMAIL_CODE_INVALID_PATTERNS)
+
+
+def _classify_email_code_post_submit_hierarchy(
+    hierarchy_xml: str,
+    *,
+    expected_username: str | None = None,
+) -> dict[str, Any]:
+    from instagram_login_password_form_executor import _classify_post_submit_hierarchy
+
+    classified = _classify_post_submit_hierarchy(hierarchy_xml)
+    if classified.get("screen_type") == "email_code_challenge":
+        if _hierarchy_has_invalid_email_code_signal(hierarchy_xml):
+            return {
+                **classified,
+                "outcome": LoginProbeOutcome.LOGIN_FAILED.value,
+                "reason": "verification_code_invalid",
+                "terminal": True,
+                "screen_label": "email_code_challenge_invalid",
+            }
+        if classified.get("terminal"):
+            return {
+                **classified,
+                "outcome": "unknown",
+                "reason": "email_code_challenge_transient_after_submit",
+                "terminal": False,
+                "screen_label": "email_code_challenge_stale",
+            }
+    if classified.get("save_login_info_prompt_present") is True and expected_username:
+        identity = extract_login_screen_signals_from_hierarchy(
+            hierarchy_xml,
+            expected_username=expected_username,
+        )
+        classified = {
+            **classified,
+            "expected_username_present": identity.get("expected_username_present"),
+            "expected_username_match_count": identity.get("expected_username_match_count"),
+        }
+    return classified
+
+
 def _observe_post_submit_settled(
     d: Any,
     *,
+    expected_username: str | None = None,
     timings: dict[str, int],
     warnings: list[str],
     timer: Timer,
@@ -332,8 +403,6 @@ def _observe_post_submit_settled(
     interval_ms: int,
     max_observations: int,
 ) -> dict[str, Any]:
-    from instagram_login_password_form_executor import _classify_post_submit_hierarchy
-
     screens: list[str] = []
     wait_total_ms = 0
     save_login_info_prompt_detected = False
@@ -360,13 +429,26 @@ def _observe_post_submit_settled(
         except Exception:
             warnings.append("post_submit_dump_failed")
             continue
-        observed = _classify_post_submit_hierarchy(str(hierarchy_xml or ""))
+        observed = _classify_email_code_post_submit_hierarchy(
+            str(hierarchy_xml or ""),
+            expected_username=expected_username,
+        )
         screen_label = str(observed.get("screen_label") or observed.get("screen_type") or "unknown")
         screens.append(screen_label)
         last_observed = {**observed, "screen_label": screen_label}
         if observed.get("save_login_info_prompt_present") is True:
             save_login_info_prompt_detected = True
             warnings.append("instagram_save_login_info_prompt_detected")
+            if expected_username and observed.get("expected_username_present") is False:
+                last_observed = {
+                    **last_observed,
+                    "outcome": "save_login_info_prompt_blocking",
+                    "screen_type": "save_login_info_prompt",
+                    "reason": "save_login_info_identity_not_confirmed",
+                    "terminal": True,
+                }
+                warnings.append("save_login_info_identity_not_confirmed")
+                break
             if save_login_info_dismiss_attempt_count >= 2:
                 last_observed = {
                     **last_observed,
@@ -393,6 +475,45 @@ def _observe_post_submit_settled(
             continue
         if observed.get("terminal"):
             break
+
+    if (
+        save_login_info_not_now_tapped
+        and str(last_observed.get("outcome") or "") != LoginProbeOutcome.CONNECTED.value
+    ):
+        from instagram_login_password_form_executor import _observe_post_dismiss_final_settled
+
+        timings.setdefault("post_submit_dump_ms", 0)
+        final_observed = _observe_post_dismiss_final_settled(
+            d,
+            timings=timings,
+            timer=timer,
+            sleeper=sleeper,
+            interval_ms=POST_SAVE_LOGIN_DISMISS_INTERVAL_MS,
+            max_observations=POST_SAVE_LOGIN_DISMISS_OBSERVATIONS,
+        )
+        final_screens = list(final_observed.get("screens") or [])
+        if final_screens:
+            screens.extend(final_screens)
+            wait_total_ms += int(final_observed.get("wait_total_ms") or 0)
+        final_last = dict(final_observed.get("observed") or {})
+        if final_last:
+            screen_label = str(
+                final_last.get("screen_label") or final_last.get("screen_type") or "unknown"
+            )
+            last_observed = {**final_last, "screen_label": screen_label}
+            if str(last_observed.get("outcome") or "") == LoginProbeOutcome.CONNECTED.value:
+                last_observed["terminal"] = True
+    elif (
+        str(last_observed.get("outcome") or "") == "verification_pending"
+        and str(last_observed.get("screen_type") or "") == "email_code_challenge"
+        and (save_login_info_prompt_detected or save_login_info_not_now_tapped or "save_login_info_prompt" in screens)
+    ):
+        last_observed = {
+            **last_observed,
+            "outcome": "post_login_finalizing",
+            "reason": "post_login_finalizing",
+            "terminal": False,
+        }
 
     timings["post_submit_wait_total_ms"] = wait_total_ms
     timings["post_submit_observation_count"] = len(screens)

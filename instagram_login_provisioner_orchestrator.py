@@ -247,6 +247,7 @@ def run_login_provisioning_flow(
     package_name: str = DEFAULT_INSTAGRAM_PACKAGE_NAME,
     post_start_wait_ms: int = DEFAULT_POST_APP_START_WAIT_MS,
     post_submit_timeout_ms: Optional[int] = None,
+    post_submit_bounded_deadline_ms: Optional[int] = None,
     operator_smoke_active_account_username: str | None = None,
     operator_smoke_allow_logout_fallback: bool = False,
     run_id: str | None = None,
@@ -1946,6 +1947,7 @@ def run_login_provisioning_flow(
         password=credentials["password"],
         signals=signals,
         post_submit_timeout_ms=post_submit_timeout_ms,
+        post_submit_bounded_deadline_ms=post_submit_bounded_deadline_ms,
         timer=timer,
     )
     actions_taken.append("login_form_submit")
@@ -1998,6 +2000,7 @@ def run_login_provisioning_flow(
             password=credentials["password"],
             signals=signals,
             post_submit_timeout_ms=post_submit_timeout_ms,
+            post_submit_bounded_deadline_ms=post_submit_bounded_deadline_ms,
             timer=timer,
         )
         actions_taken.append("login_form_submit_retry")
@@ -2111,6 +2114,69 @@ def run_login_provisioning_flow(
             retry_count=retry_count,
             dashboard_action_type=_dashboard_action_for_failure(password_result.failure_reason),
             should_publish_status=False,
+            account_id=safe_account_id,
+            expected_username=safe_expected_username,
+            actions_taken=actions_taken,
+            timings=_merge_timings(timings, password_result.timings),
+            warnings=[*warnings, *password_result.warnings],
+            extra_metadata={
+                **_flow_metadata(previous_account_lifecycle),
+                **old_logged_in_metadata,
+                **post_continue_metadata,
+                **_pre_submit_observation_metadata(signals),
+                **password_result_metadata,
+            },
+            total_start=total_start,
+            timer=timer,
+            publisher=publisher,
+            publish_enabled=publish_enabled,
+        )
+
+    probe_reason = str(getattr(password_result, "post_submit_probe_reason", "") or "")
+    if probe_reason == "post_submit_finalization_pending":
+        return _finalize(
+            ok=False,
+            completed=True,
+            final_outcome="post_login_finalizing",
+            reason=probe_reason,
+            failure_reason=probe_reason,
+            final_login_status="unknown",
+            final_provisioning_status="provisioning",
+            final_onboarding_status="credentials_submitted",
+            retry_attempted=retry_attempted,
+            retry_count=retry_count,
+            should_publish_status=False,
+            account_id=safe_account_id,
+            expected_username=safe_expected_username,
+            actions_taken=actions_taken,
+            timings=_merge_timings(timings, password_result.timings),
+            warnings=[*warnings, *password_result.warnings],
+            extra_metadata={
+                **_flow_metadata(previous_account_lifecycle),
+                **old_logged_in_metadata,
+                **post_continue_metadata,
+                **_pre_submit_observation_metadata(signals),
+                **password_result_metadata,
+            },
+            total_start=total_start,
+            timer=timer,
+            publisher=publisher,
+            publish_enabled=publish_enabled,
+        )
+    if probe_reason == "post_submit_no_stable_outcome_after_deadline":
+        return _finalize(
+            ok=False,
+            completed=True,
+            final_outcome="logged_out",
+            reason=probe_reason,
+            failure_reason=probe_reason,
+            final_login_status="failed",
+            final_provisioning_status="failed",
+            final_onboarding_status="blocked",
+            retry_attempted=retry_attempted,
+            retry_count=retry_count,
+            dashboard_action_type="retry_provisioning",
+            should_publish_status=True,
             account_id=safe_account_id,
             expected_username=safe_expected_username,
             actions_taken=actions_taken,
@@ -4358,6 +4424,7 @@ def _execute_password_form(
     password: SecretValue,
     signals: dict[str, Any],
     post_submit_timeout_ms: Optional[int],
+    post_submit_bounded_deadline_ms: Optional[int] = None,
     timer: Timer,
 ) -> Any:
     start = timer()
@@ -4368,6 +4435,7 @@ def _execute_password_form(
         prevalidated_signals=signals,
         post_submit_wait_ms=0,
         post_submit_timeout_ms=post_submit_timeout_ms,
+        post_submit_bounded_deadline_ms=post_submit_bounded_deadline_ms,
     )
     result.timings["orchestrator_password_executor_ms"] = _elapsed_ms(start, timer())
     return result
@@ -4412,6 +4480,9 @@ def _safe_password_result_metadata(result: Any) -> dict[str, Any]:
             "post_submit_wait_total_ms",
             "post_submit_timeout_ms",
             "post_submit_interval_ms",
+            "post_submit_probe_reason",
+            "post_submit_bounded_deadline_ms",
+            "post_submit_bounded_deadline_exhausted",
             "post_submit_loading_timeout",
             "email_code_challenge_detected",
             "challenge_type",
@@ -4452,7 +4523,7 @@ def _should_retry_password_result(result: Any, retry_count: int, max_retries: in
         return False
     failure = str(getattr(result, "failure_reason", "") or "")
     probe_reason = str(getattr(result, "post_submit_probe_reason", "") or "")
-    if probe_reason in {"post_submit_unknown_after_settling", "session_expired_after_settling"}:
+    if probe_reason in {"post_submit_unknown_after_settling", "session_expired_after_settling", "post_submit_no_stable_outcome_after_deadline", "post_submit_finalization_pending"}:
         return False
     outcome = _password_result_outcome(result)
     if failure in NO_RETRY_FAILURES or outcome in {
@@ -4487,6 +4558,7 @@ def _password_result_outcome(result: Any) -> str:
         "save_password_prompt_blocking",
         "save_login_info_prompt_blocking",
         "login_submit_still_loading",
+        "post_submit_finalization_pending",
     }:
         return raw
     normalized = normalize_login_probe_outcome(raw)
@@ -4514,6 +4586,10 @@ def _dashboard_action_for_outcome(
 
 def _final_reason_for_password_outcome(outcome: str, password_result: Any, classification_reason: str) -> str:
     probe_reason = str(getattr(password_result, "post_submit_probe_reason", "") or "")
+    if probe_reason == "post_submit_no_stable_outcome_after_deadline":
+        return "post_submit_no_stable_outcome_after_deadline"
+    if probe_reason == "post_submit_finalization_pending":
+        return "post_submit_finalization_pending"
     if outcome == "logged_out" and probe_reason == "session_expired_after_settling":
         return "session_expired_after_settling"
     if outcome == "unknown" and probe_reason == "post_submit_unknown_after_settling":
@@ -4932,6 +5008,7 @@ def _connected_status_publishable(
         "continue_password_only",
         "already_connected_expected",
         "add_existing_account",
+        "join_instagram_existing_profile",
         "logout_fallback",
     }
     return bool(selected_route in safe_routes or router_decision or extra_metadata.get("central_orchestrator_used"))
@@ -5157,6 +5234,7 @@ def _submit_password_after_email_code(
     expected_app_instance_id: str | None,
     adb_serial_masked: str | None,
     post_submit_timeout_ms: Optional[int],
+    post_submit_bounded_deadline_ms: Optional[int] = None,
     max_retry_attempts: int,
     action_id: str | None,
     consume_from_action: bool,
@@ -5166,6 +5244,9 @@ def _submit_password_after_email_code(
     safe_expected_username = str(expected_username or "").strip()
     safe_package_name = _safe_package_name(package_name)
     max_retries = min(MAX_RETRY_ATTEMPTS, max(0, int(max_retry_attempts or 0)))
+    effective_bounded_deadline_ms = post_submit_bounded_deadline_ms
+    if effective_bounded_deadline_ms is None and post_submit_timeout_ms is not None:
+        effective_bounded_deadline_ms = int(post_submit_timeout_ms)
 
     route = route_login_screen(
         expected_username=safe_expected_username,
@@ -5266,6 +5347,7 @@ def _submit_password_after_email_code(
         password=credentials["password"],
         signals=signals,
         post_submit_timeout_ms=post_submit_timeout_ms,
+        post_submit_bounded_deadline_ms=effective_bounded_deadline_ms,
         timer=timer,
     )
     actions_taken.append("login_form_submit")
@@ -5286,6 +5368,7 @@ def _submit_password_after_email_code(
             password=credentials["password"],
             signals=signals,
             post_submit_timeout_ms=post_submit_timeout_ms,
+            post_submit_bounded_deadline_ms=effective_bounded_deadline_ms,
             timer=timer,
         )
         actions_taken.append("login_form_submit_retry")
@@ -5403,6 +5486,8 @@ def run_email_code_resume_flow(
     resume_extra_base: dict[str, Any] = {
         "resume_mode": "consume_action" if consume_from_action else "stdin",
         "run_id": run_id,
+        "central_orchestrator_used": True,
+        "router_decision": "email_code_resume",
     }
 
     guard = _guard_foreground_package_for_login_input(
@@ -5527,6 +5612,7 @@ def run_email_code_resume_flow(
     resume_result = execute_email_code_challenge_resume(
         d,
         verification_code=code_value,
+        expected_username=safe_expected_username,
         post_submit_wait_ms=int(post_submit_timeout_ms or 0),
         timer=timer,
         sleeper=sleeper,
@@ -5554,6 +5640,7 @@ def run_email_code_resume_flow(
                     final_outcome=str(resume_result.post_submit_outcome or "connected"),
                     failure_reason=None,
                     screen_type=str(resume_result.post_submit_screen_type or ""),
+                    safe_metadata=resume_result.safe_metadata,
                 )
             except Exception:
                 warnings.append("verification_action_sync_failed_safe")
@@ -5655,6 +5742,7 @@ def run_email_code_resume_flow(
                 final_outcome=outcome,
                 failure_reason=resume_result.failure_reason or outcome,
                 screen_type=str(resume_result.post_submit_screen_type or password_signals.get("screen_type") or ""),
+                safe_metadata=resume_result.safe_metadata,
             )
         except Exception:
             warnings.append("verification_action_sync_failed_safe")
