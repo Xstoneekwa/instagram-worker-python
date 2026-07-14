@@ -862,12 +862,13 @@ def _reconcile_linked_run(
     return result
 
 
-def _upsert_welcome_operator_review_action(
+def _upsert_operator_review_action(
     *,
     incident_id: str,
     account_id: str,
     request_id: str,
     run_id: str | None,
+    incident_type: str,
     reason: str,
 ) -> dict[str, Any]:
     return supabase_client.call_rpc(
@@ -878,11 +879,11 @@ def _upsert_welcome_operator_review_action(
             "p_incident_id": incident_id,
             "p_action_type": "operator_review_required",
             "p_status": "pending_verification",
-            "p_title": "Welcome run requires operator review",
+            "p_title": "Runtime incident requires operator review",
             "p_dedupe_key": f"account:{account_id}:run:{run_id or request_id}:dashboard_action:operator_review_required",
             "p_safe_client_message": None,
-            "p_admin_message": f"Review the Welcome followers-surface failure ({reason}) before the next launch.",
-            "p_assistant_message": "Welcome followers surface evidence requires human review.",
+            "p_admin_message": f"Review the runtime failure ({reason}) before the next launch.",
+            "p_assistant_message": "Runtime incident evidence requires human review.",
             "p_action_label": "Mark reviewed",
             "p_action_deep_link": "/instagram-dashboard/incidents",
             "p_severity": "critical",
@@ -893,6 +894,7 @@ def _upsert_welcome_operator_review_action(
                 "source": "run_dispatcher",
                 "request_id": request_id,
                 "run_id": run_id,
+                "incident_type": incident_type,
                 "reason": reason,
                 "review_workflow": "canonical_operator_review",
             },
@@ -964,12 +966,17 @@ def _publish_run_failure_incident(
         result = runtime_incidents.publish_account_incident(**payload)
         incident_id = str(result.get("incident_id") or "").strip()
         action_id = None
-        if incident_id and decision.incident_type == "welcome_surface_unstable":
-            action = _upsert_welcome_operator_review_action(
+        needs_operator_review = (
+            decision.action_required == "operator_review_required"
+            or decision.incident_type == "run_worker_failure"
+        )
+        if incident_id and needs_operator_review:
+            action = _upsert_operator_review_action(
                 incident_id=incident_id,
                 account_id=account_id,
                 request_id=request_id,
                 run_id=run_id,
+                incident_type=decision.incident_type,
                 reason=decision.reason_code,
             )
             action_id = action.get("id") if isinstance(action, dict) else None

@@ -34,6 +34,8 @@ DISPATCHER_NAME = "incident_notifications"
 DISPATCHER_VERSION = "orf-4d"
 DRY_RUN_DISPATCHER_VERSION = "orf-4b"
 WEBHOOK_USER_AGENT = "PhoneFarmIncidentNotifier/1.0 (+https://localhost)"
+CANONICAL_INCIDENTS_BASE_URL = "https://www.boostmybusinesses.com"
+ACTION_CTA_LABEL = "Open Incidents/Actions"
 
 
 def _notifications_enabled() -> bool:
@@ -190,9 +192,10 @@ def _sanitize_error(value: Any) -> str:
 
 def _incident_dashboard_url(incident: dict) -> str | None:
     """Secure internal link to the Admin incidents view (never a webhook)."""
-    base = str(getattr(config, "INCIDENT_NOTIFICATIONS_DASHBOARD_BASE_URL", "") or "").strip().rstrip("/")
-    if not base:
-        return None
+    base = str(
+        getattr(config, "INCIDENT_NOTIFICATIONS_DASHBOARD_BASE_URL", "")
+        or CANONICAL_INCIDENTS_BASE_URL
+    ).strip().rstrip("/")
     incident_id = str(incident.get("id") or "").strip()
     suffix = f"?incident_id={incident_id}" if incident_id else ""
     return f"{base}/instagram-dashboard/incidents{suffix}"
@@ -223,8 +226,6 @@ def build_incident_notification_payload(incident: dict) -> dict:
     if run_id:
         message_parts.append(f"Run: {_short_id(run_id) or run_id}")
     dashboard_url = _incident_dashboard_url(incident)
-    if dashboard_url:
-        message_parts.append(f"Dashboard: {dashboard_url}")
 
     payload = {
         "title": title,
@@ -247,12 +248,27 @@ def build_incident_notification_payload(incident: dict) -> dict:
 
 def build_slack_payload(payload: dict) -> dict:
     safe = _redact_payload(dict(payload or {}))
-    return {"text": str(safe.get("text") or safe.get("title") or "Incident notification")}
+    text = str(safe.get("text") or safe.get("title") or "Incident notification")
+    dashboard_url = str(safe.get("dashboard_url") or "").strip()
+    if not dashboard_url:
+        return {"text": text}
+    cta = f"<{dashboard_url}|{ACTION_CTA_LABEL}>"
+    return {
+        "text": f"{text}\n{cta}",
+        "blocks": [
+            {"type": "section", "text": {"type": "mrkdwn", "text": text}},
+            {"type": "section", "text": {"type": "mrkdwn", "text": cta}},
+        ],
+    }
 
 
 def build_discord_payload(payload: dict) -> dict:
     safe = _redact_payload(dict(payload or {}))
-    return {"content": str(safe.get("text") or safe.get("title") or "Incident notification")}
+    text = str(safe.get("text") or safe.get("title") or "Incident notification")
+    dashboard_url = str(safe.get("dashboard_url") or "").strip()
+    if dashboard_url:
+        text = f"{text}\n[{ACTION_CTA_LABEL}]({dashboard_url})"
+    return {"content": text}
 
 
 def _post_json_webhook(url: str, body: dict, timeout: int) -> dict:

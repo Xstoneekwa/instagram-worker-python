@@ -259,9 +259,9 @@ class IncidentNotificationsTest(unittest.TestCase):
             payload["dashboard_url"],
             "https://admin.example.com/instagram-dashboard/incidents?incident_id=incident-1",
         )
-        self.assertIn("Dashboard: https://admin.example.com/instagram-dashboard/incidents", payload["text"])
+        self.assertNotIn("https://admin.example.com", payload["text"])
 
-    def test_dashboard_link_omitted_without_base_url(self) -> None:
+    def test_dashboard_link_uses_canonical_production_url_without_override(self) -> None:
         with patch.object(
             incident_notifications.config,
             "INCIDENT_NOTIFICATIONS_DASHBOARD_BASE_URL",
@@ -269,8 +269,11 @@ class IncidentNotificationsTest(unittest.TestCase):
             create=True,
         ):
             payload = incident_notifications.build_incident_notification_payload(_incident("incident-1"))
-        self.assertNotIn("dashboard_url", payload)
-        self.assertNotIn("PLACEHOLDER", payload["text"])
+        self.assertEqual(
+            payload["dashboard_url"],
+            "https://www.boostmybusinesses.com/instagram-dashboard/incidents?incident_id=incident-1",
+        )
+        self.assertNotIn("https://", payload["text"])
 
     def test_slack_payload_builder(self) -> None:
         payload = incident_notifications.build_slack_payload({"title": "T", "text": "hello"})
@@ -279,6 +282,15 @@ class IncidentNotificationsTest(unittest.TestCase):
     def test_discord_payload_builder(self) -> None:
         payload = incident_notifications.build_discord_payload({"title": "T", "text": "hello"})
         self.assertEqual(payload, {"content": "hello"})
+
+    def test_actionable_payloads_render_hidden_canonical_cta(self) -> None:
+        source = incident_notifications.build_incident_notification_payload(_incident("incident-1"))
+        slack = incident_notifications.build_slack_payload(source)
+        discord = incident_notifications.build_discord_payload(source)
+        self.assertIn("<https://www.boostmybusinesses.com/instagram-dashboard/incidents?incident_id=incident-1|Open Incidents/Actions>", slack["text"])
+        self.assertEqual(slack["blocks"][1]["text"]["text"], "<https://www.boostmybusinesses.com/instagram-dashboard/incidents?incident_id=incident-1|Open Incidents/Actions>")
+        self.assertIn("[Open Incidents/Actions](https://www.boostmybusinesses.com/instagram-dashboard/incidents?incident_id=incident-1)", discord["content"])
+        self.assertNotIn("Dashboard: https://", source["text"])
 
     def test_fail_open_on_supabase_error(self) -> None:
         with (

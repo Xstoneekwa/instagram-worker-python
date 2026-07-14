@@ -105,6 +105,42 @@ class PublishRunFailureIncidentTest(unittest.TestCase):
         self.assertIn("Impossible de confirmer le compte Instagram actif", kwargs["action_required"])
         self.assertEqual(kwargs["metadata"]["run_request_id"], REQUEST_ID)
 
+    def test_structured_worker_failure_upserts_linked_operator_review_action(self) -> None:
+        run_row = {
+            "id": RUN_ID,
+            "status": "failed",
+            "performance_summary": {
+                "reason": "followers_surface_lost",
+                "run_type": "account_session",
+            },
+        }
+        with (
+            patch.object(consumer.supabase_client, "load_run_row", return_value=run_row),
+            patch.object(consumer.supabase_client, "get_account_username", return_value="i_m_your_traker"),
+            patch.object(
+                consumer.runtime_incidents,
+                "publish_account_incident",
+                return_value={"published": True, "incident_id": "inc-worker", "occurrence_count": 1},
+            ),
+            patch.object(consumer.supabase_client, "call_rpc", return_value={"id": "action-worker"}) as call_rpc,
+        ):
+            consumer._publish_run_failure_incident(
+                request_id=REQUEST_ID,
+                account_id=ACCOUNT_ID,
+                run_id=RUN_ID,
+                run_type="account_session",
+                exit_code=1,
+                timed_out=False,
+                canceled=False,
+            )
+
+        rpc_name, params = call_rpc.call_args.args
+        self.assertEqual(rpc_name, "upsert_account_dashboard_action")
+        self.assertEqual(params["p_incident_id"], "inc-worker")
+        self.assertEqual(params["p_metadata"]["request_id"], REQUEST_ID)
+        self.assertEqual(params["p_metadata"]["run_id"], RUN_ID)
+        self.assertEqual(params["p_metadata"]["incident_type"], "run_worker_failure")
+
     def test_canceled_run_publishes_nothing(self) -> None:
         with (
             patch.object(
