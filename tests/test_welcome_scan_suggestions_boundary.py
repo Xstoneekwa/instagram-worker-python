@@ -50,7 +50,6 @@ class WelcomeScanSuggestionsBoundaryTest(unittest.TestCase):
     def test_strong_followers_rows_then_suggestions_preserves_four_planned_jobs(self) -> None:
         rows = [{"username": f"new_follower_{index}", "screen_index": 0} for index in range(4)]
         enqueue = MagicMock(side_effect=lambda _account_id, username, **_kwargs: {"id": f"job-{username}", "status": "pending"})
-        backward = MagicMock(return_value=True)
         with ExitStack() as stack:
             for context in self._common_patches(rows):
                 stack.enter_context(context)
@@ -58,7 +57,6 @@ class WelcomeScanSuggestionsBoundaryTest(unittest.TestCase):
             stack.enter_context(patch.object(scan.supabase_client, "enqueue_welcome_dm_job_if_eligible", enqueue))
             stack.enter_context(patch.object(scan, "followers_refresh_detect_hierarchy_cache", return_value=SUGGESTIONS_XML))
             stack.enter_context(patch.object(scan, "detect_followers_list_screen", return_value={"is_followers_list": False, "current_screen_guess": "likely_profile"}))
-            stack.enter_context(patch.object(scan, "scroll_followers_list_backward", backward))
             code = scan.run_welcome_scan_producer(
                 MagicMock(),
                 account_id="account-1",
@@ -72,23 +70,21 @@ class WelcomeScanSuggestionsBoundaryTest(unittest.TestCase):
         self.assertEqual(summary["jobs_enqueued_count"], 4)
         self.assertTrue(summary["followers_suggestions_boundary_detected"])
         self.assertFalse(summary["followers_suggestions_boundary_backtrack_attempted"])
-        backward.assert_not_called()
 
-    def test_loading_boundary_without_jobs_backtracks_once_and_revalidates(self) -> None:
+    def test_loading_boundary_without_jobs_stops_without_navigation(self) -> None:
         rows = [{"username": "known_follower", "screen_index": 0}]
         known = {"known_follower": {"follower_username": "known_follower", "welcome_dm_status": "skipped"}}
-        backward = MagicMock(return_value=True)
         with ExitStack() as stack:
             for context in self._common_patches(rows):
                 stack.enter_context(context)
             stack.enter_context(patch.object(scan.supabase_client, "fetch_followers_by_usernames", return_value=known))
-            enqueue = stack.enter_context(patch.object(scan.supabase_client, "enqueue_welcome_dm_job_if_eligible"))
-            stack.enter_context(patch.object(scan, "followers_refresh_detect_hierarchy_cache", side_effect=[LOADING_XML, STABLE_XML]))
-            stack.enter_context(patch.object(scan, "detect_followers_list_screen", side_effect=[
-                {"is_followers_list": False, "current_screen_guess": "likely_profile"},
-                {"is_followers_list": True, "current_screen_guess": "followers_list"},
-            ]))
-            stack.enter_context(patch.object(scan, "scroll_followers_list_backward", backward))
+            enqueue = stack.enter_context(patch.object(
+                scan.supabase_client,
+                "enqueue_welcome_dm_job_if_eligible",
+                return_value=None,
+            ))
+            stack.enter_context(patch.object(scan, "followers_refresh_detect_hierarchy_cache", return_value=LOADING_XML))
+            stack.enter_context(patch.object(scan, "detect_followers_list_screen", return_value={"is_followers_list": False, "current_screen_guess": "likely_profile"}))
             code = scan.run_welcome_scan_producer(
                 MagicMock(),
                 account_id="account-1",
@@ -101,9 +97,40 @@ class WelcomeScanSuggestionsBoundaryTest(unittest.TestCase):
         self.assertEqual(summary["stop_reason"], "followers_suggestions_boundary")
         self.assertEqual(summary["jobs_enqueued_count"], 0)
         self.assertTrue(summary["followers_suggestions_boundary_detected"])
-        self.assertTrue(summary["followers_suggestions_boundary_backtrack_attempted"])
-        backward.assert_called_once()
+        self.assertFalse(summary["followers_suggestions_boundary_backtrack_attempted"])
         enqueue.assert_not_called()
+
+    def test_known_pending_followers_restore_jobs_before_suggestions_boundary(self) -> None:
+        rows = [{"username": f"retryable_{index}", "screen_index": 0} for index in range(4)]
+        known = {
+            row["username"]: {
+                "follower_username": row["username"],
+                "welcome_dm_status": "pending",
+                "skip_reason": "",
+            }
+            for row in rows
+        }
+        enqueue = MagicMock(side_effect=lambda _account_id, username, **_kwargs: {"id": f"job-{username}", "status": "pending"})
+        with ExitStack() as stack:
+            for context in self._common_patches(rows):
+                stack.enter_context(context)
+            stack.enter_context(patch.object(scan.supabase_client, "fetch_followers_by_usernames", return_value=known))
+            stack.enter_context(patch.object(scan.supabase_client, "enqueue_welcome_dm_job_if_eligible", enqueue))
+            stack.enter_context(patch.object(scan, "followers_refresh_detect_hierarchy_cache", return_value=SUGGESTIONS_XML))
+            stack.enter_context(patch.object(scan, "detect_followers_list_screen", return_value={"is_followers_list": False, "current_screen_guess": "likely_profile"}))
+            code = scan.run_welcome_scan_producer(
+                MagicMock(),
+                account_id="account-1",
+                account_username="i_m_your_traker",
+                run_id="run-retryable-suggestions",
+            )
+
+        summary = scan.get_last_welcome_scan_summary()
+        self.assertEqual(code, 0)
+        self.assertEqual(summary["stop_reason"], "followers_suggestions_boundary")
+        self.assertEqual(summary["jobs_enqueued_count"], 4)
+        self.assertEqual(len(summary["new_follower_job_ids_enqueued"]), 4)
+        self.assertEqual(enqueue.call_count, 4)
 
 
 if __name__ == "__main__":

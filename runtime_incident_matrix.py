@@ -93,8 +93,8 @@ WELCOME_SURFACE_FAILURE_REASONS = frozenset(
 )
 
 MYTHYL_OPERATOR_MESSAGE = (
-    "Impossible de confirmer le compte Instagram actif. "
-    "Intervention humaine requise avant reprise."
+    "The active Instagram account could not be confirmed. "
+    "Human review is required before resuming."
 )
 
 
@@ -217,11 +217,11 @@ def classify_terminal_run_failure(
                 incident_type="run_identity_verification_failed",
                 reason_code=code,
                 severity="critical",
-                operator_label="Identité Instagram non vérifiable",
+                operator_label="Instagram identity could not be verified",
                 action_required=MYTHYL_OPERATOR_MESSAGE,
                 admin_message=(
-                    "Le préflight identité n'a pas pu prouver le pseudo actif "
-                    f"({code}). Le run a été arrêté avant toute action."
+                    "Identity preflight could not verify the active username "
+                    f"({code}). The run stopped before any business action."
                 ),
                 notify_channels=True,
                 metadata_safe=metadata_safe,
@@ -231,14 +231,14 @@ def classify_terminal_run_failure(
             incident_type="active_instagram_account_mismatch",
             reason_code="active_instagram_account_mismatch",
             severity="critical",
-            operator_label="Mauvais compte Instagram actif",
+            operator_label="Wrong active Instagram account",
             action_required=(
-                "Un autre compte Instagram est connecté dans le clone assigné. "
-                "Vérifier le compte actif avant reprise."
+                "A different Instagram account is signed in on the assigned clone. "
+                "Verify the active account before resuming."
             ),
             admin_message=(
-                "Le préflight identité a détecté un pseudo différent du compte "
-                "attendu. Le run a été arrêté avant toute action."
+                "Identity preflight detected a username different from the expected "
+                "account. The run stopped before any business action."
             ),
             notify_channels=True,
             metadata_safe=metadata_safe,
@@ -268,10 +268,10 @@ def classify_terminal_run_failure(
             incident_type="assigned_instagram_package_unavailable",
             reason_code=code,
             severity="critical" if exit_code == 43 else "error",
-            operator_label="Package / clone Instagram assigné inutilisable",
+            operator_label="Assigned Instagram package or clone unavailable",
             action_required=(
-                "Le clone Instagram assigné n'a pas pu être utilisé. "
-                "Vérifier le device et l'app instance avant reprise."
+                "The assigned Instagram clone could not be used. "
+                "Verify the device and app instance before resuming."
             ),
             admin_message=f"Assigned package unusable ({code}), exit code {exit_code}.",
             notify_channels=True,
@@ -285,10 +285,10 @@ def classify_terminal_run_failure(
             incident_type="account_login_required",
             reason_code=reason,
             severity="critical",
-            operator_label="Compte Instagram déconnecté ou challenge",
+            operator_label="Instagram account signed out or challenged",
             action_required=(
-                "Le compte Instagram n'est plus connecté ou un challenge est "
-                "affiché. Intervention humaine requise avant reprise."
+                "The Instagram account is signed out or a challenge is displayed. "
+                "Human review is required before resuming."
             ),
             admin_message=f"Login/challenge surface detected ({reason}).",
             notify_channels=True,
@@ -302,10 +302,10 @@ def classify_terminal_run_failure(
             incident_type="run_device_unavailable",
             reason_code=reason,
             severity="error",
-            operator_label="Device indisponible pendant le run",
+            operator_label="Device unavailable during the run",
             action_required=(
-                "Le téléphone assigné est devenu indisponible pendant le run. "
-                "Vérifier la connexion du device."
+                "The assigned phone became unavailable during the run. "
+                "Verify the device connection."
             ),
             admin_message=f"Device unavailable during run ({reason}).",
             notify_channels=True,
@@ -319,10 +319,10 @@ def classify_terminal_run_failure(
             incident_type="run_worker_failure",
             reason_code="subprocess_timeout",
             severity="error",
-            operator_label="Run interrompu par timeout dispatcher",
+            operator_label="Run stopped by dispatcher timeout",
             action_required=(
-                "Le run a dépassé le timeout du dispatcher et a été arrêté. "
-                "Vérifier l'état du device et du compte."
+                "The run exceeded the dispatcher timeout and was stopped. "
+                "Verify the device and account state."
             ),
             admin_message="Worker subprocess exceeded dispatcher timeout.",
             notify_channels=True,
@@ -336,10 +336,10 @@ def classify_terminal_run_failure(
             incident_type="run_worker_failure",
             reason_code=reason,
             severity="error",
-            operator_label="Échec runtime du run",
+            operator_label="Structured run failure",
             action_required=(
-                "Le run a échoué avec une erreur runtime structurée. "
-                "Vérifier les détails internes avant reprise."
+                "The run failed with a structured runtime error. "
+                "Review the internal details before resuming."
             ),
             admin_message=f"Structured worker failure ({reason}), exit code {exit_code}.",
             notify_channels=True,
@@ -352,10 +352,10 @@ def classify_terminal_run_failure(
         incident_type="run_worker_failure",
         reason_code="worker_exit_nonzero",
         severity="error",
-        operator_label="Échec worker sans raison structurée",
+        operator_label="Worker failed without a structured reason",
         action_required=(
-            "Le worker s'est terminé en erreur sans raison structurée. "
-            "Vérifier les logs internes du run."
+            "The worker exited with an error and no structured reason. "
+            "Review the internal run logs."
         ),
         admin_message=f"Worker subprocess exited with code {exit_code} and no structured reason.",
         notify_channels=True,

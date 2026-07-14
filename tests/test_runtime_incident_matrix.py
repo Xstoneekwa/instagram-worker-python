@@ -28,8 +28,8 @@ class ClassifyTerminalRunFailureTest(unittest.TestCase):
         self.assertEqual(decision.reason_code, "actual_logged_in_username_not_detected")
         self.assertEqual(decision.severity, "critical")
         self.assertTrue(decision.notify_channels)
-        self.assertIn("Impossible de confirmer le compte Instagram actif", decision.action_required)
-        self.assertIn("Intervention humaine", decision.action_required)
+        self.assertIn("active Instagram account could not be confirmed", decision.action_required)
+        self.assertIn("Human review", decision.action_required)
 
     def test_identity_mismatch_creates_distinct_incident(self) -> None:
         # F2: detected-but-wrong username is a distinct incident type.

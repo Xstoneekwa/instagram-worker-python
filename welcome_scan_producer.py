@@ -24,7 +24,6 @@ from instagram_navigation import (
     followers_session_list_committed_open_for,
     followers_session_merge_det_for_committed_visual_surface,
     harvest_visible_followers_rows,
-    scroll_followers_list_backward,
     scroll_followers_list_forward,
 )
 from logs import log
@@ -183,7 +182,6 @@ def run_welcome_scan_producer(
     enqueue_blocked_global = False
     enqueue_block_reason: str | None = None
     suggestions_boundary_detected = False
-    suggestions_boundary_backtrack_attempted = False
 
     def _elapsed_ms() -> float:
         return (time.perf_counter() - t0) * 1000.0
@@ -229,7 +227,7 @@ def run_welcome_scan_producer(
             stop_reason=stop_reason,
             failure_reason=failure_reason,
             followers_suggestions_boundary_detected=suggestions_boundary_detected,
-            followers_suggestions_boundary_backtrack_attempted=suggestions_boundary_backtrack_attempted,
+            followers_suggestions_boundary_backtrack_attempted=False,
             total_ms=round(_elapsed_ms(), 2),
         )
         return code
@@ -508,8 +506,25 @@ def run_welcome_scan_producer(
                 if not baseline_anchor and phase == "pre_anchor":
                     pending_job = pending_job_map.get(key)
                     if (
-                        str(row.get("welcome_dm_status") or "") == "pending"
-                        and pending_job
+                        not pending_job
+                        and str(row.get("welcome_dm_status") or "") == "pending"
+                        and jobs_enqueued_count
+                        < (
+                            session_sent_cap
+                            if welcome_send_hard_cap_present
+                            else session_candidate_attempt_cap
+                        )
+                    ):
+                        pending_job = supabase_client.enqueue_welcome_dm_job_if_eligible(
+                            aid,
+                            handle,
+                            scan_run_id=scan_run_id,
+                            template_id=welcome_template_id,
+                            message_body=None,
+                            account_username=uname,
+                        )
+                    if (
+                        pending_job
                         and jobs_enqueued_count
                         < (
                             session_sent_cap
@@ -833,45 +848,7 @@ def run_welcome_scan_producer(
                     jobs_enqueued_count=jobs_enqueued_count,
                     **{key: value for key, value in boundary.items() if key != "is_boundary"},
                 )
-                if jobs_enqueued_count > 0:
-                    stop_reason = "followers_suggestions_boundary"
-                    break
-
-                suggestions_boundary_backtrack_attempted = True
-                backtracked = scroll_followers_list_backward(
-                    d,
-                    source_profile_username=uname,
-                    bypass_post_tap_capture_gate=True,
-                    bypass_scroll_xml_guards=True,
-                )
-                followers_clear_detect_hierarchy_cache()
-                stable_hierarchy = followers_refresh_detect_hierarchy_cache(
-                    d,
-                    screen_index=max(0, scrolls_done - 1),
-                ) if backtracked else ""
-                stable_det = detect_followers_list_screen(
-                    d,
-                    source_profile_username=uname,
-                    hierarchy_xml=stable_hierarchy or None,
-                ) if backtracked else {}
-                if backtracked and bool(stable_det.get("is_followers_list")):
-                    log(
-                        "info",
-                        "followers_suggestions_boundary_stable_zone_revalidated",
-                        account_id=aid,
-                        run_id=scan_run_id,
-                        screen_index=max(0, scrolls_done - 1),
-                    )
-                    stop_reason = "followers_suggestions_boundary"
-                else:
-                    log(
-                        "error",
-                        "followers_suggestions_boundary_revalidation_failed",
-                        account_id=aid,
-                        run_id=scan_run_id,
-                        backtracked=backtracked,
-                    )
-                    stop_reason = "followers_suggestions_boundary_revalidation_failed"
+                stop_reason = "followers_suggestions_boundary"
                 break
 
             stop_reason = "followers_surface_lost"
@@ -909,7 +886,4 @@ def run_welcome_scan_producer(
 
     if enqueue_blocked_global and jobs_enqueued_count == 0:
         return _finish("failed", 1, enqueue_block_reason or "no_welcome_template")
-    if stop_reason == "followers_suggestions_boundary_revalidation_failed":
-        return _finish("failed", 1, stop_reason)
-
     return _finish("success", 0)

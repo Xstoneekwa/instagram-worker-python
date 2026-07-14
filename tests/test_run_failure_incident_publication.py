@@ -102,7 +102,7 @@ class PublishRunFailureIncidentTest(unittest.TestCase):
             kwargs["dedupe_key"],
             f"account:{ACCOUNT_ID}:run:{RUN_ID}:run_identity_verification_failed",
         )
-        self.assertIn("Impossible de confirmer le compte Instagram actif", kwargs["action_required"])
+        self.assertIn("active Instagram account could not be confirmed", kwargs["action_required"])
         self.assertEqual(kwargs["metadata"]["run_request_id"], REQUEST_ID)
 
     def test_canceled_run_publishes_nothing(self) -> None:

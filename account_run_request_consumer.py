@@ -964,7 +964,7 @@ def _publish_run_failure_incident(
         result = runtime_incidents.publish_account_incident(**payload)
         incident_id = str(result.get("incident_id") or "").strip()
         action_id = None
-        if incident_id and decision.incident_type == "welcome_surface_unstable":
+        if incident_id and decision.action_required == "operator_review_required":
             action = _upsert_welcome_operator_review_action(
                 incident_id=incident_id,
                 account_id=account_id,
