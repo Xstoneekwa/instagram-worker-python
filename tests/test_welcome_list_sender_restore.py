@@ -387,12 +387,13 @@ class WelcomeListSenderRestoreTest(unittest.TestCase):
         self.assertEqual(summary["session_scan_jobs_count_before_planning"], 4)
         self.assertEqual(len(summary["planned_session_jobs"]), 4)
 
-    def test_visible_planned_candidate_at_suggestions_boundary_skips_entry_recovery(self) -> None:
+    def test_visible_planned_welcome_follower_at_boundary_skips_entry_recovery(self) -> None:
         scan_summary = self._scan_summary(4)
         selected = scan_summary["new_follower_job_ids_enqueued"][0]["username"]
         scan_summary.update({
             "followers_suggestions_boundary_action": "use_visible_candidate",
             "followers_suggestions_boundary_selected_candidate": selected,
+            "followers_suggestions_boundary_selected_candidate_is_real_follower": True,
         })
         ensure_entry = MagicMock()
         with (

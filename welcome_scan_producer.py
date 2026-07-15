@@ -122,6 +122,20 @@ def _followers_suggestions_boundary(
     }
 
 
+_WELCOME_REAL_FOLLOWER_CTA_CLASSES = {
+    "message",
+    "follow_back",
+    "following",
+    "requested",
+    "contact",
+}
+
+
+def _is_confirmed_welcome_follower_row(row: dict[str, Any]) -> bool:
+    """Reject Suggestions rows; only own-followers row CTA classes are accepted."""
+    return str(row.get("row_cta_xml_class") or "").strip().lower() in _WELCOME_REAL_FOLLOWER_CTA_CLASSES
+
+
 def run_welcome_scan_producer(
     d: u2.Device,
     *,
@@ -188,6 +202,7 @@ def run_welcome_scan_producer(
     suggestions_boundary_backtrack_attempted = False
     suggestions_boundary_action: str | None = None
     suggestions_boundary_selected_candidate: str | None = None
+    suggestions_boundary_selected_candidate_is_real_follower = False
     suggestions_boundary_recovered_real_rows: list[str] = []
     suggestions_boundary_final_surface: str | None = None
     last_visible_rows: list[dict[str, Any]] = []
@@ -240,6 +255,9 @@ def run_welcome_scan_producer(
             followers_suggestions_boundary_backtrack_attempted=suggestions_boundary_backtrack_attempted,
             followers_suggestions_boundary_action=suggestions_boundary_action,
             followers_suggestions_boundary_selected_candidate=suggestions_boundary_selected_candidate,
+            followers_suggestions_boundary_selected_candidate_is_real_follower=(
+                suggestions_boundary_selected_candidate_is_real_follower
+            ),
             followers_suggestions_boundary_recovered_real_rows=list(suggestions_boundary_recovered_real_rows),
             followers_suggestions_boundary_final_surface=suggestions_boundary_final_surface,
             total_ms=round(_elapsed_ms(), 2),
@@ -922,12 +940,14 @@ def run_welcome_scan_producer(
                     (
                         row for row in observed_rows
                         if _norm_username(str(row.get("username") or "")) in planned_keys
+                        and _is_confirmed_welcome_follower_row(row)
                     ),
                     None,
                 )
                 if selected_row is not None:
                     suggestions_boundary_action = "use_visible_candidate"
                     suggestions_boundary_selected_candidate = str(selected_row.get("username") or "") or None
+                    suggestions_boundary_selected_candidate_is_real_follower = True
                     selected_key = _norm_username(suggestions_boundary_selected_candidate or "")
                     for entry in new_follower_visible_rows_enqueued:
                         if _norm_username(str(entry.get("username") or "")) == selected_key:
@@ -942,7 +962,7 @@ def run_welcome_scan_producer(
                     log(
                         "info",
                         "followers_suggestions_boundary_transition",
-                        visible_real_rows=rows_after,
+                        visible_real_rows=[suggestions_boundary_selected_candidate],
                         selected_candidate=suggestions_boundary_selected_candidate,
                         action=suggestions_boundary_action,
                         reason="planned_welcome_candidate_visible",
@@ -955,7 +975,11 @@ def run_welcome_scan_producer(
                 log(
                     "info",
                     "followers_suggestions_boundary_transition",
-                    visible_real_rows=rows_after,
+                    visible_real_rows=[
+                        str(row.get("username") or "").strip()
+                        for row in observed_rows
+                        if row.get("username") and _is_confirmed_welcome_follower_row(row)
+                    ],
                     selected_candidate=None,
                     action=suggestions_boundary_action,
                     reason="no_planned_welcome_candidate_visible",
@@ -986,7 +1010,7 @@ def run_welcome_scan_producer(
                 suggestions_boundary_recovered_real_rows = [
                     str(row.get("username") or "").strip()
                     for row in recovered_rows
-                    if row.get("username")
+                    if row.get("username") and _is_confirmed_welcome_follower_row(row)
                 ]
                 recovered_selected = next(
                     (
@@ -996,7 +1020,10 @@ def run_welcome_scan_producer(
                     None,
                 )
                 stable_recovery = bool(recovered_det.get("is_followers_list")) and bool(recovered_rows)
-                suggestions_boundary_selected_candidate = recovered_selected
+                suggestions_boundary_selected_candidate = recovered_selected if stable_recovery else None
+                suggestions_boundary_selected_candidate_is_real_follower = bool(
+                    stable_recovery and recovered_selected
+                )
                 suggestions_boundary_final_surface = (
                     "followers_list" if stable_recovery else str(recovered_det.get("current_screen_guess") or "unknown")
                 )
@@ -1004,7 +1031,7 @@ def run_welcome_scan_producer(
                     "info" if stable_recovery else "error",
                     "followers_suggestions_boundary_recovery_completed",
                     recovered_real_rows=suggestions_boundary_recovered_real_rows,
-                    selected_candidate=recovered_selected,
+                    selected_candidate=suggestions_boundary_selected_candidate,
                     final_surface=suggestions_boundary_final_surface,
                 )
                 if stable_recovery:

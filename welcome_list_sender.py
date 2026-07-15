@@ -1459,6 +1459,7 @@ def run_welcome_list_sender(
     boundary_candidate_ready = (
         str(scan.get("followers_suggestions_boundary_action") or "")
         == "use_visible_candidate"
+        and scan.get("followers_suggestions_boundary_selected_candidate_is_real_follower") is True
         and bool(boundary_candidate)
         and _norm_username(boundary_candidate)
         in {_norm_username(str(entry.get("username") or "")) for entry in session_scan_jobs}

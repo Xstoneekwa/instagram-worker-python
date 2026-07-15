@@ -47,7 +47,14 @@ class WelcomeScanSuggestionsBoundaryTest(unittest.TestCase):
         )
 
     def test_strong_followers_rows_then_suggestions_preserves_four_planned_jobs(self) -> None:
-        rows = [{"username": f"new_follower_{index}", "screen_index": 0} for index in range(4)]
+        rows = [
+            {
+                "username": f"new_follower_{index}",
+                "screen_index": 0,
+                "row_cta_xml_class": "message",
+            }
+            for index in range(4)
+        ]
         enqueue = MagicMock(side_effect=lambda _account_id, username, **_kwargs: {"id": f"job-{username}", "status": "pending"})
         with ExitStack() as stack:
             for context in self._common_patches(rows):
@@ -72,10 +79,48 @@ class WelcomeScanSuggestionsBoundaryTest(unittest.TestCase):
         self.assertTrue(summary["followers_suggestions_boundary_detected"])
         self.assertFalse(summary["followers_suggestions_boundary_backtrack_attempted"])
         self.assertEqual(summary["followers_suggestions_boundary_action"], "use_visible_candidate")
+        self.assertTrue(summary["followers_suggestions_boundary_selected_candidate_is_real_follower"])
         self.assertEqual(scroll.call_args.kwargs["scroll_profile"], "welcome_soft")
         planned = next(call for call in log_mock.call_args_list if call.args[1] == "followers_soft_scroll_planned")
         self.assertEqual(planned.kwargs["distance_px"], 585)
         self.assertEqual(planned.kwargs["ratio"], 0.25)
+
+    def test_suggestions_follow_row_is_never_used_as_visible_welcome_candidate(self) -> None:
+        rows = [{
+            "username": "planned_welcome_user",
+            "screen_index": 0,
+            "row_cta_xml_class": "follow",
+        }]
+        enqueue = MagicMock(return_value={"id": "job-planned", "status": "pending"})
+        with ExitStack() as stack:
+            for context in self._common_patches(rows):
+                stack.enter_context(context)
+            stack.enter_context(patch.object(scan.supabase_client, "fetch_followers_by_usernames", return_value={}))
+            stack.enter_context(patch.object(scan.supabase_client, "enqueue_welcome_dm_job_if_eligible", enqueue))
+            stack.enter_context(patch.object(scan, "scroll_followers_list_forward", return_value=True))
+            backtrack = stack.enter_context(patch.object(scan, "scroll_followers_list_backward", return_value=True))
+            stack.enter_context(patch.object(scan, "followers_refresh_detect_hierarchy_cache", return_value=SUGGESTIONS_XML))
+            stack.enter_context(patch.object(
+                scan,
+                "detect_followers_list_screen",
+                side_effect=[
+                    {"is_followers_list": False, "current_screen_guess": "likely_profile"},
+                    {"is_followers_list": True, "current_screen_guess": "followers_list"},
+                ],
+            ))
+            code = scan.run_welcome_scan_producer(
+                MagicMock(),
+                account_id="account-1",
+                account_username="i_m_your_traker",
+                run_id="run-never-use-suggestion",
+            )
+
+        summary = scan.get_last_welcome_scan_summary()
+        self.assertEqual(code, 0)
+        self.assertEqual(summary["followers_suggestions_boundary_action"], "compact_up_recovery")
+        self.assertIsNone(summary["followers_suggestions_boundary_selected_candidate"])
+        self.assertFalse(summary["followers_suggestions_boundary_selected_candidate_is_real_follower"])
+        self.assertEqual(backtrack.call_count, 1)
 
     def test_loading_boundary_without_jobs_recovers_one_stable_screen(self) -> None:
         rows = [{"username": "known_follower", "screen_index": 0}]
@@ -120,7 +165,14 @@ class WelcomeScanSuggestionsBoundaryTest(unittest.TestCase):
         enqueue.assert_not_called()
 
     def test_known_pending_followers_restore_jobs_before_suggestions_boundary(self) -> None:
-        rows = [{"username": f"retryable_{index}", "screen_index": 0} for index in range(4)]
+        rows = [
+            {
+                "username": f"retryable_{index}",
+                "screen_index": 0,
+                "row_cta_xml_class": "message",
+            }
+            for index in range(4)
+        ]
         known = {
             row["username"]: {
                 "follower_username": row["username"],
