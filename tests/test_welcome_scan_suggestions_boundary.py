@@ -62,9 +62,21 @@ class WelcomeScanSuggestionsBoundaryTest(unittest.TestCase):
             stack.enter_context(patch.object(scan.supabase_client, "fetch_followers_by_usernames", return_value={}))
             stack.enter_context(patch.object(scan.supabase_client, "enqueue_welcome_dm_job_if_eligible", enqueue))
             scroll = stack.enter_context(patch.object(scan, "scroll_followers_list_forward", return_value=True))
+            backtrack = stack.enter_context(patch.object(scan, "scroll_followers_list_backward", return_value=True))
             log_mock = stack.enter_context(patch.object(scan, "log"))
-            stack.enter_context(patch.object(scan, "followers_refresh_detect_hierarchy_cache", return_value=SUGGESTIONS_XML))
-            stack.enter_context(patch.object(scan, "detect_followers_list_screen", return_value={"is_followers_list": False, "current_screen_guess": "likely_profile"}))
+            stack.enter_context(patch.object(
+                scan,
+                "followers_refresh_detect_hierarchy_cache",
+                side_effect=[SUGGESTIONS_XML, STABLE_XML],
+            ))
+            stack.enter_context(patch.object(
+                scan,
+                "detect_followers_list_screen",
+                side_effect=[
+                    {"is_followers_list": False, "current_screen_guess": "likely_profile"},
+                    {"is_followers_list": True, "current_screen_guess": "followers_list"},
+                ],
+            ))
             code = scan.run_welcome_scan_producer(
                 MagicMock(),
                 account_id="account-1",
@@ -77,9 +89,11 @@ class WelcomeScanSuggestionsBoundaryTest(unittest.TestCase):
         self.assertEqual(summary["stop_reason"], "followers_suggestions_boundary")
         self.assertEqual(summary["jobs_enqueued_count"], 4)
         self.assertTrue(summary["followers_suggestions_boundary_detected"])
-        self.assertFalse(summary["followers_suggestions_boundary_backtrack_attempted"])
-        self.assertEqual(summary["followers_suggestions_boundary_action"], "use_visible_candidate")
+        self.assertTrue(summary["followers_suggestions_boundary_backtrack_attempted"])
+        self.assertEqual(summary["followers_suggestions_boundary_action"], "adaptive_up_recovery")
         self.assertTrue(summary["followers_suggestions_boundary_selected_candidate_is_real_follower"])
+        self.assertEqual(summary["followers_suggestions_boundary_recovery_attempts"], 1)
+        self.assertEqual(backtrack.call_count, 1)
         self.assertEqual(scroll.call_args.kwargs["scroll_profile"], "welcome_soft")
         planned = next(call for call in log_mock.call_args_list if call.args[1] == "followers_soft_scroll_planned")
         self.assertEqual(planned.kwargs["distance_px"], 585)
@@ -116,14 +130,22 @@ class WelcomeScanSuggestionsBoundaryTest(unittest.TestCase):
             )
 
         summary = scan.get_last_welcome_scan_summary()
-        self.assertEqual(code, 0)
-        self.assertEqual(summary["followers_suggestions_boundary_action"], "compact_up_recovery")
+        self.assertEqual(code, 1)
+        self.assertEqual(
+            summary["stop_reason"],
+            "followers_suggestions_boundary_recovery_exhausted",
+        )
+        self.assertEqual(summary["followers_suggestions_boundary_action"], "safe_stop")
         self.assertIsNone(summary["followers_suggestions_boundary_selected_candidate"])
         self.assertFalse(summary["followers_suggestions_boundary_selected_candidate_is_real_follower"])
         self.assertEqual(backtrack.call_count, 1)
 
     def test_loading_boundary_without_jobs_recovers_one_stable_screen(self) -> None:
-        rows = [{"username": "known_follower", "screen_index": 0}]
+        rows = [{
+            "username": "known_follower",
+            "screen_index": 0,
+            "row_cta_xml_class": "message",
+        }]
         known = {"known_follower": {"follower_username": "known_follower", "welcome_dm_status": "skipped"}}
         with ExitStack() as stack:
             for context in self._common_patches(rows):
@@ -158,8 +180,8 @@ class WelcomeScanSuggestionsBoundaryTest(unittest.TestCase):
         self.assertEqual(summary["jobs_enqueued_count"], 0)
         self.assertTrue(summary["followers_suggestions_boundary_detected"])
         self.assertTrue(summary["followers_suggestions_boundary_backtrack_attempted"])
-        self.assertEqual(summary["followers_suggestions_boundary_action"], "compact_up_recovery")
-        self.assertEqual(summary["followers_suggestions_boundary_final_surface"], "followers_list")
+        self.assertEqual(summary["followers_suggestions_boundary_action"], "adaptive_up_recovery")
+        self.assertEqual(summary["followers_suggestions_boundary_final_surface"], "followers_exploitable")
         self.assertEqual(backtrack.call_count, 1)
         self.assertEqual(backtrack.call_args.kwargs["scroll_profile"], "compact")
         enqueue.assert_not_called()
@@ -188,8 +210,20 @@ class WelcomeScanSuggestionsBoundaryTest(unittest.TestCase):
             stack.enter_context(patch.object(scan.supabase_client, "fetch_followers_by_usernames", return_value=known))
             stack.enter_context(patch.object(scan.supabase_client, "enqueue_welcome_dm_job_if_eligible", enqueue))
             stack.enter_context(patch.object(scan, "scroll_followers_list_forward", return_value=True))
-            stack.enter_context(patch.object(scan, "followers_refresh_detect_hierarchy_cache", return_value=SUGGESTIONS_XML))
-            stack.enter_context(patch.object(scan, "detect_followers_list_screen", return_value={"is_followers_list": False, "current_screen_guess": "likely_profile"}))
+            backtrack = stack.enter_context(patch.object(scan, "scroll_followers_list_backward", return_value=True))
+            stack.enter_context(patch.object(
+                scan,
+                "followers_refresh_detect_hierarchy_cache",
+                side_effect=[SUGGESTIONS_XML, STABLE_XML],
+            ))
+            stack.enter_context(patch.object(
+                scan,
+                "detect_followers_list_screen",
+                side_effect=[
+                    {"is_followers_list": False, "current_screen_guess": "likely_profile"},
+                    {"is_followers_list": True, "current_screen_guess": "followers_list"},
+                ],
+            ))
             code = scan.run_welcome_scan_producer(
                 MagicMock(),
                 account_id="account-1",
@@ -202,6 +236,10 @@ class WelcomeScanSuggestionsBoundaryTest(unittest.TestCase):
         self.assertEqual(summary["stop_reason"], "followers_suggestions_boundary")
         self.assertEqual(summary["jobs_enqueued_count"], 4)
         self.assertEqual(len(summary["new_follower_job_ids_enqueued"]), 4)
+        self.assertEqual(summary["followers_suggestions_boundary_action"], "adaptive_up_recovery")
+        self.assertEqual(summary["followers_suggestions_boundary_recovery_attempts"], 1)
+        self.assertEqual(summary["followers_suggestions_boundary_selected_candidate"], "retryable_0")
+        self.assertEqual(backtrack.call_count, 1)
         self.assertEqual(enqueue.call_count, 4)
 
     def test_boundary_recovery_failure_is_structured_safe_stop(self) -> None:
@@ -229,10 +267,137 @@ class WelcomeScanSuggestionsBoundaryTest(unittest.TestCase):
 
         summary = scan.get_last_welcome_scan_summary()
         self.assertEqual(code, 1)
-        self.assertEqual(summary["stop_reason"], "followers_suggestions_boundary_recovery_failed")
-        self.assertEqual(summary["failure_reason"], "followers_suggestions_boundary_recovery_failed")
+        self.assertEqual(summary["stop_reason"], "followers_suggestions_boundary_recovery_exhausted")
+        self.assertEqual(summary["failure_reason"], "followers_suggestions_boundary_recovery_exhausted")
         self.assertEqual(summary["followers_suggestions_boundary_action"], "safe_stop")
         self.assertEqual(backtrack.call_count, 1)
+
+    def test_three_descents_recover_after_second_up_and_stop_early(self) -> None:
+        planned = [{"username": "welcome_target", "row_cta_xml_class": "message"}]
+        with (
+            patch.object(scan, "scroll_followers_list_backward", return_value=True) as backtrack,
+            patch.object(
+                scan,
+                "followers_refresh_detect_hierarchy_cache",
+                side_effect=[SUGGESTIONS_XML, STABLE_XML],
+            ),
+            patch.object(
+                scan,
+                "detect_followers_list_screen",
+                side_effect=[
+                    {"is_followers_list": False, "current_screen_guess": "likely_profile"},
+                    {"is_followers_list": True, "current_screen_guess": "followers_list"},
+                ],
+            ),
+            patch.object(
+                scan,
+                "harvest_visible_followers_rows",
+                side_effect=[
+                    ([{"username": "suggestion", "row_cta_xml_class": "follow"}], {}),
+                    (planned, {}),
+                ],
+            ),
+        ):
+            result = scan._recover_welcome_followers_from_suggestions_boundary(
+                MagicMock(),
+                account_username="i_m_your_traker",
+                down_scroll_history=[
+                    {"distance_px": 585},
+                    {"distance_px": 585},
+                    {"distance_px": 585},
+                ],
+                planned_job_usernames=["welcome_target"],
+                runtime_seen=set(),
+                scan_surface_fingerprints=[],
+            )
+
+        self.assertTrue(result["recovered"])
+        self.assertEqual(result["attempts_used"], 2)
+        self.assertEqual(result["matching_job_username"], "welcome_target")
+        self.assertEqual(backtrack.call_count, 2)
+
+    def test_three_descents_can_use_full_bounded_recovery_budget(self) -> None:
+        planned = [{"username": "welcome_target", "row_cta_xml_class": "message"}]
+        with (
+            patch.object(scan, "scroll_followers_list_backward", return_value=True) as backtrack,
+            patch.object(
+                scan,
+                "followers_refresh_detect_hierarchy_cache",
+                side_effect=[SUGGESTIONS_XML, SUGGESTIONS_XML, STABLE_XML],
+            ),
+            patch.object(
+                scan,
+                "detect_followers_list_screen",
+                side_effect=[
+                    {"is_followers_list": False, "current_screen_guess": "likely_profile"},
+                    {"is_followers_list": False, "current_screen_guess": "likely_profile"},
+                    {"is_followers_list": True, "current_screen_guess": "followers_list"},
+                ],
+            ),
+            patch.object(
+                scan,
+                "harvest_visible_followers_rows",
+                side_effect=[
+                    ([{"username": "suggestion_1", "row_cta_xml_class": "follow"}], {}),
+                    ([{"username": "suggestion_2", "row_cta_xml_class": "follow"}], {}),
+                    (planned, {}),
+                ],
+            ),
+        ):
+            result = scan._recover_welcome_followers_from_suggestions_boundary(
+                MagicMock(),
+                account_username="i_m_your_traker",
+                down_scroll_history=[
+                    {"distance_px": 585},
+                    {"distance_px": 585},
+                    {"distance_px": 585},
+                ],
+                planned_job_usernames=["welcome_target"],
+                runtime_seen=set(),
+                scan_surface_fingerprints=[],
+            )
+
+        self.assertTrue(result["recovered"])
+        self.assertEqual(result["attempts_used"], 3)
+        self.assertEqual(backtrack.call_count, 3)
+
+    def test_recovery_budget_exhaustion_never_uses_suggestion_rows(self) -> None:
+        suggestion_rows = [{"username": "welcome_target", "row_cta_xml_class": "follow"}]
+        with (
+            patch.object(scan, "scroll_followers_list_backward", return_value=True) as backtrack,
+            patch.object(
+                scan,
+                "followers_refresh_detect_hierarchy_cache",
+                side_effect=[SUGGESTIONS_XML, SUGGESTIONS_XML, SUGGESTIONS_XML],
+            ),
+            patch.object(
+                scan,
+                "detect_followers_list_screen",
+                return_value={"is_followers_list": False, "current_screen_guess": "likely_profile"},
+            ),
+            patch.object(
+                scan,
+                "harvest_visible_followers_rows",
+                return_value=(suggestion_rows, {}),
+            ),
+        ):
+            result = scan._recover_welcome_followers_from_suggestions_boundary(
+                MagicMock(),
+                account_username="i_m_your_traker",
+                down_scroll_history=[
+                    {"distance_px": 585},
+                    {"distance_px": 585},
+                    {"distance_px": 585},
+                ],
+                planned_job_usernames=["welcome_target"],
+                runtime_seen=set(),
+                scan_surface_fingerprints=[],
+            )
+
+        self.assertFalse(result["recovered"])
+        self.assertIsNone(result["matching_job_username"])
+        self.assertEqual(result["attempts_used"], 3)
+        self.assertEqual(backtrack.call_count, 3)
 
 
 if __name__ == "__main__":

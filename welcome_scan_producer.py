@@ -6,6 +6,7 @@ No DM UI, no thread open, no send.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import time
@@ -136,6 +137,172 @@ def _is_confirmed_welcome_follower_row(row: dict[str, Any]) -> bool:
     return str(row.get("row_cta_xml_class") or "").strip().lower() in _WELCOME_REAL_FOLLOWER_CTA_CLASSES
 
 
+def _welcome_surface_fingerprint(
+    hierarchy_xml: str,
+    rows: list[dict[str, Any]],
+    det: dict[str, Any],
+) -> str:
+    row_keys = [
+        f"{_norm_username(str(row.get('username') or ''))}:{str(row.get('row_cta_xml_class') or '').lower()}"
+        for row in rows[:12]
+    ]
+    raw = "|".join((
+        str(det.get("current_screen_guess") or "unknown"),
+        str(bool(det.get("is_followers_list"))),
+        ",".join(row_keys),
+        str(hierarchy_xml or "")[:4000],
+    ))
+    return hashlib.sha256(raw.encode("utf-8", errors="ignore")).hexdigest()[:16]
+
+
+def _observe_welcome_recovery_surface(
+    hierarchy_xml: str,
+    rows: list[dict[str, Any]],
+    det: dict[str, Any],
+    planned_keys: set[str],
+) -> dict[str, Any]:
+    boundary = _followers_suggestions_boundary(
+        hierarchy_xml,
+        previously_valid_followers_rows=True,
+    )
+    real_rows = [row for row in rows if _is_confirmed_welcome_follower_row(row)]
+    real_usernames = [
+        str(row.get("username") or "").strip()
+        for row in real_rows
+        if row.get("username")
+    ]
+    matching = [value for value in real_usernames if _norm_username(value) in planned_keys]
+    guess = str(det.get("current_screen_guess") or "unknown").strip().lower()
+    contradiction_tokens = (
+        "challenge",
+        "checkpoint",
+        "profile",
+        "home",
+        "search",
+        "thread",
+        "conversation",
+        "direct_message",
+    )
+    contradiction = next((token for token in contradiction_tokens if token in guess), None)
+    list_state = bool(det.get("is_followers_list")) or guess == "followers_list"
+    exploitable = bool(
+        boundary.get("selected_followers_tab")
+        and list_state
+        and real_rows
+        and not contradiction
+    )
+    if exploitable:
+        surface_state = "followers_exploitable"
+    elif contradiction:
+        surface_state = f"contradiction:{contradiction}"
+    elif boundary.get("is_boundary"):
+        surface_state = "followers_suggestions_boundary"
+    else:
+        surface_state = guess or "unknown"
+    return {
+        "exploitable": exploitable,
+        "real_rows": real_rows,
+        "real_usernames": real_usernames,
+        "matching_planned_jobs": matching,
+        "suggestion_rows": int(boundary.get("suggestion_follow_rows") or 0),
+        "surface_state": surface_state,
+        "fingerprint": _welcome_surface_fingerprint(hierarchy_xml, rows, det),
+    }
+
+
+def _recover_welcome_followers_from_suggestions_boundary(
+    d: u2.Device,
+    *,
+    account_username: str,
+    down_scroll_history: list[dict[str, Any]],
+    planned_job_usernames: list[str],
+    runtime_seen: set[str],
+    scan_surface_fingerprints: list[str],
+) -> dict[str, Any]:
+    planned_keys = {_norm_username(value) for value in planned_job_usernames if value}
+    max_up_attempts = max(1, len(down_scroll_history))
+    down_distances = [int(item.get("distance_px") or 0) for item in down_scroll_history]
+    log(
+        "info",
+        "followers_boundary_recovery_started",
+        down_scroll_count=len(down_scroll_history),
+        down_scroll_distances=down_distances,
+        planned_welcome_jobs=list(planned_job_usernames),
+        max_up_attempts=max_up_attempts,
+        visited_fingerprints=list(scan_surface_fingerprints),
+    )
+
+    recovered = False
+    recovered_rows: list[dict[str, Any]] = []
+    matching_job_username: str | None = None
+    final_surface = "unknown"
+    attempts_used = 0
+    for attempt in range(1, max_up_attempts + 1):
+        attempts_used = attempt
+        history_index = max(0, len(down_scroll_history) - attempt)
+        gesture = down_scroll_history[history_index] if down_scroll_history else {}
+        up_distance = int(gesture.get("distance_px") or 0)
+        moved = scroll_followers_list_backward(
+            d,
+            source_profile_username=account_username,
+            scroll_steps=1,
+            scroll_profile="compact",
+        )
+        followers_clear_detect_hierarchy_cache()
+        hierarchy = followers_refresh_detect_hierarchy_cache(
+            d,
+            screen_index=history_index,
+        ) if moved else ""
+        det = detect_followers_list_screen(
+            d,
+            source_profile_username=account_username,
+            hierarchy_xml=hierarchy or None,
+        ) if moved else {"is_followers_list": False, "current_screen_guess": "scroll_failed"}
+        rows, _meta = harvest_visible_followers_rows(
+            d,
+            source_profile_username=account_username,
+            runtime_seen=runtime_seen,
+            force_fresh_hierarchy=False,
+            screen_index=history_index,
+        ) if moved else ([], {})
+        observation = _observe_welcome_recovery_surface(hierarchy, rows, det, planned_keys)
+        scan_surface_fingerprints.append(str(observation["fingerprint"]))
+        final_surface = str(observation["surface_state"])
+        log(
+            "info",
+            "followers_boundary_recovery_step",
+            attempt=attempt,
+            up_distance=up_distance,
+            followers_rows=list(observation["real_usernames"]),
+            suggestion_rows=int(observation["suggestion_rows"]),
+            matching_planned_jobs=list(observation["matching_planned_jobs"]),
+            surface_state=final_surface,
+        )
+        if observation["exploitable"]:
+            recovered = True
+            recovered_rows = list(observation["real_rows"])
+            matches = list(observation["matching_planned_jobs"])
+            matching_job_username = str(matches[0]) if matches else None
+            break
+
+    log(
+        "info" if recovered else "error",
+        "followers_boundary_recovery_completed",
+        attempts_used=attempts_used,
+        recovered=recovered,
+        matching_job_username=matching_job_username,
+        final_surface=final_surface,
+    )
+    return {
+        "recovered": recovered,
+        "attempts_used": attempts_used,
+        "max_up_attempts": max_up_attempts,
+        "rows": recovered_rows,
+        "matching_job_username": matching_job_username,
+        "final_surface": final_surface,
+    }
+
+
 def run_welcome_scan_producer(
     d: u2.Device,
     *,
@@ -205,6 +372,10 @@ def run_welcome_scan_producer(
     suggestions_boundary_selected_candidate_is_real_follower = False
     suggestions_boundary_recovered_real_rows: list[str] = []
     suggestions_boundary_final_surface: str | None = None
+    suggestions_boundary_recovery_attempts = 0
+    suggestions_boundary_recovery_max_attempts = 0
+    down_scroll_history: list[dict[str, Any]] = []
+    scan_surface_fingerprints: list[str] = []
     last_visible_rows: list[dict[str, Any]] = []
     final_screen_index = 0
 
@@ -260,6 +431,10 @@ def run_welcome_scan_producer(
             ),
             followers_suggestions_boundary_recovered_real_rows=list(suggestions_boundary_recovered_real_rows),
             followers_suggestions_boundary_final_surface=suggestions_boundary_final_surface,
+            followers_suggestions_boundary_recovery_attempts=suggestions_boundary_recovery_attempts,
+            followers_suggestions_boundary_recovery_max_attempts=suggestions_boundary_recovery_max_attempts,
+            welcome_scan_down_scroll_history=list(down_scroll_history),
+            welcome_scan_surface_fingerprints=list(scan_surface_fingerprints),
             total_ms=round(_elapsed_ms(), 2),
         )
         return code
@@ -835,6 +1010,7 @@ def run_welcome_scan_producer(
                 )
 
     _process_screen(0)
+    scan_surface_fingerprints.append(_welcome_surface_fingerprint("", last_visible_rows, det))
 
     while not _should_stop_scan():
         if _elapsed_ms() >= max_seconds * 1000.0:
@@ -881,6 +1057,16 @@ def run_welcome_scan_producer(
             break
 
         scrolls_done += 1
+        down_scroll_history.append({
+            "index": scrolls_done,
+            "method": "welcome_soft",
+            "x": int(screen_w // 2),
+            "y_start": y_start,
+            "y_end": y_end,
+            "distance_px": abs(y_end - y_start),
+            "ratio": distance_ratio,
+            "rows_before": list(rows_before),
+        })
         followers_clear_detect_hierarchy_cache()
         if post_scroll_settle_s > 0:
             time.sleep(min(post_scroll_settle_s, 2.0))
@@ -909,6 +1095,9 @@ def run_welcome_scan_producer(
             hier,
             previously_valid_followers_rows=bool(runtime_seen),
         )
+        scan_surface_fingerprints.append(
+            _welcome_surface_fingerprint(hier, observed_rows, det_scroll)
+        )
         log(
             "info",
             "followers_soft_scroll_observed",
@@ -931,46 +1120,7 @@ def run_welcome_scan_producer(
                     jobs_enqueued_count=jobs_enqueued_count,
                     **{key: value for key, value in boundary.items() if key != "is_boundary"},
                 )
-                planned_keys = {
-                    _norm_username(str(entry.get("username") or ""))
-                    for entry in new_follower_job_ids_enqueued
-                    if entry.get("username")
-                }
-                selected_row = next(
-                    (
-                        row for row in observed_rows
-                        if _norm_username(str(row.get("username") or "")) in planned_keys
-                        and _is_confirmed_welcome_follower_row(row)
-                    ),
-                    None,
-                )
-                if selected_row is not None:
-                    suggestions_boundary_action = "use_visible_candidate"
-                    suggestions_boundary_selected_candidate = str(selected_row.get("username") or "") or None
-                    suggestions_boundary_selected_candidate_is_real_follower = True
-                    selected_key = _norm_username(suggestions_boundary_selected_candidate or "")
-                    for entry in new_follower_visible_rows_enqueued:
-                        if _norm_username(str(entry.get("username") or "")) == selected_key:
-                            entry.update({
-                                "row_index": selected_row.get("row_index"),
-                                "username_bounds": dict(selected_row.get("username_bounds") or {}),
-                                "tap_bounds": dict(selected_row.get("tap_bounds") or {}),
-                                "screen_index": int(scrolls_done),
-                                "hierarchy_source": str(selected_row.get("hierarchy_source") or ""),
-                            })
-                    suggestions_boundary_final_surface = "followers_suggestions_boundary"
-                    log(
-                        "info",
-                        "followers_suggestions_boundary_transition",
-                        visible_real_rows=[suggestions_boundary_selected_candidate],
-                        selected_candidate=suggestions_boundary_selected_candidate,
-                        action=suggestions_boundary_action,
-                        reason="planned_welcome_candidate_visible",
-                    )
-                    stop_reason = "followers_suggestions_boundary"
-                    break
-
-                suggestions_boundary_action = "compact_up_recovery"
+                suggestions_boundary_action = "adaptive_up_recovery"
                 suggestions_boundary_backtrack_attempted = True
                 log(
                     "info",
@@ -982,65 +1132,42 @@ def run_welcome_scan_producer(
                     ],
                     selected_candidate=None,
                     action=suggestions_boundary_action,
-                    reason="no_planned_welcome_candidate_visible",
+                    reason="stable_followers_surface_required_before_sender",
                 )
-                recovered = scroll_followers_list_backward(
+                recovery = _recover_welcome_followers_from_suggestions_boundary(
                     d,
-                    source_profile_username=uname,
-                    scroll_steps=1,
-                    scroll_profile="compact",
-                )
-                followers_clear_detect_hierarchy_cache()
-                recovered_hier = followers_refresh_detect_hierarchy_cache(
-                    d,
-                    screen_index=max(0, scrolls_done - 1),
-                ) if recovered else ""
-                recovered_det = detect_followers_list_screen(
-                    d,
-                    source_profile_username=uname,
-                    hierarchy_xml=recovered_hier or None,
-                ) if recovered else {}
-                recovered_rows, _recovered_meta = harvest_visible_followers_rows(
-                    d,
-                    source_profile_username=uname,
+                    account_username=uname,
+                    down_scroll_history=down_scroll_history,
+                    planned_job_usernames=[
+                        str(entry.get("username") or "").strip()
+                        for entry in new_follower_job_ids_enqueued
+                        if entry.get("username")
+                    ],
                     runtime_seen=runtime_seen,
-                    force_fresh_hierarchy=False,
-                    screen_index=max(0, scrolls_done - 1),
-                ) if recovered else ([], {})
+                    scan_surface_fingerprints=scan_surface_fingerprints,
+                )
+                recovered_rows = list(recovery.get("rows") or [])
+                suggestions_boundary_recovery_attempts = int(recovery.get("attempts_used") or 0)
+                suggestions_boundary_recovery_max_attempts = int(recovery.get("max_up_attempts") or 0)
                 suggestions_boundary_recovered_real_rows = [
                     str(row.get("username") or "").strip()
                     for row in recovered_rows
                     if row.get("username") and _is_confirmed_welcome_follower_row(row)
                 ]
-                recovered_selected = next(
-                    (
-                        value for value in suggestions_boundary_recovered_real_rows
-                        if _norm_username(value) in planned_keys
-                    ),
-                    None,
-                )
-                stable_recovery = bool(recovered_det.get("is_followers_list")) and bool(recovered_rows)
-                suggestions_boundary_selected_candidate = recovered_selected if stable_recovery else None
+                recovered_selected = str(recovery.get("matching_job_username") or "").strip() or None
+                stable_recovery = bool(recovery.get("recovered"))
+                suggestions_boundary_selected_candidate = recovered_selected
                 suggestions_boundary_selected_candidate_is_real_follower = bool(
                     stable_recovery and recovered_selected
                 )
-                suggestions_boundary_final_surface = (
-                    "followers_list" if stable_recovery else str(recovered_det.get("current_screen_guess") or "unknown")
-                )
-                log(
-                    "info" if stable_recovery else "error",
-                    "followers_suggestions_boundary_recovery_completed",
-                    recovered_real_rows=suggestions_boundary_recovered_real_rows,
-                    selected_candidate=suggestions_boundary_selected_candidate,
-                    final_surface=suggestions_boundary_final_surface,
-                )
+                suggestions_boundary_final_surface = str(recovery.get("final_surface") or "unknown")
                 if stable_recovery:
                     last_visible_rows = list(recovered_rows)
-                    final_screen_index = max(0, scrolls_done - 1)
+                    final_screen_index = max(0, scrolls_done - suggestions_boundary_recovery_attempts)
                     stop_reason = "followers_suggestions_boundary"
                 else:
                     suggestions_boundary_action = "safe_stop"
-                    stop_reason = "followers_suggestions_boundary_recovery_failed"
+                    stop_reason = "followers_suggestions_boundary_recovery_exhausted"
                     failure_reason = stop_reason
                 break
 
@@ -1079,6 +1206,6 @@ def run_welcome_scan_producer(
 
     if enqueue_blocked_global and jobs_enqueued_count == 0:
         return _finish("failed", 1, enqueue_block_reason or "no_welcome_template")
-    if stop_reason == "followers_suggestions_boundary_recovery_failed":
+    if stop_reason == "followers_suggestions_boundary_recovery_exhausted":
         return _finish("failed", 1, stop_reason)
     return _finish("success", 0)
