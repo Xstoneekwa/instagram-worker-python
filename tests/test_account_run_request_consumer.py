@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import unittest
+from concurrent.futures import Future
 from datetime import datetime, timedelta, timezone
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import account_run_request_consumer as consumer
 
@@ -20,6 +21,99 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
         self.assertFalse(cfg.enabled)
         self.assertTrue(cfg.health_only)
         self.assertFalse(cfg.launch_enabled)
+        self.assertEqual(cfg.max_concurrent_subprocesses, 4)
+
+    def test_dispatch_loop_submits_multiple_requests_up_to_capacity(self) -> None:
+        cfg = consumer.DispatcherConfig(
+            enabled=True,
+            health_only=False,
+            launch_enabled=True,
+            worker_id="run-dispatcher:test",
+            poll_seconds=5.0,
+            lease_seconds=120,
+            heartbeat_seconds=20.0,
+            allowed_run_types=["account_session"],
+            test_account_ids=set(),
+            subprocess_timeout_seconds=7200,
+            require_assignment=False,
+            enforce_assignment_window=False,
+            max_concurrent_subprocesses=2,
+        )
+        first: Future[None] = Future()
+        second: Future[None] = Future()
+        executor = MagicMock()
+        executor.submit.side_effect = [first, second]
+        active: set[Future[None]] = set()
+        request_one = {"id": TEST_REQUEST_ID, "account_id": TEST_ACCOUNT_ID}
+        request_two = {
+            "id": "00000000-0000-4000-8000-000000000102",
+            "account_id": "00000000-0000-4000-8000-000000000202",
+        }
+
+        self.assertTrue(
+            consumer._submit_dispatch_task_if_capacity(executor, active, cfg, request_one)
+        )
+        self.assertTrue(
+            consumer._submit_dispatch_task_if_capacity(executor, active, cfg, request_two)
+        )
+        self.assertFalse(
+            consumer._submit_dispatch_task_if_capacity(executor, active, cfg, request_two)
+        )
+        self.assertEqual(len(active), 2)
+
+        first.set_result(None)
+        consumer._collect_completed_dispatch_tasks(active)
+        self.assertEqual(active, {second})
+        executor.submit.assert_called_with(
+            consumer._handle_claimed_request,
+            cfg,
+            request_two,
+        )
+
+    def test_stop_request_is_scoped_to_its_own_subprocess(self) -> None:
+        cfg = consumer.DispatcherConfig(
+            enabled=True,
+            health_only=False,
+            launch_enabled=True,
+            worker_id="run-dispatcher:test",
+            poll_seconds=5.0,
+            lease_seconds=120,
+            heartbeat_seconds=20.0,
+            allowed_run_types=["account_session"],
+            test_account_ids=set(),
+            subprocess_timeout_seconds=7200,
+            require_assignment=False,
+            enforce_assignment_window=False,
+        )
+        canceled_proc = MagicMock()
+        canceled_proc.poll.return_value = None
+        other_proc = MagicMock()
+        other_proc.poll.return_value = 0
+
+        with (
+            patch.object(
+                consumer,
+                "get_account_run_request",
+                return_value={"status": "running", "cancel_requested_at": "2026-07-15T00:00:00Z"},
+            ),
+            patch.object(consumer, "_terminate_subprocess", return_value=143) as terminate,
+        ):
+            canceled = consumer._wait_for_subprocess(
+                cfg,
+                canceled_proc,
+                request_id=TEST_REQUEST_ID,
+                account_id=TEST_ACCOUNT_ID,
+            )
+            other = consumer._wait_for_subprocess(
+                cfg,
+                other_proc,
+                request_id="00000000-0000-4000-8000-000000000102",
+                account_id="00000000-0000-4000-8000-000000000202",
+            )
+
+        self.assertEqual(canceled, (143, False))
+        self.assertEqual(other, (0, False))
+        terminate.assert_called_once_with(canceled_proc)
 
     def test_dispatcher_is_healthy_false_when_disabled(self) -> None:
         cfg = consumer.DispatcherConfig(
@@ -332,6 +426,14 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
             patch.object(consumer, "_account_is_launch_allowed", return_value=(True, None)),
             patch.object(consumer, "mark_account_run_request_starting", return_value=True),
             patch.object(consumer, "resolve_account_assignment_runtime_context", return_value=dispatch_ctx),
+            patch.object(
+                consumer,
+                "evaluate_queued_run_commercial_policy",
+                return_value=(True, None, {}),
+            ),
+            patch.object(consumer, "transfer_device_lock", return_value={"transferred": True}),
+            patch.object(consumer, "renew_device_lock", return_value={"renewed": True}),
+            patch.object(consumer, "release_device_lock", return_value={"released": True}),
             patch.object(consumer, "_heartbeat"),
             patch.object(consumer.subprocess, "Popen", return_value=FakeProc()) as popen,
             patch.object(consumer, "_finalize_manual_run_after_subprocess"),
@@ -424,6 +526,11 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
             patch.object(consumer, "_account_is_launch_allowed", return_value=(True, None)),
             patch.object(consumer, "mark_account_run_request_starting", return_value=True),
             patch.object(consumer, "resolve_account_assignment_runtime_context", return_value=dispatch_ctx),
+            patch.object(
+                consumer,
+                "evaluate_queued_run_commercial_policy",
+                return_value=(True, None, {}),
+            ),
             patch.object(consumer, "_heartbeat"),
             patch.object(consumer, "runner_subprocess_env", return_value=fake_env),
             patch.object(consumer, "_create_and_link_login_run", return_value=TEST_RUN_ID),
@@ -523,6 +630,11 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
             patch.object(consumer, "_account_is_launch_allowed", return_value=(True, None)),
             patch.object(consumer, "mark_account_run_request_starting", return_value=True),
             patch.object(consumer, "resolve_account_assignment_runtime_context", return_value=dispatch_ctx),
+            patch.object(
+                consumer,
+                "evaluate_queued_run_commercial_policy",
+                return_value=(True, None, {}),
+            ),
             patch.object(consumer.subprocess, "Popen") as popen,
             patch.object(consumer, "_safe_complete_account_run_request") as complete,
             patch.object(consumer, "_audit"),
@@ -573,6 +685,11 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
             patch.object(consumer, "_account_is_launch_allowed", return_value=(True, None)),
             patch.object(consumer, "mark_account_run_request_starting", return_value=True),
             patch.object(consumer, "resolve_account_assignment_runtime_context", return_value=dispatch_ctx),
+            patch.object(
+                consumer,
+                "evaluate_queued_run_commercial_policy",
+                return_value=(True, None, {}),
+            ),
             patch.object(consumer.subprocess, "Popen") as popen,
             patch.object(consumer, "_safe_complete_account_run_request") as complete,
             patch.object(consumer, "_audit"),

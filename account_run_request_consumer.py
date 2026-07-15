@@ -14,6 +14,7 @@ import socket
 import subprocess
 import sys
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -113,6 +114,7 @@ class DispatcherConfig:
     require_assignment: bool
     enforce_assignment_window: bool
     max_consecutive_loop_errors: int = 10
+    max_concurrent_subprocesses: int = 4
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -181,6 +183,10 @@ def load_dispatcher_config() -> DispatcherConfig:
         require_assignment=_env_bool("RUN_CONTROL_DISPATCHER_REQUIRE_ASSIGNMENT", False),
         enforce_assignment_window=_env_bool("RUN_CONTROL_DISPATCHER_ENFORCE_ASSIGNMENT_WINDOW", False),
         max_consecutive_loop_errors=max(1, _env_int("RUN_CONTROL_DISPATCHER_MAX_CONSECUTIVE_LOOP_ERRORS", 5)),
+        max_concurrent_subprocesses=max(
+            1,
+            _env_int("RUN_CONTROL_DISPATCHER_MAX_CONCURRENT_SUBPROCESSES", 4),
+        ),
     )
 
 
@@ -1714,13 +1720,15 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
     )
 
 
-def run_once(cfg: DispatcherConfig | None = None) -> dict[str, Any]:
-    _assert_integration_safety()
-    cfg = cfg or load_dispatcher_config()
+def _claim_next_dispatch_request(
+    cfg: DispatcherConfig,
+    *,
+    heartbeat_status: str = "idle",
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     if not cfg.enabled:
-        return {"ok": False, "reason": "disabled"}
+        return None, {"ok": False, "reason": "disabled"}
 
-    _heartbeat(cfg, status="idle")
+    _heartbeat(cfg, status=heartbeat_status)
     reclaimed = reclaim_stale_account_run_requests(cfg.worker_id)
     try:
         from scheduled_session_preflight_control import reconcile_stale_scheduled_session_preflight_requests
@@ -1745,7 +1753,7 @@ def run_once(cfg: DispatcherConfig | None = None) -> dict[str, Any]:
         )
 
     if cfg.health_only or not cfg.launch_enabled:
-        return {"ok": True, "mode": "health_only", "reclaimed": reclaimed}
+        return None, {"ok": True, "mode": "health_only", "reclaimed": reclaimed}
 
     request = claim_next_account_run_request(
         cfg.worker_id,
@@ -1753,7 +1761,7 @@ def run_once(cfg: DispatcherConfig | None = None) -> dict[str, Any]:
         allowed_run_types=cfg.allowed_run_types,
     )
     if not request:
-        return {"ok": True, "mode": "idle", "reclaimed": reclaimed}
+        return None, {"ok": True, "mode": "idle", "reclaimed": reclaimed}
 
     request_id = normalize_request_uuid(request.get("id"))
     if not request_id:
@@ -1762,10 +1770,14 @@ def run_once(cfg: DispatcherConfig | None = None) -> dict[str, Any]:
             "run_control_skip_invalid_claim_row",
             worker_id=cfg.worker_id,
         )
-        return {"ok": True, "mode": "idle", "reason": "invalid_claim_row", "reclaimed": reclaimed}
+        return None, {
+            "ok": True,
+            "mode": "idle",
+            "reason": "invalid_claim_row",
+            "reclaimed": reclaimed,
+        }
 
     account_id = normalize_request_uuid(request.get("account_id"))
-    _handle_claimed_request(cfg, request)
     result: dict[str, Any] = {
         "ok": True,
         "mode": "processed",
@@ -1775,6 +1787,15 @@ def run_once(cfg: DispatcherConfig | None = None) -> dict[str, Any]:
     }
     if _last_integration_noop_proof:
         result["noop_proof"] = _last_integration_noop_proof
+    return request, result
+
+
+def run_once(cfg: DispatcherConfig | None = None) -> dict[str, Any]:
+    _assert_integration_safety()
+    cfg = cfg or load_dispatcher_config()
+    request, result = _claim_next_dispatch_request(cfg)
+    if request is not None:
+        _handle_claimed_request(cfg, request)
     return result
 
 
@@ -1804,6 +1825,27 @@ def evaluate_launch_mode_startup_preflight_with_retries(cfg: DispatcherConfig) -
             if backoff_s > 0:
                 time.sleep(backoff_s * attempt)
     return last
+
+
+def _collect_completed_dispatch_tasks(
+    active_tasks: set[Future[None]],
+) -> None:
+    completed_tasks = {task for task in active_tasks if task.done()}
+    active_tasks.difference_update(completed_tasks)
+    for task in completed_tasks:
+        task.result()
+
+
+def _submit_dispatch_task_if_capacity(
+    executor: ThreadPoolExecutor,
+    active_tasks: set[Future[None]],
+    cfg: DispatcherConfig,
+    request: dict[str, Any],
+) -> bool:
+    if len(active_tasks) >= cfg.max_concurrent_subprocesses:
+        return False
+    active_tasks.add(executor.submit(_handle_claimed_request, cfg, request))
+    return True
 
 
 def run_forever(cfg: DispatcherConfig | None = None) -> int:
@@ -1869,63 +1911,88 @@ def run_forever(cfg: DispatcherConfig | None = None) -> int:
     last_loop_error_key = ""
     last_loop_error_logged_at = 0.0
     consecutive_loop_errors = 0
-    while not stop:
-        try:
-            now_loop = time.monotonic()
-            if should_run_auto_restart_tick(
-                last_tick_monotonic=last_auto_restart_tick,
-                now_monotonic=now_loop,
-            ):
-                last_auto_restart_tick = now_loop
-                tick_result = run_auto_restart_dispatcher_tick(
-                    worker_id=cfg.worker_id,
-                    dispatcher_reliable=consecutive_loop_errors == 0,
-                )
-                if tick_result.get("ok"):
-                    log(
-                        "info",
-                        "auto_restart_dispatcher_tick_observed",
+    active_tasks: set[Future[None]] = set()
+    executor = ThreadPoolExecutor(
+        max_workers=cfg.max_concurrent_subprocesses,
+        thread_name_prefix="run-dispatch",
+    )
+    try:
+        while not stop:
+            try:
+                _collect_completed_dispatch_tasks(active_tasks)
+
+                now_loop = time.monotonic()
+                if should_run_auto_restart_tick(
+                    last_tick_monotonic=last_auto_restart_tick,
+                    now_monotonic=now_loop,
+                ):
+                    last_auto_restart_tick = now_loop
+                    tick_result = run_auto_restart_dispatcher_tick(
                         worker_id=cfg.worker_id,
-                        skipped=bool(tick_result.get("skipped")),
+                        dispatcher_reliable=consecutive_loop_errors == 0,
                     )
-                elif tick_result.get("skipped"):
+                    if tick_result.get("ok"):
+                        log(
+                            "info",
+                            "auto_restart_dispatcher_tick_observed",
+                            worker_id=cfg.worker_id,
+                            skipped=bool(tick_result.get("skipped")),
+                        )
+                    elif tick_result.get("skipped"):
+                        log(
+                            "info",
+                            "auto_restart_dispatcher_tick_skipped",
+                            worker_id=cfg.worker_id,
+                            reason=str(tick_result.get("reason") or "skipped"),
+                        )
+                if len(active_tasks) < cfg.max_concurrent_subprocesses:
+                    request, _claim_result = _claim_next_dispatch_request(
+                        cfg,
+                        heartbeat_status="running" if active_tasks else "idle",
+                    )
+                    if request is not None:
+                        _submit_dispatch_task_if_capacity(
+                            executor,
+                            active_tasks,
+                            cfg,
+                            request,
+                        )
+                last_loop_error_key = ""
+                consecutive_loop_errors = 0
+            except Exception as exc:
+                consecutive_loop_errors += 1
+                err = str(exc)[:500]
+                now = time.monotonic()
+                err_key = err[:200]
+                if err_key != last_loop_error_key or (now - last_loop_error_logged_at) >= 60.0:
                     log(
-                        "info",
-                        "auto_restart_dispatcher_tick_skipped",
-                        worker_id=cfg.worker_id,
-                        reason=str(tick_result.get("reason") or "skipped"),
+                        "error",
+                        "run_control_dispatcher_loop_failed",
+                        error=err,
+                        consecutive_loop_errors=consecutive_loop_errors,
+                        max_consecutive_loop_errors=cfg.max_consecutive_loop_errors,
                     )
-            run_once(cfg)
-            last_loop_error_key = ""
-            consecutive_loop_errors = 0
-        except Exception as exc:
-            consecutive_loop_errors += 1
-            err = str(exc)[:500]
+                    last_loop_error_key = err_key
+                    last_loop_error_logged_at = now
+                if consecutive_loop_errors >= cfg.max_consecutive_loop_errors:
+                    log(
+                        "error",
+                        "run_control_dispatcher_exit_after_repeated_loop_errors",
+                        worker_id=cfg.worker_id,
+                        consecutive_loop_errors=consecutive_loop_errors,
+                    )
+                    return 4
             now = time.monotonic()
-            err_key = err[:200]
-            if err_key != last_loop_error_key or (now - last_loop_error_logged_at) >= 60.0:
-                log(
-                    "error",
-                    "run_control_dispatcher_loop_failed",
-                    error=err,
-                    consecutive_loop_errors=consecutive_loop_errors,
-                    max_consecutive_loop_errors=cfg.max_consecutive_loop_errors,
+            if now - last_heartbeat >= cfg.heartbeat_seconds:
+                _heartbeat(
+                    cfg,
+                    status="running" if active_tasks else "idle",
+                    metadata={"active_subprocesses": len(active_tasks)},
                 )
-                last_loop_error_key = err_key
-                last_loop_error_logged_at = now
-            if consecutive_loop_errors >= cfg.max_consecutive_loop_errors:
-                log(
-                    "error",
-                    "run_control_dispatcher_exit_after_repeated_loop_errors",
-                    worker_id=cfg.worker_id,
-                    consecutive_loop_errors=consecutive_loop_errors,
-                )
-                return 4
-        now = time.monotonic()
-        if now - last_heartbeat >= cfg.heartbeat_seconds:
-            _heartbeat(cfg, status="idle")
-            last_heartbeat = now
-        time.sleep(cfg.poll_seconds)
+                last_heartbeat = now
+            time.sleep(cfg.poll_seconds)
+    finally:
+        executor.shutdown(wait=True)
 
     _heartbeat(cfg, status="stopping")
     log("info", "run_control_dispatcher_stopped", worker_id=cfg.worker_id)

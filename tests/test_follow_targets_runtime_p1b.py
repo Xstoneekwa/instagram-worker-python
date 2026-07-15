@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import inspect
 import os
+import threading
 import time
 import unittest
 from unittest.mock import Mock, patch
@@ -3341,6 +3342,48 @@ class DeferredPostReturnPersistTests(unittest.TestCase):
         events = [event for _level, event, _kw in logs]
         self.assertIn("post_return_deferred_step_failed", events)
         self.assertIn("run_completed_blocked_deferred_persist_failed", events)
+
+    def test_post_return_background_flush_is_nonblocking_and_terminal_does_not_duplicate(self) -> None:
+        persist_started = threading.Event()
+        release_persist = threading.Event()
+        runner._schedule_deferred_post_return_supabase_step(
+            step="record_post_like_interaction_success",
+            fn_name="record_post_like_interaction_success",
+            args=("acct", "cand_one", "ct_one"),
+            kwargs={"run_id": "run", "liked_count": 1},
+            run_id="run",
+            account_id="acct",
+            source_profile_username="ct_one",
+            candidate_username="cand_one",
+            reason="return_ct_stable_live_projection",
+        )
+
+        def persist(*_args, **_kwargs):
+            persist_started.set()
+            self.assertTrue(release_persist.wait(timeout=2.0))
+            return {"_supabase_call_ok": True}
+
+        with patch.object(runner, "_timed_safe_supabase_call", side_effect=persist) as persist_call:
+            started_at = time.perf_counter()
+            thread = runner._start_deferred_post_return_background_flush(
+                reason="return_ct_stable_live_projection"
+            )
+            elapsed = time.perf_counter() - started_at
+            self.assertIsNotNone(thread)
+            self.assertLess(elapsed, 0.1)
+            self.assertTrue(persist_started.wait(timeout=1.0))
+            release_persist.set()
+            thread.join(timeout=2.0)
+            self.assertFalse(thread.is_alive())
+
+            self.assertTrue(
+                runner._flush_deferred_post_return_supabase_steps(
+                    reason="run_terminal_status_completed"
+                )
+            )
+
+        persist_call.assert_called_once()
+        self.assertEqual(runner._pending_deferred_follow_action_log_count(), 0)
 
     def test_stopped_status_flushes_deferred_verified_post_like(self) -> None:
         logs: list[tuple[str, str, dict]] = []

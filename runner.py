@@ -8,6 +8,7 @@ import random
 import re
 import signal
 import socket
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -2691,11 +2692,15 @@ def _ct_list_bypass_runtime_duplicate_social_memory(
 
 _DEFERRED_FOLLOW_ACTION_LOG_FLUSHES: list[dict[str, Any]] = []
 _DEFERRED_POST_RETURN_PERSIST_STEPS: list[dict[str, Any]] = []
+_DEFERRED_POST_RETURN_QUEUE_LOCK = threading.Lock()
+_DEFERRED_POST_RETURN_FLUSH_LOCK = threading.Lock()
 _MANUAL_STOP_FLUSH_IN_PROGRESS = False
 
 
 def _pending_deferred_follow_action_log_count() -> int:
-    return len(_DEFERRED_FOLLOW_ACTION_LOG_FLUSHES) + len(_DEFERRED_POST_RETURN_PERSIST_STEPS)
+    with _DEFERRED_POST_RETURN_QUEUE_LOCK:
+        post_return_count = len(_DEFERRED_POST_RETURN_PERSIST_STEPS)
+    return len(_DEFERRED_FOLLOW_ACTION_LOG_FLUSHES) + post_return_count
 
 
 def _deferred_follow_action_log_record_count() -> int:
@@ -2705,7 +2710,8 @@ def _deferred_follow_action_log_record_count() -> int:
             total += len(item.get("events") or [])
         except Exception:
             pass
-    total += len(_DEFERRED_POST_RETURN_PERSIST_STEPS)
+    with _DEFERRED_POST_RETURN_QUEUE_LOCK:
+        total += len(_DEFERRED_POST_RETURN_PERSIST_STEPS)
     return total
 
 
@@ -2754,7 +2760,8 @@ def _schedule_deferred_post_return_supabase_step(
         "success_event": str(success_event or ""),
         "success_payload": dict(success_payload or {}),
     }
-    _DEFERRED_POST_RETURN_PERSIST_STEPS.append(item)
+    with _DEFERRED_POST_RETURN_QUEUE_LOCK:
+        _DEFERRED_POST_RETURN_PERSIST_STEPS.append(item)
     log(
         "info",
         "post_return_deferred_step_scheduled",
@@ -2764,54 +2771,71 @@ def _schedule_deferred_post_return_supabase_step(
 
 
 def _flush_deferred_post_return_supabase_steps(*, reason: str) -> bool:
-    if not _DEFERRED_POST_RETURN_PERSIST_STEPS:
-        return True
-    ok_all = True
-    while _DEFERRED_POST_RETURN_PERSIST_STEPS:
-        item = _DEFERRED_POST_RETURN_PERSIST_STEPS.pop(0)
-        t0 = time.perf_counter()
-        common = _deferred_step_common_log_fields({**item, "reason": reason or item.get("reason") or ""})
-        log(
-            "info",
-            "post_return_deferred_step_started",
-            **common,
-            pending_deferred_count=_pending_deferred_follow_action_log_count() + 1,
-        )
-        out = _timed_safe_supabase_call(
-            str(item.get("step") or item.get("fn_name") or ""),
-            str(item.get("fn_name") or ""),
-            *(item.get("args") or ()),
-            **dict(item.get("kwargs") or {}),
-            log_run_id=str(item.get("run_id") or "") or None,
-            log_account_id=str(item.get("account_id") or "") or None,
-            log_record_count=item.get("log_record_count"),
-            return_status=True,
-        )
-        duration_ms = round((time.perf_counter() - t0) * 1000.0, 2)
-        ok = bool(isinstance(out, dict) and out.get("_supabase_call_ok"))
-        if ok:
-            success_event = str(item.get("success_event") or "")
-            if success_event:
-                log("info", success_event, **dict(item.get("success_payload") or {}))
+    with _DEFERRED_POST_RETURN_FLUSH_LOCK:
+        ok_all = True
+        while True:
+            with _DEFERRED_POST_RETURN_QUEUE_LOCK:
+                if not _DEFERRED_POST_RETURN_PERSIST_STEPS:
+                    break
+                item = _DEFERRED_POST_RETURN_PERSIST_STEPS.pop(0)
+            t0 = time.perf_counter()
+            common = _deferred_step_common_log_fields({**item, "reason": reason or item.get("reason") or ""})
             log(
                 "info",
-                "post_return_deferred_step_completed",
+                "post_return_deferred_step_started",
                 **common,
-                duration_ms=duration_ms,
-                pending_deferred_count=_pending_deferred_follow_action_log_count(),
+                pending_deferred_count=_pending_deferred_follow_action_log_count() + 1,
             )
-        else:
-            ok_all = False
-            _DEFERRED_POST_RETURN_PERSIST_STEPS.insert(0, item)
-            log(
-                "error",
-                "post_return_deferred_step_failed",
-                **common,
-                duration_ms=duration_ms,
-                pending_deferred_count=_pending_deferred_follow_action_log_count(),
+            out = _timed_safe_supabase_call(
+                str(item.get("step") or item.get("fn_name") or ""),
+                str(item.get("fn_name") or ""),
+                *(item.get("args") or ()),
+                **dict(item.get("kwargs") or {}),
+                log_run_id=str(item.get("run_id") or "") or None,
+                log_account_id=str(item.get("account_id") or "") or None,
+                log_record_count=item.get("log_record_count"),
+                return_status=True,
             )
-            break
-    return ok_all
+            duration_ms = round((time.perf_counter() - t0) * 1000.0, 2)
+            ok = bool(isinstance(out, dict) and out.get("_supabase_call_ok"))
+            if ok:
+                success_event = str(item.get("success_event") or "")
+                if success_event:
+                    log("info", success_event, **dict(item.get("success_payload") or {}))
+                log(
+                    "info",
+                    "post_return_deferred_step_completed",
+                    **common,
+                    duration_ms=duration_ms,
+                    pending_deferred_count=_pending_deferred_follow_action_log_count(),
+                )
+            else:
+                ok_all = False
+                with _DEFERRED_POST_RETURN_QUEUE_LOCK:
+                    _DEFERRED_POST_RETURN_PERSIST_STEPS.insert(0, item)
+                log(
+                    "error",
+                    "post_return_deferred_step_failed",
+                    **common,
+                    duration_ms=duration_ms,
+                    pending_deferred_count=_pending_deferred_follow_action_log_count(),
+                )
+                break
+        return ok_all
+
+
+def _start_deferred_post_return_background_flush(*, reason: str) -> threading.Thread | None:
+    with _DEFERRED_POST_RETURN_QUEUE_LOCK:
+        if not _DEFERRED_POST_RETURN_PERSIST_STEPS:
+            return None
+    thread = threading.Thread(
+        target=_flush_deferred_post_return_supabase_steps,
+        kwargs={"reason": reason},
+        name="post-return-persist",
+        daemon=True,
+    )
+    thread.start()
+    return thread
 
 
 def _flush_follow_action_logs_to_supabase(
@@ -17358,6 +17382,9 @@ def _run_followers_list_engine_session(
                 )
             _eng_log("followers_list_recovered", "success", "return_after_follower", {"method": how})
             if _pf_run_full:
+                _start_deferred_post_return_background_flush(
+                    reason="return_ct_stable_live_projection"
+                )
                 log(
                     "info",
                     "visual_candidate_profile_return_ct_success",
