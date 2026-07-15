@@ -1453,9 +1453,33 @@ def run_welcome_list_sender(
         scan_jobs_total=len(session_scan_jobs),
     )
 
-    followers_ok, entry_meta = _ensure_sender_entry_followers_surface(
-        d, account_username=acct_user, pkg=pkg
+    boundary_candidate = str(
+        scan.get("followers_suggestions_boundary_selected_candidate") or ""
+    ).strip()
+    boundary_candidate_ready = (
+        str(scan.get("followers_suggestions_boundary_action") or "")
+        == "use_visible_candidate"
+        and bool(boundary_candidate)
+        and _norm_username(boundary_candidate)
+        in {_norm_username(str(entry.get("username") or "")) for entry in session_scan_jobs}
     )
+    if boundary_candidate_ready:
+        followers_ok = True
+        entry_meta = {
+            "recovered": False,
+            "surface_decision": "followers_suggestions_boundary_visible_planned_candidate",
+        }
+        log(
+            "info",
+            "welcome_sender_entry_surface_boundary_candidate_accepted",
+            account_id=aid,
+            username=boundary_candidate,
+            surface_decision=entry_meta["surface_decision"],
+        )
+    else:
+        followers_ok, entry_meta = _ensure_sender_entry_followers_surface(
+            d, account_username=acct_user, pkg=pkg
+        )
     if followers_ok:
         scan_final_idx = int(scan.get("scan_final_screen_index") or 0)
         followers_refresh_detect_hierarchy_cache(d, screen_index=scan_final_idx)

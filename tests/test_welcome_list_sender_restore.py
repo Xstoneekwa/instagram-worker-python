@@ -387,6 +387,43 @@ class WelcomeListSenderRestoreTest(unittest.TestCase):
         self.assertEqual(summary["session_scan_jobs_count_before_planning"], 4)
         self.assertEqual(len(summary["planned_session_jobs"]), 4)
 
+    def test_visible_planned_candidate_at_suggestions_boundary_skips_entry_recovery(self) -> None:
+        scan_summary = self._scan_summary(4)
+        selected = scan_summary["new_follower_job_ids_enqueued"][0]["username"]
+        scan_summary.update({
+            "followers_suggestions_boundary_action": "use_visible_candidate",
+            "followers_suggestions_boundary_selected_candidate": selected,
+        })
+        ensure_entry = MagicMock()
+        with (
+            patch.object(sender, "resolve_welcome_dm_real_send_enabled", return_value=(True, "test")),
+            patch.object(sender, "_reset_dm_sender_session_abort"),
+            patch.object(sender, "_resolve_reserved_by", return_value="RFGL145VCKE"),
+            patch.object(sender, "_resolve_dm_sender_only_job_id", return_value=("", "none")),
+            patch.object(sender, "_ensure_sender_entry_followers_surface", ensure_entry),
+            patch.object(sender, "followers_refresh_detect_hierarchy_cache"),
+            patch.object(sender, "_sender_start_visible_usernames", return_value=([selected], {})),
+            patch.object(sender.supabase_client, "get_account_dm_settings", return_value={}),
+            patch.object(sender, "_claim_job_for_run", return_value=None),
+            patch.object(sender, "_dm_sender_session_should_abort", return_value=False),
+        ):
+            code, summary = sender.run_welcome_list_sender(
+                MagicMock(),
+                account_id="acct-1",
+                account_username="i_m_your_traker",
+                run_id="run-boundary-visible",
+                max_jobs=3,
+                scan_summary=scan_summary,
+            )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            summary["entry_surface_decision"],
+            "followers_suggestions_boundary_visible_planned_candidate",
+        )
+        self.assertGreaterEqual(len(summary["planned_session_jobs"]), 1)
+        ensure_entry.assert_not_called()
+
     def test_unknown_surface_reports_current_scan_jobs_blocked_without_claim(self) -> None:
         claim_mock = MagicMock()
         with (

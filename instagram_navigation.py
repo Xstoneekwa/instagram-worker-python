@@ -30964,7 +30964,7 @@ def _followers_scroll_list_forward(
     micro_reposition = bool(use_exploratory) and profile_req == "micro_reposition"
     zero_follow_spans_soft = bool(use_exploratory) and profile_req == "zero_follow_spans_soft"
     accelerated_skip_streak = profile_req == "accelerated_skip_streak"
-    soft_followers_scroll = profile_req in {"soft_initial", "soft_retry"}
+    soft_followers_scroll = profile_req in {"soft_initial", "soft_retry", "welcome_soft"}
     exhausted_was = False
     fallback_guard_would_block = False
     permit_reason_snapshot = ""
@@ -31196,11 +31196,11 @@ def _followers_scroll_list_forward(
             pass
     elif soft_followers_scroll:
         _mode = ""
-        _distance_ratio = 0.25 if profile_req == "soft_initial" else 0.27
+        _distance_ratio = 0.25 if profile_req in {"soft_initial", "welcome_soft"} else 0.27
         _soft_steps = 4
         try:
             rv = d(classNameMatches=".*RecyclerView.*")
-            if rv.exists(timeout=0.25):
+            if profile_req != "welcome_soft" and rv.exists(timeout=0.25):
                 _mode = "recyclerview"
                 try:
                     log(
@@ -31444,7 +31444,8 @@ def scroll_followers_list_forward(
 
     ``scroll_profile``: ``default`` | ``micro_reposition`` (unsafe-low-CTA defer) |
     ``zero_follow_spans_soft`` (exploratory defer after zero blue spans) |
-    ``accelerated_skip_streak`` (adaptive V1: faster exit from low-yield visible zone).
+    ``accelerated_skip_streak`` (adaptive V1: faster exit from low-yield visible zone) |
+    ``welcome_soft`` (deterministic Golden 0.25-height Welcome scan gesture).
 
     ``bypass_post_tap_capture_gate`` / ``bypass_scroll_xml_guards`` are narrow escape
     hatches for runner paths that return to a followers list validated visually while XML
@@ -31468,6 +31469,7 @@ def scroll_followers_list_backward(
     *,
     source_profile_username: str | None = None,
     scroll_steps: int = 1,
+    scroll_profile: str = "default",
 ) -> bool:
     """Scroll followers list toward the scan-start zone (older rows / top of list).
 
@@ -31479,8 +31481,9 @@ def scroll_followers_list_backward(
     except Exception:
         w, h = 1080, 1920
     x = int(w // 2)
-    y_start = int(h * 0.32)
-    y_end = int(h * 0.72)
+    compact = str(scroll_profile or "").strip().lower() == "compact"
+    y_start = int(h * (0.38 if compact else 0.32))
+    y_end = int(h * (0.63 if compact else 0.72))
     duration_s = 0.34
     ok_any = False
     for step_idx in range(steps):
@@ -31491,6 +31494,9 @@ def scroll_followers_list_backward(
                 direction="backward",
                 step_index=step_idx + 1,
                 step_total=steps,
+                scroll_profile="compact" if compact else "default",
+                distance_px=abs(int(y_end) - int(y_start)),
+                distance_ratio=round(abs(int(y_end) - int(y_start)) / max(1, int(h)), 5),
                 source_profile_username=str(source_profile_username or "") or None,
             )
             d.swipe(x, y_start, x, y_end, duration_s)
