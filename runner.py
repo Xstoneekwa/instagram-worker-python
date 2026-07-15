@@ -130,6 +130,7 @@ from instagram_navigation import (
     scroll_followers_list_forward,
     followers_refresh_hierarchy_for_candidates,
     followers_force_hierarchy_refresh,
+    followers_suggestions_boundary_from_cached_hierarchy,
     visual_extract_followers_candidates_from_screenshot,
     open_visual_follower_candidate_from_screenshot,
     visual_like_open_post,
@@ -11701,6 +11702,32 @@ def _run_followers_list_engine_session(
                         )
 
             if not det.get("is_followers_list"):
+                suggestions_boundary = followers_suggestions_boundary_from_cached_hierarchy(
+                    previously_valid_followers_rows=bool(
+                        follows_completed_count > 0
+                        or followers_session_list_committed_open_for(
+                            source_profile_username
+                        )
+                    ),
+                )
+                if bool(suggestions_boundary.get("is_boundary")):
+                    _followers_loop_finally_status = "suggestions_boundary"
+                    _followers_loop_finally_stop = "followers_suggestions_boundary"
+                    log(
+                        "info",
+                        "followers_suggestions_boundary",
+                        source_profile_username=source_profile_username,
+                        loop_iteration=followers_engine_loop_iteration,
+                        processed=processed,
+                        follows_completed_count=follows_completed_count,
+                        action="stop_scrolling_and_complete_target",
+                        **{
+                            key: value
+                            for key, value in suggestions_boundary.items()
+                            if key != "is_boundary"
+                        },
+                    )
+                    break
                 if followers_session_list_committed_open_for(source_profile_username):
                     _cm = followers_session_committed_meta()
                     _ca_at = float(_cm.get("followers_list_committed_at") or 0)

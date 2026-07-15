@@ -13427,6 +13427,62 @@ def followers_clear_detect_hierarchy_cache() -> None:
     _LAST_FOLLOWERS_DETECT_HIERARCHY_XML_PATH = ""
 
 
+def followers_suggestions_boundary_from_cached_hierarchy(
+    *,
+    previously_valid_followers_rows: bool,
+) -> dict[str, Any]:
+    """Classify the already-captured post-scroll hierarchy without another device probe."""
+    signals = {
+        "selected_followers_tab": False,
+        "see_all_suggestions": False,
+        "suggestion_follow_rows": 0,
+        "dismiss_controls": 0,
+        "loading_indicator": False,
+    }
+    try:
+        root = ET.fromstring(str(_LAST_FOLLOWERS_DETECT_HIERARCHY_XML or ""))
+    except ET.ParseError:
+        return {"is_boundary": False, **signals}
+
+    for node in root.iter():
+        text = str(node.attrib.get("text") or "").strip()
+        content_desc = str(node.attrib.get("content-desc") or "").strip()
+        resource_id = str(node.attrib.get("resource-id") or "").lower()
+        class_name = str(node.attrib.get("class") or "").lower()
+        normalized = " ".join((text or content_desc).lower().split())
+        if node.attrib.get("selected") == "true" and re.fullmatch(
+            r"\d+(?:[.,]\d+)?\s*[kmb]?\s+followers", normalized
+        ):
+            signals["selected_followers_tab"] = True
+        if normalized == "see all suggestions":
+            signals["see_all_suggestions"] = True
+        if text.lower() in {"follow", "follow back"}:
+            signals["suggestion_follow_rows"] += 1
+        if (
+            text in {"x", "X", "×"}
+            or normalized in {"remove", "dismiss", "close"}
+            or any(token in resource_id for token in ("dismiss", "remove", "close"))
+        ):
+            signals["dismiss_controls"] += 1
+        if class_name.endswith("progressbar") or any(
+            token in resource_id for token in ("progress", "loading", "spinner")
+        ):
+            signals["loading_indicator"] = True
+
+    suggestions_rows = (
+        signals["suggestion_follow_rows"] > 0 and signals["dismiss_controls"] > 0
+    )
+    explicit_boundary = signals["see_all_suggestions"] or suggestions_rows
+    transient_boundary = previously_valid_followers_rows and signals["loading_indicator"]
+    return {
+        "is_boundary": bool(
+            signals["selected_followers_tab"]
+            and (explicit_boundary or transient_boundary)
+        ),
+        **signals,
+    }
+
+
 def followers_refresh_detect_hierarchy_cache(
     d: u2.Device,
     *,

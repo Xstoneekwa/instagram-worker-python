@@ -92,7 +92,9 @@ def _followers_suggestions_boundary(
         resource_id = str(node.attrib.get("resource-id") or "").lower()
         class_name = str(node.attrib.get("class") or "").lower()
         normalized = " ".join((text or content_desc).lower().split())
-        if node.attrib.get("selected") == "true" and re.fullmatch(r"\d+\s+followers", normalized):
+        if node.attrib.get("selected") == "true" and re.fullmatch(
+            r"\d+(?:[.,]\d+)?\s*[kmb]?\s+followers", normalized
+        ):
             signals["selected_followers_tab"] = True
         if normalized == "see all suggestions":
             signals["see_all_suggestions"] = True
