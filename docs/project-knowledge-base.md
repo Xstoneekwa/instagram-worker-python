@@ -1,5 +1,9 @@
 # Project Knowledge Base — Phone Farm Instagram
 
+> **Current production checkpoint - 2026-07-16:**
+> [JULY_16_PRODUCTION_BASELINE](./checkpoints/2026-07-16-production-baseline-cross-repo.md).
+> Use its four strict status classes; test coverage is not physical validation.
+
 Ce document est la verite globale de handoff du projet Phone Farm Instagram.
 Il ne remplace pas `docs/outreach-entry-api.md`, qui reste la documentation
 technique detaillee des Entries, APIs, RPC, credentials et provisioning.

@@ -1,5 +1,13 @@
 # Follow optimization checkpoints
 
+## JULY_16_PRODUCTION_BASELINE
+
+The pre-optimization reference for Pre-Follow, Post-Mute to post open and CT
+stable to next candidate is
+[the July 16 runtime checkpoint](./checkpoints/2026-07-16-production-baseline-runtime.md).
+No later timing change is accepted without line-by-line comparison and the
+listed non-regression criteria.
+
 Ce registre fige les decisions de la sequence d'optimisation
 follow / mute / like / return CT / accounting. Il ne decrit aucun patch runtime
 nouveau.

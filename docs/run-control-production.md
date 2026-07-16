@@ -1,5 +1,10 @@
 # Run Control Production Guide
 
+> **Production baseline - 2026-07-16.** Scheduler authority is the durable
+> dispatcher heartbeat; Electron BotApp is observability only. First-tick launch,
+> same-account preflight lease handoff and bounded device isolation are frozen in
+> [JULY_16_PRODUCTION_BASELINE](./checkpoints/2026-07-16-production-baseline-runtime.md).
+
 Run Control delivers production-ready manual run orchestration without half-wired Play behavior.
 
 ## Invariant

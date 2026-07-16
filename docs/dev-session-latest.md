@@ -1,5 +1,13 @@
 # Dernière session dev — état du projet (mémoire courte)
 
+## Production baseline - 2026-07-16
+
+The current rollback and pre-performance-optimization checkpoint is
+[JULY_16_PRODUCTION_BASELINE](./checkpoints/2026-07-16-production-baseline-runtime.md).
+It records the exact Worker/Backend/BotApp references, physical validation,
+pending observations and the three open latency paths. Older session notes below
+remain historical evidence.
+
 *Document volatil : à mettre à jour après les prochains jalons produit / tech.*
 
 ## Return CT ambiguous own_unified — checkpoint 2026-07-12
