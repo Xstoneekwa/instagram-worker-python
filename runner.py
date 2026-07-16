@@ -163,6 +163,10 @@ from instagram_navigation import (
     visual_candidate_follow_pre_follow_screen_guard,
     visual_candidate_pre_follow_private_gate,
     build_pre_follow_tap_context,
+    build_pre_follow_observation_proof,
+    _pre_follow_observation_proof_reuse_block_reason,
+    _pre_follow_observation_proof_age_ms,
+    _log_pre_follow_observation_proof_decision,
     _followers_current_pkg_activity,
     _follow_ui_state_snapshot,
     _visual_follow_request_pending_state,
@@ -10529,6 +10533,8 @@ def _run_followers_list_engine_session(
         follower_un_so_far: str,
         det_ctx: dict[str, Any] | None,
         open_det_method: str,
+        prior_private_probe: dict[str, Any] | None,
+        navigation_token: str,
     ) -> dict[str, Any]:
         """
         Trace + observe Instagram state after opening a visual-mapped follower profile.
@@ -10614,9 +10620,11 @@ def _run_followers_list_engine_session(
             last_known_state_for_observe=NavigationEngineState.CANDIDATE_PROFILE.value,
         )
         nav_obs_local: dict[str, Any] = {}
+        _hdr_fast_captured_at_mono: float | None = None
         if _xml_list_fast_trace:
             try:
                 _hdr_fast = _follow_ui_state_snapshot(d)
+                _hdr_fast_captured_at_mono = time.monotonic()
             except Exception:
                 _hdr_fast = "unknown"
             nav_obs_local = {
@@ -10805,11 +10813,28 @@ def _run_followers_list_engine_session(
                 )
 
         _hdr = "unknown"
+        _pre_follow_observation_proof: dict[str, Any] | None = None
         if _xml_list_fast_trace:
             try:
                 _hdr = str(_hdr_fast or "unknown")
             except NameError:
                 _hdr = _follow_ui_state_snapshot(d)
+            _pre_follow_observation_proof = build_pre_follow_observation_proof(
+                follower_username=str(
+                    follower_un_so_far or pick_ctx.get("resolved_username_hint") or ""
+                ),
+                source_profile_username=source_profile_username,
+                visual_candidate_id=str(pick_ctx.get("visual_candidate_id") or ""),
+                action_bar_title=str(
+                    follower_un_so_far or pick_ctx.get("resolved_username_hint") or ""
+                ),
+                navigation_state=str(nav_obs_local.get("state") or ""),
+                navigation_confidence=float(nav_obs_local.get("confidence") or 0.0),
+                follow_header_state=_hdr,
+                private_probe_payload=prior_private_probe,
+                navigation_token=navigation_token,
+                captured_at_mono=_hdr_fast_captured_at_mono,
+            )
         try:
             _follow_state_probe_t0 = time.perf_counter()
             _pre_follow_gap_log(
@@ -10823,7 +10848,55 @@ def _run_followers_list_engine_session(
                 surface_type="candidate_profile",
                 reason="follow_header_snapshot",
             )
-            _hdr = _follow_ui_state_snapshot(d)
+            _proof_reason = _pre_follow_observation_proof_reuse_block_reason(
+                _pre_follow_observation_proof,
+                follower_username=str(
+                    follower_un_so_far or pick_ctx.get("resolved_username_hint") or ""
+                ),
+                source_profile_username=source_profile_username,
+                navigation_token=navigation_token,
+            )
+            if not _proof_reason:
+                _hdr = str((_pre_follow_observation_proof or {}).get("follow_header_state") or "")
+                _log_pre_follow_observation_proof_decision(
+                    reused=True,
+                    proof=_pre_follow_observation_proof,
+                    reason="",
+                    blocks_avoided=["duplicate_follow_header_snapshot"],
+                    caller="candidate_profile_analysis_follow_state",
+                )
+            else:
+                if isinstance(_pre_follow_observation_proof, dict):
+                    _log_pre_follow_observation_proof_decision(
+                        reused=False,
+                        proof=_pre_follow_observation_proof,
+                        reason=_proof_reason,
+                        blocks_avoided=[],
+                        caller="candidate_profile_analysis_follow_state",
+                    )
+                _hdr = _follow_ui_state_snapshot(d)
+                _hdr_captured_at_mono = time.monotonic()
+                _private_payload_for_proof = (
+                    prior_private_probe
+                    if _xml_list_fast_trace
+                    else (_priv if isinstance(_priv, dict) else None)
+                )
+                _pre_follow_observation_proof = build_pre_follow_observation_proof(
+                    follower_username=str(
+                        follower_un_so_far or pick_ctx.get("resolved_username_hint") or ""
+                    ),
+                    source_profile_username=source_profile_username,
+                    visual_candidate_id=str(pick_ctx.get("visual_candidate_id") or ""),
+                    action_bar_title=str(
+                        follower_un_so_far or pick_ctx.get("resolved_username_hint") or ""
+                    ),
+                    navigation_state=str(nav_obs_local.get("state") or ""),
+                    navigation_confidence=float(nav_obs_local.get("confidence") or 0.0),
+                    follow_header_state=_hdr,
+                    private_probe_payload=_private_payload_for_proof,
+                    navigation_token=navigation_token,
+                    captured_at_mono=_hdr_captured_at_mono,
+                )
             log(
                 "info",
                 "visual_candidate_follow_state_detected",
@@ -10988,7 +11061,33 @@ def _run_followers_list_engine_session(
                 follow_state=_hdr,
                 reason="pending_request_probe_started",
             )
-            _pend_rq, _pend_m = _visual_follow_request_pending_state(d)
+            _pending_proof_reason = _pre_follow_observation_proof_reuse_block_reason(
+                _pre_follow_observation_proof,
+                follower_username=str(
+                    follower_un_so_far or pick_ctx.get("resolved_username_hint") or ""
+                ),
+                source_profile_username=source_profile_username,
+                navigation_token=navigation_token,
+            )
+            if not _pending_proof_reason:
+                _pend_rq, _pend_m = False, "exact_follow_header_proof"
+                _log_pre_follow_observation_proof_decision(
+                    reused=True,
+                    proof=_pre_follow_observation_proof,
+                    reason="",
+                    blocks_avoided=["pending_requested_hierarchy_probe"],
+                    caller="candidate_profile_analysis_pending_requested",
+                )
+            else:
+                if isinstance(_pre_follow_observation_proof, dict):
+                    _log_pre_follow_observation_proof_decision(
+                        reused=False,
+                        proof=_pre_follow_observation_proof,
+                        reason=_pending_proof_reason,
+                        blocks_avoided=[],
+                        caller="candidate_profile_analysis_pending_requested",
+                    )
+                _pend_rq, _pend_m = _visual_follow_request_pending_state(d)
             log(
                 "info",
                 "pre_follow_timing_pending_request_probe_completed",
@@ -11042,6 +11141,7 @@ def _run_followers_list_engine_session(
                 visual_candidate_id=pick_ctx.get("visual_candidate_id"),
             )
 
+        nav_obs_local["pre_follow_observation_proof"] = _pre_follow_observation_proof
         return nav_obs_local
 
     xml_stale_bypass_meta: dict[str, Any] = {}
@@ -14914,11 +15014,22 @@ def _run_followers_list_engine_session(
                 follower_username=follower_un,
                 visual_candidate_id=str(pick.get("visual_candidate_id") or ""),
             )
+            _pre_follow_navigation_token = (
+                f"{str(pick.get('visual_candidate_id') or follower_un or '').strip()}:"
+                f"{time.monotonic_ns()}"
+            )
             _trace_decision = _trace_visual_candidate_post_follower_open(
                 pick_ctx=pick,
                 follower_un_so_far=follower_un,
                 det_ctx=det if isinstance(det, dict) else None,
                 open_det_method=open_detection_method,
+                prior_private_probe=_early_private_probe_for_terminal,
+                navigation_token=_pre_follow_navigation_token,
+            )
+            _pre_follow_observation_proof = (
+                dict(_trace_decision.get("pre_follow_observation_proof") or {})
+                if isinstance(_trace_decision.get("pre_follow_observation_proof"), dict)
+                else None
             )
             _candidate_follow_decision_apply_source(
                 _candidate_follow_decision,
@@ -15093,10 +15204,40 @@ def _run_followers_list_engine_session(
                         return 42
                     continue
 
-                try:
-                    _follow_hdr_snap = _follow_ui_state_snapshot(d)
-                except Exception:
-                    _follow_hdr_snap = "unknown"
+                _header_proof_reason = _pre_follow_observation_proof_reuse_block_reason(
+                    _pre_follow_observation_proof,
+                    follower_username=str(follower_un or ""),
+                    source_profile_username=source_profile_username,
+                    navigation_token=_pre_follow_navigation_token,
+                )
+                if not _header_proof_reason:
+                    _follow_hdr_snap = str(
+                        (_pre_follow_observation_proof or {}).get("follow_header_state")
+                        or "unknown"
+                    )
+                    _log_pre_follow_observation_proof_decision(
+                        reused=True,
+                        proof=_pre_follow_observation_proof,
+                        reason="",
+                        blocks_avoided=[
+                            "pre_social_follow_header_snapshot",
+                            "raw_follow_invite_probe",
+                        ],
+                        caller="runner_pre_social_follow_header",
+                    )
+                else:
+                    if isinstance(_pre_follow_observation_proof, dict):
+                        _log_pre_follow_observation_proof_decision(
+                            reused=False,
+                            proof=_pre_follow_observation_proof,
+                            reason=_header_proof_reason,
+                            blocks_avoided=[],
+                            caller="runner_pre_social_follow_header",
+                        )
+                    try:
+                        _follow_hdr_snap = _follow_ui_state_snapshot(d)
+                    except Exception:
+                        _follow_hdr_snap = "unknown"
                 if _vcid_sm and _follow_hdr_snap != "follow":
                     log(
                         "info",
@@ -15520,6 +15661,9 @@ def _run_followers_list_engine_session(
                         dont_follow_private_accounts=_dont_follow_private_pre,
                         profile_already_open=True,
                         defer_private_gate=True,
+                        pre_follow_observation_proof=_pre_follow_observation_proof,
+                        navigation_token=_pre_follow_navigation_token,
+                        follower_username=str(follower_un or ""),
                     )
                     _guard_ok = bool(_g_pre.get("ok"))
                     _g_final = _g_pre

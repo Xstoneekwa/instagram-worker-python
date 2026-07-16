@@ -373,6 +373,134 @@ class PreFollowTapContextTest(unittest.TestCase):
         )
 
 
+class PreFollowObservationProofTest(unittest.TestCase):
+    def _proof(self, **overrides) -> dict:
+        values = {
+            "follower_username": "public_user",
+            "source_profile_username": "healthup.sw",
+            "visual_candidate_id": "vc-1",
+            "action_bar_title": "public_user",
+            "navigation_state": "CANDIDATE_PROFILE",
+            "navigation_confidence": 0.88,
+            "follow_header_state": "follow",
+            "private_probe_payload": {
+                "private_profile_detected": False,
+                "detection_method": "none",
+                "confidence": 0.0,
+                "probe_ms": 8.0,
+                "hierarchy_fallback_used": True,
+            },
+            "navigation_token": "nav-1",
+        }
+        values.update(overrides)
+        return nav.build_pre_follow_observation_proof(**values)
+
+    def _reason(self, proof: dict, *, username: str = "public_user", token: str = "nav-1") -> str:
+        return nav._pre_follow_observation_proof_reuse_block_reason(
+            proof,
+            follower_username=username,
+            source_profile_username="healthup.sw",
+            navigation_token=token,
+        )
+
+    def test_fresh_exact_follow_proof_is_reusable(self) -> None:
+        self.assertEqual(self._reason(self._proof()), "")
+
+    def test_private_profile_is_never_reusable(self) -> None:
+        proof = self._proof(
+            private_probe_payload={
+                "private_profile_detected": True,
+                "detection_method": "ui_text_private",
+                "probe_ms": 8.0,
+            }
+        )
+        self.assertEqual(self._reason(proof), "private_profile_detected")
+
+    def test_requested_or_following_contradiction_uses_full_path(self) -> None:
+        for state in ("requested", "following"):
+            with self.subTest(state=state):
+                self.assertEqual(
+                    self._reason(self._proof(follow_header_state=state)),
+                    "follow_state_contradiction",
+                )
+
+    def test_wrong_username_is_rejected(self) -> None:
+        self.assertEqual(
+            self._reason(self._proof(), username="other_user"),
+            "candidate_username_mismatch",
+        )
+
+    def test_navigation_intervened_invalidates_proof(self) -> None:
+        self.assertEqual(
+            self._reason(self._proof(), token="nav-2"),
+            "navigation_intervened",
+        )
+
+    def test_ttl_expired_uses_full_path(self) -> None:
+        proof = self._proof(captured_at_mono=nav.time.monotonic() - 12.01)
+        self.assertEqual(self._reason(proof), "proof_ttl_expired")
+
+    def test_screen_guard_reuses_fresh_proof_without_redundant_reads(self) -> None:
+        device = MagicMock()
+        proof = self._proof()
+        with patch.object(
+            nav, "read_current_profile_username_for_follow_gate", return_value="public_user"
+        ) as username_read, patch.object(
+            nav, "_follow_ui_state_snapshot"
+        ) as header_read, patch.object(
+            nav, "_visual_raw_follow_invite_visible_quick"
+        ) as invite_read, patch.object(
+            nav, "detect_followers_list_screen_fresh"
+        ) as list_read:
+            out = nav.visual_candidate_follow_pre_follow_screen_guard(
+                device,
+                source_profile_username="healthup.sw",
+                pkg="com.instagram.android",
+                pick={"visual_candidate_id": "vc-1"},
+                profile_already_open=True,
+                defer_private_gate=True,
+                pre_follow_observation_proof=proof,
+                navigation_token="nav-1",
+                follower_username="public_user",
+            )
+
+        self.assertTrue(out["ok"])
+        self.assertTrue(out["proof_reused"])
+        username_read.assert_called_once()
+        header_read.assert_not_called()
+        invite_read.assert_not_called()
+        list_read.assert_not_called()
+
+    def test_expired_proof_runs_existing_screen_guard_reads(self) -> None:
+        device = MagicMock()
+        device.return_value.exists.return_value = False
+        proof = self._proof(captured_at_mono=nav.time.monotonic() - 12.01)
+        with patch.object(
+            nav, "read_current_profile_username_for_follow_gate", return_value="public_user"
+        ) as username_read, patch.object(
+            nav, "_follow_ui_state_snapshot", return_value="follow"
+        ) as header_read, patch.object(
+            nav, "_visual_raw_follow_invite_visible_quick", return_value=True
+        ) as invite_read:
+            out = nav.visual_candidate_follow_pre_follow_screen_guard(
+                device,
+                source_profile_username="healthup.sw",
+                pkg="com.instagram.android",
+                pick={"visual_candidate_id": "vc-1"},
+                profile_already_open=True,
+                defer_private_gate=True,
+                pre_follow_observation_proof=proof,
+                navigation_token="nav-1",
+                follower_username="public_user",
+            )
+
+        self.assertTrue(out["ok"])
+        self.assertFalse(out.get("proof_reused", False))
+        username_read.assert_called_once()
+        header_read.assert_called_once()
+        invite_read.assert_called_once()
+
+
 class PerformFollowSafePrivateGateTest(unittest.TestCase):
     def _mock_follow_button(self) -> MagicMock:
         btn = MagicMock()
@@ -594,6 +722,89 @@ class PerformFollowSafePrivateGateTest(unittest.TestCase):
         self.assertFalse(out["ok"])
         self.assertEqual(out["failure_code"], 35)
         device.click.assert_not_called()
+
+    def test_exact_selector_absent_runs_full_detection_but_returns_no_tap_target(self) -> None:
+        import follow_action_engine as engine
+
+        device = MagicMock()
+        device.window_size.return_value = (1080, 1920)
+        context = PreFollowTapContextTest()._fresh_public_context()
+        soft_candidate = MagicMock()
+        with patch.object(nav, "verify_app_foreground", return_value=True), patch.object(
+            nav, "_visual_raw_follow_invite_visible_quick", return_value=True
+        ), patch.object(
+            engine, "try_select_exact_profile_header_follow_fast", return_value=(None, {})
+        ), patch.object(
+            engine,
+            "detect_follow_action_surface",
+            return_value={
+                "follow_available": True,
+                "follow_state": "follow",
+                "confidence": 0.9,
+                "reason": "follow_control_ready_soft",
+                "signals": {"screen_class": "profile_like"},
+                "candidate_buttons": [],
+                "best_candidate": {"source": "hybrid_soft"},
+                "follow_control_element": soft_candidate,
+                "exact_follow_fast_path": False,
+            },
+        ) as full_detect:
+            element, meta = engine.follow_action_surface_wait_and_select_element(
+                device,
+                "public_user",
+                "com.instagram.android",
+                visual_candidate_id="vc-1",
+                source_profile_username="healthup.sw",
+                initial_ui_state="follow",
+                pre_follow_context=context,
+            )
+
+        self.assertIsNone(element)
+        self.assertFalse(meta["safe_to_tap"])
+        self.assertEqual(
+            meta["visual_follow_failure_reason"],
+            "profile_proof_exact_follow_control_absent",
+        )
+        full_detect.assert_called_once()
+
+    def test_requested_contradiction_after_exact_probe_uses_full_detection(self) -> None:
+        import follow_action_engine as engine
+
+        device = MagicMock()
+        device.window_size.return_value = (1080, 1920)
+        context = PreFollowTapContextTest()._fresh_public_context()
+        with patch.object(nav, "verify_app_foreground", return_value=True), patch.object(
+            nav, "_visual_raw_follow_invite_visible_quick", return_value=False
+        ), patch.object(
+            engine, "try_select_exact_profile_header_follow_fast", return_value=(None, {})
+        ), patch.object(
+            engine,
+            "detect_follow_action_surface",
+            return_value={
+                "follow_available": False,
+                "follow_state": "requested",
+                "confidence": 0.95,
+                "reason": "requested",
+                "signals": {"screen_class": "profile_like"},
+                "candidate_buttons": [],
+                "follow_control_element": None,
+                "exact_follow_fast_path": False,
+            },
+        ) as full_detect:
+            element, meta = engine.follow_action_surface_wait_and_select_element(
+                device,
+                "public_user",
+                "com.instagram.android",
+                visual_candidate_id="vc-1",
+                source_profile_username="healthup.sw",
+                initial_ui_state="follow",
+                pre_follow_context=context,
+            )
+
+        self.assertIsNone(element)
+        self.assertTrue(meta["already_following"])
+        self.assertEqual(meta["ui_state"], "requested")
+        full_detect.assert_called_once()
 
 
 if __name__ == "__main__":

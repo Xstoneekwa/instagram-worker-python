@@ -48720,10 +48720,128 @@ def _is_reusable_prior_private_probe(probe: dict[str, Any] | None) -> bool:
 
 _PRE_FOLLOW_TAP_CONTEXT_KIND = "pre_follow_tap_context_v1"
 _PRE_FOLLOW_TAP_CONTEXT_MAX_AGE_S = 12.0
+_PRE_FOLLOW_OBSERVATION_PROOF_KIND = "pre_follow_observation_proof_v1"
 
 
 def _norm_follow_username(username: str | None) -> str:
     return str(username or "").strip().lstrip("@").lower()
+
+
+def build_pre_follow_observation_proof(
+    *,
+    follower_username: str,
+    source_profile_username: str,
+    visual_candidate_id: str,
+    action_bar_title: str,
+    navigation_state: str,
+    navigation_confidence: float,
+    follow_header_state: str,
+    private_probe_payload: dict[str, Any] | None,
+    navigation_token: str,
+    captured_at_mono: float | None = None,
+) -> dict[str, Any]:
+    """Fresh, non-authoritative profile evidence reusable before the terminal selector."""
+    header_state = str(follow_header_state or "")
+    return {
+        "kind": _PRE_FOLLOW_OBSERVATION_PROOF_KIND,
+        "follower_username": str(follower_username or "").strip().lstrip("@"),
+        "source_profile_username": str(source_profile_username or "").strip(),
+        "visual_candidate_id": str(visual_candidate_id or "").strip(),
+        "action_bar_title": str(action_bar_title or "").strip().lstrip("@"),
+        "navigation_state": str(navigation_state or ""),
+        "navigation_confidence": float(navigation_confidence or 0.0),
+        "follow_header_state": header_state,
+        "requested": header_state == "requested",
+        "following": header_state == "following",
+        "private_probe_payload": dict(private_probe_payload or {}),
+        "navigation_token": str(navigation_token or ""),
+        "ambiguous": header_state not in ("follow", "requested", "following", "follow_back"),
+        "captured_at_mono": (
+            float(captured_at_mono) if captured_at_mono is not None else time.monotonic()
+        ),
+    }
+
+
+def _pre_follow_observation_proof_reuse_block_reason(
+    proof: dict[str, Any] | None,
+    *,
+    follower_username: str,
+    source_profile_username: str,
+    navigation_token: str,
+) -> str:
+    if not isinstance(proof, dict) or proof.get("kind") != _PRE_FOLLOW_OBSERVATION_PROOF_KIND:
+        return "missing_or_wrong_kind"
+    if _norm_follow_username(proof.get("follower_username")) != _norm_follow_username(
+        follower_username
+    ):
+        return "candidate_username_mismatch"
+    if _norm_follow_username(proof.get("source_profile_username")) != _norm_follow_username(
+        source_profile_username
+    ):
+        return "source_profile_mismatch"
+    if not navigation_token or str(proof.get("navigation_token") or "") != str(
+        navigation_token
+    ):
+        return "navigation_intervened"
+    try:
+        age_s = time.monotonic() - float(proof.get("captured_at_mono") or 0.0)
+    except (TypeError, ValueError):
+        return "invalid_captured_at"
+    if age_s < 0.0 or age_s > _PRE_FOLLOW_TAP_CONTEXT_MAX_AGE_S:
+        return "proof_ttl_expired"
+    if str(proof.get("navigation_state") or "") != "CANDIDATE_PROFILE":
+        return "surface_changed"
+    if _norm_follow_username(proof.get("action_bar_title")) != _norm_follow_username(
+        follower_username
+    ):
+        return "action_bar_username_mismatch"
+    if bool(proof.get("ambiguous")):
+        return "ambiguous_signal"
+    if str(proof.get("follow_header_state") or "") != "follow":
+        return "follow_state_contradiction"
+    if bool(proof.get("requested")) or bool(proof.get("following")):
+        return "follow_state_contradiction"
+    private_probe = proof.get("private_probe_payload")
+    if not _is_reusable_prior_private_probe(private_probe):
+        return "private_probe_not_reusable"
+    if bool(private_probe.get("private_profile_detected")):
+        return "private_profile_detected"
+    return ""
+
+
+def _pre_follow_observation_proof_age_ms(proof: dict[str, Any] | None) -> float | None:
+    try:
+        return round(
+            (time.monotonic() - float((proof or {}).get("captured_at_mono") or 0.0))
+            * 1000.0,
+            2,
+        )
+    except (TypeError, ValueError):
+        return None
+
+
+def _log_pre_follow_observation_proof_decision(
+    *,
+    reused: bool,
+    proof: dict[str, Any] | None,
+    reason: str,
+    blocks_avoided: list[str],
+    caller: str,
+) -> None:
+    log(
+        "info",
+        "pre_follow_observation_proof_reused"
+        if reused
+        else "pre_follow_observation_proof_invalidated",
+        caller=str(caller or ""),
+        proof_reused=bool(reused),
+        proof_age_ms=_pre_follow_observation_proof_age_ms(proof),
+        blocks_avoided=list(blocks_avoided if reused else []),
+        invalidation_reason="" if reused else str(reason or "unknown"),
+        full_fallback_used=not bool(reused),
+        follower_username=str((proof or {}).get("follower_username") or ""),
+        visual_candidate_id=str((proof or {}).get("visual_candidate_id") or ""),
+    )
 
 
 def build_pre_follow_tap_context(
@@ -48959,6 +49077,9 @@ def visual_candidate_follow_pre_follow_screen_guard(
     dont_follow_private_accounts: bool | None = None,
     profile_already_open: bool = False,
     defer_private_gate: bool = False,
+    pre_follow_observation_proof: dict[str, Any] | None = None,
+    navigation_token: str = "",
+    follower_username: str = "",
 ) -> dict[str, Any]:
     """
     Before ``perform_follow_safe(profile_already_open=True)``, confirm we are not back on the
@@ -49002,6 +49123,74 @@ def visual_candidate_follow_pre_follow_screen_guard(
         "fast_path": False,
         "private_gate_deferred": bool(defer_private_gate),
     }
+
+    proof_reason = _pre_follow_observation_proof_reuse_block_reason(
+        pre_follow_observation_proof,
+        follower_username=follower_hint,
+        source_profile_username=src_raw,
+        navigation_token=navigation_token,
+    )
+    if not proof_reason and an != fn:
+        proof_reason = "action_bar_username_mismatch"
+    if not proof_reason:
+        proof = dict(pre_follow_observation_proof or {})
+        _log_pre_follow_observation_proof_decision(
+            reused=True,
+            proof=proof,
+            reason="",
+            blocks_avoided=[
+                "follow_header_snapshot",
+                "raw_follow_invite_probe",
+                "followers_list_hint_probe",
+                "navigation_surface_observe",
+            ],
+            caller="visual_candidate_follow_pre_follow_screen_guard",
+        )
+        out.update(
+            {
+                "ok": True,
+                "reason": "candidate_profile_surface_proof_reused",
+                "navigation_state": str(proof.get("navigation_state") or ""),
+                "navigation_confidence": float(proof.get("navigation_confidence") or 0.0),
+                "navigation_reason": "pre_follow_observation_proof",
+                "follow_header_state": "follow",
+                "followers_list_xml_hint": False,
+                "raw_follow_invite_visible": True,
+                "fast_path": True,
+                "proof_reused": True,
+                "proof_age_ms": _pre_follow_observation_proof_age_ms(proof),
+            }
+        )
+        log(
+            "info",
+            "pre_follow_timing_screen_guard_completed",
+            duration_ms=round((time.perf_counter() - _guard_t0) * 1000.0, 2),
+            caller="visual_candidate_follow_pre_follow_screen_guard",
+            result=True,
+            guard_passed=True,
+            reason=out["reason"],
+            source_profile_username=src_raw or None,
+            visual_candidate_id=vcid or None,
+            action_bar_title=ab_title or None,
+            username_reused=False,
+            action_bar_check_duration_ms=_ab_ms,
+            follow_header_state_reused=True,
+            follow_header_state="follow",
+            raw_follow_invite_visible=True,
+            followers_list_xml_hint=False,
+            private_current_screen_result=out["navigation_state"],
+            snapshot_reused=True,
+            fallback_used=False,
+        )
+        return out
+    if isinstance(pre_follow_observation_proof, dict):
+        _log_pre_follow_observation_proof_decision(
+            reused=False,
+            proof=pre_follow_observation_proof,
+            reason=proof_reason,
+            blocks_avoided=[],
+            caller="visual_candidate_follow_pre_follow_screen_guard",
+        )
 
     def _log_screen_guard_completed(reason: str) -> None:
         try:

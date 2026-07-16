@@ -1893,6 +1893,7 @@ def follow_action_surface_wait_and_select_element(
 
     started_at = time.perf_counter()
     attempt = 0
+    exact_selector_absent_after_reused_proof = False
     strong_profile_context = _pre_follow_context_has_strong_profile_proof(
         pre_follow_context,
         username=username,
@@ -2064,50 +2065,21 @@ def follow_action_surface_wait_and_select_element(
         ):
             reason_exact_absent = "profile_proof_exact_follow_control_absent"
             _emit(
-                "follow_action_ambiguous_surface_fail_fast",
+                "pre_follow_observation_proof_invalidated",
                 {
-                    "visual_candidate_id": str(visual_candidate_id or ""),
-                    "source_profile_username": str(source_profile_username or ""),
-                    "reason": reason_exact_absent,
-                    "surface_reason": "followers_list_hint_with_candidate_profile_proof",
-                    "signals": {
-                        "ui_snapshot": ui_q,
-                        "raw_follow_invite": bool(raw_q),
-                        "nav_state": str((pre_follow_context or {}).get("navigation_state") or ""),
-                        "screen_class": "followers_list_strong",
-                        "followers_list_xml_hint": True,
-                        "action_bar_title": str((pre_follow_context or {}).get("action_bar_title") or ""),
-                        "candidate_username": str(username or ""),
-                        "exact_follow_fast_path": False,
-                    },
-                    "safe_to_tap": False,
-                    "exact_follow_fast_path": False,
-                    "attempt": attempt,
-                },
-            )
-            _emit(
-                "follow_action_timing_surface_selection_completed",
-                {
-                    "duration_ms": round((time.perf_counter() - started_at) * 1000.0, 2),
                     "caller": "follow_action_surface_wait_and_select_element",
-                    "result": "not_found",
-                    "reason": reason_exact_absent,
                     "visual_candidate_id": str(visual_candidate_id or ""),
                     "source_profile_username": str(source_profile_username or ""),
+                    "proof_reused": False,
+                    "proof_age_ms": _opened_to_exact_probe_ms,
+                    "blocks_avoided": [],
+                    "invalidation_reason": reason_exact_absent,
+                    "full_fallback_used": True,
                     "attempt": attempt,
-                    "fallback_used": False,
-                    "exact_follow_fast_path": False,
-                    "safe_to_tap": False,
                 },
             )
-            return None, {
-                "outcome": "not_found",
-                "last_ui_state": ui_q,
-                "events": events,
-                "surface": None,
-                "visual_follow_failure_reason": reason_exact_absent,
-                "safe_to_tap": False,
-            }
+            strong_profile_context = False
+            exact_selector_absent_after_reused_proof = True
 
         _surface_t0 = time.perf_counter()
         surf = detect_follow_action_surface(
@@ -2187,6 +2159,29 @@ def follow_action_surface_wait_and_select_element(
                 "already_following": True,
                 "events": events,
                 "surface": surf,
+            }
+
+        if exact_selector_absent_after_reused_proof:
+            _emit(
+                "follow_action_ambiguous_surface_fail_fast",
+                {
+                    "visual_candidate_id": str(visual_candidate_id or ""),
+                    "source_profile_username": str(source_profile_username or ""),
+                    "reason": "profile_proof_exact_follow_control_absent",
+                    "surface_reason": surf.get("reason"),
+                    "signals": surf.get("signals"),
+                    "safe_to_tap": False,
+                    "exact_follow_fast_path": False,
+                    "attempt": attempt,
+                },
+            )
+            return None, {
+                "outcome": "not_found",
+                "last_ui_state": str(surf.get("follow_state") or "ambiguous"),
+                "events": events,
+                "surface": surf,
+                "visual_follow_failure_reason": "profile_proof_exact_follow_control_absent",
+                "safe_to_tap": False,
             }
 
         el_pick = surf.get("follow_control_element")
