@@ -2884,6 +2884,7 @@ def get_follow_runtime_cap_inputs(account_id: str) -> dict[str, Any]:
     legacy_session = (settings or {}).get("max_follow_per_run")
     manual_day = (settings or {}).get("max_actions_per_day")
     package_day = package_caps.get("follow_day")
+    package_session = package_caps.get("follow_session")
     warmup_day_cap = preview.get("warmup_follow_day_cap")
     effective_day = preview.get("follow_day")
     follows_done_today = count_successful_follows_today(aid)
@@ -2907,6 +2908,7 @@ def get_follow_runtime_cap_inputs(account_id: str) -> dict[str, Any]:
         "max_actions_per_day_from_db": manual_day,
         "follow_day_remaining_today": max(0, day_cap - follows_done_today),
         "package_follow_day_cap": package_day,
+        "package_follow_session_cap": package_session,
         "warmup_follow_day_cap": warmup_day_cap,
         "follows_done_today": follows_done_today,
         "follow_day_cap_resolved": day_cap,

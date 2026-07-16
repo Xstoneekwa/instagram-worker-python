@@ -9750,8 +9750,10 @@ def _run_followers_list_engine_session(
     follow_limits = resolve_follow_runtime_limits(
         db_follow_per_session_limit=follow_runtime_inputs.get("db_follow_per_session_limit"),
         db_max_follow_per_run=follow_runtime_inputs.get("db_max_follow_per_run"),
+        account_follow_day_cap=follow_runtime_inputs.get("max_actions_per_day_from_db"),
         follow_day_remaining_today=follow_runtime_inputs.get("follow_day_remaining_today"),
         package_follow_day_cap=follow_runtime_inputs.get("package_follow_day_cap"),
+        package_follow_session_cap=follow_runtime_inputs.get("package_follow_session_cap"),
         warmup_follow_day_cap=follow_runtime_inputs.get("warmup_follow_day_cap"),
     )
     global_follow_goal_effective = int(follow_limits["effective_iterations_max"])
@@ -10339,7 +10341,19 @@ def _run_followers_list_engine_session(
         follow_code_cap_applied=follow_limits.get("follow_code_cap_applied"),
         iterations_code_cap_applied=follow_limits.get("iterations_code_cap_applied"),
         package_follow_day_cap=follow_limits.get("package_follow_day_cap"),
+        package_follow_session_cap=follow_limits.get("package_follow_session_cap"),
+        package_day_cap=follow_limits.get("package_day_cap"),
+        package_session_cap=follow_limits.get("package_session_cap"),
+        account_follow_day_cap=follow_runtime_inputs.get("max_actions_per_day_from_db"),
+        account_follow_session_cap=follow_runtime_inputs.get("follow_limit_from_db"),
         warmup_follow_day_cap=follow_limits.get("warmup_follow_day_cap"),
+        warmup_cap=follow_limits.get("warmup_cap"),
+        remaining_day=follow_limits.get("remaining_day"),
+        legacy_max_follow_per_run=follow_limits.get("legacy_max_follow_per_run"),
+        legacy_fallback_used=follow_limits.get("legacy_fallback_used"),
+        effective_follow_day_cap=follow_limits.get("effective_follow_day_cap"),
+        effective_follow_session_cap=follow_limits.get("effective_follow_session_cap"),
+        limiting_source=follow_limits.get("limiting_source"),
         warmup_status=follow_runtime_inputs.get("warmup_status"),
         warmup_day=follow_runtime_inputs.get("warmup_day"),
     )

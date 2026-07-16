@@ -5898,6 +5898,145 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
 
 
 class PostViewerUnusableSurfaceTests(unittest.TestCase):
+    def _stash_fresh_post_open_snapshot(self, snapshot_xml: str) -> None:
+        nav._post_follow_open_like_proof_stash = {
+            "viewer_detect_path": "phase_a2_exact_like_desc_fast",
+            "proof_method": "ui_description_exact_like",
+            "posts_action_bar": True,
+            "stashed_at_monotonic": time.perf_counter(),
+            "post_open_snapshot_captured_at_monotonic": time.perf_counter(),
+            "post_open_snapshot_xml": snapshot_xml,
+            "source_profile_username": "ct",
+            "follower_username": "cand",
+        }
+
+    def test_fresh_strong_post_open_snapshot_skips_redundant_probes_and_dump(self) -> None:
+        device = mock.MagicMock()
+        device.window_size.return_value = (1080, 2400)
+        self._stash_fresh_post_open_snapshot(
+            '<hierarchy><node content-desc="Like" bounds="[50,1700][110,1800]" '
+            'clickable="true" /></hierarchy>'
+        )
+        with mock.patch.object(nav, "_ui_story_or_highlight_viewer_detected") as story, \
+            mock.patch.object(nav, "_ui_post_viewer_like_action_bar_exploitable") as like, \
+            mock.patch.object(nav, "_ui_post_viewer_facebook_shared_content_detected") as fb, \
+            mock.patch.object(nav, "_dump_post_viewer_hierarchy") as dump:
+            out = nav._post_open_surface_audits(
+                device,
+                pkg="com.instagram.android",
+                source_profile_username="ct",
+                follower_username="cand",
+            )
+
+        self.assertTrue(out["reused_snapshot"])
+        self.assertTrue(out["like_surface_ok"])
+        self.assertEqual(out["extra_dump_count"], 0)
+        story.assert_not_called()
+        like.assert_not_called()
+        fb.assert_not_called()
+        dump.assert_not_called()
+
+    def test_ambiguous_story_snapshot_reprobes_existing_guards(self) -> None:
+        device = mock.MagicMock()
+        self._stash_fresh_post_open_snapshot("<invalid")
+        with mock.patch.object(
+            nav, "_ui_story_or_highlight_viewer_detected", return_value=(True, "story_guard")
+        ) as story, mock.patch.object(
+            nav, "_ui_post_viewer_like_action_bar_exploitable", return_value=(True, "like_guard")
+        ), mock.patch.object(
+            nav, "_dump_post_viewer_hierarchy", return_value="<hierarchy />"
+        ), mock.patch.object(
+            nav, "_ui_post_viewer_facebook_shared_content_detected", return_value=(False, "")
+        ):
+            out = nav._post_open_surface_audits(
+                device,
+                pkg="com.instagram.android",
+                source_profile_username="ct",
+                follower_username="cand",
+            )
+
+        self.assertFalse(out["reused_snapshot"])
+        self.assertTrue(out["story_detected"])
+        story.assert_called_once()
+
+    def test_ambiguous_facebook_snapshot_reprobes_existing_guards(self) -> None:
+        device = mock.MagicMock()
+        self._stash_fresh_post_open_snapshot("")
+        with mock.patch.object(
+            nav, "_ui_story_or_highlight_viewer_detected", return_value=(False, "")
+        ), mock.patch.object(
+            nav, "_ui_post_viewer_like_action_bar_exploitable", return_value=(True, "like_guard")
+        ), mock.patch.object(
+            nav, "_dump_post_viewer_hierarchy", return_value="<hierarchy />"
+        ), mock.patch.object(
+            nav,
+            "_ui_post_viewer_facebook_shared_content_detected",
+            return_value=(True, "facebook_guard"),
+        ) as facebook:
+            out = nav._post_open_surface_audits(
+                device,
+                pkg="com.instagram.android",
+                source_profile_username="ct",
+                follower_username="cand",
+            )
+
+        self.assertFalse(out["reused_snapshot"])
+        self.assertTrue(out["facebook_detected"])
+        facebook.assert_called_once()
+
+    def test_stale_post_open_snapshot_reprobes(self) -> None:
+        device = mock.MagicMock()
+        self._stash_fresh_post_open_snapshot("<hierarchy />")
+        assert nav._post_follow_open_like_proof_stash is not None
+        nav._post_follow_open_like_proof_stash["stashed_at_monotonic"] = time.perf_counter() - 30
+        nav._post_follow_open_like_proof_stash[
+            "post_open_snapshot_captured_at_monotonic"
+        ] = time.perf_counter() - 30
+        with mock.patch.object(
+            nav, "_ui_story_or_highlight_viewer_detected", return_value=(False, "")
+        ) as story, mock.patch.object(
+            nav, "_ui_post_viewer_like_action_bar_exploitable", return_value=(True, "like_guard")
+        ), mock.patch.object(
+            nav, "_dump_post_viewer_hierarchy", return_value="<hierarchy />"
+        ), mock.patch.object(
+            nav, "_ui_post_viewer_facebook_shared_content_detected", return_value=(False, "")
+        ):
+            out = nav._post_open_surface_audits(
+                device,
+                pkg="com.instagram.android",
+                source_profile_username="ct",
+                follower_username="cand",
+            )
+
+        self.assertFalse(out["reused_snapshot"])
+        story.assert_called_once()
+
+    def test_contradictory_snapshot_uses_safe_reprobe_path(self) -> None:
+        device = mock.MagicMock()
+        device.window_size.return_value = (1080, 2400)
+        self._stash_fresh_post_open_snapshot(
+            '<hierarchy><node content-desc="Unlike" bounds="[50,1700][110,1800]" '
+            'clickable="true" /></hierarchy>'
+        )
+        with mock.patch.object(
+            nav, "_ui_story_or_highlight_viewer_detected", return_value=(False, "")
+        ) as story, mock.patch.object(
+            nav, "_ui_post_viewer_like_action_bar_exploitable", return_value=(True, "like_guard")
+        ), mock.patch.object(
+            nav, "_dump_post_viewer_hierarchy", return_value="<hierarchy />"
+        ), mock.patch.object(
+            nav, "_ui_post_viewer_facebook_shared_content_detected", return_value=(False, "")
+        ):
+            out = nav._post_open_surface_audits(
+                device,
+                pkg="com.instagram.android",
+                source_profile_username="ct",
+                follower_username="cand",
+            )
+
+        self.assertFalse(out["reused_snapshot"])
+        story.assert_called_once()
+
     def test_facebook_shared_content_banner_detected_from_ui_text(self) -> None:
         device = mock.MagicMock()
         pred = mock.MagicMock()

@@ -110,6 +110,112 @@ class RuntimeCapsTest(unittest.TestCase):
         self.assertEqual(out["effective_iterations_max"], 8)
         self.assertFalse(out["follow_code_cap_applied"])
 
+    def test_follow_canonical_session_cap_wins_over_legacy(self) -> None:
+        cfg = types.SimpleNamespace(
+            FOLLOW_MAX_PER_RUN=2,
+            FOLLOWERS_LIST_MAX_ITERATIONS_PER_RUN=5,
+        )
+        out = resolve_follow_runtime_limits(
+            db_follow_per_session_limit=20,
+            db_max_follow_per_run=10,
+            follow_day_remaining_today=120,
+            package_follow_day_cap=120,
+            package_follow_session_cap=20,
+            warmup_follow_day_cap=120,
+            config_module=cfg,
+            environ={},
+        )
+
+        self.assertEqual(out["effective_follow_max"], 20)
+        self.assertFalse(out["legacy_fallback_used"])
+
+    def test_follow_saved_account_session_cap_25_reaches_worker_resolver(self) -> None:
+        out = resolve_follow_runtime_limits(
+            db_follow_per_session_limit=25,
+            db_max_follow_per_run=10,
+            account_follow_day_cap=120,
+            follow_day_remaining_today=120,
+            package_follow_day_cap=120,
+            package_follow_session_cap=120,
+            warmup_follow_day_cap=120,
+            environ={},
+        )
+
+        self.assertEqual(out["account_follow_session_cap"], 25)
+        self.assertEqual(out["effective_follow_session_cap"], 25)
+        self.assertFalse(out["legacy_fallback_used"])
+
+    def test_follow_legacy_session_cap_is_fallback_when_canonical_missing(self) -> None:
+        cfg = types.SimpleNamespace(
+            FOLLOW_MAX_PER_RUN=2,
+            FOLLOWERS_LIST_MAX_ITERATIONS_PER_RUN=5,
+        )
+        out = resolve_follow_runtime_limits(
+            db_follow_per_session_limit=None,
+            db_max_follow_per_run=10,
+            follow_day_remaining_today=120,
+            package_follow_day_cap=120,
+            package_follow_session_cap=20,
+            warmup_follow_day_cap=120,
+            config_module=cfg,
+            environ={},
+        )
+
+        self.assertEqual(out["effective_follow_max"], 10)
+        self.assertTrue(out["legacy_fallback_used"])
+
+    def test_follow_invalid_canonical_session_cap_uses_legacy_fallback(self) -> None:
+        out = resolve_follow_runtime_limits(
+            db_follow_per_session_limit="invalid",
+            db_max_follow_per_run=10,
+            follow_day_remaining_today=120,
+            package_follow_day_cap=120,
+            package_follow_session_cap=20,
+            warmup_follow_day_cap=120,
+            environ={},
+        )
+
+        self.assertEqual(out["effective_follow_max"], 10)
+        self.assertTrue(out["legacy_fallback_used"])
+
+    def test_follow_package_session_cap_can_limit_canonical_account_cap(self) -> None:
+        out = resolve_follow_runtime_limits(
+            db_follow_per_session_limit=20,
+            db_max_follow_per_run=10,
+            follow_day_remaining_today=120,
+            package_follow_day_cap=120,
+            package_follow_session_cap=15,
+            warmup_follow_day_cap=120,
+            environ={},
+        )
+
+        self.assertEqual(out["effective_follow_max"], 15)
+        self.assertEqual(out["limiting_source"], "package_session_cap")
+
+    def test_follow_remaining_day_can_limit_session(self) -> None:
+        out = resolve_follow_runtime_limits(
+            db_follow_per_session_limit=20,
+            follow_day_remaining_today=7,
+            package_follow_day_cap=120,
+            package_follow_session_cap=20,
+            warmup_follow_day_cap=120,
+            environ={},
+        )
+
+        self.assertEqual(out["effective_follow_max"], 7)
+
+    def test_follow_warmup_day_one_limits_session(self) -> None:
+        out = resolve_follow_runtime_limits(
+            db_follow_per_session_limit=20,
+            follow_day_remaining_today=120,
+            package_follow_day_cap=120,
+            package_follow_session_cap=20,
+            warmup_follow_day_cap=10,
+            environ={},
+        )
+
+        self.assertEqual(out["effective_follow_max"], 10)
+
     def test_follow_env_cap_can_intentionally_limit_db_caps(self) -> None:
         cfg = types.SimpleNamespace(
             FOLLOW_MAX_PER_RUN=2,
@@ -141,7 +247,10 @@ class RuntimeCapsTest(unittest.TestCase):
         )
 
         self.assertEqual(out["effective_follow_max"], 40)
-        self.assertEqual(out["source"], "min(db_session,package,warmup,day_remaining)")
+        self.assertEqual(
+            out["source"],
+            "min(canonical_or_legacy_session,package_session,package_day,warmup,day_remaining)",
+        )
 
     def test_unfollow_prod_normal_uses_db_session_not_env_mini_cap(self) -> None:
         out = resolve_unfollow_runtime_cap(

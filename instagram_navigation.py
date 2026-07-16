@@ -21608,6 +21608,11 @@ def _post_follow_likes_open_top_left_legacy_visual_safe(
         "strict_grid_proof_source": str(strict_grid_proof_source or ""),
         "detect_reason": viewer.get("detect_reason"),
         "viewer_detect_path": viewer.get("viewer_detect_path"),
+        "post_open_snapshot_xml": viewer.get("post_open_snapshot_xml"),
+        "post_open_snapshot_captured_at_monotonic": viewer.get(
+            "post_open_snapshot_captured_at_monotonic"
+        ),
+        "post_open_snapshot_valid": bool(viewer.get("post_open_snapshot_valid")),
         "likes_perf_post_open": perf,
         "tap_to_viewer_detected_ms": viewer.get("viewer_detect_total_ms"),
     }
@@ -21774,6 +21779,8 @@ def _visual_detect_post_viewer_opened_after_tap(
         posts_action_bar: bool = False,
         action_bar_title: str = "",
     ) -> dict[str, Any]:
+        snapshot_xml = _dump_post_viewer_hierarchy(d)
+        snapshot_captured_at = time.perf_counter()
         t_meta0 = time.perf_counter()
         meta = _followers_current_pkg_activity(d)
         stage["viewer_detect_meta_ms"] = _visual_detect_post_viewer_stage_ms(t_meta0)
@@ -21790,6 +21797,9 @@ def _visual_detect_post_viewer_opened_after_tap(
             "current_activity": meta.get("current_activity"),
             "current_package": meta.get("current_package"),
             "viewer_detect_path": detect_path,
+            "post_open_snapshot_xml": snapshot_xml,
+            "post_open_snapshot_captured_at_monotonic": snapshot_captured_at,
+            "post_open_snapshot_valid": bool(snapshot_xml),
             "viewer_detect_checked_signals": signals,
             **stage,
             "viewer_detect_total_ms": _visual_detect_post_viewer_stage_ms(t_total0),
@@ -22980,6 +22990,14 @@ def visual_open_recent_post_from_profile(
                 "post_detected": True,
                 "source_profile_username": source_profile_username or "",
                 "failure_reason": None,
+                "viewer_detect_path": det_final.get("viewer_detect_path"),
+                "post_open_snapshot_xml": det_final.get("post_open_snapshot_xml"),
+                "post_open_snapshot_captured_at_monotonic": det_final.get(
+                    "post_open_snapshot_captured_at_monotonic"
+                ),
+                "post_open_snapshot_valid": bool(
+                    det_final.get("post_open_snapshot_valid")
+                ),
             },
             outcome="success",
             failure_reason=None,
@@ -24597,6 +24615,10 @@ def _post_follow_open_like_proof_from_viewer_detect(
                 "viewer_detect_path": path,
                 "proof_method": positive_rid,
                 "posts_action_bar": posts_bar,
+                "post_open_snapshot_xml": det.get("post_open_snapshot_xml"),
+                "post_open_snapshot_captured_at_monotonic": det.get(
+                    "post_open_snapshot_captured_at_monotonic"
+                ),
             }
         return None
 
@@ -24609,6 +24631,10 @@ def _post_follow_open_like_proof_from_viewer_detect(
             "viewer_detect_path": path,
             "proof_method": exact_sig,
             "posts_action_bar": True,
+            "post_open_snapshot_xml": det.get("post_open_snapshot_xml"),
+            "post_open_snapshot_captured_at_monotonic": det.get(
+                "post_open_snapshot_captured_at_monotonic"
+            ),
         }
 
     return None
@@ -25387,7 +25413,11 @@ _FACEBOOK_SHARED_CONTENT_MARKERS = (
 )
 
 
-def _ui_post_viewer_facebook_shared_content_detected(d: u2.Device) -> tuple[bool, str]:
+def _ui_post_viewer_facebook_shared_content_detected(
+    d: u2.Device,
+    *,
+    hierarchy: str | None = None,
+) -> tuple[bool, str]:
     """Detect Instagram post surfaces shared from Facebook that hide the normal like action bar."""
     for marker in _FACEBOOK_SHARED_CONTENT_MARKERS:
         try:
@@ -25395,14 +25425,15 @@ def _ui_post_viewer_facebook_shared_content_detected(d: u2.Device) -> tuple[bool
                 return True, "ui_text_contains_facebook_shared_banner"
         except Exception:
             continue
-    hier = ""
-    try:
-        hier = str(d.dump_hierarchy(compressed=False)).lower()
-    except Exception:
+    hier = str(hierarchy or "").lower()
+    if hierarchy is None:
         try:
-            hier = str(d.dump_hierarchy()).lower()
+            hier = str(d.dump_hierarchy(compressed=False)).lower()
         except Exception:
-            hier = ""
+            try:
+                hier = str(d.dump_hierarchy()).lower()
+            except Exception:
+                hier = ""
     for marker in _FACEBOOK_SHARED_CONTENT_MARKERS:
         if marker in hier:
             return True, "hierarchy_facebook_shared_banner"
@@ -43960,6 +43991,166 @@ def _ui_story_or_highlight_viewer_detected(d: u2.Device) -> tuple[bool, str]:
     return False, ""
 
 
+def _post_open_snapshot_audit_signals(
+    d: u2.Device,
+    *,
+    snapshot_xml: str,
+    proof_method: str,
+) -> dict[str, Any]:
+    """Resolve post-open safety signals from one fresh hierarchy snapshot."""
+    try:
+        root = ET.fromstring(str(snapshot_xml or ""))
+    except ET.ParseError:
+        return {"ok": False, "reason": "snapshot_xml_invalid"}
+
+    story_detected = False
+    story_method = "snapshot_clear"
+    facebook_detected = False
+    facebook_method = "snapshot_clear"
+    for el in root.iter():
+        text_raw = str(el.attrib.get("text") or "").strip().lower()
+        desc_raw = str(el.attrib.get("content-desc") or "").strip().lower()
+        values = (text_raw, desc_raw)
+        if any(
+            value in ("reply", "send message", "message")
+            or "story controls" in value
+            or "story viewer" in value
+            or "highlight viewer" in value
+            for value in values
+            if value
+        ):
+            story_detected = True
+            story_method = "snapshot_story_highlight_marker"
+        if any(
+            marker in value
+            for value in values
+            for marker in _FACEBOOK_SHARED_CONTENT_MARKERS
+            if value
+        ):
+            facebook_detected = True
+            facebook_method = "snapshot_facebook_shared_banner"
+
+    semantic_nodes = _hierarchy_collect_like_semantic_nodes(snapshot_xml)
+    trusted_liked = any(_ui_proof_trusted_action_button_liked(node, d) for node in semantic_nodes)
+    trusted_not_liked = any(
+        _ui_proof_trusted_action_button_not_liked(node, d) for node in semantic_nodes
+    )
+    proof_is_not_liked = proof_method.endswith(
+        _TRUSTED_POST_FOLLOW_OPEN_NOT_LIKED_RID_SUFFIX
+    ) or proof_method in _TRUSTED_POST_FOLLOW_OPEN_NOT_LIKED_EXACT_SIGNALS
+    if proof_is_not_liked and trusted_liked:
+        return {
+            "ok": False,
+            "reason": "snapshot_like_state_contradiction",
+            "conflicting_signals": ["open_proof_not_liked", "snapshot_liked"],
+        }
+    if not proof_is_not_liked and not trusted_not_liked:
+        return {"ok": False, "reason": "snapshot_like_signal_ambiguous"}
+
+    return {
+        "ok": True,
+        "story_detected": story_detected,
+        "story_method": story_method,
+        "facebook_detected": facebook_detected,
+        "facebook_method": facebook_method,
+        "like_surface_ok": True,
+        "like_surface_method": f"reused:{proof_method}",
+        "like_signal": "not_liked" if proof_is_not_liked else "like_action_available",
+        "story_signal": "detected" if story_detected else "clear",
+        "facebook_signal": "detected" if facebook_detected else "clear",
+    }
+
+
+def _post_open_surface_audits(
+    d: u2.Device,
+    *,
+    pkg: str,
+    source_profile_username: str,
+    follower_username: str,
+) -> dict[str, Any]:
+    """Reuse fresh open evidence or run the existing post-open safety probes."""
+    t0 = time.perf_counter()
+    ok, stash, proof_age_ms, reject_reason = _validate_post_follow_open_like_proof_stash(
+        source_profile_username=source_profile_username,
+        expected_follower_username=follower_username,
+    )
+    snapshot_age_ms = proof_age_ms
+    snapshot_signals: dict[str, Any] = {}
+    if ok and stash:
+        captured_at = float(stash.get("post_open_snapshot_captured_at_monotonic") or 0.0)
+        snapshot_age_ms = round((time.perf_counter() - captured_at) * 1000.0, 2)
+        if captured_at <= 0:
+            reject_reason = "snapshot_timestamp_missing"
+        elif snapshot_age_ms > float(_POST_FOLLOW_OPEN_LIKE_PROOF_TTL_MS):
+            reject_reason = "snapshot_stale"
+        else:
+            snapshot_signals = _post_open_snapshot_audit_signals(
+                d,
+                snapshot_xml=str(stash.get("post_open_snapshot_xml") or ""),
+                proof_method=str(stash.get("proof_method") or ""),
+            )
+            if not bool(snapshot_signals.get("ok")):
+                reject_reason = str(snapshot_signals.get("reason") or "snapshot_ambiguous")
+
+    if ok and stash and bool(snapshot_signals.get("ok")):
+        log(
+            "info",
+            "post_open_evidence_reused",
+            viewer_detect_path=str(stash.get("viewer_detect_path") or ""),
+            snapshot_age_ms=snapshot_age_ms,
+            like_signal=snapshot_signals.get("like_signal"),
+            story_signal=snapshot_signals.get("story_signal"),
+            facebook_signal=snapshot_signals.get("facebook_signal"),
+        )
+        out = {
+            **snapshot_signals,
+            "reused_snapshot": True,
+            "extra_dump_count": 0,
+            "snapshot_age_ms": snapshot_age_ms,
+        }
+    else:
+        log(
+            "info",
+            "post_open_evidence_reprobe_required",
+            reason=reject_reason or "open_evidence_unavailable",
+            snapshot_age_ms=snapshot_age_ms,
+            conflicting_signals=snapshot_signals.get("conflicting_signals") or [],
+        )
+        story_detected, story_method = _ui_story_or_highlight_viewer_detected(d)
+        like_surface_ok, like_surface_method = _ui_post_viewer_like_action_bar_exploitable(
+            d,
+            pkg=pkg,
+        )
+        fresh_hierarchy = _dump_post_viewer_hierarchy(d)
+        facebook_detected, facebook_method = (
+            _ui_post_viewer_facebook_shared_content_detected(
+                d,
+                hierarchy=fresh_hierarchy,
+            )
+        )
+        out = {
+            "story_detected": story_detected,
+            "story_method": story_method,
+            "facebook_detected": facebook_detected,
+            "facebook_method": facebook_method,
+            "like_surface_ok": like_surface_ok,
+            "like_surface_method": like_surface_method,
+            "reused_snapshot": False,
+            "extra_dump_count": 1,
+            "snapshot_age_ms": snapshot_age_ms,
+        }
+
+    out["elapsed_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
+    log(
+        "info",
+        "post_open_audits_completed",
+        reused_snapshot=bool(out.get("reused_snapshot")),
+        extra_dump_count=int(out.get("extra_dump_count") or 0),
+        elapsed_ms=out["elapsed_ms"],
+    )
+    return out
+
+
 def _post_follow_post_likes_out_template() -> dict[str, Any]:
     return {
         "ok": False,
@@ -44042,6 +44233,7 @@ def run_post_follow_post_likes_phase(
     fs_after = str(follow_state_after or "").strip()
     follow_priv = bool(getattr(config, "FOLLOW_PRIVATE_ACCOUNTS", False))
     pending_rq = fs_after == "requested"
+    _clear_post_follow_open_like_proof_stash()
 
     out = _post_follow_post_likes_out_template()
     out["post_like_mode"] = "profile_grid_single_v1"
@@ -46109,6 +46301,13 @@ def run_post_follow_post_likes_phase(
                         act_before=meta_before_direct.get("current_activity"),
                         post_follow_fast=True,
                     )
+                    if bool(viewer_direct.get("post_detected")):
+                        _stash_post_follow_open_like_proof(
+                            viewer_direct,
+                            source_profile_username=src,
+                            follower_username=cand,
+                            proof_source="direct_cell_under_suggested",
+                        )
                     open_out = {
                         "ok": bool(viewer_direct.get("post_detected")),
                         "post_detected": bool(viewer_direct.get("post_detected")),
@@ -46118,6 +46317,16 @@ def run_post_follow_post_likes_phase(
                         "open_strategy": "direct_cell_under_suggested",
                         "tap_to_viewer_detected_ms": viewer_direct.get(
                             "viewer_detect_total_ms"
+                        ),
+                        "viewer_detect_path": viewer_direct.get("viewer_detect_path"),
+                        "post_open_snapshot_xml": viewer_direct.get(
+                            "post_open_snapshot_xml"
+                        ),
+                        "post_open_snapshot_captured_at_monotonic": viewer_direct.get(
+                            "post_open_snapshot_captured_at_monotonic"
+                        ),
+                        "post_open_snapshot_valid": bool(
+                            viewer_direct.get("post_open_snapshot_valid")
                         ),
                         "likes_perf_post_open": dict(viewer_direct),
                     }
@@ -46298,11 +46507,16 @@ def run_post_follow_post_likes_phase(
                 per_post=per_post,
             )
 
-        story_detected, story_method = _ui_story_or_highlight_viewer_detected(d)
-        like_surface_ok, like_surface_method = _ui_post_viewer_like_action_bar_exploitable(
+        post_open_audit = _post_open_surface_audits(
             d,
             pkg=pkg,
+            source_profile_username=src,
+            follower_username=cand,
         )
+        story_detected = bool(post_open_audit.get("story_detected"))
+        story_method = str(post_open_audit.get("story_method") or "")
+        like_surface_ok = bool(post_open_audit.get("like_surface_ok"))
+        like_surface_method = str(post_open_audit.get("like_surface_method") or "")
         opened_surface_kind = "unknown"
         if story_detected:
             opened_surface_kind = (
@@ -46346,7 +46560,8 @@ def run_post_follow_post_likes_phase(
                 outcome="wrong_surface_story_highlight_recovered",
             )
 
-        fb_detected, fb_method = _ui_post_viewer_facebook_shared_content_detected(d)
+        fb_detected = bool(post_open_audit.get("facebook_detected"))
+        fb_method = str(post_open_audit.get("facebook_method") or "")
         if fb_detected:
             return _skip_unusable_post_like_surface(
                 skipped_reason="post_like_skipped_facebook_shared_content",
