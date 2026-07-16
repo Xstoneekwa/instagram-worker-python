@@ -35,6 +35,7 @@ DISPATCHER_VERSION = "orf-4d"
 DRY_RUN_DISPATCHER_VERSION = "orf-4b"
 WEBHOOK_USER_AGENT = "PhoneFarmIncidentNotifier/1.0 (+https://localhost)"
 ACTION_CTA_LABEL = "Open Incidents/Actions"
+CANONICAL_INCIDENTS_BASE_URL = "https://www.boostmybusinesses.com"
 
 
 def _notifications_enabled() -> bool:
@@ -191,9 +192,10 @@ def _sanitize_error(value: Any) -> str:
 
 def _incident_dashboard_url(incident: dict) -> str | None:
     """Secure internal link to the Admin incidents view (never a webhook)."""
-    base = str(getattr(config, "INCIDENT_NOTIFICATIONS_DASHBOARD_BASE_URL", "") or "").strip().rstrip("/")
-    if not base:
-        return None
+    base = str(
+        getattr(config, "INCIDENT_NOTIFICATIONS_DASHBOARD_BASE_URL", "")
+        or CANONICAL_INCIDENTS_BASE_URL
+    ).strip().rstrip("/")
     incident_id = str(incident.get("id") or "").strip()
     suffix = f"?incident_id={incident_id}" if incident_id else ""
     return f"{base}/instagram-dashboard/incidents{suffix}"
@@ -243,22 +245,29 @@ def build_incident_notification_payload(incident: dict) -> dict:
     return _redact_payload({k: v for k, v in payload.items() if v is not None})
 
 
-def build_slack_payload(payload: dict) -> dict:
+def build_notification_channel_payload(channel: str, payload: dict) -> dict:
     safe = _redact_payload(dict(payload or {}))
     text = str(safe.get("text") or safe.get("title") or "Incident notification")
     dashboard_url = str(safe.get("dashboard_url") or "").strip()
+    normalized = str(channel or "").strip().lower()
     if dashboard_url:
-        text = f"{text}\n<{dashboard_url}|{ACTION_CTA_LABEL}>"
-    return {"text": text}
+        if normalized == "slack":
+            text = f"{text}\n<{dashboard_url}|{ACTION_CTA_LABEL}>"
+        elif normalized == "discord":
+            text = f"{text}\n[{ACTION_CTA_LABEL}]({dashboard_url})"
+    if normalized == "slack":
+        return {"text": text}
+    if normalized == "discord":
+        return {"content": text}
+    raise ValueError("invalid_notification_channel")
+
+
+def build_slack_payload(payload: dict) -> dict:
+    return build_notification_channel_payload("slack", payload)
 
 
 def build_discord_payload(payload: dict) -> dict:
-    safe = _redact_payload(dict(payload or {}))
-    text = str(safe.get("text") or safe.get("title") or "Incident notification")
-    dashboard_url = str(safe.get("dashboard_url") or "").strip()
-    if dashboard_url:
-        text = f"{text}\n[{ACTION_CTA_LABEL}]({dashboard_url})"
-    return {"content": text}
+    return build_notification_channel_payload("discord", payload)
 
 
 def dispatch_operator_review_action_notification(

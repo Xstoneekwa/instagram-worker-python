@@ -263,7 +263,7 @@ class IncidentNotificationsTest(unittest.TestCase):
         slack = incident_notifications.build_slack_payload(payload)
         self.assertIn("<https://admin.example.com/instagram-dashboard/incidents?incident_id=incident-1|Open Incidents/Actions>", slack["text"])
 
-    def test_dashboard_link_omitted_without_base_url(self) -> None:
+    def test_dashboard_link_uses_canonical_production_url_without_override(self) -> None:
         with patch.object(
             incident_notifications.config,
             "INCIDENT_NOTIFICATIONS_DASHBOARD_BASE_URL",
@@ -271,8 +271,10 @@ class IncidentNotificationsTest(unittest.TestCase):
             create=True,
         ):
             payload = incident_notifications.build_incident_notification_payload(_incident("incident-1"))
-        self.assertNotIn("dashboard_url", payload)
-        self.assertNotIn("PLACEHOLDER", payload["text"])
+        self.assertEqual(
+            payload["dashboard_url"],
+            "https://www.boostmybusinesses.com/instagram-dashboard/incidents?incident_id=incident-1",
+        )
 
     def test_slack_payload_builder(self) -> None:
         payload = incident_notifications.build_slack_payload({
@@ -295,6 +297,22 @@ class IncidentNotificationsTest(unittest.TestCase):
             payload,
             {"content": "hello\n[Open Incidents/Actions](https://www.boostmybusinesses.com/instagram-dashboard/incidents)"},
         )
+
+    def test_all_consultable_runtime_incidents_use_the_shared_cta_builder(self) -> None:
+        for incident_type in (
+            "welcome_surface_unstable",
+            "followers_suggestions_boundary_recovery_failed",
+            "run_worker_failure",
+        ):
+            incident = _incident(f"incident-{incident_type}")
+            incident["incident_type"] = incident_type
+            payload = incident_notifications.build_incident_notification_payload(incident)
+            slack = incident_notifications.build_notification_channel_payload("slack", payload)["text"]
+            discord = incident_notifications.build_notification_channel_payload("discord", payload)["content"]
+            self.assertIn("|Open Incidents/Actions>", slack)
+            self.assertIn("[Open Incidents/Actions](", discord)
+            self.assertNotRegex(slack, r"\nhttps?://")
+            self.assertNotRegex(discord, r"\nhttps?://")
 
     def test_fail_open_on_supabase_error(self) -> None:
         with (
