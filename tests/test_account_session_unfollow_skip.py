@@ -8,7 +8,7 @@ import outreach_session_orchestrator
 
 
 class AccountSessionUnfollowSkipTest(unittest.TestCase):
-    def test_h3_prod_normal_runtime_cap_honors_env_and_hard_caps(self) -> None:
+    def test_h3_prod_normal_runtime_cap_uses_domain_and_day_remaining(self) -> None:
         original_loader = account_session.load_unfollow_settings
         original_counter = account_session.supabase_client.count_successful_unfollows_today
         original_requested = getattr(account_session.config, "ACCOUNT_SESSION_FOLLOW_TO_UNFOLLOW_REAL_MAX_ACTIONS", 1)
@@ -35,14 +35,14 @@ class AccountSessionUnfollowSkipTest(unittest.TestCase):
             account_session.config.ACCOUNT_SESSION_FOLLOW_TO_UNFOLLOW_REAL_HARD_MAX = original_hard
             account_session.config.UNFOLLOW_SESSION_REAL_ACTION_MAX_PER_RUN = original_global
 
-        self.assertEqual(out["runtime_cap"], 1)
+        self.assertEqual(out["runtime_cap"], 50)
         self.assertEqual(out["runtime_cap_mode"], "prod_normal")
         self.assertEqual(out["h3_requested_cap"], 1)
         self.assertEqual(out["h3_hard_cap"], 1)
         self.assertEqual(out["global_unfollow_env_cap"], 1)
         self.assertEqual(out["unfollow_day_remaining_today"], 195)
 
-    def test_h3_runtime_cap_never_exceeds_global_unfollow_env_cap(self) -> None:
+    def test_h3_prod_normal_runtime_cap_is_not_reduced_by_global_env_cap(self) -> None:
         original_loader = account_session.load_unfollow_settings
         original_counter = account_session.supabase_client.count_successful_unfollows_today
         original_requested = getattr(account_session.config, "ACCOUNT_SESSION_FOLLOW_TO_UNFOLLOW_REAL_MAX_ACTIONS", 1)
@@ -69,7 +69,7 @@ class AccountSessionUnfollowSkipTest(unittest.TestCase):
             account_session.config.ACCOUNT_SESSION_FOLLOW_TO_UNFOLLOW_REAL_HARD_MAX = original_hard
             account_session.config.UNFOLLOW_SESSION_REAL_ACTION_MAX_PER_RUN = original_global
 
-        self.assertEqual(out["runtime_cap"], 1)
+        self.assertEqual(out["runtime_cap"], 50)
         self.assertEqual(out["h3_env_cap"], 3)
         self.assertEqual(out["global_unfollow_env_cap"], 1)
 

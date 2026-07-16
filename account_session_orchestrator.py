@@ -1632,15 +1632,20 @@ def _resolve_follow_to_unfollow_runtime_cap(account_id: str | None = None) -> di
         unfollows_done_today = db_day_limit
     day_remaining = max(0, db_day_limit - int(unfollows_done_today or 0))
     domain_cap = _h3_nonnegative_int(runtime.get("runtime_cap"), 0)
-    effective = min(domain_cap, env_effective, day_remaining)
+    prod_normal = str(runtime.get("runtime_cap_mode") or "") == "prod_normal"
+    effective = min(domain_cap, day_remaining) if prod_normal else min(domain_cap, env_effective, day_remaining)
     out = dict(runtime)
     out.update(
         {
             "runtime_cap": effective,
-            "runtime_hard_cap": min(
-                _h3_nonnegative_int(runtime.get("runtime_hard_cap"), domain_cap),
-                hard_max,
-                global_unfollow_env_cap,
+            "runtime_hard_cap": (
+                _h3_nonnegative_int(runtime.get("runtime_hard_cap"), domain_cap)
+                if prod_normal
+                else min(
+                    _h3_nonnegative_int(runtime.get("runtime_hard_cap"), domain_cap),
+                    hard_max,
+                    global_unfollow_env_cap,
+                )
             ),
             "h3_requested_cap": requested,
             "h3_hard_cap": hard_max,
@@ -1649,7 +1654,11 @@ def _resolve_follow_to_unfollow_runtime_cap(account_id: str | None = None) -> di
             "db_unfollow_per_day_limit": db_day_limit,
             "unfollows_done_today": int(unfollows_done_today or 0),
             "unfollow_day_remaining_today": day_remaining,
-            "source": "min(domain_runtime,h3_requested,h3_hard,global_unfollow_env,db_day_remaining)",
+            "source": (
+                "min(domain_runtime,db_day_remaining)"
+                if prod_normal
+                else "min(domain_runtime,h3_requested,h3_hard,global_unfollow_env,db_day_remaining)"
+            ),
         }
     )
     return out

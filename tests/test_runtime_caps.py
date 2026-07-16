@@ -168,7 +168,7 @@ class RuntimeCapsTest(unittest.TestCase):
         self.assertEqual(out["runtime_cap_mode"], "mini_run")
         self.assertTrue(out["limited_by_runtime_cap"])
 
-    def test_unfollow_effective_cap_honors_env_hard_cap_in_prod_normal(self) -> None:
+    def test_unfollow_effective_cap_ignores_env_mini_cap_in_prod_normal(self) -> None:
         settings = types.SimpleNamespace(
             session_limit=50,
             runtime_cap_mode="prod_normal",
@@ -181,7 +181,7 @@ class RuntimeCapsTest(unittest.TestCase):
             day_remaining=200,
         )
 
-        self.assertEqual(out, 1)
+        self.assertEqual(out, 50)
 
 
 if __name__ == "__main__":

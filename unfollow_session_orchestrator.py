@@ -6,7 +6,9 @@ Phase 2C: optional real Unfollow action behind explicit config/env opt-in.
 
 from __future__ import annotations
 
+import os
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 import uiautomator2 as u2
@@ -171,10 +173,54 @@ def _effective_real_action_max_per_run(
         runtime_safety_cap=getattr(settings, "runtime_safety_cap", None),
         env_real_action_max_per_run=env_cap,
     )
-    caps = [db_limit, env_cap, int(runtime_cap.get("runtime_cap") or 0)]
+    caps = [db_limit, int(runtime_cap.get("runtime_cap") or 0)]
+    if str(runtime_cap.get("runtime_cap_mode") or "") != "prod_normal":
+        caps.append(env_cap)
     if day_remaining is not None:
         caps.append(max(0, int(day_remaining)))
     return min(caps)
+
+
+def _parse_runtime_deadline(value: str | None) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _unfollow_time_budget(
+    requested_actions: int,
+    *,
+    business_action_deadline: str | None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    deadline = _parse_runtime_deadline(business_action_deadline)
+    estimate = max(1, int(getattr(config, "UNFOLLOW_CONSERVATIVE_ACTION_SECONDS", 90)))
+    reserve = max(0, int(getattr(config, "UNFOLLOW_FINALIZATION_RESERVE_SECONDS", 30)))
+    if deadline is None:
+        return {
+            "business_action_deadline": None,
+            "remaining_seconds": None,
+            "estimated_seconds_per_action": estimate,
+            "finalization_reserve_seconds": reserve,
+            "time_bounded_action_cap": max(0, int(requested_actions)),
+        }
+    current = now or datetime.now(timezone.utc)
+    remaining = max(0.0, (deadline - current).total_seconds())
+    time_cap = max(0, int((remaining - reserve) // estimate))
+    return {
+        "business_action_deadline": deadline.isoformat().replace("+00:00", "Z"),
+        "remaining_seconds": round(remaining, 3),
+        "estimated_seconds_per_action": estimate,
+        "finalization_reserve_seconds": reserve,
+        "time_bounded_action_cap": min(max(0, int(requested_actions)), time_cap),
+    }
 
 
 def _scroll_max_passes() -> int:
@@ -900,6 +946,7 @@ def _run_real_unfollow_multi_loop(
     harvest_fields: dict[str, Any],
     visible_eligibility_row_cache: dict[str, dict[str, Any] | None],
     real_action_max: int,
+    business_action_deadline: str | None,
     t0: float,
 ) -> int:
     verified = 0
@@ -1189,6 +1236,14 @@ def _run_real_unfollow_multi_loop(
 
     iteration_index = 0
     while verified < real_action_max:
+        time_budget = _unfollow_time_budget(
+            real_action_max - verified,
+            business_action_deadline=business_action_deadline,
+        )
+        if int(time_budget["time_bounded_action_cap"]) <= 0:
+            stop_reason = "unfollow_skipped_insufficient_time"
+            last_fields = {**last_fields, **time_budget}
+            return emit_final("success_unfollow_skipped_insufficient_time")
         iteration_index += 1
         log(
             "info",
@@ -1892,6 +1947,7 @@ def run_unfollow_session(
     dry_probe_only: bool = True,
     real_action_enabled_override: bool | None = None,
     real_action_max_override: int | None = None,
+    business_action_deadline: str | None = None,
 ) -> int:
     """Run unfollow_session: probe by default; real Unfollow only with explicit config opt-in."""
     t0 = time.perf_counter()
@@ -1932,6 +1988,14 @@ def run_unfollow_session(
         env_real_action_max,
         unfollow_day_remaining_today,
     )
+    resolved_deadline = str(
+        business_action_deadline or os.environ.get("BUSINESS_ACTION_DEADLINE") or ""
+    ).strip() or None
+    time_budget = _unfollow_time_budget(
+        real_action_max,
+        business_action_deadline=resolved_deadline,
+    )
+    real_action_max = min(real_action_max, int(time_budget["time_bounded_action_cap"]))
     log(
         "info",
         "unfollow_effective_limits_resolved",
@@ -1947,6 +2011,7 @@ def run_unfollow_session(
         runtime_cap_source=str(runtime_cap_resolution.get("runtime_cap_source") or ""),
         runtime_mode_cap=int(runtime_cap_resolution.get("runtime_cap") or 0),
         effective_real_action_max_per_run=real_action_max,
+        **time_budget,
         source_day_counter="ig_interacted_users.unfollowed_at",
         source="min(db_session,env_hard_cap,runtime_mode_cap,db_day_remaining)",
     )
@@ -1993,8 +2058,26 @@ def run_unfollow_session(
             "unfollows_done_today": int(unfollows_done_today or 0),
             "unfollow_day_remaining_today": unfollow_day_remaining_today,
             "source_day_counter": "ig_interacted_users.unfollowed_at",
+            **time_budget,
         }
     )
+
+    if (
+        not bool(dry_probe_only)
+        and config_real_enabled
+        and bool(settings.enabled)
+        and int(time_budget["time_bounded_action_cap"]) <= 0
+    ):
+        summary = {
+            **base_summary,
+            "status": "success_unfollow_skipped_insufficient_time",
+            "failure_reason": "",
+            "multi_action_stop_reason": "unfollow_skipped_insufficient_time",
+            "total_ms": round((time.perf_counter() - t0) * 1000.0, 2),
+        }
+        log("info", "unfollow_skipped_insufficient_time", **time_budget)
+        _emit_summary(summary)
+        return 0
 
     if (
         not bool(dry_probe_only)
@@ -2155,6 +2238,7 @@ def run_unfollow_session(
             harvest_fields=harvest_fields,
             visible_eligibility_row_cache=visible_eligibility_row_cache,
             real_action_max=real_action_max,
+            business_action_deadline=resolved_deadline,
             t0=t0,
         )
 

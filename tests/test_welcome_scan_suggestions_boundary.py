@@ -92,8 +92,8 @@ class WelcomeScanSuggestionsBoundaryTest(unittest.TestCase):
         self.assertTrue(summary["followers_suggestions_boundary_backtrack_attempted"])
         self.assertEqual(summary["followers_suggestions_boundary_action"], "adaptive_up_recovery")
         self.assertTrue(summary["followers_suggestions_boundary_selected_candidate_is_real_follower"])
-        self.assertEqual(summary["followers_suggestions_boundary_recovery_attempts"], 1)
-        self.assertEqual(backtrack.call_count, 1)
+        self.assertEqual(summary["followers_suggestions_boundary_recovery_attempts"], 0)
+        self.assertEqual(backtrack.call_count, 0)
         self.assertEqual(scroll.call_args.kwargs["scroll_profile"], "welcome_soft")
         planned = next(call for call in log_mock.call_args_list if call.args[1] == "followers_soft_scroll_planned")
         self.assertEqual(planned.kwargs["distance_px"], 585)
@@ -117,10 +117,7 @@ class WelcomeScanSuggestionsBoundaryTest(unittest.TestCase):
             stack.enter_context(patch.object(
                 scan,
                 "detect_followers_list_screen",
-                side_effect=[
-                    {"is_followers_list": False, "current_screen_guess": "likely_profile"},
-                    {"is_followers_list": True, "current_screen_guess": "followers_list"},
-                ],
+                return_value={"is_followers_list": False, "current_screen_guess": "likely_profile"},
             ))
             code = scan.run_welcome_scan_producer(
                 MagicMock(),
@@ -138,7 +135,7 @@ class WelcomeScanSuggestionsBoundaryTest(unittest.TestCase):
         self.assertEqual(summary["followers_suggestions_boundary_action"], "safe_stop")
         self.assertIsNone(summary["followers_suggestions_boundary_selected_candidate"])
         self.assertFalse(summary["followers_suggestions_boundary_selected_candidate_is_real_follower"])
-        self.assertEqual(backtrack.call_count, 1)
+        self.assertEqual(backtrack.call_count, 5)
 
     def test_loading_boundary_without_jobs_recovers_one_stable_screen(self) -> None:
         rows = [{
@@ -237,9 +234,9 @@ class WelcomeScanSuggestionsBoundaryTest(unittest.TestCase):
         self.assertEqual(summary["jobs_enqueued_count"], 4)
         self.assertEqual(len(summary["new_follower_job_ids_enqueued"]), 4)
         self.assertEqual(summary["followers_suggestions_boundary_action"], "adaptive_up_recovery")
-        self.assertEqual(summary["followers_suggestions_boundary_recovery_attempts"], 1)
+        self.assertEqual(summary["followers_suggestions_boundary_recovery_attempts"], 0)
         self.assertEqual(summary["followers_suggestions_boundary_selected_candidate"], "retryable_0")
-        self.assertEqual(backtrack.call_count, 1)
+        self.assertEqual(backtrack.call_count, 0)
         self.assertEqual(enqueue.call_count, 4)
 
     def test_boundary_recovery_failure_is_structured_safe_stop(self) -> None:
@@ -270,7 +267,7 @@ class WelcomeScanSuggestionsBoundaryTest(unittest.TestCase):
         self.assertEqual(summary["stop_reason"], "followers_suggestions_boundary_recovery_exhausted")
         self.assertEqual(summary["failure_reason"], "followers_suggestions_boundary_recovery_exhausted")
         self.assertEqual(summary["followers_suggestions_boundary_action"], "safe_stop")
-        self.assertEqual(backtrack.call_count, 1)
+        self.assertEqual(backtrack.call_count, 5)
 
     def test_three_descents_recover_after_second_up_and_stop_early(self) -> None:
         planned = [{"username": "welcome_target", "row_cta_xml_class": "message"}]
@@ -368,7 +365,7 @@ class WelcomeScanSuggestionsBoundaryTest(unittest.TestCase):
             patch.object(
                 scan,
                 "followers_refresh_detect_hierarchy_cache",
-                side_effect=[SUGGESTIONS_XML, SUGGESTIONS_XML, SUGGESTIONS_XML],
+                side_effect=[SUGGESTIONS_XML] * 5,
             ),
             patch.object(
                 scan,
@@ -396,8 +393,41 @@ class WelcomeScanSuggestionsBoundaryTest(unittest.TestCase):
 
         self.assertFalse(result["recovered"])
         self.assertIsNone(result["matching_job_username"])
-        self.assertEqual(result["attempts_used"], 3)
-        self.assertEqual(backtrack.call_count, 3)
+        self.assertEqual(result["attempts_used"], 5)
+        self.assertEqual(backtrack.call_count, 5)
+
+    def test_recovery_can_succeed_on_fourth_or_fifth_attempt(self) -> None:
+        planned = [{"username": "welcome_target", "row_cta_xml_class": "message"}]
+        for success_attempt in (4, 5):
+            xmls = [SUGGESTIONS_XML] * (success_attempt - 1) + [STABLE_XML]
+            rows = [([{"username": "suggestion", "row_cta_xml_class": "follow"}], {})] * (
+                success_attempt - 1
+            ) + [(planned, {})]
+            with (
+                patch.object(scan, "scroll_followers_list_backward", return_value=True) as backtrack,
+                patch.object(scan, "followers_refresh_detect_hierarchy_cache", side_effect=xmls),
+                patch.object(
+                    scan,
+                    "detect_followers_list_screen",
+                    side_effect=[
+                        {"is_followers_list": False, "current_screen_guess": "likely_profile"}
+                    ] * (success_attempt - 1)
+                    + [{"is_followers_list": True, "current_screen_guess": "followers_list"}],
+                ),
+                patch.object(scan, "harvest_visible_followers_rows", side_effect=rows),
+            ):
+                result = scan._recover_welcome_followers_from_suggestions_boundary(
+                    MagicMock(),
+                    account_username="i_m_your_traker",
+                    down_scroll_history=[{"distance_px": 585}] * 3,
+                    planned_job_usernames=["welcome_target"],
+                    runtime_seen=set(),
+                    scan_surface_fingerprints=[],
+                )
+
+            self.assertTrue(result["recovered"])
+            self.assertEqual(result["attempts_used"], success_attempt)
+            self.assertEqual(backtrack.call_count, success_attempt)
 
 
 if __name__ == "__main__":
