@@ -1242,6 +1242,14 @@ def _blocked_class_from_markers(*parts: Any) -> str | None:
     return None
 
 
+_TERMINAL_PHASE_STATUSES = {"completed", "skipped_cleanly", "not_planned"}
+_LAST_ACCOUNT_SESSION_SUMMARY: dict[str, Any] = {}
+
+
+def get_last_account_session_summary() -> dict[str, Any]:
+    return dict(_LAST_ACCOUNT_SESSION_SUMMARY)
+
+
 def _phase_statuses(
     *,
     welcome_enabled: bool,
@@ -1251,15 +1259,16 @@ def _phase_statuses(
     follow_phase_skipped_reason: str | None,
     follow_exit_code: int | None,
     follow_to_unfollow_real: dict[str, Any],
-) -> tuple[str, str, str]:
+    account_session_outreach_addon: dict[str, Any],
+) -> tuple[str, str, str, str]:
     if not welcome_enabled:
-        welcome_phase_status = "skipped"
+        welcome_phase_status = "not_planned"
     elif not welcome_phase_executed:
-        welcome_phase_status = "not_started"
+        welcome_phase_status = "unknown"
     elif str(welcome_session_status or "") == "success":
         welcome_phase_status = "completed"
     elif str(welcome_session_status or "") == "partial_success":
-        welcome_phase_status = "partial"
+        welcome_phase_status = "skipped_cleanly"
     elif str(welcome_session_status or "") == "failed":
         welcome_phase_status = "failed"
     else:
@@ -1267,7 +1276,7 @@ def _phase_statuses(
 
     if not follow_phase_executed:
         follow_phase_status = (
-            "skipped" if str(follow_phase_skipped_reason or "").strip() else "not_started"
+            "skipped_cleanly" if str(follow_phase_skipped_reason or "").strip() else "unknown"
         )
     elif follow_exit_code == 0:
         follow_phase_status = "completed"
@@ -1284,11 +1293,25 @@ def _phase_statuses(
 
     real_status = str(follow_to_unfollow_real.get("status") or "")
     if not bool(follow_to_unfollow_real.get("enabled")):
-        unfollow_phase_status = "skipped"
+        unfollow_phase_status = "not_planned"
     elif not bool(follow_to_unfollow_real.get("executed")):
-        unfollow_phase_status = "skipped"
-    elif real_status == "success_real_unfollow":
+        skip_reason = str(follow_to_unfollow_real.get("skip_reason") or "")
+        unfollow_phase_status = "skipped_cleanly" if skip_reason else "unknown"
+    elif (
+        _as_optional_int(follow_to_unfollow_real.get("exit_code")) == 0
+        and int(follow_to_unfollow_real.get("unfollow_actions_failed") or 0) == 0
+        and int(follow_to_unfollow_real.get("unfollow_actions_verified") or 0)
+        == int(follow_to_unfollow_real.get("unfollow_results_persisted_count") or 0)
+        and real_status.startswith("success_real_unfollow")
+    ):
         unfollow_phase_status = "completed"
+    elif real_status in {
+        "no_quota",
+        "no_more_following_rows",
+        "no_visible_eligible_unfollow_target",
+        "success_unfollow_skipped_insufficient_time",
+    }:
+        unfollow_phase_status = "skipped_cleanly"
     elif real_status.startswith("failed"):
         unfollow_phase_status = "failed"
     elif real_status:
@@ -1296,7 +1319,41 @@ def _phase_statuses(
     else:
         unfollow_phase_status = "unknown"
 
-    return welcome_phase_status, follow_phase_status, unfollow_phase_status
+    outreach_enabled = bool(account_session_outreach_addon.get("enabled"))
+    outreach_executed = bool(account_session_outreach_addon.get("executed"))
+    outreach_status = str(account_session_outreach_addon.get("status") or "")
+    outreach_exit_code = _as_optional_int(account_session_outreach_addon.get("exit_code"))
+    if not outreach_enabled:
+        outreach_phase_status = "not_planned"
+    elif not outreach_executed:
+        outreach_phase_status = (
+            "skipped_cleanly"
+            if outreach_status == "skipped" and str(account_session_outreach_addon.get("skip_reason") or "")
+            else "failed" if outreach_status == "blocked" else "unknown"
+        )
+    elif outreach_exit_code == 0 and int(account_session_outreach_addon.get("jobs_failed") or 0) == 0:
+        outreach_phase_status = "completed"
+    elif outreach_exit_code is None:
+        outreach_phase_status = "unknown"
+    else:
+        outreach_phase_status = "failed"
+
+    return welcome_phase_status, follow_phase_status, unfollow_phase_status, outreach_phase_status
+
+
+def _phase_terminal_contract(**phase_statuses: str) -> dict[str, Any]:
+    non_terminal = {
+        phase: status
+        for phase, status in phase_statuses.items()
+        if status not in _TERMINAL_PHASE_STATUSES
+    }
+    return {
+        "ok": not non_terminal,
+        "terminal_statuses": sorted(_TERMINAL_PHASE_STATUSES),
+        "phases": dict(phase_statuses),
+        "non_terminal_phases": non_terminal,
+        "reason": "all_planned_phases_terminal" if not non_terminal else "account_session_phase_not_terminal",
+    }
 
 
 def _session_termination_class(
@@ -2642,6 +2699,8 @@ def run_account_session(
     fast_rotate_to_next_target_from_followers: FastRotationRunner | None = None,
     auto_restart_resume_policy: dict[str, Any] | None = None,
 ) -> int:
+    global _LAST_ACCOUNT_SESSION_SUMMARY
+    _LAST_ACCOUNT_SESSION_SUMMARY = {}
     t0 = time.perf_counter()
     aid = str(account_id or "").strip()
     uname = str(account_username or "").strip()
@@ -3212,13 +3271,6 @@ def run_account_session(
                     run_id=run_id,
                 )
 
-    session_status = _account_session_status(
-        transition_reason=transition_reason,
-        follow_phase_executed=follow_phase_executed,
-        follow_exit_code=follow_exit_code,
-        welcome_blocked_follow=welcome_blocked_follow,
-    )
-    exit_code = 0 if session_status == "success" else 1
     total_ms = (time.perf_counter() - t0) * 1000.0
     follows_completed_count = _as_optional_int(
         follow_engine_summary.get("follows_completed_count")
@@ -3243,6 +3295,7 @@ def run_account_session(
         welcome_phase_status,
         follow_phase_status,
         unfollow_phase_status,
+        outreach_phase_status,
     ) = _phase_statuses(
         welcome_enabled=welcome_enabled,
         welcome_phase_executed=welcome_phase_executed,
@@ -3251,7 +3304,26 @@ def run_account_session(
         follow_phase_skipped_reason=follow_phase_skipped_reason,
         follow_exit_code=follow_exit_code,
         follow_to_unfollow_real=follow_to_unfollow_real,
+        account_session_outreach_addon=account_session_outreach_addon,
     )
+    phase_terminal_contract = _phase_terminal_contract(
+        welcome=welcome_phase_status,
+        follow=follow_phase_status,
+        unfollow=unfollow_phase_status,
+        outreach=outreach_phase_status,
+    )
+    base_session_status = _account_session_status(
+        transition_reason=transition_reason,
+        follow_phase_executed=follow_phase_executed,
+        follow_exit_code=follow_exit_code,
+        welcome_blocked_follow=welcome_blocked_follow,
+    )
+    session_status = (
+        "success"
+        if base_session_status == "success" and bool(phase_terminal_contract["ok"])
+        else "failed"
+    )
+    exit_code = 0 if session_status == "success" else 1
     session_termination_class = _session_termination_class(
         session_status=session_status,
         follow_phase_executed=follow_phase_executed,
@@ -3455,6 +3527,18 @@ def run_account_session(
         "auto_restart_resume_plan": auto_restart_resume_plan,
         "auto_restart_resume_plan_error": auto_restart_resume_plan_error,
     }
+    _LAST_ACCOUNT_SESSION_SUMMARY = {
+        "session_status": session_status,
+        "session_termination_class": session_termination_class,
+        "exit_code": exit_code,
+        "welcome_phase_status": welcome_phase_status,
+        "follow_phase_status": follow_phase_status,
+        "unfollow_phase_status": unfollow_phase_status,
+        "outreach_phase_status": outreach_phase_status,
+        "phase_terminal_contract": phase_terminal_contract,
+        "unfollow_actions_verified": int(follow_to_unfollow_real.get("unfollow_actions_verified") or 0),
+        "unfollow_results_persisted_count": int(follow_to_unfollow_real.get("unfollow_results_persisted_count") or 0),
+    }
     log(
         "info",
         "reliability_v1d_dry_run_started",
@@ -3607,6 +3691,8 @@ def run_account_session(
         ),
         follow_to_unfollow_diagnostic_ms=follow_to_unfollow_diagnostic.get("diagnostic_ms"),
         unfollow_phase_status=unfollow_phase_status,
+        outreach_phase_status=outreach_phase_status,
+        phase_terminal_contract=phase_terminal_contract,
         follow_to_unfollow_probe=follow_to_unfollow_probe,
         follow_to_unfollow_real=follow_to_unfollow_real,
         account_session_outreach_addon=account_session_outreach_addon,

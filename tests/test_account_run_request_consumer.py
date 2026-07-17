@@ -15,6 +15,96 @@ TEST_RUN_ID = "00000000-0000-4000-8000-000000000301"
 
 
 class AccountRunRequestConsumerTest(unittest.TestCase):
+    def test_account_session_exit_zero_requires_terminal_phase_contract(self) -> None:
+        cfg = consumer.DispatcherConfig(
+            enabled=True,
+            health_only=False,
+            launch_enabled=True,
+            worker_id="run-dispatcher:test",
+            poll_seconds=5.0,
+            lease_seconds=120,
+            heartbeat_seconds=20.0,
+            allowed_run_types=["account_session"],
+            test_account_ids=set(),
+            subprocess_timeout_seconds=7200,
+            require_assignment=False,
+            enforce_assignment_window=False,
+        )
+        request = {
+            "id": TEST_REQUEST_ID,
+            "account_id": TEST_ACCOUNT_ID,
+            "run_id": TEST_RUN_ID,
+            "requested_run_type": "account_session",
+            "status": "running",
+        }
+        with (
+            patch.object(consumer, "get_account_run_request", return_value=request),
+            patch.object(
+                consumer.supabase_client,
+                "load_run_row",
+                return_value={"performance_summary": {"phase_terminal_contract": {"ok": False}}},
+            ),
+            patch.object(consumer, "_safe_complete_account_run_request") as complete,
+            patch.object(consumer, "_reconcile_linked_run", return_value={"reconciled": True}) as reconcile,
+            patch.object(consumer, "_audit") as audit,
+            patch.object(consumer, "_publish_run_failure_incident") as publish,
+        ):
+            consumer._finalize_manual_run_after_subprocess(
+                cfg,
+                request_id=TEST_REQUEST_ID,
+                account_id=TEST_ACCOUNT_ID,
+                exit_code=0,
+            )
+
+        self.assertEqual(complete.call_args.args[2], "failed")
+        self.assertEqual(complete.call_args.kwargs["error_code"], "account_session_phase_not_terminal")
+        self.assertEqual(reconcile.call_args.kwargs["terminal_status"], "failed")
+        self.assertEqual(audit.call_args.kwargs["action_type"], "account_session_terminal_contract_failed")
+        publish.assert_called_once()
+
+    def test_account_session_exit_zero_completes_with_terminal_phase_contract(self) -> None:
+        cfg = consumer.DispatcherConfig(
+            enabled=True,
+            health_only=False,
+            launch_enabled=True,
+            worker_id="run-dispatcher:test",
+            poll_seconds=5.0,
+            lease_seconds=120,
+            heartbeat_seconds=20.0,
+            allowed_run_types=["account_session"],
+            test_account_ids=set(),
+            subprocess_timeout_seconds=7200,
+            require_assignment=False,
+            enforce_assignment_window=False,
+        )
+        request = {
+            "id": TEST_REQUEST_ID,
+            "account_id": TEST_ACCOUNT_ID,
+            "run_id": TEST_RUN_ID,
+            "requested_run_type": "account_session",
+            "status": "running",
+        }
+        with (
+            patch.object(consumer, "get_account_run_request", return_value=request),
+            patch.object(
+                consumer.supabase_client,
+                "load_run_row",
+                return_value={"performance_summary": {"phase_terminal_contract": {"ok": True}}},
+            ),
+            patch.object(consumer, "_safe_complete_account_run_request") as complete,
+            patch.object(consumer, "_reconcile_linked_run", return_value={"reconciled": True}) as reconcile,
+            patch.object(consumer, "_audit"),
+        ):
+            consumer._finalize_manual_run_after_subprocess(
+                cfg,
+                request_id=TEST_REQUEST_ID,
+                account_id=TEST_ACCOUNT_ID,
+                exit_code=0,
+            )
+
+        self.assertEqual(complete.call_args.args[2], "completed")
+        self.assertEqual(reconcile.call_args.kwargs["terminal_status"], "completed")
+
     def test_load_dispatcher_config_defaults(self) -> None:
         with patch.dict("os.environ", {}, clear=True):
             cfg = consumer.load_dispatcher_config()

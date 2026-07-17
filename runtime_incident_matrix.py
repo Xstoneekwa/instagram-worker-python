@@ -192,6 +192,16 @@ def classify_terminal_run_failure(
     summary = dict(performance_summary or {})
     status = str(run_status or "").strip().lower()
     reason = str(summary.get("reason") or "").strip()
+    phase_terminal_contract = summary.get("phase_terminal_contract")
+    if (
+        not reason
+        and isinstance(phase_terminal_contract, dict)
+        and phase_terminal_contract.get("ok") is False
+    ):
+        reason = str(
+            phase_terminal_contract.get("reason") or "account_session_phase_not_terminal"
+        ).strip()
+        summary["reason"] = reason
     identity_reason = str(summary.get("account_identity_failure_reason") or "").strip()
 
     if exit_code == 0 and not timed_out:

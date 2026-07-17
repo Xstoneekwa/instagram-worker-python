@@ -976,6 +976,12 @@ def _build_account_session_completion_performance_summary(
         "target_selection_source": target_selection_source,
         "session_counters": dict(_SESSION_COUNTERS),
     }
+    try:
+        from account_session_orchestrator import get_last_account_session_summary
+
+        summary.update(get_last_account_session_summary())
+    except Exception as exc:
+        summary["phase_summary_error"] = str(exc)[:300]
     if int(exit_code) != 0:
         from welcome_list_sender import get_last_welcome_list_sender_summary
         from welcome_scan_producer import get_last_welcome_scan_summary

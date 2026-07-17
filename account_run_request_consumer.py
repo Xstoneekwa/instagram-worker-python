@@ -1104,6 +1104,48 @@ def _finalize_manual_run_after_subprocess(
                 payload={"request_id": request_id, "exit_code": exit_code, "recovery_state": "login_surface_restored"},
             )
             return
+        if run_type == "account_session":
+            run_row = supabase_client.load_run_row(run_id or "") or {}
+            performance_summary = run_row.get("performance_summary")
+            contract = (
+                performance_summary.get("phase_terminal_contract")
+                if isinstance(performance_summary, dict)
+                else None
+            )
+            if not isinstance(contract, dict) or contract.get("ok") is not True:
+                reason = "account_session_phase_not_terminal"
+                _safe_complete_account_run_request(
+                    request_id,
+                    cfg.worker_id,
+                    "failed",
+                    error_code=reason,
+                    error_message_safe="Account session stopped before every planned phase reached a terminal state.",
+                )
+                _reconcile_linked_run(
+                    account_id=account_id,
+                    run_id=run_id,
+                    terminal_status="failed",
+                    request_id=request_id,
+                    exit_code=1,
+                )
+                _audit(
+                    account_id=account_id,
+                    action_type="account_session_terminal_contract_failed",
+                    status="failed",
+                    message="Account session terminal contract was not satisfied.",
+                    run_id=run_id,
+                    payload={"request_id": request_id, "phase_terminal_contract": contract},
+                )
+                _publish_run_failure_incident(
+                    request_id=request_id,
+                    account_id=account_id,
+                    run_id=run_id,
+                    run_type=run_type,
+                    exit_code=1,
+                    timed_out=False,
+                    canceled=False,
+                )
+                return
         _safe_complete_account_run_request(request_id, cfg.worker_id, "completed")
         _reconcile_linked_run(
             account_id=account_id,
