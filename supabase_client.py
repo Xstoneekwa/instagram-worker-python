@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -3677,7 +3678,7 @@ def get_dm_template_by_id(template_id: str, *, account_id: str | None = None) ->
     if not tid:
         return None
     query = {
-        "select": "id,account_id,template_type,active,body,is_default",
+        "select": "id,account_id,template_type,active,body,is_default,updated_at",
         "id": f"eq.{tid}",
         "limit": "1",
     }
@@ -3696,7 +3697,7 @@ def get_default_dm_template(account_id: str, dm_type: str) -> dict[str, Any] | N
         "GET",
         "ig_dm_templates",
         query={
-            "select": "id,account_id,template_type,active,body,is_default",
+            "select": "id,account_id,template_type,active,body,is_default,updated_at",
             "account_id": f"eq.{aid}",
             "template_type": f"eq.{kind}",
             "active": "eq.true",
@@ -3740,7 +3741,7 @@ def _resolve_dm_template_for_enqueue(
     return get_default_dm_template(account_id, dm_type)
 
 
-def _render_dm_message_body_for_enqueue(
+def _resolve_and_render_dm_message_for_enqueue(
     account_id: str,
     *,
     recipient_username: str,
@@ -3749,7 +3750,7 @@ def _render_dm_message_body_for_enqueue(
     dm_type: str,
     message_body: str | None,
     template_id: str | None,
-) -> str | None:
+) -> tuple[str | None, dict[str, Any] | None]:
     from dm_template_renderer import has_unresolved_template_tokens, render_dm_template
 
     raw_body = str(message_body or "").strip()
@@ -3764,10 +3765,10 @@ def _render_dm_message_body_for_enqueue(
                 raise RuntimeError("dm_template_render_failed:template_type_mismatch")
         raw_body = str((template or {}).get("body") or "").strip()
     if not raw_body:
-        return message_body
+        return message_body, template
 
     if not has_unresolved_template_tokens(raw_body):
-        return raw_body
+        return raw_body, template
 
     sender_username = str(account_username or "").strip() or get_account_username(account_id)
     result = render_dm_template(
@@ -3780,7 +3781,29 @@ def _render_dm_message_body_for_enqueue(
     )
     if not result.ok:
         raise RuntimeError(f"dm_template_render_failed:{result.reason}")
-    return result.rendered_body
+    return result.rendered_body, template
+
+
+def _render_dm_message_body_for_enqueue(
+    account_id: str,
+    *,
+    recipient_username: str,
+    recipient_name: str | None,
+    account_username: str | None,
+    dm_type: str,
+    message_body: str | None,
+    template_id: str | None,
+) -> str | None:
+    rendered_body, _template = _resolve_and_render_dm_message_for_enqueue(
+        account_id,
+        recipient_username=recipient_username,
+        recipient_name=recipient_name,
+        account_username=account_username,
+        dm_type=dm_type,
+        message_body=message_body,
+        template_id=template_id,
+    )
+    return rendered_body
 
 
 def enqueue_welcome_dm_job_if_eligible(
@@ -3795,32 +3818,73 @@ def enqueue_welcome_dm_job_if_eligible(
     priority: int = 10,
 ) -> dict[str, Any] | None:
     """RPC enqueue_welcome_dm_job_if_eligible (no DM send). Returns job row or None."""
-    rendered_body = _render_dm_message_body_for_enqueue(
+    if str(message_body or "").strip():
+        raise RuntimeError("dm_template_render_failed:welcome_message_body_override_not_allowed")
+    rendered_body, resolved_template = _resolve_and_render_dm_message_for_enqueue(
         account_id,
         recipient_username=follower_username,
         recipient_name=recipient_name,
         account_username=account_username,
         dm_type="welcome",
-        message_body=message_body,
+        message_body=None,
         template_id=template_id,
     )
+    resolved_template_id = str((resolved_template or {}).get("id") or template_id or "").strip()
+    if not resolved_template_id:
+        raise RuntimeError("dm_template_render_failed:canonical_welcome_template_missing")
+    rendered_body_normalized = str(rendered_body or "").strip()
+    if not rendered_body_normalized:
+        raise RuntimeError("dm_template_render_failed:canonical_welcome_message_empty")
     row = call_rpc(
         "enqueue_welcome_dm_job_if_eligible",
         {
             "p_account_id": str(account_id),
             "p_follower_username": str(follower_username),
             "p_source_scan_run_id": scan_run_id,
-            "p_message_body": rendered_body,
-            "p_template_id": template_id,
+            "p_message_body": rendered_body_normalized,
+            "p_template_id": resolved_template_id,
             "p_priority": int(priority),
         },
     )
+    job: dict[str, Any] | None = None
     if isinstance(row, dict):
-        return row
-    if isinstance(row, list) and row:
+        job = row
+    elif isinstance(row, list) and row:
         first = row[0]
-        return first if isinstance(first, dict) else None
-    return None
+        job = first if isinstance(first, dict) else None
+    if job is None:
+        return None
+
+    returned_template_id = str(job.get("template_id") or "").strip()
+    returned_message_body = str(job.get("message_body") or "").strip()
+    if (
+        returned_template_id != resolved_template_id
+        or returned_message_body != rendered_body_normalized
+    ):
+        log(
+            "error",
+            "welcome_template_contract_mismatch",
+            account_id=str(account_id),
+            job_id=str(job.get("id") or ""),
+            recipient_username=str(follower_username),
+            expected_template_id=resolved_template_id,
+            returned_template_id=returned_template_id,
+            template_version=str((resolved_template or {}).get("updated_at") or ""),
+            template_hash=hashlib.sha256(rendered_body_normalized.encode("utf-8")).hexdigest()[:16],
+        )
+        raise RuntimeError("welcome_template_contract_mismatch")
+
+    log(
+        "info",
+        "welcome_template_contract_validated",
+        account_id=str(account_id),
+        job_id=str(job.get("id") or ""),
+        recipient_username=str(follower_username),
+        template_id=resolved_template_id,
+        template_version=str((resolved_template or {}).get("updated_at") or ""),
+        template_hash=hashlib.sha256(rendered_body_normalized.encode("utf-8")).hexdigest()[:16],
+    )
+    return job
 
 
 def enqueue_outreach_dm_job(
