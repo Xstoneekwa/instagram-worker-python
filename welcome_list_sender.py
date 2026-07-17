@@ -6,6 +6,7 @@ Search-based dm_sender_send remains for Outreach / external prospects.
 
 from __future__ import annotations
 
+import hashlib
 import time
 import traceback
 from typing import Any
@@ -34,6 +35,7 @@ from instagram_navigation import (
     followers_clear_detect_hierarchy_cache,
     followers_refresh_detect_hierarchy_cache,
     followers_session_clear_list_committed_open,
+    followers_suggestions_boundary_from_cached_hierarchy,
     harvest_visible_followers_rows,
     get_last_dm_thread_classify_snapshot,
     is_dm_thread_screen,
@@ -42,7 +44,7 @@ from instagram_navigation import (
     reset_dm_thread_probe_state,
     return_welcome_list_from_dm_to_followers,
     scroll_followers_list_backward,
-    scroll_followers_list_to_find_row,
+    scroll_followers_list_forward,
     tap_followers_list_username_row,
     verify_dm_composer_safe,
     verify_profile,
@@ -63,6 +65,11 @@ def _norm_username(raw: str) -> str:
 
 _SEND_UNVERIFIED_REASONS = frozenset(
     {"send_unverified", "send_without_strong_outbound_proof"}
+)
+
+_WELCOME_ROW_SNAPSHOT_TTL_MS = 750.0
+_WELCOME_REAL_FOLLOWER_CTA_CLASSES = frozenset(
+    {"message", "follow_back", "following", "requested", "contact"}
 )
 
 
@@ -123,12 +130,23 @@ def _order_jobs_by_scan(
 
 def _scan_row_anchors_by_username(scan_summary: dict[str, Any]) -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
+    job_ids = {
+        _norm_username(str(entry.get("username") or "")): str(entry.get("job_id") or "")
+        for entry in scan_summary.get("new_follower_job_ids_enqueued") or []
+        if isinstance(entry, dict)
+    }
     for row in scan_summary.get("new_follower_visible_rows_enqueued") or []:
         if not isinstance(row, dict):
             continue
         key = _norm_username(str(row.get("username") or ""))
         if key:
-            out[key] = dict(row)
+            anchor = dict(row)
+            anchor["job_id"] = job_ids.get(key) or None
+            anchor["scan_generation"] = str(scan_summary.get("run_id") or "")
+            anchor["captured_at_monotonic"] = scan_summary.get(
+                "scan_completed_at_monotonic"
+            )
+            out[key] = anchor
     return out
 
 
@@ -158,6 +176,107 @@ def _row_from_scan_anchor(anchor: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def _anchor_age_ms(anchor: dict[str, Any] | None) -> float | None:
+    if not anchor:
+        return None
+    try:
+        captured = float(anchor.get("captured_at_monotonic"))
+    except (TypeError, ValueError):
+        return None
+    return max(0.0, round((time.perf_counter() - captured) * 1000.0, 2))
+
+
+def _welcome_row_bounds_valid(row: dict[str, Any]) -> bool:
+    bounds = dict(row.get("tap_bounds") or row.get("bounds") or {})
+    try:
+        left = int(bounds["left"])
+        top = int(bounds["top"])
+        right = int(bounds["right"])
+        bottom = int(bounds["bottom"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return right > left and bottom > top and left >= 0 and top >= 0
+
+
+def _welcome_row_is_real_follower(row: dict[str, Any]) -> bool:
+    return str(row.get("row_cta_xml_class") or "").strip().lower() in (
+        _WELCOME_REAL_FOLLOWER_CTA_CLASSES
+    )
+
+
+def _welcome_rows_viewport_fingerprint(rows: list[dict[str, Any]]) -> str:
+    parts: list[str] = []
+    for row in rows:
+        username = _norm_username(str(row.get("username") or ""))
+        bounds = dict(row.get("username_bounds") or row.get("bounds") or {})
+        cta = str(row.get("row_cta_xml_class") or "").strip().lower()
+        parts.append(f"{username}:{cta}:{bounds}")
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:16]
+
+
+def _mark_fresh_welcome_row(
+    row: dict[str, Any],
+    *,
+    job_id: str,
+    scan_generation: str,
+    navigation_generation: str,
+    viewport_fingerprint: str,
+    snapshot_captured_at: float,
+) -> dict[str, Any]:
+    current = dict(row)
+    current["welcome_job_id"] = str(job_id or "")
+    current["welcome_scan_generation"] = str(scan_generation or "")
+    current["welcome_navigation_generation"] = str(navigation_generation or "")
+    current["welcome_viewport_fingerprint"] = str(viewport_fingerprint or "")
+    current["welcome_snapshot_captured_at"] = float(snapshot_captured_at)
+    current["welcome_fresh_identity_resolved"] = True
+    return current
+
+
+def _authorize_welcome_row_tap(
+    row: dict[str, Any] | None,
+    *,
+    expected_username: str,
+    job_id: str,
+    scan_generation: str,
+    navigation_generation: str,
+) -> tuple[bool, str, float, str]:
+    observed_username = str((row or {}).get("username") or "").strip()
+    expected_key = _norm_username(expected_username)
+    observed_key = _norm_username(observed_username)
+    try:
+        captured_at = float((row or {}).get("welcome_snapshot_captured_at"))
+        snapshot_age_ms = max(
+            0.0, round((time.perf_counter() - captured_at) * 1000.0, 2)
+        )
+    except (TypeError, ValueError):
+        snapshot_age_ms = float("inf")
+
+    reason = "authorized"
+    if not row or not bool(row.get("welcome_fresh_identity_resolved")):
+        reason = "fresh_identity_missing"
+    elif not expected_key or observed_key != expected_key:
+        reason = "username_mismatch"
+    elif str(row.get("welcome_job_id") or "") != str(job_id or ""):
+        reason = "job_id_mismatch"
+    elif str(row.get("welcome_scan_generation") or "") != str(
+        scan_generation or ""
+    ):
+        reason = "scan_generation_changed"
+    elif str(row.get("welcome_navigation_generation") or "") != str(
+        navigation_generation or ""
+    ):
+        reason = "navigation_generation_changed"
+    elif snapshot_age_ms > _WELCOME_ROW_SNAPSHOT_TTL_MS:
+        reason = "snapshot_ttl_expired"
+    elif not _welcome_row_is_real_follower(row):
+        reason = "suggestions_or_non_follower_row"
+    elif not _welcome_row_bounds_valid(row):
+        reason = "current_bounds_invalid"
+
+    return reason == "authorized", reason, snapshot_age_ms, observed_username
+
+
 def _resolve_followers_row(
     d: u2.Device,
     username: str,
@@ -166,9 +285,13 @@ def _resolve_followers_row(
     scan_anchors: dict[str, dict[str, Any]],
     screen_index: int = 0,
     allow_scan_anchor_fast_path: bool = False,
+    job_id: str = "",
+    scan_generation: str = "",
+    navigation_generation: str = "",
+    anchor_invalidation_reason: str = "fresh_identity_required_before_tap",
 ) -> tuple[dict[str, Any] | None, int, str, dict[str, Any]]:
     """
-    Path 1 scan anchor → path 2 fresh visible harvest → path 3 bounded scroll.
+    Scan anchors retain identity/order only. Every tappable row is freshly resolved.
     Returns (row, scroll_count, lookup_path, debug_meta).
     """
     uname = str(username or "").strip()
@@ -178,28 +301,47 @@ def _resolve_followers_row(
         "username": uname,
         "scan_anchor_present": key in scan_anchors,
         "scan_anchor_fast_path_allowed": bool(allow_scan_anchor_fast_path),
+        "scan_anchor_coordinates_reused": False,
+        "job_id": str(job_id or ""),
+        "scan_generation": str(scan_generation or ""),
+        "navigation_generation": str(navigation_generation or ""),
     }
 
     anchor = scan_anchors.get(key)
-    if allow_scan_anchor_fast_path and anchor is not None:
-        t_fast = time.perf_counter()
-        row = _row_from_scan_anchor(anchor)
-        if row is not None:
-            elapsed_ms = round((time.perf_counter() - t_fast) * 1000.0, 2)
-            debug["lookup_path_used"] = "scan_anchor_fast_path"
-            log(
-                "info",
-                "welcome_list_sender_fast_row_tap_from_scan_anchor_used",
-                username=uname,
-                row_index=row.get("row_index"),
-                username_bounds=row.get("username_bounds"),
-                tap_bounds=row.get("tap_bounds"),
-                extraction_source=row.get("extraction_source"),
-                screen_index=row.get("screen_index"),
-                scan_anchor_to_tap_ms=elapsed_ms,
-            )
-            return row, 0, "scan_anchor_fast_path", debug
+    if anchor is not None:
+        log(
+            "info",
+            "welcome_row_anchor_invalidated",
+            job_id=str(job_id or anchor.get("job_id") or ""),
+            expected_username=uname,
+            reason=str(anchor_invalidation_reason or "fresh_identity_required_before_tap"),
+            anchor_age_ms=_anchor_age_ms(anchor),
+            previous_navigation_generation=str(
+                anchor.get("navigation_generation")
+                or anchor.get("scan_generation")
+                or ""
+            ),
+        )
 
+    resolve_started = time.perf_counter()
+    surface_ok, _surface_xml = _verify_followers_surface(
+        d,
+        account_username=src,
+        context="welcome_row_fresh_resolve",
+    )
+    if not surface_ok:
+        debug["lookup_path_used"] = "followers_surface_not_stable"
+        log(
+            "warning",
+            "welcome_row_tap_blocked",
+            reason="followers_surface_not_stable",
+            expected_username=uname,
+            observed_username=None,
+            job_id=str(job_id or ""),
+        )
+        return None, 0, "followers_surface_not_stable", debug
+
+    snapshot_captured_at = time.perf_counter()
     rows, harvest_meta = harvest_visible_followers_rows(
         d,
         source_profile_username=src,
@@ -212,6 +354,16 @@ def _resolve_followers_row(
     debug["visible_usernames"] = visible_usernames
     debug["hierarchy_source"] = harvest_meta.get("hierarchy_source")
     debug["screen_index"] = screen_index
+    viewport_fingerprint = _welcome_rows_viewport_fingerprint(rows)
+    debug["viewport_fingerprint"] = viewport_fingerprint
+
+    log(
+        "info",
+        "welcome_row_fresh_resolve_started",
+        job_id=str(job_id or ""),
+        expected_username=uname,
+        viewport_fingerprint=viewport_fingerprint,
+    )
 
     log(
         "info",
@@ -226,23 +378,21 @@ def _resolve_followers_row(
         scan_anchor_present=bool(debug["scan_anchor_present"]),
     )
 
-    if anchor is not None:
-        row = _row_from_scan_anchor(anchor)
-        if row is not None:
-            log(
-                "info",
-                "welcome_list_sender_scan_row_anchor_reused",
-                username=uname,
-                row_index=row.get("row_index"),
-                username_bounds=row.get("username_bounds"),
-                tap_bounds=row.get("tap_bounds"),
-                extraction_source=row.get("extraction_source"),
-                screen_index=row.get("screen_index"),
-            )
-            return row, 0, "scan_anchor", debug
-
     for row in rows:
-        if _norm_username(str(row.get("username") or "")) == key:
+        if (
+            _norm_username(str(row.get("username") or "")) == key
+            and _welcome_row_is_real_follower(row)
+            and _welcome_row_bounds_valid(row)
+        ):
+            current = _mark_fresh_welcome_row(
+                row,
+                job_id=job_id,
+                scan_generation=scan_generation,
+                navigation_generation=navigation_generation,
+                viewport_fingerprint=viewport_fingerprint,
+                snapshot_captured_at=snapshot_captured_at,
+            )
+            elapsed_ms = round((time.perf_counter() - resolve_started) * 1000.0, 2)
             log(
                 "info",
                 "welcome_list_sender_row_lookup_fresh_match",
@@ -251,8 +401,24 @@ def _resolve_followers_row(
                 extraction_source=row.get("extraction_source"),
                 hierarchy_source=row.get("hierarchy_source"),
             )
-            return dict(row), 0, "fresh_visible", debug
+            log(
+                "info",
+                "welcome_row_fresh_resolve_completed",
+                job_id=str(job_id or ""),
+                expected_username=uname,
+                username_match=True,
+                current_bounds=current.get("tap_bounds") or current.get("bounds"),
+                elapsed_ms=elapsed_ms,
+                snapshot_age_ms=round(
+                    (time.perf_counter() - snapshot_captured_at) * 1000.0, 2
+                ),
+                viewport_fingerprint=viewport_fingerprint,
+            )
+            return current, 0, "fresh_visible", debug
 
+    boundary = followers_suggestions_boundary_from_cached_hierarchy(
+        previously_valid_followers_rows=True
+    )
     log(
         "info",
         "welcome_list_sender_row_lookup_fresh_miss",
@@ -260,7 +426,24 @@ def _resolve_followers_row(
         visible_usernames=visible_usernames,
         target_in_visible_list=key in visible_keys,
         scan_anchor_present=bool(debug["scan_anchor_present"]),
+        suggestions_boundary=bool(boundary.get("is_boundary")),
     )
+
+    if bool(boundary.get("is_boundary")):
+        debug["lookup_path_used"] = "suggestions_boundary_blocked"
+        log(
+            "warning",
+            "welcome_row_tap_blocked",
+            reason=(
+                "suggestions_boundary_target_not_real_follower"
+                if key in visible_keys
+                else "suggestions_boundary_target_absent"
+            ),
+            expected_username=uname,
+            observed_username=uname if key in visible_keys else None,
+            job_id=str(job_id or ""),
+        )
+        return None, 0, "suggestions_boundary_blocked", debug
 
     if key in visible_keys:
         debug["lookup_path_used"] = "fresh_miss_despite_visible_username"
@@ -275,27 +458,102 @@ def _resolve_followers_row(
         scan_anchor_present=bool(debug["scan_anchor_present"]),
     )
     debug["visible_usernames_before_scroll"] = list(visible_usernames)
-    row, scrolls, visible_after = scroll_followers_list_to_find_row(
-        d,
-        uname,
-        source_profile_username=src,
-        screen_index=screen_index,
+    max_scrolls = max(
+        0, int(getattr(config, "WELCOME_LIST_SENDER_MAX_SCROLL_FIND", 3) or 3)
     )
-    debug["visible_usernames_after_last_scroll"] = visible_after
-    if row is not None:
-        log(
-            "info",
-            "welcome_list_sender_row_lookup_fresh_match",
-            username=uname,
-            row_index=row.get("row_index"),
-            extraction_source=row.get("extraction_source"),
-            lookup_path="after_scroll",
-            scrolls=scrolls,
+    settle_s = float(
+        getattr(config, "WELCOME_LIST_SENDER_SCROLL_SETTLE_S", 0.45) or 0.45
+    )
+    last_visible = list(visible_usernames)
+    for scrolls in range(1, max_scrolls + 1):
+        if not scroll_followers_list_forward(
+            d,
+            source_profile_username=src,
+            bypass_post_tap_capture_gate=True,
+            bypass_scroll_xml_guards=True,
+        ):
+            break
+        followers_clear_detect_hierarchy_cache()
+        if settle_s > 0:
+            time.sleep(min(settle_s, 1.5))
+        step_captured_at = time.perf_counter()
+        step_rows, step_meta = harvest_visible_followers_rows(
+            d,
+            source_profile_username=src,
+            runtime_seen=set(),
+            force_fresh_hierarchy=True,
+            screen_index=int(screen_index) + scrolls,
         )
-        return dict(row), scrolls, "scroll_find", debug
+        last_visible = [
+            str(candidate.get("username") or "")
+            for candidate in step_rows
+            if candidate.get("username")
+        ]
+        step_fingerprint = _welcome_rows_viewport_fingerprint(step_rows)
+        for candidate in step_rows:
+            if (
+                _norm_username(str(candidate.get("username") or "")) == key
+                and _welcome_row_is_real_follower(candidate)
+                and _welcome_row_bounds_valid(candidate)
+            ):
+                current = _mark_fresh_welcome_row(
+                    candidate,
+                    job_id=job_id,
+                    scan_generation=scan_generation,
+                    navigation_generation=f"{navigation_generation}:scroll:{scrolls}",
+                    viewport_fingerprint=step_fingerprint,
+                    snapshot_captured_at=step_captured_at,
+                )
+                debug["resolved_navigation_generation"] = current.get(
+                    "welcome_navigation_generation"
+                )
+                debug["visible_usernames_after_last_scroll"] = list(last_visible)
+                log(
+                    "info",
+                    "welcome_row_fresh_resolve_completed",
+                    job_id=str(job_id or ""),
+                    expected_username=uname,
+                    username_match=True,
+                    current_bounds=current.get("tap_bounds") or current.get("bounds"),
+                    elapsed_ms=round(
+                        (time.perf_counter() - resolve_started) * 1000.0, 2
+                    ),
+                    snapshot_age_ms=round(
+                        (time.perf_counter() - step_captured_at) * 1000.0, 2
+                    ),
+                    viewport_fingerprint=step_fingerprint,
+                )
+                return current, scrolls, "scroll_find", debug
+        step_boundary = followers_suggestions_boundary_from_cached_hierarchy(
+            previously_valid_followers_rows=True
+        )
+        if bool(step_boundary.get("is_boundary")):
+            debug["lookup_path_used"] = "suggestions_boundary_blocked"
+            debug["visible_usernames_after_last_scroll"] = list(last_visible)
+            log(
+                "warning",
+                "welcome_row_tap_blocked",
+                reason="suggestions_boundary_target_absent",
+                expected_username=uname,
+                observed_username=None,
+                job_id=str(job_id or ""),
+            )
+            return None, scrolls, "suggestions_boundary_blocked", debug
 
+    debug["visible_usernames_after_last_scroll"] = list(last_visible)
     debug["lookup_path_used"] = "scroll_exhausted"
-    return None, scrolls, "not_found", debug
+    log(
+        "info",
+        "welcome_row_fresh_resolve_completed",
+        job_id=str(job_id or ""),
+        expected_username=uname,
+        username_match=False,
+        current_bounds=None,
+        elapsed_ms=round((time.perf_counter() - resolve_started) * 1000.0, 2),
+        snapshot_age_ms=None,
+        viewport_fingerprint=debug.get("viewport_fingerprint"),
+    )
+    return None, max_scrolls, "not_found", debug
 
 
 def _session_scan_jobs_from_summary(scan_summary: dict[str, Any]) -> list[dict[str, Any]]:
@@ -939,6 +1197,13 @@ def _navigate_followers_row_to_dm(
             plan_ctx.get("current_scan_session")
             and plan_ctx.get("followers_surface_fresh")
         ),
+        job_id=str(plan_ctx.get("job_id") or ""),
+        scan_generation=str(plan_ctx.get("scan_generation") or ""),
+        navigation_generation=str(plan_ctx.get("navigation_generation") or ""),
+        anchor_invalidation_reason=str(
+            plan_ctx.get("anchor_invalidation_reason")
+            or "fresh_identity_required_before_tap"
+        ),
     )
     nav_meta["followers_scrolls_to_find"] = scrolls
     nav_meta["lookup_path_used"] = lookup_path
@@ -980,6 +1245,47 @@ def _navigate_followers_row_to_dm(
         bounds=bounds,
         row_index=row.get("row_index"),
         extraction_source=row.get("extraction_source"),
+    )
+
+    resolved_navigation_generation = str(
+        lookup_debug.get("resolved_navigation_generation")
+        or row.get("welcome_navigation_generation")
+        or plan_ctx.get("navigation_generation")
+        or ""
+    )
+    tap_allowed, tap_reason, snapshot_age_ms, observed_username = (
+        _authorize_welcome_row_tap(
+            row,
+            expected_username=uname,
+            job_id=str(plan_ctx.get("job_id") or ""),
+            scan_generation=str(plan_ctx.get("scan_generation") or ""),
+            navigation_generation=resolved_navigation_generation,
+        )
+    )
+    if not tap_allowed:
+        log(
+            "warning",
+            "welcome_row_tap_blocked",
+            reason=tap_reason,
+            expected_username=uname,
+            observed_username=observed_username or None,
+            job_id=str(plan_ctx.get("job_id") or ""),
+            snapshot_age_ms=None
+            if snapshot_age_ms == float("inf")
+            else snapshot_age_ms,
+        )
+        return f"row_tap_blocked_{tap_reason}", False, nav_meta
+
+    log(
+        "info",
+        "welcome_row_tap_authorized",
+        job_id=str(plan_ctx.get("job_id") or ""),
+        expected_username=uname,
+        current_bounds=row.get("tap_bounds") or row.get("bounds"),
+        scan_generation=str(plan_ctx.get("scan_generation") or ""),
+        navigation_generation=resolved_navigation_generation,
+        viewport_fingerprint=row.get("welcome_viewport_fingerprint"),
+        snapshot_age_ms=snapshot_age_ms,
     )
     tapped, tap_x, tap_y = tap_followers_list_username_row(d, row, username=uname)
     if not tapped:
@@ -1257,7 +1563,9 @@ def execute_welcome_list_job(
         )
 
         if not nav_ok:
-            if thread_state == "unknown" and get_last_dm_thread_attempted():
+            if thread_state.startswith("row_tap_blocked_"):
+                fail_reason = thread_state
+            elif thread_state == "unknown" and get_last_dm_thread_attempted():
                 fail_reason = "thread_state_unknown_after_message"
             elif thread_state in (
                 "foreground_package_mismatch",
@@ -1270,13 +1578,16 @@ def execute_welcome_list_job(
                 fail_reason = "list_navigation_failed"
             plan_ctx = dict(planned_job_context or {})
             lookup_path = str(_nav_meta.get("lookup_path_used") or "")
-            row_missing = lookup_path in (
-                "not_found",
-                "scroll_exhausted",
-                "fresh_miss_despite_visible",
-            )
+            row_failure_reason = {
+                "not_found": "current_scan_planned_row_not_found",
+                "scroll_exhausted": "current_scan_planned_row_not_found",
+                "fresh_miss_despite_visible": "current_scan_planned_row_identity_unverified",
+                "followers_surface_not_stable": "followers_surface_not_stable_before_welcome_row_tap",
+                "suggestions_boundary_blocked": "followers_suggestions_boundary_target_not_found",
+            }.get(lookup_path)
+            row_missing = row_failure_reason is not None
             if plan_ctx.get("current_scan_session") and row_missing:
-                fail_reason = "current_scan_planned_row_not_found"
+                fail_reason = str(row_failure_reason)
                 log(
                     "error",
                     "welcome_list_sender_current_scan_row_not_found",
@@ -1866,13 +2177,25 @@ def run_welcome_list_sender(
 
         planned_job_context: dict[str, Any] | None = None
         if current_scan_session_mode and not only_job_id:
+            if planned_index > 0:
+                anchor_invalidation_reason = "cross_job_navigation_completed"
+            elif reposition_applied:
+                anchor_invalidation_reason = "viewport_repositioned_after_scan"
+            else:
+                anchor_invalidation_reason = "fresh_identity_required_before_tap"
             planned_job_context = {
                 "current_scan_session": True,
+                "job_id": str(job.get("id") or ""),
                 "planned_index": planned_index,
                 "selection_strategy": selection_strategy
                 or str(planned.get("selection_reason") or ""),
                 "reposition_applied": reposition_applied,
                 "followers_surface_fresh": True,
+                "scan_generation": str(scan.get("run_id") or run_id or ""),
+                "navigation_generation": (
+                    f"{str(run_id or 'no-run')}:{planned_index}:followers_pre_tap"
+                ),
+                "anchor_invalidation_reason": anchor_invalidation_reason,
             }
 
         try:
