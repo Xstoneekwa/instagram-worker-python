@@ -54,6 +54,7 @@ from instagram_navigation import (
     verify_dm_composer_safe,
     verify_dm_draft_text,
     verify_profile,
+    verify_welcome_dm_thread_recipient_exact,
 )
 from logs import log
 
@@ -2916,6 +2917,46 @@ def _complete_job_failed_retry(
     return row, "failed_retry"
 
 
+def _complete_job_send_unverified_quarantine(
+    job: dict[str, Any],
+    *,
+    last_error: str,
+    thread_state: str | None = None,
+    metadata_patch: dict[str, Any] | None = None,
+    increment_attempt: bool = True,
+) -> tuple[dict[str, Any] | None, str]:
+    """Terminal quarantine: an unverified tap must never become retryable."""
+    job_id = str(job.get("id") or "")
+    patch = dict(metadata_patch or {})
+    patch.update(
+        {
+            "send_verification_status": "unverified",
+            "manual_reconciliation_required": True,
+            "automatic_retry_blocked": True,
+        }
+    )
+    if thread_state:
+        patch["thread_state"] = thread_state
+    row = supabase_client.complete_dm_job(
+        job_id,
+        "failed",
+        last_error=str(last_error),
+        increment_attempt=bool(increment_attempt),
+        retry_delay_seconds=None,
+        metadata_patch=patch,
+    )
+    log(
+        "warning",
+        "dm_sender_send_unverified_quarantined",
+        job_id=job_id,
+        last_error=last_error,
+        recipient_username=job.get("recipient_username"),
+        thread_state=thread_state,
+        automatic_retry_blocked=True,
+    )
+    return row, "send_unverified_quarantined"
+
+
 def _dm_message_typing_flags(text: str) -> dict[str, Any]:
     raw = str(text or "")
     return {
@@ -3182,6 +3223,20 @@ def _perform_real_welcome_dm_send(
         )
         return False, {}, "unresolved_template_token"
 
+    if str(dm_type or "").strip().lower() == "welcome":
+        identity_ok, identity_reason, observed_username = (
+            verify_welcome_dm_thread_recipient_exact(d, uname, pkg)
+        )
+        if not identity_ok:
+            log(
+                "error",
+                "dm_sender_welcome_thread_identity_blocked_before_typing",
+                username=uname,
+                reason=identity_reason,
+                observed_thread_username=observed_username or None,
+            )
+            return False, {}, identity_reason
+
     if dm_thread_shows_outgoing_message(d, draft_text):
         log(
             "info",
@@ -3350,6 +3405,20 @@ def _perform_real_welcome_dm_send(
     if bool(getattr(config, "DM_VERIFY_TYPED_TEXT", True)):
         if not verify_dm_draft_text(d, draft_text):
             return False, {}, "draft_verify_failed"
+
+    if str(dm_type or "").strip().lower() == "welcome":
+        identity_ok, identity_reason, observed_username = (
+            verify_welcome_dm_thread_recipient_exact(d, uname, pkg)
+        )
+        if not identity_ok:
+            log(
+                "error",
+                "dm_sender_welcome_thread_identity_blocked_before_send",
+                username=uname,
+                reason=identity_reason,
+                observed_thread_username=observed_username or None,
+            )
+            return False, {}, identity_reason
 
     prev_enable = bool(getattr(config, "ENABLE_REAL_DM_SEND", False))
     try:

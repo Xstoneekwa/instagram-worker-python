@@ -18,6 +18,7 @@ from dm_sender_engine import (
     _check_dm_sender_permission_blocker,
     _claim_job_for_run,
     _complete_job_failed_retry,
+    _complete_job_send_unverified_quarantine,
     _complete_job_skipped,
     _dm_sender_session_should_abort,
     _evaluate_welcome_sendability,
@@ -28,6 +29,7 @@ from dm_sender_engine import (
     resolve_welcome_dm_real_send_enabled,
 )
 from instagram_navigation import (
+    _capture_welcome_dm_forensics_artifacts,
     detect_followers_list_screen_fresh,
     followers_clear_detect_hierarchy_cache,
     followers_refresh_detect_hierarchy_cache,
@@ -44,6 +46,7 @@ from instagram_navigation import (
     tap_followers_list_username_row,
     verify_dm_composer_safe,
     verify_profile,
+    verify_welcome_profile_username_exact,
 )
 from logs import log
 
@@ -56,6 +59,53 @@ def get_last_welcome_list_sender_summary() -> dict[str, Any]:
 
 def _norm_username(raw: str) -> str:
     return str(raw or "").strip().lstrip("@").lower()
+
+
+_SEND_UNVERIFIED_REASONS = frozenset(
+    {"send_unverified", "send_without_strong_outbound_proof"}
+)
+
+
+def _job_requires_send_unverified_quarantine(job: dict[str, Any]) -> bool:
+    if str(job.get("last_error") or "") in _SEND_UNVERIFIED_REASONS:
+        return True
+    metadata = job.get("metadata") or {}
+    return bool(
+        isinstance(metadata, dict)
+        and str(metadata.get("send_verification_status") or "") == "unverified"
+    )
+
+
+def _capture_welcome_failure_before_cleanup(
+    d: u2.Device,
+    *,
+    account_username: str,
+    expected_username: str,
+    job_id: str,
+    navigation_state: str,
+) -> dict[str, Any]:
+    """Capture the final Android state before runner cleanup can force-stop Instagram."""
+    artifacts = _capture_welcome_dm_forensics_artifacts(
+        d,
+        expected_username or account_username,
+        artifact_suffix=f"failure_before_cleanup_{job_id or 'no_job'}",
+    )
+    current: dict[str, Any] = {}
+    try:
+        current = dict(d.app_current() or {})
+    except Exception as exc:
+        current = {"error": str(exc)[:200]}
+    out = {
+        **artifacts,
+        "account_username": account_username,
+        "expected_username": expected_username or None,
+        "last_job_id": job_id or None,
+        "last_navigation_state": navigation_state,
+        "current_package": current.get("package"),
+        "current_activity": current.get("activity"),
+    }
+    log("error", "welcome_failure_forensics_captured_before_cleanup", **out)
+    return out
 
 
 def _order_jobs_by_scan(
@@ -951,6 +1001,21 @@ def _navigate_followers_row_to_dm(
         log("error", "welcome_list_sender_profile_verify_failed", username=uname)
         return "unknown", False, nav_meta
 
+    identity_ok, identity_reason, observed_username = (
+        verify_welcome_profile_username_exact(d, uname, pkg)
+    )
+    nav_meta["profile_identity_reason"] = identity_reason
+    nav_meta["observed_profile_username"] = observed_username
+    if not identity_ok:
+        log(
+            "error",
+            "welcome_list_sender_profile_identity_rejected",
+            username=uname,
+            reason=identity_reason,
+            observed_profile_username=observed_username or None,
+        )
+        return identity_reason, False, nav_meta
+
     log("info", "welcome_list_sender_profile_opened", username=uname)
 
     thread_state = open_dm_thread_from_profile(
@@ -973,7 +1038,13 @@ def _navigate_followers_row_to_dm(
             composer_reason=comp_reason,
         )
 
-    nav_ok = thread_state not in ("unknown",)
+    nav_ok = thread_state not in (
+        "unknown",
+        "foreground_package_mismatch",
+        "profile_username_mismatch",
+        "thread_recipient_identity_mismatch",
+        "account_review_popup",
+    )
     return thread_state, nav_ok, nav_meta
 
 
@@ -1046,24 +1117,28 @@ def _restore_followers_after_job(
             )
             return True
 
-    from instagram_navigation import tap_instagram_action_bar_back_button
-
-    settle_s = float(
-        getattr(config, "WELCOME_LIST_SENDER_BACK_SETTLE_S", 0.45) or 0.45
+    recipient_profile_ok, _, _ = verify_welcome_profile_username_exact(
+        d, username, pkg
     )
-    for step in range(2):
-        if _confirm_followers(f"back_step_{step}"):
+    own_profile_ok, _, _ = verify_welcome_profile_username_exact(d, src, pkg)
+    if recipient_profile_ok:
+        from instagram_navigation import tap_instagram_action_bar_back_button
+
+        settle_s = float(
+            getattr(config, "WELCOME_LIST_SENDER_BACK_SETTLE_S", 0.45) or 0.45
+        )
+        tapped, _ = tap_instagram_action_bar_back_button(d, pkg)
+        if tapped and settle_s > 0:
+            time.sleep(settle_s)
+        if tapped and _confirm_followers("recipient_profile_single_back"):
             log(
                 "info",
                 "welcome_post_job_return_succeeded",
                 username=username,
                 source_profile_username=src or None,
-                method=f"action_bar_back_step_{step}",
+                method="recipient_profile_single_back",
             )
             return True
-        tapped, _ = tap_instagram_action_bar_back_button(d, pkg)
-        if tapped and settle_s > 0:
-            time.sleep(settle_s)
 
     log(
         "info",
@@ -1073,7 +1148,7 @@ def _restore_followers_after_job(
         method="own_profile_canonical_reopen",
     )
     followers_session_clear_list_committed_open(src)
-    profile_ok = open_own_profile_from_bottom_nav(d)
+    profile_ok = own_profile_ok or open_own_profile_from_bottom_nav(d)
     opened = False
     open_meta: dict[str, Any] = {}
     if profile_ok:
@@ -1184,6 +1259,13 @@ def execute_welcome_list_job(
         if not nav_ok:
             if thread_state == "unknown" and get_last_dm_thread_attempted():
                 fail_reason = "thread_state_unknown_after_message"
+            elif thread_state in (
+                "foreground_package_mismatch",
+                "profile_username_mismatch",
+                "thread_recipient_identity_mismatch",
+                "account_review_popup",
+            ):
+                fail_reason = thread_state
             else:
                 fail_reason = "list_navigation_failed"
             plan_ctx = dict(planned_job_context or {})
@@ -1208,18 +1290,26 @@ def execute_welcome_list_job(
                     scrolls_attempted=_nav_meta.get("followers_scrolls_to_find"),
                     scan_anchor_present=bool(_nav_meta.get("scan_anchor_present")),
                 )
-            updated_job, outcome = _complete_job_failed_retry(
-                job,
-                last_error=fail_reason,
-                thread_state=thread_state,
-            )
+            if fail_reason in _SEND_UNVERIFIED_REASONS:
+                updated_job, outcome = _complete_job_send_unverified_quarantine(
+                    job,
+                    last_error=fail_reason,
+                    thread_state=thread_state,
+                )
+            else:
+                updated_job, outcome = _complete_job_failed_retry(
+                    job,
+                    last_error=fail_reason,
+                    thread_state=thread_state,
+                )
             final_status = str((updated_job or {}).get("status") or "pending")
             log(
-                "info",
-                "welcome_list_sender_job_failed_retry_scheduled",
+                "warning",
+                "welcome_list_sender_job_navigation_failed",
                 job_id=job_id,
                 recipient_username=recipient,
                 reason=fail_reason,
+                outcome=outcome,
             )
         else:
             sendable, skip_candidate = _evaluate_welcome_sendability(
@@ -1320,18 +1410,19 @@ def execute_welcome_list_job(
                     unverified_reason = str(fail_reason or "send_unverified")
                     if sent_ok and not strong_send_proof:
                         unverified_reason = "send_without_strong_outbound_proof"
-                    updated_job, outcome = _complete_job_failed_retry(
+                    updated_job, outcome = _complete_job_send_unverified_quarantine(
                         job,
                         last_error=unverified_reason,
                         thread_state=thread_state,
                     )
-                    final_status = str((updated_job or {}).get("status") or "pending")
+                    final_status = str((updated_job or {}).get("status") or "failed")
                     log(
-                        "info",
-                        "welcome_list_sender_job_failed_retry_scheduled",
+                        "warning",
+                        "welcome_list_sender_job_send_unverified_quarantined",
                         job_id=job_id,
                         recipient_username=recipient,
                         reason=unverified_reason,
+                        final_job_status=final_status,
                     )
     finally:
         if followers_surface_restored_by_send_finalize:
@@ -1345,6 +1436,13 @@ def execute_welcome_list_job(
         elif not _restore_followers_after_job(
             d, recipient, pkg=pkg, account_username=account_username
         ):
+            _capture_welcome_failure_before_cleanup(
+                d,
+                account_username=account_username,
+                expected_username=recipient,
+                job_id=job_id,
+                navigation_state=str(fail_reason or thread_state or "unknown"),
+            )
             _check_dm_sender_permission_blocker(
                 d, username=recipient, context="welcome_list_teardown"
             )
@@ -1713,6 +1811,30 @@ def run_welcome_list_sender(
                 current_scan_session_mode=current_scan_session_mode,
             )
             break
+
+        if _job_requires_send_unverified_quarantine(job):
+            recipient = str(job.get("recipient_username") or "").strip()
+            _complete_job_send_unverified_quarantine(
+                job,
+                last_error=str(job.get("last_error") or "send_unverified"),
+                thread_state=str((job.get("metadata") or {}).get("thread_state") or "") or None,
+                metadata_patch={"quarantined_on_claim": True},
+                increment_attempt=False,
+            )
+            summary["jobs_claimed_count"] += 1
+            summary["jobs_failed_count"] += 1
+            summary["processed_recipients"].append(recipient)
+            summary["failed_recipients"].append(recipient)
+            summary["recipients_failed"].append(recipient)
+            log(
+                "warning",
+                "welcome_list_sender_preexisting_send_unverified_blocked",
+                account_id=aid,
+                run_id=run_id,
+                job_id=str(job.get("id") or ""),
+                recipient_username=recipient,
+            )
+            continue
 
         if len(summary["processed_recipients"]) >= sender_attempt_cap:
             loop_exit_reason = "attempt_cap_reached"

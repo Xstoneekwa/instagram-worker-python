@@ -81,7 +81,11 @@ class WelcomeListNativeFastPathTests(unittest.TestCase):
             patch.object(nav, "clear_dm_draft") as clear_mock,
             patch.object(nav, "finalize_dm_draft_before_back") as finalize_mock,
             patch.object(nav, "tap_instagram_action_bar_back_button", return_value=(True, "action_bar")),
-            patch.object(nav, "verify_profile", return_value=True),
+            patch.object(
+                nav,
+                "verify_welcome_profile_username_exact",
+                return_value=(True, "exact_profile_username", "medoc_en_mer"),
+            ),
             patch.object(nav, "detect_followers_list_screen_fresh", return_value=(det, "")),
         ):
             out = nav.return_welcome_list_from_dm_to_followers(
@@ -109,7 +113,11 @@ class WelcomeListNativeFastPathTests(unittest.TestCase):
             patch.object(nav, "clear_dm_draft") as clear_mock,
             patch.object(nav, "finalize_dm_draft_before_back") as finalize_mock,
             patch.object(nav, "tap_instagram_action_bar_back_button", return_value=(True, "action_bar")),
-            patch.object(nav, "verify_profile", return_value=True),
+            patch.object(
+                nav,
+                "verify_welcome_profile_username_exact",
+                return_value=(True, "exact_profile_username", "medoc_en_mer"),
+            ),
             patch.object(nav, "detect_followers_list_screen_fresh", return_value=(det, "")),
         ):
             out = nav.return_welcome_list_from_dm_to_followers(

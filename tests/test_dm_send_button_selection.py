@@ -402,6 +402,11 @@ class DmSendButtonSelectionTest(unittest.TestCase):
     def test_perform_real_send_reuses_existing_draft(self) -> None:
         device = MagicMock()
         with (
+            patch.object(
+                dm_sender_engine,
+                "verify_welcome_dm_thread_recipient_exact",
+                return_value=(True, "exact_thread_header", "user"),
+            ),
             patch.object(dm_sender_engine, "dm_thread_shows_outgoing_message", return_value=False),
             patch.object(dm_sender_engine, "read_dm_composer_text", return_value="Salut et bienvenue"),
             patch.object(dm_sender_engine, "verify_dm_composer_safe", return_value=(True, "ok")),
@@ -428,6 +433,11 @@ class DmSendButtonSelectionTest(unittest.TestCase):
     def test_perform_real_send_prevents_duplicate_when_message_in_thread(self) -> None:
         device = MagicMock()
         with (
+            patch.object(
+                dm_sender_engine,
+                "verify_welcome_dm_thread_recipient_exact",
+                return_value=(True, "exact_thread_header", "user"),
+            ),
             patch.object(dm_sender_engine, "dm_thread_shows_outgoing_message", return_value=True),
             patch.object(dm_sender_engine, "send_dm_safe") as send_mock,
         ):

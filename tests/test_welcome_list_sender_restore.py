@@ -528,10 +528,16 @@ class WelcomeListSenderRestoreTest(unittest.TestCase):
             patch.object(sender, "is_dm_thread_screen", return_value=False),
             patch.object(
                 sender,
+                "verify_welcome_profile_username_exact",
+                side_effect=[
+                    (False, "profile_username_mismatch", ""),
+                    (False, "profile_username_mismatch", ""),
+                ],
+            ),
+            patch.object(
+                sender,
                 "detect_followers_list_screen_fresh",
                 side_effect=[
-                    (det_lost, {}),
-                    (det_lost, {}),
                     (det_lost, {}),
                     (det_followers, {}),
                 ],
@@ -567,6 +573,14 @@ class WelcomeListSenderRestoreTest(unittest.TestCase):
         }
         with (
             patch.object(sender, "is_dm_thread_screen", return_value=False),
+            patch.object(
+                sender,
+                "verify_welcome_profile_username_exact",
+                side_effect=[
+                    (False, "profile_username_mismatch", "verslaresilience_"),
+                    (False, "profile_username_mismatch", "verslaresilience_"),
+                ],
+            ),
             patch.object(sender, "detect_followers_list_screen_fresh", return_value=(det_lost, {})),
             patch("instagram_navigation.tap_instagram_action_bar_back_button", return_value=(False, "missing")),
             patch.object(sender, "followers_session_clear_list_committed_open"),
@@ -798,9 +812,9 @@ class WelcomeListSenderRestoreTest(unittest.TestCase):
             ),
             patch.object(
                 sender,
-                "_complete_job_failed_retry",
-                return_value=({**job, "status": "pending"}, "failed_retry"),
-            ) as retry_mock,
+                "_complete_job_send_unverified_quarantine",
+                return_value=({**job, "status": "failed"}, "send_unverified_quarantined"),
+            ) as quarantine_mock,
             patch.object(sender.supabase_client, "complete_dm_job") as complete_mock,
             patch.object(sender, "_restore_followers_after_job", return_value=True),
         ):
@@ -813,9 +827,9 @@ class WelcomeListSenderRestoreTest(unittest.TestCase):
                 scan_anchors={},
             )
 
-        self.assertEqual(result["outcome"], "failed_retry")
+        self.assertEqual(result["outcome"], "send_unverified_quarantined")
         self.assertEqual(
-            retry_mock.call_args.kwargs.get("last_error"),
+            quarantine_mock.call_args.kwargs.get("last_error"),
             "send_without_strong_outbound_proof",
         )
         complete_mock.assert_not_called()
@@ -843,9 +857,9 @@ class WelcomeListSenderRestoreTest(unittest.TestCase):
             ),
             patch.object(
                 sender,
-                "_complete_job_failed_retry",
-                return_value=({**job, "status": "pending"}, "failed_retry"),
-            ) as retry_mock,
+                "_complete_job_send_unverified_quarantine",
+                return_value=({**job, "status": "failed"}, "send_unverified_quarantined"),
+            ) as quarantine_mock,
             patch.object(sender.supabase_client, "complete_dm_job") as complete_mock,
             patch.object(sender, "_restore_followers_after_job", return_value=True),
         ):
@@ -858,9 +872,11 @@ class WelcomeListSenderRestoreTest(unittest.TestCase):
                 scan_anchors={},
             )
 
-        self.assertEqual(result["outcome"], "failed_retry")
-        retry_mock.assert_called_once()
-        self.assertEqual(retry_mock.call_args.kwargs.get("last_error"), "send_unverified")
+        self.assertEqual(result["outcome"], "send_unverified_quarantined")
+        quarantine_mock.assert_called_once()
+        self.assertEqual(
+            quarantine_mock.call_args.kwargs.get("last_error"), "send_unverified"
+        )
         complete_mock.assert_not_called()
 
     def test_sender_all_non_dmable_skips_is_not_false_success(self) -> None:

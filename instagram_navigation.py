@@ -6197,21 +6197,7 @@ def dm_thread_shows_outgoing_message(d: u2.Device, expected_text: str) -> bool:
             hier = d.dump_hierarchy()
         except Exception:
             return False
-    if not _dm_expected_text_present(hier, needle):
-        return False
-    composer_text = read_dm_composer_text(d)
-    if composer_text.strip() == needle and not _dm_hierarchy_suggests_existing_thread(hier):
-        return False
-    markers = (
-        "row_thread_message",
-        "direct_message_text",
-        "message_content",
-        "thread_message",
-        "inbox_message",
-        "message_bubble",
-    )
-    blob = hier.lower()
-    return any(m in blob for m in markers)
+    return _dm_hierarchy_has_outbound_expected_message(hier, needle)
 
 
 _DM_MESSAGE_MARKERS = (
@@ -6253,6 +6239,43 @@ def _dm_expected_text_present(hierarchy_xml: str, expected_text: str) -> bool:
     return bool(compact_expected and compact_expected in compact_hierarchy)
 
 
+def _dm_hierarchy_has_outbound_expected_message(
+    hierarchy_xml: str,
+    expected_text: str,
+) -> bool:
+    """Expected text must live in a message node, never only in the composer."""
+    expected = _normalize_dm_message_text(expected_text)
+    if not expected:
+        return False
+    try:
+        root = ET.fromstring(str(hierarchy_xml or ""))
+    except Exception:
+        return False
+    compact_expected = re.sub(r"\s+", "", expected)
+    for node in root.iter():
+        rid = str(node.attrib.get("resource-id") or "").lower()
+        if "composer" in rid:
+            continue
+        if not any(
+            marker in rid
+            for marker in (
+                "direct_text_message",
+                "message_content",
+                "row_thread_message",
+            )
+        ):
+            continue
+        value = _normalize_dm_message_text(
+            node.attrib.get("text") or node.attrib.get("content-desc") or ""
+        )
+        if expected in value:
+            return True
+        compact_value = re.sub(r"\s+", "", value)
+        if compact_expected and compact_expected in compact_value:
+            return True
+    return False
+
+
 def _dm_pending_outbound_signal_present(hierarchy_xml: str) -> bool:
     blob = _normalize_dm_message_text(hierarchy_xml)
     return any(marker in blob for marker in _DM_PENDING_OUTBOUND_MARKERS)
@@ -6284,6 +6307,9 @@ def _dm_thread_message_signature(
         else "",
         "hierarchy_len": len(hier),
         "expected_text_present": expected_text_present,
+        "outbound_expected_text_present": _dm_hierarchy_has_outbound_expected_message(
+            hier, text
+        ),
         "message_marker_count": sum(blob.count(marker) for marker in _DM_MESSAGE_MARKERS),
         "composer_text_len": _dm_read_composer_text_len(d),
         "pending_outbound_signal_present": _dm_pending_outbound_signal_present(hier),
@@ -6302,13 +6328,21 @@ def _dm_outbound_signature_advanced(
     expected_became_present = bool(post_sig.get("expected_text_present")) and not bool(
         pre_sig.get("expected_text_present")
     )
+    outbound_became_present = bool(
+        post_sig.get("outbound_expected_text_present")
+    ) and not bool(pre_sig.get("outbound_expected_text_present"))
     pending_became_present = bool(post_sig.get("pending_outbound_signal_present")) and not bool(
         pre_sig.get("pending_outbound_signal_present")
     )
     return bool(
         post_hash
         and post_hash != pre_hash
-        and (marker_delta > 0 or expected_became_present or pending_became_present)
+        and (
+            marker_delta > 0
+            or expected_became_present
+            or outbound_became_present
+            or pending_became_present
+        )
     )
 
 
@@ -6341,7 +6375,9 @@ def _dm_verify_outbound_message_after_send(
         marker_delta = int(last_sig.get("message_marker_count") or 0) - int(
             pre_signature.get("message_marker_count") or 0
         )
-        exact_or_normalized_text = dm_thread_shows_outgoing_message(d, expected_text)
+        exact_or_normalized_text = bool(
+            last_sig.get("outbound_expected_text_present")
+        )
         pending_outbound = bool(last_sig.get("pending_outbound_signal_present")) and marker_delta > 0
         if advanced and (exact_or_normalized_text or pending_outbound):
             reason = (
@@ -6758,8 +6794,16 @@ def return_welcome_list_from_dm_to_followers(
     tapped, tap_method = tap_instagram_action_bar_back_button(d, pkg)
     if tapped and settle_s > 0:
         time.sleep(settle_s)
-    prof_ok = bool(tapped) and verify_profile(d, username)
+    prof_ok = False
+    profile_identity_reason = "back_not_tapped"
+    observed_profile_username = ""
+    if tapped:
+        prof_ok, profile_identity_reason, observed_profile_username = (
+            verify_welcome_profile_username_exact(d, username, pkg)
+        )
     out["back_to_profile_ok"] = prof_ok
+    out["profile_identity_reason"] = profile_identity_reason
+    out["observed_profile_username"] = observed_profile_username or None
     log(
         "info",
         "welcome_list_sender_back_dm_to_profile_done",
@@ -6767,8 +6811,21 @@ def return_welcome_list_from_dm_to_followers(
         tapped=bool(tapped),
         tap_method=tap_method,
         profile_verified=prof_ok,
+        profile_identity_reason=profile_identity_reason,
+        observed_profile_username=observed_profile_username or None,
         ms=round((time.perf_counter() - t0) * 1000.0, 2),
     )
+
+    if not prof_ok:
+        log(
+            "error",
+            "welcome_list_sender_back_dm_to_profile_identity_failed",
+            username=username,
+            source_profile_username=src or None,
+            reason=profile_identity_reason,
+            observed_profile_username=observed_profile_username or None,
+        )
+        return out
 
     log(
         "info",
@@ -7528,6 +7585,94 @@ def _welcome_dm_read_action_bar_title(d: u2.Device) -> str:
     return ""
 
 
+def _welcome_dm_thread_header_from_hierarchy(hierarchy_xml: str) -> str:
+    """Return the one-to-one DM thread header, never composer/message text."""
+    try:
+        root = ET.fromstring(str(hierarchy_xml or ""))
+    except Exception:
+        return ""
+    for node in root.iter():
+        rid = str(node.attrib.get("resource-id") or "").lower()
+        if not rid.endswith("/header_title"):
+            continue
+        value = str(
+            node.attrib.get("text") or node.attrib.get("content-desc") or ""
+        ).strip()
+        if value:
+            return value
+    return ""
+
+
+def _welcome_profile_header_from_hierarchy(
+    hierarchy_xml: str,
+    expected_username: str,
+) -> str:
+    """Resolve an exact top-band profile identity from a fresh hierarchy."""
+    expected = _normalize_handle(expected_username)
+    try:
+        root = ET.fromstring(str(hierarchy_xml or ""))
+    except Exception:
+        return ""
+    exact_top_band = ""
+    for node in root.iter():
+        value = str(
+            node.attrib.get("text") or node.attrib.get("content-desc") or ""
+        ).strip()
+        if not value:
+            continue
+        rid = str(node.attrib.get("resource-id") or "").lower()
+        if rid.endswith("/action_bar_title") and _normalize_handle(value) == expected:
+            return value
+        bounds = _dm_parse_bounds_attr_xml(node.attrib.get("bounds"))
+        if (
+            bounds
+            and int(bounds.get("top") or 0) < 800
+            and _normalize_handle(value) == expected
+        ):
+            exact_top_band = value
+    return exact_top_band
+
+
+def verify_welcome_profile_username_exact(
+    d: u2.Device,
+    expected_username: str,
+    pkg: str | None = None,
+) -> tuple[bool, str, str]:
+    """Fresh exact profile identity check used only by Welcome navigation."""
+    expected_pkg = str(pkg or config.INSTAGRAM_PACKAGE)
+    current = _followers_current_pkg_activity(d)
+    current_pkg = str(current.get("current_package") or "")
+    if current_pkg != expected_pkg:
+        return False, "foreground_package_mismatch", ""
+    observed = _welcome_profile_header_from_hierarchy(
+        _dm_dump_thread_hierarchy(d), expected_username
+    )
+    if _normalize_handle(observed) != _normalize_handle(expected_username):
+        return False, "profile_username_mismatch", observed
+    return True, "exact_profile_username", observed
+
+
+def verify_welcome_dm_thread_recipient_exact(
+    d: u2.Device,
+    expected_username: str,
+    pkg: str | None = None,
+) -> tuple[bool, str, str]:
+    """Fail closed unless a fresh DM header exactly matches the planned recipient."""
+    expected_pkg = str(pkg or config.INSTAGRAM_PACKAGE)
+    current = _followers_current_pkg_activity(d)
+    current_pkg = str(current.get("current_package") or "")
+    if current_pkg != expected_pkg:
+        return False, "foreground_package_mismatch", ""
+    hierarchy_xml = _dm_dump_thread_hierarchy(d)
+    normalized = _normalize_dm_message_text(hierarchy_xml)
+    if "review account info carefully" in normalized:
+        return False, "account_review_popup", ""
+    observed = _welcome_dm_thread_header_from_hierarchy(hierarchy_xml)
+    if _normalize_handle(observed) != _normalize_handle(expected_username):
+        return False, "thread_recipient_identity_mismatch", observed
+    return True, "exact_thread_header", observed
+
+
 def _welcome_dm_modal_signal(d: u2.Device) -> str:
     if _session_modal_or_crash(d):
         return "session_modal_or_crash"
@@ -7861,6 +8006,34 @@ def open_dm_thread_from_profile(
                 "dm_sender_dm_thread_unknown_after_popup_retry",
                 username=username,
             )
+    if welcome_list_native and thread_state not in ("unknown", "dm_not_available"):
+        identity_ok, identity_reason, observed_username = (
+            verify_welcome_dm_thread_recipient_exact(d, username, pkg)
+        )
+        snap["recipient_identity_ok"] = bool(identity_ok)
+        snap["recipient_identity_reason"] = identity_reason
+        snap["observed_thread_username"] = observed_username
+        log(
+            "info" if identity_ok else "error",
+            "welcome_dm_thread_recipient_identity_checked",
+            username=username,
+            identity_ok=bool(identity_ok),
+            identity_reason=identity_reason,
+            observed_thread_username=observed_username or None,
+        )
+        if not identity_ok:
+            artifacts = _capture_welcome_dm_forensics_artifacts(
+                d, username, artifact_suffix=identity_reason
+            )
+            log(
+                "error",
+                "welcome_dm_thread_recipient_identity_rejected",
+                username=username,
+                reason=identity_reason,
+                observed_thread_username=observed_username or None,
+                **artifacts,
+            )
+            thread_state = identity_reason
     dm_thread_detect_ms = (time.perf_counter() - t_detect) * 1000
     _perf["dm_thread_detect_ms"] = dm_thread_detect_ms
     _LAST_DM_THREAD_STATE = thread_state
@@ -49770,6 +49943,38 @@ def send_dm_safe(
         out["post_verify_artifacts"] = _dm_capture_send_debug_artifact(
             d, "dm_send_after_verify_failed"
         )
+        artifact_xml_path = str(
+            (out.get("post_verify_artifacts") or {}).get("xml_path") or ""
+        )
+        artifact_xml = ""
+        if artifact_xml_path:
+            try:
+                artifact_xml = Path(artifact_xml_path).read_text(encoding="utf-8")
+            except Exception:
+                artifact_xml = ""
+        artifact_header = _welcome_dm_thread_header_from_hierarchy(artifact_xml)
+        artifact_has_outbound = _dm_hierarchy_has_outbound_expected_message(
+            artifact_xml, msg
+        )
+        if (
+            artifact_has_outbound
+            and not bool(pre_send_signature.get("outbound_expected_text_present"))
+            and _normalize_handle(artifact_header) == _normalize_handle(username)
+        ):
+            out["sent"] = True
+            out["reason"] = None
+            out["post_send_signal_reason"] = "outbound_bubble_forensic_snapshot"
+            out["post_send_signal_method"] = "outbound_bubble_xml_snapshot"
+            log(
+                "info",
+                "dm_send_button_tap_confirmed_from_forensic_snapshot",
+                target_username=username,
+                observed_thread_username=artifact_header,
+                reason="outbound_bubble_forensic_snapshot",
+                xml_path=artifact_xml_path,
+            )
+            _LAST_DM_SEND_RESULT = dict(out)
+            return out
         log(
             "warning",
             "dm_send_button_tap_unconfirmed",
