@@ -1,8 +1,9 @@
 import unittest
-from datetime import datetime, timezone
+import time
 from unittest.mock import patch
 
 from account_commercial_policy import (
+    CommercialPolicyBoundaryEvidence,
     commercial_policy_boundary_blocks_phase,
     evaluate_queued_run_commercial_policy,
     load_account_effective_package_policy,
@@ -100,6 +101,55 @@ class AccountCommercialPolicyTests(unittest.TestCase):
         boundary="before_post_follow_likes_phase",
       )
     self.assertTrue(blocked)
+
+  def test_fresh_correlated_boundary_evidence_avoids_second_read(self):
+    evidence_out = {}
+    with patch(
+      "account_commercial_policy.load_account_commercial_policy_revision",
+      return_value={"revision_token": "rev-same", "package_code": "growth"},
+    ) as read_revision:
+      first = commercial_policy_boundary_blocks_phase(
+        "account-a",
+        bound_revision="rev-same",
+        run_id="run-1",
+        boundary="before_post_follow_likes_phase",
+        evidence_out=evidence_out,
+      )
+      second = commercial_policy_boundary_blocks_phase(
+        "account-a",
+        bound_revision="rev-same",
+        run_id="run-1",
+        boundary="before_post_follow_likes_phase",
+        evidence=evidence_out["evidence"],
+      )
+    self.assertFalse(first)
+    self.assertFalse(second)
+    self.assertEqual(read_revision.call_count, 1)
+
+  def test_mismatched_or_stale_evidence_uses_full_read(self):
+    evidence = CommercialPolicyBoundaryEvidence(
+      account_id="account-b",
+      run_id="run-1",
+      boundary="before_post_follow_likes_phase",
+      bound_revision="rev-same",
+      current_revision="rev-same",
+      changed=False,
+      package_code="growth",
+      observed_at_monotonic=time.monotonic() - 20.0,
+    )
+    with patch(
+      "account_commercial_policy.load_account_commercial_policy_revision",
+      return_value={"revision_token": "rev-new", "package_code": "growth"},
+    ) as read_revision:
+      blocked = commercial_policy_boundary_blocks_phase(
+        "account-a",
+        bound_revision="rev-same",
+        run_id="run-1",
+        boundary="before_post_follow_likes_phase",
+        evidence=evidence,
+      )
+    self.assertTrue(blocked)
+    self.assertEqual(read_revision.call_count, 1)
 
   def test_effective_package_policy_reads_summary(self):
     with patch(

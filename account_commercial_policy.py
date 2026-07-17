@@ -2,12 +2,29 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
+import time
 from typing import Any
 
 import supabase_client
 from assignment_dispatch_resolver import sensitive_log_fields
 from logs import log
+
+
+_COMMERCIAL_POLICY_BOUNDARY_EVIDENCE_TTL_S = 12.0
+
+
+@dataclass(frozen=True)
+class CommercialPolicyBoundaryEvidence:
+    account_id: str
+    run_id: str
+    boundary: str
+    bound_revision: str
+    current_revision: str
+    changed: bool
+    package_code: str
+    observed_at_monotonic: float
 
 
 def _read_revision_token(row: dict[str, Any] | None) -> str:
@@ -141,16 +158,80 @@ def commercial_policy_boundary_blocks_phase(
     bound_revision: str | None,
     run_id: str | None,
     boundary: str,
+    evidence: CommercialPolicyBoundaryEvidence | None = None,
+    evidence_out: dict[str, Any] | None = None,
 ) -> bool:
     """Central guard for all package-gated account_session phases."""
-    return bool(
-        revalidate_commercial_policy_at_boundary(
-            account_id,
-            run_id=run_id,
-            boundary=boundary,
-            bound_revision=bound_revision,
-        ).get("changed")
+    aid = str(account_id or "").strip()
+    rid = str(run_id or "").strip()
+    bound = str(bound_revision or "").strip()
+    boundary_key = str(boundary or "").strip()
+    invalid_reason = "missing_evidence"
+    age_s = 0.0
+    if isinstance(evidence, CommercialPolicyBoundaryEvidence):
+        age_s = max(0.0, time.monotonic() - evidence.observed_at_monotonic)
+        if evidence.account_id != aid:
+            invalid_reason = "account_mismatch"
+        elif evidence.run_id != rid:
+            invalid_reason = "run_mismatch"
+        elif evidence.boundary != boundary_key:
+            invalid_reason = "boundary_mismatch"
+        elif evidence.bound_revision != bound:
+            invalid_reason = "bound_revision_mismatch"
+        elif age_s > _COMMERCIAL_POLICY_BOUNDARY_EVIDENCE_TTL_S:
+            invalid_reason = "ttl_expired"
+        else:
+            log(
+                "info",
+                "commercial_policy_boundary_evidence_reused",
+                account_id=aid,
+                run_id=rid or None,
+                boundary=boundary_key,
+                proof_age_ms=round(age_s * 1000.0, 2),
+                avoided_blocks=["commercial_policy_revision_db_read"],
+                fallback_full_read_used=False,
+            )
+            return bool(evidence.changed)
+        log(
+            "info",
+            "commercial_policy_boundary_evidence_invalidated",
+            account_id=aid,
+            run_id=rid or None,
+            boundary=boundary_key,
+            proof_age_ms=round(age_s * 1000.0, 2),
+            invalidation_reason=invalid_reason,
+            fallback_full_read_used=True,
+        )
+
+    result = revalidate_commercial_policy_at_boundary(
+        aid,
+        run_id=rid or None,
+        boundary=boundary_key,
+        bound_revision=bound,
     )
+    captured = CommercialPolicyBoundaryEvidence(
+        account_id=aid,
+        run_id=rid,
+        boundary=boundary_key,
+        bound_revision=bound,
+        current_revision=str(result.get("current_revision") or "").strip(),
+        changed=bool(result.get("changed")),
+        package_code=str(result.get("package_code") or "").strip(),
+        observed_at_monotonic=time.monotonic(),
+    )
+    if isinstance(evidence_out, dict):
+        evidence_out["evidence"] = captured
+    log(
+        "info",
+        "commercial_policy_boundary_evidence_captured",
+        account_id=aid,
+        run_id=rid or None,
+        boundary=boundary_key,
+        proof_age_ms=0.0,
+        fallback_full_read_used=bool(evidence is not None),
+        invalidation_reason=invalid_reason if evidence is not None else "",
+    )
+    return bool(result.get("changed"))
 
 
 def load_account_effective_package_policy(account_id: str) -> dict[str, Any]:

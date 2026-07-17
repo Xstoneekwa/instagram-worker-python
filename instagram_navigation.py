@@ -44216,6 +44216,7 @@ def run_post_follow_post_likes_phase(
     account_id: str | None = None,
     bound_commercial_policy_revision: str | None = None,
     run_id: str | None = None,
+    commercial_policy_evidence: Any | None = None,
 ) -> dict[str, Any]:
     """
     Post-follow: like recent post(s) on the open candidate profile (V1: single post).
@@ -44513,6 +44514,7 @@ def run_post_follow_post_likes_phase(
             bound_revision=bound_commercial_policy_revision,
             run_id=likes_run_id,
             boundary="before_post_follow_likes_phase",
+            evidence=commercial_policy_evidence,
         ):
             try:
                 log(
@@ -47885,6 +47887,7 @@ def run_visual_candidate_post_follow_phase(
         except Exception:
             likes_account_id = ""
         likes_policy_blocked = False
+        likes_policy_evidence_out: dict[str, Any] = {}
         if likes_account_id:
             from account_commercial_policy import commercial_policy_boundary_blocks_phase
 
@@ -47893,6 +47896,7 @@ def run_visual_candidate_post_follow_phase(
                 bound_revision=bound_commercial_policy_revision,
                 run_id=likes_run_id,
                 boundary="before_post_follow_likes_phase",
+                evidence_out=likes_policy_evidence_out,
             )
         if likes_policy_blocked:
             post_follow_ctx.mark_like_done_or_skipped(
@@ -47933,6 +47937,7 @@ def run_visual_candidate_post_follow_phase(
                 account_id=likes_account_id or None,
                 bound_commercial_policy_revision=bound_commercial_policy_revision,
                 run_id=likes_run_id,
+                commercial_policy_evidence=likes_policy_evidence_out.get("evidence"),
             )
     likes_recoverable_failure = bool(
         str(likes_out.get("phase_outcome") or "") == "failed_safe_continue"
