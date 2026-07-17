@@ -124,6 +124,11 @@ class DmRealSendFlagsTest(unittest.TestCase):
         clear_mock = MagicMock()
         with (
             patch.object(dm_sender_engine, "dm_thread_shows_outgoing_message", return_value=False),
+            patch.object(
+                dm_sender_engine,
+                "verify_welcome_dm_thread_recipient_exact",
+                return_value=(True, "exact_thread_header", "recipient"),
+            ),
             patch.object(dm_sender_engine, "_resolve_dm_text_composer", return_value=(object(), None)),
             patch.object(dm_sender_engine, "verify_dm_composer_safe", return_value=(True, "ok")),
             patch.object(dm_sender_engine, "read_dm_composer_text", side_effect=[existing_draft, "Salut", "Salut"]),
