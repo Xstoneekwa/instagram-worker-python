@@ -16200,6 +16200,7 @@ def _stash_post_mute_sheet_closed_proof(
     visual_candidate_id: str,
     action_bar_title: str,
     duration_ms: float,
+    candidate_context: dict[str, Any] | None = None,
 ) -> None:
     global _post_mute_sheet_closed_proof_stash
     src = _normalize_handle(str(source_profile_username or ""))
@@ -16208,6 +16209,7 @@ def _stash_post_mute_sheet_closed_proof(
     if not cand or not ab or _normalize_handle(ab) != cand:
         _clear_post_mute_sheet_closed_proof_stash()
         return
+    context = dict(candidate_context or {})
     _post_mute_sheet_closed_proof_stash = {
         "stashed_at_monotonic": time.perf_counter(),
         "source_profile_username": src,
@@ -16216,6 +16218,7 @@ def _stash_post_mute_sheet_closed_proof(
         "action_bar_title": ab,
         "sheet_closed": True,
         "duration_ms": float(duration_ms or 0.0),
+        "candidate_context": context,
     }
     try:
         log(
@@ -16274,6 +16277,7 @@ def _validate_post_mute_sheet_closed_proof(
     source_profile_username: str,
     candidate_username: str,
     visual_candidate_id: str = "",
+    candidate_context: dict[str, Any] | None = None,
 ) -> tuple[bool, dict[str, Any], float, str]:
     stash = _post_mute_sheet_closed_proof_stash
     if not isinstance(stash, dict) or not stash:
@@ -16302,6 +16306,20 @@ def _validate_post_mute_sheet_closed_proof(
     ab = str(stash.get("action_bar_title") or "").strip().lstrip("@")
     if not ab or _normalize_handle(ab) != cand:
         return False, dict(stash), age_ms, "stashed_action_bar_mismatch"
+    expected_context = dict(candidate_context or {})
+    stashed_context = dict(stash.get("candidate_context") or {})
+    if expected_context:
+        for key in (
+            "account_id",
+            "run_id",
+            "target_id",
+            "username",
+            "navigation_generation",
+        ):
+            expected = str(expected_context.get(key) or "").strip()
+            stashed = str(stashed_context.get(key) or "").strip()
+            if expected and expected != stashed:
+                return False, dict(stash), age_ms, f"candidate_context_{key}_mismatch"
     return True, dict(stash), age_ms, ""
 
 
@@ -37764,6 +37782,7 @@ def _post_mute_state_checkpoint(
     candidate_username: str = "",
     sheet_dismiss_ok: bool | None = None,
     allow_fast_profile_proof: bool = False,
+    candidate_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     After mute toggles: dismiss residual sheets and observe state before return CT.
@@ -37914,6 +37933,16 @@ def _post_mute_state_checkpoint(
                 reason="candidate_profile_confirmed" if fast_ok else "fallback_heavy_checkpoint",
             )
             if fast_ok:
+                live_meta = _followers_current_pkg_activity(d)
+                context_out = {
+                    **dict(candidate_context or {}),
+                    "username": cand,
+                    "package": str(live_meta.get("current_package") or pkg),
+                    "activity": str(live_meta.get("current_activity") or ""),
+                    "identity_confirmed": True,
+                    "sheet_closed": True,
+                    "validated_at_monotonic": time.perf_counter(),
+                }
                 total_ms = round((time.perf_counter() - checkpoint_t0) * 1000.0, 2)
                 _stash_post_mute_sheet_closed_proof(
                     source_profile_username=src,
@@ -37921,6 +37950,7 @@ def _post_mute_state_checkpoint(
                     visual_candidate_id=vcid,
                     action_bar_title=ab,
                     duration_ms=total_ms,
+                    candidate_context=context_out,
                 )
                 log(
                     "info",
@@ -37950,6 +37980,7 @@ def _post_mute_state_checkpoint(
                     "mute_sheet_still_visible": False,
                     "fast_profile_proof": True,
                     "duration_ms": total_ms,
+                    "candidate_context": context_out,
                 }
     closed = 0
     last_err = ""
@@ -42350,6 +42381,7 @@ def _post_follow_like_precheck_surface(
     source_profile_username: str = "",
     follower_username: str = "",
     visual_candidate_id: str = "",
+    continuity_evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Fast post-follow like surface gate; never probes the grid on a wrong surface."""
     t0 = time.perf_counter()
@@ -42365,20 +42397,29 @@ def _post_follow_like_precheck_surface(
         "precheck_ms": 0.0,
         "action_bar_title": "",
     }
-    try:
-        out["followers_list_visible"] = bool(
-            is_followers_list_surface_quick(d, source_profile_username=src)
-        )
-    except Exception:
+    continuity = dict(continuity_evidence or {})
+    if bool(continuity.get("validated")) and _normalize_handle(
+        str(continuity.get("username") or "")
+    ) == _normalize_handle(cand):
         out["followers_list_visible"] = False
-    try:
-        ab = str(read_current_profile_username_for_follow_gate(d) or "").strip().lstrip("@")
-        out["action_bar_title"] = ab
-        out["profile_candidate_visible"] = bool(
-            ab and cand and _normalize_handle(ab) == _normalize_handle(cand)
-        )
-    except Exception:
-        out["profile_candidate_visible"] = False
+        out["profile_candidate_visible"] = True
+        out["action_bar_title"] = str(continuity.get("action_bar_title") or cand)
+        out["candidate_context_reused"] = True
+    else:
+        try:
+            out["followers_list_visible"] = bool(
+                is_followers_list_surface_quick(d, source_profile_username=src)
+            )
+        except Exception:
+            out["followers_list_visible"] = False
+        try:
+            ab = str(read_current_profile_username_for_follow_gate(d) or "").strip().lstrip("@")
+            out["action_bar_title"] = ab
+            out["profile_candidate_visible"] = bool(
+                ab and cand and _normalize_handle(ab) == _normalize_handle(cand)
+            )
+        except Exception:
+            out["profile_candidate_visible"] = False
     if bool(out["followers_list_visible"]) and not bool(out["profile_candidate_visible"]):
         out["skip_like"] = True
         out["skip_reason"] = "followers_list_visible_before_like"
@@ -44217,6 +44258,7 @@ def run_post_follow_post_likes_phase(
     bound_commercial_policy_revision: str | None = None,
     run_id: str | None = None,
     commercial_policy_evidence: Any | None = None,
+    candidate_profile_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Post-follow: like recent post(s) on the open candidate profile (V1: single post).
@@ -44620,11 +44662,13 @@ def run_post_follow_post_likes_phase(
     ab = ""
     nav_prof: dict[str, Any] = {}
     fast_profile_guard_reused = False
+    continuity_evidence: dict[str, Any] = {}
     profile_guard_live_mismatch = False
     proof_ok, proof, proof_age_ms, proof_reject = _validate_post_mute_sheet_closed_proof(
         source_profile_username=src,
         candidate_username=cand,
         visual_candidate_id=vcid,
+        candidate_context=candidate_profile_context,
     )
     if proof_ok:
         reject_reason = ""
@@ -44632,10 +44676,24 @@ def run_post_follow_post_likes_phase(
         try:
             meta = _followers_current_pkg_activity(d)
             cur_pkg = str(meta.get("current_package") or "")
+            cur_activity = str(meta.get("current_activity") or "")
         except Exception:
             cur_pkg = ""
+            cur_activity = ""
         if cur_pkg and "instagram" not in cur_pkg.lower():
             reject_reason = "instagram_not_foreground"
+        expected_context = dict(candidate_profile_context or {})
+        expected_pkg = str(expected_context.get("package") or "")
+        expected_activity = str(expected_context.get("activity") or "")
+        if not reject_reason and expected_pkg and cur_pkg and expected_pkg != cur_pkg:
+            reject_reason = "candidate_context_package_mismatch"
+        if (
+            not reject_reason
+            and expected_activity
+            and cur_activity
+            and expected_activity != cur_activity
+        ):
+            reject_reason = "candidate_context_activity_mismatch"
         try:
             ab = str(read_current_profile_username_for_follow_gate(d) or "").strip().lstrip("@")
         except Exception:
@@ -44657,6 +44715,14 @@ def run_post_follow_post_likes_phase(
                 reject_reason = "followers_list_quick_visible"
         if not reject_reason:
             fast_profile_guard_reused = True
+            stashed_context = dict(proof.get("candidate_context") or {})
+            continuity_evidence = {
+                **stashed_context,
+                "validated": True,
+                "username": cand,
+                "action_bar_title": ab,
+                "proof_age_ms": proof_age_ms,
+            }
             nav_prof = {
                 "state": NavigationEngineState.CANDIDATE_PROFILE.value,
                 "confidence": 0.95,
@@ -44675,6 +44741,11 @@ def run_post_follow_post_likes_phase(
                     action_bar_title=ab,
                     current_package=cur_pkg,
                     used_cached_context=True,
+                    candidate_context_reused=True,
+                    avoided_blocks=[
+                        "second_followers_list_surface_probe",
+                        "second_candidate_username_read",
+                    ],
                     reject_reason="",
                     duration_ms=round((time.perf_counter() - t_prof) * 1000, 2),
                     fallback_used=False,
@@ -44802,6 +44873,7 @@ def run_post_follow_post_likes_phase(
                 visual_candidate_id=vcid,
                 source_profile_username=src,
                 follower_username=cand,
+                continuity_evidence=continuity_evidence,
             )
             timings["surface_precheck_ms"] = float(
                 surface_precheck.get("precheck_ms") or 0.0
@@ -47601,6 +47673,43 @@ def run_visual_candidate_post_follow_phase(
         action_bar_title=str(det_use.get("action_bar_title") or "")[:120],
     )
 
+    context_account_id = ""
+    context_run_id = ""
+    try:
+        import supabase_client as _candidate_context_sc
+
+        context_account_id = str(
+            getattr(_candidate_context_sc, "_LOG_CONTEXT_ACCOUNT_ID", "") or ""
+        ).strip()
+        context_run_id = str(
+            getattr(_candidate_context_sc, "_LOG_CONTEXT_RUN_ID", "") or ""
+        ).strip()
+    except Exception:
+        pass
+    pick_context = dict(candidate_pick or {})
+    candidate_profile_context = {
+        "account_id": context_account_id,
+        "run_id": context_run_id,
+        "target_id": str(
+            pick_context.get("target_id")
+            or pick_context.get("source_target_id")
+            or ""
+        ).strip(),
+        "username": cand,
+        "identity_confirmed": bool(candidate_profile_confirmed),
+        "private": bool(
+            getattr(post_follow_ctx, "private_detected", False)
+            or det_use.get("private_detected")
+            or det_use.get("is_private")
+        ),
+        "post_count": det_use.get("post_count") or det_use.get("profile_post_count"),
+        "grid_state": det_use.get("grid_state"),
+        "package": pkg,
+        "activity": str(det_use.get("current_activity") or ""),
+        "created_at_monotonic": time.perf_counter(),
+        "navigation_generation": f"{vcid}:{len(post_follow_ctx.transition_history)}",
+    }
+
     flow_on = bool(getattr(config, "ENABLE_VISUAL_FOLLOW_MUTE_FLOW", False))
     real_mute = bool(getattr(config, "ENABLE_REAL_VISUAL_MUTE_AFTER_FOLLOW", False))
     follow_priv = bool(getattr(config, "FOLLOW_PRIVATE_ACCOUNTS", False))
@@ -47816,6 +47925,7 @@ def run_visual_candidate_post_follow_phase(
                 candidate_username=cand,
                 sheet_dismiss_ok=bool((v2.get("timings_ms") or {}).get("mute_sheet_dismiss_ok")),
                 allow_fast_profile_proof=True,
+                candidate_context=candidate_profile_context,
             )
         elif outcome == "partial_success":
             post_follow_ctx.mark_mute_done_or_skipped(reason="mute_partial_success")
@@ -47938,6 +48048,11 @@ def run_visual_candidate_post_follow_phase(
                 bound_commercial_policy_revision=bound_commercial_policy_revision,
                 run_id=likes_run_id,
                 commercial_policy_evidence=likes_policy_evidence_out.get("evidence"),
+                candidate_profile_context=(
+                    post_mute_checkpoint.get("candidate_context")
+                    if isinstance(post_mute_checkpoint, dict)
+                    else candidate_profile_context
+                ),
             )
     likes_recoverable_failure = bool(
         str(likes_out.get("phase_outcome") or "") == "failed_safe_continue"

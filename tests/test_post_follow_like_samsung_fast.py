@@ -349,6 +349,62 @@ class PostMuteGapTrackingTest(unittest.TestCase):
         self.assertTrue(completed["safe_to_continue_ui"])
         self.assertTrue(completed["used_cached_context"])
 
+    def test_candidate_context_reuses_identity_but_keeps_fresh_grid_hint_probe(self) -> None:
+        device = mock.MagicMock()
+        with mock.patch.object(
+            nav,
+            "is_followers_list_surface_quick",
+            side_effect=AssertionError("duplicate followers probe must be skipped"),
+        ), mock.patch.object(
+            nav,
+            "read_current_profile_username_for_follow_gate",
+            side_effect=AssertionError("duplicate identity read must be skipped"),
+        ), mock.patch.object(
+            nav,
+            "_post_follow_likes_grid_ui_surface_hints",
+            return_value={"profile_tabs_visible": True, "suggested_for_you": False},
+        ) as fresh_grid_hints:
+            out = nav._post_follow_like_precheck_surface(
+                device,
+                source_profile_username="ct",
+                follower_username="cand",
+                visual_candidate_id="vc-1",
+                continuity_evidence={
+                    "validated": True,
+                    "username": "cand",
+                    "action_bar_title": "cand",
+                },
+            )
+
+        self.assertFalse(out["skip_like"])
+        self.assertTrue(out["profile_candidate_visible"])
+        self.assertTrue(out["candidate_context_reused"])
+        self.assertTrue(out["grid_tab_visible"])
+        fresh_grid_hints.assert_called_once()
+
+    def test_candidate_context_mismatch_uses_full_surface_path(self) -> None:
+        device = mock.MagicMock()
+        with mock.patch.object(
+            nav, "is_followers_list_surface_quick", return_value=False
+        ) as followers_probe, mock.patch.object(
+            nav, "read_current_profile_username_for_follow_gate", return_value="cand"
+        ) as identity_probe, mock.patch.object(
+            nav,
+            "_post_follow_likes_grid_ui_surface_hints",
+            return_value={"profile_tabs_visible": True},
+        ):
+            out = nav._post_follow_like_precheck_surface(
+                device,
+                source_profile_username="ct",
+                follower_username="cand",
+                continuity_evidence={"validated": True, "username": "other"},
+            )
+
+        self.assertFalse(out["skip_like"])
+        self.assertNotIn("candidate_context_reused", out)
+        followers_probe.assert_called_once()
+        identity_probe.assert_called_once()
+
     def test_post_mute_checkpoint_ambiguous_profile_falls_back_to_heavy_revalidation(self) -> None:
         device = mock.MagicMock()
         logs: list[tuple[str, str, dict[str, object]]] = []
