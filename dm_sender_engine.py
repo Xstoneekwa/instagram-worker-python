@@ -8,7 +8,9 @@ Real send: reuses instagram_navigation draft + send + post-send finalize.
 from __future__ import annotations
 
 import os
+import re
 import time
+import xml.etree.ElementTree as ET
 from typing import Any, Callable
 
 import uiautomator2 as u2
@@ -63,6 +65,10 @@ _DM_SENDER_SESSION_ABORT_PERMISSION: bool = False
 _LAST_DM_SENDER_NAV_TIMINGS: dict[str, float] = {}
 _LAST_DM_SENDER_POST_JOB_RESTORE: dict[str, Any] = {}
 
+# This proof only bridges one fresh thread observation to the immediately
+# following composer focus. It is never reusable across navigation or jobs.
+WELCOME_COMPOSER_EVIDENCE_TTL_S = 1.5
+
 _TRUSTED_GLOBAL_SEARCH_CONTEXTS = frozenset(
     {
         "welcome_session_scan_to_sender",
@@ -92,6 +98,161 @@ def _is_dm_composer_placeholder_text(value: str | None) -> bool:
         return False
     normalized = " ".join(raw.lower().replace("\u2026", "...").split())
     return normalized in _DM_COMPOSER_PLACEHOLDER_TEXTS
+
+
+def _normalize_welcome_recipient(value: str | None) -> str:
+    return str(value or "").strip().lstrip("@").lower()
+
+
+def _composer_bounds_key(value: Any) -> tuple[int, int, int, int] | None:
+    if isinstance(value, dict):
+        try:
+            return tuple(int(value.get(key) or 0) for key in ("left", "top", "right", "bottom"))
+        except Exception:
+            return None
+    numbers = [int(part) for part in re.findall(r"-?\d+", str(value or ""))]
+    return tuple(numbers[:4]) if len(numbers) >= 4 else None
+
+
+def _fresh_welcome_composer_evidence(
+    d: u2.Device,
+    *,
+    pkg: str,
+    account_id: str,
+    run_id: str,
+    job_id: str,
+    expected_username: str,
+    navigation_generation: str,
+) -> tuple[dict[str, Any] | None, str, str]:
+    """Capture one exact, empty Welcome composer from a fresh hierarchy."""
+    required = {
+        "account_id": account_id,
+        "run_id": run_id,
+        "job_id": job_id,
+        "expected_username": expected_username,
+        "navigation_generation": navigation_generation,
+    }
+    if any(not str(value or "").strip() for value in required.values()):
+        return None, "missing_correlated_identity", ""
+
+    try:
+        current_pkg = str((d.app_current() or {}).get("package") or "")
+    except Exception:
+        current_pkg = ""
+    if current_pkg != str(pkg or ""):
+        return None, "foreground_package_mismatch", ""
+
+    try:
+        try:
+            hierarchy_xml = str(d.dump_hierarchy(compressed=False) or "")
+        except TypeError:
+            hierarchy_xml = str(d.dump_hierarchy() or "")
+        root = ET.fromstring(hierarchy_xml)
+    except Exception:
+        return None, "fresh_snapshot_unavailable", ""
+
+    normalized_xml = " ".join(hierarchy_xml.lower().split())
+    if "review account info carefully" in normalized_xml:
+        return None, "account_review_popup", ""
+
+    observed_username = ""
+    composer_nodes: list[ET.Element] = []
+    exact_resource_id = f"{pkg}:id/row_thread_composer_edittext"
+    for node in root.iter():
+        resource_id = str(node.attrib.get("resource-id") or "")
+        if resource_id.endswith("/header_title") and not observed_username:
+            observed_username = str(
+                node.attrib.get("text") or node.attrib.get("content-desc") or ""
+            ).strip()
+        if resource_id in {
+            "com.instagram.android:id/row_thread_composer_edittext",
+            exact_resource_id,
+        }:
+            composer_nodes.append(node)
+
+    if _normalize_welcome_recipient(observed_username) != _normalize_welcome_recipient(
+        expected_username
+    ):
+        return None, "thread_recipient_identity_mismatch", observed_username
+    if len(composer_nodes) != 1:
+        return None, "composer_exact_selector_ambiguous", observed_username
+
+    composer_node = composer_nodes[0]
+    composer_text = str(composer_node.attrib.get("text") or "").strip()
+    if composer_text and not _is_dm_composer_placeholder_text(composer_text):
+        return None, "composer_not_empty", observed_username
+
+    evidence = {
+        **required,
+        "expected_username": str(expected_username or "").strip(),
+        "observed_username": observed_username,
+        "resource_id": str(composer_node.attrib.get("resource-id") or ""),
+        "bounds": str(composer_node.attrib.get("bounds") or ""),
+        "composer_text": composer_text,
+        "created_monotonic": time.perf_counter(),
+    }
+    log(
+        "info",
+        "welcome_composer_evidence_created",
+        job_id=job_id,
+        expected_username=str(expected_username or "").strip(),
+        snapshot_age_ms=0.0,
+        navigation_generation=navigation_generation,
+    )
+    return evidence, "ok", observed_username
+
+
+def _resolve_welcome_composer_from_evidence(
+    d: u2.Device,
+    evidence: dict[str, Any],
+    *,
+    account_id: str,
+    run_id: str,
+    job_id: str,
+    expected_username: str,
+    navigation_generation: str,
+) -> tuple[Any | None, str, float, str]:
+    """Validate short-lived evidence and return only its exact selector."""
+    created_at = float(evidence.get("created_monotonic") or 0.0)
+    evidence_age_ms = max(0.0, (time.perf_counter() - created_at) * 1000.0)
+    observed_username = str(evidence.get("observed_username") or "")
+    expected = {
+        "account_id": account_id,
+        "run_id": run_id,
+        "job_id": job_id,
+        "expected_username": expected_username,
+    }
+    for field, value in expected.items():
+        if str(evidence.get(field) or "") != str(value or ""):
+            return None, f"{field}_mismatch", evidence_age_ms, observed_username
+    if _normalize_welcome_recipient(observed_username) != _normalize_welcome_recipient(
+        expected_username
+    ):
+        return None, "observed_username_mismatch", evidence_age_ms, observed_username
+    if str(evidence.get("navigation_generation") or "") != str(
+        navigation_generation or ""
+    ):
+        return None, "navigation_generation_changed", evidence_age_ms, observed_username
+    if evidence_age_ms > WELCOME_COMPOSER_EVIDENCE_TTL_S * 1000.0:
+        return None, "snapshot_stale", evidence_age_ms, observed_username
+
+    resource_id = str(evidence.get("resource_id") or "")
+    if resource_id != "com.instagram.android:id/row_thread_composer_edittext":
+        return None, "composer_selector_not_exact", evidence_age_ms, observed_username
+    try:
+        composer = d(resourceId=resource_id)
+        if not composer.exists(timeout=0.08):
+            return None, "composer_exact_selector_absent", evidence_age_ms, observed_username
+        info = composer.info or {}
+        bounds = info.get("bounds") or ""
+        if _composer_bounds_key(bounds) != _composer_bounds_key(evidence.get("bounds")):
+            return None, "composer_bounds_changed", evidence_age_ms, observed_username
+        current_text = str(composer.get_text() or "").strip()
+        if current_text and not _is_dm_composer_placeholder_text(current_text):
+            return None, "composer_not_empty", evidence_age_ms, observed_username
+    except Exception:
+        return None, "composer_exact_selector_error", evidence_age_ms, observed_username
+    return composer, "ok", evidence_age_ms, observed_username
 
 
 def _resolve_reserved_by(d: u2.Device) -> str:
@@ -3051,9 +3212,56 @@ def _resolve_dm_text_composer(
     dm_type: str = "",
     thread_state: str = "",
     thread_snapshot: dict[str, Any] | None = None,
+    welcome_composer_evidence: dict[str, Any] | None = None,
+    account_id: str = "",
+    run_id: str = "",
+    job_id: str = "",
+    navigation_generation: str = "",
+    fast_path_state: dict[str, Any] | None = None,
 ) -> tuple[Any | None, str | None]:
+    started_at = time.perf_counter()
+    state = fast_path_state if isinstance(fast_path_state, dict) else {}
     if _check_dm_sender_permission_blocker(d, username=username, context=caller):
         return None, "unexpected_permission_dialog"
+    if str(dm_type or "").strip().lower() == "welcome" and isinstance(
+        welcome_composer_evidence, dict
+    ):
+        composer, evidence_reason, evidence_age_ms, observed_username = (
+            _resolve_welcome_composer_from_evidence(
+                d,
+                welcome_composer_evidence,
+                account_id=account_id,
+                run_id=run_id,
+                job_id=job_id,
+                expected_username=username,
+                navigation_generation=navigation_generation,
+            )
+        )
+        if composer is not None:
+            try:
+                composer.click()
+            except Exception:
+                composer = None
+                evidence_reason = "composer_focus_failed"
+        if composer is not None:
+            state.update(
+                {
+                    "used": True,
+                    "evidence_age_ms": round(evidence_age_ms, 2),
+                    "composer": composer,
+                }
+            )
+            return composer, None
+        log(
+            "info",
+            "welcome_composer_fast_path_invalidated",
+            reason=evidence_reason,
+            evidence_age_ms=round(evidence_age_ms, 2),
+            expected_username=username,
+            observed_username=observed_username or None,
+        )
+        state.update({"used": False, "invalidation_reason": evidence_reason})
+
     snap = thread_snapshot if isinstance(thread_snapshot, dict) else {}
     fast_path_ok, fast_path_reason = _thread_snapshot_supports_composer_fast_path(
         snap,
@@ -3124,6 +3332,13 @@ def _resolve_dm_text_composer(
         username=username,
         caller=caller,
     )
+    if str(dm_type or "").strip().lower() == "welcome":
+        log(
+            "info",
+            "welcome_composer_full_path_completed",
+            reason=str(state.get("invalidation_reason") or "evidence_unavailable"),
+            elapsed_ms=round((time.perf_counter() - started_at) * 1000.0, 2),
+        )
     return ed2, None
 
 
@@ -3193,6 +3408,10 @@ def _perform_real_welcome_dm_send(
     source_profile_username: str = "",
     dm_type: str = "welcome",
     thread_snapshot: dict[str, Any] | None = None,
+    account_id: str = "",
+    run_id: str = "",
+    job_id: str = "",
+    navigation_generation: str = "",
 ) -> tuple[bool, dict[str, Any], str | None]:
     """
     Type job.message_body, verify draft, tap Send, post-send finalize.
@@ -3223,7 +3442,9 @@ def _perform_real_welcome_dm_send(
         )
         return False, {}, "unresolved_template_token"
 
-    if str(dm_type or "").strip().lower() == "welcome":
+    welcome_mode = str(dm_type or "").strip().lower() == "welcome"
+    welcome_composer_evidence: dict[str, Any] | None = None
+    if welcome_mode:
         identity_ok, identity_reason, observed_username = (
             verify_welcome_dm_thread_recipient_exact(d, uname, pkg)
         )
@@ -3236,6 +3457,26 @@ def _perform_real_welcome_dm_send(
                 observed_thread_username=observed_username or None,
             )
             return False, {}, identity_reason
+        welcome_composer_evidence, evidence_reason, evidence_observed = (
+            _fresh_welcome_composer_evidence(
+                d,
+                pkg=pkg,
+                account_id=account_id,
+                run_id=run_id,
+                job_id=job_id,
+                expected_username=uname,
+                navigation_generation=navigation_generation,
+            )
+        )
+        if welcome_composer_evidence is None:
+            log(
+                "info",
+                "welcome_composer_fast_path_invalidated",
+                reason=evidence_reason,
+                evidence_age_ms=0.0,
+                expected_username=uname,
+                observed_username=evidence_observed or None,
+            )
 
     if dm_thread_shows_outgoing_message(d, draft_text):
         log(
@@ -3262,6 +3503,7 @@ def _perform_real_welcome_dm_send(
         **flags,
     )
 
+    composer_fast_path_state: dict[str, Any] = {}
     _ed, focus_err = _resolve_dm_text_composer(
         d,
         pkg=pkg,
@@ -3270,6 +3512,12 @@ def _perform_real_welcome_dm_send(
         dm_type=dm_type,
         thread_state=thread_state,
         thread_snapshot=thread_snapshot,
+        welcome_composer_evidence=welcome_composer_evidence,
+        account_id=account_id,
+        run_id=run_id,
+        job_id=job_id,
+        navigation_generation=navigation_generation,
+        fast_path_state=composer_fast_path_state,
     )
     if focus_err:
         log(
@@ -3282,7 +3530,10 @@ def _perform_real_welcome_dm_send(
         )
         return False, {}, focus_err
 
-    ok_comp, comp_signal = verify_dm_composer_safe(d, pkg)
+    if bool(composer_fast_path_state.get("used")):
+        ok_comp, comp_signal = True, "fresh_welcome_composer_evidence"
+    else:
+        ok_comp, comp_signal = verify_dm_composer_safe(d, pkg)
     if not ok_comp:
         log(
             "error",
@@ -3343,7 +3594,11 @@ def _perform_real_welcome_dm_send(
     if not reused_draft:
         force_method = "set_text" if strategy == "set_text" else None
         ok_type, type_info = type_dm_draft_only(
-            d, draft_text, pkg, force_method=force_method
+            d,
+            draft_text,
+            pkg,
+            force_method=force_method,
+            composer=_ed if bool(composer_fast_path_state.get("used")) else None,
         )
         log(
             "info",
@@ -3380,7 +3635,11 @@ def _perform_real_welcome_dm_send(
                     to_strategy="set_text",
                 )
                 ok_type, type_info = type_dm_draft_only(
-                    d, draft_text, pkg, force_method="set_text"
+                    d,
+                    draft_text,
+                    pkg,
+                    force_method="set_text",
+                    composer=_ed if bool(composer_fast_path_state.get("used")) else None,
                 )
             if not ok_type:
                 return False, {"type_info": type_info}, "draft_typing_failed"
@@ -3406,7 +3665,7 @@ def _perform_real_welcome_dm_send(
         if not verify_dm_draft_text(d, draft_text):
             return False, {}, "draft_verify_failed"
 
-    if str(dm_type or "").strip().lower() == "welcome":
+    if welcome_mode:
         identity_ok, identity_reason, observed_username = (
             verify_welcome_dm_thread_recipient_exact(d, uname, pkg)
         )
@@ -3419,6 +3678,15 @@ def _perform_real_welcome_dm_send(
                 observed_thread_username=observed_username or None,
             )
             return False, {}, identity_reason
+        if bool(composer_fast_path_state.get("used")):
+            log(
+                "info",
+                "welcome_composer_fast_path_used",
+                evidence_age_ms=composer_fast_path_state.get("evidence_age_ms"),
+                exhaustive_focus_probe_skipped=True,
+                header_revalidated_before_send=True,
+                draft_revalidated_before_send=True,
+            )
 
     prev_enable = bool(getattr(config, "ENABLE_REAL_DM_SEND", False))
     try:
@@ -3642,6 +3910,9 @@ def execute_dm_job_real_send(
                 final_status = str((updated_job or {}).get("status") or "pending")
                 job_terminal_handled = True
             else:
+                navigation_generation = (
+                    f"{str(run_id or 'no-run')}:{job_id}:{time.monotonic_ns()}"
+                )
                 sent_ok, send_out, fail_reason = _perform_real_welcome_dm_send(
                     d,
                     username=recipient,
@@ -3650,6 +3921,10 @@ def execute_dm_job_real_send(
                     pkg=pkg,
                     dm_type=dm_type,
                     thread_snapshot=snap if isinstance(snap, dict) else None,
+                    account_id=account_id,
+                    run_id=str(run_id or ""),
+                    job_id=job_id,
+                    navigation_generation=navigation_generation,
                 )
                 post_send_fast_finalize_used = bool(
                     (send_out.get("post_finalize") or {}).get("post_send_fast_finalize_used")

@@ -8097,10 +8097,11 @@ def type_dm_draft_only(
     pkg: str | None = None,
     *,
     force_method: str | None = None,
+    composer: Any | None = None,
 ) -> tuple[bool, Any]:
     _ = pkg or config.INSTAGRAM_PACKAGE
     t0 = time.perf_counter()
-    ed = _dm_find_focus_composer(d)
+    ed = composer or _dm_find_focus_composer(d)
     if ed is None:
         return False, "no_composer"
     try:
@@ -8112,7 +8113,7 @@ def type_dm_draft_only(
 
     def _read_composer_text() -> str:
         try:
-            cur = _dm_find_focus_composer(d) or ed
+            cur = ed if composer is not None else (_dm_find_focus_composer(d) or ed)
             return str((cur.get_text() if cur is not None else "") or "")
         except Exception:
             return ""
