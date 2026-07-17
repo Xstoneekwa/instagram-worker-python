@@ -1299,7 +1299,6 @@ def _phase_statuses(
         unfollow_phase_status = "skipped_cleanly" if skip_reason else "unknown"
     elif (
         _as_optional_int(follow_to_unfollow_real.get("exit_code")) == 0
-        and int(follow_to_unfollow_real.get("unfollow_actions_failed") or 0) == 0
         and int(follow_to_unfollow_real.get("unfollow_actions_verified") or 0)
         == int(follow_to_unfollow_real.get("unfollow_results_persisted_count") or 0)
         and real_status.startswith("success_real_unfollow")

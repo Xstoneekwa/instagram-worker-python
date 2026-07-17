@@ -95,6 +95,56 @@ class AccountSessionTerminalContractTest(unittest.TestCase):
             welcome=statuses[0], follow=statuses[1], unfollow=statuses[2], outreach=statuses[3]
         )["ok"])
 
+    def test_exhausted_unfollow_with_recoverable_candidate_failure_is_terminal(self) -> None:
+        statuses = orchestrator._phase_statuses(
+            welcome_enabled=False,
+            welcome_phase_executed=False,
+            welcome_session_status="skipped",
+            follow_phase_executed=True,
+            follow_phase_skipped_reason=None,
+            follow_exit_code=0,
+            follow_to_unfollow_real=_successful_unfollow(
+                status="success_real_unfollow_multi_partial_exhausted",
+                unfollow_actions_failed=1,
+                unfollow_actions_verified=68,
+                unfollow_results_persisted_count=68,
+            ),
+            account_session_outreach_addon={
+                "enabled": False,
+                "executed": False,
+                "status": "disabled",
+                "skip_reason": "addon_disabled",
+            },
+        )
+
+        self.assertEqual(statuses[2], "completed")
+        contract = orchestrator._phase_terminal_contract(
+            welcome=statuses[0], follow=statuses[1], unfollow=statuses[2], outreach=statuses[3]
+        )
+        self.assertTrue(contract["ok"])
+
+    def test_exhausted_unfollow_with_persistence_gap_remains_non_terminal(self) -> None:
+        statuses = orchestrator._phase_statuses(
+            welcome_enabled=False,
+            welcome_phase_executed=False,
+            welcome_session_status="skipped",
+            follow_phase_executed=True,
+            follow_phase_skipped_reason=None,
+            follow_exit_code=0,
+            follow_to_unfollow_real=_successful_unfollow(
+                status="success_real_unfollow_multi_partial_exhausted",
+                unfollow_actions_failed=1,
+                unfollow_actions_verified=68,
+                unfollow_results_persisted_count=67,
+            ),
+            account_session_outreach_addon={"enabled": False, "executed": False},
+        )
+
+        self.assertEqual(statuses[2], "success_real_unfollow_multi_partial_exhausted")
+        self.assertFalse(orchestrator._phase_terminal_contract(
+            welcome=statuses[0], follow=statuses[1], unfollow=statuses[2], outreach=statuses[3]
+        )["ok"])
+
     def test_non_terminal_contract_is_published_with_structured_reason(self) -> None:
         decision = classify_terminal_run_failure(
             exit_code=1,
