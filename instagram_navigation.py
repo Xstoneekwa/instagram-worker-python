@@ -7736,6 +7736,41 @@ def _welcome_dm_thread_header_from_hierarchy(hierarchy_xml: str) -> str:
     return ""
 
 
+def _welcome_dm_thread_subtitle_from_hierarchy(hierarchy_xml: str) -> str:
+    """Return the one-to-one DM username subtitle from the thread header."""
+    try:
+        root = ET.fromstring(str(hierarchy_xml or ""))
+    except Exception:
+        return ""
+    for node in root.iter():
+        rid = str(node.attrib.get("resource-id") or "").lower()
+        if not rid.endswith("/header_subtitle"):
+            continue
+        value = str(
+            node.attrib.get("text") or node.attrib.get("content-desc") or ""
+        ).strip()
+        if value:
+            return value
+    return ""
+
+
+def _welcome_dm_thread_recipient_identity_from_hierarchy(
+    hierarchy_xml: str,
+    expected_username: str,
+) -> tuple[bool, str, str]:
+    """Match the exact thread username, preferring Instagram's header subtitle."""
+    observed_title = _welcome_dm_thread_header_from_hierarchy(hierarchy_xml)
+    observed_subtitle = _welcome_dm_thread_subtitle_from_hierarchy(hierarchy_xml)
+    expected = _normalize_handle(expected_username)
+    if observed_subtitle:
+        if _normalize_handle(observed_subtitle) != expected:
+            return False, "thread_recipient_identity_mismatch", observed_subtitle
+        return True, "exact_thread_header_subtitle", observed_subtitle
+    if _normalize_handle(observed_title) != expected:
+        return False, "thread_recipient_identity_mismatch", observed_title
+    return True, "exact_thread_header", observed_title
+
+
 def _welcome_profile_header_from_hierarchy(
     hierarchy_xml: str,
     expected_username: str,
@@ -7803,10 +7838,9 @@ def verify_welcome_dm_thread_recipient_exact(
     normalized = _normalize_dm_message_text(hierarchy_xml)
     if "review account info carefully" in normalized:
         return False, "account_review_popup", ""
-    observed = _welcome_dm_thread_header_from_hierarchy(hierarchy_xml)
-    if _normalize_handle(observed) != _normalize_handle(expected_username):
-        return False, "thread_recipient_identity_mismatch", observed
-    return True, "exact_thread_header", observed
+    return _welcome_dm_thread_recipient_identity_from_hierarchy(
+        hierarchy_xml, expected_username
+    )
 
 
 def _welcome_dm_modal_signal(d: u2.Device) -> str:

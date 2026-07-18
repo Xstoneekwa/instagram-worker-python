@@ -57,6 +57,7 @@ from instagram_navigation import (
     verify_dm_draft_text,
     verify_profile,
     verify_welcome_dm_thread_recipient_exact,
+    _welcome_dm_thread_recipient_identity_from_hierarchy,
 )
 from logs import log
 
@@ -155,25 +156,23 @@ def _fresh_welcome_composer_evidence(
     if "review account info carefully" in normalized_xml:
         return None, "account_review_popup", ""
 
-    observed_username = ""
+    identity_ok, identity_reason, observed_username = (
+        _welcome_dm_thread_recipient_identity_from_hierarchy(
+            hierarchy_xml, expected_username
+        )
+    )
     composer_nodes: list[ET.Element] = []
     exact_resource_id = f"{pkg}:id/row_thread_composer_edittext"
     for node in root.iter():
         resource_id = str(node.attrib.get("resource-id") or "")
-        if resource_id.endswith("/header_title") and not observed_username:
-            observed_username = str(
-                node.attrib.get("text") or node.attrib.get("content-desc") or ""
-            ).strip()
         if resource_id in {
             "com.instagram.android:id/row_thread_composer_edittext",
             exact_resource_id,
         }:
             composer_nodes.append(node)
 
-    if _normalize_welcome_recipient(observed_username) != _normalize_welcome_recipient(
-        expected_username
-    ):
-        return None, "thread_recipient_identity_mismatch", observed_username
+    if not identity_ok:
+        return None, identity_reason, observed_username
     if len(composer_nodes) != 1:
         return None, "composer_exact_selector_ambiguous", observed_username
 

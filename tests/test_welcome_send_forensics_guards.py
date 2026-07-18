@@ -58,6 +58,38 @@ class WelcomeSendForensicsGuardsTest(unittest.TestCase):
         self.assertEqual(reason, "exact_thread_header")
         self.assertEqual(observed, "tresorsbyninel")
 
+    def test_display_name_title_with_exact_username_subtitle_is_accepted(self) -> None:
+        device = _HierarchyDevice(
+            '<hierarchy><node resource-id="com.instagram.android:id/header_title" '
+            'text="Jose Manuel Justiniano" />'
+            '<node resource-id="com.instagram.android:id/header_subtitle" '
+            'content-desc="pepito_bravo_" /></hierarchy>'
+        )
+
+        ok, reason, observed = nav.verify_welcome_dm_thread_recipient_exact(
+            device, "pepito_bravo_"
+        )
+
+        self.assertTrue(ok)
+        self.assertEqual(reason, "exact_thread_header_subtitle")
+        self.assertEqual(observed, "pepito_bravo_")
+
+    def test_mismatched_username_subtitle_is_rejected_even_with_expected_title(self) -> None:
+        device = _HierarchyDevice(
+            '<hierarchy><node resource-id="com.instagram.android:id/header_title" '
+            'text="pepito_bravo_" />'
+            '<node resource-id="com.instagram.android:id/header_subtitle" '
+            'content-desc="different_recipient" /></hierarchy>'
+        )
+
+        ok, reason, observed = nav.verify_welcome_dm_thread_recipient_exact(
+            device, "pepito_bravo_"
+        )
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "thread_recipient_identity_mismatch")
+        self.assertEqual(observed, "different_recipient")
+
     def test_wrong_thread_recipient_is_rejected(self) -> None:
         device = _HierarchyDevice(
             '<hierarchy><node resource-id="com.instagram.android:id/header_title" '

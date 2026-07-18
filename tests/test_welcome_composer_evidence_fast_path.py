@@ -10,11 +10,24 @@ import dm_sender_engine
 PKG = "com.instagram.android"
 
 
-def hierarchy(*, username: str = "recipient", composer_text: str = "Message", popup: bool = False) -> str:
+def hierarchy(
+    *,
+    username: str = "recipient",
+    username_subtitle: str = "",
+    composer_text: str = "Message",
+    popup: bool = False,
+) -> str:
     popup_node = '<node text="Review account info carefully" />' if popup else ""
+    subtitle_node = (
+        f'<node resource-id="{PKG}:id/header_subtitle" '
+        f'content-desc="{username_subtitle}" />'
+        if username_subtitle
+        else ""
+    )
     return (
         "<hierarchy>"
         f'<node resource-id="{PKG}:id/header_title" text="{username}" />'
+        f"{subtitle_node}"
         f'<node resource-id="{PKG}:id/row_thread_composer_edittext" '
         f'text="{composer_text}" bounds="[1,2][3,4]" />'
         f"{popup_node}"
@@ -75,6 +88,24 @@ class WelcomeComposerEvidenceFastPathTests(unittest.TestCase):
         self.assertIsNone(evidence)
         self.assertEqual(reason, "thread_recipient_identity_mismatch")
         self.assertEqual(observed, "different")
+
+    def test_display_name_with_exact_username_subtitle_reaches_composer(self) -> None:
+        device, composer = device_for(
+            hierarchy(
+                username="Jose Manuel Justiniano",
+                username_subtitle="recipient",
+            )
+        )
+
+        evidence, reason, observed = self.make_evidence(device)
+
+        self.assertEqual(reason, "ok")
+        self.assertEqual(observed, "recipient")
+        resolved, resolve_reason, _age_ms, _observed = self.resolve(
+            device, evidence or {}
+        )
+        self.assertIs(resolved, composer)
+        self.assertEqual(resolve_reason, "ok")
 
     def test_stale_snapshot_falls_back(self) -> None:
         device, _ = device_for(hierarchy())
