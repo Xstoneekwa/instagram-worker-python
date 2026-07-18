@@ -8,6 +8,21 @@ import welcome_scan_producer as scan
 
 
 class WelcomeScanAttemptCapTest(unittest.TestCase):
+    @staticmethod
+    def _follower_row(username: str, row_index: int) -> dict:
+        return {
+            "username": username,
+            "row_index": row_index,
+            "screen_index": 0,
+            "bounds": {
+                "left": 1,
+                "top": row_index * 2 + 1,
+                "right": 2,
+                "bottom": row_index * 2 + 2,
+            },
+            "row_cta_xml_class": "message",
+        }
+
     def _run_scan(
         self,
         *,
@@ -67,9 +82,9 @@ class WelcomeScanAttemptCapTest(unittest.TestCase):
 
     def test_scan_enqueues_two_new_followers_before_baseline_anchor_with_sent_cap_one(self) -> None:
         rows = [
-            {"username": "pmwzstella", "row_index": 0, "screen_index": 0, "bounds": {"left": 1, "top": 1, "right": 2, "bottom": 2}},
-            {"username": "espehair", "row_index": 1, "screen_index": 0, "bounds": {"left": 1, "top": 3, "right": 2, "bottom": 4}},
-            {"username": "aquarellepeinture68", "row_index": 2, "screen_index": 0, "bounds": {"left": 1, "top": 5, "right": 2, "bottom": 6}},
+            self._follower_row("pmwzstella", 0),
+            self._follower_row("espehair", 1),
+            self._follower_row("aquarellepeinture68", 2),
         ]
         known_map = {
             "aquarellepeinture68": {
@@ -94,9 +109,9 @@ class WelcomeScanAttemptCapTest(unittest.TestCase):
 
     def test_explicit_welcome_send_hard_cap_one_limits_scan_enqueue_to_one(self) -> None:
         rows = [
-            {"username": "pmwzstella", "row_index": 0, "screen_index": 0, "bounds": {"left": 1, "top": 1, "right": 2, "bottom": 2}},
-            {"username": "espehair", "row_index": 1, "screen_index": 0, "bounds": {"left": 1, "top": 3, "right": 2, "bottom": 4}},
-            {"username": "mini_durable", "row_index": 2, "screen_index": 0, "bounds": {"left": 1, "top": 5, "right": 2, "bottom": 6}},
+            self._follower_row("pmwzstella", 0),
+            self._follower_row("espehair", 1),
+            self._follower_row("mini_durable", 2),
         ]
 
         code, summary, enqueue_mock = self._run_scan(
@@ -119,9 +134,9 @@ class WelcomeScanAttemptCapTest(unittest.TestCase):
 
     def test_explicit_welcome_send_hard_cap_two_limits_scan_enqueue_to_two(self) -> None:
         rows = [
-            {"username": "pmwzstella", "row_index": 0, "screen_index": 0, "bounds": {"left": 1, "top": 1, "right": 2, "bottom": 2}},
-            {"username": "espehair", "row_index": 1, "screen_index": 0, "bounds": {"left": 1, "top": 3, "right": 2, "bottom": 4}},
-            {"username": "mini_durable", "row_index": 2, "screen_index": 0, "bounds": {"left": 1, "top": 5, "right": 2, "bottom": 6}},
+            self._follower_row("pmwzstella", 0),
+            self._follower_row("espehair", 1),
+            self._follower_row("mini_durable", 2),
         ]
 
         code, summary, enqueue_mock = self._run_scan(
@@ -143,9 +158,9 @@ class WelcomeScanAttemptCapTest(unittest.TestCase):
 
     def test_scan_does_not_treat_skipped_nonbaseline_as_anchor(self) -> None:
         rows = [
-            {"username": "pmwzstella", "row_index": 0, "screen_index": 0, "bounds": {"left": 1, "top": 1, "right": 2, "bottom": 2}},
-            {"username": "espehair", "row_index": 1, "screen_index": 0, "bounds": {"left": 1, "top": 3, "right": 2, "bottom": 4}},
-            {"username": "aquarellepeinture68", "row_index": 2, "screen_index": 0, "bounds": {"left": 1, "top": 5, "right": 2, "bottom": 6}},
+            self._follower_row("pmwzstella", 0),
+            self._follower_row("espehair", 1),
+            self._follower_row("aquarellepeinture68", 2),
         ]
         known_map = {
             "pmwzstella": {
@@ -171,8 +186,8 @@ class WelcomeScanAttemptCapTest(unittest.TestCase):
 
     def test_scan_reuses_existing_pending_nonbaseline_job_before_anchor(self) -> None:
         rows = [
-            {"username": "corpus_architecture_urbanisme", "row_index": 0, "screen_index": 0, "bounds": {"left": 1, "top": 1, "right": 2, "bottom": 2}},
-            {"username": "aquarellepeinture68", "row_index": 1, "screen_index": 0, "bounds": {"left": 1, "top": 3, "right": 2, "bottom": 4}},
+            self._follower_row("corpus_architecture_urbanisme", 0),
+            self._follower_row("aquarellepeinture68", 1),
         ]
         known_map = {
             "corpus_architecture_urbanisme": {

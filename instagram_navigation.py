@@ -50065,6 +50065,7 @@ def send_dm_safe(
     )
     try:
         btn.click()
+        out["send_tapped"] = True
         log(
             "info",
             "dm_send_button_tap_sent",

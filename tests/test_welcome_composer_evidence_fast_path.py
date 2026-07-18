@@ -193,6 +193,7 @@ class WelcomeComposerEvidenceFastPathTests(unittest.TestCase):
         device, composer = device_for(hierarchy())
         logs: list[tuple[str, dict]] = []
         with (
+            patch.object(dm_sender_engine, "WELCOME_COMPOSER_FAST_PATH_RUNTIME_ENABLED", True),
             patch.object(
                 dm_sender_engine,
                 "verify_welcome_dm_thread_recipient_exact",
@@ -252,9 +253,68 @@ class WelcomeComposerEvidenceFastPathTests(unittest.TestCase):
         self.assertTrue(event["header_revalidated_before_send"])
         self.assertTrue(event["draft_revalidated_before_send"])
 
+    def test_runtime_default_disables_fast_path_and_uses_full_composer_probe(self) -> None:
+        device, composer = device_for(hierarchy())
+        logs: list[tuple[str, dict]] = []
+        with (
+            patch.object(dm_sender_engine, "WELCOME_COMPOSER_FAST_PATH_RUNTIME_ENABLED", False),
+            patch.object(
+                dm_sender_engine,
+                "verify_welcome_dm_thread_recipient_exact",
+                side_effect=[
+                    (True, "exact_thread_header", "recipient"),
+                    (True, "exact_thread_header", "recipient"),
+                ],
+            ),
+            patch.object(dm_sender_engine, "_fresh_welcome_composer_evidence") as evidence_mock,
+            patch.object(dm_sender_engine, "dm_thread_shows_outgoing_message", return_value=False),
+            patch.object(dm_sender_engine, "_resolve_dm_text_composer", return_value=(composer, None)) as full_resolve,
+            patch.object(dm_sender_engine, "verify_dm_composer_safe", return_value=(True, "exact_composer")) as full_verify,
+            patch.object(dm_sender_engine, "read_dm_composer_text", side_effect=["", "Hello"]),
+            patch.object(dm_sender_engine, "type_dm_draft_only", return_value=(True, {"method": "set_text"})),
+            patch.object(dm_sender_engine, "verify_dm_draft_text", return_value=True),
+            patch.object(
+                dm_sender_engine,
+                "send_dm_safe",
+                return_value={
+                    "sent": True,
+                    "send_tapped": True,
+                    "post_send_signal_reason": "new_outbound_bubble",
+                },
+            ),
+            patch.object(
+                dm_sender_engine,
+                "log",
+                side_effect=lambda _level, event, **fields: logs.append((event, fields)),
+            ),
+        ):
+            ok, _out, reason = dm_sender_engine._perform_real_welcome_dm_send(
+                device,
+                username="recipient",
+                message_body="Hello",
+                thread_state="empty_new_thread",
+                pkg=PKG,
+                post_send_nav="sender_owned",
+                account_id="account-1",
+                run_id="run-1",
+                job_id="job-1",
+                navigation_generation="nav-1",
+            )
+
+        self.assertTrue(ok)
+        self.assertIsNone(reason)
+        evidence_mock.assert_not_called()
+        full_resolve.assert_called_once()
+        full_verify.assert_called_once_with(device, PKG)
+        self.assertIn(
+            "WELCOME_COMPOSER_FAST_PATH_DISABLED_PENDING_PHYSICAL_STABILITY",
+            [name for name, _fields in logs],
+        )
+
     def test_send_without_outbound_proof_is_not_success(self) -> None:
         device, _ = device_for(hierarchy())
         with (
+            patch.object(dm_sender_engine, "WELCOME_COMPOSER_FAST_PATH_RUNTIME_ENABLED", True),
             patch.object(
                 dm_sender_engine,
                 "verify_welcome_dm_thread_recipient_exact",

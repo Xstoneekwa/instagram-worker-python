@@ -46,7 +46,6 @@ from instagram_navigation import (
     scroll_followers_list_backward,
     scroll_followers_list_forward,
     tap_followers_list_username_row,
-    verify_dm_composer_safe,
     verify_profile,
     verify_welcome_profile_username_exact,
 )
@@ -64,13 +63,137 @@ def _norm_username(raw: str) -> str:
 
 
 _SEND_UNVERIFIED_REASONS = frozenset(
-    {"send_unverified", "send_without_strong_outbound_proof"}
+    {
+        "send_unverified",
+        "send_without_strong_outbound_proof",
+        "welcome_outbound_unverified",
+    }
 )
 
 _WELCOME_ROW_SNAPSHOT_TTL_MS = 750.0
 _WELCOME_REAL_FOLLOWER_CTA_CLASSES = frozenset(
     {"message", "follow_back", "following", "requested", "contact"}
 )
+
+_WELCOME_STRUCTURED_FAILURES = {
+    "profile_username_mismatch": "welcome_profile_identity_mismatch",
+    "thread_recipient_identity_mismatch": "welcome_thread_identity_mismatch",
+    "draft_verify_failed": "welcome_draft_verification_failed",
+    "draft_typing_failed": "welcome_draft_verification_failed",
+    "send_unverified": "welcome_outbound_unverified",
+    "send_without_strong_outbound_proof": "welcome_outbound_unverified",
+    "post_finalize_partial": "welcome_followers_restore_failed",
+}
+
+
+def _welcome_structured_failure_reason(reason: str | None) -> str:
+    raw = str(reason or "welcome_unknown_failure").strip()
+    return _WELCOME_STRUCTURED_FAILURES.get(raw, raw)
+
+_WELCOME_STATE_TRANSITIONS = {
+    "initial": {"followers_stable"},
+    "followers_stable": {"planned_row_freshly_resolved", "next_job_ready"},
+    "planned_row_freshly_resolved": {"target_profile_exact"},
+    "target_profile_exact": {"dm_thread_exact"},
+    "dm_thread_exact": {"composer_exact"},
+    "composer_exact": {"draft_exact"},
+    "draft_exact": {"send_tapped"},
+    "send_tapped": {"outbound_verified"},
+    "outbound_verified": {"thread_exit"},
+    "thread_exit": {"followers_restored"},
+    "followers_restored": {"next_job_ready"},
+    "next_job_ready": {"planned_row_freshly_resolved", "followers_stable"},
+}
+
+
+class _WelcomeStateMachine:
+    """Nominal Welcome contract; failures are recorded without inventing transitions."""
+
+    def __init__(self, *, account_id: str, run_id: str | None) -> None:
+        self.account_id = str(account_id or "")
+        self.run_id = str(run_id or "")
+        self.current = "initial"
+        self.history: list[dict[str, Any]] = []
+
+    def transition(
+        self,
+        state: str,
+        *,
+        proof: str,
+        owner: str,
+        job_id: str = "",
+        username: str = "",
+    ) -> None:
+        target = str(state or "")
+        allowed = _WELCOME_STATE_TRANSITIONS.get(self.current, set())
+        if target not in allowed:
+            raise RuntimeError(
+                f"invalid_welcome_state_transition:{self.current}->{target}"
+            )
+        previous = self.current
+        self.current = target
+        entry = {
+            "from": previous,
+            "state": target,
+            "proof": str(proof or ""),
+            "owner": str(owner or ""),
+            "job_id": str(job_id or ""),
+            "username": str(username or ""),
+        }
+        self.history.append(entry)
+        log(
+            "info",
+            "welcome_state_transition",
+            account_id=self.account_id,
+            run_id=self.run_id or None,
+            **entry,
+        )
+
+    def fail(
+        self,
+        reason: str,
+        *,
+        owner: str,
+        job_id: str = "",
+        username: str = "",
+    ) -> None:
+        log(
+            "error",
+            "welcome_state_failed",
+            account_id=self.account_id,
+            run_id=self.run_id or None,
+            state=self.current,
+            reason=str(reason or "welcome_state_unknown_failure"),
+            owner=str(owner or ""),
+            job_id=str(job_id or ""),
+            username=str(username or ""),
+        )
+
+    def reset_after_clean_skip(
+        self,
+        *,
+        proof: str,
+        job_id: str = "",
+        username: str = "",
+    ) -> None:
+        previous = self.current
+        self.current = "followers_stable"
+        entry = {
+            "from": previous,
+            "state": "followers_stable",
+            "proof": str(proof or "clean_skip_followers_restored"),
+            "owner": "welcome_sender_job_loop",
+            "job_id": str(job_id or ""),
+            "username": str(username or ""),
+        }
+        self.history.append(entry)
+        log(
+            "info",
+            "welcome_state_clean_skip_reset",
+            account_id=self.account_id,
+            run_id=self.run_id or None,
+            **entry,
+        )
 
 
 def _job_requires_send_unverified_quarantine(job: dict[str, Any]) -> bool:
@@ -289,6 +412,8 @@ def _resolve_followers_row(
     scan_generation: str = "",
     navigation_generation: str = "",
     anchor_invalidation_reason: str = "fresh_identity_required_before_tap",
+    target_screen_index: int | None = None,
+    current_screen_index: int | None = None,
 ) -> tuple[dict[str, Any] | None, int, str, dict[str, Any]]:
     """
     Scan anchors retain identity/order only. Every tappable row is freshly resolved.
@@ -414,6 +539,8 @@ def _resolve_followers_row(
                 ),
                 viewport_fingerprint=viewport_fingerprint,
             )
+            debug["resolved_screen_index"] = int(screen_index)
+            debug["lookup_path_used"] = "fresh_visible"
             return current, 0, "fresh_visible", debug
 
     boundary = followers_suggestions_boundary_from_cached_hierarchy(
@@ -429,49 +556,78 @@ def _resolve_followers_row(
         suggestions_boundary=bool(boundary.get("is_boundary")),
     )
 
-    if bool(boundary.get("is_boundary")):
-        debug["lookup_path_used"] = "suggestions_boundary_blocked"
+    if bool(boundary.get("is_boundary")) and key in visible_keys:
+        debug["lookup_path_used"] = "welcome_suggestions_boundary_reached"
         log(
             "warning",
             "welcome_row_tap_blocked",
-            reason=(
-                "suggestions_boundary_target_not_real_follower"
-                if key in visible_keys
-                else "suggestions_boundary_target_absent"
-            ),
+            reason="suggestions_boundary_target_not_real_follower",
             expected_username=uname,
-            observed_username=uname if key in visible_keys else None,
+            observed_username=uname,
             job_id=str(job_id or ""),
         )
-        return None, 0, "suggestions_boundary_blocked", debug
+        return None, 0, "welcome_suggestions_boundary_reached", debug
 
     if key in visible_keys:
         debug["lookup_path_used"] = "fresh_miss_despite_visible_username"
         return None, 0, "fresh_miss_despite_visible", debug
 
+    current_idx = int(
+        screen_index if current_screen_index is None else current_screen_index
+    )
+    target_idx = (
+        None if target_screen_index is None else max(0, int(target_screen_index))
+    )
+    at_suggestions_boundary = bool(boundary.get("is_boundary"))
+    direction = (
+        "backward"
+        if at_suggestions_boundary or (target_idx is not None and target_idx < current_idx)
+        else "forward"
+    )
     log(
         "info",
-        "welcome_list_sender_scroll_find_started",
+        "welcome_viewport_reposition_started",
         username=uname,
         reason="target_absent_from_visible_snapshot",
+        direction=direction,
+        target_screen_index=target_idx,
+        current_screen_index=current_idx,
         initial_visible_usernames=visible_usernames,
         scan_anchor_present=bool(debug["scan_anchor_present"]),
+        suggestions_boundary=at_suggestions_boundary,
     )
     debug["visible_usernames_before_scroll"] = list(visible_usernames)
-    max_scrolls = max(
+    configured_max = max(
         0, int(getattr(config, "WELCOME_LIST_SENDER_MAX_SCROLL_FIND", 3) or 3)
     )
+    estimated_distance = (
+        abs(current_idx - target_idx) if target_idx is not None else configured_max
+    )
+    max_scrolls = min(configured_max, max(1, estimated_distance + 1))
+    debug["reposition_direction"] = direction
+    debug["reposition_max_attempts"] = max_scrolls
     settle_s = float(
         getattr(config, "WELCOME_LIST_SENDER_SCROLL_SETTLE_S", 0.45) or 0.45
     )
     last_visible = list(visible_usernames)
     for scrolls in range(1, max_scrolls + 1):
-        if not scroll_followers_list_forward(
-            d,
-            source_profile_username=src,
-            bypass_post_tap_capture_gate=True,
-            bypass_scroll_xml_guards=True,
-        ):
+        if direction == "backward":
+            moved = scroll_followers_list_backward(
+                d,
+                source_profile_username=src,
+                scroll_steps=1,
+                scroll_profile="compact",
+            )
+            step_screen_index = max(0, current_idx - scrolls)
+        else:
+            moved = scroll_followers_list_forward(
+                d,
+                source_profile_username=src,
+                bypass_post_tap_capture_gate=True,
+                bypass_scroll_xml_guards=True,
+            )
+            step_screen_index = current_idx + scrolls
+        if not moved:
             break
         followers_clear_detect_hierarchy_cache()
         if settle_s > 0:
@@ -482,7 +638,7 @@ def _resolve_followers_row(
             source_profile_username=src,
             runtime_seen=set(),
             force_fresh_hierarchy=True,
-            screen_index=int(screen_index) + scrolls,
+            screen_index=step_screen_index,
         )
         last_visible = [
             str(candidate.get("username") or "")
@@ -490,6 +646,20 @@ def _resolve_followers_row(
             if candidate.get("username")
         ]
         step_fingerprint = _welcome_rows_viewport_fingerprint(step_rows)
+        step_boundary = followers_suggestions_boundary_from_cached_hierarchy(
+            previously_valid_followers_rows=True
+        )
+        log(
+            "info",
+            "welcome_viewport_reposition_step",
+            username=uname,
+            direction=direction,
+            attempt=scrolls,
+            screen_index=step_screen_index,
+            visible_usernames=list(last_visible),
+            viewport_fingerprint=step_fingerprint,
+            suggestions_boundary=bool(step_boundary.get("is_boundary")),
+        )
         for candidate in step_rows:
             if (
                 _norm_username(str(candidate.get("username") or "")) == key
@@ -500,7 +670,9 @@ def _resolve_followers_row(
                     candidate,
                     job_id=job_id,
                     scan_generation=scan_generation,
-                    navigation_generation=f"{navigation_generation}:scroll:{scrolls}",
+                    navigation_generation=(
+                        f"{navigation_generation}:{direction}:{scrolls}"
+                    ),
                     viewport_fingerprint=step_fingerprint,
                     snapshot_captured_at=step_captured_at,
                 )
@@ -508,6 +680,8 @@ def _resolve_followers_row(
                     "welcome_navigation_generation"
                 )
                 debug["visible_usernames_after_last_scroll"] = list(last_visible)
+                debug["resolved_screen_index"] = step_screen_index
+                debug["lookup_path_used"] = f"bounded_{direction}_find"
                 log(
                     "info",
                     "welcome_row_fresh_resolve_completed",
@@ -523,25 +697,42 @@ def _resolve_followers_row(
                     ),
                     viewport_fingerprint=step_fingerprint,
                 )
-                return current, scrolls, "scroll_find", debug
-        step_boundary = followers_suggestions_boundary_from_cached_hierarchy(
-            previously_valid_followers_rows=True
-        )
-        if bool(step_boundary.get("is_boundary")):
-            debug["lookup_path_used"] = "suggestions_boundary_blocked"
+                log(
+                    "info",
+                    "welcome_viewport_reposition_completed",
+                    username=uname,
+                    direction=direction,
+                    attempts_used=scrolls,
+                    recovered=True,
+                    final_screen_index=step_screen_index,
+                )
+                return current, scrolls, f"bounded_{direction}_find", debug
+        if direction == "forward" and bool(step_boundary.get("is_boundary")):
+            debug["lookup_path_used"] = "welcome_suggestions_boundary_reached"
             debug["visible_usernames_after_last_scroll"] = list(last_visible)
             log(
                 "warning",
                 "welcome_row_tap_blocked",
-                reason="suggestions_boundary_target_absent",
+                reason="welcome_suggestions_boundary_reached",
                 expected_username=uname,
                 observed_username=None,
                 job_id=str(job_id or ""),
             )
-            return None, scrolls, "suggestions_boundary_blocked", debug
+            return None, scrolls, "welcome_suggestions_boundary_reached", debug
 
     debug["visible_usernames_after_last_scroll"] = list(last_visible)
-    debug["lookup_path_used"] = "scroll_exhausted"
+    debug["lookup_path_used"] = "welcome_planned_row_not_found"
+    log(
+        "warning",
+        "welcome_viewport_reposition_completed",
+        username=uname,
+        direction=direction,
+        attempts_used=max_scrolls,
+        recovered=False,
+        final_screen_index=max(0, current_idx - max_scrolls)
+        if direction == "backward"
+        else current_idx + max_scrolls,
+    )
     log(
         "info",
         "welcome_row_fresh_resolve_completed",
@@ -553,7 +744,7 @@ def _resolve_followers_row(
         snapshot_age_ms=None,
         viewport_fingerprint=debug.get("viewport_fingerprint"),
     )
-    return None, max_scrolls, "not_found", debug
+    return None, max_scrolls, "welcome_planned_row_not_found", debug
 
 
 def _session_scan_jobs_from_summary(scan_summary: dict[str, Any]) -> list[dict[str, Any]]:
@@ -746,7 +937,10 @@ def _resolve_session_sender_plan(
     attempt_cap: int | None = None,
 ) -> tuple[list[dict[str, Any]], str, dict[str, Any]]:
     """
-    Build planned session jobs and optional reposition to scan-start zone.
+    Build the plan without moving the Followers viewport.
+
+    Freshly visible planned jobs always win. Navigation for an off-screen job
+    belongs exclusively to the row resolver when that job is processed.
     Returns (planned_jobs, selection_strategy, position_meta).
     """
     candidates = _session_scan_jobs_from_summary(scan)
@@ -769,87 +963,35 @@ def _resolve_session_sender_plan(
 
     plan_cap = max_jobs if attempt_cap is None else max(0, int(attempt_cap))
     scan_order_slice = candidates[:plan_cap]
-    needs_restore = _planned_jobs_need_restore_scan_start(
-        [
-            {
-                "username": e.get("username"),
-                "screen_index": e.get("screen_index"),
-            }
-            for e in scan_order_slice
-        ],
-        visible_keys=visible_keys,
-        scan_final_screen_index=scan_final_screen_index,
-    )
-    position_meta["restore_needed"] = needs_restore
-    selection_strategy = "scan_order"
-
-    if needs_restore:
-        log(
-            "info",
-            "welcome_list_sender_reposition_started",
-            account_username=account_username,
-            scan_final_screen_index=scan_final_screen_index,
-            planned_usernames=[str(e.get("username") or "") for e in scan_order_slice],
-            visible_usernames=list(visible),
-            reason="planned_scan_order_jobs_not_in_current_viewport",
+    visible_planned = [
+        entry
+        for entry in scan_order_slice
+        if _norm_username(str(entry.get("username") or "")) in visible_keys
+    ]
+    if visible_planned:
+        selection_strategy = "visible_planned_job_first"
+        selected = _order_scan_jobs_viewport_first(
+            scan_order_slice, visible_keys=visible_keys
         )
-        ok_restore, method = _restore_followers_list_to_scan_start_zone(
-            d,
-            account_username=account_username,
-            pkg=pkg,
-            scan_final_screen_index=scan_final_screen_index,
-        )
-        position_meta["reposition_method"] = method
-        position_meta["reposition_success"] = ok_restore
-        if ok_restore:
-            selection_strategy = "restore_scan_start_zone"
-            visible, harvest_meta = _sender_start_visible_usernames(
-                d,
-                account_username=account_username,
-                screen_index=0,
-            )
-            visible_keys = {_norm_username(u) for u in visible}
-            position_meta["sender_start_visible_usernames_after_restore"] = list(
-                visible
-            )
-            log(
-                "info",
-                "welcome_list_sender_reposition_finished",
-                account_username=account_username,
-                method=method,
-                success=True,
-                visible_usernames=list(visible),
-            )
-            selected = scan_order_slice
-        else:
-            selection_strategy = "current_viewport_order"
-            selected = _order_scan_jobs_viewport_first(
-                candidates, visible_keys=visible_keys
-            )[:plan_cap]
-            log(
-                "info",
-                "welcome_list_sender_reposition_finished",
-                account_username=account_username,
-                method=method,
-                success=False,
-                fallback_strategy=selection_strategy,
-            )
     else:
-        if scan_final_screen_index > 0:
-            not_visible = [
-                str(e.get("username") or "")
-                for e in scan_order_slice
-                if _norm_username(str(e.get("username") or "")) not in visible_keys
-            ]
-            if not_visible and scan_order_slice:
-                selection_strategy = "current_viewport_order"
-                selected = _order_scan_jobs_viewport_first(
-                    candidates, visible_keys=visible_keys
-                )[:plan_cap]
-            else:
-                selected = scan_order_slice
-        else:
-            selected = scan_order_slice
+        selection_strategy = "scan_order_bounded_reposition"
+        selected = scan_order_slice
+
+    position_meta["restore_needed"] = False
+    position_meta["reposition_success"] = None
+    position_meta["visible_planned_usernames"] = [
+        str(entry.get("username") or "") for entry in visible_planned
+    ]
+    log(
+        "info",
+        "welcome_list_sender_non_destructive_plan_selected",
+        account_username=account_username,
+        planned_usernames=[str(e.get("username") or "") for e in selected],
+        visible_usernames=list(visible),
+        visible_planned_usernames=position_meta["visible_planned_usernames"],
+        selection_strategy=selection_strategy,
+        viewport_moved=False,
+    )
 
     planned = _build_planned_session_jobs(
         selected,
@@ -1181,6 +1323,7 @@ def _navigate_followers_row_to_dm(
     account_username: str,
     scan_anchors: dict[str, dict[str, Any]],
     planned_job_context: dict[str, Any] | None = None,
+    state_machine: _WelcomeStateMachine | None = None,
 ) -> tuple[str, bool, dict[str, Any]]:
     """Followers list row tap → profile → DM thread."""
     uname = str(username or "").strip()
@@ -1204,6 +1347,8 @@ def _navigate_followers_row_to_dm(
             plan_ctx.get("anchor_invalidation_reason")
             or "fresh_identity_required_before_tap"
         ),
+        target_screen_index=plan_ctx.get("target_screen_index"),
+        current_screen_index=plan_ctx.get("current_screen_index"),
     )
     nav_meta["followers_scrolls_to_find"] = scrolls
     nav_meta["lookup_path_used"] = lookup_path
@@ -1287,6 +1432,30 @@ def _navigate_followers_row_to_dm(
         viewport_fingerprint=row.get("welcome_viewport_fingerprint"),
         snapshot_age_ms=snapshot_age_ms,
     )
+    if state_machine is not None:
+        if state_machine.current == "initial":
+            state_machine.transition(
+                "followers_stable",
+                proof="fresh_followers_surface_and_hierarchy",
+                owner="welcome_sender_viewport",
+                job_id=str(plan_ctx.get("job_id") or ""),
+                username=uname,
+            )
+        elif state_machine.current == "followers_restored":
+            state_machine.transition(
+                "next_job_ready",
+                proof="next_planned_row_freshly_visible",
+                owner="welcome_sender_viewport",
+                job_id=str(plan_ctx.get("job_id") or ""),
+                username=uname,
+            )
+        state_machine.transition(
+            "planned_row_freshly_resolved",
+            proof="fresh_hierarchy_exact_username_current_bounds",
+            owner="welcome_sender_viewport",
+            job_id=str(plan_ctx.get("job_id") or ""),
+            username=uname,
+        )
     tapped, tap_x, tap_y = tap_followers_list_username_row(d, row, username=uname)
     if not tapped:
         return "unknown", False, nav_meta
@@ -1323,6 +1492,14 @@ def _navigate_followers_row_to_dm(
         return identity_reason, False, nav_meta
 
     log("info", "welcome_list_sender_profile_opened", username=uname)
+    if state_machine is not None:
+        state_machine.transition(
+            "target_profile_exact",
+            proof=str(identity_reason or "exact_profile_username"),
+            owner="welcome_sender_navigation",
+            job_id=str(plan_ctx.get("job_id") or ""),
+            username=uname,
+        )
 
     thread_state = open_dm_thread_from_profile(
         d, uname, welcome_list_native=True
@@ -1334,16 +1511,6 @@ def _navigate_followers_row_to_dm(
         thread_state=thread_state,
     )
 
-    if thread_state not in ("dm_not_available", "unknown"):
-        ok_comp, comp_reason = verify_dm_composer_safe(d, pkg)
-        log(
-            "info",
-            "welcome_list_sender_composer_probe",
-            username=uname,
-            composer_ok=bool(ok_comp),
-            composer_reason=comp_reason,
-        )
-
     nav_ok = thread_state not in (
         "unknown",
         "foreground_package_mismatch",
@@ -1351,6 +1518,18 @@ def _navigate_followers_row_to_dm(
         "thread_recipient_identity_mismatch",
         "account_review_popup",
     )
+    if (
+        nav_ok
+        and thread_state not in ("dm_not_available", "restricted_account")
+        and state_machine is not None
+    ):
+        state_machine.transition(
+            "dm_thread_exact",
+            proof=f"exact_thread_header:{thread_state}",
+            owner="welcome_sender_navigation",
+            job_id=str(plan_ctx.get("job_id") or ""),
+            username=uname,
+        )
     return thread_state, nav_ok, nav_meta
 
 
@@ -1361,6 +1540,7 @@ def _restore_followers_after_job(
     pkg: str,
     account_username: str,
     job_id: str = "",
+    state_machine: _WelcomeStateMachine | None = None,
 ) -> bool:
     """Ensure we end on followers list (from DM, profile, or already on list)."""
     src = str(account_username or "").strip()
@@ -1392,6 +1572,21 @@ def _restore_followers_after_job(
         source_profile_username=src or None,
     )
     if _confirm_followers("initial"):
+        if state_machine is not None and state_machine.current == "outbound_verified":
+            state_machine.transition(
+                "thread_exit",
+                proof="direct_followers_after_outbound",
+                owner="welcome_sender_post_dm_return",
+                job_id=job_id,
+                username=username,
+            )
+            state_machine.transition(
+                "followers_restored",
+                proof="fresh_followers_detection",
+                owner="welcome_sender_post_dm_return",
+                job_id=job_id,
+                username=username,
+            )
         log(
             "info",
             "welcome_post_job_return_succeeded",
@@ -1424,6 +1619,21 @@ def _restore_followers_after_job(
             profile_identity_reason=fin.get("profile_identity_reason"),
         )
         if bool(fin.get("followers_surface_ok")) and _confirm_followers("thread_return"):
+            if state_machine is not None and state_machine.current == "outbound_verified":
+                state_machine.transition(
+                    "thread_exit",
+                    proof="canonical_thread_exit",
+                    owner="welcome_sender_post_dm_return",
+                    job_id=job_id,
+                    username=username,
+                )
+                state_machine.transition(
+                    "followers_restored",
+                    proof="fresh_followers_detection",
+                    owner="welcome_sender_post_dm_return",
+                    job_id=job_id,
+                    username=username,
+                )
             log(
                 "info",
                 "welcome_post_job_return_succeeded",
@@ -1455,6 +1665,21 @@ def _restore_followers_after_job(
         if tapped and settle_s > 0:
             time.sleep(settle_s)
         if tapped and _confirm_followers("recipient_profile_single_back"):
+            if state_machine is not None and state_machine.current == "outbound_verified":
+                state_machine.transition(
+                    "thread_exit",
+                    proof="recipient_profile_already_restored",
+                    owner="welcome_sender_post_dm_return",
+                    job_id=job_id,
+                    username=username,
+                )
+                state_machine.transition(
+                    "followers_restored",
+                    proof="fresh_followers_detection",
+                    owner="welcome_sender_post_dm_return",
+                    job_id=job_id,
+                    username=username,
+                )
             log(
                 "info",
                 "welcome_post_job_return_succeeded",
@@ -1480,6 +1705,21 @@ def _restore_followers_after_job(
     if opened and _confirm_followers("own_profile_reopen"):
         followers_clear_detect_hierarchy_cache()
         followers_refresh_detect_hierarchy_cache(d, screen_index=0)
+        if state_machine is not None and state_machine.current == "outbound_verified":
+            state_machine.transition(
+                "thread_exit",
+                proof="bounded_canonical_reopen",
+                owner="welcome_sender_post_dm_return",
+                job_id=job_id,
+                username=username,
+            )
+            state_machine.transition(
+                "followers_restored",
+                proof="fresh_followers_detection",
+                owner="welcome_sender_post_dm_return",
+                job_id=job_id,
+                username=username,
+            )
         log(
             "info",
             "welcome_post_job_return_succeeded",
@@ -1510,12 +1750,18 @@ def execute_welcome_list_job(
     account_username: str,
     scan_anchors: dict[str, dict[str, Any]],
     planned_job_context: dict[str, Any] | None = None,
+    state_machine: _WelcomeStateMachine | None = None,
 ) -> dict[str, Any]:
     job_id = str(job.get("id") or "")
     recipient = str(job.get("recipient_username") or "").strip()
     dm_type = str(job.get("dm_type") or "")
     message_body = str(job.get("message_body") or "")
     pkg = str(getattr(config, "INSTAGRAM_PACKAGE", "") or "com.instagram.android")
+    machine = state_machine or _WelcomeStateMachine(
+        account_id=account_id,
+        run_id=str((planned_job_context or {}).get("run_id") or ""),
+    )
+    state_history_start = len(machine.history)
 
     running = supabase_client.mark_dm_job_running(job_id)
     if not running:
@@ -1538,7 +1784,9 @@ def execute_welcome_list_job(
     list_nav_ms = 0.0
     dm_send_ms = 0.0
     fail_reason: str | None = None
-    followers_surface_restored_by_send_finalize = False
+    followers_surface_restored = False
+    return_attempted = False
+    navigation_meta: dict[str, Any] = {}
 
     try:
         if _check_dm_sender_permission_blocker(
@@ -1559,13 +1807,14 @@ def execute_welcome_list_job(
             }
 
         t_nav = time.perf_counter()
-        thread_state, nav_ok, _nav_meta = _navigate_followers_row_to_dm(
+        thread_state, nav_ok, navigation_meta = _navigate_followers_row_to_dm(
             d,
             recipient,
             pkg=pkg,
             account_username=account_username,
             scan_anchors=scan_anchors,
             planned_job_context=planned_job_context,
+            state_machine=machine,
         )
         list_nav_ms = (time.perf_counter() - t_nav) * 1000.0
         snap = get_last_dm_thread_classify_snapshot()
@@ -1595,13 +1844,12 @@ def execute_welcome_list_job(
             else:
                 fail_reason = "list_navigation_failed"
             plan_ctx = dict(planned_job_context or {})
-            lookup_path = str(_nav_meta.get("lookup_path_used") or "")
+            lookup_path = str(navigation_meta.get("lookup_path_used") or "")
             row_failure_reason = {
-                "not_found": "current_scan_planned_row_not_found",
-                "scroll_exhausted": "current_scan_planned_row_not_found",
-                "fresh_miss_despite_visible": "current_scan_planned_row_identity_unverified",
+                "welcome_planned_row_not_found": "welcome_planned_row_not_found",
+                "fresh_miss_despite_visible": "welcome_planned_row_identity_unverified",
                 "followers_surface_not_stable": "followers_surface_not_stable_before_welcome_row_tap",
-                "suggestions_boundary_blocked": "followers_suggestions_boundary_target_not_found",
+                "welcome_suggestions_boundary_reached": "welcome_suggestions_boundary_reached",
             }.get(lookup_path)
             row_missing = row_failure_reason is not None
             if plan_ctx.get("current_scan_session") and row_missing:
@@ -1616,9 +1864,16 @@ def execute_welcome_list_job(
                     reposition_applied=bool(plan_ctx.get("reposition_applied")),
                     possible_unfollow_or_surface_shift=True,
                     lookup_path_used=lookup_path,
-                    scrolls_attempted=_nav_meta.get("followers_scrolls_to_find"),
-                    scan_anchor_present=bool(_nav_meta.get("scan_anchor_present")),
+                    scrolls_attempted=navigation_meta.get("followers_scrolls_to_find"),
+                    scan_anchor_present=bool(navigation_meta.get("scan_anchor_present")),
                 )
+            fail_reason = _welcome_structured_failure_reason(fail_reason)
+            machine.fail(
+                fail_reason,
+                owner="welcome_sender_navigation",
+                job_id=job_id,
+                username=recipient,
+            )
             if fail_reason in _SEND_UNVERIFIED_REASONS:
                 updated_job, outcome = _complete_job_send_unverified_quarantine(
                     job,
@@ -1702,16 +1957,44 @@ def execute_welcome_list_job(
                     message_body=message_body,
                     thread_state=thread_state,
                     pkg=pkg,
-                    post_send_nav="welcome_list",
+                    post_send_nav="sender_owned",
                     source_profile_username=account_username,
+                    account_id=account_id,
+                    run_id=str((planned_job_context or {}).get("run_id") or ""),
                     job_id=job_id,
+                    navigation_generation=str(
+                        navigation_meta.get("resolved_navigation_generation") or ""
+                    ),
+                    state_transition=lambda state, proof: machine.transition(
+                        state,
+                        proof=proof,
+                        owner="welcome_sender_send",
+                        job_id=job_id,
+                        username=recipient,
+                    ),
                 )
                 dm_send_ms = (time.perf_counter() - t_send) * 1000.0
                 strong_send_proof = _welcome_send_has_strong_outbound_proof(
                     send_out, fail_reason
                 )
                 if sent_ok and strong_send_proof:
-                    followers_surface_restored_by_send_finalize = fail_reason is None
+                    return_attempted = True
+                    followers_surface_restored = _restore_followers_after_job(
+                        d,
+                        recipient,
+                        pkg=pkg,
+                        account_username=account_username,
+                        job_id=job_id,
+                        state_machine=machine,
+                    )
+                    if not followers_surface_restored:
+                        fail_reason = "welcome_followers_restore_failed"
+                        machine.fail(
+                            fail_reason,
+                            owner="welcome_sender_post_dm_return",
+                            job_id=job_id,
+                            username=recipient,
+                        )
                     updated_job = supabase_client.complete_dm_job(
                         job_id,
                         "sent",
@@ -1720,7 +2003,7 @@ def execute_welcome_list_job(
                             "send_method": "instagram_send_ui",
                             "message_len": len(message_body),
                             "welcome_list_native": True,
-                            "post_finalize_partial": fail_reason == "post_finalize_partial",
+                            "post_finalize_partial": not followers_surface_restored,
                             "send_verification_status": "verified",
                             "outbound_bubble_evidence_found": True,
                         },
@@ -1737,9 +2020,12 @@ def execute_welcome_list_job(
                         dm_send_ms=round(dm_send_ms, 2),
                     )
                 else:
-                    unverified_reason = str(fail_reason or "send_unverified")
+                    unverified_reason = _welcome_structured_failure_reason(
+                        fail_reason or "send_unverified"
+                    )
                     if sent_ok and not strong_send_proof:
-                        unverified_reason = "send_without_strong_outbound_proof"
+                        unverified_reason = "welcome_outbound_unverified"
+                    fail_reason = unverified_reason
                     updated_job, outcome = _complete_job_send_unverified_quarantine(
                         job,
                         last_error=unverified_reason,
@@ -1755,21 +2041,34 @@ def execute_welcome_list_job(
                         final_job_status=final_status,
                     )
     finally:
-        if followers_surface_restored_by_send_finalize:
+        should_restore = machine.current not in {"initial", "followers_stable"}
+        if followers_surface_restored:
             log(
                 "info",
-                "welcome_list_sender_post_job_restore_skipped_after_confirmed_return",
+                "welcome_list_sender_post_job_restore_already_owned",
                 job_id=job_id,
                 recipient_username=recipient,
-                reason="followers_surface_restored_by_send_finalize",
+                reason="sender_return_completed_once",
             )
-        elif not _restore_followers_after_job(
-            d,
-            recipient,
-            pkg=pkg,
-            account_username=account_username,
-            job_id=job_id,
-        ):
+        elif should_restore and not return_attempted:
+            return_attempted = True
+            followers_surface_restored = _restore_followers_after_job(
+                d,
+                recipient,
+                pkg=pkg,
+                account_username=account_username,
+                job_id=job_id,
+                state_machine=machine,
+            )
+        if should_restore and not followers_surface_restored:
+            if not fail_reason:
+                fail_reason = "welcome_followers_restore_failed"
+            machine.fail(
+                str(fail_reason),
+                owner="welcome_sender_post_dm_return",
+                job_id=job_id,
+                username=recipient,
+            )
             _capture_welcome_failure_before_cleanup(
                 d,
                 account_username=account_username,
@@ -1780,6 +2079,16 @@ def execute_welcome_list_job(
             _check_dm_sender_permission_blocker(
                 d, username=recipient, context="welcome_list_teardown"
             )
+        elif (
+            outcome == "skipped"
+            and followers_surface_restored
+            and machine.current not in {"initial", "followers_stable"}
+        ):
+            machine.reset_after_clean_skip(
+                proof="non_dmable_job_skipped_with_fresh_followers",
+                job_id=job_id,
+                username=recipient,
+            )
 
     return {
         "job_id": job_id,
@@ -1787,8 +2096,12 @@ def execute_welcome_list_job(
         "outcome": outcome,
         "final_job_status": final_status,
         "thread_state": thread_state,
-        "post_finalize_partial": fail_reason == "post_finalize_partial",
-        "followers_surface_restored": bool(followers_surface_restored_by_send_finalize),
+        "post_finalize_partial": fail_reason == "welcome_followers_restore_failed",
+        "followers_surface_restored": bool(followers_surface_restored),
+        "failure_reason": fail_reason,
+        "navigation_meta": navigation_meta,
+        "welcome_state": machine.current,
+        "welcome_state_history": list(machine.history[state_history_start:]),
         "list_navigation_ms": round(list_nav_ms, 2),
         "dm_send_ms": round(dm_send_ms, 2),
         "job": updated_job,
@@ -1857,7 +2170,9 @@ def run_welcome_list_sender(
         "dm_send_total_ms": 0.0,
         "sender_status": "not_started",
         "session_scan_jobs_count_before_planning": len(session_scan_jobs),
+        "welcome_state_history": [],
     }
+    state_machine = _WelcomeStateMachine(account_id=aid, run_id=run_id)
 
     real_enabled, real_source = resolve_welcome_dm_real_send_enabled()
     if not real_enabled:
@@ -2029,10 +2344,7 @@ def run_welcome_list_sender(
 
     loop_exit_reason: str | None = None
     job_iterations: list[dict[str, Any]] = []
-    reposition_applied = bool(
-        position_meta.get("reposition_success")
-        or selection_strategy == "restore_scan_start_zone"
-    )
+    current_viewport_screen_index = int(scan.get("scan_final_screen_index") or 0)
 
     if only_job_id:
         job_iterations = [{"job_id": only_job_id, "username": "", "planned_index": 0}]
@@ -2202,8 +2514,6 @@ def run_welcome_list_sender(
         if current_scan_session_mode and not only_job_id:
             if planned_index > 0:
                 anchor_invalidation_reason = "cross_job_navigation_completed"
-            elif reposition_applied:
-                anchor_invalidation_reason = "viewport_repositioned_after_scan"
             else:
                 anchor_invalidation_reason = "fresh_identity_required_before_tap"
             planned_job_context = {
@@ -2212,13 +2522,16 @@ def run_welcome_list_sender(
                 "planned_index": planned_index,
                 "selection_strategy": selection_strategy
                 or str(planned.get("selection_reason") or ""),
-                "reposition_applied": reposition_applied,
+                "reposition_applied": False,
                 "followers_surface_fresh": True,
+                "run_id": str(run_id or ""),
                 "scan_generation": str(scan.get("run_id") or run_id or ""),
                 "navigation_generation": (
                     f"{str(run_id or 'no-run')}:{planned_index}:followers_pre_tap"
                 ),
                 "anchor_invalidation_reason": anchor_invalidation_reason,
+                "target_screen_index": int(planned.get("screen_index") or 0),
+                "current_screen_index": current_viewport_screen_index,
             }
 
         try:
@@ -2230,6 +2543,7 @@ def run_welcome_list_sender(
                 account_username=acct_user,
                 scan_anchors=scan_anchors,
                 planned_job_context=planned_job_context,
+                state_machine=state_machine,
             )
         except Exception as e:
             log(
@@ -2248,6 +2562,14 @@ def run_welcome_list_sender(
         summary["dm_send_total_ms"] = float(summary["dm_send_total_ms"]) + float(
             result.get("dm_send_ms") or 0.0
         )
+        summary["welcome_state_history"].extend(
+            list(result.get("welcome_state_history") or [])
+        )
+        navigation_meta = dict(result.get("navigation_meta") or {})
+        if navigation_meta.get("resolved_screen_index") is not None:
+            current_viewport_screen_index = int(
+                navigation_meta.get("resolved_screen_index") or 0
+            )
 
         outcome = str(result.get("outcome") or "")
         if outcome == "sent":
@@ -2280,6 +2602,21 @@ def run_welcome_list_sender(
             summary["failed_recipients"].append(recipient)
             summary["recipients_failed"].append(recipient)
 
+        local_failure_reason = str(result.get("failure_reason") or "").strip()
+        if local_failure_reason:
+            summary["failure_reason"] = local_failure_reason
+            loop_exit_reason = local_failure_reason
+            log(
+                "error",
+                "welcome_list_sender_structured_failure_preserved",
+                account_id=aid,
+                run_id=run_id,
+                job_id=str(job.get("id") or ""),
+                recipient_username=recipient,
+                failure_reason=local_failure_reason,
+            )
+            break
+
         if _dm_sender_session_should_abort():
             loop_exit_reason = "permission_dialog_abort"
             log(
@@ -2296,6 +2633,17 @@ def run_welcome_list_sender(
             and int(summary["jobs_sent_count"]) >= max_jobs
             and bool(result.get("followers_surface_restored"))
         ):
+            if state_machine.current == "followers_restored":
+                state_machine.transition(
+                    "next_job_ready",
+                    proof="sent_cap_reached_plan_complete",
+                    owner="welcome_sender_job_loop",
+                    job_id=str(job.get("id") or ""),
+                    username=recipient,
+                )
+                summary["welcome_state_history"].append(
+                    dict(state_machine.history[-1])
+                )
             loop_exit_reason = "sent_cap_reached"
             log(
                 "info",
@@ -2366,7 +2714,20 @@ def run_welcome_list_sender(
                 )
 
     if loop_exit_reason is None:
-        loop_exit_reason = "attempt_cap_reached"
+        loop_exit_reason = (
+            "plan_exhausted" if current_scan_session_mode else "attempt_cap_reached"
+        )
+    if state_machine.current == "followers_restored" and loop_exit_reason in {
+        "plan_exhausted",
+        "scan_session_jobs_exhausted",
+        "no_pending_job",
+    }:
+        state_machine.transition(
+            "next_job_ready",
+            proof="structured_plan_exhausted",
+            owner="welcome_sender_job_loop",
+        )
+        summary["welcome_state_history"].append(dict(state_machine.history[-1]))
     summary["loop_exit_reason"] = loop_exit_reason
     log(
         "info",
@@ -2406,27 +2767,11 @@ def run_welcome_list_sender(
         sender_status = "success"
         exit_code = 0
 
-    if str(summary.get("failure_reason") or "").startswith("followers_surface"):
-        sender_status = "failed" if sent == 0 else "partial_success"
-        exit_code = 0 if sent > 0 else 1
-
-    if (
-        current_scan_session_mode
-        and sent == 0
-        and session_scan_jobs
-        and (
-            sender_status == "failed"
-            or str(summary.get("failure_reason") or "").startswith("followers_surface")
-        )
-    ):
-        failure_reason = str(summary.get("failure_reason") or summary.get("loop_exit_reason") or "")
-        cleanup_reason = failure_reason or "welcome_sender_exit_before_send"
-        summary["scan_jobs_cleanup_count"] = _skip_current_scan_session_jobs(
-            scan,
-            run_id=run_id,
-            reason="welcome_sender_failed_before_send",
-            last_error=cleanup_reason[:240],
-        )
+    if str(summary.get("failure_reason") or ""):
+        sender_status = "failed"
+        exit_code = 1
+        summary["scan_jobs_cleanup_count"] = 0
+        summary["pending_jobs_preserved_after_structured_failure"] = True
 
     summary["sender_status"] = sender_status
     summary["total_ms"] = round(total_ms, 2)

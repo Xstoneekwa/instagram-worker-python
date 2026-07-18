@@ -69,6 +69,7 @@ _LAST_DM_SENDER_POST_JOB_RESTORE: dict[str, Any] = {}
 # This proof only bridges one fresh thread observation to the immediately
 # following composer focus. It is never reusable across navigation or jobs.
 WELCOME_COMPOSER_EVIDENCE_TTL_S = 1.5
+WELCOME_COMPOSER_FAST_PATH_RUNTIME_ENABLED = False
 
 _TRUSTED_GLOBAL_SEARCH_CONTEXTS = frozenset(
     {
@@ -3411,6 +3412,7 @@ def _perform_real_welcome_dm_send(
     run_id: str = "",
     job_id: str = "",
     navigation_generation: str = "",
+    state_transition: Callable[[str, str], None] | None = None,
 ) -> tuple[bool, dict[str, Any], str | None]:
     """
     Type job.message_body, verify draft, tap Send, post-send finalize.
@@ -3456,25 +3458,35 @@ def _perform_real_welcome_dm_send(
                 observed_thread_username=observed_username or None,
             )
             return False, {}, identity_reason
-        welcome_composer_evidence, evidence_reason, evidence_observed = (
-            _fresh_welcome_composer_evidence(
-                d,
-                pkg=pkg,
-                account_id=account_id,
-                run_id=run_id,
-                job_id=job_id,
-                expected_username=uname,
-                navigation_generation=navigation_generation,
+        if WELCOME_COMPOSER_FAST_PATH_RUNTIME_ENABLED:
+            welcome_composer_evidence, evidence_reason, evidence_observed = (
+                _fresh_welcome_composer_evidence(
+                    d,
+                    pkg=pkg,
+                    account_id=account_id,
+                    run_id=run_id,
+                    job_id=job_id,
+                    expected_username=uname,
+                    navigation_generation=navigation_generation,
+                )
             )
-        )
-        if welcome_composer_evidence is None:
+            if welcome_composer_evidence is None:
+                log(
+                    "info",
+                    "welcome_composer_fast_path_invalidated",
+                    reason=evidence_reason,
+                    evidence_age_ms=0.0,
+                    expected_username=uname,
+                    observed_username=evidence_observed or None,
+                )
+        else:
             log(
                 "info",
-                "welcome_composer_fast_path_invalidated",
-                reason=evidence_reason,
-                evidence_age_ms=0.0,
+                "WELCOME_COMPOSER_FAST_PATH_DISABLED_PENDING_PHYSICAL_STABILITY",
                 expected_username=uname,
-                observed_username=evidence_observed or None,
+                account_id=account_id or None,
+                run_id=run_id or None,
+                job_id=job_id or None,
             )
 
     if dm_thread_shows_outgoing_message(d, draft_text):
@@ -3541,6 +3553,8 @@ def _perform_real_welcome_dm_send(
             composer_reason=comp_signal,
         )
         return False, {}, "composer_not_safe"
+    if state_transition is not None:
+        state_transition("composer_exact", str(comp_signal or "full_composer_probe"))
 
     if not bool(getattr(config, "DM_DRAFT_TYPING_ENABLED", True)):
         return False, {}, "draft_typing_disabled"
@@ -3663,6 +3677,8 @@ def _perform_real_welcome_dm_send(
     if bool(getattr(config, "DM_VERIFY_TYPED_TEXT", True)):
         if not verify_dm_draft_text(d, draft_text):
             return False, {}, "draft_verify_failed"
+    if state_transition is not None:
+        state_transition("draft_exact", "draft_readback_exact")
 
     if welcome_mode:
         identity_ok, identity_reason, observed_username = (
@@ -3701,10 +3717,15 @@ def _perform_real_welcome_dm_send(
     finally:
         config.ENABLE_REAL_DM_SEND = prev_enable
 
+    if bool(send_out.get("send_tapped")) and state_transition is not None:
+        state_transition("send_tapped", "exact_send_selector_tapped")
+
     if bool(send_out.get("duplicate_prevented")):
         return True, send_out, None
 
     if bool(send_out.get("sent")):
+        if state_transition is not None:
+            state_transition("outbound_verified", "strong_outbound_bubble_proof")
         log(
             "info",
             "dm_sender_real_send_button_tapped",
@@ -3718,6 +3739,8 @@ def _perform_real_welcome_dm_send(
             thread_state=thread_state,
             message_len=len(draft_text),
         )
+        if post_send_nav == "sender_owned":
+            return True, send_out, None
         if post_send_nav == "welcome_list":
             from instagram_navigation import return_welcome_list_from_dm_to_followers
 

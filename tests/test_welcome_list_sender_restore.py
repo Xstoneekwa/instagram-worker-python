@@ -741,20 +741,20 @@ class WelcomeListSenderRestoreTest(unittest.TestCase):
         self.assertEqual(execute_mock.call_count, 1)
         self.assertEqual(self._last_verify_surface_mock.call_count, 3)
 
-    def _execute_job_with_send_finalize(self, failure_reason: str | None):
+    def _execute_job_with_sender_restore(self, *, restore_ok: bool = True):
         job = {
             "id": "job-1",
             "recipient_username": "recipient",
             "dm_type": "welcome",
             "message_body": "Salut",
         }
-        restore_mock = MagicMock(return_value=True)
+        restore_mock = MagicMock(return_value=restore_ok)
         with (
             patch.object(sender.supabase_client, "mark_dm_job_running", return_value=job),
             patch.object(sender, "_check_dm_sender_permission_blocker", return_value=False),
             patch.object(sender, "_navigate_followers_row_to_dm", return_value=("empty_new_thread", True, {})),
             patch.object(sender, "_evaluate_welcome_sendability", return_value=(True, None)),
-            patch.object(sender, "_perform_real_welcome_dm_send", return_value=(True, {"sent": True}, failure_reason)),
+            patch.object(sender, "_perform_real_welcome_dm_send", return_value=(True, {"sent": True}, None)),
             patch.object(sender.supabase_client, "complete_dm_job", return_value={**job, "status": "sent"}) as complete_mock,
             patch.object(sender, "_restore_followers_after_job", restore_mock),
         ):
@@ -769,15 +769,15 @@ class WelcomeListSenderRestoreTest(unittest.TestCase):
         self._last_complete_dm_job_mock = complete_mock
         return result, restore_mock
 
-    def test_execute_sent_job_skips_final_restore_when_send_finalize_restored_followers(self) -> None:
-        result, restore_mock = self._execute_job_with_send_finalize(None)
+    def test_execute_sent_job_uses_sender_owned_restore_once(self) -> None:
+        result, restore_mock = self._execute_job_with_sender_restore()
 
         self.assertEqual(result["outcome"], "sent")
         self.assertTrue(result["followers_surface_restored"])
-        restore_mock.assert_not_called()
+        restore_mock.assert_called_once()
 
     def test_execute_sent_job_records_strong_outbound_proof_metadata(self) -> None:
-        result, _restore_mock = self._execute_job_with_send_finalize(None)
+        result, _restore_mock = self._execute_job_with_sender_restore()
 
         self.assertEqual(result["outcome"], "sent")
         complete_call = self._last_complete_dm_job_mock.call_args
@@ -785,8 +785,8 @@ class WelcomeListSenderRestoreTest(unittest.TestCase):
         self.assertEqual(metadata_patch["send_verification_status"], "verified")
         self.assertTrue(metadata_patch["outbound_bubble_evidence_found"])
 
-    def test_execute_sent_job_keeps_final_restore_when_send_finalize_partial(self) -> None:
-        result, restore_mock = self._execute_job_with_send_finalize("post_finalize_partial")
+    def test_execute_sent_job_reports_sender_restore_failure(self) -> None:
+        result, restore_mock = self._execute_job_with_sender_restore(restore_ok=False)
 
         self.assertEqual(result["outcome"], "sent")
         self.assertTrue(result["post_finalize_partial"])
@@ -830,7 +830,7 @@ class WelcomeListSenderRestoreTest(unittest.TestCase):
         self.assertEqual(result["outcome"], "send_unverified_quarantined")
         self.assertEqual(
             quarantine_mock.call_args.kwargs.get("last_error"),
-            "send_without_strong_outbound_proof",
+            "welcome_outbound_unverified",
         )
         complete_mock.assert_not_called()
 
@@ -875,7 +875,8 @@ class WelcomeListSenderRestoreTest(unittest.TestCase):
         self.assertEqual(result["outcome"], "send_unverified_quarantined")
         quarantine_mock.assert_called_once()
         self.assertEqual(
-            quarantine_mock.call_args.kwargs.get("last_error"), "send_unverified"
+            quarantine_mock.call_args.kwargs.get("last_error"),
+            "welcome_outbound_unverified",
         )
         complete_mock.assert_not_called()
 
@@ -901,7 +902,7 @@ class WelcomeListSenderRestoreTest(unittest.TestCase):
         self.assertEqual(summary["sender_status"], "partial_success")
         self.assertEqual(summary["jobs_sent_count"], 0)
         self.assertEqual(summary["jobs_skipped_count"], 2)
-        self.assertEqual(summary["loop_exit_reason"], "attempt_cap_reached")
+        self.assertEqual(summary["loop_exit_reason"], "plan_exhausted")
         self.assertEqual(execute_mock.call_count, 2)
 
 

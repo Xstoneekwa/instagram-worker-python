@@ -187,6 +187,11 @@ def run_welcome_session_send(
     )
 
     if scan_code != 0:
+        scan_failure_reason = str(
+            scan_summary.get("failure_reason")
+            or scan_summary.get("stop_reason")
+            or "scan_phase_failed"
+        )
         log(
             "info",
             "welcome_session_send_summary",
@@ -195,7 +200,7 @@ def run_welcome_session_send(
             session_status="failed",
             total_ms=round((time.perf_counter() - t0) * 1000.0, 2),
             scan_status=scan_summary.get("status"),
-            failure_reason="scan_phase_failed",
+            failure_reason=scan_failure_reason,
         )
         return 1
 
@@ -232,6 +237,7 @@ def run_welcome_session_send(
         sender_jobs_sent_count=sender_summary.get("jobs_sent_count"),
         sender_jobs_skipped_count=sender_summary.get("jobs_skipped_count"),
         sender_jobs_failed_count=sender_summary.get("jobs_failed_count"),
+        sender_failure_reason=sender_summary.get("failure_reason"),
         list_navigation_total_ms=sender_summary.get("list_navigation_total_ms"),
         dm_send_total_ms=sender_summary.get("dm_send_total_ms"),
     )
@@ -275,6 +281,7 @@ def run_welcome_session_send(
         sender_jobs_sent_count=sender_summary.get("jobs_sent_count"),
         sender_jobs_skipped_count=sender_summary.get("jobs_skipped_count"),
         sender_jobs_failed_count=sender_summary.get("jobs_failed_count"),
+        sender_failure_reason=sender_summary.get("failure_reason"),
         sender_processed_recipients=sender_summary.get("processed_recipients"),
         sender_sent_recipients=sender_summary.get("sent_recipients"),
         sender_skipped_recipients=sender_summary.get("skipped_recipients"),

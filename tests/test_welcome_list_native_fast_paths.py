@@ -135,7 +135,7 @@ class WelcomeListNativeFastPathTests(unittest.TestCase):
             )
 
         self.assertIsNone(row)
-        self.assertEqual(path, "not_found")
+        self.assertEqual(path, "welcome_planned_row_not_found")
         tap_mock.assert_not_called()
 
     def test_username_found_after_bounded_scroll_uses_fresh_bounds(self) -> None:
@@ -169,10 +169,10 @@ class WelcomeListNativeFastPathTests(unittest.TestCase):
                 navigation_generation="nav-1",
             )
 
-        self.assertEqual(path, "scroll_find")
+        self.assertEqual(path, "bounded_forward_find")
         self.assertEqual(scrolls, 1)
         self.assertEqual(row["tap_bounds"]["top"], 840)
-        self.assertEqual(meta["resolved_navigation_generation"], "nav-1:scroll:1")
+        self.assertEqual(meta["resolved_navigation_generation"], "nav-1:forward:1")
 
     def test_suggestions_row_is_never_selected_or_scrolled_past(self) -> None:
         suggestion = self._fresh_row(cta="follow")
@@ -202,8 +202,51 @@ class WelcomeListNativeFastPathTests(unittest.TestCase):
 
         self.assertIsNone(row)
         self.assertEqual(scrolls, 0)
-        self.assertEqual(path, "suggestions_boundary_blocked")
+        self.assertEqual(path, "welcome_suggestions_boundary_reached")
         scroll_mock.assert_not_called()
+
+    def test_offscreen_planned_job_uses_bounded_backward_reposition(self) -> None:
+        current = self._fresh_row("visible_suggestion", top=700, cta="follow")
+        target = self._fresh_row(top=440)
+        with (
+            patch.object(sender, "_verify_followers_surface", return_value=(True, {})),
+            patch.object(
+                sender,
+                "harvest_visible_followers_rows",
+                side_effect=[
+                    ([current], {"hierarchy_source": "fresh_dump"}),
+                    ([target], {"hierarchy_source": "fresh_dump"}),
+                ],
+            ),
+            patch.object(
+                sender,
+                "followers_suggestions_boundary_from_cached_hierarchy",
+                side_effect=[{"is_boundary": True}, {"is_boundary": False}],
+            ),
+            patch.object(sender, "scroll_followers_list_backward", return_value=True) as backward,
+            patch.object(sender, "scroll_followers_list_forward") as forward,
+            patch.object(sender, "followers_clear_detect_hierarchy_cache"),
+            patch.object(sender, "followers_refresh_detect_hierarchy_cache"),
+            patch.object(sender.config, "WELCOME_LIST_SENDER_SCROLL_SETTLE_S", 0),
+        ):
+            row, scrolls, path, meta = sender._resolve_followers_row(
+                MagicMock(),
+                "medoc_en_mer",
+                account_username="j_automatise_pour_toi",
+                scan_anchors={"medoc_en_mer": self._anchor()},
+                job_id="job-1",
+                scan_generation="scan-1",
+                navigation_generation="nav-1",
+                target_screen_index=0,
+                current_screen_index=2,
+            )
+
+        self.assertEqual(path, "bounded_backward_find")
+        self.assertEqual(scrolls, 1)
+        self.assertEqual(row["username"], "medoc_en_mer")
+        self.assertEqual(meta["resolved_screen_index"], 1)
+        backward.assert_called_once()
+        forward.assert_not_called()
 
     def test_tap_authorization_rejects_expired_snapshot(self) -> None:
         row = sender._mark_fresh_welcome_row(

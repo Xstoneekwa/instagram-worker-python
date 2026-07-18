@@ -202,11 +202,15 @@ def _should_run_follow_after_welcome(
 
     scan_status = str(scan_summary.get("status") or "")
     if scan_status == "failed":
-        return False, "welcome_scan_failed"
+        return False, str(
+            scan_summary.get("failure_reason")
+            or scan_summary.get("stop_reason")
+            or "welcome_scan_failed"
+        )
 
     failure_reason = str(sender_summary.get("failure_reason") or "")
-    if failure_reason.startswith("followers_surface"):
-        return False, "welcome_surface_unstable"
+    if failure_reason:
+        return False, failure_reason
 
     jobs_failed = int(sender_summary.get("jobs_failed_count") or 0)
     if jobs_failed > 0:
