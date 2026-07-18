@@ -1,0 +1,105 @@
+{
+  "fixture_set": "welcome_jtm_physical_d4c3a70d",
+  "immutable": true,
+  "baseline_commit": "c7c1e1f06660d9f25c6fc5cdeb6f6d73e1be5c66",
+  "account": {
+    "account_id": "83de9cc9-5c37-42d1-9edc-c924352b17b1",
+    "username": "i_m_your_traker"
+  },
+  "device": {
+    "name": "Samsung A16-01",
+    "serial": "RFGL145VCKE",
+    "device_id": "d663648c-800c-48a6-8684-d8605218baa5"
+  },
+  "app": {
+    "app_instance_id": "7637db9a-3581-4099-8068-d5eb1ed86f96",
+    "package": "com.instagram.androie",
+    "version_name": "372.0.0.48.60",
+    "version_code": 377611059
+  },
+  "expected_username": "jtm.signature",
+  "source_run": {
+    "request_id": "b7a6927c-1d5b-4a84-8b40-c894ba4e129b",
+    "run_id": "d4c3a70d-460a-483e-995a-8beecb786430",
+    "job_id": "ffc99ef0-c35f-43ab-a6e8-67c60d5b4f2d",
+    "failure_reason": "welcome_thread_identity_mismatch"
+  },
+  "artifacts": [
+    {
+      "file": "followers-jtm.png",
+      "surface": "followers",
+      "captured_at": "2026-07-18T17:56:25Z",
+      "sha256": "3ae597c16b0cb93a7813d67c5cef34bd6a05c028f7477ffc5f5187b632965c4a",
+      "source": "read-only ADB capture after Liam positioned JTM in the viewport",
+      "visual_corroboration": null
+    },
+    {
+      "file": "followers-jtm.xml",
+      "surface": "followers",
+      "captured_at": "2026-07-18T17:57:22Z",
+      "sha256": "712558ad495d2334efa9e6802087e94fbe810557284e17fe346b4605de16a6e7",
+      "source": "read-only UiAutomator hierarchy after Liam positioned JTM in the viewport",
+      "visual_corroboration": null
+    },
+    {
+      "file": "profile-jtm.png",
+      "surface": "profile",
+      "captured_at": "2026-07-18T17:59:44Z",
+      "sha256": "2a4c4bb42bc4bd517b6c6f4d8b111f65fb8e2c738591bf4dc85c9de7d75de5db",
+      "source": "read-only ADB capture after Liam opened the JTM profile",
+      "visual_corroboration": "codex-clipboard-004cf863-d073-4c41-87f3-8da70257e4bd.png"
+    },
+    {
+      "file": "profile-jtm.xml",
+      "surface": "profile",
+      "captured_at": "2026-07-18T17:59:45Z",
+      "sha256": "08c35f44d3e2527acbd8914f95dd7e66c9906f21fc57d2462a91b1fe2336c1b8",
+      "source": "read-only UiAutomator hierarchy after Liam opened the JTM profile",
+      "visual_corroboration": "codex-clipboard-004cf863-d073-4c41-87f3-8da70257e4bd.png"
+    },
+    {
+      "file": "thread-jtm-business-chat.png",
+      "surface": "dm_thread",
+      "captured_at": "2026-07-18T15:34:09Z",
+      "sha256": "2f81e34ea133c1a067b543868849644bc3599926df4bcf62df22144e4fe28890",
+      "source": "source run failure artifact captured before cleanup",
+      "visual_corroboration": "codex-clipboard-e56c4a05-8f24-4de1-b03a-f54fbecda0af.png"
+    },
+    {
+      "file": "thread-jtm-business-chat.xml.gz",
+      "surface": "dm_thread",
+      "captured_at": "2026-07-18T15:34:09Z",
+      "sha256": "5929e9bafd74ac4bb5e329dca0bc516d90708cc3dbe1f8054a0728c1605313e8",
+      "uncompressed_sha256": "26843430b79d9b5e1692732be9b352fab6a0a89c348d7e92ef84d262062d5acd",
+      "source": "source run failure artifact captured before cleanup",
+      "visual_corroboration": "codex-clipboard-e56c4a05-8f24-4de1-b03a-f54fbecda0af.png"
+    }
+  ],
+  "attached_capture_inventory": [
+    {
+      "file": "codex-clipboard-a374ca12-2773-4da3-9a02-06a6b5bcbe9f.png",
+      "sha256": "e9f13b6a0fee8681db4a92a9be2b13dcfe31f6ae815b9eea1224d0a6bddeed0c",
+      "classification": "Tracker Followers at 19:41; JTM is not visible in this viewport"
+    },
+    {
+      "file": "codex-clipboard-dcf7e899-753f-4f61-bb1c-e7c8f81277c8.png",
+      "sha256": "0d306478c86f605431b65da2f8727b591482e104cc9cfeda6e8d20b0ec4561d8",
+      "classification": "pepito_bravo_ profile at 19:42; off-target"
+    },
+    {
+      "file": "codex-clipboard-8abc6036-16ed-448a-83b6-5c706763f840.png",
+      "sha256": "9e3b60185c5dd776153d19b252fc38d7b98452e7cf2b0887341291f3d5ba5148",
+      "classification": "pepito_bravo_ DM thread at 19:42; off-target"
+    },
+    {
+      "file": "codex-clipboard-004cf863-d073-4c41-87f3-8da70257e4bd.png",
+      "sha256": "6ac21fec80568a3205d50cdcc103644e3c54686a9e0dc5ae25b9b6f7afdd2150",
+      "classification": "exact jtm.signature profile at 19:45"
+    },
+    {
+      "file": "codex-clipboard-e56c4a05-8f24-4de1-b03a-f54fbecda0af.png",
+      "sha256": "506697a832592fb7414cf22d2faafc902b0fde6c0b897719b25904d34562f8c7",
+      "classification": "exact jtm.signature DM thread at 19:45 with Business chat subtitle"
+    }
+  ]
+}
