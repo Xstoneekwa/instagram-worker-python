@@ -170,6 +170,68 @@ class DmSendButtonSelectionTest(unittest.TestCase):
         self.assertEqual(out.get("post_send_signal_reason"), "outbound_bubble_not_verified")
         self.assertEqual(out.get("post_send_secondary_signal_reason"), "composer_text_shortened")
 
+    def test_forensic_snapshot_uses_canonical_generic_subtitle_identity(self) -> None:
+        device = MagicMock()
+        composer = MagicMock()
+        composer.get_text.return_value = "Welcome JTM"
+        tap = MagicMock()
+        artifact_xml = """
+        <hierarchy>
+          <node resource-id="com.instagram.android:id/header_title"
+                text="jtm.signature" />
+          <node resource-id="com.instagram.android:id/header_subtitle"
+                text="Business chat" />
+          <node resource-id="com.instagram.android:id/direct_text_message"
+                text="Welcome JTM" />
+        </hierarchy>
+        """
+        with (
+            patch.object(config, "ENABLE_REAL_DM_SEND", True),
+            patch.object(nav, "_dm_find_focus_composer", return_value=composer),
+            patch.object(nav, "read_dm_composer_text", return_value="Welcome JTM"),
+            patch.object(
+                nav,
+                "wait_for_dm_send_button_after_draft",
+                return_value=(tap, "ok", {"send_button_candidate_count": 1}),
+            ),
+            patch.object(
+                nav,
+                "_dm_thread_message_signature",
+                return_value={
+                    "message_marker_count": 0,
+                    "outbound_expected_text_present": False,
+                },
+            ),
+            patch.object(
+                nav,
+                "_dm_verify_outbound_message_after_send",
+                return_value=(
+                    False,
+                    "outbound_bubble_not_verified",
+                    {"message_marker_count": 0, "expected_text_present": False},
+                ),
+            ),
+            patch.object(nav, "_dm_post_send_signal_poll", return_value=(False, "timeout")),
+            patch.object(
+                nav,
+                "_dm_capture_send_debug_artifact",
+                return_value={"xml_path": "/tmp/jtm-forensic.xml"},
+            ),
+            patch.object(nav.Path, "read_text", return_value=artifact_xml),
+        ):
+            out = nav.send_dm_safe(
+                device,
+                "jtm.signature",
+                "Welcome JTM",
+                "empty_new_thread",
+            )
+
+        self.assertTrue(out.get("sent"))
+        self.assertEqual(
+            out.get("post_send_signal_reason"),
+            "outbound_bubble_forensic_snapshot",
+        )
+
     def test_send_dm_safe_accepts_new_outbound_bubble_after_tap(self) -> None:
         device = MagicMock()
         composer = MagicMock()
@@ -434,6 +496,39 @@ class DmSendButtonSelectionTest(unittest.TestCase):
 
         self.assertFalse(ok)
         self.assertEqual(reason, "outbound_bubble_wrong_thread")
+
+    def test_outbound_send_verification_accepts_exact_title_with_business_chat_subtitle(self) -> None:
+        device = MagicMock()
+        pre = {
+            "hierarchy_hash": "before",
+            "message_marker_count": 0,
+            "expected_text_present": False,
+            "outbound_expected_text_present": False,
+        }
+        device.dump_hierarchy.return_value = """
+        <hierarchy>
+          <node resource-id="com.instagram.android:id/direct_thread_header">
+            <node resource-id="com.instagram.android:id/header_title" text="jtm.signature" />
+            <node resource-id="com.instagram.android:id/header_subtitle" text="Business chat" />
+          </node>
+          <node resource-id="com.instagram.android:id/direct_text_message_text_view"
+                text="Salut" />
+        </hierarchy>
+        """
+        with (
+            patch.object(nav.config, "DM_OUTBOUND_SEND_VERIFY_MAX_S", 0.01, create=True),
+            patch.object(nav.config, "DM_OUTBOUND_SEND_VERIFY_POLL_S", 0, create=True),
+            patch.object(nav, "read_dm_composer_text", return_value=""),
+        ):
+            ok, reason, _sig = nav._dm_verify_outbound_message_after_send(
+                device,
+                "Salut",
+                pre_signature=pre,
+                expected_username="jtm.signature",
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(reason, "outbound_bubble_after_tap")
 
     def test_outbound_send_verification_rejects_retry_icon_without_text(self) -> None:
         device = MagicMock()

@@ -90,6 +90,38 @@ class WelcomeSendForensicsGuardsTest(unittest.TestCase):
         self.assertEqual(reason, "thread_recipient_identity_mismatch")
         self.assertEqual(observed, "different_recipient")
 
+    def test_exact_title_with_proven_generic_business_chat_subtitle_is_accepted(self) -> None:
+        device = _HierarchyDevice(
+            '<hierarchy><node resource-id="com.instagram.android:id/header_title" '
+            'text="jtm.signature" />'
+            '<node resource-id="com.instagram.android:id/header_subtitle" '
+            'content-desc="Business chat" /></hierarchy>'
+        )
+
+        ok, reason, observed = nav.verify_welcome_dm_thread_recipient_exact(
+            device, "jtm.signature"
+        )
+
+        self.assertTrue(ok)
+        self.assertEqual(reason, "exact_thread_header_generic_subtitle")
+        self.assertEqual(observed, "jtm.signature")
+
+    def test_display_name_with_proven_generic_business_chat_subtitle_is_rejected(self) -> None:
+        device = _HierarchyDevice(
+            '<hierarchy><node resource-id="com.instagram.android:id/header_title" '
+            'text="JTM Signature" />'
+            '<node resource-id="com.instagram.android:id/header_subtitle" '
+            'content-desc="Business chat" /></hierarchy>'
+        )
+
+        ok, reason, observed = nav.verify_welcome_dm_thread_recipient_exact(
+            device, "jtm.signature"
+        )
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "thread_recipient_identity_mismatch")
+        self.assertEqual(observed, "JTM Signature")
+
     def test_wrong_thread_recipient_is_rejected(self) -> None:
         device = _HierarchyDevice(
             '<hierarchy><node resource-id="com.instagram.android:id/header_title" '

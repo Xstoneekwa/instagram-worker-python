@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 import dm_sender_engine
 import instagram_navigation as nav
+import account_session_orchestrator
 import welcome_list_sender as sender
 
 
@@ -94,6 +95,9 @@ class _PhysicalSelector:
     def exists(self, **_kwargs: object) -> bool:
         return bool(self.all())
 
+    def wait(self, **_kwargs: object) -> bool:
+        return self.exists()
+
     @property
     def info(self) -> dict[str, object]:
         nodes = self.all()
@@ -148,9 +152,14 @@ class _PhysicalReplayDevice:
         self.clicks.append((x, y))
         if self.stage == "followers":
             self.stage = "profile"
+        elif self.stage == "profile":
+            self.stage = "thread"
 
     def advance_from_selector(self, filters: dict[str, object]) -> None:
-        if self.stage == "profile" and filters.get("description") == "Message":
+        if self.stage == "profile" and any(
+            "Message" in str(filters.get(key) or "")
+            for key in ("text", "textContains", "description", "descriptionContains")
+        ):
             self.stage = "thread"
             return
         raise RuntimeError(f"unsupported_simulated_navigation:{self.stage}:{filters}")
@@ -168,91 +177,65 @@ class WelcomeJtmPhysicalReplayTest(unittest.TestCase):
             ).decode(),
         }
 
-    def test_physical_chain_reproduces_baseline_identity_mismatch(self) -> None:
+    def test_physical_fixture_documents_baseline_identity_mismatch(self) -> None:
+        title = nav._welcome_dm_thread_header_from_hierarchy(self.surfaces["thread"])
+        subtitle = nav._welcome_dm_thread_subtitle_from_hierarchy(
+            self.surfaces["thread"]
+        )
+
+        baseline_ok = bool(
+            nav._normalize_handle(subtitle)
+            == nav._normalize_handle(USERNAME)
+        )
+
+        self.assertEqual(title, USERNAME)
+        self.assertEqual(subtitle, "Business chat")
+        self.assertFalse(baseline_ok)
+
+    def test_physical_chain_accepts_proven_generic_subtitle_after_patch(self) -> None:
         device = _PhysicalReplayDevice(self.surfaces)
         machine = sender._WelcomeStateMachine(account_id=ACCOUNT_ID, run_id=RUN_ID)
+        message_body = "jtm.signature physical replay message"
+        outbound_xml = self.surfaces["thread"].replace(
+            "</hierarchy>",
+            '<node resource-id="com.instagram.androie:id/direct_text_message_text_view" '
+            f'text="{message_body}" /></hierarchy>',
+        )
+        device.surfaces["outbound"] = outbound_xml
 
         with tempfile.TemporaryDirectory() as temp_dir, patch.object(
             nav, "_XML_DIR", Path(temp_dir)
         ), patch.object(nav.config, "INSTAGRAM_PACKAGE", PACKAGE), patch.object(
             sender.config, "INSTAGRAM_PACKAGE", PACKAGE
         ):
-            followers_det, _ = nav.detect_followers_list_screen_fresh(
-                device,
-                source_profile_username="i_m_your_traker",
-                hierarchy_xml=self.surfaces["followers"],
+            thread_state, navigation_ok, navigation_meta = (
+                sender._navigate_followers_row_to_dm(
+                    device,
+                    USERNAME,
+                    pkg=PACKAGE,
+                    account_username="i_m_your_traker",
+                    scan_anchors={},
+                    planned_job_context={
+                        "job_id": JOB_ID,
+                        "run_id": RUN_ID,
+                        "scan_generation": RUN_ID,
+                        "navigation_generation": f"{RUN_ID}:physical-replay",
+                    },
+                    state_machine=machine,
+                )
             )
-            self.assertTrue(followers_det["is_followers_list"])
-
-            row, scrolls, lookup_path, _ = sender._resolve_followers_row(
-                device,
-                USERNAME,
-                account_username="i_m_your_traker",
-                scan_anchors={},
-                job_id=JOB_ID,
-                scan_generation=RUN_ID,
-                navigation_generation=f"{RUN_ID}:physical-replay",
+            self.assertTrue(navigation_ok)
+            self.assertNotIn(
+                thread_state,
+                {
+                    "unknown",
+                    "foreground_package_mismatch",
+                    "profile_username_mismatch",
+                    "thread_recipient_identity_mismatch",
+                },
             )
-            self.assertIsNotNone(row)
-            self.assertEqual(scrolls, 0)
-            self.assertEqual(lookup_path, "fresh_visible")
-            self.assertEqual(row["username"], USERNAME)
-            self.assertEqual(row["row_cta_xml_class"], "follow_back")
-
-            allowed, reason, _, observed = sender._authorize_welcome_row_tap(
-                row,
-                expected_username=USERNAME,
-                job_id=JOB_ID,
-                scan_generation=RUN_ID,
-                navigation_generation=f"{RUN_ID}:physical-replay",
-            )
-            self.assertTrue(allowed, reason)
-            self.assertEqual(observed, USERNAME)
-            machine.transition(
-                "followers_stable",
-                proof="physical_followers_detector",
-                owner="physical_replay",
-                job_id=JOB_ID,
-                username=USERNAME,
-            )
-            machine.transition(
-                "planned_row_freshly_resolved",
-                proof="production_fresh_row_resolver",
-                owner="physical_replay",
-                job_id=JOB_ID,
-                username=USERNAME,
-            )
-
-            tapped, _, _ = nav.tap_followers_list_username_row(
-                device, row, username=USERNAME
-            )
-            self.assertTrue(tapped)
-            self.assertEqual(device.stage, "profile")
-
-            profile_ok, profile_reason, profile_observed = (
-                nav.verify_welcome_profile_username_exact(device, USERNAME, PACKAGE)
-            )
-            self.assertTrue(profile_ok, profile_reason)
-            self.assertEqual(profile_observed, USERNAME)
-            machine.transition(
-                "target_profile_exact",
-                proof=profile_reason,
-                owner="physical_replay",
-                job_id=JOB_ID,
-                username=USERNAME,
-            )
-
-            message_cta = device(description="Message")
-            self.assertTrue(message_cta.exists())
-            message_cta.click()
+            self.assertEqual(navigation_meta["lookup_path_used"], "fresh_visible")
             self.assertEqual(device.stage, "thread")
-
-            identity_ok, identity_reason, identity_observed = (
-                nav.verify_welcome_dm_thread_recipient_exact(device, USERNAME, PACKAGE)
-            )
-            self.assertFalse(identity_ok)
-            self.assertEqual(identity_reason, "thread_recipient_identity_mismatch")
-            self.assertEqual(identity_observed, "Business chat")
 
             evidence, evidence_reason, evidence_observed = (
                 dm_sender_engine._fresh_welcome_composer_evidence(
@@ -265,25 +248,115 @@ class WelcomeJtmPhysicalReplayTest(unittest.TestCase):
                     navigation_generation=f"{RUN_ID}:physical-replay:thread",
                 )
             )
-            self.assertIsNone(evidence)
-            self.assertEqual(evidence_reason, "thread_recipient_identity_mismatch")
-            self.assertEqual(evidence_observed, "Business chat")
-            machine.fail(
-                sender._welcome_structured_failure_reason(identity_reason),
+            self.assertIsNotNone(evidence)
+            self.assertEqual(evidence_reason, "ok")
+            self.assertEqual(evidence_observed, USERNAME)
+            machine.transition(
+                "composer_exact",
+                proof="production_fresh_composer_evidence",
                 owner="physical_replay",
                 job_id=JOB_ID,
                 username=USERNAME,
             )
 
-        self.assertEqual(machine.current, "target_profile_exact")
+            machine.transition(
+                "draft_exact",
+                proof="simulated_exact_draft_readback",
+                owner="physical_replay_simulation",
+                job_id=JOB_ID,
+                username=USERNAME,
+            )
+            pre_signature = nav._dm_thread_message_signature(
+                device,
+                message_body,
+                hierarchy_xml=self.surfaces["thread"],
+            )
+            machine.transition(
+                "send_tapped",
+                proof="simulated_exact_send_selector_tap",
+                owner="physical_replay_simulation",
+                job_id=JOB_ID,
+                username=USERNAME,
+            )
+            device.stage = "outbound"
+            with patch.object(
+                nav.config, "DM_OUTBOUND_SEND_VERIFY_MAX_S", 0.05, create=True
+            ), patch.object(
+                nav.config, "DM_OUTBOUND_SEND_VERIFY_POLL_S", 0, create=True
+            ):
+                outbound_ok, outbound_reason, _ = (
+                    nav._dm_verify_outbound_message_after_send(
+                        device,
+                        message_body,
+                        pre_signature=pre_signature,
+                        expected_username=USERNAME,
+                    )
+                )
+            self.assertTrue(outbound_ok)
+            self.assertEqual(outbound_reason, "outbound_bubble_after_tap")
+            machine.transition(
+                "outbound_verified",
+                proof=outbound_reason,
+                owner="physical_replay_production_probe",
+                job_id=JOB_ID,
+                username=USERNAME,
+            )
+
+            device.stage = "followers"
+            restored = sender._restore_followers_after_job(
+                device,
+                USERNAME,
+                pkg=PACKAGE,
+                account_username="i_m_your_traker",
+                job_id=JOB_ID,
+                state_machine=machine,
+            )
+            self.assertTrue(restored)
+            machine.transition(
+                "next_job_ready",
+                proof="structured_plan_exhausted",
+                owner="physical_replay_sender_loop",
+                job_id=JOB_ID,
+                username=USERNAME,
+            )
+            run_follow, handoff_reason = (
+                account_session_orchestrator._should_run_follow_after_welcome(
+                    welcome_enabled=True,
+                    real_send_enabled=True,
+                    welcome_phase_executed=True,
+                    welcome_exit_code=0,
+                    scan_summary={"status": "success"},
+                    sender_summary={
+                        "sender_status": "success",
+                        "jobs_failed_count": 0,
+                    },
+                    welcome_session_status="success",
+                )
+            )
+            self.assertTrue(run_follow)
+            self.assertEqual(handoff_reason, "welcome_closed_success")
+
+        self.assertEqual(machine.current, "next_job_ready")
         self.assertEqual(
             [entry["state"] for entry in machine.history],
-            ["followers_stable", "planned_row_freshly_resolved", "target_profile_exact"],
+            [
+                "followers_stable",
+                "planned_row_freshly_resolved",
+                "target_profile_exact",
+                "dm_thread_exact",
+                "composer_exact",
+                "draft_exact",
+                "send_tapped",
+                "outbound_verified",
+                "thread_exit",
+                "followers_restored",
+                "next_job_ready",
+            ],
         )
         self.assertEqual(device.focus_count, 0)
         self.assertEqual(device.draft_count, 0)
         self.assertEqual(device.send_count, 0)
-        print("REPLAY_PHYSICAL_FAILURE_REPRODUCED")
+        print("REPLAY_PHYSICAL_FAILURE_FIXED")
 
     def test_fixture_hashes_match_immutable_manifest(self) -> None:
         for artifact in self.manifest["artifacts"]:
@@ -299,36 +372,30 @@ class WelcomeJtmPhysicalReplayTest(unittest.TestCase):
                     artifact["file"],
                 )
 
-    def test_current_title_subtitle_matrix(self) -> None:
+    def test_title_subtitle_matrix(self) -> None:
         cases = [
-            ("exact/exact", USERNAME, USERNAME, True, "synthetic"),
-            ("display/exact", "JTM Signature", USERNAME, True, "synthetic"),
-            ("exact/business", USERNAME, "Business chat", False, "physical"),
-            ("exact/other", USERNAME, "other.real.user", False, "synthetic"),
-            ("exact/no-subtitle", USERNAME, "", True, "synthetic"),
-            ("display/generic", "JTM Signature", "Business chat", False, "synthetic"),
-            ("empty/empty", "", "", False, "synthetic"),
+            ("exact/exact", USERNAME, USERNAME, "accept", "subtitle_exact", "exact_username"),
+            ("display/exact", "JTM Signature", USERNAME, "accept", "subtitle_exact", "exact_username"),
+            ("exact/business", USERNAME, "Business chat", "accept", "title_exact_with_generic_subtitle", "generic_ui_label"),
+            ("exact/other", USERNAME, "other.real.user", "block", "none", "contradictory_username"),
+            ("exact/no-subtitle", USERNAME, "", "accept", "title_exact_legacy_no_subtitle", "absent"),
+            ("display/generic", "JTM Signature", "Business chat", "block", "none", "generic_ui_label"),
+            ("exact/unknown", USERNAME, "Creator account", "block", "none", "unknown"),
+            ("generic/exact", "Business chat", USERNAME, "accept", "subtitle_exact", "exact_username"),
+            ("empty/empty", "", "", "block", "none", "absent"),
+            ("normalized", "unused", "  @JTM.Signature  ", "accept", "subtitle_exact", "exact_username"),
         ]
 
-        for label, title, subtitle, expected_ok, evidence_type in cases:
-            with self.subTest(label=label, evidence_type=evidence_type):
-                if evidence_type == "physical":
-                    xml = self.surfaces["thread"]
-                else:
-                    subtitle_node = (
-                        f'<node resource-id="{PACKAGE}:id/header_subtitle" '
-                        f'content-desc="{subtitle}" />'
-                        if subtitle
-                        else ""
-                    )
-                    xml = (
-                        f'<hierarchy><node resource-id="{PACKAGE}:id/header_title" '
-                        f'content-desc="{title}" />{subtitle_node}</hierarchy>'
-                    )
-                ok, _, _ = nav._welcome_dm_thread_recipient_identity_from_hierarchy(
-                    xml, USERNAME
+        for label, title, subtitle, decision, source, subtitle_kind in cases:
+            with self.subTest(label=label):
+                evaluation = nav._evaluate_welcome_thread_identity(
+                    expected_username=USERNAME,
+                    header_title=title,
+                    header_subtitle=subtitle,
                 )
-                self.assertEqual(ok, expected_ok)
+                self.assertEqual(evaluation["decision"], decision)
+                self.assertEqual(evaluation["identity_source"], source)
+                self.assertEqual(evaluation["subtitle_kind"], subtitle_kind)
 
 
 if __name__ == "__main__":

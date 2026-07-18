@@ -6397,6 +6397,7 @@ def _dm_verify_outbound_message_after_send(
     attempt = 0
     last_sig: dict[str, Any] = {}
     observed_header = ""
+    last_identity_evaluation: dict[str, Any] = {}
     log(
         "info",
         "dm_outbound_send_verification_started",
@@ -6408,11 +6409,16 @@ def _dm_verify_outbound_message_after_send(
         attempt += 1
         hier = _dm_dump_thread_hierarchy(d)
         last_sig = _dm_thread_message_signature(d, expected_text, hierarchy_xml=hier)
-        observed_header = _welcome_dm_thread_header_from_hierarchy(hier)
-        header_match = bool(
-            expected_username
-            and _normalize_handle(observed_header) == _normalize_handle(expected_username)
+        observed_title = _welcome_dm_thread_header_from_hierarchy(hier)
+        observed_subtitle = _welcome_dm_thread_subtitle_from_hierarchy(hier)
+        identity_evaluation = _evaluate_welcome_thread_identity(
+            expected_username=expected_username,
+            header_title=observed_title,
+            header_subtitle=observed_subtitle,
         )
+        last_identity_evaluation = identity_evaluation
+        observed_header = str(identity_evaluation.get("observed") or "")
+        header_match = identity_evaluation.get("decision") == "accept"
         advanced = _dm_outbound_signature_advanced(pre_signature, last_sig)
         marker_delta = int(last_sig.get("message_marker_count") or 0) - int(
             pre_signature.get("message_marker_count") or 0
@@ -6433,6 +6439,9 @@ def _dm_verify_outbound_message_after_send(
             evidence_mode=last_sig.get("outbound_expected_text_match_mode") or None,
             composer_empty=int(last_sig.get("composer_text_len") or 0) == 0,
             pending_outbound=pending_outbound,
+            identity_source=identity_evaluation.get("identity_source"),
+            subtitle_kind=identity_evaluation.get("subtitle_kind"),
+            identity_reason=identity_evaluation.get("reason"),
         )
         if identity_ok and advanced and (exact_or_normalized_text or pending_outbound):
             reason = (
@@ -6464,11 +6473,7 @@ def _dm_verify_outbound_message_after_send(
             return True, reason, last_sig
         time.sleep(poll_s)
     reason = "thread_signature_unchanged"
-    if (
-        expected_username
-        and observed_header
-        and _normalize_handle(observed_header) != _normalize_handle(expected_username)
-    ):
+    if expected_username and last_identity_evaluation.get("decision") == "block":
         reason = "outbound_bubble_wrong_thread"
     elif bool(last_sig.get("expected_text_present")) and not _dm_outbound_signature_advanced(
         pre_signature, last_sig
@@ -6837,6 +6842,25 @@ def return_welcome_list_from_dm_to_followers(
         "back_to_profile_ok": False,
         "followers_surface_ok": False,
     }
+
+    if is_dm_thread_screen(d, pkg):
+        identity_ok, identity_reason, observed_username = (
+            verify_welcome_dm_thread_recipient_exact(d, username, pkg)
+        )
+        out["thread_identity_ok_before_return"] = bool(identity_ok)
+        out["thread_identity_reason_before_return"] = identity_reason
+        out["observed_thread_username_before_return"] = observed_username or None
+        if not identity_ok:
+            log(
+                "error",
+                "welcome_return_from_thread_blocked",
+                job_id=job_id or None,
+                reason=identity_reason,
+                expected_username=username,
+                observed_thread_username=observed_username or None,
+                last_surface="dm_thread_identity_unverified",
+            )
+            return out
 
     log(
         "info",
@@ -7754,21 +7778,93 @@ def _welcome_dm_thread_subtitle_from_hierarchy(hierarchy_xml: str) -> str:
     return ""
 
 
+_WELCOME_THREAD_GENERIC_UI_SUBTITLES = frozenset({"business chat"})
+_INSTAGRAM_USERNAME_SUBTITLE_RE = re.compile(r"@?[A-Za-z0-9._]{1,30}")
+
+
+def _evaluate_welcome_thread_identity(
+    *,
+    expected_username: str,
+    header_title: str,
+    header_subtitle: str,
+) -> dict[str, Any]:
+    """Classify one-to-one Welcome thread identity without permissive fallbacks."""
+    expected = _normalize_handle(expected_username)
+    title = str(header_title or "").strip()
+    subtitle = str(header_subtitle or "").strip()
+    title_exact = bool(expected and _normalize_handle(title) == expected)
+    subtitle_exact = bool(expected and _normalize_handle(subtitle) == expected)
+    normalized_subtitle_label = " ".join(subtitle.casefold().split())
+
+    decision = "block"
+    identity_source = "none"
+    subtitle_kind = "unknown"
+    reason = "thread_recipient_identity_mismatch"
+    observed = subtitle or title
+
+    if subtitle_exact:
+        decision = "accept"
+        identity_source = "subtitle_exact"
+        subtitle_kind = "exact_username"
+        reason = "exact_thread_header_subtitle"
+        observed = subtitle
+    elif not subtitle:
+        subtitle_kind = "absent"
+        observed = title
+        if title_exact:
+            decision = "accept"
+            identity_source = "title_exact_legacy_no_subtitle"
+            reason = "exact_thread_header"
+    elif normalized_subtitle_label in _WELCOME_THREAD_GENERIC_UI_SUBTITLES:
+        subtitle_kind = "generic_ui_label"
+        observed = title
+        if title_exact:
+            decision = "accept"
+            identity_source = "title_exact_with_generic_subtitle"
+            reason = "exact_thread_header_generic_subtitle"
+    elif _INSTAGRAM_USERNAME_SUBTITLE_RE.fullmatch(subtitle):
+        subtitle_kind = "contradictory_username"
+
+    result = {
+        "decision": decision,
+        "identity_source": identity_source,
+        "subtitle_kind": subtitle_kind,
+        "reason": reason,
+        "observed": observed,
+        "title_exact": title_exact,
+        "subtitle_exact": subtitle_exact,
+    }
+    log(
+        "info" if decision == "accept" else "error",
+        "welcome_thread_identity_evaluated",
+        expected_username=expected or None,
+        decision=decision,
+        identity_source=identity_source,
+        subtitle_kind=subtitle_kind,
+        reason=reason,
+        title_exact=title_exact,
+        subtitle_exact=subtitle_exact,
+    )
+    return result
+
+
 def _welcome_dm_thread_recipient_identity_from_hierarchy(
     hierarchy_xml: str,
     expected_username: str,
 ) -> tuple[bool, str, str]:
-    """Match the exact thread username, preferring Instagram's header subtitle."""
+    """Match thread identity through the canonical title/subtitle classifier."""
     observed_title = _welcome_dm_thread_header_from_hierarchy(hierarchy_xml)
     observed_subtitle = _welcome_dm_thread_subtitle_from_hierarchy(hierarchy_xml)
-    expected = _normalize_handle(expected_username)
-    if observed_subtitle:
-        if _normalize_handle(observed_subtitle) != expected:
-            return False, "thread_recipient_identity_mismatch", observed_subtitle
-        return True, "exact_thread_header_subtitle", observed_subtitle
-    if _normalize_handle(observed_title) != expected:
-        return False, "thread_recipient_identity_mismatch", observed_title
-    return True, "exact_thread_header", observed_title
+    evaluation = _evaluate_welcome_thread_identity(
+        expected_username=expected_username,
+        header_title=observed_title,
+        header_subtitle=observed_subtitle,
+    )
+    return (
+        evaluation["decision"] == "accept",
+        str(evaluation["reason"]),
+        str(evaluation["observed"]),
+    )
 
 
 def _welcome_profile_header_from_hierarchy(
@@ -50143,14 +50239,21 @@ def send_dm_safe(
                 artifact_xml = Path(artifact_xml_path).read_text(encoding="utf-8")
             except Exception:
                 artifact_xml = ""
-        artifact_header = _welcome_dm_thread_header_from_hierarchy(artifact_xml)
+        artifact_title = _welcome_dm_thread_header_from_hierarchy(artifact_xml)
+        artifact_subtitle = _welcome_dm_thread_subtitle_from_hierarchy(artifact_xml)
+        artifact_identity = _evaluate_welcome_thread_identity(
+            expected_username=username,
+            header_title=artifact_title,
+            header_subtitle=artifact_subtitle,
+        )
+        artifact_header = str(artifact_identity.get("observed") or "")
         artifact_has_outbound = _dm_hierarchy_has_outbound_expected_message(
             artifact_xml, msg
         )
         if (
             artifact_has_outbound
             and not bool(pre_send_signature.get("outbound_expected_text_present"))
-            and _normalize_handle(artifact_header) == _normalize_handle(username)
+            and artifact_identity.get("decision") == "accept"
         ):
             out["sent"] = True
             out["reason"] = None
@@ -50161,6 +50264,8 @@ def send_dm_safe(
                 "dm_send_button_tap_confirmed_from_forensic_snapshot",
                 target_username=username,
                 observed_thread_username=artifact_header,
+                identity_source=artifact_identity.get("identity_source"),
+                subtitle_kind=artifact_identity.get("subtitle_kind"),
                 reason="outbound_bubble_forensic_snapshot",
                 xml_path=artifact_xml_path,
             )
