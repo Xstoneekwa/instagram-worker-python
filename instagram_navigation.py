@@ -6227,6 +6227,67 @@ def _normalize_dm_message_text(value: str | None) -> str:
     return " ".join(normalized.split()).strip().casefold()
 
 
+def _dm_message_semantic_text_without_symbols(value: str | None) -> str:
+    """Textual DM content when UIAutomator redacts emoji/symbol glyphs."""
+    raw = html.unescape(str(value or ""))
+    normalized = unicodedata.normalize("NFKC", raw)
+    chars: list[str] = []
+    for char in normalized:
+        category = unicodedata.category(char)
+        if category.startswith("S") or ord(char) in (0xFE0E, 0xFE0F):
+            continue
+        if category.startswith("P"):
+            chars.append(" ")
+            continue
+        chars.append(char)
+    return " ".join("".join(chars).split()).strip().casefold()
+
+
+def _dm_outbound_expected_message_match_mode(
+    hierarchy_xml: str,
+    expected_text: str,
+) -> str:
+    """Return the strong outbound bubble match mode, or an empty string."""
+    expected = _normalize_dm_message_text(expected_text)
+    if not expected:
+        return ""
+    expected_semantic = _dm_message_semantic_text_without_symbols(expected_text)
+    expected_contains_symbols = any(
+        unicodedata.category(char).startswith("S")
+        for char in unicodedata.normalize("NFKC", str(expected_text or ""))
+    )
+    try:
+        root = ET.fromstring(str(hierarchy_xml or ""))
+    except Exception:
+        return ""
+    compact_expected = re.sub(r"\s+", "", expected)
+    for node in root.iter():
+        rid = str(node.attrib.get("resource-id") or "").lower()
+        if "composer" in rid:
+            continue
+        if not any(
+            marker in rid
+            for marker in (
+                "direct_text_message",
+                "message_content",
+                "row_thread_message",
+            )
+        ):
+            continue
+        raw_value = node.attrib.get("text") or node.attrib.get("content-desc") or ""
+        value = _normalize_dm_message_text(raw_value)
+        if expected in value:
+            return "exact_or_normalized"
+        compact_value = re.sub(r"\s+", "", value)
+        if compact_expected and compact_expected in compact_value:
+            return "exact_or_normalized"
+        if expected_contains_symbols and len(expected_semantic) >= 12:
+            value_semantic = _dm_message_semantic_text_without_symbols(raw_value)
+            if expected_semantic == value_semantic:
+                return "symbol_redacted_xml"
+    return ""
+
+
 def _dm_expected_text_present(hierarchy_xml: str, expected_text: str) -> bool:
     expected = _normalize_dm_message_text(expected_text)
     if not expected:
@@ -6244,36 +6305,7 @@ def _dm_hierarchy_has_outbound_expected_message(
     expected_text: str,
 ) -> bool:
     """Expected text must live in a message node, never only in the composer."""
-    expected = _normalize_dm_message_text(expected_text)
-    if not expected:
-        return False
-    try:
-        root = ET.fromstring(str(hierarchy_xml or ""))
-    except Exception:
-        return False
-    compact_expected = re.sub(r"\s+", "", expected)
-    for node in root.iter():
-        rid = str(node.attrib.get("resource-id") or "").lower()
-        if "composer" in rid:
-            continue
-        if not any(
-            marker in rid
-            for marker in (
-                "direct_text_message",
-                "message_content",
-                "row_thread_message",
-            )
-        ):
-            continue
-        value = _normalize_dm_message_text(
-            node.attrib.get("text") or node.attrib.get("content-desc") or ""
-        )
-        if expected in value:
-            return True
-        compact_value = re.sub(r"\s+", "", value)
-        if compact_expected and compact_expected in compact_value:
-            return True
-    return False
+    return bool(_dm_outbound_expected_message_match_mode(hierarchy_xml, expected_text))
 
 
 def _dm_pending_outbound_signal_present(hierarchy_xml: str) -> bool:
@@ -6301,15 +6333,15 @@ def _dm_thread_message_signature(
     hier = str(hierarchy_xml if hierarchy_xml is not None else _dm_dump_thread_hierarchy(d))
     blob = hier.lower()
     expected_text_present = _dm_expected_text_present(hier, text)
+    outbound_match_mode = _dm_outbound_expected_message_match_mode(hier, text)
     return {
         "hierarchy_hash": hashlib.sha256(hier.encode("utf-8", errors="ignore")).hexdigest()
         if hier
         else "",
         "hierarchy_len": len(hier),
         "expected_text_present": expected_text_present,
-        "outbound_expected_text_present": _dm_hierarchy_has_outbound_expected_message(
-            hier, text
-        ),
+        "outbound_expected_text_present": bool(outbound_match_mode),
+        "outbound_expected_text_match_mode": outbound_match_mode,
         "message_marker_count": sum(blob.count(marker) for marker in _DM_MESSAGE_MARKERS),
         "composer_text_len": _dm_read_composer_text_len(d),
         "pending_outbound_signal_present": _dm_pending_outbound_signal_present(hier),
@@ -6351,6 +6383,7 @@ def _dm_verify_outbound_message_after_send(
     expected_text: str,
     *,
     pre_signature: dict[str, Any],
+    expected_username: str = "",
 ) -> tuple[bool, str, dict[str, Any]]:
     """
     A send is verified only by a new outgoing message bubble after tap.
@@ -6360,7 +6393,10 @@ def _dm_verify_outbound_message_after_send(
     max_s = float(getattr(config, "DM_OUTBOUND_SEND_VERIFY_MAX_S", 4.0))
     poll_s = float(getattr(config, "DM_OUTBOUND_SEND_VERIFY_POLL_S", 0.2))
     deadline = time.monotonic() + max_s
+    started_at = time.monotonic()
+    attempt = 0
     last_sig: dict[str, Any] = {}
+    observed_header = ""
     log(
         "info",
         "dm_outbound_send_verification_started",
@@ -6369,8 +6405,14 @@ def _dm_verify_outbound_message_after_send(
         pre_hierarchy_len=int(pre_signature.get("hierarchy_len") or 0),
     )
     while time.monotonic() < deadline:
+        attempt += 1
         hier = _dm_dump_thread_hierarchy(d)
         last_sig = _dm_thread_message_signature(d, expected_text, hierarchy_xml=hier)
+        observed_header = _welcome_dm_thread_header_from_hierarchy(hier)
+        header_match = bool(
+            expected_username
+            and _normalize_handle(observed_header) == _normalize_handle(expected_username)
+        )
         advanced = _dm_outbound_signature_advanced(pre_signature, last_sig)
         marker_delta = int(last_sig.get("message_marker_count") or 0) - int(
             pre_signature.get("message_marker_count") or 0
@@ -6379,7 +6421,20 @@ def _dm_verify_outbound_message_after_send(
             last_sig.get("outbound_expected_text_present")
         )
         pending_outbound = bool(last_sig.get("pending_outbound_signal_present")) and marker_delta > 0
-        if advanced and (exact_or_normalized_text or pending_outbound):
+        identity_ok = not expected_username or header_match
+        elapsed_ms = round((time.monotonic() - started_at) * 1000.0, 2)
+        log(
+            "info",
+            "welcome_outbound_probe",
+            attempt=attempt,
+            elapsed_ms=elapsed_ms,
+            bubble_found=exact_or_normalized_text,
+            header_match=header_match,
+            evidence_mode=last_sig.get("outbound_expected_text_match_mode") or None,
+            composer_empty=int(last_sig.get("composer_text_len") or 0) == 0,
+            pending_outbound=pending_outbound,
+        )
+        if identity_ok and advanced and (exact_or_normalized_text or pending_outbound):
             reason = (
                 "outbound_bubble_after_tap"
                 if exact_or_normalized_text
@@ -6395,11 +6450,27 @@ def _dm_verify_outbound_message_after_send(
                     last_sig.get("pending_outbound_signal_present")
                 ),
                 post_hierarchy_len=int(last_sig.get("hierarchy_len") or 0),
+                evidence_mode=last_sig.get("outbound_expected_text_match_mode") or reason,
+                elapsed_ms=elapsed_ms,
+                header_match=header_match,
+            )
+            log(
+                "info",
+                "welcome_outbound_verified",
+                elapsed_ms=elapsed_ms,
+                evidence_type=last_sig.get("outbound_expected_text_match_mode") or reason,
+                message_hash_match=bool(exact_or_normalized_text),
             )
             return True, reason, last_sig
         time.sleep(poll_s)
     reason = "thread_signature_unchanged"
-    if bool(last_sig.get("expected_text_present")) and not _dm_outbound_signature_advanced(
+    if (
+        expected_username
+        and observed_header
+        and _normalize_handle(observed_header) != _normalize_handle(expected_username)
+    ):
+        reason = "outbound_bubble_wrong_thread"
+    elif bool(last_sig.get("expected_text_present")) and not _dm_outbound_signature_advanced(
         pre_signature, last_sig
     ):
         reason = "outbound_bubble_not_new"
@@ -6415,6 +6486,13 @@ def _dm_verify_outbound_message_after_send(
             last_sig.get("pending_outbound_signal_present")
         ),
         post_hierarchy_len=int(last_sig.get("hierarchy_len") or 0),
+    )
+    log(
+        "warning",
+        "welcome_post_send_timeout",
+        phase="outbound_bubble_verification",
+        elapsed_ms=round((time.monotonic() - started_at) * 1000.0, 2),
+        probe_count=attempt,
     )
     return False, reason, last_sig
 
@@ -6744,6 +6822,7 @@ def return_welcome_list_from_dm_to_followers(
     source_profile_username: str = "",
     pre_send_composer_text_len: int = 0,
     send_already_confirmed: bool = False,
+    job_id: str = "",
 ) -> dict[str, Any]:
     """
   Welcome list-native post-send / post-skip: DM → action-bar back → profile → action-bar back → followers.
@@ -6758,6 +6837,17 @@ def return_welcome_list_from_dm_to_followers(
         "back_to_profile_ok": False,
         "followers_surface_ok": False,
     }
+
+    log(
+        "info",
+        "welcome_return_from_thread_started",
+        source_surface="dm_thread",
+        job_id=job_id or None,
+        expected_username=username,
+    )
+    out["before_thread_exit_artifacts"] = _dm_capture_send_debug_artifact(
+        d, "dm_send_before_thread_exit"
+    )
 
     if send_already_confirmed:
         sig_ok, sig_reason = True, "already_confirmed_before_return"
@@ -6824,6 +6914,14 @@ def return_welcome_list_from_dm_to_followers(
             source_profile_username=src or None,
             reason=profile_identity_reason,
             observed_profile_username=observed_profile_username or None,
+        )
+        log(
+            "error",
+            "welcome_return_from_thread_blocked",
+            job_id=job_id or None,
+            reason=profile_identity_reason,
+            elapsed_ms=round((time.perf_counter() - t0) * 1000.0, 2),
+            last_surface="dm_thread_or_unverified_profile",
         )
         return out
 
@@ -6984,6 +7082,15 @@ def return_welcome_list_from_dm_to_followers(
             via="profile_to_followers_poll",
             extra_back_tapped=extra_back_tapped,
         )
+    else:
+        log(
+            "error",
+            "welcome_return_from_thread_blocked",
+            job_id=job_id or None,
+            reason="followers_surface_not_restored",
+            elapsed_ms=round((time.perf_counter() - t0) * 1000.0, 2),
+            last_surface=det.get("surface") or det.get("action_bar_title") or "unknown",
+        )
     return out
 
 
@@ -7090,6 +7197,9 @@ def is_dm_thread_screen(d, pkg=None) -> bool:
     try:
         if not verify_app_foreground(d, pkg or config.INSTAGRAM_PACKAGE):
             return False
+        hierarchy_xml = _dm_dump_thread_hierarchy(d)
+        if _dm_hierarchy_is_thread_surface(hierarchy_xml):
+            return True
         w, h = d.window_size()
         for ed in d(className="android.widget.EditText").all():
             b = (ed.info or {}).get("bounds") or {}
@@ -7098,6 +7208,29 @@ def is_dm_thread_screen(d, pkg=None) -> bool:
     except Exception:
         pass
     return False
+
+
+def _dm_hierarchy_is_thread_surface(hierarchy_xml: str) -> bool:
+    """Strong DM-thread surface proof independent of transient EditText lookup."""
+    try:
+        root = ET.fromstring(str(hierarchy_xml or ""))
+    except Exception:
+        return False
+    resource_ids = {
+        str(node.attrib.get("resource-id") or "").lower() for node in root.iter()
+    }
+    has_header = any(rid.endswith("/direct_thread_header") for rid in resource_ids)
+    has_thread_body = any(
+        rid.endswith(suffix)
+        for rid in resource_ids
+        for suffix in (
+            "/message_list",
+            "/message_thread_container",
+            "/row_thread_composer_container",
+            "/row_thread_composer_edittext",
+        )
+    )
+    return bool(has_header and has_thread_body)
 
 
 def reset_to_search_for_next_target(d: u2.Device, pkg: str | None = None) -> bool:
@@ -7644,9 +7777,12 @@ def verify_welcome_profile_username_exact(
     current_pkg = str(current.get("current_package") or "")
     if current_pkg != expected_pkg:
         return False, "foreground_package_mismatch", ""
-    observed = _welcome_profile_header_from_hierarchy(
-        _dm_dump_thread_hierarchy(d), expected_username
-    )
+    hierarchy_xml = _dm_dump_thread_hierarchy(d)
+    if _dm_hierarchy_is_thread_surface(hierarchy_xml):
+        return False, "dm_thread_surface", _welcome_dm_thread_header_from_hierarchy(
+            hierarchy_xml
+        )
+    observed = _welcome_profile_header_from_hierarchy(hierarchy_xml, expected_username)
     if _normalize_handle(observed) != _normalize_handle(expected_username):
         return False, "profile_username_mismatch", observed
     return True, "exact_profile_username", observed
@@ -49770,6 +49906,7 @@ def send_dm_safe(
     dm_state: str,
     *,
     target_row: Any = None,
+    job_id: str = "",
 ) -> dict[str, Any]:
     global _LAST_DM_SEND_RESULT
     _ = target_row
@@ -49903,6 +50040,15 @@ def send_dm_safe(
         out["post_tap_artifacts"] = _dm_capture_send_debug_artifact(
             d, "dm_send_immediate_after_tap"
         )
+        log(
+            "info",
+            "welcome_send_tap_completed",
+            job_id=job_id or None,
+            expected_username=username,
+            thread_state=dm_state,
+            draft_hash=hashlib.sha256(msg.encode("utf-8")).hexdigest()[:16],
+            thread_identity_match=True,
+        )
     except Exception as e:
         out["failure_event"] = "dm_sent_failed"
         out["reason"] = "send_button_tap_failed"
@@ -49910,14 +50056,23 @@ def send_dm_safe(
         _LAST_DM_SEND_RESULT = dict(out)
         return out
 
-    sig_ok, sig_reason = _dm_post_send_signal_poll(d, pre_send_text_len=pre_send_len)
-    out["post_send_secondary_signal_ok"] = bool(sig_ok)
-    out["post_send_secondary_signal_reason"] = sig_reason
     verified, verify_reason, post_send_signature = _dm_verify_outbound_message_after_send(
         d,
         msg,
         pre_signature=pre_send_signature,
+        expected_username=username,
     )
+    if verified:
+        out["outbound_verified_artifacts"] = _dm_capture_send_debug_artifact(
+            d, "dm_send_outbound_verified"
+        )
+        sig_ok, sig_reason = True, "skipped_strong_outbound_verified"
+    else:
+        sig_ok, sig_reason = _dm_post_send_signal_poll(
+            d, pre_send_text_len=pre_send_len
+        )
+    out["post_send_secondary_signal_ok"] = bool(sig_ok)
+    out["post_send_secondary_signal_reason"] = sig_reason
     out["post_send_thread_marker_count"] = int(
         post_send_signature.get("message_marker_count") or 0
     )

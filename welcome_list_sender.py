@@ -1360,6 +1360,7 @@ def _restore_followers_after_job(
     *,
     pkg: str,
     account_username: str,
+    job_id: str = "",
 ) -> bool:
     """Ensure we end on followers list (from DM, profile, or already on list)."""
     src = str(account_username or "").strip()
@@ -1412,6 +1413,15 @@ def _restore_followers_after_job(
             username,
             pkg,
             source_profile_username=src,
+            job_id=job_id,
+        )
+        log(
+            "info" if bool(fin.get("followers_surface_ok")) else "warning",
+            "welcome_return_from_thread_completed",
+            username=username,
+            source_profile_username=src or None,
+            followers_surface_ok=bool(fin.get("followers_surface_ok")),
+            profile_identity_reason=fin.get("profile_identity_reason"),
         )
         if bool(fin.get("followers_surface_ok")) and _confirm_followers("thread_return"):
             log(
@@ -1422,6 +1432,14 @@ def _restore_followers_after_job(
                 method="thread_to_profile_to_followers",
             )
             return True
+        log(
+            "error",
+            "welcome_post_job_return_failed",
+            username=username,
+            source_profile_username=src or None,
+            failure_reason="canonical_thread_return_failed",
+        )
+        return False
 
     recipient_profile_ok, _, _ = verify_welcome_profile_username_exact(
         d, username, pkg
@@ -1686,6 +1704,7 @@ def execute_welcome_list_job(
                     pkg=pkg,
                     post_send_nav="welcome_list",
                     source_profile_username=account_username,
+                    job_id=job_id,
                 )
                 dm_send_ms = (time.perf_counter() - t_send) * 1000.0
                 strong_send_proof = _welcome_send_has_strong_outbound_proof(
@@ -1745,7 +1764,11 @@ def execute_welcome_list_job(
                 reason="followers_surface_restored_by_send_finalize",
             )
         elif not _restore_followers_after_job(
-            d, recipient, pkg=pkg, account_username=account_username
+            d,
+            recipient,
+            pkg=pkg,
+            account_username=account_username,
+            job_id=job_id,
         ):
             _capture_welcome_failure_before_cleanup(
                 d,

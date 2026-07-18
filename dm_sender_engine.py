@@ -3697,6 +3697,7 @@ def _perform_real_welcome_dm_send(
             draft_text,
             thread_state,
             target_row=None,
+            job_id=job_id,
         )
     finally:
         config.ENABLE_REAL_DM_SEND = prev_enable
@@ -3730,6 +3731,7 @@ def _perform_real_welcome_dm_send(
                     send_out.get("composer_text_len_before_send") or 0
                 ),
                 send_already_confirmed=True,
+                job_id=job_id,
             )
             send_out["post_finalize"] = fin
             if not bool(fin.get("followers_surface_ok")):

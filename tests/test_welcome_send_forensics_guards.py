@@ -8,9 +8,9 @@ import welcome_list_sender as sender
 
 
 class _HierarchyDevice:
-    def __init__(self, xml: str, package: str = "com.instagram.android") -> None:
+    def __init__(self, xml: str, package: str | None = None) -> None:
         self.xml = xml
-        self.package = package
+        self.package = package or str(nav.config.INSTAGRAM_PACKAGE)
 
     def app_current(self) -> dict[str, str]:
         return {"package": self.package, "activity": "com.instagram.mainactivity.MainActivity"}
@@ -20,6 +20,30 @@ class _HierarchyDevice:
 
 
 class WelcomeSendForensicsGuardsTest(unittest.TestCase):
+    def test_thread_surface_is_detected_without_edittext_selector(self) -> None:
+        device = _HierarchyDevice(
+            '<hierarchy><node resource-id="com.instagram.android:id/direct_thread_header">'
+            '<node resource-id="com.instagram.android:id/header_title" text="jonova_recrutement" />'
+            '</node><node resource-id="com.instagram.android:id/message_list" /></hierarchy>'
+        )
+
+        self.assertTrue(nav.is_dm_thread_screen(device))
+
+    def test_thread_header_is_never_accepted_as_profile_identity(self) -> None:
+        device = _HierarchyDevice(
+            '<hierarchy><node resource-id="com.instagram.android:id/direct_thread_header">'
+            '<node resource-id="com.instagram.android:id/header_title" text="jonova_recrutement" />'
+            '</node><node resource-id="com.instagram.android:id/message_list" /></hierarchy>'
+        )
+
+        ok, reason, observed = nav.verify_welcome_profile_username_exact(
+            device, "jonova_recrutement"
+        )
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, "dm_thread_surface")
+        self.assertEqual(observed, "jonova_recrutement")
+
     def test_exact_thread_recipient_is_accepted(self) -> None:
         device = _HierarchyDevice(
             '<hierarchy><node resource-id="com.instagram.android:id/header_title" '
@@ -150,6 +174,42 @@ class WelcomeSendForensicsGuardsTest(unittest.TestCase):
         self.assertTrue(ok)
         back_mock.assert_not_called()
         profile_mock.assert_not_called()
+
+    def test_thread_return_has_one_canonical_owner_and_no_fallback_navigation(self) -> None:
+        device = MagicMock()
+        det_lost = {"is_followers_list": False, "action_bar_title": "jonova_recrutement"}
+        det_ok = {"is_followers_list": True, "action_bar_title": "Followers"}
+        with (
+            patch.object(sender, "is_dm_thread_screen", return_value=True),
+            patch.object(
+                sender,
+                "detect_followers_list_screen_fresh",
+                side_effect=[(det_lost, ""), (det_ok, "")],
+            ),
+            patch.object(
+                sender,
+                "return_welcome_list_from_dm_to_followers",
+                return_value={
+                    "followers_surface_ok": True,
+                    "profile_identity_reason": "exact_profile_username",
+                },
+            ) as canonical_return,
+            patch.object(sender, "verify_welcome_profile_username_exact") as profile_probe,
+            patch("own_profile_navigation.open_own_profile_from_bottom_nav") as own_profile,
+            patch("own_profile_navigation.open_own_followers_list_from_own_profile") as reopen,
+        ):
+            ok = sender._restore_followers_after_job(
+                device,
+                "jonova_recrutement",
+                pkg="com.instagram.android",
+                account_username="i_m_your_traker",
+            )
+
+        self.assertTrue(ok)
+        canonical_return.assert_called_once()
+        profile_probe.assert_not_called()
+        own_profile.assert_not_called()
+        reopen.assert_not_called()
 
     def test_send_unverified_completion_is_terminal_without_retry(self) -> None:
         job = {"id": "job-1", "recipient_username": "tresorsbyninel"}
