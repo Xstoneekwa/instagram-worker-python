@@ -40,6 +40,13 @@ import config
 import runtime_events
 import runtime_heartbeat
 import supabase_client
+import follow_persistence_intent
+from follow_persistence_rpc import (
+    action_id_hash,
+    deterministic_action_id,
+    rpc_v1_enabled as follow_persistence_rpc_v1_enabled,
+    validate_rpc_response,
+)
 from runtime_caps import resolve_follow_runtime_limits
 from assignment_dispatch_resolver import (
     resolve_account_assignment_runtime_context,
@@ -3133,6 +3140,10 @@ def _persist_verified_follow_success_to_supabase(
     target_id: str | None,
     phase: str,
     defer_source_follow_success: bool = False,
+    request_id: str | None = None,
+    action_id: str | None = None,
+    settings_revision_expected: str | None = None,
+    followed_at: str | None = None,
 ) -> bool:
     """Persist follow outcome after post-follow so mute/like are not blocked on DB I/O."""
     if not (supabase_mode and account_id):
@@ -3150,6 +3161,191 @@ def _persist_verified_follow_success_to_supabase(
         )
         return True
     t_persist = time.perf_counter()
+    rpc_enabled = follow_persistence_rpc_v1_enabled()
+    rpc_fallback_used = False
+    if rpc_enabled and bool(follow_out.get("skipped_tap")):
+        if action_id and run_id:
+            try:
+                follow_persistence_intent.update_intent_stage(
+                    run_id=str(run_id),
+                    action_id=str(action_id),
+                    stage="abandoned_before_verified_follow",
+                )
+            except Exception as exc:
+                log(
+                    "error",
+                    "follow_persistence_intent_terminal_update_failed",
+                    action_id_hash=action_id_hash(str(action_id)),
+                    reason=str(exc)[:200],
+                    safe_to_continue_ui=False,
+                )
+                return False
+        log(
+            "info",
+            "follow_persistence_critical_path_completed",
+            mode="rpc_v1",
+            total_elapsed_ms=round((time.perf_counter() - t_persist) * 1000.0, 2),
+            reason="already_following_no_new_business_action",
+        )
+        return True
+    if rpc_enabled:
+        required = {
+            "request_id": request_id,
+            "action_id": action_id,
+            "settings_revision_expected": settings_revision_expected,
+            "followed_at": followed_at,
+            "run_id": run_id,
+        }
+        missing = sorted(key for key, value in required.items() if not str(value or "").strip())
+        if missing or str(fs_af or "").lower() != "following":
+            log(
+                "error",
+                "follow_persistence_rpc_contract_missing",
+                missing_fields=missing,
+                follow_state_after=str(fs_af or ""),
+                action_id_hash=action_id_hash(str(action_id or "")),
+                safe_to_continue_ui=False,
+            )
+            return False
+        rpc_t0 = time.perf_counter()
+        log(
+            "info",
+            "follow_persistence_rpc_started",
+            account_id=account_id,
+            run_id=run_id,
+            target_username=follower_un,
+            action_id_hash=action_id_hash(str(action_id)),
+            settings_revision=str(settings_revision_expected),
+        )
+        rpc_value: dict[str, Any] | None = None
+        rpc_error: supabase_client.SupabaseRestError | None = None
+        try:
+            rpc_value = supabase_client.persist_verified_follow_success_rpc(
+                action_id=str(action_id),
+                account_id=account_id,
+                run_id=str(run_id),
+                request_id=str(request_id),
+                candidate_username=follower_un,
+                source_target_id=target_id,
+                source_ct_username=source_profile_username,
+                followed_at=str(followed_at),
+                follow_state_after=fs_af,
+                settings_revision_expected=str(settings_revision_expected),
+                verification_method="worker_exact_following_state",
+                metadata_safe={"source": "runner_point3", "phase": str(phase)},
+            )
+        except supabase_client.SupabaseRestError as exc:
+            rpc_error = exc
+
+        if rpc_error is not None and rpc_error.reason in {
+            "supabase_rest_timeout",
+            "supabase_network_timeout",
+            "supabase_dns_failed",
+            "supabase_tls_failed",
+        }:
+            try:
+                event = supabase_client.get_follow_persistence_event(str(action_id))
+            except Exception:
+                event = None
+            payload = event.get("payload") if isinstance(event, dict) else None
+            if isinstance(event, dict) and event.get("event_status") == "success" and isinstance(payload, dict):
+                rpc_value = {
+                    "ok": True,
+                    "status": "idempotent_replay",
+                    "action_id": str(action_id),
+                    "interaction_id": payload.get("interaction_id"),
+                    "follow_persisted": payload.get("follow_persisted"),
+                    "eligible_unfollow_at": payload.get("eligible_unfollow_at"),
+                    "audit_persisted": payload.get("audit_persisted"),
+                    "counter_applied": payload.get("counter_applied"),
+                    "settings_revision_match": payload.get("settings_revision_match"),
+                    "invariants_confirmed": payload.get("invariants_confirmed"),
+                    "failure_reason": None,
+                }
+            else:
+                log(
+                    "error",
+                    "follow_persistence_rpc_ambiguous",
+                    reason=rpc_error.reason,
+                    action_id_hash=action_id_hash(str(action_id)),
+                    safe_to_continue_ui=False,
+                )
+                return False
+
+        if rpc_error is not None and rpc_value is None and rpc_error.reason in {
+            "supabase_rpc_not_available",
+            "supabase_schema_payload_incompatible",
+        }:
+            try:
+                associated_event = supabase_client.get_follow_persistence_event(str(action_id))
+            except Exception:
+                associated_event = None
+            if associated_event is None:
+                log(
+                    "warning",
+                    "follow_persistence_rpc_fallback",
+                    reason=rpc_error.reason,
+                    action_id_hash=action_id_hash(str(action_id)),
+                    elapsed_ms_before_fallback=round((time.perf_counter() - rpc_t0) * 1000.0, 2),
+                )
+                rpc_enabled = False
+                rpc_fallback_used = True
+            else:
+                return False
+        elif rpc_error is not None and rpc_value is None:
+            log(
+                "error",
+                "follow_persistence_rpc_failed",
+                reason=rpc_error.reason,
+                action_id_hash=action_id_hash(str(action_id)),
+                safe_to_continue_ui=False,
+            )
+            return False
+
+        if rpc_enabled:
+            valid, validation_reason = validate_rpc_response(
+                rpc_value, expected_action_id=str(action_id)
+            )
+            elapsed_ms = round((time.perf_counter() - rpc_t0) * 1000.0, 2)
+            if not valid:
+                log(
+                    "error",
+                    "follow_persistence_rpc_partial_response",
+                    reason=validation_reason,
+                    action_id_hash=action_id_hash(str(action_id)),
+                    elapsed_ms=elapsed_ms,
+                    safe_to_continue_ui=False,
+                )
+                return False
+            try:
+                follow_persistence_intent.update_intent_stage(
+                    run_id=str(run_id), action_id=str(action_id), stage="persisted"
+                )
+            except Exception as exc:
+                log(
+                    "error",
+                    "follow_persistence_intent_terminal_update_failed",
+                    action_id_hash=action_id_hash(str(action_id)),
+                    reason=str(exc)[:200],
+                    safe_to_continue_ui=False,
+                )
+                return False
+            log(
+                "info",
+                "follow_persistence_rpc_completed",
+                elapsed_ms=elapsed_ms,
+                status=rpc_value.get("status"),
+                idempotent_replay=rpc_value.get("status") == "idempotent_replay",
+                interaction_id=rpc_value.get("interaction_id"),
+                invariants_confirmed=rpc_value.get("invariants_confirmed"),
+            )
+            log(
+                "info",
+                "follow_persistence_critical_path_completed",
+                mode="rpc_v1",
+                total_elapsed_ms=round((time.perf_counter() - t_persist) * 1000.0, 2),
+            )
+            return True
     persist_base = {
         "step": "_persist_verified_follow_success_to_supabase",
         "fn_name": "record_follow_interaction_outcome",
@@ -3254,6 +3450,26 @@ def _persist_verified_follow_success_to_supabase(
         ok=ok_all,
         error_code="" if ok_all else "critical_follow_persist_failed",
     )
+    log(
+        "info" if ok_all else "error",
+        "follow_persistence_critical_path_completed",
+        mode="legacy",
+        total_elapsed_ms=round((time.perf_counter() - t_persist) * 1000.0, 2),
+    )
+    if ok_all and rpc_fallback_used and action_id and run_id:
+        try:
+            follow_persistence_intent.update_intent_stage(
+                run_id=str(run_id), action_id=str(action_id), stage="persisted"
+            )
+        except Exception as exc:
+            log(
+                "error",
+                "follow_persistence_intent_terminal_update_failed",
+                action_id_hash=action_id_hash(str(action_id)),
+                reason=str(exc)[:200],
+                safe_to_continue_ui=False,
+            )
+            return False
     return ok_all
 
 
@@ -9634,6 +9850,7 @@ def _run_followers_list_engine_session(
     target_follow_budget: int | None = None,
     start_from_current_followers_list: bool = False,
     prevalidated_followers_list_meta: dict[str, Any] | None = None,
+    run_request_id: str | None = None,
 ) -> int:
     """
     Source profile → source followers list → follower profile → FOLLOW SAFE V1 → return to list.
@@ -9712,6 +9929,7 @@ def _run_followers_list_engine_session(
     )
 
     session_commercial_policy_revision: str | None = None
+    session_follow_persistence_settings_revision: str | None = None
     if account_id:
         try:
             from account_commercial_policy import load_account_commercial_policy_revision
@@ -9724,6 +9942,16 @@ def _run_followers_list_engine_session(
             ).strip() or None
         except Exception:
             session_commercial_policy_revision = None
+    if account_id and follow_persistence_rpc_v1_enabled():
+        try:
+            session_follow_persistence_settings_revision = str(
+                (supabase_client.get_account_unfollow_settings(account_id) or {}).get(
+                    "updated_at"
+                )
+                or ""
+            ).strip() or None
+        except Exception:
+            session_follow_persistence_settings_revision = None
 
     def _eng_log(action_type: str, status: str, message: str, payload: dict) -> None:
         if not (supabase_mode and run_id and account_id):
@@ -16257,6 +16485,36 @@ def _run_followers_list_engine_session(
                     is_private=bool(_pre_follow_private_detected),
                     reason="perform_follow_safe",
                 )
+                _follow_persistence_ctx: dict[str, Any] | None = None
+                if follow_persistence_rpc_v1_enabled():
+                    try:
+                        _settings_revision = str(
+                            session_follow_persistence_settings_revision or ""
+                        ).strip()
+                        if not _settings_revision or not str(run_request_id or "").strip():
+                            raise RuntimeError("follow_persistence_pre_tap_context_missing")
+                        _action_id = deterministic_action_id(account_id, run_id, follower_un)
+                        _follow_persistence_ctx = follow_persistence_intent.create_prepared_intent(
+                            action_id=_action_id,
+                            account_id=account_id,
+                            run_id=run_id,
+                            request_id=str(run_request_id),
+                            candidate_username=follower_un,
+                            source_target_id=target_id,
+                            source_ct_username=source_profile_username,
+                            settings_revision=_settings_revision,
+                        )
+                    except Exception as exc:
+                        log(
+                            "error",
+                            "follow_persistence_intent_prepare_failed",
+                            account_id=account_id,
+                            run_id=run_id,
+                            candidate_username=follower_un,
+                            reason=str(exc)[:200],
+                            safe_to_tap=False,
+                        )
+                        return 1
                 follow_out = perform_follow_safe(
                     d,
                     follower_un,
@@ -16281,6 +16539,37 @@ def _run_followers_list_engine_session(
                     ev_name in ("follow_tap_sent", "follow_action_exact_follow_tap_sent")
                     for ev_name, _ev_payload in _follow_action_events_for_prefollow
                 )
+                if _follow_persistence_ctx is not None:
+                    _intent_follow_state = str(follow_out.get("follow_state_after") or "").lower()
+                    try:
+                        if _tap_sent_seen and _intent_follow_state == "following":
+                            _intent_followed_at = datetime.now(timezone.utc).isoformat()
+                            _follow_persistence_ctx = follow_persistence_intent.update_intent_stage(
+                                run_id=run_id,
+                                action_id=str(_follow_persistence_ctx["action_id"]),
+                                stage="follow_physically_verified",
+                                followed_at=_intent_followed_at,
+                            )
+                        else:
+                            _follow_persistence_ctx = follow_persistence_intent.update_intent_stage(
+                                run_id=run_id,
+                                action_id=str(_follow_persistence_ctx["action_id"]),
+                                stage="abandoned_before_verified_follow",
+                            )
+                    except Exception as exc:
+                        log(
+                            "error",
+                            "follow_persistence_intent_verified_update_failed",
+                            account_id=account_id,
+                            run_id=run_id,
+                            candidate_username=follower_un,
+                            action_id_hash=action_id_hash(
+                                str(_follow_persistence_ctx.get("action_id") or "")
+                            ),
+                            reason=str(exc)[:200],
+                            safe_to_continue_ui=False,
+                        )
+                        return 1
                 _button_detect_reason = str(
                     (_surface_event or {}).get("reason")
                     or follow_out.get("visual_follow_failure_reason")
@@ -17192,6 +17481,12 @@ def _run_followers_list_engine_session(
                         target_id=target_id,
                         phase="after_post_follow",
                         defer_source_follow_success=True,
+                        request_id=str(run_request_id or "") or None,
+                        action_id=str((_follow_persistence_ctx or {}).get("action_id") or "") or None,
+                        settings_revision_expected=str(
+                            (_follow_persistence_ctx or {}).get("settings_revision") or ""
+                        ) or None,
+                        followed_at=str((_follow_persistence_ctx or {}).get("followed_at") or "") or None,
                     )
                     _log_target_budget_check("after_follow_verified")
                     if _target_budget_reached():
@@ -19894,6 +20189,7 @@ def main() -> int:
             supabase_mode=supabase_mode,
             warm_session_used=warm_session_used,
             force_stop_used=force_stop_used,
+            run_request_id=run_request_id,
         )
         if supabase_mode and run_id:
             if eng_code == 97:
