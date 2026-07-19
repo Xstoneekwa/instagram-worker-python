@@ -75,7 +75,9 @@ def validate_rpc_response(
         return False, "response_failure_reason_present"
     raw_eligible = str(value.get("eligible_unfollow_at") or "").strip()
     try:
-        datetime.fromisoformat(raw_eligible.replace("Z", "+00:00"))
+        eligible_at = datetime.fromisoformat(raw_eligible.replace("Z", "+00:00"))
+        if eligible_at.tzinfo is None:
+            raise ValueError("timezone_required")
     except Exception:
         return False, "response_eligible_unfollow_at_invalid"
     invariants = {str(item) for item in (value.get("invariants_confirmed") or [])}

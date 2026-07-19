@@ -3473,6 +3473,128 @@ def _persist_verified_follow_success_to_supabase(
     return ok_all
 
 
+def _recover_verified_follow_persistence_intents(
+    d,
+    *,
+    account_id: str,
+    run_id: str,
+    supabase_mode: bool,
+) -> bool:
+    if not (supabase_mode and follow_persistence_rpc_v1_enabled()):
+        return True
+    try:
+        intents = follow_persistence_intent.load_nonterminal_intents(
+            account_id=account_id, run_id=run_id
+        )
+    except Exception as exc:
+        log(
+            "error",
+            "follow_persistence_intent_recovery_failed",
+            prior_stage="load",
+            reason=str(exc)[:200],
+            safe_to_continue_ui=False,
+        )
+        return False
+    for intent in intents:
+        action_id = str(intent.get("action_id") or "")
+        prior_stage = str(intent.get("stage") or "")
+        username = str(intent.get("candidate_username") or "")
+        if prior_stage == "prepared_before_follow_tap":
+            try:
+                follow_persistence_intent.update_intent_stage(
+                    run_id=run_id,
+                    action_id=action_id,
+                    stage="abandoned_before_verified_follow",
+                )
+            except Exception as exc:
+                log(
+                    "error",
+                    "follow_persistence_intent_recovery_failed",
+                    action_id_hash=action_id_hash(action_id),
+                    prior_stage=prior_stage,
+                    reason=str(exc)[:200],
+                    safe_to_continue_ui=False,
+                )
+                return False
+            log(
+                "info",
+                "follow_persistence_intent_recovered",
+                action_id_hash=action_id_hash(action_id),
+                prior_stage=prior_stage,
+                fresh_follow_state="not_checked_no_verified_tap",
+                decision="abandoned_without_persistence",
+            )
+            continue
+        if prior_stage != "follow_physically_verified":
+            log(
+                "error",
+                "follow_persistence_intent_recovery_failed",
+                action_id_hash=action_id_hash(action_id),
+                prior_stage=prior_stage,
+                reason="unsupported_nonterminal_stage",
+                safe_to_continue_ui=False,
+            )
+            return False
+
+        fresh_profile = bool(username and verify_profile(d, username))
+        try:
+            fresh_follow_state = (
+                str(_follow_ui_state_snapshot(d) or "unknown").lower()
+                if fresh_profile
+                else "profile_not_verified"
+            )
+        except Exception:
+            fresh_follow_state = "unknown"
+        if not fresh_profile or fresh_follow_state != "following":
+            try:
+                follow_persistence_intent.update_intent_stage(
+                    run_id=run_id,
+                    action_id=action_id,
+                    stage="review_required",
+                )
+            except Exception:
+                pass
+            log(
+                "error",
+                "follow_persistence_intent_recovered",
+                action_id_hash=action_id_hash(action_id),
+                prior_stage=prior_stage,
+                fresh_follow_state=fresh_follow_state,
+                decision="safe_stop_review_required",
+                safe_to_continue_ui=False,
+            )
+            return False
+
+        persisted = _persist_verified_follow_success_to_supabase(
+            supabase_mode=True,
+            account_id=account_id,
+            follower_un=username,
+            source_profile_username=str(intent.get("source_ct_username") or ""),
+            run_id=run_id,
+            follow_out={"skipped_tap": False},
+            fs_af="following",
+            f_st="following",
+            target_id=str(intent.get("source_target_id") or "") or None,
+            phase="recovery_before_ui_resume",
+            defer_source_follow_success=False,
+            request_id=str(intent.get("request_id") or "") or None,
+            action_id=action_id,
+            settings_revision_expected=str(intent.get("settings_revision") or "") or None,
+            followed_at=str(intent.get("followed_at") or "") or None,
+        )
+        log(
+            "info" if persisted else "error",
+            "follow_persistence_intent_recovered",
+            action_id_hash=action_id_hash(action_id),
+            prior_stage=prior_stage,
+            fresh_follow_state=fresh_follow_state,
+            decision="rpc_persisted" if persisted else "safe_stop_persistence_failed",
+        )
+        if not persisted:
+            return False
+    return True
+
+
 def _cleanup_session_apps(d) -> None:
     if d is None or not bool(getattr(config, "CLOSE_APPS_AFTER_RUN", True)):
         return
@@ -9919,6 +10041,18 @@ def _run_followers_list_engine_session(
         follow_processed_count=0,
         follows_completed_count=0,
     )
+    if not _recover_verified_follow_persistence_intents(
+        d,
+        account_id=account_id,
+        run_id=run_id,
+        supabase_mode=supabase_mode,
+    ):
+        _publish_followers_session_summary(
+            follow_session_outcome="failed",
+            follow_stop_reason="follow_persistence_intent_recovery_failed",
+            exit_code=1,
+        )
+        return 1
     log(
         "info",
         "visual_followers_ct_source_loaded",

@@ -127,7 +127,15 @@ class FollowTargetsRuntimeP1aTest(unittest.TestCase):
 
     def test_record_follow_interaction_outcome_includes_target_id_payload(self) -> None:
         target_id = "11111111-2222-4333-8444-555555555555"
-        with patch.object(supabase_client, "merge_interacted_user_row", return_value={"ok": True}) as merge:
+        with patch.object(
+            supabase_client, "merge_interacted_user_row", return_value={"ok": True}
+        ) as merge, patch(
+            "unfollow_settings.load_unfollow_settings"
+        ) as load_settings, patch(
+            "unfollow_settings.compute_eligible_unfollow_at_iso",
+            return_value="2026-01-04T00:00:00+00:00",
+        ):
+            load_settings.return_value.after_days = 3
             supabase_client.record_follow_interaction_outcome(
                 "acct",
                 "candidate",
@@ -149,6 +157,39 @@ class FollowTargetsRuntimeP1aTest(unittest.TestCase):
         self.assertEqual(patch_body["evidence_source"], "worker_follow_outcome")
         self.assertEqual(patch_body["evidence_confidence"], "high")
         self.assertIn("via CT @source", patch_body["evidence_summary"])
+        self.assertNotIn("followed", patch_body)
+        self.assertNotIn("unfollowed", patch_body)
+
+    def test_verified_follow_preserves_canonical_unfollow_eligibility(self) -> None:
+        with patch.object(
+            supabase_client, "merge_interacted_user_row", return_value={"ok": True}
+        ) as merge, patch.object(
+            supabase_client, "record_interaction_event", return_value={"ok": True}
+        ), patch(
+            "unfollow_settings.load_unfollow_settings"
+        ) as load_settings, patch(
+            "unfollow_settings.compute_eligible_unfollow_at_iso",
+            return_value="2026-01-04T00:00:00+00:00",
+        ):
+            load_settings.return_value.after_days = 3
+            supabase_client.record_follow_interaction_outcome(
+                "acct",
+                "candidate",
+                "source",
+                run_id="run-id",
+                session_id="session-id",
+                follow_ok=True,
+                skipped_tap=False,
+                follow_state_after="following",
+                follow_status="following",
+            )
+
+        patch_body = merge.call_args.args[3]
+        self.assertEqual(
+            patch_body["eligible_unfollow_at"], "2026-01-04T00:00:00+00:00"
+        )
+        self.assertNotIn("followed", patch_body)
+        self.assertNotIn("unfollowed", patch_body)
 
 
 if __name__ == "__main__":

@@ -84,12 +84,12 @@ def load_nonterminal_intents(*, account_id: str, run_id: str) -> list[dict[str, 
     for path in sorted(run_dir.glob("*.json")):
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            continue
+        except Exception as exc:
+            raise RuntimeError(f"follow_persistence_intent_unreadable:{path.name}") from exc
         if str(payload.get("account_id") or "") != str(account_id):
-            continue
+            raise RuntimeError(f"follow_persistence_intent_account_mismatch:{path.name}")
         if str(payload.get("run_id") or "") != str(run_id):
-            continue
+            raise RuntimeError(f"follow_persistence_intent_run_mismatch:{path.name}")
         if str(payload.get("stage") or "") not in TERMINAL_STAGES:
             out.append(payload)
     return out

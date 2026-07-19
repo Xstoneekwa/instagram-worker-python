@@ -49,13 +49,11 @@ class RunnerPersistPostFollowTest(unittest.TestCase):
         self.assertEqual(summary["welcome_scan_jobs_enqueued_count"], 4)
 
     def test_persist_after_post_follow_does_not_use_eng_log(self) -> None:
-        with mock.patch.object(runner, "_safe_supabase_call") as supa, mock.patch.object(
-            runner, "log"
-        ) as log_fn:
-            supa.side_effect = [
-                {"ok": True},
-                None,
-            ]
+        with mock.patch.object(
+            runner, "follow_persistence_rpc_v1_enabled", return_value=False
+        ), mock.patch.object(
+            runner, "_timed_safe_supabase_call", return_value={"ok": True}
+        ) as supa, mock.patch.object(runner, "log") as log_fn:
             runner._persist_verified_follow_success_to_supabase(
                 supabase_mode=True,
                 account_id="acct-1",
@@ -70,7 +68,7 @@ class RunnerPersistPostFollowTest(unittest.TestCase):
             )
         self.assertGreaterEqual(supa.call_count, 1)
         first_call = supa.call_args_list[0]
-        self.assertEqual(first_call[0][0], "record_follow_interaction_outcome")
+        self.assertEqual(first_call[0][1], "record_follow_interaction_outcome")
         logged_kinds = [
             (c.kwargs or {}).get("kind")
             for c in log_fn.call_args_list
