@@ -20821,6 +20821,140 @@ _POST_FOLLOW_NO_POSTS_TEXT_NEEDLES = (
     "投稿なし",
     "投稿がありません",
 )
+_POST_FOLLOW_FAST_NO_POSTS_MAX_CONTEXT_AGE_MS = 5000.0
+
+
+def _post_follow_fast_no_posts_xml_evidence(hierarchy_xml: str) -> dict[str, Any]:
+    text = str(hierarchy_xml or "")
+    out: dict[str, Any] = {
+        "empty_marker_xml": False,
+        "profile_tabs_present": False,
+        "grid_selected": False,
+        "reels_or_tagged_selected": False,
+        "loading_visible": False,
+        "private_profile_visible": False,
+    }
+    if not text:
+        return out
+    text_l = html.unescape(text).lower()
+    out["empty_marker_xml"] = bool(
+        re.search(_POST_FOLLOW_NO_POSTS_TIER1_EMPTY_TEXT_RE, text, re.I)
+    )
+    out["loading_visible"] = bool(
+        "android.widget.progressbar" in text_l
+        or re.search(r"\b(loading|chargement|cargando)\b", text_l)
+    )
+    out["private_profile_visible"] = any(
+        marker in text_l
+        for marker in (
+            "this account is private",
+            "ce compte est privé",
+            "esta cuenta es privada",
+            "private account",
+        )
+    )
+    try:
+        root = ET.fromstring(text)
+    except Exception:
+        try:
+            root = ET.fromstring(f"<_root>{text}</_root>")
+        except Exception:
+            return out
+    for node in root.iter():
+        attrs = node.attrib or {}
+        label = " ".join(
+            str(attrs.get(key) or "")
+            for key in ("text", "content-desc", "resource-id")
+        ).lower()
+        if re.search(_POST_FOLLOW_NO_POSTS_TIER1_EMPTY_TEXT_RE, label, re.I) or re.search(
+            _POST_FOLLOW_NO_POSTS_TIER1_ZERO_POSTS_RE,
+            label,
+            re.I,
+        ):
+            out["empty_marker_xml"] = True
+        if any(
+            token in label
+            for token in ("profile_tab_grid", "profile tab grid", "grid tab", "posts tab")
+        ):
+            out["profile_tabs_present"] = True
+        if any(
+            token in label
+            for token in (
+                "profile_tab_reels",
+                "profile tab reels",
+                "reels tab",
+                "tagged tab",
+            )
+        ):
+            out["profile_tabs_present"] = True
+        selected = str(attrs.get("selected") or "").lower() == "true" or str(
+            attrs.get("checked") or ""
+        ).lower() == "true"
+        if not selected:
+            continue
+        if any(
+            token in label
+            for token in ("profile_tab_grid", "profile tab grid", "grid tab", "posts tab")
+        ):
+            out["grid_selected"] = True
+        if any(
+            token in label
+            for token in (
+                "profile_tab_reels",
+                "profile tab reels",
+                "reels tab",
+                "tagged tab",
+            )
+        ):
+            out["reels_or_tagged_selected"] = True
+    return out
+
+
+def _evaluate_post_follow_fast_no_posts_evidence(
+    evidence: dict[str, Any],
+) -> dict[str, Any]:
+    ev = dict(evidence or {})
+    critical_checks = (
+        ("profile_identity_confirmed", bool(ev.get("profile_identity_confirmed"))),
+        ("instagram_package_confirmed", bool(ev.get("instagram_package_confirmed"))),
+        ("navigation_profile_confirmed", bool(ev.get("navigation_profile_confirmed"))),
+        ("post_mute_profile_stable", bool(ev.get("post_mute_profile_stable"))),
+        ("grid_tab_confirmed", bool(ev.get("grid_tab_confirmed"))),
+        ("no_tappable_post", int(ev.get("tappable_post_count") or 0) == 0),
+        ("empty_marker_xml", bool(ev.get("empty_marker_xml"))),
+        ("independent_empty_vision", bool(ev.get("empty_marker_vision"))),
+        ("fingerprint_stable", bool(ev.get("fingerprint_stable"))),
+        (
+            "fresh_context",
+            float(ev.get("context_age_ms") or 1e9)
+            <= _POST_FOLLOW_FAST_NO_POSTS_MAX_CONTEXT_AGE_MS,
+        ),
+    )
+    contradictions = (
+        ("private_profile_ambiguous", bool(ev.get("private_profile_ambiguous"))),
+        ("reels_or_tagged_selected", bool(ev.get("reels_or_tagged_selected"))),
+        ("grid_loading", bool(ev.get("grid_loading"))),
+        ("stale_coordinates", bool(ev.get("stale_coordinates"))),
+        ("surface_ambiguous", bool(ev.get("surface_ambiguous"))),
+    )
+    failure_reason = ""
+    for reason, contradicted in contradictions:
+        if contradicted:
+            failure_reason = reason
+            break
+    if not failure_reason:
+        for reason, passed in critical_checks:
+            if not passed:
+                failure_reason = reason
+                break
+    proof_signals = [name for name, passed in critical_checks if passed]
+    return {
+        **ev,
+        "decision": "skip_no_posts" if not failure_reason else "fallback",
+        "failure_reason": failure_reason,
+        "proof_signals": proof_signals,
+        "critical_signal_count": len(critical_checks),
+    }
 
 
 def _visual_profile_no_posts_tier1_direct_check(
@@ -22197,6 +22331,8 @@ def _visual_detect_post_viewer_opened_after_tap(
     """
     Post-open detection aligned with post-follow like viewer guard (not legacy profile guess alone).
 
+    Fast path: Phase A2 first, then A1 if A2 misses.
+    Non-fast path: Phase A1 first, then A2 if A1 misses.
     Phase A1: row_feed like resource-id + trusted band proof.
     Phase A2: A2b guarded exact descriptor first, A2a trusted band fallback.
     Phase B: full fallback (broad chrome, header, profile-grid guard) only when A1/A2 miss.
@@ -22265,40 +22401,87 @@ def _visual_detect_post_viewer_opened_after_tap(
         _visual_detect_post_viewer_timing_log(out)
         return out
 
-    t_a10 = time.perf_counter()
-    like_a1, reason_a1, a1_sigs, a1_stats = _ui_post_viewer_open_like_unlike_fast(d)
-    stage["viewer_detect_like_unlike_ms"] = _visual_detect_post_viewer_stage_ms(t_a10)
-    stage["viewer_detect_a1_total_ms"] = stage["viewer_detect_like_unlike_ms"]
-    stage["viewer_detect_a1_rid_attempts"] = int(a1_stats.get("rid_attempts") or 0)
-    stage["viewer_detect_a1_positive_rid"] = str(a1_stats.get("positive_rid") or "")
-    stage["viewer_detect_a1_short_circuit_a2b"] = bool(
-        a1_stats.get("short_circuit_a2b")
-    )
-    signals.extend(a1_sigs)
-    if like_a1:
-        return _detect_success_out(
-            detect_path="phase_a_like_unlike_fast",
-            detect_reason=reason_a1 or "like_unlike_ui",
+    a1_executed = False
+    a2_result = False
+    a2_elapsed_ms = 0.0
+
+    def _log_post_follow_fast_strategy(
+        *,
+        final_strategy: str,
+        viewer_confirmed: bool,
+        snapshot_reused: bool,
+    ) -> None:
+        if not post_follow_fast:
+            return
+        try:
+            log(
+                "info",
+                "post_follow_viewer_detection_strategy",
+                candidate_username=_normalize_handle(expected_follower_username),
+                first_strategy="a2",
+                a2_result=bool(a2_result),
+                a2_elapsed_ms=round(float(a2_elapsed_ms), 2),
+                a1_executed=bool(a1_executed),
+                final_strategy=str(final_strategy or "none"),
+                viewer_confirmed=bool(viewer_confirmed),
+                snapshot_reused=bool(snapshot_reused),
+            )
+        except Exception:
+            pass
+
+    def _run_a1() -> tuple[bool, str, list[str]]:
+        nonlocal a1_executed
+        a1_executed = True
+        t_a10 = time.perf_counter()
+        like_a1, reason_a1, a1_sigs, a1_stats = (
+            _ui_post_viewer_open_like_unlike_fast(d)
+        )
+        stage["viewer_detect_like_unlike_ms"] = _visual_detect_post_viewer_stage_ms(
+            t_a10
+        )
+        stage["viewer_detect_a1_total_ms"] = stage["viewer_detect_like_unlike_ms"]
+        stage["viewer_detect_a1_rid_attempts"] = int(
+            a1_stats.get("rid_attempts") or 0
+        )
+        stage["viewer_detect_a1_positive_rid"] = str(
+            a1_stats.get("positive_rid") or ""
+        )
+        stage["viewer_detect_a1_short_circuit_a2b"] = bool(
+            a1_stats.get("short_circuit_a2b")
+        )
+        signals.extend(a1_sigs)
+        return bool(like_a1), str(reason_a1 or ""), list(a1_sigs)
+
+    def _run_a2() -> tuple[bool, str, list[str], str]:
+        nonlocal a2_result, a2_elapsed_ms
+        t_a20 = time.perf_counter()
+        like_a2, reason_a2, a2_sigs, exact_sig, guard_res, a2_stage = (
+            _ui_post_viewer_open_exact_like_desc_fast(d, pkg=pkg)
+        )
+        a2_elapsed_ms = _visual_detect_post_viewer_stage_ms(t_a20)
+        a2_result = bool(like_a2)
+        stage["viewer_detect_exact_desc_ms"] = a2_elapsed_ms
+        stage["viewer_detect_a2_total_ms"] = a2_elapsed_ms
+        stage["viewer_detect_exact_desc_signal"] = str(exact_sig or "")
+        stage["viewer_detect_exact_desc_guard_result"] = str(guard_res or "")
+        for _k, _v in a2_stage.items():
+            if _k in stage:
+                stage[_k] = _v
+        signals.extend(a2_sigs)
+        return bool(like_a2), str(reason_a2 or ""), list(a2_sigs), str(
+            guard_res or ""
         )
 
-    t_a20 = time.perf_counter()
-    like_a2, reason_a2, a2_sigs, exact_sig, guard_res, a2_stage = (
-        _ui_post_viewer_open_exact_like_desc_fast(d, pkg=pkg)
-    )
-    stage["viewer_detect_exact_desc_ms"] = _visual_detect_post_viewer_stage_ms(t_a20)
-    stage["viewer_detect_a2_total_ms"] = stage["viewer_detect_exact_desc_ms"]
-    stage["viewer_detect_exact_desc_signal"] = str(exact_sig or "")
-    stage["viewer_detect_exact_desc_guard_result"] = str(guard_res or "")
-    for _k, _v in a2_stage.items():
-        if _k in stage:
-            stage[_k] = _v
-    signals.extend(a2_sigs)
-    if like_a2:
-        posts_bar = "posts_bar" in str(guard_res or "")
+    def _a2_success_out(
+        reason_a2: str,
+        a2_sigs: list[str],
+        guard_res: str,
+    ) -> dict[str, Any]:
+        posts_bar = "posts_bar" in guard_res
         ab_title = ""
-        for s in a2_sigs:
-            if str(s).startswith("action_bar_posts_mode:"):
-                ab_title = str(s).split(":", 1)[-1]
+        for signal in a2_sigs:
+            if str(signal).startswith("action_bar_posts_mode:"):
+                ab_title = str(signal).split(":", 1)[-1]
                 break
         return _detect_success_out(
             detect_path="phase_a2_exact_like_desc_fast",
@@ -22306,6 +22489,39 @@ def _visual_detect_post_viewer_opened_after_tap(
             posts_action_bar=posts_bar,
             action_bar_title=ab_title,
         )
+
+    if post_follow_fast:
+        like_a2, reason_a2, a2_sigs, guard_res = _run_a2()
+        if like_a2:
+            out_a2 = _a2_success_out(reason_a2, a2_sigs, guard_res)
+            _log_post_follow_fast_strategy(
+                final_strategy="a2",
+                viewer_confirmed=True,
+                snapshot_reused=bool(out_a2.get("post_open_snapshot_valid")),
+            )
+            return out_a2
+        like_a1, reason_a1, _a1_sigs = _run_a1()
+        if like_a1:
+            out_a1 = _detect_success_out(
+                detect_path="phase_a_like_unlike_fast",
+                detect_reason=reason_a1 or "like_unlike_ui",
+            )
+            _log_post_follow_fast_strategy(
+                final_strategy="a1",
+                viewer_confirmed=True,
+                snapshot_reused=bool(out_a1.get("post_open_snapshot_valid")),
+            )
+            return out_a1
+    else:
+        like_a1, reason_a1, _a1_sigs = _run_a1()
+        if like_a1:
+            return _detect_success_out(
+                detect_path="phase_a_like_unlike_fast",
+                detect_reason=reason_a1 or "like_unlike_ui",
+            )
+        like_a2, reason_a2, a2_sigs, guard_res = _run_a2()
+        if like_a2:
+            return _a2_success_out(reason_a2, a2_sigs, guard_res)
 
     if post_follow_fast:
         t_grid0 = time.perf_counter()
@@ -22340,6 +22556,11 @@ def _visual_detect_post_viewer_opened_after_tap(
             "viewer_detect_total_ms": _visual_detect_post_viewer_stage_ms(t_total0),
         }
         _visual_detect_post_viewer_timing_log(out_fast, post_follow_fast=True)
+        _log_post_follow_fast_strategy(
+            final_strategy="fallback",
+            viewer_confirmed=False,
+            snapshot_reused=False,
+        )
         return out_fast
 
     t_broad0 = time.perf_counter()
@@ -45658,6 +45879,214 @@ def run_post_follow_post_likes_phase(
                 pass
             return out_early
 
+        def _run_fast_no_posts_hybrid_probe() -> dict[str, Any]:
+            t_fast_np = time.perf_counter()
+
+            def _fresh_hierarchy() -> str:
+                try:
+                    return str(d.dump_hierarchy(compressed=False))
+                except TypeError:
+                    try:
+                        return str(d.dump_hierarchy())
+                    except Exception:
+                        return ""
+                except Exception:
+                    return ""
+
+            try:
+                username_before = str(
+                    read_current_profile_username_for_follow_gate(d) or ""
+                ).strip().lstrip("@")
+            except Exception:
+                username_before = ""
+            meta_before = _followers_current_pkg_activity(d)
+            xml_before = _fresh_hierarchy()
+            xml_before_ev = _post_follow_fast_no_posts_xml_evidence(xml_before)
+
+            empty_marker_vision = False
+            if bool(xml_before_ev.get("empty_marker_xml")):
+                try:
+                    _ensure_debug_dirs()
+                    shot_path = _SCREENSHOTS_DIR / (
+                        f"post_follow_fast_no_posts_{int(time.time() * 1000)}.png"
+                    )
+                    screenshot(d, str(shot_path))
+                    from PIL import Image
+
+                    with Image.open(shot_path) as im_raw:
+                        im = im_raw.convert("RGB")
+                        iw, ih = im.size
+                        empty_marker_vision, _vision_conf = (
+                            _visual_profile_lower_grid_mostly_blank(im, iw, ih)
+                        )
+                except Exception:
+                    empty_marker_vision = False
+
+            xml_after = _fresh_hierarchy()
+            xml_after_ev = _post_follow_fast_no_posts_xml_evidence(xml_after)
+            try:
+                username_after = str(
+                    read_current_profile_username_for_follow_gate(d) or ""
+                ).strip().lstrip("@")
+            except Exception:
+                username_after = ""
+            meta_after = _followers_current_pkg_activity(d)
+            try:
+                ww_np, wh_np = d.window_size()
+            except Exception:
+                ww_np, wh_np = 1080, 2340
+            tabs_bottom_np, _tabs_source_np = _followers_profile_tabs_bottom_y_px(
+                d,
+                window_h=int(wh_np),
+            )
+            tappable_cells: list[dict[str, int]] = []
+            if tabs_bottom_np is not None:
+                tappable_cells = _post_follow_likes_collect_grid_thumbnail_cells(
+                    d,
+                    y_min_px=int(tabs_bottom_np) + 1,
+                    ww=int(ww_np),
+                    wh=int(wh_np),
+                    relaxed_probe=False,
+                )
+
+            candidate_norm = _normalize_handle(cand)
+            identity_confirmed = bool(
+                candidate_norm
+                and _normalize_handle(username_before) == candidate_norm
+                and _normalize_handle(username_after) == candidate_norm
+            )
+            package_before = str(meta_before.get("current_package") or "")
+            package_after = str(meta_after.get("current_package") or "")
+            activity_before = str(meta_before.get("current_activity") or "")
+            activity_after = str(meta_after.get("current_activity") or "")
+            package_confirmed = bool(
+                package_before == pkg and package_after == pkg
+            )
+            grid_before = bool(
+                xml_before_ev.get("grid_selected")
+                or (
+                    xml_before_ev.get("profile_tabs_present")
+                    and xml_before_ev.get("empty_marker_xml")
+                    and not xml_before_ev.get("reels_or_tagged_selected")
+                )
+            )
+            grid_after = bool(
+                xml_after_ev.get("grid_selected")
+                or (
+                    xml_after_ev.get("profile_tabs_present")
+                    and xml_after_ev.get("empty_marker_xml")
+                    and not xml_after_ev.get("reels_or_tagged_selected")
+                )
+            )
+            fingerprint_before = (
+                _normalize_handle(username_before),
+                package_before,
+                activity_before,
+                bool(xml_before_ev.get("empty_marker_xml")),
+                grid_before,
+                bool(xml_before_ev.get("loading_visible")),
+            )
+            fingerprint_after = (
+                _normalize_handle(username_after),
+                package_after,
+                activity_after,
+                bool(xml_after_ev.get("empty_marker_xml")),
+                grid_after,
+                bool(xml_after_ev.get("loading_visible")),
+            )
+            context_age_ms = round(
+                (time.perf_counter() - t_fast_np) * 1000.0,
+                2,
+            )
+            evidence = _evaluate_post_follow_fast_no_posts_evidence(
+                {
+                    "profile_identity_confirmed": identity_confirmed,
+                    "instagram_package_confirmed": package_confirmed,
+                    "navigation_profile_confirmed": st_prof
+                    in {
+                        NavigationEngineState.PROFILE.value,
+                        NavigationEngineState.CANDIDATE_PROFILE.value,
+                    },
+                    "post_mute_profile_stable": bool(
+                        not sheet_precheck.get("skip_like")
+                        and not sheet_precheck.get("sheet_visible")
+                        and surface_profile_ok
+                    ),
+                    "grid_tab_confirmed": bool(
+                        grid_tab_visible and grid_before and grid_after
+                    ),
+                    "tappable_post_count": len(tappable_cells),
+                    "empty_marker_xml": bool(
+                        xml_before_ev.get("empty_marker_xml")
+                        and xml_after_ev.get("empty_marker_xml")
+                    ),
+                    "empty_marker_vision": bool(empty_marker_vision),
+                    "fingerprint_stable": fingerprint_before == fingerprint_after,
+                    "context_age_ms": context_age_ms,
+                    "private_profile_ambiguous": bool(
+                        st_prof == NavigationEngineState.PRIVATE_PROFILE.value
+                        or xml_before_ev.get("private_profile_visible")
+                        or xml_after_ev.get("private_profile_visible")
+                    ),
+                    "reels_or_tagged_selected": bool(
+                        xml_before_ev.get("reels_or_tagged_selected")
+                        or xml_after_ev.get("reels_or_tagged_selected")
+                    ),
+                    "grid_loading": bool(
+                        xml_before_ev.get("loading_visible")
+                        or xml_after_ev.get("loading_visible")
+                    ),
+                    "stale_coordinates": False,
+                    "surface_ambiguous": tabs_bottom_np is None,
+                }
+            )
+            try:
+                log(
+                    "info",
+                    "post_follow_fast_no_posts_evaluated",
+                    source_profile_username=src,
+                    candidate_username=cand,
+                    profile_identity_confirmed=bool(
+                        evidence.get("profile_identity_confirmed")
+                    ),
+                    grid_tab_confirmed=bool(evidence.get("grid_tab_confirmed")),
+                    tappable_post_count=int(
+                        evidence.get("tappable_post_count") or 0
+                    ),
+                    empty_marker_xml=bool(evidence.get("empty_marker_xml")),
+                    empty_marker_vision=bool(evidence.get("empty_marker_vision")),
+                    fingerprint_stable=bool(evidence.get("fingerprint_stable")),
+                    context_age_ms=context_age_ms,
+                    decision=str(evidence.get("decision") or "fallback"),
+                    failure_reason=str(evidence.get("failure_reason") or ""),
+                )
+            except Exception:
+                pass
+            if evidence.get("decision") == "skip_no_posts":
+                try:
+                    log(
+                        "info",
+                        "post_follow_fast_no_posts_short_circuit",
+                        candidate_username=cand,
+                        proof_signals=list(evidence.get("proof_signals") or []),
+                        elapsed_ms=context_age_ms,
+                        fallback_avoided=True,
+                    )
+                except Exception:
+                    pass
+                return {
+                    "no_posts_detected": True,
+                    "detection_method": "post_follow_fast_hybrid_no_posts",
+                    "confidence": 0.98,
+                    **evidence,
+                }
+            return {
+                "no_posts_detected": False,
+                "detection_method": "post_follow_fast_hybrid_fallback",
+                "confidence": 0.0,
+                **evidence,
+            }
+
         surface_profile_ok = bool(
             surface_precheck.get("profile_candidate_visible")
         ) and not bool(surface_precheck.get("followers_list_visible"))
@@ -45723,7 +46152,17 @@ def run_post_follow_post_likes_phase(
         except Exception:
             pass
         if tier1_check.get("no_posts_detected") is True:
-            return _skip_no_posts(tier1_check)
+            try:
+                log(
+                    "info",
+                    "post_follow_fast_no_posts_single_signal_deferred",
+                    source_profile_username=src,
+                    candidate_username=cand,
+                    signal=str(tier1_check.get("detection_method") or "tier1"),
+                    reason="hybrid_proof_required_after_reveal",
+                )
+            except Exception:
+                pass
 
         full_check_used = False
         no_posts_check: dict[str, Any] = dict(tier1_check)
@@ -45834,7 +46273,17 @@ def run_post_follow_post_likes_phase(
             except Exception:
                 pass
         if no_posts_check.get("no_posts_detected") is True:
-            return _skip_no_posts(no_posts_check)
+            try:
+                log(
+                    "info",
+                    "post_follow_fast_no_posts_single_signal_deferred",
+                    source_profile_username=src,
+                    candidate_username=cand,
+                    signal=str(no_posts_check.get("detection_method") or "cheap"),
+                    reason="hybrid_proof_required_after_reveal",
+                )
+            except Exception:
+                pass
 
         def _hard_skip_no_post_grid_allowed() -> bool:
             return bool(
@@ -45861,7 +46310,20 @@ def run_post_follow_post_likes_phase(
                 gate_fields=_early_fields,
             )
             if no_posts_visual_early.get("no_posts_detected") is True:
-                return _skip_no_posts(no_posts_visual_early)
+                try:
+                    log(
+                        "info",
+                        "post_follow_fast_no_posts_single_signal_deferred",
+                        source_profile_username=src,
+                        candidate_username=cand,
+                        signal=str(
+                            no_posts_visual_early.get("detection_method")
+                            or "early_visual"
+                        ),
+                        reason="hybrid_proof_required_after_reveal",
+                    )
+                except Exception:
+                    pass
         else:
             try:
                 log(
@@ -46146,6 +46608,9 @@ def run_post_follow_post_likes_phase(
                 )
             except Exception:
                 pass
+            fast_no_posts_after_pre_reveal = _run_fast_no_posts_hybrid_probe()
+            if fast_no_posts_after_pre_reveal.get("no_posts_detected") is True:
+                return _skip_no_posts(fast_no_posts_after_pre_reveal)
         scroll_first_unknown_tabs = (
             str(pre_reveal_out.get("reason") or "") == "profile_tabs_bottom_unknown"
             and not bool(pre_reveal_out.get("pre_reveal_used"))
@@ -46397,6 +46862,13 @@ def run_post_follow_post_likes_phase(
                 except Exception:
                     pass
                 if bool(sw_retry.get("swipe_ok")):
+                    fast_no_posts_after_retry_reveal = (
+                        _run_fast_no_posts_hybrid_probe()
+                    )
+                    if fast_no_posts_after_retry_reveal.get(
+                        "no_posts_detected"
+                    ) is True:
+                        return _skip_no_posts(fast_no_posts_after_retry_reveal)
                     try:
                         log(
                             "info",

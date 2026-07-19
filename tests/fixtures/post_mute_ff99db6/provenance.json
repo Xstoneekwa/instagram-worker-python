@@ -1,0 +1,19 @@
+{
+  "fixture_set": "post_mute_ff99db6",
+  "immutable": true,
+  "baseline_commit": "ff99db6d7de48d75ede439c704e770feaaec6b7c",
+  "account_username": "mythyl_fitness",
+  "request_id": "46a45bf5-3c90-4ee1-863a-6980d07aec74",
+  "run_id": "9597985e-d357-4a44-a3d5-a6f0457ca05e",
+  "artifacts": [
+    {"file": "cisko-92-no-post-after-reveal.png", "username": "cisko.92", "classification": "physical_no_posts_after_reveal", "source_timestamp_ms": 1784477523381, "sha256": "90caabf4dbfa1d5a17ad3c2763bd1129f824daf5174f6c2be8299d924b67cd53"},
+    {"file": "konedaouda714-no-post-after-reveal.png", "username": "konedaouda714", "classification": "physical_no_posts_after_reveal", "source_timestamp_ms": 1784477776761, "sha256": "6748673c066ac24b176a8ba737f8f79dcf9df0aa7d103c3b9330251da5342e4d"},
+    {"file": "nii-ilo2-no-post-after-reveal.png", "username": "nii_ilo2", "classification": "physical_no_posts_after_reveal", "source_timestamp_ms": 1784478277930, "sha256": "dbfcd0050a13d1e2c986fe84d0e80c5f43bdbd99e5640fbec7ca0c5b6c5616f8"},
+    {"file": "mohamed-karraz-58-no-post-after-reveal.png", "username": "mohamed.karraz.58", "classification": "physical_no_posts_after_reveal", "source_timestamp_ms": 1784478628441, "sha256": "9e01f9c3ed79ecb4c63425ff0b7b896b8743ab5a1d03a5c2caed699204725e8d"},
+    {"file": "azdin-wear-public-posts.png", "username": "azdin.wear", "classification": "physical_public_posts", "source_timestamp_ms": 1784476997260, "sha256": "1dee85b146acd1488f428f27a150577b35ca1d4328c7d7ea599723c6dfd40d00"},
+    {"file": "mbambu-gedeon-first-fallback.png", "username": "mbambu.gedeon", "classification": "physical_viewer_fallback_first", "source_timestamp_ms": 1784478343685, "sha256": "59e40cdfe0f754f04b623095b9449c6ef49f161f430e2d35a3a3e185c79ffe19"},
+    {"file": "mbambu-gedeon-second-fallback.png", "username": "mbambu.gedeon", "classification": "physical_viewer_fallback_second", "source_timestamp_ms": 1784478364632, "sha256": "cdbd5c7128d3f6f279279bf57e69ddbd11ca248a979c17464d73a8c9e06597a8"},
+    {"file": "ravinderbathua-first-fallback.png", "username": "ravinderbathua_", "classification": "physical_viewer_fallback_first", "source_timestamp_ms": 1784478440259, "sha256": "ba0db3f21b3216edcfef24404d3b8029e9e94ac9786c4f8caa1b23cb876d6f1c"},
+    {"file": "ravinderbathua-second-fallback.png", "username": "ravinderbathua_", "classification": "physical_posts_after_fallback", "source_timestamp_ms": 1784478460742, "sha256": "e3790504e1c685959246ab5e0ce371bda5e1950f162bdebe5ecb11a183b2d139"}
+  ]
+}
