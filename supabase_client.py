@@ -97,6 +97,26 @@ def _classify_request_error(exc: BaseException) -> str:
     return "supabase_queue_read_failed"
 
 
+def _classify_http_error(exc: error.HTTPError, detail: str) -> str:
+    """Classify definitive PostgREST contract failures before retry policy."""
+    base_reason = _classify_request_error(exc)
+    detail_lower = str(detail or "").lower()
+    if exc.code == 400 and (
+        "pgrst204" in detail_lower
+        or "could not find" in detail_lower and "column" in detail_lower
+        or "column" in detail_lower and "does not exist" in detail_lower
+        or "42703" in detail_lower
+    ):
+        return "supabase_schema_payload_incompatible"
+    if exc.code in {404, 400} and (
+        "pgrst202" in detail_lower
+        or "could not find the function" in detail_lower
+        or "function" in detail_lower and "does not exist" in detail_lower
+    ):
+        return "supabase_rpc_not_available"
+    return base_reason
+
+
 def _request_urlopen(
     req: request.Request,
     *,
@@ -117,7 +137,7 @@ def _request_urlopen(
         except error.HTTPError as exc:
             latency_ms = int((time.monotonic() - started) * 1000)
             detail = exc.read().decode("utf-8", errors="replace")
-            reason = _classify_request_error(exc)
+            reason = _classify_http_error(exc, detail)
             rest_exc = SupabaseRestError(
                 reason,
                 method=str(getattr(req, "method", "") or ""),
@@ -126,7 +146,12 @@ def _request_urlopen(
                 latency_ms=latency_ms,
                 detail=detail[:200],
             )
-            if reason in {"supabase_auth_401", "supabase_auth_403"} or attempt >= max_retries:
+            if reason in {
+                "supabase_auth_401",
+                "supabase_auth_403",
+                "supabase_schema_payload_incompatible",
+                "supabase_rpc_not_available",
+            } or attempt >= max_retries:
                 raise rest_exc from exc
             last_exc = rest_exc
         except (error.URLError, TimeoutError, socket.timeout) as exc:
@@ -1951,8 +1976,6 @@ def record_follow_interaction_outcome(
             "payload": payload_delta,
             "interaction_status": "success",
             "interaction_lifecycle_state": "active_following",
-            "followed": True,
-            "unfollowed": False,
             "source_target_username": _canonical_source_profile(source_profile) or None,
             "evidence_source": "worker_follow_outcome",
             "evidence_confidence": "high" if safe_target_id else "medium",
@@ -2030,8 +2053,6 @@ def record_follow_interaction_outcome(
             "payload": payload_delta,
             "interaction_status": "failed",
             "interaction_lifecycle_state": "failed",
-            "followed": False,
-            "skip_reason": (failure_reason or f"follow_failure_{failure_code}")[:500],
             "source_target_username": _canonical_source_profile(source_profile) or None,
             "evidence_source": "worker_follow_outcome",
             "evidence_confidence": "high" if safe_target_id else "medium",
