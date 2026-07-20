@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "runs": [
+    {
+      "role": "canonical",
+      "request_id": "46a45bf5-3c90-4ee1-863a-6980d07aec74",
+      "run_id": "9597985e-d357-4a44-a3d5-a6f0457ca05e",
+      "runtime_sha": "ff99db6d7de48d75ede439c704e770feaaec6b7c",
+      "result": "20_of_20_verified",
+      "candidate_to_candidate_seconds": 85.225803
+    },
+    {
+      "role": "before_optimization",
+      "request_id": "aa46601f-3db1-4380-b98c-569cdb3026cb",
+      "run_id": "245613bb-8d26-4dca-ba05-7d8202496071",
+      "runtime_sha": "c7c1e1f06660d9f25c6fc5cdeb6f6d73e1be5c66",
+      "raw_candidate_to_candidate_seconds": 93.053441,
+      "historical_comparable_seconds": 91.794935,
+      "result": "slower_reference"
+    },
+    {
+      "role": "rejected_canary",
+      "request_id": "7ced5dbf-68cb-4679-93ec-aaf4cdd28599",
+      "run_id": "903ea73c-c853-4853-9df0-b8514fc0e9bb",
+      "runtime_sha": "d53a6b1c111b80917e87aac634077cdf26957c0a",
+      "candidate_to_candidate_seconds": 91.9136,
+      "result": "post_mute_regression_rejected"
+    }
+  ]
+}

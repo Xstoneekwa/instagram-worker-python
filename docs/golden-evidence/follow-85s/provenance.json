@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "checkpoint": "FOLLOW_85S_PERFORMANCE_GOLDEN_V1",
+  "created_from_worker_sha": "ff99db6d7de48d75ede439c704e770feaaec6b7c",
+  "evidence_origin": "local immutable worker release logs",
+  "canonical_run": "9597985e-d357-4a44-a3d5-a6f0457ca05e",
+  "comparison_runs": [
+    "245613bb-8d26-4dca-ba05-7d8202496071",
+    "903ea73c-c853-4853-9df0-b8514fc0e9bb"
+  ],
+  "sanitization": {
+    "candidate_usernames": "deterministically aliased",
+    "absolute_source_paths": "omitted from sanitized event extracts",
+    "raw_log_hashes": "retained for provenance"
+  },
+  "excluded": [
+    "__pycache__",
+    "runtime caches",
+    "credentials",
+    "environment files"
+  ]
+}

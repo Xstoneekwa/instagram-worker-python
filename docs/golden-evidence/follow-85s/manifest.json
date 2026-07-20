@@ -1,0 +1,90 @@
+{
+  "schema_version": 1,
+  "name": "FOLLOW_85S_PERFORMANCE_GOLDEN_V1",
+  "tag": "golden-follow-85s-v1",
+  "status": "physically_validated",
+  "runtime_sha": "ff99db6d7de48d75ede439c704e770feaaec6b7c",
+  "runtime_release": "/Users/admin/phonefarm-worker-releases/ff99db6-follow-persistence-rpc-v1",
+  "performance_baseline": {
+    "candidate_to_candidate_seconds": 85.225803,
+    "strict_cycle_seconds": 77.204886,
+    "point3_without_scroll_seconds": 6.953824,
+    "throughput_follows_per_hour": 42.240729,
+    "verified_cycles": 20
+  },
+  "reference_runs": [
+    {
+      "role": "canonical_follow_85s",
+      "request_id": "46a45bf5-3c90-4ee1-863a-6980d07aec74",
+      "run_id": "9597985e-d357-4a44-a3d5-a6f0457ca05e",
+      "runtime_sha": "ff99db6d7de48d75ede439c704e770feaaec6b7c",
+      "evidence": {
+        "availability": "available",
+        "evidence_type": "raw_physical_log",
+        "source_path": "/Users/admin/phonefarm-worker-releases/ff99db6-follow-persistence-rpc-v1/runs/run_20260719T160145_257075Z_9597985e-d357-4a44-a3d5-a6f0457ca05e.log",
+        "sha256": "d0d07f3a2fc18025189a1ecfa96dbd27261519a7bd36afd330f191b246098ae8",
+        "bytes": 3914697,
+        "lines": 9620,
+        "confidence": "high"
+      }
+    },
+    {
+      "role": "before_optimization",
+      "request_id": "aa46601f-3db1-4380-b98c-569cdb3026cb",
+      "run_id": "245613bb-8d26-4dca-ba05-7d8202496071",
+      "runtime_sha": "c7c1e1f06660d9f25c6fc5cdeb6f6d73e1be5c66",
+      "evidence": {
+        "availability": "available",
+        "evidence_type": "raw_physical_log",
+        "source_path": "/Users/admin/phonefarm-worker-releases/c7c1e1f-welcome-consolidated/runs/run_20260718T160041_243174Z_245613bb-8d26-4dca-ba05-7d8202496071.log",
+        "sha256": "d789cfa2b64e41d3f4e077535610de4e758bfa46212f0678fa9e446876781383",
+        "bytes": 3969919,
+        "lines": 9680,
+        "confidence": "high"
+      }
+    },
+    {
+      "role": "rejected_post_mute_canary",
+      "request_id": "7ced5dbf-68cb-4679-93ec-aaf4cdd28599",
+      "run_id": "903ea73c-c853-4853-9df0-b8514fc0e9bb",
+      "runtime_sha": "d53a6b1c111b80917e87aac634077cdf26957c0a",
+      "evidence": {
+        "availability": "available",
+        "evidence_type": "raw_physical_log",
+        "source_path": "/Users/admin/phonefarm-worker-releases/d53a6b1-post-mute-canary/runs/run_20260720T000738_048575Z_903ea73c-c853-4853-9df0-b8514fc0e9bb.log",
+        "sha256": "3b60662cf13bb4dd7b64dc103f7b52ab9236d198b9c340ec46501d11ef054a01",
+        "bytes": 3962870,
+        "lines": 9769,
+        "confidence": "high"
+      }
+    }
+  ],
+  "protected_files": [
+    {
+      "path": "instagram_navigation.py",
+      "sha256": "c39787fb8b7ce83e168f0e4820b07f452229dbc2ba06d78a6fe2ebef7ebda5ba",
+      "reason": "Candidate navigation, Mute, Like and Return CT cycle"
+    },
+    {
+      "path": "follow_action_engine.py",
+      "sha256": "5389f1d747b7a317ba6d21646a8f36ef32af1f1870d706844db0298539f86f22",
+      "reason": "Follow selection, tap and verification"
+    },
+    {
+      "path": "runner.py",
+      "sha256": "39432e155e708a294e085d32cb87cf6e64bd1928b3573e51af7cc6428aa048ad",
+      "reason": "Cycle orchestration and functional accounting"
+    },
+    {
+      "path": "supabase_client.py",
+      "sha256": "235c869cc70b74900a1fb0e974a2ca49b18dad732e5c36269c2b3c60a377fa48",
+      "reason": "Physical baseline persistence path"
+    }
+  ],
+  "rules": [
+    "Require explicit Liam approval before touching a protected file.",
+    "Compare every approved change physically against 85.226 seconds candidate-to-candidate.",
+    "Create a V2 manifest for a newly accepted baseline; never rewrite V1.",
+    "Keep Welcome and experimental Post-Mute work outside this checkpoint."
+  ]
+}

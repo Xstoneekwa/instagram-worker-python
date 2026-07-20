@@ -19,3 +19,20 @@
   retry is created without explicit approval.
 - Every future change to the three open performance paths requires comparison
   against `JULY_16_PRODUCTION_BASELINE`.
+
+## FOLLOW_85S_PERFORMANCE_GOLDEN_V1
+
+- `ff99db6d7de48d75ede439c704e770feaaec6b7c` is the official worker runtime
+  baseline for the physically validated Follow cycle.
+- The locked performance reference is 85.226 seconds candidate-to-candidate,
+  with 20/20 Follow and Return CT cycles verified.
+- Protected files may change only after explicit Liam approval through
+  `--allow-worker-golden-touch` and a physical comparison with this baseline.
+- An accepted replacement requires a new V2 manifest. V1 evidence and hashes
+  are immutable.
+- Follow RPC code can remain available, but this baseline ran with the RPC OFF
+  and the legacy persistence path active.
+- The `d53a6b1` Post-Mute canary is rejected. Fast no-post work stays frozen
+  until temporal evidence is sufficient; A2 is not generalized from that run.
+- Welcome is a separate frozen path. This Follow checkpoint does not validate
+  Welcome scan, sender, outbound proof or Welcome-to-Follow handoff.

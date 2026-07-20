@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "canonical_run": {
+    "run_id": "9597985e-d357-4a44-a3d5-a6f0457ca05e",
+    "strict_cycle_seconds": {
+      "count": 20,
+      "mean": 77.204886,
+      "median": 75.208068,
+      "min": 67.519871,
+      "max": 94.988017
+    },
+    "point3_seconds": {
+      "all": {
+        "count": 19,
+        "mean": 8.002045
+      },
+      "without_scroll": {
+        "count": 17,
+        "mean": 6.953824,
+        "median": 6.961416,
+        "min": 5.833549,
+        "max": 7.933146
+      },
+      "scroll_transitions": [16.095576, 17.728271]
+    },
+    "candidate_to_candidate_seconds": {
+      "count": 19,
+      "mean": 85.225803,
+      "median": 84.546991,
+      "min": 73.666318,
+      "max": 102.222866
+    },
+    "throughput_follows_per_hour": 42.240729,
+    "functional_counts": {
+      "candidate_profiles_opened": 20,
+      "follows_verified": 20,
+      "return_ct_successes": 20
+    }
+  },
+  "comparisons": {
+    "before_optimization": {
+      "run_id": "245613bb-8d26-4dca-ba05-7d8202496071",
+      "raw_candidate_to_candidate_mean_seconds": 93.053441,
+      "historical_no_scroll_comparable_seconds": 91.794935,
+      "classification": "slower_than_follow_85s"
+    },
+    "rejected_post_mute_canary": {
+      "run_id": "903ea73c-c853-4853-9df0-b8514fc0e9bb",
+      "candidate_to_candidate_mean_seconds": 91.9136,
+      "strict_cycle_mean_seconds": 83.253261,
+      "classification": "regression_rejected"
+    }
+  }
+}

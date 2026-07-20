@@ -79,6 +79,22 @@ for item in data.get("protected_files", []):
 PY
 )"
 
+guard_metadata="$("$PYTHON_BIN" - "$MANIFEST" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    data = json.load(fh)
+
+baseline = data.get("performance_baseline") or {}
+seconds = baseline.get("candidate_to_candidate_seconds")
+if seconds is not None:
+    print(f"Performance baseline: {float(seconds):.3f} s candidate-to-candidate")
+    print("A physical comparison against this baseline is required before release.")
+    print("If the validated baseline changes, create a V2 manifest; do not rewrite V1.")
+PY
+)"
+
 protected_files=()
 while IFS= read -r path; do
   [[ -n "$path" ]] && protected_files+=("$path")
@@ -126,6 +142,7 @@ Protected files changed:
 $changed_files
 
 Use --allow-worker-golden-touch only after explicit approval.
+$guard_metadata
 EOF
   exit 1
 fi
@@ -133,6 +150,10 @@ fi
 echo "Golden Flow guard OK."
 echo "Manifest: $MANIFEST"
 echo "Baseline: $BASELINE_REF"
+
+if [[ -n "$guard_metadata" ]]; then
+  echo "$guard_metadata"
+fi
 
 if [[ -n "$changed_files" ]]; then
   echo "Protected files touched but allowed:"
