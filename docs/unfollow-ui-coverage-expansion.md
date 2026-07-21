@@ -11,33 +11,56 @@ aggregate timings contain no account or target identifiers:
   `3 s/viewport`;
 - the recorded Following viewports expose 7 username rows.
 
-For `Q` quota remaining, `E` eligible DB candidates, and `S` seconds until the
-scheduled session end:
+For `Q` quota remaining, `E` eligible DB candidates, `S` seconds until the
+scheduled session end, `U` recent unique usernames per viewport, `C` recent DB
+candidates matched per viewport, `Tv` seconds per viewport and `Ta` seconds per
+verified Unfollow:
 
 ```text
 cleanup_reserve = 600
 available_business_seconds = max(0, S - cleanup_reserve)
 action_slots = min(Q, E)
-required_viewports = ceil(E / 7)
-diagnostic_allowance = min(ceil(15 / 3), max(1, required_viewports))
+observation_window = ceil(Ta / Tv)
+bootstrap_candidate_yield = 1 / observation_window
+username_discovery_ratio = min(1, U / 7) if U > 0 else 1
+effective_candidate_yield = max(
+  bootstrap_candidate_yield,
+  C * username_discovery_ratio
+)
+required_viewports = ceil(E / effective_candidate_yield)
+diagnostic_allowance = min(observation_window, max(1, E))
 coverage_viewports_budget = required_viewports + diagnostic_allowance
-recovery_budget_seconds = diagnostic_allowance * 15
+recovery_budget_seconds = diagnostic_allowance * Ta
 derived_phase_seconds = (
-  action_slots * 15
-  + coverage_viewports_budget * 3
+  action_slots * Ta
+  + coverage_viewports_budget * Tv
   + recovery_budget_seconds
 )
 max_unfollow_phase_duration_seconds = min(
   available_business_seconds,
   derived_phase_seconds
 )
-max_scroll_passes = min(
+max_scroll_passes_absolute = floor(
+  max(0, available_business_seconds - action_slots*Ta - recovery_budget_seconds)
+  / Tv
+)
+adaptive_scroll_budget = min(
+  max_scroll_passes_absolute,
   max(0, coverage_viewports_budget - 1),
   floor(
-    max(0, max_phase_seconds - action_slots * 15 - recovery_budget_seconds) / 3
+    max(0, max_phase_seconds - action_slots*Ta - recovery_budget_seconds) / Tv
   )
 )
 ```
+
+`Tv` and `Ta` start from the measured p90 values (`3 s`, `15 s`). `U` and `C`
+are recomputed over the recent evidence-derived observation window after every
+viewport. Before the first positive candidate yield, the bootstrap is one
+candidate per observation window; candidate location is therefore never
+inferred from the DB count or from `7 rows/viewport`. In particular, 20 DB
+candidates do not imply three viewports. Zero recent matches expands only the
+adaptive estimate; no-progress, repeated-fingerprint, time and absolute-scroll
+bounds still stop the loop.
 
 The no-progress, repeated-fingerprint and recovery allowances are also bounded
 by measured time: at most `ceil(15 / 3)` viewports, further capped by the number
@@ -87,7 +110,17 @@ these conditions are proven:
 - exact account identity revalidated;
 - no challenge, restriction, unsafe marker or account mismatch;
 - the normal session window still has business time before the T-10 cleanup
-  boundary.
+boundary.
+
+## Offline harness
+
+The release-candidate harness contains 16 deterministic device-free replays:
+zero candidates, first-viewport completion, dispersed candidates, normal
+overlap, identical viewport, no-motion scroll, A/B/A cycle, real list end,
+unresolved candidates at UI end, quota reached, time exhaustion, successful
+recovery, recovery exhaustion, unsafe marker, 120 verified candidates without
+duplicates, and DB-plan exhaustion before the cap. The harness never imports or
+invokes ADB/uiautomator2 and reports `device_runs=0`.
 
 The recovery request must carry the original run lineage and durable completed
 action identities. It must stop rather than retry when reconciliation is

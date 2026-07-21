@@ -35,6 +35,18 @@ class UnfollowObservabilityContractTest(unittest.TestCase):
         self.assertIn('"ui_coverage_status": (', source)
         self.assertIn('"resume_recommended": False', source)
 
+    def test_summary_exposes_required_action_time_and_stop_metrics(self) -> None:
+        source = inspect.getsource(orchestrator._run_real_unfollow_multi_loop)
+        for field in (
+            '"attempted": sent',
+            '"verified": verified',
+            '"persisted": persisted',
+            '"phase_duration_seconds":',
+            '"cleanup_reserve_seconds":',
+            '"stop_reason": exploration_stop',
+        ):
+            self.assertIn(field, source)
+
     def test_strict_runtime_uses_plan_intersection_and_current_state_validation(self) -> None:
         source = inspect.getsource(orchestrator._run_real_unfollow_multi_loop)
         self.assertIn("if visible_key not in planned_usernames", source)

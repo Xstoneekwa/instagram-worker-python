@@ -1373,6 +1373,9 @@ def _run_real_unfollow_multi_loop(
             "unfollow_actions_verified": verified,
             "unfollow_actions_failed": failed,
             "unfollow_results_persisted_count": persisted,
+            "attempted": sent,
+            "verified": verified,
+            "persisted": persisted,
             "unfollow_observed_success_count": len(unfollow_observed_successes),
             "unfollow_observed_success_usernames": [
                 str(item.get("username") or "")
@@ -1392,6 +1395,9 @@ def _run_real_unfollow_multi_loop(
                 if remaining_planned_count > 0
                 else "complete"
             ),
+            "phase_duration_seconds": round(coverage_elapsed_seconds(), 3),
+            "cleanup_reserve_seconds": SCHEDULED_SESSION_CLEANUP_RESERVE_SECONDS,
+            "stop_reason": exploration_stop,
             # Existing account-session policy treats an executed mandatory Unfollow
             # phase as non-resumable; this flag reports that policy without claiming
             # the DB candidate supply was exhausted.
@@ -1696,7 +1702,12 @@ def _run_real_unfollow_multi_loop(
                 )
                 return emit_final(status)
 
-            if scroll_passes_used >= max_scroll_passes:
+            current_scroll_budget = (
+                int(coverage_tracker.budget.adaptive_scroll_budget)
+                if coverage_tracker is not None
+                else max_scroll_passes
+            )
+            if scroll_passes_used >= current_scroll_budget:
                 scroll_stop_reason = "scroll_budget_exhausted"
                 if coverage_tracker is not None:
                     coverage_stop = coverage_tracker.scroll_budget_decision()
@@ -1721,6 +1732,7 @@ def _run_real_unfollow_multi_loop(
                     unfollow_actions_verified_so_far=verified,
                     real_action_max_per_run=real_action_max,
                     remaining_planned_count=remaining_planned_count,
+                    adaptive_scroll_budget=current_scroll_budget,
                 )
                 status = (
                     "success_real_unfollow_multi_partial_exhausted"

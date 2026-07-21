@@ -45,6 +45,8 @@ def viewport_fingerprint(
 @dataclass(frozen=True)
 class AdaptiveCoverageBudget:
     max_scroll_passes: int
+    max_scroll_passes_absolute: int
+    adaptive_scroll_budget: int
     max_unfollow_phase_duration_seconds: int
     max_consecutive_no_progress_viewports: int
     max_repeated_fingerprints: int
@@ -58,6 +60,12 @@ class AdaptiveCoverageBudget:
     diagnostic_viewport_allowance: int
     recovery_budget_seconds: int
     available_business_seconds: int
+    scheduled_session_remaining_seconds: int
+    recent_unique_usernames_per_viewport: float
+    recent_candidates_found_per_viewport: float
+    effective_candidate_yield_per_viewport: float
+    observation_window_viewports: int
+    budget_formula_version: str
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -68,6 +76,10 @@ def derive_adaptive_coverage_budget(
     quota_remaining: int,
     eligible_remaining: int,
     session_remaining_seconds: float,
+    recent_unique_usernames_per_viewport: float | None = None,
+    recent_candidates_found_per_viewport: float | None = None,
+    average_viewport_seconds: float | None = None,
+    average_unfollow_seconds: float | None = None,
 ) -> AdaptiveCoverageBudget:
     """Derive every bound from measured timings, supply, quota and session time.
 
@@ -79,22 +91,46 @@ def derive_adaptive_coverage_budget(
     session_seconds = max(0, int(session_remaining_seconds))
     available = max(0, session_seconds - SCHEDULED_SESSION_CLEANUP_RESERVE_SECONDS)
     action_slots = min(quota, eligible)
-    required_viewports = (
-        int(math.ceil(eligible / HISTORICAL_ROWS_PER_VIEWPORT)) if eligible else 0
+    viewport_seconds = max(
+        1,
+        int(math.ceil(average_viewport_seconds or HISTORICAL_VIEWPORT_P90_SECONDS)),
+    )
+    action_seconds_per_unfollow = max(
+        1,
+        int(math.ceil(average_unfollow_seconds or HISTORICAL_ACTION_P90_SECONDS)),
     )
     action_equivalent_viewports = max(
         1,
-        int(math.ceil(HISTORICAL_ACTION_P90_SECONDS / HISTORICAL_VIEWPORT_P90_SECONDS)),
+        int(math.ceil(action_seconds_per_unfollow / viewport_seconds)),
     )
     bounded_observation_allowance = min(
         action_equivalent_viewports,
-        max(1, required_viewports),
+        max(1, eligible),
     )
-    action_seconds = action_slots * HISTORICAL_ACTION_P90_SECONDS
+    observation_window = action_equivalent_viewports
+    recent_unique_yield = max(0.0, float(recent_unique_usernames_per_viewport or 0.0))
+    recent_candidate_yield = max(0.0, float(recent_candidates_found_per_viewport or 0.0))
+    # Candidate positions are unknown.  Before a positive match yield exists,
+    # bootstrap from the smallest measurable progress rate: one candidate over
+    # the evidence-derived observation window, never candidates/visible rows.
+    bootstrap_candidate_yield = 1.0 / max(1, observation_window)
+    username_discovery_ratio = (
+        min(1.0, recent_unique_yield / HISTORICAL_ROWS_PER_VIEWPORT)
+        if recent_unique_yield > 0
+        else 1.0
+    )
+    effective_candidate_yield = max(
+        bootstrap_candidate_yield,
+        recent_candidate_yield * username_discovery_ratio,
+    )
+    required_viewports = (
+        int(math.ceil(eligible / effective_candidate_yield)) if eligible else 0
+    )
+    action_seconds = action_slots * action_seconds_per_unfollow
     coverage_viewports_budget = required_viewports + bounded_observation_allowance
-    coverage_seconds = coverage_viewports_budget * HISTORICAL_VIEWPORT_P90_SECONDS
+    coverage_seconds = coverage_viewports_budget * viewport_seconds
     recovery_budget_seconds = (
-        bounded_observation_allowance * HISTORICAL_ACTION_P90_SECONDS
+        bounded_observation_allowance * action_seconds_per_unfollow
     )
     derived_phase_seconds = action_seconds + coverage_seconds + recovery_budget_seconds
     max_phase_seconds = min(available, derived_phase_seconds)
@@ -102,26 +138,42 @@ def derive_adaptive_coverage_budget(
         0,
         max_phase_seconds - action_seconds - recovery_budget_seconds,
     )
-    time_bounded_viewports = seconds_left_for_coverage // HISTORICAL_VIEWPORT_P90_SECONDS
+    max_scroll_passes_absolute = max(
+        0,
+        (max(0, available - action_seconds - recovery_budget_seconds) // viewport_seconds),
+    )
+    time_bounded_viewports = seconds_left_for_coverage // viewport_seconds
     max_scroll_passes = max(
         0,
-        min(max(0, coverage_viewports_budget - 1), int(time_bounded_viewports)),
+        min(
+            max_scroll_passes_absolute,
+            max(0, coverage_viewports_budget - 1),
+            int(time_bounded_viewports),
+        ),
     )
     return AdaptiveCoverageBudget(
         max_scroll_passes=max_scroll_passes,
+        max_scroll_passes_absolute=max_scroll_passes_absolute,
+        adaptive_scroll_budget=max_scroll_passes,
         max_unfollow_phase_duration_seconds=max_phase_seconds,
         max_consecutive_no_progress_viewports=bounded_observation_allowance,
         max_repeated_fingerprints=bounded_observation_allowance,
         max_viewport_recoveries=bounded_observation_allowance,
         minimum_session_cleanup_reserve_seconds=SCHEDULED_SESSION_CLEANUP_RESERVE_SECONDS,
-        estimated_seconds_per_unfollow=HISTORICAL_ACTION_P90_SECONDS,
-        estimated_seconds_per_viewport=HISTORICAL_VIEWPORT_P90_SECONDS,
+        estimated_seconds_per_unfollow=action_seconds_per_unfollow,
+        estimated_seconds_per_viewport=viewport_seconds,
         historical_rows_per_viewport=HISTORICAL_ROWS_PER_VIEWPORT,
         action_slots=action_slots,
         required_viewports=required_viewports,
         diagnostic_viewport_allowance=bounded_observation_allowance,
         recovery_budget_seconds=recovery_budget_seconds,
         available_business_seconds=available,
+        scheduled_session_remaining_seconds=session_seconds,
+        recent_unique_usernames_per_viewport=round(recent_unique_yield, 4),
+        recent_candidates_found_per_viewport=round(recent_candidate_yield, 4),
+        effective_candidate_yield_per_viewport=round(effective_candidate_yield, 4),
+        observation_window_viewports=observation_window,
+        budget_formula_version="adaptive_recent_yield_v2",
     )
 
 
@@ -149,6 +201,13 @@ class FollowingCoverageTracker:
     no_motion_scrolls: int = 0
     terminal_fingerprint: str = ""
     stop_reason: str = ""
+    total_rows_observed: int = 0
+    viewport_new_username_counts: list[int] = field(default_factory=list)
+    viewport_candidate_match_counts: list[int] = field(default_factory=list)
+    last_progress_at: float | None = None
+    initial_eligible_count: int = 0
+    quota_remaining_at_start: int = 0
+    initial_max_scroll_passes_absolute: int = 0
 
     def __post_init__(self) -> None:
         self.planned_usernames = {
@@ -157,6 +216,9 @@ class FollowingCoverageTracker:
             if normalized
         }
         self.quota_target = max(0, int(self.quota_target))
+        self.initial_eligible_count = len(self.planned_usernames)
+        self.quota_remaining_at_start = self.quota_target
+        self.initial_max_scroll_passes_absolute = self.budget.max_scroll_passes_absolute
 
     @property
     def remaining_planned_usernames(self) -> set[str]:
@@ -167,6 +229,43 @@ class FollowingCoverageTracker:
         if fingerprint:
             self.terminal_fingerprint = fingerprint
         return CoverageDecision("stop", reason, fingerprint)
+
+    def _refresh_adaptive_budget(self, *, elapsed_seconds: float) -> None:
+        window = max(1, self.budget.observation_window_viewports)
+        recent_unique = self.viewport_new_username_counts[-window:]
+        recent_matches = self.viewport_candidate_match_counts[-window:]
+        unique_yield = sum(recent_unique) / len(recent_unique) if recent_unique else 0.0
+        candidate_yield = sum(recent_matches) / len(recent_matches) if recent_matches else 0.0
+        remaining_session = max(
+            0.0,
+            self.budget.scheduled_session_remaining_seconds - elapsed_seconds,
+        )
+        refreshed = derive_adaptive_coverage_budget(
+            quota_remaining=max(0, self.quota_target - len(self.verified_usernames)),
+            eligible_remaining=len(self.remaining_planned_usernames),
+            session_remaining_seconds=remaining_session,
+            recent_unique_usernames_per_viewport=unique_yield,
+            recent_candidates_found_per_viewport=candidate_yield,
+            average_viewport_seconds=self.budget.estimated_seconds_per_viewport,
+            average_unfollow_seconds=self.budget.estimated_seconds_per_unfollow,
+        )
+        total_adaptive_scroll_budget = min(
+            self.initial_max_scroll_passes_absolute,
+            self.scroll_passes_used + refreshed.max_scroll_passes,
+        )
+        self.budget = AdaptiveCoverageBudget(
+            **{
+                **refreshed.as_dict(),
+                "max_scroll_passes": max(self.scroll_passes_used, total_adaptive_scroll_budget),
+                "max_scroll_passes_absolute": self.initial_max_scroll_passes_absolute,
+                "adaptive_scroll_budget": max(self.scroll_passes_used, total_adaptive_scroll_budget),
+                "max_unfollow_phase_duration_seconds": min(
+                    self.budget.max_unfollow_phase_duration_seconds,
+                    max(int(math.ceil(elapsed_seconds)), int(math.ceil(elapsed_seconds)) + refreshed.max_unfollow_phase_duration_seconds),
+                ),
+                "scheduled_session_remaining_seconds": self.budget.scheduled_session_remaining_seconds,
+            }
+        )
 
     def preflight_decision(self, *, elapsed_seconds: float) -> Optional[CoverageDecision]:
         if len(self.verified_usernames) >= self.quota_target:
@@ -199,6 +298,7 @@ class FollowingCoverageTracker:
 
         normalized = [normalize_username(value) for value in usernames]
         normalized = [value for value in normalized if value]
+        self.total_rows_observed += len(normalized)
         fingerprint = viewport_fingerprint(
             normalized,
             surface_signature=surface_signature,
@@ -215,8 +315,14 @@ class FollowingCoverageTracker:
         self.observed_usernames.update(current)
         if new_usernames:
             self.consecutive_no_progress_viewports = 0
+            self.last_progress_at = elapsed_seconds
         else:
             self.consecutive_no_progress_viewports += 1
+
+        matches = current.intersection(self.remaining_planned_usernames)
+        self.viewport_new_username_counts.append(len(new_usernames))
+        self.viewport_candidate_match_counts.append(len(matches))
+        self._refresh_adaptive_budget(elapsed_seconds=elapsed_seconds)
 
         if end_of_list:
             if self.remaining_planned_usernames:
@@ -229,7 +335,6 @@ class FollowingCoverageTracker:
             >= self.budget.max_consecutive_no_progress_viewports
         ):
             return self._stop("ui_no_progress", fingerprint)
-        matches = current.intersection(self.remaining_planned_usernames)
         return CoverageDecision(
             "act" if matches else "scroll",
             fingerprint=fingerprint,
@@ -275,16 +380,29 @@ class FollowingCoverageTracker:
         return {
             **self.budget.as_dict(),
             "viewports_observed": self.viewports_observed,
+            "eligible_db_at_start": self.initial_eligible_count,
+            "eligible_db_remaining": len(self.remaining_planned_usernames),
+            "effective_unfollow_limit": self.quota_target,
+            "quota_remaining_at_start": self.quota_remaining_at_start,
             "unique_usernames_observed": len(self.observed_usernames),
+            "total_rows_observed": self.total_rows_observed,
+            "new_usernames_per_viewport": list(self.viewport_new_username_counts),
+            "candidates_matched": sum(self.viewport_candidate_match_counts),
+            "duplicate_candidates_skipped": max(0, sum(self.viewport_candidate_match_counts) - len(set(self.observed_usernames).intersection(self.planned_usernames))),
             "verified_unique_count": len(self.verified_usernames),
             "remaining_planned_count": len(self.remaining_planned_usernames),
             "scroll_passes_used": self.scroll_passes_used,
             "consecutive_no_progress_viewports": self.consecutive_no_progress_viewports,
             "repeated_fingerprints_count": self.repeated_fingerprints_count,
+            "repeated_fingerprints": self.repeated_fingerprints_count,
+            "no_progress_viewports": self.consecutive_no_progress_viewports,
             "unique_fingerprints_count": len(self.fingerprint_counts),
             "viewport_recoveries_used": self.viewport_recoveries_used,
+            "viewport_recoveries": self.viewport_recoveries_used,
             "no_motion_scrolls": self.no_motion_scrolls,
             "terminal_fingerprint": self.terminal_fingerprint,
             "coverage_stop_reason": self.stop_reason,
+            "stop_reason": self.stop_reason,
+            "last_progress_at_seconds": self.last_progress_at,
             "theoretical_max_loop_steps": theoretical_max_loop_steps,
         }
