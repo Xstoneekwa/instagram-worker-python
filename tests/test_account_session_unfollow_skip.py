@@ -189,6 +189,35 @@ class AccountSessionUnfollowSkipTest(unittest.TestCase):
         self.assertEqual(summary["skip_reason"], "unfollow_any_no_safe_candidate")
         self.assertEqual(summary["failure_reason"], "unfollow_any_no_safe_candidate")
 
+    def test_real_summary_preserves_partial_ui_coverage_contract(self) -> None:
+        summary = account_session._real_summary_from_unfollow_summary(
+            enabled=True,
+            executed=True,
+            exit_code=0,
+            unfollow_summary={
+                "status": "success_real_unfollow_multi_partial_exhausted",
+                "candidates_planned_count": 51,
+                "unfollow_actions_sent": 11,
+                "unfollow_actions_verified": 11,
+                "unfollow_results_persisted_count": 11,
+                "eligible_db_remaining": 40,
+                "ui_coverage_status": "partial",
+                "multi_action_stop_reason": "ui_coverage_budget_exhausted",
+                "resume_recommended": False,
+            },
+            real_max_actions_requested=120,
+            real_max_actions_effective=120,
+            real_hard_max=120,
+        )
+
+        self.assertEqual(summary["last_run_eligible_at_start"], 51)
+        self.assertEqual(summary["last_run_attempted"], 11)
+        self.assertEqual(summary["last_run_verified"], 11)
+        self.assertEqual(summary["last_run_remaining_eligible"], 40)
+        self.assertEqual(summary["last_run_coverage_status"], "partial")
+        self.assertEqual(summary["last_run_stop_reason"], "ui_coverage_budget_exhausted")
+        self.assertFalse(summary["unfollow_resume_recommended"])
+
     def test_outreach_addon_disabled_does_not_touch_outreach(self) -> None:
         original_flag = getattr(account_session.config, "ACCOUNT_SESSION_OUTREACH_ADDON_ENABLED", False)
         account_session.config.ACCOUNT_SESSION_OUTREACH_ADDON_ENABLED = False

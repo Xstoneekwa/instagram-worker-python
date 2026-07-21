@@ -2062,6 +2062,36 @@ def _real_summary_from_unfollow_summary(
         "unfollow_results_persisted_count": int(
             unfollow_summary.get("unfollow_results_persisted_count") or 0
         ),
+        "unfollow_effective_limit": int(real_max_actions_effective),
+        "last_run_eligible_at_start": int(
+            unfollow_summary.get("last_run_eligible_at_start")
+            or unfollow_summary.get("candidates_planned_count")
+            or 0
+        ),
+        "last_run_attempted": int(
+            unfollow_summary.get("last_run_attempted")
+            or unfollow_summary.get("unfollow_actions_sent")
+            or 0
+        ),
+        "last_run_verified": int(
+            unfollow_summary.get("last_run_verified")
+            or unfollow_summary.get("unfollow_actions_verified")
+            or 0
+        ),
+        "last_run_remaining_eligible": int(
+            unfollow_summary.get("last_run_remaining_eligible")
+            or unfollow_summary.get("eligible_db_remaining")
+            or 0
+        ),
+        "last_run_coverage_status": str(
+            unfollow_summary.get("ui_coverage_status") or "unknown"
+        ),
+        "last_run_stop_reason": str(
+            unfollow_summary.get("multi_action_stop_reason") or ""
+        ),
+        "unfollow_resume_recommended": bool(
+            unfollow_summary.get("resume_recommended")
+        ),
         "failure_reason": failure_reason,
         "unfollow_total_ms": float(unfollow_summary.get("total_ms") or 0.0),
         "skip_reason": str(skip_reason or ""),
@@ -3541,6 +3571,14 @@ def run_account_session(
         "phase_terminal_contract": phase_terminal_contract,
         "unfollow_actions_verified": int(follow_to_unfollow_real.get("unfollow_actions_verified") or 0),
         "unfollow_results_persisted_count": int(follow_to_unfollow_real.get("unfollow_results_persisted_count") or 0),
+        "unfollow_effective_limit": follow_to_unfollow_real.get("unfollow_effective_limit"),
+        "last_run_eligible_at_start": follow_to_unfollow_real.get("last_run_eligible_at_start"),
+        "last_run_attempted": follow_to_unfollow_real.get("last_run_attempted"),
+        "last_run_verified": follow_to_unfollow_real.get("last_run_verified"),
+        "last_run_remaining_eligible": follow_to_unfollow_real.get("last_run_remaining_eligible"),
+        "last_run_coverage_status": follow_to_unfollow_real.get("last_run_coverage_status"),
+        "last_run_stop_reason": follow_to_unfollow_real.get("last_run_stop_reason"),
+        "unfollow_resume_recommended": follow_to_unfollow_real.get("unfollow_resume_recommended"),
     }
     log(
         "info",

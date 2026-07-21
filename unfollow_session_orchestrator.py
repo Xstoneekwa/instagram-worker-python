@@ -43,6 +43,16 @@ from unfollow_profile_probe import (
     verify_unfollow_target_profile_strict,
 )
 from unfollow_settings import UNFOLLOW_MODE_ANY, load_unfollow_settings
+from unfollow_ui_coverage_policy import (
+    HISTORICAL_ACTION_P90_SECONDS,
+    HISTORICAL_ACTION_SAMPLE_COUNT,
+    HISTORICAL_ROWS_PER_VIEWPORT,
+    HISTORICAL_VIEWPORT_P90_SECONDS,
+    HISTORICAL_VIEWPORT_SAMPLE_COUNT,
+    SCHEDULED_SESSION_CLEANUP_RESERVE_SECONDS,
+    FollowingCoverageTracker,
+    derive_adaptive_coverage_budget,
+)
 
 _LAST_UNFOLLOW_SESSION_PROBE_SUMMARY: dict[str, Any] = {}
 
@@ -68,6 +78,19 @@ def _planned_username_set(plan: dict[str, Any]) -> set[str]:
         if key:
             out.add(key)
     return out
+
+
+def _scroll_budget_stop_reason(
+    planned_usernames: set[str],
+    completed_usernames: set[str],
+) -> tuple[str, int]:
+    remaining = len(planned_usernames - completed_usernames)
+    reason = (
+        "ui_coverage_budget_exhausted"
+        if remaining > 0
+        else "eligible_targets_exhausted"
+    )
+    return reason, remaining
 
 
 def _select_probe_target_row(
@@ -201,7 +224,16 @@ def _unfollow_time_budget(
     now: datetime | None = None,
 ) -> dict[str, Any]:
     deadline = _parse_runtime_deadline(business_action_deadline)
-    estimate = max(1, int(getattr(config, "UNFOLLOW_CONSERVATIVE_ACTION_SECONDS", 90)))
+    estimate = max(
+        1,
+        int(
+            getattr(
+                config,
+                "UNFOLLOW_CONSERVATIVE_ACTION_SECONDS",
+                HISTORICAL_ACTION_P90_SECONDS,
+            )
+        ),
+    )
     reserve = max(0, int(getattr(config, "UNFOLLOW_FINALIZATION_RESERVE_SECONDS", 30)))
     if deadline is None:
         return {
@@ -225,6 +257,73 @@ def _unfollow_time_budget(
 
 def _scroll_max_passes() -> int:
     return max(0, int(getattr(config, "UNFOLLOW_SESSION_SCROLL_MAX_PASSES", 10)))
+
+
+def _runtime_adaptive_coverage_budget(
+    *,
+    quota_remaining: int,
+    eligible_remaining: int,
+    business_action_deadline: str | None,
+    now: datetime | None = None,
+) -> Any:
+    deadline = _parse_runtime_deadline(business_action_deadline)
+    current = now or datetime.now(timezone.utc)
+    if deadline is not None:
+        # business_action_deadline is already session_end-T10. Reconstruct the
+        # scheduled remaining duration so the pure policy subtracts T10 once.
+        session_remaining_seconds = max(0.0, (deadline - current).total_seconds())
+        session_remaining_seconds += SCHEDULED_SESSION_CLEANUP_RESERVE_SECONDS
+    else:
+        action_slots = min(max(0, int(quota_remaining)), max(0, int(eligible_remaining)))
+        required_viewports = (
+            (max(0, int(eligible_remaining)) + HISTORICAL_ROWS_PER_VIEWPORT - 1)
+            // HISTORICAL_ROWS_PER_VIEWPORT
+        )
+        session_remaining_seconds = (
+            action_slots * HISTORICAL_ACTION_P90_SECONDS
+            + required_viewports * HISTORICAL_VIEWPORT_P90_SECONDS
+            + SCHEDULED_SESSION_CLEANUP_RESERVE_SECONDS
+        )
+    return derive_adaptive_coverage_budget(
+        quota_remaining=quota_remaining,
+        eligible_remaining=eligible_remaining,
+        session_remaining_seconds=session_remaining_seconds,
+    )
+
+
+_UNFOLLOW_UNSAFE_MARKER_TEXT = {
+    "challenge_required": "challenge_required",
+    "help us confirm": "identity_confirmation_required",
+    "verify your identity": "identity_confirmation_required",
+    "we restrict certain activity": "activity_restricted",
+    "try again later": "activity_restricted",
+    "your account has been compromised": "account_compromised",
+    "account suspended": "account_suspended",
+}
+
+
+def _detect_unfollow_unsafe_markers(d: u2.Device) -> list[str]:
+    try:
+        hierarchy = str(d.dump_hierarchy(compressed=False) or "").lower()
+    except Exception:
+        return []
+    return sorted(
+        {
+            marker
+            for text, marker in _UNFOLLOW_UNSAFE_MARKER_TEXT.items()
+            if text in hierarchy
+        }
+    )
+
+
+def _merge_unfollow_surface_unsafe_markers(
+    markers: list[str],
+    following_detection: dict[str, Any],
+) -> list[str]:
+    merged = set(markers)
+    if str(following_detection.get("failure_reason") or "") == "following_list_account_title_mismatch":
+        merged.add("active_account_mismatch")
+    return sorted(merged)
 
 
 def _scroll_v2_lite_enabled() -> bool:
@@ -311,6 +410,10 @@ def _base_session_summary(
         "unfollow_sort_mode_requested": str(getattr(settings, "sort_mode", "default") or "default"),
         "plan_reason": str(plan.get("plan_reason") or ""),
         "candidates_planned_count": int(plan.get("candidates_count") or 0),
+        "last_run_eligible_at_start": int(plan.get("candidates_count") or 0),
+        "source_rows_loaded": int(plan.get("source_rows_loaded") or 0),
+        "query_limit": int(plan.get("query_limit") or 0),
+        "pagination_used": bool(plan.get("pagination_used")),
         "following_surface_ok": False,
         "visible_rows_count": 0,
         "row_cta_counts": {},
@@ -336,6 +439,9 @@ def _base_session_summary(
         "scroll_passes_used": 0,
         "scroll_stop_reason": "",
         "multi_action_stop_reason": "",
+        "eligible_db_remaining": int(plan.get("candidates_count") or 0),
+        "ui_coverage_status": "not_started",
+        "resume_recommended": False,
         "probe_target_username": "",
         "probe_target_selection_reason": "",
         "real_target_username": "",
@@ -967,6 +1073,21 @@ def _run_real_unfollow_multi_loop(
     any_mode_selected_count = 0
     last_fields = dict(harvest_fields)
     any_mode_active = str(getattr(settings, "mode", "") or "") == UNFOLLOW_MODE_ANY
+    coverage_started_at = time.perf_counter()
+    adaptive_coverage_budget = _runtime_adaptive_coverage_budget(
+        quota_remaining=real_action_max,
+        eligible_remaining=len(planned_usernames),
+        business_action_deadline=business_action_deadline,
+    )
+    coverage_tracker = (
+        None
+        if any_mode_active
+        else FollowingCoverageTracker(
+            adaptive_coverage_budget,
+            set(planned_usernames),
+            real_action_max,
+        )
+    )
     totals: dict[str, Any] = {
         "visible_eligibility_total_db_queries": 0,
         "visible_eligibility_total_cache_hits": 0,
@@ -989,8 +1110,15 @@ def _run_real_unfollow_multi_loop(
         "recoverable_action_failure_reasons": {},
         "max_recoverable_action_failures": max_recoverable_action_failures,
         "session_continued_after_recoverable_failure": False,
+        "adaptive_ui_coverage_enabled": not any_mode_active,
+        "coverage_historical_action_sample_count": HISTORICAL_ACTION_SAMPLE_COUNT,
+        "coverage_historical_viewport_sample_count": HISTORICAL_VIEWPORT_SAMPLE_COUNT,
     }
-    max_scroll_passes = _scroll_max_passes()
+    max_scroll_passes = (
+        int(adaptive_coverage_budget.max_scroll_passes)
+        if coverage_tracker is not None
+        else _scroll_max_passes()
+    )
     stop_after_skipped_effective = _stop_after_skipped()
     max_minutes_effective = _max_minutes()
     exploration_started_at = time.perf_counter()
@@ -1012,6 +1140,47 @@ def _run_real_unfollow_multi_loop(
     unchanged_scroll_streak_max = 0
     scroll_surface_failures_count = 0
     scroll_v2_lite_fallback_count = 0
+
+    def coverage_elapsed_seconds() -> float:
+        return max(0.0, time.perf_counter() - coverage_started_at)
+
+    def refresh_coverage_summary_totals() -> None:
+        if coverage_tracker is None:
+            return
+        totals.update(coverage_tracker.summary())
+
+    def recover_following_viewport(*, trigger_reason: str) -> tuple[bool, str]:
+        if coverage_tracker is None:
+            return False, "ui_recovery_budget_exhausted"
+        if (
+            coverage_tracker.viewport_recoveries_used
+            >= coverage_tracker.budget.max_viewport_recoveries
+        ):
+            decision = coverage_tracker.mark_recovery(succeeded=False)
+            refresh_coverage_summary_totals()
+            return False, str(decision.stop_reason if decision else "ui_recovery_budget_exhausted")
+        returned = return_to_following_list_after_unfollow_action(
+            d,
+            account_username=uname,
+        )
+        recovery_method = "bounded_back"
+        recovery_ok = bool(returned.get("ok"))
+        if not recovery_ok:
+            recovery_ok, _open_meta = open_own_following_list_from_own_profile(d, uname)
+            recovery_method = "own_profile_following_reopen"
+        decision = coverage_tracker.mark_recovery(succeeded=recovery_ok)
+        refresh_coverage_summary_totals()
+        log(
+            "info",
+            "unfollow_viewport_recovery_completed",
+            trigger_reason=trigger_reason,
+            recovery_method=recovery_method,
+            recovery_ok=recovery_ok,
+            viewport_recoveries_used=coverage_tracker.viewport_recoveries_used,
+            max_viewport_recoveries=coverage_tracker.budget.max_viewport_recoveries,
+            stop_reason=str(decision.stop_reason if decision else ""),
+        )
+        return recovery_ok and decision is None, str(decision.stop_reason if decision else "")
 
     def exploration_fields(*, exploration_stop_reason: str = "") -> dict[str, Any]:
         skip_reason_counts_total = {
@@ -1174,6 +1343,7 @@ def _run_real_unfollow_multi_loop(
         exploration_summary = exploration_fields(exploration_stop_reason=exploration_stop)
         refresh_scroll_summary_totals()
         refresh_recoverable_action_summary_totals()
+        refresh_coverage_summary_totals()
         log(
             "info",
             event_name,
@@ -1191,6 +1361,7 @@ def _run_real_unfollow_multi_loop(
             scroll_passes_used=scroll_passes_used,
             **exploration_summary,
         )
+        remaining_planned_count = len(planned_usernames - completed_usernames)
         summary = {
             **base_summary,
             **last_fields,
@@ -1212,10 +1383,52 @@ def _run_real_unfollow_multi_loop(
             "scroll_passes_used": scroll_passes_used,
             "scroll_stop_reason": scroll_stop_reason,
             "multi_action_stop_reason": exploration_stop,
+            "last_run_attempted": sent,
+            "last_run_verified": verified,
+            "last_run_remaining_eligible": remaining_planned_count,
+            "eligible_db_remaining": remaining_planned_count,
+            "ui_coverage_status": (
+                "partial"
+                if remaining_planned_count > 0
+                else "complete"
+            ),
+            # Existing account-session policy treats an executed mandatory Unfollow
+            # phase as non-resumable; this flag reports that policy without claiming
+            # the DB candidate supply was exhausted.
+            "resume_recommended": False,
             "status": status,
             "failure_reason": failure_reason,
             "total_ms": round((time.perf_counter() - t0) * 1000.0, 2),
         }
+        log(
+            "info",
+            "unfollow_candidate_funnel",
+            account_id=aid,
+            run_id=run_id,
+            source_total=int(base_summary.get("source_rows_loaded") or 0),
+            eligible_total=int(base_summary.get("candidates_planned_count") or 0),
+            selected_total=sent,
+            attempted_total=sent,
+            verified_total=verified,
+            persisted_total=persisted,
+            remaining_eligible=remaining_planned_count,
+            query_limit=int(base_summary.get("query_limit") or 0),
+            pagination_used=bool(base_summary.get("pagination_used")),
+            skip_reason_counts=dict(exploration_summary.get("skip_reason_counts_total") or {}),
+            stop_reason=exploration_stop,
+        )
+        log(
+            "info",
+            "unfollow_run_reconciliation",
+            account_id=aid,
+            run_id=run_id,
+            worker_verified=verified,
+            persisted_actions=persisted,
+            summary_actions=int(summary.get("unfollow_results_persisted_count") or 0),
+            botapp_displayed_actions=None,
+            reconciliation_ok=(verified == persisted),
+            discrepancy_reason="" if verified == persisted else "verified_persisted_mismatch",
+        )
         _emit_summary(summary)
         return 0 if not status.startswith("failed_") else 1
 
@@ -1226,6 +1439,7 @@ def _run_real_unfollow_multi_loop(
         account_username=uname,
         real_action_max_per_run=real_action_max,
         scroll_max_passes=max_scroll_passes,
+        adaptive_coverage_budget=adaptive_coverage_budget.as_dict(),
     )
     log(
         "info",
@@ -1236,12 +1450,23 @@ def _run_real_unfollow_multi_loop(
 
     iteration_index = 0
     while verified < real_action_max:
+        if coverage_tracker is not None:
+            coverage_preflight = coverage_tracker.preflight_decision(
+                elapsed_seconds=coverage_elapsed_seconds()
+            )
+            if coverage_preflight is not None:
+                stop_reason = coverage_preflight.stop_reason
+                return emit_final("success_real_unfollow_multi_partial_exhausted")
         time_budget = _unfollow_time_budget(
             real_action_max - verified,
             business_action_deadline=business_action_deadline,
         )
         if int(time_budget["time_bounded_action_cap"]) <= 0:
-            stop_reason = "unfollow_skipped_insufficient_time"
+            stop_reason = (
+                "session_time_budget_exhausted"
+                if coverage_tracker is not None
+                else "unfollow_skipped_insufficient_time"
+            )
             last_fields = {**last_fields, **time_budget}
             return emit_final("success_unfollow_skipped_insufficient_time")
         iteration_index += 1
@@ -1287,6 +1512,60 @@ def _run_real_unfollow_multi_loop(
                 )
             else:
                 visible_usernames = [str(row.get("username") or "") for row in rows]
+                following_det = detect_own_following_list_screen(
+                    d,
+                    account_username=uname,
+                )
+                unsafe_markers = _merge_unfollow_surface_unsafe_markers(
+                    _detect_unfollow_unsafe_markers(d),
+                    following_det,
+                )
+                coverage_decision = coverage_tracker.observe_viewport(
+                    visible_usernames,
+                    elapsed_seconds=coverage_elapsed_seconds(),
+                    following_confirmed=bool(following_det.get("is_following_list")),
+                    unsafe_marker=bool(unsafe_markers),
+                    end_of_list=bool(harvest_meta.get("following_list_end_detected")),
+                    surface_signature=str(
+                        following_det.get("detected_reason")
+                        or following_det.get("failure_reason")
+                        or "following_unknown"
+                    ),
+                )
+                log(
+                    "info",
+                    "unfollow_ui_coverage_viewport_decision",
+                    decision=coverage_decision.action,
+                    stop_reason=coverage_decision.stop_reason,
+                    viewport_fingerprint=coverage_decision.fingerprint,
+                    new_usernames_count=coverage_decision.new_usernames_count,
+                    following_confirmed=bool(following_det.get("is_following_list")),
+                    following_failure_reason=str(following_det.get("failure_reason") or ""),
+                    unsafe_markers=unsafe_markers,
+                    **coverage_tracker.summary(),
+                )
+                if coverage_decision.action == "recover":
+                    recovered, recovery_stop = recover_following_viewport(
+                        trigger_reason=str(
+                            following_det.get("failure_reason") or "following_state_unconfirmed"
+                        )
+                    )
+                    if not recovered:
+                        stop_reason = recovery_stop or "ui_recovery_budget_exhausted"
+                        return emit_final("failed_unfollow_multi_action", stop_reason)
+                    rows, harvest_meta = harvest_visible_following_rows_for_unfollow(
+                        d,
+                        account_username=uname,
+                    )
+                    continue
+                if coverage_decision.action == "stop":
+                    stop_reason = coverage_decision.stop_reason
+                    status = (
+                        "failed_unfollow_multi_action"
+                        if stop_reason == "unsafe_marker_detected"
+                        else "success_real_unfollow_multi_partial_exhausted"
+                    )
+                    return emit_final(status, stop_reason if status.startswith("failed_") else "")
                 visible_eval = _evaluate_visible_unfollow_with_session_cache(
                     aid,
                     visible_usernames,
@@ -1299,6 +1578,9 @@ def _run_real_unfollow_multi_loop(
                     visible_eval,
                 )
                 visible_candidates = _visible_candidates_by_username(visible_eval)
+                for visible_key in list(visible_candidates):
+                    if visible_key not in planned_usernames:
+                        visible_candidates.pop(visible_key, None)
                 for done in completed_usernames:
                     visible_candidates.pop(done, None)
                 for failed_key in failed_usernames_this_run:
@@ -1378,6 +1660,8 @@ def _run_real_unfollow_multi_loop(
                 return emit_final(status)
 
             if (
+                coverage_tracker is None
+                and
                 stop_after_skipped_effective > 0
                 and unique_skipped_usernames_count() >= stop_after_skipped_effective
             ):
@@ -1396,7 +1680,7 @@ def _run_real_unfollow_multi_loop(
                 )
                 return emit_final(status)
 
-            if max_minutes_reached():
+            if coverage_tracker is None and max_minutes_reached():
                 scroll_stop_reason = "max_minutes_reached"
                 stop_reason = "max_minutes_reached"
                 log(
@@ -1414,7 +1698,21 @@ def _run_real_unfollow_multi_loop(
 
             if scroll_passes_used >= max_scroll_passes:
                 scroll_stop_reason = "scroll_budget_exhausted"
-                stop_reason = "eligible_targets_exhausted"
+                if coverage_tracker is not None:
+                    coverage_stop = coverage_tracker.scroll_budget_decision()
+                    stop_reason = str(
+                        coverage_stop.stop_reason
+                        if coverage_stop is not None
+                        else "ui_coverage_budget_exhausted"
+                    )
+                    remaining_planned_count = len(
+                        coverage_tracker.remaining_planned_usernames
+                    )
+                else:
+                    stop_reason, remaining_planned_count = _scroll_budget_stop_reason(
+                        planned_usernames,
+                        completed_usernames,
+                    )
                 log(
                     "info",
                     "unfollow_multi_action_loop_completed",
@@ -1422,6 +1720,7 @@ def _run_real_unfollow_multi_loop(
                     scroll_stop_reason=scroll_stop_reason,
                     unfollow_actions_verified_so_far=verified,
                     real_action_max_per_run=real_action_max,
+                    remaining_planned_count=remaining_planned_count,
                 )
                 status = (
                     "success_real_unfollow_multi_partial_exhausted"
@@ -1458,6 +1757,19 @@ def _run_real_unfollow_multi_loop(
                     stop_reason=stop_reason,
                     failure_reason=scroll_stop_reason,
                 )
+                if coverage_tracker is not None:
+                    recovered, recovery_stop = recover_following_viewport(
+                        trigger_reason=scroll_stop_reason
+                    )
+                    if recovered:
+                        rows, harvest_meta = harvest_visible_following_rows_for_unfollow(
+                            d,
+                            account_username=uname,
+                        )
+                        continue
+                    stop_reason = recovery_stop or "ui_recovery_budget_exhausted"
+                    return emit_final("failed_unfollow_multi_action", stop_reason)
+                stop_reason = "scroll_surface_lost"
                 return emit_final("failed_unfollow_multi_action", scroll_stop_reason)
             scroll_passes_used += 1
             rows, harvest_meta = harvest_visible_following_rows_for_unfollow(d, account_username=uname)
@@ -1474,6 +1786,11 @@ def _run_real_unfollow_multi_loop(
                 unchanged_scroll_streak += 1
             else:
                 unchanged_scroll_streak = 0
+            if coverage_tracker is not None:
+                coverage_tracker.mark_scroll(
+                    moved=bool(after_scroll_keys and after_scroll_keys != before_scroll_keys)
+                )
+                refresh_coverage_summary_totals()
             unchanged_scroll_streak_max = max(unchanged_scroll_streak_max, unchanged_scroll_streak)
             scroll_new_usernames_total += new_after_count
             scroll_overlap_ratio_total += overlap_ratio
@@ -1534,7 +1851,7 @@ def _run_real_unfollow_multi_loop(
                 after_scroll_usernames=after_scroll_keys[:20],
                 **progress_fields,
             )
-            if bool(harvest_meta.get("following_list_end_detected")) and (
+            if coverage_tracker is None and bool(harvest_meta.get("following_list_end_detected")) and (
                 not after_scroll_keys or after_scroll_keys == before_scroll_keys
             ):
                 scroll_stop_reason = "following_list_end_reached"
@@ -1580,12 +1897,17 @@ def _run_real_unfollow_multi_loop(
                 else 1
             )
             if (
+                coverage_tracker is None
+                and
                 after_scroll_keys
                 and after_scroll_keys == before_scroll_keys
                 and unchanged_scroll_streak >= unchanged_stop_threshold
             ):
                 scroll_stop_reason = "end_of_list_or_no_new_rows_detected"
-                stop_reason = "eligible_targets_exhausted"
+                stop_reason, remaining_planned_count = _scroll_budget_stop_reason(
+                    planned_usernames,
+                    completed_usernames,
+                )
                 log(
                     "info",
                     "unfollow_multi_action_loop_completed",
@@ -1594,6 +1916,7 @@ def _run_real_unfollow_multi_loop(
                     unfollow_actions_verified_so_far=verified,
                     real_action_max_per_run=real_action_max,
                     scroll_passes_used=scroll_passes_used,
+                    remaining_planned_count=remaining_planned_count,
                 )
                 status = (
                     "success_real_unfollow_multi_partial_exhausted"
@@ -1637,6 +1960,40 @@ def _run_real_unfollow_multi_loop(
             row_cta_class=str(target_row.get("row_cta_class") or ""),
             cta_text=str(target_row.get("cta_text") or "")[:80],
         )
+
+        if coverage_tracker is not None:
+            current_surface = detect_own_following_list_screen(
+                d,
+                account_username=uname,
+            )
+            unsafe_markers = _merge_unfollow_surface_unsafe_markers(
+                _detect_unfollow_unsafe_markers(d),
+                current_surface,
+            )
+            if unsafe_markers:
+                stop_reason = "unsafe_marker_detected"
+                log(
+                    "error",
+                    "unfollow_action_blocked_unsafe_marker",
+                    unsafe_markers=unsafe_markers,
+                    viewport_fingerprint=coverage_tracker.terminal_fingerprint,
+                )
+                return emit_final("failed_unfollow_multi_action", stop_reason)
+            if not bool(current_surface.get("is_following_list")):
+                recovered, recovery_stop = recover_following_viewport(
+                    trigger_reason=str(
+                        current_surface.get("failure_reason")
+                        or "following_state_unconfirmed_before_action"
+                    )
+                )
+                if not recovered:
+                    stop_reason = recovery_stop or "ui_recovery_budget_exhausted"
+                    return emit_final("failed_unfollow_multi_action", stop_reason)
+                rows, harvest_meta = harvest_visible_following_rows_for_unfollow(
+                    d,
+                    account_username=uname,
+                )
+                continue
 
         target_fields = {
             **last_fields,
@@ -1901,6 +2258,9 @@ def _run_real_unfollow_multi_loop(
 
         verified += 1
         completed_usernames.add(target_key)
+        if coverage_tracker is not None:
+            coverage_tracker.mark_action_verified(target_key)
+            refresh_coverage_summary_totals()
         visible_eligibility_row_cache[target_key] = None
         last_fields = {
             **target_fields,

@@ -280,6 +280,9 @@ def plan_unfollow_targets(
         "candidates_count": len(candidates),
         "skipped_counts": skipped,
         "session_limit_applied": session_cap,
+        "source_rows_loaded": len(rows),
+        "query_limit": fetch_cap,
+        "pagination_used": False,
     }
     log(
         "info",
@@ -290,6 +293,9 @@ def plan_unfollow_targets(
         candidates_count=out["candidates_count"],
         skipped_counts=skipped,
         session_limit_applied=session_cap,
+        source_rows_loaded=out["source_rows_loaded"],
+        query_limit=fetch_cap,
+        pagination_used=False,
     )
     return out
 

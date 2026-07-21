@@ -3019,7 +3019,19 @@ def parse_utc_iso_timestamp(raw: Any) -> datetime | None:
     if not raw:
         return None
     try:
-        ts = str(raw).replace("Z", "+00:00")
+        ts = str(raw).strip().replace("Z", "+00:00")
+        # macOS' system Python 3.9 only accepts selected fractional-second
+        # widths in datetime.fromisoformat(). Postgres/Supabase legitimately
+        # emits variable precision (for example 5 digits), so normalize it to
+        # microseconds before parsing instead of classifying a real timestamp
+        # as missing.
+        fractional = re.fullmatch(
+            r"(?P<prefix>.*\.)(?P<fraction>\d+)(?P<offset>[+-]\d{2}:\d{2})",
+            ts,
+        )
+        if fractional:
+            digits = (fractional.group("fraction") + "000000")[:6]
+            ts = f'{fractional.group("prefix")}{digits}{fractional.group("offset")}'
         dt = datetime.fromisoformat(ts)
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
