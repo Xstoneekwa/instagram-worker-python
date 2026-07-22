@@ -277,10 +277,13 @@ def extract_login_screen_signals_from_hierarchy(
         and has_join_instagram_get_started
         and has_join_instagram_existing_profile
     )
-    has_username_field = "username, email or mobile number" in text or (
+    editable_fields = _extract_editable_field_signals(raw_hierarchy)
+    has_username_field = bool(editable_fields["username_candidates"]) or "username, email or mobile number" in text or (
         "username" in text and ("email" in text or "mobile" in text)
     )
-    has_password_field = "password" in text
+    # Do not treat the "Forgot password?" link as proof of a credential input.
+    # A secret field must be backed by an editable node signal.
+    has_password_field = bool(editable_fields["password_candidates"])
     has_login_button = "log in" in text
     has_ok_button = _has_phrase(text, "ok")
     has_password_required_dialog = _contains_any(text, PASSWORD_REQUIRED_DIALOG_PATTERNS) and has_ok_button
@@ -361,6 +364,8 @@ def extract_login_screen_signals_from_hierarchy(
         screen_type = "continue_password_only"
     elif has_username_field and has_password_field and has_login_button:
         screen_type = "login_form_empty"
+    elif has_username_field and has_login_button and not has_password_field:
+        screen_type = "login_form_username_step"
     else:
         screen_type = "unknown"
 
@@ -384,6 +389,8 @@ def extract_login_screen_signals_from_hierarchy(
         "prefilled_username": prefilled_username,
         "has_password_field": has_password_field,
         "password_field_present": has_password_field,
+        "password_field_candidate_count": len(editable_fields["password_candidates"]),
+        "password_field_proof": editable_fields["password_proof"],
         "has_login_button": has_login_button,
         "login_button_present": has_login_button,
         "has_ok_button": has_ok_button,
@@ -461,6 +468,7 @@ def extract_login_screen_signals_from_hierarchy(
         and has_password_field
         and has_login_button,
         "ready_for_password_submit": screen_type == "continue_password_only" and has_password_field and has_login_button,
+        "ready_for_username_step": screen_type == "login_form_username_step" and has_username_field and has_login_button,
         "transition_loading": transition_loading,
     }
 
@@ -733,6 +741,96 @@ def _extract_edit_text_values(hierarchy_xml: str) -> list[str]:
         if value:
             values.append(value)
     return values
+
+
+def _extract_editable_field_signals(hierarchy_xml: str) -> dict[str, Any]:
+    username_candidates: list[dict[str, str]] = []
+    password_candidates: list[dict[str, str]] = []
+    password_proof = ""
+    for match in re.finditer(r"<node\b[^>]*>", str(hierarchy_xml or "")):
+        node = match.group(0)
+        attrs = {
+            key: unescape(value).strip()
+            for key, value in re.findall(r'([\w:-]+)="([^"]*)"', node)
+        }
+        normalized = {
+            str(key).lower(): str(value).strip().lower()
+            for key, value in attrs.items()
+        }
+        resource = normalized.get("resource-id") or normalized.get("resourcename") or ""
+        description = normalized.get("content-desc") or normalized.get("contentdescription") or ""
+        visible_labels = {
+            normalized.get("text", ""),
+            normalized.get("hint", ""),
+            description,
+        }
+        localized_password_label = bool(
+            visible_labels & {"password", "mot de passe"}
+        )
+        is_editable = "EditText" in node or normalized.get("editable") == "true"
+        if not is_editable:
+            if localized_password_label:
+                password_candidates.append(attrs)
+                if not password_proof:
+                    password_proof = "localized_accessibility_label"
+            continue
+        label = " ".join(
+            value
+            for value in (
+                normalized.get("text", ""),
+                normalized.get("hint", ""),
+                description,
+                resource,
+                normalized.get("input-type", ""),
+                normalized.get("inputtype", ""),
+            )
+            if value
+        )
+        password_attr = normalized.get("password") == "true"
+        input_type_password = "password" in normalized.get("input-type", "") or "password" in normalized.get("inputtype", "")
+        resource_password = "password" in resource or "passcode" in resource
+        label_password = localized_password_label
+        masked_value = _looks_like_masked_editable_value(normalized.get("text", ""))
+        if password_attr or input_type_password or resource_password or label_password or masked_value:
+            password_candidates.append(attrs)
+            if not password_proof:
+                password_proof = (
+                    "android_password_property"
+                    if password_attr
+                    else "android_input_type"
+                    if input_type_password
+                    else "resource_id"
+                    if resource_password
+                    else "localized_accessibility_label"
+                    if label_password
+                    else "masked_editable_value"
+                )
+            continue
+        if (
+            "username" in label
+            or "user_name" in resource
+            or "login" in resource
+            or "email" in label
+            or "mobile" in label
+            or "nom d'utilisateur" in label
+            or "nom d’utilisateur" in label
+        ):
+            username_candidates.append(attrs)
+            continue
+        # On username-only screens Instagram can expose a single unlabeled
+        # EditText. It is safe to treat it as the username field only when no
+        # credential-field proof exists on that node.
+        username_candidates.append(attrs)
+    return {
+        "username_candidates": username_candidates,
+        "password_candidates": password_candidates,
+        "password_proof": password_proof,
+    }
+
+
+def _looks_like_masked_editable_value(value: str) -> bool:
+    text = str(value or "").strip()
+    return bool(text and re.fullmatch(r"[\u2022\u25cf\u25e6\u2219*]+", text))
 
 
 def _extract_prefilled_username(values: list[str]) -> str:

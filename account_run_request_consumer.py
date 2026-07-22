@@ -27,6 +27,7 @@ from account_run_control import (
     claim_next_account_run_request,
     complete_account_run_request,
     get_account_run_request,
+    finalize_auto_login_failure,
     insert_manual_run_audit,
     link_account_run_request_run,
     mark_account_run_request_starting,
@@ -34,8 +35,8 @@ from account_run_control import (
     reconcile_linked_ig_run_terminal,
     reclaim_stale_account_run_requests,
 )
+from auto_login_failure_contract import normalize_auto_login_failure
 from assignment_dispatch_resolver import resolve_account_assignment_runtime_context
-from account_commercial_policy import evaluate_queued_run_commercial_policy
 from account_commercial_policy import evaluate_queued_run_commercial_policy, sensitive_log_fields
 from auto_restart_dispatcher_tick import run_auto_restart_dispatcher_tick, should_run_auto_restart_tick
 from auto_restart_device_lock import acquire_device_lock, release_device_lock, release_device_lock_for_request, renew_device_lock, transfer_device_lock
@@ -809,6 +810,75 @@ def _safe_complete_account_run_request(
     )
 
 
+def _terminalize_auto_login_failure(
+    *,
+    cfg: DispatcherConfig,
+    request_id: str,
+    account_id: str,
+    run_id: str | None,
+    internal_reason: str,
+    phase: str | None,
+    exit_code: int,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Persist a terminal Auto Login state before incident/notification work.
+
+    The only persistence path is one PostgreSQL transaction. The call is
+    retried once because the RPC is idempotent for an already-failed request;
+    no split request/run fallback is allowed.
+    """
+    contract = normalize_auto_login_failure(
+        internal_reason,
+        phase=phase,
+        correction_deployed=True,
+    )
+    safe_summary = {
+        "domain": "auto_login",
+        "reason_code": contract.persisted_error_code,
+        "phase": contract.phase,
+        "retryable": contract.retryable,
+        "severity": contract.severity,
+        "operator_message": contract.operator_message,
+        "recommended_action": contract.recommended_action,
+        "client_safe_message": contract.client_safe_message,
+        "request_id": request_id,
+        "run_id": run_id,
+        "account_id": account_id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "operator_action_required": True,
+    }
+    if not run_id:
+        raise RuntimeError("auto_login_terminalization_run_id_missing")
+    last_error: Exception | None = None
+    for attempt in range(2):
+        try:
+            terminal = finalize_auto_login_failure(
+                request_id=request_id,
+                worker_id=cfg.worker_id,
+                account_id=account_id,
+                run_id=run_id,
+                persisted_error_code=contract.persisted_error_code,
+                error_message_safe="Auto Login could not be completed. Review the correlated incident.",
+                internal_worker_reason=contract.internal_worker_reason,
+                phase=contract.phase,
+                exit_code=exit_code,
+            )
+            return terminal, safe_summary
+        except Exception as exc:
+            last_error = exc
+            log(
+                "warning",
+                "auto_login_atomic_terminalization_retry_required",
+                request_id=request_id,
+                run_id=run_id,
+                error_code=contract.persisted_error_code,
+                attempt=attempt + 1,
+                error_type=type(exc).__name__,
+            )
+            if attempt == 0:
+                time.sleep(0.2)
+    raise RuntimeError("auto_login_atomic_terminalization_failed") from last_error
+
+
 def _audit(
     *,
     account_id: str,
@@ -1082,20 +1152,33 @@ def _finalize_manual_run_after_subprocess(
     canceled = bool(latest.get("cancel_requested_at")) or str(latest.get("status") or "").strip().lower() == "canceled"
 
     if timed_out:
-        _safe_complete_account_run_request(
-            request_id,
-            cfg.worker_id,
-            "failed",
-            error_code="subprocess_timeout",
-            error_message_safe="Worker subprocess exceeded dispatcher timeout.",
-        )
-        _reconcile_linked_run(
-            account_id=account_id,
-            run_id=run_id,
-            terminal_status="failed",
-            request_id=request_id,
-            exit_code=exit_code,
-        )
+        if _is_login_run_type(run_type):
+            _terminal_result, timeout_summary = _terminalize_auto_login_failure(
+                cfg=cfg,
+                request_id=request_id,
+                account_id=account_id,
+                run_id=run_id,
+                internal_reason="subprocess_timeout",
+                phase="cleanup",
+                exit_code=exit_code,
+            )
+            timeout_summary["run_type"] = run_type
+        else:
+            timeout_summary = {}
+            _safe_complete_account_run_request(
+                request_id,
+                cfg.worker_id,
+                "failed",
+                error_code="subprocess_timeout",
+                error_message_safe="Worker subprocess exceeded dispatcher timeout.",
+            )
+            _reconcile_linked_run(
+                account_id=account_id,
+                run_id=run_id,
+                terminal_status="failed",
+                request_id=request_id,
+                exit_code=exit_code,
+            )
         _audit(
             account_id=account_id,
             action_type="manual_run_failed",
@@ -1112,14 +1195,7 @@ def _finalize_manual_run_after_subprocess(
             exit_code=exit_code,
             timed_out=True,
             canceled=canceled,
-            worker_summary={
-                "domain": "auto_login",
-                "run_type": run_type,
-                "phase": "cleanup",
-                "reason_code": "subprocess_timeout",
-            }
-            if _is_login_run_type(run_type)
-            else None,
+            worker_summary=timeout_summary or None,
             request_snapshot=request_snapshot,
         )
         return
@@ -1311,51 +1387,44 @@ def _finalize_manual_run_after_subprocess(
 
     structured_summary = dict(summary or {})
     is_auto_login = _is_login_run_type(run_type)
-    structured_reason = str(
+    internal_reason = str(
         structured_summary.get("reason_code")
         or structured_summary.get("failure_reason")
         or structured_summary.get("reason")
         or ""
     ).strip()
     if is_auto_login:
-        structured_reason = structured_reason or "unclassified_auto_login_failure"
+        terminal_result, structured_summary = _terminalize_auto_login_failure(
+            cfg=cfg,
+            request_id=request_id,
+            account_id=account_id,
+            run_id=run_id,
+            internal_reason=internal_reason or "unclassified_auto_login_failure",
+            phase=str(summary.get("phase") or "").strip() or None,
+            exit_code=exit_code,
+        )
         structured_summary.update(
             {
-                "domain": "auto_login",
                 "run_type": run_type,
-                "reason_code": structured_reason,
-                "request_id": request_id,
-                "run_id": run_id,
-                "account_id": account_id,
                 "device_id": str((request_snapshot or {}).get("device_id") or "").strip() or None,
                 "app_instance_id": str((request_snapshot or {}).get("app_instance_id") or "").strip() or None,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "operator_action_required": True,
-                "client_safe_message": (
-                    "La connexion Instagram n’a pas pu être finalisée. "
-                    "Notre équipe technique a été informée."
-                ),
             }
         )
-    request_error_code = structured_reason if is_auto_login else "worker_exit_nonzero"
-    _safe_complete_account_run_request(
-        request_id,
-        cfg.worker_id,
-        "failed",
-        error_code=request_error_code,
-        error_message_safe=(
-            "Auto Login could not be completed. Review the correlated incident."
-            if is_auto_login
-            else f"Worker subprocess exited with code {exit_code}."
-        ),
-    )
-    _reconcile_linked_run(
-        account_id=account_id,
-        run_id=run_id,
-        terminal_status="failed",
-        request_id=request_id,
-        exit_code=exit_code,
-    )
+    else:
+        terminal_result = _safe_complete_account_run_request(
+            request_id,
+            cfg.worker_id,
+            "failed",
+            error_code="worker_exit_nonzero",
+            error_message_safe=f"Worker subprocess exited with code {exit_code}.",
+        ) or {}
+        _reconcile_linked_run(
+            account_id=account_id,
+            run_id=run_id,
+            terminal_status="failed",
+            request_id=request_id,
+            exit_code=exit_code,
+        )
     _audit(
         account_id=account_id,
         action_type="manual_run_failed",
@@ -1365,7 +1434,13 @@ def _finalize_manual_run_after_subprocess(
         payload={
             "request_id": request_id,
             "exit_code": exit_code,
-            **({"login_provisioner_summary": structured_summary} if structured_summary else {}),
+            "terminalization": {
+                "request_status": terminal_result.get("request_status"),
+                "run_status": terminal_result.get("run_status"),
+                "persisted_error_code": terminal_result.get("persisted_error_code"),
+                "contract": terminal_result.get("reason"),
+            },
+            **({"login_provisioner_summary": structured_summary} if is_auto_login else {}),
         },
     )
     _publish_run_failure_incident(

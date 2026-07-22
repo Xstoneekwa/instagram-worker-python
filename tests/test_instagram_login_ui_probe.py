@@ -535,8 +535,8 @@ class InstagramLoginUiProbeTest(unittest.TestCase):
 
     def test_extracts_login_form_empty_signals(self) -> None:
         xml = (
-            '<node text="Username, email or mobile number" />'
-            '<node text="Password" />'
+            '<node class="android.widget.EditText" text="Username, email or mobile number" editable="true" />'
+            '<node class="android.widget.EditText" text="Password" password="true" editable="true" />'
             '<node text="Log in" />'
             '<node text="Forgot password?" />'
             '<node text="Create new account" />'
@@ -561,8 +561,8 @@ class InstagramLoginUiProbeTest(unittest.TestCase):
     def test_login_form_empty_with_secondary_signals_stays_login_form(self) -> None:
         xml = (
             '<node text="English (US)" />'
-            '<node text="Username, email or mobile number" />'
-            '<node text="Password" />'
+            '<node class="android.widget.EditText" text="Username, email or mobile number" editable="true" />'
+            '<node class="android.widget.EditText" text="Password" password="true" editable="true" />'
             '<node text="Log in" />'
             '<node text="Forgot password?" />'
             '<node text="Create new account" />'
@@ -641,7 +641,7 @@ class InstagramLoginUiProbeTest(unittest.TestCase):
     def test_extracts_continue_password_only_signals(self) -> None:
         xml = (
             '<node text="random_expected" />'
-            '<node text="Password" />'
+            '<node class="android.widget.EditText" text="Password" password="true" editable="true" />'
             '<node text="Log in" />'
             '<node text="Forgot password?" />'
         )
@@ -661,7 +661,7 @@ class InstagramLoginUiProbeTest(unittest.TestCase):
     def test_continue_password_only_tolerates_password_manager_overlay(self) -> None:
         xml = (
             '<node text="random_expected" />'
-            '<node text="Password" />'
+            '<node class="android.widget.EditText" text="Password" password="true" editable="true" />'
             '<node text="Suggest strong password" />'
             '<node text="And save to your Google account" />'
             '<node text="Log in" />'
@@ -678,7 +678,7 @@ class InstagramLoginUiProbeTest(unittest.TestCase):
     def test_continue_password_only_tolerates_autofill_overlay_with_login_accessible(self) -> None:
         xml = (
             '<node text="random_expected" />'
-            '<node text="Password" />'
+            '<node class="android.widget.EditText" text="Password" password="true" editable="true" />'
             '<node text="Autofill" />'
             '<node text="Password manager" />'
             '<node text="Log in" />'
@@ -690,6 +690,46 @@ class InstagramLoginUiProbeTest(unittest.TestCase):
         self.assertTrue(signals["overlay_present"])
         self.assertEqual(signals["overlay_type"], "password_manager_or_autofill")
         self.assertTrue(signals["ready_for_password_submit"])
+
+    def test_forgot_password_link_does_not_prove_secret_input(self) -> None:
+        xml = (
+            '<node class="android.widget.EditText" text="Username, email or mobile number" editable="true" />'
+            '<node text="Forgot password?" clickable="true" />'
+            '<node text="Log in" clickable="true" />'
+        )
+
+        signals = extract_login_screen_signals_from_hierarchy(xml)
+
+        self.assertEqual(signals["screen_type"], "login_form_username_step")
+        self.assertTrue(signals["has_username_field"])
+        self.assertFalse(signals["has_password_field"])
+        self.assertEqual(signals["password_field_candidate_count"], 0)
+        self.assertTrue(signals["ready_for_username_step"])
+
+    def test_password_resource_id_proves_secret_input_without_visible_label(self) -> None:
+        xml = (
+            '<node class="android.widget.EditText" resource-id="com.instagram.android:id/login_username" editable="true" />'
+            '<node class="android.widget.EditText" resource-id="com.instagram.android:id/login_password" editable="true" />'
+            '<node text="Log in" clickable="true" />'
+        )
+
+        signals = extract_login_screen_signals_from_hierarchy(xml)
+
+        self.assertEqual(signals["screen_type"], "login_form_empty")
+        self.assertTrue(signals["has_password_field"])
+        self.assertEqual(signals["password_field_proof"], "resource_id")
+
+    def test_localized_password_property_proves_secret_input(self) -> None:
+        xml = (
+            '<node class="android.widget.EditText" text="Nom d’utilisateur" editable="true" />'
+            '<node class="android.widget.EditText" text="Mot de passe" password="true" editable="true" />'
+            '<node text="Log in" clickable="true" />'
+        )
+
+        signals = extract_login_screen_signals_from_hierarchy(xml)
+
+        self.assertEqual(signals["screen_type"], "login_form_empty")
+        self.assertEqual(signals["password_field_proof"], "android_password_property")
 
     def test_loading_transition_is_unknown_with_transition_signal(self) -> None:
         signals = extract_login_screen_signals_from_hierarchy('<node text="Loading..." />')

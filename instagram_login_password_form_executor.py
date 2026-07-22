@@ -31,6 +31,7 @@ from instagram_login_ui_probe import extract_login_screen_signals_from_hierarchy
 
 
 ACTION_LOGIN_FORM_SUBMIT = "login_form_submit"
+ACTION_LOGIN_USERNAME_STEP_SUBMIT = "login_username_step_submit"
 NO_ACTION = "no_action"
 MAX_POST_SUBMIT_WAIT_MS = 3000
 MAX_PASSWORD_REQUIRED_RETRY = 1
@@ -86,6 +87,156 @@ class LoginPasswordExecutionResult:
     timings: dict[str, int] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
     safe_metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class LoginUsernameStepExecutionResult:
+    ok: bool
+    executed: bool
+    reason: str
+    failure_reason: str | None = None
+    post_action_signals: dict[str, Any] = field(default_factory=dict)
+    observations: tuple[str, ...] = ()
+    safe_metadata: dict[str, Any] = field(default_factory=dict)
+
+
+def advance_login_username_step(
+    d: Any,
+    *,
+    expected_username: str,
+    prevalidated_signals: dict | None,
+    max_observations: int = 4,
+    observation_interval_ms: int = 500,
+    sleeper: Sleeper | None = None,
+) -> LoginUsernameStepExecutionResult:
+    """Advance a proven username-only login step without reading a secret."""
+    sleeper = sleeper or time.sleep
+    signals = dict(prevalidated_signals or {})
+    if (
+        signals.get("screen_type") != "login_form_username_step"
+        or signals.get("has_username_field") is not True
+        or signals.get("has_login_button") is not True
+        or signals.get("has_password_field") is True
+    ):
+        return LoginUsernameStepExecutionResult(
+            ok=False,
+            executed=False,
+            reason="username_step_not_validated",
+            failure_reason="username_step_not_validated",
+        )
+
+    username = str(expected_username or "").strip()
+    if not username:
+        return LoginUsernameStepExecutionResult(
+            ok=False,
+            executed=False,
+            reason="expected_username_missing",
+            failure_reason="expected_username_missing",
+        )
+
+    username_target = _find_username_target(
+        d,
+        prefilled_username=str(signals.get("prefilled_username") or ""),
+    )
+    if username_target.get("failure_reason"):
+        reason = str(username_target["failure_reason"])
+        return LoginUsernameStepExecutionResult(False, False, reason, reason)
+    submit_target = _find_unique_target(
+        d,
+        (
+            {"text": "Log in"},
+            {"description": "Log in"},
+            {"text": "Continue"},
+            {"description": "Continue"},
+            {"text": "Se connecter"},
+            {"description": "Se connecter"},
+            {"text": "Continuer"},
+            {"description": "Continuer"},
+        ),
+        missing_reason="login_button_not_found",
+    )
+    if submit_target.get("failure_reason"):
+        reason = str(submit_target["failure_reason"])
+        return LoginUsernameStepExecutionResult(False, False, reason, reason)
+
+    warnings: list[str] = []
+    username_result = _focus_clear_set_and_confirm_username(
+        d,
+        username_target["target"],
+        username,
+        prefilled_username_mode=bool(signals.get("prefilled_username")),
+        prefilled_username=str(signals.get("prefilled_username") or ""),
+        sleeper=sleeper,
+        warnings=warnings,
+    )
+    if username_result.get("username_input_confirmed") == "false":
+        reason = str(username_result.get("username_input_result") or "username_input_failed")
+        return LoginUsernameStepExecutionResult(False, False, reason, reason)
+
+    try:
+        _click_target(submit_target["target"])
+    except Exception:
+        return LoginUsernameStepExecutionResult(
+            ok=False,
+            executed=False,
+            reason="username_step_submit_failed",
+            failure_reason="username_step_submit_failed",
+        )
+
+    observations: list[str] = []
+    latest: dict[str, Any] = {}
+    bounded_observations = _clamp_count(max_observations, 6)
+    bounded_interval_ms = _clamp_ms(observation_interval_ms, 1500)
+    for index in range(bounded_observations):
+        if bounded_interval_ms > 0:
+            sleeper(bounded_interval_ms / 1000.0)
+        try:
+            latest = extract_login_screen_signals_from_hierarchy(
+                _dump_hierarchy_once(d),
+                expected_username=username,
+            )
+        except Exception:
+            latest = {"screen_type": "unknown"}
+        screen_type = str(latest.get("screen_type") or "unknown")
+        observations.append(screen_type)
+        if screen_type in {
+            "continue_password_only",
+            "login_form_empty",
+            "login_form_prefilled_username",
+            "email_code_challenge",
+            "active_account_home",
+            "active_account_profile",
+        }:
+            break
+
+    final_screen = str(latest.get("screen_type") or "unknown")
+    ok = final_screen in {
+        "continue_password_only",
+        "login_form_empty",
+        "login_form_prefilled_username",
+        "email_code_challenge",
+        "active_account_home",
+        "active_account_profile",
+    }
+    reason = "username_step_advanced" if ok else "username_step_transition_not_reached"
+    return LoginUsernameStepExecutionResult(
+        ok=ok,
+        executed=True,
+        reason=reason,
+        failure_reason=None if ok else reason,
+        post_action_signals=latest,
+        observations=tuple(observations),
+        safe_metadata={
+            "source": "login_username_step_executor",
+            "username_input_confirmed": username_result.get("username_input_confirmed"),
+            "username_input_result": username_result.get("username_input_result"),
+            "observation_count": len(observations),
+            "observed_screens": list(observations),
+            "final_screen_type": final_screen,
+            "secret_read": False,
+            "credential_input_attempted": False,
+        },
+    )
 
 
 def execute_login_form_credentials(
@@ -186,6 +337,7 @@ def execute_login_form_credentials(
         d,
         password_only_mode=password_only_mode,
         prefilled_username=str((prevalidated_signals or {}).get("prefilled_username") or ""),
+        password_field_proof=str((prevalidated_signals or {}).get("password_field_proof") or ""),
     )
     timings["target_lookup_ms"] = _elapsed_ms(start, timer())
     if targets["failure_reason"]:
@@ -745,12 +897,17 @@ def _resolve_login_form_targets(
     *,
     password_only_mode: bool = False,
     prefilled_username: str = "",
+    password_field_proof: str = "",
 ) -> dict[str, Any]:
     username = _find_username_target(d, prefilled_username=prefilled_username)
     if username["failure_reason"] and not (password_only_mode and username["failure_reason"] == "username_field_not_found"):
         return {"failure_reason": username["failure_reason"]}
 
-    password = _find_password_target(d, password_only_mode=password_only_mode)
+    password = _find_password_target(
+        d,
+        password_only_mode=password_only_mode,
+        password_field_proof=password_field_proof,
+    )
     if password["failure_reason"]:
         return {"failure_reason": password["failure_reason"]}
 
@@ -866,19 +1023,36 @@ def _find_unique_target(
     return {"target": matches[0], "failure_reason": ""}
 
 
-def _find_password_target(d: Any, *, password_only_mode: bool) -> dict[str, Any]:
+def _find_password_target(
+    d: Any,
+    *,
+    password_only_mode: bool,
+    password_field_proof: str = "",
+) -> dict[str, Any]:
+    hierarchy_proof = str(password_field_proof or "").strip() in {
+        "android_password_property",
+        "android_input_type",
+        "resource_id",
+        "localized_accessibility_label",
+        "masked_editable_value",
+    }
     if password_only_mode:
         edit_text = _find_unique_target(
             d,
             ({"className": "android.widget.EditText"},),
             missing_reason="password_field_not_found",
         )
-        if not edit_text["failure_reason"]:
+        if not edit_text["failure_reason"] and (
+            _password_target_proof(edit_text["target"]) or hierarchy_proof
+        ):
             return edit_text
         if edit_text["failure_reason"] == "ambiguous_login_form":
             return edit_text
     else:
-        edit_text = _find_password_edit_text_target(d)
+        edit_text = _find_password_edit_text_target(
+            d,
+            hierarchy_proof=hierarchy_proof,
+        )
         if edit_text["target"] is not None:
             return edit_text
     return _find_unique_target(
@@ -886,12 +1060,18 @@ def _find_password_target(d: Any, *, password_only_mode: bool) -> dict[str, Any]
         (
             {"text": "Password"},
             {"description": "Password"},
+            {"text": "Mot de passe"},
+            {"description": "Mot de passe"},
         ),
         missing_reason="password_field_not_found",
     )
 
 
-def _find_password_edit_text_target(d: Any) -> dict[str, Any]:
+def _find_password_edit_text_target(
+    d: Any,
+    *,
+    hierarchy_proof: bool = False,
+) -> dict[str, Any]:
     try:
         selector = d(className="android.widget.EditText")
     except Exception:
@@ -910,28 +1090,52 @@ def _find_password_edit_text_target(d: Any) -> dict[str, Any]:
         if count == 1:
             candidates = [selector]
 
-    if len(candidates) >= 2:
+    proven = [candidate for candidate in candidates if _password_target_proof(candidate)]
+    if len(proven) == 1:
+        return {"target": proven[0], "failure_reason": ""}
+    if len(proven) > 1:
+        return {"target": None, "failure_reason": "ambiguous_login_form"}
+    if len(candidates) >= 2 and hierarchy_proof:
         return {"target": candidates[1], "failure_reason": ""}
     if len(candidates) == 1:
-        info = _selector_info(candidates[0])
-        text = _target_public_text(candidates[0]).strip().lower()
-        resource_name = str(info.get("resourceName") or info.get("resource-id") or "").strip().lower()
-        if "password" in resource_name or text in {"password", "mot de passe"} or _looks_like_masked_password(text):
+        if _password_target_proof(candidates[0]):
             return {"target": candidates[0], "failure_reason": ""}
     count = _selector_count(selector)
-    if count >= 2:
+    if count >= 2 and hierarchy_proof:
         target = _selector_instance(d, "android.widget.EditText", 1)
         if target is not None:
             return {"target": target, "failure_reason": ""}
     elif count == 1:
         target = _selector_instance(d, "android.widget.EditText", 0)
         if target is not None:
-            info = _selector_info(target)
-            text = _target_public_text(target).strip().lower()
-            resource_name = str(info.get("resourceName") or info.get("resource-id") or "").strip().lower()
-            if "password" in resource_name or text in {"password", "mot de passe"} or _looks_like_masked_password(text):
+            if _password_target_proof(target):
                 return {"target": target, "failure_reason": ""}
     return {"target": None, "failure_reason": "password_field_not_found"}
+
+
+def _password_target_proof(target: Any) -> str:
+    info = _selector_info(target)
+    text = _target_public_text(target).strip().lower()
+    resource_name = str(info.get("resourceName") or info.get("resource-id") or "").strip().lower()
+    description = str(
+        info.get("contentDescription")
+        or info.get("content-desc")
+        or info.get("hint")
+        or ""
+    ).strip().lower()
+    input_type = str(info.get("inputType") or info.get("input-type") or "").strip().lower()
+    password_property = info.get("password") is True or str(info.get("password") or "").lower() == "true"
+    if password_property:
+        return "android_password_property"
+    if "password" in input_type:
+        return "android_input_type"
+    if "password" in resource_name or "passcode" in resource_name:
+        return "resource_id"
+    if text in {"password", "mot de passe"} or description in {"password", "mot de passe"}:
+        return "localized_accessibility_label"
+    if _looks_like_masked_password(text):
+        return "masked_editable_value"
+    return ""
 
 
 def _selector_instance(d: Any, class_name: str, instance: int) -> Any | None:
@@ -1590,8 +1794,9 @@ def _password_target_kind(target: Any) -> str:
     class_name = str(info.get("className") or info.get("class") or "").strip()
     resource_name = str(info.get("resourceName") or info.get("resource-id") or "").strip().lower()
     text = _target_public_text(target).strip().lower()
-    if "edittext" in class_name.lower() and "password" in resource_name:
-        return "password_edittext_resource"
+    proof = _password_target_proof(target)
+    if "edittext" in class_name.lower() and proof:
+        return f"password_edittext_{proof}"
     if "edittext" in class_name.lower():
         return "edittext"
     if text in {"password", "mot de passe"}:
@@ -1638,12 +1843,10 @@ def _confirm_password_non_empty_after_input(
             "password_confirm_method": "target_accessibility_empty",
         }
 
-    if input_success and method == "adb_keyboard_b64" and target_kind in {
-        "password_edittext_resource",
-        "edittext",
-        "password_placeholder",
-        "unknown",
-    }:
+    if input_success and method == "adb_keyboard_b64" and (
+        target_kind.startswith("password_edittext_")
+        or target_kind in {"edittext", "password_placeholder", "unknown"}
+    ):
         return {
             "non_empty_state": "unknown_but_input_success",
             "password_input_result": "password_input_assumed",

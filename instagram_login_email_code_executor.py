@@ -12,7 +12,6 @@ from device import (
     adb_available,
     ensure_adb_keyboard_ready,
     get_device_serial,
-    is_fast_ime_available,
     run_adb_keyboard_b64_input_detailed as run_adb_keyboard_b64_input,
 )
 from instagram_credentials_runtime_access import SecretValue, redact_credentials_payload

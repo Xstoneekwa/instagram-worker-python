@@ -28,7 +28,10 @@ from login_challenge_provenance import (
 from login_orphan_recovery_state import ORPHAN_RECOVERY_EVENT_DETECTED, record_orphan_recovery_event
 from instagram_login_action_executor import execute_login_screen_decision
 from instagram_login_email_code_executor import execute_email_code_challenge_resume
-from instagram_login_password_form_executor import execute_login_form_credentials
+from instagram_login_password_form_executor import (
+    advance_login_username_step,
+    execute_login_form_credentials,
+)
 from instagram_login_screen_router import (
     JOIN_INSTAGRAM_PROVISIONING_NEXT_ACTION,
     normalize_instagram_username,
@@ -151,6 +154,7 @@ CONNECTED_HOME_IDENTITY_SCREENS = frozenset(
 POST_LOGOUT_KNOWN_SCREENS = {
     "login_form_empty",
     "login_form_prefilled_username",
+    "login_form_username_step",
     "continue_as_candidate",
     "account_picker",
     "continue_password_only",
@@ -161,6 +165,7 @@ POST_EMAIL_CODE_PASSWORD_SCREENS = frozenset(
         "continue_password_only",
         "login_form_empty",
         "login_form_prefilled_username",
+        "login_form_username_step",
     }
 )
 POST_LOGOUT_SETTLING_OBSERVATIONS = 6
@@ -193,6 +198,7 @@ POST_ADD_EXISTING_RESUME_SCREENS = frozenset(
     {
         "login_form_empty",
         "login_form_prefilled_username",
+        "login_form_username_step",
         "continue_as_candidate",
         "account_picker",
         "continue_password_only",
@@ -207,6 +213,7 @@ ROUTING_SCREEN_TYPES = {
     "account_picker",
     "login_form_empty",
     "login_form_prefilled_username",
+    "login_form_username_step",
     "continue_password_only",
     "join_instagram_landing",
     "active_account_profile",
@@ -1988,6 +1995,119 @@ def run_login_provisioning_flow(
             publish_enabled=publish_enabled,
         )
 
+    if str(signals.get("screen_type") or "") == "login_form_username_step":
+        guard = _guard_foreground_package_for_login_input(
+            d,
+            expected_package_name=safe_package_name,
+            timer=timer,
+            sleeper=sleeper,
+        )
+        old_logged_in_metadata.update(guard)
+        if guard.get("package_guard_mismatch"):
+            return _finalize_package_mismatch(
+                account_id=safe_account_id,
+                expected_username=safe_expected_username,
+                expected_package_name=safe_package_name,
+                actual_foreground_package=str(guard.get("actual_foreground_package") or ""),
+                run_id=safe_run_id,
+                run_type=safe_run_type,
+                device_id=safe_device_id,
+                expected_app_instance_id=safe_expected_app_instance_id,
+                adb_serial_masked=safe_adb_serial_masked,
+                actions_taken=actions_taken,
+                timings=timings,
+                warnings=warnings,
+                extra_metadata={**old_logged_in_metadata, **post_continue_metadata},
+                total_start=total_start,
+                timer=timer,
+                publisher=publisher,
+                publish_enabled=publish_enabled,
+            )
+        username_step = advance_login_username_step(
+            d,
+            expected_username=safe_expected_username,
+            prevalidated_signals=signals,
+            sleeper=sleeper,
+        )
+        actions_taken.append("login_username_step_submit")
+        old_logged_in_metadata["login_username_step"] = dict(username_step.safe_metadata)
+        if not username_step.ok:
+            return _finalize(
+                ok=False,
+                completed=False,
+                final_outcome="username_step_failed",
+                reason=username_step.failure_reason or username_step.reason,
+                failure_reason=username_step.failure_reason or username_step.reason,
+                final_login_status="logged_out",
+                final_provisioning_status="login_pending",
+                final_onboarding_status="credentials_required",
+                should_publish_status=False,
+                account_id=safe_account_id,
+                expected_username=safe_expected_username,
+                actions_taken=actions_taken,
+                timings=timings,
+                warnings=warnings,
+                extra_metadata={**old_logged_in_metadata, **post_continue_metadata},
+                total_start=total_start,
+                timer=timer,
+                publisher=publisher,
+                publish_enabled=publish_enabled,
+            )
+        signals = dict(username_step.post_action_signals or {})
+        post_username_outcome = _post_action_outcome_from_signals(signals)
+        if not _signals_confirm_login_form(signals):
+            if post_username_outcome:
+                classification = classify_login_probe_outcome(post_username_outcome)
+                return _finalize(
+                    ok=post_username_outcome == LoginProbeOutcome.CONNECTED.value,
+                    completed=post_username_outcome in {
+                        LoginProbeOutcome.CONNECTED.value,
+                        LoginProbeOutcome.NEEDS_2FA.value,
+                        LoginProbeOutcome.CHECKPOINT.value,
+                        LoginProbeOutcome.VERIFICATION_PENDING.value,
+                        LoginProbeOutcome.LOGIN_FAILED.value,
+                    },
+                    final_outcome=post_username_outcome,
+                    reason=f"username_step_{classification.reason}",
+                    failure_reason=None if post_username_outcome == LoginProbeOutcome.CONNECTED.value else post_username_outcome,
+                    final_login_status=classification.login_status,
+                    final_provisioning_status=classification.provisioning_status,
+                    final_onboarding_status=classification.onboarding_status,
+                    dashboard_action_type=_dashboard_action_for_outcome(
+                        post_username_outcome,
+                        challenge_type=str(signals.get("challenge_type") or ""),
+                        post_submit_screen_type=str(signals.get("screen_type") or ""),
+                    ),
+                    should_publish_status=classification.should_publish,
+                    account_id=safe_account_id,
+                    expected_username=safe_expected_username,
+                    actions_taken=actions_taken,
+                    timings=timings,
+                    warnings=warnings,
+                    extra_metadata={**old_logged_in_metadata, **post_continue_metadata},
+                    total_start=total_start,
+                    timer=timer,
+                    publisher=publisher,
+                    publish_enabled=publish_enabled,
+                )
+            return _finalize(
+                ok=False,
+                completed=False,
+                final_outcome="unknown",
+                reason="username_step_transition_not_reached",
+                failure_reason="username_step_transition_not_reached",
+                account_id=safe_account_id,
+                expected_username=safe_expected_username,
+                actions_taken=actions_taken,
+                timings=timings,
+                warnings=warnings,
+                extra_metadata={**old_logged_in_metadata, **post_continue_metadata},
+                total_start=total_start,
+                timer=timer,
+                publisher=publisher,
+                publish_enabled=publish_enabled,
+            )
+
     if str(signals.get("screen_type") or "") == "login_form_empty":
         actions_taken.append("login_form_empty_detected")
         old_logged_in_metadata["login_form_empty_detected"] = True
@@ -2979,6 +3099,7 @@ def _post_logout_screen_type(signals: dict[str, Any]) -> str:
     if screen_type in {
         "login_form_empty",
         "login_form_prefilled_username",
+        "login_form_username_step",
         "continue_as_candidate",
         "account_picker",
         "continue_password_only",
@@ -3092,6 +3213,8 @@ def _central_selected_route(decision: str, signals: dict[str, Any]) -> str:
         return "login_form_prefilled_expected"
     if safe_decision == "start_login_form_flow_replace_username":
         return "replace_prefilled_username"
+    if safe_decision == "start_login_username_step_flow":
+        return "login_username_step"
     if safe_decision == "start_login_form_flow":
         if screen_type == "continue_password_only":
             return "continue_password_only"
@@ -4020,6 +4143,12 @@ def _screen_after_app_start(signals: dict[str, Any]) -> str:
 
 
 def _signals_confirm_login_form(signals: dict[str, Any]) -> bool:
+    if signals.get("screen_type") == "login_form_username_step":
+        return (
+            signals.get("has_username_field") is True
+            and signals.get("has_password_field") is not True
+            and signals.get("has_login_button") is True
+        )
     if signals.get("screen_type") == "login_form_empty":
         return signals.get("has_username_field") is True and signals.get("has_login_button") is True
     if signals.get("screen_type") == "login_form_prefilled_username":
@@ -4040,6 +4169,7 @@ def _signals_confirm_login_form(signals: dict[str, Any]) -> bool:
 
 def _route_starts_login_form_flow(decision: Any) -> bool:
     return str(decision or "") in {
+        "start_login_username_step_flow",
         "start_login_form_flow",
         "start_login_form_flow_prefilled_expected",
         "start_login_form_flow_replace_username",
@@ -4348,6 +4478,7 @@ def _safe_screen_type_value(value: Any) -> str:
         "continue_password_only",
         "login_form_empty",
         "login_form_prefilled_username",
+        "login_form_username_step",
         "unknown",
     }:
         return text

@@ -20,6 +20,7 @@ JOIN_INSTAGRAM_LANDING = "join_instagram_landing"
 JOIN_INSTAGRAM_PROVISIONING_NEXT_ACTION = "continue_to_existing_profile_login"
 LOGIN_FORM_EMPTY = "login_form_empty"
 LOGIN_FORM_PREFILLED_USERNAME = "login_form_prefilled_username"
+LOGIN_FORM_USERNAME_STEP = "login_form_username_step"
 UNKNOWN_SCREEN = "unknown"
 
 STOPPED_LIFECYCLE_STATUSES = {"canceled", "archived", "stopped"}
@@ -106,6 +107,21 @@ def route_login_screen(
             normalized_suggested_username=normalized_suggested,
             next_action="secure_credentials_required_later",
             reason="login_form_empty",
+            should_start_login_form_flow=True,
+            clone_reuse_allowed=clone_reuse_allowed,
+        )
+
+    if safe_screen_type == LOGIN_FORM_USERNAME_STEP:
+        return _decision(
+            ok=True,
+            screen_type=safe_screen_type,
+            decision="start_login_username_step_flow",
+            expected_username=expected_username,
+            suggested_username=suggested_username or "",
+            normalized_expected_username=normalized_expected,
+            normalized_suggested_username=normalized_suggested,
+            next_action="submit_expected_username_then_observe_credential_step",
+            reason="login_username_step_ready",
             should_start_login_form_flow=True,
             clone_reuse_allowed=clone_reuse_allowed,
         )

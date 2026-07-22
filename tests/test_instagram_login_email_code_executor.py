@@ -135,7 +135,11 @@ class EmailCodeExecutorTests(unittest.TestCase):
 
         with (
             patch.object(email_code_executor, "adb_available", return_value=True),
-            patch.object(email_code_executor, "is_fast_ime_available", return_value=True),
+            patch.object(
+                email_code_executor,
+                "ensure_adb_keyboard_ready",
+                return_value={"ok": True, "reason": "adb_keyboard_ready"},
+            ) as keyboard_ready,
             patch.object(
                 email_code_executor,
                 "run_adb_keyboard_b64_input",
@@ -158,6 +162,10 @@ class EmailCodeExecutorTests(unittest.TestCase):
         self.assertTrue(result.safe_metadata["code_input_confirmed"])
         self.assertIn("verification_code_set_text_not_confirmed", result.warnings)
         self.assertIn("verification_code_input_confirmed_after_fallback", result.warnings)
+        keyboard_ready.assert_called_once_with(
+            "RFGL145VCKE",
+            fast_ime_id="com.android.adbkeyboard/.AdbIME",
+        )
         adb_input.assert_called_once()
 
     def test_password_screen_ready_after_code_detects_continue_password_only(self) -> None:

@@ -18,6 +18,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from auto_login_failure_contract import (
+    AUTO_LOGIN_REASON_PHASES,
+    normalize_auto_login_failure,
+)
+
 # Reasons that describe normal control-flow gates, not runtime failures.
 # They must never produce an incident nor a Slack/Discord notification.
 NON_INCIDENT_REASONS = frozenset(
@@ -100,53 +105,6 @@ MYTHYL_OPERATOR_MESSAGE = (
 
 AUTO_LOGIN_RUN_TYPES = frozenset({"login_provisioning", "login_email_code_resume"})
 
-AUTO_LOGIN_REASON_PHASES = {
-    "auto_login_not_ready": "request",
-    "active_request_exists": "request",
-    "credentials_missing": "login_form",
-    "credentials_fetch_failed": "login_form",
-    "invalid_credentials": "submit_credentials",
-    "assignment_missing": "request",
-    "assignment_not_found": "request",
-    "assignment_device_missing_adb_serial": "request",
-    "device_busy": "device_lock",
-    "device_lock_failed": "device_lock",
-    "device_lock_held": "device_lock",
-    "device_lock_release_failed": "cleanup",
-    "request_expired": "request",
-    "request_canceled": "request",
-    "dispatcher_claim_timeout": "dispatcher_claim",
-    "dispatcher_unavailable": "dispatcher_claim",
-    "unsupported_login_run_type": "dispatcher_claim",
-    "worker_start_failed": "open_instagram",
-    "login_device_serial_required": "open_instagram",
-    "app_start_failed": "open_instagram",
-    "suggested_account_surface_unusable": "route_suggested_account",
-    "use_another_profile_not_available": "route_suggested_account",
-    "wrong_suggested_account_requires_admin_review": "route_suggested_account",
-    "login_form_not_reached": "login_form",
-    "account_picker_expected_account_missing": "login_form",
-    "expected_account_not_listed": "login_form",
-    "instagram_surface_ambiguous": "detect_surface",
-    "username_field_not_found": "login_form",
-    "password_field_not_found": "login_form",
-    "login_submit_failed": "submit_credentials",
-    "network_login_failure": "submit_credentials",
-    "email_challenge_detected": "email_challenge",
-    "verification_code_required": "email_challenge",
-    "verification_code_expired": "email_code_resume",
-    "verification_code_rejected": "email_code_resume",
-    "verification_resume_failed": "email_code_resume",
-    "active_instagram_account_mismatch": "identity_verification",
-    "expected_identity_not_proven": "identity_verification",
-    "identity_guard_failed": "identity_verification",
-    "actual_logged_in_username_not_detected": "identity_verification",
-    "own_profile_open_failed": "identity_verification",
-    "expected_account_username_missing": "identity_verification",
-    "login_cleanup_failed": "cleanup",
-}
-
-
 def _auto_login_phase(reason: str, summary: dict[str, Any]) -> str:
     explicit = str(summary.get("phase") or "").strip().lower()
     if explicit:
@@ -162,8 +120,13 @@ def _classify_auto_login_failure(
     summary: dict[str, Any],
     metadata_safe: dict[str, Any],
 ) -> IncidentDecision:
-    code = reason or "unclassified_auto_login_failure"
-    phase = _auto_login_phase(code, summary)
+    contract = normalize_auto_login_failure(
+        reason,
+        phase=_auto_login_phase(reason, summary),
+        correction_deployed=True,
+    )
+    code = contract.persisted_error_code
+    phase = contract.phase
     challenge = phase in {"email_challenge", "email_code_resume"}
     identity = phase == "identity_verification"
     device = phase == "device_lock" or code in DEVICE_UNAVAILABLE_REASONS
@@ -190,13 +153,7 @@ def _classify_auto_login_failure(
         if expired
         else "Auto Login failed"
     )
-    retryable = code not in {
-        "invalid_credentials",
-        "active_instagram_account_mismatch",
-        "expected_identity_not_proven",
-        "identity_guard_failed",
-        "verification_code_rejected",
-    }
+    retryable = contract.retryable
     action = (
         "Enter the Instagram verification code, then resume Auto Login once."
         if challenge
@@ -206,7 +163,7 @@ def _classify_auto_login_failure(
         if device
         else "Review the redacted Auto Login runtime logs for this request."
         if code == "unclassified_auto_login_failure"
-        else "Correct the reported Auto Login condition before retrying."
+        else contract.recommended_action
     )
     client_message = (
         "Un code de vérification Instagram est nécessaire pour terminer la connexion."
@@ -222,7 +179,7 @@ def _classify_auto_login_failure(
             "retryable": retryable,
             "operator_action_required": True,
             "client_safe_message": client_message,
-            "operator_message": action,
+            "operator_message": contract.operator_message,
         }
     )
     warning_codes = {
@@ -241,7 +198,7 @@ def _classify_auto_login_failure(
         action_required=action,
         requires_operator_review=True,
         blocking_campaign=True,
-        admin_message=f"Auto Login failed during {phase} ({code}), exit code {exit_code}.",
+        admin_message=contract.operator_message,
         notify_channels=True,
         metadata_safe=metadata_safe,
     )

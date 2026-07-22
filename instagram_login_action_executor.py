@@ -1060,6 +1060,8 @@ def _safe_login_screen_signals(hierarchy_xml: str | None) -> dict[str, Any]:
     signals.pop("password_required_dialog_present", None)
     signals.pop("password_field_editable_present", None)
     signals.pop("password_field_present", None)
+    signals.pop("password_field_candidate_count", None)
+    signals.pop("password_field_proof", None)
     signals.pop("forgot_password_present", None)
     signals.pop("ready_for_password_submit", None)
     signals.pop("save_password_prompt_present", None)

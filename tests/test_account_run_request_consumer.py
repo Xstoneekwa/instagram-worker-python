@@ -974,6 +974,7 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
             "id": TEST_REQUEST_ID,
             "account_id": TEST_ACCOUNT_ID,
             "run_id": TEST_RUN_ID,
+            "requested_run_type": "login_provisioning",
             "status": "running",
         }
         summary = {
@@ -1111,13 +1112,29 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
             "id": TEST_REQUEST_ID,
             "account_id": TEST_ACCOUNT_ID,
             "run_id": TEST_RUN_ID,
+            "requested_run_type": "login_provisioning",
             "status": "running",
         }
         summary = {"run_id": TEST_RUN_ID, "final_outcome": "wrong_app_package", "submit_executed": False}
         with (
             patch.object(consumer, "get_account_run_request", return_value=request),
-            patch.object(consumer, "complete_account_run_request"),
-            patch.object(consumer, "_reconcile_linked_run", return_value={"reconciled": True}),
+            patch.object(
+                consumer,
+                "_terminalize_auto_login_failure",
+                return_value=(
+                    {
+                        "request_status": "failed",
+                        "run_status": "failed",
+                        "persisted_error_code": "unclassified_auto_login_failure",
+                        "reason": "terminalized",
+                    },
+                    {
+                        "domain": "auto_login",
+                        "reason_code": "unclassified_auto_login_failure",
+                        "phase": "unknown",
+                    },
+                ),
+            ),
             patch.object(consumer, "_safe_login_provisioner_summary_for_audit", return_value=summary),
             patch.object(consumer, "_audit") as audit,
         ):
@@ -1128,8 +1145,11 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
                 exit_code=1,
             )
         payload = audit.call_args.kwargs["payload"]
-        self.assertEqual(payload["login_provisioner_summary"]["final_outcome"], "wrong_app_package")
-        self.assertFalse(payload["login_provisioner_summary"]["submit_executed"])
+        projected = payload["login_provisioner_summary"]
+        self.assertEqual(projected["domain"], "auto_login")
+        self.assertEqual(projected["reason_code"], "unclassified_auto_login_failure")
+        self.assertNotIn("final_outcome", projected)
+        self.assertNotIn("submit_executed", projected)
 
     def test_finalize_auto_login_persists_precise_reason_and_publishes_same_summary(self) -> None:
         cfg = consumer.DispatcherConfig(
@@ -1163,8 +1183,26 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
         }
         with (
             patch.object(consumer, "get_account_run_request", return_value=request),
-            patch.object(consumer, "complete_account_run_request") as complete,
-            patch.object(consumer, "_reconcile_linked_run", return_value={"reconciled": True}),
+            patch.object(
+                consumer,
+                "_terminalize_auto_login_failure",
+                return_value=(
+                    {
+                        "request_status": "failed",
+                        "run_status": "failed",
+                        "persisted_error_code": "wrong_suggested_account_requires_admin_review",
+                        "reason": "terminalized",
+                    },
+                    {
+                        "domain": "auto_login",
+                        "reason_code": "wrong_suggested_account_requires_admin_review",
+                        "phase": "route_suggested_account",
+                        "request_id": TEST_REQUEST_ID,
+                        "run_id": TEST_RUN_ID,
+                        "account_id": TEST_ACCOUNT_ID,
+                    },
+                ),
+            ) as terminalize,
             patch.object(consumer, "_safe_login_provisioner_summary_for_audit", return_value=summary),
             patch.object(consumer, "_publish_run_failure_incident") as publish,
             patch.object(consumer, "_audit"),
@@ -1176,9 +1214,9 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
                 exit_code=1,
                 request_snapshot=request,
             )
-
+        terminalize.assert_called_once()
         self.assertEqual(
-            complete.call_args.kwargs["error_code"],
+            terminalize.call_args.kwargs["internal_reason"],
             "wrong_suggested_account_requires_admin_review",
         )
         propagated = publish.call_args.kwargs["worker_summary"]
@@ -1186,7 +1224,70 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
         self.assertEqual(propagated["reason_code"], "wrong_suggested_account_requires_admin_review")
         self.assertEqual(propagated["request_id"], TEST_REQUEST_ID)
         self.assertEqual(propagated["run_id"], TEST_RUN_ID)
-        self.assertFalse(propagated["submit_executed"])
+        self.assertNotIn("submit_executed", propagated)
+
+    def test_notification_failure_happens_after_atomic_terminalization(self) -> None:
+        cfg = consumer.DispatcherConfig(
+            enabled=True,
+            health_only=False,
+            launch_enabled=True,
+            worker_id="run-dispatcher:test",
+            poll_seconds=5.0,
+            lease_seconds=120,
+            heartbeat_seconds=20.0,
+            allowed_run_types=["login_provisioning"],
+            test_account_ids=set(),
+            subprocess_timeout_seconds=7200,
+            require_assignment=False,
+            enforce_assignment_window=False,
+        )
+        request = {
+            "id": TEST_REQUEST_ID,
+            "account_id": TEST_ACCOUNT_ID,
+            "run_id": TEST_RUN_ID,
+            "requested_run_type": "login_provisioning",
+            "status": "running",
+        }
+        summary = {"failure_reason": "password_field_not_found", "phase": "login_form"}
+        call_order: list[str] = []
+
+        def terminalize(**_kwargs):
+            call_order.append("terminalized")
+            return (
+                {
+                    "request_status": "failed",
+                    "run_status": "failed",
+                    "persisted_error_code": "credential_input_field_unavailable",
+                    "reason": "terminalized",
+                },
+                {
+                    "domain": "auto_login",
+                    "reason_code": "credential_input_field_unavailable",
+                    "phase": "login_form",
+                },
+            )
+
+        def publish(**_kwargs):
+            call_order.append("notification_failed")
+            raise RuntimeError("notification transport unavailable")
+
+        with (
+            patch.object(consumer, "get_account_run_request", return_value=request),
+            patch.object(consumer, "_safe_login_provisioner_summary_for_audit", return_value=summary),
+            patch.object(consumer, "_terminalize_auto_login_failure", side_effect=terminalize),
+            patch.object(consumer, "_publish_run_failure_incident", side_effect=publish),
+            patch.object(consumer, "_audit"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "notification transport unavailable"):
+                consumer._finalize_manual_run_after_subprocess(
+                    cfg,
+                    request_id=TEST_REQUEST_ID,
+                    account_id=TEST_ACCOUNT_ID,
+                    exit_code=1,
+                    request_snapshot=request,
+                )
+
+        self.assertEqual(call_order, ["terminalized", "notification_failed"])
 
     def test_finalize_subprocess_without_linked_run_skips_reconcile_patch(self) -> None:
         cfg = consumer.DispatcherConfig(

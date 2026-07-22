@@ -134,6 +134,47 @@ def complete_account_run_request(
     return _row_or_none(supabase_client.call_rpc("complete_account_run_request", params))
 
 
+def finalize_auto_login_failure(
+    *,
+    request_id: str,
+    worker_id: str,
+    account_id: str,
+    run_id: str,
+    persisted_error_code: str,
+    error_message_safe: str,
+    internal_worker_reason: str,
+    phase: str,
+    exit_code: int | None = None,
+) -> dict[str, Any]:
+    """Atomically terminalize one Auto Login request and its linked run.
+
+    The RPC stores ``internal_worker_reason`` in a service-role-only relation;
+    its response intentionally contains only projectable fields.
+    """
+    normalized_request_id = normalize_request_uuid(request_id)
+    normalized_run_id = normalize_request_uuid(run_id)
+    normalized_account_id = normalize_request_uuid(account_id)
+    if not normalized_request_id or not normalized_run_id or not normalized_account_id:
+        raise ValueError("auto_login_terminalization_identifiers_invalid")
+    value = supabase_client.call_rpc(
+        "finalize_auto_login_failure_v1",
+        {
+            "p_request_id": normalized_request_id,
+            "p_worker_id": str(worker_id or "").strip(),
+            "p_account_id": normalized_account_id,
+            "p_run_id": normalized_run_id,
+            "p_persisted_error_code": str(persisted_error_code or "").strip(),
+            "p_error_message_safe": str(error_message_safe or "").strip(),
+            "p_internal_worker_reason": str(internal_worker_reason or "").strip(),
+            "p_phase": str(phase or "").strip(),
+            "p_exit_code": int(exit_code) if exit_code is not None else None,
+        },
+    )
+    if not isinstance(value, dict):
+        raise RuntimeError("finalize_auto_login_failure_v1 returned invalid response")
+    return dict(value)
+
+
 def cancel_account_run_request(
     *,
     request_id: str | None = None,

@@ -8,7 +8,10 @@ from unittest.mock import patch
 
 from instagram_credentials_runtime_access import SecretValue
 import instagram_login_password_form_executor as password_executor
-from instagram_login_password_form_executor import execute_login_form_credentials
+from instagram_login_password_form_executor import (
+    advance_login_username_step,
+    execute_login_form_credentials,
+)
 
 
 USERNAME = "cinema_catchup"
@@ -18,6 +21,7 @@ LOGIN_FORM_SIGNALS = {
     "has_username_field": True,
     "has_password_field": True,
     "has_login_button": True,
+    "password_field_proof": "localized_accessibility_label",
 }
 PASSWORD_ONLY_SIGNALS = {
     "screen_type": "continue_password_only",
@@ -25,6 +29,7 @@ PASSWORD_ONLY_SIGNALS = {
     "has_username_field": False,
     "has_password_field": True,
     "has_login_button": True,
+    "password_field_proof": "localized_accessibility_label",
 }
 PREFILLED_USERNAME_SIGNALS = {
     "screen_type": "login_form_prefilled_username",
@@ -34,6 +39,14 @@ PREFILLED_USERNAME_SIGNALS = {
     "username_prefilled_present": True,
     "prefilled_username": "i_m_your_traker",
     "has_password_field": True,
+    "has_login_button": True,
+    "password_field_proof": "localized_accessibility_label",
+}
+
+USERNAME_STEP_SIGNALS = {
+    "screen_type": "login_form_username_step",
+    "has_username_field": True,
+    "has_password_field": False,
     "has_login_button": True,
 }
 CONNECTED_XML = (
@@ -309,6 +322,91 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
 
     def tearDown(self) -> None:
         self._ensure_adb_keyboard_ready_patch.stop()
+
+    def test_username_only_step_advances_without_reading_or_injecting_secret(self) -> None:
+        device = FakeDevice()
+        username = device.add_selector(
+            "text",
+            "Username, email or mobile number",
+            TrackingTextSelector(text="Username, email or mobile number"),
+        )
+        login = device.add_selector("text", "Log in", FakeSelector(1))
+        device.hierarchies = [
+            '<node text="cinema_catchup" />'
+            '<node class="android.widget.EditText" text="Password" password="true" editable="true" />'
+            '<node text="Log in" clickable="true" />'
+        ]
+
+        result = advance_login_username_step(
+            device,
+            expected_username=USERNAME,
+            prevalidated_signals=USERNAME_STEP_SIGNALS,
+            observation_interval_ms=0,
+            sleeper=Mock(),
+        )
+
+        self.assertTrue(result.ok)
+        self.assertTrue(result.executed)
+        self.assertEqual(username.set_text_calls, [USERNAME])
+        self.assertEqual(login.click_calls, 1)
+        self.assertEqual(result.post_action_signals["screen_type"], "continue_password_only")
+        self.assertFalse(result.safe_metadata["secret_read"])
+        self.assertFalse(result.safe_metadata["credential_input_attempted"])
+
+    def test_username_only_step_is_bounded_when_transition_never_arrives(self) -> None:
+        device = FakeDevice()
+        device.add_selector(
+            "text",
+            "Username, email or mobile number",
+            TrackingTextSelector(text="Username, email or mobile number"),
+        )
+        device.add_selector("text", "Log in", FakeSelector(1))
+        username_only_xml = (
+            '<node class="android.widget.EditText" text="Username, email or mobile number" editable="true" />'
+            '<node text="Forgot password?" />'
+            '<node text="Log in" clickable="true" />'
+        )
+        device.hierarchies = [username_only_xml, username_only_xml, username_only_xml]
+
+        result = advance_login_username_step(
+            device,
+            expected_username=USERNAME,
+            prevalidated_signals=USERNAME_STEP_SIGNALS,
+            max_observations=3,
+            observation_interval_ms=0,
+            sleeper=Mock(),
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.failure_reason, "username_step_transition_not_reached")
+        self.assertEqual(len(result.observations), 3)
+        self.assertFalse(result.safe_metadata["secret_read"])
+
+    def test_unproven_single_edittext_is_never_used_for_secret_input(self) -> None:
+        device = FakeDevice()
+        unproven = device.add_selector(
+            "className",
+            "android.widget.EditText",
+            FakeSelector(1),
+        )
+        device.add_selector("text", "Log in", FakeSelector(1))
+        secret = TrackingSecretValue(PASSWORD)
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=secret,
+            prevalidated_signals={
+                **PASSWORD_ONLY_SIGNALS,
+                "password_field_proof": "",
+            },
+            sleeper=Mock(),
+        )
+
+        self.assertEqual(result.failure_reason, "password_field_not_found")
+        self.assertFalse(result.executed)
+        self.assertEqual(secret.reveal_calls, 0)
+        self.assertEqual(unproven.set_text_calls, [])
 
     def test_valid_login_form_enters_username_password_and_taps_login(self) -> None:
         device, username, password_selector, login = configured_device()
