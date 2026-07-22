@@ -61,6 +61,9 @@ DEVICE_BOUND_RUN_TYPES = frozenset({
     "account_session",
     "outreach_session",
     "scheduled_session_preflight",
+    "login_provisioning",
+    "login_email_code_resume",
+    "login_orphan_challenge_recovery",
 })
 PREFLIGHT_RUN_TYPE = "scheduled_session_preflight"
 _last_integration_noop_proof: dict[str, Any] | None = None
@@ -1607,6 +1610,8 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
             message="Login run blocked: assigned device serial is required.",
             payload={"request_id": request_id, "run_type": run_type},
         )
+        if device_lock_active and device_id:
+            release_device_lock(device_id=device_id, worker_id=lock_owner_worker_id, request_id=request_id)
         return
 
     if _is_scheduled_session_preflight_run_type(run_type) and not adb_serial:

@@ -15,6 +15,12 @@ TEST_RUN_ID = "00000000-0000-4000-8000-000000000301"
 
 
 class AccountRunRequestConsumerTest(unittest.TestCase):
+    def test_all_login_ui_runs_are_device_bound(self) -> None:
+        self.assertTrue(consumer._is_device_bound_run_type("login_provisioning"))
+        self.assertTrue(consumer._is_device_bound_run_type("login_email_code_resume"))
+        self.assertTrue(consumer._is_device_bound_run_type("login_orphan_challenge_recovery"))
+        self.assertFalse(consumer._is_device_bound_run_type("unknown"))
+
     def test_account_session_exit_zero_requires_terminal_phase_contract(self) -> None:
         cfg = consumer.DispatcherConfig(
             enabled=True,
@@ -622,6 +628,9 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
                 return_value=(True, None, {}),
             ),
             patch.object(consumer, "_heartbeat"),
+            patch.object(consumer, "transfer_device_lock", return_value={"transferred": True}) as transfer_lock,
+            patch.object(consumer, "renew_device_lock", return_value={"renewed": True}) as renew_lock,
+            patch.object(consumer, "release_device_lock", return_value={"released": True}) as release_lock,
             patch.object(consumer, "runner_subprocess_env", return_value=fake_env),
             patch.object(consumer, "_create_and_link_login_run", return_value=TEST_RUN_ID),
             patch.object(consumer, "_load_expected_username", return_value="cinema_catchup"),
@@ -634,6 +643,21 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
         self.assertEqual(popen.call_args.kwargs.get("env"), fake_env)
         self.assertEqual(fake_env["ADB_PATH"], "/tmp/platform-tools/adb")
         self.assertEqual(fake_env["LOGIN_PROVISIONER_PUBLISH_ENABLED"], "true")
+        transfer_lock.assert_called_once_with(
+            device_id="device-1",
+            request_id=TEST_REQUEST_ID,
+            new_worker_id="worker-1",
+        )
+        renew_lock.assert_called_once_with(
+            device_id="device-1",
+            worker_id="worker-1",
+            request_id=TEST_REQUEST_ID,
+        )
+        release_lock.assert_called_once_with(
+            device_id="device-1",
+            worker_id="worker-1",
+            request_id=TEST_REQUEST_ID,
+        )
 
     def test_build_login_email_code_resume_command(self) -> None:
         with patch.object(consumer, "_load_expected_username", return_value="cinema_catchup"):
@@ -780,6 +804,9 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
                 "evaluate_queued_run_commercial_policy",
                 return_value=(True, None, {}),
             ),
+            patch.object(consumer, "transfer_device_lock", return_value={"transferred": True}),
+            patch.object(consumer, "renew_device_lock", return_value={"renewed": True}),
+            patch.object(consumer, "release_device_lock", return_value={"released": True}) as release_lock,
             patch.object(consumer.subprocess, "Popen") as popen,
             patch.object(consumer, "_safe_complete_account_run_request") as complete,
             patch.object(consumer, "_audit"),
@@ -789,6 +816,11 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
         popen.assert_not_called()
         complete.assert_called_once()
         self.assertEqual(complete.call_args.kwargs["error_code"], "login_device_serial_required")
+        release_lock.assert_called_once_with(
+            device_id="device-1",
+            worker_id="run-dispatcher:test",
+            request_id=TEST_REQUEST_ID,
+        )
 
     def test_finalize_subprocess_nonzero_reconciles_linked_run(self) -> None:
         cfg = consumer.DispatcherConfig(
