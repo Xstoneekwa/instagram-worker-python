@@ -1,0 +1,26 @@
+{
+  "j_automatise_pour_toi": {
+    "account_id": "fixture-account-growth",
+    "package": "Growth",
+    "package_limits": {"day": 80, "session": 80},
+    "account_override": {"present": false, "day": null, "session": null, "source": null},
+    "warmup": {"enabled": true, "day": 2, "day_cap": 20, "session_cap": 20},
+    "business_effective": {"day": 20, "session": 20, "limiting_source": "warmup", "limiting_reason": "warmup_day_2"}
+  },
+  "i_m_your_traker": {
+    "account_id": "fixture-account-pro-20",
+    "package": "Pro",
+    "package_limits": {"day": 120, "session": 120},
+    "account_override": {"present": true, "day": 120, "session": 20, "source": "migration_confirmed"},
+    "warmup": null,
+    "business_effective": null
+  },
+  "mythyl_fitness": {
+    "account_id": "fixture-account-pro-40",
+    "package": "Pro",
+    "package_limits": {"day": 120, "session": 120},
+    "account_override": {"present": true, "day": 120, "session": 40, "source": "migration_confirmed"},
+    "warmup": null,
+    "business_effective": null
+  }
+}

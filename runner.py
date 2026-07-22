@@ -48,6 +48,10 @@ from follow_persistence_rpc import (
     validate_rpc_response,
 )
 from runtime_caps import resolve_follow_runtime_limits
+from follow_limit_provenance_shadow import (
+    evaluate_follow_limit_shadow,
+    shadow_log_fields,
+)
 from assignment_dispatch_resolver import (
     resolve_account_assignment_runtime_context,
     sensitive_log_fields,
@@ -10128,6 +10132,56 @@ def _run_followers_list_engine_session(
         package_follow_session_cap=follow_runtime_inputs.get("package_follow_session_cap"),
         warmup_follow_day_cap=follow_runtime_inputs.get("warmup_follow_day_cap"),
     )
+    if bool(getattr(config, "FOLLOW_LIMIT_PROVENANCE_SHADOW_ENABLED", False)):
+        canonical_follow_payload = follow_runtime_inputs.get("canonical_follow_limit_payload")
+        canonical_package = (
+            str(canonical_follow_payload.get("package") or "")
+            if isinstance(canonical_follow_payload, dict)
+            else ""
+        )
+        try:
+            follow_limit_shadow = evaluate_follow_limit_shadow(
+                enabled=True,
+                account_id=str(account_id or ""),
+                account_username=None,
+                package=canonical_package,
+                legacy_resolved_limits=follow_limits,
+                canonical_payload=canonical_follow_payload,
+                completed_today=follow_runtime_inputs.get("follows_done_today"),
+                ops_session_hard_cap=(
+                    int(getattr(config, "FOLLOW_MAX_PER_RUN", 0) or 0)
+                    if bool(follow_limits.get("env_follow_cap_present"))
+                    else None
+                ),
+            )
+            shadow_status = str(follow_limit_shadow.get("shadow_status") or "not_evaluable")
+            shadow_event = {
+                "evaluated": "follow_limit_provenance_shadow_evaluated",
+                "invalid_payload": "follow_limit_provenance_shadow_payload_invalid",
+            }.get(shadow_status, "follow_limit_provenance_shadow_not_evaluable")
+            log(
+                "info" if shadow_status == "evaluated" else "warning",
+                shadow_event,
+                **shadow_log_fields(
+                    follow_limit_shadow,
+                    account_id=str(account_id or ""),
+                    account_username=None,
+                    run_id=str(run_id or ""),
+                    package=canonical_package,
+                ),
+            )
+        except Exception:
+            log(
+                "warning",
+                "follow_limit_provenance_shadow_not_evaluable",
+                account_id=str(account_id or ""),
+                account_username=None,
+                run_id=str(run_id or "") or None,
+                package=canonical_package,
+                classification="canonical_not_evaluable",
+                shadow_limiting_reason="shadow_exception_fail_open",
+                flag_state=True,
+            )
     global_follow_goal_effective = int(follow_limits["effective_iterations_max"])
     _runtime_follow_cap = int(getattr(config, "FOLLOW_MAX_PER_RUN", 0) or 0)
     if bool(follow_limits.get("env_follow_cap_present")) and _runtime_follow_cap > 0:

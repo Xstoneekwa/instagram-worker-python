@@ -262,6 +262,9 @@ ENABLE_REAL_FOLLOW = True
 FOLLOW_THEN_DM = False
 FOLLOW_COOLDOWN_HOURS = 999999
 FOLLOW_MAX_PER_RUN = max(0, _env_int("FOLLOW_MAX_PER_RUN", 2))
+FOLLOW_LIMIT_PROVENANCE_SHADOW_ENABLED = _env_bool(
+    "FOLLOW_LIMIT_PROVENANCE_SHADOW_ENABLED", False
+)
 FOLLOW_VERIFY_TIMEOUT_MS = 4000
 # Max wait to locate a tappable Follow / Suivre control on profile header (seconds).
 FOLLOW_BUTTON_WAIT_S = 4.0

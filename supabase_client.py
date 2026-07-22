@@ -2937,6 +2937,9 @@ def get_follow_runtime_cap_inputs(account_id: str) -> dict[str, Any]:
         "follow_cap_source": "min(max_actions_per_day,effective_preview_follow_day,package_follow_day)",
         "warmup_status": summary.get("warmup_status"),
         "warmup_day": summary.get("warmup_day"),
+        # Passive transport slot only. The current production projection does not
+        # expose it; no table or RPC is queried specifically for shadow mode.
+        "canonical_follow_limit_payload": summary.get("follow_limit_provenance"),
     }
 
 
