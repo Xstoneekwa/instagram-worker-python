@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import uuid
 import re
 import time
 from dataclasses import dataclass, field
@@ -28,7 +29,9 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 CHECKPOINT_NAME = "TARGET_FOLLOWERS_PROGRESSIVE_RESUME_V2"
 SURFACE_FOLLOWERS = "followers"
 SHADOW_FLAG = "TARGET_FOLLOWERS_RESUME_V2_SHADOW_ENABLED"
+SHADOW_ACCOUNT_IDS_FLAG = "TARGET_FOLLOWERS_RESUME_V2_SHADOW_ACCOUNT_IDS"
 ENFORCE_FLAG = "TARGET_FOLLOWERS_RESUME_V2_ENFORCE_ENABLED"
+MAX_SHADOW_ACCOUNT_IDS = 32
 MAX_ANCHORS = 12
 MAX_DEPTH = 80
 MAX_FAST_FORWARD_DEPTH = 40
@@ -123,10 +126,27 @@ def bounded_anchor_hashes(values: Iterable[object]) -> tuple[str, ...]:
     return tuple(token for token in (anchor_hash(item) for item in selected) if token)
 
 
+def parse_account_id_allowlist(raw: object) -> tuple[str, ...]:
+    """Parse a bounded UUID allowlist; malformed or oversized input fails closed."""
+    values = [item.strip().lower() for item in str(raw or "").split(",") if item.strip()]
+    if len(values) > MAX_SHADOW_ACCOUNT_IDS:
+        return ()
+    parsed: list[str] = []
+    for value in values:
+        try:
+            canonical = str(uuid.UUID(value))
+        except (ValueError, AttributeError, TypeError):
+            return ()
+        if canonical not in parsed:
+            parsed.append(canonical)
+    return tuple(parsed)
+
+
 @dataclass(frozen=True)
 class ResumeFlags:
     shadow_enabled: bool = False
     enforce_enabled: bool = False
+    shadow_account_ids: tuple[str, ...] = ()
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> "ResumeFlags":
@@ -134,6 +154,7 @@ class ResumeFlags:
         return cls(
             shadow_enabled=_truthy(env.get(SHADOW_FLAG)),
             enforce_enabled=_truthy(env.get(ENFORCE_FLAG)),
+            shadow_account_ids=parse_account_id_allowlist(env.get(SHADOW_ACCOUNT_IDS_FLAG)),
         )
 
     @property
@@ -143,6 +164,14 @@ class ResumeFlags:
     @property
     def mode(self) -> str:
         return "enforce" if self.enforce_enabled else "shadow"
+
+    def shadow_allowed_for(self, account_id: str) -> bool:
+        """First-rollout gate: shadow only, explicit account UUID, never enforce."""
+        return bool(
+            self.shadow_enabled
+            and not self.enforce_enabled
+            and _clean_id(account_id).lower() in self.shadow_account_ids
+        )
 
 
 @dataclass(frozen=True)
@@ -659,15 +688,26 @@ def build_runtime_controller(
     instagram_version: str = "",
     emit: Callable[[str, dict[str, Any]], None] | None = None,
     flags: ResumeFlags | None = None,
+    rpc_call: Callable[[str, dict[str, Any]], Any] | None = None,
 ) -> ProgressiveResumeController | None:
-    """Construct a controller only when one V2 flag is explicitly enabled."""
+    """Construct only for an explicitly allowlisted shadow account.
+
+    The gate runs before importing the Supabase client, guaranteeing that an
+    ineligible account performs no V2 RPC and creates no V2 event/checkpoint.
+    Enforcement intentionally remains unavailable in the first rollout.
+    """
     flags = flags or ResumeFlags.from_env()
-    if not flags.enabled or not all((_clean_id(account_id), _clean_id(target_id), _clean_id(run_id))):
+    if not flags.shadow_allowed_for(account_id) or not all(
+        (_clean_id(account_id), _clean_id(target_id), _clean_id(run_id))
+    ):
         return None
-    import supabase_client
+    if rpc_call is None:
+        import supabase_client
+
+        rpc_call = supabase_client.call_rpc
 
     return ProgressiveResumeController(
-        repository=ResumeRepository(supabase_client.call_rpc),
+        repository=ResumeRepository(rpc_call),
         flags=flags,
         account_id=_clean_id(account_id),
         target_id=_clean_id(target_id),

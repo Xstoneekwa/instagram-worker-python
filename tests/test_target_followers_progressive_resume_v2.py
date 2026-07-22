@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import inspect
 import os
 import unittest
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -13,6 +15,7 @@ from target_followers_resume_replay import compare_legacy_to_theoretical_v2, loa
 
 ACCOUNT_A = "00000000-0000-0000-0000-000000000001"
 ACCOUNT_B = "00000000-0000-0000-0000-000000000002"
+ACCOUNT_C = "00000000-0000-0000-0000-000000000003"
 TARGET_A = "10000000-0000-0000-0000-000000000001"
 TARGET_B = "10000000-0000-0000-0000-000000000002"
 RUN_A = "20000000-0000-0000-0000-000000000001"
@@ -86,7 +89,7 @@ class FakeRpc:
 
 class FlagsTests(unittest.TestCase):
     def test_01_flags_default_off(self):
-        self.assertEqual(resume.ResumeFlags.from_env({}), resume.ResumeFlags(False, False))
+        self.assertEqual(resume.ResumeFlags.from_env({}), resume.ResumeFlags(False, False, ()))
 
     def test_02_shadow_flag(self):
         self.assertEqual(resume.ResumeFlags.from_env({resume.SHADOW_FLAG: "true"}).mode, "shadow")
@@ -383,6 +386,97 @@ class ReplayAndStaticSafetyTests(unittest.TestCase):
     def test_59_build_controller_off_import_has_no_rpc(self):
         with patch.dict(os.environ, {resume.SHADOW_FLAG: "false", resume.ENFORCE_FLAG: "false"}, clear=False):
             self.assertIsNone(resume.build_runtime_controller(account_id=ACCOUNT_A, target_id=TARGET_A, target_username="neutral.target", run_id=RUN_A))
+
+
+class ShadowAccountScopeTests(unittest.TestCase):
+    def flags(self, *account_ids, shadow=True, enforce=False):
+        return resume.ResumeFlags(shadow, enforce, tuple(account_ids))
+
+    def build(self, account_id, rpc, events, flags):
+        return resume.build_runtime_controller(
+            account_id=account_id,
+            target_id=TARGET_A,
+            target_username="neutral.target",
+            run_id=RUN_A,
+            flags=flags,
+            rpc_call=rpc,
+            emit=lambda event, payload: events.append((event, payload)),
+        )
+
+    def test_60_allowed_canary_executes_shadow_and_keeps_legacy_navigation(self):
+        rpc = FakeRpc(row=checkpoint_row())
+        events = []
+        flags = resume.ResumeFlags.from_env(
+            {
+                resume.SHADOW_FLAG: "true",
+                resume.SHADOW_ACCOUNT_IDS_FLAG: ACCOUNT_A,
+                resume.ENFORCE_FLAG: "false",
+            }
+        )
+        controller = self.build(ACCOUNT_A, rpc, events, flags)
+        self.assertIsNotNone(controller)
+        plan = controller.load_and_plan()
+        controller.claim()
+        self.assertTrue(plan.use_legacy_navigation)
+        self.assertEqual(controller.flags.mode, "shadow")
+        self.assertGreater(len(rpc.calls), 0)
+
+    def test_61_other_account_performs_zero_v2_rpc_or_event(self):
+        rpc = FakeRpc()
+        events = []
+        self.assertIsNone(self.build(ACCOUNT_B, rpc, events, self.flags(ACCOUNT_A)))
+        self.assertEqual(rpc.calls, [])
+        self.assertEqual(events, [])
+
+    def test_62_future_third_account_is_off_by_default(self):
+        rpc = FakeRpc()
+        events = []
+        self.assertIsNone(self.build(ACCOUNT_C, rpc, events, self.flags(ACCOUNT_A)))
+        self.assertEqual(rpc.calls, [])
+        self.assertEqual(events, [])
+
+    def test_63_global_shadow_false_disables_v2_for_all_accounts(self):
+        for account_id in (ACCOUNT_A, ACCOUNT_B, ACCOUNT_C):
+            rpc = FakeRpc()
+            self.assertIsNone(self.build(account_id, rpc, [], self.flags(ACCOUNT_A, shadow=False)))
+            self.assertEqual(rpc.calls, [])
+
+    def test_64_empty_allowlist_disables_v2_when_shadow_true(self):
+        rpc = FakeRpc()
+        self.assertIsNone(self.build(ACCOUNT_A, rpc, [], self.flags()))
+        self.assertEqual(rpc.calls, [])
+
+    def test_65_enforce_true_fails_closed_even_for_allowlisted_account(self):
+        rpc = FakeRpc()
+        self.assertIsNone(self.build(ACCOUNT_A, rpc, [], self.flags(ACCOUNT_A, enforce=True)))
+        self.assertEqual(rpc.calls, [])
+
+    def test_66_no_account_id_is_hardcoded_in_product(self):
+        source = Path(resume.__file__).read_text(encoding="utf-8")
+        runner_source = (Path(resume.__file__).parent / "runner.py").read_text(encoding="utf-8")
+        config_source = (Path(resume.__file__).parent / "config.py").read_text(encoding="utf-8")
+        for account_id in (ACCOUNT_A, ACCOUNT_B, ACCOUNT_C):
+            self.assertNotIn(account_id, source + runner_source + config_source)
+        self.assertNotIn("username", inspect.getsource(resume.ResumeFlags.shadow_allowed_for))
+
+    def test_67_scheduler_accounts_keep_legacy_and_only_canary_gets_shadow(self):
+        flags = self.flags(ACCOUNT_A)
+        controllers = []
+        rpc_by_account = {}
+        for account_id in (ACCOUNT_A, ACCOUNT_B, ACCOUNT_C):
+            rpc = FakeRpc(row=checkpoint_row(account_id=account_id))
+            rpc_by_account[account_id] = rpc
+            controllers.append(self.build(account_id, rpc, [], flags))
+        self.assertEqual([controller is not None for controller in controllers], [True, False, False])
+        self.assertTrue(controllers[0].load_and_plan().use_legacy_navigation)
+        self.assertEqual(rpc_by_account[ACCOUNT_B].calls, [])
+        self.assertEqual(rpc_by_account[ACCOUNT_C].calls, [])
+
+    def test_68_allowlist_parser_is_bounded_and_fails_closed(self):
+        self.assertEqual(resume.parse_account_id_allowlist(f"{ACCOUNT_A},{ACCOUNT_A}"), (ACCOUNT_A,))
+        self.assertEqual(resume.parse_account_id_allowlist("not-an-account-id"), ())
+        oversized = ",".join(str(uuid.UUID(int=index + 1)) for index in range(resume.MAX_SHADOW_ACCOUNT_IDS + 1))
+        self.assertEqual(resume.parse_account_id_allowlist(oversized), ())
 
 
 if __name__ == "__main__":
