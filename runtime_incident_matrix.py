@@ -16,6 +16,7 @@ Normal scheduler gates and voluntary stops must never become incidents.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import re
 from typing import Any
 
 from auto_login_failure_contract import (
@@ -104,6 +105,187 @@ MYTHYL_OPERATOR_MESSAGE = (
 )
 
 AUTO_LOGIN_RUN_TYPES = frozenset({"login_provisioning", "login_email_code_resume"})
+RECOVERABLE_PYTHON_FAILURE_CATEGORY = "recoverable_python_runtime_failure"
+RECOVERABLE_PYTHON_FAILURE_SIGNATURE = "python:unfollow:duplicate_stop_reason"
+RECOVERABLE_PYTHON_ROOT_FAILURE_CODE = "unfollow_runtime_exception"
+AUTO_RESTART_MAX_RETRIES_AFTER_INITIAL_FAILURE = 2
+
+
+@dataclass(frozen=True)
+class RecoverablePythonRetryDecision:
+    applies: bool
+    restart_allowed: bool = False
+    retries_exhausted: bool = False
+    notify_informational: bool = False
+    event_type: str = ""
+    block_reason: str = ""
+    business_session_id: str = ""
+    attempt_id: int = 1
+    retry_index: int = 0
+    next_attempt_id: int | None = None
+    next_retry_index: int | None = None
+    previous_run_id: str = ""
+    root_failure_code: str = ""
+    failure_signature: str = ""
+    failure_category: str = ""
+
+
+def _explicit_unsafe_markers(summary: dict[str, Any]) -> list[str]:
+    raw = summary.get("unsafe_markers")
+    markers = (
+        [str(item).strip().lower() for item in raw if str(item).strip()]
+        if isinstance(raw, list)
+        else []
+    )
+    reason_fields = {
+        str(summary.get("reason") or "").strip().lower(),
+        str(summary.get("account_identity_failure_reason") or "").strip().lower(),
+    }
+    explicit = {
+        "challenge",
+        "checkpoint",
+        "restriction",
+        "action_block",
+        "active_instagram_account_mismatch",
+        "account_mismatch",
+        "device_offline",
+        "cleanup_uncertain",
+        "critical_action_result_unknown",
+        "device_lock_incoherent",
+    }
+    for value in reason_fields:
+        if value in explicit:
+            markers.append(value)
+    return sorted(set(markers))
+
+
+def classify_recoverable_python_retry(
+    *,
+    performance_summary: dict[str, Any] | None,
+    request_metadata: dict[str, Any] | None = None,
+    run_id: str | None = None,
+    cleanup_completed: bool | None,
+    lock_released: bool | None,
+) -> RecoverablePythonRetryDecision:
+    """Classify the locked two-retry policy without scheduling anything.
+
+    Generic text such as ``error`` or ``failed`` is deliberately ignored as a
+    safety marker. Only structured unsafe markers can escape the silent path.
+    """
+    summary = dict(performance_summary or {})
+    metadata = dict(request_metadata or {})
+    category = str(summary.get("failure_category") or "").strip()
+    root_code = str(summary.get("root_failure_code") or "").strip()
+    signature = str(summary.get("failure_signature") or "").strip()
+    applies = (
+        category == RECOVERABLE_PYTHON_FAILURE_CATEGORY
+        and root_code == RECOVERABLE_PYTHON_ROOT_FAILURE_CODE
+        and signature == RECOVERABLE_PYTHON_FAILURE_SIGNATURE
+        and str(summary.get("session_termination_class") or "").strip()
+        == "partial_resumable"
+    )
+    if not applies:
+        return RecoverablePythonRetryDecision(applies=False)
+
+    try:
+        attempt_id = int(metadata.get("attempt_id") or summary.get("attempt_id") or 1)
+    except (TypeError, ValueError):
+        attempt_id = 1
+    try:
+        retry_index = int(
+            metadata.get("retry_index")
+            if metadata.get("retry_index") is not None
+            else summary.get("retry_index", max(0, attempt_id - 1))
+        )
+    except (TypeError, ValueError):
+        retry_index = max(0, attempt_id - 1)
+    business_session_id = str(
+        metadata.get("business_session_id")
+        or summary.get("business_session_id")
+        or run_id
+        or ""
+    ).strip()
+    previous_run_id = str(
+        metadata.get("previous_run_id")
+        or metadata.get("prior_run_id")
+        or summary.get("previous_run_id")
+        or ""
+    ).strip()
+    unsafe = _explicit_unsafe_markers(summary)
+    if unsafe:
+        return RecoverablePythonRetryDecision(
+            applies=True,
+            block_reason="unsafe_markers:" + ",".join(unsafe),
+            business_session_id=business_session_id,
+            attempt_id=attempt_id,
+            retry_index=retry_index,
+            previous_run_id=previous_run_id,
+            root_failure_code=root_code,
+            failure_signature=signature,
+            failure_category=category,
+        )
+    if cleanup_completed is not True:
+        return RecoverablePythonRetryDecision(
+            applies=True,
+            block_reason="cleanup_uncertain",
+            business_session_id=business_session_id,
+            attempt_id=attempt_id,
+            retry_index=retry_index,
+            previous_run_id=previous_run_id,
+            root_failure_code=root_code,
+            failure_signature=signature,
+            failure_category=category,
+        )
+    if lock_released is not True:
+        return RecoverablePythonRetryDecision(
+            applies=True,
+            block_reason="device_lock_incoherent",
+            business_session_id=business_session_id,
+            attempt_id=attempt_id,
+            retry_index=retry_index,
+            previous_run_id=previous_run_id,
+            root_failure_code=root_code,
+            failure_signature=signature,
+            failure_category=category,
+        )
+    if not business_session_id or attempt_id != retry_index + 1 or retry_index < 0:
+        return RecoverablePythonRetryDecision(
+            applies=True,
+            block_reason="retry_identity_invalid",
+            business_session_id=business_session_id,
+            attempt_id=attempt_id,
+            retry_index=retry_index,
+            previous_run_id=previous_run_id,
+            root_failure_code=root_code,
+            failure_signature=signature,
+            failure_category=category,
+        )
+
+    exhausted = retry_index >= AUTO_RESTART_MAX_RETRIES_AFTER_INITIAL_FAILURE
+    next_retry_index = None if exhausted else retry_index + 1
+    next_attempt_id = None if exhausted else attempt_id + 1
+    event_type = (
+        "recoverable_python_bug_retries_exhausted"
+        if exhausted
+        else f"recoverable_python_failure_restart_{next_retry_index}_scheduled"
+    )
+    return RecoverablePythonRetryDecision(
+        applies=True,
+        restart_allowed=not exhausted,
+        retries_exhausted=exhausted,
+        notify_informational=exhausted,
+        event_type=event_type,
+        block_reason="auto_restart_retries_exhausted" if exhausted else "",
+        business_session_id=business_session_id,
+        attempt_id=attempt_id,
+        retry_index=retry_index,
+        next_attempt_id=next_attempt_id,
+        next_retry_index=next_retry_index,
+        previous_run_id=previous_run_id,
+        root_failure_code=root_code,
+        failure_signature=signature,
+        failure_category=category,
+    )
 
 def _auto_login_phase(reason: str, summary: dict[str, Any]) -> str:
     explicit = str(summary.get("phase") or "").strip().lower()
@@ -281,6 +463,19 @@ _SAFE_METADATA_KEYS = (
     "welcome_scan_jobs_enqueued_count",
     "welcome_sender_failure_reason",
     "welcome_entry_surface_decision",
+    "root_failure_code",
+    "failure_phase",
+    "failure_module",
+    "failure_function",
+    "specific_failure_reason",
+    "session_termination_class",
+    "restart_allowed",
+    "restart_block_reason",
+    "failure_category",
+    "failure_signature",
+    "business_session_id",
+    "attempt_id",
+    "retry_index",
 )
 
 
@@ -291,6 +486,14 @@ def _safe_summary_metadata(summary: dict[str, Any]) -> dict[str, Any]:
         if value is None:
             continue
         text = str(value).strip()
+        if key == "specific_failure_reason":
+            text = re.sub(r"<[^>]*>", "[redacted]", text)
+            text = re.sub(
+                r"(?i)\b(password|token|secret|authorization)\b\s*[:=]\s*\S+",
+                r"\1=[redacted]",
+                text,
+            )
+            text = re.sub(r"/(?:Users|private|var|tmp)/\S+", "[path]", text)
         if text:
             out[key] = text[:200]
     return out
@@ -317,8 +520,10 @@ def classify_terminal_run_failure(
     summary = dict(performance_summary or {})
     status = str(run_status or "").strip().lower()
     normalized_run_type = str(run_type or summary.get("run_type") or "").strip().lower()
+    root_failure_code = str(summary.get("root_failure_code") or "").strip()
     reason = str(
-        summary.get("reason_code")
+        root_failure_code
+        or summary.get("reason_code")
         or summary.get("failure_reason")
         or summary.get("reason")
         or ""

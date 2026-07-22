@@ -405,6 +405,203 @@ def dispatch_operator_review_action_notification(
     return summary
 
 
+def build_python_retries_exhausted_notification(
+    *,
+    account_username: str,
+    run_id: str | None,
+    business_session_id: str,
+    phase: str,
+    root_failure_code: str,
+    failure_signature: str,
+    quota_remaining: dict[str, Any] | None,
+    cleanup_completed: bool,
+) -> dict[str, Any]:
+    """Build the exact redacted informational message from the locked policy."""
+    title = "[INFO] Python runtime retries exhausted"
+    quota = dict(quota_remaining or {})
+    quota_label = ", ".join(
+        f"{key}={value}"
+        for key, value in sorted(quota.items())
+        if key in {"follow", "unfollow", "welcome", "outreach", "total"}
+        and isinstance(value, (int, float))
+    ) or "unknown"
+    lines = [
+        title,
+        f"Le run de {str(account_username or 'unknown').strip()} a rencontré un bug Python interne.",
+        "Deux relances automatiques ont été effectuées sans succès.",
+        "Aucun challenge, aucune restriction et aucun risque Instagram n’ont été détectés.",
+        "Aucune action sur le compte Instagram, aucun patch manuel du compte et aucune review opérateur ne sont nécessaires.",
+        "La campagne n’est pas bloquée pour une raison de sécurité.",
+        "L’événement est transmis à l’équipe technique à titre informatif.",
+        f"Run: {_short_id(run_id) or 'unknown'}",
+        f"Business session: {_short_id(business_session_id) or 'unknown'}",
+        f"Phase: {str(phase or 'unknown')[:40]}",
+        f"Root failure code: {str(root_failure_code or 'unknown')[:80]}",
+        f"Failure signature: {str(failure_signature or 'unknown')[:120]}",
+        "Relances effectuées: 2/2",
+        f"Quota restant: {quota_label}",
+        f"Cleanup: {'completed' if cleanup_completed else 'uncertain'}",
+    ]
+    return {
+        "title": title,
+        "text": "\n".join(lines),
+        "severity": "warning",
+        "notification_type": "python_runtime_retries_exhausted",
+    }
+
+
+def _load_retry_proof(
+    *, business_session_id: str, failure_signature: str
+) -> set[int]:
+    rows = supabase_client._request_json(
+        "GET",
+        "auto_restart_decisions",
+        query={
+            "select": "business_session_id,decision,metadata_safe",
+            "business_session_id": f"eq.{business_session_id}",
+            "decision": "eq.enqueued",
+            "limit": "20",
+        },
+    ) or []
+    indexes: set[int] = set()
+    for row in rows:
+        metadata = row.get("metadata_safe") if isinstance(row, dict) else None
+        if not isinstance(metadata, dict):
+            continue
+        if str(metadata.get("failure_signature") or "") != failure_signature:
+            continue
+        try:
+            retry_index = int(metadata.get("retry_index"))
+        except (TypeError, ValueError):
+            continue
+        if retry_index in {1, 2}:
+            indexes.add(retry_index)
+    return indexes
+
+
+def dispatch_python_retries_exhausted_notification(
+    *,
+    account_id: str,
+    account_username: str,
+    run_id: str | None,
+    request_id: str,
+    business_session_id: str,
+    phase: str,
+    root_failure_code: str,
+    failure_signature: str,
+    quota_remaining: dict[str, Any] | None,
+    cleanup_completed: bool,
+) -> dict[str, Any]:
+    """Send one deduplicated technical notification, without an incident row."""
+    if not _notifications_enabled() or _dry_run_enabled():
+        return {"sent_count": 0, "reason": "disabled_or_dry_run"}
+    try:
+        if _load_retry_proof(
+            business_session_id=business_session_id,
+            failure_signature=failure_signature,
+        ) != {1, 2}:
+            return {"sent_count": 0, "reason": "retry_proof_incomplete"}
+    except Exception as exc:
+        return {
+            "sent_count": 0,
+            "reason": "retry_proof_unavailable",
+            "error": _truncate_redact(exc),
+        }
+
+    payload = build_python_retries_exhausted_notification(
+        account_username=account_username,
+        run_id=run_id,
+        business_session_id=business_session_id,
+        phase=phase,
+        root_failure_code=root_failure_code,
+        failure_signature=failure_signature,
+        quota_remaining=quota_remaining,
+        cleanup_completed=cleanup_completed,
+    )
+    allowed_channels, selected_channels = resolve_dispatch_channels()
+    summary = {"sent_count": 0, "failed_count": 0, "skipped_count": 0, "reason": "real_send"}
+    for channel in allowed_channels:
+        if channel not in selected_channels:
+            summary["skipped_count"] += 1
+            continue
+        delivery_key = (
+            f"technical:{channel}:{business_session_id}:"
+            f"{failure_signature}:retries_exhausted"
+        )
+        existing = supabase_client._request_json(
+            "GET",
+            "auto_restart_decisions",
+            query={"select": "id", "idempotency_key": f"eq.{delivery_key}", "limit": "1"},
+        ) or []
+        if existing:
+            summary["skipped_count"] += 1
+            continue
+        rows = supabase_client._request_json(
+            "POST",
+            "auto_restart_decisions",
+            query={"on_conflict": "idempotency_key"},
+            body={
+                "request_id": request_id,
+                "idempotency_key": delivery_key,
+                "actor": "system",
+                "account_id": account_id,
+                "business_session_id": business_session_id,
+                "prior_run_id": run_id,
+                "action": "technical_notification",
+                "decision": "notification_pending",
+                "reason": "recoverable_python_bug_retries_exhausted",
+                "mode": "production",
+                "restart_count_window": 2,
+                "metadata_safe": {
+                    "channel": channel,
+                    "severity": "warning",
+                    "failure_signature": failure_signature,
+                    "root_failure_code": root_failure_code,
+                    "retry_index": 2,
+                    "retries_completed": "2/2",
+                },
+            },
+            prefer_representation=True,
+            prefer_resolution="resolution=ignore-duplicates",
+        ) or []
+        # The unique idempotency key is the send claim. A concurrent
+        # dispatcher that loses the insert race gets no represented row and
+        # must not call the webhook.
+        if not rows:
+            summary["skipped_count"] += 1
+            continue
+        decision_id = str(rows[0].get("id") or "") if rows else ""
+        result = send_notification_webhook(channel, payload)
+        delivered = bool(result.get("ok"))
+        if delivered:
+            summary["sent_count"] += 1
+        else:
+            summary["failed_count"] += 1
+        if decision_id:
+            supabase_client._request_json(
+                "PATCH",
+                "auto_restart_decisions",
+                query={"id": f"eq.{decision_id}"},
+                body={
+                    "decision": "notification_sent" if delivered else "notification_failed",
+                    "metadata_safe": {
+                        "channel": channel,
+                        "severity": "warning",
+                        "failure_signature": failure_signature,
+                        "root_failure_code": root_failure_code,
+                        "retry_index": 2,
+                        "retries_completed": "2/2",
+                        "delivery_status": "sent" if delivered else "failed",
+                        "delivery_reason": None
+                        if delivered
+                        else _truncate_redact(result.get("reason")),
+                    },
+                },
+                prefer_representation=False,
+            )
+    return summary
+
+
 def _post_json_webhook(url: str, body: dict, timeout: int) -> dict:
     raw_url = str(url or "").strip()
     if not raw_url:

@@ -265,6 +265,46 @@ def validate_auto_restart_request_at_claim(
     if schema_reason:
         return False, schema_reason, None
 
+    recoverable_python_retry = (
+        str(meta.get("failure_category") or embedded.get("failure_category") or "")
+        == "recoverable_python_runtime_failure"
+    )
+    retry_context: dict[str, Any] = {}
+    if recoverable_python_retry:
+        business_session_id = str(meta.get("business_session_id") or "").strip()
+        previous_run_id = str(
+            meta.get("previous_run_id") or meta.get("prior_run_id") or ""
+        ).strip()
+        try:
+            attempt_id = int(meta.get("attempt_id"))
+            retry_index = int(meta.get("retry_index"))
+        except (TypeError, ValueError):
+            return False, "resume_plan_invalid", None
+        if (
+            not business_session_id
+            or previous_run_id != prior_run_id
+            or retry_index not in {1, 2}
+            or attempt_id != retry_index + 1
+            or embedded.get("cleanup_completed") is not True
+            or embedded.get("lock_released") is not True
+            or str(meta.get("root_failure_code") or embedded.get("root_failure_code") or "")
+            != "unfollow_runtime_exception"
+            or str(meta.get("failure_signature") or embedded.get("failure_signature") or "")
+            != "python:unfollow:duplicate_stop_reason"
+        ):
+            return False, "resume_plan_invalid", None
+        retry_context = {
+            "business_session_id": business_session_id,
+            "attempt_id": attempt_id,
+            "retry_index": retry_index,
+            "previous_run_id": previous_run_id,
+            "root_failure_code": "unfollow_runtime_exception",
+            "failure_signature": "python:unfollow:duplicate_stop_reason",
+            "failure_category": "recoverable_python_runtime_failure",
+            "scheduled_at": meta.get("scheduled_at"),
+            "business_day_sast": meta.get("business_day_sast"),
+        }
+
     summary = load_prior_run_summary(account_id, prior_run_id)
     if not summary:
         return False, "resume_plan_invalid", None
@@ -306,11 +346,13 @@ def validate_auto_restart_request_at_claim(
         "phases_to_run": {phase: bool(phases.get(phase)) for phase in ("welcome", "follow", "unfollow")},
         "quota_remaining": {k: v for k, v in quota.items() if v is not None},
         "restart_allowed": True,
+        **retry_context,
         "request_metadata": {
             "source": AUTO_RESTART_TICK_SOURCE,
             "session_termination_class": meta.get("session_termination_class"),
             "trigger_source": meta.get("trigger_source"),
             "execution_worker_id": meta.get("execution_worker_id"),
+            **retry_context,
         },
     }
     return True, "", policy

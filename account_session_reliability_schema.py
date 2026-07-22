@@ -222,7 +222,11 @@ def _build_badges(snapshot: dict[str, Any]) -> list[str]:
     if "device_offline" in unsafe:
         badges.append("device_offline")
         badges.append("needs_human_review")
-    if snapshot.get("mandatory_unfollow_executed") is False:
+    if (
+        snapshot.get("mandatory_unfollow_executed") is False
+        and snapshot.get("restart_allowed") is not True
+        and snapshot.get("failure_category") != "recoverable_python_runtime_failure"
+    ):
         if str(snapshot.get("follow_phase_status") or "") in {"completed", "partial_safe_stopped"}:
             badges.append("mandatory_unfollow_missing")
             badges.append("needs_human_review")
@@ -272,6 +276,11 @@ def build_admin_reliability_snapshot(
             safe_summary.get("attempt_id"),
             safe_plan.get("current_attempt_id"),
         ),
+        "retry_index": _value(
+            safe_summary.get("retry_index"),
+            safe_plan.get("retry_index"),
+        ),
+        "next_retry_index": _value(safe_plan.get("next_retry_index")),
         "restart_count": UNKNOWN,
         "session_status": _value(safe_summary.get("session_status")),
         "session_termination_class": _value(safe_summary.get("session_termination_class")),
@@ -361,6 +370,18 @@ def build_admin_reliability_snapshot(
             safe_summary.get("auto_restart_resume_plan_error"),
             _nested(safe_summary, "follow_to_unfollow_real", "failure_reason"),
         ),
+        "failure_category": _value(
+            safe_summary.get("failure_category"),
+            safe_plan.get("failure_category"),
+        ),
+        "root_failure_code": _value(
+            safe_summary.get("root_failure_code"),
+            safe_plan.get("root_failure_code"),
+        ),
+        "failure_signature": _value(
+            safe_summary.get("failure_signature"),
+            safe_plan.get("failure_signature"),
+        ),
         "account_health_status": _value(safe_summary.get("account_health_status")),
         "last_error": _value(
             safe_summary.get("last_error"),
@@ -391,6 +412,13 @@ def _total_quota_remaining(snapshot: dict[str, Any], resume_plan: dict[str, Any]
 
 
 def _mandatory_unfollow_expected(snapshot: dict[str, Any], resume_plan: dict[str, Any]) -> bool:
+    if (
+        snapshot.get("failure_category") == "recoverable_python_runtime_failure"
+        and not snapshot.get("unsafe_markers")
+    ):
+        return False
+    if _as_bool(snapshot.get("restart_allowed")) is True and not snapshot.get("unsafe_markers"):
+        return False
     phase_status = str(snapshot.get("follow_phase_status") or "")
     unfollow_remaining = _as_int(snapshot.get("unfollow_quota_remaining"))
     planned_unfollow = _as_bool(_nested(resume_plan, "phases_to_run", "unfollow"))
@@ -432,6 +460,32 @@ def _event_type_and_severity(
     restart_allowed = _as_bool(snapshot.get("restart_allowed"))
     block_reason = str(snapshot.get("restart_block_reason") or "")
     remaining = _total_quota_remaining(snapshot, resume_plan)
+    if (
+        snapshot.get("failure_category") == "recoverable_python_runtime_failure"
+        and not unsafe
+    ):
+        next_retry_index = _as_int(resume_plan.get("next_retry_index"))
+        if restart_allowed is True and next_retry_index == 1:
+            return (
+                "recoverable_python_failure_restart_1_scheduled",
+                "info",
+                "recoverable_python_runtime_failure",
+                "",
+            )
+        if restart_allowed is True and next_retry_index == 2:
+            return (
+                "recoverable_python_failure_restart_2_scheduled",
+                "info",
+                "recoverable_python_runtime_failure",
+                "",
+            )
+        if block_reason == "auto_restart_retries_exhausted":
+            return (
+                "recoverable_python_bug_retries_exhausted",
+                "warning",
+                "auto_restart_retries_exhausted",
+                "",
+            )
     if restart_allowed is True:
         return "restart_scheduled", "info", "restart_allowed", "Monitor next restart attempt."
     if block_reason and remaining is not None and remaining > 0:

@@ -53,6 +53,7 @@ import runtime_incidents
 import supabase_client
 from runtime_incident_matrix import (
     build_run_failure_incident_payload,
+    classify_recoverable_python_retry,
     classify_terminal_run_failure,
 )
 
@@ -983,6 +984,49 @@ def _upsert_operator_review_action(
     )
 
 
+def _update_incident_recovery_state(
+    *,
+    incident_id: str,
+    state: str,
+    original_run_id: str | None,
+    resume_run_id: str | None,
+) -> None:
+    """Best-effort enrichment for the existing human-resume incident."""
+    iid = str(incident_id or "").strip()
+    if not iid:
+        return
+    try:
+        rows = supabase_client._request_json(
+            "GET",
+            "account_incidents",
+            query={"select": "id,metadata", "id": f"eq.{iid}", "limit": "1"},
+        ) or []
+        existing = rows[0].get("metadata") if rows and isinstance(rows[0], dict) else {}
+        metadata = dict(existing) if isinstance(existing, dict) else {}
+        metadata.update(
+            {
+                "recovery_state": str(state or "").strip(),
+                "original_run_id": str(original_run_id or "").strip() or None,
+                "resume_run_id": str(resume_run_id or "").strip() or None,
+            }
+        )
+        supabase_client._request_json(
+            "PATCH",
+            "account_incidents",
+            query={"id": f"eq.{iid}"},
+            body={"metadata": metadata, "updated_at": datetime.now(timezone.utc).isoformat()},
+            prefer_representation=False,
+        )
+    except Exception as exc:
+        log(
+            "warning",
+            "incident_recovery_state_update_failed",
+            incident_id=iid,
+            state=state,
+            error=str(exc)[:200],
+        )
+
+
 def _publish_run_failure_incident(
     *,
     request_id: str,
@@ -994,8 +1038,16 @@ def _publish_run_failure_incident(
     canceled: bool,
     worker_summary: dict[str, Any] | None = None,
     request_snapshot: dict[str, Any] | None = None,
+    request_metadata: dict[str, Any] | None = None,
+    cleanup_completed: bool | None = None,
+    lock_released: bool | None = None,
 ) -> None:
     try:
+        effective_request_metadata = dict(
+            request_metadata
+            or (request_snapshot or {}).get("metadata_safe")
+            or {}
+        )
         run_status: str | None = None
         performance_summary: dict[str, Any] | None = dict(worker_summary or {}) or None
         if run_id:
@@ -1022,15 +1074,115 @@ def _publish_run_failure_incident(
                 "unknown_error",
                 "no_structured_reason",
             }:
-                request_metadata = dict((request_snapshot or {}).get("metadata_safe") or {})
+                auto_login_metadata = dict((request_snapshot or {}).get("metadata_safe") or {})
                 performance_summary = {
                     "domain": "auto_login",
                     "run_type": run_type,
                     "reason_code": request_reason,
-                    "phase": str(request_metadata.get("phase") or "").strip() or None,
+                    "phase": str(auto_login_metadata.get("phase") or "").strip() or None,
                     "request_id": request_id,
                     "run_id": run_id,
                 }
+        retry_decision = classify_recoverable_python_retry(
+            performance_summary=performance_summary,
+            request_metadata=effective_request_metadata,
+            run_id=run_id,
+            cleanup_completed=cleanup_completed,
+            lock_released=lock_released,
+        )
+        if retry_decision.applies and (
+            retry_decision.restart_allowed or retry_decision.retries_exhausted
+        ):
+            plan = (
+                performance_summary.get("auto_restart_resume_plan")
+                if isinstance(performance_summary, dict)
+                else {}
+            )
+            plan = dict(plan) if isinstance(plan, dict) else {}
+            from account_session_resume_plan_store import (
+                record_automatic_retry_terminal_state,
+            )
+
+            persisted = record_automatic_retry_terminal_state(
+                run_id=str(run_id or ""),
+                retry_decision=retry_decision,
+                cleanup_completed=cleanup_completed is True,
+                lock_released=lock_released is True,
+                quota_remaining=plan.get("quota_remaining")
+                if isinstance(plan.get("quota_remaining"), dict)
+                else {},
+                phases_to_run=plan.get("phases_to_run")
+                if isinstance(plan.get("phases_to_run"), dict)
+                else {},
+                scheduled_at=str(effective_request_metadata.get("scheduled_at") or "")
+                or None,
+                claimed_at=str(effective_request_metadata.get("claimed_at") or "")
+                or None,
+            )
+            if retry_decision.retries_exhausted:
+                try:
+                    supabase_client.insert_runtime_event(
+                        {
+                            "event_type": retry_decision.event_type,
+                            "severity": "warning",
+                            "visibility": "admin_only",
+                            "account_id": account_id,
+                            "run_id": run_id,
+                            "job_id": request_id,
+                            "source": "run_dispatcher",
+                            "reason": "auto_restart_retries_exhausted",
+                            "message": "Recoverable Python retries exhausted.",
+                            "metadata": {
+                                "business_session_id": retry_decision.business_session_id,
+                                "attempt_id": retry_decision.attempt_id,
+                                "retry_index": retry_decision.retry_index,
+                                "root_failure_code": retry_decision.root_failure_code,
+                                "failure_signature": retry_decision.failure_signature,
+                                "retries_completed": "2/2",
+                            },
+                        }
+                    )
+                except Exception as exc:
+                    log(
+                        "warning",
+                        "recoverable_python_retries_exhausted_event_failed",
+                        account_id=account_id,
+                        run_id=run_id,
+                        error=str(exc)[:200],
+                    )
+                try:
+                    account_username = supabase_client.get_account_username(account_id) or "unknown"
+                except Exception:
+                    account_username = "unknown"
+                incident_notifications.dispatch_python_retries_exhausted_notification(
+                    account_id=account_id,
+                    account_username=account_username,
+                    run_id=run_id,
+                    request_id=request_id,
+                    business_session_id=retry_decision.business_session_id,
+                    phase=str((performance_summary or {}).get("failure_phase") or "unfollow"),
+                    root_failure_code=retry_decision.root_failure_code,
+                    failure_signature=retry_decision.failure_signature,
+                    quota_remaining=plan.get("quota_remaining")
+                    if isinstance(plan.get("quota_remaining"), dict)
+                    else {},
+                    cleanup_completed=cleanup_completed is True,
+                )
+            log(
+                "info",
+                retry_decision.event_type,
+                account_id=account_id,
+                request_id=request_id,
+                run_id=run_id,
+                business_session_id=retry_decision.business_session_id,
+                attempt_id=retry_decision.attempt_id,
+                retry_index=retry_decision.retry_index,
+                restart_allowed=retry_decision.restart_allowed,
+                retries_exhausted=retry_decision.retries_exhausted,
+                persisted=bool(persisted.get("persisted")),
+            )
+            return
+
         decision = classify_terminal_run_failure(
             exit_code=exit_code,
             timed_out=timed_out,
@@ -1056,6 +1208,16 @@ def _publish_run_failure_incident(
             account_username = supabase_client.get_account_username(account_id) or None
         except Exception:
             account_username = None
+        original_run_ref = (
+            str(
+                effective_request_metadata.get("original_run_id")
+                or effective_request_metadata.get("prior_run_id")
+                or ""
+            ).strip()
+            if str(effective_request_metadata.get("recovery_mode") or "")
+            == "human_confirmed_resume"
+            else ""
+        )
         payload = build_run_failure_incident_payload(
             decision,
             account_id=account_id,
@@ -1063,13 +1225,51 @@ def _publish_run_failure_incident(
             run_id=run_id,
             run_request_id=request_id,
             run_type=run_type,
+            dedupe_run_ref=original_run_ref or None,
             device_id=str((request_snapshot or {}).get("device_id") or "").strip() or None,
             app_instance_id=str((request_snapshot or {}).get("app_instance_id") or "").strip() or None,
         )
+        if original_run_ref and run_id:
+            payload["run_id"] = original_run_ref
+            payload["metadata"]["resume_run_id"] = run_id
         result = runtime_incidents.publish_account_incident(**payload)
         incident_id = str(result.get("incident_id") or "").strip()
+        if run_id and incident_id:
+            if str(effective_request_metadata.get("recovery_mode") or "") == "human_confirmed_resume":
+                original_run_id = str(
+                    effective_request_metadata.get("original_run_id")
+                    or effective_request_metadata.get("prior_run_id")
+                    or ""
+                ).strip()
+                from account_session_resume_plan_store import mark_resume_outcome
+
+                mark_resume_outcome(
+                    original_run_id=original_run_id,
+                    succeeded=False,
+                    reason_code=decision.reason_code,
+                )
+                _update_incident_recovery_state(
+                    incident_id=str(effective_request_metadata.get("incident_id") or incident_id),
+                    state="reintervention_required",
+                    original_run_id=original_run_id,
+                    resume_run_id=run_id,
+                )
+            else:
+                from account_session_resume_plan_store import record_terminal_failure
+
+                record_terminal_failure(
+                    run_id=run_id,
+                    incident_type=decision.incident_type,
+                    reason_code=decision.reason_code,
+                    incident_id=incident_id,
+                )
         action_id = None
-        if incident_id and decision.requires_operator_review:
+        if (
+            incident_id
+            and decision.requires_operator_review
+            and str(effective_request_metadata.get("recovery_mode") or "")
+            != "human_confirmed_resume"
+        ):
             action = _upsert_operator_review_action(
                 decision=decision,
                 incident_id=incident_id,
@@ -1141,6 +1341,8 @@ def _finalize_manual_run_after_subprocess(
     exit_code: int,
     timed_out: bool = False,
     request_snapshot: dict[str, Any] | None = None,
+    cleanup_completed: bool | None = None,
+    lock_released: bool | None = None,
 ) -> None:
     latest = get_account_run_request(request_id) or request_snapshot or {}
     run_id = str(latest.get("run_id") or "").strip() or None
@@ -1150,6 +1352,13 @@ def _finalize_manual_run_after_subprocess(
         or ""
     ).strip().lower()
     canceled = bool(latest.get("cancel_requested_at")) or str(latest.get("status") or "").strip().lower() == "canceled"
+    request_metadata = dict(
+        latest.get("metadata_safe")
+        or (request_snapshot or {}).get("metadata_safe")
+        or {}
+    )
+    if latest.get("claimed_at"):
+        request_metadata.setdefault("claimed_at", latest.get("claimed_at"))
 
     if timed_out:
         if _is_login_run_type(run_type):
@@ -1197,6 +1406,9 @@ def _finalize_manual_run_after_subprocess(
             canceled=canceled,
             worker_summary=timeout_summary or None,
             request_snapshot=request_snapshot,
+            request_metadata=request_metadata,
+            cleanup_completed=cleanup_completed,
+            lock_released=lock_released,
         )
         return
 
@@ -1258,6 +1470,9 @@ def _finalize_manual_run_after_subprocess(
                     exit_code=1,
                     timed_out=False,
                     canceled=False,
+                    request_metadata=request_metadata,
+                    cleanup_completed=cleanup_completed,
+                    lock_released=lock_released,
                 )
                 return
         _safe_complete_account_run_request(request_id, cfg.worker_id, "completed")
@@ -1281,6 +1496,18 @@ def _finalize_manual_run_after_subprocess(
                 **({"login_provisioner_summary": summary} if summary else {}),
             },
         )
+        if (
+            is_auto_restart_request(request_metadata)
+            and str(request_metadata.get("failure_category") or "")
+            == "recoverable_python_runtime_failure"
+            and run_id
+        ):
+            from account_session_resume_plan_store import mark_automatic_retry_success
+
+            mark_automatic_retry_success(
+                run_id=run_id,
+                request_metadata=request_metadata,
+            )
         return
 
     if canceled:
@@ -1453,6 +1680,9 @@ def _finalize_manual_run_after_subprocess(
         canceled=canceled,
         worker_summary=structured_summary if is_auto_login else None,
         request_snapshot=request_snapshot,
+        request_metadata=request_metadata,
+        cleanup_completed=cleanup_completed,
+        lock_released=lock_released,
     )
 
 
@@ -1989,6 +2219,7 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
             device_lock_renewal=device_lock_active,
         )
 
+    lock_released = False
     if device_id and device_lock_active:
         if _is_scheduled_session_preflight_run_type(run_type) and int(exit_code) == 0:
             renew_device_lock(
@@ -1997,7 +2228,12 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
                 request_id=request_id,
             )
         else:
-            release_device_lock(device_id=device_id, worker_id=lock_owner_worker_id, request_id=request_id)
+            release_result = release_device_lock(
+                device_id=device_id,
+                worker_id=lock_owner_worker_id,
+                request_id=request_id,
+            )
+            lock_released = bool((release_result or {}).get("released"))
 
     _finalize_manual_run_after_subprocess(
         cfg,
@@ -2010,6 +2246,10 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
             "device_id": dispatch_ctx.get("device_id"),
             "app_instance_id": dispatch_ctx.get("app_instance_id"),
         },
+        # Every normal runner return passes through _return_with_cleanup. A
+        # timeout/forced termination cannot make that guarantee.
+        cleanup_completed=not timed_out,
+        lock_released=lock_released,
     )
 
 

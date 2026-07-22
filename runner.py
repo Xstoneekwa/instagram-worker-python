@@ -18766,6 +18766,9 @@ def main() -> int:
     if account_session_run and supabase_mode and run_id:
         try:
             from account_session_resume_plan_store import create_early_resume_plan
+            from auto_restart_runtime import load_resume_policy_from_env
+
+            early_resume_policy = load_resume_policy_from_env() or {}
 
             create_early_resume_plan(
                 run_id=run_id,
@@ -18780,6 +18783,23 @@ def main() -> int:
                 expected_package=str(config.INSTAGRAM_PACKAGE or "") or None,
                 scheduled_window_start=dispatch_ctx.get("starts_at"),
                 scheduled_window_end=dispatch_ctx.get("ends_at"),
+                business_session_id=str(
+                    early_resume_policy.get("business_session_id") or run_id
+                ),
+                attempt_id=int(early_resume_policy.get("attempt_id") or 1),
+                retry_index=int(early_resume_policy.get("retry_index") or 0),
+                previous_run_id=str(
+                    early_resume_policy.get("previous_run_id")
+                    or early_resume_policy.get("prior_run_id")
+                    or ""
+                )
+                or None,
+                scheduled_at=str(early_resume_policy.get("scheduled_at") or "")
+                or None,
+                business_day_sast=str(
+                    early_resume_policy.get("business_day_sast") or ""
+                )
+                or None,
             )
         except Exception as exc:
             log(

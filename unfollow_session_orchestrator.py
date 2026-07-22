@@ -1542,7 +1542,6 @@ def _run_real_unfollow_multi_loop(
                     "info",
                     "unfollow_ui_coverage_viewport_decision",
                     decision=coverage_decision.action,
-                    stop_reason=coverage_decision.stop_reason,
                     viewport_fingerprint=coverage_decision.fingerprint,
                     new_usernames_count=coverage_decision.new_usernames_count,
                     following_confirmed=bool(following_det.get("is_following_list")),

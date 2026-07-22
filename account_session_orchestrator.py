@@ -54,6 +54,11 @@ FOLLOW_TARGET_MAX_TARGETS_PER_RUN_ENV = "FOLLOW_TARGET_ROTATION_MAX_TARGETS_PER_
 FOLLOW_TARGET_MAX_FOLLOWS_PER_TARGET_ENV = "FOLLOW_TARGET_MAX_FOLLOWS_PER_TARGET_PER_RUN"
 FOLLOW_SOURCE_ROTATION_CONTRACT_MAX_FOLLOWS_PER_TARGET_PER_RUN = 30
 FOLLOW_SOURCE_ROTATION_CONTRACT_MAX_TARGETS_PER_RUN = 4
+RECOVERABLE_UNFOLLOW_DUPLICATE_STOP_REASON = (
+    "logs.log() got multiple values for keyword argument 'stop_reason'"
+)
+RECOVERABLE_UNFOLLOW_FAILURE_SIGNATURE = "python:unfollow:duplicate_stop_reason"
+RECOVERABLE_PYTHON_FAILURE_CATEGORY = "recoverable_python_runtime_failure"
 FOLLOW_TARGET_EXHAUSTION_EXIT_CODES = frozenset({66})
 FOLLOW_TARGET_EXHAUSTION_TOKENS = frozenset(
     {
@@ -1379,6 +1384,23 @@ def _session_termination_class(
     )
     if blocked:
         return blocked
+    real_status = str(follow_to_unfollow_real.get("status") or "").strip()
+    real_failure_reason = str(
+        follow_to_unfollow_real.get("failure_reason") or ""
+    ).strip()
+    if (
+        session_status == "failed"
+        and bool(follow_to_unfollow_real.get("executed"))
+        and real_status == "failed_exception"
+        and real_failure_reason == RECOVERABLE_UNFOLLOW_DUPLICATE_STOP_REASON
+    ):
+        return "partial_resumable"
+    if (
+        session_status == "failed"
+        and bool(follow_to_unfollow_real.get("executed"))
+        and real_status == "failed_exception"
+    ):
+        return "non_recoverable_failure"
     if not follow_phase_executed:
         return "unknown" if session_status != "failed" else "recoverable_failure"
     if str(follow_session_outcome or "").strip() == "no_followable_candidates_all_targets":
@@ -1422,6 +1444,13 @@ def _restart_eligibility(
             return "eligible", "quota_remaining_after_safe_continued"
         return "not_needed", "safe_continued_no_known_quota_remaining"
     if session_termination_class in ("partial_safe_stopped", "partial_resumable"):
+        if (
+            str(follow_to_unfollow_real.get("status") or "").strip()
+            == "failed_exception"
+            and str(follow_to_unfollow_real.get("failure_reason") or "").strip()
+            == RECOVERABLE_UNFOLLOW_DUPLICATE_STOP_REASON
+        ):
+            return "eligible", "recoverable_python_runtime_failure"
         if follow_quota_remaining is not None and follow_quota_remaining <= 0:
             return "not_needed", "no_quota_remaining"
         if follow_quota_remaining is None:
@@ -3378,6 +3407,46 @@ def run_account_session(
         follow_to_unfollow_real.get("executed")
         and int(follow_to_unfollow_real.get("unfollow_actions_sent") or 0) > 0
     )
+    unfollow_quota_target = (
+        follow_to_unfollow_real.get("real_max_actions_effective")
+        or follow_to_unfollow_real.get("real_max_actions")
+    )
+    specific_failure_reason = str(
+        follow_to_unfollow_real.get("failure_reason") or ""
+    ).strip()
+    failure_phase = "unfollow" if unfollow_phase_status == "failed" else ""
+    root_failure_code = (
+        "unfollow_runtime_exception"
+        if failure_phase == "unfollow"
+        and str(follow_to_unfollow_real.get("status") or "") == "failed_exception"
+        else phase_terminal_contract.get("reason") if session_status == "failed" else ""
+    )
+    is_recoverable_python_failure = (
+        session_termination_class == "partial_resumable"
+        and root_failure_code == "unfollow_runtime_exception"
+        and specific_failure_reason == RECOVERABLE_UNFOLLOW_DUPLICATE_STOP_REASON
+    )
+    failure_category = (
+        RECOVERABLE_PYTHON_FAILURE_CATEGORY
+        if is_recoverable_python_failure
+        else None
+    )
+    failure_signature = (
+        RECOVERABLE_UNFOLLOW_FAILURE_SIGNATURE
+        if is_recoverable_python_failure
+        else None
+    )
+    resume_policy = dict(auto_restart_resume_policy or {})
+    attempt_id = int(resume_policy.get("attempt_id") or 1)
+    retry_index = int(resume_policy.get("retry_index") or max(0, attempt_id - 1))
+    business_session_id = str(
+        resume_policy.get("business_session_id") or run_id or ""
+    ).strip()
+    previous_run_id = str(
+        resume_policy.get("previous_run_id")
+        or resume_policy.get("prior_run_id")
+        or ""
+    ).strip()
     auto_restart_v1b_dry_run = auto_restart_resume_policy is None
     auto_restart_v1b_enabled = bool(getattr(config, "AUTO_RESTART_ENABLED", False))
     auto_restart_resume_plan: dict[str, Any] | None = None
@@ -3396,6 +3465,11 @@ def run_account_session(
             "session_termination_class": session_termination_class,
             "restart_eligibility": restart_eligibility,
             "restart_block_reason": restart_block_reason,
+            "business_session_id": business_session_id,
+            "attempt_id": attempt_id,
+            "current_attempt_id": attempt_id,
+            "retry_index": retry_index,
+            "previous_run_id": previous_run_id or None,
             "welcome_enabled": welcome_enabled,
             "welcome_phase_status": welcome_phase_status,
             "follow_phase_status": follow_phase_status,
@@ -3415,6 +3489,7 @@ def run_account_session(
                 "pending_unfollow_count"
             ),
             "mandatory_unfollow_executed": mandatory_unfollow_executed,
+            "unfollow_quota_target": unfollow_quota_target,
             "unfollow_actions_verified": follow_to_unfollow_real.get(
                 "unfollow_actions_verified"
             ),
@@ -3423,6 +3498,9 @@ def run_account_session(
             ),
             "follow_to_unfollow_real": follow_to_unfollow_real,
             "account_session_outreach_addon": account_session_outreach_addon,
+            "root_failure_code": root_failure_code or None,
+            "failure_category": failure_category,
+            "failure_signature": failure_signature,
         }
         log(
             "info",
@@ -3443,11 +3521,14 @@ def run_account_session(
                     "AUTO_RESTART_DELAY_MINUTES",
                     20,
                 ),
-                "auto_restart_max_attempts_per_session": getattr(
+                "auto_restart_max_retries_after_initial_failure": getattr(
                     config,
-                    "AUTO_RESTART_MAX_ATTEMPTS_PER_SESSION",
+                    "AUTO_RESTART_MAX_RETRIES_AFTER_INITIAL_FAILURE",
                     2,
                 ),
+                "current_attempt_id": attempt_id,
+                "business_session_id": business_session_id,
+                "previous_run_id": previous_run_id or None,
             },
         )
         auto_restart_restart_allowed = bool(
@@ -3531,6 +3612,11 @@ def run_account_session(
         "package_name": str(getattr(config, "INSTAGRAM_PACKAGE", "") or ""),
         "session_status": session_status,
         "session_termination_class": session_termination_class,
+        "business_session_id": business_session_id,
+        "attempt_id": attempt_id,
+        "current_attempt_id": attempt_id,
+        "retry_index": retry_index,
+        "previous_run_id": previous_run_id or None,
         "restart_eligibility": restart_eligibility,
         "restart_block_reason": restart_block_reason,
         "welcome_enabled": welcome_enabled,
@@ -3547,6 +3633,14 @@ def run_account_session(
         "follow_stop_reason": follow_stop_reason or None,
         "welcome_sender_jobs_sent_count": sender_summary.get("jobs_sent_count"),
         "mandatory_unfollow_executed": mandatory_unfollow_executed,
+        "unfollow_quota_target": unfollow_quota_target,
+        "root_failure_code": root_failure_code or None,
+        "failure_phase": failure_phase or None,
+        "failure_module": "unfollow_session_orchestrator" if failure_phase else None,
+        "failure_function": "_run_real_unfollow_multi_loop" if failure_phase else None,
+        "specific_failure_reason": specific_failure_reason or None,
+        "failure_category": failure_category,
+        "failure_signature": failure_signature,
         "unfollow_actions_verified": follow_to_unfollow_real.get(
             "unfollow_actions_verified"
         ),
@@ -3563,12 +3657,27 @@ def run_account_session(
     _LAST_ACCOUNT_SESSION_SUMMARY = {
         "session_status": session_status,
         "session_termination_class": session_termination_class,
+        "business_session_id": business_session_id,
+        "attempt_id": attempt_id,
+        "current_attempt_id": attempt_id,
+        "retry_index": retry_index,
+        "previous_run_id": previous_run_id or None,
         "exit_code": exit_code,
         "welcome_phase_status": welcome_phase_status,
         "follow_phase_status": follow_phase_status,
         "unfollow_phase_status": unfollow_phase_status,
         "outreach_phase_status": outreach_phase_status,
         "phase_terminal_contract": phase_terminal_contract,
+        "root_failure_code": root_failure_code or None,
+        "failure_phase": failure_phase or None,
+        "failure_module": "unfollow_session_orchestrator" if failure_phase else None,
+        "failure_function": "_run_real_unfollow_multi_loop" if failure_phase else None,
+        "specific_failure_reason": specific_failure_reason or None,
+        "failure_category": failure_category,
+        "failure_signature": failure_signature,
+        "restart_allowed": auto_restart_restart_allowed,
+        "restart_block_reason": auto_restart_restart_block_reason,
+        "unfollow_quota_target": unfollow_quota_target,
         "unfollow_actions_verified": int(follow_to_unfollow_real.get("unfollow_actions_verified") or 0),
         "unfollow_results_persisted_count": int(follow_to_unfollow_real.get("unfollow_results_persisted_count") or 0),
         "unfollow_effective_limit": follow_to_unfollow_real.get("unfollow_effective_limit"),
@@ -3738,6 +3847,19 @@ def run_account_session(
         follow_to_unfollow_real=follow_to_unfollow_real,
         account_session_outreach_addon=account_session_outreach_addon,
         mandatory_unfollow_executed=mandatory_unfollow_executed,
+        unfollow_quota_target=unfollow_quota_target,
+        root_failure_code=root_failure_code or None,
+        failure_phase=failure_phase or None,
+        failure_module="unfollow_session_orchestrator" if failure_phase else None,
+        failure_function="_run_real_unfollow_multi_loop" if failure_phase else None,
+        specific_failure_reason=specific_failure_reason or None,
+        failure_category=failure_category,
+        failure_signature=failure_signature,
+        business_session_id=business_session_id,
+        attempt_id=attempt_id,
+        retry_index=retry_index,
+        previous_run_id=previous_run_id or None,
+        restart_allowed=auto_restart_restart_allowed,
         auto_restart_v1b_enabled=auto_restart_v1b_enabled,
         auto_restart_v1b_dry_run=auto_restart_v1b_dry_run,
         auto_restart_resume_plan=auto_restart_resume_plan,

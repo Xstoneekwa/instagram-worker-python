@@ -14,6 +14,8 @@ import config
 from logs import log
 
 UNKNOWN = "unknown"
+AUTO_RESTART_MAX_RETRIES_AFTER_INITIAL_FAILURE = 2
+AUTO_RESTART_TOTAL_ATTEMPTS = AUTO_RESTART_MAX_RETRIES_AFTER_INITIAL_FAILURE + 1
 
 
 def _as_bool(value: Any) -> bool | None:
@@ -112,6 +114,12 @@ def _unfollow_quota(
         target = _as_int(_setting(settings, "unfollow_quota_target", None))
     if target is None:
         target = _as_int(_setting(settings, "unfollow_target", None))
+    if target is None:
+        target = _as_int(
+            _nested(summary, "follow_to_unfollow_real", "real_max_actions_effective")
+        )
+    if target is None:
+        target = _as_int(_nested(summary, "follow_to_unfollow_real", "real_max_actions"))
 
     done = _as_int(summary.get("unfollow_actions_verified"))
     if done is None:
@@ -173,7 +181,9 @@ def _attempt_ids(
     if current is None:
         current = _as_int(_setting(settings, "current_attempt_id", None))
     if current is None:
-        return UNKNOWN, UNKNOWN
+        # A normal scheduler/manual session is attempt 1. Auto Restart request
+        # metadata supplies attempt 2/3 explicitly through ``settings``.
+        current = 1
     return current, current + 1
 
 
@@ -234,13 +244,20 @@ def build_account_session_resume_plan(
     total_quota_remaining = sum(total_known_remaining) if total_known_remaining else None
 
     current_attempt_id, next_attempt_id = _attempt_ids(safe_summary, safe_settings)
-    max_attempts = _as_int(
+    max_retries_after_initial_failure = _as_int(
         _setting(
             safe_settings,
-            "auto_restart_max_attempts_per_session",
-            getattr(config, "AUTO_RESTART_MAX_ATTEMPTS_PER_SESSION", 2),
+            "auto_restart_max_retries_after_initial_failure",
+            getattr(
+                config,
+                "AUTO_RESTART_MAX_RETRIES_AFTER_INITIAL_FAILURE",
+                AUTO_RESTART_MAX_RETRIES_AFTER_INITIAL_FAILURE,
+            ),
         )
     )
+    if max_retries_after_initial_failure is None:
+        max_retries_after_initial_failure = AUTO_RESTART_MAX_RETRIES_AFTER_INITIAL_FAILURE
+    max_retries_after_initial_failure = max(0, max_retries_after_initial_failure)
     delay_minutes = _as_int(
         _setting(
             safe_settings,
@@ -311,11 +328,22 @@ def build_account_session_resume_plan(
             restart_block_reason = "restart_not_allowed_for_termination_class"
             reason = restart_block_reason
 
-    if restart_allowed and max_attempts is not None and isinstance(next_attempt_id, int):
-        if next_attempt_id > max_attempts:
+    retry_index = (
+        max(0, current_attempt_id - 1)
+        if isinstance(current_attempt_id, int)
+        else UNKNOWN
+    )
+    next_retry_index = retry_index + 1 if isinstance(retry_index, int) else UNKNOWN
+    if restart_allowed and isinstance(next_retry_index, int):
+        if next_retry_index > max_retries_after_initial_failure:
             restart_allowed = False
-            restart_block_reason = "max_attempts_per_session_reached"
+            restart_block_reason = "auto_restart_retries_exhausted"
             reason = restart_block_reason
+            # Exhaustion is terminal for this business session: do not expose
+            # a synthetic attempt 4 / retry 3 that another scheduler could
+            # mistake for executable work.
+            next_attempt_id = None
+            next_retry_index = None
 
     if restart_allowed and any(value == UNKNOWN for value in phases_to_run.values()):
         restart_allowed = False
@@ -329,6 +357,19 @@ def build_account_session_resume_plan(
         "business_session_id": _business_session_id(safe_summary, safe_settings),
         "current_attempt_id": current_attempt_id,
         "next_attempt_id": next_attempt_id,
+        "attempt_id": current_attempt_id,
+        "retry_index": retry_index,
+        "next_retry_index": next_retry_index,
+        "auto_restart_max_retries_after_initial_failure": max_retries_after_initial_failure,
+        "total_attempts_allowed": max_retries_after_initial_failure + 1,
+        "previous_run_id": _setting(
+            safe_settings,
+            "previous_run_id",
+            safe_summary.get("previous_run_id"),
+        ),
+        "root_failure_code": safe_summary.get("root_failure_code"),
+        "failure_signature": safe_summary.get("failure_signature"),
+        "failure_category": safe_summary.get("failure_category"),
         "session_termination_class": termination_class,
         "restart_eligibility": restart_eligibility,
         "phases_to_run": phases_to_run,
@@ -351,6 +392,9 @@ def build_account_session_resume_plan(
         business_session_id=plan["business_session_id"],
         current_attempt_id=plan["current_attempt_id"],
         next_attempt_id=plan["next_attempt_id"],
+        retry_index=plan["retry_index"],
+        next_retry_index=plan["next_retry_index"],
+        max_retries_after_initial_failure=max_retries_after_initial_failure,
         quota_remaining=quota_remaining,
         phases_to_run=phases_to_run,
         unsafe_markers=unsafe,

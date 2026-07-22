@@ -64,6 +64,23 @@ def _clean(value: Any) -> str | None:
     return text or None
 
 
+def _business_day_sast(value: str | None) -> str:
+    from datetime import datetime, timezone
+    from zoneinfo import ZoneInfo
+
+    raw = _clean(value)
+    if raw:
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+        except ValueError:
+            parsed = datetime.now(timezone.utc)
+    else:
+        parsed = datetime.now(timezone.utc)
+    return parsed.astimezone(ZoneInfo("Africa/Johannesburg")).date().isoformat()
+
+
 def create_early_resume_plan(
     *,
     run_id: str,
@@ -79,6 +96,12 @@ def create_early_resume_plan(
     source_surface: str | None = None,
     run_trigger: str | None = None,
     attempts_in_window: int = 0,
+    business_session_id: str | None = None,
+    attempt_id: int = 1,
+    retry_index: int = 0,
+    previous_run_id: str | None = None,
+    scheduled_at: str | None = None,
+    business_day_sast: str | None = None,
     test: bool = False,
 ) -> dict[str, Any]:
     """Create (or refresh) the canonical resume plan row for one run.
@@ -90,6 +113,23 @@ def create_early_resume_plan(
     aid = _clean(account_id)
     if not rid or not aid:
         return {"persisted": False, "reason": "missing_run_or_account"}
+    safe_attempt_id = max(1, int(attempt_id or 1))
+    safe_retry_index = max(0, int(retry_index or 0))
+    attempt_plan = {
+        "business_session_id": _clean(business_session_id) or rid,
+        "attempt_id": safe_attempt_id,
+        "current_attempt_id": safe_attempt_id,
+        "retry_index": safe_retry_index,
+        "previous_run_id": _clean(previous_run_id),
+        "scheduled_at": _clean(scheduled_at),
+        "claimed_at": _utc_now_iso(),
+        "completed_at": None,
+        "result": "running",
+        "business_day_sast": _clean(business_day_sast)
+        or _business_day_sast(scheduled_window_start),
+        "auto_restart_max_retries_after_initial_failure": 2,
+        "total_attempts_allowed": 3,
+    }
     row = {
         "run_id": rid,
         "run_request_id": _clean(run_request_id),
@@ -112,7 +152,11 @@ def create_early_resume_plan(
         "resume_state": RESUME_STATE_RUN_ACTIVE,
         "restart_allowed": False,
         "restart_block_reason": "run_in_progress",
-        "attempts_in_window": max(0, int(attempts_in_window or 0)),
+        "attempts_in_window": max(
+            safe_retry_index,
+            max(0, int(attempts_in_window or 0)),
+        ),
+        "plan": attempt_plan,
         "test": bool(test),
         "last_updated_at": _utc_now_iso(),
     }
@@ -230,6 +274,13 @@ def record_end_of_session(
 ) -> dict[str, Any]:
     """Orchestrator hook: persist the V1A restart verdict at end of session."""
     plan = dict(session_plan or {})
+    try:
+        existing = load_resume_plan(run_id=run_id) or {}
+        existing_plan = existing.get("plan")
+        if isinstance(existing_plan, dict):
+            plan = {**existing_plan, **plan}
+    except Exception:
+        pass
     completed = str(session_status or "").strip().lower() == "success"
     patch: dict[str, Any] = {
         "resume_stage": "completed" if completed else "phases",
@@ -242,6 +293,110 @@ def record_end_of_session(
         "plan": plan,
     }
     return _patch_plan_by_run_id(run_id, patch)
+
+
+def record_automatic_retry_terminal_state(
+    *,
+    run_id: str,
+    retry_decision: Any,
+    cleanup_completed: bool,
+    lock_released: bool,
+    quota_remaining: dict[str, Any] | None,
+    phases_to_run: dict[str, Any] | None,
+    scheduled_at: str | None = None,
+    claimed_at: str | None = None,
+) -> dict[str, Any]:
+    """Persist the terminal state of one allowlisted Python attempt.
+
+    The existing JSON plan is merged so early claim evidence and the final
+    quota/phase decision remain in one canonical row without a schema change.
+    """
+    try:
+        existing = load_resume_plan(run_id=run_id) or {}
+    except Exception:
+        existing = {}
+    existing_plan = existing.get("plan")
+    plan = dict(existing_plan) if isinstance(existing_plan, dict) else {}
+    plan.update(
+        {
+            "business_session_id": retry_decision.business_session_id,
+            "attempt_id": retry_decision.attempt_id,
+            "current_attempt_id": retry_decision.attempt_id,
+            "retry_index": retry_decision.retry_index,
+            "next_attempt_id": retry_decision.next_attempt_id,
+            "next_retry_index": retry_decision.next_retry_index,
+            "previous_run_id": retry_decision.previous_run_id or None,
+            "root_failure_code": retry_decision.root_failure_code,
+            "failure_signature": retry_decision.failure_signature,
+            "failure_category": retry_decision.failure_category,
+            "cleanup_completed": bool(cleanup_completed),
+            "lock_released": bool(lock_released),
+            "quota_remaining": dict(quota_remaining or {}),
+            "phases_to_run": dict(phases_to_run or {}),
+            "scheduled_at": _clean(scheduled_at) or plan.get("scheduled_at"),
+            "claimed_at": _clean(claimed_at) or plan.get("claimed_at"),
+            "completed_at": _utc_now_iso(),
+            "result": "failed",
+            "restart_allowed": bool(retry_decision.restart_allowed),
+            "restart_block_reason": retry_decision.block_reason,
+            "terminal_event_type": retry_decision.event_type,
+            "auto_restart_max_retries_after_initial_failure": 2,
+            "total_attempts_allowed": 3,
+        }
+    )
+    patch = {
+        "resume_stage": "phases",
+        "resume_state": (
+            RESUME_STATE_RUN_ACTIVE
+            if retry_decision.restart_allowed
+            else RESUME_STATE_NOT_RECOVERABLE
+        ),
+        "restart_allowed": bool(retry_decision.restart_allowed),
+        "restart_block_reason": retry_decision.block_reason,
+        "terminal_reason_code": retry_decision.root_failure_code,
+        "attempts_in_window": max(0, int(retry_decision.retry_index or 0)),
+        "plan": plan,
+    }
+    return _patch_plan_by_run_id(run_id, patch)
+
+
+def mark_automatic_retry_success(
+    *,
+    run_id: str,
+    request_metadata: dict[str, Any] | None,
+) -> dict[str, Any]:
+    metadata = dict(request_metadata or {})
+    try:
+        existing = load_resume_plan(run_id=run_id) or {}
+    except Exception:
+        existing = {}
+    existing_plan = existing.get("plan")
+    plan = dict(existing_plan) if isinstance(existing_plan, dict) else {}
+    plan.update(
+        {
+            "business_session_id": metadata.get("business_session_id")
+            or plan.get("business_session_id"),
+            "attempt_id": metadata.get("attempt_id") or plan.get("attempt_id"),
+            "retry_index": metadata.get("retry_index") or plan.get("retry_index"),
+            "previous_run_id": metadata.get("previous_run_id")
+            or metadata.get("prior_run_id")
+            or plan.get("previous_run_id"),
+            "completed_at": _utc_now_iso(),
+            "result": "succeeded",
+            "restart_allowed": False,
+            "restart_block_reason": "resume_succeeded",
+        }
+    )
+    return _patch_plan_by_run_id(
+        run_id,
+        {
+            "resume_stage": "completed",
+            "resume_state": RESUME_STATE_RESUME_SUCCEEDED,
+            "restart_allowed": False,
+            "restart_block_reason": "resume_succeeded",
+            "plan": plan,
+        },
+    )
 
 
 def mark_resume_outcome(
