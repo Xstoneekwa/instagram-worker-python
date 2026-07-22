@@ -1094,7 +1094,7 @@ def _preparation_flow_used(metadata: dict[str, Any], actions_taken: list[Any]) -
     if recovery_path == "add_existing_account" and screen_after_add_existing:
         return f"add_existing_account_to_{screen_after_add_existing}"
     if "tap_use_another_profile" in actions:
-        return "use_another_profile_previous_account_stopped"
+        return "use_another_profile_for_expected_account"
     if "tap_continue" in actions:
         return "continue_as_candidate"
     if "tap_expected_account" in actions or any("select_expected_account" in action for action in actions):

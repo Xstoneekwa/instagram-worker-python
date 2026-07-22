@@ -221,6 +221,7 @@ def _use_another_decision():
         screen_type="continue_as_candidate",
         account_lifecycle_lookup=lambda _username: {"lifecycle_status": "canceled"},
         clone_reuse_allowed=True,
+        has_use_another_profile=True,
     )
 
 

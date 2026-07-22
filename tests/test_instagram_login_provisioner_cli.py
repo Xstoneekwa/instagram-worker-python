@@ -550,7 +550,7 @@ class InstagramLoginProvisionerCliTest(unittest.TestCase):
             run_id="run-1",
         )
 
-        self.assertEqual(summary["preparation_flow_used"], "use_another_profile_previous_account_stopped")
+        self.assertEqual(summary["preparation_flow_used"], "use_another_profile_for_expected_account")
 
     def test_preparation_flow_used_maps_add_existing_direct_login_form_empty(self) -> None:
         summary = cli._safe_summary_from_result(

@@ -191,6 +191,7 @@ def execute_login_screen_decision(
         else _find_first_exact_target(d, _target_aliases_for_action(action, target_text))
         if action
         in {
+            ACTION_USE_ANOTHER_PROFILE,
             ACTION_ADD_INSTAGRAM_ACCOUNT,
             ACTION_LOG_INTO_EXISTING_ACCOUNT,
             ACTION_ALREADY_HAVE_PROFILE,
@@ -332,6 +333,14 @@ def _find_first_exact_target(d: Any, target_texts: tuple[str, ...]) -> dict[str,
 
 
 def _target_aliases_for_action(action: str, target_text: str) -> tuple[str, ...]:
+    if action == ACTION_USE_ANOTHER_PROFILE:
+        return (
+            "Use another profile",
+            "Log into another account",
+            "Utiliser un autre profil",
+            "Se connecter à un autre compte",
+            "Se connecter a un autre compte",
+        )
     if action == ACTION_ADD_INSTAGRAM_ACCOUNT:
         return (
             "Add Instagram account",
@@ -1056,6 +1065,8 @@ def _safe_login_screen_signals(hierarchy_xml: str | None) -> dict[str, Any]:
     signals.pop("save_password_prompt_present", None)
     signals.pop("google_password_manager_save_prompt", None)
     signals.pop("save_password_prompt", None)
+    signals.pop("samsung_pass_save_password_prompt", None)
+    signals.pop("samsung_pass_save_password_prompt_present", None)
     signals.pop("overlay_type", None)
     if signals.get("screen_type") == "continue_password_only":
         signals["screen_type"] = "login_form_ready"

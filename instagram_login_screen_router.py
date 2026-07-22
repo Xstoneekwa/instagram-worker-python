@@ -67,6 +67,7 @@ def route_login_screen(
     available_usernames: list[str] | tuple[str, ...] | None = None,
     account_lifecycle_lookup: LifecycleLookup | None = None,
     clone_reuse_allowed: bool = False,
+    has_use_another_profile: bool = False,
     account_id: str | None = None,
     clone_id: str | None = None,
 ) -> LoginScreenRouteDecision:
@@ -252,6 +253,22 @@ def route_login_screen(
                 reason="ambiguous_expected_account_row",
                 clone_reuse_allowed=clone_reuse_allowed,
             )
+        if has_use_another_profile is True:
+            return _decision(
+                ok=True,
+                screen_type=safe_screen_type,
+                decision="use_another_profile_previous_account_stopped",
+                expected_username=expected_username,
+                suggested_username=suggested_username or "",
+                normalized_expected_username=normalized_expected,
+                normalized_suggested_username=normalized_suggested,
+                target_username=normalized_expected,
+                next_action="use_another_profile_then_login_form",
+                reason="expected_account_not_listed_safe_navigation_available",
+                should_tap_use_another_profile=True,
+                audit_reason="account_picker_safe_alternate_navigation",
+                clone_reuse_allowed=clone_reuse_allowed,
+            )
         return _decision(
             ok=False,
             screen_type=safe_screen_type,
@@ -352,13 +369,14 @@ def route_login_screen(
             clone_reuse_allowed=clone_reuse_allowed,
         )
 
-    lifecycle_status, lookup_error = _lookup_lifecycle_status(
-        normalized_suggested,
-        account_lifecycle_lookup,
-    )
-    lifecycle_is_stopped = lifecycle_status in STOPPED_LIFECYCLE_STATUSES
-
-    if lifecycle_is_stopped and clone_reuse_allowed:
+    # A Continue-as candidate is a pre-authentication suggestion, not proof of
+    # the currently authenticated identity. Its routing must therefore be
+    # independent of database lifecycle state and clone-reuse eligibility.
+    # The alternate action must be proven on this pre-authentication surface.
+    # Database lifecycle state is deliberately irrelevant here: the only
+    # credentials allowed downstream remain those of ``expected_username``.
+    if has_use_another_profile:
+        suggested_readable = bool(normalized_suggested)
         return _decision(
             ok=True,
             screen_type=safe_screen_type,
@@ -368,18 +386,16 @@ def route_login_screen(
             normalized_expected_username=normalized_expected,
             normalized_suggested_username=normalized_suggested,
             next_action="use_another_profile_then_login_form",
-            reason="previous_account_canceled_clone_reusable",
+            reason=(
+                "suggested_account_mismatch_safe_navigation_available"
+                if suggested_readable
+                else "suggested_account_unreadable_safe_navigation_available"
+            ),
             should_tap_use_another_profile=True,
-            audit_reason="previous_account_stopped_override",
+            audit_reason=("suggested_account_mismatch" if suggested_readable else "suggested_account_unreadable"),
             clone_reuse_allowed=clone_reuse_allowed,
-            lifecycle_status=lifecycle_status,
         )
 
-    reason = (
-        "lifecycle_lookup_failed_wrong_suggested_account_requires_admin_review"
-        if lookup_error
-        else "wrong_suggested_account_requires_admin_review"
-    )
     return _decision(
         ok=False,
         screen_type=safe_screen_type,
@@ -388,14 +404,13 @@ def route_login_screen(
         suggested_username=suggested_username or "",
         normalized_expected_username=normalized_expected,
         normalized_suggested_username=normalized_suggested,
-        reason=reason,
+        reason="use_another_profile_not_available",
         should_escalate=True,
         publish_login_status="mismatch",
         provisioning_status="blocked",
         onboarding_status="blocked",
         dashboard_action_type="review_account_mismatch",
         clone_reuse_allowed=clone_reuse_allowed,
-        lifecycle_status=lifecycle_status,
     )
 
 

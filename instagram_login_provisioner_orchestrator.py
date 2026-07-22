@@ -1402,6 +1402,22 @@ def run_login_provisioning_flow(
                 "required_navigation_action": JOIN_INSTAGRAM_PROVISIONING_NEXT_ACTION,
             }
         )
+    if routing_signals.get("screen_type") == "continue_as_candidate":
+        suggested = _safe_public_text(routing_signals.get("suggested_username"))
+        route_metadata.update(
+            {
+                "suggested_account_screen_detected": True,
+                "suggested_account_mismatch": bool(
+                    suggested
+                    and suggested.strip().lstrip("@").lower()
+                    != safe_expected_username.strip().lstrip("@").lower()
+                ),
+                "safe_alternate_navigation_available": bool(
+                    routing_signals.get("has_use_another_profile")
+                    or routing_signals.get("has_use_another_profile_button")
+                ),
+            }
+        )
     if route.decision == "select_expected_account_from_picker":
         route_metadata["selected_account_username"] = _safe_public_text(
             getattr(route, "target_username", "") or safe_expected_username
@@ -1631,6 +1647,8 @@ def run_login_provisioning_flow(
         action_result = execute_login_screen_decision(d, route, post_action_wait_ms=0)
         timings["action_ms"] += _elapsed_ms(start, timer())
         actions_taken.append(action_result.action)
+        if action_result.action == "tap_use_another_profile" and action_result.executed:
+            old_logged_in_metadata["use_another_profile_selected"] = True
         if action_result.action == "tap_already_have_profile":
             old_logged_in_metadata.update(
                 {
@@ -1701,6 +1719,7 @@ def run_login_provisioning_flow(
                         "post_use_another_profile_screens": [final_screen],
                         "post_use_another_profile_wait_total_ms": 0,
                         "screen_after_use_another_profile_final": final_screen,
+                        "login_surface_reached": True,
                     }
                 )
         if not _signals_confirm_login_form(signals):
@@ -3826,6 +3845,10 @@ def _route_provisioning_screen(
         available_usernames=list(routing_signals.get("available_usernames") or []),
         account_lifecycle_lookup=_router_lifecycle_lookup(previous_account_lifecycle),
         clone_reuse_allowed=clone_reuse_allowed,
+        has_use_another_profile=bool(
+            routing_signals.get("has_use_another_profile")
+            or routing_signals.get("has_use_another_profile_button")
+        ),
         account_id=account_id,
     )
     if route.decision != "unknown_no_action":
@@ -3843,6 +3866,10 @@ def _route_provisioning_screen(
         available_usernames=list(routing_signals.get("available_usernames") or []),
         account_lifecycle_lookup=_router_lifecycle_lookup(previous_account_lifecycle),
         clone_reuse_allowed=clone_reuse_allowed,
+        has_use_another_profile=bool(
+            routing_signals.get("has_use_another_profile")
+            or routing_signals.get("has_use_another_profile_button")
+        ),
         account_id=account_id,
     )
 
@@ -4934,6 +4961,8 @@ def _finalize(
         dict(extra_metadata or {}),
         final_outcome=final_outcome,
     )
+    if ok and completed and final_outcome == LoginProbeOutcome.CONNECTED.value:
+        extra_metadata.setdefault("expected_identity_verified", True)
     publish_payload = _publish_payload(
         account_id=account_id,
         final_login_status=final_login_status,
@@ -5421,6 +5450,9 @@ def _submit_password_after_email_code(
         suggested_username=str(signals.get("suggested_username") or signals.get("prefilled_username") or ""),
         screen_type=str(signals.get("screen_type") or "unknown"),
         available_usernames=list(signals.get("available_usernames") or []),
+        has_use_another_profile=bool(
+            signals.get("has_use_another_profile") or signals.get("has_use_another_profile_button")
+        ),
         account_id=safe_account_id,
     )
     if route.decision == "block_wrong_suggested_account":

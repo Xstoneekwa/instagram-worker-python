@@ -2259,6 +2259,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
             "screen_type": "unknown",
             "suggested_username": "random_old_profile",
             "available_usernames": [],
+            "has_use_another_profile": True,
         }
         previous_account_lifecycle = {
             "username": "random_old_profile",
@@ -2344,7 +2345,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertTrue(result.safe_metadata["previous_account_lifecycle"]["clone_reuse_allowed"])
         self.assertEqual(result.safe_metadata["previous_account_lifecycle"]["source"], "operator_smoke_override")
 
-    def test_previous_canceled_clone_not_reusable_blocks_mismatch(self) -> None:
+    def test_previous_canceled_clone_not_reusable_still_uses_safe_alternate(self) -> None:
         getter = Mock(return_value=credentials())
 
         result = self.run_flow(
@@ -2363,13 +2364,13 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
             dry_run=True,
         )
 
-        self.assertFalse(result.ok)
-        self.assertEqual(result.safe_metadata["router_decision"], "block_wrong_suggested_account")
-        self.assertEqual(result.dashboard_action_type, "review_account_mismatch")
-        self.assertTrue(result.safe_metadata["would_block_mismatch"])
+        self.assertTrue(result.ok)
+        self.assertEqual(result.safe_metadata["router_decision"], "use_another_profile_previous_account_stopped")
+        self.assertTrue(result.safe_metadata["would_tap_use_another_profile"])
+        self.assertFalse(result.safe_metadata["would_block_mismatch"])
         getter.assert_not_called()
 
-    def test_previous_active_clone_reusable_blocks_mismatch(self) -> None:
+    def test_previous_active_clone_reusable_still_uses_safe_alternate(self) -> None:
         getter = Mock(return_value=credentials())
 
         result = self.run_flow(
@@ -2388,12 +2389,13 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
             dry_run=True,
         )
 
-        self.assertFalse(result.ok)
-        self.assertEqual(result.safe_metadata["router_decision"], "block_wrong_suggested_account")
+        self.assertTrue(result.ok)
+        self.assertEqual(result.safe_metadata["router_decision"], "use_another_profile_previous_account_stopped")
         self.assertEqual(result.safe_metadata["previous_account_lifecycle"]["lifecycle_status"], "active")
+        self.assertTrue(result.safe_metadata["would_tap_use_another_profile"])
         getter.assert_not_called()
 
-    def test_previous_lifecycle_lookup_absent_blocks_mismatch(self) -> None:
+    def test_previous_lifecycle_lookup_absent_still_uses_safe_alternate(self) -> None:
         getter = Mock(return_value=credentials())
 
         result = self.run_flow(
@@ -2405,12 +2407,12 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
             dry_run=True,
         )
 
-        self.assertFalse(result.ok)
-        self.assertEqual(result.safe_metadata["router_decision"], "block_wrong_suggested_account")
-        self.assertEqual(result.dashboard_action_type, "review_account_mismatch")
+        self.assertTrue(result.ok)
+        self.assertEqual(result.safe_metadata["router_decision"], "use_another_profile_previous_account_stopped")
+        self.assertTrue(result.safe_metadata["would_tap_use_another_profile"])
         getter.assert_not_called()
 
-    def test_wrong_suggested_active_account_blocks_mismatch_no_password(self) -> None:
+    def test_wrong_suggested_active_account_uses_alternate_and_expected_credentials(self) -> None:
         device, selectors = configured_device()
         getter = Mock(return_value=credentials())
 
@@ -2424,11 +2426,12 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
             initial_signals=WRONG_CONTINUE_SIGNALS,
         )
 
-        self.assertEqual(result.final_outcome, "mismatch")
-        self.assertEqual(result.final_login_status, "mismatch")
-        self.assertEqual(result.dashboard_action_type, "review_account_mismatch")
+        self.assertEqual(result.final_outcome, "connected")
+        self.assertEqual(result.final_login_status, "connected")
         getter.assert_not_called()
+        self.assertEqual(selectors["username"].set_text_calls, [])
         self.assertEqual(selectors["password"].set_text_calls, [])
+        self.assertTrue(result.safe_metadata["expected_identity_verified"])
 
     def test_unknown_screen_no_action_no_password(self) -> None:
         device, selectors = configured_device()
@@ -2825,7 +2828,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         for forbidden in ("secret_ref", "vault", "Vault", "token", "emulator-5554", "device_udid", "adb_serial", "xml", "screenshot"):
             self.assertNotIn(forbidden, rendered)
 
-    def test_lifecycle_lookup_exception_blocks_safe_mismatch_unknown(self) -> None:
+    def test_lifecycle_lookup_exception_does_not_change_safe_route(self) -> None:
         result = self.run_flow(
             FakeDevice(),
             account_id=ACCOUNT_ID,
@@ -2835,9 +2838,9 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
             initial_signals=WRONG_CONTINUE_SIGNALS,
         )
 
-        self.assertEqual(result.final_outcome, "mismatch")
-        self.assertEqual(result.final_provisioning_status, "blocked")
-        self.assertIn("lifecycle_lookup_failed", result.reason)
+        self.assertEqual(result.final_outcome, "action_failed")
+        self.assertEqual(result.failure_reason, "target_button_not_found")
+        self.assertNotIn("lifecycle_lookup_failed", result.reason)
 
     def test_timings_and_warnings_present(self) -> None:
         result = self._run_login_form(CONNECTED_XML)
@@ -2921,7 +2924,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertFalse(result.safe_metadata["would_publish"])
         getter.assert_not_called()
 
-    def test_account_picker_expected_absent_stops_without_submit(self) -> None:
+    def test_account_picker_expected_absent_uses_safe_alternate_before_login(self) -> None:
         getter = Mock(return_value=credentials())
 
         result = self.run_flow(
@@ -2932,9 +2935,9 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
             initial_signals=ACCOUNT_PICKER_SIGNALS,
         )
 
-        self.assertEqual(result.final_outcome, "mismatch")
-        self.assertIn("route:expected_account_not_listed", result.actions_taken)
-        self.assertEqual(result.safe_metadata["selected_route"], "expected_account_not_listed")
+        self.assertEqual(result.final_outcome, "action_failed")
+        self.assertIn("route:use_another_profile_previous_account_stopped", result.actions_taken)
+        self.assertEqual(result.failure_reason, "target_button_not_found")
         self.assertNotIn("tap_expected_account", result.actions_taken)
         self.assertNotIn("login_form_submit", result.actions_taken)
         self.assertFalse(result.safe_metadata["account_picker_selection_executed"])
@@ -4590,7 +4593,7 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
         self.assertEqual(result.safe_metadata["screen_after_logout_final"], "login_form_prefilled_username")
         self.assertIn("route:start_login_form_flow_replace_username", result.actions_taken)
 
-    def test_dry_run_wrong_candidate_blocks_mismatch_without_db_assumption(self) -> None:
+    def test_dry_run_wrong_candidate_uses_safe_alternate_without_db_assumption(self) -> None:
         getter = Mock(return_value=credentials())
 
         result = self.run_flow(
@@ -4602,9 +4605,9 @@ class LoginProvisionerOrchestratorTest(unittest.TestCase):
             dry_run=True,
         )
 
-        self.assertFalse(result.ok)
-        self.assertEqual(result.dashboard_action_type, "review_account_mismatch")
-        self.assertTrue(result.safe_metadata["would_block_mismatch"])
+        self.assertTrue(result.ok)
+        self.assertTrue(result.safe_metadata["would_tap_use_another_profile"])
+        self.assertFalse(result.safe_metadata["would_block_mismatch"])
         self.assertEqual(result.safe_metadata["suggested_username"], "random_old_profile")
         self.assertFalse(result.safe_metadata["would_submit_password"])
         getter.assert_not_called()

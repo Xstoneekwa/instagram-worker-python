@@ -20,37 +20,36 @@ class InstagramLoginScreenRouterTest(unittest.TestCase):
         self.assertEqual(decision.next_action, "continue_then_secure_password_step_later")
         self.assertEqual(decision.reason, "suggested_username_matches_expected")
 
-    def test_continue_as_different_active_blocks_for_admin_review(self) -> None:
+    def test_continue_as_different_active_uses_safe_alternate_navigation(self) -> None:
         decision = route_login_screen(
             expected_username="new_account",
             suggested_username="old_account",
             screen_type="continue_as_candidate",
             account_lifecycle_lookup=lambda _username: {"found": True, "lifecycle_status": "active"},
             clone_reuse_allowed=True,
+            has_use_another_profile=True,
         )
 
-        self.assertFalse(decision.ok)
-        self.assertEqual(decision.decision, "block_wrong_suggested_account")
-        self.assertTrue(decision.should_escalate)
-        self.assertEqual(decision.publish_login_status, "mismatch")
-        self.assertEqual(decision.provisioning_status, "blocked")
-        self.assertEqual(decision.onboarding_status, "blocked")
-        self.assertEqual(decision.dashboard_action_type, "review_account_mismatch")
+        self.assertTrue(decision.ok)
+        self.assertEqual(decision.decision, "use_another_profile_previous_account_stopped")
+        self.assertFalse(decision.should_escalate)
+        self.assertIsNone(decision.publish_login_status)
         self.assertFalse(decision.should_tap_continue)
-        self.assertFalse(decision.should_tap_use_another_profile)
+        self.assertTrue(decision.should_tap_use_another_profile)
 
-    def test_continue_as_different_unknown_blocks_for_admin_review(self) -> None:
+    def test_continue_as_different_unknown_uses_safe_alternate_navigation(self) -> None:
         decision = route_login_screen(
             expected_username="new_account",
             suggested_username="unknown_account",
             screen_type="continue_as_candidate",
             account_lifecycle_lookup=lambda _username: {"found": False, "lifecycle_status": "unknown"},
             clone_reuse_allowed=True,
+            has_use_another_profile=True,
         )
 
-        self.assertEqual(decision.decision, "block_wrong_suggested_account")
-        self.assertTrue(decision.should_escalate)
-        self.assertEqual(decision.reason, "wrong_suggested_account_requires_admin_review")
+        self.assertEqual(decision.decision, "use_another_profile_previous_account_stopped")
+        self.assertFalse(decision.should_escalate)
+        self.assertEqual(decision.reason, "suggested_account_mismatch_safe_navigation_available")
 
     def test_lifecycle_status_canceled_uppercase_is_normalized(self) -> None:
         decision = route_login_screen(
@@ -59,6 +58,7 @@ class InstagramLoginScreenRouterTest(unittest.TestCase):
             screen_type="continue_as_candidate",
             account_lifecycle_lookup=lambda _username: {"lifecycle_status": "CANCELED"},
             clone_reuse_allowed=True,
+            has_use_another_profile=True,
         )
 
         self.assertEqual(decision.decision, "use_another_profile_previous_account_stopped")
@@ -70,27 +70,29 @@ class InstagramLoginScreenRouterTest(unittest.TestCase):
             screen_type="continue_as_candidate",
             account_lifecycle_lookup=lambda _username: {"found": True, "lifecycle_status": "canceled"},
             clone_reuse_allowed=True,
+            has_use_another_profile=True,
         )
 
         self.assertTrue(decision.ok)
         self.assertEqual(decision.decision, "use_another_profile_previous_account_stopped")
         self.assertTrue(decision.should_tap_use_another_profile)
         self.assertFalse(decision.should_escalate)
-        self.assertEqual(decision.audit_reason, "previous_account_stopped_override")
-        self.assertEqual(decision.reason, "previous_account_canceled_clone_reusable")
+        self.assertEqual(decision.audit_reason, "suggested_account_mismatch")
+        self.assertEqual(decision.reason, "suggested_account_mismatch_safe_navigation_available")
 
-    def test_canceled_without_clone_reuse_blocks(self) -> None:
+    def test_canceled_without_clone_reuse_still_uses_safe_alternate_navigation(self) -> None:
         decision = route_login_screen(
             expected_username="new_account",
             suggested_username="old_account",
             screen_type="continue_as_candidate",
             account_lifecycle_lookup=lambda _username: {"found": True, "lifecycle_status": "canceled"},
             clone_reuse_allowed=False,
+            has_use_another_profile=True,
         )
 
-        self.assertEqual(decision.decision, "block_wrong_suggested_account")
-        self.assertTrue(decision.should_escalate)
-        self.assertFalse(decision.should_tap_use_another_profile)
+        self.assertEqual(decision.decision, "use_another_profile_previous_account_stopped")
+        self.assertFalse(decision.should_escalate)
+        self.assertTrue(decision.should_tap_use_another_profile)
 
     def test_archived_and_stopped_aliases_are_treated_as_canceled(self) -> None:
         for status in ("archived", "stopped"):
@@ -104,10 +106,11 @@ class InstagramLoginScreenRouterTest(unittest.TestCase):
                         "lifecycle_status": s,
                     },
                     clone_reuse_allowed=True,
+                    has_use_another_profile=True,
                 )
 
                 self.assertEqual(decision.decision, "use_another_profile_previous_account_stopped")
-                self.assertEqual(decision.audit_reason, "previous_account_stopped_override")
+                self.assertEqual(decision.audit_reason, "suggested_account_mismatch")
 
     def test_login_form_empty_starts_login_form_flow(self) -> None:
         decision = route_login_screen(
@@ -222,6 +225,19 @@ class InstagramLoginScreenRouterTest(unittest.TestCase):
         self.assertFalse(decision.should_tap_expected_account)
         self.assertEqual(decision.dashboard_action_type, "review_account_picker_missing_expected")
 
+    def test_account_picker_expected_absent_uses_safe_alternate_when_present(self) -> None:
+        decision = route_login_screen(
+            expected_username="random_expected",
+            screen_type="account_picker",
+            available_usernames=["random_old_profile"],
+            has_use_another_profile=True,
+        )
+
+        self.assertTrue(decision.ok)
+        self.assertEqual(decision.decision, "use_another_profile_previous_account_stopped")
+        self.assertTrue(decision.should_tap_use_another_profile)
+        self.assertFalse(decision.should_tap_expected_account)
+
     def test_account_picker_duplicate_expected_rows_are_ambiguous(self) -> None:
         decision = route_login_screen(
             expected_username="random_expected",
@@ -311,11 +327,12 @@ class InstagramLoginScreenRouterTest(unittest.TestCase):
             screen_type="continue_as_candidate",
             account_lifecycle_lookup=lambda _username: {"found": True, "lifecycle_status": "active"},
             clone_reuse_allowed=True,
+            has_use_another_profile=True,
         )
 
         self.assertEqual(decision.metadata["source"], "login_screen_router")
         self.assertEqual(decision.metadata["screen_type"], "continue_as_candidate")
-        self.assertEqual(decision.metadata["decision"], "block_wrong_suggested_account")
+        self.assertEqual(decision.metadata["decision"], "use_another_profile_previous_account_stopped")
         for key in (
             "password",
             "secret_ref",
@@ -329,7 +346,7 @@ class InstagramLoginScreenRouterTest(unittest.TestCase):
         ):
             self.assertNotIn(key, decision.metadata)
 
-    def test_lookup_exception_fails_safe_to_admin_review(self) -> None:
+    def test_lookup_exception_does_not_affect_suggested_screen_navigation(self) -> None:
         def raise_lookup(_username: str) -> dict:
             raise RuntimeError("db down")
 
@@ -339,14 +356,38 @@ class InstagramLoginScreenRouterTest(unittest.TestCase):
             screen_type="continue_as_candidate",
             account_lifecycle_lookup=raise_lookup,
             clone_reuse_allowed=True,
+            has_use_another_profile=True,
         )
 
+        self.assertEqual(decision.decision, "use_another_profile_previous_account_stopped")
+        self.assertFalse(decision.should_escalate)
+        self.assertEqual(decision.reason, "suggested_account_mismatch_safe_navigation_available")
+
+    def test_unreadable_suggested_username_uses_safe_alternate_navigation(self) -> None:
+        decision = route_login_screen(
+            expected_username="new_account",
+            suggested_username=None,
+            screen_type="continue_as_candidate",
+            has_use_another_profile=True,
+        )
+
+        self.assertTrue(decision.ok)
+        self.assertEqual(decision.decision, "use_another_profile_previous_account_stopped")
+        self.assertEqual(decision.audit_reason, "suggested_account_unreadable")
+        self.assertTrue(decision.should_tap_use_another_profile)
+
+    def test_suggested_mismatch_without_safe_alternate_requires_review(self) -> None:
+        decision = route_login_screen(
+            expected_username="new_account",
+            suggested_username="old_account",
+            screen_type="continue_as_candidate",
+            has_use_another_profile=False,
+        )
+
+        self.assertFalse(decision.ok)
         self.assertEqual(decision.decision, "block_wrong_suggested_account")
         self.assertTrue(decision.should_escalate)
-        self.assertEqual(
-            decision.reason,
-            "lifecycle_lookup_failed_wrong_suggested_account_requires_admin_review",
-        )
+        self.assertEqual(decision.reason, "use_another_profile_not_available")
 
     def test_i_m_your_traker_canceled_case_allows_use_another_profile(self) -> None:
         decision = route_login_screen(
@@ -359,11 +400,12 @@ class InstagramLoginScreenRouterTest(unittest.TestCase):
                 "account_id": "old-account-id",
             },
             clone_reuse_allowed=True,
+            has_use_another_profile=True,
         )
 
         self.assertEqual(decision.normalized_suggested_username, "i_m_your_traker")
         self.assertEqual(decision.decision, "use_another_profile_previous_account_stopped")
-        self.assertEqual(decision.audit_reason, "previous_account_stopped_override")
+        self.assertEqual(decision.audit_reason, "suggested_account_mismatch")
         self.assertFalse(decision.should_escalate)
 
     def test_cinema_catchup_expected_i_m_your_traker_canceled_allows_use_another_profile(self) -> None:
@@ -376,24 +418,26 @@ class InstagramLoginScreenRouterTest(unittest.TestCase):
                 "lifecycle_status": "canceled",
             },
             clone_reuse_allowed=True,
+            has_use_another_profile=True,
         )
 
         self.assertEqual(decision.decision, "use_another_profile_previous_account_stopped")
         self.assertTrue(decision.should_tap_use_another_profile)
         self.assertFalse(decision.should_escalate)
 
-    def test_cinema_catchup_expected_i_m_your_traker_active_blocks(self) -> None:
+    def test_cinema_catchup_expected_i_m_your_traker_active_suggestion_uses_alternate(self) -> None:
         decision = route_login_screen(
             expected_username="cinema_catchup",
             suggested_username="i_m_your_traker",
             screen_type="continue_as_candidate",
             account_lifecycle_lookup=lambda _username: {"lifecycle_status": "active"},
             clone_reuse_allowed=True,
+            has_use_another_profile=True,
         )
 
-        self.assertEqual(decision.decision, "block_wrong_suggested_account")
-        self.assertEqual(decision.publish_login_status, "mismatch")
-        self.assertEqual(decision.dashboard_action_type, "review_account_mismatch")
+        self.assertEqual(decision.decision, "use_another_profile_previous_account_stopped")
+        self.assertIsNone(decision.publish_login_status)
+        self.assertTrue(decision.should_tap_use_another_profile)
 
     def test_i_m_your_traker_expected_allows_continue(self) -> None:
         decision = route_login_screen(
@@ -415,13 +459,14 @@ class InstagramLoginScreenRouterTest(unittest.TestCase):
                 "lifecycle_status": "canceled",
             },
             clone_reuse_allowed=True,
+            has_use_another_profile=True,
         )
 
         self.assertEqual(decision.normalized_suggested_username, "random_old_profile")
         self.assertEqual(decision.decision, "use_another_profile_previous_account_stopped")
         self.assertTrue(decision.should_tap_use_another_profile)
 
-    def test_random_old_profile_active_blocks_wrong_account(self) -> None:
+    def test_random_old_profile_active_suggestion_uses_alternate(self) -> None:
         decision = route_login_screen(
             expected_username="cinema_catchup",
             suggested_username="random_old_profile",
@@ -431,11 +476,12 @@ class InstagramLoginScreenRouterTest(unittest.TestCase):
                 "lifecycle_status": "active",
             },
             clone_reuse_allowed=True,
+            has_use_another_profile=True,
         )
 
-        self.assertEqual(decision.decision, "block_wrong_suggested_account")
-        self.assertEqual(decision.publish_login_status, "mismatch")
-        self.assertTrue(decision.should_escalate)
+        self.assertEqual(decision.decision, "use_another_profile_previous_account_stopped")
+        self.assertIsNone(decision.publish_login_status)
+        self.assertFalse(decision.should_escalate)
 
     def test_random_old_profile_expected_allows_continue(self) -> None:
         decision = route_login_screen(
