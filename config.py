@@ -43,6 +43,14 @@ TARGET_USERNAME = "mythyllus"
 
 INSTAGRAM_PACKAGE = _env_str("INSTAGRAM_PACKAGE", "com.instagram.android")
 
+# Persistent target Followers resume V2 is inert unless explicitly enabled.
+TARGET_FOLLOWERS_RESUME_V2_SHADOW_ENABLED = _env_bool(
+    "TARGET_FOLLOWERS_RESUME_V2_SHADOW_ENABLED", False
+)
+TARGET_FOLLOWERS_RESUME_V2_ENFORCE_ENABLED = _env_bool(
+    "TARGET_FOLLOWERS_RESUME_V2_ENFORCE_ENABLED", False
+)
+
 # None = use default device from adb / uiautomator2
 DEVICE_SERIAL = None
 

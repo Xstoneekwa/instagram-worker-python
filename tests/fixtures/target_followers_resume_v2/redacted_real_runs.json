@@ -1,0 +1,31 @@
+{
+  "schema": "target_followers_resume_replay_v1",
+  "contains_raw_usernames": false,
+  "source_kind": "redacted_real_run_aggregates",
+  "run_count_total": 17,
+  "action_log_count_total": 6313,
+  "proof_signals": {
+    "followers_list_scroll_events": 31,
+    "followers_loop_iterations": 329,
+    "followers_list_open_success": 24,
+    "followers_list_recovered": 269,
+    "viewport_fingerprint_before": false,
+    "viewport_fingerprint_after": false,
+    "visible_username_lists": false,
+    "explicit_depth": false
+  },
+  "targets": [
+    {
+      "target_alias": "target-a",
+      "run_count": 2,
+      "observed_scroll_events": [0, 2],
+      "has_validated_depth_transitions": false
+    },
+    {
+      "target_alias": "target-b",
+      "run_count": 2,
+      "observed_scroll_events": [0, 4],
+      "has_validated_depth_transitions": false
+    }
+  ]
+}

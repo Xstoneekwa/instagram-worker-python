@@ -41,6 +41,7 @@ import runtime_events
 import runtime_heartbeat
 import supabase_client
 import follow_persistence_intent
+import target_followers_progressive_resume_v2 as target_followers_resume_v2
 from follow_persistence_rpc import (
     action_id_hash,
     deterministic_action_id,
@@ -10009,6 +10010,61 @@ def _run_followers_list_engine_session(
     )
     target_scan_tracker["_ct_checkpoint"] = ct_checkpoint
 
+    def _target_followers_resume_v2_emit(event: str, payload: dict[str, Any]) -> None:
+        safe_payload = dict(payload or {})
+        try:
+            log("info", event, **safe_payload)
+        except Exception:
+            pass
+        try:
+            runtime_events.publish_runtime_event(
+                event,
+                visibility="admin_only",
+                account_id=str(account_id or "") or None,
+                run_id=str(run_id or "") or None,
+                source="worker",
+                reason=str(safe_payload.get("reason") or "") or None,
+                metadata={
+                    key: value
+                    for key, value in safe_payload.items()
+                    if key not in {"account_id", "run_id"}
+                },
+            )
+        except Exception:
+            pass
+
+    target_followers_resume_controller = target_followers_resume_v2.build_runtime_controller(
+        account_id=str(account_id or ""),
+        target_id=str(target_id or ""),
+        target_username=source_profile_username,
+        run_id=str(run_id or ""),
+        emit=_target_followers_resume_v2_emit,
+        flags=target_followers_resume_v2.ResumeFlags(
+            shadow_enabled=bool(
+                getattr(config, "TARGET_FOLLOWERS_RESUME_V2_SHADOW_ENABLED", False)
+            ),
+            enforce_enabled=bool(
+                getattr(config, "TARGET_FOLLOWERS_RESUME_V2_ENFORCE_ENABLED", False)
+            ),
+        ),
+    )
+    if target_followers_resume_controller is not None:
+        try:
+            target_followers_resume_controller.load_and_plan()
+            target_followers_resume_controller.claim()
+        except Exception as exc:
+            log(
+                "warning",
+                "target_followers_resume_fallback_legacy",
+                account_id=str(account_id or ""),
+                target_id=str(target_id or ""),
+                run_id=str(run_id or ""),
+                reason="checkpoint_load_or_claim_failed",
+                error=str(exc)[:200],
+                shadow=bool(target_followers_resume_controller.flags.mode == "shadow"),
+                enforce=bool(target_followers_resume_controller.flags.mode == "enforce"),
+            )
+
     def _publish_followers_session_summary(**updates: Any) -> None:
         if "rejection_reason_counts" not in updates:
             updates["rejection_reason_counts"] = dict(
@@ -12611,6 +12667,45 @@ def _run_followers_list_engine_session(
                     loop_iteration=int(followers_engine_loop_iteration),
                     reason="after_collect_candidates",
                 )
+            if isinstance(candidates, list) and target_followers_resume_controller is not None:
+                try:
+                    _v2_handles = [
+                        str(item.get("username") or item.get("resolved_username_hint") or "")
+                        for item in candidates
+                        if isinstance(item, dict)
+                    ]
+                    _v2_verdict = target_followers_resume_controller.observe_viewport(
+                        _v2_handles,
+                        followers_surface_confirmed=bool(
+                            isinstance(det, dict)
+                            and det.get("is_followers_list")
+                            and followers_session_list_committed_open_for(source_profile_username)
+                        ),
+                        expected_target_confirmed=bool(
+                            followers_session_list_committed_open_for(source_profile_username)
+                        ),
+                        list_moved=bool(
+                            target_followers_resume_controller.pending_scroll_before is not None
+                        ),
+                        recoverable=True,
+                        ambiguous_surface=False,
+                    )
+                    if _v2_verdict.verified:
+                        target_followers_resume_controller.commit_verified_progress(
+                            reason="validated_transition"
+                        )
+                except Exception as exc:
+                    log(
+                        "warning",
+                        "target_followers_resume_fallback_legacy",
+                        account_id=str(account_id or ""),
+                        target_id=str(target_id or ""),
+                        run_id=str(run_id or ""),
+                        reason="viewport_observation_failed",
+                        error=str(exc)[:200],
+                        shadow=bool(target_followers_resume_controller.flags.mode == "shadow"),
+                        enforce=bool(target_followers_resume_controller.flags.mode == "enforce"),
+                    )
             _odm_open_meta_gate = str(open_list_meta.get("open_detection_method") or "")
             if str(open_detection_method) == "visual_fallback" or _odm_open_meta_gate == "visual_fallback":
                 _svf_early = (
@@ -14537,6 +14632,13 @@ def _run_followers_list_engine_session(
                         "scroll",
                         {"scroll_index": scroll_used, "direction": "forward"},
                     )
+                    if target_followers_resume_controller is not None:
+                        try:
+                            target_followers_resume_controller.note_scroll_sent(
+                                previous_viewport_complete=bool(_visible_window_scroll_required)
+                            )
+                        except Exception:
+                            pass
                     if exploratory_scroll_permit_armed_this_iter:
                         _prev_stop_exploratory = get_followers_engine_stop_reason()
                         followers_engine_clear_stop_reason()
