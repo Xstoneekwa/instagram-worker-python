@@ -10046,6 +10046,9 @@ def _run_followers_list_engine_session(
             enforce_enabled=bool(
                 getattr(config, "TARGET_FOLLOWERS_RESUME_V2_ENFORCE_ENABLED", False)
             ),
+            shadow_account_ids=target_followers_resume_v2.parse_account_id_allowlist(
+                getattr(config, "TARGET_FOLLOWERS_RESUME_V2_SHADOW_ACCOUNT_IDS", "")
+            ),
         ),
     )
     if target_followers_resume_controller is not None:
