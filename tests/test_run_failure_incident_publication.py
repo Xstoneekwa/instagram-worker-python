@@ -157,6 +157,88 @@ class PublishRunFailureIncidentTest(unittest.TestCase):
         self.assertIn("active Instagram account could not be confirmed", kwargs["action_required"])
         self.assertEqual(kwargs["metadata"]["run_request_id"], REQUEST_ID)
 
+    def test_auto_login_worker_summary_is_canonical_incident_reason(self) -> None:
+        worker_summary = {
+            "domain": "auto_login",
+            "run_type": "login_provisioning",
+            "reason_code": "wrong_suggested_account_requires_admin_review",
+            "reason": "wrong_suggested_account_requires_admin_review",
+            "phase": "route_suggested_account",
+            "request_id": REQUEST_ID,
+            "run_id": RUN_ID,
+        }
+        with (
+            patch.object(
+                consumer.supabase_client,
+                "load_run_row",
+                return_value={"id": RUN_ID, "status": "failed", "performance_summary": {}},
+            ),
+            patch.object(consumer.supabase_client, "get_account_username", return_value="expected_account"),
+            patch.object(
+                consumer.runtime_incidents,
+                "publish_account_incident",
+                return_value={"published": True, "incident_id": "inc-auto-login", "occurrence_count": 1},
+            ) as publish,
+            patch.object(consumer.supabase_client, "call_rpc", return_value={"id": "action-auto-login"}),
+            patch.object(
+                consumer.incident_notifications,
+                "dispatch_operator_review_action_notification",
+            ) as dispatch_action_notification,
+            patch.object(consumer, "_audit"),
+        ):
+            consumer._publish_run_failure_incident(
+                request_id=REQUEST_ID,
+                account_id=ACCOUNT_ID,
+                run_id=RUN_ID,
+                run_type="login_provisioning",
+                exit_code=1,
+                timed_out=False,
+                canceled=False,
+                worker_summary=worker_summary,
+                request_snapshot={"device_id": "device-123", "app_instance_id": "instance-456"},
+            )
+
+        kwargs = publish.call_args.kwargs
+        self.assertEqual(kwargs["incident_type"], "auto_login_failed")
+        self.assertEqual(kwargs["reason"], "wrong_suggested_account_requires_admin_review")
+        self.assertEqual(kwargs["metadata"]["domain"], "auto_login")
+        self.assertEqual(kwargs["metadata"]["phase"], "route_suggested_account")
+        self.assertEqual(kwargs["device_id"], "device-123")
+        self.assertEqual(kwargs["metadata"]["app_instance_id"], "instance-456")
+        self.assertNotEqual(kwargs["reason"], "worker_exit_nonzero")
+        dispatch_action_notification.assert_not_called()
+
+    def test_auto_login_request_reason_is_used_when_no_run_exists(self) -> None:
+        with (
+            patch.object(consumer.supabase_client, "get_account_username", return_value="expected_account"),
+            patch.object(
+                consumer.runtime_incidents,
+                "publish_account_incident",
+                return_value={"published": True, "incident_id": "inc-request", "occurrence_count": 1},
+            ) as publish,
+            patch.object(consumer.supabase_client, "call_rpc", return_value={"id": "action-request"}),
+            patch.object(consumer.incident_notifications, "dispatch_operator_review_action_notification"),
+            patch.object(consumer, "_audit"),
+        ):
+            consumer._publish_run_failure_incident(
+                request_id=REQUEST_ID,
+                account_id=ACCOUNT_ID,
+                run_id=None,
+                run_type="login_provisioning",
+                exit_code=1,
+                timed_out=False,
+                canceled=False,
+                request_snapshot={
+                    "error_code": "assignment_missing",
+                    "metadata_safe": {"phase": "request"},
+                },
+            )
+
+        kwargs = publish.call_args.kwargs
+        self.assertEqual(kwargs["reason"], "assignment_missing")
+        self.assertEqual(kwargs["metadata"]["phase"], "request")
+        self.assertIsNone(kwargs["run_id"])
+
     def test_canceled_run_publishes_nothing(self) -> None:
         with (
             patch.object(

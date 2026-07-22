@@ -21,6 +21,96 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
         self.assertTrue(consumer._is_device_bound_run_type("login_orphan_challenge_recovery"))
         self.assertFalse(consumer._is_device_bound_run_type("unknown"))
 
+    def test_auto_login_failure_before_dispatcher_claim_is_published_structured(self) -> None:
+        cfg = consumer.DispatcherConfig(
+            enabled=True,
+            health_only=False,
+            launch_enabled=True,
+            worker_id="run-dispatcher:test",
+            poll_seconds=5.0,
+            lease_seconds=120,
+            heartbeat_seconds=20.0,
+            allowed_run_types=["login_provisioning"],
+            test_account_ids=set(),
+            subprocess_timeout_seconds=7200,
+            require_assignment=False,
+            enforce_assignment_window=False,
+        )
+        request = {
+            "id": TEST_REQUEST_ID,
+            "account_id": TEST_ACCOUNT_ID,
+            "requested_run_type": "login_provisioning",
+            "status": "claimed",
+        }
+        with (
+            patch.object(consumer, "_account_is_launch_allowed", return_value=(False, "auto_login_not_ready")),
+            patch.object(consumer, "_safe_complete_account_run_request"),
+            patch.object(consumer, "_audit"),
+            patch.object(consumer, "_publish_auto_login_dispatch_failure") as publish,
+            patch.object(consumer, "mark_account_run_request_starting") as starting,
+        ):
+            consumer._handle_claimed_request(cfg, request)
+
+        starting.assert_not_called()
+        publish.assert_called_once_with(
+            request=request,
+            request_id=TEST_REQUEST_ID,
+            account_id=TEST_ACCOUNT_ID,
+            run_type="login_provisioning",
+            reason_code="auto_login_not_ready",
+            phase="request",
+        )
+
+    def test_auto_login_failure_after_claim_before_worker_start_is_published_structured(self) -> None:
+        cfg = consumer.DispatcherConfig(
+            enabled=True,
+            health_only=False,
+            launch_enabled=True,
+            worker_id="run-dispatcher:test",
+            poll_seconds=5.0,
+            lease_seconds=120,
+            heartbeat_seconds=20.0,
+            allowed_run_types=["login_provisioning"],
+            test_account_ids=set(),
+            subprocess_timeout_seconds=7200,
+            require_assignment=True,
+            enforce_assignment_window=False,
+        )
+        request = {
+            "id": TEST_REQUEST_ID,
+            "account_id": TEST_ACCOUNT_ID,
+            "requested_run_type": "login_provisioning",
+            "status": "claimed",
+        }
+        dispatch_ctx = {
+            "assignment_found": False,
+            "reason": "assignment_missing",
+            "device_id": None,
+            "app_instance_id": None,
+        }
+        with (
+            patch.object(consumer, "_account_is_launch_allowed", return_value=(True, None)),
+            patch.object(consumer, "mark_account_run_request_starting", return_value=True),
+            patch.object(consumer, "resolve_account_assignment_runtime_context", return_value=dispatch_ctx),
+            patch.object(consumer, "_safe_complete_account_run_request"),
+            patch.object(consumer, "_audit"),
+            patch.object(consumer, "_publish_auto_login_dispatch_failure") as publish,
+            patch.object(consumer.subprocess, "Popen") as popen,
+        ):
+            consumer._handle_claimed_request(cfg, request)
+
+        popen.assert_not_called()
+        publish.assert_called_once_with(
+            request=request,
+            request_id=TEST_REQUEST_ID,
+            account_id=TEST_ACCOUNT_ID,
+            run_type="login_provisioning",
+            reason_code="assignment_missing",
+            phase="request",
+            device_id=None,
+            app_instance_id=None,
+        )
+
     def test_account_session_exit_zero_requires_terminal_phase_contract(self) -> None:
         cfg = consumer.DispatcherConfig(
             enabled=True,
@@ -810,12 +900,15 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
             patch.object(consumer.subprocess, "Popen") as popen,
             patch.object(consumer, "_safe_complete_account_run_request") as complete,
             patch.object(consumer, "_audit"),
+            patch.object(consumer, "_publish_auto_login_dispatch_failure") as publish_failure,
         ):
             consumer._handle_claimed_request(cfg, request)
 
         popen.assert_not_called()
         complete.assert_called_once()
         self.assertEqual(complete.call_args.kwargs["error_code"], "login_device_serial_required")
+        self.assertEqual(publish_failure.call_args.kwargs["phase"], "open_instagram")
+        self.assertEqual(publish_failure.call_args.kwargs["reason_code"], "login_device_serial_required")
         release_lock.assert_called_once_with(
             device_id="device-1",
             worker_id="run-dispatcher:test",
@@ -1037,6 +1130,63 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
         payload = audit.call_args.kwargs["payload"]
         self.assertEqual(payload["login_provisioner_summary"]["final_outcome"], "wrong_app_package")
         self.assertFalse(payload["login_provisioner_summary"]["submit_executed"])
+
+    def test_finalize_auto_login_persists_precise_reason_and_publishes_same_summary(self) -> None:
+        cfg = consumer.DispatcherConfig(
+            enabled=True,
+            health_only=False,
+            launch_enabled=True,
+            worker_id="run-dispatcher:test",
+            poll_seconds=5.0,
+            lease_seconds=120,
+            heartbeat_seconds=20.0,
+            allowed_run_types=["login_provisioning"],
+            test_account_ids=set(),
+            subprocess_timeout_seconds=7200,
+            require_assignment=False,
+            enforce_assignment_window=False,
+        )
+        request = {
+            "id": TEST_REQUEST_ID,
+            "account_id": TEST_ACCOUNT_ID,
+            "run_id": TEST_RUN_ID,
+            "requested_run_type": "login_provisioning",
+            "status": "running",
+            "device_id": "device-1",
+            "app_instance_id": "instance-1",
+        }
+        summary = {
+            "run_id": TEST_RUN_ID,
+            "final_outcome": "mismatch",
+            "reason": "wrong_suggested_account_requires_admin_review",
+            "submit_executed": False,
+        }
+        with (
+            patch.object(consumer, "get_account_run_request", return_value=request),
+            patch.object(consumer, "complete_account_run_request") as complete,
+            patch.object(consumer, "_reconcile_linked_run", return_value={"reconciled": True}),
+            patch.object(consumer, "_safe_login_provisioner_summary_for_audit", return_value=summary),
+            patch.object(consumer, "_publish_run_failure_incident") as publish,
+            patch.object(consumer, "_audit"),
+        ):
+            consumer._finalize_manual_run_after_subprocess(
+                cfg,
+                request_id=TEST_REQUEST_ID,
+                account_id=TEST_ACCOUNT_ID,
+                exit_code=1,
+                request_snapshot=request,
+            )
+
+        self.assertEqual(
+            complete.call_args.kwargs["error_code"],
+            "wrong_suggested_account_requires_admin_review",
+        )
+        propagated = publish.call_args.kwargs["worker_summary"]
+        self.assertEqual(propagated["domain"], "auto_login")
+        self.assertEqual(propagated["reason_code"], "wrong_suggested_account_requires_admin_review")
+        self.assertEqual(propagated["request_id"], TEST_REQUEST_ID)
+        self.assertEqual(propagated["run_id"], TEST_RUN_ID)
+        self.assertFalse(propagated["submit_executed"])
 
     def test_finalize_subprocess_without_linked_run_skips_reconcile_patch(self) -> None:
         cfg = consumer.DispatcherConfig(

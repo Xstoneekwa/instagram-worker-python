@@ -98,6 +98,154 @@ MYTHYL_OPERATOR_MESSAGE = (
     "Human review is required before resuming."
 )
 
+AUTO_LOGIN_RUN_TYPES = frozenset({"login_provisioning", "login_email_code_resume"})
+
+AUTO_LOGIN_REASON_PHASES = {
+    "auto_login_not_ready": "request",
+    "active_request_exists": "request",
+    "credentials_missing": "login_form",
+    "credentials_fetch_failed": "login_form",
+    "invalid_credentials": "submit_credentials",
+    "assignment_missing": "request",
+    "assignment_not_found": "request",
+    "assignment_device_missing_adb_serial": "request",
+    "device_busy": "device_lock",
+    "device_lock_failed": "device_lock",
+    "device_lock_held": "device_lock",
+    "device_lock_release_failed": "cleanup",
+    "request_expired": "request",
+    "request_canceled": "request",
+    "dispatcher_claim_timeout": "dispatcher_claim",
+    "dispatcher_unavailable": "dispatcher_claim",
+    "unsupported_login_run_type": "dispatcher_claim",
+    "worker_start_failed": "open_instagram",
+    "login_device_serial_required": "open_instagram",
+    "app_start_failed": "open_instagram",
+    "suggested_account_surface_unusable": "route_suggested_account",
+    "use_another_profile_not_available": "route_suggested_account",
+    "wrong_suggested_account_requires_admin_review": "route_suggested_account",
+    "login_form_not_reached": "login_form",
+    "account_picker_expected_account_missing": "login_form",
+    "expected_account_not_listed": "login_form",
+    "instagram_surface_ambiguous": "detect_surface",
+    "username_field_not_found": "login_form",
+    "password_field_not_found": "login_form",
+    "login_submit_failed": "submit_credentials",
+    "network_login_failure": "submit_credentials",
+    "email_challenge_detected": "email_challenge",
+    "verification_code_required": "email_challenge",
+    "verification_code_expired": "email_code_resume",
+    "verification_code_rejected": "email_code_resume",
+    "verification_resume_failed": "email_code_resume",
+    "active_instagram_account_mismatch": "identity_verification",
+    "expected_identity_not_proven": "identity_verification",
+    "identity_guard_failed": "identity_verification",
+    "actual_logged_in_username_not_detected": "identity_verification",
+    "own_profile_open_failed": "identity_verification",
+    "expected_account_username_missing": "identity_verification",
+    "login_cleanup_failed": "cleanup",
+}
+
+
+def _auto_login_phase(reason: str, summary: dict[str, Any]) -> str:
+    explicit = str(summary.get("phase") or "").strip().lower()
+    if explicit:
+        return explicit
+    return AUTO_LOGIN_REASON_PHASES.get(reason, "identity_verification")
+
+
+def _classify_auto_login_failure(
+    *,
+    reason: str,
+    exit_code: int,
+    run_type: str,
+    summary: dict[str, Any],
+    metadata_safe: dict[str, Any],
+) -> IncidentDecision:
+    code = reason or "unclassified_auto_login_failure"
+    phase = _auto_login_phase(code, summary)
+    challenge = phase in {"email_challenge", "email_code_resume"}
+    identity = phase == "identity_verification"
+    device = phase == "device_lock" or code in DEVICE_UNAVAILABLE_REASONS
+    expired = code == "request_expired"
+    incident_type = (
+        "auto_login_verification_required"
+        if challenge
+        else "auto_login_identity_mismatch"
+        if identity
+        else "auto_login_device_unavailable"
+        if device
+        else "auto_login_request_expired"
+        if expired
+        else "auto_login_failed"
+    )
+    operator_label = (
+        "Auto Login verification required"
+        if challenge
+        else "Auto Login identity mismatch"
+        if identity
+        else "Auto Login device unavailable"
+        if device
+        else "Auto Login request expired"
+        if expired
+        else "Auto Login failed"
+    )
+    retryable = code not in {
+        "invalid_credentials",
+        "active_instagram_account_mismatch",
+        "expected_identity_not_proven",
+        "identity_guard_failed",
+        "verification_code_rejected",
+    }
+    action = (
+        "Enter the Instagram verification code, then resume Auto Login once."
+        if challenge
+        else "Verify the expected Instagram identity before retrying Auto Login."
+        if identity
+        else "Verify the assigned phone and device lock before retrying Auto Login."
+        if device
+        else "Review the redacted Auto Login runtime logs for this request."
+        if code == "unclassified_auto_login_failure"
+        else "Correct the reported Auto Login condition before retrying."
+    )
+    client_message = (
+        "Un code de vérification Instagram est nécessaire pour terminer la connexion."
+        if challenge
+        else "La connexion Instagram n’a pas pu être finalisée. Notre équipe technique a été informée."
+    )
+    metadata_safe.update(
+        {
+            "domain": "auto_login",
+            "run_type": run_type,
+            "phase": phase,
+            "reason_code": code,
+            "retryable": retryable,
+            "operator_action_required": True,
+            "client_safe_message": client_message,
+            "operator_message": action,
+        }
+    )
+    warning_codes = {
+        "active_request_exists",
+        "device_busy",
+        "device_lock_held",
+        "request_expired",
+        "verification_code_expired",
+    }
+    return IncidentDecision(
+        should_publish=True,
+        incident_type=incident_type,
+        reason_code=code,
+        severity="warning" if challenge or code in warning_codes else "error",
+        operator_label=operator_label,
+        action_required=action,
+        requires_operator_review=True,
+        blocking_campaign=True,
+        admin_message=f"Auto Login failed during {phase} ({code}), exit code {exit_code}.",
+        notify_channels=True,
+        metadata_safe=metadata_safe,
+    )
+
 
 @dataclass(frozen=True)
 class IncidentDecision:
@@ -133,6 +281,8 @@ def build_incident_dedupe_key(
     account_id: str | None,
     run_ref: str | None,
     incident_type: str,
+    phase: str | None = None,
+    reason_code: str | None = None,
 ) -> str:
     """Canonical dedupe key: one incident per (account, run, incident_type).
 
@@ -143,12 +293,29 @@ def build_incident_dedupe_key(
     """
     aid = str(account_id or "").strip() or "unknown"
     ref = str(run_ref or "").strip() or "unknown"
-    return f"account:{aid}:run:{ref}:{incident_type}"
+    suffix = incident_type
+    if phase or reason_code:
+        suffix = f"{incident_type}:{str(phase or 'unknown')}:{str(reason_code or 'unknown')}"
+    return f"account:{aid}:run:{ref}:{suffix}"
 
 
 _SAFE_METADATA_KEYS = (
+    "domain",
     "run_type",
+    "phase",
+    "reason_code",
     "reason",
+    "failure_reason",
+    "retryable",
+    "operator_action_required",
+    "client_safe_message",
+    "operator_message",
+    "request_id",
+    "run_id",
+    "account_id",
+    "device_id",
+    "app_instance_id",
+    "timestamp",
     "account_identity_failure_reason",
     "account_identity_verification_method",
     "expected_account_username",
@@ -183,6 +350,7 @@ def classify_terminal_run_failure(
     run_status: str | None = None,
     canceled: bool = False,
     performance_summary: dict[str, Any] | None = None,
+    run_type: str | None = None,
 ) -> IncidentDecision:
     """Classify one terminal run outcome into a canonical incident decision.
 
@@ -191,7 +359,13 @@ def classify_terminal_run_failure(
     """
     summary = dict(performance_summary or {})
     status = str(run_status or "").strip().lower()
-    reason = str(summary.get("reason") or "").strip()
+    normalized_run_type = str(run_type or summary.get("run_type") or "").strip().lower()
+    reason = str(
+        summary.get("reason_code")
+        or summary.get("failure_reason")
+        or summary.get("reason")
+        or ""
+    ).strip()
     phase_terminal_contract = summary.get("phase_terminal_contract")
     if (
         not reason
@@ -220,6 +394,17 @@ def classify_terminal_run_failure(
     metadata_safe["exit_code"] = int(exit_code)
     if timed_out:
         metadata_safe["timed_out"] = True
+
+    if normalized_run_type in AUTO_LOGIN_RUN_TYPES:
+        if timed_out and not reason:
+            reason = "dispatcher_claim_timeout"
+        return _classify_auto_login_failure(
+            reason=reason,
+            exit_code=exit_code,
+            run_type=normalized_run_type,
+            summary=summary,
+            metadata_safe=metadata_safe,
+        )
 
     # 1) Identity guard outcomes (concrete, stable causes).
     if reason == "active_instagram_account_mismatch" or identity_reason:
@@ -404,6 +589,8 @@ def build_run_failure_incident_payload(
     run_id: str | None = None,
     run_request_id: str | None = None,
     run_type: str | None = None,
+    device_id: str | None = None,
+    app_instance_id: str | None = None,
     source: str = "run_dispatcher",
     dedupe_run_ref: str | None = None,
 ) -> dict[str, Any]:
@@ -426,23 +613,33 @@ def build_run_failure_incident_payload(
     if dedupe_run_ref and run_id and str(dedupe_run_ref).strip() != str(run_id).strip():
         metadata["resume_run_id"] = str(run_id)
     metadata["operator_label"] = decision.operator_label
+    if device_id:
+        metadata.setdefault("device_id", str(device_id))
+    if app_instance_id:
+        metadata.setdefault("app_instance_id", str(app_instance_id))
+    is_auto_login = metadata.get("domain") == "auto_login"
     return {
         "incident_type": decision.incident_type,
         "dedupe_key": build_incident_dedupe_key(
             account_id=account_id,
             run_ref=run_ref,
             incident_type=decision.incident_type,
+            phase=str(metadata.get("phase") or "") if is_auto_login else None,
+            reason_code=decision.reason_code if is_auto_login else None,
         ),
         "severity": decision.severity,
         "status": "open",
         "account_id": str(account_id or "").strip() or None,
         "account_username": str(account_username or "").strip() or None,
         "run_id": str(run_id or "").strip() or None,
+        "device_id": str(device_id or "").strip() or None,
         "source": source,
         "reason": decision.reason_code,
         "failure_reason": decision.reason_code,
         "action_required": decision.action_required,
-        "safe_client_message": "Automation paused for account safety.",
+        "safe_client_message": str(
+            metadata.get("client_safe_message") or "Automation paused for account safety."
+        ),
         "assistant_message": decision.operator_label,
         "admin_message": decision.admin_message,
         "metadata": metadata,

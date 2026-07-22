@@ -212,6 +212,61 @@ def build_incident_notification_payload(incident: dict) -> dict:
     run_id = str(incident.get("run_id") or "").strip() or None
     last_seen_at = str(incident.get("last_seen_at") or "").strip() or None
     occurrence_count = incident.get("occurrence_count") or 1
+    metadata = incident.get("metadata") if isinstance(incident.get("metadata"), dict) else {}
+
+    if str(metadata.get("domain") or "").strip().lower() == "auto_login":
+        phase = _safe_text(metadata.get("phase"), max_len=80) or "unknown"
+        reason_code = _safe_text(
+            metadata.get("reason_code") or incident.get("failure_reason") or incident.get("reason"),
+            max_len=160,
+        ) or "unclassified_auto_login_failure"
+        operator_label = _safe_text(metadata.get("operator_label"), max_len=160) or "Auto Login failed"
+        retryable = metadata.get("retryable")
+        retry_label = "yes" if retryable is True else "no" if retryable is False else "after correction"
+        request_id = str(metadata.get("request_id") or metadata.get("run_request_id") or "").strip()
+        device_id = str(incident.get("device_id") or metadata.get("device_id") or "").strip()
+        app_instance_id = str(metadata.get("app_instance_id") or "").strip()
+        title = f"[AUTO LOGIN {severity.upper()}] {operator_label}"
+        message_parts = [
+            title,
+            f"Account: {account_username or 'unknown'}",
+            f"Phase: {phase}",
+            f"Reason: {reason_code}",
+        ]
+        if admin_message:
+            message_parts.append(f"Summary: {admin_message}")
+        if action_required:
+            message_parts.append(f"Action: {action_required}")
+        message_parts.append(f"Retry: {retry_label}")
+        if request_id:
+            message_parts.append(f"Request: {_short_id(request_id) or request_id}")
+        if run_id:
+            message_parts.append(f"Run: {_short_id(run_id) or run_id}")
+        if device_id or app_instance_id:
+            message_parts.append(
+                "Device/instance: "
+                f"{_short_id(device_id) or 'unknown'} / {_short_id(app_instance_id) or 'unknown'}"
+            )
+        if last_seen_at:
+            message_parts.append(f"Date: {last_seen_at}")
+        dashboard_url = _incident_dashboard_url(incident)
+        payload = {
+            "title": title,
+            "text": "\n".join(message_parts),
+            "severity": severity,
+            "incident_type": incident_type,
+            "domain": "auto_login",
+            "phase": phase,
+            "reason_code": reason_code,
+            "account_username": account_username,
+            "request_id": request_id or None,
+            "run_id": run_id,
+            "device_id_short": _short_id(device_id),
+            "app_instance_id_short": _short_id(app_instance_id),
+            "retryable": retryable,
+            "dashboard_url": dashboard_url,
+        }
+        return _redact_payload({k: v for k, v in payload.items() if v is not None})
 
     title = f"[{severity.upper()}] {incident_type}"
     message_parts = [

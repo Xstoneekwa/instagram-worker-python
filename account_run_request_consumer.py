@@ -922,16 +922,18 @@ def _publish_run_failure_incident(
     exit_code: int,
     timed_out: bool,
     canceled: bool,
+    worker_summary: dict[str, Any] | None = None,
+    request_snapshot: dict[str, Any] | None = None,
 ) -> None:
     try:
         run_status: str | None = None
-        performance_summary: dict[str, Any] | None = None
+        performance_summary: dict[str, Any] | None = dict(worker_summary or {}) or None
         if run_id:
             try:
                 run_row = supabase_client.load_run_row(run_id) or {}
                 run_status = str(run_row.get("status") or "").strip() or None
                 raw_summary = run_row.get("performance_summary")
-                if isinstance(raw_summary, dict):
+                if performance_summary is None and isinstance(raw_summary, dict):
                     performance_summary = raw_summary
             except Exception as exc:
                 log(
@@ -942,12 +944,30 @@ def _publish_run_failure_incident(
                     run_id=run_id,
                     error=str(exc)[:300],
                 )
+        if performance_summary is None and _is_login_run_type(run_type):
+            request_reason = str((request_snapshot or {}).get("error_code") or "").strip()
+            if request_reason and request_reason not in {
+                "worker_exit_nonzero",
+                "run_worker_failure",
+                "unknown_error",
+                "no_structured_reason",
+            }:
+                request_metadata = dict((request_snapshot or {}).get("metadata_safe") or {})
+                performance_summary = {
+                    "domain": "auto_login",
+                    "run_type": run_type,
+                    "reason_code": request_reason,
+                    "phase": str(request_metadata.get("phase") or "").strip() or None,
+                    "request_id": request_id,
+                    "run_id": run_id,
+                }
         decision = classify_terminal_run_failure(
             exit_code=exit_code,
             timed_out=timed_out,
             run_status=run_status,
             canceled=canceled,
             performance_summary=performance_summary,
+            run_type=run_type,
         )
         log(
             "info",
@@ -973,6 +993,8 @@ def _publish_run_failure_incident(
             run_id=run_id,
             run_request_id=request_id,
             run_type=run_type,
+            device_id=str((request_snapshot or {}).get("device_id") or "").strip() or None,
+            app_instance_id=str((request_snapshot or {}).get("app_instance_id") or "").strip() or None,
         )
         result = runtime_incidents.publish_account_incident(**payload)
         incident_id = str(result.get("incident_id") or "").strip()
@@ -1002,16 +1024,20 @@ def _publish_run_failure_incident(
                         "blocking_campaign": decision.blocking_campaign,
                     },
                 )
-                incident_notifications.dispatch_operator_review_action_notification(
-                    event="created",
-                    action_id=str(action_id),
-                    incident_id=incident_id,
-                    account_id=account_id,
-                    account_username=account_username or "unknown",
-                    reason=decision.admin_message or decision.reason_code,
-                    final_status="pending_verification",
-                    operator_id="system",
-                )
+                # Auto Login uses the canonical incident notifier so one
+                # failure cannot emit both a precise incident notification and
+                # a second generic operator-review notification.
+                if decision.metadata_safe.get("domain") != "auto_login":
+                    incident_notifications.dispatch_operator_review_action_notification(
+                        event="created",
+                        action_id=str(action_id),
+                        incident_id=incident_id,
+                        account_id=account_id,
+                        account_username=account_username or "unknown",
+                        reason=decision.admin_message or decision.reason_code,
+                        final_status="pending_verification",
+                        operator_id="system",
+                    )
         log(
             "info",
             "run_incident_publish_result",
@@ -1086,6 +1112,15 @@ def _finalize_manual_run_after_subprocess(
             exit_code=exit_code,
             timed_out=True,
             canceled=canceled,
+            worker_summary={
+                "domain": "auto_login",
+                "run_type": run_type,
+                "phase": "cleanup",
+                "reason_code": "subprocess_timeout",
+            }
+            if _is_login_run_type(run_type)
+            else None,
+            request_snapshot=request_snapshot,
         )
         return
 
@@ -1274,12 +1309,45 @@ def _finalize_manual_run_after_subprocess(
         )
         return
 
+    structured_summary = dict(summary or {})
+    is_auto_login = _is_login_run_type(run_type)
+    structured_reason = str(
+        structured_summary.get("reason_code")
+        or structured_summary.get("failure_reason")
+        or structured_summary.get("reason")
+        or ""
+    ).strip()
+    if is_auto_login:
+        structured_reason = structured_reason or "unclassified_auto_login_failure"
+        structured_summary.update(
+            {
+                "domain": "auto_login",
+                "run_type": run_type,
+                "reason_code": structured_reason,
+                "request_id": request_id,
+                "run_id": run_id,
+                "account_id": account_id,
+                "device_id": str((request_snapshot or {}).get("device_id") or "").strip() or None,
+                "app_instance_id": str((request_snapshot or {}).get("app_instance_id") or "").strip() or None,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "operator_action_required": True,
+                "client_safe_message": (
+                    "La connexion Instagram n’a pas pu être finalisée. "
+                    "Notre équipe technique a été informée."
+                ),
+            }
+        )
+    request_error_code = structured_reason if is_auto_login else "worker_exit_nonzero"
     _safe_complete_account_run_request(
         request_id,
         cfg.worker_id,
         "failed",
-        error_code="worker_exit_nonzero",
-        error_message_safe=f"Worker subprocess exited with code {exit_code}.",
+        error_code=request_error_code,
+        error_message_safe=(
+            "Auto Login could not be completed. Review the correlated incident."
+            if is_auto_login
+            else f"Worker subprocess exited with code {exit_code}."
+        ),
     )
     _reconcile_linked_run(
         account_id=account_id,
@@ -1297,7 +1365,7 @@ def _finalize_manual_run_after_subprocess(
         payload={
             "request_id": request_id,
             "exit_code": exit_code,
-            **({"login_provisioner_summary": summary} if summary else {}),
+            **({"login_provisioner_summary": structured_summary} if structured_summary else {}),
         },
     )
     _publish_run_failure_incident(
@@ -1308,6 +1376,8 @@ def _finalize_manual_run_after_subprocess(
         exit_code=exit_code,
         timed_out=False,
         canceled=canceled,
+        worker_summary=structured_summary if is_auto_login else None,
+        request_snapshot=request_snapshot,
     )
 
 
@@ -1362,6 +1432,54 @@ def _wait_for_subprocess(
         time.sleep(1.0)
 
 
+def _publish_auto_login_dispatch_failure(
+    *,
+    request: dict[str, Any],
+    request_id: str,
+    account_id: str,
+    run_type: str,
+    reason_code: str,
+    phase: str,
+    device_id: str | None = None,
+    app_instance_id: str | None = None,
+) -> None:
+    """Publish one structured Auto Login incident before a worker result exists."""
+    if not _is_login_run_type(run_type):
+        return
+    snapshot = {
+        **request,
+        "error_code": reason_code,
+        "device_id": device_id or request.get("device_id"),
+        "app_instance_id": app_instance_id or request.get("app_instance_id"),
+        "metadata_safe": {
+            **dict(request.get("metadata_safe") or {}),
+            "phase": phase,
+        },
+    }
+    _publish_run_failure_incident(
+        request_id=request_id,
+        account_id=account_id,
+        run_id=None,
+        run_type=run_type,
+        exit_code=1,
+        timed_out=False,
+        canceled=False,
+        worker_summary={
+            "domain": "auto_login",
+            "run_type": run_type,
+            "phase": phase,
+            "reason_code": reason_code,
+            "request_id": request_id,
+            "run_id": None,
+            "account_id": account_id,
+            "device_id": snapshot.get("device_id"),
+            "app_instance_id": snapshot.get("app_instance_id"),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        },
+        request_snapshot=snapshot,
+    )
+
+
 def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> None:
     request_id = normalize_request_uuid(request.get("id"))
     account_id = normalize_request_uuid(request.get("account_id"))
@@ -1379,19 +1497,28 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
 
     allowed, block_reason = _account_is_launch_allowed(account_id, cfg)
     if not allowed:
+        failure_reason = block_reason or "auto_login_not_ready"
         _safe_complete_account_run_request(
             request_id,
             cfg.worker_id,
             "blocked",
-            error_code=block_reason or "blocked",
-            error_message_safe=f"Run request blocked: {block_reason or 'blocked'}.",
+            error_code=failure_reason,
+            error_message_safe=f"Run request blocked: {failure_reason}.",
         )
         _audit(
             account_id=account_id,
             action_type="manual_run_blocked",
             status="blocked",
-            message=f"Run request blocked: {block_reason or 'blocked'}.",
+            message=f"Run request blocked: {failure_reason}.",
             payload={"request_id": request_id, "reason": block_reason},
+        )
+        _publish_auto_login_dispatch_failure(
+            request=request,
+            request_id=request_id,
+            account_id=account_id,
+            run_type=run_type,
+            reason_code=failure_reason,
+            phase="request",
         )
         return
 
@@ -1430,6 +1557,16 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
             message=f"Assignment blocked: {error_code}.",
             payload={"request_id": request_id, "assignment": safe_dispatch},
         )
+        _publish_auto_login_dispatch_failure(
+            request=request,
+            request_id=request_id,
+            account_id=account_id,
+            run_type=run_type,
+            reason_code=error_code,
+            phase="request",
+            device_id=str(dispatch_ctx.get("device_id") or "").strip() or None,
+            app_instance_id=str(dispatch_ctx.get("app_instance_id") or "").strip() or None,
+        )
         return
 
     request_metadata = dict(request.get("metadata_safe") or {})
@@ -1452,6 +1589,16 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
             status="blocked",
             message="Run request blocked: commercial package changed since queue.",
             payload={"request_id": request_id, "policy": policy_ctx},
+        )
+        _publish_auto_login_dispatch_failure(
+            request=request,
+            request_id=request_id,
+            account_id=account_id,
+            run_type=run_type,
+            reason_code=policy_reason or "commercial_policy_revision_changed",
+            phase="request",
+            device_id=str(dispatch_ctx.get("device_id") or "").strip() or None,
+            app_instance_id=str(dispatch_ctx.get("app_instance_id") or "").strip() or None,
         )
         return
 
@@ -1584,6 +1731,16 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
                     message="Manual run blocked because the assigned phone is reserved.",
                     payload={"request_id": request_id, "run_type": run_type, "device_id": device_id},
                 )
+                _publish_auto_login_dispatch_failure(
+                    request=request,
+                    request_id=request_id,
+                    account_id=account_id,
+                    run_type=run_type,
+                    reason_code="device_lock_held",
+                    phase="device_lock",
+                    device_id=device_id,
+                    app_instance_id=str(dispatch_ctx.get("app_instance_id") or "").strip() or None,
+                )
                 release_device_lock(device_id=device_id, worker_id=pending_worker, request_id=request_id)
                 return
             transfer_device_lock(
@@ -1609,6 +1766,16 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
             status="blocked",
             message="Login run blocked: assigned device serial is required.",
             payload={"request_id": request_id, "run_type": run_type},
+        )
+        _publish_auto_login_dispatch_failure(
+            request=request,
+            request_id=request_id,
+            account_id=account_id,
+            run_type=run_type,
+            reason_code="login_device_serial_required",
+            phase="open_instagram",
+            device_id=device_id or None,
+            app_instance_id=str(dispatch_ctx.get("app_instance_id") or "").strip() or None,
         )
         if device_lock_active and device_id:
             release_device_lock(device_id=device_id, worker_id=lock_owner_worker_id, request_id=request_id)
@@ -1763,7 +1930,11 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
         account_id=account_id,
         exit_code=int(exit_code),
         timed_out=timed_out,
-        request_snapshot=request,
+        request_snapshot={
+            **request,
+            "device_id": dispatch_ctx.get("device_id"),
+            "app_instance_id": dispatch_ctx.get("app_instance_id"),
+        },
     )
 
 

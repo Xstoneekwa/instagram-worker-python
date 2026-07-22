@@ -166,6 +166,69 @@ class ClassifyTerminalRunFailureTest(unittest.TestCase):
         self.assertNotIn("password", blob)
         self.assertNotIn("rfgl145lzhe", blob)
 
+    def test_auto_login_precise_worker_reason_beats_generic_exit(self) -> None:
+        decision = classify_terminal_run_failure(
+            exit_code=1,
+            run_type="login_provisioning",
+            performance_summary={
+                "reason_code": "wrong_suggested_account_requires_admin_review",
+                "reason": "worker_exit_nonzero",
+                "request_id": REQUEST_ID,
+                "run_id": RUN_ID,
+            },
+        )
+        self.assertEqual(decision.incident_type, "auto_login_failed")
+        self.assertEqual(decision.reason_code, "wrong_suggested_account_requires_admin_review")
+        self.assertEqual(decision.metadata_safe["domain"], "auto_login")
+        self.assertEqual(decision.metadata_safe["phase"], "route_suggested_account")
+        self.assertNotEqual(decision.reason_code, "worker_exit_nonzero")
+
+    def test_auto_login_reason_families_keep_domain_and_phase(self) -> None:
+        cases = (
+            ("email_challenge_detected", "email_challenge", "auto_login_verification_required", "warning"),
+            ("verification_code_rejected", "email_code_resume", "auto_login_verification_required", "warning"),
+            ("active_instagram_account_mismatch", "identity_verification", "auto_login_identity_mismatch", "error"),
+            ("device_lock_failed", "device_lock", "auto_login_device_unavailable", "error"),
+            ("invalid_credentials", "submit_credentials", "auto_login_failed", "error"),
+        )
+        for reason, phase, incident_type, severity in cases:
+            with self.subTest(reason=reason):
+                decision = classify_terminal_run_failure(
+                    exit_code=1,
+                    run_type="login_email_code_resume" if "verification" in reason else "login_provisioning",
+                    performance_summary={"reason_code": reason},
+                )
+                self.assertEqual(decision.reason_code, reason)
+                self.assertEqual(decision.metadata_safe["phase"], phase)
+                self.assertEqual(decision.incident_type, incident_type)
+                self.assertEqual(decision.severity, severity)
+
+    def test_auto_login_fallback_is_domain_specific_only_when_reason_absent(self) -> None:
+        decision = classify_terminal_run_failure(
+            exit_code=1,
+            run_type="login_provisioning",
+            performance_summary={"phase": "detect_surface"},
+        )
+        self.assertEqual(decision.reason_code, "unclassified_auto_login_failure")
+        self.assertEqual(decision.metadata_safe["phase"], "detect_surface")
+        self.assertNotEqual(decision.reason_code, "worker_exit_nonzero")
+
+    def test_auto_login_metadata_redacts_unapproved_material(self) -> None:
+        decision = classify_terminal_run_failure(
+            exit_code=1,
+            run_type="login_provisioning",
+            performance_summary={
+                "reason_code": "login_submit_failed",
+                "password": "never-log-me",
+                "email_code": "123456",
+                "raw_xml": "<secret/>",
+                "token": "secret-token",
+            },
+        )
+        blob = str(decision.metadata_safe).lower()
+        for forbidden in ("never-log-me", "123456", "<secret", "secret-token"):
+            self.assertNotIn(forbidden, blob)
+
 
 class DedupeAndPayloadTest(unittest.TestCase):
     def test_same_run_same_reason_shares_one_dedupe_key(self) -> None:
@@ -246,6 +309,27 @@ class DedupeAndPayloadTest(unittest.TestCase):
         self.assertEqual(payload["metadata"]["run_type"], "account_session")
         self.assertEqual(payload["source"], "run_dispatcher")
         self.assertEqual(payload["status"], "open")
+
+    def test_auto_login_dedupe_includes_phase_and_reason(self) -> None:
+        first = classify_terminal_run_failure(
+            exit_code=1,
+            run_type="login_provisioning",
+            performance_summary={"reason_code": "login_form_not_reached"},
+        )
+        second = classify_terminal_run_failure(
+            exit_code=1,
+            run_type="login_provisioning",
+            performance_summary={"reason_code": "invalid_credentials"},
+        )
+        payload_a = build_run_failure_incident_payload(
+            first, account_id=ACCOUNT_ID, run_id=RUN_ID, run_request_id=REQUEST_ID
+        )
+        payload_b = build_run_failure_incident_payload(
+            second, account_id=ACCOUNT_ID, run_id=RUN_ID, run_request_id=REQUEST_ID
+        )
+        self.assertNotEqual(payload_a["dedupe_key"], payload_b["dedupe_key"])
+        self.assertIn("login_form:login_form_not_reached", payload_a["dedupe_key"])
+        self.assertIn("submit_credentials:invalid_credentials", payload_b["dedupe_key"])
 
 
 if __name__ == "__main__":

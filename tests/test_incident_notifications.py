@@ -298,6 +298,45 @@ class IncidentNotificationsTest(unittest.TestCase):
             {"content": "hello\n[Open Incidents/Actions](https://www.boostmybusinesses.com/instagram-dashboard/incidents)"},
         )
 
+    def test_auto_login_discord_payload_is_precise_correlated_and_redacted(self) -> None:
+        incident = _incident("incident-auto-login")
+        incident.update(
+            {
+                "severity": "error",
+                "incident_type": "auto_login_failed",
+                "account_username": "expected_account",
+                "reason": "wrong_suggested_account_requires_admin_review",
+                "failure_reason": "wrong_suggested_account_requires_admin_review",
+                "action_required": "Use the safe alternate login route before retrying.",
+                "admin_message": "Auto Login routing stopped safely.",
+                "run_id": "22222222-2222-4222-8222-222222222222",
+                "device_id": "d663648c-800c-48a6-8684-d8605218baa5",
+                "metadata": {
+                    "domain": "auto_login",
+                    "phase": "route_suggested_account",
+                    "reason_code": "wrong_suggested_account_requires_admin_review",
+                    "operator_label": "Auto Login failed",
+                    "retryable": True,
+                    "request_id": "11111111-1111-4111-8111-111111111111",
+                    "app_instance_id": "88e37799-890e-4776-8763-bb0b4180fa43",
+                    "password": "must-not-leak",
+                    "email_code": "123456",
+                },
+            }
+        )
+        payload = incident_notifications.build_incident_notification_payload(incident)
+        discord = incident_notifications.build_discord_payload(payload)["content"]
+        self.assertIn("[AUTO LOGIN ERROR] Auto Login failed", discord)
+        self.assertIn("Phase: route_suggested_account", discord)
+        self.assertIn("Reason: wrong_suggested_account_requires_admin_review", discord)
+        self.assertIn("Request: 11111111", discord)
+        self.assertIn("Run: 22222222", discord)
+        self.assertIn("Retry: yes", discord)
+        self.assertNotIn("run_worker_failure", discord)
+        self.assertNotIn("no structured reason", discord.lower())
+        self.assertNotIn("must-not-leak", discord)
+        self.assertNotIn("123456", discord)
+
     def test_all_consultable_runtime_incidents_use_the_shared_cta_builder(self) -> None:
         for incident_type in (
             "welcome_surface_unstable",
