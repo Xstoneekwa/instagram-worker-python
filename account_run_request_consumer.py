@@ -9,6 +9,7 @@ from __future__ import annotations
 import contextlib
 import os
 import json
+import re
 import signal
 import socket
 import subprocess
@@ -412,6 +413,65 @@ def _is_login_run_type(run_type: str) -> bool:
     return str(run_type or "").strip().lower() in LOGIN_RUN_TYPES
 
 
+AUTO_LOGIN_APP_INSTANCE_BINDING_VERSION = "auto_login_app_instance_v1"
+
+
+def _validate_login_request_binding(
+    metadata_safe: dict[str, Any],
+    dispatch_ctx: dict[str, Any],
+) -> tuple[bool, str | None, dict[str, Any]]:
+    """Verify the immutable server binding against fresh assignment context."""
+    metadata = dict(metadata_safe or {})
+    required_strings = (
+        "assignment_id",
+        "device_id",
+        "app_instance_id",
+        "package_name",
+    )
+    binding: dict[str, Any] = {
+        "binding_version": str(metadata.get("binding_version") or "").strip(),
+        **{key: str(metadata.get(key) or "").strip() for key in required_strings},
+        "clone_index": metadata.get("clone_index"),
+    }
+    try:
+        binding["clone_index"] = int(binding["clone_index"])
+    except (TypeError, ValueError):
+        return False, "auto_login_app_instance_binding_missing", binding
+
+    if (
+        binding["binding_version"] != AUTO_LOGIN_APP_INSTANCE_BINDING_VERSION
+        or any(not binding[key] for key in required_strings)
+        or not re.fullmatch(r"[A-Za-z0-9_.]+", binding["package_name"])
+        or binding["clone_index"] < 0
+    ):
+        return False, "auto_login_app_instance_binding_missing", binding
+
+    resolved_package = str(
+        dispatch_ctx.get("package_name")
+        or dispatch_ctx.get("app_package")
+        or dispatch_ctx.get("package")
+        or ""
+    ).strip()
+    resolved_index = dispatch_ctx.get("app_instance_index")
+    if resolved_index is None:
+        resolved_index = dispatch_ctx.get("clone_index")
+    try:
+        resolved_index = int(resolved_index)
+    except (TypeError, ValueError):
+        resolved_index = None
+
+    comparisons = {
+        "assignment_id": str(dispatch_ctx.get("assignment_id") or "").strip(),
+        "device_id": str(dispatch_ctx.get("device_id") or "").strip(),
+        "app_instance_id": str(dispatch_ctx.get("app_instance_id") or "").strip(),
+        "package_name": resolved_package,
+        "clone_index": resolved_index,
+    }
+    if any(binding[key] != comparisons[key] for key in comparisons):
+        return False, "assigned_instagram_app_instance_mismatch", binding
+    return True, None, binding
+
+
 def _is_orphan_recovery_run_type(run_type: str) -> bool:
     return str(run_type or "").strip().lower() == ORPHAN_RECOVERY_RUN_TYPE
 
@@ -471,6 +531,12 @@ def _build_login_provisioner_command(
     app_instance_id: str | None = None,
     metadata_safe: dict[str, Any] | None = None,
 ) -> list[str]:
+    package = str(package_name or "").strip()
+    if not package:
+        raise ValueError("auto_login_package_binding_required")
+    app_instance = str(app_instance_id or "").strip()
+    if not app_instance:
+        raise ValueError("auto_login_app_instance_binding_required")
     expected_username = _load_expected_username(account_id)
     cmd = [
         sys.executable,
@@ -488,12 +554,8 @@ def _build_login_provisioner_command(
     serial = str(device_serial or "").strip()
     if serial:
         cmd.extend(["--device-serial", serial])
-    package = str(package_name or "").strip()
-    if package:
-        cmd.extend(["--package-name", package])
-    app_instance = str(app_instance_id or "").strip()
-    if app_instance:
-        cmd.extend(["--expected-app-instance-id", app_instance])
+    cmd.extend(["--package-name", package])
+    cmd.extend(["--expected-app-instance-id", app_instance])
     meta = dict(metadata_safe or {})
     if str(run_type or "").strip().lower() == "login_email_code_resume":
         cmd.append("--resume-email-code-from-action")
@@ -727,6 +789,39 @@ def _safe_login_provisioner_summary_for_audit(run_id: str | None) -> dict[str, A
         "challenge_type",
     }
     return {key: summary.get(key) for key in allowed_keys if key in summary}
+
+
+def _log_auto_login_foreground_package_result(
+    *,
+    account_id: str,
+    request_id: str,
+    request_metadata: dict[str, Any],
+    summary: dict[str, Any],
+) -> None:
+    if not summary.get("package_guard_checked"):
+        return
+    package_mismatch = bool(summary.get("package_guard_mismatch"))
+    binding = dict(request_metadata or {})
+    log(
+        "error" if package_mismatch else "info",
+        "auto_login_app_instance_mismatch"
+        if package_mismatch
+        else "auto_login_foreground_package_verified",
+        account_id=account_id,
+        request_id=request_id,
+        assignment_id=binding.get("assignment_id"),
+        device_id=binding.get("device_id"),
+        app_instance_id=binding.get("app_instance_id"),
+        expected_package=summary.get("expected_package_name") or binding.get("package_name"),
+        observed_package=summary.get("actual_foreground_package"),
+        clone_index=binding.get("clone_index"),
+        phase="open_instagram",
+        reason=(
+            "assigned_instagram_app_instance_mismatch"
+            if package_mismatch
+            else "foreground_package_verified"
+        ),
+    )
 
 
 LOGIN_VERIFICATION_PAUSE_OUTCOMES = frozenset(
@@ -1484,6 +1579,13 @@ def _finalize_manual_run_after_subprocess(
             exit_code=exit_code,
         )
         summary = _safe_login_provisioner_summary_for_audit(run_id or request_id)
+        if _is_login_run_type(run_type):
+            _log_auto_login_foreground_package_result(
+                account_id=account_id,
+                request_id=request_id,
+                request_metadata=request_metadata,
+                summary=summary,
+            )
         _audit(
             account_id=account_id,
             action_type="manual_run_completed",
@@ -1530,6 +1632,13 @@ def _finalize_manual_run_after_subprocess(
         return
 
     summary = _safe_login_provisioner_summary_for_audit(run_id or request_id)
+    if _is_login_run_type(run_type):
+        _log_auto_login_foreground_package_result(
+            account_id=account_id,
+            request_id=request_id,
+            request_metadata=request_metadata,
+            summary=summary,
+        )
     if _is_orphan_recovery_run_type(run_type):
         from login_orphan_recovery_state import resolve_orphan_recovery_state
 
@@ -1875,6 +1984,74 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
         return
 
     request_metadata = dict(request.get("metadata_safe") or {})
+    login_binding: dict[str, Any] | None = None
+    if _is_login_run_type(run_type):
+        binding_ok, binding_reason, login_binding = _validate_login_request_binding(
+            request_metadata,
+            dispatch_ctx,
+        )
+        if not binding_ok:
+            reason = binding_reason or "auto_login_app_instance_binding_missing"
+            event = (
+                "auto_login_app_instance_binding_missing"
+                if reason == "auto_login_app_instance_binding_missing"
+                else "auto_login_app_instance_mismatch"
+            )
+            log(
+                "error",
+                event,
+                account_id=account_id,
+                request_id=request_id,
+                assignment_id=(login_binding or {}).get("assignment_id") or None,
+                device_id=(login_binding or {}).get("device_id") or None,
+                app_instance_id=(login_binding or {}).get("app_instance_id") or None,
+                expected_package=(login_binding or {}).get("package_name") or None,
+                clone_index=(login_binding or {}).get("clone_index"),
+                phase="request_binding",
+                reason=reason,
+            )
+            _safe_complete_account_run_request(
+                request_id,
+                cfg.worker_id,
+                "blocked",
+                error_code=reason,
+                error_message_safe=(
+                    "Auto Login blocked: assigned Instagram app instance binding is missing."
+                    if reason == "auto_login_app_instance_binding_missing"
+                    else "Auto Login blocked: assigned Instagram app instance binding changed."
+                ),
+            )
+            _audit(
+                account_id=account_id,
+                action_type="auto_login_app_instance_binding_blocked",
+                status="blocked",
+                message="Auto Login app-instance binding failed closed before launch.",
+                payload={"request_id": request_id, "reason": reason},
+            )
+            _publish_auto_login_dispatch_failure(
+                request=request,
+                request_id=request_id,
+                account_id=account_id,
+                run_type=run_type,
+                reason_code=reason,
+                phase="request_binding",
+                device_id=(login_binding or {}).get("device_id") or None,
+                app_instance_id=(login_binding or {}).get("app_instance_id") or None,
+            )
+            return
+        log(
+            "info",
+            "auto_login_app_instance_binding_resolved",
+            account_id=account_id,
+            request_id=request_id,
+            assignment_id=login_binding.get("assignment_id"),
+            device_id=login_binding.get("device_id"),
+            app_instance_id=login_binding.get("app_instance_id"),
+            expected_package=login_binding.get("package_name"),
+            clone_index=login_binding.get("clone_index"),
+            phase="request_binding",
+            reason="binding_verified",
+        )
     policy_ok, policy_reason, policy_ctx = evaluate_queued_run_commercial_policy(
         account_id,
         request_metadata,
@@ -2144,8 +2321,12 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
         run_type,
         linked_login_run_id or request_id,
         device_serial=adb_serial,
-        package_name=dispatch_ctx.get("package_name") or dispatch_ctx.get("app_package") or dispatch_ctx.get("package"),
-        app_instance_id=dispatch_ctx.get("app_instance_id"),
+        package_name=(login_binding or {}).get("package_name")
+        if _is_login_run_type(run_type)
+        else dispatch_ctx.get("package_name") or dispatch_ctx.get("app_package") or dispatch_ctx.get("package"),
+        app_instance_id=(login_binding or {}).get("app_instance_id")
+        if _is_login_run_type(run_type)
+        else dispatch_ctx.get("app_instance_id"),
         metadata_safe={
             **request_metadata,
             "assignment_id": dispatch_ctx.get("assignment_id"),
@@ -2164,6 +2345,20 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
         app_instance_id=dispatch_ctx.get("app_instance_id"),
         adb_serial_present=bool(adb_serial),
     )
+    if _is_login_run_type(run_type):
+        log(
+            "info",
+            "auto_login_app_launch_requested",
+            account_id=account_id,
+            request_id=request_id,
+            assignment_id=(login_binding or {}).get("assignment_id"),
+            device_id=(login_binding or {}).get("device_id"),
+            app_instance_id=(login_binding or {}).get("app_instance_id"),
+            expected_package=(login_binding or {}).get("package_name"),
+            clone_index=(login_binding or {}).get("clone_index"),
+            phase="open_instagram",
+            reason="explicit_bound_package_launch",
+        )
     _heartbeat(cfg, status="running", metadata={"active_request_id": request_id, "account_id": account_id})
 
     subprocess_env = (

@@ -40,6 +40,14 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
             "id": TEST_REQUEST_ID,
             "account_id": TEST_ACCOUNT_ID,
             "requested_run_type": "login_provisioning",
+            "metadata_safe": {
+                "binding_version": "auto_login_app_instance_v1",
+                "assignment_id": "assignment-1",
+                "device_id": "device-1",
+                "app_instance_id": "app-instance-1",
+                "package_name": "com.instagram.androie",
+                "clone_index": 1,
+            },
             "status": "claimed",
         }
         with (
@@ -595,6 +603,7 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
             "device_id": "device-1",
             "clone_id": None,
             "app_instance_id": "app-instance-1",
+            "app_instance_index": 1,
             "device_kind": "emulator",
             "adb_serial": "emulator-5554",
             "package_name": "com.instagram.androif",
@@ -683,6 +692,14 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
             "id": TEST_REQUEST_ID,
             "account_id": TEST_ACCOUNT_ID,
             "requested_run_type": "login_provisioning",
+            "metadata_safe": {
+                "binding_version": "auto_login_app_instance_v1",
+                "assignment_id": "assignment-1",
+                "device_id": "device-1",
+                "app_instance_id": "app-instance-1",
+                "package_name": "com.instagram.androie",
+                "clone_index": 1,
+            },
             "status": "claimed",
         }
         dispatch_ctx = {
@@ -694,6 +711,7 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
             "device_id": "device-1",
             "clone_id": None,
             "app_instance_id": "app-instance-1",
+            "app_instance_index": 1,
             "device_kind": "physical_phone",
             "adb_serial": "RFGL145VCKE",
             "package_name": "com.instagram.androie",
@@ -868,7 +886,15 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
             "id": TEST_REQUEST_ID,
             "account_id": TEST_ACCOUNT_ID,
             "requested_run_type": "login_email_code_resume",
-            "metadata_safe": {"action_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"},
+            "metadata_safe": {
+                "action_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                "binding_version": "auto_login_app_instance_v1",
+                "assignment_id": "assignment-1",
+                "device_id": "device-1",
+                "app_instance_id": "app-instance-1",
+                "package_name": "com.instagram.androie",
+                "clone_index": 1,
+            },
             "status": "claimed",
         }
         dispatch_ctx = {
@@ -878,6 +904,8 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
             "assignment_type": "full_cycle",
             "device_id": "device-1",
             "app_instance_id": "app-instance-1",
+            "app_instance_index": 1,
+            "package_name": "com.instagram.androie",
             "adb_serial": "",
             "source": "account_assignments",
             "fallback_used": False,

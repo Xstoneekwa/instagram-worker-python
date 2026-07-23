@@ -305,7 +305,7 @@ def extract_login_screen_signals_from_hierarchy(
     expected_username_matches = [
         username for username in available_usernames if username == normalized_expected_username
     ]
-    actual_logged_in_username = _extract_profile_username(text, available_usernames)
+    actual_logged_in_username = _extract_profile_username(raw_hierarchy, available_usernames)
     overlay_type = _password_overlay_type(text)
     overlay_present = bool(overlay_type)
     transition_loading = _has_phrase(text, "loading")
@@ -978,12 +978,43 @@ def _extract_available_usernames(text: str) -> list[str]:
     return usernames
 
 
-def _extract_profile_username(text: str, available_usernames: list[str]) -> str:
+def _extract_profile_username(raw_hierarchy: str, available_usernames: list[str]) -> str:
     if not available_usernames:
         return ""
-    if _has_phrase(text, "edit profile") and _has_phrase(text, "share profile"):
-        return available_usernames[0]
-    return ""
+    text = _normalize_hierarchy_text(raw_hierarchy)
+    if not (_has_phrase(text, "edit profile") and _has_phrase(text, "share profile")):
+        return ""
+
+    scored: list[tuple[int, int, str]] = []
+    for order, node in enumerate(re.findall(r"<node\b[^>]*>", str(raw_hierarchy or ""), re.IGNORECASE)):
+        text_match = re.search(r'\btext="([^"]*)"', node, re.IGNORECASE)
+        raw_value = unescape(text_match.group(1)) if text_match else ""
+        candidate = _normalize_username_candidate(raw_value)
+        if not candidate or candidate not in available_usernames:
+            continue
+        resource_match = re.search(r'\bresource-id="([^"]*)"', node, re.IGNORECASE)
+        resource_id = (resource_match.group(1) if resource_match else "").lower()
+        bounds_match = re.search(
+            r'\bbounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"',
+            node,
+            re.IGNORECASE,
+        )
+        top = int(bounds_match.group(2)) if bounds_match else 10_000
+        score = 0
+        if "action_bar_title" in resource_id or "profile_username" in resource_id:
+            score += 100
+        if bounds_match and top < 450:
+            score += 50
+        if "suggest" in resource_id or (bounds_match and top > 800):
+            score -= 100
+        scored.append((score, -order, candidate))
+
+    if scored:
+        score, _order, candidate = max(scored)
+        if score >= 0:
+            return candidate
+        return ""
+    return available_usernames[0]
 
 
 def _has_profile_menu_signal(raw_hierarchy: str, text: str) -> bool:

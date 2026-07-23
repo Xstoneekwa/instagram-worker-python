@@ -36,6 +36,8 @@ AUTO_LOGIN_REASON_PHASES = {
     "assignment_missing": "request",
     "assignment_not_found": "request",
     "assignment_device_missing_adb_serial": "request",
+    "auto_login_app_instance_binding_missing": "request_binding",
+    "assigned_instagram_app_instance_mismatch": "open_instagram",
     "device_busy": "device_lock",
     "device_lock_failed": "device_lock",
     "device_lock_held": "device_lock",
@@ -52,6 +54,7 @@ AUTO_LOGIN_REASON_PHASES = {
     "suggested_account_surface_unusable": "route_suggested_account",
     "use_another_profile_not_available": "route_suggested_account",
     "wrong_suggested_account_requires_admin_review": "route_suggested_account",
+    "wrong_active_account_requires_admin_review": "identity_verification",
     "login_form_not_reached": "login_form",
     "login_form_not_validated": "login_form",
     "account_picker_expected_account_missing": "login_form",
@@ -199,7 +202,18 @@ def normalize_auto_login_failure(
     if not resolved_phase:
         resolved_phase = AUTO_LOGIN_REASON_PHASES.get(raw_internal) or PERSISTED_PHASES.get(mapped, "unknown")
 
-    if mapped == "credential_input_field_unavailable":
+    if mapped == "assigned_instagram_app_instance_mismatch":
+        operator_message = (
+            "L’application Instagram assignée n’a pas été ouverte. "
+            "Aucune donnée de connexion n’a été saisie."
+        )
+        recommended_action = "Verify the canonical assignment and Android package before retrying."
+        retryable = False
+    elif mapped == "auto_login_app_instance_binding_missing":
+        operator_message = "Auto Login stopped because its immutable app-instance binding was missing."
+        recommended_action = "Create a new request only after the canonical assignment is complete."
+        retryable = False
+    elif mapped == "credential_input_field_unavailable":
         operator_message = (
             "The secure credential input field could not be located on the "
             "Instagram login surface."

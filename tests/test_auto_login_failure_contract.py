@@ -51,6 +51,27 @@ class AutoLoginFailureContractTest(unittest.TestCase):
         self.assertEqual(contract.persisted_error_code, "device_lock_failed")
         self.assertEqual(contract.phase, "device_lock")
 
+    def test_wrong_active_account_is_not_degraded_to_unclassified(self) -> None:
+        contract = normalize_auto_login_failure("wrong_active_account_requires_admin_review")
+
+        self.assertEqual(
+            contract.persisted_error_code,
+            "wrong_active_account_requires_admin_review",
+        )
+        self.assertEqual(contract.phase, "identity_verification")
+
+    def test_app_instance_mismatch_notification_states_no_credentials_entered(self) -> None:
+        contract = normalize_auto_login_failure("assigned_instagram_app_instance_mismatch")
+
+        self.assertEqual(contract.persisted_error_code, "assigned_instagram_app_instance_mismatch")
+        self.assertEqual(contract.phase, "open_instagram")
+        self.assertEqual(
+            contract.operator_message,
+            "L’application Instagram assignée n’a pas été ouverte. "
+            "Aucune donnée de connexion n’a été saisie.",
+        )
+        self.assertFalse(contract.retryable)
+
     def test_every_known_persisted_code_satisfies_sql_constraint(self) -> None:
         internal_reasons = set(AUTO_LOGIN_REASON_PHASES) | set(SENSITIVE_REASON_OVERRIDES)
         for reason in sorted(internal_reasons):

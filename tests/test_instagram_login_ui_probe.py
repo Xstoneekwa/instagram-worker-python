@@ -468,6 +468,44 @@ class InstagramLoginUiProbeTest(unittest.TestCase):
         self.assertEqual(signals["actual_logged_in_username"], "random_old_profile")
         self.assertTrue(signals["profile_menu_ready"])
 
+    def test_profile_username_is_not_replaced_by_discover_people_suggestion(self) -> None:
+        xml = (
+            '<node text="studio.cmb74" resource-id="com.instagram.androif:id/suggestion_username" '
+            'bounds="[40,1100][420,1180]" />'
+            '<node text="j_automatise_pour_toi" resource-id="com.instagram.androif:id/action_bar_title" '
+            'bounds="[40,120][620,220]" />'
+            '<node text="Edit profile" bounds="[40,600][500,700]" />'
+            '<node text="Share profile" bounds="[520,600][1020,700]" />'
+            '<node text="1 posts" />'
+            '<node text="54 followers" />'
+            '<node text="77 following" />'
+        )
+
+        signals = extract_login_screen_signals_from_hierarchy(
+            xml,
+            expected_username="lorielebras_autom",
+        )
+
+        self.assertEqual(signals["screen_type"], "active_account_profile")
+        self.assertEqual(signals["actual_logged_in_username"], "j_automatise_pour_toi")
+        self.assertEqual(signals["suggested_username"], "studio.cmb74")
+
+    def test_profile_suggestion_alone_is_not_reported_as_active_username(self) -> None:
+        xml = (
+            '<node text="studio.cmb74" resource-id="com.instagram.androif:id/suggestion_username" '
+            'bounds="[40,1100][420,1180]" />'
+            '<node text="Edit profile" bounds="[40,600][500,700]" />'
+            '<node text="Share profile" bounds="[520,600][1020,700]" />'
+        )
+
+        signals = extract_login_screen_signals_from_hierarchy(
+            xml,
+            expected_username="lorielebras_autom",
+        )
+
+        self.assertEqual(signals["actual_logged_in_username"], "")
+        self.assertEqual(signals["suggested_username"], "studio.cmb74")
+
     def test_active_account_profile_marks_menu_missing_transient(self) -> None:
         xml = (
             '<node text="random_old_profile" />'
