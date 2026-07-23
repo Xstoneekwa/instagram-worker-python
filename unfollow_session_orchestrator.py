@@ -16,6 +16,11 @@ import uiautomator2 as u2
 import config
 import supabase_client
 from account_identity_guard import verify_active_instagram_account_matches_expected
+from instagram_list_continuation import (
+    InstagramListContinuationSignals,
+    classify_instagram_list_continuation,
+    compare_instagram_list_viewports,
+)
 from logs import log
 from runtime_caps import resolve_unfollow_runtime_cap
 from own_following_navigation import (
@@ -91,6 +96,64 @@ def _scroll_budget_stop_reason(
         else "eligible_targets_exhausted"
     )
     return reason, remaining
+
+
+def _observe_canonical_unfollow_list_continuation(
+    rows: list[dict[str, Any]],
+    harvest_meta: dict[str, Any],
+    *,
+    before_row_ids: list[str] | None = None,
+    account_id: str = "",
+    run_id: str | None = None,
+) -> str:
+    """Read-only shared-contract observation; Unfollow decisions stay unchanged."""
+    row_ids = [
+        str(row.get("username_normalized") or row.get("username") or "")
+        for row in rows
+        if isinstance(row, dict)
+    ]
+    continuity = compare_instagram_list_viewports(
+        before_row_ids or [],
+        row_ids,
+        require_overlap=bool(before_row_ids),
+    )
+    state = classify_instagram_list_continuation(
+        InstagramListContinuationSignals(
+            flow="unfollow",
+            expected_surface_selected=True,
+            primary_row_ids=tuple(row_ids),
+            suggestions_visible=bool(
+                harvest_meta.get("suggested_for_you_visible")
+                or harvest_meta.get("following_list_end_detected")
+            ),
+            scroll_attempted=before_row_ids is not None,
+            viewport_fingerprint_before=continuity.fingerprint_before,
+            viewport_fingerprint_after=continuity.fingerprint_after,
+            overlap_count=continuity.overlap_count,
+            scroll_excessive=continuity.excessive,
+            continuation_probe_count=1,
+        )
+    )
+    try:
+        if row_ids:
+            log(
+                "info",
+                "instagram_list_primary_rows_detected",
+                flow="unfollow",
+                account_id=str(account_id or ""),
+                target_id="",
+                run_id=str(run_id or ""),
+                viewport_fingerprint_before=continuity.fingerprint_before,
+                viewport_fingerprint_after=continuity.fingerprint_after,
+                visible_primary_row_count=len(row_ids),
+                overlap_count=continuity.overlap_count,
+                scroll_distance=0.0,
+                reason=f"read_only_observation:{state.value}",
+                elapsed_ms=0.0,
+            )
+    except Exception:
+        pass
+    return state.value
 
 
 def _select_probe_target_row(
@@ -1786,6 +1849,13 @@ def _run_real_unfollow_multi_loop(
             rows, harvest_meta = harvest_visible_following_rows_for_unfollow(d, account_username=uname)
             after_scroll_keys = _visible_username_keys(
                 [str(row.get("username") or "") for row in rows]
+            )
+            _observe_canonical_unfollow_list_continuation(
+                rows,
+                harvest_meta,
+                before_row_ids=before_scroll_keys,
+                account_id=aid,
+                run_id=run_id,
             )
             before_set = set(before_scroll_keys)
             after_set = set(after_scroll_keys)

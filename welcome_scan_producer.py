@@ -8,10 +8,8 @@ from __future__ import annotations
 
 import hashlib
 import os
-import re
 import time
 import uuid
-import xml.etree.ElementTree as ET
 from typing import Any, Literal
 
 import uiautomator2 as u2
@@ -22,6 +20,7 @@ from instagram_navigation import (
     detect_followers_list_screen,
     followers_clear_detect_hierarchy_cache,
     followers_refresh_detect_hierarchy_cache,
+    followers_list_continuation_from_hierarchy_xml,
     followers_session_list_committed_open_for,
     followers_session_merge_det_for_committed_visual_surface,
     harvest_visible_followers_rows,
@@ -76,51 +75,12 @@ def _followers_suggestions_boundary(
     *,
     previously_valid_followers_rows: bool,
 ) -> dict[str, Any]:
-    signals = {
-        "selected_followers_tab": False,
-        "see_all_suggestions": False,
-        "suggestion_follow_rows": 0,
-        "dismiss_controls": 0,
-        "loading_indicator": False,
-    }
-    try:
-        root = ET.fromstring(str(hierarchy_xml or ""))
-    except ET.ParseError:
-        return {"is_boundary": False, **signals}
-
-    for node in root.iter():
-        text = str(node.attrib.get("text") or "").strip()
-        content_desc = str(node.attrib.get("content-desc") or "").strip()
-        resource_id = str(node.attrib.get("resource-id") or "").lower()
-        class_name = str(node.attrib.get("class") or "").lower()
-        normalized = " ".join((text or content_desc).lower().split())
-        if node.attrib.get("selected") == "true" and re.fullmatch(
-            r"\d+(?:[.,]\d+)?\s*[kmb]?\s+followers", normalized
-        ):
-            signals["selected_followers_tab"] = True
-        if normalized == "see all suggestions":
-            signals["see_all_suggestions"] = True
-        if text.lower() in {"follow", "follow back"}:
-            signals["suggestion_follow_rows"] += 1
-        if (
-            text in {"x", "X", "×"}
-            or normalized in {"remove", "dismiss", "close"}
-            or any(token in resource_id for token in ("dismiss", "remove", "close"))
-        ):
-            signals["dismiss_controls"] += 1
-        if class_name.endswith("progressbar") or any(token in resource_id for token in ("progress", "loading", "spinner")):
-            signals["loading_indicator"] = True
-
-    suggestions_rows = (
-        signals["suggestion_follow_rows"] > 0
-        and signals["dismiss_controls"] > 0
+    return followers_list_continuation_from_hierarchy_xml(
+        hierarchy_xml,
+        flow="welcome_dm",
+        previously_valid_followers_rows=previously_valid_followers_rows,
+        continuation_probe_count=1,
     )
-    explicit_boundary = signals["see_all_suggestions"] or suggestions_rows
-    transient_boundary = previously_valid_followers_rows and signals["loading_indicator"]
-    return {
-        "is_boundary": bool(signals["selected_followers_tab"] and (explicit_boundary or transient_boundary)),
-        **signals,
-    }
 
 
 _WELCOME_REAL_FOLLOWER_CTA_CLASSES = {
@@ -378,6 +338,10 @@ def run_welcome_scan_producer(
     suggestions_boundary_final_surface: str | None = None
     suggestions_boundary_recovery_attempts = 0
     suggestions_boundary_recovery_max_attempts = 0
+    ambiguous_surface_detected = False
+    ambiguous_surface_recovery_attempted = False
+    ambiguous_surface_final_surface: str | None = None
+    ambiguous_surface_recovery_attempts = 0
     down_scroll_history: list[dict[str, Any]] = []
     scan_surface_fingerprints: list[str] = []
     last_visible_rows: list[dict[str, Any]] = []
@@ -437,6 +401,10 @@ def run_welcome_scan_producer(
             followers_suggestions_boundary_final_surface=suggestions_boundary_final_surface,
             followers_suggestions_boundary_recovery_attempts=suggestions_boundary_recovery_attempts,
             followers_suggestions_boundary_recovery_max_attempts=suggestions_boundary_recovery_max_attempts,
+            instagram_list_ambiguous_surface_detected=ambiguous_surface_detected,
+            instagram_list_ambiguous_surface_recovery_attempted=ambiguous_surface_recovery_attempted,
+            instagram_list_ambiguous_surface_final_surface=ambiguous_surface_final_surface,
+            instagram_list_ambiguous_surface_recovery_attempts=ambiguous_surface_recovery_attempts,
             welcome_scan_down_scroll_history=list(down_scroll_history),
             welcome_scan_surface_fingerprints=list(scan_surface_fingerprints),
             total_ms=round(_elapsed_ms(), 2),
@@ -1132,6 +1100,63 @@ def run_welcome_scan_producer(
         _process_screen(scrolls_done)
         new_jobs = max(0, jobs_enqueued_count - jobs_before_screen)
 
+        if (
+            str(boundary.get("state") or "") == "AMBIGUOUS_SURFACE"
+            and bool(boundary.get("loading_indicator"))
+            and bool(runtime_seen)
+        ):
+            ambiguous_surface_detected = True
+            ambiguous_surface_recovery_attempted = True
+            log(
+                "info",
+                "instagram_list_ambiguous_surface_detected",
+                flow="welcome_dm",
+                account_id=aid,
+                target_id="",
+                run_id=scan_run_id,
+                viewport_fingerprint_before="",
+                viewport_fingerprint_after=str(fingerprint or ""),
+                visible_primary_row_count=len(rows_after),
+                overlap_count=len(before_keys & after_keys),
+                scroll_distance=0.25,
+                reason="loading_after_previously_valid_followers_rows",
+                elapsed_ms=round(_elapsed_ms(), 2),
+            )
+            recovery = _recover_welcome_followers_from_suggestions_boundary(
+                d,
+                account_username=uname,
+                down_scroll_history=down_scroll_history,
+                planned_job_usernames=[],
+                runtime_seen=runtime_seen,
+                scan_surface_fingerprints=scan_surface_fingerprints,
+            )
+            ambiguous_surface_recovery_attempts = int(recovery.get("attempts_used") or 0)
+            ambiguous_surface_final_surface = str(recovery.get("final_surface") or "unknown")
+            if bool(recovery.get("recovered")):
+                last_visible_rows = list(recovery.get("rows") or [])
+                final_screen_index = max(0, scrolls_done - ambiguous_surface_recovery_attempts)
+                _process_screen(final_screen_index)
+                stop_reason = "instagram_list_ambiguous_surface_recovered"
+            else:
+                stop_reason = "instagram_list_ambiguous_surface_recovery_exhausted"
+                failure_reason = stop_reason
+            log(
+                "info" if bool(recovery.get("recovered")) else "error",
+                "instagram_list_ambiguous_surface_recovery_completed",
+                flow="welcome_dm",
+                account_id=aid,
+                target_id="",
+                run_id=scan_run_id,
+                viewport_fingerprint_before=str(fingerprint or ""),
+                viewport_fingerprint_after="",
+                visible_primary_row_count=len(last_visible_rows),
+                overlap_count=0,
+                scroll_distance=0.0,
+                reason=stop_reason,
+                elapsed_ms=round(_elapsed_ms(), 2),
+            )
+            break
+
         if bool(boundary.get("is_boundary")):
                 suggestions_boundary_detected = True
                 log(
@@ -1277,6 +1302,9 @@ def run_welcome_scan_producer(
 
     if enqueue_blocked_global and jobs_enqueued_count == 0:
         return _finish("failed", 1, enqueue_block_reason or "no_welcome_template")
-    if stop_reason == "followers_suggestions_boundary_recovery_exhausted":
+    if stop_reason in {
+        "followers_suggestions_boundary_recovery_exhausted",
+        "instagram_list_ambiguous_surface_recovery_exhausted",
+    }:
         return _finish("failed", 1, stop_reason)
     return _finish("success", 0)

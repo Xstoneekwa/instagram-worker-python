@@ -140,6 +140,7 @@ from instagram_navigation import (
     followers_refresh_hierarchy_for_candidates,
     followers_force_hierarchy_refresh,
     followers_suggestions_boundary_from_cached_hierarchy,
+    followers_try_expand_primary_list,
     visual_extract_followers_candidates_from_screenshot,
     open_visual_follower_candidate_from_screenshot,
     visual_like_open_post,
@@ -12269,6 +12270,9 @@ def _run_followers_list_engine_session(
                         )
 
             if not det.get("is_followers_list"):
+                _canonical_processed_rows = set(_RUNTIME_SEEN_FOLLOWER_USERNAMES)
+                _canonical_processed_rows.update(_RUNTIME_FOLLOWED_USERNAMES)
+                _canonical_processed_rows.update(_RUNTIME_SKIPPED_USERNAMES)
                 suggestions_boundary = followers_suggestions_boundary_from_cached_hierarchy(
                     previously_valid_followers_rows=bool(
                         follows_completed_count > 0
@@ -12276,10 +12280,177 @@ def _run_followers_list_engine_session(
                             source_profile_username
                         )
                     ),
+                    processed_primary_row_ids=_canonical_processed_rows,
+                    continuation_probe_count=1,
                 )
+                if bool(suggestions_boundary.get("is_boundary")):
+                    # A single post-scroll hierarchy is only a boundary candidate.
+                    # Confirm it from a second fresh, bounded probe before rotating
+                    # the CT so a transient/loading surface cannot look terminal.
+                    try:
+                        from instagram_navigation import followers_refresh_detect_hierarchy_cache
+
+                        followers_refresh_detect_hierarchy_cache(
+                            d,
+                            screen_index=int(scroll_used),
+                        )
+                        suggestions_boundary = (
+                            followers_suggestions_boundary_from_cached_hierarchy(
+                                previously_valid_followers_rows=True,
+                                processed_primary_row_ids=_canonical_processed_rows,
+                                continuation_probe_count=2,
+                            )
+                        )
+                    except Exception as _boundary_probe_exc:
+                        suggestions_boundary = {
+                            **suggestions_boundary,
+                            "is_boundary": False,
+                            "state": "AMBIGUOUS_SURFACE",
+                            "reason": "boundary_confirmation_probe_failed",
+                        }
+                        log(
+                            "warning",
+                            "instagram_list_boundary_confirmation_probe_failed",
+                            flow="follow",
+                            account_id=str(account_id or ""),
+                            target_id=str(target_id or ""),
+                            run_id=str(run_id or ""),
+                            viewport_fingerprint_before="",
+                            viewport_fingerprint_after=str(
+                                suggestions_boundary.get("viewport_fingerprint") or ""
+                            ),
+                            visible_primary_row_count=int(
+                                suggestions_boundary.get("primary_row_count") or 0
+                            ),
+                            overlap_count=0,
+                            scroll_distance=0.0,
+                            reason="boundary_confirmation_probe_failed",
+                            elapsed_ms=0.0,
+                            error=str(_boundary_probe_exc)[:160],
+                        )
+                _canonical_state = str(suggestions_boundary.get("state") or "")
+                if bool(suggestions_boundary.get("see_more_visible")):
+                    log(
+                        "info",
+                        "instagram_list_see_more_detected",
+                        flow="follow",
+                        account_id=str(account_id or ""),
+                        target_id=str(target_id or ""),
+                        run_id=str(run_id or ""),
+                        viewport_fingerprint_before="",
+                        viewport_fingerprint_after=str(
+                            suggestions_boundary.get("viewport_fingerprint") or ""
+                        ),
+                        visible_primary_row_count=int(
+                            suggestions_boundary.get("primary_row_count") or 0
+                        ),
+                        overlap_count=0,
+                        scroll_distance=0.0,
+                        reason=(
+                            "deferred_until_primary_rows_processed"
+                            if _canonical_state == "PRIMARY_ROWS_AVAILABLE"
+                            else "primary_list_continuation_available"
+                        ),
+                        elapsed_ms=0.0,
+                    )
+                if bool(suggestions_boundary.get("suggestions_visible")):
+                    log(
+                        "info",
+                        "instagram_list_suggestions_visible",
+                        flow="follow",
+                        account_id=str(account_id or ""),
+                        target_id=str(target_id or ""),
+                        run_id=str(run_id or ""),
+                        viewport_fingerprint_before="",
+                        viewport_fingerprint_after=str(
+                            suggestions_boundary.get("viewport_fingerprint") or ""
+                        ),
+                        visible_primary_row_count=int(
+                            suggestions_boundary.get("primary_row_count") or 0
+                        ),
+                        overlap_count=0,
+                        scroll_distance=0.0,
+                        reason="surface_marker_detected_not_yet_terminal",
+                        elapsed_ms=0.0,
+                    )
+                if _canonical_state == "PRIMARY_ROWS_AVAILABLE":
+                    log(
+                        "info",
+                        "instagram_list_primary_rows_detected",
+                        flow="follow",
+                        account_id=str(account_id or ""),
+                        target_id=str(target_id or ""),
+                        run_id=str(run_id or ""),
+                        viewport_fingerprint_before="",
+                        viewport_fingerprint_after=str(
+                            suggestions_boundary.get("viewport_fingerprint") or ""
+                        ),
+                        visible_primary_row_count=int(
+                            suggestions_boundary.get("primary_row_count") or 0
+                        ),
+                        overlap_count=0,
+                        scroll_distance=0.0,
+                        reason="canonical_primary_rows_take_priority",
+                        elapsed_ms=0.0,
+                    )
+                elif _canonical_state == "EXPAND_PRIMARY_LIST_AVAILABLE":
+                    expansion = followers_try_expand_primary_list(
+                        d,
+                        expected_source_profile=source_profile_username,
+                        account_id=str(account_id or ""),
+                        target_id=str(target_id or ""),
+                        run_id=str(run_id or ""),
+                        processed_primary_row_ids=_canonical_processed_rows,
+                        max_attempts=2,
+                    )
+                    if bool(expansion.get("expanded")):
+                        # See more extends the current viewport.  It is neither
+                        # a depth scroll nor target exhaustion.
+                        continue
+                    _followers_loop_finally_status = "see_more_no_progress"
+                    _followers_loop_finally_stop = str(
+                        expansion.get("reason") or "see_more_no_progress"
+                    )
+                    break
                 if bool(suggestions_boundary.get("is_boundary")):
                     _followers_loop_finally_status = "suggestions_boundary"
                     _followers_loop_finally_stop = "followers_suggestions_boundary"
+                    log(
+                        "info",
+                        "instagram_list_suggestions_boundary_confirmed",
+                        flow="follow",
+                        account_id=str(account_id or ""),
+                        target_id=str(target_id or ""),
+                        run_id=str(run_id or ""),
+                        viewport_fingerprint_before="",
+                        viewport_fingerprint_after=str(
+                            suggestions_boundary.get("viewport_fingerprint") or ""
+                        ),
+                        visible_primary_row_count=int(
+                            suggestions_boundary.get("primary_row_count") or 0
+                        ),
+                        overlap_count=0,
+                        scroll_distance=0.0,
+                        reason="no_primary_rows_and_no_primary_continuation",
+                        elapsed_ms=0.0,
+                    )
+                    log(
+                        "info",
+                        "follow_target_exhausted",
+                        flow="follow",
+                        account_id=str(account_id or ""),
+                        target_id=str(target_id or ""),
+                        run_id=str(run_id or ""),
+                        viewport_fingerprint_before="",
+                        viewport_fingerprint_after=str(
+                            suggestions_boundary.get("viewport_fingerprint") or ""
+                        ),
+                        visible_primary_row_count=0,
+                        overlap_count=0,
+                        scroll_distance=0.0,
+                        reason="suggestions_boundary_confirmed",
+                        elapsed_ms=0.0,
+                    )
                     log(
                         "info",
                         "followers_suggestions_boundary",
@@ -13964,11 +14135,12 @@ def _run_followers_list_engine_session(
                         phase="forced_already_connected",
                     )
                 else:
-                    _forced_scroll_profile = _expl_v1.choose_scroll_profile(
+                    _forced_scroll_profile_requested = _expl_v1.choose_scroll_profile(
                         base_profile="default",
                         exploratory_armed=False,
                         forced_already_connected=True,
                     )
+                    _forced_scroll_profile = "canonical_controlled"
                     _scroll_diag: dict[str, Any] = {}
                     _sc_ac = scroll_followers_list_forward(
                         d,
@@ -13979,10 +14151,14 @@ def _run_followers_list_engine_session(
                         bypass_post_tap_capture_gate=True,
                         bypass_scroll_xml_guards=True,
                         scroll_diag_out=_scroll_diag,
+                        account_id=str(account_id or ""),
+                        target_id=str(target_id or ""),
+                        run_id=str(run_id or ""),
                     )
                     if _sc_ac:
-                        scroll_used += 1
-                        _expl_v1.mark_scroll_completed_pending_check()
+                        if bool(_scroll_diag.get("depth_advanced")):
+                            scroll_used += 1
+                            _expl_v1.mark_scroll_completed_pending_check()
                         try:
                             log(
                                 "info",
@@ -13990,6 +14166,10 @@ def _run_followers_list_engine_session(
                                 source_profile_username=source_profile_username,
                                 scroll_used_after=int(scroll_used),
                                 scroll_profile=str(_forced_scroll_profile or ""),
+                                requested_scroll_profile=str(
+                                    _forced_scroll_profile_requested or ""
+                                ),
+                                depth_advanced=bool(_scroll_diag.get("depth_advanced")),
                             )
                         except Exception:
                             pass
@@ -14130,19 +14310,26 @@ def _run_followers_list_engine_session(
                             source_profile_username=source_profile_username,
                             scroll_kind="micro_swipe",
                         )
-                        _sparse_micro_profile = _expl_v1.choose_scroll_profile(
+                        _sparse_micro_profile_requested = _expl_v1.choose_scroll_profile(
                             base_profile="default",
                             exploratory_armed=False,
                         )
+                        _sparse_micro_profile = "canonical_controlled"
+                        _sparse_scroll_diag: dict[str, Any] = {}
                         if scroll_followers_list_forward(
                             d,
                             scroll_profile=_sparse_micro_profile,
                             source_profile_username=source_profile_username,
+                            scroll_diag_out=_sparse_scroll_diag,
+                            account_id=str(account_id or ""),
+                            target_id=str(target_id or ""),
+                            run_id=str(run_id or ""),
                         ):
                             sparse_follow_scrolls += 1
                             visible_follow_buttons_stall_scrolls += 1
-                            scroll_used += 1
-                            _expl_v1.mark_scroll_completed_pending_check()
+                            if bool(_sparse_scroll_diag.get("depth_advanced")):
+                                scroll_used += 1
+                                _expl_v1.mark_scroll_completed_pending_check()
                             _eng_log(
                                 "followers_list_scroll",
                                 "info",
@@ -14152,6 +14339,10 @@ def _run_followers_list_engine_session(
                                     "sparse_index": sparse_follow_scrolls,
                                     "direction": "forward",
                                     "scroll_kind": "micro_swipe",
+                                    "requested_scroll_profile": _sparse_micro_profile_requested,
+                                    "depth_advanced": bool(
+                                        _sparse_scroll_diag.get("depth_advanced")
+                                    ),
                                 },
                             )
                             _followers_try_refresh_injection_screenshot_after_scroll(
@@ -14492,11 +14683,17 @@ def _run_followers_list_engine_session(
                         )
                     except Exception:
                         pass
+                _main_scroll_profile_requested = str(_main_scroll_profile or "")
+                # Every Follow traversal uses the same measured viewport-relative
+                # gesture.  Adaptive policy may still decide *when* to scroll,
+                # but it no longer controls an unbounded RecyclerView amplitude.
+                _main_scroll_profile = "canonical_controlled"
                 try:
                     log(
                         "info",
                         "followers_engine_scroll_forward_started",
                         scroll_profile=str(_main_scroll_profile or ""),
+                        requested_scroll_profile=_main_scroll_profile_requested,
                         scroll_used_before=int(scroll_used),
                         source_profile_username=source_profile_username,
                         loop_iteration=followers_engine_loop_iteration,
@@ -14519,6 +14716,9 @@ def _run_followers_list_engine_session(
                     bypass_post_tap_capture_gate=bool(_visible_window_scroll_required),
                     bypass_scroll_xml_guards=bool(_visible_window_scroll_required),
                     scroll_diag_out=_main_scroll_diag,
+                    account_id=str(account_id or ""),
+                    target_id=str(target_id or ""),
+                    run_id=str(run_id or ""),
                 )
                 target_scan_tracker["scrolls_attempted"] = int(
                     target_scan_tracker.get("scrolls_attempted") or 0
@@ -14532,6 +14732,7 @@ def _run_followers_list_engine_session(
                         result=bool(_scroll_forward_ok),
                         duration_ms=round((time.perf_counter() - _scroll_forward_t0) * 1000.0, 2),
                         scroll_profile=str(_main_scroll_profile or ""),
+                        requested_scroll_profile=_main_scroll_profile_requested,
                         source_profile_username=source_profile_username,
                         loop_iteration=followers_engine_loop_iteration,
                     )
@@ -14576,6 +14777,10 @@ def _run_followers_list_engine_session(
                     )
                     break
                 else:
+                    if not bool(_main_scroll_diag.get("depth_advanced")):
+                        # See more / Suggestions are classified from the fresh
+                        # hierarchy on the next loop.  No depth is consumed.
+                        continue
                     _expl_profile_completed = ""
                     if exploratory_scroll_permit_armed_this_iter:
                         _expl_profile_completed = str(

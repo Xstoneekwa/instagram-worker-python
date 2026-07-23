@@ -28,6 +28,14 @@ from device import (
     shell,
 )
 from logs import log
+from instagram_list_continuation import (
+    InstagramListContinuationSignals,
+    InstagramListContinuationState,
+    canonical_follow_scroll_geometry,
+    classify_instagram_list_continuation,
+    compare_instagram_list_viewports,
+    viewport_fingerprint,
+)
 from screen_fingerprint import build_screen_fingerprint, compare_screen_fingerprints
 
 # Set by runner after open_accounts_tab: "accounts_tab" | "mixed_results"
@@ -13867,60 +13875,332 @@ def followers_clear_detect_hierarchy_cache() -> None:
     _LAST_FOLLOWERS_DETECT_HIERARCHY_XML_PATH = ""
 
 
-def followers_suggestions_boundary_from_cached_hierarchy(
+_INSTAGRAM_LIST_SUGGESTIONS_LABELS = {
+    "suggested for you",
+    "suggestions for you",
+    "suggestions pour vous",
+}
+_INSTAGRAM_LIST_SEE_MORE_LABELS = {"see more", "voir plus"}
+
+
+def _instagram_list_event(
+    event: str,
     *,
-    previously_valid_followers_rows: bool,
+    flow: str,
+    account_id: str = "",
+    target_id: str = "",
+    run_id: str = "",
+    fingerprint_before: str = "",
+    fingerprint_after: str = "",
+    visible_primary_row_count: int = 0,
+    overlap_count: int = 0,
+    scroll_distance: float = 0.0,
+    reason: str = "",
+    elapsed_ms: float = 0.0,
+    **extra: Any,
+) -> None:
+    """Emit the canonical list telemetry without raw XML or row identifiers."""
+    try:
+        log(
+            "info",
+            event,
+            flow=str(flow or ""),
+            account_id=str(account_id or ""),
+            target_id=str(target_id or ""),
+            run_id=str(run_id or ""),
+            viewport_fingerprint_before=str(fingerprint_before or ""),
+            viewport_fingerprint_after=str(fingerprint_after or ""),
+            visible_primary_row_count=int(visible_primary_row_count or 0),
+            overlap_count=int(overlap_count or 0),
+            scroll_distance=round(float(scroll_distance or 0.0), 4),
+            reason=str(reason or "")[:160],
+            elapsed_ms=round(float(elapsed_ms or 0.0), 2),
+            **extra,
+        )
+    except Exception:
+        pass
+
+
+def _instagram_list_xml_y(node: Any) -> int | None:
+    bounds = _parse_follow_list_xml_bounds(node)
+    if not bounds:
+        return None
+    return (int(bounds["top"]) + int(bounds["bottom"])) // 2
+
+
+def followers_list_continuation_from_hierarchy_xml(
+    hierarchy_xml: str,
+    *,
+    flow: str = "follow",
+    processed_primary_row_ids: set[str] | None = None,
+    previously_valid_followers_rows: bool = False,
+    continuation_probe_count: int = 1,
+    scroll_attempted: bool = False,
+    viewport_fingerprint_before: str = "",
+    overlap_count: int = 0,
+    scroll_excessive: bool = False,
 ) -> dict[str, Any]:
-    """Classify the already-captured post-scroll hierarchy without another device probe."""
-    signals = {
+    """Adapt an Instagram hierarchy to the shared list-continuation contract."""
+    _ = previously_valid_followers_rows  # retained for caller compatibility
+    base = {
+        "is_boundary": False,
+        "state": InstagramListContinuationState.AMBIGUOUS_SURFACE.value,
         "selected_followers_tab": False,
         "see_all_suggestions": False,
+        "see_more_visible": False,
+        "see_more_actionable": False,
+        "see_more_before_suggestions": False,
+        "suggestions_visible": False,
         "suggestion_follow_rows": 0,
         "dismiss_controls": 0,
         "loading_indicator": False,
+        "primary_row_count": 0,
+        "primary_row_ids": [],
+        "viewport_fingerprint": "",
     }
     try:
-        root = ET.fromstring(str(_LAST_FOLLOWERS_DETECT_HIERARCHY_XML or ""))
+        root = ET.fromstring(str(hierarchy_xml or ""))
     except ET.ParseError:
-        return {"is_boundary": False, **signals}
+        return base
 
+    suggestions_y: int | None = None
+    see_more_nodes: list[tuple[Any, int | None]] = []
+    raw_primary_rows: list[tuple[str, int | None]] = []
+    raw_follow_ctas: list[int | None] = []
+    dismiss_y: list[int | None] = []
     for node in root.iter():
         text = str(node.attrib.get("text") or "").strip()
         content_desc = str(node.attrib.get("content-desc") or "").strip()
         resource_id = str(node.attrib.get("resource-id") or "").lower()
         class_name = str(node.attrib.get("class") or "").lower()
-        normalized = " ".join((text or content_desc).lower().split())
-        if node.attrib.get("selected") == "true" and re.fullmatch(
-            r"\d+(?:[.,]\d+)?\s*[kmb]?\s+followers", normalized
+        normalized = " ".join((text or content_desc).casefold().split())
+        node_y = _instagram_list_xml_y(node)
+        if node.attrib.get("selected") == "true" and (
+            re.fullmatch(r"\d+(?:[.,]\d+)?\s*[kmb]?\s+followers", normalized)
+            or re.fullmatch(r"\d+(?:[.,]\d+)?\s*[kmb]?\s+abonn(?:e|é|és|ees|ées)?", normalized)
         ):
-            signals["selected_followers_tab"] = True
+            base["selected_followers_tab"] = True
+        if normalized in _INSTAGRAM_LIST_SUGGESTIONS_LABELS:
+            base["suggestions_visible"] = True
+            suggestions_y = node_y if suggestions_y is None else min(suggestions_y, node_y or suggestions_y)
         if normalized == "see all suggestions":
-            signals["see_all_suggestions"] = True
-        if text.lower() in {"follow", "follow back"}:
-            signals["suggestion_follow_rows"] += 1
+            base["see_all_suggestions"] = True
+            base["suggestions_visible"] = True
+            suggestions_y = node_y if suggestions_y is None else min(suggestions_y, node_y or suggestions_y)
+        if normalized in _INSTAGRAM_LIST_SEE_MORE_LABELS:
+            see_more_nodes.append((node, node_y))
+        if "follow_list_username" in resource_id:
+            username = str(text or content_desc).strip().lstrip("@").casefold()
+            if username:
+                raw_primary_rows.append((username, node_y))
+        if normalized in {"follow", "follow back", "suivre", "suivre en retour"}:
+            raw_follow_ctas.append(node_y)
         if (
             text in {"x", "X", "×"}
-            or normalized in {"remove", "dismiss", "close"}
+            or normalized in {"remove", "dismiss", "close", "supprimer", "fermer"}
             or any(token in resource_id for token in ("dismiss", "remove", "close"))
         ):
-            signals["dismiss_controls"] += 1
+            dismiss_y.append(node_y)
         if class_name.endswith("progressbar") or any(
             token in resource_id for token in ("progress", "loading", "spinner")
         ):
-            signals["loading_indicator"] = True
+            base["loading_indicator"] = True
 
-    suggestions_rows = (
-        signals["suggestion_follow_rows"] > 0 and signals["dismiss_controls"] > 0
+    see_more_y = min((y for _, y in see_more_nodes if y is not None), default=None)
+    base["see_more_visible"] = bool(see_more_nodes)
+    base["see_more_actionable"] = any(
+        node.attrib.get("clickable") == "true" or bool(_parse_follow_list_xml_bounds(node))
+        for node, _ in see_more_nodes
     )
-    explicit_boundary = signals["see_all_suggestions"] or suggestions_rows
-    transient_boundary = previously_valid_followers_rows and signals["loading_indicator"]
-    return {
-        "is_boundary": bool(
-            signals["selected_followers_tab"]
-            and (explicit_boundary or transient_boundary)
-        ),
-        **signals,
-    }
+    base["see_more_before_suggestions"] = bool(
+        see_more_nodes
+        and (
+            suggestions_y is None
+            or (see_more_y is not None and see_more_y < suggestions_y)
+        )
+    )
+
+    primary_rows: list[str] = []
+    for username, row_y in raw_primary_rows:
+        if suggestions_y is not None and row_y is not None and row_y >= suggestions_y:
+            continue
+        if username not in primary_rows:
+            primary_rows.append(username)
+    suggestion_follow_rows = 0
+    for cta_y in raw_follow_ctas:
+        if suggestions_y is not None and cta_y is not None and cta_y > suggestions_y:
+            suggestion_follow_rows += 1
+        elif dismiss_y and cta_y is not None and any(
+            dy is not None and abs(int(dy) - int(cta_y)) <= 120 for dy in dismiss_y
+        ):
+            suggestion_follow_rows += 1
+    if suggestion_follow_rows and dismiss_y:
+        base["suggestions_visible"] = True
+    base["suggestion_follow_rows"] = int(suggestion_follow_rows)
+    base["dismiss_controls"] = len(dismiss_y)
+    base["primary_row_ids"] = primary_rows
+    base["primary_row_count"] = len(primary_rows)
+    after_fp = viewport_fingerprint(primary_rows)
+    base["viewport_fingerprint"] = after_fp
+
+    state = classify_instagram_list_continuation(
+        InstagramListContinuationSignals(
+            flow=str(flow or ""),
+            expected_surface_selected=bool(base["selected_followers_tab"]),
+            primary_row_ids=tuple(primary_rows),
+            processed_primary_row_ids=tuple(processed_primary_row_ids or ()),
+            see_more_visible=bool(base["see_more_visible"]),
+            see_more_actionable=bool(base["see_more_actionable"]),
+            see_more_before_suggestions=bool(base["see_more_before_suggestions"]),
+            suggestions_visible=bool(base["suggestions_visible"]),
+            loading=bool(base["loading_indicator"]),
+            scroll_attempted=bool(scroll_attempted),
+            viewport_fingerprint_before=str(viewport_fingerprint_before or ""),
+            viewport_fingerprint_after=after_fp,
+            overlap_count=int(overlap_count or 0),
+            scroll_excessive=bool(scroll_excessive),
+            continuation_probe_count=int(continuation_probe_count or 0),
+        )
+    )
+    base["state"] = state.value
+    base["is_boundary"] = state is InstagramListContinuationState.SUGGESTIONS_BOUNDARY_CONFIRMED
+    return base
+
+
+def followers_suggestions_boundary_from_cached_hierarchy(
+    *,
+    previously_valid_followers_rows: bool,
+    processed_primary_row_ids: set[str] | None = None,
+    continuation_probe_count: int = 1,
+) -> dict[str, Any]:
+    """Classify the cached post-scroll hierarchy via the canonical contract."""
+    return followers_list_continuation_from_hierarchy_xml(
+        str(_LAST_FOLLOWERS_DETECT_HIERARCHY_XML or ""),
+        flow="follow",
+        processed_primary_row_ids=processed_primary_row_ids,
+        previously_valid_followers_rows=previously_valid_followers_rows,
+        continuation_probe_count=continuation_probe_count,
+    )
+
+
+def followers_try_expand_primary_list(
+    d: u2.Device,
+    *,
+    expected_source_profile: str = "",
+    account_id: str = "",
+    target_id: str = "",
+    run_id: str = "",
+    processed_primary_row_ids: set[str] | None = None,
+    max_attempts: int = 2,
+) -> dict[str, Any]:
+    """Click a verified primary-list See more selector and prove expansion."""
+    if expected_source_profile and not followers_session_list_committed_open_for(
+        expected_source_profile
+    ):
+        return {
+            "expanded": False,
+            "reason": "see_more_surface_not_committed",
+            "before": {},
+        }
+    before = followers_list_continuation_from_hierarchy_xml(
+        str(_LAST_FOLLOWERS_DETECT_HIERARCHY_XML or ""),
+        flow="follow",
+        processed_primary_row_ids=processed_primary_row_ids,
+    )
+    if before.get("state") != InstagramListContinuationState.EXPAND_PRIMARY_LIST_AVAILABLE.value:
+        return {"expanded": False, "reason": "see_more_not_canonical", "before": before}
+    _instagram_list_event(
+        "instagram_list_see_more_detected",
+        flow="follow",
+        account_id=account_id,
+        target_id=target_id,
+        run_id=run_id,
+        fingerprint_before=str(before.get("viewport_fingerprint") or ""),
+        visible_primary_row_count=int(before.get("primary_row_count") or 0),
+        reason="primary_continuation_actionable",
+    )
+    started = time.perf_counter()
+    baseline_rows = list(before.get("primary_row_ids") or [])
+    last_after = before
+    no_progress_reason = "bounded_clicks_without_new_primary_rows"
+    for attempt in range(1, max(1, min(int(max_attempts or 1), 2)) + 1):
+        clicked = False
+        for label_re in (r"(?i)^see more$", r"(?i)^voir plus$"):
+            for selector in (
+                d(textMatches=label_re),
+                d(descriptionMatches=label_re),
+            ):
+                try:
+                    if selector.exists(timeout=0.25):
+                        selector.click()
+                        clicked = True
+                        break
+                except Exception:
+                    continue
+            if clicked:
+                break
+        if not clicked:
+            no_progress_reason = "see_more_selector_unavailable"
+            break
+        _instagram_list_event(
+            "instagram_list_see_more_clicked",
+            flow="follow",
+            account_id=account_id,
+            target_id=target_id,
+            run_id=run_id,
+            fingerprint_before=str(before.get("viewport_fingerprint") or ""),
+            visible_primary_row_count=int(before.get("primary_row_count") or 0),
+            reason=f"selector_click_attempt_{attempt}",
+            elapsed_ms=(time.perf_counter() - started) * 1000.0,
+        )
+        # Instagram can briefly expose a loading/ambiguous hierarchy after the
+        # selector click.  Probe that same click a bounded number of times
+        # before deciding whether the one permitted retry is safe.
+        for settle_probe in range(1, 4):
+            time.sleep(0.35 if settle_probe == 1 else 0.25)
+            after_xml = followers_refresh_detect_hierarchy_cache(d)
+            after = followers_list_continuation_from_hierarchy_xml(
+                after_xml,
+                flow="follow",
+                processed_primary_row_ids=processed_primary_row_ids,
+            )
+            last_after = after
+            continuity = compare_instagram_list_viewports(
+                baseline_rows,
+                list(after.get("primary_row_ids") or []),
+                require_overlap=False,
+            )
+            if continuity.new_row_count > 0:
+                _instagram_list_event(
+                    "instagram_list_see_more_expanded",
+                    flow="follow",
+                    account_id=account_id,
+                    target_id=target_id,
+                    run_id=run_id,
+                    fingerprint_before=continuity.fingerprint_before,
+                    fingerprint_after=continuity.fingerprint_after,
+                    visible_primary_row_count=int(after.get("primary_row_count") or 0),
+                    overlap_count=continuity.overlap_count,
+                    reason="new_primary_rows_detected",
+                    elapsed_ms=(time.perf_counter() - started) * 1000.0,
+                )
+                return {"expanded": True, "reason": "new_primary_rows_detected", "after": after}
+        if last_after.get("state") != InstagramListContinuationState.EXPAND_PRIMARY_LIST_AVAILABLE.value:
+            no_progress_reason = "post_click_surface_not_safe_for_retry"
+            break
+    _instagram_list_event(
+        "instagram_list_see_more_no_progress",
+        flow="follow",
+        account_id=account_id,
+        target_id=target_id,
+        run_id=run_id,
+        fingerprint_before=str(before.get("viewport_fingerprint") or ""),
+        fingerprint_after=str(last_after.get("viewport_fingerprint") or ""),
+        visible_primary_row_count=int(last_after.get("primary_row_count") or 0),
+        reason=no_progress_reason,
+        elapsed_ms=(time.perf_counter() - started) * 1000.0,
+    )
+    return {"expanded": False, "reason": "see_more_no_progress", "after": last_after}
 
 
 def followers_refresh_detect_hierarchy_cache(
@@ -31632,6 +31912,9 @@ def _followers_scroll_list_forward(
     bypass_post_tap_capture_gate: bool = False,
     bypass_scroll_xml_guards: bool = False,
     scroll_diag_out: dict[str, Any] | None = None,
+    account_id: str = "",
+    target_id: str = "",
+    run_id: str = "",
 ) -> bool:
     global _FOLLOWERS_VISUAL_EXPLORATORY_SCROLL_ONCE
     global _FOLLOWERS_VISUAL_EXPLORATORY_SCROLL_REASON
@@ -31669,12 +31952,14 @@ def _followers_scroll_list_forward(
         "accelerated_skip_streak",
         "soft_initial",
         "soft_retry",
+        "canonical_controlled",
     ):
         profile_req = "default"
     micro_reposition = bool(use_exploratory) and profile_req == "micro_reposition"
     zero_follow_spans_soft = bool(use_exploratory) and profile_req == "zero_follow_spans_soft"
     accelerated_skip_streak = profile_req == "accelerated_skip_streak"
     soft_followers_scroll = profile_req in {"soft_initial", "soft_retry", "welcome_soft"}
+    canonical_controlled = profile_req == "canonical_controlled"
     exhausted_was = False
     fallback_guard_would_block = False
     permit_reason_snapshot = ""
@@ -31717,7 +32002,192 @@ def _followers_scroll_list_forward(
     _sd("whether_physical_swipe_attempted", True)
     scroll_ok = False
     fallback_fixed_micro_used = False
-    if micro_reposition:
+    if canonical_controlled:
+        started = time.perf_counter()
+        before_surface = followers_list_continuation_from_hierarchy_xml(
+            str(_LAST_FOLLOWERS_DETECT_HIERARCHY_XML or ""),
+            flow="follow",
+        )
+        before_rows = list(before_surface.get("primary_row_ids") or [])
+        before_fp = viewport_fingerprint(before_rows)
+        if before_rows:
+            _instagram_list_event(
+                "instagram_list_primary_rows_detected",
+                flow="follow",
+                account_id=account_id,
+                target_id=target_id,
+                run_id=run_id,
+                fingerprint_before=before_fp,
+                visible_primary_row_count=len(before_rows),
+                scroll_distance=0.0,
+                reason="pre_scroll_primary_viewport",
+            )
+        try:
+            w, h = d.window_size()
+        except Exception:
+            w, h = 1080, 2400
+        geometry = canonical_follow_scroll_geometry(w, h)
+        _instagram_list_event(
+            "instagram_list_scroll_started",
+            flow="follow",
+            account_id=account_id,
+            target_id=target_id,
+            run_id=run_id,
+            fingerprint_before=before_fp,
+            visible_primary_row_count=len(before_rows),
+            scroll_distance=float(geometry["distance_ratio"]),
+            reason="viewport_relative_controlled_swipe",
+        )
+        try:
+            _followers_log_scroll_or_swipe_about_to_run(
+                d,
+                source_function="_followers_scroll_list_forward",
+                reason="canonical_controlled_follow_swipe",
+            )
+            d.swipe(
+                int(geometry["x"]),
+                int(geometry["y_start"]),
+                int(geometry["x"]),
+                int(geometry["y_end"]),
+                float(geometry["duration_s"]),
+            )
+            time.sleep(0.45)
+            scroll_ok = True
+        except Exception:
+            scroll_ok = False
+        after_xml = followers_refresh_detect_hierarchy_cache(d) if scroll_ok else ""
+        after_surface = followers_list_continuation_from_hierarchy_xml(
+            after_xml,
+            flow="follow",
+            scroll_attempted=True,
+            viewport_fingerprint_before=before_fp,
+        )
+        after_rows = list(after_surface.get("primary_row_ids") or [])
+        continuity = compare_instagram_list_viewports(before_rows, after_rows)
+        _sd("viewport_fingerprint_before", continuity.fingerprint_before)
+        _sd("viewport_fingerprint_after", continuity.fingerprint_after)
+        _sd("visible_primary_row_count_before", len(before_rows))
+        _sd("visible_primary_row_count_after", len(after_rows))
+        _sd("overlap_count", continuity.overlap_count)
+        _sd("new_primary_row_count", continuity.new_row_count)
+        _sd("scroll_distance_ratio", geometry["distance_ratio"])
+        _sd("scroll_distance_px", geometry["distance_px"])
+        _sd("viewport_unchanged", continuity.unchanged)
+        _sd("scroll_excessive", continuity.excessive)
+        _sd("depth_advanced", continuity.continuity_proved)
+        if continuity.continuity_proved:
+            _instagram_list_event(
+                "instagram_list_viewport_overlap_verified",
+                flow="follow",
+                account_id=account_id,
+                target_id=target_id,
+                run_id=run_id,
+                fingerprint_before=continuity.fingerprint_before,
+                fingerprint_after=continuity.fingerprint_after,
+                visible_primary_row_count=len(after_rows),
+                overlap_count=continuity.overlap_count,
+                scroll_distance=float(geometry["distance_ratio"]),
+                reason=continuity.reason,
+                elapsed_ms=(time.perf_counter() - started) * 1000.0,
+            )
+            _instagram_list_event(
+                "instagram_list_scroll_verified",
+                flow="follow",
+                account_id=account_id,
+                target_id=target_id,
+                run_id=run_id,
+                fingerprint_before=continuity.fingerprint_before,
+                fingerprint_after=continuity.fingerprint_after,
+                visible_primary_row_count=len(after_rows),
+                overlap_count=continuity.overlap_count,
+                scroll_distance=float(geometry["distance_ratio"]),
+                reason="next_viewport_continuity_proved",
+                elapsed_ms=(time.perf_counter() - started) * 1000.0,
+            )
+        elif continuity.excessive:
+            _instagram_list_event(
+                "instagram_list_scroll_excessive",
+                flow="follow",
+                account_id=account_id,
+                target_id=target_id,
+                run_id=run_id,
+                fingerprint_before=continuity.fingerprint_before,
+                fingerprint_after=continuity.fingerprint_after,
+                visible_primary_row_count=len(after_rows),
+                overlap_count=0,
+                scroll_distance=float(geometry["distance_ratio"]),
+                reason="no_anchor_overlap_corrective_backstep",
+                elapsed_ms=(time.perf_counter() - started) * 1000.0,
+            )
+            # One bounded backward correction attempts to recover an anchor.  If
+            # continuity is still not proved, the caller receives a safe failure.
+            try:
+                correction_start = int(h * 0.46)
+                correction_end = int(h * 0.56)
+                d.swipe(int(geometry["x"]), correction_start, int(geometry["x"]), correction_end, 0.28)
+                time.sleep(0.40)
+                corrected_xml = followers_refresh_detect_hierarchy_cache(d)
+                corrected_surface = followers_list_continuation_from_hierarchy_xml(
+                    corrected_xml,
+                    flow="follow",
+                    scroll_attempted=True,
+                    viewport_fingerprint_before=before_fp,
+                )
+                corrected_rows = list(corrected_surface.get("primary_row_ids") or [])
+                corrected = compare_instagram_list_viewports(before_rows, corrected_rows)
+                _sd("corrective_backstep_used", True)
+                _sd("overlap_count", corrected.overlap_count)
+                _sd("viewport_fingerprint_after", corrected.fingerprint_after)
+                _sd("depth_advanced", corrected.continuity_proved)
+                _sd("scroll_excessive", corrected.excessive)
+                scroll_ok = bool(corrected.continuity_proved)
+                if scroll_ok:
+                    _instagram_list_event(
+                        "instagram_list_viewport_overlap_verified",
+                        flow="follow",
+                        account_id=account_id,
+                        target_id=target_id,
+                        run_id=run_id,
+                        fingerprint_before=corrected.fingerprint_before,
+                        fingerprint_after=corrected.fingerprint_after,
+                        visible_primary_row_count=len(corrected_rows),
+                        overlap_count=corrected.overlap_count,
+                        scroll_distance=float(geometry["distance_ratio"]),
+                        reason="overlap_recovered_after_backstep",
+                        elapsed_ms=(time.perf_counter() - started) * 1000.0,
+                    )
+                    _instagram_list_event(
+                        "instagram_list_scroll_verified",
+                        flow="follow",
+                        account_id=account_id,
+                        target_id=target_id,
+                        run_id=run_id,
+                        fingerprint_before=corrected.fingerprint_before,
+                        fingerprint_after=corrected.fingerprint_after,
+                        visible_primary_row_count=len(corrected_rows),
+                        overlap_count=corrected.overlap_count,
+                        scroll_distance=float(geometry["distance_ratio"]),
+                        reason="continuity_recovered_after_backstep",
+                        elapsed_ms=(time.perf_counter() - started) * 1000.0,
+                    )
+            except Exception:
+                scroll_ok = False
+        elif continuity.unchanged:
+            _sd("failure_reason", "viewport_unchanged")
+            scroll_ok = False
+        else:
+            # An empty primary viewport may expose See more or a boundary; let
+            # the canonical surface classifier resolve it in the next loop.
+            _sd("depth_advanced", False)
+            _sd("surface_state_after", str(after_surface.get("state") or ""))
+            scroll_ok = bool(
+                after_surface.get("state")
+                in {
+                    InstagramListContinuationState.EXPAND_PRIMARY_LIST_AVAILABLE.value,
+                    InstagramListContinuationState.SUGGESTIONS_BOUNDARY_CONFIRMED.value,
+                }
+            )
+    elif micro_reposition:
         w, h = 0, 0
         try:
             w, h = d.window_size()
@@ -32149,6 +32619,9 @@ def scroll_followers_list_forward(
     bypass_post_tap_capture_gate: bool = False,
     bypass_scroll_xml_guards: bool = False,
     scroll_diag_out: dict[str, Any] | None = None,
+    account_id: str = "",
+    target_id: str = "",
+    run_id: str = "",
 ) -> bool:
     """Bounded scroll on the followers RecyclerView (or fallback swipe).
 
@@ -32156,6 +32629,7 @@ def scroll_followers_list_forward(
     ``zero_follow_spans_soft`` (exploratory defer after zero blue spans) |
     ``accelerated_skip_streak`` (adaptive V1: faster exit from low-yield visible zone) |
     ``welcome_soft`` (deterministic Golden 0.25-height Welcome scan gesture).
+    ``canonical_controlled`` (Follow-only viewport-relative gesture with overlap proof).
 
     ``bypass_post_tap_capture_gate`` / ``bypass_scroll_xml_guards`` are narrow escape
     hatches for runner paths that return to a followers list validated visually while XML
@@ -32171,6 +32645,9 @@ def scroll_followers_list_forward(
         bypass_post_tap_capture_gate=bypass_post_tap_capture_gate,
         bypass_scroll_xml_guards=bypass_scroll_xml_guards,
         scroll_diag_out=scroll_diag_out,
+        account_id=account_id,
+        target_id=target_id,
+        run_id=run_id,
     )
 
 
