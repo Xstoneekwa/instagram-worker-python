@@ -21,9 +21,12 @@ Detailed provenance: [cross-repository checkpoint](./checkpoints/2026-07-16-prod
 | Repository | Code reference | Documentation reference |
 |---|---|---|
 | Worker | `51278eadf1613f80349a7930e17420c8d8dd1e64` | `8a5e9726e3dc3bdedaad6a8090ebc3a2ce83d88d` |
-| Backend | `9a472903d4d6d3202e1489347a42b06df425f244` | `c8383001362a3b5400a4d6c41d0047e140b4f350` |
-| BotApp | `4606fc29b3717611219a62cc7132e2245647422a` | `261afcf5858d17fac2e3ddded2d6d31c2cf4a8d0` |
+| Backend | `108f7defc17c2bce328801f4c272f82fb1f62706` | `bd37a1eea82cc44c0cf50f02c4f6fdedde80c579` |
+| BotApp | `5f5b6a8ba97ce6af73482fc05767a3c4efb81f50` | `9bc269740e7d036bee852351f3ccedfe3618e7eb` |
 
-Branch: `feature/follow-warmup-active-days-v1-20260723` in each repository.
+Worker branch: `feature/follow-warmup-active-days-v1-20260723`. Backend and
+BotApp final consolidated heads: `feature/targets-ui-parity-v1-20260723`;
+these preserve the validated Warmup commits and add the Targets UI parity
+checkpoint.
 Activation requires documentation, additive migration verification, backend
 deployment, immutable Worker release and official BotApp package validation.
