@@ -20,9 +20,9 @@ Detailed provenance: [cross-repository checkpoint](./checkpoints/2026-07-16-prod
 
 | Repository | Code reference | Documentation reference |
 |---|---|---|
-| Worker | `51278eadf1613f80349a7930e17420c8d8dd1e64` | resolved by the scoped docs commit recorded after documentation validation |
-| Backend | `9a472903d4d6d3202e1489347a42b06df425f244` | backend registry entry |
-| BotApp | `4606fc29b3717611219a62cc7132e2245647422a` | BotApp checkpoint entry |
+| Worker | `51278eadf1613f80349a7930e17420c8d8dd1e64` | `8a5e9726e3dc3bdedaad6a8090ebc3a2ce83d88d` |
+| Backend | `9a472903d4d6d3202e1489347a42b06df425f244` | `c8383001362a3b5400a4d6c41d0047e140b4f350` |
+| BotApp | `4606fc29b3717611219a62cc7132e2245647422a` | `261afcf5858d17fac2e3ddded2d6d31c2cf4a8d0` |
 
 Branch: `feature/follow-warmup-active-days-v1-20260723` in each repository.
 Activation requires documentation, additive migration verification, backend
