@@ -10186,6 +10186,8 @@ def _run_followers_list_engine_session(
         package_follow_day_cap=follow_runtime_inputs.get("package_follow_day_cap"),
         package_follow_session_cap=follow_runtime_inputs.get("package_follow_session_cap"),
         warmup_follow_day_cap=follow_runtime_inputs.get("warmup_follow_day_cap"),
+        ops_hard_day_cap=getattr(config, "FOLLOW_HARD_MAX_PER_DAY", 0),
+        ops_hard_session_cap=getattr(config, "FOLLOW_HARD_MAX_PER_SESSION", 0),
     )
     global_follow_goal_effective = int(follow_limits["effective_iterations_max"])
     _runtime_follow_cap = int(getattr(config, "FOLLOW_MAX_PER_RUN", 0) or 0)

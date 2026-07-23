@@ -112,6 +112,8 @@ def resolve_follow_runtime_limits(
     package_follow_day_cap: Any = None,
     package_follow_session_cap: Any = None,
     warmup_follow_day_cap: Any = None,
+    ops_hard_day_cap: Any = None,
+    ops_hard_session_cap: Any = None,
     config_module: Any = config,
     environ: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
@@ -172,15 +174,33 @@ def resolve_follow_runtime_limits(
         if warmup_follow_day_cap is not None
         else package_cap
     )
-    effective_follow_day_cap = min(
-        day_remaining,
-        account_day_cap,
-        package_cap,
-        warmup_cap,
+    ops_day_cap = (
+        _as_nonnegative_int(ops_hard_day_cap, 0)
+        if ops_hard_day_cap is not None
+        else 0
     )
-    effective_follow_max = min(db_session, package_session_cap, effective_follow_day_cap)
-    if follow_env_present:
-        effective_follow_max = min(effective_follow_max, config_follow_max)
+    explicit_ops_session_cap = (
+        _as_nonnegative_int(ops_hard_session_cap, 0)
+        if ops_hard_session_cap is not None
+        else 0
+    )
+    resolved_ops_session_cap = explicit_ops_session_cap or (
+        config_follow_max if follow_env_present else 0
+    )
+    day_candidates = [account_day_cap, package_cap, warmup_cap]
+    if ops_day_cap > 0:
+        day_candidates.append(ops_day_cap)
+    effective_follow_day_cap = min(day_candidates)
+    remaining_effective_day_quota = min(day_remaining, effective_follow_day_cap)
+    session_candidates = [
+        db_session,
+        package_session_cap,
+        warmup_cap,
+        remaining_effective_day_quota,
+    ]
+    if resolved_ops_session_cap > 0:
+        session_candidates.append(resolved_ops_session_cap)
+    effective_follow_max = min(session_candidates)
     effective_iterations_max = (
         min(iterations_max, effective_follow_max)
         if iterations_env_present
@@ -188,6 +208,18 @@ def resolve_follow_runtime_limits(
         if has_db_session_cap
         else iterations_max
     )
+    limiting_candidates = [
+        (db_session, "account_follow_session_cap"),
+        (package_session_cap, "package_session_cap"),
+        (day_remaining, "remaining_day"),
+        (account_day_cap, "account_follow_day_cap"),
+        (package_cap, "package_day_cap"),
+        (warmup_cap, "warmup_cap"),
+    ]
+    if ops_day_cap > 0:
+        limiting_candidates.append((ops_day_cap, "ops_hard_day_cap"))
+    if resolved_ops_session_cap > 0:
+        limiting_candidates.append((resolved_ops_session_cap, "ops_hard_session_cap"))
     return {
         "code_default_follow_max": DEFAULT_FOLLOW_MAX_PER_RUN,
         "code_default_iterations_max": DEFAULT_FOLLOWERS_LIST_MAX_ITERATIONS_PER_RUN,
@@ -205,29 +237,22 @@ def resolve_follow_runtime_limits(
         "legacy_max_follow_per_run": legacy_session,
         "legacy_fallback_used": legacy_fallback_used,
         "follow_day_remaining_today": day_remaining,
-        "remaining_day": day_remaining,
+        "remaining_day": remaining_effective_day_quota,
+        "remaining_effective_day_quota": remaining_effective_day_quota,
         "package_follow_day_cap": package_cap,
         "package_day_cap": package_cap,
         "package_follow_session_cap": package_session_cap,
         "package_session_cap": package_session_cap,
         "warmup_follow_day_cap": warmup_cap,
         "warmup_cap": warmup_cap,
+        "ops_hard_day_cap": ops_day_cap or None,
+        "ops_hard_session_cap": resolved_ops_session_cap or None,
         "account_follow_day_cap": account_day_cap,
         "account_follow_session_cap": canonical_session or None,
         "effective_follow_day_cap": effective_follow_day_cap,
         "effective_follow_session_cap": effective_follow_max,
         "effective_follow_max": effective_follow_max,
         "effective_iterations_max": effective_iterations_max,
-        "limiting_source": min(
-            (
-                (db_session, "account_follow_session_cap"),
-                (package_session_cap, "package_session_cap"),
-                (day_remaining, "remaining_day"),
-                (account_day_cap, "account_follow_day_cap"),
-                (package_cap, "package_day_cap"),
-                (warmup_cap, "warmup_cap"),
-            ),
-            key=lambda item: item[0],
-        )[1],
-        "source": "min(canonical_or_legacy_session,package_session,package_day,warmup,day_remaining)",
+        "limiting_source": min(limiting_candidates, key=lambda item: item[0])[1],
+        "source": "day=min(configured_day,package_day,warmup,ops_hard_day);session=min(configured_session,package_session,warmup,ops_hard_session,remaining_effective_day_quota)",
     }

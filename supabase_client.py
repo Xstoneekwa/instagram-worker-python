@@ -11,6 +11,7 @@ import time
 from typing import Any
 from urllib import error, parse, request
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from logs import log
 
@@ -2799,18 +2800,27 @@ def count_successful_unfollows_today(account_id: str) -> int:
 
 
 def count_successful_follows_today(account_id: str) -> int:
-    """Count persisted follows for the account in the current UTC day."""
+    """Count persisted verified follows for the current SAST business day."""
     aid = str(account_id or "").strip()
     if not aid:
         return 0
-    start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    business_timezone = ZoneInfo("Africa/Johannesburg")
+    start = (
+        datetime.now(business_timezone)
+        .replace(hour=0, minute=0, second=0, microsecond=0)
+        .astimezone(timezone.utc)
+    )
     rows = _request_json(
         "GET",
-        "ig_interacted_users",
+        "ig_interaction_events",
         query={
-            "select": "id,followed_at",
+            "select": "id,event_at",
             "account_id": f"eq.{aid}",
-            "followed_at": f"gte.{start.isoformat()}",
+            "interaction_type": "eq.follow",
+            "interaction_status": "eq.success",
+            "event_type": "eq.follow_verified",
+            "run_id": "not.is.null",
+            "event_at": f"gte.{start.isoformat()}",
             "limit": "10000",
         },
     )
@@ -2901,17 +2911,20 @@ def get_follow_runtime_cap_inputs(account_id: str) -> dict[str, Any]:
         settings = rows[0]
     summary = get_account_package_summary(aid) or {}
     package_caps = summary.get("package_caps") if isinstance(summary.get("package_caps"), dict) else {}
+    package_defaults = summary.get("package_defaults") if isinstance(summary.get("package_defaults"), dict) else {}
     preview = summary.get("effective_caps_preview") if isinstance(summary.get("effective_caps_preview"), dict) else {}
     manual_session = (settings or {}).get("follow_limit")
     legacy_session = (settings or {}).get("max_follow_per_run")
     manual_day = (settings or {}).get("max_actions_per_day")
+    configured_session = manual_session or package_defaults.get("follow_session")
+    configured_day = manual_day or package_defaults.get("follow_day")
     package_day = package_caps.get("follow_day")
     package_session = package_caps.get("follow_session")
     warmup_day_cap = preview.get("warmup_follow_day_cap")
     effective_day = preview.get("follow_day")
     follows_done_today = count_successful_follows_today(aid)
     day_candidates = []
-    for value in (manual_day, effective_day, package_day):
+    for value in (configured_day, effective_day, package_day):
         try:
             parsed = int(value)
         except (TypeError, ValueError):
@@ -2923,11 +2936,13 @@ def get_follow_runtime_cap_inputs(account_id: str) -> dict[str, Any]:
     except (TypeError, ValueError):
         day_cap = 0
     return {
-        "db_follow_per_session_limit": manual_session,
+        "db_follow_per_session_limit": configured_session,
         "db_max_follow_per_run": legacy_session,
         "follow_limit_from_db": manual_session,
+        "package_default_follow_session_cap": package_defaults.get("follow_session"),
+        "package_default_follow_day_cap": package_defaults.get("follow_day"),
         "max_follow_per_run_from_db": legacy_session,
-        "max_actions_per_day_from_db": manual_day,
+        "max_actions_per_day_from_db": configured_day,
         "follow_day_remaining_today": max(0, day_cap - follows_done_today),
         "package_follow_day_cap": package_day,
         "package_follow_session_cap": package_session,
