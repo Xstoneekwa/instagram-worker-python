@@ -599,3 +599,16 @@ DF-1B should not yet:
 - expose a client dashboard;
 - connect the full Settings drawer;
 - enqueue or stop real workers except through a later audited action flow.
+
+## Follow Warmup — Active SAST Days V1
+
+The canonical dashboard contract separates writable account configuration from
+read-only runtime projection:
+
+- editable: configured Follow cap/day and cap/session;
+- read-only: package defaults/maxima, active warmup day, warmup cap, effective
+  cap, limiting source and limiting reason.
+
+Refresh must not replace configured values with effective values. Save must
+never include temporary warmup caps. The backend rejects non-positive,
+non-integer or above-package settings before persistence.

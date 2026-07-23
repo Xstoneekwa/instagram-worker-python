@@ -60,11 +60,15 @@ date and scope.
 
 ## Warmup and Unfollow
 
-- Warmup is calendar based: Day 1 = 10, Day 2 = 20, Day 3 = 40 and Day 4+ =
+- Historical baseline rule at this checkpoint was calendar based: Day 1 = 10,
+  Day 2 = 20, Day 3 = 40 and Day 4+ =
   package maximum. Effective limits are the minimum of package, warmup and
   account day/session limits.
 - Tracker and Mythyl activation dates are backfilled; future activated accounts
   initialize from package/service start and progress without manual intervention.
+
+> Superseded for current policy on 2026-07-23 by
+> [Follow Warmup Active SAST Days V1](2026-07-23-follow-warmup-active-sast-days-v1.md).
 - Unfollow eligibility begins at J+3. Protected rows are excluded, production
   day/session caps apply, the hidden one-action safety cap is removed from the
   effective production path, and insufficient remaining time produces a clean

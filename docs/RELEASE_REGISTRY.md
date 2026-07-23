@@ -15,3 +15,15 @@ Purpose: immutable rollback baseline before performance optimization of
 Pre-Follow, Post-Mute to post open and CT stable to next candidate.
 
 Detailed provenance: [cross-repository checkpoint](./checkpoints/2026-07-16-production-baseline-cross-repo.md).
+
+## FOLLOW_WARMUP_ACTIVE_SAST_DAYS_V1 — prepared 2026-07-23
+
+| Repository | Code reference | Documentation reference |
+|---|---|---|
+| Worker | `51278eadf1613f80349a7930e17420c8d8dd1e64` | resolved by the scoped docs commit recorded after documentation validation |
+| Backend | `9a472903d4d6d3202e1489347a42b06df425f244` | backend registry entry |
+| BotApp | `4606fc29b3717611219a62cc7132e2245647422a` | BotApp checkpoint entry |
+
+Branch: `feature/follow-warmup-active-days-v1-20260723` in each repository.
+Activation requires documentation, additive migration verification, backend
+deployment, immutable Worker release and official BotApp package validation.

@@ -546,3 +546,13 @@ remain historical evidence.
 ## Fichiers de référence (lecture)
 
 - Détails navigation / vision / follow / post-follow / recovery : voir les autres fichiers sous `docs/` et la carte dans `AGENTS.md`.
+
+## Checkpoint préparé — 2026-07-23
+
+- Follow warmup : journées actives SAST basées sur `follow_verified`, pas âge
+  calendaire.
+- Packages : defaults et maxima jour/session séparés.
+- Account settings : valeurs configurées persistées, modifiables vers le bas.
+- Worker : enforcement final indépendant et fail-closed.
+- Tests : 26 ciblés + 156 gardes, zéro run device.
+- Code Worker : `51278eadf1613f80349a7930e17420c8d8dd1e64`.

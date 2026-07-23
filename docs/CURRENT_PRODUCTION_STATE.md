@@ -1,5 +1,13 @@
 # Current Production State
 
+## Prepared checkpoint — 2026-07-23
+
+`FOLLOW_WARMUP_ACTIVE_SAST_DAYS_V1` is documented at
+[this checkpoint](./checkpoints/2026-07-23-follow-warmup-active-sast-days-v1.md).
+Worker code `51278eadf1613f80349a7930e17420c8d8dd1e64` is pushed. The
+runtime/deployment state must be confirmed by the rollout evidence before this
+prepared checkpoint is called active production.
+
 Current checkpoint: [JULY_16_PRODUCTION_BASELINE](./checkpoints/2026-07-16-production-baseline-cross-repo.md).
 
 | Surface | Reference |

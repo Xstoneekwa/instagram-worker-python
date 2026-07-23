@@ -59,3 +59,11 @@ Les surfaces **Contact** (et assimilés) peuvent être **marquées pour usage fu
 - Croiser **position**, **texte**, **resourceId**, **score**, et **état header** (Following / Requested) quand disponible.
 - En cas de doute : **pas de tap** ; préférer **observation** supplémentaire ou **échec explicite** avec `failure_reason` stable.
 - Toute régression “Contact tapé comme Follow” est **bloquante** : prioriser tests / logs sur les jeux de labels Instagram multilingues.
+
+## Limite globale avant action — Active SAST Days V1
+
+Le moteur Follow conserve ses gardes d'action existantes, mais leur budget
+global provient désormais du minimum entre cap configuré, maximum package,
+palier warmup par journées actives SAST, hard caps ops et quota journalier
+restant. Le warmup ne modifie jamais les settings persistés. Une action qui
+ferait dépasser la limite effective doit être refusée avant le tap.

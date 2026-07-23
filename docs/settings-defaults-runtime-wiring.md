@@ -2,6 +2,12 @@
 
 Status: audit only. No runtime patch, no dashboard patch, no dispatcher change, no run.
 
+> **Implemented checkpoint — 2026-07-23:** Follow configuration now has a
+> package-bounded active-day resolver. Package defaults initialize account
+> values; package maxima bound writes; the Worker applies warmup and remaining
+> quota independently. See
+> [Active SAST Days V1](./checkpoints/2026-07-23-follow-warmup-active-sast-days-v1.md).
+
 ## Executive Summary
 
 The current admin dashboard still contains two different classes of settings:
@@ -1169,3 +1175,7 @@ GO / NO-GO before next patch:
 - GO for focused docs and preset/API design.
 - GO for a small P0 implementation patch only after operator chooses the first drawer/domain to wire.
 - NO-GO for next test run until P0 preflights and package/domain preset alignment are implemented.
+
+The Follow portion of the former P0 mismatch is resolved by the linked
+checkpoint. Other domains and legacy drawer fields retain their existing
+status; this checkpoint does not certify them.

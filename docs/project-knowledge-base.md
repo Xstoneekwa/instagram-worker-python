@@ -8,6 +8,12 @@ Ce document est la verite globale de handoff du projet Phone Farm Instagram.
 Il ne remplace pas `docs/outreach-entry-api.md`, qui reste la documentation
 technique detaillee des Entries, APIs, RPC, credentials et provisioning.
 
+> **Scoped update — 2026-07-23:** the canonical Follow warmup rule is now
+> [Active SAST Days V1](./checkpoints/2026-07-23-follow-warmup-active-sast-days-v1.md).
+> Historical calendar-based checkpoint text remains historical and must not be
+> used as current policy. This update does not claim the final Frontend/Stripe
+> handover is complete.
+
 ## 1. Big Picture
 
 Le projet construit une Phone Farm Instagram production-grade :

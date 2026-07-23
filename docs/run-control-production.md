@@ -415,3 +415,12 @@ Never store secrets, tokens, raw XML, screenshots, Vault ids, or raw device seri
 4. Validate runner link + stop/cancel smoke
 5. Enable dashboard Play flag for selected admins
 6. Expand account allowlist / remove test-only gate after production sign-off
+
+## Follow cap preflight — Active SAST Days V1
+
+At startup, RunControl must obtain configured account caps, package maxima,
+active SAST warmup day, ops hard caps and verified Follow consumption. The
+Worker resolves their minimum and fails closed when package Follow policy is
+missing. This calculation cannot create a request, run, lock or account
+session. A rollout smoke for this checkpoint is read-only; no Follow run is
+required or authorized.
