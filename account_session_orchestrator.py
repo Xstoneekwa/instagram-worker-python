@@ -68,6 +68,8 @@ FOLLOW_TARGET_EXHAUSTION_TOKENS = frozenset(
         "no_followable_candidates_bounded_exploration",
         "no_followable_candidates_after_bounded_exploration",
         "bounded_exploration_exhausted",
+        "followers_suggestions_boundary",
+        "suggestions_boundary_confirmed",
     }
 )
 FOLLOW_TARGET_NON_EXHAUSTION_TOKENS = frozenset(
@@ -514,9 +516,6 @@ def is_follow_target_exhaustion_outcome(
     code = exit_code if exit_code is not None else _as_optional_int(data.get("exit_code"))
     if code in FOLLOW_TARGET_EXHAUSTION_EXIT_CODES:
         return True
-    follows_completed = _as_optional_int(data.get("follows_completed_count"))
-    if follows_completed is not None and follows_completed > 0:
-        return False
     text = " ".join(
         str(part or "").strip().lower()
         for part in (
@@ -527,9 +526,17 @@ def is_follow_target_exhaustion_outcome(
         )
         if str(part or "").strip()
     )
+    # Terminal target exhaustion has priority over successful work already
+    # preserved in the same attempt.  Eight valid follows followed by a proved
+    # boundary still means this target is exhausted for the current run.
+    if any(token in text for token in FOLLOW_TARGET_EXHAUSTION_TOKENS):
+        return True
     if any(token in text for token in FOLLOW_TARGET_NON_EXHAUSTION_TOKENS):
         return False
-    return any(token in text for token in FOLLOW_TARGET_EXHAUSTION_TOKENS)
+    follows_completed = _as_optional_int(data.get("follows_completed_count"))
+    if follows_completed is not None and follows_completed > 0:
+        return False
+    return False
 
 
 def is_follow_target_budget_reached(summary: dict[str, Any], target_budget: int) -> bool:

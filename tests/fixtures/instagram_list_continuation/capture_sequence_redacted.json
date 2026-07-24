@@ -1,0 +1,43 @@
+{
+  "source": "four ordered operator screenshots from 2026-07-23",
+  "redaction": "visible usernames replaced by stable row aliases",
+  "captures": [
+    {
+      "capture": 1,
+      "visible_time": "20:34",
+      "primary_rows": ["row_01", "row_02", "row_03", "row_04", "row_05", "row_06"],
+      "see_more_visible": true,
+      "suggestions_visible": true,
+      "suggestion_rows": ["suggestion_01"]
+    },
+    {
+      "capture": 2,
+      "visible_time": "20:39",
+      "primary_rows": ["row_07", "row_08", "row_09", "row_10", "row_11", "row_12", "row_13", "row_14"],
+      "following_rows": ["row_08", "row_11"],
+      "see_more_visible": false,
+      "suggestions_visible": false
+    },
+    {
+      "capture": 3,
+      "visible_time": "20:40",
+      "primary_rows": ["row_14", "row_15", "row_16", "row_17", "row_18", "row_01", "row_02", "row_03", "row_04"],
+      "following_rows": ["row_15"],
+      "see_more_visible": false,
+      "suggestions_visible": false
+    },
+    {
+      "capture": 4,
+      "visible_time": "20:40",
+      "primary_rows": ["row_03", "row_04", "row_05", "row_06"],
+      "see_more_visible": true,
+      "suggestions_visible": true,
+      "suggestion_rows": ["suggestion_01", "suggestion_02", "suggestion_03"]
+    }
+  ],
+  "expected_overlap": [
+    {"from": 2, "to": 3, "rows": ["row_14"]},
+    {"from": 3, "to": 4, "rows": ["row_03", "row_04"]}
+  ],
+  "contract": "See more before Suggestions remains primary-list continuation"
+}
