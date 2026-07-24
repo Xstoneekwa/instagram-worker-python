@@ -10057,17 +10057,19 @@ def _run_followers_list_engine_session(
             target_followers_resume_controller.load_and_plan()
             target_followers_resume_controller.claim()
         except Exception as exc:
-            log(
-                "warning",
-                "target_followers_resume_fallback_legacy",
-                account_id=str(account_id or ""),
-                target_id=str(target_id or ""),
-                run_id=str(run_id or ""),
-                reason="checkpoint_load_or_claim_failed",
-                error=str(exc)[:200],
-                shadow=bool(target_followers_resume_controller.flags.mode == "shadow"),
-                enforce=bool(target_followers_resume_controller.flags.mode == "enforce"),
+            _target_followers_resume_v2_emit(
+                "resume_fallback_legacy",
+                {
+                    "account_id": str(account_id or ""),
+                    "target_id_hash": target_followers_resume_v2.stable_id_hash(target_id),
+                    "run_id": str(run_id or ""),
+                    "reason": "checkpoint_load_or_claim_failed",
+                    "error_type": type(exc).__name__,
+                    "shadow": True,
+                    "enforce": False,
+                },
             )
+            target_followers_resume_controller = None
 
     def _publish_followers_session_summary(**updates: Any) -> None:
         if "rejection_reason_counts" not in updates:
@@ -12871,17 +12873,19 @@ def _run_followers_list_engine_session(
                             reason="validated_transition"
                         )
                 except Exception as exc:
-                    log(
-                        "warning",
-                        "target_followers_resume_fallback_legacy",
-                        account_id=str(account_id or ""),
-                        target_id=str(target_id or ""),
-                        run_id=str(run_id or ""),
-                        reason="viewport_observation_failed",
-                        error=str(exc)[:200],
-                        shadow=bool(target_followers_resume_controller.flags.mode == "shadow"),
-                        enforce=bool(target_followers_resume_controller.flags.mode == "enforce"),
+                    _target_followers_resume_v2_emit(
+                        "resume_fallback_legacy",
+                        {
+                            "account_id": str(account_id or ""),
+                            "target_id_hash": target_followers_resume_v2.stable_id_hash(target_id),
+                            "run_id": str(run_id or ""),
+                            "reason": "viewport_observation_failed",
+                            "error_type": type(exc).__name__,
+                            "shadow": True,
+                            "enforce": False,
+                        },
                     )
+                    target_followers_resume_controller = None
             _odm_open_meta_gate = str(open_list_meta.get("open_detection_method") or "")
             if str(open_detection_method) == "visual_fallback" or _odm_open_meta_gate == "visual_fallback":
                 _svf_early = (

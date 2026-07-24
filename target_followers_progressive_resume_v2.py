@@ -40,16 +40,17 @@ DEFAULT_STALE_AFTER_SECONDS = 14 * 24 * 60 * 60
 EVENTS = frozenset(
     {
         "target_followers_checkpoint_loaded",
-        "target_followers_resume_plan_built",
-        "target_followers_fast_forward_started",
-        "target_followers_depth_transition_verified",
-        "target_followers_anchor_found",
-        "target_followers_anchor_missing",
-        "target_followers_checkpoint_stale",
-        "target_followers_checkpoint_committed",
-        "target_followers_checkpoint_commit_conflict",
-        "target_followers_end_reached",
-        "target_followers_resume_fallback_legacy",
+        "resume_plan_built",
+        "fast_forward_started",
+        "depth_transition_verified",
+        "anchor_found",
+        "anchor_not_found",
+        "checkpoint_claimed",
+        "checkpoint_committed",
+        "checkpoint_conflict",
+        "checkpoint_invalidated",
+        "end_reached",
+        "resume_fallback_legacy",
     }
 )
 
@@ -91,6 +92,11 @@ def _parse_timestamp(value: object) -> datetime | None:
 def _sha256_token(value: str, *, prefix: str) -> str:
     digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:24]
     return f"{prefix}:{digest}"
+
+
+def stable_id_hash(value: object) -> str:
+    normalized = _clean_id(value)
+    return _sha256_token(normalized, prefix="id2") if normalized else ""
 
 
 def anchor_hash(handle: object) -> str:
@@ -529,13 +535,14 @@ class ProgressiveResumeController:
     navigation_mutations: int = 0
     _claimed: bool = False
     _safe_stop: bool = False
+    _anchor_proposal_emitted: bool = False
 
     def _event(self, event: str, *, reason: str, **metadata: Any) -> None:
         if event not in EVENTS:
             raise ValueError(f"unsupported resume event: {event}")
         payload = {
             "account_id": self.account_id,
-            "target_id": self.target_id,
+            "target_id_hash": stable_id_hash(self.target_id),
             "run_id": self.run_id,
             "checkpoint_version": self.plan.checkpoint_version if self.plan else 1,
             "previous_depth": self.plan.previous_depth if self.plan else 0,
@@ -553,8 +560,13 @@ class ProgressiveResumeController:
         if not self.flags.enabled:
             self.plan = build_resume_plan(None, flags=self.flags, account_id=self.account_id, target_id=self.target_id, target_username=self.target_username)
             return self.plan
+        rpc_started_at = time.perf_counter()
         self.checkpoint = self.repository.get(account_id=self.account_id, target_id=self.target_id)
-        self._event("target_followers_checkpoint_loaded", reason="loaded" if self.checkpoint else "checkpoint_missing")
+        self._event(
+            "target_followers_checkpoint_loaded",
+            reason="loaded" if self.checkpoint else "checkpoint_missing",
+            rpc_duration_ms=round((time.perf_counter() - rpc_started_at) * 1000.0, 2),
+        )
         self.plan = build_resume_plan(
             self.checkpoint,
             flags=self.flags,
@@ -563,11 +575,20 @@ class ProgressiveResumeController:
             target_username=self.target_username,
         )
         self.reached_depth = self.plan.previous_depth
-        self._event("target_followers_resume_plan_built", reason=self.plan.reason, anchor_status="available" if self.plan.anchor_hashes else "missing")
-        if self.plan.reason in {"checkpoint_too_old", "target_username_changed", "surface_mismatch", "account_id_mismatch", "target_id_mismatch"}:
-            self._event("target_followers_checkpoint_stale", reason=self.plan.reason)
+        self._event(
+            "resume_plan_built",
+            reason=self.plan.reason,
+            anchor_status="available" if self.plan.anchor_hashes else "missing",
+            theoretical_fast_forward_depth=self.plan.planned_depth,
+        )
+        if self.plan.planned_depth > 0 and self.plan.reason == "shadow_plan_only":
+            self._event(
+                "fast_forward_started",
+                reason="theoretical_shadow_only",
+                theoretical=True,
+            )
         if self.plan.use_legacy_navigation:
-            self._event("target_followers_resume_fallback_legacy", reason=self.plan.reason)
+            self._event("resume_fallback_legacy", reason=self.plan.reason)
         return self.plan
 
     def claim(self) -> bool:
@@ -575,6 +596,7 @@ class ProgressiveResumeController:
             return False
         if self.plan is None:
             self.load_and_plan()
+        rpc_started_at = time.perf_counter()
         response = self.repository.claim(
             account_id=self.account_id,
             target_id=self.target_id,
@@ -583,11 +605,24 @@ class ProgressiveResumeController:
             mode=self.flags.mode,
             expected_version=self.plan.optimistic_version if self.checkpoint else None,
         )
+        rpc_duration_ms = round((time.perf_counter() - rpc_started_at) * 1000.0, 2)
         if not response.get("ok"):
-            self._event("target_followers_checkpoint_commit_conflict", reason=str(response.get("reason") or "claim_rejected"))
+            self._event(
+                "checkpoint_conflict",
+                reason=str(response.get("reason") or "claim_rejected"),
+                rpc_duration_ms=rpc_duration_ms,
+                operation="claim",
+            )
             return False
         self.claimed_version = int(response.get("optimistic_version") or 0)
         self._claimed = self.claimed_version > 0
+        if self._claimed:
+            self._event(
+                "checkpoint_claimed",
+                reason="claimed",
+                rpc_duration_ms=rpc_duration_ms,
+                optimistic_version=self.claimed_version,
+            )
         return self._claimed
 
     def observe_viewport(
@@ -610,6 +645,23 @@ class ProgressiveResumeController:
         )
         if self.pending_scroll_before is None:
             self.current_viewport = observation
+            if not self._anchor_proposal_emitted and self.plan is not None:
+                cursor, anchor_reason = find_resume_cursor(
+                    observation.handles,
+                    self.plan.anchor_hashes,
+                )
+                anchor_event = (
+                    "anchor_found"
+                    if anchor_reason.startswith("anchor_found")
+                    else "anchor_not_found"
+                )
+                self._event(
+                    anchor_event,
+                    reason=anchor_reason,
+                    proposed_cursor=int(cursor),
+                    theoretical=True,
+                )
+                self._anchor_proposal_emitted = True
             return TransitionVerdict(False, "baseline_viewport_recorded")
         before = self.pending_scroll_before
         verdict = validate_depth_transition(before, observation)
@@ -628,7 +680,7 @@ class ProgressiveResumeController:
         self.reached_depth = min(MAX_DEPTH, self.reached_depth + 1)
         self.current_viewport = observation
         self._event(
-            "target_followers_depth_transition_verified",
+            "depth_transition_verified",
             reason=verdict.reason,
             previous_depth=previous,
             reached_depth=self.reached_depth,
@@ -651,6 +703,7 @@ class ProgressiveResumeController:
     def commit_verified_progress(self, *, cursor_handle: str = "", reason: str = "validated_transition") -> bool:
         if self._safe_stop or not self._claimed or self.claimed_version is None or self.current_viewport is None:
             return False
+        rpc_started_at = time.perf_counter()
         response = self.repository.commit(
             account_id=self.account_id,
             target_id=self.target_id,
@@ -663,11 +716,23 @@ class ProgressiveResumeController:
             instagram_version=self.instagram_version,
             reason=reason,
         )
+        rpc_duration_ms = round((time.perf_counter() - rpc_started_at) * 1000.0, 2)
         if not response.get("ok"):
-            self._event("target_followers_checkpoint_commit_conflict", reason=str(response.get("reason") or "commit_rejected"))
+            self._event(
+                "checkpoint_conflict",
+                reason=str(response.get("reason") or "commit_rejected"),
+                rpc_duration_ms=rpc_duration_ms,
+                operation="commit",
+            )
             return False
         self.claimed_version = int(response.get("optimistic_version") or self.claimed_version + 1)
-        self._event("target_followers_checkpoint_committed", reason=reason, reached_depth=self.reached_depth)
+        self._event(
+            "checkpoint_committed",
+            reason=reason,
+            reached_depth=self.reached_depth,
+            rpc_duration_ms=rpc_duration_ms,
+            optimistic_version=self.claimed_version,
+        )
         return True
 
     def mark_safe_stop(self) -> None:
@@ -676,7 +741,7 @@ class ProgressiveResumeController:
         self.pending_previous_viewport_complete = False
 
     def mark_end_reached(self, *, reason: str = "end_reached") -> None:
-        self._event("target_followers_end_reached", reason=reason)
+        self._event("end_reached", reason=reason)
 
 
 def build_runtime_controller(
@@ -704,7 +769,7 @@ def build_runtime_controller(
     if rpc_call is None:
         import supabase_client
 
-        rpc_call = supabase_client.call_rpc
+        rpc_call = supabase_client.call_rpc_shadow
 
     return ProgressiveResumeController(
         repository=ResumeRepository(rpc_call),

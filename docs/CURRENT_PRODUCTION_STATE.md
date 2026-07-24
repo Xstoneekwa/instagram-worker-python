@@ -1,5 +1,18 @@
 # Current Production State
 
+## Golden addendum — Target Followers Resume V2
+
+The current rollout is based on Worker `d605736` and preserves Golden
+navigation `e7f54a9`, Follow `ff99db6`, historical Auto Login `07ee49b`, T-10
+and Follow source 30/4. V2 is a passive observer only. Its production target is
+Mythyl UUID `0d299d1e-46ee-49d2-8a84-4f928f2bb182`; all other accounts remain
+outside the builder gate. No history is backfilled and the first checkpoint is
+zero.
+
+This addendum becomes active only after the recorded off-state release,
+production migration, Mythyl-only canonical environment activation and zero-run
+checks. A natural Mythyl observation requires a separate Liam GO.
+
 ## Prepared checkpoint — 2026-07-23
 
 `FOLLOW_WARMUP_ACTIVE_SAST_DAYS_V1` is documented at

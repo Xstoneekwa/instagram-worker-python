@@ -1,5 +1,20 @@
 # Release Registry
 
+## TARGET_FOLLOWERS_PROGRESSIVE_RESUME_V2_2026-07-24
+
+Baseline: `d60573601174d4983b66582ada2cc079da934a46` on the Golden production
+lineage. Historical source commits `ca3e1aa` and `7fdf2b4` were audited; their
+core blobs were already present through `6e4b6da` and `a64368c`. This checkpoint
+adds exact shadow observability, bounded fail-open RPC transport, migration
+certification and the production runbook.
+
+Activation order is immutable release with V2 off, then Mythyl-only shadow in
+the canonical dispatcher environment. Enforce stays false. The final commit,
+release directory, active symlink and dispatcher PID belong to the rollout
+evidence; no natural or physical run is part of this registry entry.
+
+Architecture and rollback: [Target Followers Progressive Resume V2](./target-followers-progressive-resume-v2.md).
+
 ## T10_PREFLIGHT_AND_FOLLOW_SOURCE_DEFAULTS_2026-07-24
 
 Worker baseline is `e7f54a9ee750e9fa4c5e5d081649fa4da6bc4f8f`; the final immutable release

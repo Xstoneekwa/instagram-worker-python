@@ -1,5 +1,19 @@
 # Locked Decisions
 
+## Target Followers Progressive Resume V2 — 2026-07-24
+
+- V2 is shadow-only for account UUID `0d299d1e-46ee-49d2-8a84-4f928f2bb182`.
+- `TARGET_FOLLOWERS_RESUME_V2_ENFORCE_ENABLED` remains false; legacy Golden
+  navigation is the sole device-action authority.
+- Non-allowlisted and future accounts stop before Supabase import/RPC and emit
+  no V2 event or checkpoint.
+- Checkpoints start at zero with no historical backfill; depth advances only on
+  a verified, complete, distinct Followers viewport transition.
+- Anchors are hashed and bounded to 12; raw usernames and visual artifacts are
+  forbidden in checkpoint persistence.
+- A normal V2 fallback is fail-open and never creates operator review or a
+  Slack/Discord notification.
+
 ## T-10 and Follow-source defaults — 2026-07-24
 
 - T-10 is backend-only. A backend-reread `connected` + `ready` account never receives a preflight UI request.

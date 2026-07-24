@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import target_followers_progressive_resume_v2 as resume
+import supabase_client
 from target_followers_resume_replay import compare_legacy_to_theoretical_v2, load_redacted_corpus
 
 
@@ -272,7 +273,7 @@ class RepositoryAndControllerTests(unittest.TestCase):
         ctl = self.controller(FakeRpc(row=checkpoint_row(), claim_ok=False), events=events)
         ctl.load_and_plan()
         self.assertFalse(ctl.claim())
-        self.assertIn("target_followers_checkpoint_commit_conflict", [e for e, _ in events])
+        self.assertIn("checkpoint_conflict", [e for e, _ in events])
 
     def test_41_two_runs_compare_and_swap(self):
         rpc = FakeRpc(row=checkpoint_row(), commit_ok=False)
@@ -346,10 +347,26 @@ class RepositoryAndControllerTests(unittest.TestCase):
         events = []
         ctl = self.controller(FakeRpc(row=checkpoint_row()), events=events)
         ctl.load_and_plan(); ctl.mark_end_reached(reason="repeated_no_progress")
-        self.assertIn("target_followers_end_reached", [e for e, _ in events])
+        self.assertIn("end_reached", [e for e, _ in events])
 
     def test_52_all_required_event_names_present(self):
-        self.assertEqual(len(resume.EVENTS), 11)
+        self.assertEqual(
+            resume.EVENTS,
+            {
+                "target_followers_checkpoint_loaded",
+                "resume_plan_built",
+                "fast_forward_started",
+                "depth_transition_verified",
+                "anchor_found",
+                "anchor_not_found",
+                "checkpoint_claimed",
+                "checkpoint_committed",
+                "checkpoint_conflict",
+                "checkpoint_invalidated",
+                "end_reached",
+                "resume_fallback_legacy",
+            },
+        )
 
 
 class ReplayAndStaticSafetyTests(unittest.TestCase):
@@ -477,6 +494,47 @@ class ShadowAccountScopeTests(unittest.TestCase):
         self.assertEqual(resume.parse_account_id_allowlist("not-an-account-id"), ())
         oversized = ",".join(str(uuid.UUID(int=index + 1)) for index in range(resume.MAX_SHADOW_ACCOUNT_IDS + 1))
         self.assertEqual(resume.parse_account_id_allowlist(oversized), ())
+
+    def test_69_shadow_events_redact_target_id_and_report_rpc_duration(self):
+        rpc = FakeRpc(row=checkpoint_row())
+        events = []
+        controller = self.build(ACCOUNT_A, rpc, events, self.flags(ACCOUNT_A))
+        controller.load_and_plan()
+        controller.claim()
+        payloads = [payload for _, payload in events]
+        self.assertTrue(all("target_id" not in payload for payload in payloads))
+        self.assertTrue(all(TARGET_A not in json.dumps(payload) for payload in payloads))
+        self.assertTrue(any("rpc_duration_ms" in payload for payload in payloads))
+
+    def test_70_anchor_proposal_is_observable_but_never_changes_navigation(self):
+        rpc = FakeRpc(row=checkpoint_row(shadow_visible_anchor_hashes=[resume.anchor_hash("b")]))
+        events = []
+        controller = self.build(ACCOUNT_A, rpc, events, self.flags(ACCOUNT_A))
+        controller.load_and_plan()
+        controller.observe_viewport(
+            ["a", "b", "c"],
+            followers_surface_confirmed=True,
+            expected_target_confirmed=True,
+        )
+        anchor_payload = next(payload for event, payload in events if event == "anchor_found")
+        self.assertEqual(anchor_payload["proposed_cursor"], 0)
+        self.assertTrue(anchor_payload["theoretical"])
+        self.assertEqual(controller.navigation_mutations, 0)
+        self.assertTrue(controller.plan.use_legacy_navigation)
+
+    def test_71_shadow_rpc_uses_one_short_attempt(self):
+        with patch.object(supabase_client, "_call_rpc", return_value={"ok": True}) as call:
+            result = supabase_client.call_rpc_shadow("safe_test", {"p": 1})
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(call.call_args.kwargs["max_retries"], 0)
+        self.assertLessEqual(call.call_args.kwargs["timeout_seconds"], 5.0)
+
+    def test_72_runner_shadow_failure_is_fail_open_and_redacted(self):
+        runner_source = (Path(resume.__file__).parent / "runner.py").read_text(encoding="utf-8")
+        self.assertIn('"checkpoint_load_or_claim_failed"', runner_source)
+        self.assertIn('"viewport_observation_failed"', runner_source)
+        self.assertIn("target_followers_resume_controller = None", runner_source)
+        self.assertIn('"target_id_hash": target_followers_resume_v2.stable_id_hash(target_id)', runner_source)
 
 
 if __name__ == "__main__":

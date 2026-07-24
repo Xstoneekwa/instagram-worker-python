@@ -123,14 +123,19 @@ def _request_urlopen(
     *,
     op: str,
     timeout: float | None = None,
+    max_retries: int | None = None,
 ) -> bytes:
     """Issue a Supabase REST request with bounded retries and safe errors."""
     timeout_s = float(timeout if timeout is not None else _rest_timeout_seconds())
-    max_retries = _rest_max_retries()
+    retry_limit = (
+        _rest_max_retries()
+        if max_retries is None
+        else max(0, int(max_retries))
+    )
     backoff_s = _rest_retry_backoff_seconds()
     last_exc: BaseException | None = None
 
-    for attempt in range(max_retries + 1):
+    for attempt in range(retry_limit + 1):
         started = time.monotonic()
         try:
             with request.urlopen(req, timeout=timeout_s) as resp:
@@ -152,7 +157,7 @@ def _request_urlopen(
                 "supabase_auth_403",
                 "supabase_schema_payload_incompatible",
                 "supabase_rpc_not_available",
-            } or attempt >= max_retries:
+            } or attempt >= retry_limit:
                 raise rest_exc from exc
             last_exc = rest_exc
         except (error.URLError, TimeoutError, socket.timeout) as exc:
@@ -165,7 +170,7 @@ def _request_urlopen(
                 latency_ms=latency_ms,
                 detail=str(getattr(exc, "reason", exc))[:200],
             )
-            if attempt >= max_retries:
+            if attempt >= retry_limit:
                 raise rest_exc from exc
             last_exc = rest_exc
 
@@ -174,7 +179,7 @@ def _request_urlopen(
             "supabase_rest_retry",
             op=op,
             attempt=attempt + 1,
-            max_retries=max_retries,
+            max_retries=retry_limit,
             reason=getattr(last_exc, "reason", "supabase_queue_read_failed"),
             latency_ms=getattr(last_exc, "latency_ms", None),
         )
@@ -2628,8 +2633,13 @@ def record_post_like_interaction_success(
     return mout
 
 
-def call_rpc(function_name: str, params: dict[str, Any] | None = None) -> Any:
-    """Invoke a Postgres RPC via PostgREST (service role)."""
+def _call_rpc(
+    function_name: str,
+    params: dict[str, Any] | None,
+    *,
+    timeout_seconds: float,
+    max_retries: int | None,
+) -> Any:
     fn = str(function_name or "").strip()
     if not fn:
         raise ValueError("function_name is required")
@@ -2645,7 +2655,12 @@ def call_rpc(function_name: str, params: dict[str, Any] | None = None) -> Any:
     data = json.dumps(body, separators=(",", ":")).encode("utf-8")
     req = request.Request(url=url, method="POST", headers=headers, data=data)
     try:
-        raw = _request_urlopen(req, op=f"RPC {fn}", timeout=max(30.0, _rest_timeout_seconds()))
+        raw = _request_urlopen(
+            req,
+            op=f"RPC {fn}",
+            timeout=max(1.0, float(timeout_seconds)),
+            max_retries=max_retries,
+        )
         if not raw:
             return None
         return json.loads(raw.decode("utf-8"))
@@ -2658,6 +2673,31 @@ def call_rpc(function_name: str, params: dict[str, Any] | None = None) -> Any:
             path=f"rpc/{fn}",
             detail=str(e)[:200],
         ) from e
+
+
+def call_rpc(function_name: str, params: dict[str, Any] | None = None) -> Any:
+    """Invoke a Postgres RPC via PostgREST (service role)."""
+    return _call_rpc(
+        function_name,
+        params,
+        timeout_seconds=max(30.0, _rest_timeout_seconds()),
+        max_retries=None,
+    )
+
+
+def call_rpc_shadow(
+    function_name: str,
+    params: dict[str, Any] | None = None,
+    *,
+    timeout_seconds: float = 3.0,
+) -> Any:
+    """Invoke a non-authoritative shadow RPC once with a short fail-open bound."""
+    return _call_rpc(
+        function_name,
+        params,
+        timeout_seconds=max(1.0, min(5.0, float(timeout_seconds))),
+        max_retries=0,
+    )
 
 
 def ensure_account_dm_settings(account_id: str) -> dict[str, Any]:
