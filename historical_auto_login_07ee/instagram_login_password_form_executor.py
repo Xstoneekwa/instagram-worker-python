@@ -45,6 +45,9 @@ POST_SUBMIT_FINAL_RECHECK_OBSERVATIONS = 3
 POST_SUBMIT_FINAL_RECHECK_INTERVAL_MS = 1000
 POST_DISMISS_FINAL_OBSERVATIONS = 4
 POST_DISMISS_FINAL_INTERVAL_MS = 1000
+CONNECTED_HOME_STABILIZATION_OBSERVATIONS = 3
+CONNECTED_HOME_STABILIZATION_INTERVAL_MS = 500
+CONNECTED_HOME_POST_PROMPT_CONFIRMATIONS = 2
 PASSWORD_CONFIRM_SETTLE_MS = 150
 USERNAME_INPUT_FAILURE_REASONS = {
     "username_input_failed",
@@ -404,6 +407,9 @@ def execute_login_form_credentials(
     post_dismiss_final_wait_total_ms = 0
     post_dismiss_final_screen_type = ""
     connected_detected_after_save_prompt_dismiss = False
+    connected_home_stabilization_started = False
+    connected_home_stabilization_observation_count = 0
+    connected_home_post_prompt_confirmation_count = 0
     post_submit_loading_timeout = False
     post_submit_challenge_type = ""
     post_submit_masked_email_present = False
@@ -466,6 +472,13 @@ def execute_login_form_credentials(
             post_dismiss_final_screen_type = str(observed.get("post_dismiss_final_screen_type") or "")
             connected_detected_after_save_prompt_dismiss = bool(
                 observed.get("connected_detected_after_save_prompt_dismiss")
+            )
+            connected_home_stabilization_started = bool(observed.get("connected_home_stabilization_started"))
+            connected_home_stabilization_observation_count = int(
+                observed.get("connected_home_stabilization_observation_count") or 0
+            )
+            connected_home_post_prompt_confirmation_count = int(
+                observed.get("connected_home_post_prompt_confirmation_count") or 0
             )
             post_submit_loading_timeout = bool(observed.get("post_submit_loading_timeout"))
             email_code_challenge_detected = bool(observed.get("email_code_challenge_detected"))
@@ -589,6 +602,16 @@ def execute_login_form_credentials(
                                 connected_detected_after_save_prompt_dismiss
                                 or bool(observed.get("connected_detected_after_save_prompt_dismiss"))
                             )
+                            connected_home_stabilization_started = (
+                                connected_home_stabilization_started
+                                or bool(observed.get("connected_home_stabilization_started"))
+                            )
+                            connected_home_stabilization_observation_count += int(
+                                observed.get("connected_home_stabilization_observation_count") or 0
+                            )
+                            connected_home_post_prompt_confirmation_count += int(
+                                observed.get("connected_home_post_prompt_confirmation_count") or 0
+                            )
                             post_submit_loading_timeout = post_submit_loading_timeout or bool(
                                 observed.get("post_submit_loading_timeout")
                             )
@@ -699,6 +722,9 @@ def execute_login_form_credentials(
         post_dismiss_final_wait_total_ms=post_dismiss_final_wait_total_ms,
         post_dismiss_final_screen_type=post_dismiss_final_screen_type,
         connected_detected_after_save_prompt_dismiss=connected_detected_after_save_prompt_dismiss,
+        connected_home_stabilization_started=connected_home_stabilization_started,
+        connected_home_stabilization_observation_count=connected_home_stabilization_observation_count,
+        connected_home_post_prompt_confirmation_count=connected_home_post_prompt_confirmation_count,
         username_replaced=username_replaced,
         username_input_confirmed=username_input_confirmed,
         username_input_result=username_input_result,
@@ -2048,8 +2074,27 @@ def _observe_post_submit_settled(
     post_dismiss_final_wait_total_ms = 0
     post_dismiss_final_screen_type = ""
     connected_detected_after_save_prompt_dismiss = False
-    for index in range(observations):
-        delay_ms = int(initial_wait_ms if index == 0 and initial_wait_ms > 0 else interval_ms)
+    observation_budget = observations
+    maximum_observation_budget = (
+        observations
+        + CONNECTED_HOME_STABILIZATION_OBSERVATIONS
+        + (CONNECTED_HOME_POST_PROMPT_CONFIRMATIONS * MAX_SAVE_PASSWORD_PROMPT_DISMISS_ATTEMPTS)
+    )
+    index = 0
+    connected_home_stabilization_started = False
+    connected_home_stabilization_observation_count = 0
+    connected_home_post_prompt_confirmation_count = 0
+    connected_home_post_prompt_confirmation_remaining = 0
+    while index < observation_budget:
+        delay_ms = int(
+            initial_wait_ms
+            if index == 0 and initial_wait_ms > 0
+            else (
+                min(interval_ms, CONNECTED_HOME_STABILIZATION_INTERVAL_MS)
+                if connected_home_stabilization_started
+                else interval_ms
+            )
+        )
         if delay_ms > 0:
             sleeper(delay_ms / 1000.0)
             wait_total_ms += delay_ms
@@ -2057,6 +2102,7 @@ def _observe_post_submit_settled(
         hierarchy_xml = _dump_hierarchy_once(d)
         timings["post_submit_dump_ms"] += _elapsed_ms(start, timer())
         observed = _classify_post_submit_hierarchy(hierarchy_xml)
+        index += 1
         last_observed = observed
         screen_label = str(observed.get("screen_label") or observed.get("screen_type") or "unknown")
         screens.append(screen_label)
@@ -2091,6 +2137,12 @@ def _observe_post_submit_settled(
             if is_samsung_pass_prompt:
                 samsung_pass_save_password_prompt_cancelled = True
                 warnings.append("samsung_pass_save_password_prompt_cancelled")
+            if connected_home_stabilization_started:
+                connected_home_post_prompt_confirmation_remaining = CONNECTED_HOME_POST_PROMPT_CONFIRMATIONS
+                observation_budget = min(
+                    maximum_observation_budget,
+                    index + CONNECTED_HOME_POST_PROMPT_CONFIRMATIONS,
+                )
             continue
         if observed.get("save_login_info_prompt_present") is True:
             instagram_save_login_info_prompt_detected = True
@@ -2119,6 +2171,12 @@ def _observe_post_submit_settled(
                 break
             instagram_save_login_info_prompt_not_now = True
             warnings.append("instagram_save_login_info_prompt_not_now")
+            if connected_home_stabilization_started:
+                connected_home_post_prompt_confirmation_remaining = CONNECTED_HOME_POST_PROMPT_CONFIRMATIONS
+                observation_budget = min(
+                    maximum_observation_budget,
+                    index + CONNECTED_HOME_POST_PROMPT_CONFIRMATIONS,
+                )
             continue
         if observed.get("post_login_location_services_prompt_present") is True:
             post_login_location_services_prompt_detected = True
@@ -2163,6 +2221,25 @@ def _observe_post_submit_settled(
             warnings.append("notifications_prompt_no_action_target")
             continue
         if observed.get("password_required_dialog_present") is True:
+            break
+        if bool(observed.get("terminal")) and screen_label == "connected_home":
+            if not connected_home_stabilization_started:
+                connected_home_stabilization_started = True
+                warnings.append("connected_home_stabilization_started")
+                observation_budget = min(
+                    maximum_observation_budget,
+                    index + CONNECTED_HOME_STABILIZATION_OBSERVATIONS,
+                )
+                continue
+            if connected_home_post_prompt_confirmation_remaining > 0:
+                connected_home_post_prompt_confirmation_count += 1
+                connected_home_post_prompt_confirmation_remaining -= 1
+                if connected_home_post_prompt_confirmation_remaining > 0:
+                    continue
+                break
+            connected_home_stabilization_observation_count += 1
+            if connected_home_stabilization_observation_count < CONNECTED_HOME_STABILIZATION_OBSERVATIONS:
+                continue
             break
         if bool(observed.get("terminal")):
             break
@@ -2285,6 +2362,9 @@ def _observe_post_submit_settled(
         "post_dismiss_final_wait_total_ms": post_dismiss_final_wait_total_ms,
         "post_dismiss_final_screen_type": post_dismiss_final_screen_type,
         "connected_detected_after_save_prompt_dismiss": connected_detected_after_save_prompt_dismiss,
+        "connected_home_stabilization_started": connected_home_stabilization_started,
+        "connected_home_stabilization_observation_count": connected_home_stabilization_observation_count,
+        "connected_home_post_prompt_confirmation_count": connected_home_post_prompt_confirmation_count,
     }
 
 
@@ -2645,6 +2725,9 @@ def _result(
     post_dismiss_final_wait_total_ms: int = 0,
     post_dismiss_final_screen_type: str = "",
     connected_detected_after_save_prompt_dismiss: bool = False,
+    connected_home_stabilization_started: bool = False,
+    connected_home_stabilization_observation_count: int = 0,
+    connected_home_post_prompt_confirmation_count: int = 0,
     post_login_location_services_prompt_detected: bool = False,
     post_login_location_services_prompt_dismissed: bool = False,
     post_login_location_services_prompt_dismiss_method: str = "",
@@ -2723,6 +2806,9 @@ def _result(
                 "post_dismiss_final_wait_total_ms": post_dismiss_final_wait_total_ms,
                 "post_dismiss_final_screen_type": post_dismiss_final_screen_type,
                 "connected_detected_after_save_prompt_dismiss": connected_detected_after_save_prompt_dismiss,
+                "connected_home_stabilization_started": connected_home_stabilization_started,
+                "connected_home_stabilization_observation_count": connected_home_stabilization_observation_count,
+                "connected_home_post_prompt_confirmation_count": connected_home_post_prompt_confirmation_count,
                 "username_replaced": username_replaced,
                 "username_input_confirmed": username_input_confirmed,
                 "username_input_result": username_input_result,

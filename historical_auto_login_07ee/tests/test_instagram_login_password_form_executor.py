@@ -42,6 +42,7 @@ CONNECTED_XML = (
     '<node content-desc="Reels" />'
     '<node content-desc="Profile" />'
 )
+CONNECTED_HOME_XML = '<node text="Instagram" /><node text="Follow" />'
 POST_LOGIN_LOCATION_SERVICES_PROMPT_XML = (
     '<node text="Set up on new device" />'
     '<node text="To use Location services, allow Instagram to access your location" />'
@@ -1138,6 +1139,163 @@ class InstagramLoginPasswordFormExecutorTest(unittest.TestCase):
         self.assertEqual(device.press_calls, [])
         self.assertIn("instagram_save_login_info_prompt_detected", result.warnings)
         self.assertIn("instagram_save_login_info_prompt_not_now", result.warnings)
+
+    def test_connected_home_without_popup_stabilizes_then_connects(self) -> None:
+        device, _username, _password_selector, _login = configured_device()
+        device.hierarchies = [CONNECTED_HOME_XML]
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=LOGIN_FORM_SIGNALS,
+            post_submit_wait_ms=0,
+            post_submit_observation_interval_ms=1000,
+            max_post_submit_observations=1,
+            sleeper=Mock(),
+        )
+
+        self.assertEqual(result.post_submit_outcome, "connected")
+        self.assertEqual(result.safe_metadata["post_submit_screens"], ["connected_home"] * 4)
+        self.assertTrue(result.safe_metadata["connected_home_stabilization_started"])
+        self.assertEqual(result.safe_metadata["connected_home_stabilization_observation_count"], 3)
+        self.assertFalse(result.safe_metadata["instagram_save_login_info_prompt_detected"])
+
+    def test_immediate_save_login_info_popup_uses_historical_not_now_then_stabilizes(self) -> None:
+        device, _username, _password_selector, _login = configured_device()
+        not_now = device.add_selector("text", "Not now", FakeSelector(1))
+        save = device.add_selector("text", "Save", FakeSelector(1))
+        device.hierarchies = [INSTAGRAM_SAVE_LOGIN_INFO_PROMPT_XML, CONNECTED_HOME_XML]
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=LOGIN_FORM_SIGNALS,
+            post_submit_wait_ms=0,
+            post_submit_observation_interval_ms=1000,
+            max_post_submit_observations=4,
+            sleeper=Mock(),
+        )
+
+        self.assertEqual(result.post_submit_outcome, "connected")
+        self.assertTrue(result.safe_metadata["instagram_save_login_info_prompt_detected"])
+        self.assertTrue(result.safe_metadata["instagram_save_login_info_prompt_not_now"])
+        self.assertEqual(not_now.click_calls, 1)
+        self.assertEqual(save.click_calls, 0)
+        self.assertEqual(result.safe_metadata["post_submit_screens"][0], "save_login_info_prompt")
+        self.assertEqual(result.safe_metadata["post_submit_screens"][-1], "connected_home")
+
+    def test_late_save_login_info_popup_is_caught_during_connected_home_stabilization(self) -> None:
+        device, _username, _password_selector, _login = configured_device()
+        not_now = device.add_selector("text", "Not now", FakeSelector(1))
+        save = device.add_selector("text", "Save", FakeSelector(1))
+        device.hierarchies = [
+            CONNECTED_HOME_XML,
+            CONNECTED_HOME_XML,
+            INSTAGRAM_SAVE_LOGIN_INFO_PROMPT_XML,
+            CONNECTED_HOME_XML,
+        ]
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=LOGIN_FORM_SIGNALS,
+            post_submit_wait_ms=0,
+            post_submit_observation_interval_ms=1000,
+            max_post_submit_observations=1,
+            sleeper=Mock(),
+        )
+
+        self.assertEqual(result.post_submit_outcome, "connected")
+        self.assertTrue(result.safe_metadata["instagram_save_login_info_prompt_detected"])
+        self.assertTrue(result.safe_metadata["instagram_save_login_info_prompt_not_now"])
+        self.assertEqual(not_now.click_calls, 1)
+        self.assertEqual(save.click_calls, 0)
+        self.assertEqual(result.safe_metadata["connected_home_post_prompt_confirmation_count"], 2)
+        self.assertEqual(
+            result.safe_metadata["post_submit_screens"],
+            ["connected_home", "connected_home", "save_login_info_prompt", "connected_home", "connected_home"],
+        )
+
+    def test_samsung_pass_then_instagram_popup_dismisses_cancel_then_historical_not_now(self) -> None:
+        device, _username, _password_selector, _login = configured_device()
+        cancel = device.add_selector("text", "Cancel", FakeSelector(1))
+        not_now = device.add_selector("text", "Not now", FakeSelector(1))
+        save = device.add_selector("text", "Save", FakeSelector(1))
+        device.hierarchies = [
+            SAMSUNG_PASS_SAVE_PASSWORD_PROMPT_XML,
+            INSTAGRAM_SAVE_LOGIN_INFO_PROMPT_XML,
+            CONNECTED_HOME_XML,
+        ]
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=LOGIN_FORM_SIGNALS,
+            post_submit_wait_ms=0,
+            post_submit_observation_interval_ms=1000,
+            max_post_submit_observations=4,
+            sleeper=Mock(),
+        )
+
+        self.assertEqual(result.post_submit_outcome, "connected")
+        self.assertTrue(result.safe_metadata["samsung_pass_save_password_prompt_cancelled"])
+        self.assertTrue(result.safe_metadata["instagram_save_login_info_prompt_not_now"])
+        self.assertEqual(cancel.click_calls, 1)
+        self.assertEqual(not_now.click_calls, 1)
+        self.assertEqual(save.click_calls, 0)
+
+    def test_persistent_late_save_login_info_popup_remains_bounded(self) -> None:
+        device, _username, _password_selector, _login = configured_device()
+        not_now = device.add_selector("text", "Not now", FakeSelector(1))
+        save = device.add_selector("text", "Save", FakeSelector(1))
+        device.hierarchies = [
+            CONNECTED_HOME_XML,
+            INSTAGRAM_SAVE_LOGIN_INFO_PROMPT_XML,
+            INSTAGRAM_SAVE_LOGIN_INFO_PROMPT_XML,
+            INSTAGRAM_SAVE_LOGIN_INFO_PROMPT_XML,
+        ]
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=LOGIN_FORM_SIGNALS,
+            post_submit_wait_ms=0,
+            post_submit_observation_interval_ms=1000,
+            max_post_submit_observations=1,
+            sleeper=Mock(),
+        )
+
+        self.assertEqual(result.post_submit_outcome, "save_login_info_prompt_blocking")
+        self.assertEqual(result.post_submit_probe_reason, "save_login_info_prompt_not_dismissed_after_2_attempts")
+        self.assertEqual(result.safe_metadata["save_password_prompt_dismiss_attempt_count"], 2)
+        self.assertEqual(not_now.click_calls, 2)
+        self.assertEqual(save.click_calls, 0)
+
+    def test_connected_home_stabilization_window_expires_without_popup(self) -> None:
+        device, _username, _password_selector, _login = configured_device()
+        device.hierarchies = [CONNECTED_HOME_XML]
+        sleeper = Mock()
+
+        result = execute_login_form_credentials(
+            device,
+            expected_username=USERNAME,
+            password=SecretValue(PASSWORD),
+            prevalidated_signals=LOGIN_FORM_SIGNALS,
+            post_submit_wait_ms=0,
+            post_submit_observation_interval_ms=1000,
+            max_post_submit_observations=1,
+            sleeper=sleeper,
+        )
+
+        self.assertEqual(result.post_submit_outcome, "connected")
+        self.assertEqual(device.dump_calls, 4)
+        self.assertEqual(sleeper.call_args_list[-3:], [unittest.mock.call(0.5)] * 3)
+        self.assertEqual(result.safe_metadata["connected_home_stabilization_observation_count"], 3)
 
     def test_save_password_prompt_still_visible_once_then_dismissed_after_second_attempt(self) -> None:
         device, _username, _password_selector, _login = configured_device()
