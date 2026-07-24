@@ -1,5 +1,9 @@
 # Dernière session dev — état du projet (mémoire courte)
 
+## T-10 preflight + default Follow-source contract — 2026-07-24
+
+The missing Vercel registration for the existing preflight cron is restored backend-side. The Worker bridge for historical 07ee performs no new UI action: after a successful publish it rereads the backend ready state and reuses the canonical create-only `30/4` Follow-source hook. See [the checkpoint addendum](./checkpoints/2026-07-24-t10-preflight-follow-source-defaults.md).
+
 ## Production baseline - 2026-07-16
 
 The current rollback and pre-performance-optimization checkpoint is

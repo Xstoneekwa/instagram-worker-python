@@ -1,5 +1,10 @@
 # Release Registry
 
+## T10_PREFLIGHT_AND_FOLLOW_SOURCE_DEFAULTS_2026-07-24
+
+Worker baseline is `e7f54a9ee750e9fa4c5e5d081649fa4da6bc4f8f`; the final immutable release
+and backend deployment SHA are recorded at activation. See the [addendum](./checkpoints/2026-07-24-t10-preflight-follow-source-defaults.md).
+
 ## JULY_16_PRODUCTION_BASELINE
 
 | Repository | Business reference | Final documentation reference |

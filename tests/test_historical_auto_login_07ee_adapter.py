@@ -42,21 +42,72 @@ class HistoricalAutoLogin07eeAdapterTest(unittest.TestCase):
         self.assertIn("--json", command)
 
     def test_adapter_propagates_engine_exit_code_without_retry(self) -> None:
-        calls: list[tuple[str, list[str], dict[str, str]]] = []
+        calls: list[tuple[list[str], dict[str, str]]] = []
 
-        def fake_execve(path: str, command: list[str], env: dict[str, str]) -> int:
-            calls.append((path, list(command), dict(env)))
-            return 75
+        class Result:
+            returncode = 75
+
+        def fake_run(command: list[str], env: dict[str, str], check: bool) -> Result:
+            calls.append((list(command), dict(env)))
+            return Result()
 
         exit_code = adapter.execute_historical_engine(
             self._invocation(),
-            execve=fake_execve,
+            run_process=fake_run,
             environ={"SAFE_TEST": "1"},
         )
 
         self.assertEqual(exit_code, 75)
         self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0][2], {"SAFE_TEST": "1"})
+        self.assertEqual(calls[0][1], {"SAFE_TEST": "1"})
+
+    def test_published_connected_ready_historical_login_reuses_default_hook(self) -> None:
+        with patch.object(adapter, "_read_historical_summary", return_value={
+            "ok": True,
+            "completed": True,
+            "final_outcome": "connected",
+            "status_candidate": "connected",
+            "published": True,
+            "publish_reason": "published_connected",
+        }), patch.object(adapter.supabase_client, "load_account", return_value={
+            "login_status": "connected",
+            "provisioning_status": "ready",
+        }), patch.object(adapter, "maybe_provision_follow_source_rotation_on_ready", return_value={
+            "ok": True,
+            "action": "created_row_30_4",
+        }) as provision:
+            result = adapter._provision_follow_source_defaults_after_historical_success(self._invocation())
+
+        self.assertTrue(result["ok"])
+        provision.assert_called_once_with(
+            account_id=ACCOUNT_ID,
+            account_username="lorielebras_autom",
+            final_provisioning_status="ready",
+            context="historical_auto_login_07ee_published_ready",
+        )
+
+    def test_historical_login_without_successful_publish_never_creates_defaults(self) -> None:
+        with patch.object(adapter, "_read_historical_summary", return_value={"ok": False}), patch.object(
+            adapter, "maybe_provision_follow_source_rotation_on_ready"
+        ) as provision:
+            result = adapter._provision_follow_source_defaults_after_historical_success(self._invocation())
+
+        self.assertTrue(result["skipped"])
+        provision.assert_not_called()
+
+    def test_existing_custom_defaults_are_left_to_canonical_idempotent_hook(self) -> None:
+        with patch.object(adapter, "_read_historical_summary", return_value={
+            "ok": True, "completed": True, "final_outcome": "connected", "status_candidate": "connected",
+            "published": True, "publish_reason": "published_connected",
+        }), patch.object(adapter.supabase_client, "load_account", return_value={
+            "login_status": "connected", "provisioning_status": "ready",
+        }), patch.object(adapter, "maybe_provision_follow_source_rotation_on_ready", return_value={
+            "ok": False, "action": "existing_non_contract_row_requires_explicit_repair", "db_mutation_performed": False,
+        }) as provision:
+            result = adapter._provision_follow_source_defaults_after_historical_success(self._invocation())
+
+        self.assertFalse(result["ok"])
+        provision.assert_called_once()
 
     def test_login_provisioning_routes_only_to_historical_adapter(self) -> None:
         with patch.object(consumer, "_load_expected_username", return_value="lorielebras_autom"):

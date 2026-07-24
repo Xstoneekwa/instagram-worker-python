@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
+
+from follow_source_rotation_settings import maybe_provision_follow_source_rotation_on_ready
+from logs import log
+import supabase_client
 
 
 HISTORICAL_ENGINE_ROOT = Path(__file__).resolve().parent / "historical_auto_login_07ee"
@@ -82,12 +88,62 @@ def build_historical_command(invocation: HistoricalAutoLoginInvocation) -> list[
 def execute_historical_engine(
     invocation: HistoricalAutoLoginInvocation,
     *,
-    execve: Callable[[str, Sequence[str], Mapping[str, str]], Any] = os.execve,
+    run_process: Callable[..., Any] = subprocess.run,
     environ: Mapping[str, str] | None = None,
 ) -> int:
     command = build_historical_command(invocation)
-    result = execve(sys.executable, command, dict(os.environ if environ is None else environ))
-    return int(result) if isinstance(result, int) else 0
+    result = run_process(command, env=dict(os.environ if environ is None else environ), check=False)
+    exit_code = int(getattr(result, "returncode", result))
+    if exit_code != 0:
+        return exit_code
+    _provision_follow_source_defaults_after_historical_success(invocation)
+    return exit_code
+
+
+def _read_historical_summary(run_id: str) -> dict[str, Any]:
+    log_path = Path("logs") / "instagram_login_provisioner.jsonl"
+    try:
+        with log_path.open("r", encoding="utf-8") as handle:
+            rows = [json.loads(line) for line in handle if line.strip() and f'"run_id":"{run_id}"' in line]
+    except (OSError, ValueError):
+        return {}
+    return dict(rows[-1]) if rows and isinstance(rows[-1], dict) else {}
+
+
+def _provision_follow_source_defaults_after_historical_success(invocation: HistoricalAutoLoginInvocation) -> dict[str, Any]:
+    """Reuse the canonical 30/4 hook only after 07ee published connected+ready."""
+    summary = _read_historical_summary(invocation.run_id)
+    if not (
+        summary.get("ok") is True
+        and summary.get("completed") is True
+        and str(summary.get("final_outcome") or "") == "connected"
+        and str(summary.get("status_candidate") or "") == "connected"
+        and summary.get("published") is True
+        and str(summary.get("publish_reason") or "") == "published_connected"
+    ):
+        return {"skipped": True, "reason": "historical_login_not_published_connected"}
+    account = supabase_client.load_account(account_id=invocation.account_id) or {}
+    if not (
+        str(account.get("login_status") or "") == "connected"
+        and str(account.get("provisioning_status") or "") == "ready"
+    ):
+        return {"skipped": True, "reason": "backend_account_not_connected_ready"}
+    try:
+        return maybe_provision_follow_source_rotation_on_ready(
+            account_id=invocation.account_id,
+            account_username=invocation.expected_username,
+            final_provisioning_status="ready",
+            context="historical_auto_login_07ee_published_ready",
+        )
+    except Exception as exc:
+        log(
+            "warning",
+            "historical_auto_login_follow_source_provision_failed",
+            account_id=invocation.account_id,
+            run_id=invocation.run_id,
+            error=str(exc)[:200],
+        )
+        return {"ok": False, "reason": "follow_source_rotation_provision_failed"}
 
 
 def main(argv: Sequence[str] | None = None) -> int:
