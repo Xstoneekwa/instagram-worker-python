@@ -1,24 +1,28 @@
 # Feature Status Matrix
 
-Canonical status source:
-[JULY_16_PRODUCTION_BASELINE](./checkpoints/2026-07-16-production-baseline-cross-repo.md).
+Canonical source:
+[`GOLDEN_PHONEFARM_PRODUCTION_2026_07_24`](./golden/2026-07-24-production-golden/FEATURE_STATUS_MATRIX.md).
 
-| Feature | Status | Evidence / limitation |
-|---|---|---|
-| First-tick natural scheduler | Physically validated | July 16 natural launch |
-| Scheduler without Electron | Test-validated | Closed-BotApp natural run pending |
-| Same-account preflight lease | Test-validated | Natural contract tests |
-| Multi-device bounded pool | Test-validated | Simultaneous physical runs pending |
-| Welcome Suggestions boundary/recovery | Test-validated | Latest Tracker completion pending |
-| Welcome outbound bubble | Pending physical observation | Current-release proof pending |
-| Welcome-to-Follow handoff | Pending physical observation | Latest patches not fully observed |
-| Golden Follow/Mute/Like/Return CT | Physically validated | Physical production cycles |
-| Follow cap resolver | Test-validated | Generic configured/package/warmup/ops/remaining minimum; rollout evidence required for production activation |
-| Like evidence reuse | Test-validated | Physical latency gain pending |
-| Warmup active SAST days V1 | Code and tests pushed | 26 targeted + 156 runtime guards; no new Follow run in checkpoint |
-| Configured versus effective Follow caps | Code and tests pushed | Persisted values remain distinct from temporary runtime limits |
-| Unfollow J+3 and time guard | Physically validated | 11 Mythyl successes |
-| Follow/Like live counters | Physically validated | July 16 BotApp observation |
-| Incident actions / Mark reviewed | Physically validated | Human review and refresh |
-| Slack/Discord shared CTA | Physically validated | Creation/resolution deliveries |
-| Transactional settings | Test-validated | No checkpoint-time mutation |
+| Function | Implemented | Offline tested | Deployed | Physically validated | Locked |
+|---|---:|---:|---:|---:|---:|
+| Historical Auto Login 07ee routing | Yes | Yes | Yes | Yes | Yes |
+| Clone/app-instance/package binding | Yes | Yes | Yes | Yes | Yes |
+| Late post-login popup stabilization | Yes | Yes | Yes | Partial: popup observed; post-patch replay not performed | Yes |
+| Navigation f93c501 soft scroll/continuity | Yes | Yes | Yes | No | Yes |
+| `See more` and Suggestions boundary | Yes | Yes | Yes | No for this release | Yes |
+| CT rotation after true exhaustion | Yes | Yes | Yes | Historical flow yes; f93 replay pending | Yes |
+| Shared Follow/Welcome/Unfollow contract | Yes | Yes | Yes | Partial | Yes |
+| Golden Follow/Mute/Like/Return CT | Yes | Yes | Yes | Yes | Yes |
+| Welcome outbound proof/handoff | Yes | Yes | Yes | Pending current-release completion | No |
+| Unfollow J+3/time guards | Yes | Yes | Yes | Yes | Yes |
+| Outreach session path | Yes | Yes | Yes | Not re-certified here | No |
+| Active-SAST-day warmup | Yes | Yes | Yes | Prior production projection observed | Yes |
+| Dispatcher/preflight/locks | Yes | Yes | Yes | Operationally observed | Yes |
+| Embedded scheduler without BotApp authority | Yes | Yes | Yes | Natural launch observed historically | Yes |
+| Incidents and operator review | Yes | Yes | Yes | Yes | Yes |
+| Slack/Discord notification delivery | Yes | Yes | Yes | Historical production delivery | Yes |
+| Backend/frontend production deployment | Yes | Separately tested | Yes | Production UI observed | External |
+| Installed BotApp package | Yes | Separately tested | Yes | Production UI observed | External provenance gap |
+
+“Partial” and “pending” are deliberate due-diligence states. They must not be
+upgraded by inference from unit tests.
