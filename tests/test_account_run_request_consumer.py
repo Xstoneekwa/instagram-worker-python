@@ -799,7 +799,9 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
                 package_name="com.instagram.androie",
                 app_instance_id="7637db9a-3581-4099-8068-d5eb1ed86f96",
             )
-        self.assertIn("instagram_login_provisioner_cli", cmd)
+        self.assertIn("historical_auto_login_07ee_adapter", cmd)
+        self.assertNotIn("instagram_login_provisioner_cli", cmd)
+        self.assertEqual(cmd[cmd.index("--request-id") + 1], TEST_REQUEST_ID)
         self.assertNotIn("--resume-email-code-from-action", cmd)
         self.assertIn("--publish", cmd)
         self.assertNotIn("--no-publish", cmd)
@@ -983,7 +985,7 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
         audit.assert_called_once()
         self.assertEqual(audit.call_args.kwargs["action_type"], "manual_run_failed")
 
-    def test_finalize_subprocess_verification_pending_keeps_request_active(self) -> None:
+    def test_historical_login_provisioning_bypasses_modern_verification_pause(self) -> None:
         cfg = consumer.DispatcherConfig(
             enabled=True,
             health_only=False,
@@ -1016,7 +1018,8 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
             patch.object(consumer, "get_account_run_request", return_value=request),
             patch.object(consumer, "complete_account_run_request") as complete,
             patch.object(consumer, "_reconcile_linked_run", return_value={"reconciled": True}) as reconcile,
-            patch.object(consumer, "_safe_login_provisioner_summary_for_audit", return_value=summary),
+            patch.object(consumer, "_safe_login_provisioner_summary_for_audit", return_value=summary) as modern_summary,
+            patch.object(consumer, "_terminalize_auto_login_failure") as modern_terminalization,
             patch.object(consumer, "_audit") as audit,
         ):
             consumer._finalize_manual_run_after_subprocess(
@@ -1025,13 +1028,16 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
                 account_id=TEST_ACCOUNT_ID,
                 exit_code=1,
             )
-        complete.assert_not_called()
-        reconcile.assert_not_called()
+        complete.assert_called_once()
+        self.assertEqual(complete.call_args.args[2], "failed")
+        self.assertEqual(complete.call_args.kwargs["error_code"], "worker_exit_nonzero")
+        reconcile.assert_called_once()
         audit.assert_called_once()
-        self.assertEqual(audit.call_args.kwargs["action_type"], "manual_run_verification_paused")
-        self.assertEqual(audit.call_args.kwargs["payload"]["login_provisioner_summary"]["final_outcome"], "verification_pending")
+        self.assertEqual(audit.call_args.kwargs["action_type"], "manual_run_failed")
+        modern_summary.assert_not_called()
+        modern_terminalization.assert_not_called()
 
-    def test_finalize_subprocess_orphan_challenge_blocked_marks_request_blocked(self) -> None:
+    def test_historical_login_provisioning_bypasses_modern_orphan_classification(self) -> None:
         cfg = consumer.DispatcherConfig(
             enabled=True,
             health_only=False,
@@ -1050,6 +1056,7 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
             "id": TEST_REQUEST_ID,
             "account_id": TEST_ACCOUNT_ID,
             "run_id": TEST_RUN_ID,
+            "requested_run_type": "login_provisioning",
             "status": "running",
         }
         summary = {
@@ -1062,7 +1069,7 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
             patch.object(consumer, "get_account_run_request", return_value=request),
             patch.object(consumer, "complete_account_run_request") as complete,
             patch.object(consumer, "_reconcile_linked_run", return_value={"reconciled": True}) as reconcile,
-            patch.object(consumer, "_safe_login_provisioner_summary_for_audit", return_value=summary),
+            patch.object(consumer, "_safe_login_provisioner_summary_for_audit", return_value=summary) as modern_summary,
             patch.object(consumer, "_audit") as audit,
         ):
             consumer._finalize_manual_run_after_subprocess(
@@ -1072,10 +1079,11 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
                 exit_code=1,
             )
         complete.assert_called_once()
-        self.assertEqual(complete.call_args.args[2], "blocked")
-        self.assertEqual(complete.call_args.kwargs["error_code"], "orphan_challenge_provenance_weak")
+        self.assertEqual(complete.call_args.args[2], "failed")
+        self.assertEqual(complete.call_args.kwargs["error_code"], "worker_exit_nonzero")
         reconcile.assert_called_once()
-        self.assertEqual(audit.call_args.kwargs["action_type"], "manual_run_blocked")
+        self.assertEqual(audit.call_args.kwargs["action_type"], "manual_run_failed")
+        modern_summary.assert_not_called()
 
     def test_finalize_subprocess_real_failure_still_marks_failed(self) -> None:
         cfg = consumer.DispatcherConfig(
@@ -1121,7 +1129,7 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
         reconcile.assert_called_once()
         self.assertEqual(audit.call_args.kwargs["action_type"], "manual_run_failed")
 
-    def test_finalize_subprocess_nonzero_attaches_login_provisioner_summary_when_available(self) -> None:
+    def test_historical_login_provisioning_does_not_use_modern_failure_summary(self) -> None:
         cfg = consumer.DispatcherConfig(
             enabled=True,
             health_only=False,
@@ -1146,24 +1154,10 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
         summary = {"run_id": TEST_RUN_ID, "final_outcome": "wrong_app_package", "submit_executed": False}
         with (
             patch.object(consumer, "get_account_run_request", return_value=request),
-            patch.object(
-                consumer,
-                "_terminalize_auto_login_failure",
-                return_value=(
-                    {
-                        "request_status": "failed",
-                        "run_status": "failed",
-                        "persisted_error_code": "unclassified_auto_login_failure",
-                        "reason": "terminalized",
-                    },
-                    {
-                        "domain": "auto_login",
-                        "reason_code": "unclassified_auto_login_failure",
-                        "phase": "unknown",
-                    },
-                ),
-            ),
-            patch.object(consumer, "_safe_login_provisioner_summary_for_audit", return_value=summary),
+            patch.object(consumer, "complete_account_run_request") as complete,
+            patch.object(consumer, "_reconcile_linked_run", return_value={"reconciled": True}),
+            patch.object(consumer, "_terminalize_auto_login_failure") as modern_terminalization,
+            patch.object(consumer, "_safe_login_provisioner_summary_for_audit", return_value=summary) as modern_summary,
             patch.object(consumer, "_audit") as audit,
         ):
             consumer._finalize_manual_run_after_subprocess(
@@ -1172,14 +1166,13 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
                 account_id=TEST_ACCOUNT_ID,
                 exit_code=1,
             )
-        payload = audit.call_args.kwargs["payload"]
-        projected = payload["login_provisioner_summary"]
-        self.assertEqual(projected["domain"], "auto_login")
-        self.assertEqual(projected["reason_code"], "unclassified_auto_login_failure")
-        self.assertNotIn("final_outcome", projected)
-        self.assertNotIn("submit_executed", projected)
+        self.assertEqual(complete.call_args.args[2], "failed")
+        self.assertEqual(complete.call_args.kwargs["error_code"], "worker_exit_nonzero")
+        self.assertEqual(audit.call_args.kwargs["payload"], {"request_id": TEST_REQUEST_ID, "exit_code": 1})
+        modern_terminalization.assert_not_called()
+        modern_summary.assert_not_called()
 
-    def test_finalize_auto_login_persists_precise_reason_and_publishes_same_summary(self) -> None:
+    def test_historical_login_provisioning_bypasses_modern_failure_contract_and_incident(self) -> None:
         cfg = consumer.DispatcherConfig(
             enabled=True,
             health_only=False,
@@ -1211,27 +1204,10 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
         }
         with (
             patch.object(consumer, "get_account_run_request", return_value=request),
-            patch.object(
-                consumer,
-                "_terminalize_auto_login_failure",
-                return_value=(
-                    {
-                        "request_status": "failed",
-                        "run_status": "failed",
-                        "persisted_error_code": "wrong_suggested_account_requires_admin_review",
-                        "reason": "terminalized",
-                    },
-                    {
-                        "domain": "auto_login",
-                        "reason_code": "wrong_suggested_account_requires_admin_review",
-                        "phase": "route_suggested_account",
-                        "request_id": TEST_REQUEST_ID,
-                        "run_id": TEST_RUN_ID,
-                        "account_id": TEST_ACCOUNT_ID,
-                    },
-                ),
-            ) as terminalize,
-            patch.object(consumer, "_safe_login_provisioner_summary_for_audit", return_value=summary),
+            patch.object(consumer, "complete_account_run_request") as complete,
+            patch.object(consumer, "_reconcile_linked_run", return_value={"reconciled": True}),
+            patch.object(consumer, "_terminalize_auto_login_failure") as terminalize,
+            patch.object(consumer, "_safe_login_provisioner_summary_for_audit", return_value=summary) as modern_summary,
             patch.object(consumer, "_publish_run_failure_incident") as publish,
             patch.object(consumer, "_audit"),
         ):
@@ -1242,19 +1218,13 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
                 exit_code=1,
                 request_snapshot=request,
             )
-        terminalize.assert_called_once()
-        self.assertEqual(
-            terminalize.call_args.kwargs["internal_reason"],
-            "wrong_suggested_account_requires_admin_review",
-        )
-        propagated = publish.call_args.kwargs["worker_summary"]
-        self.assertEqual(propagated["domain"], "auto_login")
-        self.assertEqual(propagated["reason_code"], "wrong_suggested_account_requires_admin_review")
-        self.assertEqual(propagated["request_id"], TEST_REQUEST_ID)
-        self.assertEqual(propagated["run_id"], TEST_RUN_ID)
-        self.assertNotIn("submit_executed", propagated)
+        self.assertEqual(complete.call_args.args[2], "failed")
+        self.assertEqual(complete.call_args.kwargs["error_code"], "worker_exit_nonzero")
+        terminalize.assert_not_called()
+        modern_summary.assert_not_called()
+        publish.assert_not_called()
 
-    def test_notification_failure_happens_after_atomic_terminalization(self) -> None:
+    def test_email_resume_keeps_modern_atomic_terminalization_before_notification(self) -> None:
         cfg = consumer.DispatcherConfig(
             enabled=True,
             health_only=False,
@@ -1263,7 +1233,7 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
             poll_seconds=5.0,
             lease_seconds=120,
             heartbeat_seconds=20.0,
-            allowed_run_types=["login_provisioning"],
+            allowed_run_types=["login_email_code_resume"],
             test_account_ids=set(),
             subprocess_timeout_seconds=7200,
             require_assignment=False,
@@ -1273,7 +1243,7 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
             "id": TEST_REQUEST_ID,
             "account_id": TEST_ACCOUNT_ID,
             "run_id": TEST_RUN_ID,
-            "requested_run_type": "login_provisioning",
+            "requested_run_type": "login_email_code_resume",
             "status": "running",
         }
         summary = {"failure_reason": "password_field_not_found", "phase": "login_form"}
@@ -1409,7 +1379,6 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
         self.assertTrue(proc.terminated)
         self.assertEqual(exit_code, -15)
         self.assertFalse(timed_out)
-
 
     def test_build_orphan_recovery_command_uses_recovery_cli(self) -> None:
         cmd = consumer._build_orphan_recovery_command(

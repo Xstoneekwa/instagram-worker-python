@@ -526,6 +526,7 @@ def _build_login_provisioner_command(
     run_type: str,
     request_id: str,
     *,
+    run_request_id: str | None = None,
     device_serial: str | None = None,
     package_name: str | None = None,
     app_instance_id: str | None = None,
@@ -538,10 +539,16 @@ def _build_login_provisioner_command(
     if not app_instance:
         raise ValueError("auto_login_app_instance_binding_required")
     expected_username = _load_expected_username(account_id)
+    normalized_run_type = str(run_type or "").strip().lower()
+    cli_module = (
+        "historical_auto_login_07ee_adapter"
+        if normalized_run_type == "login_provisioning"
+        else "instagram_login_provisioner_cli"
+    )
     cmd = [
         sys.executable,
         "-m",
-        "instagram_login_provisioner_cli",
+        cli_module,
         "--account-id",
         account_id,
         "--expected-username",
@@ -551,13 +558,15 @@ def _build_login_provisioner_command(
         "--run-id",
         request_id,
     ]
+    if normalized_run_type == "login_provisioning":
+        cmd.extend(["--request-id", str(run_request_id or request_id)])
     serial = str(device_serial or "").strip()
     if serial:
         cmd.extend(["--device-serial", serial])
     cmd.extend(["--package-name", package])
     cmd.extend(["--expected-app-instance-id", app_instance])
     meta = dict(metadata_safe or {})
-    if str(run_type or "").strip().lower() == "login_email_code_resume":
+    if normalized_run_type == "login_email_code_resume":
         cmd.append("--resume-email-code-from-action")
         action_id = str(meta.get("action_id") or meta.get("verification_action_id") or "").strip()
         if action_id:
@@ -611,6 +620,7 @@ def _build_runner_command(
     run_type: str,
     request_id: str,
     *,
+    run_request_id: str | None = None,
     device_serial: str | None = None,
     package_name: str | None = None,
     app_instance_id: str | None = None,
@@ -633,6 +643,7 @@ def _build_runner_command(
             account_id,
             run_type,
             request_id,
+            run_request_id=run_request_id,
             device_serial=device_serial,
             package_name=package_name,
             app_instance_id=app_instance_id,
@@ -1631,6 +1642,31 @@ def _finalize_manual_run_after_subprocess(
         )
         return
 
+    if run_type == "login_provisioning":
+        _safe_complete_account_run_request(
+            request_id,
+            cfg.worker_id,
+            "failed",
+            error_code="worker_exit_nonzero",
+            error_message_safe=f"Worker subprocess exited with code {exit_code}.",
+        )
+        _reconcile_linked_run(
+            account_id=account_id,
+            run_id=run_id,
+            terminal_status="failed",
+            request_id=request_id,
+            exit_code=exit_code,
+        )
+        _audit(
+            account_id=account_id,
+            action_type="manual_run_failed",
+            status="failed",
+            message=f"Manual run failed with exit code {exit_code}.",
+            run_id=run_id,
+            payload={"request_id": request_id, "exit_code": exit_code},
+        )
+        return
+
     summary = _safe_login_provisioner_summary_for_audit(run_id or request_id)
     if _is_login_run_type(run_type):
         _log_auto_login_foreground_package_result(
@@ -2320,6 +2356,7 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
         account_id,
         run_type,
         linked_login_run_id or request_id,
+        run_request_id=request_id,
         device_serial=adb_serial,
         package_name=(login_binding or {}).get("package_name")
         if _is_login_run_type(run_type)
