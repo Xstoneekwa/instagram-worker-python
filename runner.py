@@ -3623,9 +3623,29 @@ def _cleanup_session_apps(d) -> None:
     )
 
 
+_DEFER_TERMINAL_RUN_STATUS_UNTIL_CLEANUP = False
+_RUNNER_SESSION_CLEANUP_COMPLETE = False
+_PENDING_TERMINAL_RUN_STATUS: dict[str, Any] | None = None
+
+
 def _return_with_cleanup(d, code: int) -> int:
+    global _DEFER_TERMINAL_RUN_STATUS_UNTIL_CLEANUP
+    global _RUNNER_SESSION_CLEANUP_COMPLETE, _PENDING_TERMINAL_RUN_STATUS
     set_wait_event_callback(None)
     _cleanup_session_apps(d)
+    _RUNNER_SESSION_CLEANUP_COMPLETE = True
+    pending = _PENDING_TERMINAL_RUN_STATUS
+    _PENDING_TERMINAL_RUN_STATUS = None
+    if pending:
+        _update_run_status_safe(**pending)
+        log(
+            "info",
+            "run_terminal_status_published_after_cleanup",
+            run_id=pending.get("run_id"),
+            status=pending.get("status"),
+            cleanup_completed=True,
+        )
+    _DEFER_TERMINAL_RUN_STATUS_UNTIL_CLEANUP = False
     return code
 
 
@@ -3721,6 +3741,25 @@ def _update_run_status_safe(
     totals: dict,
     performance_summary: dict,
 ) -> None:
+    global _PENDING_TERMINAL_RUN_STATUS
+    if (
+        status in {"completed", "failed", "stopped"}
+        and _DEFER_TERMINAL_RUN_STATUS_UNTIL_CLEANUP
+        and not _RUNNER_SESSION_CLEANUP_COMPLETE
+    ):
+        _PENDING_TERMINAL_RUN_STATUS = {
+            "run_id": run_id,
+            "status": status,
+            "totals": dict(totals or {}),
+            "performance_summary": dict(performance_summary or {}),
+        }
+        log(
+            "info",
+            "run_terminal_status_deferred_until_cleanup",
+            run_id=run_id,
+            status=status,
+        )
+        return
     if status in {"completed", "failed", "stopped"}:
         deferred_steps_ok = _flush_deferred_post_return_supabase_steps(
             reason=f"before_run_status_{status}"
@@ -18602,6 +18641,12 @@ def _load_account_session_follow_targets(account_id: str, limit: int) -> tuple[l
 
 
 def main() -> int:
+    global _DEFER_TERMINAL_RUN_STATUS_UNTIL_CLEANUP
+    global _RUNNER_SESSION_CLEANUP_COMPLETE, _PENDING_TERMINAL_RUN_STATUS
+    _DEFER_TERMINAL_RUN_STATUS_UNTIL_CLEANUP = True
+    _RUNNER_SESSION_CLEANUP_COMPLETE = False
+    _PENDING_TERMINAL_RUN_STATUS = None
+
     parser = argparse.ArgumentParser(description="Instagram safe navigation worker")
     parser.add_argument(
         "--multi",
@@ -20544,6 +20589,9 @@ def main() -> int:
             warm_session_used=warm_session_used,
             force_stop_used=force_stop_used,
             auto_restart_resume_policy=auto_restart_resume_policy,
+            business_action_deadline=str(
+                os.environ.get("BUSINESS_ACTION_DEADLINE") or ""
+            ).strip() or None,
         )
         if supabase_mode and run_id:
             _update_run_status_safe(

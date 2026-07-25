@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import time
 import os
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 import uiautomator2 as u2
@@ -1861,6 +1862,50 @@ def _account_session_outreach_addon_max_jobs() -> int:
         return 1
 
 
+def _outreach_time_budget(
+    business_action_deadline: str | None,
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Re-evaluate the immutable session deadline immediately before Outreach."""
+    raw = str(business_action_deadline or "").strip()
+    minimum_seconds = max(
+        0,
+        int(getattr(config, "ACCOUNT_SESSION_OUTREACH_MINIMUM_SECONDS", 5 * 60)),
+    )
+    if not raw:
+        return {
+            "deadline_source": "fallback_unavailable_at_outreach_boundary",
+            "business_action_deadline": None,
+            "remaining_seconds": None,
+            "minimum_seconds": minimum_seconds,
+            "allowed": True,
+        }
+    try:
+        deadline = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return {
+            "deadline_source": "invalid_scheduler_business_action_deadline",
+            "business_action_deadline": raw,
+            "remaining_seconds": 0.0,
+            "minimum_seconds": minimum_seconds,
+            "allowed": False,
+        }
+    if deadline.tzinfo is None:
+        deadline = deadline.replace(tzinfo=timezone.utc)
+    current = now or datetime.now(timezone.utc)
+    remaining = max(0.0, (deadline.astimezone(timezone.utc) - current).total_seconds())
+    return {
+        "deadline_source": "scheduler_business_action_deadline",
+        "business_action_deadline": deadline.astimezone(timezone.utc).isoformat().replace(
+            "+00:00", "Z"
+        ),
+        "remaining_seconds": round(remaining, 3),
+        "minimum_seconds": minimum_seconds,
+        "allowed": remaining >= minimum_seconds,
+    }
+
+
 def _skip_account_session_outreach_addon(
     *,
     enabled: bool,
@@ -2447,6 +2492,8 @@ def _run_follow_to_unfollow_real(
     follow_exit_code: int | None,
     follow_total_ms: float,
     diagnostic: dict[str, Any],
+    business_action_deadline: str | None = None,
+    outreach_reserve_seconds: int = 0,
 ) -> dict[str, Any]:
     """H3 only: explicit real Unfollow handoff with a hard low cap."""
     t0 = time.perf_counter()
@@ -2567,6 +2614,8 @@ def _run_follow_to_unfollow_real(
             dry_probe_only=False,
             real_action_enabled_override=True,
             real_action_max_override=real_max_effective,
+            business_action_deadline=business_action_deadline,
+            outreach_reserve_seconds=outreach_reserve_seconds,
         )
         unfollow_summary = get_last_unfollow_session_probe_summary()
         out = _real_summary_from_unfollow_summary(
@@ -2853,6 +2902,7 @@ def run_account_session(
     max_follows_per_target_per_run: int | None = None,
     fast_rotate_to_next_target_from_followers: FastRotationRunner | None = None,
     auto_restart_resume_policy: dict[str, Any] | None = None,
+    business_action_deadline: str | None = None,
 ) -> int:
     global _LAST_ACCOUNT_SESSION_SUMMARY
     _LAST_ACCOUNT_SESSION_SUMMARY = {}
@@ -3340,6 +3390,18 @@ def run_account_session(
                         follow_exit_code=follow_exit_code,
                         follow_total_ms=(follow_t1 - follow_t0) * 1000.0,
                         diagnostic=follow_to_unfollow_diagnostic,
+                        business_action_deadline=business_action_deadline,
+                        outreach_reserve_seconds=(
+                            int(
+                                getattr(
+                                    config,
+                                    "ACCOUNT_SESSION_OUTREACH_MINIMUM_SECONDS",
+                                    5 * 60,
+                                )
+                            )
+                            if _account_session_outreach_addon_enabled()
+                            else 0
+                        ),
                     )
             else:
                 real_skip_reason = (
@@ -3407,7 +3469,23 @@ def run_account_session(
                 max_jobs=_account_session_outreach_addon_max_jobs(),
             )
         else:
-            if commercial_policy_boundary_blocks_phase(
+            outreach_time_budget = _outreach_time_budget(business_action_deadline)
+            log(
+                "info",
+                "account_session_outreach_time_budget_reevaluated",
+                account_id=aid,
+                account_username=uname,
+                run_id=run_id,
+                **outreach_time_budget,
+            )
+            if not bool(outreach_time_budget.get("allowed")):
+                account_session_outreach_addon = _skip_account_session_outreach_addon(
+                    enabled=True,
+                    reason="outreach_skipped_insufficient_time",
+                    max_jobs=_account_session_outreach_addon_max_jobs(),
+                )
+                account_session_outreach_addon["time_budget"] = outreach_time_budget
+            elif commercial_policy_boundary_blocks_phase(
                 aid,
                 bound_revision=session_policy_revision,
                 run_id=run_id,
@@ -4011,6 +4089,7 @@ def dispatch_account_session(
     max_follows_per_target_per_run: int | None = None,
     fast_rotate_to_next_target_from_followers: FastRotationRunner | None = None,
     auto_restart_resume_policy: dict[str, Any] | None = None,
+    business_action_deadline: str | None = None,
 ) -> int:
     return run_account_session(
         d,
@@ -4028,4 +4107,5 @@ def dispatch_account_session(
         warm_session_used=warm_session_used,
         force_stop_used=force_stop_used,
         auto_restart_resume_policy=auto_restart_resume_policy,
+        business_action_deadline=business_action_deadline,
     )

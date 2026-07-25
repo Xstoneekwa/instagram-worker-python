@@ -703,6 +703,38 @@ def _login_provisioner_env() -> dict[str, str]:
     return env
 
 
+def _account_session_deadline_env(
+    metadata_safe: dict[str, Any] | None,
+    dispatch_ctx: dict[str, Any] | None,
+) -> dict[str, str]:
+    """Resolve the scheduler window once and pass it unchanged to the runner."""
+    from session_transition_buffer import resolve_business_action_deadline
+
+    metadata = dict(metadata_safe or {})
+    dispatch = dict(dispatch_ctx or {})
+    deadline = resolve_business_action_deadline(metadata, dispatch)
+    starts_at = str(
+        metadata.get("scheduled_session_start")
+        or metadata.get("scheduled_session_at")
+        or dispatch.get("starts_at")
+        or ""
+    ).strip()
+    ends_at = str(
+        metadata.get("scheduled_session_end")
+        or metadata.get("scheduled_session_ends_at")
+        or dispatch.get("ends_at")
+        or ""
+    ).strip()
+    out: dict[str, str] = {}
+    if deadline:
+        out["BUSINESS_ACTION_DEADLINE"] = deadline
+    if starts_at:
+        out["SCHEDULED_SESSION_START"] = starts_at
+    if ends_at:
+        out["SCHEDULED_SESSION_END"] = ends_at
+    return out
+
+
 def _create_and_link_login_run(account_id: str, request_id: str, worker_id: str) -> str | None:
     try:
         run = supabase_client.create_run(account_id=account_id)
@@ -2407,6 +2439,23 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
         if _is_login_run_type(run_type) or _is_orphan_recovery_run_type(run_type)
         else runner_subprocess_env()
     )
+    if run_type == "account_session":
+        deadline_env = _account_session_deadline_env(request_metadata, dispatch_ctx)
+        subprocess_env = {**subprocess_env, **deadline_env}
+        log(
+            "info",
+            "account_session_deadline_propagated",
+            account_id=account_id,
+            request_id=request_id,
+            session_deadline=deadline_env.get("BUSINESS_ACTION_DEADLINE"),
+            scheduled_session_start=deadline_env.get("SCHEDULED_SESSION_START"),
+            scheduled_session_end=deadline_env.get("SCHEDULED_SESSION_END"),
+            deadline_source=(
+                "scheduler_request_metadata"
+                if deadline_env.get("BUSINESS_ACTION_DEADLINE")
+                else "fallback_required"
+            ),
+        )
     if auto_restart_policy:
         subprocess_env = {**subprocess_env, **runner_env_for_resume_policy(auto_restart_policy)}
 

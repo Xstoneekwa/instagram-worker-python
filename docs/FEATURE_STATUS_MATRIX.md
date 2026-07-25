@@ -18,6 +18,8 @@ Canonical status source:
 | Warmup active SAST days V1 | Code and tests pushed | 26 targeted + 156 runtime guards; no new Follow run in checkpoint |
 | Configured versus effective Follow caps | Code and tests pushed | Persisted values remain distinct from temporary runtime limits |
 | Unfollow J+3 and time guard | Physically validated | 11 Mythyl successes |
+| Unfollow handoff time budget V1 | Test-validated | Real deadline propagated; one immutable handoff plan; next natural/authorized physical observation pending |
+| Run/request terminal ordering | Test-validated | Run publishes terminal state after cleanup; request completes after subprocess return and lease release |
 | Follow/Like live counters | Physically validated | July 16 BotApp observation |
 | Incident actions / Mark reviewed | Physically validated | Human review and refresh |
 | Slack/Discord shared CTA | Physically validated | Creation/resolution deliveries |

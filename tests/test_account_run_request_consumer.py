@@ -15,6 +15,22 @@ TEST_RUN_ID = "00000000-0000-4000-8000-000000000301"
 
 
 class AccountRunRequestConsumerTest(unittest.TestCase):
+    def test_account_session_deadline_env_prefers_real_scheduler_deadline(self) -> None:
+        out = consumer._account_session_deadline_env(
+            {
+                "scheduled_session_start": "2026-07-25T16:00:00+00:00",
+                "scheduled_session_ends_at": "2026-07-25T22:00:00+00:00",
+            },
+            {},
+        )
+
+        self.assertEqual(out["SCHEDULED_SESSION_START"], "2026-07-25T16:00:00+00:00")
+        self.assertEqual(out["SCHEDULED_SESSION_END"], "2026-07-25T22:00:00+00:00")
+        self.assertEqual(out["BUSINESS_ACTION_DEADLINE"], "2026-07-25T21:50:00Z")
+
+    def test_account_session_deadline_env_is_empty_without_scheduler_window(self) -> None:
+        self.assertEqual(consumer._account_session_deadline_env({}, {}), {})
+
     def test_startup_tick_guard_sets_cadence_without_calling_tick(self) -> None:
         with (
             patch.object(

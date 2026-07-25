@@ -328,6 +328,7 @@ def _runtime_adaptive_coverage_budget(
     eligible_remaining: int,
     business_action_deadline: str | None,
     now: datetime | None = None,
+    outreach_reserve_seconds: int = 0,
 ) -> Any:
     deadline = _parse_runtime_deadline(business_action_deadline)
     current = now or datetime.now(timezone.utc)
@@ -336,21 +337,31 @@ def _runtime_adaptive_coverage_budget(
         # scheduled remaining duration so the pure policy subtracts T10 once.
         session_remaining_seconds = max(0.0, (deadline - current).total_seconds())
         session_remaining_seconds += SCHEDULED_SESSION_CLEANUP_RESERVE_SECONDS
+        deadline_source = "scheduler_business_action_deadline"
     else:
-        action_slots = min(max(0, int(quota_remaining)), max(0, int(eligible_remaining)))
-        required_viewports = (
-            (max(0, int(eligible_remaining)) + HISTORICAL_ROWS_PER_VIEWPORT - 1)
-            // HISTORICAL_ROWS_PER_VIEWPORT
+        session_remaining_seconds = max(
+            SCHEDULED_SESSION_CLEANUP_RESERVE_SECONDS,
+            int(getattr(config, "UNFOLLOW_FALLBACK_SESSION_SECONDS", 6 * 60 * 60)),
         )
-        session_remaining_seconds = (
-            action_slots * HISTORICAL_ACTION_P90_SECONDS
-            + required_viewports * HISTORICAL_VIEWPORT_P90_SECONDS
-            + SCHEDULED_SESSION_CLEANUP_RESERVE_SECONDS
-        )
+        deadline_source = "fallback_six_hour_window"
     return derive_adaptive_coverage_budget(
         quota_remaining=quota_remaining,
         eligible_remaining=eligible_remaining,
         session_remaining_seconds=session_remaining_seconds,
+        deadline_source=deadline_source,
+        recovery_reserve_seconds=int(
+            getattr(config, "UNFOLLOW_RECOVERY_RESERVE_SECONDS", 75)
+        ),
+        outreach_reserve_seconds=max(0, int(outreach_reserve_seconds)),
+        navigation_reserve_seconds=int(
+            getattr(config, "UNFOLLOW_NAVIGATION_RESERVE_SECONDS", 30)
+        ),
+        lightweight_deadline_check_interval_seconds=int(
+            getattr(config, "UNFOLLOW_DEADLINE_CHECK_INTERVAL_SECONDS", 5 * 60)
+        ),
+        lightweight_deadline_check_action_interval=int(
+            getattr(config, "UNFOLLOW_DEADLINE_CHECK_ACTION_INTERVAL", 25)
+        ),
     )
 
 
@@ -1116,6 +1127,7 @@ def _run_real_unfollow_multi_loop(
     visible_eligibility_row_cache: dict[str, dict[str, Any] | None],
     real_action_max: int,
     business_action_deadline: str | None,
+    adaptive_coverage_budget: Any,
     t0: float,
 ) -> int:
     verified = 0
@@ -1137,11 +1149,6 @@ def _run_real_unfollow_multi_loop(
     last_fields = dict(harvest_fields)
     any_mode_active = str(getattr(settings, "mode", "") or "") == UNFOLLOW_MODE_ANY
     coverage_started_at = time.perf_counter()
-    adaptive_coverage_budget = _runtime_adaptive_coverage_budget(
-        quota_remaining=real_action_max,
-        eligible_remaining=len(planned_usernames),
-        business_action_deadline=business_action_deadline,
-    )
     coverage_tracker = (
         None
         if any_mode_active
@@ -1407,6 +1414,9 @@ def _run_real_unfollow_multi_loop(
         refresh_scroll_summary_totals()
         refresh_recoverable_action_summary_totals()
         refresh_coverage_summary_totals()
+        if coverage_tracker is None:
+            totals["lightweight_deadline_checks"] = any_mode_deadline_checks
+            totals["per_scroll_full_recalculations"] = 0
         log(
             "info",
             event_name,
@@ -1518,6 +1528,8 @@ def _run_real_unfollow_multi_loop(
     )
 
     iteration_index = 0
+    any_mode_deadline_checks = 0
+    any_mode_last_deadline_check = -float("inf")
     while verified < real_action_max:
         if coverage_tracker is not None:
             coverage_preflight = coverage_tracker.preflight_decision(
@@ -1526,18 +1538,22 @@ def _run_real_unfollow_multi_loop(
             if coverage_preflight is not None:
                 stop_reason = coverage_preflight.stop_reason
                 return emit_final("success_real_unfollow_multi_partial_exhausted")
-        time_budget = _unfollow_time_budget(
-            real_action_max - verified,
-            business_action_deadline=business_action_deadline,
-        )
-        if int(time_budget["time_bounded_action_cap"]) <= 0:
-            stop_reason = (
-                "session_time_budget_exhausted"
-                if coverage_tracker is not None
-                else "unfollow_skipped_insufficient_time"
+        if coverage_tracker is None:
+            elapsed = coverage_elapsed_seconds()
+            check_due = (
+                any_mode_deadline_checks == 0
+                or elapsed - any_mode_last_deadline_check
+                >= adaptive_coverage_budget.lightweight_deadline_check_interval_seconds
+                or verified > 0
+                and verified % adaptive_coverage_budget.lightweight_deadline_check_action_interval == 0
             )
-            last_fields = {**last_fields, **time_budget}
-            return emit_final("success_unfollow_skipped_insufficient_time")
+            if elapsed >= adaptive_coverage_budget.max_unfollow_phase_duration_seconds:
+                stop_reason = "session_time_budget_exhausted"
+                any_mode_deadline_checks += 1
+                return emit_final("success_unfollow_skipped_insufficient_time")
+            if check_due:
+                any_mode_deadline_checks += 1
+                any_mode_last_deadline_check = elapsed
         iteration_index += 1
         log(
             "info",
@@ -2389,6 +2405,7 @@ def run_unfollow_session(
     real_action_enabled_override: bool | None = None,
     real_action_max_override: int | None = None,
     business_action_deadline: str | None = None,
+    outreach_reserve_seconds: int = 0,
 ) -> int:
     """Run unfollow_session: probe by default; real Unfollow only with explicit config opt-in."""
     t0 = time.perf_counter()
@@ -2432,11 +2449,27 @@ def run_unfollow_session(
     resolved_deadline = str(
         business_action_deadline or os.environ.get("BUSINESS_ACTION_DEADLINE") or ""
     ).strip() or None
-    time_budget = _unfollow_time_budget(
-        real_action_max,
+    domain_real_action_max = real_action_max
+    plan = plan_unfollow_targets(aid, settings=settings)
+    planned_usernames = _planned_username_set(plan)
+    planned_by_username = _planned_candidates_by_username(plan)
+    handoff_budget = _runtime_adaptive_coverage_budget(
+        quota_remaining=domain_real_action_max,
+        eligible_remaining=len(planned_usernames),
         business_action_deadline=resolved_deadline,
+        outreach_reserve_seconds=outreach_reserve_seconds,
     )
-    real_action_max = min(real_action_max, int(time_budget["time_bounded_action_cap"]))
+    real_action_max = min(domain_real_action_max, int(handoff_budget.planned_unfollows))
+    time_budget = {
+        "business_action_deadline": handoff_budget.deadline_source.startswith("scheduler")
+        and resolved_deadline
+        or None,
+        "remaining_seconds": handoff_budget.scheduled_session_remaining_seconds,
+        "estimated_seconds_per_action": handoff_budget.estimated_seconds_per_unfollow,
+        "finalization_reserve_seconds": handoff_budget.minimum_session_cleanup_reserve_seconds,
+        "time_bounded_action_cap": real_action_max,
+        "deadline_source": handoff_budget.deadline_source,
+    }
     log(
         "info",
         "unfollow_effective_limits_resolved",
@@ -2452,13 +2485,19 @@ def run_unfollow_session(
         runtime_cap_source=str(runtime_cap_resolution.get("runtime_cap_source") or ""),
         runtime_mode_cap=int(runtime_cap_resolution.get("runtime_cap") or 0),
         effective_real_action_max_per_run=real_action_max,
+        domain_real_action_max_per_run=domain_real_action_max,
+        eligible_candidates=len(planned_usernames),
+        quota_remaining=domain_real_action_max,
+        cleanup_reserve=handoff_budget.minimum_session_cleanup_reserve_seconds,
+        recovery_reserve=handoff_budget.recovery_reserve_seconds,
+        outreach_reserve=handoff_budget.outreach_reserve_seconds,
+        capacity_estimate=handoff_budget.conservative_capacity,
+        planned_unfollows=handoff_budget.planned_unfollows,
+        handoff_budget=handoff_budget.as_dict(),
         **time_budget,
         source_day_counter="ig_interacted_users.unfollowed_at",
         source="min(db_session,env_hard_cap,runtime_mode_cap,db_day_remaining)",
     )
-    plan = plan_unfollow_targets(aid, settings=settings)
-    planned_usernames = _planned_username_set(plan)
-    planned_by_username = _planned_candidates_by_username(plan)
     visible_eligibility_row_cache: dict[str, dict[str, Any] | None] = {}
 
     if bool(dry_probe_only):
@@ -2680,6 +2719,7 @@ def run_unfollow_session(
             visible_eligibility_row_cache=visible_eligibility_row_cache,
             real_action_max=real_action_max,
             business_action_deadline=resolved_deadline,
+            adaptive_coverage_budget=handoff_budget,
             t0=t0,
         )
 

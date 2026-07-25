@@ -43,3 +43,12 @@ Before any worker release that touches protected files:
 4. Run the guard and the targeted tests listed in the manifest.
 5. Confirm no Golden Flow sanctuary artifacts were modified.
 6. Confirm the release is clean, reproducible, and not directly edited in place.
+
+## 2026-07-25 Unfollow handoff addendum
+
+The Unfollow handoff budget checkpoint does not alter the protected Golden
+Follow/Mute/Like/Return-CT gesture. It changes only deadline transport, the
+Unfollow phase budget/guard, the optional Outreach boundary decision, and
+request terminal ordering. Its device-free regression suite is required before
+release; physical validation remains deferred to a natural run or a separate
+Liam GO.

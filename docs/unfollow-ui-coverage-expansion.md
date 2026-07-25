@@ -1,6 +1,47 @@
 # Unfollow UI coverage expansion
 
-## Evidence-derived budget
+## Handoff budget V1 (current contract)
+
+The complete time and capacity calculation runs exactly once when Follow hands
+off to Unfollow, or at the same Unfollow entry point when Follow is disabled or
+has no work. The primary clock is the timezone-aware
+`BUSINESS_ACTION_DEADLINE` propagated from scheduler/request metadata. Only if
+that value is absent does the runtime use the documented six-hour synthetic
+window and emit `deadline_source=fallback_six_hour_window`.
+
+For `Q` quota remaining, `E` eligible candidates, `S` seconds until scheduled
+session end, `R` recovery reserve, `O` optional Outreach reserve, `N` initial
+navigation reserve and `Ta` conservative seconds per verified Unfollow:
+
+```text
+cleanup_reserve = 600
+available_business_seconds = max(0, S - cleanup_reserve)
+capacity_seconds = max(0, available_business_seconds - R - O - N)
+conservative_capacity = floor(capacity_seconds / Ta)
+planned_unfollows = min(Q, E, conservative_capacity)
+max_unfollow_phase_duration = max(0, available_business_seconds - R - O)
+```
+
+The measured defaults remain `Ta=15 s`, `viewport=3 s`, `R=75 s`, `N=30 s`.
+They are configuration values, not a guarantee that every planned action must
+fit before the first scroll. The Mythyl replay with 199 eligible candidates,
+quota 120 and a real six-hour window plans 120 and authorizes the first scroll.
+
+The plan is immutable during Unfollow. No candidate reload, database scan or
+full capacity calculation occurs per action, scroll or viewport. The only time
+check is monotonic and is sampled every 300 seconds or 25 verified actions; it
+stops at the phase hard boundary, preserving recovery, optional Outreach and
+the scheduler T-10 cleanup reserve. At the Unfollow-to-Outreach boundary, the
+orchestrator performs one new complete real-deadline decision. If insufficient,
+Outreach is skipped with `outreach_skipped_insufficient_time`. If Outreach is
+disabled, the session proceeds directly to cleanup.
+
+Telemetry includes deadline/source, handoff remaining time, all reserves,
+eligible/quota/capacity/planned/actual counts, lightweight check count and the
+explicit stop reason. The existing stop-manual, force-stop, identity, challenge,
+unsafe-surface and device-availability protections remain authoritative.
+
+## Superseded per-viewport model
 
 The offline replay uses existing Worker JSONL artifacts from 2026-05-23. The
 aggregate timings contain no account or target identifiers:
@@ -11,10 +52,10 @@ aggregate timings contain no account or target identifiers:
   `3 s/viewport`;
 - the recorded Following viewports expose 7 username rows.
 
-For `Q` quota remaining, `E` eligible DB candidates, `S` seconds until the
-scheduled session end, `U` recent unique usernames per viewport, `C` recent DB
-candidates matched per viewport, `Tv` seconds per viewport and `Ta` seconds per
-verified Unfollow:
+The earlier model below is retained only as historical context. It recomputed a
+derived phase/scroll allowance from recent viewport yield and reserved the
+theoretical cost of every action before coverage. It is no longer the active
+runtime contract.
 
 ```text
 cleanup_reserve = 600
@@ -53,22 +94,17 @@ adaptive_scroll_budget = min(
 )
 ```
 
-`Tv` and `Ta` start from the measured p90 values (`3 s`, `15 s`). `U` and `C`
-are recomputed over the recent evidence-derived observation window after every
-viewport. Before the first positive candidate yield, the bootstrap is one
-candidate per observation window; candidate location is therefore never
-inferred from the DB count or from `7 rows/viewport`. In particular, 20 DB
-candidates do not imply three viewports. Zero recent matches expands only the
-adaptive estimate; no-progress, repeated-fingerprint, time and absolute-scroll
-bounds still stop the loop.
+`Tv` and `Ta` started from the measured p90 values (`3 s`, `15 s`). `U` and `C`
+were recomputed after every viewport. This per-viewport full recalculation is
+now explicitly removed.
 
 The no-progress, repeated-fingerprint and recovery allowances are also bounded
 by measured time: at most `ceil(15 / 3)` viewports, further capped by the number
 of required viewports. No environment-selected fixed scroll count controls the
 strict DB-plan path.
 
-`business_action_deadline` is already `session_end - 10 minutes`. The runtime
-adapter reconstructs the scheduled remaining duration before calling the pure
+`business_action_deadline` is already `session_end - 10 minutes`. The current
+runtime reconstructs scheduled remaining duration before the pure handoff
 policy so that the 600-second cleanup reserve is subtracted exactly once.
 
 ## Runtime state and recovery contract

@@ -1,5 +1,24 @@
 # Current Production State
 
+## Golden addendum — Unfollow handoff budget and request terminalization
+
+The 2026-07-25 checkpoint moves the complete Unfollow time calculation to the
+Follow-to-Unfollow handoff (or the direct Unfollow entry point). The scheduler
+business-action deadline is propagated through the request consumer, runner and
+account-session orchestrator. A six-hour fallback is used only when that real
+deadline is absent. During Unfollow, only a monotonic check every five minutes
+or 25 verified actions remains; the full plan is immutable until the optional
+Outreach boundary is re-evaluated.
+
+For real runner sessions, the run terminal status is now published after
+session cleanup; direct status-helper semantics used by the established Follow
+deferred-persistence contract remain unchanged. The request consumer
+terminalizes the request only after the subprocess has returned and its device
+lease has been released. Follow, Outreach, Auto Restart, Incidents,
+T-10 and Mythyl V2 policy are otherwise unchanged; V2 enforce remains disabled.
+No phone or Instagram action is part of this checkpoint. See the
+[scoped checkpoint](./checkpoints/2026-07-25-unfollow-handoff-budget-v1.md).
+
 ## Golden addendum — T-10 safe skip, Follow 7+1 and V2 natural shadow evidence
 
 The 2026-07-25 intermediate checkpoint records three bounded facts: connected

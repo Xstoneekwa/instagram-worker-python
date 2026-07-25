@@ -66,6 +66,14 @@ class AdaptiveCoverageBudget:
     effective_candidate_yield_per_viewport: float
     observation_window_viewports: int
     budget_formula_version: str
+    deadline_source: str
+    recovery_reserve_seconds: int
+    outreach_reserve_seconds: int
+    navigation_reserve_seconds: int
+    conservative_capacity: int
+    planned_unfollows: int
+    lightweight_deadline_check_interval_seconds: int
+    lightweight_deadline_check_action_interval: int
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -80,17 +88,27 @@ def derive_adaptive_coverage_budget(
     recent_candidates_found_per_viewport: float | None = None,
     average_viewport_seconds: float | None = None,
     average_unfollow_seconds: float | None = None,
+    deadline_source: str = "fallback",
+    recovery_reserve_seconds: int = 75,
+    outreach_reserve_seconds: int = 0,
+    navigation_reserve_seconds: int = 30,
+    lightweight_deadline_check_interval_seconds: int = 5 * 60,
+    lightweight_deadline_check_action_interval: int = 25,
 ) -> AdaptiveCoverageBudget:
-    """Derive every bound from measured timings, supply, quota and session time.
+    """Build the immutable Unfollow phase budget at the phase handoff.
 
     ``session_remaining_seconds`` is measured to the scheduled session end.  The
-    mandatory T-10 cleanup reserve is subtracted exactly once here.
+    mandatory T-10 cleanup reserve is subtracted exactly once here.  Capacity
+    is time-bounded; the policy never requires enough time for every eligible
+    action before permitting the first scroll.
     """
     quota = max(0, int(quota_remaining))
     eligible = max(0, int(eligible_remaining))
     session_seconds = max(0, int(session_remaining_seconds))
     available = max(0, session_seconds - SCHEDULED_SESSION_CLEANUP_RESERVE_SECONDS)
-    action_slots = min(quota, eligible)
+    recovery_reserve = max(0, int(recovery_reserve_seconds))
+    outreach_reserve = max(0, int(outreach_reserve_seconds))
+    navigation_reserve = max(0, int(navigation_reserve_seconds))
     viewport_seconds = max(
         1,
         int(math.ceil(average_viewport_seconds or HISTORICAL_VIEWPORT_P90_SECONDS)),
@@ -126,21 +144,23 @@ def derive_adaptive_coverage_budget(
     required_viewports = (
         int(math.ceil(eligible / effective_candidate_yield)) if eligible else 0
     )
-    action_seconds = action_slots * action_seconds_per_unfollow
+    capacity_seconds = max(
+        0,
+        available - recovery_reserve - outreach_reserve - navigation_reserve,
+    )
+    conservative_capacity = capacity_seconds // action_seconds_per_unfollow
+    action_slots = min(quota, eligible, conservative_capacity)
     coverage_viewports_budget = required_viewports + bounded_observation_allowance
     coverage_seconds = coverage_viewports_budget * viewport_seconds
-    recovery_budget_seconds = (
-        bounded_observation_allowance * action_seconds_per_unfollow
-    )
-    derived_phase_seconds = action_seconds + coverage_seconds + recovery_budget_seconds
-    max_phase_seconds = min(available, derived_phase_seconds)
-    seconds_left_for_coverage = max(
-        0,
-        max_phase_seconds - action_seconds - recovery_budget_seconds,
-    )
+    recovery_budget_seconds = recovery_reserve
+    # Recovery is a terminal safety reserve, not executable Unfollow time.
+    # Keep it outside the phase hard-stop just like the optional Outreach
+    # reserve; navigation remains part of the phase itself.
+    max_phase_seconds = max(0, available - recovery_reserve - outreach_reserve)
+    seconds_left_for_coverage = max(0, capacity_seconds)
     max_scroll_passes_absolute = max(
         0,
-        (max(0, available - action_seconds - recovery_budget_seconds) // viewport_seconds),
+        seconds_left_for_coverage // viewport_seconds,
     )
     time_bounded_viewports = seconds_left_for_coverage // viewport_seconds
     max_scroll_passes = max(
@@ -173,7 +193,19 @@ def derive_adaptive_coverage_budget(
         recent_candidates_found_per_viewport=round(recent_candidate_yield, 4),
         effective_candidate_yield_per_viewport=round(effective_candidate_yield, 4),
         observation_window_viewports=observation_window,
-        budget_formula_version="adaptive_recent_yield_v2",
+        budget_formula_version="handoff_capacity_v3",
+        deadline_source=str(deadline_source or "fallback"),
+        recovery_reserve_seconds=recovery_reserve,
+        outreach_reserve_seconds=outreach_reserve,
+        navigation_reserve_seconds=navigation_reserve,
+        conservative_capacity=int(conservative_capacity),
+        planned_unfollows=int(action_slots),
+        lightweight_deadline_check_interval_seconds=max(
+            1, int(lightweight_deadline_check_interval_seconds)
+        ),
+        lightweight_deadline_check_action_interval=max(
+            1, int(lightweight_deadline_check_action_interval)
+        ),
     )
 
 
@@ -208,6 +240,9 @@ class FollowingCoverageTracker:
     initial_eligible_count: int = 0
     quota_remaining_at_start: int = 0
     initial_max_scroll_passes_absolute: int = 0
+    lightweight_deadline_checks: int = 0
+    last_deadline_check_elapsed_seconds: float | None = None
+    last_deadline_check_verified_count: int = 0
 
     def __post_init__(self) -> None:
         self.planned_usernames = {
@@ -230,50 +265,33 @@ class FollowingCoverageTracker:
             self.terminal_fingerprint = fingerprint
         return CoverageDecision("stop", reason, fingerprint)
 
-    def _refresh_adaptive_budget(self, *, elapsed_seconds: float) -> None:
-        window = max(1, self.budget.observation_window_viewports)
-        recent_unique = self.viewport_new_username_counts[-window:]
-        recent_matches = self.viewport_candidate_match_counts[-window:]
-        unique_yield = sum(recent_unique) / len(recent_unique) if recent_unique else 0.0
-        candidate_yield = sum(recent_matches) / len(recent_matches) if recent_matches else 0.0
-        remaining_session = max(
-            0.0,
-            self.budget.scheduled_session_remaining_seconds - elapsed_seconds,
+    def _deadline_check_due(self, *, elapsed_seconds: float) -> bool:
+        if self.last_deadline_check_elapsed_seconds is None:
+            return True
+        elapsed_due = (
+            elapsed_seconds - self.last_deadline_check_elapsed_seconds
+            >= self.budget.lightweight_deadline_check_interval_seconds
         )
-        refreshed = derive_adaptive_coverage_budget(
-            quota_remaining=max(0, self.quota_target - len(self.verified_usernames)),
-            eligible_remaining=len(self.remaining_planned_usernames),
-            session_remaining_seconds=remaining_session,
-            recent_unique_usernames_per_viewport=unique_yield,
-            recent_candidates_found_per_viewport=candidate_yield,
-            average_viewport_seconds=self.budget.estimated_seconds_per_viewport,
-            average_unfollow_seconds=self.budget.estimated_seconds_per_unfollow,
+        action_due = (
+            len(self.verified_usernames) - self.last_deadline_check_verified_count
+            >= self.budget.lightweight_deadline_check_action_interval
         )
-        total_adaptive_scroll_budget = min(
-            self.initial_max_scroll_passes_absolute,
-            self.scroll_passes_used + refreshed.max_scroll_passes,
-        )
-        self.budget = AdaptiveCoverageBudget(
-            **{
-                **refreshed.as_dict(),
-                "max_scroll_passes": max(self.scroll_passes_used, total_adaptive_scroll_budget),
-                "max_scroll_passes_absolute": self.initial_max_scroll_passes_absolute,
-                "adaptive_scroll_budget": max(self.scroll_passes_used, total_adaptive_scroll_budget),
-                "max_unfollow_phase_duration_seconds": min(
-                    self.budget.max_unfollow_phase_duration_seconds,
-                    max(int(math.ceil(elapsed_seconds)), int(math.ceil(elapsed_seconds)) + refreshed.max_unfollow_phase_duration_seconds),
-                ),
-                "scheduled_session_remaining_seconds": self.budget.scheduled_session_remaining_seconds,
-            }
-        )
+        return elapsed_due or action_due
 
     def preflight_decision(self, *, elapsed_seconds: float) -> Optional[CoverageDecision]:
         if len(self.verified_usernames) >= self.quota_target:
             return self._stop("unfollow_quota_reached")
         if not self.remaining_planned_usernames:
             return self._stop("eligible_targets_exhausted")
+        # This is intentionally only a monotonic comparison.  The complete
+        # candidate/quota/capacity plan remains immutable after handoff.
         if elapsed_seconds >= self.budget.max_unfollow_phase_duration_seconds:
+            self.lightweight_deadline_checks += 1
             return self._stop("session_time_budget_exhausted")
+        if self._deadline_check_due(elapsed_seconds=elapsed_seconds):
+            self.lightweight_deadline_checks += 1
+            self.last_deadline_check_elapsed_seconds = elapsed_seconds
+            self.last_deadline_check_verified_count = len(self.verified_usernames)
         return None
 
     def observe_viewport(
@@ -322,8 +340,6 @@ class FollowingCoverageTracker:
         matches = current.intersection(self.remaining_planned_usernames)
         self.viewport_new_username_counts.append(len(new_usernames))
         self.viewport_candidate_match_counts.append(len(matches))
-        self._refresh_adaptive_budget(elapsed_seconds=elapsed_seconds)
-
         if end_of_list:
             if self.remaining_planned_usernames:
                 return self._stop("ui_end_of_list_with_candidates_unresolved", fingerprint)
@@ -404,5 +420,7 @@ class FollowingCoverageTracker:
             "coverage_stop_reason": self.stop_reason,
             "stop_reason": self.stop_reason,
             "last_progress_at_seconds": self.last_progress_at,
+            "lightweight_deadline_checks": self.lightweight_deadline_checks,
+            "per_scroll_full_recalculations": 0,
             "theoretical_max_loop_steps": theoretical_max_loop_steps,
         }

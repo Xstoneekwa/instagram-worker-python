@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from datetime import datetime, timedelta, timezone
 
 import account_session_orchestrator as orchestrator
 from runtime_incident_matrix import classify_terminal_run_failure
@@ -21,6 +22,29 @@ def _successful_unfollow(**overrides):
 
 
 class AccountSessionTerminalContractTest(unittest.TestCase):
+    def test_outreach_time_budget_allows_open_deadline(self) -> None:
+        now = datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc)
+        out = orchestrator._outreach_time_budget(
+            (now + timedelta(minutes=20)).isoformat(),
+            now=now,
+        )
+        self.assertTrue(out["allowed"])
+        self.assertEqual(out["remaining_seconds"], 1200.0)
+
+    def test_outreach_time_budget_skips_when_cleanup_window_is_too_close(self) -> None:
+        now = datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc)
+        out = orchestrator._outreach_time_budget(
+            (now + timedelta(seconds=299)).isoformat(),
+            now=now,
+        )
+        self.assertFalse(out["allowed"])
+        self.assertEqual(out["deadline_source"], "scheduler_business_action_deadline")
+
+    def test_no_outreach_deadline_does_not_add_a_new_block(self) -> None:
+        out = orchestrator._outreach_time_budget(None)
+        self.assertTrue(out["allowed"])
+        self.assertEqual(out["deadline_source"], "fallback_unavailable_at_outreach_boundary")
+
     def test_run_e44ef22a_phase_contract_is_terminal(self) -> None:
         statuses = orchestrator._phase_statuses(
             welcome_enabled=False,

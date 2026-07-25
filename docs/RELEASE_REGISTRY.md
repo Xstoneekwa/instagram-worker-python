@@ -1,5 +1,17 @@
 # Release Registry
 
+## UNFOLLOW_HANDOFF_BUDGET_V1_2026-07-25
+
+Parent Worker code: `403036a7f27dfbaa81103669266444a63ee0f200`.
+This release propagates the real business-action deadline, calculates one
+capacity plan at Unfollow entry, retains only the periodic monotonic deadline
+guard, re-evaluates the optional Outreach handoff, and repairs request/run
+terminal ordering. The immutable release name and final SHA are rollout
+evidence; no physical run belongs to this entry.
+
+Architecture, tests and rollback:
+[Unfollow handoff budget V1](./checkpoints/2026-07-25-unfollow-handoff-budget-v1.md).
+
 ## T10_FOLLOW_SCROLL_7_PLUS_1_V2_RUNTIME_2026-07-25
 
 Parent Worker runtime: `d0910d79538fd23cc1d53f0f00367194a8dded6b`.
