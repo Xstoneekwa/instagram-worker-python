@@ -16,6 +16,7 @@ from logs import log
 UNKNOWN = "unknown"
 AUTO_RESTART_MAX_RETRIES_AFTER_INITIAL_FAILURE = 2
 AUTO_RESTART_TOTAL_ATTEMPTS = AUTO_RESTART_MAX_RETRIES_AFTER_INITIAL_FAILURE + 1
+FOLLOW_SCROLL_RESUMABLE_REASON = "visible_window_exhausted_scroll_failed"
 
 
 def _as_bool(value: Any) -> bool | None:
@@ -213,6 +214,28 @@ def _initial_block_reason(
     return ""
 
 
+def _follow_resume_checkpoint_block_reason(summary: dict[str, Any]) -> str:
+    """Require an explicit safe CT boundary for the scroll-failure reason.
+
+    Other historically resumable failure classes keep their existing policy.
+    This guard only prevents an ambiguous Followers viewport from being turned
+    into an automatic retry merely because quota remains.
+    """
+    reason = str(
+        summary.get("follow_stop_reason")
+        or summary.get("follow_session_outcome")
+        or ""
+    ).strip()
+    if reason != FOLLOW_SCROLL_RESUMABLE_REASON:
+        return ""
+    if (
+        summary.get("target_rotation_safe_after_scroll_failure") is True
+        and summary.get("scroll_failure_surface_ambiguous") is not True
+    ):
+        return ""
+    return "unsafe_follow_resume_checkpoint"
+
+
 def build_account_session_resume_plan(
     summary: dict,
     settings: dict | None = None,
@@ -298,6 +321,8 @@ def build_account_session_resume_plan(
         restart_eligibility=restart_eligibility,
         unsafe_markers=unsafe,
     )
+    if not restart_block_reason:
+        restart_block_reason = _follow_resume_checkpoint_block_reason(safe_summary)
     reason = restart_block_reason or "restart_unknown"
 
     if not restart_block_reason:
@@ -370,6 +395,13 @@ def build_account_session_resume_plan(
         "root_failure_code": safe_summary.get("root_failure_code"),
         "failure_signature": safe_summary.get("failure_signature"),
         "failure_category": safe_summary.get("failure_category"),
+        "follow_stop_reason": safe_summary.get("follow_stop_reason"),
+        "target_rotation_safe_after_scroll_failure": safe_summary.get(
+            "target_rotation_safe_after_scroll_failure"
+        ) is True,
+        "scroll_failure_surface_ambiguous": safe_summary.get(
+            "scroll_failure_surface_ambiguous"
+        ) is True,
         "session_termination_class": termination_class,
         "restart_eligibility": restart_eligibility,
         "phases_to_run": phases_to_run,

@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 import hashlib
+import statistics
 from typing import Iterable, Sequence
 
 
@@ -131,6 +132,74 @@ def canonical_follow_scroll_geometry(width: int, height: int) -> dict[str, int |
         "distance_px": int(h * (start_ratio - end_ratio)),
         "distance_ratio": round(start_ratio - end_ratio, 4),
         "duration_s": 0.32,
+    }
+
+
+def adaptive_follow_scroll_geometry(
+    width: int,
+    height: int,
+    row_centers_y: Sequence[int],
+) -> dict[str, int | float | bool]:
+    """Compute one soft Follow gesture from the measured visible row cadence.
+
+    The legacy 0.24-height gesture remains the deterministic fallback.  A normal
+    traversal aims to retain the last two visible rows as positional anchors,
+    while never exceeding the already validated 0.78 -> 0.22 safe band.
+    """
+    w = max(1, int(width or 0))
+    h = max(1, int(height or 0))
+    centers = sorted(
+        {
+            max(0, min(h - 1, int(value)))
+            for value in row_centers_y
+            if value is not None
+        }
+    )
+    positive_gaps = [
+        right - left
+        for left, right in zip(centers, centers[1:])
+        if right - left > 0
+    ]
+    short = canonical_follow_scroll_geometry(w, h)
+    if len(centers) < 3 or not positive_gaps:
+        return {
+            **short,
+            "adaptive": False,
+            "visible_row_count": len(centers),
+            "median_row_spacing_px": 0,
+            "target_new_rows": 0,
+            "target_overlap_rows": 0,
+            "fallback_reason": "insufficient_measured_rows",
+        }
+
+    median_spacing = max(1, int(round(float(statistics.median(positive_gaps)))))
+    visible_count = len(centers)
+    target_new_rows = min(7, max(1, visible_count - 2))
+    target_overlap_rows = max(1, visible_count - target_new_rows)
+    y_start = int(h * 0.78)
+    safe_y_end = int(h * 0.22)
+    min_distance = int(h * 0.24)
+    max_distance = max(min_distance, y_start - safe_y_end)
+    desired_distance = median_spacing * target_new_rows
+    distance_px = max(min_distance, min(max_distance, desired_distance))
+    y_end = max(safe_y_end, y_start - distance_px)
+    distance_px = y_start - y_end
+    distance_ratio = round(float(distance_px) / float(h), 4)
+    # Longer gestures stay deliberately slow enough to remain a soft scroll.
+    duration_s = round(min(0.46, max(0.32, 0.32 + (distance_ratio - 0.24) * 0.35)), 3)
+    return {
+        "x": int(w * 0.50),
+        "y_start": y_start,
+        "y_end": y_end,
+        "distance_px": distance_px,
+        "distance_ratio": distance_ratio,
+        "duration_s": duration_s,
+        "adaptive": True,
+        "visible_row_count": visible_count,
+        "median_row_spacing_px": median_spacing,
+        "target_new_rows": target_new_rows,
+        "target_overlap_rows": target_overlap_rows,
+        "fallback_reason": "",
     }
 
 

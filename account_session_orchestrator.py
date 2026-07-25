@@ -54,6 +54,10 @@ FOLLOW_TARGET_MAX_TARGETS_PER_RUN_ENV = "FOLLOW_TARGET_ROTATION_MAX_TARGETS_PER_
 FOLLOW_TARGET_MAX_FOLLOWS_PER_TARGET_ENV = "FOLLOW_TARGET_MAX_FOLLOWS_PER_TARGET_PER_RUN"
 FOLLOW_SOURCE_ROTATION_CONTRACT_MAX_FOLLOWS_PER_TARGET_PER_RUN = 30
 FOLLOW_SOURCE_ROTATION_CONTRACT_MAX_TARGETS_PER_RUN = 4
+FOLLOW_TARGET_MAX_SAFE_PARTIAL_FAILURES_PER_RUN = 2
+FOLLOW_TARGET_SAFE_PARTIAL_ROTATION_REASONS = frozenset(
+    {"visible_window_exhausted_scroll_failed"}
+)
 RECOVERABLE_UNFOLLOW_DUPLICATE_STOP_REASON = (
     "logs.log() got multiple values for keyword argument 'stop_reason'"
 )
@@ -544,6 +548,25 @@ def is_follow_target_budget_reached(summary: dict[str, Any], target_budget: int)
     return follows_completed >= max(1, int(target_budget))
 
 
+def is_follow_target_safe_partial_rotation(
+    *,
+    exit_code: int,
+    summary: dict[str, Any],
+) -> bool:
+    """Permit a new CT only when the failed viewport is proved unchanged/safe."""
+    reason = str(
+        summary.get("follow_stop_reason")
+        or summary.get("follow_session_outcome")
+        or ""
+    ).strip()
+    return bool(
+        int(exit_code) == 0
+        and reason in FOLLOW_TARGET_SAFE_PARTIAL_ROTATION_REASONS
+        and summary.get("target_rotation_safe_after_scroll_failure") is True
+        and summary.get("scroll_failure_surface_ambiguous") is not True
+    )
+
+
 def _run_follow_target_rotation(
     d: u2.Device,
     *,
@@ -566,6 +589,7 @@ def _run_follow_target_rotation(
     exhausted_keys: set[str] = set()
     budget_reached_keys: set[str] = set()
     exhausted_targets: list[dict[str, Any]] = []
+    partial_resumable_targets: list[dict[str, Any]] = []
     attempts: list[dict[str, Any]] = []
     global_follows_completed = 0
     global_follow_goal: int | None = None
@@ -1051,6 +1075,67 @@ def _run_follow_target_rotation(
             )
             break
         if not exhausted:
+            safe_partial_rotation = is_follow_target_safe_partial_rotation(
+                exit_code=exit_code,
+                summary=summary,
+            )
+            if safe_partial_rotation:
+                partial_resumable_targets.append(
+                    {
+                        "target_id": target_id,
+                        "source_profile": source_profile,
+                        "target_index": target_index,
+                        "reason": summary_reason,
+                        "follows_completed_count": target_follows_completed,
+                    }
+                )
+                remaining_safe_targets = [
+                    candidate
+                    for candidate in bounded_targets[attempt_index + 1 :]
+                    if _follow_target_key(candidate) not in exhausted_keys
+                    and _follow_target_key(candidate) not in budget_reached_keys
+                ]
+                within_failure_limit = (
+                    len(partial_resumable_targets)
+                    < FOLLOW_TARGET_MAX_SAFE_PARTIAL_FAILURES_PER_RUN
+                )
+                if remaining_safe_targets and within_failure_limit:
+                    next_target = remaining_safe_targets[0]
+                    next_source_profile = _as_source_profile(
+                        next_target.get("source_profile")
+                    )
+                    log(
+                        "info",
+                        "follow_target_partial_resumable_rotated",
+                        account_id=account_id,
+                        run_id=run_id,
+                        target_id=target_id,
+                        source_profile=source_profile,
+                        next_target_id=_as_target_id(next_target.get("target_id")) or None,
+                        next_source_profile=next_source_profile,
+                        target_index=target_index,
+                        next_target_index=int(next_target.get("target_index") or 0),
+                        reason=summary_reason,
+                        partial_failure_count=len(partial_resumable_targets),
+                        max_partial_failures=FOLLOW_TARGET_MAX_SAFE_PARTIAL_FAILURES_PER_RUN,
+                        global_follows_completed=global_follows_completed,
+                        global_follow_goal=global_follow_goal,
+                    )
+                    continue
+                final_reason = (
+                    "safe_partial_ct_failure_limit_reached"
+                    if not within_failure_limit
+                    else summary_reason
+                )
+                final_summary.update(
+                    {
+                        "follow_session_outcome": "partial_resumable",
+                        "follow_stop_reason": final_reason,
+                        "partial_resumable_targets": list(partial_resumable_targets),
+                        "target_rotation_safe_after_scroll_failure": True,
+                    }
+                )
+                break
             if supabase_mode and exit_code not in (0, 97, 98):
                 _record_follow_target_metric(
                     "runtime_error_non_exhaustion",
@@ -1228,6 +1313,7 @@ def _run_follow_target_rotation(
         "summary": final_summary,
         "attempts": attempts,
         "exhausted_targets": exhausted_targets,
+        "partial_resumable_targets": partial_resumable_targets,
         "all_targets_exhausted": bool(final_summary.get("all_targets_exhausted")),
             "global_follows_completed": global_follows_completed,
             "global_follows_goal_effective": global_follow_goal,
@@ -3489,6 +3575,15 @@ def run_account_session(
             "follow_quota_remaining": follow_quota_remaining,
             "follow_session_outcome": follow_session_outcome or None,
             "follow_stop_reason": follow_stop_reason or None,
+            "target_rotation_safe_after_scroll_failure": follow_engine_summary.get(
+                "target_rotation_safe_after_scroll_failure"
+            ) is True,
+            "scroll_recovery_attempts": int(
+                follow_engine_summary.get("scroll_recovery_attempts") or 0
+            ),
+            "scroll_failure_surface_ambiguous": follow_engine_summary.get(
+                "scroll_failure_surface_ambiguous"
+            ) is True,
             "follow_to_unfollow_handoff_skip_reason": follow_to_unfollow_diagnostic.get(
                 "handoff_skip_reason"
             ),

@@ -31,6 +31,7 @@ from logs import log
 from instagram_list_continuation import (
     InstagramListContinuationSignals,
     InstagramListContinuationState,
+    adaptive_follow_scroll_geometry,
     canonical_follow_scroll_geometry,
     classify_instagram_list_continuation,
     compare_instagram_list_viewports,
@@ -13956,6 +13957,7 @@ def followers_list_continuation_from_hierarchy_xml(
         "loading_indicator": False,
         "primary_row_count": 0,
         "primary_row_ids": [],
+        "primary_row_centers_y": [],
         "viewport_fingerprint": "",
     }
     try:
@@ -14021,11 +14023,14 @@ def followers_list_continuation_from_hierarchy_xml(
     )
 
     primary_rows: list[str] = []
+    primary_row_centers: list[int] = []
     for username, row_y in raw_primary_rows:
         if suggestions_y is not None and row_y is not None and row_y >= suggestions_y:
             continue
         if username not in primary_rows:
             primary_rows.append(username)
+            if row_y is not None:
+                primary_row_centers.append(int(row_y))
     suggestion_follow_rows = 0
     for cta_y in raw_follow_ctas:
         if suggestions_y is not None and cta_y is not None and cta_y > suggestions_y:
@@ -14039,6 +14044,7 @@ def followers_list_continuation_from_hierarchy_xml(
     base["suggestion_follow_rows"] = int(suggestion_follow_rows)
     base["dismiss_controls"] = len(dismiss_y)
     base["primary_row_ids"] = primary_rows
+    base["primary_row_centers_y"] = primary_row_centers
     base["primary_row_count"] = len(primary_rows)
     after_fp = viewport_fingerprint(primary_rows)
     base["viewport_fingerprint"] = after_fp
@@ -31952,6 +31958,7 @@ def _followers_scroll_list_forward(
         "accelerated_skip_streak",
         "soft_initial",
         "soft_retry",
+        "canonical_adaptive",
         "canonical_controlled",
     ):
         profile_req = "default"
@@ -31960,6 +31967,7 @@ def _followers_scroll_list_forward(
     accelerated_skip_streak = profile_req == "accelerated_skip_streak"
     soft_followers_scroll = profile_req in {"soft_initial", "soft_retry", "welcome_soft"}
     canonical_controlled = profile_req == "canonical_controlled"
+    canonical_adaptive = profile_req == "canonical_adaptive"
     exhausted_was = False
     fallback_guard_would_block = False
     permit_reason_snapshot = ""
@@ -32002,191 +32010,224 @@ def _followers_scroll_list_forward(
     _sd("whether_physical_swipe_attempted", True)
     scroll_ok = False
     fallback_fixed_micro_used = False
-    if canonical_controlled:
+    if canonical_controlled or canonical_adaptive:
         started = time.perf_counter()
-        before_surface = followers_list_continuation_from_hierarchy_xml(
-            str(_LAST_FOLLOWERS_DETECT_HIERARCHY_XML or ""),
-            flow="follow",
-        )
-        before_rows = list(before_surface.get("primary_row_ids") or [])
-        before_fp = viewport_fingerprint(before_rows)
-        if before_rows:
+        try:
+            w, h = d.window_size()
+        except Exception:
+            w, h = 1080, 2400
+        current_xml = str(_LAST_FOLLOWERS_DETECT_HIERARCHY_XML or "")
+        short_geometry = canonical_follow_scroll_geometry(w, h)
+        max_forward_attempts = 3 if canonical_adaptive else 1
+        _sd("max_forward_attempts", max_forward_attempts)
+        _sd("short_fallback_preserved", True)
+        _sd("forward_attempts", [])
+        unsafe_anchor_loss = False
+
+        for forward_attempt in range(1, max_forward_attempts + 1):
+            before_surface = followers_list_continuation_from_hierarchy_xml(
+                current_xml,
+                flow="follow",
+            )
+            before_rows = list(before_surface.get("primary_row_ids") or [])
+            before_fp = viewport_fingerprint(before_rows)
+            if forward_attempt == 1 and canonical_adaptive:
+                geometry = adaptive_follow_scroll_geometry(
+                    w,
+                    h,
+                    list(before_surface.get("primary_row_centers_y") or []),
+                )
+                attempt_kind = "adaptive"
+            else:
+                geometry = dict(short_geometry)
+                attempt_kind = "short_fallback" if forward_attempt == 2 else "bounded_short_recovery"
+            if before_rows:
+                _instagram_list_event(
+                    "instagram_list_primary_rows_detected",
+                    flow="follow",
+                    account_id=account_id,
+                    target_id=target_id,
+                    run_id=run_id,
+                    fingerprint_before=before_fp,
+                    visible_primary_row_count=len(before_rows),
+                    scroll_distance=0.0,
+                    reason=f"pre_scroll_primary_viewport_{attempt_kind}",
+                )
             _instagram_list_event(
-                "instagram_list_primary_rows_detected",
+                "instagram_list_scroll_started",
                 flow="follow",
                 account_id=account_id,
                 target_id=target_id,
                 run_id=run_id,
                 fingerprint_before=before_fp,
                 visible_primary_row_count=len(before_rows),
-                scroll_distance=0.0,
-                reason="pre_scroll_primary_viewport",
-            )
-        try:
-            w, h = d.window_size()
-        except Exception:
-            w, h = 1080, 2400
-        geometry = canonical_follow_scroll_geometry(w, h)
-        _instagram_list_event(
-            "instagram_list_scroll_started",
-            flow="follow",
-            account_id=account_id,
-            target_id=target_id,
-            run_id=run_id,
-            fingerprint_before=before_fp,
-            visible_primary_row_count=len(before_rows),
-            scroll_distance=float(geometry["distance_ratio"]),
-            reason="viewport_relative_controlled_swipe",
-        )
-        try:
-            _followers_log_scroll_or_swipe_about_to_run(
-                d,
-                source_function="_followers_scroll_list_forward",
-                reason="canonical_controlled_follow_swipe",
-            )
-            d.swipe(
-                int(geometry["x"]),
-                int(geometry["y_start"]),
-                int(geometry["x"]),
-                int(geometry["y_end"]),
-                float(geometry["duration_s"]),
-            )
-            time.sleep(0.45)
-            scroll_ok = True
-        except Exception:
-            scroll_ok = False
-        after_xml = followers_refresh_detect_hierarchy_cache(d) if scroll_ok else ""
-        after_surface = followers_list_continuation_from_hierarchy_xml(
-            after_xml,
-            flow="follow",
-            scroll_attempted=True,
-            viewport_fingerprint_before=before_fp,
-        )
-        after_rows = list(after_surface.get("primary_row_ids") or [])
-        continuity = compare_instagram_list_viewports(before_rows, after_rows)
-        _sd("viewport_fingerprint_before", continuity.fingerprint_before)
-        _sd("viewport_fingerprint_after", continuity.fingerprint_after)
-        _sd("visible_primary_row_count_before", len(before_rows))
-        _sd("visible_primary_row_count_after", len(after_rows))
-        _sd("overlap_count", continuity.overlap_count)
-        _sd("new_primary_row_count", continuity.new_row_count)
-        _sd("scroll_distance_ratio", geometry["distance_ratio"])
-        _sd("scroll_distance_px", geometry["distance_px"])
-        _sd("viewport_unchanged", continuity.unchanged)
-        _sd("scroll_excessive", continuity.excessive)
-        _sd("depth_advanced", continuity.continuity_proved)
-        if continuity.continuity_proved:
-            _instagram_list_event(
-                "instagram_list_viewport_overlap_verified",
-                flow="follow",
-                account_id=account_id,
-                target_id=target_id,
-                run_id=run_id,
-                fingerprint_before=continuity.fingerprint_before,
-                fingerprint_after=continuity.fingerprint_after,
-                visible_primary_row_count=len(after_rows),
-                overlap_count=continuity.overlap_count,
                 scroll_distance=float(geometry["distance_ratio"]),
-                reason=continuity.reason,
-                elapsed_ms=(time.perf_counter() - started) * 1000.0,
+                reason=f"canonical_{attempt_kind}_attempt_{forward_attempt}",
+                target_new_rows=int(geometry.get("target_new_rows") or 0),
+                median_row_spacing_px=int(geometry.get("median_row_spacing_px") or 0),
             )
-            _instagram_list_event(
-                "instagram_list_scroll_verified",
-                flow="follow",
-                account_id=account_id,
-                target_id=target_id,
-                run_id=run_id,
-                fingerprint_before=continuity.fingerprint_before,
-                fingerprint_after=continuity.fingerprint_after,
-                visible_primary_row_count=len(after_rows),
-                overlap_count=continuity.overlap_count,
-                scroll_distance=float(geometry["distance_ratio"]),
-                reason="next_viewport_continuity_proved",
-                elapsed_ms=(time.perf_counter() - started) * 1000.0,
-            )
-        elif continuity.excessive:
-            _instagram_list_event(
-                "instagram_list_scroll_excessive",
-                flow="follow",
-                account_id=account_id,
-                target_id=target_id,
-                run_id=run_id,
-                fingerprint_before=continuity.fingerprint_before,
-                fingerprint_after=continuity.fingerprint_after,
-                visible_primary_row_count=len(after_rows),
-                overlap_count=0,
-                scroll_distance=float(geometry["distance_ratio"]),
-                reason="no_anchor_overlap_corrective_backstep",
-                elapsed_ms=(time.perf_counter() - started) * 1000.0,
-            )
-            # One bounded backward correction attempts to recover an anchor.  If
-            # continuity is still not proved, the caller receives a safe failure.
+            gesture_ok = False
             try:
-                correction_start = int(h * 0.46)
-                correction_end = int(h * 0.56)
-                d.swipe(int(geometry["x"]), correction_start, int(geometry["x"]), correction_end, 0.28)
-                time.sleep(0.40)
-                corrected_xml = followers_refresh_detect_hierarchy_cache(d)
-                corrected_surface = followers_list_continuation_from_hierarchy_xml(
-                    corrected_xml,
-                    flow="follow",
-                    scroll_attempted=True,
-                    viewport_fingerprint_before=before_fp,
+                _followers_log_scroll_or_swipe_about_to_run(
+                    d,
+                    source_function="_followers_scroll_list_forward",
+                    reason=f"canonical_{attempt_kind}_follow_swipe",
                 )
-                corrected_rows = list(corrected_surface.get("primary_row_ids") or [])
-                corrected = compare_instagram_list_viewports(before_rows, corrected_rows)
-                _sd("corrective_backstep_used", True)
-                _sd("overlap_count", corrected.overlap_count)
-                _sd("viewport_fingerprint_after", corrected.fingerprint_after)
-                _sd("depth_advanced", corrected.continuity_proved)
-                _sd("scroll_excessive", corrected.excessive)
-                scroll_ok = bool(corrected.continuity_proved)
-                if scroll_ok:
-                    _instagram_list_event(
-                        "instagram_list_viewport_overlap_verified",
-                        flow="follow",
-                        account_id=account_id,
-                        target_id=target_id,
-                        run_id=run_id,
-                        fingerprint_before=corrected.fingerprint_before,
-                        fingerprint_after=corrected.fingerprint_after,
-                        visible_primary_row_count=len(corrected_rows),
-                        overlap_count=corrected.overlap_count,
-                        scroll_distance=float(geometry["distance_ratio"]),
-                        reason="overlap_recovered_after_backstep",
-                        elapsed_ms=(time.perf_counter() - started) * 1000.0,
-                    )
-                    _instagram_list_event(
-                        "instagram_list_scroll_verified",
-                        flow="follow",
-                        account_id=account_id,
-                        target_id=target_id,
-                        run_id=run_id,
-                        fingerprint_before=corrected.fingerprint_before,
-                        fingerprint_after=corrected.fingerprint_after,
-                        visible_primary_row_count=len(corrected_rows),
-                        overlap_count=corrected.overlap_count,
-                        scroll_distance=float(geometry["distance_ratio"]),
-                        reason="continuity_recovered_after_backstep",
-                        elapsed_ms=(time.perf_counter() - started) * 1000.0,
-                    )
+                d.swipe(
+                    int(geometry["x"]),
+                    int(geometry["y_start"]),
+                    int(geometry["x"]),
+                    int(geometry["y_end"]),
+                    float(geometry["duration_s"]),
+                )
+                time.sleep(0.45 if forward_attempt < 3 else 0.60)
+                gesture_ok = True
             except Exception:
-                scroll_ok = False
-        elif continuity.unchanged:
-            _sd("failure_reason", "viewport_unchanged")
-            scroll_ok = False
-        else:
-            # An empty primary viewport may expose See more or a boundary; let
-            # the canonical surface classifier resolve it in the next loop.
-            _sd("depth_advanced", False)
-            _sd("surface_state_after", str(after_surface.get("state") or ""))
-            scroll_ok = bool(
-                after_surface.get("state")
-                in {
-                    InstagramListContinuationState.EXPAND_PRIMARY_LIST_AVAILABLE.value,
-                    InstagramListContinuationState.SUGGESTIONS_BOUNDARY_CONFIRMED.value,
-                }
+                gesture_ok = False
+            after_xml = followers_refresh_detect_hierarchy_cache(d) if gesture_ok else ""
+            after_surface = followers_list_continuation_from_hierarchy_xml(
+                after_xml,
+                flow="follow",
+                scroll_attempted=True,
+                viewport_fingerprint_before=before_fp,
             )
+            after_rows = list(after_surface.get("primary_row_ids") or [])
+            continuity = compare_instagram_list_viewports(before_rows, after_rows)
+            attempt_diag = {
+                "attempt": forward_attempt,
+                "kind": attempt_kind,
+                "gesture_ok": gesture_ok,
+                "distance_ratio": geometry["distance_ratio"],
+                "distance_px": geometry["distance_px"],
+                "fingerprint_before": continuity.fingerprint_before,
+                "fingerprint_after": continuity.fingerprint_after,
+                "visible_before": len(before_rows),
+                "visible_after": len(after_rows),
+                "overlap_count": continuity.overlap_count,
+                "new_row_count": continuity.new_row_count,
+                "reason": continuity.reason,
+            }
+            if scroll_diag_out is not None:
+                scroll_diag_out["forward_attempts"].append(attempt_diag)
+            _sd("forward_attempt_count", forward_attempt)
+            _sd("viewport_fingerprint_before", continuity.fingerprint_before)
+            _sd("viewport_fingerprint_after", continuity.fingerprint_after)
+            _sd("visible_primary_row_count_before", len(before_rows))
+            _sd("visible_primary_row_count_after", len(after_rows))
+            _sd("overlap_count", continuity.overlap_count)
+            _sd("new_primary_row_count", continuity.new_row_count)
+            _sd("scroll_distance_ratio", geometry["distance_ratio"])
+            _sd("scroll_distance_px", geometry["distance_px"])
+            _sd("viewport_unchanged", continuity.unchanged)
+            _sd("scroll_excessive", continuity.excessive)
+            _sd("depth_advanced", continuity.continuity_proved)
+            _sd("surface_state_after", str(after_surface.get("state") or ""))
+
+            if continuity.continuity_proved:
+                scroll_ok = True
+                _instagram_list_event(
+                    "instagram_list_viewport_overlap_verified",
+                    flow="follow",
+                    account_id=account_id,
+                    target_id=target_id,
+                    run_id=run_id,
+                    fingerprint_before=continuity.fingerprint_before,
+                    fingerprint_after=continuity.fingerprint_after,
+                    visible_primary_row_count=len(after_rows),
+                    overlap_count=continuity.overlap_count,
+                    scroll_distance=float(geometry["distance_ratio"]),
+                    reason=f"{attempt_kind}_{continuity.reason}",
+                    elapsed_ms=(time.perf_counter() - started) * 1000.0,
+                )
+                break
+
+            safe_surface_state = after_surface.get("state") in {
+                InstagramListContinuationState.EXPAND_PRIMARY_LIST_AVAILABLE.value,
+                InstagramListContinuationState.SUGGESTIONS_BOUNDARY_CONFIRMED.value,
+            }
+            if safe_surface_state:
+                _sd("depth_advanced", False)
+                scroll_ok = True
+                break
+
+            if continuity.excessive:
+                _instagram_list_event(
+                    "instagram_list_scroll_excessive",
+                    flow="follow",
+                    account_id=account_id,
+                    target_id=target_id,
+                    run_id=run_id,
+                    fingerprint_before=continuity.fingerprint_before,
+                    fingerprint_after=continuity.fingerprint_after,
+                    visible_primary_row_count=len(after_rows),
+                    overlap_count=0,
+                    scroll_distance=float(geometry["distance_ratio"]),
+                    reason="no_anchor_overlap_corrective_backstep",
+                    elapsed_ms=(time.perf_counter() - started) * 1000.0,
+                )
+                try:
+                    correction_distance = min(int(h * 0.18), int(geometry["distance_px"]))
+                    correction_start = int(h * 0.38)
+                    correction_end = min(int(h * 0.62), correction_start + correction_distance)
+                    d.swipe(int(geometry["x"]), correction_start, int(geometry["x"]), correction_end, 0.34)
+                    time.sleep(0.45)
+                    corrected_xml = followers_refresh_detect_hierarchy_cache(d)
+                    corrected_surface = followers_list_continuation_from_hierarchy_xml(
+                        corrected_xml,
+                        flow="follow",
+                        scroll_attempted=True,
+                        viewport_fingerprint_before=before_fp,
+                    )
+                    corrected_rows = list(corrected_surface.get("primary_row_ids") or [])
+                    corrected = compare_instagram_list_viewports(before_rows, corrected_rows)
+                    _sd("corrective_backstep_used", True)
+                    _sd("corrective_backstep_reason", corrected.reason)
+                    _sd("viewport_fingerprint_after", corrected.fingerprint_after)
+                    if corrected.continuity_proved:
+                        _sd("overlap_count", corrected.overlap_count)
+                        _sd("new_primary_row_count", corrected.new_row_count)
+                        _sd("depth_advanced", True)
+                        scroll_ok = True
+                        current_xml = corrected_xml
+                        break
+                    if corrected.unchanged:
+                        current_xml = corrected_xml
+                    else:
+                        unsafe_anchor_loss = True
+                        _sd("failure_reason", "anchor_not_recovered_after_excessive_scroll")
+                        break
+                except Exception:
+                    unsafe_anchor_loss = True
+                    _sd("failure_reason", "corrective_backstep_failed")
+                    break
+            elif continuity.unchanged:
+                current_xml = after_xml or current_xml
+                _sd("failure_reason", f"viewport_unchanged_after_{attempt_kind}")
+            else:
+                # A transient empty/ambiguous dump must not consume depth. One
+                # fresh XML-only reprobe may prove that the original anchor is
+                # still intact, in which case the short fallback remains safe.
+                reprobe_xml = followers_refresh_detect_hierarchy_cache(d)
+                reprobe_surface = followers_list_continuation_from_hierarchy_xml(
+                    reprobe_xml,
+                    flow="follow",
+                )
+                reprobe_rows = list(reprobe_surface.get("primary_row_ids") or [])
+                reprobe = compare_instagram_list_viewports(before_rows, reprobe_rows)
+                _sd("ambiguous_reprobe_used", True)
+                _sd("ambiguous_reprobe_reason", reprobe.reason)
+                if reprobe.unchanged:
+                    current_xml = reprobe_xml
+                    _sd("failure_reason", f"ambiguous_reprobe_restored_anchor_after_{attempt_kind}")
+                else:
+                    unsafe_anchor_loss = True
+                    _sd("failure_reason", f"ambiguous_viewport_after_{attempt_kind}")
+                    break
+
+        if not scroll_ok:
+            _sd("unsafe_anchor_loss", unsafe_anchor_loss)
+            if not unsafe_anchor_loss:
+                _sd("failure_reason", "adaptive_short_and_bounded_recovery_exhausted")
     elif micro_reposition:
         w, h = 0, 0
         try:
@@ -32629,6 +32670,7 @@ def scroll_followers_list_forward(
     ``zero_follow_spans_soft`` (exploratory defer after zero blue spans) |
     ``accelerated_skip_streak`` (adaptive V1: faster exit from low-yield visible zone) |
     ``welcome_soft`` (deterministic Golden 0.25-height Welcome scan gesture).
+    ``canonical_adaptive`` (Follow-only measured row cadence, 3 attempts maximum).
     ``canonical_controlled`` (Follow-only viewport-relative gesture with overlap proof).
 
     ``bypass_post_tap_capture_gate`` / ``bypass_scroll_xml_guards`` are narrow escape

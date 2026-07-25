@@ -10003,6 +10003,8 @@ def _run_followers_list_engine_session(
         "exit_code": None,
     }
     target_scan_tracker = _target_rejection_tracker(source_profile_username)
+    scroll_failure_target_rotation_safe = False
+    scroll_failure_recovery_attempts = 0
     ct_checkpoint = _ct_checkpoint_new(
         source_username=source_profile_username,
         source_target_id=str(target_id or ""),
@@ -14688,10 +14690,10 @@ def _run_followers_list_engine_session(
                     except Exception:
                         pass
                 _main_scroll_profile_requested = str(_main_scroll_profile or "")
-                # Every Follow traversal uses the same measured viewport-relative
-                # gesture.  Adaptive policy may still decide *when* to scroll,
-                # but it no longer controls an unbounded RecyclerView amplitude.
-                _main_scroll_profile = "canonical_controlled"
+                # Keep the canonical continuity guard, but pass the measured
+                # adaptive geometry through instead of collapsing every normal
+                # Follow advance to the legacy 0.24-height short gesture.
+                _main_scroll_profile = "canonical_adaptive"
                 try:
                     log(
                         "info",
@@ -14745,6 +14747,14 @@ def _run_followers_list_engine_session(
                 if not _scroll_forward_ok:
                     if _visible_window_scroll_required:
                         _followers_loop_finally_stop = "visible_window_exhausted_scroll_failed"
+                        scroll_failure_recovery_attempts = int(
+                            _main_scroll_diag.get("forward_attempt_count") or 0
+                        )
+                        scroll_failure_target_rotation_safe = not bool(
+                            _main_scroll_diag.get("unsafe_anchor_loss")
+                        ) and str(_main_scroll_diag.get("failure_reason") or "") == (
+                            "adaptive_short_and_bounded_recovery_exhausted"
+                        )
                         visual_loop_state["list_progressive_exploration_exhausted"] = True
                         try:
                             log(
@@ -18498,6 +18508,15 @@ def _run_followers_list_engine_session(
         target_follow_budget_effective=target_follow_budget_effective,
         follow_session_outcome=_followers_sess_outcome,
         follow_stop_reason=str(_followers_loop_finally_stop or stop_final or ""),
+        target_rotation_safe_after_scroll_failure=bool(
+            scroll_failure_target_rotation_safe
+        ),
+        scroll_recovery_attempts=int(scroll_failure_recovery_attempts),
+        scroll_failure_surface_ambiguous=bool(
+            str(_followers_loop_finally_stop or "")
+            == "visible_window_exhausted_scroll_failed"
+            and not scroll_failure_target_rotation_safe
+        ),
         current_target=source_profile_username,
         candidates_not_scanned_due_to_cap=(
             str(_followers_loop_finally_stop or "") == "global_follow_cap_reached"
