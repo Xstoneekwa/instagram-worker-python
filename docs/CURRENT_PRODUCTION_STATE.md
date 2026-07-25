@@ -1,5 +1,17 @@
 # Current Production State
 
+## Golden addendum — T-10 safe skip, Follow 7+1 and V2 natural shadow evidence
+
+The 2026-07-25 intermediate checkpoint records three bounded facts: connected
+and ready accounts are safely skipped by T-10 before any phone action; legacy
+Follow continuation now prefers seven fully visible new rows plus one verified
+overlap while preserving all safe fallbacks; and Mythyl naturally exercised V2
+shadow fail-open with enforce disabled. No physical validation of the new
+scroll geometry belongs to this addendum.
+
+Full evidence and rollback are in
+[the scoped checkpoint](./checkpoints/2026-07-25-t10-follow-scroll-v2-runtime.md).
+
 ## Golden addendum — Follow adaptive scroll startup-safe activation
 
 The `7d2797e` adaptive Follow scroll, bounded recovery and safe CT rotation

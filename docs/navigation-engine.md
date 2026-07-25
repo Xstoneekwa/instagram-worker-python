@@ -46,3 +46,20 @@ Principes alignés avec le moteur :
 ## Règle d’or
 
 **Ne jamais agir sur un écran non confirmé** pour une action critique (follow, ouverture DM, navigation profil→followers, retour CT post-follow, etc.) : au minimum **état nav cohérent** + **signaux corroborants** (détection écran, fingerprint, ou vision selon le flow documenté).
+
+## Contrat Follow 7+1 — 2026-07-25
+
+La continuation legacy de la liste Followers calcule la cadence à partir des
+centres physiques des lignes entièrement visibles. La déduplication d'identité
+reste utilisée pour le fingerprint et la preuve de continuité, mais ne réduit
+plus artificiellement la distance quand deux labels d'accessibilité sont
+tronqués de façon identique. Les lignes partielles en haut ou en bas sont
+exclues du calcul de cadence et des ancres sûres.
+
+Le geste préféré vise sept nouvelles lignes et une ligne de recouvrement
+vérifiée. Un recouvrement précédent supérieur à deux autorise une adaptation
+unique et bornée; un recouvrement de un ou deux conserve la distance. Zéro
+recouvrement reste excessif et interdit toute réutilisation comme ancre. Les
+chemins de sécurité 6+2, 5+3 et le fallback déterministe de 0,24 hauteur restent
+disponibles. Détails et preuve runtime historique :
+[checkpoint T-10 / Follow / V2](./checkpoints/2026-07-25-t10-follow-scroll-v2-runtime.md).

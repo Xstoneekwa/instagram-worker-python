@@ -14725,11 +14725,20 @@ def _run_followers_list_engine_session(
                     account_id=str(account_id or ""),
                     target_id=str(target_id or ""),
                     run_id=str(run_id or ""),
+                    previous_actual_overlap=(
+                        int(target_scan_tracker.get("last_verified_scroll_overlap"))
+                        if target_scan_tracker.get("last_verified_scroll_overlap") is not None
+                        else None
+                    ),
                 )
                 target_scan_tracker["scrolls_attempted"] = int(
                     target_scan_tracker.get("scrolls_attempted") or 0
                 ) + 1
                 target_scan_tracker["last_scroll_index"] = int(scroll_used)
+                if _scroll_forward_ok and bool(_main_scroll_diag.get("depth_advanced")):
+                    _verified_overlap = int(_main_scroll_diag.get("overlap_count") or 0)
+                    if _verified_overlap > 0:
+                        target_scan_tracker["last_verified_scroll_overlap"] = _verified_overlap
                 try:
                     log(
                         "info",

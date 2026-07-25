@@ -13940,6 +13940,7 @@ def followers_list_continuation_from_hierarchy_xml(
     viewport_fingerprint_before: str = "",
     overlap_count: int = 0,
     scroll_excessive: bool = False,
+    viewport_height: int = 0,
 ) -> dict[str, Any]:
     """Adapt an Instagram hierarchy to the shared list-continuation contract."""
     _ = previously_valid_followers_rows  # retained for caller compatibility
@@ -13958,6 +13959,9 @@ def followers_list_continuation_from_hierarchy_xml(
         "primary_row_count": 0,
         "primary_row_ids": [],
         "primary_row_centers_y": [],
+        "fully_visible_primary_row_centers_y": [],
+        "fully_visible_primary_row_count": 0,
+        "partial_primary_row_count": 0,
         "viewport_fingerprint": "",
     }
     try:
@@ -13967,7 +13971,7 @@ def followers_list_continuation_from_hierarchy_xml(
 
     suggestions_y: int | None = None
     see_more_nodes: list[tuple[Any, int | None]] = []
-    raw_primary_rows: list[tuple[str, int | None]] = []
+    raw_primary_rows: list[tuple[str, int | None, dict[str, int] | None]] = []
     raw_follow_ctas: list[int | None] = []
     dismiss_y: list[int | None] = []
     for node in root.iter():
@@ -13994,7 +13998,7 @@ def followers_list_continuation_from_hierarchy_xml(
         if "follow_list_username" in resource_id:
             username = str(text or content_desc).strip().lstrip("@").casefold()
             if username:
-                raw_primary_rows.append((username, node_y))
+                raw_primary_rows.append((username, node_y, _parse_follow_list_xml_bounds(node)))
         if normalized in {"follow", "follow back", "suivre", "suivre en retour"}:
             raw_follow_ctas.append(node_y)
         if (
@@ -14023,14 +14027,29 @@ def followers_list_continuation_from_hierarchy_xml(
     )
 
     primary_rows: list[str] = []
-    primary_row_centers: list[int] = []
-    for username, row_y in raw_primary_rows:
+    physical_row_centers: list[int] = []
+    fully_visible_row_centers: list[int] = []
+    partial_row_count = 0
+    viewport_h = max(0, int(viewport_height or 0))
+    safe_top = int(viewport_h * 0.10) if viewport_h else 0
+    safe_bottom = int(viewport_h * 0.90) if viewport_h else 0
+    for username, row_y, row_bounds in raw_primary_rows:
         if suggestions_y is not None and row_y is not None and row_y >= suggestions_y:
             continue
+        if row_y is not None:
+            physical_row_centers.append(int(row_y))
+            is_full = True
+            if viewport_h and row_bounds:
+                is_full = bool(
+                    int(row_bounds.get("top", 0)) >= safe_top
+                    and int(row_bounds.get("bottom", viewport_h + 1)) <= safe_bottom
+                )
+            if is_full:
+                fully_visible_row_centers.append(int(row_y))
+            else:
+                partial_row_count += 1
         if username not in primary_rows:
             primary_rows.append(username)
-            if row_y is not None:
-                primary_row_centers.append(int(row_y))
     suggestion_follow_rows = 0
     for cta_y in raw_follow_ctas:
         if suggestions_y is not None and cta_y is not None and cta_y > suggestions_y:
@@ -14044,7 +14063,10 @@ def followers_list_continuation_from_hierarchy_xml(
     base["suggestion_follow_rows"] = int(suggestion_follow_rows)
     base["dismiss_controls"] = len(dismiss_y)
     base["primary_row_ids"] = primary_rows
-    base["primary_row_centers_y"] = primary_row_centers
+    base["primary_row_centers_y"] = physical_row_centers
+    base["fully_visible_primary_row_centers_y"] = fully_visible_row_centers
+    base["fully_visible_primary_row_count"] = len(fully_visible_row_centers)
+    base["partial_primary_row_count"] = int(partial_row_count)
     base["primary_row_count"] = len(primary_rows)
     after_fp = viewport_fingerprint(primary_rows)
     base["viewport_fingerprint"] = after_fp
@@ -31921,6 +31943,7 @@ def _followers_scroll_list_forward(
     account_id: str = "",
     target_id: str = "",
     run_id: str = "",
+    previous_actual_overlap: int | None = None,
 ) -> bool:
     global _FOLLOWERS_VISUAL_EXPLORATORY_SCROLL_ONCE
     global _FOLLOWERS_VISUAL_EXPLORATORY_SCROLL_REASON
@@ -32028,6 +32051,7 @@ def _followers_scroll_list_forward(
             before_surface = followers_list_continuation_from_hierarchy_xml(
                 current_xml,
                 flow="follow",
+                viewport_height=h,
             )
             before_rows = list(before_surface.get("primary_row_ids") or [])
             before_fp = viewport_fingerprint(before_rows)
@@ -32035,7 +32059,9 @@ def _followers_scroll_list_forward(
                 geometry = adaptive_follow_scroll_geometry(
                     w,
                     h,
-                    list(before_surface.get("primary_row_centers_y") or []),
+                    list(before_surface.get("fully_visible_primary_row_centers_y") or []),
+                    previous_actual_overlap=previous_actual_overlap,
+                    partial_row_count=int(before_surface.get("partial_primary_row_count") or 0),
                 )
                 attempt_kind = "adaptive"
             else:
@@ -32064,7 +32090,15 @@ def _followers_scroll_list_forward(
                 scroll_distance=float(geometry["distance_ratio"]),
                 reason=f"canonical_{attempt_kind}_attempt_{forward_attempt}",
                 target_new_rows=int(geometry.get("target_new_rows") or 0),
+                target_overlap_rows=int(geometry.get("target_overlap_rows") or 0),
+                fully_visible_count=int(before_surface.get("fully_visible_primary_row_count") or 0),
+                partial_row_count=int(before_surface.get("partial_primary_row_count") or 0),
                 median_row_spacing_px=int(geometry.get("median_row_spacing_px") or 0),
+                requested_ratio=float(geometry.get("distance_ratio") or 0.0),
+                effective_ratio=float(geometry.get("distance_ratio") or 0.0),
+                adaptive_adjustment_px=int(geometry.get("adaptive_adjustment_px") or 0),
+                adaptive_adjustment=str(geometry.get("adaptive_adjustment_reason") or ""),
+                fallback_reason=str(geometry.get("fallback_reason") or ""),
             )
             gesture_ok = False
             try:
@@ -32090,6 +32124,7 @@ def _followers_scroll_list_forward(
                 flow="follow",
                 scroll_attempted=True,
                 viewport_fingerprint_before=before_fp,
+                viewport_height=h,
             )
             after_rows = list(after_surface.get("primary_row_ids") or [])
             continuity = compare_instagram_list_viewports(before_rows, after_rows)
@@ -32103,6 +32138,10 @@ def _followers_scroll_list_forward(
                 "fingerprint_after": continuity.fingerprint_after,
                 "visible_before": len(before_rows),
                 "visible_after": len(after_rows),
+                "fully_visible_before": int(before_surface.get("fully_visible_primary_row_count") or 0),
+                "fully_visible_after": int(after_surface.get("fully_visible_primary_row_count") or 0),
+                "partial_before": int(before_surface.get("partial_primary_row_count") or 0),
+                "partial_after": int(after_surface.get("partial_primary_row_count") or 0),
                 "overlap_count": continuity.overlap_count,
                 "new_row_count": continuity.new_row_count,
                 "reason": continuity.reason,
@@ -32114,6 +32153,15 @@ def _followers_scroll_list_forward(
             _sd("viewport_fingerprint_after", continuity.fingerprint_after)
             _sd("visible_primary_row_count_before", len(before_rows))
             _sd("visible_primary_row_count_after", len(after_rows))
+            _sd("fully_visible_count", int(before_surface.get("fully_visible_primary_row_count") or 0))
+            _sd("fully_visible_count_after", int(after_surface.get("fully_visible_primary_row_count") or 0))
+            _sd("partial_row_count", int(before_surface.get("partial_primary_row_count") or 0))
+            _sd("partial_row_count_after", int(after_surface.get("partial_primary_row_count") or 0))
+            _sd("target_new_rows", int(geometry.get("target_new_rows") or 0))
+            _sd("target_overlap", int(geometry.get("target_overlap_rows") or 0))
+            _sd("adaptive_adjustment", str(geometry.get("adaptive_adjustment_reason") or ""))
+            _sd("adaptive_adjustment_px", int(geometry.get("adaptive_adjustment_px") or 0))
+            _sd("fallback_reason", str(geometry.get("fallback_reason") or ""))
             _sd("overlap_count", continuity.overlap_count)
             _sd("new_primary_row_count", continuity.new_row_count)
             _sd("scroll_distance_ratio", geometry["distance_ratio"])
@@ -32138,6 +32186,14 @@ def _followers_scroll_list_forward(
                     scroll_distance=float(geometry["distance_ratio"]),
                     reason=f"{attempt_kind}_{continuity.reason}",
                     elapsed_ms=(time.perf_counter() - started) * 1000.0,
+                    fully_visible_count=int(after_surface.get("fully_visible_primary_row_count") or 0),
+                    partial_row_count=int(after_surface.get("partial_primary_row_count") or 0),
+                    actual_new_rows=int(continuity.new_row_count),
+                    actual_overlap=int(continuity.overlap_count),
+                    anchor_verified=bool(continuity.overlap_count > 0),
+                    continuity_result=str(continuity.reason),
+                    adaptive_adjustment=str(geometry.get("adaptive_adjustment_reason") or ""),
+                    fallback_reason=str(geometry.get("fallback_reason") or ""),
                 )
                 break
 
@@ -32177,6 +32233,7 @@ def _followers_scroll_list_forward(
                         flow="follow",
                         scroll_attempted=True,
                         viewport_fingerprint_before=before_fp,
+                        viewport_height=h,
                     )
                     corrected_rows = list(corrected_surface.get("primary_row_ids") or [])
                     corrected = compare_instagram_list_viewports(before_rows, corrected_rows)
@@ -32211,6 +32268,7 @@ def _followers_scroll_list_forward(
                 reprobe_surface = followers_list_continuation_from_hierarchy_xml(
                     reprobe_xml,
                     flow="follow",
+                    viewport_height=h,
                 )
                 reprobe_rows = list(reprobe_surface.get("primary_row_ids") or [])
                 reprobe = compare_instagram_list_viewports(before_rows, reprobe_rows)
@@ -32663,6 +32721,7 @@ def scroll_followers_list_forward(
     account_id: str = "",
     target_id: str = "",
     run_id: str = "",
+    previous_actual_overlap: int | None = None,
 ) -> bool:
     """Bounded scroll on the followers RecyclerView (or fallback swipe).
 
@@ -32690,6 +32749,7 @@ def scroll_followers_list_forward(
         account_id=account_id,
         target_id=target_id,
         run_id=run_id,
+        previous_actual_overlap=previous_actual_overlap,
     )
 
 

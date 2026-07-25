@@ -139,12 +139,19 @@ def adaptive_follow_scroll_geometry(
     width: int,
     height: int,
     row_centers_y: Sequence[int],
+    *,
+    previous_actual_overlap: int | None = None,
+    partial_row_count: int = 0,
 ) -> dict[str, int | float | bool]:
     """Compute one soft Follow gesture from the measured visible row cadence.
 
     The legacy 0.24-height gesture remains the deterministic fallback.  A normal
-    traversal aims to retain the last two visible rows as positional anchors,
-    while never exceeding the already validated 0.78 -> 0.22 safe band.
+    traversal aims for seven new fully visible rows and one positional anchor.
+    ``row_centers_y`` is deliberately the physical full-row cadence, not the
+    de-duplicated identity list: truncated accessibility labels can otherwise
+    make two distinct rows look identical and shorten the gesture.  A previous
+    normal overlap above two adds at most half one measured row, while never
+    exceeding the already validated 0.78 -> 0.22 safe band.
     """
     w = max(1, int(width or 0))
     h = max(1, int(height or 0))
@@ -169,18 +176,38 @@ def adaptive_follow_scroll_geometry(
             "median_row_spacing_px": 0,
             "target_new_rows": 0,
             "target_overlap_rows": 0,
+            "partial_row_count": max(0, int(partial_row_count or 0)),
+            "adaptive_adjustment_px": 0,
+            "adaptive_adjustment_reason": "insufficient_measured_rows",
             "fallback_reason": "insufficient_measured_rows",
         }
 
     median_spacing = max(1, int(round(float(statistics.median(positive_gaps)))))
     visible_count = len(centers)
-    target_new_rows = min(7, max(1, visible_count - 2))
+    target_new_rows = min(7, max(1, visible_count - 1))
     target_overlap_rows = max(1, visible_count - target_new_rows)
     y_start = int(h * 0.78)
     safe_y_end = int(h * 0.22)
     min_distance = int(h * 0.24)
-    max_distance = max(min_distance, y_start - safe_y_end)
-    desired_distance = median_spacing * target_new_rows
+    max_distance = max(
+        min_distance,
+        min(int(h * 0.56), y_start - safe_y_end),
+    )
+    adaptive_adjustment_px = 0
+    adaptive_adjustment_reason = "previous_overlap_not_available"
+    if previous_actual_overlap is not None:
+        previous_overlap = max(0, int(previous_actual_overlap))
+        if previous_overlap > 2:
+            adaptive_adjustment_px = min(
+                max(1, median_spacing // 2),
+                max(1, int(h * 0.04)),
+            )
+            adaptive_adjustment_reason = "previous_overlap_above_two_increase_bounded"
+        elif previous_overlap in (1, 2):
+            adaptive_adjustment_reason = "previous_overlap_safe_keep_distance"
+        else:
+            adaptive_adjustment_reason = "previous_zero_overlap_not_reusable"
+    desired_distance = median_spacing * target_new_rows + adaptive_adjustment_px
     distance_px = max(min_distance, min(max_distance, desired_distance))
     y_end = max(safe_y_end, y_start - distance_px)
     distance_px = y_start - y_end
@@ -199,6 +226,9 @@ def adaptive_follow_scroll_geometry(
         "median_row_spacing_px": median_spacing,
         "target_new_rows": target_new_rows,
         "target_overlap_rows": target_overlap_rows,
+        "partial_row_count": max(0, int(partial_row_count or 0)),
+        "adaptive_adjustment_px": adaptive_adjustment_px,
+        "adaptive_adjustment_reason": adaptive_adjustment_reason,
         "fallback_reason": "",
     }
 

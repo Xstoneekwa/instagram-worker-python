@@ -1,5 +1,16 @@
 # Dernière session dev — état du projet (mémoire courte)
 
+## T-10 + Follow 7+1 + V2 shadow runtime — 2026-07-25
+
+Natural Loriele and Mythyl evidence isolated the legacy Follow scroll issue to
+physical row cadence being shortened by identity deduplication and partial
+rows. The scoped patch prefers 7+1, preserves every Golden fallback and does
+not touch Unfollow or Auto Login 07ee. T-10 needs only its two production
+boolean values corrected; connected+ready remains a safe no-phone skip. Mythyl
+certified V2 shadow execution and fail-open behavior with enforce false, but
+lease expiry prevented persisted depth. See
+[the checkpoint](./checkpoints/2026-07-25-t10-follow-scroll-v2-runtime.md).
+
 ## T-10 preflight + default Follow-source contract — 2026-07-24
 
 The missing Vercel registration for the existing preflight cron is restored backend-side. The Worker bridge for historical 07ee performs no new UI action: after a successful publish it rereads the backend ready state and reuses the canonical create-only `30/4` Follow-source hook. See [the checkpoint addendum](./checkpoints/2026-07-24-t10-preflight-follow-source-defaults.md).

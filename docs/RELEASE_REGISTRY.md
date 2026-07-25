@@ -1,5 +1,19 @@
 # Release Registry
 
+## T10_FOLLOW_SCROLL_7_PLUS_1_V2_RUNTIME_2026-07-25
+
+Parent Worker runtime: `d0910d79538fd23cc1d53f0f00367194a8dded6b`.
+The scoped release changes only legacy Follow continuation geometry and its
+telemetry: seven fully visible new rows plus one verified overlap is preferred,
+while 6+2, 5+3, the 0.24-height fallback and zero-overlap refusal remain
+authoritative safety paths. T-10 requires environment correction but no code
+change. Target Followers V2 remains Mythyl-only shadow, enforce false, and its
+natural observation failed open after lease expiry.
+
+The final commit, immutable release, active symlink, backend deployment and
+official BotApp package are rollout evidence. See
+[the scoped checkpoint](./checkpoints/2026-07-25-t10-follow-scroll-v2-runtime.md).
+
 ## FOLLOW_ADAPTIVE_SCROLL_STARTUP_GUARD_V1_2026-07-25
 
 Parent checkpoint: `7d2797eb72bbc3432415bd9a3eccc907f3e053b0`. The

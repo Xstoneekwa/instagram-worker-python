@@ -300,10 +300,10 @@ class InstagramListContinuationContractTests(unittest.TestCase):
             [300, 420, 540, 660, 780, 900, 1020, 1140],
         )
         self.assertTrue(adaptive["adaptive"])
-        self.assertEqual(adaptive["target_new_rows"], 6)
-        self.assertEqual(adaptive["target_overlap_rows"], 2)
+        self.assertEqual(adaptive["target_new_rows"], 7)
+        self.assertEqual(adaptive["target_overlap_rows"], 1)
         self.assertEqual(adaptive["median_row_spacing_px"], 120)
-        self.assertAlmostEqual(float(adaptive["distance_ratio"]), 0.30)
+        self.assertAlmostEqual(float(adaptive["distance_ratio"]), 0.35)
         source = inspect.getsource(runner._run_followers_list_engine_session)
         main_scroll_handoff = source.split("_main_scroll_profile_requested", 1)[1][:900]
         self.assertIn('_main_scroll_profile = "canonical_adaptive"', main_scroll_handoff)
@@ -409,11 +409,11 @@ class InstagramListContinuationContractTests(unittest.TestCase):
         )
         self.assertEqual(out["primary_row_centers_y"], [285 + 120 * idx for idx in range(8)])
 
-    def test_29_adaptive_scroll_validates_six_new_rows_with_two_anchors(self) -> None:
+    def test_29_adaptive_scroll_targets_seven_new_rows_with_one_anchor(self) -> None:
         before = _surface(rows=[(f"row_{idx}", "Following") for idx in range(8)])
         after = _surface(
-            rows=[("row_6", "Following"), ("row_7", "Following")]
-            + [(f"row_{idx}", "Follow") for idx in range(8, 14)]
+            rows=[("row_7", "Following")]
+            + [(f"row_{idx}", "Follow") for idx in range(8, 15)]
         )
         nav._followers_store_detect_hierarchy_xml(before)
         device = _FakeScrollDevice()
@@ -432,8 +432,12 @@ class InstagramListContinuationContractTests(unittest.TestCase):
             )
         self.assertTrue(ok)
         self.assertEqual(diag["forward_attempt_count"], 1)
-        self.assertEqual(diag["overlap_count"], 2)
-        self.assertEqual(diag["new_primary_row_count"], 6)
+        self.assertEqual(diag["overlap_count"], 1)
+        self.assertEqual(diag["new_primary_row_count"], 7)
+        self.assertEqual(diag["target_new_rows"], 7)
+        self.assertEqual(diag["target_overlap"], 1)
+        self.assertEqual(diag["fully_visible_count"], 8)
+        self.assertEqual(diag["partial_row_count"], 0)
         self.assertNotEqual(diag["scroll_distance_ratio"], 0.24)
 
     def test_30_adaptive_failure_runs_short_fallback_and_reprobes(self) -> None:
@@ -525,7 +529,101 @@ class InstagramListContinuationContractTests(unittest.TestCase):
         self.assertEqual(result["global_follows_completed"], 40)
         self.assertEqual(len(result["partial_resumable_targets"]), 1)
 
-    def test_33_ambiguous_scroll_failure_stops_global_rotation(self) -> None:
+    def test_33_duplicate_accessibility_labels_do_not_shorten_geometry(self) -> None:
+        xml = _surface(
+            rows=[
+                ("row_0", "Following"),
+                ("same_truncated_label", "Following"),
+                ("same_truncated_label", "Following"),
+                ("row_3", "Follow"),
+                ("row_4", "Follow"),
+                ("row_5", "Follow"),
+                ("row_6", "Follow"),
+                ("row_7", "Follow"),
+            ]
+        )
+        out = nav.followers_list_continuation_from_hierarchy_xml(
+            xml,
+            viewport_height=2400,
+        )
+        self.assertEqual(out["primary_row_count"], 7)
+        self.assertEqual(out["fully_visible_primary_row_count"], 8)
+        geometry = adaptive_follow_scroll_geometry(
+            1080,
+            2400,
+            out["fully_visible_primary_row_centers_y"],
+        )
+        self.assertEqual(geometry["target_new_rows"], 7)
+        self.assertEqual(geometry["target_overlap_rows"], 1)
+
+    def test_34_partial_bottom_row_is_excluded_from_safe_geometry(self) -> None:
+        xml = _surface(rows=[(f"row_{idx}", "Follow") for idx in range(9)])
+        xml = xml.replace(
+            'bounds="[120,1220][520,1270]"',
+            'bounds="[120,2180][520,2230]"',
+        ).replace(
+            'bounds="[720,1220][1030,1290]"',
+            'bounds="[720,2180][1030,2250]"',
+        )
+        out = nav.followers_list_continuation_from_hierarchy_xml(
+            xml,
+            viewport_height=2400,
+        )
+        self.assertEqual(out["primary_row_count"], 9)
+        self.assertEqual(out["fully_visible_primary_row_count"], 8)
+        self.assertEqual(out["partial_primary_row_count"], 1)
+        geometry = adaptive_follow_scroll_geometry(
+            1080,
+            2400,
+            out["fully_visible_primary_row_centers_y"],
+            partial_row_count=out["partial_primary_row_count"],
+        )
+        self.assertEqual(geometry["target_new_rows"], 7)
+        self.assertEqual(geometry["target_overlap_rows"], 1)
+        self.assertEqual(geometry["partial_row_count"], 1)
+
+    def test_35_overlap_above_two_increases_next_gesture_once_and_bounded(self) -> None:
+        centers = [300, 450, 600, 750, 900, 1050, 1200, 1350]
+        baseline = adaptive_follow_scroll_geometry(1080, 2400, centers)
+        overlap_two = adaptive_follow_scroll_geometry(
+            1080,
+            2400,
+            centers,
+            previous_actual_overlap=2,
+        )
+        overlap_three = adaptive_follow_scroll_geometry(
+            1080,
+            2400,
+            centers,
+            previous_actual_overlap=3,
+        )
+        self.assertEqual(overlap_two["distance_px"], baseline["distance_px"])
+        self.assertGreater(overlap_three["distance_px"], baseline["distance_px"])
+        self.assertLessEqual(overlap_three["distance_px"], int(2400 * 0.56))
+        self.assertEqual(
+            overlap_three["adaptive_adjustment_reason"],
+            "previous_overlap_above_two_increase_bounded",
+        )
+
+    def test_36_zero_overlap_remains_excessive_and_is_not_reusable(self) -> None:
+        continuity = compare_instagram_list_viewports(
+            [f"row_{idx}" for idx in range(8)],
+            [f"row_{idx}" for idx in range(8, 16)],
+        )
+        self.assertTrue(continuity.excessive)
+        self.assertFalse(continuity.continuity_proved)
+        geometry = adaptive_follow_scroll_geometry(
+            1080,
+            2400,
+            [300, 450, 600, 750, 900, 1050, 1200, 1350],
+            previous_actual_overlap=0,
+        )
+        self.assertEqual(
+            geometry["adaptive_adjustment_reason"],
+            "previous_zero_overlap_not_reusable",
+        )
+
+    def test_37_ambiguous_scroll_failure_stops_global_rotation(self) -> None:
         engine = _FakeFollowersEngine([(0, {
             "follows_completed_count": 17,
             "follows_goal_effective": 40,
@@ -545,7 +643,7 @@ class InstagramListContinuationContractTests(unittest.TestCase):
         self.assertEqual(len(engine.calls), 1)
         self.assertEqual(result["partial_resumable_targets"], [])
 
-    def test_34_safe_partial_rotation_stops_after_two_failed_cts(self) -> None:
+    def test_38_safe_partial_rotation_stops_after_two_failed_cts(self) -> None:
         safe_failure = {
             "follows_completed_count": 1,
             "follows_goal_effective": 40,

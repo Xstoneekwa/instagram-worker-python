@@ -94,6 +94,13 @@ remains disabled.
 ## Handover and known gaps
 
 This is an intermediate production checkpoint, not the final Frontend/Stripe
-handover. V2 has no physical shadow-run certification yet, no latency evidence
-from a natural Mythyl run, and no authorization for enforce. Those remain gated
-by a separate Liam GO.
+handover. A natural Mythyl run on 2026-07-25 certified that the UUID gate,
+checkpoint load, plan build, lease claim, redacted events and fail-open legacy
+authority execute in production. Two checkpoints and two `claimed` events were
+persisted at depth zero. Six bounded commit attempts conflicted with
+`lease_expired`; no depth advance was persisted, and legacy Follow continued to
+its natural cap. All other accounts had zero V2 checkpoint and event for the
+observation. Enforce remains false and is not authorized. Follow-up work may
+investigate lease duration separately, but this checkpoint does not patch V2.
+
+Evidence: [2026-07-25 scoped checkpoint](./checkpoints/2026-07-25-t10-follow-scroll-v2-runtime.md).
