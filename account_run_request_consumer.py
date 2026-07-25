@@ -39,7 +39,11 @@ from account_run_control import (
 from auto_login_failure_contract import normalize_auto_login_failure
 from assignment_dispatch_resolver import resolve_account_assignment_runtime_context
 from account_commercial_policy import evaluate_queued_run_commercial_policy, sensitive_log_fields
-from auto_restart_dispatcher_tick import run_auto_restart_dispatcher_tick, should_run_auto_restart_tick
+from auto_restart_dispatcher_tick import (
+    consume_auto_restart_startup_tick_skip_once,
+    run_auto_restart_dispatcher_tick,
+    should_run_auto_restart_tick,
+)
 from auto_restart_device_lock import acquire_device_lock, release_device_lock, release_device_lock_for_request, renew_device_lock, transfer_device_lock
 from auto_restart_runtime import (
     is_auto_restart_request,
@@ -2613,6 +2617,39 @@ def _submit_dispatch_task_if_capacity(
     return True
 
 
+def initialize_auto_restart_tick_state(
+    *,
+    worker_id: str,
+    now_monotonic: float | None = None,
+) -> float:
+    """Return the initial cadence marker after consuming any one-shot guard."""
+
+    startup_tick_guard = consume_auto_restart_startup_tick_skip_once()
+    if startup_tick_guard.get("consumed"):
+        initial_tick_monotonic = (
+            now_monotonic if now_monotonic is not None else time.monotonic()
+        )
+        log(
+            "info",
+            "auto_restart_startup_tick_skipped",
+            worker_id=worker_id,
+            one_shot=True,
+            token_consumed=True,
+            token_cleanup_ok=bool(startup_tick_guard.get("cleanup_ok")),
+        )
+        return initial_tick_monotonic
+
+    guard_reason = str(startup_tick_guard.get("reason") or "")
+    if guard_reason not in {"guard_absent", "guard_not_configured"}:
+        log(
+            "warning",
+            "auto_restart_startup_tick_skip_guard_invalid",
+            worker_id=worker_id,
+            reason=guard_reason,
+        )
+    return 0.0
+
+
 def run_forever(cfg: DispatcherConfig | None = None) -> int:
     cfg = cfg or load_dispatcher_config()
     if not cfg.enabled:
@@ -2672,7 +2709,7 @@ def run_forever(cfg: DispatcherConfig | None = None) -> int:
     signal.signal(signal.SIGTERM, _handle_signal)
 
     last_heartbeat = 0.0
-    last_auto_restart_tick = 0.0
+    last_auto_restart_tick = initialize_auto_restart_tick_state(worker_id=cfg.worker_id)
     last_loop_error_key = ""
     last_loop_error_logged_at = 0.0
     consecutive_loop_errors = 0

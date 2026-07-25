@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import tempfile
 import unittest
 import urllib.error
 from unittest import mock
@@ -31,6 +32,53 @@ class AutoRestartDispatcherTickTests(unittest.TestCase):
                 now_monotonic=160.0,
             )
         )
+
+    def test_startup_skip_guard_absent_preserves_historical_startup_tick(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            token_path = os.path.join(tmp, "startup-skip.once")
+            result = tick.consume_auto_restart_startup_tick_skip_once(token_path)
+        self.assertFalse(result["consumed"])
+        self.assertEqual(result["reason"], "guard_absent")
+        self.assertTrue(
+            tick.should_run_auto_restart_tick(
+                last_tick_monotonic=0.0,
+                now_monotonic=100.0,
+            )
+        )
+
+    def test_startup_skip_guard_is_consumed_atomically_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            token_path = os.path.join(tmp, "startup-skip.once")
+            with open(token_path, "w", encoding="utf-8") as handle:
+                handle.write("phonefarm-auto-restart-startup-skip-v1\n")
+            first = tick.consume_auto_restart_startup_tick_skip_once(token_path)
+            second = tick.consume_auto_restart_startup_tick_skip_once(token_path)
+            leftovers = [name for name in os.listdir(tmp) if ".consumed." in name]
+        self.assertTrue(first["consumed"])
+        self.assertTrue(first["cleanup_ok"])
+        self.assertFalse(second["consumed"])
+        self.assertEqual(second["reason"], "guard_absent")
+        self.assertEqual(leftovers, [])
+
+    def test_consumed_guard_delays_only_initial_tick(self) -> None:
+        startup_monotonic = 100.0
+        self.assertFalse(
+            tick.should_run_auto_restart_tick(
+                last_tick_monotonic=startup_monotonic,
+                now_monotonic=159.0,
+            )
+        )
+        self.assertTrue(
+            tick.should_run_auto_restart_tick(
+                last_tick_monotonic=startup_monotonic,
+                now_monotonic=160.0,
+            )
+        )
+
+    def test_invalid_relative_guard_path_preserves_historical_behavior(self) -> None:
+        result = tick.consume_auto_restart_startup_tick_skip_once("relative-token.once")
+        self.assertFalse(result["consumed"])
+        self.assertEqual(result["reason"], "guard_path_not_absolute")
 
     def test_missing_token_skips_without_http(self) -> None:
         with mock.patch.dict(

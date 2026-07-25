@@ -1,5 +1,21 @@
 # Release Registry
 
+## FOLLOW_ADAPTIVE_SCROLL_STARTUP_GUARD_V1_2026-07-25
+
+Parent checkpoint: `7d2797eb72bbc3432415bd9a3eccc907f3e053b0`. The
+release containing this registry entry adds only the deployment-time,
+atomically consumed Auto Restart startup-tick guard above the already validated
+adaptive Follow scroll and safe CT recovery patch.
+
+Immutable release name:
+`follow-adaptive-scroll-startup-guard-v1-20260725`. Normal Auto Restart remains
+enabled; the token skips only the first embedded tick of the one controlled
+dispatcher restart. No physical run or phone validation belongs to this
+checkpoint. The full final commit, active symlink and dispatcher PID are rollout
+evidence and must be recorded in the operator report.
+
+Runbook and rollback: [Run Control production](./run-control-production.md#deployment-only-startup-tick-guard).
+
 ## TARGET_FOLLOWERS_PROGRESSIVE_RESUME_V2_2026-07-24
 
 Baseline: `d60573601174d4983b66582ada2cc079da934a46` on the Golden production

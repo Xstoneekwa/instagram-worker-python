@@ -11,6 +11,7 @@ LOCK_DIR="$RUN_DIR/dispatcher.lock"
 LOCK_OWNER_FILE="$LOCK_DIR/owner.pid"
 PID_FILE="$RUN_DIR/dispatcher.pid"
 PAUSE_FILE="$RUN_DIR/paused"
+AUTO_RESTART_STARTUP_SKIP_ONCE_FILE="${AUTO_RESTART_SKIP_STARTUP_TICK_ONCE_FILE:-$RUN_DIR/auto-restart-skip-startup-tick.once}"
 PLIST_SOURCE="$ROOT_DIR/ops/launchd/com.boost.phonefarm.dispatcher.plist"
 PLIST_TARGET="$HOME/Library/LaunchAgents/com.boost.phonefarm.dispatcher.plist"
 LAUNCHD_LABEL="com.boost.phonefarm.dispatcher"
@@ -74,6 +75,7 @@ export RUN_CONTROL_DISPATCHER_HEALTH_ONLY="${RUN_CONTROL_DISPATCHER_HEALTH_ONLY:
 export RUN_CONTROL_DISPATCHER_LAUNCH_ENABLED="${RUN_CONTROL_DISPATCHER_LAUNCH_ENABLED:-true}"
 export RUN_CONTROL_DISPATCHER_ALLOW_EXISTING_QUEUE="${RUN_CONTROL_DISPATCHER_ALLOW_EXISTING_QUEUE:-false}"
 export RUN_CONTROL_DISPATCHER_STOP_TIMEOUT_SECONDS="${RUN_CONTROL_DISPATCHER_STOP_TIMEOUT_SECONDS:-15}"
+export AUTO_RESTART_SKIP_STARTUP_TICK_ONCE_FILE="$AUTO_RESTART_STARTUP_SKIP_ONCE_FILE"
 
 if [[ -z "${RUN_CONTROL_DISPATCHER_WORKER_ID:-}" ]]; then
   HOST_NAME="$(hostname -s 2>/dev/null || hostname)"
@@ -534,6 +536,18 @@ _start_foreground() {
   return "$consumer_exit"
 }
 
+_prepare_auto_restart_startup_skip_once() {
+  local token_dir token_tmp
+  token_dir="$(dirname "$AUTO_RESTART_STARTUP_SKIP_ONCE_FILE")"
+  mkdir -p "$token_dir"
+  token_tmp="${AUTO_RESTART_STARTUP_SKIP_ONCE_FILE}.prepare.$$"
+  umask 077
+  printf '%s\n' 'phonefarm-auto-restart-startup-skip-v1' > "$token_tmp"
+  chmod 600 "$token_tmp"
+  mv -f "$token_tmp" "$AUTO_RESTART_STARTUP_SKIP_ONCE_FILE"
+  echo "auto_restart_startup_tick_skip_once_prepared"
+}
+
 usage() {
   cat <<'EOF'
 Usage: scripts/run_control_dispatcher_service.sh <command>
@@ -547,6 +561,8 @@ Commands:
   pause       Unload LaunchAgent and stop process (no auto-restart until resume)
   resume      Reload LaunchAgent after pause (idempotent when already healthy)
   restart     Stop then kickstart the LaunchAgent (clears pause)
+  prepare-auto-restart-startup-skip
+              Arm one atomic startup-only Auto Restart tick skip
   fix-duplicate Kill extra consumer processes and restart cleanly
   install     Install/load the user LaunchAgent
   launchd     Print launchd status for the dispatcher
@@ -673,6 +689,9 @@ case "$cmd" in
     fi
     launchctl kickstart -k "gui/$(id -u)/$LAUNCHD_LABEL" 2>/dev/null || true
     echo "dispatcher_restart_requested label=$LAUNCHD_LABEL"
+    ;;
+  prepare-auto-restart-startup-skip)
+    _prepare_auto_restart_startup_skip_once
     ;;
   fix-duplicate)
     rm -f "$PAUSE_FILE"

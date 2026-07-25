@@ -330,6 +330,37 @@ The backend route owns account selection, schedule windows, commercial gates and
 `manual_only` exclusion. Never modify caps, schedules, packages or account
 settings to force a scheduler smoke test.
 
+### Deployment-only startup tick guard
+
+`last_auto_restart_tick` historically starts at zero, so the first dispatcher
+loop is immediately eligible to call the backend tick. This opportunistic call
+is not required for heartbeat publication, queue claims or dispatcher health.
+Normal embedded ticks remain limited by the local one-minute cadence while the
+backend owns its production bucket and eligibility rules.
+
+For a release switch that must not trigger that first call, arm exactly one
+local token before restarting:
+
+```bash
+/Users/admin/phonefarm-worker-current/scripts/run_control_dispatcher_service.sh \
+  prepare-auto-restart-startup-skip
+```
+
+The wrapper creates
+`$RUN_CONTROL_DISPATCHER_RUN_DIR/auto-restart-skip-startup-tick.once` with mode
+`0600` using an atomic rename. On the next dispatcher startup the consumer
+atomically renames and removes it, logs `auto_restart_startup_tick_skipped`, and
+initializes the cadence marker to the current monotonic time. Candidate
+selection and the backend route are not called for that startup tick. The file
+must be absent after startup; the next natural tick becomes eligible after the
+normal local interval. A later restart without a token restores the historical
+immediate-tick behavior.
+
+An absent token is the normal steady state. A relative or non-regular token is
+rejected and logged; it never becomes a permanent Auto Restart disable. The
+mechanism does not change global settings, account eligibility, idempotency,
+cooldown, restart counters or V2 enforcement.
+
 ## Release And Rollback
 
 Release flow:
@@ -350,6 +381,13 @@ Rollback is the same symlink operation in reverse: repoint
 affected LaunchAgents. Roll back immediately if any service starts from the
 legacy checkout, reports `runtime_root_mismatch`, fails to publish heartbeat, or
 BotApp reports a contradictory runtime root.
+
+On a rollback that also must not enqueue Auto Restart work, first run
+`prepare-auto-restart-startup-skip` from the currently active release, verify the
+token exists, atomically repoint the symlink with BSD `ln -sfn` through a
+temporary sibling link followed by `mv -h`, then restart the dispatcher once.
+Verify the skip log, token absence, one dispatcher PID and zero new requests,
+runs and device locks.
 
 ### Mandatory 12-minute stability validation
 

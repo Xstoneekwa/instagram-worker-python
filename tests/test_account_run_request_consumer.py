@@ -15,6 +15,83 @@ TEST_RUN_ID = "00000000-0000-4000-8000-000000000301"
 
 
 class AccountRunRequestConsumerTest(unittest.TestCase):
+    def test_startup_tick_guard_sets_cadence_without_calling_tick(self) -> None:
+        with (
+            patch.object(
+                consumer,
+                "consume_auto_restart_startup_tick_skip_once",
+                return_value={"consumed": True, "cleanup_ok": True},
+            ),
+            patch.object(consumer, "run_auto_restart_dispatcher_tick") as tick_call,
+            patch.object(consumer, "log") as log_mock,
+        ):
+            initial = consumer.initialize_auto_restart_tick_state(
+                worker_id="run-dispatcher:test",
+                now_monotonic=100.0,
+            )
+
+        self.assertEqual(initial, 100.0)
+        tick_call.assert_not_called()
+        log_mock.assert_called_once_with(
+            "info",
+            "auto_restart_startup_tick_skipped",
+            worker_id="run-dispatcher:test",
+            one_shot=True,
+            token_consumed=True,
+            token_cleanup_ok=True,
+        )
+        self.assertFalse(
+            consumer.should_run_auto_restart_tick(
+                last_tick_monotonic=initial,
+                now_monotonic=159.0,
+            )
+        )
+        self.assertTrue(
+            consumer.should_run_auto_restart_tick(
+                last_tick_monotonic=initial,
+                now_monotonic=160.0,
+            )
+        )
+
+    def test_restart_without_guard_restores_immediate_tick_eligibility(self) -> None:
+        with patch.object(
+            consumer,
+            "consume_auto_restart_startup_tick_skip_once",
+            return_value={"consumed": False, "reason": "guard_absent"},
+        ):
+            initial = consumer.initialize_auto_restart_tick_state(
+                worker_id="run-dispatcher:test",
+                now_monotonic=100.0,
+            )
+        self.assertEqual(initial, 0.0)
+        self.assertTrue(
+            consumer.should_run_auto_restart_tick(
+                last_tick_monotonic=initial,
+                now_monotonic=100.0,
+            )
+        )
+
+    def test_invalid_guard_is_logged_and_does_not_disable_future_ticks(self) -> None:
+        with (
+            patch.object(
+                consumer,
+                "consume_auto_restart_startup_tick_skip_once",
+                return_value={"consumed": False, "reason": "guard_path_not_absolute"},
+            ),
+            patch.object(consumer, "log") as log_mock,
+        ):
+            initial = consumer.initialize_auto_restart_tick_state(
+                worker_id="run-dispatcher:test",
+                now_monotonic=100.0,
+            )
+        self.assertEqual(initial, 0.0)
+        log_mock.assert_called_once_with(
+            "warning",
+            "auto_restart_startup_tick_skip_guard_invalid",
+            worker_id="run-dispatcher:test",
+            reason="guard_path_not_absolute",
+        )
+
     def test_all_login_ui_runs_are_device_bound(self) -> None:
         self.assertTrue(consumer._is_device_bound_run_type("login_provisioning"))
         self.assertTrue(consumer._is_device_bound_run_type("login_email_code_resume"))

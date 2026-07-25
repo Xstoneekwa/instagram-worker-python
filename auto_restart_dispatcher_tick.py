@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import time
 import urllib.error
 import urllib.request
@@ -20,6 +21,7 @@ AUTO_RESTART_TICK_MIN_INTERVAL_SECONDS = 60.0
 AUTO_RESTART_TICK_HTTP_TIMEOUT_SECONDS = 45.0
 AUTO_RESTART_TICK_ROUTE = "/api/instagram-dashboard/auto-restart/tick"
 AUTO_RESTART_TICK_TOKEN_ENV = "INSTAGRAM_AUTO_RESTART_TICK_TOKEN"
+AUTO_RESTART_STARTUP_SKIP_ONCE_FILE_ENV = "AUTO_RESTART_SKIP_STARTUP_TICK_ONCE_FILE"
 AUTO_RESTART_TICK_URL_ENV_CANDIDATES = (
     "INSTAGRAM_DASHBOARD_API_BASE_URL",
     "BOTAPP_COMPASS_AI_RELAY_URL",
@@ -28,6 +30,57 @@ AUTO_RESTART_TICK_URL_ENV_CANDIDATES = (
 
 def _env(name: str, default: str = "") -> str:
     return str(os.environ.get(name, default) or "").strip()
+
+
+def consume_auto_restart_startup_tick_skip_once(
+    token_path: str | None = None,
+) -> dict[str, Any]:
+    """Atomically consume the optional local startup-tick skip token.
+
+    The wrapper exports an absolute path in the shared dispatcher run directory.
+    Absence preserves the historical immediate startup tick.  A valid regular
+    file is renamed before removal so two concurrent consumers cannot both use
+    the same one-shot token.
+    """
+
+    resolved_path = str(
+        token_path
+        if token_path is not None
+        else _env(AUTO_RESTART_STARTUP_SKIP_ONCE_FILE_ENV)
+    ).strip()
+    if not resolved_path:
+        return {"consumed": False, "reason": "guard_not_configured"}
+    if not os.path.isabs(resolved_path):
+        return {"consumed": False, "reason": "guard_path_not_absolute"}
+
+    try:
+        token_stat = os.stat(resolved_path, follow_symlinks=False)
+    except FileNotFoundError:
+        return {"consumed": False, "reason": "guard_absent"}
+    except OSError:
+        return {"consumed": False, "reason": "guard_stat_failed"}
+
+    if not stat.S_ISREG(token_stat.st_mode):
+        return {"consumed": False, "reason": "guard_not_regular_file"}
+
+    consumed_path = f"{resolved_path}.consumed.{os.getpid()}"
+    try:
+        os.replace(resolved_path, consumed_path)
+    except FileNotFoundError:
+        return {"consumed": False, "reason": "guard_already_consumed"}
+    except OSError:
+        return {"consumed": False, "reason": "guard_consume_failed"}
+
+    cleanup_ok = True
+    try:
+        os.unlink(consumed_path)
+    except OSError:
+        cleanup_ok = False
+    return {
+        "consumed": True,
+        "reason": "guard_consumed" if cleanup_ok else "guard_consumed_cleanup_failed",
+        "cleanup_ok": cleanup_ok,
+    }
 
 
 def resolve_auto_restart_tick_base_url() -> str:

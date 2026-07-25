@@ -1,5 +1,19 @@
 # Current Production State
 
+## Golden addendum — Follow adaptive scroll startup-safe activation
+
+The `7d2797e` adaptive Follow scroll, bounded recovery and safe CT rotation
+checkpoint is extended by one local deployment guard. The guard does not change
+Follow behavior: it only consumes a private runtime token during dispatcher
+initialization and advances the embedded Auto Restart cadence marker so the
+startup call is skipped once.
+
+The production Auto Restart policy remains enabled. Subsequent natural ticks,
+backend candidate selection, `manual_only`, manual-stop, cooldown, idempotency
+and maximum-restart gates remain authoritative and unchanged. Target Followers
+Resume V2 stays Mythyl-only shadow with enforce disabled. No physical run is
+part of this Golden addendum.
+
 ## Golden addendum — Target Followers Resume V2
 
 The current rollout is based on Worker `d605736` and preserves Golden

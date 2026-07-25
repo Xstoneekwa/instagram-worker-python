@@ -152,6 +152,25 @@ def _terminate_process(process: subprocess.Popen):
             process.wait(timeout=5)
 
 
+def test_prepare_startup_tick_skip_creates_private_one_shot_token(tmp_path):
+    harness = _make_harness(tmp_path)
+    events = tmp_path / "events.log"
+    token_path = harness["run_dir"] / "auto-restart-skip-startup-tick.once"
+
+    result = subprocess.run(
+        [str(harness["wrapper"]), "prepare-auto-restart-startup-skip"],
+        cwd=harness["root"],
+        env=_env(harness, events),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.stdout.strip() == "auto_restart_startup_tick_skip_once_prepared"
+    assert token_path.read_text().strip() == "phonefarm-auto-restart-startup-skip-v1"
+    assert token_path.stat().st_mode & 0o777 == 0o600
+
+
 def test_start_tracks_single_child_and_wrapper_waits(tmp_path):
     harness = _make_harness(tmp_path)
     events = tmp_path / "events.log"

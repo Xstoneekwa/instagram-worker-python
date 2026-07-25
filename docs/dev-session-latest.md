@@ -560,3 +560,24 @@ remain historical evidence.
 - Worker : enforcement final indépendant et fail-closed.
 - Tests : 26 ciblés + 156 gardes, zéro run device.
 - Code Worker : `51278eadf1613f80349a7930e17420c8d8dd1e64`.
+
+## Handover — Follow adaptive scroll + garde startup Auto Restart 2026-07-25
+
+- Baseline du correctif Follow :
+  `7d2797eb72bbc3432415bd9a3eccc907f3e053b0`.
+- Cause du risque de déploiement : `run_forever()` initialisait
+  `last_auto_restart_tick=0`, rendant le premier tour de boucle immédiatement
+  éligible au POST backend Auto Restart.
+- Garde ajouté : token local régulier `0600`, préparé atomiquement par
+  `prepare-auto-restart-startup-skip`, consommé par rename puis supprimé au
+  prochain startup. Log attendu : `auto_restart_startup_tick_skipped`.
+- Le tick startup est opportuniste : heartbeat, préflight, claim et santé du
+  dispatcher démarrent normalement sans lui. Le tick naturel suivant reste
+  éligible après la cadence locale normale et la politique backend reste active.
+- État V2 à préserver : Mythyl uniquement, shadow, `enforce=false`, legacy
+  autoritaire.
+- Validation physique et run Instagram interdits dans ce checkpoint. Attendre
+  un GO Liam séparé.
+- Rollback : armer un nouveau token one-shot, repointer atomiquement le symlink
+  vers la release précédente, redémarrer une seule fois et vérifier token
+  consommé, PID unique, root correct et zéro request/run/lock créé.
