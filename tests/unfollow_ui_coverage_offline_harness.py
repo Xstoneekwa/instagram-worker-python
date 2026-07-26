@@ -73,17 +73,19 @@ def run_offline_harness() -> dict[str, Any]:
     results["04_normal_overlap"] = tracker.summary()
 
     # 5. An identical viewport after scroll is bounded by fingerprints.
-    tracker = _tracker(set(_names(0, 35)), quota=35)
+    tracker = _tracker(set(_names(100, 35)), quota=35)
     base = _names(0, 7)
     decision = tracker.observe_viewport(base, elapsed_seconds=0, following_confirmed=True)
     for index in range(tracker.budget.max_repeated_fingerprints):
         tracker.mark_scroll(moved=False)
         decision = tracker.observe_viewport(base, elapsed_seconds=(index + 1) * 3, following_confirmed=True)
+    assert decision.action == "recover"
     assert decision.stop_reason == "ui_repeated_viewport_limit"
+    assert tracker.mark_recovery(succeeded=False).stop_reason == "ui_recovery_budget_exhausted"
     results["05_identical_viewport"] = tracker.summary()
 
     # 6. Geometric scroll without any new username stops as no progress.
-    tracker = _tracker(set(_names(0, 35)), quota=35)
+    tracker = _tracker(set(_names(100, 35)), quota=35)
     base = _names(0, 7)
     tracker.observe_viewport(base, elapsed_seconds=0, following_confirmed=True)
     decision = None
@@ -91,19 +93,26 @@ def run_offline_harness() -> dict[str, Any]:
         tracker.mark_scroll(moved=False)
         rotated = base[index % len(base):] + base[:index % len(base)]
         decision = tracker.observe_viewport(rotated, elapsed_seconds=(index + 1) * 3, following_confirmed=True)
-    assert decision and decision.stop_reason in {"ui_no_progress", "ui_repeated_viewport_limit"}
+    assert decision and decision.action == "recover"
+    assert decision.stop_reason in {"ui_no_progress", "ui_repeated_viewport_limit"}
     results["06_scroll_without_motion"] = tracker.summary()
 
-    # 7. A -> B -> A cycling is detected without relying on one stale XML.
+    # 7. A -> B -> A across successful scroll generations is not a false
+    # phase-global repetition stop; the independent scroll budget remains the
+    # hard bound in runtime.
     tracker = _tracker(set(_names(30, 20)), quota=20)
     viewport_a, viewport_b = _names(0, 7), _names(7, 7)
     decision = tracker.observe_viewport(viewport_a, elapsed_seconds=0, following_confirmed=True)
     for index in range(1, 10):
-        tracker.mark_scroll(moved=True)
+        scroll_decision = tracker.mark_scroll(moved=True)
+        if scroll_decision is not None:
+            decision = scroll_decision
+            break
         decision = tracker.observe_viewport(viewport_b if index % 2 else viewport_a, elapsed_seconds=index * 3, following_confirmed=True)
         if decision.action == "stop":
             break
-    assert decision.stop_reason in {"ui_repeated_viewport_limit", "ui_no_progress"}
+    assert decision.action in {"scroll", "stop"}
+    assert tracker.consecutive_stagnation_count == 0
     results["07_cycle_a_b_a"] = tracker.summary()
 
     # 8. A real list end after the plan is empty is truthful exhaustion.

@@ -1573,11 +1573,18 @@ def _phase_statuses(
         follow_phase_status = "failed"
 
     real_status = str(follow_to_unfollow_real.get("status") or "")
+    unfollow_outcome = (
+        dict(follow_to_unfollow_real.get("unfollow_outcome") or {})
+        if isinstance(follow_to_unfollow_real.get("unfollow_outcome"), dict)
+        else {}
+    )
     if not bool(follow_to_unfollow_real.get("enabled")):
         unfollow_phase_status = "not_planned"
     elif not bool(follow_to_unfollow_real.get("executed")):
         skip_reason = str(follow_to_unfollow_real.get("skip_reason") or "")
         unfollow_phase_status = "skipped_cleanly" if skip_reason else "unknown"
+    elif str(unfollow_outcome.get("phase_status") or ""):
+        unfollow_phase_status = str(unfollow_outcome.get("phase_status"))
     elif (
         _as_optional_int(follow_to_unfollow_real.get("exit_code")) == 0
         and int(follow_to_unfollow_real.get("unfollow_actions_verified") or 0)
@@ -1656,6 +1663,16 @@ def _session_termination_class(
     )
     if blocked:
         return blocked
+    unfollow_outcome = (
+        dict(follow_to_unfollow_real.get("unfollow_outcome") or {})
+        if isinstance(follow_to_unfollow_real.get("unfollow_outcome"), dict)
+        else {}
+    )
+    unfollow_phase_status = str(unfollow_outcome.get("phase_status") or "")
+    if unfollow_phase_status == "partial_resumable":
+        return "partial_resumable"
+    if unfollow_phase_status in {"blocked_critical", "failed_internal"}:
+        return "non_recoverable_failure"
     real_status = str(follow_to_unfollow_real.get("status") or "").strip()
     real_failure_reason = str(
         follow_to_unfollow_real.get("failure_reason") or ""
@@ -1709,6 +1726,18 @@ def _restart_eligibility(
     )
     if blocked:
         return "blocked", blocked
+    unfollow_outcome = (
+        dict(follow_to_unfollow_real.get("unfollow_outcome") or {})
+        if isinstance(follow_to_unfollow_real.get("unfollow_outcome"), dict)
+        else {}
+    )
+    if (
+        unfollow_outcome.get("phase_status") == "partial_resumable"
+        and unfollow_outcome.get("resume_recommended") is True
+        and int(unfollow_outcome.get("remaining_count") or 0) > 0
+        and str(unfollow_outcome.get("last_safe_checkpoint") or "").strip()
+    ):
+        return "eligible", "unfollow_partial_resumable"
     if session_termination_class == "completed":
         return "not_needed", "session_completed"
     if session_termination_class == "partial_safe_but_continued":
@@ -2381,6 +2410,11 @@ def _real_summary_from_unfollow_summary(
     status = str(unfollow_summary.get("status") or "")
     failure_reason = str(unfollow_summary.get("failure_reason") or "")
     actions_sent = int(unfollow_summary.get("unfollow_actions_sent") or 0)
+    unfollow_outcome = (
+        dict(unfollow_summary.get("unfollow_outcome") or {})
+        if isinstance(unfollow_summary.get("unfollow_outcome"), dict)
+        else {}
+    )
     if _is_unfollow_any_mode(mode):
         if actions_sent > 0:
             skip_reason = "unfollow_any_executed"
@@ -2453,6 +2487,9 @@ def _real_summary_from_unfollow_summary(
         "unfollow_resume_recommended": bool(
             unfollow_summary.get("resume_recommended")
         ),
+        "unfollow_outcome": unfollow_outcome,
+        "unfollow_checkpoint": unfollow_summary.get("unfollow_checkpoint"),
+        "unfollow_resume_strategy": str(unfollow_summary.get("resume_strategy") or ""),
         "failure_reason": failure_reason,
         "unfollow_total_ms": float(unfollow_summary.get("total_ms") or 0.0),
         "skip_reason": str(skip_reason or ""),
@@ -3906,6 +3943,11 @@ def run_account_session(
             "unfollow_results_persisted_count": follow_to_unfollow_real.get(
                 "unfollow_results_persisted_count"
             ),
+            "unfollow_outcome": follow_to_unfollow_real.get("unfollow_outcome"),
+            "unfollow_checkpoint": follow_to_unfollow_real.get("unfollow_checkpoint"),
+            "unfollow_resume_recommended": follow_to_unfollow_real.get(
+                "unfollow_resume_recommended"
+            ),
             "follow_to_unfollow_real": follow_to_unfollow_real,
             "account_session_outreach_addon": account_session_outreach_addon,
             "root_failure_code": root_failure_code or None,
@@ -4065,6 +4107,8 @@ def run_account_session(
         "unfollow_results_persisted_count": follow_to_unfollow_real.get(
             "unfollow_results_persisted_count"
         ),
+        "unfollow_outcome": follow_to_unfollow_real.get("unfollow_outcome"),
+        "unfollow_checkpoint": follow_to_unfollow_real.get("unfollow_checkpoint"),
         "follow_to_unfollow_real": follow_to_unfollow_real,
         "account_session_outreach_addon": account_session_outreach_addon,
         "auto_restart_restart_allowed": auto_restart_restart_allowed,
@@ -4114,6 +4158,8 @@ def run_account_session(
         "last_run_coverage_status": follow_to_unfollow_real.get("last_run_coverage_status"),
         "last_run_stop_reason": follow_to_unfollow_real.get("last_run_stop_reason"),
         "unfollow_resume_recommended": follow_to_unfollow_real.get("unfollow_resume_recommended"),
+        "unfollow_outcome": follow_to_unfollow_real.get("unfollow_outcome"),
+        "unfollow_checkpoint": follow_to_unfollow_real.get("unfollow_checkpoint"),
     }
     log(
         "info",

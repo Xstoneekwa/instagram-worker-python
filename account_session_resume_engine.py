@@ -60,6 +60,12 @@ def _flatten_marker_text(value: Any, *, parent_key: str = "") -> list[str]:
         "restart_eligibility",
         "restart_block_reason",
         "session_termination_class",
+        # Structural resume checkpoints are evidence, not an Instagram
+        # challenge/checkpoint marker.
+        "checkpoint",
+        "unfollow_checkpoint",
+        "last_safe_checkpoint",
+        "safe_checkpoint",
     }
     if parent_key in ignored_keys:
         return []
@@ -108,7 +114,13 @@ def _unfollow_quota(
     summary: dict[str, Any],
     settings: dict[str, Any],
 ) -> tuple[int | None, int | None, int | None]:
+    outcome = summary.get("unfollow_outcome")
+    if not isinstance(outcome, dict):
+        nested_outcome = _nested(summary, "follow_to_unfollow_real", "unfollow_outcome")
+        outcome = nested_outcome if isinstance(nested_outcome, dict) else {}
     target = _as_int(summary.get("unfollow_quota_target"))
+    if target is None:
+        target = _as_int(outcome.get("planned_candidate_count"))
     if target is None:
         target = _as_int(summary.get("unfollow_target"))
     if target is None:
@@ -124,6 +136,8 @@ def _unfollow_quota(
 
     done = _as_int(summary.get("unfollow_actions_verified"))
     if done is None:
+        done = _as_int(outcome.get("persisted_count"))
+    if done is None:
         done = _as_int(_nested(summary, "follow_to_unfollow_real", "unfollow_actions_verified"))
     if done is None:
         done = _as_int(summary.get("unfollow_results_persisted_count"))
@@ -133,6 +147,8 @@ def _unfollow_quota(
         )
 
     remaining = _as_int(summary.get("unfollow_quota_remaining"))
+    if remaining is None:
+        remaining = _as_int(outcome.get("remaining_count"))
     if remaining is None and target is not None and done is not None:
         remaining = max(0, target - done)
     return target, done, remaining
@@ -162,6 +178,17 @@ def _phase_to_run_unfollow(
     unfollow_done: int | None,
     unfollow_remaining: int | None,
 ) -> bool | str:
+    outcome = summary.get("unfollow_outcome")
+    if not isinstance(outcome, dict):
+        nested_outcome = _nested(summary, "follow_to_unfollow_real", "unfollow_outcome")
+        outcome = nested_outcome if isinstance(nested_outcome, dict) else {}
+    if (
+        outcome.get("phase_status") == "partial_resumable"
+        and outcome.get("resume_recommended") is True
+        and int(outcome.get("remaining_count") or 0) > 0
+        and str(outcome.get("last_safe_checkpoint") or "").strip()
+    ):
+        return True
     mandatory_done = _as_bool(summary.get("mandatory_unfollow_executed"))
     if unfollow_remaining is not None:
         return bool(mandatory_done is False and unfollow_remaining > 0)
@@ -416,6 +443,15 @@ def build_account_session_resume_plan(
             if isinstance(safe_summary.get("follow_outcome"), dict)
             else {}
         ),
+        "unfollow_outcome": (
+            dict(safe_summary.get("unfollow_outcome") or {})
+            if isinstance(safe_summary.get("unfollow_outcome"), dict)
+            else dict(_nested(safe_summary, "follow_to_unfollow_real", "unfollow_outcome") or {})
+            if isinstance(_nested(safe_summary, "follow_to_unfollow_real", "unfollow_outcome"), dict)
+            else {}
+        ),
+        "unfollow_checkpoint": safe_summary.get("unfollow_checkpoint")
+        or _nested(safe_summary, "follow_to_unfollow_real", "unfollow_checkpoint"),
         "follow_partial": safe_summary.get("follow_partial") is True,
         "follow_resume_recommended": safe_summary.get("follow_resume_recommended") is True,
         "remaining_follow_quota": safe_summary.get("remaining_follow_quota"),

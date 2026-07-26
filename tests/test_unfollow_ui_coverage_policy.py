@@ -1,11 +1,15 @@
 import unittest
 
+from account_session_resume_engine import build_account_session_resume_plan
 from tests.unfollow_ui_coverage_offline_harness import run_offline_harness
 from unfollow_ui_coverage_policy import (
     FollowingCoverageTracker,
     HISTORICAL_ACTION_P90_SECONDS,
     HISTORICAL_VIEWPORT_P90_SECONDS,
     SCHEDULED_SESSION_CLEANUP_RESERVE_SECONDS,
+    UNFOLLOW_POST_RECOVERY_STAGNATION_LIMIT,
+    UNFOLLOW_PRE_RECOVERY_STAGNATION_LIMIT,
+    build_unfollow_outcome,
     derive_adaptive_coverage_budget,
     viewport_fingerprint,
 )
@@ -149,6 +153,240 @@ class UnfollowUiCoveragePolicyTests(unittest.TestCase):
         self.assertNotEqual(first, reordered)
         self.assertNotIn("alpha", first)
         self.assertEqual(len(first), 20)
+
+    def test_five_successful_actions_returning_to_same_viewport_never_stagnate(self) -> None:
+        names = [f"candidate_{index}" for index in range(7)]
+        budget = derive_adaptive_coverage_budget(
+            quota_remaining=7,
+            eligible_remaining=7,
+            session_remaining_seconds=3600,
+        )
+        tracker = FollowingCoverageTracker(budget, set(names), 7)
+        for index in range(5):
+            decision = tracker.observe_viewport(
+                names,
+                elapsed_seconds=float(index),
+                following_confirmed=True,
+            )
+            self.assertEqual(decision.action, "act")
+            username = names[index]
+            tracker.mark_action_attempted(username)
+            tracker.mark_action_verified(username)
+            tracker.mark_action_persisted(username)
+            tracker.mark_safe_profile_return(username)
+            self.assertEqual(tracker.consecutive_stagnation_count, 0)
+        self.assertEqual(len(tracker.persisted_usernames), 5)
+        self.assertEqual(tracker.viewport_recoveries_used, 0)
+
+    def test_true_consecutive_stagnation_recovers_before_stop(self) -> None:
+        budget = derive_adaptive_coverage_budget(
+            quota_remaining=5,
+            eligible_remaining=5,
+            session_remaining_seconds=3600,
+        )
+        tracker = FollowingCoverageTracker(
+            budget,
+            {f"planned_{index}" for index in range(5)},
+            5,
+        )
+        visible = [f"other_{index}" for index in range(7)]
+        tracker.observe_viewport(visible, elapsed_seconds=0, following_confirmed=True)
+        decision = None
+        for index in range(UNFOLLOW_PRE_RECOVERY_STAGNATION_LIMIT):
+            decision = tracker.observe_viewport(
+                visible,
+                elapsed_seconds=float(index + 1),
+                following_confirmed=True,
+            )
+        self.assertIsNotNone(decision)
+        self.assertEqual(decision.action, "recover")
+        self.assertEqual(decision.stop_reason, "ui_repeated_viewport_limit")
+        self.assertIsNone(tracker.mark_recovery(succeeded=True, progress_proved=True))
+        self.assertEqual(tracker.consecutive_stagnation_count, 0)
+
+    def test_two_stagnations_do_not_trigger_recovery(self) -> None:
+        budget = derive_adaptive_coverage_budget(
+            quota_remaining=5,
+            eligible_remaining=5,
+            session_remaining_seconds=3600,
+        )
+        tracker = FollowingCoverageTracker(budget, {f"planned_{i}" for i in range(5)}, 5)
+        visible = ["other_a", "other_b"]
+        tracker.observe_viewport(visible, elapsed_seconds=0, following_confirmed=True)
+        first = tracker.observe_viewport(visible, elapsed_seconds=1, following_confirmed=True)
+        second = tracker.observe_viewport(visible, elapsed_seconds=2, following_confirmed=True)
+        self.assertEqual((first.action, second.action), ("scroll", "scroll"))
+        self.assertEqual(tracker.pre_recovery_stagnation_count, 2)
+        self.assertFalse(tracker.recovery_attempted)
+
+    def test_progress_on_third_observation_resets_without_recovery(self) -> None:
+        budget = derive_adaptive_coverage_budget(quota_remaining=5, eligible_remaining=5, session_remaining_seconds=3600)
+        tracker = FollowingCoverageTracker(budget, {f"planned_{i}" for i in range(5)}, 5)
+        visible = ["other_a", "other_b"]
+        tracker.observe_viewport(visible, elapsed_seconds=0, following_confirmed=True)
+        tracker.observe_viewport(visible, elapsed_seconds=1, following_confirmed=True)
+        tracker.observe_viewport(visible, elapsed_seconds=2, following_confirmed=True)
+        tracker.mark_scroll(moved=True)
+        decision = tracker.observe_viewport(visible, elapsed_seconds=3, following_confirmed=True)
+        self.assertNotEqual(decision.action, "recover")
+        self.assertEqual(tracker.pre_recovery_stagnation_count, 0)
+        self.assertEqual(tracker.reset_reason, "verified_action_progress_credit")
+        self.assertFalse(tracker.recovery_attempted)
+
+    def test_successful_recovery_with_proved_progress_resets_completely(self) -> None:
+        budget = derive_adaptive_coverage_budget(quota_remaining=5, eligible_remaining=5, session_remaining_seconds=3600)
+        tracker = FollowingCoverageTracker(budget, {f"planned_{i}" for i in range(5)}, 5)
+        visible = ["other_a", "other_b"]
+        tracker.observe_viewport(visible, elapsed_seconds=0, following_confirmed=True)
+        for index in range(3):
+            decision = tracker.observe_viewport(visible, elapsed_seconds=index + 1, following_confirmed=True)
+        self.assertEqual(decision.action, "recover")
+        self.assertIsNone(tracker.mark_recovery(succeeded=True, progress_proved=True))
+        self.assertTrue(tracker.recovery_attempted)
+        self.assertTrue(tracker.recovery_succeeded)
+        self.assertEqual(tracker.pre_recovery_stagnation_count, 0)
+        self.assertEqual(tracker.post_recovery_stagnation_count, 0)
+        self.assertFalse(tracker.post_recovery_observation_active)
+        self.assertEqual(tracker.reset_reason, "recovery_progress_proved")
+
+    def test_recovery_without_progress_plus_one_stagnation_continues(self) -> None:
+        tracker, visible = self._tracker_at_recovery_boundary()
+        self.assertIsNone(tracker.mark_recovery(succeeded=True, progress_proved=False))
+        decision = tracker.observe_viewport(visible, elapsed_seconds=4, following_confirmed=True)
+        self.assertEqual(decision.action, "scroll")
+        self.assertEqual(tracker.post_recovery_stagnation_count, 1)
+
+    def test_recovery_without_progress_plus_two_stagnations_is_partial_resumable(self) -> None:
+        tracker, visible = self._tracker_at_recovery_boundary()
+        self.assertIsNone(tracker.mark_recovery(succeeded=True, progress_proved=False))
+        tracker.observe_viewport(visible, elapsed_seconds=4, following_confirmed=True)
+        decision = tracker.observe_viewport(visible, elapsed_seconds=5, following_confirmed=True)
+        self.assertEqual(tracker.post_recovery_stagnation_count, UNFOLLOW_POST_RECOVERY_STAGNATION_LIMIT)
+        self.assertEqual(decision.action, "stop")
+        self.assertEqual(decision.stop_reason, "ui_repeated_viewport_limit_after_recovery")
+        outcome = build_unfollow_outcome(
+            stable_reason=decision.stop_reason,
+            raw_candidate_count=5,
+            eligible_candidate_count=5,
+            planned_candidate_count=5,
+            attempted_count=0,
+            verified_count=0,
+            persisted_count=0,
+            tracker=tracker,
+        )
+        self.assertEqual(outcome["phase_status"], "partial_resumable")
+        self.assertTrue(outcome["resume_recommended"])
+        self.assertEqual(outcome["stable_reason"], "ui_repeated_viewport_limit_after_recovery")
+
+    def test_verified_unfollow_between_repetitions_resets_to_zero(self) -> None:
+        budget = derive_adaptive_coverage_budget(quota_remaining=2, eligible_remaining=2, session_remaining_seconds=3600)
+        tracker = FollowingCoverageTracker(budget, {"planned_a", "planned_b"}, 2)
+        unrelated = ["other_a"]
+        tracker.observe_viewport(unrelated, elapsed_seconds=0, following_confirmed=True)
+        tracker.observe_viewport(unrelated, elapsed_seconds=1, following_confirmed=True)
+        self.assertEqual(tracker.pre_recovery_stagnation_count, 1)
+        tracker.mark_action_attempted("planned_a")
+        tracker.mark_action_verified("planned_a")
+        tracker.mark_action_persisted("planned_a")
+        self.assertEqual(tracker.consecutive_stagnation_count, 0)
+        self.assertEqual(tracker.reset_reason, "unfollow_persisted")
+        decision = tracker.observe_viewport(unrelated, elapsed_seconds=2, following_confirmed=True)
+        self.assertNotEqual(decision.action, "recover")
+        self.assertEqual(tracker.pre_recovery_stagnation_count, 0)
+
+    def test_no_stagnation_accumulates_between_successful_actions(self) -> None:
+        budget = derive_adaptive_coverage_budget(quota_remaining=3, eligible_remaining=3, session_remaining_seconds=3600)
+        tracker = FollowingCoverageTracker(budget, {"planned_a", "planned_b", "planned_c"}, 3)
+        for index, username in enumerate(("planned_a", "planned_b", "planned_c")):
+            tracker.mark_action_attempted(username)
+            tracker.mark_action_verified(username)
+            tracker.mark_action_persisted(username)
+            tracker.mark_safe_profile_return(username)
+            decision = tracker.observe_viewport(["same_row"], elapsed_seconds=float(index), following_confirmed=True)
+            self.assertNotEqual(decision.action, "recover")
+            self.assertEqual(tracker.consecutive_stagnation_count, 0)
+        self.assertFalse(tracker.recovery_attempted)
+
+    @staticmethod
+    def _tracker_at_recovery_boundary() -> tuple[FollowingCoverageTracker, list[str]]:
+        budget = derive_adaptive_coverage_budget(quota_remaining=5, eligible_remaining=5, session_remaining_seconds=3600)
+        tracker = FollowingCoverageTracker(budget, {f"planned_{i}" for i in range(5)}, 5)
+        visible = ["other_a", "other_b"]
+        tracker.observe_viewport(visible, elapsed_seconds=0, following_confirmed=True)
+        decision = None
+        for index in range(3):
+            decision = tracker.observe_viewport(visible, elapsed_seconds=index + 1, following_confirmed=True)
+        assert decision is not None and decision.action == "recover"
+        return tracker, visible
+
+    def test_partial_outcome_preserves_checkpoint_and_remaining_plan(self) -> None:
+        names = {f"candidate_{index:03d}" for index in range(120)}
+        budget = derive_adaptive_coverage_budget(
+            quota_remaining=120,
+            eligible_remaining=120,
+            session_remaining_seconds=6 * 60 * 60,
+        )
+        tracker = FollowingCoverageTracker(budget, names, 120)
+        for username in sorted(names)[:5]:
+            tracker.mark_action_attempted(username)
+            tracker.mark_action_verified(username)
+            tracker.mark_action_persisted(username)
+            tracker.mark_safe_profile_return(username)
+        outcome = build_unfollow_outcome(
+            stable_reason="ui_repeated_viewport_limit",
+            raw_candidate_count=267,
+            eligible_candidate_count=120,
+            planned_candidate_count=120,
+            attempted_count=5,
+            verified_count=5,
+            persisted_count=5,
+            tracker=tracker,
+        )
+        self.assertEqual(outcome["phase_status"], "partial_resumable")
+        self.assertTrue(outcome["resume_recommended"])
+        self.assertEqual(outcome["remaining_count"], 115)
+        self.assertEqual(len(outcome["checkpoint"]["persisted_usernames"]), 5)
+        self.assertEqual(len(outcome["checkpoint"]["remaining_usernames"]), 115)
+        self.assertTrue(
+            set(outcome["checkpoint"]["persisted_usernames"]).isdisjoint(
+                outcome["checkpoint"]["remaining_usernames"]
+            )
+        )
+
+    def test_partial_unfollow_outcome_overrides_legacy_mandatory_done_gate(self) -> None:
+        outcome = {
+            "phase_status": "partial_resumable",
+            "stable_reason": "ui_repeated_viewport_limit",
+            "planned_candidate_count": 120,
+            "persisted_count": 5,
+            "remaining_count": 115,
+            "last_safe_checkpoint": "persisted:candidate_004",
+            "resume_recommended": True,
+            "checkpoint": {
+                "schema": "UNFOLLOW_CHECKPOINT_V1",
+                "persisted_usernames": [f"candidate_{index:03d}" for index in range(5)],
+                "remaining_usernames": [f"candidate_{index:03d}" for index in range(5, 120)],
+            },
+        }
+        plan = build_account_session_resume_plan(
+            {
+                "session_termination_class": "partial_resumable",
+                "restart_eligibility": "eligible",
+                "business_session_id": "mythyl-fixture",
+                "welcome_enabled": False,
+                "follow_quota_target": 18,
+                "follows_completed_count": 18,
+                "follow_quota_remaining": 0,
+                "mandatory_unfollow_executed": True,
+                "unfollow_outcome": outcome,
+                "unfollow_phase_status": "partial_resumable",
+            }
+        )
+        self.assertTrue(plan["restart_allowed"])
+        self.assertEqual(plan["phases_to_run"]["follow"], False)
+        self.assertEqual(plan["phases_to_run"]["unfollow"], True)
+        self.assertEqual(plan["quota_remaining"]["unfollow"], 115)
+        self.assertEqual(plan["unfollow_outcome"]["checkpoint"]["schema"], "UNFOLLOW_CHECKPOINT_V1")
 
 
 if __name__ == "__main__":

@@ -57,6 +57,7 @@ from unfollow_ui_coverage_policy import (
     HISTORICAL_VIEWPORT_SAMPLE_COUNT,
     SCHEDULED_SESSION_CLEANUP_RESERVE_SECONDS,
     FollowingCoverageTracker,
+    build_unfollow_outcome,
     derive_adaptive_coverage_budget,
 )
 
@@ -1436,6 +1437,24 @@ def _run_real_unfollow_multi_loop(
             **exploration_summary,
         )
         remaining_planned_count = len(planned_usernames - completed_usernames)
+        stable_reason = str(failure_reason or stop_reason or "").strip()
+        if not stable_reason:
+            stable_reason = {
+                "success_real_unfollow_multi_limit_reached": "unfollow_quota_reached",
+                "no_quota": "unfollow_quota_reached",
+                "no_more_following_rows": "no_more_following_rows",
+                "success_unfollow_skipped_insufficient_time": "session_time_budget_exhausted",
+            }.get(status, status)
+        canonical_outcome = build_unfollow_outcome(
+            stable_reason=stable_reason,
+            raw_candidate_count=int(base_summary.get("source_rows_loaded") or 0),
+            eligible_candidate_count=int(base_summary.get("candidates_planned_count") or 0),
+            planned_candidate_count=len(planned_usernames),
+            attempted_count=sent,
+            verified_count=verified,
+            persisted_count=persisted,
+            tracker=coverage_tracker,
+        )
         summary = {
             **base_summary,
             **last_fields,
@@ -1472,10 +1491,10 @@ def _run_real_unfollow_multi_loop(
             "phase_duration_seconds": round(coverage_elapsed_seconds(), 3),
             "cleanup_reserve_seconds": SCHEDULED_SESSION_CLEANUP_RESERVE_SECONDS,
             "stop_reason": exploration_stop,
-            # Existing account-session policy treats an executed mandatory Unfollow
-            # phase as non-resumable; this flag reports that policy without claiming
-            # the DB candidate supply was exhausted.
-            "resume_recommended": False,
+            "unfollow_outcome": canonical_outcome,
+            "unfollow_checkpoint": canonical_outcome.get("checkpoint"),
+            "resume_recommended": bool(canonical_outcome.get("resume_recommended")),
+            "resume_strategy": canonical_outcome.get("resume_strategy"),
             "status": status,
             "failure_reason": failure_reason,
             "total_ms": round((time.perf_counter() - t0) * 1000.0, 2),
@@ -1632,7 +1651,9 @@ def _run_real_unfollow_multi_loop(
                 if coverage_decision.action == "recover":
                     recovered, recovery_stop = recover_following_viewport(
                         trigger_reason=str(
-                            following_det.get("failure_reason") or "following_state_unconfirmed"
+                            coverage_decision.stop_reason
+                            or following_det.get("failure_reason")
+                            or "following_state_unconfirmed"
                         )
                     )
                     if not recovered:
@@ -2238,6 +2259,8 @@ def _run_real_unfollow_multi_loop(
         tap_out = tap_unfollow_in_following_sheet(d, target_username=target_username)
         if tap_out.get("ok"):
             sent += 1
+            if coverage_tracker is not None:
+                coverage_tracker.mark_action_attempted(target_key)
         else:
             failed += 1
             stop_reason = "unfollow_tap_failed"
@@ -2258,6 +2281,8 @@ def _run_real_unfollow_multi_loop(
 
         verify_out = verify_unfollow_action_success_after_tap(d, target_username=target_username)
         verify_ok = bool(verify_out.get("ok"))
+        if verify_ok and coverage_tracker is not None:
+            coverage_tracker.mark_action_verified(target_key)
         cand = (
             _visible_candidates_by_username({"visible_eligible_matches": list(visible_candidates.values())}).get(target_key)
             or planned_by_username.get(target_key)
@@ -2275,6 +2300,8 @@ def _run_real_unfollow_multi_loop(
         persist_ok = bool(persist_out.get("ok"))
         if persist_ok:
             persisted += 1
+            if verify_ok and coverage_tracker is not None:
+                coverage_tracker.mark_action_persisted(target_key)
             if verify_ok:
                 interaction_row_id = str(persist_out.get("interaction_row_id") or "").strip() or None
                 unfollow_observed_successes.append(
@@ -2357,7 +2384,7 @@ def _run_real_unfollow_multi_loop(
         verified += 1
         completed_usernames.add(target_key)
         if coverage_tracker is not None:
-            coverage_tracker.mark_action_verified(target_key)
+            coverage_tracker.mark_safe_profile_return(target_key)
             refresh_coverage_summary_totals()
         visible_eligibility_row_cache[target_key] = None
         last_fields = {

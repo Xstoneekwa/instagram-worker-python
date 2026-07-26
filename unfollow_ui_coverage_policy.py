@@ -25,6 +25,8 @@ HISTORICAL_VIEWPORT_SAMPLE_COUNT = 4
 
 # The scheduler already defines business_action_deadline=session_end-10 minutes.
 SCHEDULED_SESSION_CLEANUP_RESERVE_SECONDS = 10 * 60
+UNFOLLOW_PRE_RECOVERY_STAGNATION_LIMIT = 3
+UNFOLLOW_POST_RECOVERY_STAGNATION_LIMIT = 2
 
 
 def normalize_username(value: str) -> str:
@@ -225,10 +227,15 @@ class FollowingCoverageTracker:
     observed_usernames: set[str] = field(default_factory=set)
     verified_usernames: set[str] = field(default_factory=set)
     fingerprint_counts: dict[str, int] = field(default_factory=dict)
+    generation_fingerprint_counts: dict[str, int] = field(default_factory=dict)
+    last_generation_fingerprint: str = ""
     viewports_observed: int = 0
     scroll_passes_used: int = 0
     consecutive_no_progress_viewports: int = 0
     repeated_fingerprints_count: int = 0
+    consecutive_stagnation_count: int = 0
+    navigation_generation: int = 1
+    navigation_generation_reason: str = "following_list_opened"
     viewport_recoveries_used: int = 0
     no_motion_scrolls: int = 0
     terminal_fingerprint: str = ""
@@ -243,6 +250,19 @@ class FollowingCoverageTracker:
     lightweight_deadline_checks: int = 0
     last_deadline_check_elapsed_seconds: float | None = None
     last_deadline_check_verified_count: int = 0
+    attempted_usernames: set[str] = field(default_factory=set)
+    persisted_usernames: set[str] = field(default_factory=set)
+    unavailable_usernames: set[str] = field(default_factory=set)
+    last_candidate_attempted: str = ""
+    last_safe_checkpoint: str = "following_list_opened"
+    progress_credit_pending: bool = False
+    generation_progress_events: int = 0
+    pre_recovery_stagnation_count: int = 0
+    post_recovery_stagnation_count: int = 0
+    recovery_attempted: bool = False
+    recovery_succeeded: bool = False
+    post_recovery_observation_active: bool = False
+    reset_reason: str = "following_list_opened"
 
     def __post_init__(self) -> None:
         self.planned_usernames = {
@@ -264,6 +284,37 @@ class FollowingCoverageTracker:
         if fingerprint:
             self.terminal_fingerprint = fingerprint
         return CoverageDecision("stop", reason, fingerprint)
+
+    def begin_navigation_generation(
+        self,
+        reason: str,
+        *,
+        progress_proved: bool,
+        safe_checkpoint: str | None = None,
+    ) -> None:
+        """Start a bounded navigation generation after a real state boundary.
+
+        Phase-wide fingerprints remain telemetry only.  Stop decisions use the
+        consecutive stagnation observed inside the current generation.
+        """
+        self.navigation_generation += 1
+        self.navigation_generation_reason = str(reason or "navigation_changed")
+        self.generation_fingerprint_counts.clear()
+        self.last_generation_fingerprint = ""
+        if progress_proved:
+            self._reset_stagnation(str(reason or "navigation_progressed"))
+            self.progress_credit_pending = True
+            self.generation_progress_events += 1
+        if safe_checkpoint:
+            self.last_safe_checkpoint = str(safe_checkpoint)
+
+    def _reset_stagnation(self, reason: str) -> None:
+        self.consecutive_stagnation_count = 0
+        self.consecutive_no_progress_viewports = 0
+        self.pre_recovery_stagnation_count = 0
+        self.post_recovery_stagnation_count = 0
+        self.post_recovery_observation_active = False
+        self.reset_reason = str(reason or "progress_proved")
 
     def _deadline_check_due(self, *, elapsed_seconds: float) -> bool:
         if self.last_deadline_check_elapsed_seconds is None:
@@ -323,34 +374,72 @@ class FollowingCoverageTracker:
         )
         self.terminal_fingerprint = fingerprint
         self.viewports_observed += 1
-        previous_count = self.fingerprint_counts.get(fingerprint, 0)
-        self.fingerprint_counts[fingerprint] = previous_count + 1
-        if previous_count:
+        phase_previous_count = self.fingerprint_counts.get(fingerprint, 0)
+        self.fingerprint_counts[fingerprint] = phase_previous_count + 1
+        if phase_previous_count:
             self.repeated_fingerprints_count += 1
+        generation_previous_count = self.generation_fingerprint_counts.get(fingerprint, 0)
+        self.generation_fingerprint_counts[fingerprint] = generation_previous_count + 1
+        repeated_consecutively = fingerprint == self.last_generation_fingerprint
+        self.last_generation_fingerprint = fingerprint
 
         current = set(normalized)
         new_usernames = current - self.observed_usernames
         self.observed_usernames.update(current)
+        matches = current.intersection(self.remaining_planned_usernames)
+        exploitable_candidate_present = bool(matches)
+        progress_credit = self.progress_credit_pending
+        self.progress_credit_pending = False
         if new_usernames:
-            self.consecutive_no_progress_viewports = 0
+            was_post_recovery = self.post_recovery_observation_active
+            self._reset_stagnation("new_usernames_visible")
+            if was_post_recovery:
+                self.recovery_succeeded = True
             self.last_progress_at = elapsed_seconds
+            self.generation_progress_events += 1
+        elif progress_credit or exploitable_candidate_present:
+            # The first identical viewport after a verified+persistent action
+            # and a safe profile return is expected.  Likewise, a remaining
+            # planned candidate on that viewport is actionable, not stagnation.
+            was_post_recovery = self.post_recovery_observation_active
+            self._reset_stagnation(
+                "next_candidate_exploitable"
+                if exploitable_candidate_present
+                else "verified_action_progress_credit"
+            )
+            if was_post_recovery:
+                self.recovery_succeeded = True
         else:
             self.consecutive_no_progress_viewports += 1
+            if self.post_recovery_observation_active:
+                self.post_recovery_stagnation_count += 1
+                self.consecutive_stagnation_count = self.post_recovery_stagnation_count
+            elif generation_previous_count and repeated_consecutively:
+                self.pre_recovery_stagnation_count += 1
+                self.consecutive_stagnation_count = self.pre_recovery_stagnation_count
+            else:
+                # A changed fingerprint is not progress by itself.  Progress
+                # must be proved by one of the explicit reset signals above
+                # (new usernames, an exploitable candidate, an action credit,
+                # cursor/scroll movement, or a successful recovery).
+                self.pre_recovery_stagnation_count += 1
+                self.consecutive_stagnation_count = self.pre_recovery_stagnation_count
 
-        matches = current.intersection(self.remaining_planned_usernames)
         self.viewport_new_username_counts.append(len(new_usernames))
         self.viewport_candidate_match_counts.append(len(matches))
         if end_of_list:
             if self.remaining_planned_usernames:
                 return self._stop("ui_end_of_list_with_candidates_unresolved", fingerprint)
             return self._stop("eligible_targets_exhausted", fingerprint)
-        if self.repeated_fingerprints_count >= self.budget.max_repeated_fingerprints:
-            return self._stop("ui_repeated_viewport_limit", fingerprint)
         if (
-            self.consecutive_no_progress_viewports
-            >= self.budget.max_consecutive_no_progress_viewports
+            self.post_recovery_observation_active
+            and self.post_recovery_stagnation_count >= UNFOLLOW_POST_RECOVERY_STAGNATION_LIMIT
         ):
-            return self._stop("ui_no_progress", fingerprint)
+            return self._stop("ui_repeated_viewport_limit_after_recovery", fingerprint)
+        if self.pre_recovery_stagnation_count >= UNFOLLOW_PRE_RECOVERY_STAGNATION_LIMIT:
+            if self.viewport_recoveries_used < self.budget.max_viewport_recoveries:
+                return CoverageDecision("recover", "ui_repeated_viewport_limit", fingerprint)
+            return self._stop("ui_recovery_budget_exhausted", fingerprint)
         return CoverageDecision(
             "act" if matches else "scroll",
             fingerprint=fingerprint,
@@ -361,6 +450,12 @@ class FollowingCoverageTracker:
         self.scroll_passes_used += 1
         if not moved:
             self.no_motion_scrolls += 1
+        else:
+            self.begin_navigation_generation(
+                "scroll_progressed",
+                progress_proved=True,
+                safe_checkpoint="following_list_after_scroll",
+            )
         if self.scroll_passes_used > self.budget.max_scroll_passes:
             return self._stop("ui_coverage_budget_exhausted", self.terminal_fingerprint)
         return None
@@ -370,17 +465,90 @@ class FollowingCoverageTracker:
             return self._stop("ui_coverage_budget_exhausted", self.terminal_fingerprint)
         return None
 
-    def mark_recovery(self, *, succeeded: bool) -> Optional[CoverageDecision]:
+    def mark_recovery(
+        self,
+        *,
+        succeeded: bool,
+        progress_proved: bool = False,
+    ) -> Optional[CoverageDecision]:
         self.viewport_recoveries_used += 1
+        self.recovery_attempted = True
         if not succeeded or self.viewport_recoveries_used > self.budget.max_viewport_recoveries:
+            self.recovery_succeeded = False
             return self._stop("ui_recovery_budget_exhausted", self.terminal_fingerprint)
+        self.navigation_generation += 1
+        self.navigation_generation_reason = "viewport_recovery_completed"
+        self.generation_fingerprint_counts.clear()
+        self.last_generation_fingerprint = ""
+        self.pre_recovery_stagnation_count = 0
+        self.post_recovery_stagnation_count = 0
+        self.consecutive_stagnation_count = 0
+        self.consecutive_no_progress_viewports = 0
+        self.post_recovery_observation_active = not progress_proved
+        self.recovery_succeeded = bool(progress_proved)
+        self.reset_reason = (
+            "recovery_progress_proved"
+            if progress_proved
+            else "recovery_completed_awaiting_progress"
+        )
+        self.last_safe_checkpoint = "following_list_after_recovery"
         return None
+
+    def mark_action_attempted(self, username: str) -> None:
+        normalized = normalize_username(username)
+        if not normalized or normalized not in self.planned_usernames:
+            raise ValueError("unplanned_unfollow_attempt")
+        self.attempted_usernames.add(normalized)
+        self.last_candidate_attempted = normalized
 
     def mark_action_verified(self, username: str) -> None:
         normalized = normalize_username(username)
         if not normalized or normalized not in self.remaining_planned_usernames:
             raise ValueError("duplicate_or_unplanned_unfollow")
         self.verified_usernames.add(normalized)
+        self._reset_stagnation("unfollow_verified")
+        self.progress_credit_pending = True
+        self.generation_progress_events += 1
+
+    def mark_action_persisted(self, username: str) -> None:
+        normalized = normalize_username(username)
+        if not normalized or normalized not in self.verified_usernames:
+            raise ValueError("unverified_unfollow_persistence")
+        self.persisted_usernames.add(normalized)
+        self._reset_stagnation("unfollow_persisted")
+        self.progress_credit_pending = True
+        self.generation_progress_events += 1
+
+    def mark_candidate_unavailable(self, username: str) -> None:
+        normalized = normalize_username(username)
+        if normalized and normalized in self.planned_usernames:
+            self.unavailable_usernames.add(normalized)
+
+    def mark_safe_profile_return(self, username: str) -> None:
+        normalized = normalize_username(username)
+        if normalized not in self.persisted_usernames:
+            raise ValueError("unpersisted_unfollow_safe_return")
+        self.begin_navigation_generation(
+            "profile_return_restored",
+            progress_proved=True,
+            safe_checkpoint=f"persisted:{normalized}",
+        )
+
+    def checkpoint(self) -> dict[str, Any]:
+        remaining = self.planned_usernames - self.persisted_usernames
+        return {
+            "schema": "UNFOLLOW_CHECKPOINT_V1",
+            "planned_usernames": sorted(self.planned_usernames),
+            "attempted_usernames": sorted(self.attempted_usernames),
+            "verified_usernames": sorted(self.verified_usernames),
+            "persisted_usernames": sorted(self.persisted_usernames),
+            "unavailable_usernames": sorted(self.unavailable_usernames),
+            "remaining_usernames": sorted(remaining),
+            "navigation_generation": self.navigation_generation,
+            "navigation_generation_reason": self.navigation_generation_reason,
+            "viewport_fingerprint": self.terminal_fingerprint,
+            "last_safe_checkpoint": self.last_safe_checkpoint,
+        }
 
     def summary(self) -> dict[str, Any]:
         theoretical_max_loop_steps = (
@@ -412,6 +580,16 @@ class FollowingCoverageTracker:
             "repeated_fingerprints_count": self.repeated_fingerprints_count,
             "repeated_fingerprints": self.repeated_fingerprints_count,
             "no_progress_viewports": self.consecutive_no_progress_viewports,
+            "consecutive_stagnation_count": self.consecutive_stagnation_count,
+            "pre_recovery_stagnation_count": self.pre_recovery_stagnation_count,
+            "post_recovery_stagnation_count": self.post_recovery_stagnation_count,
+            "recovery_attempted": self.recovery_attempted,
+            "recovery_succeeded": self.recovery_succeeded,
+            "reset_reason": self.reset_reason,
+            "navigation_generation": self.navigation_generation,
+            "navigation_generation_reason": self.navigation_generation_reason,
+            "generation_progress_events": self.generation_progress_events,
+            "generation_unique_fingerprints_count": len(self.generation_fingerprint_counts),
             "unique_fingerprints_count": len(self.fingerprint_counts),
             "viewport_recoveries_used": self.viewport_recoveries_used,
             "viewport_recoveries": self.viewport_recoveries_used,
@@ -423,4 +601,79 @@ class FollowingCoverageTracker:
             "lightweight_deadline_checks": self.lightweight_deadline_checks,
             "per_scroll_full_recalculations": 0,
             "theoretical_max_loop_steps": theoretical_max_loop_steps,
+            "last_safe_checkpoint": self.last_safe_checkpoint,
         }
+
+
+_UNFOLLOW_CRITICAL_REASONS = frozenset(
+    {
+        "unsafe_marker_detected",
+        "active_instagram_account_mismatch",
+        "challenge_detected",
+        "restriction_detected",
+    }
+)
+_UNFOLLOW_INTERNAL_FAILURE_REASONS = frozenset(
+    {
+        "unfollow_persistence_failed",
+        "unfollow_verify_failed",
+        "return_to_following_list_failed",
+        "unfollow_tap_failed",
+    }
+)
+
+
+def build_unfollow_outcome(
+    *,
+    stable_reason: str,
+    raw_candidate_count: int,
+    eligible_candidate_count: int,
+    planned_candidate_count: int,
+    attempted_count: int,
+    verified_count: int,
+    persisted_count: int,
+    tracker: FollowingCoverageTracker | None,
+) -> dict[str, Any]:
+    """Build the single canonical Unfollow terminal outcome."""
+    reason = str(stable_reason or "unfollow_outcome_unknown")
+    remaining_count = max(0, int(planned_candidate_count) - int(persisted_count))
+    checkpoint = tracker.checkpoint() if tracker is not None else {}
+    safe_checkpoint = str(checkpoint.get("last_safe_checkpoint") or "")
+
+    if reason == "unfollow_quota_reached":
+        phase_status = "quota_reached"
+    elif reason in {"eligible_targets_exhausted", "no_more_following_rows"} or remaining_count == 0:
+        phase_status = "candidates_exhausted"
+    elif reason in _UNFOLLOW_CRITICAL_REASONS:
+        phase_status = "blocked_critical"
+    elif reason in _UNFOLLOW_INTERNAL_FAILURE_REASONS:
+        phase_status = "failed_internal"
+    elif remaining_count > 0 and safe_checkpoint:
+        phase_status = "partial_resumable"
+    else:
+        phase_status = "partial_not_resumable"
+
+    resume_recommended = phase_status == "partial_resumable"
+    return {
+        "phase_status": phase_status,
+        "stable_reason": reason,
+        "raw_candidate_count": max(0, int(raw_candidate_count)),
+        "eligible_candidate_count": max(0, int(eligible_candidate_count)),
+        "planned_candidate_count": max(0, int(planned_candidate_count)),
+        "attempted_count": max(0, int(attempted_count)),
+        "verified_count": max(0, int(verified_count)),
+        "persisted_count": max(0, int(persisted_count)),
+        "remaining_count": remaining_count,
+        "last_safe_checkpoint": safe_checkpoint or None,
+        "resume_recommended": resume_recommended,
+        "resume_strategy": "recalculate_db_then_resume_remaining_plan" if resume_recommended else "none",
+        "navigation_generation": int(tracker.navigation_generation) if tracker else 0,
+        "recovery_attempts": int(tracker.viewport_recoveries_used) if tracker else 0,
+        "consecutive_stagnation_count": int(tracker.consecutive_stagnation_count) if tracker else 0,
+        "pre_recovery_stagnation_count": int(tracker.pre_recovery_stagnation_count) if tracker else 0,
+        "post_recovery_stagnation_count": int(tracker.post_recovery_stagnation_count) if tracker else 0,
+        "recovery_attempted": bool(tracker.recovery_attempted) if tracker else False,
+        "recovery_succeeded": bool(tracker.recovery_succeeded) if tracker else False,
+        "reset_reason": str(tracker.reset_reason) if tracker else "",
+        "checkpoint": checkpoint or None,
+    }
