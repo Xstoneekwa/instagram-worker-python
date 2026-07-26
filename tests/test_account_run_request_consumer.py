@@ -728,6 +728,20 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
                 "evaluate_queued_run_commercial_policy",
                 return_value=(True, None, {}),
             ),
+            patch.object(
+                consumer,
+                "_load_account_protection_snapshot",
+                return_value=(
+                    True,
+                    "ready",
+                    '{"ok":true}',
+                    {
+                        "protection_lists_source": "canonical_v1",
+                        "blacklist_count": 0,
+                        "unfollow_whitelist_count": 0,
+                    },
+                ),
+            ),
             patch.object(consumer, "transfer_device_lock", return_value={"transferred": True}),
             patch.object(consumer, "renew_device_lock", return_value={"renewed": True}),
             patch.object(consumer, "release_device_lock", return_value={"released": True}),

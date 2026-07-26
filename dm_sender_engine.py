@@ -16,6 +16,7 @@ from typing import Any, Callable
 import uiautomator2 as u2
 
 import config
+import account_protection_lists
 import supabase_client
 from device import app_start, force_stop, get_device_serial
 from dm_real_send_flags import (
@@ -4430,6 +4431,26 @@ def run_dm_sender_send(
         summary["jobs_claimed_count"] += 1
         recipient = str(job.get("recipient_username") or "").strip()
         summary["processed_recipients"].append(recipient)
+
+        if account_protection_lists.is_interaction_blocked(recipient):
+            _complete_job_skipped(
+                job,
+                skip_reason="interaction_blacklist",
+                thread_state="not_opened_protection_list",
+            )
+            summary["jobs_skipped_count"] += 1
+            summary["skipped_recipients"].append(recipient)
+            log(
+                "info",
+                "interaction_blacklist_action_skipped",
+                account_id=aid,
+                run_id=run_id,
+                job_id=str(job.get("id") or ""),
+                action=f"{dm_type_resolved}_dm_send",
+                username=recipient or None,
+                reason="interaction_blacklist",
+            )
+            continue
 
         skip_post_job_restore = bool(using_prepared_jobs and max_jobs == 1)
         last_result = execute_dm_job_real_send(

@@ -56,6 +56,11 @@ from logs import log
 import incident_notifications
 import runtime_incidents
 import supabase_client
+from account_protection_lists import (
+    SNAPSHOT_ENV as ACCOUNT_PROTECTION_SNAPSHOT_ENV,
+    load_snapshot_for_run,
+    serialize_snapshot,
+)
 from runtime_incident_matrix import (
     build_run_failure_incident_payload,
     classify_recoverable_python_retry,
@@ -2008,6 +2013,41 @@ def _load_package_runtime_contract(account_id: str) -> tuple[bool, str, dict[str
     return ok, reason, contract
 
 
+def _load_account_protection_snapshot(account_id: str) -> tuple[bool, str, str, dict[str, Any]]:
+    """Load exactly once before device access and freeze the result for the subprocess."""
+    try:
+        snapshot = load_snapshot_for_run(account_id, supabase_client.call_rpc)
+        serialized = serialize_snapshot(snapshot)
+        metadata = {
+            "protection_lists_source": "canonical_v1",
+            "protection_lists_storage": snapshot.source,
+            "lists_loaded_at": snapshot.loaded_at,
+            "lists_version": dict(snapshot.versions),
+            "blacklist_count": len(snapshot.interaction_blacklist),
+            "interaction_blacklist_version": snapshot.versions["interaction_blacklist"],
+            "interaction_blacklist_count": len(snapshot.interaction_blacklist),
+            "unfollow_whitelist_version": snapshot.versions["unfollow_whitelist"],
+            "unfollow_whitelist_count": len(snapshot.unfollow_whitelist),
+        }
+        log("info", "account_protection_lists_snapshot_loaded", account_id=account_id, **metadata)
+        return True, "ready", serialized, metadata
+    except Exception as exc:
+        detail = str(exc)
+        reason = (
+            "unfollow_whitelist_load_failed"
+            if "unfollow_whitelist" in detail and "interaction_blacklist" not in detail
+            else "interaction_blacklist_load_failed"
+        )
+        log(
+            "error",
+            "account_protection_lists_snapshot_failed",
+            account_id=account_id,
+            reason=reason,
+            error_type=type(exc).__name__,
+        )
+        return False, reason, "", {}
+
+
 def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> None:
     request_id = normalize_request_uuid(request.get("id"))
     account_id = normalize_request_uuid(request.get("account_id"))
@@ -2123,7 +2163,31 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
         )
         return
 
-    request_metadata = dict(request.get("metadata_safe") or {})
+    protection_snapshot_json = ""
+    protection_metadata: dict[str, Any] = {}
+    if run_type in {"account_session", "outreach_session"}:
+        protection_ok, protection_reason, protection_snapshot_json, protection_metadata = _load_account_protection_snapshot(account_id)
+        if not protection_ok:
+            _safe_complete_account_run_request(
+                request_id,
+                cfg.worker_id,
+                "blocked",
+                error_code=protection_reason,
+                error_message_safe="Run request blocked before device access: account protection lists unavailable.",
+            )
+            _audit(
+                account_id=account_id,
+                action_type="account_protection_lists_blocked",
+                status="blocked",
+                message="Run request blocked before device access: account protection lists unavailable.",
+                payload={"request_id": request_id, "reason": protection_reason},
+            )
+            return
+
+    request_metadata = {
+        **dict(request.get("metadata_safe") or {}),
+        **protection_metadata,
+    }
     login_binding: dict[str, Any] | None = None
     if _is_login_run_type(run_type):
         binding_ok, binding_reason, login_binding = _validate_login_request_binding(
@@ -2507,6 +2571,20 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
         if _is_login_run_type(run_type) or _is_orphan_recovery_run_type(run_type)
         else runner_subprocess_env()
     )
+    if protection_snapshot_json:
+        subprocess_env = {
+            **subprocess_env,
+            ACCOUNT_PROTECTION_SNAPSHOT_ENV: protection_snapshot_json,
+            "ACCOUNT_PROTECTION_LISTS_REQUIRED": "1",
+        }
+        log(
+            "info",
+            "account_protection_lists_snapshot_propagated",
+            account_id=account_id,
+            request_id=request_id,
+            run_type=run_type,
+            **protection_metadata,
+        )
     if run_type == "account_session":
         deadline_env = _account_session_deadline_env(request_metadata, dispatch_ctx)
         subprocess_env = {**subprocess_env, **deadline_env}

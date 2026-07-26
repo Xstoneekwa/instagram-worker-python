@@ -17,6 +17,7 @@ import xml.etree.ElementTree as ET
 import uiautomator2 as u2
 
 import config
+import account_protection_lists
 from device import (
     force_stop,
     get_device_serial,
@@ -9533,6 +9534,25 @@ def perform_follow_safe(
     pkg = pkg or getattr(config, "INSTAGRAM_PACKAGE", "") or ""
     events: list[tuple[str, dict[str, Any]]] = []
     t_all = time.perf_counter()
+
+    protection_username = str(username or "").strip()
+    if account_protection_lists.is_interaction_blocked(protection_username):
+        log(
+            "info",
+            "interaction_blacklist_action_skipped",
+            action="follow",
+            username=protection_username or None,
+            reason="interaction_blacklist" if protection_username else "candidate_username_unresolved",
+        )
+        return {
+            "ok": False,
+            "failure_code": 91,
+            "failure_reason": "interaction_blacklist" if protection_username else "candidate_username_unresolved",
+            "tapped": False,
+            "follow_tap_sent": False,
+            "verify_attempts": 0,
+            "events": [],
+        }
 
     def _record(event: str, payload: dict[str, Any]) -> None:
         events.append((event, dict(payload)))
@@ -45520,6 +45540,17 @@ def run_post_follow_post_likes_phase(
 
     out = _post_follow_post_likes_out_template()
     out["post_like_mode"] = "profile_grid_single_v1"
+    if account_protection_lists.is_interaction_blocked(cand):
+        out["result"] = "skipped"
+        out["failure_reason"] = "interaction_blacklist" if cand else "candidate_username_unresolved"
+        log(
+            "info",
+            "interaction_blacklist_action_skipped",
+            action="like",
+            username=cand or None,
+            reason=out["failure_reason"],
+        )
+        return out
     _likes_perf_ctx: dict[str, Any] = {
         "phase_t0": time.perf_counter(),
         "summary_emitted": False,

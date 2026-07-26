@@ -1,5 +1,11 @@
 # Release Registry
 
+## ACCOUNT_PROTECTION_LISTS_V1_2026-07-26
+
+Parent Worker runtime: `8eec60f8301aec32597a393659357da18d38ba36`. This release adds the once-per-request canonical protection snapshot and action gates without changing caps, scheduling, Auto Login or device control. The final SHA, immutable release name, active symlink and dispatcher PID are rollout evidence. No physical run belongs to this entry.
+
+Architecture and rollback: [Account protection lists runtime](./account-protection-lists-runtime.md).
+
 ## PACKAGE_RUNTIME_CONTRACT_V1_2026-07-26
 
 Parent Worker runtime: `ada6af15f4cd3506cdd48e9e79aa3a28d4c31ec6`.

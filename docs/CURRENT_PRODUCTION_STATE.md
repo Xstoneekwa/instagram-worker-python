@@ -1,5 +1,9 @@
 # Current Production State
 
+## Prepared addendum — account protection lists V1
+
+The 2026-07-26 checkpoint adds one canonical account-scoped protection snapshot loaded once before device access for account/outreach sessions. Interaction blacklist and Unfollow whitelist have separate action semantics; active requests keep an immutable snapshot. Backend failure blocks safely and legacy list fields are not fallbacks. No run or phone action belongs to deployment. See the [scoped checkpoint](./checkpoints/2026-07-26-account-protection-lists-v1.md).
+
 ## Prepared addendum — package runtime contract V1
 
 The 2026-07-26 checkpoint makes the Supabase package/runtime contract a

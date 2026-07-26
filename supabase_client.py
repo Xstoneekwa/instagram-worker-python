@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from logs import log
+import account_protection_lists
 
 
 class SupabaseRestError(RuntimeError):
@@ -3280,7 +3281,6 @@ def fetch_unfollow_strict_candidate_rows(
         "followed_by_bot": "eq.true",
         "followed_at": "not.is.null",
         "unfollowed_at": "is.null",
-        "whitelist_protected": "eq.false",
         "follow_status": "eq.following",
     }
 
@@ -3964,6 +3964,16 @@ def enqueue_welcome_dm_job_if_eligible(
     priority: int = 10,
 ) -> dict[str, Any] | None:
     """RPC enqueue_welcome_dm_job_if_eligible (no DM send). Returns job row or None."""
+    if account_protection_lists.is_interaction_blocked(follower_username):
+        log(
+            "info",
+            "interaction_blacklist_action_skipped",
+            account_id=str(account_id),
+            action="welcome_dm_enqueue",
+            username=str(follower_username or "") or None,
+            reason="interaction_blacklist",
+        )
+        return None
     if str(message_body or "").strip():
         raise RuntimeError("dm_template_render_failed:welcome_message_body_override_not_allowed")
     rendered_body, resolved_template = _resolve_and_render_dm_message_for_enqueue(
@@ -4047,6 +4057,16 @@ def enqueue_outreach_dm_job(
     metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """RPC enqueue_outreach_dm_job (no DM send). Returns job row or None."""
+    if account_protection_lists.is_interaction_blocked(recipient_username):
+        log(
+            "info",
+            "interaction_blacklist_action_skipped",
+            account_id=str(account_id),
+            action="outreach_dm_enqueue",
+            username=str(recipient_username or "") or None,
+            reason="interaction_blacklist",
+        )
+        return None
     rendered_body = _render_dm_message_body_for_enqueue(
         account_id,
         recipient_username=recipient_username,

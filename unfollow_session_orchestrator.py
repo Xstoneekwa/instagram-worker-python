@@ -14,6 +14,7 @@ from typing import Any
 import uiautomator2 as u2
 
 import config
+import account_protection_lists
 import supabase_client
 from account_identity_guard import verify_active_instagram_account_matches_expected
 from instagram_list_continuation import (
@@ -814,7 +815,7 @@ def _evaluate_visible_unfollow_any_with_session_cache(
             reject_reason = "row_cta_follow"
         elif row_cta_class == "follow_back":
             reject_reason = "row_cta_follow_back"
-        elif isinstance(db_row, dict) and bool(db_row.get("whitelist_protected")):
+        elif account_protection_lists.is_unfollow_protected(key):
             reject_reason = "whitelist"
         elif isinstance(db_row, dict) and db_row.get("unfollowed_at"):
             reject_reason = "already_unfollowed"
@@ -2453,6 +2454,25 @@ def run_unfollow_session(
     plan = plan_unfollow_targets(aid, settings=settings)
     planned_usernames = _planned_username_set(plan)
     planned_by_username = _planned_candidates_by_username(plan)
+    canonical_whitelist_skips = {
+        username for username in planned_usernames
+        if account_protection_lists.is_unfollow_protected(username)
+    }
+    if canonical_whitelist_skips:
+        planned_usernames -= canonical_whitelist_skips
+        planned_by_username = {
+            username: candidate
+            for username, candidate in planned_by_username.items()
+            if username not in canonical_whitelist_skips
+        }
+        log(
+            "info",
+            "unfollow_whitelist_candidates_skipped",
+            account_id=aid,
+            run_id=run_id,
+            skip_count=len(canonical_whitelist_skips),
+            source="account_protection_list_entries",
+        )
     handoff_budget = _runtime_adaptive_coverage_budget(
         quota_remaining=domain_real_action_max,
         eligible_remaining=len(planned_usernames),

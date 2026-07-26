@@ -5,6 +5,7 @@ Canonical status source:
 
 | Feature | Status | Evidence / limitation |
 |---|---|---|
+| Account protection lists V1 | Test-validated, activation pending | Once-per-request canonical snapshot; Follow/Like/DM/Unfollow guards; no physical run authorized |
 | First-tick natural scheduler | Physically validated | July 16 natural launch |
 | Scheduler without Electron | Test-validated | Closed-BotApp natural run pending |
 | Same-account preflight lease | Test-validated | Natural contract tests |

@@ -129,9 +129,6 @@ def _strict_unfollow_skip_reason(
     if not row.get("followed_at"):
         return "missing_followed_at"
 
-    if bool(row.get("whitelist_protected")):
-        return "whitelist"
-
     if _row_follow_status(row) != "following":
         return "follow_status_not_following"
 
