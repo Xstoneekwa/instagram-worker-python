@@ -1,5 +1,14 @@
 # Current Production State
 
+## Prepared addendum — package runtime contract V1
+
+The 2026-07-26 checkpoint makes the Supabase package/runtime contract a
+fail-closed Worker preflight before device lock or subprocess creation. It also
+distinguishes known transient Android login overlays from a persistent package
+mismatch without weakening the strict package guard or Identity Guard. The
+active release, dispatcher PID and zero-queue evidence are recorded at rollout.
+See the [scoped checkpoint](./checkpoints/2026-07-26-package-runtime-contract-v1.md).
+
 ## Golden addendum — Unfollow handoff budget and request terminalization
 
 The 2026-07-25 checkpoint moves the complete Unfollow time calculation to the

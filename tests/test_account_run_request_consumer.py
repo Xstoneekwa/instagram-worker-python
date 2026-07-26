@@ -15,6 +15,15 @@ TEST_RUN_ID = "00000000-0000-4000-8000-000000000301"
 
 
 class AccountRunRequestConsumerTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.package_runtime_contract = patch.object(
+            consumer,
+            "_load_package_runtime_contract",
+            return_value=(True, "ready", {"ok": True, "reason": "ready"}),
+        )
+        self.package_runtime_contract.start()
+        self.addCleanup(self.package_runtime_contract.stop)
+
     def test_account_session_deadline_env_prefers_real_scheduler_deadline(self) -> None:
         out = consumer._account_session_deadline_env(
             {

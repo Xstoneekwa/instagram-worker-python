@@ -314,7 +314,7 @@ def _resolve_rotation_setting_with_fallback(
         return fallback, True
 
 
-def _resolve_follow_source_rotation_settings(account_id: str) -> dict[str, Any]:
+def _resolve_follow_source_rotation_settings(account_id: str, *, strict: bool = False) -> dict[str, Any]:
     max_targets_upper = int(getattr(config, "FOLLOW_TARGET_ROTATION_MAX_TARGETS_PER_RUN_UPPER_BOUND", 10) or 10)
     max_follows_upper = int(getattr(config, "FOLLOW_TARGET_MAX_FOLLOWS_PER_TARGET_PER_RUN_UPPER_BOUND", 50) or 50)
     fallback = {
@@ -336,9 +336,37 @@ def _resolve_follow_source_rotation_settings(account_id: str) -> dict[str, Any]:
             reason=str(exc),
             fallback_source=fallback["settings_source"],
         )
+        if strict:
+            raise RuntimeError("package_settings_incomplete") from exc
         return fallback
     if not row:
+        if strict:
+            raise RuntimeError("package_settings_incomplete")
         return fallback
+    if strict:
+        try:
+            return {
+                "max_targets_per_run": _validate_rotation_setting(
+                    row.get("max_targets_per_run"), field="max_targets_per_run", lower=1, upper=max_targets_upper,
+                ),
+                "max_follows_per_target_per_run": _validate_rotation_setting(
+                    row.get("max_follows_per_target_per_run"),
+                    field="max_follows_per_target_per_run",
+                    lower=1,
+                    upper=max_follows_upper,
+                ),
+                "settings_source": "account",
+                "bounds": fallback["bounds"],
+            }
+        except ValueError as exc:
+            log(
+                "error",
+                "follow_source_rotation_settings_strict_blocked",
+                account_id=account_id,
+                reason="package_settings_incomplete",
+                validation_error=str(exc),
+            )
+            raise RuntimeError("package_settings_incomplete") from exc
     max_targets_per_run, max_targets_fallback_used = _resolve_rotation_setting_with_fallback(
         row.get("max_targets_per_run"),
         field="max_targets_per_run",
@@ -3274,7 +3302,7 @@ def run_account_session(
                 target_count=len(rotation_targets),
             )
             t_rotation_settings = time.perf_counter()
-            rotation_settings = _resolve_follow_source_rotation_settings(aid)
+            rotation_settings = _resolve_follow_source_rotation_settings(aid, strict=supabase_mode)
             log(
                 "info",
                 "follow_source_rotation_settings_loaded",

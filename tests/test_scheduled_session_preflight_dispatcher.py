@@ -17,6 +17,15 @@ TEST_ASSIGNMENT_ID = "00000000-0000-4000-8000-000000000601"
 
 
 class ScheduledSessionPreflightDispatcherTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.package_runtime_contract = patch.object(
+            consumer,
+            "_load_package_runtime_contract",
+            return_value=(True, "ready", {"ok": True, "reason": "ready"}),
+        )
+        self.package_runtime_contract.start()
+        self.addCleanup(self.package_runtime_contract.stop)
+
     def test_load_dispatcher_config_includes_scheduled_session_preflight(self) -> None:
         with patch.dict("os.environ", {}, clear=True):
             with patch.object(

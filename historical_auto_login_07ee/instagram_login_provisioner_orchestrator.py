@@ -85,6 +85,15 @@ POST_CONTINUE_REOBSERVE_WAIT_MS = 1500
 PROFILE_MENU_REOBSERVE_WAIT_MS = 1500
 PROFILE_REFRESH_WAIT_MS = 500
 DEFAULT_INSTAGRAM_PACKAGE_NAME = "com.instagram.android"
+TRANSIENT_FOREGROUND_PACKAGES = frozenset(
+    {
+        "com.android.credentialmanager",
+        "com.google.android.gms",
+        "com.samsung.android.samsungpassautofill",
+    }
+)
+TRANSIENT_FOREGROUND_RECOVERY_ATTEMPTS = 2
+TRANSIENT_FOREGROUND_RECOVERY_WAIT_MS = 500
 DEFAULT_POST_APP_START_WAIT_MS = 1500
 MAX_POST_APP_START_WAIT_MS = 3000
 DEFAULT_STARTUP_OBSERVATIONS = 4
@@ -1719,7 +1728,12 @@ def run_login_provisioning_flow(
             publish_enabled=publish_enabled,
         )
 
-    guard = _check_expected_foreground_package(d, expected_package_name=safe_package_name)
+    guard = _guard_foreground_package_for_login_input(
+        d,
+        expected_package_name=safe_package_name,
+        timer=timer,
+        sleeper=sleeper,
+    )
     old_logged_in_metadata.update(guard)
     if guard.get("package_guard_mismatch"):
         return _finalize_package_mismatch(
@@ -1774,7 +1788,12 @@ def run_login_provisioning_flow(
 
     retry_count = 0
     retry_attempted = False
-    guard = _check_expected_foreground_package(d, expected_package_name=safe_package_name)
+    guard = _guard_foreground_package_for_login_input(
+        d,
+        expected_package_name=safe_package_name,
+        timer=timer,
+        sleeper=sleeper,
+    )
     old_logged_in_metadata.update(guard)
     if guard.get("package_guard_mismatch"):
         return _finalize_package_mismatch(
@@ -1821,7 +1840,12 @@ def run_login_provisioning_flow(
         if not _signals_confirm_login_form(signals):
             warnings.append("retry_aborted_login_form_not_validated")
             break
-        guard = _check_expected_foreground_package(d, expected_package_name=safe_package_name)
+        guard = _guard_foreground_package_for_login_input(
+            d,
+            expected_package_name=safe_package_name,
+            timer=timer,
+            sleeper=sleeper,
+        )
         old_logged_in_metadata.update(guard)
         if guard.get("package_guard_mismatch"):
             return _finalize_package_mismatch(
@@ -3145,6 +3169,53 @@ def _check_expected_foreground_package(d: Any, *, expected_package_name: str) ->
         "package_guard_mismatch": mismatch,
         "package_guard_reason": "expected_package_mismatch" if mismatch else "",
     }
+
+
+def _guard_foreground_package_for_login_input(
+    d: Any,
+    *,
+    expected_package_name: str,
+    timer: Timer,
+    sleeper: Sleeper,
+    max_attempts: int = TRANSIENT_FOREGROUND_RECOVERY_ATTEMPTS,
+) -> dict[str, Any]:
+    """Dismiss only known system credential overlays, then re-run the strict guard."""
+    metadata = {
+        "transient_foreground_recovery_attempted": False,
+        "transient_foreground_recovery_count": 0,
+        "transient_foreground_packages_seen": [],
+        "transient_foreground_recovery_succeeded": False,
+    }
+    guard = _check_expected_foreground_package(d, expected_package_name=expected_package_name)
+    if not guard.get("package_guard_mismatch"):
+        return {**guard, **metadata}
+    actual = str(guard.get("actual_foreground_package") or "").strip()
+    if actual not in TRANSIENT_FOREGROUND_PACKAGES:
+        return {**guard, **metadata}
+
+    press = getattr(d, "press", None)
+    for attempt in range(max_attempts):
+        metadata["transient_foreground_recovery_attempted"] = True
+        metadata["transient_foreground_recovery_count"] = attempt + 1
+        seen = list(metadata["transient_foreground_packages_seen"])
+        if actual and actual not in seen:
+            seen.append(actual)
+        metadata["transient_foreground_packages_seen"] = seen
+        if callable(press):
+            try:
+                press("back")
+            except Exception:
+                pass
+        if TRANSIENT_FOREGROUND_RECOVERY_WAIT_MS > 0:
+            sleeper(TRANSIENT_FOREGROUND_RECOVERY_WAIT_MS / 1000.0)
+        guard = _check_expected_foreground_package(d, expected_package_name=expected_package_name)
+        if not guard.get("package_guard_mismatch"):
+            metadata["transient_foreground_recovery_succeeded"] = True
+            return {**guard, **metadata}
+        actual = str(guard.get("actual_foreground_package") or "").strip()
+        if actual not in TRANSIENT_FOREGROUND_PACKAGES:
+            return {**guard, **metadata}
+    return {**guard, **metadata}
 
 
 def _retry_app_start_once(

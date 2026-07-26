@@ -166,6 +166,11 @@ class AutoLoginAppInstanceBindingTests(unittest.TestCase):
         }
         with (
             patch.object(consumer, "_account_is_launch_allowed", return_value=(True, None)),
+            patch.object(
+                consumer,
+                "_load_package_runtime_contract",
+                return_value=(True, "ready", {"ready": True}),
+            ),
             patch.object(consumer, "mark_account_run_request_starting", return_value=True),
             patch.object(consumer, "resolve_account_assignment_runtime_context", return_value=dispatch),
             patch.object(consumer, "_safe_complete_account_run_request") as complete,
@@ -211,6 +216,11 @@ class AutoLoginAppInstanceBindingTests(unittest.TestCase):
         }
         with (
             patch.object(consumer, "_account_is_launch_allowed", return_value=(True, None)),
+            patch.object(
+                consumer,
+                "_load_package_runtime_contract",
+                return_value=(True, "ready", {"ready": True}),
+            ),
             patch.object(consumer, "mark_account_run_request_starting", return_value=True),
             patch.object(consumer, "resolve_account_assignment_runtime_context", return_value=dispatch),
             patch.object(consumer, "_safe_complete_account_run_request") as complete,

@@ -1966,6 +1966,48 @@ def _publish_auto_login_dispatch_failure(
     )
 
 
+PACKAGE_RUNTIME_CONTRACT_REASONS = {
+    "assignment_package_mismatch",
+    "app_instance_package_mismatch",
+    "clone_package_mismatch",
+    "package_settings_incomplete",
+    "runtime_profile_mismatch",
+}
+
+
+def _load_package_runtime_contract(account_id: str) -> tuple[bool, str, dict[str, Any]]:
+    """Fail closed before any device lock or subprocess when the DB contract is incomplete."""
+    try:
+        value = supabase_client.call_rpc(
+            "account_package_runtime_contract_status",
+            {"p_account_id": account_id},
+        )
+    except Exception as exc:
+        log(
+            "error",
+            "package_runtime_contract_preflight_failed",
+            account_id=account_id,
+            reason="package_settings_incomplete",
+            error_type=type(exc).__name__,
+        )
+        return False, "package_settings_incomplete", {}
+    contract = dict(value) if isinstance(value, dict) else {}
+    reason = str(contract.get("reason") or "package_settings_incomplete").strip()
+    if reason not in PACKAGE_RUNTIME_CONTRACT_REASONS and reason != "ready":
+        reason = "package_settings_incomplete"
+    ok = contract.get("ok") is True and reason == "ready"
+    log(
+        "info" if ok else "warning",
+        "package_runtime_contract_preflight_completed",
+        account_id=account_id,
+        ok=ok,
+        reason=reason,
+        commercial_package_code=contract.get("commercial_package_code"),
+        runtime_profile=contract.get("runtime_profile"),
+    )
+    return ok, reason, contract
+
+
 def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> None:
     request_id = normalize_request_uuid(request.get("id"))
     account_id = normalize_request_uuid(request.get("account_id"))
@@ -2005,6 +2047,32 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
             run_type=run_type,
             reason_code=failure_reason,
             phase="request",
+        )
+        return
+
+    contract_ok, contract_reason, _contract = _load_package_runtime_contract(account_id)
+    if not contract_ok:
+        _safe_complete_account_run_request(
+            request_id,
+            cfg.worker_id,
+            "blocked",
+            error_code=contract_reason,
+            error_message_safe=f"Package runtime contract blocked: {contract_reason}.",
+        )
+        _audit(
+            account_id=account_id,
+            action_type="package_runtime_contract_blocked",
+            status="blocked",
+            message=f"Run request blocked before device access: {contract_reason}.",
+            payload={"request_id": request_id, "reason": contract_reason},
+        )
+        _publish_auto_login_dispatch_failure(
+            request=request,
+            request_id=request_id,
+            account_id=account_id,
+            run_type=run_type,
+            reason_code=contract_reason,
+            phase="package_runtime_contract",
         )
         return
 

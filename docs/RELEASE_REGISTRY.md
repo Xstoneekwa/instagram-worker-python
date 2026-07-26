@@ -1,5 +1,17 @@
 # Release Registry
 
+## PACKAGE_RUNTIME_CONTRACT_V1_2026-07-26
+
+Parent Worker runtime: `ada6af15f4cd3506cdd48e9e79aa3a28d4c31ec6`.
+This release adds the fail-closed Supabase package/runtime preflight, strict
+production follow-source settings and a bounded recheck for known Android login
+system overlays. Unknown or persistent foreground mismatches still safe-stop;
+Identity Guard is unchanged. The final SHA, immutable release name and active
+dispatcher PID are rollout evidence. No physical run belongs to this entry.
+
+Architecture and rollback:
+[Package runtime contract V1](./checkpoints/2026-07-26-package-runtime-contract-v1.md).
+
 ## UNFOLLOW_HANDOFF_BUDGET_V1_2026-07-25
 
 Parent Worker code: `403036a7f27dfbaa81103669266444a63ee0f200`.
