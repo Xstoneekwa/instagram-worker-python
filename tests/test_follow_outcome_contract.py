@@ -19,6 +19,7 @@ class FollowOutcomeContractTests(unittest.TestCase):
         self.assertFalse(outcome["completed"])
         self.assertTrue(outcome["partial"])
         self.assertEqual(outcome["remaining_actions"], 22)
+        self.assertEqual(outcome["current_ct_result"], "locally_blocked")
         self.assertEqual(outcome["safe_next_step"], "rotate_next_ct")
 
     def test_critical_marker_stops_account_session(self) -> None:

@@ -411,6 +411,106 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
         self.assertEqual(other, (0, False))
         terminate.assert_called_once_with(canceled_proc)
 
+    def test_wait_for_subprocess_keeps_ownership_on_control_plane_read_failure(self) -> None:
+        cfg = consumer.DispatcherConfig(
+            enabled=True,
+            health_only=False,
+            launch_enabled=True,
+            worker_id="run-dispatcher:test",
+            poll_seconds=5.0,
+            lease_seconds=120,
+            heartbeat_seconds=20.0,
+            allowed_run_types=["account_session"],
+            test_account_ids=set(),
+            subprocess_timeout_seconds=7200,
+            require_assignment=False,
+            enforce_assignment_window=False,
+        )
+        proc = MagicMock()
+        proc.poll.side_effect = [None, 0]
+        with (
+            patch.object(
+                consumer,
+                "get_account_run_request",
+                side_effect=RuntimeError("supabase_dns_failed"),
+            ),
+            patch.object(consumer.time, "sleep"),
+            patch.object(consumer, "log") as log_mock,
+        ):
+            result = consumer._wait_for_subprocess(
+                cfg,
+                proc,
+                request_id=TEST_REQUEST_ID,
+                account_id=TEST_ACCOUNT_ID,
+            )
+
+        self.assertEqual(result, (0, False))
+        self.assertTrue(
+            any(
+                call.args[1] == "manual_run_control_plane_read_failed_while_child_active"
+                for call in log_mock.call_args_list
+            )
+        )
+
+    def test_reconcile_requests_with_terminal_runs_closes_only_terminal_links(self) -> None:
+        cfg = consumer.DispatcherConfig(
+            enabled=True,
+            health_only=False,
+            launch_enabled=True,
+            worker_id="run-dispatcher:test",
+            poll_seconds=5.0,
+            lease_seconds=120,
+            heartbeat_seconds=20.0,
+            allowed_run_types=["account_session"],
+            test_account_ids=set(),
+            subprocess_timeout_seconds=7200,
+            require_assignment=False,
+            enforce_assignment_window=False,
+        )
+        active_run_id = "00000000-0000-4000-8000-000000000302"
+        requests = [
+            {
+                "id": TEST_REQUEST_ID,
+                "account_id": TEST_ACCOUNT_ID,
+                "status": "running",
+                "run_id": TEST_RUN_ID,
+                "requested_run_type": "account_session",
+            },
+            {
+                "id": "00000000-0000-4000-8000-000000000102",
+                "account_id": "00000000-0000-4000-8000-000000000202",
+                "status": "running",
+                "run_id": active_run_id,
+                "requested_run_type": "account_session",
+            },
+        ]
+        runs = [
+            {"id": TEST_RUN_ID, "status": "completed"},
+            {"id": active_run_id, "status": "running"},
+        ]
+        with (
+            patch.object(
+                consumer.supabase_client,
+                "_request_json",
+                side_effect=[requests, runs],
+            ),
+            patch.object(
+                consumer,
+                "_safe_complete_account_run_request",
+                return_value={"status": "completed"},
+            ) as complete,
+        ):
+            result = consumer.reconcile_requests_with_terminal_runs(cfg)
+
+        self.assertEqual(result, {"ok": True, "observed": 2, "terminalized": 1})
+        complete.assert_called_once_with(
+            TEST_REQUEST_ID,
+            "run-dispatcher:test",
+            "completed",
+            error_code=None,
+            error_message_safe=None,
+        )
+
     def test_dispatcher_is_healthy_false_when_disabled(self) -> None:
         cfg = consumer.DispatcherConfig(
             enabled=False,

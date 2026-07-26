@@ -165,6 +165,7 @@ def build_follow_outcome(
         "remaining_target_ids": remaining_ids,
         "remaining_target_count": len(remaining_ids),
         "current_ct_status": current_ct_status,
+        "current_ct_result": current_ct_status,
         "safe_boundary": boundary,
         "safe_next_step": safe_next_step,
         "suggested_next_action": suggested_next_action,

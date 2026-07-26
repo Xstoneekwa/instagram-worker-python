@@ -3627,6 +3627,53 @@ def _cleanup_session_apps(d) -> None:
 _DEFER_TERMINAL_RUN_STATUS_UNTIL_CLEANUP = False
 _RUNNER_SESSION_CLEANUP_COMPLETE = False
 _PENDING_TERMINAL_RUN_STATUS: dict[str, Any] | None = None
+_CURRENT_RUN_REQUEST_ID: str | None = None
+
+
+def _terminalize_run_request_after_cleanup(run_status: str) -> None:
+    """Close the linked queue row as soon as the session run is terminal.
+
+    The dispatcher remains an idempotent second writer.  Keeping this write in
+    the Runner prevents a transient dispatcher control-plane read failure from
+    orphaning a request after cleanup has already completed.
+    """
+    request_id = str(_CURRENT_RUN_REQUEST_ID or "").strip()
+    if not request_id:
+        return
+    normalized_run_status = str(run_status or "").strip().lower()
+    request_status = {
+        "completed": "completed",
+        "stopped": "canceled",
+        "canceled": "canceled",
+        "blocked": "blocked",
+    }.get(normalized_run_status, "failed")
+    try:
+        from account_run_control import complete_account_run_request
+
+        result = complete_account_run_request(
+            request_id,
+            _run_control_dispatcher_worker_id(),
+            request_status,
+        )
+        log(
+            "info",
+            "run_request_terminalized_after_session_cleanup",
+            run_request_id=request_id,
+            run_status=normalized_run_status,
+            request_status=request_status,
+            persisted=bool(result),
+        )
+    except Exception as exc:
+        # The dispatcher reconciliation sweep retries this transition from the
+        # terminal ig_runs row; cleanup itself must never be reverted.
+        log(
+            "warning",
+            "run_request_terminalization_after_cleanup_failed",
+            run_request_id=request_id,
+            run_status=normalized_run_status,
+            request_status=request_status,
+            error=str(exc)[:200],
+        )
 
 
 def _return_with_cleanup(d, code: int) -> int:
@@ -3638,13 +3685,16 @@ def _return_with_cleanup(d, code: int) -> int:
     pending = _PENDING_TERMINAL_RUN_STATUS
     _PENDING_TERMINAL_RUN_STATUS = None
     if pending:
-        _update_run_status_safe(**pending)
+        persisted_status = _update_run_status_safe(**pending)
+        if persisted_status:
+            _terminalize_run_request_after_cleanup(persisted_status)
         log(
             "info",
             "run_terminal_status_published_after_cleanup",
             run_id=pending.get("run_id"),
-            status=pending.get("status"),
+            status=persisted_status or pending.get("status"),
             cleanup_completed=True,
+            persisted=bool(persisted_status),
         )
     _DEFER_TERMINAL_RUN_STATUS_UNTIL_CLEANUP = False
     return code
@@ -3741,7 +3791,7 @@ def _update_run_status_safe(
     status: str,
     totals: dict,
     performance_summary: dict,
-) -> None:
+) -> str:
     global _PENDING_TERMINAL_RUN_STATUS
     if (
         status in {"completed", "failed", "stopped"}
@@ -3760,7 +3810,7 @@ def _update_run_status_safe(
             run_id=run_id,
             status=status,
         )
-        return
+        return status
     if status in {"completed", "failed", "stopped"}:
         deferred_steps_ok = _flush_deferred_post_return_supabase_steps(
             reason=f"before_run_status_{status}"
@@ -3784,7 +3834,7 @@ def _update_run_status_safe(
                 "pending_deferred_count": _pending_deferred_follow_action_log_count(),
                 "deferred_record_count": _deferred_follow_action_log_record_count(),
             }
-    _timed_safe_supabase_call(
+    persist_result = _timed_safe_supabase_call(
         "run_status_updated",
         "update_run_status",
         log_run_id=run_id,
@@ -3792,13 +3842,16 @@ def _update_run_status_safe(
         status=status,
         totals=totals,
         performance_summary=performance_summary,
+        return_status=True,
     )
+    persisted = bool((persist_result or {}).get("_supabase_call_ok"))
     log(
         "info",
         "run_status_updated",
         run_id=run_id,
         status=status,
         totals=totals,
+        persisted=persisted,
     )
     if status in {"completed", "failed"}:
         event_type = "run_completed" if status == "completed" else "run_failed"
@@ -3830,6 +3883,7 @@ def _update_run_status_safe(
             clone_id=_ORF_RUNTIME_CONTEXT.get("clone_id"),
             metadata={"run_status": status, "reason": reason},
         )
+    return status if persisted else ""
 
 
 def _update_target_status_safe(
@@ -18704,6 +18758,7 @@ def _load_account_session_follow_targets(account_id: str, limit: int) -> tuple[l
 
 
 def main() -> int:
+    global _CURRENT_RUN_REQUEST_ID
     global _DEFER_TERMINAL_RUN_STATUS_UNTIL_CLEANUP
     global _RUNNER_SESSION_CLEANUP_COMPLETE, _PENDING_TERMINAL_RUN_STATUS
     _DEFER_TERMINAL_RUN_STATUS_UNTIL_CLEANUP = True
@@ -18783,6 +18838,7 @@ def main() -> int:
     account_username = ""
     run_id = ""
     run_request_id = _parse_run_request_id(args)
+    _CURRENT_RUN_REQUEST_ID = run_request_id or None
     db_targets: list[dict] = []
     if supabase_mode:
         account = _safe_supabase_call(

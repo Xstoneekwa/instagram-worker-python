@@ -3740,6 +3740,7 @@ def run_account_session(
     follow_partial = bool(canonical_follow_outcome.get("partial"))
     follow_resume_recommended = bool(canonical_follow_outcome.get("resumable"))
     remaining_ct_count = int(canonical_follow_outcome.get("remaining_target_count") or 0)
+    current_ct_result = str(canonical_follow_outcome.get("current_ct_result") or "")
     last_safe_checkpoint = str(canonical_follow_outcome.get("last_safe_checkpoint") or "")
     suggested_resume_strategy = str(
         canonical_follow_outcome.get("suggested_resume_strategy") or ""
@@ -3879,6 +3880,7 @@ def run_account_session(
             "follow_resume_recommended": follow_resume_recommended,
             "remaining_follow_quota": follow_quota_remaining,
             "remaining_ct_count": remaining_ct_count,
+            "current_ct_result": current_ct_result or None,
             "last_safe_checkpoint": last_safe_checkpoint or None,
             "suggested_resume_strategy": suggested_resume_strategy or None,
             "target_rotation_safe_after_scroll_failure": follow_engine_summary.get(
@@ -4044,6 +4046,7 @@ def run_account_session(
         "follow_resume_recommended": follow_resume_recommended,
         "remaining_follow_quota": follow_quota_remaining,
         "remaining_ct_count": remaining_ct_count,
+        "current_ct_result": current_ct_result or None,
         "last_safe_checkpoint": last_safe_checkpoint or None,
         "suggested_resume_strategy": suggested_resume_strategy or None,
         "welcome_sender_jobs_sent_count": sender_summary.get("jobs_sent_count"),
@@ -4085,6 +4088,7 @@ def run_account_session(
         "follow_resume_recommended": follow_resume_recommended,
         "remaining_follow_quota": follow_quota_remaining,
         "remaining_ct_count": remaining_ct_count,
+        "current_ct_result": current_ct_result or None,
         "last_safe_checkpoint": last_safe_checkpoint or None,
         "suggested_resume_strategy": suggested_resume_strategy or None,
         "unfollow_phase_status": unfollow_phase_status,
@@ -4227,6 +4231,7 @@ def run_account_session(
         follow_resume_recommended=follow_resume_recommended,
         remaining_follow_quota=follow_quota_remaining,
         remaining_ct_count=remaining_ct_count,
+        current_ct_result=current_ct_result or None,
         last_safe_checkpoint=last_safe_checkpoint or None,
         suggested_resume_strategy=suggested_resume_strategy or None,
         follow_processed_count=follow_processed_count,

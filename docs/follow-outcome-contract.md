@@ -30,3 +30,19 @@ Follow may hand off to Unfollow only when the canonical result is
 `phase_status=completed`, `scope=follow_phase`, and
 `safe_next_step=end_follow_phase`. Reaching the per-run CT limit with remaining
 Follow quota produces a safe resumable checkpoint, not global completion.
+
+## Queue terminalization after session cleanup
+
+The linked `account_run_requests` row must become terminal immediately after
+the Runner has persisted the terminal `ig_runs` status following application
+cleanup. The transition is idempotent and has three owners:
+
+- the Runner writes it directly after the terminal run status succeeds;
+- the dispatcher finalizes again after observing subprocess exit;
+- a dispatcher sweep, every five seconds and before startup preflight, closes
+  any still-active request whose linked run is already terminal.
+
+A transient request read or device-lock renewal failure while a child is alive
+is logged but cannot detach the child from its dispatcher Future. Under a
+healthy control plane the direct write is immediate; the sweep provides one
+retry window inside the ten-second terminalization objective.

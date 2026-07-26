@@ -322,6 +322,128 @@ def summarize_active_account_run_requests(limit: int = 20) -> dict[str, Any]:
     }
 
 
+def reconcile_requests_with_terminal_runs(
+    cfg: DispatcherConfig,
+    *,
+    limit: int = 20,
+) -> dict[str, Any]:
+    """Idempotently close active queue rows whose linked run is terminal.
+
+    A terminal ``ig_runs`` row is only published after Runner cleanup.  It is
+    therefore the durable recovery marker when the dispatch Future is lost or
+    the dispatcher restarts between child exit and request completion.
+    """
+    try:
+        requests = supabase_client._request_json(
+            "GET",
+            "account_run_requests",
+            query={
+                "select": "id,account_id,status,run_id,requested_run_type",
+                "status": f"in.({','.join(sorted(ACTIVE_REQUEST_STATUSES))})",
+                "run_id": "not.is.null",
+                "order": "created_at.asc",
+                "limit": str(max(1, int(limit))),
+            },
+        ) or []
+        run_ids = [
+            str(row.get("run_id") or "").strip()
+            for row in requests
+            if isinstance(row, dict) and str(row.get("run_id") or "").strip()
+        ]
+        if not run_ids:
+            return {"ok": True, "observed": 0, "terminalized": 0}
+        runs = supabase_client._request_json(
+            "GET",
+            "ig_runs",
+            query={
+                "select": "id,status,finished_at,updated_at",
+                "id": f"in.({','.join(run_ids)})",
+            },
+        ) or []
+    except Exception as exc:
+        log(
+            "warning",
+            "terminal_run_request_reconciliation_read_failed",
+            worker_id=cfg.worker_id,
+            error=str(exc)[:200],
+        )
+        return {"ok": False, "observed": 0, "terminalized": 0, "error": str(exc)[:200]}
+
+    terminal_runs = {
+        str(row.get("id") or "").strip(): dict(row)
+        for row in runs
+        if isinstance(row, dict)
+        and str(row.get("status") or "").strip().lower()
+        in {"completed", "failed", "stopped", "canceled", "blocked", "aborted"}
+    }
+    terminalized = 0
+    for request in requests:
+        if not isinstance(request, dict):
+            continue
+        request_id = normalize_request_uuid(request.get("id"))
+        run_id = str(request.get("run_id") or "").strip()
+        run = terminal_runs.get(run_id)
+        if not request_id or not run:
+            continue
+        run_status = str(run.get("status") or "").strip().lower()
+        request_status = {
+            "completed": "completed",
+            "stopped": "canceled",
+            "canceled": "canceled",
+            "blocked": "blocked",
+        }.get(run_status, "failed")
+        try:
+            result = _safe_complete_account_run_request(
+                request_id,
+                cfg.worker_id,
+                request_status,
+                error_code=(
+                    None
+                    if request_status in {"completed", "canceled"}
+                    else f"linked_run_{run_status}"
+                ),
+                error_message_safe=(
+                    None
+                    if request_status in {"completed", "canceled"}
+                    else "Linked worker session reached a terminal failure state."
+                ),
+            )
+        except Exception as exc:
+            log(
+                "warning",
+                "terminal_run_request_reconciliation_write_failed",
+                worker_id=cfg.worker_id,
+                request_id=request_id,
+                run_id=run_id,
+                run_status=run_status,
+                error=str(exc)[:200],
+            )
+            continue
+        if not result:
+            log(
+                "warning",
+                "terminal_run_request_reconciliation_not_persisted",
+                worker_id=cfg.worker_id,
+                request_id=request_id,
+                run_id=run_id,
+                run_status=run_status,
+                request_status=request_status,
+            )
+            continue
+        terminalized += 1
+        log(
+            "info",
+            "terminal_run_request_reconciled",
+            worker_id=cfg.worker_id,
+            request_id=request_id,
+            run_id=run_id,
+            run_status=run_status,
+            request_status=request_status,
+            persisted=True,
+        )
+    return {"ok": True, "observed": len(requests), "terminalized": terminalized}
+
+
 def evaluate_launch_mode_startup_preflight(cfg: DispatcherConfig) -> dict[str, Any]:
     """Block launch mode when an active queue exists unless explicitly overridden."""
     if cfg.health_only or not cfg.launch_enabled:
@@ -1893,12 +2015,34 @@ def _wait_for_subprocess(
     deadline = time.monotonic() + cfg.subprocess_timeout_seconds
     next_lock_renew = time.monotonic()
     lock_renew_interval = max(30.0, float(cfg.heartbeat_seconds) * 2.0)
+    last_control_plane_error_logged_at: float | None = None
     while True:
         exit_code = proc.poll()
         if exit_code is not None:
             return int(exit_code), False
 
-        latest = get_account_run_request(request_id)
+        try:
+            latest = get_account_run_request(request_id)
+        except Exception as exc:
+            # A control-plane read failure must not detach the child.  The old
+            # behaviour raised out of this loop, discarded the dispatch Future,
+            # and left the request running even when the orphaned Runner later
+            # published a terminal ig_runs status.
+            latest = None
+            now = time.monotonic()
+            if (
+                last_control_plane_error_logged_at is None
+                or now - last_control_plane_error_logged_at >= 60.0
+            ):
+                log(
+                    "warning",
+                    "manual_run_control_plane_read_failed_while_child_active",
+                    account_id=account_id,
+                    request_id=request_id,
+                    worker_id=cfg.worker_id,
+                    error=str(exc)[:200],
+                )
+                last_control_plane_error_logged_at = now
         if latest and (latest.get("status") == "canceled" or latest.get("cancel_requested_at")):
             log(
                 "info",
@@ -1910,11 +2054,21 @@ def _wait_for_subprocess(
             return _terminate_subprocess(proc), False
 
         if device_lock_renewal and device_id and time.monotonic() >= next_lock_renew:
-            renew_device_lock(
-                device_id=device_id,
-                worker_id=cfg.worker_id,
-                request_id=request_id,
-            )
+            try:
+                renew_device_lock(
+                    device_id=device_id,
+                    worker_id=cfg.worker_id,
+                    request_id=request_id,
+                )
+            except Exception as exc:
+                log(
+                    "warning",
+                    "manual_run_device_lock_renew_failed_while_child_active",
+                    account_id=account_id,
+                    request_id=request_id,
+                    worker_id=cfg.worker_id,
+                    error=str(exc)[:200],
+                )
             next_lock_renew = time.monotonic() + lock_renew_interval
 
         if time.monotonic() >= deadline:
@@ -2851,6 +3005,9 @@ def run_forever(cfg: DispatcherConfig | None = None) -> int:
         log("error", "run_control_dispatcher_disabled")
         return 2
 
+    # Recover terminal sessions before startup queue preflight so stale active
+    # rows cannot permanently prevent a safe dispatcher restart.
+    reconcile_requests_with_terminal_runs(cfg)
     preflight = evaluate_launch_mode_startup_preflight_with_retries(cfg)
     if not preflight.get("ok"):
         reason = str(preflight.get("reason") or "blocked")
@@ -2917,6 +3074,8 @@ def run_forever(cfg: DispatcherConfig | None = None) -> int:
         while not stop:
             try:
                 _collect_completed_dispatch_tasks(active_tasks)
+
+                reconcile_requests_with_terminal_runs(cfg)
 
                 now_loop = time.monotonic()
                 if should_run_auto_restart_tick(
@@ -2987,7 +3146,10 @@ def run_forever(cfg: DispatcherConfig | None = None) -> int:
                     metadata={"active_subprocesses": len(active_tasks)},
                 )
                 last_heartbeat = now
-            time.sleep(cfg.poll_seconds)
+            # Five seconds leaves a second five-second window for one transient
+            # reconciliation retry while meeting the 10-second terminalization
+            # target under a healthy control plane.
+            time.sleep(min(cfg.poll_seconds, 5.0))
     finally:
         executor.shutdown(wait=True)
 
