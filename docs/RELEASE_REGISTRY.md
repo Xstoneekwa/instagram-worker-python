@@ -2,7 +2,7 @@
 
 ## ACCOUNT_PROTECTION_LISTS_V1_2026-07-26
 
-Parent Worker runtime: `8eec60f8301aec32597a393659357da18d38ba36`. This release adds the once-per-request canonical protection snapshot and action gates without changing caps, scheduling, Auto Login or device control. The final SHA, immutable release name, active symlink and dispatcher PID are rollout evidence. No physical run belongs to this entry.
+Parent Worker runtime: `8eec60f8301aec32597a393659357da18d38ba36`. Final code SHA: `45d3cd3e4ca1647299ed28ef324e2cc96562d046`. Immutable release: `/Users/admin/phonefarm-worker-releases/45d3cd3-account-protection-lists-v1`, selected by `/Users/admin/phonefarm-worker-current`. Activation used the one-shot startup guard and one dispatcher restart; dispatcher PID `72009`, consumer PID `72061`, with zero active request, run or device lock before and after rollout. This release adds the once-per-request canonical protection snapshot and action gates without changing caps, scheduling, Auto Login or device control. No physical run belongs to this entry.
 
 Architecture and rollback: [Account protection lists runtime](./account-protection-lists-runtime.md).
 

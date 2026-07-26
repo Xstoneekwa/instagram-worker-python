@@ -1,8 +1,8 @@
 # Current Production State
 
-## Prepared addendum — account protection lists V1
+## Active addendum — account protection lists V1
 
-The 2026-07-26 checkpoint adds one canonical account-scoped protection snapshot loaded once before device access for account/outreach sessions. Interaction blacklist and Unfollow whitelist have separate action semantics; active requests keep an immutable snapshot. Backend failure blocks safely and legacy list fields are not fallbacks. No run or phone action belongs to deployment. See the [scoped checkpoint](./checkpoints/2026-07-26-account-protection-lists-v1.md).
+The 2026-07-26 checkpoint is active at Worker code SHA `45d3cd3e4ca1647299ed28ef324e2cc96562d046` in immutable release `/Users/admin/phonefarm-worker-releases/45d3cd3-account-protection-lists-v1`. It adds one canonical account-scoped protection snapshot loaded once before device access for account/outreach sessions. Interaction blacklist and Unfollow whitelist have separate action semantics; active requests keep an immutable snapshot. Backend failure blocks safely and legacy list fields are not fallbacks. Activation used one dispatcher restart and produced zero request, run, device lock or phone action. See the [scoped checkpoint](./checkpoints/2026-07-26-account-protection-lists-v1.md).
 
 ## Prepared addendum — package runtime contract V1
 
