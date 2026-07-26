@@ -41,6 +41,7 @@ import runtime_events
 import runtime_heartbeat
 import supabase_client
 import follow_persistence_intent
+from follow_outcome_contract import merge_follow_outcome
 import target_followers_progressive_resume_v2 as target_followers_resume_v2
 from follow_persistence_rpc import (
     action_id_hash,
@@ -18564,8 +18565,11 @@ def _run_followers_list_engine_session(
     _prog_max_end = int(followers_progressive_max_passes())
     _expl_used_end = int(visual_loop_state.get("list_progressive_exploration_passes_used") or 0)
     _expl_exhausted_end = bool(visual_loop_state.get("list_progressive_exploration_exhausted"))
-    if str(_followers_loop_finally_stop or "") == "global_follow_cap_reached":
+    _followers_stable_reason = str(_followers_loop_finally_stop or stop_final or "")
+    if _followers_stable_reason == "global_follow_cap_reached":
         _followers_sess_outcome = "global_follow_cap_reached"
+    elif _followers_stable_reason == "visible_window_exhausted_scroll_failed":
+        _followers_sess_outcome = "partial_resumable"
     elif follows_completed_count > 0:
         _followers_sess_outcome = "follows_completed"
     elif _expl_exhausted_end:
@@ -18585,7 +18589,7 @@ def _run_followers_list_engine_session(
         exploration_max_passes=_prog_max_end,
         followers_session_outcome=_followers_sess_outcome,
     )
-    _publish_followers_session_summary(
+    _followers_summary_payload = dict(
         exit_code=0,
         follow_processed_count=int(processed),
         follows_completed_count=int(follows_completed_count),
@@ -18593,7 +18597,7 @@ def _run_followers_list_engine_session(
         global_follows_goal_effective=int(global_follow_goal_effective or 0),
         target_follow_budget_effective=target_follow_budget_effective,
         follow_session_outcome=_followers_sess_outcome,
-        follow_stop_reason=str(_followers_loop_finally_stop or stop_final or ""),
+        follow_stop_reason=_followers_stable_reason,
         target_rotation_safe_after_scroll_failure=bool(
             scroll_failure_target_rotation_safe
         ),
@@ -18608,6 +18612,19 @@ def _run_followers_list_engine_session(
             str(_followers_loop_finally_stop or "") == "global_follow_cap_reached"
         ),
     )
+    _followers_outcome_contract = merge_follow_outcome(
+        _followers_summary_payload,
+        stable_reason=_followers_stable_reason or _followers_sess_outcome,
+        verified_actions=int(follows_completed_count),
+        target_actions=int(global_follow_goal_effective or max_iter or 0),
+        current_target_id=source_profile_username,
+        safe_boundary=bool(scroll_failure_target_rotation_safe),
+        target_budget_reached=bool(
+            int(target_follow_budget_effective or 0) > 0
+            and int(follows_completed_count) >= int(target_follow_budget_effective or 0)
+        ),
+    )
+    _publish_followers_session_summary(**_followers_summary_payload)
     log(
         "info",
         "followers_engine_session_complete",
@@ -18620,11 +18637,18 @@ def _run_followers_list_engine_session(
         exploration_max_passes=_prog_max_end,
         session_outcome=_followers_sess_outcome,
         stop_reason=str(_followers_loop_finally_stop or stop_final or ""),
+        phase_status=_followers_outcome_contract.get("phase_status"),
+        scope=_followers_outcome_contract.get("scope"),
+        safe_next_step=_followers_outcome_contract.get("safe_next_step"),
     )
     _eng_log(
         "followers_engine_session_complete",
-        "success",
-        "complete",
+        (
+            "success"
+            if _followers_outcome_contract.get("phase_status") == "completed"
+            else "partial"
+        ),
+        str(_followers_outcome_contract.get("phase_status") or "complete"),
         {
             "iterations": processed,
             "total_ms": round((time.perf_counter() - t0) * 1000, 2),
@@ -18633,6 +18657,7 @@ def _run_followers_list_engine_session(
             "exploration_passes_used": _expl_used_end,
             "exploration_max_passes": _prog_max_end,
             "session_outcome": _followers_sess_outcome,
+            "follow_outcome": _followers_outcome_contract,
         },
     )
     return 0

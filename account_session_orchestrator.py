@@ -24,6 +24,7 @@ from account_session_resume_engine import build_account_session_resume_plan
 from device import app_start, press_home
 from dm_follow_handoff import HandoffResult, prepare_dm_to_follow_handoff
 from dm_sender_engine import resolve_welcome_dm_real_send_enabled
+from follow_outcome_contract import merge_follow_outcome
 from instagram_navigation import verify_app_foreground
 from logs import log
 from own_profile_navigation import open_own_profile_from_bottom_nav, verify_own_profile
@@ -582,7 +583,7 @@ def is_follow_target_safe_partial_rotation(
     exit_code: int,
     summary: dict[str, Any],
 ) -> bool:
-    """Permit a new CT only when the failed viewport is proved unchanged/safe."""
+    """Return whether the current surface already proves a safe CT boundary."""
     reason = str(
         summary.get("follow_stop_reason")
         or summary.get("follow_session_outcome")
@@ -594,6 +595,14 @@ def is_follow_target_safe_partial_rotation(
         and summary.get("target_rotation_safe_after_scroll_failure") is True
         and summary.get("scroll_failure_surface_ambiguous") is not True
     )
+
+
+def _follow_target_ids(targets: list[dict[str, Any]]) -> list[str]:
+    return [
+        target_id
+        for target in targets
+        if (target_id := (_as_target_id(target.get("target_id")) or _as_source_profile(target.get("source_profile"))))
+    ]
 
 
 def _run_follow_target_rotation(
@@ -870,6 +879,28 @@ def _run_follow_target_rotation(
             and global_follows_completed >= global_follow_goal
         )
         budget_reached = is_follow_target_budget_reached(summary, target_budget)
+        remaining_after_current = [
+            candidate
+            for candidate in follow_targets[attempt_index + 1 :]
+            if _follow_target_key(candidate) not in exhausted_keys
+            and _follow_target_key(candidate) not in budget_reached_keys
+        ]
+        merge_follow_outcome(
+            summary,
+            stable_reason=summary_reason or str(summary.get("follow_session_outcome") or ""),
+            verified_actions=global_follows_completed,
+            target_actions=global_follow_goal,
+            current_target_id=target_id or source_profile,
+            remaining_target_ids=_follow_target_ids(remaining_after_current),
+            current_ct_exhausted=exhausted,
+            target_budget_reached=budget_reached,
+            safe_boundary=is_follow_target_safe_partial_rotation(
+                exit_code=exit_code,
+                summary=summary,
+            ),
+            extra_diagnostics=summary,
+        )
+        attempts[-1]["follow_outcome"] = dict(summary.get("follow_outcome") or {})
         if summary_reason == "global_follow_cap_reached":
             final_reason = "global_follow_cap_reached"
             final_exit_code = 0
@@ -1104,11 +1135,8 @@ def _run_follow_target_rotation(
             )
             break
         if not exhausted:
-            safe_partial_rotation = is_follow_target_safe_partial_rotation(
-                exit_code=exit_code,
-                summary=summary,
-            )
-            if safe_partial_rotation:
+            local_partial_rotation = summary_reason in FOLLOW_TARGET_SAFE_PARTIAL_ROTATION_REASONS
+            if local_partial_rotation:
                 partial_resumable_targets.append(
                     {
                         "target_id": target_id,
@@ -1133,6 +1161,63 @@ def _run_follow_target_rotation(
                     next_source_profile = _as_source_profile(
                         next_target.get("source_profile")
                     )
+                    boundary_already_safe = is_follow_target_safe_partial_rotation(
+                        exit_code=exit_code,
+                        summary=summary,
+                    )
+                    fast_rotation_result: dict[str, Any] | None = None
+                    if fast_rotate_to_next_target_from_followers is not None:
+                        fast_rotation_result = fast_rotate_to_next_target_from_followers(
+                            d,
+                            account_id=account_id,
+                            run_id=run_id,
+                            from_source_target=source_profile,
+                            to_source_target=next_source_profile,
+                        )
+                    fast_rotation_ok = bool((fast_rotation_result or {}).get("ok"))
+                    if fast_rotation_ok:
+                        prevalidated_followers_target_key = _follow_target_key(next_target)
+                        prevalidated_followers_meta = {
+                            "fast_target_rotation": fast_rotation_result,
+                            "fast_target_rotation_prevalidated": True,
+                            "partial_ct_boundary_revalidated": True,
+                        }
+                    if not boundary_already_safe and not fast_rotation_ok:
+                        final_reason = "partial_ct_rotation_revalidation_failed"
+                        final_summary.update(
+                            {
+                                "follow_session_outcome": "partial_not_resumable",
+                                "follow_stop_reason": final_reason,
+                                "original_follow_stop_reason": summary_reason,
+                                "partial_resumable_targets": list(partial_resumable_targets),
+                                "target_rotation_safe_after_scroll_failure": False,
+                                "fast_target_rotation": fast_rotation_result,
+                            }
+                        )
+                        merge_follow_outcome(
+                            final_summary,
+                            stable_reason=final_reason,
+                            verified_actions=global_follows_completed,
+                            target_actions=global_follow_goal,
+                            current_target_id=target_id or source_profile,
+                            remaining_target_ids=_follow_target_ids(remaining_safe_targets),
+                            safe_boundary=False,
+                            extra_diagnostics=fast_rotation_result,
+                        )
+                        log(
+                            "warning",
+                            "follow_target_partial_rotation_stopped_unproved_boundary",
+                            account_id=account_id,
+                            run_id=run_id,
+                            target_id=target_id,
+                            source_profile=source_profile,
+                            next_target_id=_as_target_id(next_target.get("target_id")) or None,
+                            next_source_profile=next_source_profile,
+                            reason=final_reason,
+                            original_reason=summary_reason,
+                            fast_rotation_reason=str((fast_rotation_result or {}).get("reason") or "not_available"),
+                        )
+                        break
                     log(
                         "info",
                         "follow_target_partial_resumable_rotated",
@@ -1149,6 +1234,8 @@ def _run_follow_target_rotation(
                         max_partial_failures=FOLLOW_TARGET_MAX_SAFE_PARTIAL_FAILURES_PER_RUN,
                         global_follows_completed=global_follows_completed,
                         global_follow_goal=global_follow_goal,
+                        boundary_already_safe=boundary_already_safe,
+                        fast_rotation_ok=fast_rotation_ok,
                     )
                     continue
                 final_reason = (
@@ -1163,6 +1250,15 @@ def _run_follow_target_rotation(
                         "partial_resumable_targets": list(partial_resumable_targets),
                         "target_rotation_safe_after_scroll_failure": True,
                     }
+                )
+                merge_follow_outcome(
+                    final_summary,
+                    stable_reason=final_reason,
+                    verified_actions=global_follows_completed,
+                    target_actions=global_follow_goal,
+                    current_target_id=target_id or source_profile,
+                    remaining_target_ids=_follow_target_ids(remaining_safe_targets),
+                    safe_boundary=True,
                 )
                 break
             if supabase_mode and exit_code not in (0, 97, 98):
@@ -1316,6 +1412,52 @@ def _run_follow_target_rotation(
             final_summary["follows_goal_effective"] = global_follow_goal
             final_summary["global_follows_goal_effective"] = global_follow_goal
 
+    remaining_target_ids = _follow_target_ids(
+        [
+            candidate
+            for candidate in follow_targets
+            if _follow_target_key(candidate) not in exhausted_keys
+            and all(
+                _follow_target_key(candidate) != _follow_target_key(attempt_target)
+                for attempt_target in bounded_targets[: len(attempts)]
+            )
+        ]
+    )
+    final_contract = dict(final_summary.get("follow_outcome") or {})
+    globally_completed = bool(
+        final_reason in {"global_follow_cap_reached", "all_targets_exhausted"}
+        or final_summary.get("all_targets_exhausted") is True
+    )
+    if not globally_completed:
+        merge_follow_outcome(
+            final_summary,
+            stable_reason=final_reason,
+            verified_actions=global_follows_completed,
+            target_actions=global_follow_goal,
+            current_target_id=(
+                _as_target_id((final_target or {}).get("target_id"))
+                or _as_source_profile((final_target or {}).get("source_profile"))
+            ),
+            remaining_target_ids=remaining_target_ids,
+            deadline_insufficient=final_reason in {"deadline_insufficient", "insufficient_time"},
+            safe_boundary=bool(final_contract.get("safe_boundary")),
+            extra_diagnostics=final_summary,
+        )
+    else:
+        merge_follow_outcome(
+            final_summary,
+            stable_reason=final_reason,
+            verified_actions=global_follows_completed,
+            target_actions=global_follow_goal,
+            current_target_id=(
+                _as_target_id((final_target or {}).get("target_id"))
+                or _as_source_profile((final_target or {}).get("source_profile"))
+            ),
+            remaining_target_ids=[],
+            all_targets_exhausted=bool(final_summary.get("all_targets_exhausted")),
+            safe_boundary=True,
+        )
+
     log(
         "info",
         "follow_target_rotation_completed",
@@ -1335,6 +1477,11 @@ def _run_follow_target_rotation(
         exit_code=final_exit_code,
         reason=final_reason,
         outcome=str(final_summary.get("follow_session_outcome") or ""),
+        phase_status=final_summary.get("phase_status"),
+        scope=final_summary.get("scope"),
+        safe_next_step=final_summary.get("safe_next_step"),
+        remaining_actions=final_summary.get("remaining_actions"),
+        remaining_target_count=final_summary.get("remaining_target_count"),
         total_ms=round((time.perf_counter() - t0) * 1000.0, 2),
     )
     return {
@@ -1391,6 +1538,7 @@ def _phase_statuses(
     follow_exit_code: int | None,
     follow_to_unfollow_real: dict[str, Any],
     account_session_outreach_addon: dict[str, Any],
+    follow_outcome: dict[str, Any] | None = None,
 ) -> tuple[str, str, str, str]:
     if not welcome_enabled:
         welcome_phase_status = "not_planned"
@@ -1409,6 +1557,8 @@ def _phase_statuses(
         follow_phase_status = (
             "skipped_cleanly" if str(follow_phase_skipped_reason or "").strip() else "unknown"
         )
+    elif str((follow_outcome or {}).get("phase_status") or ""):
+        follow_phase_status = str((follow_outcome or {}).get("phase_status"))
     elif follow_exit_code == 0:
         follow_phase_status = "completed"
     elif follow_exit_code == 97:
@@ -1587,7 +1737,18 @@ def _restart_eligibility(
     return "unknown", "termination_class_unknown"
 
 
-def _follow_exit_handoff_gate(follow_exit_code: int | None) -> tuple[bool, str]:
+def _follow_exit_handoff_gate(
+    follow_exit_code: int | None,
+    follow_outcome: dict[str, Any] | None = None,
+) -> tuple[bool, str]:
+    outcome = dict(follow_outcome or {})
+    if outcome:
+        if (
+            outcome.get("phase_status") != "completed"
+            or outcome.get("scope") != "follow_phase"
+            or outcome.get("safe_next_step") != "end_follow_phase"
+        ):
+            return False, "follow_phase_not_globally_completed"
     if follow_exit_code == 0:
         return True, "follow_completed"
     if follow_exit_code == 97:
@@ -1609,6 +1770,7 @@ def _run_follow_to_unfollow_handoff_diagnostic(
     follow_exit_code: int | None,
     follow_total_ms: float,
     session_started_at: float,
+    follow_outcome: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """H1 only: DB/settings diagnostic, no Unfollow dispatch and no UI navigation."""
     diag_t0 = time.perf_counter()
@@ -1661,12 +1823,16 @@ def _run_follow_to_unfollow_handoff_diagnostic(
         "session_elapsed_ms": round(session_elapsed_ms, 2),
         "session_time_remaining_ms": None,
         "diagnostic_ms": 0.0,
+        "follow_outcome": dict(follow_outcome or {}),
     }
 
     skip_reasons: list[str] = []
     if not aid or not uname:
         skip_reasons.append("missing_account_context")
-    follow_gate_ok, follow_gate_reason = _follow_exit_handoff_gate(follow_exit_code)
+    follow_gate_ok, follow_gate_reason = _follow_exit_handoff_gate(
+        follow_exit_code,
+        follow_outcome,
+    )
     if not follow_phase_executed:
         skip_reasons.append("follow_phase_not_executed")
     if not follow_gate_ok:
@@ -3363,6 +3529,7 @@ def run_account_session(
             follow_engine_summary["exhausted_targets"] = list(rotation_result.get("exhausted_targets") or [])
             follow_engine_summary["rotation_reason"] = str(rotation_result.get("reason") or "")
             follow_engine_summary["follow_total_ms"] = round((follow_t1 - follow_t0) * 1000.0, 2)
+            follow_outcome = dict(follow_engine_summary.get("follow_outcome") or {})
             follow_to_unfollow_diagnostic = _run_follow_to_unfollow_handoff_diagnostic(
                 account_id=aid,
                 account_username=uname,
@@ -3372,6 +3539,7 @@ def run_account_session(
                 follow_exit_code=follow_exit_code,
                 follow_total_ms=(follow_t1 - follow_t0) * 1000.0,
                 session_started_at=t0,
+                follow_outcome=follow_outcome,
             )
             probe_enabled = _follow_to_unfollow_probe_enabled()
             real_enabled = _follow_to_unfollow_real_enabled(aid)
@@ -3380,7 +3548,23 @@ def run_account_session(
 
                 if not phase_enabled("unfollow", default=real_enabled, policy=auto_restart_resume_policy):
                     real_enabled = False
-            if real_enabled:
+            if real_enabled and not bool(follow_to_unfollow_diagnostic.get("handoff_would_run")):
+                follow_to_unfollow_real = _skip_follow_to_unfollow_real(
+                    account_id=aid,
+                    account_username=uname,
+                    run_id=run_id,
+                    real_enabled=True,
+                    skip_reason=str(
+                        follow_to_unfollow_diagnostic.get("handoff_skip_reason")
+                        or "follow_phase_not_globally_completed"
+                    ),
+                    diagnostic=follow_to_unfollow_diagnostic,
+                    follow_exit_code=follow_exit_code,
+                    real_max_actions_requested=_follow_to_unfollow_real_max_actions_requested(),
+                    real_max_actions_effective=_follow_to_unfollow_real_max_actions_effective(aid),
+                    real_hard_max=_follow_to_unfollow_real_hard_max(),
+                )
+            elif real_enabled:
                 if commercial_policy_boundary_blocks_phase(
                     aid,
                     bound_revision=session_policy_revision,
@@ -3552,6 +3736,14 @@ def run_account_session(
         follow_engine_summary.get("follow_session_outcome") or ""
     )
     follow_stop_reason = str(follow_engine_summary.get("follow_stop_reason") or "")
+    canonical_follow_outcome = dict(follow_engine_summary.get("follow_outcome") or {})
+    follow_partial = bool(canonical_follow_outcome.get("partial"))
+    follow_resume_recommended = bool(canonical_follow_outcome.get("resumable"))
+    remaining_ct_count = int(canonical_follow_outcome.get("remaining_target_count") or 0)
+    last_safe_checkpoint = str(canonical_follow_outcome.get("last_safe_checkpoint") or "")
+    suggested_resume_strategy = str(
+        canonical_follow_outcome.get("suggested_resume_strategy") or ""
+    )
     (
         welcome_phase_status,
         follow_phase_status,
@@ -3566,6 +3758,7 @@ def run_account_session(
         follow_exit_code=follow_exit_code,
         follow_to_unfollow_real=follow_to_unfollow_real,
         account_session_outreach_addon=account_session_outreach_addon,
+        follow_outcome=canonical_follow_outcome,
     )
     phase_terminal_contract = _phase_terminal_contract(
         welcome=welcome_phase_status,
@@ -3681,6 +3874,13 @@ def run_account_session(
             "follow_quota_remaining": follow_quota_remaining,
             "follow_session_outcome": follow_session_outcome or None,
             "follow_stop_reason": follow_stop_reason or None,
+            "follow_outcome": canonical_follow_outcome,
+            "follow_partial": follow_partial,
+            "follow_resume_recommended": follow_resume_recommended,
+            "remaining_follow_quota": follow_quota_remaining,
+            "remaining_ct_count": remaining_ct_count,
+            "last_safe_checkpoint": last_safe_checkpoint or None,
+            "suggested_resume_strategy": suggested_resume_strategy or None,
             "target_rotation_safe_after_scroll_failure": follow_engine_summary.get(
                 "target_rotation_safe_after_scroll_failure"
             ) is True,
@@ -3839,6 +4039,13 @@ def run_account_session(
         "follow_quota_remaining": follow_quota_remaining,
         "follow_session_outcome": follow_session_outcome or None,
         "follow_stop_reason": follow_stop_reason or None,
+        "follow_outcome": canonical_follow_outcome,
+        "follow_partial": follow_partial,
+        "follow_resume_recommended": follow_resume_recommended,
+        "remaining_follow_quota": follow_quota_remaining,
+        "remaining_ct_count": remaining_ct_count,
+        "last_safe_checkpoint": last_safe_checkpoint or None,
+        "suggested_resume_strategy": suggested_resume_strategy or None,
         "welcome_sender_jobs_sent_count": sender_summary.get("jobs_sent_count"),
         "mandatory_unfollow_executed": mandatory_unfollow_executed,
         "unfollow_quota_target": unfollow_quota_target,
@@ -3873,6 +4080,13 @@ def run_account_session(
         "exit_code": exit_code,
         "welcome_phase_status": welcome_phase_status,
         "follow_phase_status": follow_phase_status,
+        "follow_outcome": canonical_follow_outcome,
+        "follow_partial": follow_partial,
+        "follow_resume_recommended": follow_resume_recommended,
+        "remaining_follow_quota": follow_quota_remaining,
+        "remaining_ct_count": remaining_ct_count,
+        "last_safe_checkpoint": last_safe_checkpoint or None,
+        "suggested_resume_strategy": suggested_resume_strategy or None,
         "unfollow_phase_status": unfollow_phase_status,
         "outreach_phase_status": outreach_phase_status,
         "phase_terminal_contract": phase_terminal_contract,
@@ -4008,6 +4222,13 @@ def run_account_session(
         follows_completed_count=follows_completed_count,
         follow_session_outcome=follow_session_outcome or None,
         follow_stop_reason=follow_stop_reason or None,
+        follow_outcome=canonical_follow_outcome,
+        follow_partial=follow_partial,
+        follow_resume_recommended=follow_resume_recommended,
+        remaining_follow_quota=follow_quota_remaining,
+        remaining_ct_count=remaining_ct_count,
+        last_safe_checkpoint=last_safe_checkpoint or None,
+        suggested_resume_strategy=suggested_resume_strategy or None,
         follow_processed_count=follow_processed_count,
         follows_goal_effective=follows_goal_effective,
         follow_quota_target=follow_quota_target,

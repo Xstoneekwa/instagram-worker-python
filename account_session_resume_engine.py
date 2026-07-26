@@ -228,6 +228,15 @@ def _follow_resume_checkpoint_block_reason(summary: dict[str, Any]) -> str:
     ).strip()
     if reason != FOLLOW_SCROLL_RESUMABLE_REASON:
         return ""
+    outcome = summary.get("follow_outcome")
+    if isinstance(outcome, dict) and outcome:
+        if (
+            outcome.get("phase_status") == "partial_resumable"
+            and outcome.get("resumable") is True
+            and outcome.get("safe_boundary") is True
+            and str(outcome.get("last_safe_checkpoint") or "").strip()
+        ):
+            return ""
     if (
         summary.get("target_rotation_safe_after_scroll_failure") is True
         and summary.get("scroll_failure_surface_ambiguous") is not True
@@ -402,6 +411,17 @@ def build_account_session_resume_plan(
         "scroll_failure_surface_ambiguous": safe_summary.get(
             "scroll_failure_surface_ambiguous"
         ) is True,
+        "follow_outcome": (
+            dict(safe_summary.get("follow_outcome") or {})
+            if isinstance(safe_summary.get("follow_outcome"), dict)
+            else {}
+        ),
+        "follow_partial": safe_summary.get("follow_partial") is True,
+        "follow_resume_recommended": safe_summary.get("follow_resume_recommended") is True,
+        "remaining_follow_quota": safe_summary.get("remaining_follow_quota"),
+        "remaining_ct_count": safe_summary.get("remaining_ct_count"),
+        "last_safe_checkpoint": safe_summary.get("last_safe_checkpoint"),
+        "suggested_resume_strategy": safe_summary.get("suggested_resume_strategy"),
         "session_termination_class": termination_class,
         "restart_eligibility": restart_eligibility,
         "phases_to_run": phases_to_run,

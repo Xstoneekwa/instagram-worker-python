@@ -641,7 +641,12 @@ class InstagramListContinuationContractTests(unittest.TestCase):
             max_targets_per_run=4, max_follows_per_target_per_run=30,
         )
         self.assertEqual(len(engine.calls), 1)
-        self.assertEqual(result["partial_resumable_targets"], [])
+        self.assertEqual(len(result["partial_resumable_targets"]), 1)
+        self.assertEqual(result["summary"]["phase_status"], "partial_not_resumable")
+        self.assertEqual(
+            result["summary"]["follow_stop_reason"],
+            "partial_ct_rotation_revalidation_failed",
+        )
 
     def test_38_safe_partial_rotation_stops_after_two_failed_cts(self) -> None:
         safe_failure = {
@@ -700,6 +705,98 @@ class InstagramListContinuationContractTests(unittest.TestCase):
         )
         self.assertIn("followers_try_expand_primary_list", pre_scroll_contract)
         self.assertIn("continue", pre_scroll_contract)
+
+    def test_40_mythyl_partial_revalidates_and_rotates_without_consuming_wrong_ct(self) -> None:
+        engine = _FakeFollowersEngine([
+            (0, {
+                "follows_completed_count": 18,
+                "follows_goal_effective": 40,
+                "global_follows_goal_effective": 40,
+                "follow_session_outcome": "partial_resumable",
+                "follow_stop_reason": "visible_window_exhausted_scroll_failed",
+                "target_rotation_safe_after_scroll_failure": False,
+                "scroll_failure_surface_ambiguous": True,
+            }),
+            (0, {
+                "follows_completed_count": 22,
+                "follows_goal_effective": 40,
+                "global_follows_goal_effective": 40,
+                "follow_session_outcome": "global_follow_cap_reached",
+                "follow_stop_reason": "global_follow_cap_reached",
+            }),
+        ])
+        rotations: list[dict] = []
+
+        def rotate(_device, **kwargs):
+            rotations.append(kwargs)
+            return {"ok": True, "reason": "ok", "steps_completed": ["open_followers"]}
+
+        result = session._run_follow_target_rotation(
+            object(), account_id="account", account_username="mythyl_fitness", run_id="run",
+            follow_targets=[_target(1), _target(2), _target(3)],
+            run_followers_list_engine_session=engine, supabase_mode=False,
+            warm_session_used=False, force_stop_used=False,
+            max_targets_per_run=4, max_follows_per_target_per_run=30,
+            fast_rotate_to_next_target_from_followers=rotate,
+        )
+        self.assertEqual(len(rotations), 1)
+        self.assertEqual(rotations[0]["to_source_target"], "source-2")
+        self.assertEqual(len(engine.calls), 2)
+        self.assertTrue(engine.calls[1]["start_from_current_followers_list"])
+        self.assertEqual(result["global_follows_completed"], 40)
+        self.assertEqual(result["summary"]["phase_status"], "completed")
+        self.assertEqual(result["summary"]["safe_next_step"], "end_follow_phase")
+
+    def test_41_failed_revalidation_does_not_consume_next_ct(self) -> None:
+        engine = _FakeFollowersEngine([(0, {
+            "follows_completed_count": 18,
+            "follows_goal_effective": 40,
+            "global_follows_goal_effective": 40,
+            "follow_session_outcome": "partial_resumable",
+            "follow_stop_reason": "visible_window_exhausted_scroll_failed",
+            "target_rotation_safe_after_scroll_failure": False,
+            "scroll_failure_surface_ambiguous": True,
+        })])
+
+        result = session._run_follow_target_rotation(
+            object(), account_id="account", account_username="mythyl_fitness", run_id="run",
+            follow_targets=[_target(1), _target(2)],
+            run_followers_list_engine_session=engine, supabase_mode=False,
+            warm_session_used=False, force_stop_used=False,
+            max_targets_per_run=4, max_follows_per_target_per_run=30,
+            fast_rotate_to_next_target_from_followers=lambda *_args, **_kwargs: {
+                "ok": False,
+                "reason": "current_surface_not_compatible",
+                "steps_completed": [],
+            },
+        )
+        self.assertEqual(len(engine.calls), 1)
+        self.assertEqual(result["summary"]["phase_status"], "partial_not_resumable")
+        self.assertEqual(result["summary"]["safe_next_step"], "end_session")
+
+    def test_42_partial_follow_contract_blocks_unfollow_handoff(self) -> None:
+        ok, reason = session._follow_exit_handoff_gate(
+            0,
+            {
+                "phase_status": "partial_resumable",
+                "scope": "current_ct",
+                "safe_next_step": "rotate_next_ct",
+            },
+        )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "follow_phase_not_globally_completed")
+
+    def test_43_only_global_follow_completion_allows_unfollow_handoff(self) -> None:
+        ok, reason = session._follow_exit_handoff_gate(
+            0,
+            {
+                "phase_status": "completed",
+                "scope": "follow_phase",
+                "safe_next_step": "end_follow_phase",
+            },
+        )
+        self.assertTrue(ok)
+        self.assertEqual(reason, "follow_completed")
 
 
 if __name__ == "__main__":

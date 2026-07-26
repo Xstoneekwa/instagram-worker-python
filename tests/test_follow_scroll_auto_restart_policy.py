@@ -56,6 +56,30 @@ class FollowScrollAutoRestartPolicyTests(unittest.TestCase):
         self.assertFalse(plan["restart_allowed"])
         self.assertEqual(plan["restart_block_reason"], "unsafe_follow_resume_checkpoint")
 
+    def test_canonical_safe_checkpoint_allows_follow_only_resume(self) -> None:
+        outcome = {
+            "phase_status": "partial_resumable",
+            "resumable": True,
+            "safe_boundary": True,
+            "last_safe_checkpoint": "next_ct_followers_list_validated",
+            "suggested_resume_strategy": "resume_follow_with_remaining_ct_plan",
+        }
+        plan = build_account_session_resume_plan(
+            _summary(
+                follow_outcome=outcome,
+                follow_partial=True,
+                follow_resume_recommended=True,
+                remaining_follow_quota=23,
+                remaining_ct_count=13,
+                last_safe_checkpoint="next_ct_followers_list_validated",
+                suggested_resume_strategy="resume_follow_with_remaining_ct_plan",
+            )
+        )
+        self.assertTrue(plan["restart_allowed"])
+        self.assertTrue(plan["phases_to_run"]["follow"])
+        self.assertFalse(plan["phases_to_run"]["unfollow"])
+        self.assertEqual(plan["remaining_ct_count"], 13)
+
     def test_completed_quota_never_restarts(self) -> None:
         plan = build_account_session_resume_plan(
             _summary(
