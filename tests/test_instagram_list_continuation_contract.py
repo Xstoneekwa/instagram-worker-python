@@ -668,6 +668,39 @@ class InstagramListContinuationContractTests(unittest.TestCase):
             "safe_partial_ct_failure_limit_reached",
         )
 
+    def test_39_processed_valid_viewport_expands_see_more_before_scroll(self) -> None:
+        nav._followers_store_detect_hierarchy_xml(
+            _surface(
+                rows=[("row_a", "Following"), ("row_b", "Following")],
+                see_more=True,
+                suggestions=True,
+            )
+        )
+        decision = nav.followers_suggestions_boundary_from_cached_hierarchy(
+            previously_valid_followers_rows=True,
+            processed_primary_row_ids={"row_a", "row_b"},
+            continuation_probe_count=1,
+        )
+        self.assertEqual(decision["state"], State.EXPAND_PRIMARY_LIST_AVAILABLE.value)
+
+        source = inspect.getsource(runner._run_followers_list_engine_session)
+        exhausted_offset = source.index("_visible_window_scroll_required =")
+        strategy_offset = source.index(
+            "_visible_window_scroll_strategy: dict[str, Any] = {}",
+            exhausted_offset,
+        )
+        pre_scroll_contract = source[exhausted_offset:strategy_offset]
+        self.assertIn(
+            "followers_suggestions_boundary_from_cached_hierarchy",
+            pre_scroll_contract,
+        )
+        self.assertIn(
+            "processed_primary_row_ids=_visible_window_processed_rows",
+            pre_scroll_contract,
+        )
+        self.assertIn("followers_try_expand_primary_list", pre_scroll_contract)
+        self.assertIn("continue", pre_scroll_contract)
+
 
 if __name__ == "__main__":
     unittest.main()

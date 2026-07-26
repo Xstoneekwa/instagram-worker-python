@@ -14667,6 +14667,44 @@ def _run_followers_list_engine_session(
                     max_scroll=int(max_scroll),
                     should_stop_scrolling=bool(_main_scroll_stop),
                 )
+                if _visible_window_scroll_required:
+                    # The viewport can remain a valid Followers list even when
+                    # every visible primary row has already been processed.  In
+                    # that state, classify the canonical continuation before
+                    # any swipe so an actionable See more marker is never
+                    # mistaken for exhausted scroll depth.
+                    _visible_window_processed_rows = set(_RUNTIME_SEEN_FOLLOWER_USERNAMES)
+                    _visible_window_processed_rows.update(_RUNTIME_FOLLOWED_USERNAMES)
+                    _visible_window_processed_rows.update(_RUNTIME_SKIPPED_USERNAMES)
+                    _visible_window_continuation = (
+                        followers_suggestions_boundary_from_cached_hierarchy(
+                            previously_valid_followers_rows=True,
+                            processed_primary_row_ids=_visible_window_processed_rows,
+                            continuation_probe_count=1,
+                        )
+                    )
+                    if str(_visible_window_continuation.get("state") or "") == (
+                        "EXPAND_PRIMARY_LIST_AVAILABLE"
+                    ):
+                        _visible_window_expansion = followers_try_expand_primary_list(
+                            d,
+                            expected_source_profile=source_profile_username,
+                            account_id=str(account_id or ""),
+                            target_id=str(target_id or ""),
+                            run_id=str(run_id or ""),
+                            processed_primary_row_ids=_visible_window_processed_rows,
+                            max_attempts=2,
+                        )
+                        if bool(_visible_window_expansion.get("expanded")):
+                            # Expansion is continuation inside the same CT.  It
+                            # consumes neither a scroll attempt nor CT rotation.
+                            continue
+                        _followers_loop_finally_status = "see_more_no_progress"
+                        _followers_loop_finally_stop = str(
+                            _visible_window_expansion.get("reason")
+                            or "see_more_no_progress"
+                        )
+                        break
                 _visible_window_scroll_strategy: dict[str, Any] = {}
                 if _visible_window_scroll_required:
                     _visible_window_scroll_strategy = _followers_visible_window_scroll_strategy(
