@@ -281,11 +281,16 @@ def record_end_of_session(
             plan = {**existing_plan, **plan}
     except Exception:
         pass
-    completed = str(session_status or "").strip().lower() == "success"
+    attempt_succeeded = str(session_status or "").strip().lower() == "success"
+    restart_allowed = bool(plan.get("restart_allowed"))
+    # A cleanly terminal attempt can still be incomplete for the business
+    # quota.  In that case the resumable phase plan must remain active instead
+    # of being collapsed into a globally completed session.
+    completed = attempt_succeeded and not restart_allowed
     patch: dict[str, Any] = {
         "resume_stage": "completed" if completed else "phases",
         "resume_state": RESUME_STATE_COMPLETED if completed else RESUME_STATE_RUN_ACTIVE,
-        "restart_allowed": bool(plan.get("restart_allowed")),
+        "restart_allowed": restart_allowed,
         "restart_block_reason": str(
             plan.get("restart_block_reason")
             or ("session_completed" if completed else "")

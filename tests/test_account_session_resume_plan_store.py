@@ -217,6 +217,34 @@ class RecordEndOfSessionTest(unittest.TestCase):
         self.assertTrue(body["restart_allowed"])
         self.assertEqual(body["plan"]["quota_remaining"]["total"], 5)
 
+    def test_successful_attempt_with_remaining_quota_keeps_resumable_plan(self) -> None:
+        import supabase_client
+
+        with patch.object(
+            supabase_client,
+            "_request_json",
+            return_value=[{"id": "plan-1"}],
+        ) as req:
+            store.record_end_of_session(
+                run_id=RUN_ID,
+                session_plan={
+                    "restart_allowed": True,
+                    "restart_block_reason": "",
+                    "quota_remaining": {"unfollow": 3},
+                    "phases_to_run": {"follow": False, "unfollow": True},
+                },
+                session_status="success",
+            )
+        body = req.call_args.kwargs["body"]
+        self.assertEqual(body["resume_stage"], "phases")
+        self.assertEqual(body["resume_state"], "run_active")
+        self.assertTrue(body["restart_allowed"])
+        self.assertEqual(body["plan"]["quota_remaining"]["unfollow"], 3)
+        self.assertEqual(
+            body["plan"]["phases_to_run"],
+            {"follow": False, "unfollow": True},
+        )
+
 
 class MarkResumeOutcomeTest(unittest.TestCase):
     def test_success_marks_resume_succeeded(self) -> None:
