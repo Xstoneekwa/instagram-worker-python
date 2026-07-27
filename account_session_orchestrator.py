@@ -251,11 +251,14 @@ def _account_session_status(
     follow_phase_executed: bool,
     follow_exit_code: int | None,
     welcome_blocked_follow: bool,
+    unfollow_only_resume: bool = False,
 ) -> str:
     if transition_reason == "welcome_real_send_disabled":
         return "failed"
     if welcome_blocked_follow:
         return "failed"
+    if unfollow_only_resume:
+        return "success"
     if not follow_phase_executed:
         return "failed"
     if follow_exit_code is None:
@@ -1678,6 +1681,11 @@ def _session_termination_class(
         return "partial_resumable"
     if unfollow_phase_status in {"blocked_critical", "failed_internal"}:
         return "non_recoverable_failure"
+    if (
+        bool(follow_to_unfollow_diagnostic.get("unfollow_only_resume_authorized"))
+        and session_status == "success"
+    ):
+        return "completed"
     real_status = str(follow_to_unfollow_real.get("status") or "").strip()
     real_failure_reason = str(
         follow_to_unfollow_real.get("failure_reason") or ""
@@ -1805,6 +1813,7 @@ def _run_follow_to_unfollow_handoff_diagnostic(
     follow_total_ms: float,
     session_started_at: float,
     follow_outcome: dict[str, Any] | None = None,
+    unfollow_only_resume_authorized: bool = False,
 ) -> dict[str, Any]:
     """H1 only: DB/settings diagnostic, no Unfollow dispatch and no UI navigation."""
     diag_t0 = time.perf_counter()
@@ -1858,6 +1867,7 @@ def _run_follow_to_unfollow_handoff_diagnostic(
         "session_time_remaining_ms": None,
         "diagnostic_ms": 0.0,
         "follow_outcome": dict(follow_outcome or {}),
+        "unfollow_only_resume_authorized": bool(unfollow_only_resume_authorized),
     }
 
     skip_reasons: list[str] = []
@@ -1867,9 +1877,9 @@ def _run_follow_to_unfollow_handoff_diagnostic(
         follow_exit_code,
         follow_outcome,
     )
-    if not follow_phase_executed:
+    if not follow_phase_executed and not unfollow_only_resume_authorized:
         skip_reasons.append("follow_phase_not_executed")
-    if not follow_gate_ok:
+    if not follow_gate_ok and not unfollow_only_resume_authorized:
         skip_reasons.append(follow_gate_reason)
 
     try:
@@ -2660,6 +2670,15 @@ def _evaluate_h3_follow_exit_code_gate(
         "follow_session_outcome": "",
         "follow_stop_reason": "",
     }
+    if bool(diagnostic.get("unfollow_only_resume_authorized")):
+        out.update(
+            {
+                "follow_exit_code_allowed": True,
+                "follow_exit_code_allow_reason": "auto_restart_unfollow_only_resume",
+                "follow_phase_executed": False,
+            }
+        )
+        return out
     if follow_exit_code == 0:
         out.update(
             {
@@ -3227,6 +3246,12 @@ def run_account_session(
             prior_run_id=auto_restart_resume_policy.get("prior_run_id"),
             phases_to_run=auto_restart_resume_policy.get("phases_to_run"),
         )
+    resume_phases = dict((auto_restart_resume_policy or {}).get("phases_to_run") or {})
+    unfollow_only_resume = bool(
+        auto_restart_resume_policy
+        and resume_phases.get("follow") is False
+        and resume_phases.get("unfollow") is True
+    )
     real_send_enabled, real_send_source = resolve_welcome_dm_real_send_enabled()
 
     welcome_phase_executed = False
@@ -3392,13 +3417,14 @@ def run_account_session(
     welcome_blocked_follow = not run_follow and welcome_enabled
 
     if not run_follow:
-        follow_phase_skipped_reason = transition_reason
+        if follow_phase_skipped_reason is None:
+            follow_phase_skipped_reason = transition_reason
         log(
             "info",
             "account_session_follow_phase_skipped",
             account_id=aid,
             run_id=run_id,
-            reason=transition_reason,
+            reason=follow_phase_skipped_reason,
         )
     elif _operator_stop_cancel_requested():
         run_follow = False
@@ -3709,6 +3735,80 @@ def run_account_session(
                         diagnostic=follow_to_unfollow_diagnostic,
                     )
 
+    if unfollow_only_resume:
+        follow_to_unfollow_diagnostic = _run_follow_to_unfollow_handoff_diagnostic(
+            account_id=aid,
+            account_username=uname,
+            run_id=run_id,
+            followers_source_username=src,
+            follow_phase_executed=False,
+            follow_exit_code=None,
+            follow_total_ms=0.0,
+            session_started_at=t0,
+            follow_outcome=None,
+            unfollow_only_resume_authorized=True,
+        )
+        real_enabled = _follow_to_unfollow_real_enabled(aid)
+        if not real_enabled:
+            follow_to_unfollow_real = _skip_follow_to_unfollow_real(
+                account_id=aid,
+                account_username=uname,
+                run_id=run_id,
+                real_enabled=False,
+                skip_reason="real_handoff_disabled",
+                diagnostic=follow_to_unfollow_diagnostic,
+                follow_exit_code=None,
+                real_max_actions_requested=_follow_to_unfollow_real_max_actions_requested(),
+                real_max_actions_effective=_follow_to_unfollow_real_max_actions_effective(aid),
+                real_hard_max=_follow_to_unfollow_real_hard_max(),
+            )
+        elif not bool(follow_to_unfollow_diagnostic.get("handoff_would_run")):
+            follow_to_unfollow_real = _skip_follow_to_unfollow_real(
+                account_id=aid,
+                account_username=uname,
+                run_id=run_id,
+                real_enabled=True,
+                skip_reason=str(
+                    follow_to_unfollow_diagnostic.get("handoff_skip_reason")
+                    or "handoff_gates_not_met"
+                ),
+                diagnostic=follow_to_unfollow_diagnostic,
+                follow_exit_code=None,
+                real_max_actions_requested=_follow_to_unfollow_real_max_actions_requested(),
+                real_max_actions_effective=_follow_to_unfollow_real_max_actions_effective(aid),
+                real_hard_max=_follow_to_unfollow_real_hard_max(),
+            )
+        elif commercial_policy_boundary_blocks_phase(
+            aid,
+            bound_revision=session_policy_revision,
+            run_id=run_id,
+            boundary="before_unfollow_phase",
+        ):
+            follow_to_unfollow_real = _skip_follow_to_unfollow_real(
+                account_id=aid,
+                account_username=uname,
+                run_id=run_id,
+                real_enabled=False,
+                skip_reason="commercial_policy_revision_changed",
+                diagnostic=follow_to_unfollow_diagnostic,
+                follow_exit_code=None,
+                real_max_actions_requested=_follow_to_unfollow_real_max_actions_requested(),
+                real_max_actions_effective=_follow_to_unfollow_real_max_actions_effective(aid),
+                real_hard_max=_follow_to_unfollow_real_hard_max(),
+            )
+        else:
+            follow_to_unfollow_real = _run_follow_to_unfollow_real(
+                d,
+                account_id=aid,
+                account_username=uname,
+                run_id=run_id,
+                follow_exit_code=None,
+                follow_total_ms=0.0,
+                diagnostic=follow_to_unfollow_diagnostic,
+                business_action_deadline=business_action_deadline,
+                outreach_reserve_seconds=0,
+            )
+
     if _account_session_outreach_addon_enabled():
         if not follow_phase_executed:
             account_session_outreach_addon = _skip_account_session_outreach_addon(
@@ -3814,6 +3914,7 @@ def run_account_session(
         follow_phase_executed=follow_phase_executed,
         follow_exit_code=follow_exit_code,
         welcome_blocked_follow=welcome_blocked_follow,
+        unfollow_only_resume=unfollow_only_resume,
     )
     session_status = (
         "success"

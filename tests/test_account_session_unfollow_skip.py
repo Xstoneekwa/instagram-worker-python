@@ -2,12 +2,87 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import account_session_orchestrator as account_session
 import outreach_session_orchestrator
 
 
 class AccountSessionUnfollowSkipTest(unittest.TestCase):
+    def test_unfollow_only_resume_diagnostic_does_not_require_local_follow(self) -> None:
+        settings = SimpleNamespace(
+            enabled=True,
+            mode="unfollow",
+            sort_mode="oldest",
+            session_limit=35,
+        )
+        with (
+            patch.object(account_session, "load_unfollow_settings", return_value=settings),
+            patch.object(
+                account_session,
+                "plan_unfollow_targets",
+                return_value={"candidates_count": 1, "plan_reason": "planned", "skipped_counts": {}},
+            ),
+        ):
+            diagnostic = account_session._run_follow_to_unfollow_handoff_diagnostic(
+                account_id="00000000-0000-4000-8000-000000000001",
+                account_username="j_automatise_pour_toi",
+                run_id="run-id",
+                followers_source_username="source",
+                follow_phase_executed=False,
+                follow_exit_code=None,
+                follow_total_ms=0.0,
+                session_started_at=0.0,
+                unfollow_only_resume_authorized=True,
+            )
+
+        self.assertTrue(diagnostic["handoff_would_run"])
+        self.assertTrue(diagnostic["unfollow_only_resume_authorized"])
+        self.assertNotIn("follow_phase_not_executed", diagnostic["handoff_skip_reasons"])
+
+    def test_unfollow_only_resume_has_explicit_follow_gate_authorization(self) -> None:
+        gate = account_session._evaluate_h3_follow_exit_code_gate(
+            account_id="00000000-0000-4000-8000-000000000001",
+            account_username="j_automatise_pour_toi",
+            follow_exit_code=None,
+            diagnostic={"unfollow_only_resume_authorized": True},
+            real_max_actions_effective=27,
+        )
+
+        self.assertTrue(gate["follow_exit_code_allowed"])
+        self.assertFalse(gate["follow_phase_executed"])
+        self.assertEqual(
+            gate["follow_exit_code_allow_reason"],
+            "auto_restart_unfollow_only_resume",
+        )
+
+    def test_unfollow_only_resume_can_complete_account_attempt_without_follow(self) -> None:
+        status = account_session._account_session_status(
+            transition_reason="welcome_disabled",
+            follow_phase_executed=False,
+            follow_exit_code=None,
+            welcome_blocked_follow=False,
+            unfollow_only_resume=True,
+        )
+
+        self.assertEqual(status, "success")
+
+        termination_class = account_session._session_termination_class(
+            session_status=status,
+            follow_phase_executed=False,
+            follow_exit_code=None,
+            follow_quota_remaining=None,
+            follow_to_unfollow_diagnostic={"unfollow_only_resume_authorized": True},
+            follow_to_unfollow_real={
+                "executed": True,
+                "status": "success_real_unfollow_multi",
+                "unfollow_outcome": {"phase_status": "completed"},
+            },
+            follow_phase_skipped_reason="auto_restart_resume_skip_follow",
+            transition_reason="welcome_disabled",
+        )
+        self.assertEqual(termination_class, "completed")
+
     def test_h3_prod_normal_runtime_cap_uses_domain_and_day_remaining(self) -> None:
         original_loader = account_session.load_unfollow_settings
         original_counter = account_session.supabase_client.count_successful_unfollows_today
