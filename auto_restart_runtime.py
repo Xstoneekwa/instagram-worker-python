@@ -13,6 +13,8 @@ AUTO_RESTART_TICK_SOURCE = "auto_restart_tick"
 AUTO_RESTART_RESUME_PLAN_ENV = "AUTO_RESTART_RESUME_PLAN_V1"
 AUTO_RESTART_RESUME_PLAN_SCHEMA = "AUTO_RESTART_RESUME_PLAN_V1"
 RESUME_PLAN_VERSION = 1
+CANONICAL_RESUME_PLAN_SCHEMA_V2 = "AUTO_RESTART_RESUME_PLAN_V2"
+CANONICAL_RESUME_PLAN_VERSION_V2 = 2
 
 HARD_STOP_REASONS = frozenset(
     {
@@ -113,7 +115,7 @@ def _validate_quota_consistency(
         remaining = quota.get(phase)
         if remaining is None:
             return "unknown_required_field"
-        if remaining < 0:
+        if remaining <= 0:
             return "quota_inconsistency_blocked"
     total = quota.get("total")
     if total is not None:
@@ -131,10 +133,14 @@ def _validate_resume_plan_schema(meta: dict[str, Any], embedded: dict[str, Any])
         or meta.get("resume_plan_schema")
         or AUTO_RESTART_RESUME_PLAN_SCHEMA
     ).strip()
-    if schema != AUTO_RESTART_RESUME_PLAN_SCHEMA:
+    accepted = {
+        AUTO_RESTART_RESUME_PLAN_SCHEMA: RESUME_PLAN_VERSION,
+        CANONICAL_RESUME_PLAN_SCHEMA_V2: CANONICAL_RESUME_PLAN_VERSION_V2,
+    }
+    if schema not in accepted:
         return "resume_plan_invalid"
     version = int(meta.get("resume_plan_version") or embedded.get("resume_plan_version") or 0)
-    if version != RESUME_PLAN_VERSION:
+    if version != accepted[schema]:
         return "resume_plan_invalid"
     return None
 
@@ -176,13 +182,7 @@ def _validate_human_confirmed_resume_at_claim(
     account_id: str,
     meta: dict[str, Any],
 ) -> tuple[bool, str, dict[str, Any] | None]:
-    """Validate a P3 human-confirmed resume request against the canonical
-    per-run resume plan row (not the legacy quota resume-plan contract).
-
-    The prior run typically failed at preflight, so quotas are unknown by
-    design: the session resumes from the preflight stage with a full plan.
-    The identity guard remains the unchanged final safe-stop.
-    """
+    """Validate the durable authorization and its explicit frozen V2 plan."""
     from account_session_resume_plan_store import (
         RESUME_STATE_RESUME_REQUESTED,
         load_resume_plan,
@@ -195,6 +195,25 @@ def _validate_human_confirmed_resume_at_claim(
     incident_id = str(meta.get("incident_id") or "").strip()
     if not resume_plan_id or not original_run_id or not incident_id:
         return False, "resume_plan_invalid", None
+
+    embedded = _read_record(meta.get("resume_plan"))
+    if _validate_resume_plan_schema(meta, embedded):
+        return False, "resume_plan_invalid", None
+    if str(embedded.get("schema") or "") != CANONICAL_RESUME_PLAN_SCHEMA_V2:
+        return False, "resume_plan_invalid", None
+    if str(embedded.get("account_id") or "").strip() != str(account_id or "").strip():
+        return False, "resume_plan_invalid", None
+    if embedded.get("package_contract_ready") is not True:
+        return False, "resume_plan_invalid", None
+    if embedded.get("phase_order") != ["welcome", "follow", "unfollow"]:
+        return False, "resume_plan_invalid", None
+    phases = _read_record(embedded.get("phases_to_run"))
+    if any(phases.get(phase) not in (True, False) for phase in ("welcome", "follow", "unfollow")):
+        return False, "resume_plan_invalid", None
+    quota = _quota_record(embedded.get("quota_remaining"))
+    quota_reason = _validate_quota_consistency(phases=phases, quota=quota)
+    if quota_reason:
+        return False, quota_reason, None
 
     try:
         plan_row = load_resume_plan(resume_plan_id=resume_plan_id)
@@ -221,15 +240,19 @@ def _validate_human_confirmed_resume_at_claim(
             return False, "resume_plan_invalid", None
 
     policy = {
-        "schema": AUTO_RESTART_RESUME_PLAN_SCHEMA,
-        "resume_plan_version": RESUME_PLAN_VERSION,
+        "schema": CANONICAL_RESUME_PLAN_SCHEMA_V2,
+        "resume_plan_version": CANONICAL_RESUME_PLAN_VERSION_V2,
         "prior_run_id": original_run_id,
         "recovery_mode": HUMAN_CONFIRMED_RESUME_MODE,
         "resume_plan_id": resume_plan_id,
         "incident_id": incident_id,
-        # Preflight-stage resume: run the full planned session again; the
-        # orchestrator's own gates and quotas apply as on a normal session.
-        "phases_to_run": {"welcome": True, "follow": True, "unfollow": True},
+        "phases_to_run": {
+            phase: bool(phases.get(phase)) for phase in ("welcome", "follow", "unfollow")
+        },
+        "quota_remaining": {k: v for k, v in quota.items() if v is not None},
+        "phase_order": list(embedded.get("phase_order") or []),
+        "retry_generation": _as_int(embedded.get("retry_generation")) or 0,
+        "frozen_phase_plan": embedded,
         "restart_allowed": True,
         "request_metadata": {
             "source": AUTO_RESTART_TICK_SOURCE,

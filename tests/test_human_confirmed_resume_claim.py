@@ -24,6 +24,19 @@ def _metadata(**overrides) -> dict:
         "resume_plan_id": RESUME_PLAN_ID,
         "original_run_id": ORIGINAL_RUN_ID,
         "incident_id": INCIDENT_ID,
+        "resume_plan_version": 2,
+        "resume_plan_schema": "AUTO_RESTART_RESUME_PLAN_V2",
+        "resume_plan": {
+            "schema": "AUTO_RESTART_RESUME_PLAN_V2",
+            "resume_plan_version": 2,
+            "plan_version": 2,
+            "account_id": ACCOUNT_ID,
+            "package_contract_ready": True,
+            "phase_order": ["welcome", "follow", "unfollow"],
+            "phases_to_run": {"welcome": False, "follow": True, "unfollow": False},
+            "quota_remaining": {"welcome": 0, "follow": 10, "unfollow": 0, "outreach": 0},
+            "retry_generation": 1,
+        },
     }
     base.update(overrides)
     return base
@@ -63,11 +76,32 @@ class HumanConfirmedResumeClaimTest(unittest.TestCase):
         self.assertEqual(policy["recovery_mode"], "human_confirmed_resume")
         self.assertEqual(policy["prior_run_id"], ORIGINAL_RUN_ID)
         self.assertEqual(policy["incident_id"], INCIDENT_ID)
-        # Preflight-stage resume: full planned session; identity guard
-        # remains the unchanged final safe-stop downstream.
         self.assertEqual(
-            policy["phases_to_run"], {"welcome": True, "follow": True, "unfollow": True}
+            policy["phases_to_run"], {"welcome": False, "follow": True, "unfollow": False}
         )
+        self.assertEqual(policy["quota_remaining"]["follow"], 10)
+        self.assertEqual(policy["retry_generation"], 1)
+
+    def test_missing_frozen_plan_is_invalid(self) -> None:
+        with patch.object(store, "load_resume_plan", return_value=_plan_row()):
+            ok, reason, policy = validate_auto_restart_request_at_claim(
+                account_id=ACCOUNT_ID,
+                metadata=_metadata(resume_plan=None),
+            )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "resume_plan_invalid")
+        self.assertIsNone(policy)
+
+    def test_zero_quota_enabled_phase_is_blocked(self) -> None:
+        meta = _metadata()
+        meta["resume_plan"]["quota_remaining"]["follow"] = 0
+        with patch.object(store, "load_resume_plan", return_value=_plan_row()):
+            ok, reason, _ = validate_auto_restart_request_at_claim(
+                account_id=ACCOUNT_ID,
+                metadata=meta,
+            )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "quota_inconsistency_blocked")
 
     def test_missing_authorization_links_are_invalid(self) -> None:
         for missing in ("resume_plan_id", "original_run_id", "incident_id"):
