@@ -260,7 +260,7 @@ class RecordEndOfSessionTest(unittest.TestCase):
             )
         body = req.call_args.kwargs["body"]
         self.assertEqual(body["resume_stage"], "phases")
-        self.assertEqual(body["resume_state"], "run_active")
+        self.assertEqual(body["resume_state"], "partial_resumable")
         self.assertTrue(body["restart_allowed"])
         self.assertEqual(body["plan"]["quota_remaining"]["unfollow"], 3)
         self.assertEqual(

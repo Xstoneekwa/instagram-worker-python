@@ -203,17 +203,28 @@ def _validate_human_confirmed_resume_at_claim(
         return False, "resume_plan_invalid", None
     if str(embedded.get("account_id") or "").strip() != str(account_id or "").strip():
         return False, "resume_plan_invalid", None
-    if embedded.get("package_contract_ready") is not True:
-        return False, "resume_plan_invalid", None
     if embedded.get("phase_order") != ["welcome", "follow", "unfollow"]:
         return False, "resume_plan_invalid", None
     phases = _read_record(embedded.get("phases_to_run"))
     if any(phases.get(phase) not in (True, False) for phase in ("welcome", "follow", "unfollow")):
         return False, "resume_plan_invalid", None
     quota = _quota_record(embedded.get("quota_remaining"))
-    quota_reason = _validate_quota_consistency(phases=phases, quota=quota)
-    if quota_reason:
-        return False, quota_reason, None
+    restriction_preflight_only = embedded.get("restriction_preflight_only") is True
+    if restriction_preflight_only:
+        if (
+            str(embedded.get("resume_kind") or "")
+            != "instagram_restriction_preflight"
+            or str(embedded.get("incident_id") or "").strip() != incident_id
+            or any(phases.get(phase) is not False for phase in ("welcome", "follow", "unfollow"))
+            or any((quota.get(phase) or 0) != 0 for phase in ("welcome", "follow", "unfollow", "outreach", "total"))
+        ):
+            return False, "restriction_preflight_contract_invalid", None
+    else:
+        if embedded.get("package_contract_ready") is not True:
+            return False, "resume_plan_invalid", None
+        quota_reason = _validate_quota_consistency(phases=phases, quota=quota)
+        if quota_reason:
+            return False, quota_reason, None
 
     try:
         plan_row = load_resume_plan(resume_plan_id=resume_plan_id)
@@ -246,6 +257,7 @@ def _validate_human_confirmed_resume_at_claim(
         "recovery_mode": HUMAN_CONFIRMED_RESUME_MODE,
         "resume_plan_id": resume_plan_id,
         "incident_id": incident_id,
+        "restriction_preflight_only": restriction_preflight_only,
         "phases_to_run": {
             phase: bool(phases.get(phase)) for phase in ("welcome", "follow", "unfollow")
         },

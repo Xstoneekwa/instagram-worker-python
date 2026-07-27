@@ -82,6 +82,19 @@ if [[ -z "${RUN_CONTROL_DISPATCHER_WORKER_ID:-}" ]]; then
   export RUN_CONTROL_DISPATCHER_WORKER_ID="run-dispatcher:${HOST_NAME}"
 fi
 
+if [[ -z "${RUN_CONTROL_DISPATCHER_HOST_MACHINE:-}" ]]; then
+  if command -v scutil >/dev/null 2>&1; then
+    LOCAL_HOST_NAME="$(scutil --get LocalHostName 2>/dev/null || true)"
+  else
+    LOCAL_HOST_NAME=""
+  fi
+  if [[ -n "$LOCAL_HOST_NAME" ]]; then
+    export RUN_CONTROL_DISPATCHER_HOST_MACHINE="${LOCAL_HOST_NAME}.local"
+  else
+    export RUN_CONTROL_DISPATCHER_HOST_MACHINE="$(hostname 2>/dev/null || hostname -s)"
+  fi
+fi
+
 mkdir -p "$LOG_DIR" "$RUN_DIR"
 
 _pid_alive() {

@@ -82,6 +82,54 @@ class HumanConfirmedResumeClaimTest(unittest.TestCase):
         self.assertEqual(policy["quota_remaining"]["follow"], 10)
         self.assertEqual(policy["retry_generation"], 1)
 
+    def test_zero_action_restriction_preflight_passes_only_with_exact_contract(self) -> None:
+        meta = _metadata(restriction_preflight_only=True)
+        meta["resume_plan"] = {
+            "schema": "AUTO_RESTART_RESUME_PLAN_V2",
+            "resume_plan_version": 2,
+            "plan_version": 2,
+            "resume_kind": "instagram_restriction_preflight",
+            "restriction_preflight_only": True,
+            "account_id": ACCOUNT_ID,
+            "incident_id": INCIDENT_ID,
+            "phase_order": ["welcome", "follow", "unfollow"],
+            "phases_to_run": {"welcome": False, "follow": False, "unfollow": False},
+            "quota_remaining": {
+                "welcome": 0,
+                "follow": 0,
+                "unfollow": 0,
+                "outreach": 0,
+                "total": 0,
+            },
+        }
+        with patch.object(store, "load_resume_plan", return_value=_plan_row()):
+            ok, reason, policy = validate_auto_restart_request_at_claim(
+                account_id=ACCOUNT_ID,
+                metadata=meta,
+            )
+        self.assertTrue(ok, reason)
+        self.assertIsNotNone(policy)
+        self.assertTrue(policy["restriction_preflight_only"])
+        self.assertFalse(any(policy["phases_to_run"].values()))
+
+    def test_restriction_preflight_with_business_phase_fails_closed(self) -> None:
+        meta = _metadata(restriction_preflight_only=True)
+        meta["resume_plan"].update(
+            {
+                "resume_kind": "instagram_restriction_preflight",
+                "restriction_preflight_only": True,
+                "incident_id": INCIDENT_ID,
+            }
+        )
+        with patch.object(store, "load_resume_plan", return_value=_plan_row()):
+            ok, reason, policy = validate_auto_restart_request_at_claim(
+                account_id=ACCOUNT_ID,
+                metadata=meta,
+            )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "restriction_preflight_contract_invalid")
+        self.assertIsNone(policy)
+
     def test_missing_frozen_plan_is_invalid(self) -> None:
         with patch.object(store, "load_resume_plan", return_value=_plan_row()):
             ok, reason, policy = validate_auto_restart_request_at_claim(

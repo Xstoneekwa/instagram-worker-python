@@ -40,6 +40,46 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
     def test_account_session_deadline_env_is_empty_without_scheduler_window(self) -> None:
         self.assertEqual(consumer._account_session_deadline_env({}, {}), {})
 
+    def test_dispatcher_config_uses_explicit_stable_host_machine(self) -> None:
+        with patch.dict(
+            consumer.os.environ,
+            {
+                "RUN_CONTROL_DISPATCHER_WORKER_ID": "run-dispatcher:mac-admin-01",
+                "RUN_CONTROL_DISPATCHER_HOST_MACHINE": "stable-physical-host.local",
+            },
+            clear=False,
+        ):
+            cfg = consumer.load_dispatcher_config()
+        self.assertEqual(cfg.worker_id, "run-dispatcher:mac-admin-01")
+        self.assertEqual(cfg.host_machine, "stable-physical-host.local")
+
+    def test_dispatcher_heartbeat_publishes_canonical_and_observed_host(self) -> None:
+        cfg = consumer.DispatcherConfig(
+            enabled=True,
+            health_only=False,
+            launch_enabled=True,
+            worker_id="run-dispatcher:mac-admin-01",
+            poll_seconds=5.0,
+            lease_seconds=120,
+            heartbeat_seconds=20.0,
+            allowed_run_types=["account_session"],
+            test_account_ids=set(),
+            subprocess_timeout_seconds=7200,
+            require_assignment=True,
+            enforce_assignment_window=True,
+            host_machine="stable-physical-host.local",
+        )
+        with (
+            patch.object(consumer.socket, "gethostname", return_value="mutable-dhcp-name.local"),
+            patch.object(consumer.runtime_heartbeat, "heartbeat_worker") as heartbeat,
+        ):
+            consumer._heartbeat(cfg)
+        self.assertEqual(heartbeat.call_args.kwargs["host_machine"], "stable-physical-host.local")
+        self.assertEqual(
+            heartbeat.call_args.kwargs["metadata"]["observed_socket_hostname"],
+            "mutable-dhcp-name.local",
+        )
+
     def test_startup_tick_guard_sets_cadence_without_calling_tick(self) -> None:
         with (
             patch.object(

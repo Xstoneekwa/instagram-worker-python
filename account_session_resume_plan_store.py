@@ -37,6 +37,7 @@ RECOVERY_ELIGIBLE_INCIDENT_TYPES = frozenset(
 )
 
 RESUME_STATE_RUN_ACTIVE = "run_active"
+RESUME_STATE_PARTIAL_RESUMABLE = "partial_resumable"
 RESUME_STATE_AWAITING_HUMAN = "awaiting_human_resume_authorization"
 RESUME_STATE_RESUME_REQUESTED = "resume_requested"
 RESUME_STATE_RESUME_SUCCEEDED = "resume_succeeded"
@@ -290,7 +291,9 @@ def record_end_of_session(
     completed = attempt_succeeded and not restart_allowed
     patch: dict[str, Any] = {
         "resume_stage": "completed" if completed else "phases",
-        "resume_state": RESUME_STATE_COMPLETED if completed else RESUME_STATE_RUN_ACTIVE,
+        "resume_state": (
+            RESUME_STATE_COMPLETED if completed else RESUME_STATE_PARTIAL_RESUMABLE
+        ),
         "restart_allowed": restart_allowed,
         "restart_block_reason": str(
             plan.get("restart_block_reason")
@@ -353,7 +356,7 @@ def record_automatic_retry_terminal_state(
     patch = {
         "resume_stage": "phases",
         "resume_state": (
-            RESUME_STATE_RUN_ACTIVE
+            RESUME_STATE_PARTIAL_RESUMABLE
             if retry_decision.restart_allowed
             else RESUME_STATE_NOT_RECOVERABLE
         ),

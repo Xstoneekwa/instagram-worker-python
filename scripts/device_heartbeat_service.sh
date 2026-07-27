@@ -68,6 +68,24 @@ _resolve_python_path() {
 }
 
 PYTHON_BIN="$(_resolve_python_path)"
+
+_resolve_host_label() {
+  if [[ -n "${RUN_CONTROL_DISPATCHER_HOST_MACHINE:-}" ]]; then
+    printf '%s' "$RUN_CONTROL_DISPATCHER_HOST_MACHINE"
+    return 0
+  fi
+  local local_host_name=""
+  if command -v scutil >/dev/null 2>&1; then
+    local_host_name="$(scutil --get LocalHostName 2>/dev/null || true)"
+  fi
+  if [[ -n "$local_host_name" ]]; then
+    printf '%s.local' "$local_host_name"
+    return 0
+  fi
+  hostname 2>/dev/null || hostname -s
+}
+
+HOST_LABEL="$(_resolve_host_label)"
 mkdir -p "$LOG_DIR" "$RUN_DIR"
 
 _pid_alive() {
@@ -374,6 +392,7 @@ _start_foreground() {
   "$PYTHON_BIN" "$PUBLISHER" \
     --env-file "$ENV_FILE" \
     --adb "${ADB_PATH:-adb}" \
+    --host-label "$HOST_LABEL" \
     --include-battery \
     --serve \
     --interval-seconds "$INTERVAL_SECONDS" \
@@ -428,6 +447,7 @@ case "$cmd" in
     "$PYTHON_BIN" "$PUBLISHER" \
       --env-file "$ENV_FILE" \
       --adb "${ADB_PATH:-adb}" \
+      --host-label "$HOST_LABEL" \
       --include-battery \
       --state-file "$STATE_FILE"
     ;;

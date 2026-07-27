@@ -61,6 +61,26 @@ class RuntimeHeartbeatTest(unittest.TestCase):
             runtime_heartbeat.heartbeat_worker(worker_id="worker-1", status="running")
         self.assertEqual(upsert_worker.call_args.args[0]["last_seen_at"], fixed_ts)
 
+    def test_worker_heartbeat_uses_explicit_canonical_host_identity(self) -> None:
+        with (
+            patch.object(runtime_heartbeat.config, "RUNTIME_HEARTBEATS_ENABLED", True, create=True),
+            patch.object(runtime_heartbeat.socket, "gethostname", return_value="mutable-dhcp-name.local"),
+            patch.object(
+                runtime_heartbeat.supabase_client,
+                "upsert_worker_heartbeat",
+                return_value={"worker_id": "run-dispatcher:mac-admin-01"},
+            ) as upsert_worker,
+        ):
+            runtime_heartbeat.heartbeat_worker(
+                worker_id="run-dispatcher:mac-admin-01",
+                host_machine="stable-physical-host.local",
+                status="idle",
+            )
+        self.assertEqual(
+            upsert_worker.call_args.args[0]["host_machine"],
+            "stable-physical-host.local",
+        )
+
     def test_device_heartbeat_missing_device_id_skips(self) -> None:
         with patch.object(runtime_heartbeat.config, "RUNTIME_HEARTBEATS_ENABLED", True, create=True):
             out = runtime_heartbeat.heartbeat_device(None, status="online")

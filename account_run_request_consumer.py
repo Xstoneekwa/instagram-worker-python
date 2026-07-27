@@ -130,6 +130,9 @@ class DispatcherConfig:
     enforce_assignment_window: bool
     max_consecutive_loop_errors: int = 10
     max_concurrent_subprocesses: int = 4
+    # Stable physical-host identity shared with the device heartbeat service.
+    # It must not depend on DHCP/mDNS's mutable socket hostname.
+    host_machine: str = ""
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -202,6 +205,7 @@ def load_dispatcher_config() -> DispatcherConfig:
             1,
             _env_int("RUN_CONTROL_DISPATCHER_MAX_CONCURRENT_SUBPROCESSES", 4),
         ),
+        host_machine=_env_str("RUN_CONTROL_DISPATCHER_HOST_MACHINE", host),
     )
 
 
@@ -489,8 +493,12 @@ def _heartbeat(cfg: DispatcherConfig, *, status: str = "idle", metadata: dict[st
         runtime_heartbeat.heartbeat_worker(
             worker_id=cfg.worker_id,
             status=status,
+            host_machine=cfg.host_machine or socket.gethostname(),
             metadata={
                 "component": "run_control_dispatcher",
+                "dispatcher_worker_id": cfg.worker_id,
+                "canonical_host_machine": cfg.host_machine or socket.gethostname(),
+                "observed_socket_hostname": socket.gethostname(),
                 "health_only": cfg.health_only,
                 "launch_enabled": cfg.launch_enabled,
                 **(metadata or {}),

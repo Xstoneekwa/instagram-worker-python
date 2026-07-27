@@ -72,6 +72,7 @@ def heartbeat_worker(
     assignment_id: str | None = None,
     device_id: str | None = None,
     clone_id: str | None = None,
+    host_machine: str | None = None,
     metadata: dict | None = None,
     *,
     force: bool = False,
@@ -91,7 +92,7 @@ def heartbeat_worker(
 
     body = {
         "worker_id": wid,
-        "host_machine": socket.gethostname(),
+        "host_machine": str(host_machine or socket.gethostname()).strip() or None,
         "process_id": str(os.getpid()),
         "git_sha": _git_sha(),
         "status": st,
