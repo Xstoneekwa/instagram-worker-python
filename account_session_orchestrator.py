@@ -3973,10 +3973,17 @@ def run_account_session(
         else None
     )
     resume_policy = dict(auto_restart_resume_policy or {})
-    attempt_id = int(resume_policy.get("attempt_id") or 1)
+    retry_generation = int(resume_policy.get("retry_generation") or 0)
+    attempt_id = int(
+        resume_policy.get("attempt_id")
+        or (retry_generation + 1 if resume_policy else 1)
+    )
     retry_index = int(resume_policy.get("retry_index") or max(0, attempt_id - 1))
     business_session_id = str(
-        resume_policy.get("business_session_id") or run_id or ""
+        resume_policy.get("business_session_id")
+        or resume_policy.get("prior_run_id")
+        or run_id
+        or ""
     ).strip()
     previous_run_id = str(
         resume_policy.get("previous_run_id")
@@ -4009,6 +4016,7 @@ def run_account_session(
             "welcome_enabled": welcome_enabled,
             "welcome_phase_status": welcome_phase_status,
             "follow_phase_status": follow_phase_status,
+            "current_attempt_phases_to_run": dict(resume_phases),
             "unfollow_phase_status": unfollow_phase_status,
             "follow_engine_exit_code": follow_exit_code,
             "follows_completed_count": follows_completed_count,

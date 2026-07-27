@@ -293,6 +293,19 @@ def build_account_session_resume_plan(
     ).strip()
     unsafe = _unsafe_markers(safe_summary)
     follow_target, follow_done, follow_remaining = _follow_quota(safe_summary)
+    current_attempt_phases = safe_summary.get("current_attempt_phases_to_run")
+    if (
+        isinstance(current_attempt_phases, dict)
+        and current_attempt_phases.get("follow") is False
+        and str(safe_summary.get("follow_phase_status") or "").strip()
+        == "skipped_cleanly"
+    ):
+        # A frozen resume plan that explicitly excluded Follow is complete for
+        # this attempt. Do not turn the intentionally absent local counters
+        # back into an unknown Follow phase on the next partial checkpoint.
+        follow_target = 0
+        follow_done = 0
+        follow_remaining = 0
     unfollow_target, unfollow_done, unfollow_remaining = _unfollow_quota(
         safe_summary,
         safe_settings,

@@ -114,6 +114,40 @@ class MythylUnfollowFailureRecoveryTest(unittest.TestCase):
         self.assertEqual(plan["quota_targets"]["unfollow"], 120)
         self.assertEqual(plan["quota_remaining"]["unfollow"], 120)
 
+    def test_unfollow_only_resume_keeps_follow_closed_on_next_partial_checkpoint(self) -> None:
+        plan = build_account_session_resume_plan(
+            {
+                "session_termination_class": "partial_resumable",
+                "restart_eligibility": "eligible",
+                "business_session_id": "j-automatise-business-session",
+                "welcome_enabled": False,
+                "follow_phase_status": "skipped_cleanly",
+                "current_attempt_phases_to_run": {
+                    "welcome": False,
+                    "follow": False,
+                    "unfollow": True,
+                },
+                "mandatory_unfollow_executed": True,
+                "unfollow_outcome": {
+                    "phase_status": "partial_resumable",
+                    "planned_candidate_count": 27,
+                    "persisted_count": 24,
+                    "remaining_count": 3,
+                    "last_safe_checkpoint": "following_list_after_scroll",
+                    "resume_recommended": True,
+                },
+            }
+        )
+
+        self.assertTrue(plan["restart_allowed"])
+        self.assertEqual(plan["restart_block_reason"], "")
+        self.assertEqual(
+            plan["phases_to_run"],
+            {"welcome": False, "follow": False, "unfollow": True},
+        )
+        self.assertEqual(plan["quota_remaining"]["follow"], 0)
+        self.assertEqual(plan["quota_remaining"]["unfollow"], 3)
+
     def test_recoverable_failure_does_not_require_human_review(self) -> None:
         summary = _mythyl_summary()
         plan = build_account_session_resume_plan(summary)
