@@ -476,6 +476,11 @@ _SAFE_METADATA_KEYS = (
     "business_session_id",
     "attempt_id",
     "retry_index",
+    "incident_dedupe_key",
+    "incident_type",
+    "language",
+    "confidence",
+    "physical_preflight_required",
 )
 
 
@@ -565,6 +570,28 @@ def classify_terminal_run_failure(
             exit_code=exit_code,
             run_type=normalized_run_type,
             summary=summary,
+            metadata_safe=metadata_safe,
+        )
+
+    if reason == "instagram_action_rate_limit":
+        return IncidentDecision(
+            should_publish=True,
+            incident_type="instagram_account_restriction",
+            reason_code="instagram_action_rate_limit",
+            severity="error",
+            operator_label="Instagram action restriction detected",
+            action_required=(
+                "Open the account manually, verify whether Instagram still shows the action "
+                "restriction, wait if necessary, then resolve the incident only after confirming "
+                "the restriction is cleared."
+            ),
+            requires_operator_review=True,
+            blocking_campaign=True,
+            admin_message=(
+                "Instagram is temporarily limiting actions. The campaign is paused and Auto Restart "
+                "must remain blocked until human review and a physical preflight pass."
+            ),
+            notify_channels=True,
             metadata_safe=metadata_safe,
         )
 
@@ -782,7 +809,8 @@ def build_run_failure_incident_payload(
     is_auto_login = metadata.get("domain") == "auto_login"
     return {
         "incident_type": decision.incident_type,
-        "dedupe_key": build_incident_dedupe_key(
+        "dedupe_key": str(metadata.get("incident_dedupe_key") or "").strip()
+        or build_incident_dedupe_key(
             account_id=account_id,
             run_ref=run_ref,
             incident_type=decision.incident_type,

@@ -880,6 +880,7 @@ def _exit_reason_from_code(code: int) -> str:
         72: "failed_no_follow_tap",
         74: "follow_review_popup_unhandled",
         75: "active_instagram_account_mismatch",
+        76: "instagram_action_rate_limit",
         99: "follow_review_popup_unhandled_safe_stop",
     }
     return mapping.get(code, f"exit_code_{code}")
@@ -18803,7 +18804,7 @@ def _load_account_session_follow_targets(account_id: str, limit: int) -> tuple[l
     return db_targets, None
 
 
-def main() -> int:
+def _main_impl() -> int:
     global _CURRENT_RUN_REQUEST_ID
     global _DEFER_TERMINAL_RUN_STATUS_UNTIL_CLEANUP
     global _RUNNER_SESSION_CLEANUP_COMPLETE, _PENDING_TERMINAL_RUN_STATUS
@@ -19314,6 +19315,24 @@ def main() -> int:
         run_type=dispatch_run_type or None,
     )
 
+    from instagram_action_restriction import configure_restriction_runtime_context
+
+    configure_restriction_runtime_context(
+        account_id=account_id,
+        account_username=account_username,
+        run_id=run_id,
+        request_id=run_request_id,
+        device_id=str(dispatch_ctx.get("device_id") or ""),
+        app_instance_id=str(
+            dispatch_ctx.get("clone_id")
+            or getattr(args, "expected_app_instance_id", "")
+            or ""
+        ),
+        clone=str(dispatch_ctx.get("clone_id") or ""),
+        worker_sha=str(os.environ.get("WORKER_GIT_SHA") or ""),
+        release=str(os.environ.get("WORKER_RELEASE") or ""),
+    )
+
     # P3: canonical resume plan created EARLY, before any device/UI action.
     # Covers every dispatched account_session regardless of trigger
     # (scheduler, manual Play, auto restart resume). Best-effort by contract.
@@ -19793,6 +19812,159 @@ def main() -> int:
                 target_username=account_username or None,
             )
             return _return_with_cleanup(d, 75)
+
+    if account_session_run and supabase_mode and account_id:
+        from auto_restart_runtime import load_resume_policy_from_env
+        from instagram_action_restriction import (
+            guard_instagram_action_rate_limit,
+            validate_restriction_preflight_policy,
+        )
+
+        restriction_resume_policy = load_resume_policy_from_env() or {}
+        restriction_preflight_requested = (
+            "restriction_preflight_only" in restriction_resume_policy
+        )
+        if restriction_preflight_requested:
+            authorized, authorization_reason, restriction_incident_id = (
+                validate_restriction_preflight_policy(restriction_resume_policy)
+            )
+            if not authorized or not restriction_incident_id:
+                log(
+                    "error",
+                    "restriction_preflight_failed",
+                    account_id=account_id,
+                    run_id=run_id or None,
+                    incident_id=restriction_incident_id,
+                    reason=authorization_reason,
+                    business_actions_allowed=False,
+                )
+                if run_id:
+                    _update_run_status_safe(
+                        run_id=run_id,
+                        status="failed",
+                        totals={"total": 0, "success": 0, "failed": 1},
+                        performance_summary={
+                            "reason": authorization_reason,
+                            "physical_preflight_required": True,
+                            "restriction_preflight_only": True,
+                        },
+                    )
+                return _return_with_cleanup(d, 76)
+
+            restriction_hold = _safe_supabase_call(
+                "load_instagram_restriction_hold",
+                account_id,
+                restriction_incident_id,
+            ) or {}
+            if str(restriction_hold.get("status") or "") != "verification_required":
+                hold_reason = "restriction_hold_not_verification_required"
+                log(
+                    "error",
+                    "restriction_preflight_failed",
+                    account_id=account_id,
+                    run_id=run_id or None,
+                    incident_id=restriction_incident_id,
+                    hold_status=restriction_hold.get("status"),
+                    reason=hold_reason,
+                    business_actions_allowed=False,
+                )
+                if run_id:
+                    _update_run_status_safe(
+                        run_id=run_id,
+                        status="failed",
+                        totals={"total": 0, "success": 0, "failed": 1},
+                        performance_summary={
+                            "reason": hold_reason,
+                            "incident_id": restriction_incident_id,
+                            "physical_preflight_required": True,
+                            "restriction_preflight_only": True,
+                        },
+                    )
+                return _return_with_cleanup(d, 76)
+
+            log(
+                "info",
+                "restriction_preflight_required",
+                account_id=account_id,
+                run_id=run_id or None,
+                incident_id=restriction_incident_id,
+                business_actions_allowed=False,
+            )
+            guard_instagram_action_rate_limit(
+                d,
+                phase="restriction_preflight",
+                preceding_action="physical_preflight",
+            )
+            released = _safe_supabase_call(
+                "release_instagram_action_restriction_hold",
+                account_id=account_id,
+                incident_id=restriction_incident_id,
+                run_id=run_id or None,
+            ) or {}
+            if not released.get("ok"):
+                release_reason = str(
+                    released.get("reason") or "restriction_hold_release_failed"
+                )
+                log(
+                    "error",
+                    "restriction_preflight_failed",
+                    account_id=account_id,
+                    run_id=run_id or None,
+                    incident_id=restriction_incident_id,
+                    reason=release_reason,
+                    business_actions_allowed=False,
+                )
+                if run_id:
+                    _update_run_status_safe(
+                        run_id=run_id,
+                        status="failed",
+                        totals={"total": 0, "success": 0, "failed": 1},
+                        performance_summary={
+                            "reason": release_reason,
+                            "incident_id": restriction_incident_id,
+                            "physical_preflight_required": True,
+                            "restriction_preflight_only": True,
+                        },
+                    )
+                return _return_with_cleanup(d, 76)
+            log(
+                "info",
+                "restriction_preflight_passed",
+                account_id=account_id,
+                run_id=run_id or None,
+                incident_id=restriction_incident_id,
+                popup_absent=True,
+                business_actions_executed=0,
+            )
+            log(
+                "info",
+                "restriction_hold_released",
+                account_id=account_id,
+                run_id=run_id or None,
+                incident_id=restriction_incident_id,
+            )
+            if run_id:
+                _update_run_status_safe(
+                    run_id=run_id,
+                    status="completed",
+                    totals={"total": 0, "success": 0, "failed": 0},
+                    performance_summary={
+                        "reason": "restriction_physical_preflight_passed",
+                        "incident_id": restriction_incident_id,
+                        "physical_preflight_passed": True,
+                        "restriction_preflight_only": True,
+                        "business_actions_executed": 0,
+                    },
+                )
+            reset_perf_counters()
+            _emit_performance_summary(
+                t0=t_session,
+                warm_session_used=warm_session_used,
+                force_stop_used=force_stop_used,
+                exit_code=0,
+                target_username=account_username or None,
+            )
+            return _return_with_cleanup(d, 0)
 
     if welcome_baseline_run:
         if not supabase_mode or not account_id:
@@ -21274,6 +21446,36 @@ def main() -> int:
         if strict_code is not None and failures == 0:
             return _return_with_cleanup(d, strict_code)
     return _return_with_cleanup(d, 1 if failures > 0 else 0)
+
+
+def main() -> int:
+    try:
+        return _main_impl()
+    except Exception as exc:
+        from instagram_action_restriction import InstagramActionRestrictionDetected
+
+        if not isinstance(exc, InstagramActionRestrictionDetected):
+            raise
+        summary = dict(exc.summary)
+        run_id = str(summary.get("run_id") or "")
+        started = time.perf_counter()
+        if run_id:
+            _update_run_status_safe(
+                run_id=run_id,
+                status="failed",
+                totals={"total": 0, "success": 0, "failed": 1},
+                performance_summary=summary,
+            )
+        log(
+            "error",
+            "restriction_session_terminalized",
+            run_id=run_id or None,
+            request_id=summary.get("request_id"),
+            reason=summary.get("reason"),
+            terminalization_ms=round((time.perf_counter() - started) * 1000.0, 2),
+            target_lt_10_seconds=True,
+        )
+        return _return_with_cleanup(exc.device, 76)
 
 
 if __name__ == "__main__":

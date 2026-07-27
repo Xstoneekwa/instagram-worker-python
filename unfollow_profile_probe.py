@@ -14,6 +14,7 @@ from typing import Any
 import uiautomator2 as u2
 
 from logs import log
+from instagram_action_restriction import guard_instagram_action_rate_limit
 from own_following_navigation import detect_own_following_list_screen
 from unfollow_list_harvest import normalize_unfollow_username
 
@@ -609,13 +610,24 @@ def tap_unfollow_in_following_sheet(
         "tap_y": int(opt.get("tap_y") or 0),
     }
     log("info", "unfollow_sheet_unfollow_option_tap_started", **out)
+    guard_instagram_action_rate_limit(
+        d,
+        phase="unfollow",
+        preceding_action="unfollow_pre_tap",
+    )
     try:
         d.click(int(out["tap_x"]), int(out["tap_y"]))
+        time.sleep(0.2)
     except Exception as exc:
         out["ok"] = False
         out["failure_reason"] = "unfollow_option_tap_failed"
         out["error"] = str(exc)[:200]
         return out
+    guard_instagram_action_rate_limit(
+        d,
+        phase="unfollow",
+        preceding_action="unfollow",
+    )
     log("info", "unfollow_sheet_unfollow_option_tapped", **out)
     return out
 

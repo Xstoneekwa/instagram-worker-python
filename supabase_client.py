@@ -1141,6 +1141,61 @@ def upsert_account_incident(payload: dict[str, Any]) -> dict[str, Any]:
     return _parse_rpc_account_incident_row(row)
 
 
+def apply_instagram_action_restriction(payload: dict[str, Any]) -> dict[str, Any]:
+    """Atomically create/enrich the restriction incident and apply its account hold."""
+    body = dict(payload or {})
+    row = _call_rpc(
+        "apply_instagram_action_restriction_v1",
+        {
+            "p_account_id": body.get("account_id"),
+            "p_account_username": body.get("account_username"),
+            "p_run_id": body.get("run_id"),
+            "p_request_id": body.get("request_id"),
+            "p_stable_reason": body.get("stable_reason") or "instagram_action_rate_limit",
+            "p_metadata_safe": body.get("metadata_safe") or {},
+        },
+        timeout_seconds=4.0,
+        max_retries=0,
+    )
+    if isinstance(row, list):
+        row = row[0] if row else {}
+    if not isinstance(row, dict) or not row:
+        raise RuntimeError("apply_instagram_action_restriction_v1 returned empty response")
+    return row
+
+
+def load_instagram_restriction_hold(account_id: str, incident_id: str | None = None) -> dict[str, Any] | None:
+    query: dict[str, str] = {
+        "select": "id,account_id,incident_id,status,stable_reason,previous_admin_lifecycle_status,verification_required_at,verified_cleared_at,metadata_safe",
+        "account_id": f"eq.{str(account_id or '').strip()}",
+        "status": "in.(active,verification_required)",
+        "order": "created_at.desc",
+        "limit": "1",
+    }
+    if incident_id:
+        query["incident_id"] = f"eq.{str(incident_id).strip()}"
+    rows = _request_json("GET", "instagram_account_restriction_holds", query=query) or []
+    return dict(rows[0]) if rows and isinstance(rows[0], dict) else None
+
+
+def release_instagram_action_restriction_hold(
+    *, account_id: str, incident_id: str, run_id: str | None
+) -> dict[str, Any]:
+    row = call_rpc(
+        "release_instagram_action_restriction_hold_v1",
+        {
+            "p_account_id": account_id,
+            "p_incident_id": incident_id,
+            "p_preflight_run_id": run_id,
+        },
+    )
+    if isinstance(row, list):
+        row = row[0] if row else {}
+    if not isinstance(row, dict) or not row:
+        raise RuntimeError("release_instagram_action_restriction_hold_v1 returned empty response")
+    return row
+
+
 def load_account_incidents_to_notify(
     *,
     statuses: list[str] | tuple[str, ...] | None = None,

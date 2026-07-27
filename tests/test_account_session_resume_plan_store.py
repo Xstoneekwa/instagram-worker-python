@@ -119,6 +119,29 @@ class CreateEarlyResumePlanTest(unittest.TestCase):
 
 
 class RecordTerminalFailureTest(unittest.TestCase):
+    def test_instagram_action_restriction_awaits_human_authorization(self) -> None:
+        import supabase_client
+
+        with patch.object(
+            supabase_client,
+            "_request_json",
+            return_value=[{"id": "plan-1", "run_id": RUN_ID}],
+        ) as req:
+            result = store.record_terminal_failure(
+                run_id=RUN_ID,
+                incident_type="instagram_account_restriction",
+                reason_code="instagram_action_rate_limit",
+                incident_id="inc-restriction-1",
+            )
+        self.assertTrue(result["persisted"])
+        body = req.call_args.kwargs["body"]
+        self.assertEqual(body["resume_state"], "awaiting_human_resume_authorization")
+        self.assertFalse(body["restart_allowed"])
+        self.assertEqual(
+            body["restart_block_reason"], "awaiting_human_resume_authorization"
+        )
+        self.assertEqual(body["incident_id"], "inc-restriction-1")
+
     def test_recoverable_incident_awaits_human_authorization(self) -> None:
         import supabase_client
 

@@ -32,6 +32,7 @@ RECOVERY_ELIGIBLE_INCIDENT_TYPES = frozenset(
         "assigned_instagram_package_unavailable",
         "run_device_unavailable",
         "run_worker_failure",
+        "instagram_account_restriction",
     }
 )
 

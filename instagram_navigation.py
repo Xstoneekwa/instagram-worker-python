@@ -18,6 +18,7 @@ import uiautomator2 as u2
 
 import config
 import account_protection_lists
+from instagram_action_restriction import guard_instagram_action_rate_limit
 from device import (
     force_stop,
     get_device_serial,
@@ -10064,6 +10065,12 @@ def perform_follow_safe(
         tap_coords_ready=bool(tap_coords_ready),
     )
 
+    guard_instagram_action_rate_limit(
+        d,
+        phase="follow",
+        preceding_action="follow_pre_tap",
+    )
+
     try:
         if tap_exact and tap_coords_ready:
             d.click(tap_cx, tap_cy)
@@ -10118,6 +10125,12 @@ def perform_follow_safe(
             "verify_attempts": 0,
             "events": events,
         }
+
+    guard_instagram_action_rate_limit(
+        d,
+        phase="follow",
+        preceding_action="follow",
+    )
 
     if tap_exact:
         log(
@@ -27472,6 +27485,11 @@ def visual_like_open_post(
             current_package=meta1.get("current_package"),
             source_profile_username=source_profile_username or "",
         )
+        guard_instagram_action_rate_limit(
+            d,
+            phase="like",
+            preceding_action="like_pre_tap",
+        )
         try:
             _t_tap_dispatch0 = time.perf_counter()
             d.click(tap_x, tap_y)
@@ -27537,6 +27555,11 @@ def visual_like_open_post(
             pass
         _clear_post_follow_open_like_proof_stash()
         time.sleep(1.2)
+        guard_instagram_action_rate_limit(
+            d,
+            phase="like",
+            preceding_action="like",
+        )
         post_shot = str(
             _SCREENSHOTS_DIR / f"visual_post_like_after_tap_{int(time.time() * 1000)}.png"
         )
@@ -51241,6 +51264,11 @@ def send_dm_safe(
         thread_state=dm_state,
         send_button_candidate_count=out.get("send_button_candidate_count"),
     )
+    guard_instagram_action_rate_limit(
+        d,
+        phase="dm",
+        preceding_action="dm_send_pre_tap",
+    )
     try:
         btn.click()
         out["send_tapped"] = True
@@ -51268,6 +51296,12 @@ def send_dm_safe(
         out["tap_error"] = str(e)
         _LAST_DM_SEND_RESULT = dict(out)
         return out
+
+    guard_instagram_action_rate_limit(
+        d,
+        phase="dm",
+        preceding_action="dm_send",
+    )
 
     verified, verify_reason, post_send_signature = _dm_verify_outbound_message_after_send(
         d,
