@@ -784,6 +784,7 @@ def _run_follow_target_rotation(
             "warm_session_used": warm_session_used,
             "force_stop_used": force_stop_used,
             "target_follow_budget": target_budget,
+            "session_global_follow_cap": global_follow_goal,
         }
         if start_from_current_followers_list:
             call_kwargs["start_from_current_followers_list"] = True

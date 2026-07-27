@@ -1034,6 +1034,35 @@ def _runtime_follow_cap_exceeded(cap: int | None = None) -> bool:
     return cap > 0 and _RUNTIME_FOLLOW_COUNT >= cap
 
 
+def _resolve_absolute_follow_session_cap(
+    *,
+    current_session_count: int,
+    remaining_allowance: int,
+    fixed_session_cap: int | None = None,
+    runtime_absolute_cap: int | None = None,
+) -> int:
+    """Convert a live remaining quota into an absolute per-session stop cap.
+
+    Runtime cap inputs are refreshed between Follow sources.  Their day quota
+    is therefore a *remaining* allowance, while ``_RUNTIME_FOLLOW_COUNT`` is
+    cumulative for the whole account session.  Comparing the cumulative count
+    directly with the refreshed allowance would stop 25/50 as soon as the DB
+    reports 25 remaining.  Keep the first orchestrator goal as a ceiling and
+    also honor any stricter live or explicit runtime ceiling.
+    """
+    current = max(0, int(current_session_count or 0))
+    remaining = max(0, int(remaining_allowance or 0))
+    candidates = [current + remaining]
+    for value in (fixed_session_cap, runtime_absolute_cap):
+        try:
+            cap = int(value or 0)
+        except (TypeError, ValueError):
+            cap = 0
+        if cap > 0:
+            candidates.append(cap)
+    return min(candidates)
+
+
 def should_stop_for_global_follow_cap(current_count: int, cap: int | None) -> bool:
     try:
         cap_i = int(cap or 0)
@@ -10141,6 +10170,7 @@ def _run_followers_list_engine_session(
     force_stop_used: bool,
     target_id: str | None = None,
     target_follow_budget: int | None = None,
+    session_global_follow_cap: int | None = None,
     start_from_current_followers_list: bool = False,
     prevalidated_followers_list_meta: dict[str, Any] | None = None,
     run_request_id: str | None = None,
@@ -10365,23 +10395,54 @@ def _run_followers_list_engine_session(
         ops_hard_day_cap=getattr(config, "FOLLOW_HARD_MAX_PER_DAY", 0),
         ops_hard_session_cap=getattr(config, "FOLLOW_HARD_MAX_PER_SESSION", 0),
     )
-    global_follow_goal_effective = int(follow_limits["effective_iterations_max"])
+    session_follow_count_at_entry = int(_RUNTIME_FOLLOW_COUNT)
     _runtime_follow_cap = int(getattr(config, "FOLLOW_MAX_PER_RUN", 0) or 0)
-    if bool(follow_limits.get("env_follow_cap_present")) and _runtime_follow_cap > 0:
-        global_follow_goal_effective = min(global_follow_goal_effective, _runtime_follow_cap)
+    runtime_absolute_cap = (
+        _runtime_follow_cap
+        if bool(follow_limits.get("env_follow_cap_present")) and _runtime_follow_cap > 0
+        else None
+    )
+    global_follow_goal_effective = _resolve_absolute_follow_session_cap(
+        current_session_count=session_follow_count_at_entry,
+        remaining_allowance=int(follow_limits["effective_iterations_max"]),
+        fixed_session_cap=session_global_follow_cap,
+        runtime_absolute_cap=runtime_absolute_cap,
+    )
     target_follow_budget_effective = (
         max(1, int(target_follow_budget))
         if target_follow_budget is not None and int(target_follow_budget) > 0
         else None
     )
-    max_iter = min(global_follow_goal_effective, target_follow_budget_effective) if target_follow_budget_effective else global_follow_goal_effective
-    _follow_max_per_run = min(
-        int(follow_limits["effective_follow_max"]),
-        _runtime_follow_cap
-        if bool(follow_limits.get("env_follow_cap_present")) and _runtime_follow_cap > 0
-        else int(follow_limits["effective_follow_max"]),
+    global_follow_remaining_at_entry = max(
+        0,
+        int(global_follow_goal_effective) - session_follow_count_at_entry,
+    )
+    max_iter = (
+        min(global_follow_remaining_at_entry, target_follow_budget_effective)
+        if target_follow_budget_effective
+        else global_follow_remaining_at_entry
+    )
+    _follow_max_per_run = _resolve_absolute_follow_session_cap(
+        current_session_count=session_follow_count_at_entry,
+        remaining_allowance=int(follow_limits["effective_follow_max"]),
+        fixed_session_cap=session_global_follow_cap,
+        runtime_absolute_cap=runtime_absolute_cap,
     )
     global_follow_stop_cap_for_logs = int(_follow_max_per_run or 0)
+    log(
+        "info",
+        "follow_absolute_session_cap_resolved",
+        account_id=str(account_id or ""),
+        run_id=str(run_id or ""),
+        source_profile_username=source_profile_username,
+        session_follow_count_at_entry=session_follow_count_at_entry,
+        live_remaining_allowance=int(follow_limits["effective_follow_max"]),
+        fixed_session_cap=int(session_global_follow_cap or 0) or None,
+        runtime_absolute_cap=runtime_absolute_cap,
+        absolute_stop_cap=int(_follow_max_per_run),
+        global_follow_goal_effective=int(global_follow_goal_effective),
+        target_action_budget=int(max_iter),
+    )
 
     def _global_follow_cap_payload() -> dict[str, Any]:
         cap = int(global_follow_stop_cap_for_logs or 0)
@@ -10472,7 +10533,7 @@ def _run_followers_list_engine_session(
         if global_follow_goal_effective is not None:
             _global_remaining = max(
                 0,
-                int(global_follow_goal_effective) - int(follows_completed_count),
+                int(global_follow_goal_effective) - int(_RUNTIME_FOLLOW_COUNT),
             )
         set_follow_target_rotation_pending(
             target_username=source_profile_username,

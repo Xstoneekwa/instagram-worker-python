@@ -1134,7 +1134,29 @@ class FollowTargetsRuntimeP1bTest(unittest.TestCase):
         self.assertIn("follow_target_switched", events)
         self.assertEqual([call["target_id"] for call in engine.calls], ["t1", "t2"])
         self.assertEqual([call["target_follow_budget"] for call in engine.calls], [2, 2])
+        self.assertIsNone(engine.calls[0]["session_global_follow_cap"])
+        self.assertEqual(engine.calls[1]["session_global_follow_cap"], 5)
         self.assertEqual(result["summary"]["target_id"], "t2")
+
+    def test_refreshed_remaining_quota_is_not_misread_as_absolute_cap(self) -> None:
+        self.assertEqual(
+            runner._resolve_absolute_follow_session_cap(
+                current_session_count=25,
+                remaining_allowance=25,
+                fixed_session_cap=50,
+            ),
+            50,
+        )
+
+    def test_live_quota_shrink_still_tightens_fixed_session_cap(self) -> None:
+        self.assertEqual(
+            runner._resolve_absolute_follow_session_cap(
+                current_session_count=25,
+                remaining_allowance=10,
+                fixed_session_cap=50,
+            ),
+            35,
+        )
 
     def test_global_follow_cap_after_success_stops_before_next_target(self) -> None:
         engine = FakeFollowersEngine([

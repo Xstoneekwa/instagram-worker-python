@@ -225,6 +225,11 @@ class AutoRestartRuntimeTests(unittest.TestCase):
                 }
             )
         self.assertEqual(plan["restart_delay_minutes"], 10)
+        self.assertIs(plan["restart_delay_authoritative"], False)
+        self.assertEqual(
+            plan["restart_delay_policy_source"],
+            "backend:auto_restart_settings:global",
+        )
 
 
 if __name__ == "__main__":

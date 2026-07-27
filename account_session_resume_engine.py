@@ -440,6 +440,11 @@ def build_account_session_resume_plan(
         "restart_allowed": bool(restart_allowed),
         "restart_block_reason": "" if restart_allowed else restart_block_reason,
         "restart_delay_minutes": int(delay_minutes),
+        # Informational fallback only. The Scheduler singleton is the sole
+        # operational cooldown authority for every account and is reloaded by
+        # the Backend tick after each BotApp change.
+        "restart_delay_authoritative": False,
+        "restart_delay_policy_source": "backend:auto_restart_settings:global",
         "business_session_id": _business_session_id(safe_summary, safe_settings),
         "current_attempt_id": current_attempt_id,
         "next_attempt_id": next_attempt_id,
