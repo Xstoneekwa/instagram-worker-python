@@ -17,6 +17,7 @@ Safety invariants:
 from __future__ import annotations
 
 import hashlib
+import hmac
 import os
 import uuid
 import re
@@ -31,11 +32,15 @@ SURFACE_FOLLOWERS = "followers"
 SHADOW_FLAG = "TARGET_FOLLOWERS_RESUME_V2_SHADOW_ENABLED"
 SHADOW_ACCOUNT_IDS_FLAG = "TARGET_FOLLOWERS_RESUME_V2_SHADOW_ACCOUNT_IDS"
 ENFORCE_FLAG = "TARGET_FOLLOWERS_RESUME_V2_ENFORCE_ENABLED"
+HMAC_SECRET_FLAG = "TARGET_FOLLOWERS_RESUME_V2_HMAC_SECRET"
 MAX_SHADOW_ACCOUNT_IDS = 32
 MAX_ANCHORS = 12
 MAX_DEPTH = 80
 MAX_FAST_FORWARD_DEPTH = 40
 DEFAULT_STALE_AFTER_SECONDS = 14 * 24 * 60 * 60
+DEFAULT_LEASE_SECONDS = 60 * 60
+MAX_LEASE_SECONDS = 2 * 60 * 60
+RENEWAL_MARGIN_SECONDS = 10 * 60
 
 EVENTS = frozenset(
     {
@@ -45,10 +50,16 @@ EVENTS = frozenset(
         "depth_transition_verified",
         "anchor_found",
         "anchor_not_found",
+        "v2_gate_evaluated",
+        "v2_controller_initialized",
         "checkpoint_claimed",
+        "lease_renewed",
+        "lease_reclaimed",
         "checkpoint_committed",
         "checkpoint_conflict",
         "checkpoint_invalidated",
+        "lease_released",
+        "v2_failed_open",
         "end_reached",
         "resume_fallback_legacy",
     }
@@ -99,9 +110,22 @@ def stable_id_hash(value: object) -> str:
     return _sha256_token(normalized, prefix="id2") if normalized else ""
 
 
-def anchor_hash(handle: object) -> str:
+def _hmac_secret(secret: object | None = None) -> bytes:
+    raw = str(secret if secret is not None else os.environ.get(HMAC_SECRET_FLAG, "")).strip()
+    return raw.encode("utf-8") if len(raw) >= 32 else b""
+
+
+def _hmac_token(value: str, *, prefix: str, secret: object | None = None) -> str:
+    key = _hmac_secret(secret)
+    if not key or not value:
+        return ""
+    digest = hmac.new(key, value.encode("utf-8"), hashlib.sha256).hexdigest()[:32]
+    return f"{prefix}:{digest}"
+
+
+def anchor_hash(handle: object, *, secret: object | None = None) -> str:
     normalized = normalize_handle(handle)
-    return _sha256_token(normalized, prefix="a2") if normalized else ""
+    return _hmac_token(normalized, prefix="a3", secret=secret) if normalized else ""
 
 
 def normalize_visible_handles(values: Iterable[object]) -> tuple[str, ...]:
@@ -115,21 +139,21 @@ def normalize_visible_handles(values: Iterable[object]) -> tuple[str, ...]:
     return tuple(out)
 
 
-def viewport_fingerprint(values: Iterable[object]) -> str:
+def viewport_fingerprint(values: Iterable[object], *, secret: object | None = None) -> str:
     handles = normalize_visible_handles(values)
     if not handles:
         return ""
-    return _sha256_token("\x1f".join(handles), prefix="v2")
+    return _hmac_token("\x1f".join(handles), prefix="v3", secret=secret)
 
 
-def bounded_anchor_hashes(values: Iterable[object]) -> tuple[str, ...]:
+def bounded_anchor_hashes(values: Iterable[object], *, secret: object | None = None) -> tuple[str, ...]:
     handles = normalize_visible_handles(values)
     if len(handles) <= MAX_ANCHORS:
         selected = handles
     else:
         left = MAX_ANCHORS // 2
         selected = handles[:left] + handles[-(MAX_ANCHORS - left) :]
-    return tuple(token for token in (anchor_hash(item) for item in selected) if token)
+    return tuple(token for token in (anchor_hash(item, secret=secret) for item in selected) if token)
 
 
 def parse_account_id_allowlist(raw: object) -> tuple[str, ...]:
@@ -201,12 +225,13 @@ class ViewportObservation:
         list_moved: bool,
         recoverable: bool,
         ambiguous_surface: bool = False,
+        hmac_secret: object | None = None,
     ) -> "ViewportObservation":
         handles = normalize_visible_handles(visible_handles)
         return cls(
             handles=handles,
-            fingerprint=viewport_fingerprint(handles),
-            anchor_hashes=bounded_anchor_hashes(handles),
+            fingerprint=viewport_fingerprint(handles, secret=hmac_secret),
+            anchor_hashes=bounded_anchor_hashes(handles, secret=hmac_secret),
             followers_surface_confirmed=bool(followers_surface_confirmed),
             expected_target_confirmed=bool(expected_target_confirmed),
             list_moved=bool(list_moved),
@@ -248,7 +273,6 @@ def validate_depth_transition(
 class Checkpoint:
     account_id: str
     target_id: str
-    target_username_normalized: str
     surface: str
     checkpoint_version: int
     last_safe_depth: int
@@ -268,6 +292,10 @@ class Checkpoint:
     lease_owner_run_id: str
     lease_mode: str
     lease_expires_at: datetime | None
+    lease_heartbeat_at: datetime | None
+    lease_generation: int
+    last_verified_at: datetime | None
+    end_reached: bool
 
     @classmethod
     def from_rpc(cls, row: Mapping[str, Any]) -> "Checkpoint":
@@ -275,12 +303,11 @@ class Checkpoint:
             raw = row.get(name)
             if not isinstance(raw, list):
                 return ()
-            return tuple(str(item)[:64] for item in raw[:MAX_ANCHORS] if str(item).startswith("a2:"))
+            return tuple(str(item)[:64] for item in raw[:MAX_ANCHORS] if str(item).startswith("a3:"))
 
         return cls(
             account_id=_clean_id(row.get("account_id")),
             target_id=_clean_id(row.get("target_id")),
-            target_username_normalized=normalize_handle(row.get("target_username_normalized")),
             surface=str(row.get("surface") or ""),
             checkpoint_version=max(1, int(row.get("checkpoint_version") or 1)),
             last_safe_depth=max(0, int(row.get("last_safe_depth") or 0)),
@@ -300,6 +327,10 @@ class Checkpoint:
             lease_owner_run_id=_clean_id(row.get("lease_owner_run_id")),
             lease_mode=str(row.get("lease_mode") or ""),
             lease_expires_at=_parse_timestamp(row.get("lease_expires_at")),
+            lease_heartbeat_at=_parse_timestamp(row.get("lease_heartbeat_at")),
+            lease_generation=max(0, int(row.get("lease_generation") or 0)),
+            last_verified_at=_parse_timestamp(row.get("last_verified_at")),
+            end_reached=bool(row.get("end_reached")),
         )
 
     def depth(self, mode: str) -> int:
@@ -339,9 +370,6 @@ def validate_checkpoint(
         return False, "target_id_mismatch"
     if checkpoint.surface != SURFACE_FOLLOWERS:
         return False, "surface_mismatch"
-    expected_username = normalize_handle(target_username)
-    if expected_username and checkpoint.target_username_normalized != expected_username:
-        return False, "target_username_changed"
     if checkpoint.status not in {"active", "exhausted"}:
         return False, f"checkpoint_status_{checkpoint.status or 'invalid'}"
     if checkpoint.updated_at:
@@ -398,6 +426,7 @@ def find_resume_cursor(
     expected_anchor_hashes: Sequence[str],
     *,
     terminally_handled: Callable[[str], bool] | None = None,
+    hmac_secret: object | None = None,
 ) -> tuple[int, str]:
     """Return the first safe row to evaluate without skipping viewport remainder.
 
@@ -406,17 +435,17 @@ def find_resume_cursor(
     anchor forces scanning from that row.
     """
     handles = normalize_visible_handles(visible_handles)
-    anchors = {str(item) for item in expected_anchor_hashes[:MAX_ANCHORS] if str(item).startswith("a2:")}
+    anchors = {str(item) for item in expected_anchor_hashes[:MAX_ANCHORS] if str(item).startswith("a3:")}
     if not handles:
         return 0, "viewport_empty"
-    first_anchor_index = next((i for i, handle in enumerate(handles) if anchor_hash(handle) in anchors), None)
+    first_anchor_index = next((i for i, handle in enumerate(handles) if anchor_hash(handle, secret=hmac_secret) in anchors), None)
     if first_anchor_index is None:
         return 0, "anchor_missing"
     is_terminal = terminally_handled or (lambda _handle: False)
     cursor = 0
     while cursor < len(handles):
         handle = handles[cursor]
-        if anchor_hash(handle) in anchors or bool(is_terminal(handle)):
+        if anchor_hash(handle, secret=hmac_secret) in anchors or bool(is_terminal(handle)):
             cursor += 1
             continue
         break
@@ -438,7 +467,7 @@ class ResumeRepository:
     def get(self, *, account_id: str, target_id: str) -> Checkpoint | None:
         row = self._one(
             self._rpc(
-                "get_target_followers_resume_checkpoint",
+                "get_target_followers_resume_checkpoint_v3",
                 {"p_account_id": account_id, "p_target_id": target_id, "p_surface": SURFACE_FOLLOWERS},
             )
         )
@@ -449,24 +478,22 @@ class ResumeRepository:
         *,
         account_id: str,
         target_id: str,
-        target_username: str,
         run_id: str,
         mode: str,
         expected_version: int | None,
-        lease_seconds: int = 180,
+        lease_seconds: int = DEFAULT_LEASE_SECONDS,
     ) -> dict[str, Any]:
         return self._one(
             self._rpc(
-                "claim_target_followers_resume_checkpoint",
+                "claim_target_followers_resume_checkpoint_v3",
                 {
                     "p_account_id": account_id,
                     "p_target_id": target_id,
-                    "p_target_username_normalized": normalize_handle(target_username),
                     "p_surface": SURFACE_FOLLOWERS,
                     "p_run_id": run_id,
                     "p_mode": mode,
                     "p_expected_version": expected_version,
-                    "p_lease_seconds": max(30, min(900, int(lease_seconds))),
+                    "p_lease_seconds": max(300, min(MAX_LEASE_SECONDS, int(lease_seconds))),
                 },
             )
         ) or {"ok": False, "reason": "empty_claim_response"}
@@ -484,11 +511,13 @@ class ResumeRepository:
         cursor_anchor: str,
         instagram_version: str,
         status: str = "active",
+        end_reached: bool = False,
         reason: str = "validated_transition",
+        lease_seconds: int = DEFAULT_LEASE_SECONDS,
     ) -> dict[str, Any]:
         return self._one(
             self._rpc(
-                "commit_target_followers_resume_checkpoint",
+                "commit_target_followers_resume_checkpoint_v3",
                 {
                     "p_account_id": account_id,
                     "p_target_id": target_id,
@@ -502,10 +531,51 @@ class ResumeRepository:
                     "p_last_visible_anchor_hashes": list(observation.anchor_hashes),
                     "p_last_instagram_version": str(instagram_version or "")[:80] or None,
                     "p_status": status,
+                    "p_end_reached": bool(end_reached),
                     "p_reason": _bounded_reason(reason, "validated_transition"),
+                    "p_lease_seconds": max(300, min(MAX_LEASE_SECONDS, int(lease_seconds))),
                 },
             )
         ) or {"ok": False, "reason": "empty_commit_response"}
+
+    def renew(
+        self,
+        *,
+        account_id: str,
+        target_id: str,
+        run_id: str,
+        mode: str,
+        expected_version: int,
+        lease_seconds: int = DEFAULT_LEASE_SECONDS,
+    ) -> dict[str, Any]:
+        return self._one(
+            self._rpc(
+                "renew_target_followers_resume_checkpoint_v3",
+                {
+                    "p_account_id": account_id,
+                    "p_target_id": target_id,
+                    "p_surface": SURFACE_FOLLOWERS,
+                    "p_run_id": run_id,
+                    "p_mode": mode,
+                    "p_expected_version": int(expected_version),
+                    "p_lease_seconds": max(300, min(MAX_LEASE_SECONDS, int(lease_seconds))),
+                },
+            )
+        ) or {"ok": False, "reason": "empty_renew_response"}
+
+    def release(self, *, account_id: str, target_id: str, run_id: str, mode: str) -> dict[str, Any]:
+        return self._one(
+            self._rpc(
+                "release_target_followers_resume_checkpoint_v3",
+                {
+                    "p_account_id": account_id,
+                    "p_target_id": target_id,
+                    "p_surface": SURFACE_FOLLOWERS,
+                    "p_run_id": run_id,
+                    "p_mode": mode,
+                },
+            )
+        ) or {"ok": False, "reason": "empty_release_response"}
 
     def invalidate(self, **params: Any) -> dict[str, Any]:
         return self._one(self._rpc("invalidate_target_followers_resume_checkpoint", params)) or {"ok": False, "reason": "empty_invalidate_response"}
@@ -522,11 +592,13 @@ class ProgressiveResumeController:
     target_id: str
     target_username: str
     run_id: str
+    hmac_secret: str = field(repr=False)
     instagram_version: str = ""
     emit: Callable[[str, dict[str, Any]], None] | None = None
     checkpoint: Checkpoint | None = None
     plan: ResumePlan | None = None
     claimed_version: int | None = None
+    lease_expires_at: datetime | None = None
     reached_depth: int = 0
     current_viewport: ViewportObservation | None = None
     pending_scroll_before: ViewportObservation | None = None
@@ -536,6 +608,9 @@ class ProgressiveResumeController:
     _claimed: bool = False
     _safe_stop: bool = False
     _anchor_proposal_emitted: bool = False
+    _released: bool = False
+    cas_reloads: int = 0
+    cas_retries: int = 0
 
     def _event(self, event: str, *, reason: str, **metadata: Any) -> None:
         if event not in EVENTS:
@@ -600,7 +675,6 @@ class ProgressiveResumeController:
         response = self.repository.claim(
             account_id=self.account_id,
             target_id=self.target_id,
-            target_username=self.target_username,
             run_id=self.run_id,
             mode=self.flags.mode,
             expected_version=self.plan.optimistic_version if self.checkpoint else None,
@@ -615,13 +689,16 @@ class ProgressiveResumeController:
             )
             return False
         self.claimed_version = int(response.get("optimistic_version") or 0)
+        self.lease_expires_at = _parse_timestamp(response.get("lease_expires_at"))
         self._claimed = self.claimed_version > 0
         if self._claimed:
+            reclaimed = str(response.get("reason") or "") == "reclaimed"
             self._event(
-                "checkpoint_claimed",
-                reason="claimed",
+                "lease_reclaimed" if reclaimed else "checkpoint_claimed",
+                reason="lease_reclaimed" if reclaimed else "claimed",
                 rpc_duration_ms=rpc_duration_ms,
                 optimistic_version=self.claimed_version,
+                lease_expires_at=self.lease_expires_at.isoformat() if self.lease_expires_at else None,
             )
         return self._claimed
 
@@ -642,6 +719,7 @@ class ProgressiveResumeController:
             list_moved=list_moved,
             recoverable=recoverable,
             ambiguous_surface=ambiguous_surface,
+            hmac_secret=self.hmac_secret,
         )
         if self.pending_scroll_before is None:
             self.current_viewport = observation
@@ -649,6 +727,7 @@ class ProgressiveResumeController:
                 cursor, anchor_reason = find_resume_cursor(
                     observation.handles,
                     self.plan.anchor_hashes,
+                    hmac_secret=self.hmac_secret,
                 )
                 anchor_event = (
                     "anchor_found"
@@ -700,32 +779,95 @@ class ProgressiveResumeController:
         # by V2.  The counter therefore remains zero.
         return True
 
-    def commit_verified_progress(self, *, cursor_handle: str = "", reason: str = "validated_transition") -> bool:
-        if self._safe_stop or not self._claimed or self.claimed_version is None or self.current_viewport is None:
+    def _renew_if_due(self) -> bool:
+        if self.claimed_version is None:
             return False
-        rpc_started_at = time.perf_counter()
-        response = self.repository.commit(
+        now = datetime.now(timezone.utc)
+        if self.lease_expires_at and (self.lease_expires_at - now).total_seconds() > RENEWAL_MARGIN_SECONDS:
+            return True
+        started = time.perf_counter()
+        response = self.repository.renew(
             account_id=self.account_id,
             target_id=self.target_id,
             run_id=self.run_id,
             mode=self.flags.mode,
             expected_version=self.claimed_version,
-            depth=self.reached_depth,
-            observation=self.current_viewport,
-            cursor_anchor=anchor_hash(cursor_handle),
-            instagram_version=self.instagram_version,
-            reason=reason,
         )
-        rpc_duration_ms = round((time.perf_counter() - rpc_started_at) * 1000.0, 2)
+        duration_ms = round((time.perf_counter() - started) * 1000.0, 2)
         if not response.get("ok"):
             self._event(
                 "checkpoint_conflict",
-                reason=str(response.get("reason") or "commit_rejected"),
-                rpc_duration_ms=rpc_duration_ms,
-                operation="commit",
+                reason=str(response.get("reason") or "renew_rejected"),
+                operation="renew",
+                rpc_duration_ms=duration_ms,
             )
             return False
         self.claimed_version = int(response.get("optimistic_version") or self.claimed_version + 1)
+        self.lease_expires_at = _parse_timestamp(response.get("lease_expires_at"))
+        reclaimed = str(response.get("reason") or "") == "reclaimed"
+        self._event(
+            "lease_reclaimed" if reclaimed else "lease_renewed",
+            reason="lease_reclaimed_same_run" if reclaimed else "lease_renewed",
+            optimistic_version=self.claimed_version,
+            lease_expires_at=self.lease_expires_at.isoformat() if self.lease_expires_at else None,
+            rpc_duration_ms=duration_ms,
+        )
+        return True
+
+    def _commit_once(self, *, cursor_handle: str, reason: str) -> tuple[dict[str, Any], float]:
+        started = time.perf_counter()
+        response = self.repository.commit(
+            account_id=self.account_id,
+            target_id=self.target_id,
+            run_id=self.run_id,
+            mode=self.flags.mode,
+            expected_version=int(self.claimed_version or 0),
+            depth=self.reached_depth,
+            observation=self.current_viewport,
+            cursor_anchor=anchor_hash(cursor_handle, secret=self.hmac_secret),
+            instagram_version=self.instagram_version,
+            reason=reason,
+        )
+        return response, round((time.perf_counter() - started) * 1000.0, 2)
+
+    def commit_verified_progress(self, *, cursor_handle: str = "", reason: str = "validated_transition") -> bool:
+        if self._safe_stop or not self._claimed or self.claimed_version is None or self.current_viewport is None:
+            return False
+        if not self._renew_if_due():
+            self._event("v2_failed_open", reason="lease_renew_failed", operation="commit")
+            return False
+        response, rpc_duration_ms = self._commit_once(cursor_handle=cursor_handle, reason=reason)
+        if not response.get("ok"):
+            failure_reason = str(response.get("reason") or "commit_rejected")
+            if failure_reason == "optimistic_version_conflict" and self.cas_reloads < 1:
+                self.cas_reloads += 1
+                latest = self.repository.get(account_id=self.account_id, target_id=self.target_id)
+                if latest is not None and latest.lease_owner_run_id == self.run_id and latest.lease_mode == self.flags.mode:
+                    if latest.depth(self.flags.mode) >= self.reached_depth:
+                        self.claimed_version = latest.optimistic_version
+                        self.lease_expires_at = latest.lease_expires_at
+                        return True
+                    self.claimed_version = latest.optimistic_version
+                    self.lease_expires_at = latest.lease_expires_at
+                    if self.cas_retries < 1:
+                        self.cas_retries += 1
+                        response, rpc_duration_ms = self._commit_once(cursor_handle=cursor_handle, reason=reason)
+            if not response.get("ok"):
+                failure_reason = str(response.get("reason") or failure_reason)
+                self._event(
+                    "checkpoint_conflict",
+                    reason=failure_reason,
+                    rpc_duration_ms=rpc_duration_ms,
+                    operation="commit",
+                    cas_reloads=self.cas_reloads,
+                    cas_retries=self.cas_retries,
+                )
+                self._event("v2_failed_open", reason="checkpoint_commit_failed", operation="commit")
+                return False
+        self.claimed_version = int(response.get("optimistic_version") or self.claimed_version + 1)
+        self.lease_expires_at = _parse_timestamp(response.get("lease_expires_at")) or self.lease_expires_at
+        if bool(response.get("lease_reclaimed")):
+            self._event("lease_reclaimed", reason="lease_reclaimed_before_commit", optimistic_version=self.claimed_version)
         self._event(
             "checkpoint_committed",
             reason=reason,
@@ -733,6 +875,27 @@ class ProgressiveResumeController:
             rpc_duration_ms=rpc_duration_ms,
             optimistic_version=self.claimed_version,
         )
+        return True
+
+    def release(self) -> bool:
+        if self._released or not self._claimed:
+            return True
+        started = time.perf_counter()
+        response = self.repository.release(
+            account_id=self.account_id,
+            target_id=self.target_id,
+            run_id=self.run_id,
+            mode=self.flags.mode,
+        )
+        duration_ms = round((time.perf_counter() - started) * 1000.0, 2)
+        if not response.get("ok"):
+            self._event("v2_failed_open", reason=str(response.get("reason") or "lease_release_failed"), operation="release", rpc_duration_ms=duration_ms)
+            return False
+        self._released = True
+        self._claimed = False
+        self.claimed_version = int(response.get("optimistic_version") or self.claimed_version or 0)
+        self.lease_expires_at = None
+        self._event("lease_released", reason=str(response.get("reason") or "released"), rpc_duration_ms=duration_ms, optimistic_version=self.claimed_version)
         return True
 
     def mark_safe_stop(self) -> None:
@@ -754,6 +917,7 @@ def build_runtime_controller(
     emit: Callable[[str, dict[str, Any]], None] | None = None,
     flags: ResumeFlags | None = None,
     rpc_call: Callable[[str, dict[str, Any]], Any] | None = None,
+    hmac_secret: str | None = None,
 ) -> ProgressiveResumeController | None:
     """Construct only for an explicitly allowlisted shadow account.
 
@@ -762,22 +926,41 @@ def build_runtime_controller(
     Enforcement intentionally remains unavailable in the first rollout.
     """
     flags = flags or ResumeFlags.from_env()
+    secret = str(hmac_secret if hmac_secret is not None else os.environ.get(HMAC_SECRET_FLAG, "")).strip()
     if not flags.shadow_allowed_for(account_id) or not all(
         (_clean_id(account_id), _clean_id(target_id), _clean_id(run_id))
     ):
+        return None
+    if len(secret) < 32:
+        if emit:
+            emit(
+                "v2_failed_open",
+                {
+                    "account_id": _clean_id(account_id),
+                    "target_id_hash": stable_id_hash(target_id),
+                    "run_id": _clean_id(run_id),
+                    "reason": "hmac_secret_missing_or_too_short",
+                    "shadow": True,
+                    "enforce": False,
+                },
+            )
         return None
     if rpc_call is None:
         import supabase_client
 
         rpc_call = supabase_client.call_rpc_shadow
 
-    return ProgressiveResumeController(
+    controller = ProgressiveResumeController(
         repository=ResumeRepository(rpc_call),
         flags=flags,
         account_id=_clean_id(account_id),
         target_id=_clean_id(target_id),
         target_username=normalize_handle(target_username),
         run_id=_clean_id(run_id),
+        hmac_secret=secret,
         instagram_version=str(instagram_version or "")[:80],
         emit=emit,
     )
+    controller._event("v2_gate_evaluated", reason="allowlisted_shadow_account")
+    controller._event("v2_controller_initialized", reason="controller_available")
+    return controller

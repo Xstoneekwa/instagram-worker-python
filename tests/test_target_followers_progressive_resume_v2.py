@@ -20,13 +20,14 @@ ACCOUNT_C = "00000000-0000-0000-0000-000000000003"
 TARGET_A = "10000000-0000-0000-0000-000000000001"
 TARGET_B = "10000000-0000-0000-0000-000000000002"
 RUN_A = "20000000-0000-0000-0000-000000000001"
+TEST_HMAC_SECRET = "test-only-target-followers-resume-v2-secret-0001"
+os.environ[resume.HMAC_SECRET_FLAG] = TEST_HMAC_SECRET
 
 
 def checkpoint_row(**overrides):
     row = {
         "account_id": ACCOUNT_A,
         "target_id": TARGET_A,
-        "target_username_normalized": "neutral.target",
         "surface": "followers",
         "checkpoint_version": 2,
         "last_safe_depth": 3,
@@ -46,6 +47,10 @@ def checkpoint_row(**overrides):
         "lease_owner_run_id": "",
         "lease_mode": "",
         "lease_expires_at": None,
+        "lease_heartbeat_at": None,
+        "lease_generation": 0,
+        "last_verified_at": None,
+        "end_reached": False,
     }
     row.update(overrides)
     return row
@@ -79,7 +84,13 @@ class FakeRpc:
             if not self.claim_ok:
                 return {"ok": False, "reason": "lease_held", "optimistic_version": self.version}
             self.version += 1
-            return {"ok": True, "reason": "claimed", "optimistic_version": self.version}
+            return {"ok": True, "reason": "claimed", "optimistic_version": self.version, "lease_expires_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()}
+        if name.startswith("renew_"):
+            self.version += 1
+            return {"ok": True, "reason": "renewed", "optimistic_version": self.version, "lease_expires_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()}
+        if name.startswith("release_"):
+            self.version += 1
+            return {"ok": True, "reason": "released", "optimistic_version": self.version}
         if name.startswith("commit_"):
             if not self.commit_ok:
                 return {"ok": False, "reason": "optimistic_version_conflict", "optimistic_version": self.version + 1}
@@ -211,9 +222,9 @@ class CheckpointTests(unittest.TestCase):
         cp = resume.Checkpoint.from_rpc(checkpoint_row())
         self.assertEqual(resume.validate_checkpoint(cp, account_id=ACCOUNT_A, target_id=TARGET_B, target_username="neutral.target")[1], "target_id_mismatch")
 
-    def test_31_username_changed(self):
+    def test_31_username_is_not_part_of_checkpoint_identity(self):
         cp = resume.Checkpoint.from_rpc(checkpoint_row())
-        self.assertEqual(resume.validate_checkpoint(cp, account_id=ACCOUNT_A, target_id=TARGET_A, target_username="renamed.target")[1], "target_username_changed")
+        self.assertEqual(resume.validate_checkpoint(cp, account_id=ACCOUNT_A, target_id=TARGET_A, target_username="renamed.target")[1], "checkpoint_valid")
 
     def test_32_checkpoint_stale(self):
         old = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
@@ -254,6 +265,7 @@ class RepositoryAndControllerTests(unittest.TestCase):
             target_id=TARGET_A,
             target_username="neutral.target",
             run_id=RUN_A,
+            hmac_secret=TEST_HMAC_SECRET,
             emit=lambda event, payload: sink.append((event, payload)),
         )
 
@@ -261,12 +273,12 @@ class RepositoryAndControllerTests(unittest.TestCase):
         rpc = FakeRpc(row=checkpoint_row())
         cp = resume.ResumeRepository(rpc).get(account_id=ACCOUNT_A, target_id=TARGET_A)
         self.assertEqual(cp.target_id, TARGET_A)
-        self.assertEqual(rpc.calls[0][0], "get_target_followers_resume_checkpoint")
+        self.assertEqual(rpc.calls[0][0], "get_target_followers_resume_checkpoint_v3")
 
     def test_39_rpc_claim_bounds_lease(self):
         rpc = FakeRpc()
-        resume.ResumeRepository(rpc).claim(account_id=ACCOUNT_A, target_id=TARGET_A, target_username="neutral.target", run_id=RUN_A, mode="shadow", expected_version=None, lease_seconds=9999)
-        self.assertEqual(rpc.calls[-1][1]["p_lease_seconds"], 900)
+        resume.ResumeRepository(rpc).claim(account_id=ACCOUNT_A, target_id=TARGET_A, run_id=RUN_A, mode="shadow", expected_version=None, lease_seconds=9999)
+        self.assertEqual(rpc.calls[-1][1]["p_lease_seconds"], resume.MAX_LEASE_SECONDS)
 
     def test_40_claim_conflict_is_clean(self):
         events = []
@@ -350,8 +362,7 @@ class RepositoryAndControllerTests(unittest.TestCase):
         self.assertIn("end_reached", [e for e, _ in events])
 
     def test_52_all_required_event_names_present(self):
-        self.assertEqual(
-            resume.EVENTS,
+        self.assertTrue(
             {
                 "target_followers_checkpoint_loaded",
                 "resume_plan_built",
@@ -365,8 +376,97 @@ class RepositoryAndControllerTests(unittest.TestCase):
                 "checkpoint_invalidated",
                 "end_reached",
                 "resume_fallback_legacy",
-            },
+            }.issubset(resume.EVENTS),
         )
+
+    def test_52a_hmac_is_keyed_and_stable(self):
+        first = resume.anchor_hash("sensitive.name", secret=TEST_HMAC_SECRET)
+        self.assertEqual(first, resume.anchor_hash("sensitive.name", secret=TEST_HMAC_SECRET))
+        self.assertNotEqual(first, resume.anchor_hash("sensitive.name", secret=TEST_HMAC_SECRET + "x"))
+        self.assertTrue(first.startswith("a3:"))
+
+    def test_52b_secret_absent_fails_open_without_rpc(self):
+        rpc = FakeRpc()
+        events = []
+        controller = resume.build_runtime_controller(
+            account_id=ACCOUNT_A, target_id=TARGET_A, target_username="neutral.target", run_id=RUN_A,
+            flags=resume.ResumeFlags(True, False, (ACCOUNT_A,)), rpc_call=rpc,
+            emit=lambda event, payload: events.append((event, payload)), hmac_secret="",
+        )
+        self.assertIsNone(controller)
+        self.assertEqual(rpc.calls, [])
+        self.assertEqual(events[0][0], "v2_failed_open")
+
+    def test_52c_release_is_idempotent_and_calls_rpc_once(self):
+        rpc = FakeRpc(row=checkpoint_row())
+        ctl = self.controller(rpc)
+        ctl.load_and_plan(); ctl.claim()
+        self.assertTrue(ctl.release())
+        self.assertTrue(ctl.release())
+        self.assertEqual(sum(name.startswith("release_") for name, _ in rpc.calls), 1)
+
+    def test_52d_renewal_occurs_when_lease_is_near_expiry(self):
+        rpc = FakeRpc(row=checkpoint_row(shadow_last_safe_depth=0))
+        ctl = self.controller(rpc)
+        ctl.load_and_plan(); ctl.claim()
+        ctl.lease_expires_at = datetime.now(timezone.utc) + timedelta(seconds=5)
+        ctl.current_viewport = observation(["next"])
+        ctl.reached_depth = 1
+        self.assertTrue(ctl.commit_verified_progress())
+        self.assertEqual(sum(name.startswith("renew_") for name, _ in rpc.calls), 1)
+
+    def test_52e_no_renewal_when_hour_lease_is_healthy(self):
+        rpc = FakeRpc(row=checkpoint_row(shadow_last_safe_depth=0))
+        ctl = self.controller(rpc)
+        ctl.load_and_plan(); ctl.claim()
+        ctl.current_viewport = observation(["next"])
+        ctl.reached_depth = 1
+        self.assertTrue(ctl.commit_verified_progress())
+        self.assertEqual(sum(name.startswith("renew_") for name, _ in rpc.calls), 0)
+
+    def test_52f_cas_uses_one_reload_and_one_retry(self):
+        class CasOnceRpc:
+            def __init__(self):
+                self.calls = []
+                self.gets = 0
+                self.commits = 0
+
+            def __call__(self, name, params):
+                self.calls.append((name, dict(params)))
+                if name.startswith("get_"):
+                    self.gets += 1
+                    version = 7 if self.gets == 1 else 9
+                    return checkpoint_row(
+                        shadow_last_safe_depth=0,
+                        optimistic_version=version,
+                        lease_owner_run_id=RUN_A if self.gets > 1 else "",
+                        lease_mode="shadow" if self.gets > 1 else "",
+                        lease_expires_at=(datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+                    )
+                if name.startswith("claim_"):
+                    return {"ok": True, "reason": "claimed", "optimistic_version": 8, "lease_expires_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()}
+                if name.startswith("commit_"):
+                    self.commits += 1
+                    if self.commits == 1:
+                        return {"ok": False, "reason": "optimistic_version_conflict", "optimistic_version": 9}
+                    return {"ok": True, "reason": "committed", "optimistic_version": 10, "lease_expires_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()}
+                raise AssertionError(name)
+
+        rpc = CasOnceRpc()
+        ctl = self.controller(rpc)
+        ctl.load_and_plan(); ctl.claim()
+        ctl.current_viewport = observation(["next"])
+        ctl.reached_depth = 1
+        self.assertTrue(ctl.commit_verified_progress())
+        self.assertEqual((ctl.cas_reloads, ctl.cas_retries, rpc.commits), (1, 1, 2))
+
+    def test_52g_worker_contract_contains_no_plaintext_checkpoint_field(self):
+        source = Path(resume.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("target_username_normalized", source)
+
+    def test_52h_runner_releases_controller_in_session_finally(self):
+        runner_source = (Path(resume.__file__).parent / "runner.py").read_text(encoding="utf-8")
+        self.assertIn("target_followers_resume_controller.release()", runner_source)
 
 
 class ReplayAndStaticSafetyTests(unittest.TestCase):

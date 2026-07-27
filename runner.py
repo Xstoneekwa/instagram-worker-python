@@ -10147,11 +10147,13 @@ def _run_followers_list_engine_session(
                 getattr(config, "TARGET_FOLLOWERS_RESUME_V2_SHADOW_ACCOUNT_IDS", "")
             ),
         ),
+        hmac_secret=str(
+            getattr(config, "TARGET_FOLLOWERS_RESUME_V2_HMAC_SECRET", "") or ""
+        ),
     )
     if target_followers_resume_controller is not None:
         try:
             target_followers_resume_controller.load_and_plan()
-            target_followers_resume_controller.claim()
         except Exception as exc:
             _target_followers_resume_v2_emit(
                 "resume_fallback_legacy",
@@ -11840,6 +11842,34 @@ def _run_followers_list_engine_session(
     _followers_loop_finally_stop = ""
     _followers_loop_finally_error = ""
     try:
+        if target_followers_resume_controller is not None:
+            try:
+                if not target_followers_resume_controller.claim():
+                    _target_followers_resume_v2_emit(
+                        "v2_failed_open",
+                        {
+                            "account_id": str(account_id or ""),
+                            "target_id_hash": target_followers_resume_v2.stable_id_hash(target_id),
+                            "run_id": str(run_id or ""),
+                            "reason": "checkpoint_claim_rejected",
+                            "shadow": True,
+                            "enforce": False,
+                        },
+                    )
+            except Exception as exc:
+                _target_followers_resume_v2_emit(
+                    "v2_failed_open",
+                    {
+                        "account_id": str(account_id or ""),
+                        "target_id_hash": target_followers_resume_v2.stable_id_hash(target_id),
+                        "run_id": str(run_id or ""),
+                        "reason": "checkpoint_claim_exception",
+                        "error_type": type(exc).__name__,
+                        "shadow": True,
+                        "enforce": False,
+                    },
+                )
+                target_followers_resume_controller = None
         while processed < max_iter:
             _log_target_budget_check("before_candidate_selection")
             if _runtime_follow_cap_exceeded(_follow_max_per_run):
@@ -12981,7 +13011,7 @@ def _run_followers_list_engine_session(
                             "enforce": False,
                         },
                     )
-                    target_followers_resume_controller = None
+                    target_followers_resume_controller.mark_safe_stop()
             _odm_open_meta_gate = str(open_list_meta.get("open_detection_method") or "")
             if str(open_detection_method) == "visual_fallback" or _odm_open_meta_gate == "visual_fallback":
                 _svf_early = (
@@ -18554,6 +18584,22 @@ def _run_followers_list_engine_session(
 
     finally:
         try:
+            if target_followers_resume_controller is not None:
+                try:
+                    target_followers_resume_controller.release()
+                except Exception as exc:
+                    _target_followers_resume_v2_emit(
+                        "v2_failed_open",
+                        {
+                            "account_id": str(account_id or ""),
+                            "target_id_hash": target_followers_resume_v2.stable_id_hash(target_id),
+                            "run_id": str(run_id or ""),
+                            "reason": "lease_release_exception",
+                            "error_type": type(exc).__name__,
+                            "shadow": True,
+                            "enforce": False,
+                        },
+                    )
             if is_follow_target_rotation_pending(target_username=source_profile_username):
                 _complete_post_return_idle_gap(reason="followers_engine_session_finished")
             _publish_followers_session_summary(
