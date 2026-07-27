@@ -157,6 +157,36 @@ class UnfollowUiCoveragePolicyTests(unittest.TestCase):
             )
         )
 
+    def test_transient_cta_failure_is_checkpointed_retryable_not_lost(self) -> None:
+        budget = derive_adaptive_coverage_budget(
+            quota_remaining=2,
+            eligible_remaining=2,
+            session_remaining_seconds=3600,
+        )
+        tracker = FollowingCoverageTracker(budget, {"missing_cta", "next_candidate"}, 2)
+        tracker.mark_candidate_retryable("missing_cta")
+        checkpoint = tracker.checkpoint()
+        self.assertEqual(checkpoint["retryable_usernames"], ["missing_cta"])
+        self.assertEqual(
+            checkpoint["remaining_usernames"],
+            ["missing_cta", "next_candidate"],
+        )
+        self.assertEqual(tracker.summary()["retryable_candidates_count"], 1)
+
+    def test_unavailable_candidate_and_retryable_candidate_have_distinct_semantics(self) -> None:
+        budget = derive_adaptive_coverage_budget(
+            quota_remaining=2,
+            eligible_remaining=2,
+            session_remaining_seconds=3600,
+        )
+        tracker = FollowingCoverageTracker(budget, {"deleted", "transient"}, 2)
+        tracker.mark_candidate_unavailable("deleted")
+        tracker.mark_candidate_retryable("transient")
+        checkpoint = tracker.checkpoint()
+        self.assertEqual(checkpoint["unavailable_usernames"], ["deleted"])
+        self.assertEqual(checkpoint["retryable_usernames"], ["transient"])
+        self.assertEqual(checkpoint["remaining_usernames"], ["transient"])
+
     def test_offline_harness_covers_all_required_scenarios(self) -> None:
         out = run_offline_harness()
         self.assertTrue(out["ok"])

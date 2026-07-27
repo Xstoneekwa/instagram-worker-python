@@ -344,13 +344,24 @@ def validate_auto_restart_request_at_claim(
     if not summary:
         return False, "resume_plan_invalid", None
 
-    stored_plan = (
-        _extract_resume_plan_from_run_row({"performance_summary": {"auto_restart_resume_plan": embedded}})
+    # The scheduler embeds the phase/quota decision in the new request, while
+    # the prior run remains the canonical source for its UI checkpoint.  Merge
+    # both records instead of letting a smaller embedded payload erase the
+    # persisted cursor.  Request-time fields win, but an omitted checkpoint is
+    # inherited from the exact prior run validated above.
+    canonical_plan = _read_record(summary.get("auto_restart_resume_plan"))
+    embedded_plan = (
+        _extract_resume_plan_from_run_row(
+            {"performance_summary": {"auto_restart_resume_plan": embedded}}
+        )
         if embedded
-        else _extract_resume_plan_from_run_row({"performance_summary": summary})
+        else {}
     )
-    if not stored_plan:
-        stored_plan = _read_record(summary.get("auto_restart_resume_plan"))
+    stored_plan = {**canonical_plan, **embedded_plan}
+    if not embedded_plan.get("unfollow_checkpoint") and canonical_plan.get(
+        "unfollow_checkpoint"
+    ):
+        stored_plan["unfollow_checkpoint"] = canonical_plan["unfollow_checkpoint"]
 
     manual = build_manual_resume_command(summary, resume_plan=stored_plan)
     if not manual.get("manual_resume_allowed"):

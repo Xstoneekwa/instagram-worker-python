@@ -255,6 +255,7 @@ class FollowingCoverageTracker:
     attempted_usernames: set[str] = field(default_factory=set)
     persisted_usernames: set[str] = field(default_factory=set)
     unavailable_usernames: set[str] = field(default_factory=set)
+    retryable_usernames: set[str] = field(default_factory=set)
     last_candidate_attempted: str = ""
     last_safe_checkpoint: str = "following_list_opened"
     progress_credit_pending: bool = False
@@ -607,6 +608,18 @@ class FollowingCoverageTracker:
         if normalized and normalized in self.planned_usernames:
             self.unavailable_usernames.add(normalized)
 
+    def mark_candidate_retryable(self, username: str) -> None:
+        """Skip a transiently unusable candidate for this run, but resume it later.
+
+        Retryable candidates deliberately remain in ``remaining_usernames``.  The
+        orchestrator keeps its own per-run completed set, while the durable
+        checkpoint records why the DB-eligible candidate must be reconsidered by
+        a later session instead of being lost as permanently unavailable.
+        """
+        normalized = normalize_username(username)
+        if normalized and normalized in self.remaining_planned_usernames:
+            self.retryable_usernames.add(normalized)
+
     def mark_safe_profile_return(self, username: str) -> None:
         normalized = normalize_username(username)
         if normalized not in self.persisted_usernames:
@@ -637,6 +650,7 @@ class FollowingCoverageTracker:
             "verified_usernames": sorted(self.verified_usernames),
             "persisted_usernames": sorted(self.persisted_usernames),
             "unavailable_usernames": sorted(self.unavailable_usernames),
+            "retryable_usernames": sorted(self.retryable_usernames),
             "remaining_usernames": sorted(remaining),
             "navigation_generation": self.navigation_generation,
             "navigation_generation_reason": self.navigation_generation_reason,
@@ -677,6 +691,7 @@ class FollowingCoverageTracker:
             "duplicate_candidates_skipped": max(0, sum(self.viewport_candidate_match_counts) - len(set(self.observed_usernames).intersection(self.planned_usernames))),
             "verified_unique_count": len(self.verified_usernames),
             "remaining_planned_count": len(self.remaining_planned_usernames),
+            "retryable_candidates_count": len(self.retryable_usernames),
             "scroll_passes_used": self.scroll_passes_used,
             "consecutive_no_progress_viewports": self.consecutive_no_progress_viewports,
             "repeated_fingerprints_count": self.repeated_fingerprints_count,

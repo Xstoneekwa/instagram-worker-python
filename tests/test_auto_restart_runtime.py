@@ -212,6 +212,60 @@ class AutoRestartRuntimeTests(unittest.TestCase):
         self.assertEqual(policy["prior_run_id"], "22222222-2222-4222-8222-222222222222")
         self.assertEqual(policy["unfollow_checkpoint"]["depth"], 4)
 
+    @patch("auto_restart_runtime.load_prior_run_summary")
+    def test_embedded_request_cannot_erase_canonical_unfollow_cursor(self, load_summary) -> None:
+        account_id = "11111111-1111-4111-8111-111111111111"
+        prior_run_id = "22222222-2222-4222-8222-222222222222"
+        checkpoint = {
+            "cursor_schema": "UNFOLLOW_CURSOR_V2",
+            "depth": 21,
+            "generation": 79,
+            "anchor_hashes": ["a3:canonical"],
+            "remaining_usernames": ["one", "two"],
+        }
+        load_summary.return_value = {
+            "account_id": account_id,
+            "account_username": "fixture_user",
+            "run_id": prior_run_id,
+            "session_termination_class": "partial_resumable",
+            "restart_eligibility": "eligible",
+            "auto_restart_resume_plan": {
+                "restart_allowed": True,
+                "restart_block_reason": "",
+                "session_termination_class": "partial_resumable",
+                "phases_to_run": {"welcome": False, "follow": False, "unfollow": True},
+                "quota_remaining": {"follow": 0, "unfollow": 2, "total": 2},
+                "unfollow_checkpoint": checkpoint,
+            },
+        }
+        ok, reason, policy = validate_auto_restart_request_at_claim(
+            account_id=account_id,
+            metadata={
+                "auto_restart": True,
+                "source": "auto_restart_tick",
+                "resume_plan_version": 1,
+                "resume_plan_schema": "AUTO_RESTART_RESUME_PLAN_V1",
+                "prior_run_id": prior_run_id,
+                # This mirrors the production request that carried phases and
+                # quota but omitted the cursor persisted on the prior run.
+                "resume_plan": {
+                    "schema": "AUTO_RESTART_RESUME_PLAN_V1",
+                    "restart_allowed": True,
+                    "restart_block_reason": "",
+                    "session_termination_class": "partial_resumable",
+                    "phases_to_run": {
+                        "welcome": False,
+                        "follow": False,
+                        "unfollow": True,
+                    },
+                    "quota_remaining": {"follow": 0, "unfollow": 2, "total": 2},
+                },
+            },
+        )
+        self.assertTrue(ok, reason)
+        self.assertEqual(policy["unfollow_checkpoint"], checkpoint)
+        self.assertEqual(policy["phases_to_run"], {"welcome": False, "follow": False, "unfollow": True})
+
     def test_resume_plan_default_cooldown_is_ten_minutes(self) -> None:
         with patch("account_session_resume_engine.config.AUTO_RESTART_DELAY_MINUTES", 10):
             plan = build_account_session_resume_plan(

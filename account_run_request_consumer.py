@@ -1690,6 +1690,41 @@ def _finalize_manual_run_after_subprocess(
         )
         return
 
+    # Cancellation is authoritative even if the child handles SIGTERM and
+    # exits with code 0.  Terminalize the durable phase-plan projection too;
+    # otherwise a canceled request/run can leave a stale ``run_active`` row
+    # indefinitely and make future restart diagnostics contradictory.
+    if canceled:
+        _safe_complete_account_run_request(request_id, cfg.worker_id, "canceled")
+        _reconcile_linked_run(
+            account_id=account_id,
+            run_id=run_id,
+            terminal_status="canceled",
+            request_id=request_id,
+            exit_code=exit_code,
+        )
+        if run_id and run_type == "account_session":
+            from account_session_resume_plan_store import record_end_of_session
+
+            record_end_of_session(
+                run_id=run_id,
+                session_plan={
+                    "restart_allowed": False,
+                    "restart_block_reason": "operator_canceled",
+                    "terminal_reason_code": "operator_canceled",
+                },
+                session_status="success",
+            )
+        _audit(
+            account_id=account_id,
+            action_type="manual_run_canceled",
+            status="success",
+            message="Manual run canceled.",
+            run_id=run_id,
+            payload={"request_id": request_id, "exit_code": exit_code},
+        )
+        return
+
     if exit_code == 0:
         if _is_orphan_recovery_run_type(run_type):
             _safe_complete_account_run_request(
@@ -1793,25 +1828,6 @@ def _finalize_manual_run_after_subprocess(
                 run_id=run_id,
                 request_metadata=request_metadata,
             )
-        return
-
-    if canceled:
-        _safe_complete_account_run_request(request_id, cfg.worker_id, "canceled")
-        _reconcile_linked_run(
-            account_id=account_id,
-            run_id=run_id,
-            terminal_status="canceled",
-            request_id=request_id,
-            exit_code=exit_code,
-        )
-        _audit(
-            account_id=account_id,
-            action_type="manual_run_canceled",
-            status="success",
-            message="Manual run canceled.",
-            run_id=run_id,
-            payload={"request_id": request_id, "exit_code": exit_code},
-        )
         return
 
     if run_type == "login_provisioning":

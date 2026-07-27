@@ -68,6 +68,24 @@ def _mythyl_summary() -> dict:
 
 
 class MythylUnfollowFailureRecoveryTest(unittest.TestCase):
+    def test_one_recoverable_cta_failure_cannot_be_configured_to_stop_the_phase(self) -> None:
+        with patch.object(
+            unfollow_orchestrator.config,
+            "UNFOLLOW_SESSION_MAX_RECOVERABLE_ACTION_FAILURES",
+            0,
+            create=True,
+        ):
+            self.assertEqual(unfollow_orchestrator._max_recoverable_action_failures(), 1)
+
+    def test_recoverable_cta_path_uses_bounded_surface_recovery_and_partial_exit(self) -> None:
+        source = inspect.getsource(unfollow_orchestrator._run_real_unfollow_multi_loop)
+        self.assertIn("recover_following_viewport(", source)
+        self.assertIn("coverage_tracker.mark_candidate_retryable(target_key)", source)
+        self.assertIn('"success_real_unfollow_multi_partial_exhausted"', source)
+        self.assertNotIn(
+            'is_recoverable_action_sheet_failure(sheet, return_ok=return_ok)',
+            source,
+        )
     def test_749800d_duplicate_stop_reason_regression_is_removed(self) -> None:
         source = inspect.getsource(unfollow_orchestrator._run_real_unfollow_multi_loop)
         event_block = source.split('"unfollow_ui_coverage_viewport_decision"', 1)[1].split(

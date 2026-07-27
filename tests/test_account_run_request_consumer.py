@@ -351,6 +351,59 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
         self.assertEqual(complete.call_args.args[2], "completed")
         self.assertEqual(reconcile.call_args.kwargs["terminal_status"], "completed")
 
+    def test_canceled_account_session_terminalizes_resume_plan_even_on_exit_zero(self) -> None:
+        cfg = consumer.DispatcherConfig(
+            enabled=True,
+            health_only=False,
+            launch_enabled=True,
+            worker_id="run-dispatcher:test",
+            poll_seconds=5.0,
+            lease_seconds=120,
+            heartbeat_seconds=20.0,
+            allowed_run_types=["account_session"],
+            test_account_ids=set(),
+            subprocess_timeout_seconds=7200,
+            require_assignment=False,
+            enforce_assignment_window=False,
+        )
+        request = {
+            "id": TEST_REQUEST_ID,
+            "account_id": TEST_ACCOUNT_ID,
+            "run_id": TEST_RUN_ID,
+            "requested_run_type": "account_session",
+            "status": "canceled",
+            "cancel_requested_at": "2026-07-27T19:45:44Z",
+        }
+        with (
+            patch.object(consumer, "get_account_run_request", return_value=request),
+            patch.object(consumer, "_safe_complete_account_run_request") as complete,
+            patch.object(consumer, "_reconcile_linked_run") as reconcile,
+            patch.object(consumer, "_audit"),
+            patch(
+                "account_session_resume_plan_store.record_end_of_session"
+            ) as record_end,
+            patch.object(consumer.supabase_client, "load_run_row") as load_run,
+        ):
+            consumer._finalize_manual_run_after_subprocess(
+                cfg,
+                request_id=TEST_REQUEST_ID,
+                account_id=TEST_ACCOUNT_ID,
+                exit_code=0,
+            )
+
+        self.assertEqual(complete.call_args.args[2], "canceled")
+        self.assertEqual(reconcile.call_args.kwargs["terminal_status"], "canceled")
+        record_end.assert_called_once_with(
+            run_id=TEST_RUN_ID,
+            session_plan={
+                "restart_allowed": False,
+                "restart_block_reason": "operator_canceled",
+                "terminal_reason_code": "operator_canceled",
+            },
+            session_status="success",
+        )
+        load_run.assert_not_called()
+
     def test_load_dispatcher_config_defaults(self) -> None:
         with patch.dict("os.environ", {}, clear=True):
             cfg = consumer.load_dispatcher_config()

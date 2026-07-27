@@ -436,7 +436,8 @@ def _scroll_v2_lite_max_unchanged_scrolls() -> int:
 
 
 def _max_recoverable_action_failures() -> int:
-    return max(0, int(getattr(config, "UNFOLLOW_SESSION_MAX_RECOVERABLE_ACTION_FAILURES", 2)))
+    # A single transient CTA/render failure must never terminate a full phase.
+    return max(1, int(getattr(config, "UNFOLLOW_SESSION_MAX_RECOVERABLE_ACTION_FAILURES", 2)))
 
 
 def _stop_after_skipped() -> int:
@@ -1362,7 +1363,7 @@ def _run_real_unfollow_multi_loop(
         totals["max_recoverable_action_failures"] = max_recoverable_action_failures
         totals["session_continued_after_recoverable_failure"] = session_continued_after_recoverable_failure
 
-    def is_recoverable_action_sheet_failure(sheet_out: dict[str, Any], *, return_ok: bool) -> bool:
+    def is_recoverable_action_sheet_failure(sheet_out: dict[str, Any]) -> bool:
         reason = str(sheet_out.get("failure_reason") or "").strip()
         retry_reason = str(sheet_out.get("retry_failure_reason") or "").strip()
         recoverable_reasons = {
@@ -1373,10 +1374,10 @@ def _run_real_unfollow_multi_loop(
             "following_button_not_found",
             "following_button_pre_tap_revalidation_failed",
             "following_button_bounds_shift_too_large",
+            "unfollow_option_missing",
         }
         return bool(
-            return_ok
-            and not bool(sheet_out.get("ok"))
+            not bool(sheet_out.get("ok"))
             and not bool(sheet_out.get("unfollow_option_visible"))
             and (reason in recoverable_reasons or retry_reason in recoverable_reasons)
         )
@@ -2352,7 +2353,12 @@ def _run_real_unfollow_multi_loop(
             )
             return_ok = bool(ret.get("ok"))
             sheet_failure_reason = str(sheet.get("failure_reason") or "actions_sheet_open_failed")
-            recoverable = is_recoverable_action_sheet_failure(sheet, return_ok=return_ok)
+            recoverable = is_recoverable_action_sheet_failure(sheet)
+            recovery_stop_reason = ""
+            if recoverable and not return_ok:
+                return_ok, recovery_stop_reason = recover_following_viewport(
+                    trigger_reason=sheet_failure_reason,
+                )
             log(
                 "info",
                 "unfollow_recoverable_action_failure_detected",
@@ -2361,6 +2367,7 @@ def _run_real_unfollow_multi_loop(
                 failure_reason=sheet_failure_reason,
                 retry_failure_reason=str(sheet.get("retry_failure_reason") or ""),
                 return_to_following_list_ok=return_ok,
+                recovery_stop_reason=recovery_stop_reason,
                 recoverable=recoverable,
                 recoverable_action_failures_count=recoverable_action_failures_count,
                 max_recoverable_action_failures=max_recoverable_action_failures,
@@ -2378,7 +2385,14 @@ def _run_real_unfollow_multi_loop(
                 "return_to_following_list_ok": return_ok,
                 "unfollow_actions_failed": failed,
             }
-            if recoverable and recoverable_action_failures_count < max_recoverable_action_failures:
+            if recoverable and coverage_tracker is not None:
+                coverage_tracker.mark_candidate_retryable(target_key)
+                refresh_coverage_summary_totals()
+            if (
+                recoverable
+                and return_ok
+                and recoverable_action_failures_count < max_recoverable_action_failures
+            ):
                 recoverable_action_failures_count += 1
                 session_continued_after_recoverable_failure = True
                 failed_usernames_this_run.add(target_key)
@@ -2427,11 +2441,16 @@ def _run_real_unfollow_multi_loop(
                     recoverable_action_failures_count=recoverable_action_failures_count,
                     max_recoverable_action_failures=max_recoverable_action_failures,
                 )
+                stop_reason = (
+                    recovery_stop_reason
+                    or "recoverable_action_failure_budget_exhausted"
+                )
+                return emit_final(
+                    "success_real_unfollow_multi_partial_exhausted",
+                    sheet_failure_reason,
+                )
             stop_reason = "actions_sheet_open_failed"
-            return emit_final(
-                "failed_unfollow_multi_action",
-                str(sheet.get("failure_reason") or "actions_sheet_open_failed"),
-            )
+            return emit_final("failed_unfollow_multi_action", sheet_failure_reason)
         if not bool(sheet.get("unfollow_option_visible")):
             failed += 1
             stop_reason = "unfollow_option_missing"
