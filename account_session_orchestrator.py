@@ -1536,6 +1536,28 @@ def get_last_account_session_summary() -> dict[str, Any]:
     return dict(_LAST_ACCOUNT_SESSION_SUMMARY)
 
 
+def _auto_restart_performance_projection(
+    resume_plan: dict[str, Any] | None,
+    *,
+    error: str | None = None,
+) -> dict[str, Any]:
+    """Expose the canonical resume plan under the persisted Backend contract."""
+    plan = dict(resume_plan) if isinstance(resume_plan, dict) else None
+    phases = plan.get("phases_to_run") if plan else None
+    quota = plan.get("quota_remaining") if plan else None
+    return {
+        "auto_restart_resume_plan": plan,
+        "auto_restart_resume_plan_error": error,
+        "auto_restart_restart_allowed": bool(plan and plan.get("restart_allowed")),
+        "auto_restart_restart_block_reason": str(
+            (plan or {}).get("restart_block_reason") or ""
+        ),
+        "auto_restart_phases_to_run": dict(phases) if isinstance(phases, dict) else {},
+        "auto_restart_quota_remaining": dict(quota) if isinstance(quota, dict) else {},
+        "auto_restart_reason": str((plan or {}).get("reason") or ""),
+    }
+
+
 def _phase_statuses(
     *,
     welcome_enabled: bool,
@@ -4274,6 +4296,10 @@ def run_account_session(
         "unfollow_resume_recommended": follow_to_unfollow_real.get("unfollow_resume_recommended"),
         "unfollow_outcome": follow_to_unfollow_real.get("unfollow_outcome"),
         "unfollow_checkpoint": follow_to_unfollow_real.get("unfollow_checkpoint"),
+        **_auto_restart_performance_projection(
+            auto_restart_resume_plan,
+            error=auto_restart_resume_plan_error,
+        ),
     }
     log(
         "info",

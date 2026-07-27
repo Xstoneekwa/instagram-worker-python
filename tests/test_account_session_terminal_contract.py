@@ -22,6 +22,28 @@ def _successful_unfollow(**overrides):
 
 
 class AccountSessionTerminalContractTest(unittest.TestCase):
+    def test_persisted_summary_exports_backend_auto_restart_contract(self) -> None:
+        projection = orchestrator._auto_restart_performance_projection(
+            {
+                "restart_allowed": True,
+                "restart_block_reason": "",
+                "reason": "quota_remaining",
+                "phases_to_run": {"welcome": False, "follow": False, "unfollow": True},
+                "quota_remaining": {"follow": 0, "unfollow": 3, "total": 3},
+            }
+        )
+
+        self.assertTrue(projection["auto_restart_restart_allowed"])
+        self.assertEqual(
+            projection["auto_restart_phases_to_run"],
+            {"welcome": False, "follow": False, "unfollow": True},
+        )
+        self.assertEqual(
+            projection["auto_restart_quota_remaining"],
+            {"follow": 0, "unfollow": 3, "total": 3},
+        )
+        self.assertEqual(projection["auto_restart_reason"], "quota_remaining")
+
     def test_outreach_time_budget_allows_open_deadline(self) -> None:
         now = datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc)
         out = orchestrator._outreach_time_budget(
