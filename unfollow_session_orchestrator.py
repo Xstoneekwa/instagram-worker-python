@@ -1098,6 +1098,53 @@ def _persist_unfollow_outcome_for_session(
     )
 
 
+def resolve_effective_unfollow_day_progress(
+    *,
+    day_limit: int,
+    persisted_daily_count: int,
+    quota_remaining_hint: int | None = None,
+) -> dict[str, int | None]:
+    """Resolve a fail-closed day counter from DB plus the canonical resume plan.
+
+    The resume plan can be fresher than the mutable interaction projection while
+    deferred persistence is draining.  It may only reduce the remaining budget;
+    it can never grant more work than the direct persisted counter.
+    """
+    limit = max(0, int(day_limit or 0))
+    persisted = max(0, int(persisted_daily_count or 0))
+    hinted_remaining: int | None = None
+    if quota_remaining_hint is not None:
+        try:
+            hinted_remaining = max(0, min(limit, int(quota_remaining_hint)))
+        except (TypeError, ValueError):
+            hinted_remaining = 0
+    hinted_done = max(0, limit - hinted_remaining) if hinted_remaining is not None else 0
+    effective_done = max(persisted, hinted_done)
+    return {
+        "day_limit": limit,
+        "persisted_daily_count": persisted,
+        "quota_remaining_hint": hinted_remaining,
+        "hinted_done": hinted_done,
+        "effective_done": effective_done,
+        "remaining": max(0, limit - effective_done),
+    }
+
+
+def unfollow_quota_reached_after_persist(
+    *,
+    day_limit: int,
+    effective_done_at_start: int,
+    verified_persisted_in_run: int,
+) -> bool:
+    limit = max(0, int(day_limit or 0))
+    return bool(
+        limit > 0
+        and max(0, int(effective_done_at_start or 0))
+        + max(0, int(verified_persisted_in_run or 0))
+        >= limit
+    )
+
+
 def _log_unfollow_success_observed(
     *,
     account_id: str,
@@ -1135,6 +1182,8 @@ def _run_real_unfollow_multi_loop(
     harvest_fields: dict[str, Any],
     visible_eligibility_row_cache: dict[str, dict[str, Any] | None],
     real_action_max: int,
+    unfollow_day_limit: int,
+    effective_unfollows_done_at_start: int,
     business_action_deadline: str | None,
     adaptive_coverage_budget: Any,
     resume_checkpoint: dict[str, Any] | None,
@@ -1485,6 +1534,12 @@ def _run_real_unfollow_multi_loop(
             **exploration_summary,
             "multi_action_mode": True,
             "real_action_max_per_run": real_action_max,
+            "unfollow_day_quota": max(0, int(unfollow_day_limit)),
+            "unfollows_done_at_start": max(0, int(effective_unfollows_done_at_start)),
+            "effective_unfollows_done": max(
+                0,
+                int(effective_unfollows_done_at_start) + int(verified),
+            ),
             "unfollow_actions_sent": sent,
             "unfollow_actions_verified": verified,
             "unfollow_actions_failed": failed,
@@ -2464,6 +2519,61 @@ def _run_real_unfollow_multi_loop(
                 username=target_username,
                 reason=str(persist_out.get("error") or "persist_failed"),
             )
+        if verify_ok and persist_ok:
+            verified += 1
+            completed_usernames.add(target_key)
+            visible_eligibility_row_cache[target_key] = None
+            effective_unfollows_done = (
+                max(0, int(effective_unfollows_done_at_start)) + int(verified)
+            )
+            quota_reached = unfollow_quota_reached_after_persist(
+                day_limit=unfollow_day_limit,
+                effective_done_at_start=effective_unfollows_done_at_start,
+                verified_persisted_in_run=verified,
+            )
+            log(
+                "info",
+                "unfollow_post_persist_quota_evaluated",
+                account_id=aid,
+                run_id=run_id,
+                target_username=target_username,
+                unfollow_day_quota=max(0, int(unfollow_day_limit)),
+                unfollows_done_at_start=max(0, int(effective_unfollows_done_at_start)),
+                verified_persisted_in_run=int(verified),
+                effective_unfollows_done=effective_unfollows_done,
+                quota_reached=quota_reached,
+            )
+            if quota_reached:
+                stop_reason = "unfollow_quota_reached"
+                last_fields = {
+                    **target_fields,
+                    "target_profile_open_ok": True,
+                    "following_actions_sheet_open_ok": True,
+                    "unfollow_option_visible": True,
+                    "unfollow_actions_sent": sent,
+                    "unfollow_actions_verified": verified,
+                    "unfollow_actions_failed": failed,
+                    "unfollow_results_persisted_count": persisted,
+                    "unfollow_action_verify_ok": True,
+                    "unfollow_persistence_ok": True,
+                    "return_to_following_list_ok": None,
+                    "safe_boundary": "post_action_verified_and_persisted",
+                    "unfollow_day_quota": int(unfollow_day_limit),
+                    "effective_unfollows_done": effective_unfollows_done,
+                }
+                log(
+                    "info",
+                    "unfollow_quota_reached_immediate_stop",
+                    account_id=aid,
+                    run_id=run_id,
+                    target_username=target_username,
+                    unfollow_day_quota=int(unfollow_day_limit),
+                    effective_unfollows_done=effective_unfollows_done,
+                    actions_after_quota=0,
+                    scrolls_after_quota=0,
+                )
+                return emit_final("success_real_unfollow_multi_quota_reached")
+
         ret = (
             {"ok": open_own_following_list_from_own_profile(d, uname)[0]}
             if target_opened_directly
@@ -2528,12 +2638,9 @@ def _run_real_unfollow_multi_loop(
             }
             return emit_final("failed_unfollow_multi_action", "return_to_following_list_failed")
 
-        verified += 1
-        completed_usernames.add(target_key)
         if coverage_tracker is not None:
             coverage_tracker.mark_safe_profile_return(target_key)
             refresh_coverage_summary_totals()
-        visible_eligibility_row_cache[target_key] = None
         last_fields = {
             **target_fields,
             "target_profile_open_ok": True,
@@ -2582,6 +2689,7 @@ def run_unfollow_session(
     business_action_deadline: str | None = None,
     outreach_reserve_seconds: int = 0,
     resume_checkpoint: dict[str, Any] | None = None,
+    quota_remaining_hint: int | None = None,
 ) -> int:
     """Run unfollow_session: probe by default; real Unfollow only with explicit config opt-in."""
     t0 = time.perf_counter()
@@ -2610,7 +2718,15 @@ def run_unfollow_session(
             run_id=run_id,
             error=str(exc)[:500],
         )
-    unfollow_day_remaining_today = max(0, db_unfollow_day_limit - int(unfollows_done_today or 0))
+    day_progress = resolve_effective_unfollow_day_progress(
+        day_limit=db_unfollow_day_limit,
+        persisted_daily_count=int(unfollows_done_today or 0),
+        quota_remaining_hint=quota_remaining_hint,
+    )
+    hinted_remaining = day_progress["quota_remaining_hint"]
+    hinted_done_today = int(day_progress["hinted_done"] or 0)
+    effective_unfollows_done_at_start = int(day_progress["effective_done"] or 0)
+    unfollow_day_remaining_today = int(day_progress["remaining"] or 0)
     runtime_cap_resolution = resolve_unfollow_runtime_cap(
         db_unfollow_per_session_limit=getattr(settings, "session_limit", 0),
         runtime_cap_mode=getattr(settings, "runtime_cap_mode", "prod_normal"),
@@ -2674,6 +2790,9 @@ def run_unfollow_session(
         db_unfollow_per_session_limit=int(getattr(settings, "session_limit", 0) or 0),
         db_unfollow_per_day_limit=db_unfollow_day_limit,
         unfollows_done_today=int(unfollows_done_today or 0),
+        quota_remaining_hint=hinted_remaining,
+        hinted_unfollows_done_today=hinted_done_today,
+        effective_unfollows_done_at_start=effective_unfollows_done_at_start,
         unfollow_day_remaining_today=unfollow_day_remaining_today,
         env_real_action_max_per_run=env_real_action_max,
         runtime_cap_mode=str(runtime_cap_resolution.get("runtime_cap_mode") or ""),
@@ -2731,6 +2850,9 @@ def run_unfollow_session(
         {
             "db_unfollow_per_day_limit": db_unfollow_day_limit,
             "unfollows_done_today": int(unfollows_done_today or 0),
+            "quota_remaining_hint": hinted_remaining,
+            "hinted_unfollows_done_today": hinted_done_today,
+            "effective_unfollows_done_at_start": effective_unfollows_done_at_start,
             "unfollow_day_remaining_today": unfollow_day_remaining_today,
             "source_day_counter": "ig_interacted_users.unfollowed_at",
             **time_budget,
@@ -2965,6 +3087,8 @@ def run_unfollow_session(
             harvest_fields=harvest_fields,
             visible_eligibility_row_cache=visible_eligibility_row_cache,
             real_action_max=real_action_max,
+            unfollow_day_limit=db_unfollow_day_limit,
+            effective_unfollows_done_at_start=effective_unfollows_done_at_start,
             business_action_deadline=resolved_deadline,
             adaptive_coverage_budget=handoff_budget,
             resume_checkpoint=resume_checkpoint,

@@ -2454,6 +2454,11 @@ def _real_summary_from_unfollow_summary(
         if isinstance(unfollow_summary.get("unfollow_outcome"), dict)
         else {}
     )
+    resolved_real_max_actions_effective = int(
+        unfollow_summary.get("real_action_max_per_run")
+        if unfollow_summary.get("real_action_max_per_run") is not None
+        else real_max_actions_effective
+    )
     if _is_unfollow_any_mode(mode):
         if actions_sent > 0:
             skip_reason = "unfollow_any_executed"
@@ -2477,10 +2482,10 @@ def _real_summary_from_unfollow_summary(
         "probe_only": False,
         "status": str(unfollow_summary.get("status") or ""),
         "exit_code": exit_code,
-        "real_max_actions": int(real_max_actions_effective),
+        "real_max_actions": resolved_real_max_actions_effective,
         "real_max_actions_requested": int(real_max_actions_requested),
         "real_hard_max": int(real_hard_max),
-        "real_max_actions_effective": int(real_max_actions_effective),
+        "real_max_actions_effective": resolved_real_max_actions_effective,
         "following_surface_ok": bool(unfollow_summary.get("following_surface_ok")),
         "visible_rows_count": int(unfollow_summary.get("visible_rows_count") or 0),
         "visible_plan_matches_count": int(
@@ -2496,7 +2501,7 @@ def _real_summary_from_unfollow_summary(
         "unfollow_results_persisted_count": int(
             unfollow_summary.get("unfollow_results_persisted_count") or 0
         ),
-        "unfollow_effective_limit": int(real_max_actions_effective),
+        "unfollow_effective_limit": resolved_real_max_actions_effective,
         "last_run_eligible_at_start": int(
             unfollow_summary.get("last_run_eligible_at_start")
             or unfollow_summary.get("candidates_planned_count")
@@ -2774,6 +2779,7 @@ def _run_follow_to_unfollow_real(
     business_action_deadline: str | None = None,
     outreach_reserve_seconds: int = 0,
     resume_checkpoint: dict[str, Any] | None = None,
+    quota_remaining_hint: int | None = None,
 ) -> dict[str, Any]:
     """H3 only: explicit real Unfollow handoff with a hard low cap."""
     t0 = time.perf_counter()
@@ -2897,6 +2903,7 @@ def _run_follow_to_unfollow_real(
             business_action_deadline=business_action_deadline,
             outreach_reserve_seconds=outreach_reserve_seconds,
             resume_checkpoint=resume_checkpoint,
+            quota_remaining_hint=quota_remaining_hint,
         )
         unfollow_summary = get_last_unfollow_session_probe_summary()
         out = _real_summary_from_unfollow_summary(
@@ -2912,7 +2919,7 @@ def _run_follow_to_unfollow_real(
         out.update(surface_prep)
         out["total_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
 
-        if int(out.get("unfollow_actions_sent") or 0) > int(real_max_effective):
+        if int(out.get("unfollow_actions_sent") or 0) > int(out.get("real_max_actions_effective") or 0):
             out["status"] = "failed_real_actions_cap_exceeded"
             out["failure_reason"] = "real_actions_cap_exceeded"
             log(
@@ -3713,6 +3720,9 @@ def run_account_session(
                             if isinstance((auto_restart_resume_policy or {}).get("unfollow_checkpoint"), dict)
                             else None
                         ),
+                        quota_remaining_hint=_as_optional_int(
+                            ((auto_restart_resume_policy or {}).get("quota_remaining") or {}).get("unfollow")
+                        ),
                     )
             else:
                 real_skip_reason = (
@@ -3842,6 +3852,9 @@ def run_account_session(
                     dict((auto_restart_resume_policy or {}).get("unfollow_checkpoint") or {})
                     if isinstance((auto_restart_resume_policy or {}).get("unfollow_checkpoint"), dict)
                     else None
+                ),
+                quota_remaining_hint=_as_optional_int(
+                    ((auto_restart_resume_policy or {}).get("quota_remaining") or {}).get("unfollow")
                 ),
             )
 

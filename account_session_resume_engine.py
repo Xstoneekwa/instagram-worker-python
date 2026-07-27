@@ -157,6 +157,8 @@ def _unfollow_quota(
     remaining = _as_int(summary.get("unfollow_quota_remaining"))
     if remaining is None:
         remaining = _as_int(outcome.get("remaining_count"))
+    if str(outcome.get("phase_status") or "") in {"quota_reached", "candidates_exhausted", "disabled"}:
+        remaining = 0
     if remaining is None and target is not None and done is not None:
         remaining = max(0, target - done)
     return target, done, remaining
@@ -190,6 +192,8 @@ def _phase_to_run_unfollow(
     if not isinstance(outcome, dict):
         nested_outcome = _nested(summary, "follow_to_unfollow_real", "unfollow_outcome")
         outcome = nested_outcome if isinstance(nested_outcome, dict) else {}
+    if str(outcome.get("phase_status") or "") in {"quota_reached", "candidates_exhausted", "disabled"}:
+        return False
     if (
         outcome.get("phase_status") == "partial_resumable"
         and outcome.get("resume_recommended") is True
