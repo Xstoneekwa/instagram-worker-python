@@ -51,28 +51,48 @@ def _nested(mapping: dict[str, Any] | None, *path: str) -> Any:
     return current
 
 
-def _flatten_text(value: Any, *, parent_key: str = "") -> list[str]:
-    ignored_keys = {
-        "restart_block_reason",
-        "session_termination_class",
-        "badges",
-        "severity",
+_UNSAFE_SEMANTIC_KEYS = frozenset(
+    {
+        "failure_reason",
+        "root_failure_code",
+        "specific_failure_reason",
+        "hard_stop_reason",
+        "safety_status",
+        "runtime_status",
+        "instagram_state",
+        "login_state",
+        "account_identity_status",
+        "last_run_stop_reason",
+        "follow_stop_reason",
+        "unfollow_stop_reason",
     }
-    if parent_key in ignored_keys:
+)
+
+
+def _semantic_safety_text(value: Any) -> list[str]:
+    """Read safety evidence only from fields that carry failure/state values.
+
+    Session summaries also contain benign structural keys such as
+    ``checkpoint`` and ``last_safe_checkpoint``.  Flattening the complete JSON
+    makes those keys look like an Instagram challenge and creates false
+    critical incidents after an otherwise safe partial run.
+    """
+    if not isinstance(value, dict):
         return []
-    if isinstance(value, dict):
-        out: list[str] = []
-        for key, child in value.items():
-            out.extend(_flatten_text(child, parent_key=str(key)))
-        return out
-    if isinstance(value, (list, tuple, set)):
-        out = []
-        for child in value:
-            out.extend(_flatten_text(child, parent_key=parent_key))
-        return out
-    if value is None:
-        return []
-    return [str(value).lower()]
+    out: list[str] = []
+    for key, child in value.items():
+        normalized_key = str(key).strip().lower()
+        if normalized_key in _UNSAFE_SEMANTIC_KEYS and isinstance(
+            child, (str, int, float, bool)
+        ):
+            out.append(str(child).strip().lower())
+        if isinstance(child, dict):
+            out.extend(_semantic_safety_text(child))
+        elif isinstance(child, (list, tuple)):
+            for item in child:
+                if isinstance(item, dict):
+                    out.extend(_semantic_safety_text(item))
+    return out
 
 
 def _unsafe_markers(summary: dict[str, Any], resume_plan: dict[str, Any]) -> list[str]:
@@ -81,7 +101,9 @@ def _unsafe_markers(summary: dict[str, Any], resume_plan: dict[str, Any]) -> lis
         markers = [str(item) for item in explicit if str(item).strip()]
     else:
         markers = []
-    text = " ".join(_flatten_text({"summary": summary, "resume_plan": resume_plan}))
+    text = " ".join(
+        _semantic_safety_text({"summary": summary, "resume_plan": resume_plan})
+    )
     marker_patterns = (
         ("challenge", ("challenge", "checkpoint")),
         ("restriction", ("restriction", "restricted")),

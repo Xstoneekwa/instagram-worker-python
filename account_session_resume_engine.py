@@ -54,38 +54,46 @@ def _nested(summary: dict[str, Any], *path: str) -> Any:
     return current
 
 
-def _flatten_marker_text(value: Any, *, parent_key: str = "") -> list[str]:
-    # Avoid counting the plan's own block labels as platform unsafe signals.
-    ignored_keys = {
-        "restart_eligibility",
-        "restart_block_reason",
-        "session_termination_class",
-        # Structural resume checkpoints are evidence, not an Instagram
-        # challenge/checkpoint marker.
-        "checkpoint",
-        "unfollow_checkpoint",
-        "last_safe_checkpoint",
-        "safe_checkpoint",
+_UNSAFE_SEMANTIC_KEYS = frozenset(
+    {
+        "failure_reason",
+        "root_failure_code",
+        "specific_failure_reason",
+        "hard_stop_reason",
+        "safety_status",
+        "runtime_status",
+        "instagram_state",
+        "login_state",
+        "account_identity_status",
+        "last_run_stop_reason",
+        "follow_stop_reason",
+        "unfollow_stop_reason",
     }
-    if parent_key in ignored_keys:
+)
+
+
+def _semantic_safety_text(value: Any) -> list[str]:
+    """Extract safety signals without scanning structural checkpoint data."""
+    if not isinstance(value, dict):
         return []
-    if isinstance(value, dict):
-        out: list[str] = []
-        for key, child in value.items():
-            out.extend(_flatten_marker_text(child, parent_key=str(key)))
-        return out
-    if isinstance(value, (list, tuple, set)):
-        out = []
-        for child in value:
-            out.extend(_flatten_marker_text(child, parent_key=parent_key))
-        return out
-    if value is None:
-        return []
-    return [str(value).lower()]
+    out: list[str] = []
+    for key, child in value.items():
+        normalized_key = str(key).strip().lower()
+        if normalized_key in _UNSAFE_SEMANTIC_KEYS and isinstance(
+            child, (str, int, float, bool)
+        ):
+            out.append(str(child).strip().lower())
+        if isinstance(child, dict):
+            out.extend(_semantic_safety_text(child))
+        elif isinstance(child, (list, tuple)):
+            for item in child:
+                if isinstance(item, dict):
+                    out.extend(_semantic_safety_text(item))
+    return out
 
 
 def _unsafe_markers(summary: dict[str, Any]) -> list[str]:
-    text = " ".join(_flatten_marker_text(summary))
+    text = " ".join(_semantic_safety_text(summary))
     markers: list[str] = []
     marker_patterns = (
         ("account_mismatch", ("active_instagram_account_mismatch", "account_mismatch")),

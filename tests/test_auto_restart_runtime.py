@@ -2,6 +2,8 @@ import unittest
 from unittest.mock import patch
 
 from account_session_manual_resume import build_manual_resume_command
+from account_session_reliability_schema import build_admin_reliability_snapshot
+from account_session_resume_engine import build_account_session_resume_plan
 from auto_restart_runtime import (
     is_auto_restart_request,
     phase_enabled,
@@ -53,6 +55,48 @@ class AutoRestartRuntimeTests(unittest.TestCase):
         result = build_manual_resume_command(summary)
         self.assertFalse(result["manual_resume_allowed"])
         self.assertEqual(result["manual_resume_block_reason"], "challenge")
+
+    def test_checkpoint_payload_is_safe_in_resume_and_reliability_contracts(self) -> None:
+        summary = {
+            "account_id": "11111111-1111-4111-8111-111111111111",
+            "account_username": "fixture_user",
+            "session_status": "success",
+            "session_termination_class": "partial_resumable",
+            "restart_eligibility": "eligible",
+            "unfollow_phase_status": "partial_resumable",
+            "mandatory_unfollow_executed": True,
+            "unfollow_outcome": {
+                "phase_status": "partial_resumable",
+                "planned_candidate_count": 3,
+                "persisted_count": 1,
+                "remaining_count": 2,
+                "checkpoint": {
+                    "schema": "UNFOLLOW_CHECKPOINT_V1",
+                    "last_safe_checkpoint": "following_list_after_scroll",
+                    "remaining_usernames": ["one", "two"],
+                },
+            },
+        }
+        plan = build_account_session_resume_plan(summary)
+        snapshot = build_admin_reliability_snapshot(summary, plan)
+        self.assertEqual(plan["unsafe_markers"], [])
+        self.assertEqual(snapshot["unsafe_markers"], [])
+        self.assertNotIn("challenge", snapshot["badges"])
+        self.assertNotIn("needs_human_review", snapshot["badges"])
+
+    def test_explicit_challenge_blocks_resume_and_reliability_contracts(self) -> None:
+        summary = {
+            "account_id": "11111111-1111-4111-8111-111111111111",
+            "account_username": "fixture_user",
+            "session_status": "failed",
+            "session_termination_class": "partial_resumable",
+            "restart_eligibility": "eligible",
+            "root_failure_code": "instagram_challenge_checkpoint",
+        }
+        plan = build_account_session_resume_plan(summary)
+        snapshot = build_admin_reliability_snapshot(summary, plan)
+        self.assertIn("challenge", plan["unsafe_markers"])
+        self.assertIn("challenge", snapshot["unsafe_markers"])
 
     def test_validate_blocks_missing_prior_run(self) -> None:
         ok, reason, policy = validate_auto_restart_request_at_claim(
