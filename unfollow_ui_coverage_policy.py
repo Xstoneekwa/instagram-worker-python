@@ -27,6 +27,8 @@ HISTORICAL_VIEWPORT_SAMPLE_COUNT = 4
 SCHEDULED_SESSION_CLEANUP_RESERVE_SECONDS = 10 * 60
 UNFOLLOW_PRE_RECOVERY_STAGNATION_LIMIT = 3
 UNFOLLOW_POST_RECOVERY_STAGNATION_LIMIT = 2
+UNFOLLOW_PRE_RECOVERY_SEARCH_SCROLL_LIMIT = 10
+UNFOLLOW_POST_RECOVERY_SEARCH_SCROLL_LIMIT = 5
 
 
 def normalize_username(value: str) -> str:
@@ -263,6 +265,16 @@ class FollowingCoverageTracker:
     recovery_succeeded: bool = False
     post_recovery_observation_active: bool = False
     reset_reason: str = "following_list_opened"
+    search_scroll_count: int = 0
+    pre_recovery_search_scroll_count: int = 0
+    post_recovery_search_scroll_count: int = 0
+    total_search_scroll_count: int = 0
+    search_recovery_attempted: bool = False
+    search_recovery_succeeded: bool = False
+    search_post_recovery_active: bool = False
+    search_scroll_observation_pending: bool = False
+    pending_recovery_reason: str = ""
+    repeated_viewport_stagnation_count: int = 0
 
     def __post_init__(self) -> None:
         self.planned_usernames = {
@@ -310,11 +322,24 @@ class FollowingCoverageTracker:
 
     def _reset_stagnation(self, reason: str) -> None:
         self.consecutive_stagnation_count = 0
+        self.repeated_viewport_stagnation_count = 0
         self.consecutive_no_progress_viewports = 0
         self.pre_recovery_stagnation_count = 0
         self.post_recovery_stagnation_count = 0
         self.post_recovery_observation_active = False
         self.reset_reason = str(reason or "progress_proved")
+
+    def _reset_search(self, reason: str) -> None:
+        self.search_scroll_count = 0
+        self.pre_recovery_search_scroll_count = 0
+        self.post_recovery_search_scroll_count = 0
+        self.total_search_scroll_count = 0
+        self.search_recovery_attempted = False
+        self.search_recovery_succeeded = False
+        self.search_post_recovery_active = False
+        self.search_scroll_observation_pending = False
+        self.pending_recovery_reason = ""
+        self.reset_reason = str(reason or "search_progress_proved")
 
     def _deadline_check_due(self, *, elapsed_seconds: float) -> bool:
         if self.last_deadline_check_elapsed_seconds is None:
@@ -388,6 +413,22 @@ class FollowingCoverageTracker:
         self.observed_usernames.update(current)
         matches = current.intersection(self.remaining_planned_usernames)
         exploitable_candidate_present = bool(matches)
+        progressive_search_viewport = bool(
+            self.search_scroll_observation_pending
+            and new_usernames
+            and not exploitable_candidate_present
+        )
+        self.search_scroll_observation_pending = False
+        if exploitable_candidate_present:
+            self._reset_search("candidate_exploitable")
+        elif progressive_search_viewport:
+            self.total_search_scroll_count += 1
+            if self.search_post_recovery_active:
+                self.post_recovery_search_scroll_count += 1
+                self.search_scroll_count = self.post_recovery_search_scroll_count
+            else:
+                self.pre_recovery_search_scroll_count += 1
+                self.search_scroll_count = self.pre_recovery_search_scroll_count
         progress_credit = self.progress_credit_pending
         self.progress_credit_pending = False
         if new_usernames:
@@ -414,9 +455,11 @@ class FollowingCoverageTracker:
             if self.post_recovery_observation_active:
                 self.post_recovery_stagnation_count += 1
                 self.consecutive_stagnation_count = self.post_recovery_stagnation_count
+                self.repeated_viewport_stagnation_count = self.post_recovery_stagnation_count
             elif generation_previous_count and repeated_consecutively:
                 self.pre_recovery_stagnation_count += 1
                 self.consecutive_stagnation_count = self.pre_recovery_stagnation_count
+                self.repeated_viewport_stagnation_count = self.pre_recovery_stagnation_count
             else:
                 # A changed fingerprint is not progress by itself.  Progress
                 # must be proved by one of the explicit reset signals above
@@ -424,6 +467,7 @@ class FollowingCoverageTracker:
                 # cursor/scroll movement, or a successful recovery).
                 self.pre_recovery_stagnation_count += 1
                 self.consecutive_stagnation_count = self.pre_recovery_stagnation_count
+                self.repeated_viewport_stagnation_count = self.pre_recovery_stagnation_count
 
         self.viewport_new_username_counts.append(len(new_usernames))
         self.viewport_candidate_match_counts.append(len(matches))
@@ -436,6 +480,25 @@ class FollowingCoverageTracker:
             and self.post_recovery_stagnation_count >= UNFOLLOW_POST_RECOVERY_STAGNATION_LIMIT
         ):
             return self._stop("ui_repeated_viewport_limit_after_recovery", fingerprint)
+        if (
+            self.search_post_recovery_active
+            and self.post_recovery_search_scroll_count
+            >= UNFOLLOW_POST_RECOVERY_SEARCH_SCROLL_LIMIT
+        ):
+            return self._stop("ui_progressive_search_limit_after_recovery", fingerprint)
+        if (
+            not self.search_recovery_attempted
+            and self.pre_recovery_search_scroll_count
+            >= UNFOLLOW_PRE_RECOVERY_SEARCH_SCROLL_LIMIT
+        ):
+            self.search_recovery_attempted = True
+            self.pending_recovery_reason = "ui_progressive_search_limit"
+            return CoverageDecision(
+                "recover",
+                "ui_progressive_search_limit",
+                fingerprint,
+                len(new_usernames),
+            )
         if self.pre_recovery_stagnation_count >= UNFOLLOW_PRE_RECOVERY_STAGNATION_LIMIT:
             if self.viewport_recoveries_used < self.budget.max_viewport_recoveries:
                 return CoverageDecision("recover", "ui_repeated_viewport_limit", fingerprint)
@@ -450,7 +513,9 @@ class FollowingCoverageTracker:
         self.scroll_passes_used += 1
         if not moved:
             self.no_motion_scrolls += 1
+            self.search_scroll_observation_pending = False
         else:
+            self.search_scroll_observation_pending = True
             self.begin_navigation_generation(
                 "scroll_progressed",
                 progress_proved=True,
@@ -473,8 +538,12 @@ class FollowingCoverageTracker:
     ) -> Optional[CoverageDecision]:
         self.viewport_recoveries_used += 1
         self.recovery_attempted = True
+        recovery_reason = self.pending_recovery_reason
+        self.pending_recovery_reason = ""
         if not succeeded or self.viewport_recoveries_used > self.budget.max_viewport_recoveries:
             self.recovery_succeeded = False
+            if recovery_reason == "ui_progressive_search_limit":
+                self.search_recovery_succeeded = False
             return self._stop("ui_recovery_budget_exhausted", self.terminal_fingerprint)
         self.navigation_generation += 1
         self.navigation_generation_reason = "viewport_recovery_completed"
@@ -483,6 +552,7 @@ class FollowingCoverageTracker:
         self.pre_recovery_stagnation_count = 0
         self.post_recovery_stagnation_count = 0
         self.consecutive_stagnation_count = 0
+        self.repeated_viewport_stagnation_count = 0
         self.consecutive_no_progress_viewports = 0
         self.post_recovery_observation_active = not progress_proved
         self.recovery_succeeded = bool(progress_proved)
@@ -492,6 +562,11 @@ class FollowingCoverageTracker:
             else "recovery_completed_awaiting_progress"
         )
         self.last_safe_checkpoint = "following_list_after_recovery"
+        if recovery_reason == "ui_progressive_search_limit":
+            self.search_recovery_succeeded = True
+            self.search_post_recovery_active = True
+            self.search_scroll_count = 0
+            self.post_recovery_search_scroll_count = 0
         return None
 
     def mark_action_attempted(self, username: str) -> None:
@@ -506,6 +581,7 @@ class FollowingCoverageTracker:
         if not normalized or normalized not in self.remaining_planned_usernames:
             raise ValueError("duplicate_or_unplanned_unfollow")
         self.verified_usernames.add(normalized)
+        self._reset_search("unfollow_verified")
         self._reset_stagnation("unfollow_verified")
         self.progress_credit_pending = True
         self.generation_progress_events += 1
@@ -515,6 +591,7 @@ class FollowingCoverageTracker:
         if not normalized or normalized not in self.verified_usernames:
             raise ValueError("unverified_unfollow_persistence")
         self.persisted_usernames.add(normalized)
+        self._reset_search("unfollow_persisted")
         self._reset_stagnation("unfollow_persisted")
         self.progress_credit_pending = True
         self.generation_progress_events += 1
@@ -548,6 +625,13 @@ class FollowingCoverageTracker:
             "navigation_generation_reason": self.navigation_generation_reason,
             "viewport_fingerprint": self.terminal_fingerprint,
             "last_safe_checkpoint": self.last_safe_checkpoint,
+            "search_scroll_count": self.search_scroll_count,
+            "pre_recovery_search_scroll_count": self.pre_recovery_search_scroll_count,
+            "post_recovery_search_scroll_count": self.post_recovery_search_scroll_count,
+            "total_search_scroll_count": self.total_search_scroll_count,
+            "search_recovery_attempted": self.search_recovery_attempted,
+            "search_recovery_succeeded": self.search_recovery_succeeded,
+            "repeated_viewport_stagnation_count": self.repeated_viewport_stagnation_count,
         }
 
     def summary(self) -> dict[str, Any]:
@@ -581,11 +665,18 @@ class FollowingCoverageTracker:
             "repeated_fingerprints": self.repeated_fingerprints_count,
             "no_progress_viewports": self.consecutive_no_progress_viewports,
             "consecutive_stagnation_count": self.consecutive_stagnation_count,
+            "repeated_viewport_stagnation_count": self.repeated_viewport_stagnation_count,
             "pre_recovery_stagnation_count": self.pre_recovery_stagnation_count,
             "post_recovery_stagnation_count": self.post_recovery_stagnation_count,
             "recovery_attempted": self.recovery_attempted,
             "recovery_succeeded": self.recovery_succeeded,
             "reset_reason": self.reset_reason,
+            "search_scroll_count": self.search_scroll_count,
+            "pre_recovery_search_scroll_count": self.pre_recovery_search_scroll_count,
+            "post_recovery_search_scroll_count": self.post_recovery_search_scroll_count,
+            "total_search_scroll_count": self.total_search_scroll_count,
+            "search_recovery_attempted": self.search_recovery_attempted,
+            "search_recovery_succeeded": self.search_recovery_succeeded,
             "navigation_generation": self.navigation_generation,
             "navigation_generation_reason": self.navigation_generation_reason,
             "generation_progress_events": self.generation_progress_events,
@@ -675,5 +766,24 @@ def build_unfollow_outcome(
         "recovery_attempted": bool(tracker.recovery_attempted) if tracker else False,
         "recovery_succeeded": bool(tracker.recovery_succeeded) if tracker else False,
         "reset_reason": str(tracker.reset_reason) if tracker else "",
+        "search_scroll_count": int(tracker.search_scroll_count) if tracker else 0,
+        "pre_recovery_search_scroll_count": (
+            int(tracker.pre_recovery_search_scroll_count) if tracker else 0
+        ),
+        "post_recovery_search_scroll_count": (
+            int(tracker.post_recovery_search_scroll_count) if tracker else 0
+        ),
+        "total_search_scroll_count": (
+            int(tracker.total_search_scroll_count) if tracker else 0
+        ),
+        "repeated_viewport_stagnation_count": (
+            int(tracker.repeated_viewport_stagnation_count) if tracker else 0
+        ),
+        "search_recovery_attempted": (
+            bool(tracker.search_recovery_attempted) if tracker else False
+        ),
+        "search_recovery_succeeded": (
+            bool(tracker.search_recovery_succeeded) if tracker else False
+        ),
         "checkpoint": checkpoint or None,
     }

@@ -78,6 +78,18 @@ class AccountSessionTerminalContractTest(unittest.TestCase):
         self.assertEqual(contract["reason"], "account_session_phase_not_terminal")
         self.assertEqual(contract["non_terminal_phases"], {"unfollow": "unknown"})
 
+    def test_partial_resumable_is_terminal_for_current_attempt(self) -> None:
+        contract = orchestrator._phase_terminal_contract(
+            welcome="not_planned",
+            follow="completed",
+            unfollow="partial_resumable",
+            outreach="not_planned",
+        )
+
+        self.assertTrue(contract["ok"])
+        self.assertEqual(contract["non_terminal_phases"], {})
+        self.assertEqual(contract["reason"], "all_planned_phases_terminal")
+
     def test_unfollow_end_without_candidate_is_clean_terminal(self) -> None:
         statuses = orchestrator._phase_statuses(
             welcome_enabled=False,

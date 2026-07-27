@@ -8,7 +8,9 @@ from unfollow_ui_coverage_policy import (
     HISTORICAL_VIEWPORT_P90_SECONDS,
     SCHEDULED_SESSION_CLEANUP_RESERVE_SECONDS,
     UNFOLLOW_POST_RECOVERY_STAGNATION_LIMIT,
+    UNFOLLOW_POST_RECOVERY_SEARCH_SCROLL_LIMIT,
     UNFOLLOW_PRE_RECOVERY_STAGNATION_LIMIT,
+    UNFOLLOW_PRE_RECOVERY_SEARCH_SCROLL_LIMIT,
     build_unfollow_outcome,
     derive_adaptive_coverage_budget,
     viewport_fingerprint,
@@ -16,6 +18,145 @@ from unfollow_ui_coverage_policy import (
 
 
 class UnfollowUiCoveragePolicyTests(unittest.TestCase):
+    @staticmethod
+    def _progressive_search_tracker(candidate_scroll: int) -> tuple[FollowingCoverageTracker, object]:
+        budget = derive_adaptive_coverage_budget(
+            quota_remaining=35,
+            eligible_remaining=35,
+            session_remaining_seconds=6 * 60 * 60,
+        )
+        tracker = FollowingCoverageTracker(
+            budget,
+            {"planned_candidate", *{f"planned_{index}" for index in range(34)}},
+            35,
+        )
+        tracker.observe_viewport(
+            ["initial_unrelated"],
+            elapsed_seconds=0,
+            following_confirmed=True,
+        )
+        decision = None
+        for scroll_index in range(1, candidate_scroll + 1):
+            tracker.mark_scroll(moved=True)
+            visible = (
+                ["planned_candidate"]
+                if scroll_index == candidate_scroll
+                else [f"unrelated_{scroll_index}"]
+            )
+            decision = tracker.observe_viewport(
+                visible,
+                elapsed_seconds=float(scroll_index),
+                following_confirmed=True,
+            )
+            if decision.action == "recover":
+                tracker.mark_recovery(succeeded=True, progress_proved=True)
+        return tracker, decision
+
+    def test_first_candidate_on_fifth_progressive_scroll(self) -> None:
+        tracker, decision = self._progressive_search_tracker(5)
+        self.assertEqual(decision.action, "act")
+        self.assertEqual(tracker.search_scroll_count, 0)
+        self.assertFalse(tracker.search_recovery_attempted)
+
+    def test_first_candidate_on_tenth_progressive_scroll_needs_no_recovery(self) -> None:
+        tracker, decision = self._progressive_search_tracker(10)
+        self.assertEqual(decision.action, "act")
+        self.assertFalse(tracker.search_recovery_attempted)
+        self.assertEqual(tracker.search_scroll_count, 0)
+
+    def test_first_candidate_on_fifteenth_progressive_scroll_after_recovery(self) -> None:
+        tracker, decision = self._progressive_search_tracker(15)
+        self.assertEqual(decision.action, "act")
+        self.assertEqual(tracker.viewport_recoveries_used, 1)
+        self.assertEqual(tracker.search_scroll_count, 0)
+
+    def test_fifteen_progressive_scrolls_without_candidate_stop_resumable(self) -> None:
+        budget = derive_adaptive_coverage_budget(
+            quota_remaining=35,
+            eligible_remaining=35,
+            session_remaining_seconds=6 * 60 * 60,
+        )
+        tracker = FollowingCoverageTracker(
+            budget,
+            {f"planned_{index}" for index in range(35)},
+            35,
+        )
+        tracker.observe_viewport(["initial"], elapsed_seconds=0, following_confirmed=True)
+        decision = None
+        for scroll_index in range(1, 16):
+            tracker.mark_scroll(moved=True)
+            decision = tracker.observe_viewport(
+                [f"unrelated_{scroll_index}"],
+                elapsed_seconds=float(scroll_index),
+                following_confirmed=True,
+            )
+            if decision.action == "recover":
+                self.assertEqual(scroll_index, UNFOLLOW_PRE_RECOVERY_SEARCH_SCROLL_LIMIT)
+                self.assertIsNone(tracker.mark_recovery(succeeded=True, progress_proved=True))
+        self.assertEqual(decision.action, "stop")
+        self.assertEqual(decision.stop_reason, "ui_progressive_search_limit_after_recovery")
+        self.assertEqual(
+            tracker.post_recovery_search_scroll_count,
+            UNFOLLOW_POST_RECOVERY_SEARCH_SCROLL_LIMIT,
+        )
+        self.assertEqual(tracker.total_search_scroll_count, 15)
+
+    def test_eight_actions_then_next_progressive_search_starts_from_one(self) -> None:
+        names = {f"candidate_{index:02d}" for index in range(35)}
+        budget = derive_adaptive_coverage_budget(
+            quota_remaining=35,
+            eligible_remaining=35,
+            session_remaining_seconds=6 * 60 * 60,
+        )
+        tracker = FollowingCoverageTracker(budget, names, 35)
+        for username in sorted(names)[:8]:
+            tracker.mark_action_attempted(username)
+            tracker.mark_action_verified(username)
+            tracker.mark_action_persisted(username)
+            tracker.mark_safe_profile_return(username)
+        tracker.observe_viewport(["unrelated_initial"], elapsed_seconds=0, following_confirmed=True)
+        tracker.mark_scroll(moved=True)
+        decision = tracker.observe_viewport(
+            ["unrelated_next"], elapsed_seconds=1, following_confirmed=True
+        )
+        self.assertEqual(decision.action, "scroll")
+        self.assertEqual(tracker.search_scroll_count, 1)
+        self.assertEqual(tracker.repeated_viewport_stagnation_count, 0)
+
+    def test_plan_35_checkpoint_preserves_8_and_resumes_27_without_duplicates(self) -> None:
+        names = {f"candidate_{index:02d}" for index in range(35)}
+        budget = derive_adaptive_coverage_budget(
+            quota_remaining=35,
+            eligible_remaining=35,
+            session_remaining_seconds=6 * 60 * 60,
+        )
+        tracker = FollowingCoverageTracker(budget, names, 35)
+        for username in sorted(names)[:8]:
+            tracker.mark_action_attempted(username)
+            tracker.mark_action_verified(username)
+            tracker.mark_action_persisted(username)
+            tracker.mark_safe_profile_return(username)
+        outcome = build_unfollow_outcome(
+            stable_reason="following_button_not_found",
+            raw_candidate_count=127,
+            eligible_candidate_count=35,
+            planned_candidate_count=35,
+            attempted_count=8,
+            verified_count=8,
+            persisted_count=8,
+            tracker=tracker,
+        )
+        checkpoint = outcome["checkpoint"]
+        self.assertEqual(outcome["phase_status"], "partial_resumable")
+        self.assertEqual(outcome["remaining_count"], 27)
+        self.assertEqual(len(checkpoint["persisted_usernames"]), 8)
+        self.assertEqual(len(checkpoint["remaining_usernames"]), 27)
+        self.assertTrue(
+            set(checkpoint["persisted_usernames"]).isdisjoint(
+                checkpoint["remaining_usernames"]
+            )
+        )
+
     def test_offline_harness_covers_all_required_scenarios(self) -> None:
         out = run_offline_harness()
         self.assertTrue(out["ok"])

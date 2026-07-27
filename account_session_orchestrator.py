@@ -1520,7 +1520,12 @@ def _blocked_class_from_markers(*parts: Any) -> str | None:
     return None
 
 
-_TERMINAL_PHASE_STATUSES = {"completed", "skipped_cleanly", "not_planned"}
+_TERMINAL_PHASE_STATUSES = {
+    "completed",
+    "partial_resumable",
+    "skipped_cleanly",
+    "not_planned",
+}
 _LAST_ACCOUNT_SESSION_SUMMARY: dict[str, Any] = {}
 
 

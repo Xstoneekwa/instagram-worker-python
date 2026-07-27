@@ -29,11 +29,14 @@ class UnfollowObservabilityContractTest(unittest.TestCase):
         self.assertIn('"unfollow_run_reconciliation"', source)
         self.assertIn("verified == persisted", source)
 
-    def test_summary_exposes_partial_ui_coverage_without_recommending_resume(self) -> None:
+    def test_summary_exposes_partial_ui_coverage_with_canonical_resume_decision(self) -> None:
         source = inspect.getsource(orchestrator._run_real_unfollow_multi_loop)
         self.assertIn('"eligible_db_remaining": remaining_planned_count', source)
         self.assertIn('"ui_coverage_status": (', source)
-        self.assertIn('"resume_recommended": False', source)
+        self.assertIn(
+            '"resume_recommended": bool(canonical_outcome.get("resume_recommended"))',
+            source,
+        )
 
     def test_summary_exposes_required_action_time_and_stop_metrics(self) -> None:
         source = inspect.getsource(orchestrator._run_real_unfollow_multi_loop)
