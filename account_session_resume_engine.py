@@ -342,11 +342,11 @@ def build_account_session_resume_plan(
         _setting(
             safe_settings,
             "auto_restart_delay_minutes",
-            getattr(config, "AUTO_RESTART_DELAY_MINUTES", 20),
+            getattr(config, "AUTO_RESTART_DELAY_MINUTES", 10),
         )
     )
     if delay_minutes is None:
-        delay_minutes = 20
+        delay_minutes = 10
 
     phases_to_run = {
         "welcome": _phase_to_run_welcome(safe_summary),

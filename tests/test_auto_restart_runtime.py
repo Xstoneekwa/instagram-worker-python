@@ -180,6 +180,11 @@ class AutoRestartRuntimeTests(unittest.TestCase):
                 "session_termination_class": "partial_resumable",
                 "phases_to_run": {"welcome": False, "follow": True, "unfollow": False},
                 "quota_remaining": {"follow": 5, "unfollow": 0, "total": 5},
+                "unfollow_checkpoint": {
+                    "cursor_schema": "UNFOLLOW_CURSOR_V2",
+                    "depth": 4,
+                    "anchor_hashes": ["a3:fixture"],
+                },
             },
             "follow_quota_remaining": 5,
             "follows_completed_count": 10,
@@ -205,6 +210,21 @@ class AutoRestartRuntimeTests(unittest.TestCase):
         self.assertTrue(ok, reason)
         self.assertIsNotNone(policy)
         self.assertEqual(policy["prior_run_id"], "22222222-2222-4222-8222-222222222222")
+        self.assertEqual(policy["unfollow_checkpoint"]["depth"], 4)
+
+    def test_resume_plan_default_cooldown_is_ten_minutes(self) -> None:
+        with patch("account_session_resume_engine.config.AUTO_RESTART_DELAY_MINUTES", 10):
+            plan = build_account_session_resume_plan(
+                {
+                    "session_termination_class": "partial_resumable",
+                    "restart_eligibility": "eligible",
+                    "follow_phase_status": "partial_resumable",
+                    "follow_quota_target": 10,
+                    "follows_completed_count": 5,
+                    "follow_quota_remaining": 5,
+                }
+            )
+        self.assertEqual(plan["restart_delay_minutes"], 10)
 
 
 if __name__ == "__main__":

@@ -56,6 +56,7 @@ from logs import log
 import incident_notifications
 import runtime_incidents
 import supabase_client
+import deferred_projection_outbox
 from account_protection_lists import (
     SNAPSHOT_ENV as ACCOUNT_PROTECTION_SNAPSHOT_ENV,
     load_snapshot_for_run,
@@ -3085,6 +3086,11 @@ def run_forever(cfg: DispatcherConfig | None = None) -> int:
                 _collect_completed_dispatch_tasks(active_tasks)
 
                 reconcile_requests_with_terminal_runs(cfg)
+
+                # Reconcile secondary projections independently from business
+                # terminalization.  The bounded durable queue prevents a
+                # transient Supabase outage from leaving a session running.
+                deferred_projection_outbox.drain(limit=25, time_budget_seconds=4.0)
 
                 now_loop = time.monotonic()
                 if should_run_auto_restart_tick(

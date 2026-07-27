@@ -13917,6 +13917,25 @@ _INSTAGRAM_LIST_SUGGESTIONS_LABELS = {
 _INSTAGRAM_LIST_SEE_MORE_LABELS = {"see more", "voir plus"}
 
 
+def _instagram_list_see_more_label(value: str) -> bool:
+    """Accept the bounded accessibility variants used by Instagram.
+
+    Some builds expose ``See more, button`` (or the French equivalent) in the
+    content description instead of the exact visible text.  Keep this narrow:
+    no generic ``more`` token and no Suggestions alias is accepted.
+    """
+    normalized = " ".join(str(value or "").casefold().split())
+    normalized = normalized.strip(" ,:;-.")
+    if normalized in _INSTAGRAM_LIST_SEE_MORE_LABELS:
+        return True
+    return bool(
+        re.fullmatch(
+            r"(?:see more|voir plus)(?:\s*[,;:-]?\s*(?:button|bouton))?",
+            normalized,
+        )
+    )
+
+
 def _instagram_list_event(
     event: str,
     *,
@@ -14026,7 +14045,7 @@ def followers_list_continuation_from_hierarchy_xml(
             base["see_all_suggestions"] = True
             base["suggestions_visible"] = True
             suggestions_y = node_y if suggestions_y is None else min(suggestions_y, node_y or suggestions_y)
-        if normalized in _INSTAGRAM_LIST_SEE_MORE_LABELS:
+        if _instagram_list_see_more_label(text) or _instagram_list_see_more_label(content_desc):
             see_more_nodes.append((node, node_y))
         if "follow_list_username" in resource_id:
             username = str(text or content_desc).strip().lstrip("@").casefold()
@@ -14186,7 +14205,10 @@ def followers_try_expand_primary_list(
     no_progress_reason = "bounded_clicks_without_new_primary_rows"
     for attempt in range(1, max(1, min(int(max_attempts or 1), 2)) + 1):
         clicked = False
-        for label_re in (r"(?i)^see more$", r"(?i)^voir plus$"):
+        for label_re in (
+            r"(?i)^\s*see more(?:\s*[,;:-]?\s*button)?\s*$",
+            r"(?i)^\s*voir plus(?:\s*[,;:-]?\s*bouton)?\s*$",
+        ):
             for selector in (
                 d(textMatches=label_re),
                 d(descriptionMatches=label_re),

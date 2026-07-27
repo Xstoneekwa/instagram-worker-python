@@ -381,6 +381,14 @@ def validate_auto_restart_request_at_claim(
         "phases_to_run": {phase: bool(phases.get(phase)) for phase in ("welcome", "follow", "unfollow")},
         "quota_remaining": {k: v for k, v in quota.items() if v is not None},
         "restart_allowed": True,
+        "unfollow_checkpoint": (
+            dict(embedded.get("unfollow_checkpoint") or stored_plan.get("unfollow_checkpoint") or {})
+            if isinstance(
+                embedded.get("unfollow_checkpoint") or stored_plan.get("unfollow_checkpoint"),
+                dict,
+            )
+            else {}
+        ),
         **retry_context,
         "request_metadata": {
             "source": AUTO_RESTART_TICK_SOURCE,

@@ -41,6 +41,7 @@ import runtime_events
 import runtime_heartbeat
 import supabase_client
 import follow_persistence_intent
+import deferred_projection_outbox
 from follow_outcome_contract import merge_follow_outcome
 import target_followers_progressive_resume_v2 as target_followers_resume_v2
 from follow_persistence_rpc import (
@@ -3051,6 +3052,66 @@ def _flush_deferred_follow_action_log_persists(*, reason: str) -> bool:
     return ok_all
 
 
+def _spool_noncritical_deferred_projections(*, reason: str) -> dict[str, int]:
+    records: list[dict[str, Any]] = []
+    for item in list(_DEFERRED_FOLLOW_ACTION_LOG_FLUSHES):
+        for event, payload in list(item.get("events") or []):
+            base = {
+                "run_id": str(item.get("run_id") or ""),
+                "account_id": str(item.get("account_id") or ""),
+                "target_username": str(item.get("target_username") or ""),
+            }
+            records.append(
+                {
+                    "kind": "action_log",
+                    "payload": {
+                        "run_id": base["run_id"],
+                        "account_id": base["account_id"],
+                        "target_username": base["target_username"],
+                        "action_type": str(event or ""),
+                        "status": "info",
+                        "message": str(event or ""),
+                        "payload": {**base, **dict(payload or {})},
+                    },
+                }
+            )
+    with _DEFERRED_POST_RETURN_QUEUE_LOCK:
+        post_return_items = list(_DEFERRED_POST_RETURN_PERSIST_STEPS)
+    for item in post_return_items:
+        records.append(
+            {
+                "kind": "supabase_step",
+                "payload": {
+                    "fn_name": str(item.get("fn_name") or ""),
+                    "args": list(item.get("args") or ()),
+                    "kwargs": dict(item.get("kwargs") or {}),
+                },
+            }
+        )
+    enqueued = deferred_projection_outbox.enqueue(records)
+    if enqueued != len(records):
+        raise RuntimeError("deferred_projection_outbox_incomplete_enqueue")
+    follow_batches = len(_DEFERRED_FOLLOW_ACTION_LOG_FLUSHES)
+    follow_records = sum(len(item.get("events") or []) for item in _DEFERRED_FOLLOW_ACTION_LOG_FLUSHES)
+    _DEFERRED_FOLLOW_ACTION_LOG_FLUSHES.clear()
+    with _DEFERRED_POST_RETURN_QUEUE_LOCK:
+        post_return_steps = len(_DEFERRED_POST_RETURN_PERSIST_STEPS)
+        _DEFERRED_POST_RETURN_PERSIST_STEPS.clear()
+    spooled = {
+        "follow_batches": follow_batches,
+        "follow_records": follow_records,
+        "post_return_steps": post_return_steps,
+        "outbox_records": enqueued,
+    }
+    log(
+        "warning",
+        "terminal_deferred_projection_spooled",
+        reason=str(reason or "terminal_projection_spool"),
+        **spooled,
+    )
+    return spooled
+
+
 def _flush_deferred_persists_for_manual_stop(
     *,
     run_id: str = "",
@@ -3813,28 +3874,41 @@ def _update_run_status_safe(
         )
         return status
     if status in {"completed", "failed", "stopped"}:
-        deferred_steps_ok = _flush_deferred_post_return_supabase_steps(
-            reason=f"before_run_status_{status}"
-        )
-        deferred_logs_ok = _flush_deferred_follow_action_log_persists(
-            reason=f"before_run_status_{status}"
-        )
-        deferred_ok = bool(deferred_steps_ok and deferred_logs_ok)
-        if not deferred_ok and status == "completed":
-            log(
-                "error",
-                "run_completed_blocked_deferred_persist_failed",
-                run_id=run_id,
-                pending_deferred_count=_pending_deferred_follow_action_log_count(),
-                deferred_record_count=_deferred_follow_action_log_record_count(),
-            )
-            status = "failed"
-            performance_summary = {
-                **(performance_summary or {}),
-                "reason": "deferred_persist_failed_before_completed",
-                "pending_deferred_count": _pending_deferred_follow_action_log_count(),
-                "deferred_record_count": _deferred_follow_action_log_record_count(),
-            }
+        # Never put event-level projections on the terminal critical path.
+        # They are durable locally and replayed by the five-second dispatcher
+        # loop, while the authoritative run/request terminal writes proceed.
+        if _pending_deferred_follow_action_log_count() > 0:
+            try:
+                spooled = _spool_noncritical_deferred_projections(
+                    reason=f"before_run_status_{status}"
+                )
+            except Exception as exc:
+                # Secondary projections must never strand the authoritative
+                # run/request state.  Preserve a loud degraded signal, clear
+                # the in-memory queue, and continue the terminal write.
+                _DEFERRED_FOLLOW_ACTION_LOG_FLUSHES.clear()
+                with _DEFERRED_POST_RETURN_QUEUE_LOCK:
+                    dropped_steps = len(_DEFERRED_POST_RETURN_PERSIST_STEPS)
+                    _DEFERRED_POST_RETURN_PERSIST_STEPS.clear()
+                log(
+                    "error",
+                    "terminal_deferred_projection_spool_failed",
+                    run_id=run_id,
+                    status=status,
+                    error_type=type(exc).__name__,
+                    dropped_post_return_steps=dropped_steps,
+                )
+                performance_summary = {
+                    **(performance_summary or {}),
+                    "terminal_deferred_projection_degraded": True,
+                    "terminal_deferred_projection_error": type(exc).__name__,
+                }
+            else:
+                performance_summary = {
+                    **(performance_summary or {}),
+                    "terminal_deferred_projection_degraded": False,
+                    "terminal_deferred_projection_spooled": spooled,
+                }
     persist_result = _timed_safe_supabase_call(
         "run_status_updated",
         "update_run_status",
@@ -14762,6 +14836,27 @@ def _run_followers_list_engine_session(
                     _visible_window_processed_rows = set(_RUNTIME_SEEN_FOLLOWER_USERNAMES)
                     _visible_window_processed_rows.update(_RUNTIME_FOLLOWED_USERNAMES)
                     _visible_window_processed_rows.update(_RUNTIME_SKIPPED_USERNAMES)
+                    # The last picker capture can predate the rendered footer.
+                    # Refresh immediately at the scroll boundary so See More
+                    # always wins over a swipe when it is currently visible.
+                    try:
+                        from instagram_navigation import followers_refresh_detect_hierarchy_cache
+
+                        followers_refresh_detect_hierarchy_cache(
+                            d,
+                            screen_index=int(scroll_used),
+                        )
+                    except Exception as _continuation_refresh_exc:
+                        log(
+                            "warning",
+                            "instagram_list_continuation_refresh_failed",
+                            flow="follow",
+                            account_id=str(account_id or ""),
+                            target_id=str(target_id or ""),
+                            run_id=str(run_id or ""),
+                            reason="fresh_pre_scroll_hierarchy_unavailable",
+                            error_type=type(_continuation_refresh_exc).__name__,
+                        )
                     _visible_window_continuation = (
                         followers_suggestions_boundary_from_cached_hierarchy(
                             previously_valid_followers_rows=True,
@@ -18670,6 +18765,11 @@ def _run_followers_list_engine_session(
     if _followers_stable_reason == "global_follow_cap_reached":
         _followers_sess_outcome = "global_follow_cap_reached"
     elif _followers_stable_reason == "visible_window_exhausted_scroll_failed":
+        _followers_sess_outcome = "partial_resumable"
+    elif _followers_stable_reason:
+        # A proven local stop remains partial even when earlier actions were
+        # verified.  The orchestrator, not the action count, decides whether a
+        # later CT or phase can safely continue.
         _followers_sess_outcome = "partial_resumable"
     elif follows_completed_count > 0:
         _followers_sess_outcome = "follows_completed"

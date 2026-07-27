@@ -275,6 +275,7 @@ class FollowingCoverageTracker:
     search_scroll_observation_pending: bool = False
     pending_recovery_reason: str = ""
     repeated_viewport_stagnation_count: int = 0
+    last_visible_usernames: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         self.planned_usernames = {
@@ -289,7 +290,11 @@ class FollowingCoverageTracker:
 
     @property
     def remaining_planned_usernames(self) -> set[str]:
-        return self.planned_usernames - self.verified_usernames
+        return (
+            self.planned_usernames
+            - self.verified_usernames
+            - self.unavailable_usernames
+        )
 
     def _stop(self, reason: str, fingerprint: str = "") -> CoverageDecision:
         self.stop_reason = reason
@@ -392,6 +397,7 @@ class FollowingCoverageTracker:
 
         normalized = [normalize_username(value) for value in usernames]
         normalized = [value for value in normalized if value]
+        self.last_visible_usernames = tuple(normalized[:12])
         self.total_rows_observed += len(normalized)
         fingerprint = viewport_fingerprint(
             normalized,
@@ -612,7 +618,18 @@ class FollowingCoverageTracker:
         )
 
     def checkpoint(self) -> dict[str, Any]:
-        remaining = self.planned_usernames - self.persisted_usernames
+        from unfollow_hybrid_strategy import build_cursor_checkpoint
+
+        remaining = (
+            self.planned_usernames
+            - self.persisted_usernames
+            - self.unavailable_usernames
+        )
+        cursor = build_cursor_checkpoint(
+            self.last_visible_usernames,
+            depth=self.scroll_passes_used,
+            generation=self.navigation_generation,
+        )
         return {
             "schema": "UNFOLLOW_CHECKPOINT_V1",
             "planned_usernames": sorted(self.planned_usernames),
@@ -632,6 +649,7 @@ class FollowingCoverageTracker:
             "search_recovery_attempted": self.search_recovery_attempted,
             "search_recovery_succeeded": self.search_recovery_succeeded,
             "repeated_viewport_stagnation_count": self.repeated_viewport_stagnation_count,
+            **cursor,
         }
 
     def summary(self) -> dict[str, Any]:
@@ -727,7 +745,12 @@ def build_unfollow_outcome(
 ) -> dict[str, Any]:
     """Build the single canonical Unfollow terminal outcome."""
     reason = str(stable_reason or "unfollow_outcome_unknown")
-    remaining_count = max(0, int(planned_candidate_count) - int(persisted_count))
+    unavailable_count = len(tracker.unavailable_usernames) if tracker is not None else 0
+    remaining_count = (
+        len(tracker.remaining_planned_usernames)
+        if tracker is not None
+        else max(0, int(planned_candidate_count) - int(persisted_count))
+    )
     checkpoint = tracker.checkpoint() if tracker is not None else {}
     safe_checkpoint = str(checkpoint.get("last_safe_checkpoint") or "")
 
@@ -754,6 +777,7 @@ def build_unfollow_outcome(
         "attempted_count": max(0, int(attempted_count)),
         "verified_count": max(0, int(verified_count)),
         "persisted_count": max(0, int(persisted_count)),
+        "unavailable_count": unavailable_count,
         "remaining_count": remaining_count,
         "last_safe_checkpoint": safe_checkpoint or None,
         "resume_recommended": resume_recommended,

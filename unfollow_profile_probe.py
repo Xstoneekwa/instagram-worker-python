@@ -34,6 +34,7 @@ _FOLLOWING_BUTTON_MAX_PRE_TAP_SHIFT_PX = 140
 _FOLLOWING_BUTTON_RETRY_STABLE_SHIFT_PX = 50
 _FOLLOWING_BUTTON_BOUNDS_SHIFT_RETRY_SETTLE_S = 1.0
 _FOLLOWING_BUTTON_RETRY_SECOND_DETECT_SETTLE_S = 0.5
+_FOLLOWING_BUTTON_INITIAL_MISSING_SETTLE_S = 0.8
 
 
 def _elapsed_ms(start: float) -> float:
@@ -1022,6 +1023,35 @@ def open_unfollow_actions_sheet_from_profile_probe(
         d,
         expected_target_username=expected_target_username,
     )
+    if not btn_det.get("ok") and str(btn_det.get("failure_reason") or "") == "following_button_not_found":
+        # A profile can be identity-verifiable one render before its CTA row is
+        # attached.  Retry only after proving that we are still on the exact
+        # target profile; no coordinate fallback is permitted.
+        log(
+            "info",
+            "unfollow_following_button_initial_missing_retry_started",
+            expected_target_username=expected_target_username,
+            settle_s=_FOLLOWING_BUTTON_INITIAL_MISSING_SETTLE_S,
+        )
+        time.sleep(_FOLLOWING_BUTTON_INITIAL_MISSING_SETTLE_S)
+        profile_retry = verify_unfollow_target_profile_strict(
+            d,
+            expected_target_username=expected_target_username,
+            timeout_s=2.0,
+        )
+        if bool(profile_retry.get("ok")):
+            btn_det = detect_profile_following_button_for_unfollow(
+                d,
+                expected_target_username=expected_target_username,
+            )
+        log(
+            "info",
+            "unfollow_following_button_initial_missing_retry_completed",
+            expected_target_username=expected_target_username,
+            profile_revalidated=bool(profile_retry.get("ok")),
+            detector_ok=bool(btn_det.get("ok")),
+            failure_reason=str(btn_det.get("failure_reason") or ""),
+        )
     if not btn_det.get("ok"):
         out = {
             "ok": False,

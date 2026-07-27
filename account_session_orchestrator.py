@@ -1525,6 +1525,8 @@ def _blocked_class_from_markers(*parts: Any) -> str | None:
 
 _TERMINAL_PHASE_STATUSES = {
     "completed",
+    "candidates_exhausted",
+    "quota_reached",
     "partial_resumable",
     "skipped_cleanly",
     "not_planned",
@@ -2771,6 +2773,7 @@ def _run_follow_to_unfollow_real(
     diagnostic: dict[str, Any],
     business_action_deadline: str | None = None,
     outreach_reserve_seconds: int = 0,
+    resume_checkpoint: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """H3 only: explicit real Unfollow handoff with a hard low cap."""
     t0 = time.perf_counter()
@@ -2893,6 +2896,7 @@ def _run_follow_to_unfollow_real(
             real_action_max_override=real_max_effective,
             business_action_deadline=business_action_deadline,
             outreach_reserve_seconds=outreach_reserve_seconds,
+            resume_checkpoint=resume_checkpoint,
         )
         unfollow_summary = get_last_unfollow_session_probe_summary()
         out = _real_summary_from_unfollow_summary(
@@ -3704,6 +3708,11 @@ def run_account_session(
                             if _account_session_outreach_addon_enabled()
                             else 0
                         ),
+                        resume_checkpoint=(
+                            dict((auto_restart_resume_policy or {}).get("unfollow_checkpoint") or {})
+                            if isinstance((auto_restart_resume_policy or {}).get("unfollow_checkpoint"), dict)
+                            else None
+                        ),
                     )
             else:
                 real_skip_reason = (
@@ -3829,6 +3838,11 @@ def run_account_session(
                 diagnostic=follow_to_unfollow_diagnostic,
                 business_action_deadline=business_action_deadline,
                 outreach_reserve_seconds=0,
+                resume_checkpoint=(
+                    dict((auto_restart_resume_policy or {}).get("unfollow_checkpoint") or {})
+                    if isinstance((auto_restart_resume_policy or {}).get("unfollow_checkpoint"), dict)
+                    else None
+                ),
             )
 
     if _account_session_outreach_addon_enabled():
@@ -4107,7 +4121,7 @@ def run_account_session(
                 "auto_restart_delay_minutes": getattr(
                     config,
                     "AUTO_RESTART_DELAY_MINUTES",
-                    20,
+                    10,
                 ),
                 "auto_restart_max_retries_after_initial_failure": getattr(
                     config,

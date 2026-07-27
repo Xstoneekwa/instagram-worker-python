@@ -60,6 +60,13 @@ from unfollow_ui_coverage_policy import (
     build_unfollow_outcome,
     derive_adaptive_coverage_budget,
 )
+from unfollow_hybrid_strategy import (
+    CURSOR_RESTORE_SCROLL_LIMIT,
+    DIRECT_SEARCH_FALLBACK_BATCH_LIMIT,
+    choose_hybrid_selection,
+    cursor_anchor_matches,
+    open_exact_profile_for_unfollow,
+)
 
 _LAST_UNFOLLOW_SESSION_PROBE_SUMMARY: dict[str, Any] = {}
 
@@ -1130,6 +1137,7 @@ def _run_real_unfollow_multi_loop(
     real_action_max: int,
     business_action_deadline: str | None,
     adaptive_coverage_budget: Any,
+    resume_checkpoint: dict[str, Any] | None,
     t0: float,
 ) -> int:
     verified = 0
@@ -1160,6 +1168,9 @@ def _run_real_unfollow_multi_loop(
             real_action_max,
         )
     )
+    if coverage_tracker is not None and isinstance(resume_checkpoint, dict):
+        for prior_unavailable in list(resume_checkpoint.get("unavailable_usernames") or []):
+            coverage_tracker.mark_candidate_unavailable(str(prior_unavailable or ""))
     totals: dict[str, Any] = {
         "visible_eligibility_total_db_queries": 0,
         "visible_eligibility_total_cache_hits": 0,
@@ -1212,6 +1223,11 @@ def _run_real_unfollow_multi_loop(
     unchanged_scroll_streak_max = 0
     scroll_surface_failures_count = 0
     scroll_v2_lite_fallback_count = 0
+    direct_search_attempted: set[str] = set()
+    direct_search_unavailable: set[str] = set()
+    direct_search_ambiguous: set[str] = set()
+    direct_search_verified_profiles = 0
+    direct_fallback_armed = False
 
     def coverage_elapsed_seconds() -> float:
         return max(0.0, time.perf_counter() - coverage_started_at)
@@ -1305,6 +1321,9 @@ def _run_real_unfollow_multi_loop(
             "actions_sheet_signals_missing_after_retry",
             "sheet_not_opened",
             "actions_sheet_not_opened",
+            "following_button_not_found",
+            "following_button_pre_tap_revalidation_failed",
+            "following_button_bounds_shift_too_large",
         }
         return bool(
             return_ok
@@ -1436,7 +1455,11 @@ def _run_real_unfollow_multi_loop(
             scroll_passes_used=scroll_passes_used,
             **exploration_summary,
         )
-        remaining_planned_count = len(planned_usernames - completed_usernames)
+        remaining_planned_count = (
+            len(coverage_tracker.remaining_planned_usernames)
+            if coverage_tracker is not None
+            else len(planned_usernames - completed_usernames)
+        )
         stable_reason = str(failure_reason or stop_reason or "").strip()
         if not stable_reason:
             stable_reason = {
@@ -1489,6 +1512,11 @@ def _run_real_unfollow_multi_loop(
                 else "complete"
             ),
             "phase_duration_seconds": round(coverage_elapsed_seconds(), 3),
+            "hybrid_unfollow_strategy": "progressive_cursor_direct_v1",
+            "direct_search_attempted_count": len(direct_search_attempted),
+            "direct_search_verified_profiles": direct_search_verified_profiles,
+            "direct_search_unavailable_count": len(direct_search_unavailable),
+            "direct_search_ambiguous_count": len(direct_search_ambiguous),
             "cleanup_reserve_seconds": SCHEDULED_SESSION_CLEANUP_RESERVE_SECONDS,
             "stop_reason": exploration_stop,
             "unfollow_outcome": canonical_outcome,
@@ -1551,6 +1579,7 @@ def _run_real_unfollow_multi_loop(
     any_mode_deadline_checks = 0
     any_mode_last_deadline_check = -float("inf")
     while verified < real_action_max:
+        target_opened_directly = False
         if coverage_tracker is not None:
             coverage_preflight = coverage_tracker.preflight_decision(
                 elapsed_seconds=coverage_elapsed_seconds()
@@ -1586,6 +1615,73 @@ def _run_real_unfollow_multi_loop(
 
         while True:
             selection_t0 = time.perf_counter()
+            if coverage_tracker is not None:
+                hybrid = choose_hybrid_selection(
+                    coverage_tracker.remaining_planned_usernames,
+                    scan_exhausted=direct_fallback_armed,
+                    already_direct_searched=direct_search_attempted,
+                )
+                fallback_batch_exhausted = bool(
+                    direct_fallback_armed
+                    and len(direct_search_attempted) >= DIRECT_SEARCH_FALLBACK_BATCH_LIMIT
+                )
+                if fallback_batch_exhausted:
+                    stop_reason = "direct_fallback_batch_limit_reached"
+                    return emit_final(
+                        "success_real_unfollow_multi_partial_exhausted",
+                        stop_reason,
+                    )
+                if hybrid.mode == "direct_exact" and not fallback_batch_exhausted:
+                    target_username = str(hybrid.usernames[0])
+                    target_key = normalize_unfollow_username(target_username)
+                    direct_search_attempted.add(target_key)
+                    direct_result = open_exact_profile_for_unfollow(d, target_username)
+                    log(
+                        "info",
+                        "unfollow_direct_exact_search_completed",
+                        username=target_username,
+                        result_status=str(direct_result.get("status") or ""),
+                        reason=str(direct_result.get("reason") or ""),
+                        exact_match_count=int(direct_result.get("exact_match_count") or 0),
+                        remaining_count=len(coverage_tracker.remaining_planned_usernames),
+                        selection_reason=hybrid.reason,
+                    )
+                    if bool(direct_result.get("ok")):
+                        direct_search_verified_profiles += 1
+                        target_row = {
+                            "username": target_username,
+                            "username_normalized": target_key,
+                            "row_index": -1,
+                            "direct_exact_search": True,
+                        }
+                        visible_candidates = {
+                            target_key: planned_by_username.get(target_key) or {}
+                        }
+                        selection_reason = hybrid.reason
+                        target_opened_directly = True
+                        break
+                    direct_status = str(direct_result.get("status") or "retryable")
+                    if direct_status in {"unavailable", "ambiguous"}:
+                        if direct_status == "unavailable":
+                            coverage_tracker.mark_candidate_unavailable(target_key)
+                            direct_search_unavailable.add(target_key)
+                        else:
+                            direct_search_ambiguous.add(target_key)
+                        continue
+                    stop_reason = "direct_exact_search_retryable_failure"
+                    return emit_final(
+                        "success_real_unfollow_multi_partial_exhausted",
+                        str(direct_result.get("reason") or stop_reason),
+                    )
+                if hybrid.mode == "complete":
+                    stop_reason = "eligible_targets_exhausted"
+                    return emit_final("success_real_unfollow_multi_partial_exhausted")
+                if hybrid.mode == "partial_resumable":
+                    stop_reason = hybrid.reason
+                    return emit_final(
+                        "success_real_unfollow_multi_partial_exhausted",
+                        stop_reason,
+                    )
             if any_mode_active:
                 visible_eval = _evaluate_visible_unfollow_any_with_session_cache(
                     aid,
@@ -1666,6 +1762,20 @@ def _run_real_unfollow_multi_loop(
                     continue
                 if coverage_decision.action == "stop":
                     stop_reason = coverage_decision.stop_reason
+                    if (
+                        stop_reason not in {"unsafe_marker_detected", "session_time_budget_exhausted"}
+                        and coverage_tracker.remaining_planned_usernames
+                        and not direct_fallback_armed
+                    ):
+                        direct_fallback_armed = True
+                        log(
+                            "info",
+                            "unfollow_direct_fallback_armed",
+                            reason=stop_reason,
+                            remaining_count=len(coverage_tracker.remaining_planned_usernames),
+                            direct_batch_limit=DIRECT_SEARCH_FALLBACK_BATCH_LIMIT,
+                        )
+                        continue
                     status = (
                         "failed_unfollow_multi_action"
                         if stop_reason == "unsafe_marker_detected"
@@ -1808,6 +1918,16 @@ def _run_real_unfollow_multi_loop(
                 else max_scroll_passes
             )
             if scroll_passes_used >= current_scroll_budget:
+                if coverage_tracker is not None and not direct_fallback_armed:
+                    direct_fallback_armed = True
+                    log(
+                        "info",
+                        "unfollow_direct_fallback_armed",
+                        reason="progressive_scroll_budget_exhausted",
+                        remaining_count=len(coverage_tracker.remaining_planned_usernames),
+                        direct_batch_limit=DIRECT_SEARCH_FALLBACK_BATCH_LIMIT,
+                    )
+                    continue
                 scroll_stop_reason = "scroll_budget_exhausted"
                 if coverage_tracker is not None:
                     coverage_stop = coverage_tracker.scroll_budget_decision()
@@ -2080,7 +2200,7 @@ def _run_real_unfollow_multi_loop(
             cta_text=str(target_row.get("cta_text") or "")[:80],
         )
 
-        if coverage_tracker is not None:
+        if coverage_tracker is not None and not target_opened_directly:
             current_surface = detect_own_following_list_screen(
                 d,
                 account_username=uname,
@@ -2120,11 +2240,14 @@ def _run_real_unfollow_multi_loop(
             "probe_target_selection_reason": "",
             "real_target_username": target_username,
         }
-        tapped, tap_meta = tap_following_list_username_row_for_unfollow_probe(
-            d,
-            target_row,
-            selection_reason=selection_reason,
-        )
+        if target_opened_directly:
+            tapped, tap_meta = True, {"ok": True, "method": "direct_exact_search"}
+        else:
+            tapped, tap_meta = tap_following_list_username_row_for_unfollow_probe(
+                d,
+                target_row,
+                selection_reason=selection_reason,
+            )
         if not tapped:
             failed += 1
             stop_reason = "target_row_tap_failed"
@@ -2134,14 +2257,22 @@ def _run_real_unfollow_multi_loop(
                 str(tap_meta.get("failure_reason") or "target_row_tap_failed"),
             )
 
-        profile_det = verify_unfollow_target_profile_strict(
-            d,
-            expected_target_username=target_username,
+        profile_det = (
+            {"ok": True, "method": "direct_exact_search_preverified"}
+            if target_opened_directly
+            else verify_unfollow_target_profile_strict(
+                d,
+                expected_target_username=target_username,
+            )
         )
         if not profile_det.get("ok"):
             failed += 1
             stop_reason = "target_profile_open_failed"
-            ret = return_to_following_list_after_unfollow_action(d, account_username=uname)
+            ret = (
+                {"ok": open_own_following_list_from_own_profile(d, uname)[0]}
+                if target_opened_directly
+                else return_to_following_list_after_unfollow_action(d, account_username=uname)
+            )
             last_fields = {
                 **target_fields,
                 "target_profile_open_ok": False,
@@ -2159,7 +2290,11 @@ def _run_real_unfollow_multi_loop(
         )
         if not sheet.get("ok"):
             failed += 1
-            ret = return_to_following_list_after_unfollow_action(d, account_username=uname)
+            ret = (
+                {"ok": open_own_following_list_from_own_profile(d, uname)[0]}
+                if target_opened_directly
+                else return_to_following_list_after_unfollow_action(d, account_username=uname)
+            )
             return_ok = bool(ret.get("ok"))
             sheet_failure_reason = str(sheet.get("failure_reason") or "actions_sheet_open_failed")
             recoverable = is_recoverable_action_sheet_failure(sheet, return_ok=return_ok)
@@ -2245,7 +2380,11 @@ def _run_real_unfollow_multi_loop(
         if not bool(sheet.get("unfollow_option_visible")):
             failed += 1
             stop_reason = "unfollow_option_missing"
-            ret = return_to_following_list_after_unfollow_action(d, account_username=uname)
+            ret = (
+                {"ok": open_own_following_list_from_own_profile(d, uname)[0]}
+                if target_opened_directly
+                else return_to_following_list_after_unfollow_action(d, account_username=uname)
+            )
             last_fields = {
                 **target_fields,
                 "target_profile_open_ok": True,
@@ -2264,7 +2403,11 @@ def _run_real_unfollow_multi_loop(
         else:
             failed += 1
             stop_reason = "unfollow_tap_failed"
-            ret = return_to_following_list_after_unfollow_action(d, account_username=uname)
+            ret = (
+                {"ok": open_own_following_list_from_own_profile(d, uname)[0]}
+                if target_opened_directly
+                else return_to_following_list_after_unfollow_action(d, account_username=uname)
+            )
             last_fields = {
                 **target_fields,
                 "target_profile_open_ok": True,
@@ -2321,7 +2464,11 @@ def _run_real_unfollow_multi_loop(
                 username=target_username,
                 reason=str(persist_out.get("error") or "persist_failed"),
             )
-        ret = return_to_following_list_after_unfollow_action(d, account_username=uname)
+        ret = (
+            {"ok": open_own_following_list_from_own_profile(d, uname)[0]}
+            if target_opened_directly
+            else return_to_following_list_after_unfollow_action(d, account_username=uname)
+        )
         return_ok = bool(ret.get("ok"))
         if not verify_ok:
             failed += 1
@@ -2434,6 +2581,7 @@ def run_unfollow_session(
     real_action_max_override: int | None = None,
     business_action_deadline: str | None = None,
     outreach_reserve_seconds: int = 0,
+    resume_checkpoint: dict[str, Any] | None = None,
 ) -> int:
     """Run unfollow_session: probe by default; real Unfollow only with explicit config opt-in."""
     t0 = time.perf_counter()
@@ -2750,6 +2898,58 @@ def run_unfollow_session(
             **sort_fields,
         }
 
+    cursor_restore_fields: dict[str, Any] = {
+        "cursor_restore_attempted": False,
+        "cursor_restore_succeeded": False,
+        "cursor_restore_scrolls": 0,
+        "cursor_restore_reason": "no_checkpoint",
+    }
+    if real_action_active and isinstance(resume_checkpoint, dict):
+        prior_depth = max(0, int(resume_checkpoint.get("depth") or 0))
+        restore_limit = min(prior_depth, CURSOR_RESTORE_SCROLL_LIMIT)
+        if restore_limit > 0 and list(resume_checkpoint.get("anchor_hashes") or []):
+            cursor_restore_fields.update(
+                {
+                    "cursor_restore_attempted": True,
+                    "cursor_restore_reason": "anchor_not_found_within_bound",
+                }
+            )
+            for restore_index in range(restore_limit + 1):
+                visible_handles = [str(row.get("username") or "") for row in rows]
+                if cursor_anchor_matches(visible_handles, resume_checkpoint):
+                    cursor_restore_fields.update(
+                        {
+                            "cursor_restore_succeeded": True,
+                            "cursor_restore_reason": "checkpoint_anchor_found",
+                        }
+                    )
+                    break
+                if restore_index >= restore_limit:
+                    break
+                scroll = _scroll_following_list_for_unfollow(d, account_username=uname)
+                if not bool(scroll.get("ok")):
+                    cursor_restore_fields["cursor_restore_reason"] = str(
+                        scroll.get("failure_reason") or "cursor_restore_scroll_failed"
+                    )
+                    break
+                cursor_restore_fields["cursor_restore_scrolls"] = restore_index + 1
+                rows, harvest_meta = harvest_visible_following_rows_for_unfollow(
+                    d,
+                    account_username=uname,
+                )
+            log(
+                "info",
+                "unfollow_cursor_restore_completed",
+                prior_depth=prior_depth,
+                restore_limit=restore_limit,
+                **cursor_restore_fields,
+            )
+            harvest_fields = {
+                **harvest_fields,
+                **_harvest_summary_fields(rows, harvest_meta, planned_usernames),
+                **cursor_restore_fields,
+            }
+
     if real_action_active:
         return _run_real_unfollow_multi_loop(
             d,
@@ -2767,6 +2967,7 @@ def run_unfollow_session(
             real_action_max=real_action_max,
             business_action_deadline=resolved_deadline,
             adaptive_coverage_budget=handoff_budget,
+            resume_checkpoint=resume_checkpoint,
             t0=t0,
         )
 

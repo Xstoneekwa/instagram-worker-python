@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import inspect
 import os
+import tempfile
 import threading
 import time
 import unittest
@@ -3184,14 +3185,22 @@ class FollowTargetRotationPendingTests(unittest.TestCase):
 
 class DeferredPostReturnPersistTests(unittest.TestCase):
     def setUp(self) -> None:
+        self._outbox_tmp = tempfile.TemporaryDirectory()
+        self._outbox_env = patch.dict(
+            os.environ,
+            {"WORKER_DEFERRED_PROJECTION_OUTBOX_PATH": os.path.join(self._outbox_tmp.name, "outbox.sqlite3")},
+        )
+        self._outbox_env.start()
         runner._DEFERRED_FOLLOW_ACTION_LOG_FLUSHES.clear()
         runner._DEFERRED_POST_RETURN_PERSIST_STEPS.clear()
 
     def tearDown(self) -> None:
         runner._DEFERRED_FOLLOW_ACTION_LOG_FLUSHES.clear()
         runner._DEFERRED_POST_RETURN_PERSIST_STEPS.clear()
+        self._outbox_env.stop()
+        self._outbox_tmp.cleanup()
 
-    def test_deferred_action_logs_flush_before_completed_status(self) -> None:
+    def test_deferred_action_logs_spool_before_completed_status(self) -> None:
         logs: list[tuple[str, str, dict]] = []
         runner._schedule_deferred_follow_action_log_flush(
             events=[("follow_tap_sent", {"safe": True})],
@@ -3214,15 +3223,14 @@ class DeferredPostReturnPersistTests(unittest.TestCase):
                 performance_summary={},
             )
 
-        insert_log.assert_called_once()
+        insert_log.assert_not_called()
         update_status.assert_called_once()
         self.assertEqual(update_status.call_args.kwargs["status"], "completed")
         events = [event for _level, event, _kw in logs]
-        self.assertIn("post_return_deferred_persist_started", events)
-        self.assertIn("post_return_deferred_persist_completed", events)
+        self.assertIn("terminal_deferred_projection_spooled", events)
         self.assertIn("run_status_updated", events)
 
-    def test_deferred_action_logs_none_return_counts_as_success(self) -> None:
+    def test_deferred_action_logs_do_not_wait_for_remote_return(self) -> None:
         logs: list[tuple[str, str, dict]] = []
         runner._schedule_deferred_follow_action_log_flush(
             events=[("follow_tap_sent", {"safe": True})],
@@ -3248,10 +3256,45 @@ class DeferredPostReturnPersistTests(unittest.TestCase):
         update_status.assert_called_once()
         self.assertEqual(update_status.call_args.kwargs["status"], "completed")
         events = [event for _level, event, _kw in logs]
-        self.assertIn("post_return_deferred_persist_completed", events)
-        self.assertNotIn("post_return_deferred_persist_failed", events)
+        self.assertIn("terminal_deferred_projection_spooled", events)
+        self.assertNotIn("post_return_deferred_persist_started", events)
 
-    def test_deferred_action_log_failure_blocks_completed_status(self) -> None:
+    def test_terminal_status_does_not_wait_on_an_eleven_second_projection(self) -> None:
+        runner._schedule_deferred_post_return_supabase_step(
+            step="record_post_like_interaction_success",
+            fn_name="record_post_like_interaction_success",
+            args=("acct", "cand_one", "ct_one"),
+            run_id="run",
+            account_id="acct",
+        )
+
+        def slow_projection(*_args, **_kwargs):
+            time.sleep(11)
+
+        with patch.object(
+            runner.supabase_client,
+            "record_post_like_interaction_success",
+            side_effect=slow_projection,
+            create=True,
+        ) as projection, patch.object(
+            runner.supabase_client,
+            "update_run_status",
+            return_value={"ok": True},
+        ):
+            started = time.monotonic()
+            status = runner._update_run_status_safe(
+                run_id="run",
+                status="completed",
+                totals={"total": 1, "success": 1, "failed": 0},
+                performance_summary={},
+            )
+            elapsed = time.monotonic() - started
+
+        self.assertEqual(status, "completed")
+        self.assertLess(elapsed, 1.0)
+        projection.assert_not_called()
+
+    def test_deferred_action_log_failure_spools_without_changing_completed_status(self) -> None:
         logs: list[tuple[str, str, dict]] = []
         runner._schedule_deferred_follow_action_log_flush(
             events=[("follow_tap_sent", {"safe": True})],
@@ -3275,12 +3318,43 @@ class DeferredPostReturnPersistTests(unittest.TestCase):
             )
 
         update_status.assert_called_once()
-        self.assertEqual(update_status.call_args.kwargs["status"], "failed")
+        self.assertEqual(update_status.call_args.kwargs["status"], "completed")
         events = [event for _level, event, _kw in logs]
-        self.assertIn("post_return_deferred_persist_failed", events)
-        self.assertIn("run_completed_blocked_deferred_persist_failed", events)
+        self.assertNotIn("post_return_deferred_persist_failed", events)
+        self.assertIn("terminal_deferred_projection_spooled", events)
 
-    def test_deferred_post_return_step_flushes_before_completed_status(self) -> None:
+    def test_local_outbox_failure_never_blocks_terminal_status(self) -> None:
+        logs: list[tuple[str, str, dict]] = []
+        runner._schedule_deferred_follow_action_log_flush(
+            events=[("follow_tap_sent", {"safe": True})],
+            run_id="run",
+            account_id="acct",
+            target_username="cand_one",
+            supabase_mode=True,
+        )
+        with patch.object(
+            runner, "log", side_effect=lambda level, event, **kw: logs.append((level, event, kw))
+        ), patch.object(
+            runner.deferred_projection_outbox, "enqueue", side_effect=OSError("disk unavailable")
+        ), patch.object(
+            runner.supabase_client, "update_run_status", return_value={"ok": True}
+        ) as update_status:
+            status = runner._update_run_status_safe(
+                run_id="run",
+                status="completed",
+                totals={"total": 1, "success": 1, "failed": 0},
+                performance_summary={},
+            )
+
+        self.assertEqual(status, "completed")
+        update_status.assert_called_once()
+        self.assertEqual(runner._pending_deferred_follow_action_log_count(), 0)
+        self.assertIn(
+            "terminal_deferred_projection_spool_failed",
+            [event for _level, event, _kw in logs],
+        )
+
+    def test_deferred_post_return_step_spools_before_completed_status(self) -> None:
         logs: list[tuple[str, str, dict]] = []
         runner._schedule_deferred_post_return_supabase_step(
             step="record_mute_interaction_success",
@@ -3305,14 +3379,13 @@ class DeferredPostReturnPersistTests(unittest.TestCase):
                 performance_summary={},
             )
 
-        mute_persist.assert_called_once()
+        mute_persist.assert_not_called()
         update_status.assert_called_once()
         self.assertEqual(update_status.call_args.kwargs["status"], "completed")
         events = [event for _level, event, _kw in logs]
-        self.assertIn("post_return_deferred_step_started", events)
-        self.assertIn("post_return_deferred_step_completed", events)
+        self.assertIn("terminal_deferred_projection_spooled", events)
 
-    def test_deferred_post_return_step_failure_blocks_completed_status(self) -> None:
+    def test_deferred_post_return_step_failure_spools_without_changing_completed_status(self) -> None:
         logs: list[tuple[str, str, dict]] = []
         runner._schedule_deferred_post_return_supabase_step(
             step="record_post_like_interaction_success",
@@ -3338,10 +3411,10 @@ class DeferredPostReturnPersistTests(unittest.TestCase):
             )
 
         update_status.assert_called_once()
-        self.assertEqual(update_status.call_args.kwargs["status"], "failed")
+        self.assertEqual(update_status.call_args.kwargs["status"], "completed")
         events = [event for _level, event, _kw in logs]
-        self.assertIn("post_return_deferred_step_failed", events)
-        self.assertIn("run_completed_blocked_deferred_persist_failed", events)
+        self.assertNotIn("post_return_deferred_step_failed", events)
+        self.assertIn("terminal_deferred_projection_spooled", events)
 
     def test_post_return_background_flush_is_nonblocking_and_terminal_does_not_duplicate(self) -> None:
         persist_started = threading.Event()
@@ -3385,7 +3458,7 @@ class DeferredPostReturnPersistTests(unittest.TestCase):
         persist_call.assert_called_once()
         self.assertEqual(runner._pending_deferred_follow_action_log_count(), 0)
 
-    def test_stopped_status_flushes_deferred_verified_post_like(self) -> None:
+    def test_stopped_status_spools_deferred_verified_post_like(self) -> None:
         logs: list[tuple[str, str, dict]] = []
         runner._schedule_deferred_post_return_supabase_step(
             step="record_post_like_interaction_success",
@@ -3419,13 +3492,11 @@ class DeferredPostReturnPersistTests(unittest.TestCase):
                 performance_summary={"reason": "manual_stop_graceful_flush_completed"},
             )
 
-        like_persist.assert_called_once()
+        like_persist.assert_not_called()
         update_status.assert_called_once()
         self.assertEqual(update_status.call_args.kwargs["status"], "stopped")
         events = [event for _level, event, _kw in logs]
-        self.assertIn("post_return_deferred_step_started", events)
-        self.assertIn("post_return_deferred_step_completed", events)
-        self.assertIn("post_likes_persisted", events)
+        self.assertIn("terminal_deferred_projection_spooled", events)
 
     def test_manual_stop_flush_logs_post_like_persisted_before_stop(self) -> None:
         logs: list[tuple[str, str, dict]] = []
