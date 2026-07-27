@@ -175,6 +175,7 @@ def detect_profile_following_button_for_unfollow(
     d: u2.Device,
     *,
     expected_target_username: str,
+    allow_verified_wide_cta: bool = False,
 ) -> dict[str, Any]:
     """Find the profile Following button in the Unfollow probe context.
 
@@ -247,6 +248,27 @@ def detect_profile_following_button_for_unfollow(
             screen_w=screen_w,
             screen_h=screen_h,
         )
+        verified_wide_cta = bool(
+            allow_verified_wide_cta
+            and reject_reason == "bounds_shape_rejected"
+            and int(bounds.get("right", 0)) - int(bounds.get("left", 0))
+            <= int(screen_w * 0.92)
+            and int(bounds.get("right", 0)) - int(bounds.get("left", 0))
+            > int(screen_w * 0.62)
+            and rid.rsplit("/", 1)[-1] == "profile_header_follow_button"
+            and cls == "android.widget.Button"
+            and clickable
+            and text in _FOLLOWING_BUTTON_LABELS
+        )
+        if verified_wide_cta:
+            reject_reason = ""
+            candidate["detection_method"] = "verified_profile_wide_resource_button"
+            candidate["verified_wide_cta"] = True
+            log(
+                "info",
+                "unfollow_profile_following_button_wide_cta_accepted",
+                **candidate,
+            )
         if reject_reason:
             candidates_rejected += 1
             reject_reasons_count[reject_reason] = int(reject_reasons_count.get(reject_reason, 0)) + 1
@@ -308,6 +330,7 @@ def detect_profile_following_button_for_unfollow(
         "tap_x": int(best.get("tap_x") or 0),
         "tap_y": int(best.get("tap_y") or 0),
         "clickable": bool(best.get("clickable")),
+        "verified_wide_cta": bool(best.get("verified_wide_cta")),
         "candidates_seen_count": candidates_seen,
         "candidates_rejected_count": candidates_rejected,
         "reject_reasons_count": reject_reasons_count,
@@ -1043,6 +1066,7 @@ def open_unfollow_actions_sheet_from_profile_probe(
             btn_det = detect_profile_following_button_for_unfollow(
                 d,
                 expected_target_username=expected_target_username,
+                allow_verified_wide_cta=True,
             )
         log(
             "info",
@@ -1078,6 +1102,7 @@ def open_unfollow_actions_sheet_from_profile_probe(
     refreshed = detect_profile_following_button_for_unfollow(
         d,
         expected_target_username=expected_target_username,
+        allow_verified_wide_cta=bool(btn_det.get("verified_wide_cta")),
     )
     refreshed_bounds = dict(refreshed.get("bounds") or {})
     delta_x, delta_y, bounds_shift_px = _center_shift_metrics(initial_bounds, refreshed_bounds)

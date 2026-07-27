@@ -7,7 +7,9 @@
   before any scroll. A local navigation stop remains `partial_resumable`; a
   positive verified-action count never promotes it to global completion.
 - Unfollow retries an initially absent `Following` CTA once, after a fresh
-  exact-profile identity proof. There is no coordinate fallback.
+  exact-profile identity proof. A stable full-width CTA is accepted only after
+  that proof and only for the exact clickable Instagram resource button with
+  an exact `Following` label. There is no coordinate fallback.
 - Unfollow keeps an HMAC-only cursor (bounded anchors, depth and generation),
   restores at most ten scrolls, scans progressively while more than ten
   candidates remain, and switches to exact verified profile search for the

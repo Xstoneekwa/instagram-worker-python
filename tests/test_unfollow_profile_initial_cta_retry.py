@@ -12,6 +12,20 @@ class _Device:
         self.clicks.append((x, y))
 
 
+class _WideButtonDevice(_Device):
+    def window_size(self):
+        return 1080, 2400
+
+    def dump_hierarchy(self, compressed=False):
+        del compressed
+        return (
+            '<hierarchy><node text="Following" content-desc="Following e-baie.be" '
+            'resource-id="com.instagram.androif:id/profile_header_follow_button" '
+            'class="android.widget.Button" clickable="true" '
+            'bounds="[33,752][941,842]" /></hierarchy>'
+        )
+
+
 class UnfollowProfileInitialCtaRetryTests(unittest.TestCase):
     def test_transient_missing_following_cta_revalidates_exact_profile_then_retries(self) -> None:
         button = {
@@ -65,6 +79,26 @@ class UnfollowProfileInitialCtaRetryTests(unittest.TestCase):
         self.assertEqual(result["failure_reason"], "following_button_not_found")
         self.assertEqual(detector.call_count, 1)
         self.assertEqual(device.clicks, [])
+
+    def test_verified_exact_profile_accepts_stable_wide_resource_cta(self) -> None:
+        device = _WideButtonDevice()
+        with patch.object(
+            probe,
+            "verify_unfollow_target_profile_strict",
+            return_value={"ok": True, "actual_profile_username": "ebaie.be"},
+        ), patch.object(
+            probe,
+            "_detect_actions_sheet_signals",
+            return_value={"sheet_context": True, "unfollow_visible": True, "unfollow_text": "Unfollow"},
+        ), patch.object(probe.time, "sleep"):
+            result = probe.open_unfollow_actions_sheet_from_profile_probe(
+                device,
+                expected_target_username="ebaie.be",
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["following_detection_method"], "verified_profile_wide_resource_button")
+        self.assertEqual(device.clicks, [(487, 797)])
 
 
 if __name__ == "__main__":
