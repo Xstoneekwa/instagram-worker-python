@@ -16,6 +16,23 @@ from zoneinfo import ZoneInfo
 from logs import log
 import account_protection_lists
 
+BUSINESS_TIMEZONE = ZoneInfo("Africa/Johannesburg")
+
+
+def sast_business_day_window(now: datetime | None = None) -> tuple[str, datetime, datetime]:
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    local_start = current.astimezone(BUSINESS_TIMEZONE).replace(
+        hour=0,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+    start = local_start.astimezone(timezone.utc)
+    end = (local_start + timedelta(days=1)).astimezone(timezone.utc)
+    return local_start.date().isoformat(), start, end
+
 
 class SupabaseRestError(RuntimeError):
     """Structured Supabase REST failure without leaking secrets."""
@@ -2853,17 +2870,11 @@ def get_account_dm_counter_today(account_id: str) -> dict[str, Any] | None:
 
 
 def count_successful_unfollows_today(account_id: str) -> int:
-    """Count successful unfollows for the account in the current UTC day."""
+    """Count persisted verified Unfollows in the current SAST business day."""
     aid = str(account_id or "").strip()
     if not aid:
         return 0
-    start = datetime.now(timezone.utc).replace(
-        hour=0,
-        minute=0,
-        second=0,
-        microsecond=0,
-    )
-    end = start + timedelta(days=1)
+    _business_date, start, end = sast_business_day_window()
     rows = _request_json(
         "GET",
         "ig_interacted_users",
@@ -2900,12 +2911,7 @@ def count_successful_follows_today(account_id: str) -> int:
     aid = str(account_id or "").strip()
     if not aid:
         return 0
-    business_timezone = ZoneInfo("Africa/Johannesburg")
-    start = (
-        datetime.now(business_timezone)
-        .replace(hour=0, minute=0, second=0, microsecond=0)
-        .astimezone(timezone.utc)
-    )
+    _business_date, start, _end = sast_business_day_window()
     rows = _request_json(
         "GET",
         "ig_interaction_events",
