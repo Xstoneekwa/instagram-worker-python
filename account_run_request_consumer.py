@@ -2519,6 +2519,7 @@ def _handle_claimed_request(cfg: DispatcherConfig, request: dict[str, Any]) -> N
                     reason=resume_reason,
                     request_id=request_id,
                     device_id=device_id or None,
+                    clone_id=str(dispatch_ctx.get("clone_id") or "").strip() or None,
                     app_instance_id=str(dispatch_ctx.get("app_instance_id") or "").strip() or None,
                     execution_worker_id=str(request_metadata.get("execution_worker_id") or "").strip() or None,
                     trigger_source=str(request_metadata.get("trigger_source") or "").strip() or None,

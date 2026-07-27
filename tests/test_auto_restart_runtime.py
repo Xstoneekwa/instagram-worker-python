@@ -21,6 +21,39 @@ class AutoRestartRuntimeTests(unittest.TestCase):
         self.assertFalse(phase_enabled("welcome", default=True, policy=policy))
         self.assertTrue(phase_enabled("follow", default=False, policy=policy))
 
+    def test_checkpoint_payload_is_not_an_instagram_challenge(self) -> None:
+        summary = {
+            "account_id": "11111111-1111-4111-8111-111111111111",
+            "account_username": "fixture_user",
+            "auto_restart_resume_plan": {
+                "restart_allowed": True,
+                "phases_to_run": {"welcome": False, "follow": False, "unfollow": True},
+                "quota_remaining": {"follow": 0, "unfollow": 3, "total": 3},
+                "unfollow_checkpoint": {
+                    "checkpoint": {"last_safe_checkpoint": "following_list_after_scroll"},
+                    "remaining_usernames": ["one", "two", "three"],
+                },
+            },
+        }
+        result = build_manual_resume_command(summary)
+        self.assertTrue(result["manual_resume_allowed"])
+        self.assertEqual(result["unsafe_markers"], [])
+
+    def test_explicit_challenge_failure_field_still_blocks(self) -> None:
+        summary = {
+            "account_id": "11111111-1111-4111-8111-111111111111",
+            "account_username": "fixture_user",
+            "root_failure_code": "instagram_challenge_checkpoint",
+            "auto_restart_resume_plan": {
+                "restart_allowed": True,
+                "phases_to_run": {"welcome": False, "follow": False, "unfollow": True},
+                "quota_remaining": {"follow": 0, "unfollow": 3, "total": 3},
+            },
+        }
+        result = build_manual_resume_command(summary)
+        self.assertFalse(result["manual_resume_allowed"])
+        self.assertEqual(result["manual_resume_block_reason"], "challenge")
+
     def test_validate_blocks_missing_prior_run(self) -> None:
         ok, reason, policy = validate_auto_restart_request_at_claim(
             account_id="11111111-1111-4111-8111-111111111111",
