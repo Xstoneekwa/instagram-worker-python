@@ -7,7 +7,6 @@ existing DM sender engine with dm_type='outreach'.
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
 from typing import Any
 
 import uiautomator2 as u2
@@ -45,7 +44,8 @@ def _as_nonnegative_int(value: Any, default: int = 0) -> int:
 def _is_valid_counter_row(counter: Any) -> bool:
     if not isinstance(counter, dict):
         return False
-    if str(counter.get("counter_date") or "") != datetime.now(timezone.utc).date().isoformat():
+    business_date, _start, _end = supabase_client.sast_business_day_window()
+    if str(counter.get("counter_date") or "") != business_date:
         return False
     for key in ("outreach_sent_count", "total_dm_sent_count"):
         if key not in counter:

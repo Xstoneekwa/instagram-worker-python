@@ -2849,11 +2849,11 @@ def get_account_dm_settings(account_id: str) -> dict[str, Any] | None:
 
 
 def get_account_dm_counter_today(account_id: str) -> dict[str, Any] | None:
-    """Return today's DM counter row when it exists; does not create one."""
+    """Return the current Johannesburg business-day DM counter row."""
     aid = str(account_id or "").strip()
     if not aid:
         return None
-    today = datetime.now(timezone.utc).date().isoformat()
+    today, _start, _end = sast_business_day_window()
     rows = _request_json(
         "GET",
         "ig_account_dm_counters",

@@ -20,6 +20,22 @@ class SastBusinessDayCounterTests(unittest.TestCase):
         self.assertEqual(after[1].isoformat(), "2026-07-27T22:00:00+00:00")
         self.assertEqual(after[2].isoformat(), "2026-07-28T22:00:00+00:00")
 
+    def test_dm_counter_lookup_uses_the_sast_business_date(self) -> None:
+        with (
+            patch.object(
+                supabase_client,
+                "sast_business_day_window",
+                return_value=(
+                    "2026-07-28",
+                    datetime(2026, 7, 27, 22, 0, tzinfo=timezone.utc),
+                    datetime(2026, 7, 28, 22, 0, tzinfo=timezone.utc),
+                ),
+            ),
+            patch.object(supabase_client, "_request_json", return_value=[]) as request,
+        ):
+            supabase_client.get_account_dm_counter_today("account-1")
+
+        self.assertEqual(request.call_args.kwargs["query"]["counter_date"], "eq.2026-07-28")
     def test_unfollow_counter_uses_half_open_sast_window(self) -> None:
         rows = [
             {"id": "before", "unfollowed_at": "2026-07-27T21:59:59.999Z"},
