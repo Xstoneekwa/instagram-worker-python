@@ -757,26 +757,29 @@ def build_unfollow_outcome(
     verified_count: int,
     persisted_count: int,
     tracker: FollowingCoverageTracker | None,
+    unplanned_eligible_count: int = 0,
 ) -> dict[str, Any]:
     """Build the single canonical Unfollow terminal outcome."""
     reason = str(stable_reason or "unfollow_outcome_unknown")
     unavailable_count = len(tracker.unavailable_usernames) if tracker is not None else 0
-    remaining_count = (
+    planned_remaining_count = (
         len(tracker.remaining_planned_usernames)
         if tracker is not None
         else max(0, int(planned_candidate_count) - int(persisted_count))
     )
+    unplanned_count = max(0, int(unplanned_eligible_count))
+    remaining_count = planned_remaining_count + unplanned_count
     checkpoint = tracker.checkpoint() if tracker is not None else {}
     safe_checkpoint = str(checkpoint.get("last_safe_checkpoint") or "")
 
     if reason == "unfollow_quota_reached":
         phase_status = "quota_reached"
-    elif reason in {"eligible_targets_exhausted", "no_more_following_rows"} or remaining_count == 0:
-        phase_status = "candidates_exhausted"
     elif reason in _UNFOLLOW_CRITICAL_REASONS:
         phase_status = "blocked_critical"
     elif reason in _UNFOLLOW_INTERNAL_FAILURE_REASONS:
         phase_status = "failed_internal"
+    elif remaining_count == 0:
+        phase_status = "candidates_exhausted"
     elif remaining_count > 0 and safe_checkpoint:
         phase_status = "partial_resumable"
     else:
@@ -789,10 +792,12 @@ def build_unfollow_outcome(
         "raw_candidate_count": max(0, int(raw_candidate_count)),
         "eligible_candidate_count": max(0, int(eligible_candidate_count)),
         "planned_candidate_count": max(0, int(planned_candidate_count)),
+        "unplanned_eligible_count": unplanned_count,
         "attempted_count": max(0, int(attempted_count)),
         "verified_count": max(0, int(verified_count)),
         "persisted_count": max(0, int(persisted_count)),
         "unavailable_count": unavailable_count,
+        "planned_remaining_count": planned_remaining_count,
         "remaining_count": remaining_count,
         "last_safe_checkpoint": safe_checkpoint or None,
         "resume_recommended": resume_recommended,

@@ -14,6 +14,7 @@ from typing import Any, Callable
 
 import uiautomator2 as u2
 
+import account_protection_lists
 import config
 import supabase_client
 from account_session_reliability_schema import (
@@ -2002,7 +2003,7 @@ def _run_follow_to_unfollow_handoff_diagnostic(
         "handoff_decision": "would_skip_unfollow",
         "handoff_skip_reason": "",
         "pending_unfollow_count": 0,
-        "pending_unfollow_count_scope": "probe_limit_1",
+        "pending_unfollow_count_scope": "not_evaluated",
         "has_pending_unfollow": False,
         "unfollow_enabled": False,
         "unfollow_mode": "",
@@ -2033,13 +2034,20 @@ def _run_follow_to_unfollow_handoff_diagnostic(
 
     try:
         settings = load_unfollow_settings(aid, ensure_row=False)
+        protected_usernames = account_protection_lists.unfollow_whitelist_for_run(aid)
         plan = plan_unfollow_targets(
             aid,
             settings=settings,
             limit=1,
+            protected_usernames=protected_usernames,
         )
 
-        pending_unfollow_count = int(plan.get("candidates_count") or 0)
+        pending_unfollow_count = int(
+            plan.get("eligible_total")
+            if plan.get("eligible_total") is not None
+            else plan.get("candidates_count")
+            or 0
+        )
         plan_reason = str(plan.get("plan_reason") or "")
         mode = str(settings.mode or "")
         is_unfollow_any = _is_unfollow_any_mode(mode)
@@ -2051,7 +2059,7 @@ def _run_follow_to_unfollow_handoff_diagnostic(
         pending_scope = (
             "following_ui_safe_candidate_required"
             if is_unfollow_any
-            else "probe_limit_1"
+            else "global_exhaustive_candidate_scan"
         )
 
         summary.update(

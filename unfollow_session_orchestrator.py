@@ -495,10 +495,31 @@ def _base_session_summary(
         "unfollow_sort_mode_requested": str(getattr(settings, "sort_mode", "default") or "default"),
         "plan_reason": str(plan.get("plan_reason") or ""),
         "candidates_planned_count": int(plan.get("candidates_count") or 0),
-        "last_run_eligible_at_start": int(plan.get("candidates_count") or 0),
+        "eligible_total": int(
+            plan.get("eligible_total")
+            if plan.get("eligible_total") is not None
+            else plan.get("candidates_count")
+            or 0
+        ),
+        "unplanned_eligible_count": int(plan.get("unplanned_eligible_count") or 0),
+        "last_run_eligible_at_start": int(
+            plan.get("eligible_total")
+            if plan.get("eligible_total") is not None
+            else plan.get("candidates_count")
+            or 0
+        ),
         "source_rows_loaded": int(plan.get("source_rows_loaded") or 0),
         "query_limit": int(plan.get("query_limit") or 0),
+        "page_size": int(plan.get("page_size") or plan.get("query_limit") or 0),
+        "pages_loaded": int(plan.get("pages_loaded") or 0),
+        "page_requests": int(plan.get("page_requests") or 0),
         "pagination_used": bool(plan.get("pagination_used")),
+        "pagination_strategy": str(plan.get("pagination_strategy") or ""),
+        "candidate_scan_exhaustive": bool(plan.get("candidate_scan_exhaustive")),
+        "candidate_funnel_reconciled": bool(plan.get("candidate_funnel_reconciled")),
+        "candidate_skip_counts": dict(plan.get("skipped_counts") or {}),
+        "candidate_skipped_total": int(plan.get("skipped_total") or 0),
+        "scan_as_of": str(plan.get("scan_as_of") or ""),
         "following_surface_ok": False,
         "visible_rows_count": 0,
         "row_cta_counts": {},
@@ -524,7 +545,12 @@ def _base_session_summary(
         "scroll_passes_used": 0,
         "scroll_stop_reason": "",
         "multi_action_stop_reason": "",
-        "eligible_db_remaining": int(plan.get("candidates_count") or 0),
+        "eligible_db_remaining": int(
+            plan.get("eligible_total")
+            if plan.get("eligible_total") is not None
+            else plan.get("candidates_count")
+            or 0
+        ),
         "ui_coverage_status": "not_started",
         "resume_recommended": False,
         "probe_target_username": "",
@@ -1354,7 +1380,7 @@ def _run_real_unfollow_multi_loop(
                 if planned_usernames
                 else 0.0
             ),
-            "plan_guided_mode": "instrumentation_only",
+            "plan_guided_mode": "enforced_allowlist",
         }
 
     def refresh_recoverable_action_summary_totals() -> None:
@@ -1522,13 +1548,17 @@ def _run_real_unfollow_multi_loop(
         canonical_outcome = build_unfollow_outcome(
             stable_reason=stable_reason,
             raw_candidate_count=int(base_summary.get("source_rows_loaded") or 0),
-            eligible_candidate_count=int(base_summary.get("candidates_planned_count") or 0),
+            eligible_candidate_count=int(base_summary.get("eligible_total") or 0),
             planned_candidate_count=len(planned_usernames),
             attempted_count=sent,
             verified_count=verified,
             persisted_count=persisted,
             tracker=coverage_tracker,
+            unplanned_eligible_count=int(
+                base_summary.get("unplanned_eligible_count") or 0
+            ),
         )
+        global_remaining_count = int(canonical_outcome.get("remaining_count") or 0)
         summary = {
             **base_summary,
             **last_fields,
@@ -1561,11 +1591,12 @@ def _run_real_unfollow_multi_loop(
             "multi_action_stop_reason": exploration_stop,
             "last_run_attempted": sent,
             "last_run_verified": verified,
-            "last_run_remaining_eligible": remaining_planned_count,
-            "eligible_db_remaining": remaining_planned_count,
+            "last_run_remaining_eligible": global_remaining_count,
+            "eligible_db_remaining": global_remaining_count,
+            "planned_eligible_remaining": remaining_planned_count,
             "ui_coverage_status": (
                 "partial"
-                if remaining_planned_count > 0
+                if global_remaining_count > 0
                 else "complete"
             ),
             "phase_duration_seconds": round(coverage_elapsed_seconds(), 3),
@@ -1590,15 +1621,35 @@ def _run_real_unfollow_multi_loop(
             account_id=aid,
             run_id=run_id,
             source_total=int(base_summary.get("source_rows_loaded") or 0),
-            eligible_total=int(base_summary.get("candidates_planned_count") or 0),
+            eligible_total=int(base_summary.get("eligible_total") or 0),
+            planned_total=len(planned_usernames),
+            unplanned_eligible_total=int(
+                base_summary.get("unplanned_eligible_count") or 0
+            ),
             selected_total=sent,
             attempted_total=sent,
             verified_total=verified,
             persisted_total=persisted,
-            remaining_eligible=remaining_planned_count,
+            remaining_eligible=global_remaining_count,
+            planned_remaining=remaining_planned_count,
             query_limit=int(base_summary.get("query_limit") or 0),
+            page_size=int(base_summary.get("page_size") or 0),
+            pages_loaded=int(base_summary.get("pages_loaded") or 0),
+            page_requests=int(base_summary.get("page_requests") or 0),
             pagination_used=bool(base_summary.get("pagination_used")),
-            skip_reason_counts=dict(exploration_summary.get("skip_reason_counts_total") or {}),
+            pagination_strategy=str(base_summary.get("pagination_strategy") or ""),
+            candidate_scan_exhaustive=bool(
+                base_summary.get("candidate_scan_exhaustive")
+            ),
+            candidate_funnel_reconciled=bool(
+                base_summary.get("candidate_funnel_reconciled")
+            ),
+            candidate_skip_reason_counts=dict(
+                base_summary.get("candidate_skip_counts") or {}
+            ),
+            ui_skip_reason_counts=dict(
+                exploration_summary.get("skip_reason_counts_total") or {}
+            ),
             stop_reason=exploration_stop,
         )
         log(
@@ -2217,6 +2268,17 @@ def _run_real_unfollow_multi_loop(
 
         target_username = str(target_row.get("username") or "")
         target_key = normalize_unfollow_username(target_username)
+        if account_protection_lists.is_unfollow_protected(target_key):
+            stop_reason = "unfollow_target_protected_at_final_action_gate"
+            log(
+                "error",
+                "unfollow_final_action_protection_gate_blocked",
+                account_id=aid,
+                run_id=run_id,
+                username_normalized=target_key,
+                source="account_protection_list_entries",
+            )
+            return emit_final("failed_unfollow_multi_action", stop_reason)
         if any_mode_active:
             any_mode_selected_count += 1
             totals["any_mode_selected_count"] = any_mode_selected_count
@@ -2756,28 +2818,25 @@ def run_unfollow_session(
         business_action_deadline or os.environ.get("BUSINESS_ACTION_DEADLINE") or ""
     ).strip() or None
     domain_real_action_max = real_action_max
-    plan = plan_unfollow_targets(aid, settings=settings)
+    protected_usernames = account_protection_lists.unfollow_whitelist_for_run(aid)
+    plan = plan_unfollow_targets(
+        aid,
+        settings=settings,
+        protected_usernames=protected_usernames,
+    )
     planned_usernames = _planned_username_set(plan)
     planned_by_username = _planned_candidates_by_username(plan)
-    canonical_whitelist_skips = {
-        username for username in planned_usernames
-        if account_protection_lists.is_unfollow_protected(username)
-    }
-    if canonical_whitelist_skips:
-        planned_usernames -= canonical_whitelist_skips
-        planned_by_username = {
-            username: candidate
-            for username, candidate in planned_by_username.items()
-            if username not in canonical_whitelist_skips
-        }
+    unexpected_protected_candidates = planned_usernames.intersection(protected_usernames)
+    if unexpected_protected_candidates:
         log(
-            "info",
-            "unfollow_whitelist_candidates_skipped",
+            "error",
+            "unfollow_plan_protection_invariant_failed",
             account_id=aid,
             run_id=run_id,
-            skip_count=len(canonical_whitelist_skips),
+            protected_candidate_count=len(unexpected_protected_candidates),
             source="account_protection_list_entries",
         )
+        raise RuntimeError("unfollow_plan_contains_protected_candidate")
     handoff_budget = _runtime_adaptive_coverage_budget(
         quota_remaining=domain_real_action_max,
         eligible_remaining=len(planned_usernames),

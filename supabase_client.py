@@ -3323,110 +3323,123 @@ def fetch_unfollow_strict_candidate_rows(
     *,
     limit: int = 500,
     after_days: int = 0,
-) -> list[dict[str, Any]]:
+    as_of: datetime | None = None,
+    include_metadata: bool = False,
+) -> list[dict[str, Any]] | tuple[list[dict[str, Any]], dict[str, Any]]:
     """
-    Load ig_interacted_users rows that may qualify for strict unfollow modes (DB pre-filter).
-    Final eligibility (delay, lifecycle, followback) is applied in unfollow_eligibility_engine.
+    Load the complete account-scoped bot-Follow ledger for strict Unfollow modes.
+
+    ``limit`` is the page size, never a total-result cap.  Final eligibility,
+    lifecycle, followback, protection-list and per-session slicing are applied
+    only after this exhaustive scan in ``unfollow_eligibility_engine``.
     """
     aid = str(account_id or "").strip()
     if not aid:
-        return []
-    cap = max(1, min(int(limit), 2000))
-    out_cap = max(cap, min(cap * 2, 2000))
-    now = datetime.now(timezone.utc)
-    cutoff = now - timedelta(days=max(0, int(after_days)))
+        empty_metadata = {
+            "source_rows_loaded": 0,
+            "page_size": 0,
+            "pages_loaded": 0,
+            "page_requests": 0,
+            "pagination_used": False,
+            "candidate_scan_exhaustive": True,
+            "pagination_strategy": "stable_offset_snapshot_v1",
+            "scan_as_of": None,
+            "eligibility_cutoff": None,
+        }
+        return ([], empty_metadata) if include_metadata else []
+
+    page_size = max(1, min(int(limit), 1000))
+    snapshot_at = as_of or datetime.now(timezone.utc)
+    if snapshot_at.tzinfo is None:
+        snapshot_at = snapshot_at.replace(tzinfo=timezone.utc)
+    else:
+        snapshot_at = snapshot_at.astimezone(timezone.utc)
+    cutoff = snapshot_at - timedelta(days=max(0, int(after_days)))
 
     base_query = {
         "select": "*",
         "account_id": f"eq.{aid}",
         "followed_by_bot": "eq.true",
-        "followed_at": "not.is.null",
-        "unfollowed_at": "is.null",
-        "follow_status": "eq.following",
+        # Freeze membership for the duration of the scan.  State fields may be
+        # classified by the engine, but a concurrent insert cannot shift offsets.
+        "created_at": f"lte.{snapshot_at.isoformat()}",
+        "order": "followed_at.asc.nullslast,created_at.asc,id.asc",
     }
 
-    def _load(query_extra: dict[str, str], query_limit: int) -> list[dict[str, Any]]:
-        if query_limit <= 0:
-            return []
-        rows = _request_json(
+    out: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    seen_page_signatures: set[str] = set()
+    pages_loaded = 0
+    page_requests = 0
+    offset = 0
+    max_pages = 10_000
+
+    for _page_index in range(max_pages):
+        raw_rows = _request_json(
             "GET",
             "ig_interacted_users",
             query={
                 **base_query,
-                **query_extra,
-                "limit": str(max(1, min(int(query_limit), 2000))),
+                "limit": str(page_size),
+                "offset": str(offset),
             },
         )
-        if not rows or not isinstance(rows, list):
-            return []
-        return [r for r in rows if isinstance(r, dict)]
+        page_requests += 1
+        if not isinstance(raw_rows, list):
+            raise RuntimeError("unfollow_candidate_pagination_response_not_list")
+        if any(not isinstance(row, dict) for row in raw_rows):
+            raise RuntimeError("unfollow_candidate_pagination_row_not_object")
+        rows = list(raw_rows)
 
-    def _merge_unique(
-        dst: list[dict[str, Any]],
-        src: list[dict[str, Any]],
-        seen_ids: set[str],
-        seen_usernames: set[str],
-    ) -> None:
-        for row in src:
+        signature_payload = [
+            (
+                str(row.get("id") or ""),
+                str(row.get("username") or ""),
+                str(row.get("followed_at") or ""),
+            )
+            for row in rows
+        ]
+        page_signature = hashlib.sha256(
+            json.dumps(signature_payload, separators=(",", ":"), ensure_ascii=True).encode(
+                "utf-8"
+            )
+        ).hexdigest()
+        if rows and page_signature in seen_page_signatures:
+            raise RuntimeError("unfollow_candidate_pagination_repeated_page")
+        if rows:
+            seen_page_signatures.add(page_signature)
+            pages_loaded += 1
+
+        added = 0
+        for row in rows:
             row_id = str(row.get("id") or "").strip()
-            username = str(row.get("username") or "").strip().lower()
-            if (row_id and row_id in seen_ids) or (username and username in seen_usernames):
-                continue
+            if row_id and row_id in seen_ids:
+                raise RuntimeError("unfollow_candidate_pagination_duplicate_row_id")
             if row_id:
                 seen_ids.add(row_id)
-            if username:
-                seen_usernames.add(username)
-            dst.append(row)
-            if len(dst) >= out_cap:
-                break
+            out.append(row)
+            added += 1
 
-    out: list[dict[str, Any]] = []
-    seen_ids: set[str] = set()
-    seen_usernames: set[str] = set()
+        if rows and len(rows) >= page_size and added == 0:
+            raise RuntimeError("unfollow_candidate_pagination_no_progress")
+        if len(rows) < page_size:
+            break
+        offset += len(rows)
+    else:
+        raise RuntimeError("unfollow_candidate_pagination_max_pages_exceeded")
 
-    # Priority 1: rows with a stored eligibility timestamp that is already due.
-    _merge_unique(
-        out,
-        _load(
-            {
-                "eligible_unfollow_at": f"lte.{now.isoformat()}",
-                "order": "eligible_unfollow_at.asc,followed_at.asc",
-            },
-            cap,
-        ),
-        seen_ids,
-        seen_usernames,
-    )
-
-    # Priority 2: legacy rows where eligibility is computed from followed_at.
-    _merge_unique(
-        out,
-        _load(
-            {
-                "eligible_unfollow_at": "is.null",
-                "followed_at": f"lte.{cutoff.isoformat()}",
-                "order": "followed_at.asc",
-            },
-            cap,
-        ),
-        seen_ids,
-        seen_usernames,
-    )
-
-    # Fill remaining slots with the historical broad prefilter so skipped_counts
-    # still capture near-future or malformed rows when the eligible pool is small.
-    _merge_unique(
-        out,
-        _load(
-            {
-                "order": "eligible_unfollow_at.asc.nullslast,followed_at.asc",
-            },
-            max(0, out_cap - len(out)),
-        ),
-        seen_ids,
-        seen_usernames,
-    )
-    return out
+    metadata = {
+        "source_rows_loaded": len(out),
+        "page_size": page_size,
+        "pages_loaded": pages_loaded,
+        "page_requests": page_requests,
+        "pagination_used": page_requests > 1,
+        "candidate_scan_exhaustive": True,
+        "pagination_strategy": "stable_offset_snapshot_v1",
+        "scan_as_of": snapshot_at.isoformat(),
+        "eligibility_cutoff": cutoff.isoformat(),
+    }
+    return (out, metadata) if include_metadata else out
 
 
 def fetch_visible_unfollow_eligibility_rows(

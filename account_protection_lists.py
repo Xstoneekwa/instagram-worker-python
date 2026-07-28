@@ -129,6 +129,22 @@ def is_unfollow_protected(username: Any) -> bool:
     return normalized in snapshot_from_env().unfollow_whitelist
 
 
+def unfollow_whitelist_for_run(account_id: str) -> frozenset[str]:
+    """Return the immutable canonical Unfollow whitelist for this run.
+
+    Older local probes may omit the snapshot when protection lists are not
+    required.  Production requests that require it keep the existing
+    fail-closed behaviour for missing, malformed, or cross-account snapshots.
+    """
+    raw = str(os.environ.get(SNAPSHOT_ENV) or "").strip()
+    if not raw:
+        if os.environ.get(REQUIRED_ENV) == "1":
+            raise ValueError("protection_lists_snapshot_missing")
+        return frozenset()
+    snapshot = snapshot_from_env(expected_account_id=str(account_id or "").strip())
+    return snapshot.unfollow_whitelist
+
+
 def snapshot_metadata() -> dict[str, Any]:
     snapshot = snapshot_from_env()
     return {

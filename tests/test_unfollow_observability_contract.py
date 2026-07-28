@@ -31,7 +31,9 @@ class UnfollowObservabilityContractTest(unittest.TestCase):
 
     def test_summary_exposes_partial_ui_coverage_with_canonical_resume_decision(self) -> None:
         source = inspect.getsource(orchestrator._run_real_unfollow_multi_loop)
-        self.assertIn('"eligible_db_remaining": remaining_planned_count', source)
+        self.assertIn('"eligible_db_remaining": global_remaining_count', source)
+        self.assertIn('"planned_eligible_remaining": remaining_planned_count', source)
+        self.assertIn('base_summary.get("unplanned_eligible_count")', source)
         self.assertIn('"ui_coverage_status": (', source)
         self.assertIn(
             '"resume_recommended": bool(canonical_outcome.get("resume_recommended"))',
@@ -55,6 +57,7 @@ class UnfollowObservabilityContractTest(unittest.TestCase):
         self.assertIn("if visible_key not in planned_usernames", source)
         self.assertGreaterEqual(source.count("detect_own_following_list_screen("), 2)
         self.assertIn("unfollow_action_blocked_unsafe_marker", source)
+        self.assertIn('"plan_guided_mode": "enforced_allowlist"', source)
         self.assertIn("recover_following_viewport", source)
         self.assertNotIn("search_for_unfollow_username", source)
 
