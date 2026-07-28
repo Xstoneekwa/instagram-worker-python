@@ -13917,6 +13917,19 @@ _INSTAGRAM_LIST_SUGGESTIONS_LABELS = {
 _INSTAGRAM_LIST_SEE_MORE_LABELS = {"see more", "voir plus"}
 
 
+def _instagram_followers_count_label(value: str) -> bool:
+    """Match compact and grouped Instagram Followers-count tab labels."""
+    normalized = " ".join(str(value or "").casefold().split())
+    number = r"(?:\d{1,3}(?:[ .,]\d{3})+|\d+(?:[.,]\d+)?)(?:\s*[kmb])?"
+    return bool(
+        re.fullmatch(rf"{number}\s+followers", normalized)
+        or re.fullmatch(
+            rf"{number}\s+abonn(?:e|é|és|ees|ées)?",
+            normalized,
+        )
+    )
+
+
 def _instagram_list_see_more_label(value: str) -> bool:
     """Accept the bounded accessibility variants used by Instagram.
 
@@ -13995,15 +14008,19 @@ def followers_list_continuation_from_hierarchy_xml(
     viewport_height: int = 0,
 ) -> dict[str, Any]:
     """Adapt an Instagram hierarchy to the shared list-continuation contract."""
-    _ = previously_valid_followers_rows  # retained for caller compatibility
     base = {
         "is_boundary": False,
         "state": InstagramListContinuationState.AMBIGUOUS_SURFACE.value,
         "selected_followers_tab": False,
+        "followers_tab_title_visible": False,
+        "surface_verification_source": "unverified",
         "see_all_suggestions": False,
         "see_more_visible": False,
         "see_more_actionable": False,
         "see_more_before_suggestions": False,
+        "see_more_bounds": {},
+        "see_more_detection_source": "none",
+        "see_more_candidate_id": "",
         "suggestions_visible": False,
         "suggestion_follow_rows": 0,
         "dismiss_controls": 0,
@@ -14021,8 +14038,13 @@ def followers_list_continuation_from_hierarchy_xml(
     except ET.ParseError:
         return base
 
+    parent_by_child = {
+        child: parent
+        for parent in root.iter()
+        for child in list(parent)
+    }
     suggestions_y: int | None = None
-    see_more_nodes: list[tuple[Any, int | None]] = []
+    see_more_nodes: list[tuple[Any, int | None, str]] = []
     raw_primary_rows: list[tuple[str, int | None, dict[str, int] | None]] = []
     raw_follow_ctas: list[int | None] = []
     dismiss_y: list[int | None] = []
@@ -14033,11 +14055,10 @@ def followers_list_continuation_from_hierarchy_xml(
         class_name = str(node.attrib.get("class") or "").lower()
         normalized = " ".join((text or content_desc).casefold().split())
         node_y = _instagram_list_xml_y(node)
-        if node.attrib.get("selected") == "true" and (
-            re.fullmatch(r"\d+(?:[.,]\d+)?\s*[kmb]?\s+followers", normalized)
-            or re.fullmatch(r"\d+(?:[.,]\d+)?\s*[kmb]?\s+abonn(?:e|é|és|ees|ées)?", normalized)
-        ):
-            base["selected_followers_tab"] = True
+        if _instagram_followers_count_label(normalized):
+            base["followers_tab_title_visible"] = True
+            if node.attrib.get("selected") == "true":
+                base["selected_followers_tab"] = True
         if normalized in _INSTAGRAM_LIST_SUGGESTIONS_LABELS:
             base["suggestions_visible"] = True
             suggestions_y = node_y if suggestions_y is None else min(suggestions_y, node_y or suggestions_y)
@@ -14045,8 +14066,13 @@ def followers_list_continuation_from_hierarchy_xml(
             base["see_all_suggestions"] = True
             base["suggestions_visible"] = True
             suggestions_y = node_y if suggestions_y is None else min(suggestions_y, node_y or suggestions_y)
-        if _instagram_list_see_more_label(text) or _instagram_list_see_more_label(content_desc):
-            see_more_nodes.append((node, node_y))
+        see_more_source = ""
+        if _instagram_list_see_more_label(text):
+            see_more_source = "xml_text"
+        elif _instagram_list_see_more_label(content_desc):
+            see_more_source = "xml_content_description"
+        if see_more_source:
+            see_more_nodes.append((node, node_y, see_more_source))
         if "follow_list_username" in resource_id:
             username = str(text or content_desc).strip().lstrip("@").casefold()
             if username:
@@ -14064,12 +14090,38 @@ def followers_list_continuation_from_hierarchy_xml(
         ):
             base["loading_indicator"] = True
 
-    see_more_y = min((y for _, y in see_more_nodes if y is not None), default=None)
+    see_more_y = min((y for _, y, _ in see_more_nodes if y is not None), default=None)
     base["see_more_visible"] = bool(see_more_nodes)
-    base["see_more_actionable"] = any(
-        node.attrib.get("clickable") == "true" or bool(_parse_follow_list_xml_bounds(node))
-        for node, _ in see_more_nodes
-    )
+    for node, _, detection_source in see_more_nodes:
+        click_node = node
+        parent = parent_by_child.get(node)
+        if node.attrib.get("clickable") == "true":
+            detection_source = f"{detection_source}_clickable"
+        else:
+            while parent is not None:
+                if parent.attrib.get("clickable") == "true":
+                    click_node = parent
+                    detection_source = f"{detection_source}_clickable_parent"
+                    break
+                parent = parent_by_child.get(parent)
+            else:
+                detection_source = f"{detection_source}_verified_bounds"
+        click_bounds = _parse_follow_list_xml_bounds(click_node)
+        if not click_bounds:
+            click_bounds = _parse_follow_list_xml_bounds(node)
+        if click_bounds:
+            base["see_more_actionable"] = True
+            base["see_more_bounds"] = dict(click_bounds)
+            base["see_more_detection_source"] = detection_source
+            candidate_material = (
+                f"{detection_source}:"
+                f"{click_bounds.get('left')}:{click_bounds.get('top')}:"
+                f"{click_bounds.get('right')}:{click_bounds.get('bottom')}"
+            )
+            base["see_more_candidate_id"] = hashlib.sha256(
+                candidate_material.encode("utf-8")
+            ).hexdigest()[:16]
+            break
     base["see_more_before_suggestions"] = bool(
         see_more_nodes
         and (
@@ -14123,10 +14175,25 @@ def followers_list_continuation_from_hierarchy_xml(
     after_fp = viewport_fingerprint(primary_rows)
     base["viewport_fingerprint"] = after_fp
 
+    committed_rows_surface = bool(
+        previously_valid_followers_rows
+        and base["followers_tab_title_visible"]
+        and (primary_rows or see_more_nodes)
+    )
+    expected_surface_verified = bool(
+        base["selected_followers_tab"] or committed_rows_surface
+    )
+    if base["selected_followers_tab"]:
+        base["surface_verification_source"] = "selected_followers_tab"
+    elif committed_rows_surface:
+        base["surface_verification_source"] = (
+            "committed_rows_and_visible_followers_title"
+        )
+
     state = classify_instagram_list_continuation(
         InstagramListContinuationSignals(
             flow=str(flow or ""),
-            expected_surface_selected=bool(base["selected_followers_tab"]),
+            expected_surface_selected=expected_surface_verified,
             primary_row_ids=tuple(primary_rows),
             processed_primary_row_ids=tuple(processed_primary_row_ids or ()),
             see_more_visible=bool(base["see_more_visible"]),
@@ -14180,15 +14247,76 @@ def followers_try_expand_primary_list(
         return {
             "expanded": False,
             "reason": "see_more_surface_not_committed",
+            "see_more_status": "see_more_failed_terminal",
             "before": {},
         }
     before = followers_list_continuation_from_hierarchy_xml(
         str(_LAST_FOLLOWERS_DETECT_HIERARCHY_XML or ""),
         flow="follow",
         processed_primary_row_ids=processed_primary_row_ids,
+        previously_valid_followers_rows=True,
     )
+    live_selector_confirmed = False
     if before.get("state") != InstagramListContinuationState.EXPAND_PRIMARY_LIST_AVAILABLE.value:
-        return {"expanded": False, "reason": "see_more_not_canonical", "before": before}
+        # A cached hierarchy can lag the rendered footer.  A committed Followers
+        # navigation state plus an exact live accessibility selector is a safe
+        # independent confirmation.  It blocks scrolling/rotation, but never
+        # authorizes a coordinate tap.
+        for label_re in (
+            r"(?i)^\s*see more(?:\s*[,;:-]?\s*button)?\s*$",
+            r"(?i)^\s*voir plus(?:\s*[,;:-]?\s*bouton)?\s*$",
+        ):
+            for selector_kind, selector in (
+                ("live_accessibility_text", d(textMatches=label_re)),
+                ("live_accessibility_description", d(descriptionMatches=label_re)),
+            ):
+                try:
+                    if selector.exists(timeout=0.25):
+                        live_selector_confirmed = True
+                        before = {
+                            **before,
+                            "see_more_visible": True,
+                            "see_more_actionable": True,
+                            "see_more_detection_source": selector_kind,
+                            "see_more_candidate_id": hashlib.sha256(
+                                f"{selector_kind}:{expected_source_profile}".encode("utf-8")
+                            ).hexdigest()[:16],
+                            "state": InstagramListContinuationState.EXPAND_PRIMARY_LIST_AVAILABLE.value,
+                        }
+                        break
+                except Exception:
+                    continue
+            if live_selector_confirmed:
+                break
+    if before.get("state") != InstagramListContinuationState.EXPAND_PRIMARY_LIST_AVAILABLE.value:
+        return {
+            "expanded": False,
+            "reason": "see_more_not_canonical",
+            "see_more_status": "see_more_failed_terminal",
+            "before": before,
+        }
+    bounds = dict(before.get("see_more_bounds") or {})
+    coordinates = (
+        {
+            "x": (int(bounds.get("left") or 0) + int(bounds.get("right") or 0)) // 2,
+            "y": (int(bounds.get("top") or 0) + int(bounds.get("bottom") or 0)) // 2,
+        }
+        if bounds
+        else {}
+    )
+    detection_source = str(before.get("see_more_detection_source") or "unknown")
+    candidate_id = str(before.get("see_more_candidate_id") or "")
+    visual_capture_before = ""
+    if account_id and run_id:
+        try:
+            _ensure_debug_dirs()
+            capture_path = _SCREENSHOTS_DIR / (
+                f"see_more_before_{int(time.time() * 1000)}.png"
+            )
+            screenshot(d, str(capture_path))
+            visual_capture_before = str(capture_path)
+        except Exception:
+            visual_capture_before = ""
     _instagram_list_event(
         "instagram_list_see_more_detected",
         flow="follow",
@@ -14198,6 +14326,30 @@ def followers_try_expand_primary_list(
         fingerprint_before=str(before.get("viewport_fingerprint") or ""),
         visible_primary_row_count=int(before.get("primary_row_count") or 0),
         reason="primary_continuation_actionable",
+        target_username=expected_source_profile,
+        detection_source=detection_source,
+        bounds=bounds,
+        surface_fingerprint=str(before.get("viewport_fingerprint") or ""),
+        candidate_id=candidate_id,
+        see_more_status="see_more_available",
+        visual_capture_path=visual_capture_before,
+    )
+    _instagram_list_event(
+        "see_more_detected",
+        flow="follow",
+        account_id=account_id,
+        target_id=target_id,
+        run_id=run_id,
+        fingerprint_before=str(before.get("viewport_fingerprint") or ""),
+        visible_primary_row_count=int(before.get("primary_row_count") or 0),
+        reason="primary_continuation_actionable",
+        target_username=expected_source_profile,
+        detection_source=detection_source,
+        bounds=bounds,
+        surface_fingerprint=str(before.get("viewport_fingerprint") or ""),
+        candidate_id=candidate_id,
+        see_more_status="see_more_available",
+        visual_capture_path=visual_capture_before,
     )
     started = time.perf_counter()
     baseline_rows = list(before.get("primary_row_ids") or [])
@@ -14209,12 +14361,31 @@ def followers_try_expand_primary_list(
             r"(?i)^\s*see more(?:\s*[,;:-]?\s*button)?\s*$",
             r"(?i)^\s*voir plus(?:\s*[,;:-]?\s*bouton)?\s*$",
         ):
-            for selector in (
-                d(textMatches=label_re),
-                d(descriptionMatches=label_re),
+            for tap_method, selector in (
+                ("accessibility_text_selector", d(textMatches=label_re)),
+                (
+                    "accessibility_description_selector",
+                    d(descriptionMatches=label_re),
+                ),
             ):
                 try:
                     if selector.exists(timeout=0.25):
+                        _instagram_list_event(
+                            "see_more_click_attempted",
+                            flow="follow",
+                            account_id=account_id,
+                            target_id=target_id,
+                            run_id=run_id,
+                            fingerprint_before=str(before.get("viewport_fingerprint") or ""),
+                            visible_primary_row_count=int(before.get("primary_row_count") or 0),
+                            reason="exact_accessibility_selector",
+                            target_username=expected_source_profile,
+                            attempt=attempt,
+                            tap_method=tap_method,
+                            coordinates=coordinates,
+                            candidate_id=candidate_id,
+                            see_more_status="see_more_clicking",
+                        )
                         selector.click()
                         clicked = True
                         break
@@ -14224,6 +14395,31 @@ def followers_try_expand_primary_list(
                 break
         if not clicked:
             no_progress_reason = "see_more_selector_unavailable"
+            _instagram_list_event(
+                "see_more_click_failed",
+                flow="follow",
+                account_id=account_id,
+                target_id=target_id,
+                run_id=run_id,
+                fingerprint_before=str(before.get("viewport_fingerprint") or ""),
+                visible_primary_row_count=int(before.get("primary_row_count") or 0),
+                reason=no_progress_reason,
+                target_username=expected_source_profile,
+                attempt=attempt,
+                recovery_path=(
+                    "fresh_hierarchy_then_second_exact_selector_attempt"
+                    if attempt < max(1, min(int(max_attempts or 1), 2))
+                    else "bounded_recovery_exhausted"
+                ),
+                see_more_status=(
+                    "see_more_failed_recoverable"
+                    if attempt < max(1, min(int(max_attempts or 1), 2))
+                    else "see_more_failed_terminal"
+                ),
+            )
+            if attempt < max(1, min(int(max_attempts or 1), 2)):
+                followers_refresh_detect_hierarchy_cache(d)
+                continue
             break
         _instagram_list_event(
             "instagram_list_see_more_clicked",
@@ -14235,6 +14431,10 @@ def followers_try_expand_primary_list(
             visible_primary_row_count=int(before.get("primary_row_count") or 0),
             reason=f"selector_click_attempt_{attempt}",
             elapsed_ms=(time.perf_counter() - started) * 1000.0,
+            target_username=expected_source_profile,
+            attempt=attempt,
+            candidate_id=candidate_id,
+            see_more_status="see_more_expansion_wait",
         )
         # Instagram can briefly expose a loading/ambiguous hierarchy after the
         # selector click.  Probe that same click a bounded number of times
@@ -14246,6 +14446,7 @@ def followers_try_expand_primary_list(
                 after_xml,
                 flow="follow",
                 processed_primary_row_ids=processed_primary_row_ids,
+                previously_valid_followers_rows=True,
             )
             last_after = after
             continuity = compare_instagram_list_viewports(
@@ -14254,6 +14455,17 @@ def followers_try_expand_primary_list(
                 require_overlap=False,
             )
             if continuity.new_row_count > 0:
+                visual_capture_after = ""
+                if account_id and run_id:
+                    try:
+                        _ensure_debug_dirs()
+                        capture_path = _SCREENSHOTS_DIR / (
+                            f"see_more_after_{int(time.time() * 1000)}.png"
+                        )
+                        screenshot(d, str(capture_path))
+                        visual_capture_after = str(capture_path)
+                    except Exception:
+                        visual_capture_after = ""
                 _instagram_list_event(
                     "instagram_list_see_more_expanded",
                     flow="follow",
@@ -14266,11 +14478,79 @@ def followers_try_expand_primary_list(
                     overlap_count=continuity.overlap_count,
                     reason="new_primary_rows_detected",
                     elapsed_ms=(time.perf_counter() - started) * 1000.0,
+                    target_username=expected_source_profile,
+                    new_rows_count=int(continuity.new_row_count),
+                    before_fingerprint=continuity.fingerprint_before,
+                    after_fingerprint=continuity.fingerprint_after,
+                    see_more_status="see_more_expanded",
+                    visual_capture_path=visual_capture_after,
                 )
-                return {"expanded": True, "reason": "new_primary_rows_detected", "after": after}
+                _instagram_list_event(
+                    "see_more_expansion_confirmed",
+                    flow="follow",
+                    account_id=account_id,
+                    target_id=target_id,
+                    run_id=run_id,
+                    fingerprint_before=continuity.fingerprint_before,
+                    fingerprint_after=continuity.fingerprint_after,
+                    visible_primary_row_count=int(after.get("primary_row_count") or 0),
+                    overlap_count=continuity.overlap_count,
+                    reason="new_primary_rows_detected",
+                    elapsed_ms=(time.perf_counter() - started) * 1000.0,
+                    target_username=expected_source_profile,
+                    new_rows_count=int(continuity.new_row_count),
+                    before_fingerprint=continuity.fingerprint_before,
+                    after_fingerprint=continuity.fingerprint_after,
+                    see_more_status="see_more_expanded",
+                    visual_capture_path=visual_capture_after,
+                )
+                return {
+                    "expanded": True,
+                    "reason": "new_primary_rows_detected",
+                    "see_more_status": "see_more_expanded",
+                    "after": after,
+                }
         if last_after.get("state") != InstagramListContinuationState.EXPAND_PRIMARY_LIST_AVAILABLE.value:
             no_progress_reason = "post_click_surface_not_safe_for_retry"
+            _instagram_list_event(
+                "see_more_click_failed",
+                flow="follow",
+                account_id=account_id,
+                target_id=target_id,
+                run_id=run_id,
+                fingerprint_before=str(before.get("viewport_fingerprint") or ""),
+                fingerprint_after=str(last_after.get("viewport_fingerprint") or ""),
+                visible_primary_row_count=int(last_after.get("primary_row_count") or 0),
+                reason=no_progress_reason,
+                target_username=expected_source_profile,
+                attempt=attempt,
+                recovery_path="surface_revalidation_failed_fail_closed",
+                see_more_status="see_more_failed_terminal",
+            )
             break
+        _instagram_list_event(
+            "see_more_click_failed",
+            flow="follow",
+            account_id=account_id,
+            target_id=target_id,
+            run_id=run_id,
+            fingerprint_before=str(before.get("viewport_fingerprint") or ""),
+            fingerprint_after=str(last_after.get("viewport_fingerprint") or ""),
+            visible_primary_row_count=int(last_after.get("primary_row_count") or 0),
+            reason="click_without_new_primary_rows",
+            target_username=expected_source_profile,
+            attempt=attempt,
+            recovery_path=(
+                "fresh_hierarchy_then_second_exact_selector_attempt"
+                if attempt < max(1, min(int(max_attempts or 1), 2))
+                else "bounded_recovery_exhausted"
+            ),
+            see_more_status=(
+                "see_more_failed_recoverable"
+                if attempt < max(1, min(int(max_attempts or 1), 2))
+                else "see_more_failed_terminal"
+            ),
+        )
     _instagram_list_event(
         "instagram_list_see_more_no_progress",
         flow="follow",
@@ -14282,8 +14562,16 @@ def followers_try_expand_primary_list(
         visible_primary_row_count=int(last_after.get("primary_row_count") or 0),
         reason=no_progress_reason,
         elapsed_ms=(time.perf_counter() - started) * 1000.0,
+        target_username=expected_source_profile,
+        see_more_status="see_more_failed_terminal",
     )
-    return {"expanded": False, "reason": "see_more_no_progress", "after": last_after}
+    return {
+        "expanded": False,
+        "reason": "see_more_click_exhausted_after_bounded_recovery",
+        "see_more_status": "see_more_failed_terminal",
+        "failure_reason": no_progress_reason,
+        "after": last_after,
+    }
 
 
 def followers_refresh_detect_hierarchy_cache(

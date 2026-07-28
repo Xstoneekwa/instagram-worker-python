@@ -44,8 +44,17 @@ def _surface(
     suggestions: bool = False,
     suggestion_rows: list[str] | None = None,
     loading: bool = False,
+    followers_tab_selected: bool = True,
+    followers_count_label: str = "22.2K followers",
 ) -> str:
-    parts = ["<hierarchy>", _node(text="22.2K followers", selected=True, bounds="[180,120][520,200]")]
+    parts = [
+        "<hierarchy>",
+        _node(
+            text=followers_count_label,
+            selected=followers_tab_selected,
+            bounds="[180,120][520,200]",
+        ),
+    ]
     for idx, (username, cta) in enumerate(rows or []):
         top = 250 + idx * 120
         parts.append(
@@ -182,8 +191,72 @@ class InstagramListContinuationContractTests(unittest.TestCase):
         with patch.object(nav.time, "sleep", return_value=None):
             result = nav.followers_try_expand_primary_list(device, max_attempts=2)
         self.assertFalse(result["expanded"])
-        self.assertEqual(result["reason"], "see_more_no_progress")
+        self.assertEqual(
+            result["reason"],
+            "see_more_click_exhausted_after_bounded_recovery",
+        )
+        self.assertEqual(result["see_more_status"], "see_more_failed_terminal")
         self.assertEqual(device.clicks, 2)
+
+    def test_05a_visible_text_with_clickable_parent_is_actionable(self) -> None:
+        xml = (
+            "<hierarchy>"
+            + _node(text="22.2K followers", selected=True)
+            + '<node clickable="true" bounds="[0,1180][1080,1280]">'
+            + _node(text="See more", bounds="[20,1200][300,1260]")
+            + "</node>"
+            + _node(text="Suggested for you", bounds="[0,1300][700,1380]")
+            + "</hierarchy>"
+        )
+        out = nav.followers_list_continuation_from_hierarchy_xml(xml)
+        self.assertTrue(out["see_more_actionable"])
+        self.assertEqual(
+            out["see_more_detection_source"],
+            "xml_text_clickable_parent",
+        )
+        self.assertEqual(out["state"], State.EXPAND_PRIMARY_LIST_AVAILABLE.value)
+
+    def test_05b_stale_xml_live_accessibility_confirmation_can_expand(self) -> None:
+        nav._followers_store_detect_hierarchy_xml(
+            _surface(rows=[], suggestions=True)
+        )
+        device = _FakeDevice(_surface(rows=[("row_new", "Follow")]))
+        with patch.object(nav.time, "sleep", return_value=None):
+            result = nav.followers_try_expand_primary_list(device, max_attempts=2)
+        self.assertTrue(result["expanded"])
+        self.assertEqual(result["see_more_status"], "see_more_expanded")
+
+    def test_05c_required_see_more_events_are_structured(self) -> None:
+        before = _surface(rows=[], see_more=True, suggestions=True)
+        after = _surface(rows=[("row_new", "Follow")])
+        nav._followers_store_detect_hierarchy_xml(before)
+        device = _FakeDevice(after)
+        with patch.object(nav.time, "sleep", return_value=None), patch.object(
+            nav, "log"
+        ) as log_mock:
+            result = nav.followers_try_expand_primary_list(
+                device,
+                expected_source_profile="source",
+                account_id="account",
+                run_id="run",
+            )
+        # The explicit source name requires a committed navigation surface.
+        self.assertFalse(result["expanded"])
+        nav._followers_store_detect_hierarchy_xml(before)
+        with patch.object(nav.time, "sleep", return_value=None), patch.object(
+            nav, "followers_session_list_committed_open_for", return_value=True
+        ), patch.object(nav, "log") as log_mock:
+            result = nav.followers_try_expand_primary_list(
+                device,
+                expected_source_profile="source",
+                account_id="account",
+                run_id="run",
+            )
+        self.assertTrue(result["expanded"])
+        events = [str(call.args[1]) for call in log_mock.call_args_list]
+        self.assertIn("see_more_detected", events)
+        self.assertIn("see_more_click_attempted", events)
+        self.assertIn("see_more_expansion_confirmed", events)
 
     def test_06_suggestions_without_see_more_is_boundary(self) -> None:
         out = nav.followers_list_continuation_from_hierarchy_xml(
@@ -706,6 +779,49 @@ class InstagramListContinuationContractTests(unittest.TestCase):
         self.assertIn("followers_try_expand_primary_list", pre_scroll_contract)
         self.assertIn("continue", pre_scroll_contract)
 
+    def test_44_real_grouped_count_without_selected_flag_uses_committed_surface(self) -> None:
+        run_rows = [
+            ("myriam_flh_", "Following"),
+            ("bryant_wankak79", "Message"),
+            ("le.placard.de.robyn", "Message"),
+            ("guerin_henri", "Following"),
+            ("mathis68224", "Following"),
+        ]
+        xml = _surface(
+            rows=run_rows,
+            see_more=True,
+            suggestions=True,
+            followers_tab_selected=False,
+            followers_count_label="9 550 followers",
+        )
+        out = nav.followers_list_continuation_from_hierarchy_xml(
+            xml,
+            processed_primary_row_ids={username for username, _ in run_rows},
+            previously_valid_followers_rows=True,
+        )
+        self.assertFalse(out["selected_followers_tab"])
+        self.assertTrue(out["followers_tab_title_visible"])
+        self.assertEqual(
+            out["surface_verification_source"],
+            "committed_rows_and_visible_followers_title",
+        )
+        self.assertEqual(out["state"], State.EXPAND_PRIMARY_LIST_AVAILABLE.value)
+
+    def test_45_unselected_grouped_count_without_prior_rows_fails_closed(self) -> None:
+        xml = _surface(
+            rows=[("myriam_flh_", "Following")],
+            see_more=True,
+            suggestions=True,
+            followers_tab_selected=False,
+            followers_count_label="9 550 followers",
+        )
+        out = nav.followers_list_continuation_from_hierarchy_xml(
+            xml,
+            processed_primary_row_ids={"myriam_flh_"},
+            previously_valid_followers_rows=False,
+        )
+        self.assertEqual(out["state"], State.AMBIGUOUS_SURFACE.value)
+
     def test_40_mythyl_partial_revalidates_and_rotates_without_consuming_wrong_ct(self) -> None:
         engine = _FakeFollowersEngine([
             (0, {
@@ -797,6 +913,90 @@ class InstagramListContinuationContractTests(unittest.TestCase):
         )
         self.assertTrue(ok)
         self.assertEqual(reason, "follow_completed")
+
+    def test_46_rotation_is_forbidden_while_see_more_is_pending(self) -> None:
+        engine = _FakeFollowersEngine(
+            [
+                (
+                    0,
+                    {
+                        "follows_completed_count": 8,
+                        "follow_session_outcome": "followers_suggestions_boundary",
+                        "follow_stop_reason": "followers_suggestions_boundary",
+                        "global_follows_goal_effective": 40,
+                        "see_more_status": "see_more_available",
+                    },
+                )
+            ]
+        )
+        result = session._run_follow_target_rotation(
+            object(),
+            account_id="account",
+            account_username="account",
+            run_id="run",
+            follow_targets=[_target(1), _target(2)],
+            run_followers_list_engine_session=engine,
+            supabase_mode=False,
+            warm_session_used=False,
+            force_stop_used=False,
+            max_targets_per_run=4,
+            max_follows_per_target_per_run=30,
+        )
+        self.assertEqual(len(engine.calls), 1)
+        self.assertEqual(
+            result["summary"]["follow_stop_reason"],
+            "see_more_pending_rotation_forbidden",
+        )
+
+    def test_47_rotation_is_allowed_after_bounded_see_more_terminal_failure(self) -> None:
+        engine = _FakeFollowersEngine(
+            [
+                (
+                    0,
+                    {
+                        "follows_completed_count": 8,
+                        "follows_goal_effective": 40,
+                        "global_follows_goal_effective": 40,
+                        "follow_session_outcome": "partial_resumable",
+                        "follow_stop_reason": "see_more_click_exhausted_after_bounded_recovery",
+                        "see_more_status": "see_more_failed_terminal",
+                    },
+                ),
+                (
+                    0,
+                    {
+                        "follows_completed_count": 32,
+                        "follows_goal_effective": 40,
+                        "global_follows_goal_effective": 40,
+                        "follow_session_outcome": "global_follow_cap_reached",
+                        "follow_stop_reason": "global_follow_cap_reached",
+                    },
+                ),
+            ]
+        )
+        rotations: list[dict] = []
+
+        def rotate(_device, **kwargs):
+            rotations.append(kwargs)
+            return {"ok": True, "reason": "ok", "steps_completed": ["open_followers"]}
+
+        result = session._run_follow_target_rotation(
+            object(),
+            account_id="account",
+            account_username="account",
+            run_id="run",
+            follow_targets=[_target(1), _target(2)],
+            run_followers_list_engine_session=engine,
+            supabase_mode=False,
+            warm_session_used=False,
+            force_stop_used=False,
+            max_targets_per_run=4,
+            max_follows_per_target_per_run=30,
+            fast_rotate_to_next_target_from_followers=rotate,
+        )
+        self.assertEqual(len(rotations), 1)
+        self.assertEqual(len(engine.calls), 2)
+        self.assertEqual(result["global_follows_completed"], 40)
 
 
 if __name__ == "__main__":

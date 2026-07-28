@@ -63,6 +63,7 @@ from unfollow_ui_coverage_policy import (
 from unfollow_hybrid_strategy import (
     CURSOR_RESTORE_SCROLL_LIMIT,
     DIRECT_SEARCH_FALLBACK_BATCH_LIMIT,
+    can_arm_direct_search_fallback,
     choose_hybrid_selection,
     cursor_anchor_matches,
     open_exact_profile_for_unfollow,
@@ -1819,8 +1820,12 @@ def _run_real_unfollow_multi_loop(
                 if coverage_decision.action == "stop":
                     stop_reason = coverage_decision.stop_reason
                     if (
-                        stop_reason not in {"unsafe_marker_detected", "session_time_budget_exhausted"}
-                        and coverage_tracker.remaining_planned_usernames
+                        can_arm_direct_search_fallback(
+                            stop_reason,
+                            remaining_count=len(
+                                coverage_tracker.remaining_planned_usernames
+                            ),
+                        )
                         and not direct_fallback_armed
                     ):
                         direct_fallback_armed = True
@@ -1974,16 +1979,6 @@ def _run_real_unfollow_multi_loop(
                 else max_scroll_passes
             )
             if scroll_passes_used >= current_scroll_budget:
-                if coverage_tracker is not None and not direct_fallback_armed:
-                    direct_fallback_armed = True
-                    log(
-                        "info",
-                        "unfollow_direct_fallback_armed",
-                        reason="progressive_scroll_budget_exhausted",
-                        remaining_count=len(coverage_tracker.remaining_planned_usernames),
-                        direct_batch_limit=DIRECT_SEARCH_FALLBACK_BATCH_LIMIT,
-                    )
-                    continue
                 scroll_stop_reason = "scroll_budget_exhausted"
                 if coverage_tracker is not None:
                     coverage_stop = coverage_tracker.scroll_budget_decision()

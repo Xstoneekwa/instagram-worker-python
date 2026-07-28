@@ -8,6 +8,7 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from typing import Iterable
 
+from logs import log
 from target_followers_progressive_resume_v2 import (
     bounded_anchor_hashes,
     viewport_fingerprint as hmac_viewport_fingerprint,
@@ -15,7 +16,6 @@ from target_followers_progressive_resume_v2 import (
 from unfollow_ui_coverage_policy import normalize_username
 
 
-DIRECT_SEARCH_REMAINING_LIMIT = 10
 DIRECT_SEARCH_FALLBACK_BATCH_LIMIT = 10
 CURSOR_RESTORE_SCROLL_LIMIT = 10
 SEARCH_RESULT_INITIAL_SETTLE_S = 0.6
@@ -27,6 +27,22 @@ class HybridSelection:
     mode: str
     usernames: tuple[str, ...] = ()
     reason: str = ""
+
+
+_DIRECT_SEARCH_FALLBACK_SAFE_REASONS = frozenset(
+    {
+        "ui_progressive_search_limit_after_recovery",
+        "ui_end_of_list_with_candidates_unresolved",
+    }
+)
+
+
+def can_arm_direct_search_fallback(stop_reason: str, *, remaining_count: int) -> bool:
+    """Allow direct search only after the primary list path is proved exhausted."""
+    return bool(
+        max(0, int(remaining_count or 0)) > 0
+        and str(stop_reason or "").strip() in _DIRECT_SEARCH_FALLBACK_SAFE_REASONS
+    )
 
 
 def choose_hybrid_selection(
@@ -56,19 +72,20 @@ def choose_hybrid_selection(
         )
     if not pending:
         return HybridSelection("complete", (), "no_remaining_direct_candidate")
-    if len(remaining) <= DIRECT_SEARCH_REMAINING_LIMIT:
-        return HybridSelection(
-            "direct_exact",
-            pending[:DIRECT_SEARCH_REMAINING_LIMIT],
-            "remaining_at_or_below_direct_threshold",
-        )
     if scan_exhausted:
         return HybridSelection(
             "direct_exact",
             pending[:DIRECT_SEARCH_FALLBACK_BATCH_LIMIT],
             "progressive_scan_exhausted_bounded_fallback",
         )
-    return HybridSelection("progressive_scan", (), "remaining_above_direct_threshold")
+    # The own Following list is the primary discovery path at every backlog
+    # size.  A small remainder is not evidence that progressive discovery has
+    # failed: the current viewport may already contain the next candidate.
+    return HybridSelection(
+        "progressive_scan",
+        (),
+        "progressive_scan_primary_not_exhausted",
+    )
 
 
 def exact_search_result_count(hierarchy_xml: str, expected_username: str) -> int:
@@ -140,12 +157,45 @@ def open_exact_profile_for_unfollow(device: object, username: str) -> dict[str, 
     expected = normalize_username(username)
     if not expected:
         return {"ok": False, "status": "unavailable", "reason": "invalid_username"}
-    if not open_search(
+    search_opened = open_search(
         device,
         caller_context="unfollow_direct_exact",
         allow_percent_fallback=False,
-    ):
-        return {"ok": False, "status": "retryable", "reason": "open_search_failed"}
+    )
+    if not search_opened:
+        # A selector click only proves that the input was sent.  The natural
+        # 2026-07-28 run showed the exact search-tab selector click succeeding
+        # while the EditText transition never committed.  Permit one bounded,
+        # selector-only retry; never fall back to coordinates.
+        log(
+            "warning",
+            "unfollow_direct_open_search_retry_started",
+            username=expected,
+            reason="search_tab_click_without_committed_search_field",
+            max_retries=1,
+        )
+        search_opened = open_search(
+            device,
+            caller_context="unfollow_direct_exact_retry",
+            allow_percent_fallback=False,
+        )
+        log(
+            "info",
+            "unfollow_direct_open_search_retry_completed",
+            username=expected,
+            ok=bool(search_opened),
+            reason=(
+                "search_surface_committed_after_bounded_retry"
+                if search_opened
+                else "search_surface_uncommitted_after_bounded_retry"
+            ),
+        )
+    if not search_opened:
+        return {
+            "ok": False,
+            "status": "retryable",
+            "reason": "open_search_failed_after_bounded_retry",
+        }
     if not type_search(device, expected):
         return {"ok": False, "status": "retryable", "reason": "type_search_failed"}
 

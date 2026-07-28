@@ -10204,6 +10204,7 @@ def _run_followers_list_engine_session(
     target_scan_tracker = _target_rejection_tracker(source_profile_username)
     scroll_failure_target_rotation_safe = False
     scroll_failure_recovery_attempts = 0
+    see_more_status = "not_seen"
     ct_checkpoint = _ct_checkpoint_new(
         source_username=source_profile_username,
         source_target_id=str(target_id or ""),
@@ -12594,6 +12595,7 @@ def _run_followers_list_engine_session(
                         )
                 _canonical_state = str(suggestions_boundary.get("state") or "")
                 if bool(suggestions_boundary.get("see_more_visible")):
+                    see_more_status = "see_more_available"
                     log(
                         "info",
                         "instagram_list_see_more_detected",
@@ -12658,6 +12660,7 @@ def _run_followers_list_engine_session(
                         elapsed_ms=0.0,
                     )
                 elif _canonical_state == "EXPAND_PRIMARY_LIST_AVAILABLE":
+                    see_more_status = "see_more_clicking"
                     expansion = followers_try_expand_primary_list(
                         d,
                         expected_source_profile=source_profile_username,
@@ -12670,13 +12673,23 @@ def _run_followers_list_engine_session(
                     if bool(expansion.get("expanded")):
                         # See more extends the current viewport.  It is neither
                         # a depth scroll nor target exhaustion.
+                        see_more_status = "see_more_expanded"
                         continue
+                    see_more_status = str(
+                        expansion.get("see_more_status")
+                        or "see_more_failed_terminal"
+                    )
                     _followers_loop_finally_status = "see_more_no_progress"
                     _followers_loop_finally_stop = str(
                         expansion.get("reason") or "see_more_no_progress"
                     )
                     break
                 if bool(suggestions_boundary.get("is_boundary")):
+                    see_more_status = (
+                        "see_more_expansion_confirmed_but_no_more_followers"
+                        if see_more_status == "see_more_expanded"
+                        else "see_more_absent"
+                    )
                     _followers_loop_finally_status = "suggestions_boundary"
                     _followers_loop_finally_stop = "followers_suggestions_boundary"
                     log(
@@ -14928,6 +14941,7 @@ def _run_followers_list_engine_session(
                     if str(_visible_window_continuation.get("state") or "") == (
                         "EXPAND_PRIMARY_LIST_AVAILABLE"
                     ):
+                        see_more_status = "see_more_clicking"
                         _visible_window_expansion = followers_try_expand_primary_list(
                             d,
                             expected_source_profile=source_profile_username,
@@ -14940,7 +14954,12 @@ def _run_followers_list_engine_session(
                         if bool(_visible_window_expansion.get("expanded")):
                             # Expansion is continuation inside the same CT.  It
                             # consumes neither a scroll attempt nor CT rotation.
+                            see_more_status = "see_more_expanded"
                             continue
+                        see_more_status = str(
+                            _visible_window_expansion.get("see_more_status")
+                            or "see_more_failed_terminal"
+                        )
                         _followers_loop_finally_status = "see_more_no_progress"
                         _followers_loop_finally_stop = str(
                             _visible_window_expansion.get("reason")
@@ -18862,6 +18881,7 @@ def _run_followers_list_engine_session(
         follow_stop_reason=_followers_stable_reason,
         target_rotation_safe_after_scroll_failure=bool(
             scroll_failure_target_rotation_safe
+            or see_more_status == "see_more_failed_terminal"
         ),
         scroll_recovery_attempts=int(scroll_failure_recovery_attempts),
         scroll_failure_surface_ambiguous=bool(
@@ -18873,6 +18893,7 @@ def _run_followers_list_engine_session(
         candidates_not_scanned_due_to_cap=(
             str(_followers_loop_finally_stop or "") == "global_follow_cap_reached"
         ),
+        see_more_status=str(see_more_status or "not_seen"),
     )
     _followers_outcome_contract = merge_follow_outcome(
         _followers_summary_payload,
@@ -18880,7 +18901,10 @@ def _run_followers_list_engine_session(
         verified_actions=int(follows_completed_count),
         target_actions=int(global_follow_goal_effective or max_iter or 0),
         current_target_id=source_profile_username,
-        safe_boundary=bool(scroll_failure_target_rotation_safe),
+        safe_boundary=bool(
+            scroll_failure_target_rotation_safe
+            or see_more_status == "see_more_failed_terminal"
+        ),
         target_budget_reached=bool(
             int(target_follow_budget_effective or 0) > 0
             and int(follows_completed_count) >= int(target_follow_budget_effective or 0)

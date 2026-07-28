@@ -58,7 +58,18 @@ FOLLOW_SOURCE_ROTATION_CONTRACT_MAX_FOLLOWS_PER_TARGET_PER_RUN = 30
 FOLLOW_SOURCE_ROTATION_CONTRACT_MAX_TARGETS_PER_RUN = 4
 FOLLOW_TARGET_MAX_SAFE_PARTIAL_FAILURES_PER_RUN = 2
 FOLLOW_TARGET_SAFE_PARTIAL_ROTATION_REASONS = frozenset(
-    {"visible_window_exhausted_scroll_failed"}
+    {
+        "visible_window_exhausted_scroll_failed",
+        "see_more_click_exhausted_after_bounded_recovery",
+    }
+)
+SEE_MORE_ROTATION_BLOCKING_STATUSES = frozenset(
+    {
+        "see_more_available",
+        "see_more_clicking",
+        "see_more_expansion_wait",
+        "see_more_failed_recoverable",
+    }
 )
 RECOVERABLE_UNFOLLOW_DUPLICATE_STOP_REASON = (
     "logs.log() got multiple values for keyword argument 'stop_reason'"
@@ -592,12 +603,36 @@ def is_follow_target_safe_partial_rotation(
         or summary.get("follow_session_outcome")
         or ""
     ).strip()
+    if reason == "see_more_click_exhausted_after_bounded_recovery":
+        return bool(
+            int(exit_code) == 0
+            and summary.get("see_more_status") == "see_more_failed_terminal"
+        )
     return bool(
         int(exit_code) == 0
         and reason in FOLLOW_TARGET_SAFE_PARTIAL_ROTATION_REASONS
         and summary.get("target_rotation_safe_after_scroll_failure") is True
         and summary.get("scroll_failure_surface_ambiguous") is not True
     )
+
+
+def _follow_target_rotation_contract(
+    summary: dict[str, Any],
+    *,
+    reason: str,
+) -> dict[str, Any]:
+    """Fail closed while the current CT still owns an unfinished See More."""
+    see_more_status = str(summary.get("see_more_status") or "not_seen")
+    allowed = see_more_status not in SEE_MORE_ROTATION_BLOCKING_STATUSES
+    return {
+        "allowed": bool(allowed),
+        "reason": (
+            str(reason or "")
+            if allowed
+            else "see_more_pending_rotation_forbidden"
+        ),
+        "see_more_status": see_more_status,
+    }
 
 
 def _follow_target_ids(targets: list[dict[str, Any]]) -> list[str]:
@@ -686,6 +721,8 @@ def _run_follow_target_rotation(
                 from_target=source_profile,
                 to_target="",
                 reason="global_follow_cap_reached",
+                allowed=False,
+                see_more_status="not_applicable_phase_complete",
                 global_follows_done=global_follows_completed,
                 global_follow_cap=global_follow_goal,
             )
@@ -940,6 +977,8 @@ def _run_follow_target_rotation(
                 from_target=source_profile,
                 to_target="",
                 reason="global_follow_cap_reached",
+                allowed=False,
+                see_more_status=str(summary.get("see_more_status") or "not_seen"),
                 global_follows_done=global_follows_completed,
                 global_follow_cap=global_follow_goal,
             )
@@ -1018,6 +1057,8 @@ def _run_follow_target_rotation(
                     from_target=source_profile,
                     to_target="",
                     reason="global_follow_cap_reached",
+                    allowed=False,
+                    see_more_status=str(summary.get("see_more_status") or "not_seen"),
                     global_follows_done=global_follows_completed,
                     global_follow_cap=global_follow_goal,
                 )
@@ -1062,15 +1103,39 @@ def _run_follow_target_rotation(
                     "total_follows_this_run": global_follows_completed,
                     "effective_follow_cap": global_follow_goal,
                 }
+                rotation_decision = _follow_target_rotation_contract(
+                    summary,
+                    reason="target_budget_reached",
+                )
                 log(
                     "info",
                     "target_rotation_decision",
                     from_target=source_profile,
                     to_target=next_source_profile,
-                    reason="target_budget_reached",
+                    **rotation_decision,
                     global_follows_done=global_follows_completed,
                     global_follow_cap=global_follow_goal,
                 )
+                if not rotation_decision["allowed"]:
+                    final_reason = str(rotation_decision["reason"])
+                    final_summary.update(
+                        {
+                            "follow_session_outcome": "partial_resumable",
+                            "follow_stop_reason": final_reason,
+                            "see_more_status": rotation_decision["see_more_status"],
+                            "target_rotation_allowed": False,
+                        }
+                    )
+                    merge_follow_outcome(
+                        final_summary,
+                        stable_reason=final_reason,
+                        verified_actions=global_follows_completed,
+                        target_actions=global_follow_goal,
+                        current_target_id=target_id or source_profile,
+                        remaining_target_ids=_follow_target_ids(remaining_budget_targets),
+                        safe_boundary=False,
+                    )
+                    break
                 log("info", "follow_target_rotation_requested", **rotation_payload)
                 fast_rotation_result: dict[str, Any] | None = None
                 if fast_rotate_to_next_target_from_followers is not None:
@@ -1169,6 +1234,41 @@ def _run_follow_target_rotation(
                         exit_code=exit_code,
                         summary=summary,
                     )
+                    rotation_decision = _follow_target_rotation_contract(
+                        summary,
+                        reason=summary_reason,
+                    )
+                    log(
+                        "info",
+                        "target_rotation_decision",
+                        from_target=source_profile,
+                        to_target=next_source_profile,
+                        **rotation_decision,
+                        global_follows_done=global_follows_completed,
+                        global_follow_cap=global_follow_goal,
+                    )
+                    if not rotation_decision["allowed"]:
+                        final_reason = str(rotation_decision["reason"])
+                        final_summary.update(
+                            {
+                                "follow_session_outcome": "partial_resumable",
+                                "follow_stop_reason": final_reason,
+                                "original_follow_stop_reason": summary_reason,
+                                "see_more_status": rotation_decision["see_more_status"],
+                                "target_rotation_allowed": False,
+                                "partial_resumable_targets": list(partial_resumable_targets),
+                            }
+                        )
+                        merge_follow_outcome(
+                            final_summary,
+                            stable_reason=final_reason,
+                            verified_actions=global_follows_completed,
+                            target_actions=global_follow_goal,
+                            current_target_id=target_id or source_profile,
+                            remaining_target_ids=_follow_target_ids(remaining_safe_targets),
+                            safe_boundary=False,
+                        )
+                        break
                     fast_rotation_result: dict[str, Any] | None = None
                     if fast_rotate_to_next_target_from_followers is not None:
                         fast_rotation_result = fast_rotate_to_next_target_from_followers(
@@ -1318,15 +1418,39 @@ def _run_follow_target_rotation(
         if remaining:
             next_target = remaining[0]
             next_source_profile = _as_source_profile(next_target.get("source_profile"))
+            rotation_decision = _follow_target_rotation_contract(
+                summary,
+                reason="target_exhausted",
+            )
             log(
                 "info",
                 "target_rotation_decision",
                 from_target=source_profile,
                 to_target=next_source_profile,
-                reason="target_exhausted",
+                **rotation_decision,
                 global_follows_done=global_follows_completed,
                 global_follow_cap=global_follow_goal,
             )
+            if not rotation_decision["allowed"]:
+                final_reason = str(rotation_decision["reason"])
+                final_summary.update(
+                    {
+                        "follow_session_outcome": "partial_resumable",
+                        "follow_stop_reason": final_reason,
+                        "see_more_status": rotation_decision["see_more_status"],
+                        "target_rotation_allowed": False,
+                    }
+                )
+                merge_follow_outcome(
+                    final_summary,
+                    stable_reason=final_reason,
+                    verified_actions=global_follows_completed,
+                    target_actions=global_follow_goal,
+                    current_target_id=target_id or source_profile,
+                    remaining_target_ids=_follow_target_ids(remaining),
+                    safe_boundary=False,
+                )
+                break
             log(
                 "info",
                 "follow_target_switched",
