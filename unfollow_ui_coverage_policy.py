@@ -740,6 +740,7 @@ _UNFOLLOW_CRITICAL_REASONS = frozenset(
 _UNFOLLOW_INTERNAL_FAILURE_REASONS = frozenset(
     {
         "unfollow_persistence_failed",
+        "unfollow_candidate_availability_persistence_failed",
         "unfollow_verify_failed",
         "return_to_following_list_failed",
         "unfollow_tap_failed",

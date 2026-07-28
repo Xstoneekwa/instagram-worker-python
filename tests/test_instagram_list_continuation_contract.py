@@ -123,6 +123,19 @@ class _FakeDevice:
         return self.after_xml
 
 
+class _SequenceDevice(_FakeDevice):
+    def __init__(self, hierarchy_sequence: list[str]) -> None:
+        super().__init__(hierarchy_sequence[-1])
+        self.hierarchy_sequence = list(hierarchy_sequence)
+        self.dump_count = 0
+
+    def dump_hierarchy(self, compressed: bool = False) -> str:
+        _ = compressed
+        index = min(self.dump_count, len(self.hierarchy_sequence) - 1)
+        self.dump_count += 1
+        return self.hierarchy_sequence[index]
+
+
 class _FakeScrollDevice:
     def __init__(self, *, width: int = 1080, height: int = 2400) -> None:
         self.width = width
@@ -197,6 +210,61 @@ class InstagramListContinuationContractTests(unittest.TestCase):
         )
         self.assertEqual(result["see_more_status"], "see_more_failed_terminal")
         self.assertEqual(device.clicks, 2)
+
+    def test_05d_slow_loading_three_seconds_keeps_same_ct_until_rows_stable(self) -> None:
+        before = _surface(rows=[], see_more=True, suggestions=True)
+        loading = _surface(rows=[], loading=True)
+        partial = _surface(rows=[("row_new", "Follow")], loading=True)
+        stable = _surface(rows=[("row_new", "Follow")])
+        nav._followers_store_detect_hierarchy_xml(before)
+        device = _SequenceDevice([loading] * 7 + [partial, stable, stable])
+        with patch.object(nav.time, "sleep", return_value=None):
+            result = nav.followers_try_expand_primary_list(device, max_attempts=2)
+        self.assertTrue(result["expanded"])
+        self.assertTrue(result["loading_observed"])
+        self.assertGreaterEqual(result["poll_count"], 9)
+        self.assertEqual(device.clicks, 1)
+
+    def test_05e_loading_timeout_is_terminal_only_after_full_poll_budget(self) -> None:
+        before = _surface(rows=[], see_more=True, suggestions=True)
+        loading = _surface(rows=[], loading=True)
+        nav._followers_store_detect_hierarchy_xml(before)
+        device = _SequenceDevice([loading])
+        with patch.object(nav.time, "sleep", return_value=None):
+            result = nav.followers_try_expand_primary_list(device, max_attempts=2)
+        self.assertFalse(result["expanded"])
+        self.assertEqual(
+            result["failure_reason"],
+            "see_more_expansion_timeout_after_observed_loading",
+        )
+        self.assertEqual(device.dump_count, 13)
+        self.assertEqual(device.clicks, 1)
+
+    def test_05f_first_partial_frame_is_not_accepted_until_stable(self) -> None:
+        before = _surface(rows=[], see_more=True, suggestions=True)
+        partial = _surface(rows=[("row_new", "Follow")], loading=True)
+        nav._followers_store_detect_hierarchy_xml(before)
+        device = _SequenceDevice([partial, partial])
+        with patch.object(nav.time, "sleep", return_value=None):
+            result = nav.followers_try_expand_primary_list(device, max_attempts=1)
+        self.assertTrue(result["expanded"])
+        self.assertEqual(result["poll_count"], 2)
+
+    def test_05g_stale_xml_without_mutation_uses_single_bounded_retry(self) -> None:
+        before = _surface(rows=[], see_more=True, suggestions=True)
+        nav._followers_store_detect_hierarchy_xml(before)
+        device = _SequenceDevice([before])
+        with patch.object(nav.time, "sleep", return_value=None):
+            result = nav.followers_try_expand_primary_list(device, max_attempts=2)
+        self.assertFalse(result["expanded"])
+        self.assertEqual(result["failure_reason"], "see_more_click_no_surface_mutation")
+        self.assertEqual(device.clicks, 2)
+
+    def test_05h_visual_fallback_uses_a_bounded_coarse_signature(self) -> None:
+        before = "0" * 256
+        after = "1" * 12 + "0" * 244
+        self.assertEqual(nav._see_more_visual_signature_distance(before, after), 12)
+        self.assertEqual(nav._see_more_visual_signature_distance(before, ""), 0)
 
     def test_05a_visible_text_with_clickable_parent_is_actionable(self) -> None:
         xml = (

@@ -268,6 +268,22 @@ def validate_restriction_preflight_policy(
     return True, "restriction_preflight_authorized", incident_id
 
 
+def classify_restriction_preflight_request(
+    policy: dict[str, object] | None,
+) -> tuple[bool, str]:
+    """Interpret the flag by boolean value; key presence alone is never enough."""
+
+    payload = policy if isinstance(policy, dict) else {}
+    if "restriction_preflight_only" not in payload:
+        return False, "restriction_preflight_not_requested"
+    value = payload.get("restriction_preflight_only")
+    if value is True:
+        return True, "restriction_preflight_requested"
+    if value is False:
+        return False, "restriction_preflight_not_requested"
+    return False, "restriction_preflight_only_contract_invalid"
+
+
 def _safe_xml_snapshot(hierarchy_xml: str) -> str:
     """Retain popup proof and structure, blanking unrelated UI/account text."""
     raw = str(hierarchy_xml or "")

@@ -176,6 +176,16 @@ class UnfollowCandidatePaginationTests(unittest.TestCase):
 
 
 class UnfollowCandidateLedgerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.availability_patch = patch(
+            "supabase_client.fetch_unfollow_candidate_availability",
+            return_value={},
+        )
+        self.availability_patch.start()
+
+    def tearDown(self) -> None:
+        self.availability_patch.stop()
+
     def test_filters_every_row_before_session_slice(self) -> None:
         rows = [
             _row(index, following_back=True)
@@ -359,6 +369,69 @@ class UnfollowCandidateLedgerTests(unittest.TestCase):
         self.assertEqual(outcome["planned_remaining_count"], 0)
         self.assertEqual(outcome["remaining_count"], 3)
         self.assertTrue(outcome["resume_recommended"])
+
+    def test_not_found_cooldown_is_excluded_from_actionable_backlog(self) -> None:
+        rows = [_row(1, username="temporarily.missing"), _row(2, username="actionable")]
+        with patch(
+            "supabase_client.fetch_unfollow_strict_candidate_rows",
+            return_value=rows,
+        ), patch(
+            "supabase_client.fetch_unfollow_candidate_availability",
+            return_value={
+                "temporarily.missing": {
+                    "status": "temporary_unavailable",
+                    "next_retry_at": (AS_OF + timedelta(hours=24)).isoformat(),
+                }
+            },
+        ):
+            plan = plan_unfollow_targets(
+                "account-1",
+                settings=_settings(),
+                as_of=AS_OF,
+            )
+        self.assertEqual(plan["eligible_total"], 1)
+        self.assertEqual(plan["backlog_actionable_remaining"], 1)
+        self.assertEqual(plan["backlog_unavailable_remaining"], 1)
+        self.assertEqual(plan["skipped_counts"]["candidate_unavailable_cooldown"], 1)
+
+    def test_exhausted_not_found_never_reenters_actionable_backlog(self) -> None:
+        with patch(
+            "supabase_client.fetch_unfollow_strict_candidate_rows",
+            return_value=[_row(1, username="removed.account")],
+        ), patch(
+            "supabase_client.fetch_unfollow_candidate_availability",
+            return_value={"removed.account": {"status": "exhausted"}},
+        ):
+            plan = plan_unfollow_targets(
+                "account-1",
+                settings=_settings(),
+                as_of=AS_OF,
+            )
+        self.assertEqual(plan["eligible_total"], 0)
+        self.assertEqual(plan["backlog_actionable_remaining"], 0)
+        self.assertEqual(plan["backlog_unavailable_remaining"], 1)
+        self.assertEqual(plan["skipped_counts"]["candidate_unavailable_exhausted"], 1)
+
+    def test_due_cooldown_allows_one_future_retry(self) -> None:
+        with patch(
+            "supabase_client.fetch_unfollow_strict_candidate_rows",
+            return_value=[_row(1, username="retry.due")],
+        ), patch(
+            "supabase_client.fetch_unfollow_candidate_availability",
+            return_value={
+                "retry.due": {
+                    "status": "temporary_unavailable",
+                    "next_retry_at": (AS_OF - timedelta(microseconds=1)).isoformat(),
+                }
+            },
+        ):
+            plan = plan_unfollow_targets(
+                "account-1",
+                settings=_settings(),
+                as_of=AS_OF,
+            )
+        self.assertEqual(plan["eligible_total"], 1)
+        self.assertEqual(plan["backlog_unavailable_remaining"], 0)
 
     def test_quota_reached_does_not_recommend_same_session_resume(self) -> None:
         outcome = build_unfollow_outcome(

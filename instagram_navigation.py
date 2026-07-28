@@ -14230,6 +14230,34 @@ def followers_suggestions_boundary_from_cached_hierarchy(
     )
 
 
+def _see_more_visual_surface_signature(path: str) -> str:
+    """Return a coarse list-body signature used only when XML is incomplete."""
+
+    if not str(path or "").strip():
+        return ""
+    try:
+        from PIL import Image
+
+        with Image.open(path) as raw:
+            image = raw.convert("L")
+            width, height = image.size
+            if width < 8 or height < 8:
+                return ""
+            body = image.crop((0, int(height * 0.16), width, int(height * 0.82)))
+            small = body.resize((16, 16), Image.Resampling.LANCZOS)
+            pixels = [int(value) for value in small.getdata()]
+        threshold = sum(pixels) / max(1, len(pixels))
+        return "".join("1" if value >= threshold else "0" for value in pixels)
+    except Exception:
+        return ""
+
+
+def _see_more_visual_signature_distance(before: str, after: str) -> int:
+    if not before or len(before) != len(after):
+        return 0
+    return sum(left != right for left, right in zip(before, after))
+
+
 def followers_try_expand_primary_list(
     d: u2.Device,
     *,
@@ -14307,6 +14335,7 @@ def followers_try_expand_primary_list(
     detection_source = str(before.get("see_more_detection_source") or "unknown")
     candidate_id = str(before.get("see_more_candidate_id") or "")
     visual_capture_before = ""
+    visual_signature_before = ""
     if account_id and run_id:
         try:
             _ensure_debug_dirs()
@@ -14315,6 +14344,9 @@ def followers_try_expand_primary_list(
             )
             screenshot(d, str(capture_path))
             visual_capture_before = str(capture_path)
+            visual_signature_before = _see_more_visual_surface_signature(
+                visual_capture_before
+            )
         except Exception:
             visual_capture_before = ""
     _instagram_list_event(
@@ -14354,6 +14386,7 @@ def followers_try_expand_primary_list(
     started = time.perf_counter()
     baseline_rows = list(before.get("primary_row_ids") or [])
     last_after = before
+    last_visual_probe_path = ""
     no_progress_reason = "bounded_clicks_without_new_primary_rows"
     for attempt in range(1, max(1, min(int(max_attempts or 1), 2)) + 1):
         clicked = False
@@ -14436,11 +14469,22 @@ def followers_try_expand_primary_list(
             candidate_id=candidate_id,
             see_more_status="see_more_expansion_wait",
         )
-        # Instagram can briefly expose a loading/ambiguous hierarchy after the
-        # selector click.  Probe that same click a bounded number of times
-        # before deciding whether the one permitted retry is safe.
-        for settle_probe in range(1, 4):
-            time.sleep(0.35 if settle_probe == 1 else 0.25)
+        # A click acknowledgement is not an expansion acknowledgement.  The
+        # natural Loriele run showed Instagram starting the transition while
+        # the historical three probes stopped after roughly two seconds.  Poll
+        # the rendered state for a realistic but bounded window and require
+        # new primary rows before authorising continuation on this CT.
+        poll_interval_s = 0.4
+        max_wait_s = 5.2
+        max_polls = max(2, int(max_wait_s / poll_interval_s))
+        loading_observed = False
+        mutation_observed = False
+        visual_mutation_observed = False
+        visual_probe_count = 0
+        stable_new_rows_frames = 0
+        stable_new_rows_fingerprint = ""
+        for settle_probe in range(1, max_polls + 1):
+            time.sleep(poll_interval_s)
             after_xml = followers_refresh_detect_hierarchy_cache(d)
             after = followers_list_continuation_from_hierarchy_xml(
                 after_xml,
@@ -14454,7 +14498,87 @@ def followers_try_expand_primary_list(
                 list(after.get("primary_row_ids") or []),
                 require_overlap=False,
             )
+            loading_observed = bool(
+                loading_observed or after.get("loading_indicator")
+            )
+            current_fingerprint = str(after.get("viewport_fingerprint") or "")
+            xml_incomplete = bool(
+                not str(after_xml or "").strip()
+                or not str(after.get("surface_verification_source") or "").strip()
+            )
+            visual_distance = 0
+            if (
+                xml_incomplete
+                and visual_signature_before
+                and visual_probe_count < 2
+                and account_id
+                and run_id
+            ):
+                visual_probe_count += 1
+                try:
+                    _ensure_debug_dirs()
+                    visual_probe_path = _SCREENSHOTS_DIR / (
+                        f"see_more_visual_probe_{int(time.time() * 1000)}.png"
+                    )
+                    screenshot(d, str(visual_probe_path))
+                    last_visual_probe_path = str(visual_probe_path)
+                    visual_signature_after = _see_more_visual_surface_signature(
+                        str(visual_probe_path)
+                    )
+                    visual_distance = _see_more_visual_signature_distance(
+                        visual_signature_before,
+                        visual_signature_after,
+                    )
+                    visual_mutation_observed = bool(
+                        visual_mutation_observed or visual_distance >= 12
+                    )
+                except Exception:
+                    visual_distance = 0
+            mutation_observed = bool(
+                mutation_observed
+                or loading_observed
+                or visual_mutation_observed
+                or (
+                    current_fingerprint
+                    and current_fingerprint
+                    != str(before.get("viewport_fingerprint") or "")
+                )
+                or after.get("state") != before.get("state")
+            )
             if continuity.new_row_count > 0:
+                if current_fingerprint == stable_new_rows_fingerprint:
+                    stable_new_rows_frames += 1
+                else:
+                    stable_new_rows_fingerprint = current_fingerprint
+                    stable_new_rows_frames = 1
+            else:
+                stable_new_rows_frames = 0
+                stable_new_rows_fingerprint = ""
+            _instagram_list_event(
+                "see_more_expansion_poll",
+                flow="follow",
+                account_id=account_id,
+                target_id=target_id,
+                run_id=run_id,
+                target_username=expected_source_profile,
+                attempt=attempt,
+                poll_index=settle_probe,
+                poll_interval_ms=round(poll_interval_s * 1000.0, 2),
+                deadline_ms=round(max_wait_s * 1000.0, 2),
+                elapsed_ms=(time.perf_counter() - started) * 1000.0,
+                loading_observed=loading_observed,
+                mutation_observed=mutation_observed,
+                new_rows_count=int(continuity.new_row_count),
+                stable_new_rows_frames=stable_new_rows_frames,
+                xml_incomplete=xml_incomplete,
+                visual_probe_count=visual_probe_count,
+                visual_mutation_observed=visual_mutation_observed,
+                visual_signature_distance=visual_distance,
+                visual_capture_path=last_visual_probe_path,
+                fingerprint_after=current_fingerprint,
+                see_more_status="see_more_expansion_wait",
+            )
+            if continuity.new_row_count > 0 and stable_new_rows_frames >= 2:
                 visual_capture_after = ""
                 if account_id and run_id:
                     try:
@@ -14476,7 +14600,7 @@ def followers_try_expand_primary_list(
                     fingerprint_after=continuity.fingerprint_after,
                     visible_primary_row_count=int(after.get("primary_row_count") or 0),
                     overlap_count=continuity.overlap_count,
-                    reason="new_primary_rows_detected",
+                    reason="new_primary_rows_stable",
                     elapsed_ms=(time.perf_counter() - started) * 1000.0,
                     target_username=expected_source_profile,
                     new_rows_count=int(continuity.new_row_count),
@@ -14495,7 +14619,7 @@ def followers_try_expand_primary_list(
                     fingerprint_after=continuity.fingerprint_after,
                     visible_primary_row_count=int(after.get("primary_row_count") or 0),
                     overlap_count=continuity.overlap_count,
-                    reason="new_primary_rows_detected",
+                    reason="new_primary_rows_stable",
                     elapsed_ms=(time.perf_counter() - started) * 1000.0,
                     target_username=expected_source_profile,
                     new_rows_count=int(continuity.new_row_count),
@@ -14506,12 +14630,19 @@ def followers_try_expand_primary_list(
                 )
                 return {
                     "expanded": True,
-                    "reason": "new_primary_rows_detected",
+                    "reason": "new_primary_rows_stable",
                     "see_more_status": "see_more_expanded",
                     "after": after,
+                    "poll_count": settle_probe,
+                    "loading_observed": loading_observed,
                 }
+        if loading_observed:
+            no_progress_reason = "see_more_expansion_timeout_after_observed_loading"
+        elif mutation_observed:
+            no_progress_reason = "see_more_expanded_but_no_new_followers"
+        else:
+            no_progress_reason = "see_more_click_no_surface_mutation"
         if last_after.get("state") != InstagramListContinuationState.EXPAND_PRIMARY_LIST_AVAILABLE.value:
-            no_progress_reason = "post_click_surface_not_safe_for_retry"
             _instagram_list_event(
                 "see_more_click_failed",
                 flow="follow",
@@ -14524,8 +14655,14 @@ def followers_try_expand_primary_list(
                 reason=no_progress_reason,
                 target_username=expected_source_profile,
                 attempt=attempt,
-                recovery_path="surface_revalidation_failed_fail_closed",
+                recovery_path="bounded_state_wait_exhausted_fail_closed",
                 see_more_status="see_more_failed_terminal",
+                loading_observed=loading_observed,
+                mutation_observed=mutation_observed,
+                poll_count=max_polls,
+                visual_probe_count=visual_probe_count,
+                visual_mutation_observed=visual_mutation_observed,
+                visual_capture_path=last_visual_probe_path,
             )
             break
         _instagram_list_event(
@@ -14537,7 +14674,7 @@ def followers_try_expand_primary_list(
             fingerprint_before=str(before.get("viewport_fingerprint") or ""),
             fingerprint_after=str(last_after.get("viewport_fingerprint") or ""),
             visible_primary_row_count=int(last_after.get("primary_row_count") or 0),
-            reason="click_without_new_primary_rows",
+            reason=no_progress_reason,
             target_username=expected_source_profile,
             attempt=attempt,
             recovery_path=(
@@ -14550,6 +14687,12 @@ def followers_try_expand_primary_list(
                 if attempt < max(1, min(int(max_attempts or 1), 2))
                 else "see_more_failed_terminal"
             ),
+            loading_observed=loading_observed,
+            mutation_observed=mutation_observed,
+            poll_count=max_polls,
+            visual_probe_count=visual_probe_count,
+            visual_mutation_observed=visual_mutation_observed,
+            visual_capture_path=last_visual_probe_path,
         )
     _instagram_list_event(
         "instagram_list_see_more_no_progress",
@@ -14564,6 +14707,7 @@ def followers_try_expand_primary_list(
         elapsed_ms=(time.perf_counter() - started) * 1000.0,
         target_username=expected_source_profile,
         see_more_status="see_more_failed_terminal",
+        visual_capture_path=last_visual_probe_path,
     )
     return {
         "expanded": False,

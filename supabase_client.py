@@ -3442,6 +3442,98 @@ def fetch_unfollow_strict_candidate_rows(
     return (out, metadata) if include_metadata else out
 
 
+def fetch_unfollow_candidate_availability(
+    account_id: str,
+) -> dict[str, dict[str, Any]]:
+    """Load the complete account-scoped not-found ledger for classification."""
+
+    aid = str(account_id or "").strip()
+    if not aid:
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    page_size = 1000
+    offset = 0
+    snapshot_at = datetime.now(timezone.utc).isoformat()
+    seen_page_signatures: set[str] = set()
+    for _page_index in range(10_000):
+        rows = _request_json(
+            "GET",
+            "ig_unfollow_candidate_availability",
+            query={
+                "select": "account_id,normalized_username,status,reason,first_not_found_at,last_checked_at,not_found_attempt_count,next_retry_at,terminal_at,source_run_id,created_at",
+                "account_id": f"eq.{aid}",
+                "status": "in.(temporary_unavailable,exhausted)",
+                "created_at": f"lte.{snapshot_at}",
+                "order": "normalized_username.asc",
+                "limit": str(page_size),
+                "offset": str(offset),
+            },
+        )
+        if not isinstance(rows, list):
+            raise RuntimeError("unfollow_candidate_availability_response_not_list")
+        if any(not isinstance(row, dict) for row in rows):
+            raise RuntimeError("unfollow_candidate_availability_row_not_object")
+        page_signature = hashlib.sha256(
+            json.dumps(
+                [str(row.get("normalized_username") or "") for row in rows],
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        if rows and page_signature in seen_page_signatures:
+            raise RuntimeError("unfollow_candidate_availability_repeated_page")
+        if rows:
+            seen_page_signatures.add(page_signature)
+        for row in rows:
+            key = _canonical_interaction_username(
+                str(row.get("normalized_username") or "")
+            )
+            if not key:
+                raise RuntimeError("unfollow_candidate_availability_username_invalid")
+            if key in out:
+                raise RuntimeError("unfollow_candidate_availability_duplicate_username")
+            out[key] = dict(row)
+        if len(rows) < page_size:
+            break
+        offset += len(rows)
+    else:
+        raise RuntimeError("unfollow_candidate_availability_max_pages_exceeded")
+    return out
+
+
+def record_unfollow_candidate_not_found(
+    account_id: str,
+    normalized_username: str,
+    *,
+    source_run_id: str | None,
+    reason: str,
+    cooldown_hours: int = 24,
+    max_attempts: int = 2,
+) -> dict[str, Any]:
+    """Atomically advance the durable unavailable/cooldown lifecycle."""
+
+    aid = str(account_id or "").strip()
+    username = _canonical_interaction_username(normalized_username)
+    if not aid or not username:
+        raise ValueError("account_id and normalized_username are required")
+    result = _call_rpc(
+        "record_unfollow_candidate_not_found_v1",
+        {
+            "p_account_id": aid,
+            "p_normalized_username": username,
+            "p_source_run_id": str(source_run_id or "").strip() or None,
+            "p_reason": str(reason or "unfollow_candidate_not_found").strip(),
+            "p_cooldown_hours": max(1, min(int(cooldown_hours), 168)),
+            "p_max_attempts": max(1, min(int(max_attempts), 10)),
+        },
+        timeout_seconds=5.0,
+        max_retries=1,
+    )
+    if not isinstance(result, dict) or not bool(result.get("ok")):
+        raise RuntimeError("record_unfollow_candidate_not_found_failed")
+    return dict(result)
+
+
 def fetch_visible_unfollow_eligibility_rows(
     account_id: str,
     usernames: list[str],

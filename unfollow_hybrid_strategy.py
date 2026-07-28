@@ -18,8 +18,9 @@ from unfollow_ui_coverage_policy import normalize_username
 
 DIRECT_SEARCH_FALLBACK_BATCH_LIMIT = 10
 CURSOR_RESTORE_SCROLL_LIMIT = 10
-SEARCH_RESULT_INITIAL_SETTLE_S = 0.6
-SEARCH_RESULT_CONFIRM_MISSING_S = 0.8
+SEARCH_RESULT_MAX_WAIT_S = 3.5
+SEARCH_RESULT_POLL_INTERVAL_S = 0.35
+SEARCH_LOCAL_REFRESH_RETRY_LIMIT = 1
 
 
 @dataclass(frozen=True)
@@ -110,6 +111,81 @@ def exact_search_result_count(hierarchy_xml: str, expected_username: str) -> int
     return matches
 
 
+def _search_surface_committed(hierarchy_xml: str) -> bool:
+    value = str(hierarchy_xml or "")
+    lowered = value.casefold()
+    return bool(
+        "row_search_user_username" in value
+        or "no results" in lowered
+        or "aucun résultat" in lowered
+        or "aucun resultat" in lowered
+    )
+
+
+def _wait_for_exact_search_result(device: object, expected: str) -> dict[str, object]:
+    """Poll one typed query until an exact row appears or absence is proved."""
+
+    max_polls = max(
+        2,
+        int(SEARCH_RESULT_MAX_WAIT_S / SEARCH_RESULT_POLL_INTERVAL_S),
+    )
+    committed_surface_count = 0
+    observed_poll_count = 0
+    for poll_index in range(1, max_polls + 1):
+        time.sleep(SEARCH_RESULT_POLL_INTERVAL_S)
+        try:
+            try:
+                hierarchy = str(device.dump_hierarchy(compressed=False) or "")
+            except TypeError:
+                hierarchy = str(device.dump_hierarchy() or "")
+        except Exception:
+            hierarchy = ""
+        observed_poll_count = poll_index
+        if _search_surface_committed(hierarchy):
+            committed_surface_count += 1
+        count = exact_search_result_count(hierarchy, expected)
+        log(
+            "info",
+            "unfollow_direct_exact_result_poll",
+            username=expected,
+            poll_index=poll_index,
+            poll_interval_ms=round(SEARCH_RESULT_POLL_INTERVAL_S * 1000.0, 2),
+            deadline_ms=round(SEARCH_RESULT_MAX_WAIT_S * 1000.0, 2),
+            exact_match_count=count,
+            committed_surface_count=committed_surface_count,
+        )
+        if count > 1:
+            return {
+                "ok": False,
+                "status": "ambiguous",
+                "reason": "multiple_exact_account_rows",
+                "exact_match_count": count,
+                "confirmed_surface_count": committed_surface_count,
+                "poll_count": observed_poll_count,
+            }
+        if count == 1:
+            return {
+                "ok": True,
+                "status": "exact_result_visible",
+                "reason": "exact_username_result_visible",
+                "exact_match_count": 1,
+                "confirmed_surface_count": committed_surface_count,
+                "poll_count": observed_poll_count,
+            }
+    return {
+        "ok": False,
+        "status": "unavailable" if committed_surface_count >= 2 else "retryable",
+        "reason": (
+            "exact_username_not_found"
+            if committed_surface_count >= 2
+            else "search_surface_unconfirmed"
+        ),
+        "exact_match_count": 0,
+        "confirmed_surface_count": committed_surface_count,
+        "poll_count": observed_poll_count,
+    }
+
+
 def build_cursor_checkpoint(
     visible_usernames: Iterable[str],
     *,
@@ -196,57 +272,52 @@ def open_exact_profile_for_unfollow(device: object, username: str) -> dict[str, 
             "status": "retryable",
             "reason": "open_search_failed_after_bounded_retry",
         }
-    if not type_search(device, expected):
-        return {"ok": False, "status": "retryable", "reason": "type_search_failed"}
-
-    def dump_search_hierarchy() -> str:
-        try:
-            try:
-                return str(device.dump_hierarchy(compressed=False) or "")
-            except TypeError:
-                return str(device.dump_hierarchy() or "")
-        except Exception:
-            return ""
-
-    time.sleep(SEARCH_RESULT_INITIAL_SETTLE_S)
-    hierarchies = [dump_search_hierarchy()]
-    count = exact_search_result_count(hierarchies[0], expected)
-    if count == 0:
-        # Search results can attach one render late.  Never classify a stale
-        # one-shot dump as a renamed/deleted account.
-        time.sleep(SEARCH_RESULT_CONFIRM_MISSING_S)
-        hierarchies.append(dump_search_hierarchy())
-        count = exact_search_result_count(hierarchies[-1], expected)
-    if count > 1:
-        return {
-            "ok": False,
-            "status": "ambiguous",
-            "reason": "multiple_exact_account_rows",
-            "exact_match_count": count,
-        }
-    if count == 0:
-        # Two independently committed surfaces without the exact handle prove
-        # unavailable/renamed.  Anything weaker remains retryable.
-        committed = all(
-            bool("row_search_user_username" in hierarchy or "No results" in hierarchy)
-            for hierarchy in hierarchies
-        ) and len(hierarchies) >= 2
-        return {
-            "ok": False,
-            "status": "unavailable" if committed else "retryable",
-            "reason": "exact_username_not_found" if committed else "search_surface_unconfirmed",
-            "exact_match_count": 0,
-            "confirmed_surface_count": sum(
-                bool("row_search_user_username" in hierarchy or "No results" in hierarchy)
-                for hierarchy in hierarchies
-            ),
-        }
+    search_result: dict[str, object] = {}
+    local_retry_count = 0
+    total_confirmed_surfaces = 0
+    for search_attempt in range(1, SEARCH_LOCAL_REFRESH_RETRY_LIMIT + 2):
+        if not type_search(device, expected):
+            search_result = {
+                "ok": False,
+                "status": "retryable",
+                "reason": "type_search_failed",
+                "exact_match_count": 0,
+            }
+        else:
+            search_result = _wait_for_exact_search_result(device, expected)
+        total_confirmed_surfaces += int(
+            search_result.get("confirmed_surface_count") or 0
+        )
+        if bool(search_result.get("ok")):
+            break
+        if search_attempt > SEARCH_LOCAL_REFRESH_RETRY_LIMIT:
+            break
+        local_retry_count += 1
+        log(
+            "warning",
+            "unfollow_candidate_local_search_retry_started",
+            username=expected,
+            retry_index=local_retry_count,
+            max_retries=SEARCH_LOCAL_REFRESH_RETRY_LIMIT,
+            previous_status=str(search_result.get("status") or ""),
+            previous_reason=str(search_result.get("reason") or ""),
+            refresh_method="clear_and_retype_exact_username",
+        )
+    if not bool(search_result.get("ok")):
+        result = dict(search_result)
+        result["confirmed_surface_count"] = total_confirmed_surfaces
+        result["local_retry_count"] = local_retry_count
+        if total_confirmed_surfaces >= 2:
+            result["status"] = "unavailable"
+            result["reason"] = "unfollow_candidate_account_unavailable"
+        return result
     if not tap_account_result(device, expected):
         return {
             "ok": False,
             "status": "retryable",
             "reason": "exact_account_row_tap_failed",
             "exact_match_count": 1,
+            "local_retry_count": local_retry_count,
         }
     profile = verify_unfollow_target_profile_strict(
         device,
@@ -258,10 +329,12 @@ def open_exact_profile_for_unfollow(device: object, username: str) -> dict[str, 
             "status": "ambiguous",
             "reason": str(profile.get("failure_reason") or "profile_identity_unconfirmed"),
             "exact_match_count": 1,
+            "local_retry_count": local_retry_count,
         }
     return {
         "ok": True,
         "status": "profile_opened",
         "reason": "exact_username_profile_verified",
         "exact_match_count": 1,
+        "local_retry_count": local_retry_count,
     }

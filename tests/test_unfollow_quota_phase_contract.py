@@ -79,7 +79,10 @@ class UnfollowQuotaPhaseContractTest(unittest.TestCase):
             'return emit_final("success_real_unfollow_multi_quota_reached")',
             quota_branch,
         )
-        return_navigation = source.index("ret = (", immediate_stop)
+        return_navigation = source.index(
+            "ret = _return_after_unfollow_profile(",
+            immediate_stop,
+        )
         self.assertLess(quota_branch, immediate_stop)
         self.assertLess(immediate_stop, return_navigation)
 

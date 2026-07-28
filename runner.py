@@ -20001,14 +20001,36 @@ def _main_impl() -> int:
     if account_session_run and supabase_mode and account_id:
         from auto_restart_runtime import load_resume_policy_from_env
         from instagram_action_restriction import (
+            classify_restriction_preflight_request,
             guard_instagram_action_rate_limit,
             validate_restriction_preflight_policy,
         )
 
         restriction_resume_policy = load_resume_policy_from_env() or {}
-        restriction_preflight_requested = (
-            "restriction_preflight_only" in restriction_resume_policy
+        restriction_preflight_requested, restriction_preflight_request_reason = (
+            classify_restriction_preflight_request(restriction_resume_policy)
         )
+        if restriction_preflight_request_reason == "restriction_preflight_only_contract_invalid":
+            log(
+                "error",
+                "restriction_preflight_failed",
+                account_id=account_id,
+                run_id=run_id or None,
+                reason="restriction_preflight_only_contract_invalid",
+                business_actions_allowed=False,
+            )
+            if run_id:
+                _update_run_status_safe(
+                    run_id=run_id,
+                    status="failed",
+                    totals={"total": 0, "success": 0, "failed": 1},
+                    performance_summary={
+                        "reason": "restriction_preflight_only_contract_invalid",
+                        "physical_preflight_required": False,
+                        "restriction_preflight_only": None,
+                    },
+                )
+            return _return_with_cleanup(d, 76)
         if restriction_preflight_requested:
             authorized, authorization_reason, restriction_incident_id = (
                 validate_restriction_preflight_policy(restriction_resume_policy)

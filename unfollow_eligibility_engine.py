@@ -35,6 +35,8 @@ _STRICT_SKIP_KEYS = (
     "follow_status_not_following",
     "missing_followback_confirmation",
     "not_following_back",
+    "candidate_unavailable_cooldown",
+    "candidate_unavailable_exhausted",
 )
 
 
@@ -263,6 +265,9 @@ def plan_unfollow_targets(
         )
         if key
     }
+    availability_by_username = (
+        supabase_client.fetch_unfollow_candidate_availability(aid)
+    )
     fetch_cap = max(session_cap * 4, 50) if session_cap > 0 else 200
     loaded = supabase_client.fetch_unfollow_strict_candidate_rows(
         aid,
@@ -315,6 +320,23 @@ def plan_unfollow_targets(
             skipped["whitelist"] = int(skipped.get("whitelist", 0)) + 1
             continue
 
+        availability = availability_by_username.get(username_key) or {}
+        availability_status = str(availability.get("status") or "").strip()
+        if availability_status == "exhausted":
+            skipped["candidate_unavailable_exhausted"] = int(
+                skipped.get("candidate_unavailable_exhausted", 0)
+            ) + 1
+            continue
+        if availability_status == "temporary_unavailable":
+            next_retry_at = supabase_client.parse_utc_iso_timestamp(
+                availability.get("next_retry_at")
+            )
+            if next_retry_at is None or next_retry_at > now:
+                skipped["candidate_unavailable_cooldown"] = int(
+                    skipped.get("candidate_unavailable_cooldown", 0)
+                ) + 1
+                continue
+
         if username_key in seen_eligible_usernames:
             skipped["duplicate_username_row"] = int(
                 skipped.get("duplicate_username_row", 0)
@@ -357,6 +379,15 @@ def plan_unfollow_targets(
             scan_metadata.get("candidate_scan_exhaustive")
         ),
         "candidate_funnel_reconciled": candidate_funnel_reconciled,
+        "candidate_not_found": int(
+            skipped.get("candidate_unavailable_cooldown", 0)
+        )
+        + int(skipped.get("candidate_unavailable_exhausted", 0)),
+        "backlog_actionable_remaining": eligible_total,
+        "backlog_unavailable_remaining": int(
+            skipped.get("candidate_unavailable_cooldown", 0)
+        )
+        + int(skipped.get("candidate_unavailable_exhausted", 0)),
         "scan_as_of": str(scan_metadata.get("scan_as_of") or now.isoformat()),
     }
     log(

@@ -1,8 +1,9 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 import account_session_orchestrator as account_session
 import instagram_navigation as nav
+import unfollow_session_orchestrator as unfollow_session
 from unfollow_hybrid_strategy import (
     build_cursor_checkpoint,
     can_arm_direct_search_fallback,
@@ -20,6 +21,10 @@ def _search_xml(*usernames: str) -> str:
         for username in usernames
     )
     return f'<hierarchy>{rows}</hierarchy>'
+
+
+def _no_results_xml() -> str:
+    return '<hierarchy><node text="No results" /></hierarchy>'
 
 
 class UnfollowHybridStrategyTests(unittest.TestCase):
@@ -156,7 +161,9 @@ class UnfollowHybridStrategyTests(unittest.TestCase):
             out = open_exact_profile_for_unfollow(Device(), "old_name")
         self.assertFalse(out["ok"])
         self.assertEqual(out["status"], "unavailable")
-        self.assertEqual(out["confirmed_surface_count"], 2)
+        self.assertGreaterEqual(out["confirmed_surface_count"], 2)
+        self.assertEqual(out["local_retry_count"], 1)
+        self.assertEqual(out["reason"], "unfollow_candidate_account_unavailable")
 
     def test_direct_search_retries_one_uncommitted_search_tab_transition(self) -> None:
         class Device:
@@ -185,6 +192,125 @@ class UnfollowHybridStrategyTests(unittest.TestCase):
         self.assertEqual(out["status"], "retryable")
         self.assertEqual(out["reason"], "open_search_failed_after_bounded_retry")
         self.assertEqual(open_search_mock.call_count, 2)
+
+    def test_not_found_refreshes_and_retypes_exactly_once(self) -> None:
+        class Device:
+            def dump_hierarchy(self, compressed=False):
+                del compressed
+                return _no_results_xml()
+
+        with patch("instagram_navigation.open_search", return_value=True), patch(
+            "instagram_navigation.type_search", return_value=True
+        ) as type_mock, patch("unfollow_hybrid_strategy.time.sleep"):
+            out = open_exact_profile_for_unfollow(Device(), "missing_account")
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["status"], "unavailable")
+        self.assertEqual(out["local_retry_count"], 1)
+        self.assertEqual(type_mock.call_count, 2)
+
+    def test_exact_result_on_local_retry_is_opened_without_approximation(self) -> None:
+        class Device:
+            def __init__(self) -> None:
+                self.dumps = 0
+
+            def dump_hierarchy(self, compressed=False):
+                del compressed
+                self.dumps += 1
+                return _no_results_xml() if self.dumps <= 10 else _search_xml("target")
+
+        with patch("instagram_navigation.open_search", return_value=True), patch(
+            "instagram_navigation.type_search", return_value=True
+        ) as type_mock, patch(
+            "instagram_navigation.tap_account_result", return_value=True
+        ) as tap_mock, patch(
+            "unfollow_profile_probe.verify_unfollow_target_profile_strict",
+            return_value={"ok": True},
+        ), patch("unfollow_hybrid_strategy.time.sleep"):
+            out = open_exact_profile_for_unfollow(Device(), "target")
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["local_retry_count"], 1)
+        self.assertEqual(type_mock.call_count, 2)
+        tap_mock.assert_called_once_with(ANY, "target")
+
+    def test_partial_result_never_authorizes_a_tap(self) -> None:
+        class Device:
+            def dump_hierarchy(self, compressed=False):
+                del compressed
+                return _search_xml("target_backup")
+
+        with patch("instagram_navigation.open_search", return_value=True), patch(
+            "instagram_navigation.type_search", return_value=True
+        ), patch("instagram_navigation.tap_account_result") as tap_mock, patch(
+            "unfollow_hybrid_strategy.time.sleep"
+        ):
+            out = open_exact_profile_for_unfollow(Device(), "target")
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["status"], "unavailable")
+        tap_mock.assert_not_called()
+
+    def test_confirmed_removed_account_fixture_is_not_marked_success(self) -> None:
+        class Device:
+            def dump_hierarchy(self, compressed=False):
+                del compressed
+                return _no_results_xml()
+
+        with patch("instagram_navigation.open_search", return_value=True), patch(
+            "instagram_navigation.type_search", return_value=True
+        ), patch("unfollow_hybrid_strategy.time.sleep"):
+            out = open_exact_profile_for_unfollow(Device(), "comoraisoncielesteart")
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["status"], "unavailable")
+        self.assertEqual(out["exact_match_count"], 0)
+
+    def test_search_remains_fallback_after_progressive_scan(self) -> None:
+        before_exhaustion = choose_hybrid_selection(
+            ["target"],
+            scan_exhausted=False,
+        )
+        after_exhaustion = choose_hybrid_selection(
+            ["target"],
+            scan_exhausted=True,
+        )
+        self.assertEqual(before_exhaustion.mode, "progressive_scan")
+        self.assertEqual(after_exhaustion.mode, "direct_exact")
+
+    def test_direct_candidate_returns_to_existing_search_session(self) -> None:
+        with patch.object(
+            unfollow_session,
+            "return_to_search_from_profile",
+            return_value=True,
+        ), patch.object(
+            unfollow_session,
+            "open_own_following_list_from_own_profile",
+        ) as reopen:
+            out = unfollow_session._return_after_unfollow_profile(
+                object(),
+                account_username="owner",
+                direct_exact_search=True,
+            )
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["destination"], "search")
+        self.assertTrue(out["search_session_reused"])
+        reopen.assert_not_called()
+
+    def test_direct_candidate_falls_back_to_following_when_search_return_fails(self) -> None:
+        with patch.object(
+            unfollow_session,
+            "return_to_search_from_profile",
+            return_value=False,
+        ), patch.object(
+            unfollow_session,
+            "open_own_following_list_from_own_profile",
+            return_value=(True, {"reason": "reopened"}),
+        ):
+            out = unfollow_session._return_after_unfollow_profile(
+                object(),
+                account_username="owner",
+                direct_exact_search=True,
+            )
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["destination"], "following")
+        self.assertFalse(out["search_session_reused"])
 
 
 if __name__ == "__main__":

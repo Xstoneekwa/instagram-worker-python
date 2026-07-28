@@ -8,6 +8,16 @@ from unfollow_settings import UnfollowSettings
 
 
 class UnfollowEligibilityTimestampPrecisionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.availability_patch = patch(
+            "supabase_client.fetch_unfollow_candidate_availability",
+            return_value={},
+        )
+        self.availability_patch.start()
+
+    def tearDown(self) -> None:
+        self.availability_patch.stop()
+
     def test_variable_precision_postgres_timestamp_remains_eligible(self) -> None:
         settings = UnfollowSettings(
             account_id="account-1",

@@ -7,6 +7,7 @@ from instagram_action_restriction import (
     InstagramActionRestrictionDetected,
     _safe_xml_snapshot,
     classify_instagram_action_rate_limit,
+    classify_restriction_preflight_request,
     configure_restriction_runtime_context,
     guard_instagram_action_rate_limit,
     validate_restriction_preflight_policy,
@@ -183,6 +184,20 @@ class RestrictionRuntimeGuardTests(unittest.TestCase):
 
 
 class RestrictionPreflightPolicyTests(unittest.TestCase):
+    def test_false_preflight_flag_does_not_enter_physical_preflight(self) -> None:
+        requested, reason = classify_restriction_preflight_request(
+            {"restriction_preflight_only": False}
+        )
+        self.assertFalse(requested)
+        self.assertEqual(reason, "restriction_preflight_not_requested")
+
+    def test_non_boolean_preflight_flag_fails_closed(self) -> None:
+        requested, reason = classify_restriction_preflight_request(
+            {"restriction_preflight_only": "false"}
+        )
+        self.assertFalse(requested)
+        self.assertEqual(reason, "restriction_preflight_only_contract_invalid")
+
     def test_explicit_preflight_only_with_all_business_phases_false_is_authorized(self) -> None:
         authorized, reason, incident_id = validate_restriction_preflight_policy(
             {
