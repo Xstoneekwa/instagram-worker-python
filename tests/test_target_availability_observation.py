@@ -49,11 +49,73 @@ class TargetAvailabilityObservationTests(unittest.TestCase):
             reason_codes=["target_verified_status_detected", "target_profile_found"],
         )
         payload = json.loads(observation.to_json())
+        self.assertEqual(payload["schema_version"], "target-availability-observation-v1")
+        self.assertEqual(payload["requested_username"], "target.one")
+        self.assertEqual(payload["normalized_username"], "target.one")
         self.assertEqual(payload["searched_username"], "target.one")
         self.assertEqual(payload["observed_username"], "target.one")
         self.assertEqual(payload["observed_stable_platform_user_id"], "ig-100")
         self.assertEqual(payload["reason_codes"], sorted(payload["reason_codes"]))
         self.assertNotIn("password", payload)
+
+    def test_explicit_identity_context_stage_and_terrain_signals(self) -> None:
+        observation = self.build(
+            request_id="request-one",
+            instance_id="worker-one",
+            device_key="device-one",
+            worker_version="release-one",
+            observation_stage="followers_pagination",
+            identity_source="accessibility_node",
+            identity_confidence="medium",
+            username_lookup_started=True,
+            username_lookup_completed=True,
+            profile_ambiguous=True,
+            followers_surface_entered=True,
+            followers_surface_entry_failed=True,
+            pagination_stalled=True,
+            recovery_attempted=True,
+            ui_ambiguous=True,
+            network_ambiguous=True,
+            session_ambiguous=True,
+            source_profile_mismatch=True,
+            identity_conflict=True,
+            reason_codes=[
+                "target_username_lookup_completed",
+                "target_profile_ambiguous",
+                "target_followers_surface_entered",
+                "target_followers_entry_failed",
+                "target_pagination_stalled",
+                "target_recovery_attempted",
+                "target_ui_ambiguity",
+                "target_network_ambiguity",
+                "target_session_ambiguity",
+                "target_source_profile_mismatch",
+                "target_identity_conflict",
+            ],
+        )
+        payload = observation.to_dict()
+        self.assertEqual(payload["request_id"], "request-one")
+        self.assertEqual(payload["instance_id"], "worker-one")
+        self.assertEqual(payload["device_id"], "device-one")
+        self.assertEqual(payload["worker_release"], "release-one")
+        self.assertEqual(payload["observation_stage"], "followers_pagination")
+        self.assertEqual(payload["identity_source"], "accessibility_node")
+        self.assertEqual(payload["identity_confidence"], "medium")
+        for signal in (
+            "username_lookup_started",
+            "username_lookup_completed",
+            "profile_ambiguous",
+            "followers_surface_entered",
+            "followers_surface_entry_failed",
+            "pagination_stalled",
+            "recovery_attempted",
+            "ui_ambiguous",
+            "network_ambiguous",
+            "session_ambiguous",
+            "source_profile_mismatch",
+            "identity_conflict",
+        ):
+            self.assertTrue(payload[signal])
 
     def test_idempotency_is_stable_for_the_same_runtime_event(self) -> None:
         first = self.build()
@@ -127,6 +189,14 @@ class TargetAvailabilityObservationTests(unittest.TestCase):
             self.build(reason_codes=["archive_target_now"])
         with self.assertRaises(TypeError):
             self.build(evidence_safe={"bad": object()})
+        with self.assertRaisesRegex(ValueError, "sensitive_evidence_key_forbidden"):
+            self.build(evidence_safe={"nested": {"service_role_key": "never"}})
+        with self.assertRaisesRegex(ValueError, "evidence_safe_too_large"):
+            self.build(evidence_safe={"note": "x" * 5_000})
+        with self.assertRaisesRegex(ValueError, "identity_source_invalid"):
+            self.build(identity_source="guessed_from_username")
+        with self.assertRaisesRegex(ValueError, "observation_stage_invalid"):
+            self.build(observation_stage="archive_target")
 
     def test_scope_is_required_and_account_isolation_changes_identity(self) -> None:
         with self.assertRaisesRegex(ValueError, "account_id_required"):
@@ -155,20 +225,12 @@ class TargetAvailabilityObservationTests(unittest.TestCase):
                 normalized_username="invalid username",
             )
 
-    def test_contract_is_not_wired_into_worker_runtime(self) -> None:
+    def test_contract_has_no_navigation_or_supabase_dependency(self) -> None:
         root = Path(__file__).resolve().parents[1]
-        for relative in (
-            "runner.py",
-            "instagram_navigation.py",
-            "account_session_orchestrator.py",
-            "supabase_client.py",
-            "account_run_request_consumer.py",
-        ):
-            self.assertNotIn(
-                "target_availability_observation",
-                (root / relative).read_text(encoding="utf-8"),
-                relative,
-            )
+        contract = (root / "target_availability_observation.py").read_text(encoding="utf-8")
+        self.assertNotIn("supabase_client", contract)
+        self.assertNotIn("uiautomator2", contract)
+        self.assertNotIn("instagram_navigation", contract)
 
 
 if __name__ == "__main__":
