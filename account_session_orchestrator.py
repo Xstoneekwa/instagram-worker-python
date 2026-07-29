@@ -58,6 +58,34 @@ FOLLOW_TARGET_MAX_FOLLOWS_PER_TARGET_ENV = "FOLLOW_TARGET_MAX_FOLLOWS_PER_TARGET
 FOLLOW_SOURCE_ROTATION_CONTRACT_MAX_FOLLOWS_PER_TARGET_PER_RUN = 30
 FOLLOW_SOURCE_ROTATION_CONTRACT_MAX_TARGETS_PER_RUN = 4
 FOLLOW_TARGET_MAX_SAFE_PARTIAL_FAILURES_PER_RUN = 2
+
+
+def _target_availability_capture_requested(account_id: str) -> bool:
+    enabled = str(os.getenv("TARGET_AVAILABILITY_OBSERVATION_CAPTURE_ENABLED") or "").strip().lower()
+    if enabled not in {"1", "true", "yes", "on"}:
+        return False
+    killed = str(os.getenv("TARGET_AVAILABILITY_KILL_SWITCH") or "").strip().lower()
+    kill_file = str(os.getenv("TARGET_AVAILABILITY_KILL_SWITCH_FILE") or "").strip()
+    if killed in {"1", "true", "yes", "on"} or bool(kill_file and os.path.isfile(kill_file)):
+        return False
+    allowlist = {
+        item.strip()
+        for item in str(os.getenv("TARGET_AVAILABILITY_ACCOUNT_ALLOWLIST") or "").split(",")
+        if item.strip()
+    }
+    return not allowlist or account_id in allowlist
+
+
+def _observe_target_availability(hook_name: str, **kwargs: Any) -> bool:
+    if not _target_availability_capture_requested(str(kwargs.get("account_id") or "")):
+        return True
+    try:
+        from target_availability_runtime import observe_rotation_target_loaded, observe_rotation_target_summary
+
+        hook = observe_rotation_target_loaded if hook_name == "loaded" else observe_rotation_target_summary
+        return bool(hook(**kwargs))
+    except Exception:
+        return True
 FOLLOW_TARGET_SAFE_PARTIAL_ROTATION_REASONS = frozenset(
     {
         "visible_window_exhausted_scroll_failed",
@@ -501,11 +529,19 @@ def _rotation_target_from_row(row: dict[str, Any], index: int) -> dict[str, Any]
     )
     if not source_profile:
         return None
+    raw = row.get("raw") if isinstance(row.get("raw"), dict) else row
+    metadata_safe = raw.get("metadata_safe") if isinstance(raw.get("metadata_safe"), dict) else {}
     return {
         "target_id": _as_target_id(row.get("target_id") or row.get("id")) or None,
         "source_profile": source_profile,
         "target_index": index,
         "selection_source": str(row.get("selection_source") or "ig_targets").strip() or "ig_targets",
+        "stable_platform_user_id": str(
+            raw.get("stable_platform_user_id")
+            or metadata_safe.get("instagram_user_id")
+            or metadata_safe.get("external_profile_id")
+            or ""
+        ).strip() or None,
     }
 
 
@@ -650,6 +686,7 @@ def _run_follow_target_rotation(
     account_id: str,
     account_username: str,
     run_id: str | None,
+    tenant_id: str | None = None,
     follow_targets: list[dict[str, Any]],
     run_followers_list_engine_session: FollowEngineRunner,
     supabase_mode: bool,
@@ -760,6 +797,7 @@ def _run_follow_target_rotation(
         target_id = _as_target_id(target.get("target_id")) or None
         source_profile = _as_source_profile(target.get("source_profile"))
         target_index = int(target.get("target_index") or attempt_index)
+        stable_platform_user_id = str(target.get("stable_platform_user_id") or "").strip() or None
         t_target_selected = time.perf_counter()
         log(
             "info",
@@ -829,6 +867,16 @@ def _run_follow_target_rotation(
             call_kwargs["prevalidated_followers_list_meta"] = dict(prevalidated_followers_meta)
             prevalidated_followers_target_key = None
             prevalidated_followers_meta = {}
+        _observe_target_availability(
+            "loaded",
+            tenant_id=str(tenant_id or ""),
+            account_id=account_id,
+            target_id=str(target_id or ""),
+            username=source_profile,
+            run_id=run_id,
+            target_index=target_index,
+            stable_platform_user_id=stable_platform_user_id,
+        )
         follow_t0 = time.perf_counter()
         exit_code = int(run_followers_list_engine_session(d, **call_kwargs))
         follow_total_ms = round((time.perf_counter() - follow_t0) * 1000.0, 2)
@@ -843,6 +891,17 @@ def _run_follow_target_rotation(
                 "target_budget": target_budget,
                 "exit_code": exit_code,
             }
+        )
+        _observe_target_availability(
+            "summary",
+            tenant_id=str(tenant_id or ""),
+            account_id=account_id,
+            target_id=str(target_id or ""),
+            username=source_profile,
+            run_id=run_id,
+            target_index=target_index,
+            stable_platform_user_id=stable_platform_user_id,
+            summary=summary,
         )
         target_follows_completed = _as_optional_int(summary.get("follows_completed_count")) or 0
         global_follows_completed += target_follows_completed
@@ -3357,9 +3416,9 @@ def run_account_session(
         )
         return stop_code
 
-    session_policy_revision = str(
-        (load_account_commercial_policy_revision(aid) or {}).get("revision_token") or ""
-    ).strip() or None
+    commercial_policy_revision = load_account_commercial_policy_revision(aid) or {}
+    session_policy_revision = str(commercial_policy_revision.get("revision_token") or "").strip() or None
+    target_availability_tenant_id = str(commercial_policy_revision.get("client_id") or "").strip() or None
 
     t_settings_load = time.perf_counter()
     if not src:
@@ -3738,6 +3797,7 @@ def run_account_session(
                 account_id=aid,
                 account_username=uname,
                 run_id=run_id,
+                tenant_id=target_availability_tenant_id,
                 follow_targets=rotation_targets,
                 run_followers_list_engine_session=run_followers_list_engine_session,
                 supabase_mode=supabase_mode,
