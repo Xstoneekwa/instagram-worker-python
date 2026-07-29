@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 import time
 import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
 from typing import Any
 
 import uiautomator2 as u2
@@ -35,6 +36,9 @@ _FOLLOWING_BUTTON_RETRY_STABLE_SHIFT_PX = 50
 _FOLLOWING_BUTTON_BOUNDS_SHIFT_RETRY_SETTLE_S = 1.0
 _FOLLOWING_BUTTON_RETRY_SECOND_DETECT_SETTLE_S = 0.5
 _FOLLOWING_BUTTON_INITIAL_MISSING_SETTLE_S = 0.8
+_FOLLOWING_CTA_RENDER_POLL_INTERVAL_S = 0.45
+_FOLLOWING_CTA_RENDER_MAX_PROBES = 5
+_FOLLOWING_CTA_STABLE_XML_DELTA_RATIO = 0.08
 
 
 def _elapsed_ms(start: float) -> float:
@@ -136,7 +140,16 @@ def _parse_bounds_attr(raw: str | None) -> dict[str, int]:
     }
 
 
-def _following_button_label_match(text: str, content_desc: str) -> tuple[bool, str]:
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _following_button_label_match(
+    text: str,
+    content_desc: str,
+    *,
+    expected_target_username: str = "",
+) -> tuple[bool, str]:
     t = str(text or "").strip()
     cd = str(content_desc or "").strip()
     if t in _FOLLOWING_BUTTON_LABELS:
@@ -145,7 +158,36 @@ def _following_button_label_match(text: str, content_desc: str) -> tuple[bool, s
     cd_low = cd.lower()
     if "following button" in cd_low or cd in _FOLLOWING_BUTTON_LABELS:
         return True, "content_desc_following_button"
+    expected = normalize_unfollow_username(expected_target_username)
+    if expected:
+        cd_normalized = normalize_unfollow_username(cd.replace(" ", ""))
+        for label in _FOLLOWING_BUTTON_LABELS:
+            label_low = label.casefold()
+            if cd_low.startswith(f"{label_low} ") or cd_low.startswith(f"{label_low},"):
+                if expected in cd_normalized:
+                    return True, "content_desc_following_exact_profile"
     return False, "text_not_exact_following"
+
+
+def _nearest_clickable_ancestor(
+    element: ET.Element,
+    parent_map: dict[ET.Element, ET.Element],
+) -> ET.Element | None:
+    current = parent_map.get(element)
+    while current is not None:
+        if str(current.get("clickable") or "").lower() == "true":
+            return current
+        current = parent_map.get(current)
+    return None
+
+
+def _following_cta_reason(detection_method: str) -> str:
+    method = str(detection_method or "")
+    if method.startswith("accessibility_") or method.startswith("content_desc_"):
+        return "following_cta_detected_accessibility"
+    if method.startswith("vision_verified"):
+        return "following_cta_detected_vision_verified"
+    return "following_cta_detected_xml"
 
 
 def _unfollow_button_bounds_reject_reason(
@@ -171,6 +213,78 @@ def _unfollow_button_bounds_reject_reason(
     return ""
 
 
+def _detect_following_cta_from_accessibility(
+    d: u2.Device,
+    *,
+    expected_target_username: str,
+    screen_w: int,
+    screen_h: int,
+) -> dict[str, Any] | None:
+    """Use live accessibility selectors when a hierarchy dump is stale.
+
+    This never falls back to a global coordinate.  The selector must expose a
+    Following semantic and fresh bounds in the verified profile CTA band.
+    """
+    selectors: list[tuple[str, dict[str, str]]] = []
+    for label in _FOLLOWING_BUTTON_LABELS:
+        selectors.append(("accessibility_text_exact", {"text": label}))
+        selectors.append(("accessibility_desc_contains", {"descriptionContains": label}))
+    for detection_method, selector in selectors:
+        try:
+            element = d(**selector)
+            if not element.exists(timeout=0.04):
+                continue
+            info = dict(element.info or {})
+        except Exception:
+            continue
+        text = str(info.get("text") or "").strip()
+        content_desc = str(
+            info.get("contentDescription")
+            or info.get("content-desc")
+            or ""
+        ).strip()
+        label_ok, label_method = _following_button_label_match(
+            text,
+            content_desc,
+            expected_target_username=expected_target_username,
+        )
+        if not label_ok:
+            continue
+        bounds_raw = info.get("bounds") or {}
+        try:
+            bounds = {
+                key: int(bounds_raw.get(key, 0))
+                for key in ("left", "top", "right", "bottom")
+            }
+        except Exception:
+            continue
+        if _unfollow_button_bounds_reject_reason(
+            bounds,
+            screen_w=screen_w,
+            screen_h=screen_h,
+        ):
+            continue
+        center = _bounds_center(bounds)
+        if center is None:
+            continue
+        return {
+            "text": text,
+            "content_desc": content_desc,
+            "resource_id": str(info.get("resourceName") or info.get("resource-id") or ""),
+            "class_name": str(info.get("className") or info.get("class") or ""),
+            "bounds": bounds,
+            "center_x": int(center[0]),
+            "center_y": int(center[1]),
+            "tap_x": int(center[0]),
+            "tap_y": int(center[1]),
+            "clickable": bool(info.get("clickable", True)),
+            "detection_method": f"{detection_method}:{label_method}",
+            "expected_target_username": expected_target_username,
+            "accessibility_live_probe": True,
+        }
+    return None
+
+
 def detect_profile_following_button_for_unfollow(
     d: u2.Device,
     *,
@@ -187,6 +301,7 @@ def detect_profile_following_button_for_unfollow(
     screen_w, screen_h = _safe_window_size(d)
     hierarchy, dump_ms = _dump_hierarchy_with_timing(d)
     root = _parse_xml_root(hierarchy)
+    probe_at = _utc_now_iso()
     reject_reasons_count: dict[str, int] = {}
     candidates_seen = 0
     candidates_rejected = 0
@@ -200,6 +315,8 @@ def detect_profile_following_button_for_unfollow(
             "candidates_seen_count": 0,
             "candidates_rejected_count": 0,
             "reject_reasons_count": {},
+            "probe_at": probe_at,
+            "hierarchy_xml_len": len(str(hierarchy or "")),
         }
         log(
             "info",
@@ -215,20 +332,34 @@ def detect_profile_following_button_for_unfollow(
         )
         return out
 
+    parent_map = {child: parent for parent in root.iter() for child in parent}
     for el in root.iter():
         text = str(el.get("text") or "").strip()
         content_desc = str(el.get("content-desc") or "").strip()
-        label_ok, label_method = _following_button_label_match(text, content_desc)
+        label_ok, label_method = _following_button_label_match(
+            text,
+            content_desc,
+            expected_target_username=expected_target_username,
+        )
         if not label_ok:
             continue
 
         candidates_seen += 1
-        rid = str(el.get("resource-id") or "")
-        cls = str(el.get("class") or "")
-        bounds = _parse_bounds_attr(el.get("bounds"))
+        source_el = el
+        tap_el = el
+        clickable = str(el.get("clickable") or "").lower() == "true"
+        clickable_ancestor = False
+        if not clickable:
+            ancestor = _nearest_clickable_ancestor(el, parent_map)
+            if ancestor is not None:
+                tap_el = ancestor
+                clickable = True
+                clickable_ancestor = True
+        rid = str(tap_el.get("resource-id") or source_el.get("resource-id") or "")
+        cls = str(tap_el.get("class") or source_el.get("class") or "")
+        bounds = _parse_bounds_attr(tap_el.get("bounds"))
         center = _bounds_center(bounds)
         cx, cy = center if center is not None else (0, 0)
-        clickable = str(el.get("clickable") or "").lower() == "true"
         candidate = {
             "text": text,
             "content_desc": content_desc,
@@ -238,7 +369,12 @@ def detect_profile_following_button_for_unfollow(
             "center_x": cx,
             "center_y": cy,
             "clickable": clickable,
-            "detection_method": label_method,
+            "clickable_ancestor": clickable_ancestor,
+            "detection_method": (
+                f"{label_method}:clickable_ancestor"
+                if clickable_ancestor
+                else label_method
+            ),
             "expected_target_username": expected_target_username,
         }
         log("info", "unfollow_profile_following_button_candidate_seen", **candidate)
@@ -293,6 +429,16 @@ def detect_profile_following_button_for_unfollow(
             best = accepted
 
     if best is None:
+        accessibility = _detect_following_cta_from_accessibility(
+            d,
+            expected_target_username=expected_target_username,
+            screen_w=screen_w,
+            screen_h=screen_h,
+        )
+        if accessibility is not None:
+            best = {**accessibility, "score": (3, 0)}
+
+    if best is None:
         out = {
             "ok": False,
             "failure_reason": "following_button_not_found",
@@ -300,6 +446,8 @@ def detect_profile_following_button_for_unfollow(
             "candidates_seen_count": candidates_seen,
             "candidates_rejected_count": candidates_rejected,
             "reject_reasons_count": reject_reasons_count,
+            "probe_at": probe_at,
+            "hierarchy_xml_len": len(str(hierarchy or "")),
         }
         log(
             "info",
@@ -331,9 +479,14 @@ def detect_profile_following_button_for_unfollow(
         "tap_y": int(best.get("tap_y") or 0),
         "clickable": bool(best.get("clickable")),
         "verified_wide_cta": bool(best.get("verified_wide_cta")),
+        "clickable_ancestor": bool(best.get("clickable_ancestor")),
+        "accessibility_live_probe": bool(best.get("accessibility_live_probe")),
         "candidates_seen_count": candidates_seen,
         "candidates_rejected_count": candidates_rejected,
         "reject_reasons_count": reject_reasons_count,
+        "probe_at": probe_at,
+        "hierarchy_xml_len": len(str(hierarchy or "")),
+        "stable_reason": _following_cta_reason(str(best.get("detection_method") or "")),
     }
     log("info", "unfollow_profile_following_button_detected", **out)
     log(
@@ -1036,10 +1189,95 @@ def _retry_following_button_after_bounds_shift(
     return True, retry_2, retry_meta
 
 
+def _profile_surface_xml_is_stable(lengths: list[int]) -> bool:
+    nonzero = [max(0, int(value or 0)) for value in lengths if int(value or 0) > 0]
+    if len(nonzero) < 2:
+        return False
+    previous, current = nonzero[-2:]
+    return abs(current - previous) / float(max(previous, current)) <= _FOLLOWING_CTA_STABLE_XML_DELTA_RATIO
+
+
+def _poll_following_cta_after_initial_miss(
+    d: u2.Device,
+    *,
+    expected_target_username: str,
+    initial_detection: dict[str, Any],
+    profile_exact_confirmed: bool,
+) -> dict[str, Any]:
+    first_probe_at = str(initial_detection.get("probe_at") or _utc_now_iso())
+    detections = [initial_detection]
+    hierarchy_lengths = [int(initial_detection.get("hierarchy_xml_len") or 0)]
+    identity = {"ok": bool(profile_exact_confirmed)}
+    if not profile_exact_confirmed:
+        identity = verify_unfollow_target_profile_strict(
+            d,
+            expected_target_username=expected_target_username,
+            timeout_s=2.0,
+        )
+    if not bool(identity.get("ok")):
+        return {
+            **initial_detection,
+            "ok": False,
+            "failure_reason": "target_profile_retry_revalidation_failed",
+            "terminal_reason": "following_cta_surface_not_stable",
+            "profile_exact_confirmed": False,
+            "first_cta_probe_at": first_probe_at,
+            "probes_count": 1,
+            "profile_surface_stable_at": "",
+            "recovery_used": True,
+        }
+
+    for _probe_index in range(2, _FOLLOWING_CTA_RENDER_MAX_PROBES + 1):
+        time.sleep(_FOLLOWING_CTA_RENDER_POLL_INTERVAL_S)
+        detection = detect_profile_following_button_for_unfollow(
+            d,
+            expected_target_username=expected_target_username,
+            allow_verified_wide_cta=True,
+        )
+        detections.append(detection)
+        hierarchy_lengths.append(int(detection.get("hierarchy_xml_len") or 0))
+        if bool(detection.get("ok")):
+            out = {
+                **detection,
+                "profile_exact_confirmed": True,
+                "first_cta_probe_at": first_probe_at,
+                "probes_count": len(detections),
+                "profile_surface_stable_at": "",
+                "recovery_used": True,
+                "terminal_reason": str(detection.get("stable_reason") or ""),
+                "cta_detected_at": str(detection.get("probe_at") or _utc_now_iso()),
+                "hierarchy_xml_lengths": hierarchy_lengths,
+            }
+            log("info", "unfollow_following_cta_render_recovery_succeeded", **out)
+            return out
+
+    surface_stable = _profile_surface_xml_is_stable(hierarchy_lengths)
+    terminal_reason = (
+        "following_cta_terminally_absent"
+        if surface_stable
+        else "following_cta_surface_not_stable"
+    )
+    out = {
+        **detections[-1],
+        "ok": False,
+        "failure_reason": terminal_reason,
+        "terminal_reason": terminal_reason,
+        "profile_exact_confirmed": True,
+        "first_cta_probe_at": first_probe_at,
+        "probes_count": len(detections),
+        "profile_surface_stable_at": _utc_now_iso() if surface_stable else "",
+        "recovery_used": True,
+        "hierarchy_xml_lengths": hierarchy_lengths,
+    }
+    log("info", "unfollow_following_cta_render_recovery_exhausted", **out)
+    return out
+
+
 def open_unfollow_actions_sheet_from_profile_probe(
     d: u2.Device,
     *,
     expected_target_username: str,
+    profile_exact_confirmed: bool = False,
 ) -> dict[str, Any]:
     """Tap profile Following and verify the actions sheet. Never taps Unfollow."""
     btn_det = detect_profile_following_button_for_unfollow(
@@ -1047,34 +1285,29 @@ def open_unfollow_actions_sheet_from_profile_probe(
         expected_target_username=expected_target_username,
     )
     if not btn_det.get("ok") and str(btn_det.get("failure_reason") or "") == "following_button_not_found":
-        # A profile can be identity-verifiable one render before its CTA row is
-        # attached.  Retry only after proving that we are still on the exact
-        # target profile; no coordinate fallback is permitted.
         log(
             "info",
             "unfollow_following_button_initial_missing_retry_started",
             expected_target_username=expected_target_username,
-            settle_s=_FOLLOWING_BUTTON_INITIAL_MISSING_SETTLE_S,
+            settle_s=_FOLLOWING_CTA_RENDER_POLL_INTERVAL_S,
+            max_probes=_FOLLOWING_CTA_RENDER_MAX_PROBES,
         )
-        time.sleep(_FOLLOWING_BUTTON_INITIAL_MISSING_SETTLE_S)
-        profile_retry = verify_unfollow_target_profile_strict(
+        btn_det = _poll_following_cta_after_initial_miss(
             d,
             expected_target_username=expected_target_username,
-            timeout_s=2.0,
+            initial_detection=btn_det,
+            profile_exact_confirmed=profile_exact_confirmed,
         )
-        if bool(profile_retry.get("ok")):
-            btn_det = detect_profile_following_button_for_unfollow(
-                d,
-                expected_target_username=expected_target_username,
-                allow_verified_wide_cta=True,
-            )
+        profile_exact_confirmed = bool(btn_det.get("profile_exact_confirmed"))
         log(
             "info",
             "unfollow_following_button_initial_missing_retry_completed",
             expected_target_username=expected_target_username,
-            profile_revalidated=bool(profile_retry.get("ok")),
+            profile_revalidated=bool(btn_det.get("profile_exact_confirmed")),
             detector_ok=bool(btn_det.get("ok")),
             failure_reason=str(btn_det.get("failure_reason") or ""),
+            terminal_reason=str(btn_det.get("terminal_reason") or ""),
+            probes_count=int(btn_det.get("probes_count") or 0),
         )
     if not btn_det.get("ok"):
         out = {
@@ -1087,9 +1320,45 @@ def open_unfollow_actions_sheet_from_profile_probe(
             "candidates_seen_count": int(btn_det.get("candidates_seen_count") or 0),
             "candidates_rejected_count": int(btn_det.get("candidates_rejected_count") or 0),
             "reject_reasons_count": dict(btn_det.get("reject_reasons_count") or {}),
+            "profile_exact_confirmed": bool(btn_det.get("profile_exact_confirmed") or profile_exact_confirmed),
+            "first_cta_probe_at": str(btn_det.get("first_cta_probe_at") or btn_det.get("probe_at") or ""),
+            "cta_detection_method": "",
+            "probes_count": int(btn_det.get("probes_count") or 1),
+            "profile_surface_stable_at": str(btn_det.get("profile_surface_stable_at") or ""),
+            "recovery_used": bool(btn_det.get("recovery_used")),
+            "terminal_reason": str(btn_det.get("terminal_reason") or btn_det.get("failure_reason") or ""),
         }
         log("info", "unfollow_actions_sheet_open_failed", **out)
         return out
+
+    if not profile_exact_confirmed:
+        identity = verify_unfollow_target_profile_strict(
+            d,
+            expected_target_username=expected_target_username,
+            timeout_s=2.0,
+        )
+        profile_exact_confirmed = bool(identity.get("ok"))
+        if not profile_exact_confirmed:
+            out = {
+                "ok": False,
+                "failure_reason": str(
+                    identity.get("failure_reason")
+                    or "target_profile_pre_cta_revalidation_failed"
+                ),
+                "expected_target_username": expected_target_username,
+                "following_detection_method": "",
+                "unfollow_option_visible": False,
+                "sheet_context_signals": {},
+                "profile_exact_confirmed": False,
+                "first_cta_probe_at": str(btn_det.get("first_cta_probe_at") or btn_det.get("probe_at") or ""),
+                "cta_detection_method": "",
+                "probes_count": int(btn_det.get("probes_count") or 1),
+                "profile_surface_stable_at": "",
+                "recovery_used": bool(btn_det.get("recovery_used")),
+                "terminal_reason": "following_cta_surface_not_stable",
+            }
+            log("info", "unfollow_actions_sheet_open_failed", **out)
+            return out
 
     initial_bounds = dict(btn_det.get("bounds") or {})
     log(
@@ -1103,6 +1372,10 @@ def open_unfollow_actions_sheet_from_profile_probe(
         d,
         expected_target_username=expected_target_username,
         allow_verified_wide_cta=bool(btn_det.get("verified_wide_cta")),
+    )
+    probes_count = int(btn_det.get("probes_count") or 1) + 1
+    first_cta_probe_at = str(
+        btn_det.get("first_cta_probe_at") or btn_det.get("probe_at") or ""
     )
     refreshed_bounds = dict(refreshed.get("bounds") or {})
     delta_x, delta_y, bounds_shift_px = _center_shift_metrics(initial_bounds, refreshed_bounds)
@@ -1176,6 +1449,13 @@ def open_unfollow_actions_sheet_from_profile_probe(
                 "center_delta_y": delta_y,
                 "bounds_shift_px": bounds_shift_px,
                 "retry_failure_reason": revalidation_failure,
+                "profile_exact_confirmed": profile_exact_confirmed,
+                "first_cta_probe_at": first_cta_probe_at,
+                "cta_detection_method": str(btn_det.get("stable_reason") or ""),
+                "probes_count": probes_count,
+                "profile_surface_stable_at": "",
+                "recovery_used": bool(btn_det.get("recovery_used")),
+                "terminal_reason": "following_cta_surface_not_stable",
             }
             log("info", "unfollow_actions_sheet_open_failed", **out)
             return out
@@ -1229,6 +1509,13 @@ def open_unfollow_actions_sheet_from_profile_probe(
             "center_delta_x": delta_x,
             "center_delta_y": delta_y,
             "bounds_shift_px": bounds_shift_px,
+            "profile_exact_confirmed": profile_exact_confirmed,
+            "first_cta_probe_at": first_cta_probe_at,
+            "cta_detection_method": str(refreshed.get("stable_reason") or btn_det.get("stable_reason") or ""),
+            "probes_count": probes_count,
+            "profile_surface_stable_at": str(refreshed.get("probe_at") or ""),
+            "recovery_used": bool(btn_det.get("recovery_used")),
+            "terminal_reason": "following_button_tap_failed",
         }
         log("info", "unfollow_actions_sheet_open_failed", **out)
         return out
@@ -1264,6 +1551,14 @@ def open_unfollow_actions_sheet_from_profile_probe(
         "center_delta_x": delta_x,
         "center_delta_y": delta_y,
         "bounds_shift_px": bounds_shift_px,
+        "profile_exact_confirmed": profile_exact_confirmed,
+        "first_cta_probe_at": first_cta_probe_at,
+        "cta_detection_method": str(refreshed.get("stable_reason") or btn_det.get("stable_reason") or ""),
+        "probes_count": probes_count,
+        "profile_surface_stable_at": str(refreshed.get("probe_at") or ""),
+        "recovery_used": bool(btn_det.get("recovery_used")),
+        "terminal_reason": "",
+        "cta_detected_at": str(btn_det.get("cta_detected_at") or btn_det.get("probe_at") or ""),
     }
     if sheet_open:
         log("info", "unfollow_actions_sheet_opened", **out)

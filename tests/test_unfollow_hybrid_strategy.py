@@ -1,4 +1,5 @@
 import unittest
+import time
 from unittest.mock import ANY, patch
 
 import account_session_orchestrator as account_session
@@ -28,6 +29,42 @@ def _no_results_xml() -> str:
 
 
 class UnfollowHybridStrategyTests(unittest.TestCase):
+    def test_preverified_stable_exact_bounds_skip_redundant_row_discovery(self) -> None:
+        class Device:
+            def __init__(self) -> None:
+                self.clicks = []
+
+            def window_size(self):
+                return 1080, 2400
+
+            def click(self, x, y):
+                self.clicks.append((x, y))
+
+        device = Device()
+        with patch.object(
+            nav,
+            "find_real_account_text_element",
+            side_effect=AssertionError("redundant row discovery must be skipped"),
+        ), patch.object(
+            nav,
+            "_early_profile_transition_signal",
+            return_value="profile_header",
+        ), patch.object(nav.time, "sleep"):
+            ok = nav.tap_account_result(
+                device,
+                "target",
+                preverified_exact_row_bounds={
+                    "left": 120,
+                    "top": 300,
+                    "right": 420,
+                    "bottom": 380,
+                },
+                preverified_exact_result_at_monotonic=time.monotonic(),
+                preverified_exact_result_method="unfollow_direct_stable_exact_xml",
+            )
+        self.assertTrue(ok)
+        self.assertEqual(device.clicks, [(270, 340)])
+
     def test_one_remaining_keeps_progressive_primary_until_exhausted(self) -> None:
         out = choose_hybrid_selection(["one"])
         self.assertEqual(out.mode, "progressive_scan")
@@ -130,7 +167,11 @@ class UnfollowHybridStrategyTests(unittest.TestCase):
     def test_direct_search_waits_for_a_late_exact_result(self) -> None:
         class Device:
             def __init__(self) -> None:
-                self.dumps = iter([_search_xml("someone_else"), _search_xml("target")])
+                self.dumps = iter([
+                    _search_xml("someone_else"),
+                    _search_xml("target"),
+                    _search_xml("target"),
+                ])
 
             def dump_hierarchy(self, compressed=False):
                 del compressed
@@ -230,7 +271,13 @@ class UnfollowHybridStrategyTests(unittest.TestCase):
         self.assertTrue(out["ok"])
         self.assertEqual(out["local_retry_count"], 1)
         self.assertEqual(type_mock.call_count, 2)
-        tap_mock.assert_called_once_with(ANY, "target")
+        tap_mock.assert_called_once_with(
+            ANY,
+            "target",
+            preverified_exact_row_bounds={"left": 0, "top": 0, "right": 100, "bottom": 50},
+            preverified_exact_result_at_monotonic=ANY,
+            preverified_exact_result_method="unfollow_direct_stable_exact_xml",
+        )
 
     def test_partial_result_never_authorizes_a_tap(self) -> None:
         class Device:

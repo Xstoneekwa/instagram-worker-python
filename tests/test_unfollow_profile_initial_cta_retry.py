@@ -76,7 +76,8 @@ class UnfollowProfileInitialCtaRetryTests(unittest.TestCase):
                 expected_target_username="angiedakouo",
             )
         self.assertFalse(result["ok"])
-        self.assertEqual(result["failure_reason"], "following_button_not_found")
+        self.assertEqual(result["failure_reason"], "target_profile_retry_revalidation_failed")
+        self.assertEqual(result["terminal_reason"], "following_cta_surface_not_stable")
         self.assertEqual(detector.call_count, 1)
         self.assertEqual(device.clicks, [])
 

@@ -4489,10 +4489,40 @@ def tap_account_result(
     nav_timing_origin: float | None = None,
     follow_ct_search_context: bool = False,
     outreach_search_context: bool = False,
+    preverified_exact_row_bounds: dict[str, int] | None = None,
+    preverified_exact_result_at_monotonic: float | None = None,
+    preverified_exact_result_method: str = "",
 ) -> bool:
     """Tap chosen row: FastIME+fused uses hot resource-id poll + direct tap; else legacy find."""
     follow_ct_active = _follow_ct_search_active(explicit=follow_ct_search_context)
     outreach_active = bool(outreach_search_context)
+    preverified_bounds: dict[str, int] = {}
+    preverified_age_ms: float | None = None
+    try:
+        raw_bounds = dict(preverified_exact_row_bounds or {})
+        preverified_bounds = {
+            key: int(raw_bounds.get(key, 0))
+            for key in ("left", "top", "right", "bottom")
+        }
+        screen_w, screen_h = d.window_size()
+        center_x = (preverified_bounds["left"] + preverified_bounds["right"]) // 2
+        center_y = (preverified_bounds["top"] + preverified_bounds["bottom"]) // 2
+        observed_at = float(preverified_exact_result_at_monotonic or 0.0)
+        preverified_age_ms = (time.monotonic() - observed_at) * 1000.0
+        bounds_safe = bool(
+            preverified_bounds["right"] > preverified_bounds["left"]
+            and preverified_bounds["bottom"] > preverified_bounds["top"]
+            and 0 <= preverified_bounds["left"] < preverified_bounds["right"] <= int(screen_w)
+            and 0 <= preverified_bounds["top"] < preverified_bounds["bottom"] <= int(screen_h)
+            and center_x <= int(screen_w * 0.72)
+            and center_y <= int(screen_h * 0.90)
+            and 0.0 <= preverified_age_ms <= 1_250.0
+            and preverified_exact_result_method == "unfollow_direct_stable_exact_xml"
+        )
+        if not bounds_safe:
+            preverified_bounds = {}
+    except Exception:
+        preverified_bounds = {}
     row_detect_trace_state: dict[str, Any] = {"first_raw_seen": False}
     row_detect_poll_index = 0
     try:
@@ -4733,7 +4763,8 @@ def tap_account_result(
             )
 
     fused = _peek_pending_fused_fast_ime_row(username)
-    if fused:
+    preverified_exact_used = bool(preverified_bounds)
+    if fused and not preverified_exact_used:
         _clear_pending_fused_fast_ime_row()
 
     hot_el_found = False
@@ -4755,7 +4786,24 @@ def tap_account_result(
         )
     poll_s = float(getattr(config, "HOT_ROW_POLL_S", 0.12))
 
-    if fused:
+    if preverified_exact_used:
+        el = object()
+        fast_accept_used = True
+        hot_el_found = False
+        first_result_at[0] = max(
+            float(preverified_exact_result_at_monotonic or time.perf_counter()),
+            t_origin,
+        )
+        exact_match_at[0] = first_result_at[0]
+        log(
+            "info",
+            "unfollow_direct_preverified_exact_row_reused",
+            username=username,
+            bounds=preverified_bounds,
+            evidence_age_ms=round(float(preverified_age_ms or 0.0), 2),
+            verification_method=preverified_exact_result_method,
+        )
+    elif fused:
         if get_search_ui_mode() == "mixed_results":
             timeout_s = float(getattr(config, "MIXED_HOT_ROW_DETECT_MAX_S", 4.0))
         else:
@@ -4964,7 +5012,12 @@ def tap_account_result(
     _perf["post_tap_settle_ms"] = 0.0
     _perf["profile_transition_wait_ms"] = 0.0
     try:
-        if hot_el_found:
+        if preverified_exact_used:
+            b = dict(preverified_bounds)
+            cx = (b["left"] + b["right"]) // 2
+            cy = (b["top"] + b["bottom"]) // 2
+            tap_mode = "unfollow_direct_preverified_exact_bounds"
+        elif hot_el_found:
             cx, cy, b = _tap_hot_username_center_jitter(d, el)
             tap_mode = "hot_center_jitter"
         elif fast_accept_used:
@@ -5028,7 +5081,13 @@ def tap_account_result(
                 exact_match_to_tap_ms=exact_to_tap_ms,
             )
         selected_path = (
-            "hot_row" if hot_el_found else "fast_accept" if fast_accept_used else "legacy"
+            "unfollow_direct_preverified_exact"
+            if preverified_exact_used
+            else "hot_row"
+            if hot_el_found
+            else "fast_accept"
+            if fast_accept_used
+            else "legacy"
         )
         _log_row_evaluation_summary(found=True, selected_path=selected_path)
         log(

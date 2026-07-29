@@ -1443,6 +1443,8 @@ def _run_real_unfollow_multi_loop(
             "sheet_not_opened",
             "actions_sheet_not_opened",
             "following_button_not_found",
+            "following_cta_surface_not_stable",
+            "following_cta_terminally_absent",
             "following_button_pre_tap_revalidation_failed",
             "following_button_bounds_shift_too_large",
             "unfollow_option_missing",
@@ -2524,6 +2526,7 @@ def _run_real_unfollow_multi_loop(
         sheet = open_unfollow_actions_sheet_from_profile_probe(
             d,
             expected_target_username=target_username,
+            profile_exact_confirmed=True,
         )
         if not sheet.get("ok"):
             failed += 1
@@ -3473,6 +3476,7 @@ def run_unfollow_session(
     sheet = open_unfollow_actions_sheet_from_profile_probe(
         d,
         expected_target_username=target_username,
+        profile_exact_confirmed=True,
     )
     if not sheet.get("ok"):
         ret_fn = (
@@ -3483,7 +3487,11 @@ def run_unfollow_session(
         ret = ret_fn(d, account_username=uname)
         status = (
             "failed_following_button_not_found"
-            if str(sheet.get("failure_reason") or "") == "following_button_not_found"
+            if str(sheet.get("failure_reason") or "") in {
+                "following_button_not_found",
+                "following_cta_surface_not_stable",
+                "following_cta_terminally_absent",
+            }
             else "failed_actions_sheet_open"
         )
         summary = {

@@ -6,6 +6,7 @@ import re
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Iterable
 
 from logs import log
@@ -21,6 +22,7 @@ CURSOR_RESTORE_SCROLL_LIMIT = 10
 SEARCH_RESULT_MAX_WAIT_S = 3.5
 SEARCH_RESULT_POLL_INTERVAL_S = 0.35
 SEARCH_LOCAL_REFRESH_RETRY_LIMIT = 1
+SEARCH_RESULT_STABLE_EXACT_POLLS = 2
 
 
 @dataclass(frozen=True)
@@ -89,16 +91,33 @@ def choose_hybrid_selection(
     )
 
 
-def exact_search_result_count(hierarchy_xml: str, expected_username: str) -> int:
-    """Count exact account rows; zero/unparseable and duplicates fail closed."""
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _parse_bounds(raw: str) -> dict[str, int]:
+    match = re.fullmatch(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", str(raw or ""))
+    if not match:
+        return {}
+    left, top, right, bottom = (int(value) for value in match.groups())
+    if right <= left or bottom <= top:
+        return {}
+    return {"left": left, "top": top, "right": right, "bottom": bottom}
+
+
+def exact_search_result_evidence(
+    hierarchy_xml: str,
+    expected_username: str,
+) -> dict[str, object]:
+    """Return one exact row and its fresh bounds; duplicates fail closed."""
     expected = normalize_username(expected_username)
     if not expected:
-        return 0
+        return {"exact_match_count": 0, "bounds": {}, "signature": ""}
     try:
         root = ET.fromstring(str(hierarchy_xml or ""))
     except ET.ParseError:
-        return 0
-    matches = 0
+        return {"exact_match_count": 0, "bounds": {}, "signature": ""}
+    matches: list[dict[str, object]] = []
     for node in root.iter():
         rid = str(node.attrib.get("resource-id") or "")
         if not re.search(r"(?:^|[:/])id/row_search_user_username$", rid):
@@ -107,8 +126,40 @@ def exact_search_result_count(hierarchy_xml: str, expected_username: str) -> int
             str(node.attrib.get("text") or node.attrib.get("content-desc") or "")
         )
         if value == expected:
-            matches += 1
-    return matches
+            bounds = _parse_bounds(str(node.attrib.get("bounds") or ""))
+            matches.append(
+                {
+                    "bounds": bounds,
+                    "resource_id": rid,
+                    "text": str(node.attrib.get("text") or ""),
+                }
+            )
+    if len(matches) != 1:
+        return {"exact_match_count": len(matches), "bounds": {}, "signature": ""}
+    match = matches[0]
+    bounds = dict(match.get("bounds") or {})
+    signature = (
+        f"{expected}:{bounds.get('left')}:{bounds.get('top')}:"
+        f"{bounds.get('right')}:{bounds.get('bottom')}"
+        if bounds
+        else ""
+    )
+    return {
+        "exact_match_count": 1,
+        "bounds": bounds,
+        "signature": signature,
+        "resource_id": str(match.get("resource_id") or ""),
+    }
+
+
+def exact_search_result_count(hierarchy_xml: str, expected_username: str) -> int:
+    """Count exact account rows; zero/unparseable and duplicates fail closed."""
+    return int(
+        exact_search_result_evidence(hierarchy_xml, expected_username).get(
+            "exact_match_count", 0
+        )
+        or 0
+    )
 
 
 def _search_surface_committed(hierarchy_xml: str) -> bool:
@@ -131,6 +182,10 @@ def _wait_for_exact_search_result(device: object, expected: str) -> dict[str, ob
     )
     committed_surface_count = 0
     observed_poll_count = 0
+    stable_exact_poll_count = 0
+    previous_exact_signature = ""
+    result_visible_at = ""
+    result_visible_monotonic = 0.0
     for poll_index in range(1, max_polls + 1):
         time.sleep(SEARCH_RESULT_POLL_INTERVAL_S)
         try:
@@ -143,7 +198,22 @@ def _wait_for_exact_search_result(device: object, expected: str) -> dict[str, ob
         observed_poll_count = poll_index
         if _search_surface_committed(hierarchy):
             committed_surface_count += 1
-        count = exact_search_result_count(hierarchy, expected)
+        evidence = exact_search_result_evidence(hierarchy, expected)
+        count = int(evidence.get("exact_match_count") or 0)
+        signature = str(evidence.get("signature") or "")
+        if count == 1 and signature:
+            if not result_visible_at:
+                result_visible_at = _utc_now_iso()
+                result_visible_monotonic = time.monotonic()
+            stable_exact_poll_count = (
+                stable_exact_poll_count + 1
+                if signature == previous_exact_signature
+                else 1
+            )
+            previous_exact_signature = signature
+        else:
+            stable_exact_poll_count = 0
+            previous_exact_signature = ""
         log(
             "info",
             "unfollow_direct_exact_result_poll",
@@ -153,6 +223,8 @@ def _wait_for_exact_search_result(device: object, expected: str) -> dict[str, ob
             deadline_ms=round(SEARCH_RESULT_MAX_WAIT_S * 1000.0, 2),
             exact_match_count=count,
             committed_surface_count=committed_surface_count,
+            stable_exact_poll_count=stable_exact_poll_count,
+            exact_bounds_present=bool(evidence.get("bounds")),
         )
         if count > 1:
             return {
@@ -163,7 +235,7 @@ def _wait_for_exact_search_result(device: object, expected: str) -> dict[str, ob
                 "confirmed_surface_count": committed_surface_count,
                 "poll_count": observed_poll_count,
             }
-        if count == 1:
+        if count == 1 and stable_exact_poll_count >= SEARCH_RESULT_STABLE_EXACT_POLLS:
             return {
                 "ok": True,
                 "status": "exact_result_visible",
@@ -171,6 +243,11 @@ def _wait_for_exact_search_result(device: object, expected: str) -> dict[str, ob
                 "exact_match_count": 1,
                 "confirmed_surface_count": committed_surface_count,
                 "poll_count": observed_poll_count,
+                "exact_row_bounds": dict(evidence.get("bounds") or {}),
+                "result_visible_at": result_visible_at,
+                "result_visible_monotonic": result_visible_monotonic,
+                "result_stable_at": _utc_now_iso(),
+                "stable_exact_poll_count": stable_exact_poll_count,
             }
     return {
         "ok": False,
@@ -311,7 +388,27 @@ def open_exact_profile_for_unfollow(device: object, username: str) -> dict[str, 
             result["status"] = "unavailable"
             result["reason"] = "unfollow_candidate_account_unavailable"
         return result
-    if not tap_account_result(device, expected):
+    result_stable_at = str(search_result.get("result_stable_at") or _utc_now_iso())
+    log(
+        "info",
+        "unfollow_direct_exact_result_stable",
+        username=expected,
+        result_visible_at=str(search_result.get("result_visible_at") or ""),
+        result_stable_at=result_stable_at,
+        stable_exact_poll_count=int(search_result.get("stable_exact_poll_count") or 0),
+        exact_row_bounds_present=bool(search_result.get("exact_row_bounds")),
+    )
+    row_click_started_at = _utc_now_iso()
+    transition_started_at = row_click_started_at
+    if not tap_account_result(
+        device,
+        expected,
+        preverified_exact_row_bounds=dict(search_result.get("exact_row_bounds") or {}),
+        preverified_exact_result_at_monotonic=float(
+            search_result.get("result_visible_monotonic") or 0.0
+        ),
+        preverified_exact_result_method="unfollow_direct_stable_exact_xml",
+    ):
         return {
             "ok": False,
             "status": "retryable",
@@ -319,6 +416,17 @@ def open_exact_profile_for_unfollow(device: object, username: str) -> dict[str, 
             "exact_match_count": 1,
             "local_retry_count": local_retry_count,
         }
+    profile_transition_completed_at = _utc_now_iso()
+    log(
+        "info",
+        "unfollow_direct_exact_row_click_completed",
+        username=expected,
+        result_visible_at=str(search_result.get("result_visible_at") or ""),
+        result_stable_at=result_stable_at,
+        row_click_started_at=row_click_started_at,
+        transition_started_at=transition_started_at,
+        profile_transition_completed_at=profile_transition_completed_at,
+    )
     profile = verify_unfollow_target_profile_strict(
         device,
         expected_target_username=expected,
@@ -331,10 +439,25 @@ def open_exact_profile_for_unfollow(device: object, username: str) -> dict[str, 
             "exact_match_count": 1,
             "local_retry_count": local_retry_count,
         }
+    profile_exact_confirmed_at = _utc_now_iso()
+    log(
+        "info",
+        "unfollow_direct_exact_profile_confirmed",
+        username=expected,
+        profile_transition_completed_at=profile_transition_completed_at,
+        profile_exact_confirmed_at=profile_exact_confirmed_at,
+        verification_method=str(profile.get("verification_method") or ""),
+    )
     return {
         "ok": True,
         "status": "profile_opened",
         "reason": "exact_username_profile_verified",
         "exact_match_count": 1,
         "local_retry_count": local_retry_count,
+        "result_visible_at": str(search_result.get("result_visible_at") or ""),
+        "result_stable_at": result_stable_at,
+        "row_click_at": row_click_started_at,
+        "transition_started_at": transition_started_at,
+        "profile_opened_at": profile_transition_completed_at,
+        "profile_exact_confirmed_at": profile_exact_confirmed_at,
     }
