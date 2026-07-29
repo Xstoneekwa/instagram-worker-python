@@ -23,6 +23,7 @@ from target_availability_writer import (
 
 
 _WRITER: FailOpenTargetAvailabilityWriter | None = None
+_MEMORY_PROBE = None
 
 
 def _text(value: object) -> str:
@@ -76,6 +77,47 @@ def _capture(observation, *, flags: TargetAvailabilityFeatureFlags) -> bool:
     return writer.enqueue(observation)
 
 
+def _memory_probe(flags: TargetAvailabilityFeatureFlags, account_id: str):
+    """Resolve the local probe only for the capture-only Gate 4B boundary."""
+
+    global _MEMORY_PROBE
+    if (
+        not flags.capture_allowed(account_id)
+        or flags.target_availability_writer_enabled
+        or flags.target_availability_shadow_enabled
+        or flags.target_availability_policy_shadow_enabled
+    ):
+        return None
+    if str(os.getenv("TARGET_AVAILABILITY_MEMORY_PROBE_ENABLED") or "").strip().lower() != "true":
+        return None
+    if _MEMORY_PROBE is None:
+        try:
+            from target_availability_memory_probe import TargetAvailabilityMemoryProbe
+
+            _MEMORY_PROBE = TargetAvailabilityMemoryProbe.from_mapping()
+        except Exception:
+            return None
+    return _MEMORY_PROBE
+
+
+def _probe_started(probe, *, account_id: str, run_id: object, stage: str):
+    if probe is None:
+        return None
+    try:
+        return probe.start_hook(account_id=account_id, run_id=run_id, stage=stage)
+    except Exception:
+        return None
+
+
+def _probe_finished(probe, started_ns) -> None:
+    if probe is None or started_ns is None:
+        return
+    try:
+        probe.finish_hook(started_ns)
+    except Exception:
+        pass
+
+
 def observe_rotation_target_loaded(
     *,
     tenant_id: str,
@@ -90,10 +132,19 @@ def observe_rotation_target_loaded(
     active = flags or TargetAvailabilityFeatureFlags.from_mapping()
     if not active.capture_allowed(account_id):
         return True
-    scope = _scope(tenant_id=tenant_id, account_id=account_id, target_id=target_id, username=username, stable_id=stable_platform_user_id)
-    if scope is None:
-        return True
+    probe = _memory_probe(active, account_id)
+    probe_started_ns = _probe_started(
+        probe,
+        account_id=account_id,
+        run_id=run_id,
+        stage="username_lookup_started",
+    )
     try:
+        scope = _scope(tenant_id=tenant_id, account_id=account_id, target_id=target_id, username=username, stable_id=stable_platform_user_id)
+        if scope is None:
+            if probe is not None:
+                probe.record_rejected("invalid_observation_scope")
+            return True
         observation = build_target_availability_observation(
             scope=scope,
             event_key="%s:target:%s:loaded" % (_text(run_id) or "no-run", int(target_index)),
@@ -110,9 +161,22 @@ def observe_rotation_target_loaded(
             instagram_version=os.getenv("INSTAGRAM_VERSION"),
             evidence_safe={"target_index": int(target_index), "signal": "ct_rotation_target_loaded"},
         )
-        return _capture(observation, flags=active)
-    except Exception:
+        if probe is not None and not probe.record_observation(observation):
+            del observation
+            return True
+        captured = _capture(observation, flags=active)
+        del observation
+        return captured
+    except (TypeError, ValueError) as exc:
+        if probe is not None:
+            probe.record_rejected(type(exc).__name__)
         return True
+    except Exception as exc:
+        if probe is not None:
+            probe.record_error(type(exc).__name__)
+        return True
+    finally:
+        _probe_finished(probe, probe_started_ns)
 
 
 def observation_from_rotation_summary(
@@ -270,11 +334,35 @@ def observe_rotation_target_summary(**kwargs: Any) -> bool:
     account_id = _text(kwargs.get("account_id"))
     if not flags.capture_allowed(account_id):
         return True
+    probe = _memory_probe(flags, account_id)
+    probe_started_ns = _probe_started(
+        probe,
+        account_id=account_id,
+        run_id=kwargs.get("run_id"),
+        stage="target_summary_completed",
+    )
     try:
         observation = observation_from_rotation_summary(**kwargs)
-        return True if observation is None else _capture(observation, flags=flags)
-    except Exception:
+        if observation is None:
+            if probe is not None:
+                probe.record_rejected("invalid_observation_scope")
+            return True
+        if probe is not None and not probe.record_observation(observation):
+            del observation
+            return True
+        captured = _capture(observation, flags=flags)
+        del observation
+        return captured
+    except (TypeError, ValueError) as exc:
+        if probe is not None:
+            probe.record_rejected(type(exc).__name__)
         return True
+    except Exception as exc:
+        if probe is not None:
+            probe.record_error(type(exc).__name__)
+        return True
+    finally:
+        _probe_finished(probe, probe_started_ns)
 
 
 __all__ = [
