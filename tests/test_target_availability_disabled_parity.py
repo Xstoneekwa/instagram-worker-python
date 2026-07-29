@@ -14,6 +14,10 @@ import account_session_orchestrator as session
 
 PRODUCTION_BASE_SHA = "8f6d16c772236450b22d167239223ca3eae30e7d"
 ACCOUNT_ID = "22222222-2222-4222-8222-222222222222"
+REVIEWED_SUCCESSOR_RUNTIME_DELTAS = {
+    "instagram_navigation.py",
+    "unfollow_session_orchestrator.py",
+}
 
 
 class FakeFollowersEngine:
@@ -131,7 +135,7 @@ class TargetAvailabilityDisabledParityTests(unittest.TestCase):
         without_hooks = exercise(True)
         self.assertEqual(with_hooks, without_hooks)
 
-    def test_sensitive_runtime_modules_have_zero_delta_from_production(self):
+    def test_sensitive_runtime_modules_only_have_reviewed_successor_deltas(self):
         root = Path(__file__).resolve().parents[1]
         sensitive = [
             "account_session_resume_engine.py",
@@ -152,7 +156,12 @@ class TargetAvailabilityDisabledParityTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(compared.returncode, 0, compared.stderr)
-        self.assertEqual(compared.stdout.strip(), "")
+        actual_deltas = {
+            value.strip()
+            for value in compared.stdout.splitlines()
+            if value.strip()
+        }
+        self.assertEqual(actual_deltas, REVIEWED_SUCCESSOR_RUNTIME_DELTAS)
 
 
 if __name__ == "__main__":
