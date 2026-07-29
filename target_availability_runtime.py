@@ -57,14 +57,19 @@ def _writer(flags: TargetAvailabilityFeatureFlags) -> FailOpenTargetAvailability
         return None
     if _WRITER is None:
         try:
-            _WRITER = FailOpenTargetAvailabilityWriter(SupabaseObservationTransport.from_environment())
-            _WRITER.start()
+            candidate = FailOpenTargetAvailabilityWriter(SupabaseObservationTransport.from_environment())
+            candidate.start()
+            if not candidate.thread_alive:
+                return None
+            _WRITER = candidate
         except Exception:
             return None
     return _WRITER
 
 
 def _capture(observation, *, flags: TargetAvailabilityFeatureFlags) -> bool:
+    if not flags.writer_allowed(str(getattr(observation, "account_id", "") or "")):
+        return True
     writer = _writer(flags)
     if writer is None:
         return True

@@ -62,18 +62,14 @@ FOLLOW_TARGET_MAX_SAFE_PARTIAL_FAILURES_PER_RUN = 2
 
 def _target_availability_capture_requested(account_id: str) -> bool:
     enabled = str(os.getenv("TARGET_AVAILABILITY_OBSERVATION_CAPTURE_ENABLED") or "").strip().lower()
-    if enabled not in {"1", "true", "yes", "on"}:
+    if enabled != "true":
         return False
-    killed = str(os.getenv("TARGET_AVAILABILITY_KILL_SWITCH") or "").strip().lower()
-    kill_file = str(os.getenv("TARGET_AVAILABILITY_KILL_SWITCH_FILE") or "").strip()
-    if killed in {"1", "true", "yes", "on"} or bool(kill_file and os.path.isfile(kill_file)):
+    try:
+        from target_availability_writer import TargetAvailabilityFeatureFlags
+
+        return TargetAvailabilityFeatureFlags.from_mapping().capture_allowed(account_id)
+    except Exception:
         return False
-    allowlist = {
-        item.strip()
-        for item in str(os.getenv("TARGET_AVAILABILITY_ACCOUNT_ALLOWLIST") or "").split(",")
-        if item.strip()
-    }
-    return not allowlist or account_id in allowlist
 
 
 def _observe_target_availability(hook_name: str, **kwargs: Any) -> bool:

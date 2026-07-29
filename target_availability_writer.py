@@ -12,6 +12,7 @@ from dataclasses import dataclass
 import base64
 import json
 import os
+import re
 import threading
 import time
 from typing import Any, Callable, Deque, Iterable, Mapping, Optional, Protocol, Sequence
@@ -32,9 +33,61 @@ _ENV_KEYS = {
     POLICY_SHADOW_FLAG: "TARGET_AVAILABILITY_POLICY_SHADOW_ENABLED",
 }
 
+_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
+
 
 def _enabled(value: object) -> bool:
-    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+    return value is True or (isinstance(value, str) and value.strip().lower() == "true")
+
+
+def _normalized_uuid(value: object) -> str:
+    normalized = str(value or "").strip().lower()
+    return normalized if _UUID_RE.fullmatch(normalized) else ""
+
+
+def _account_allowlist(value: object) -> frozenset[str]:
+    """Parse the all-or-nothing UUID allowlist shared with the Backend contract."""
+
+    raw_items: object
+    if isinstance(value, (list, tuple, set, frozenset)):
+        raw_items = list(value)
+    elif isinstance(value, str):
+        serialized = value.strip()
+        if not serialized:
+            return frozenset()
+        if serialized.startswith("[") or serialized.startswith("{"):
+            try:
+                raw_items = json.loads(serialized)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return frozenset()
+            if not isinstance(raw_items, list):
+                return frozenset()
+        else:
+            raw_items = serialized.split(",")
+    elif value is None:
+        return frozenset()
+    else:
+        return frozenset()
+
+    normalized = [_normalized_uuid(item) for item in raw_items]
+    if not normalized or any(not item for item in normalized):
+        return frozenset()
+    return frozenset(normalized)
+
+
+def _kill_switch_file_active(path: object) -> bool:
+    configured = str(path or "").strip()
+    if not configured:
+        return False
+    try:
+        os.stat(configured)
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
 
 
 @dataclass(frozen=True)
@@ -49,22 +102,21 @@ class TargetAvailabilityFeatureFlags:
     @classmethod
     def from_mapping(cls, values: Optional[Mapping[str, object]] = None) -> "TargetAvailabilityFeatureFlags":
         source = values if values is not None else os.environ
-        kill_switch_file = str(source.get("TARGET_AVAILABILITY_KILL_SWITCH_FILE") or "").strip()
-        allowlist = frozenset(
-            item.strip() for item in str(source.get("TARGET_AVAILABILITY_ACCOUNT_ALLOWLIST") or "").split(",") if item.strip()
-        )
+        kill_switch_file = source.get("TARGET_AVAILABILITY_KILL_SWITCH_FILE")
+        allowlist = _account_allowlist(source.get("TARGET_AVAILABILITY_ACCOUNT_ALLOWLIST"))
         return cls(
             **{field: _enabled(source.get(env_key)) for field, env_key in _ENV_KEYS.items()},
             account_allowlist=allowlist,
             kill_switch=_enabled(source.get("TARGET_AVAILABILITY_KILL_SWITCH"))
-            or bool(kill_switch_file and os.path.isfile(kill_switch_file)),
+            or _kill_switch_file_active(kill_switch_file),
         )
 
     def capture_allowed(self, account_id: str) -> bool:
         return bool(
             not self.kill_switch
             and self.target_availability_observation_capture_enabled
-            and (not self.account_allowlist or str(account_id or "").strip() in self.account_allowlist)
+            and self.account_allowlist
+            and _normalized_uuid(account_id) in self.account_allowlist
         )
 
     def writer_allowed(self, account_id: str) -> bool:
@@ -267,17 +319,26 @@ class FailOpenTargetAvailabilityWriter:
         return len(rows)
 
     def start(self) -> None:
-        if self._thread is not None:
-            return
-        self._thread = threading.Thread(target=self._run, name="target-availability-writer", daemon=True)
-        self._thread.start()
+        with self._lock:
+            if self._thread is not None:
+                return
+            candidate = threading.Thread(target=self._run, name="target-availability-writer", daemon=True)
+            try:
+                candidate.start()
+            except Exception:
+                self.metrics["failures"] += 1
+                return
+            self._thread = candidate
 
     def _run(self) -> None:
         while not self._stop.is_set():
             self._wake.wait(timeout=0.5)
             self._wake.clear()
-            while not self._stop.is_set() and self.flush_once() > 0:
-                pass
+            try:
+                while not self._stop.is_set() and self.flush_once() > 0:
+                    pass
+            except Exception:
+                self.metrics["failures"] += 1
 
     def close(self, timeout_seconds: float = 0.5) -> None:
         self._stop.set()
@@ -289,6 +350,10 @@ class FailOpenTargetAvailabilityWriter:
     def queue_size(self) -> int:
         with self._lock:
             return len(self._queue)
+
+    @property
+    def thread_alive(self) -> bool:
+        return bool(self._thread is not None and self._thread.is_alive())
 
 
 __all__ = [
