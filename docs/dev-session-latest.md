@@ -1,5 +1,14 @@
 # Dernière session dev — état du projet (mémoire courte)
 
+## Target Availability Gate 4B offline preparation — 2026-07-29
+
+The successor candidate starts from active Worker `9bc958b` and adds only a
+capture-only, fixed-cardinality memory probe over the two existing dormant
+Availability hooks. Writer, Live Shadow and Policy Shadow stay OFF; no payload,
+thread, queue, network or database write is introduced. The operator snapshot
+is bounded to 4 KiB and the kill switch remains dynamic. See
+[the Gate 4B contract](./target-availability-gate4b-memory-pilot.md).
+
 ## T-10 + Follow 7+1 + V2 shadow runtime — 2026-07-25
 
 Natural Loriele and Mythyl evidence isolated the legacy Follow scroll issue to
