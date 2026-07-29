@@ -4,7 +4,7 @@
 
 `target_availability_observation.py` remains a pure contract module with no navigation, device, Supabase or runtime import. V2-1 imports the separate runtime adapter only from `account_session_orchestrator.py`; all four flags default OFF.
 
-The pure contract performs no navigation, logging, HTTP, Supabase write, lifecycle decision, rename, archive, replacement, email, notification or activation. `evidence_safe` rejects secret/token/password/screenshot/provider-payload keys and is capped at 4 KiB.
+The pure contract performs no navigation, logging, HTTP, Supabase write, lifecycle decision, rename, archive, replacement, email, notification or activation. `evidence_safe` rejects secret/token/password/screenshot/provider-payload keys and is capped at 4 KiB. Capture is fail-closed unless the exact capture flag is true and the account is explicitly present in a non-empty UUID allowlist.
 
 ## Payload
 

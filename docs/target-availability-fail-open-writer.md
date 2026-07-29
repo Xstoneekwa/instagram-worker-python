@@ -10,6 +10,6 @@
 - three failures open a 30-second circuit by default;
 - counters: accepted, duplicates, flushed, failures, dropped, circuit open.
 
-Enqueue is fail-open and nonblocking. A daemon flush thread is created only when capture and writer flags are both enabled. PostgREST uses the service-role key and `resolution=ignore-duplicates`; no other table is writable by this adapter.
+Enqueue is fail-open and nonblocking. A daemon flush thread is created only when capture and writer flags are both enabled **and** the observation account is present in the mandatory UUID allowlist. PostgREST uses the service-role key and `resolution=ignore-duplicates`; no other table is writable by this adapter. A missing transport, invalid credential, timeout, DNS/HTTP failure, queue overflow, serialization error or thread-start failure is contained by the adapter and never propagates into the historical run.
 
 Direct synchronous writes were rejected because they block actions. A sidecar was rejected for rollout complexity. A disk outbox was rejected for replay and lifecycle risk. The bounded in-memory buffer is the smallest dormant design.
