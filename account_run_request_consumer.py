@@ -37,6 +37,9 @@ from account_run_control import (
     reclaim_stale_account_run_requests,
 )
 from auto_login_failure_contract import normalize_auto_login_failure
+from account_session_phase_notification import (
+    build_account_session_phase_notification_summary,
+)
 from assignment_dispatch_resolver import resolve_account_assignment_runtime_context
 from account_commercial_policy import evaluate_queued_run_commercial_policy, sensitive_log_fields
 from auto_restart_dispatcher_tick import (
@@ -1507,6 +1510,15 @@ def _publish_run_failure_incident(
             device_id=str((request_snapshot or {}).get("device_id") or "").strip() or None,
             app_instance_id=str((request_snapshot or {}).get("app_instance_id") or "").strip() or None,
         )
+        if run_type == "account_session":
+            phase_summary = build_account_session_phase_notification_summary(
+                performance_summary,
+                effective_request_metadata,
+                primary_failure_reason=str(payload.get("failure_reason") or ""),
+            )
+            payload_metadata = payload.get("metadata")
+            if isinstance(payload_metadata, dict):
+                payload_metadata["phase_summary"] = phase_summary
         if original_run_ref and run_id:
             payload["run_id"] = original_run_ref
             payload["metadata"]["resume_run_id"] = run_id

@@ -20,6 +20,7 @@ ACCOUNT_C = "00000000-0000-0000-0000-000000000003"
 TARGET_A = "10000000-0000-0000-0000-000000000001"
 TARGET_B = "10000000-0000-0000-0000-000000000002"
 RUN_A = "20000000-0000-0000-0000-000000000001"
+RUN_B = "20000000-0000-0000-0000-000000000002"
 TEST_HMAC_SECRET = "test-only-target-followers-resume-v2-secret-0001"
 os.environ[resume.HMAC_SECRET_FLAG] = TEST_HMAC_SECRET
 
@@ -635,6 +636,86 @@ class ShadowAccountScopeTests(unittest.TestCase):
         self.assertIn('"viewport_observation_failed"', runner_source)
         self.assertIn("target_followers_resume_controller = None", runner_source)
         self.assertIn('"target_id_hash": target_followers_resume_v2.stable_id_hash(target_id)', runner_source)
+
+    def test_73_same_ct_run_b_loads_run_a_shadow_checkpoint_and_progresses(self):
+        flags = self.flags(ACCOUNT_A)
+        run_a_rpc = FakeRpc(
+            row=checkpoint_row(
+                shadow_last_safe_depth=0,
+                shadow_visible_anchor_hashes=[],
+                shadow_anchor_fingerprint="",
+            )
+        )
+        run_a = resume.build_runtime_controller(
+            account_id=ACCOUNT_A,
+            target_id=TARGET_A,
+            target_username="neutral.target",
+            run_id=RUN_A,
+            flags=flags,
+            rpc_call=run_a_rpc,
+        )
+        self.assertIsNotNone(run_a)
+        self.assertTrue(run_a.load_and_plan().use_legacy_navigation)
+        self.assertTrue(run_a.claim())
+        run_a.observe_viewport(
+            ["row1", "row2"],
+            followers_surface_confirmed=True,
+            expected_target_confirmed=True,
+        )
+        self.assertTrue(run_a.note_scroll_sent(previous_viewport_complete=True))
+        verdict_a = run_a.observe_viewport(
+            ["row2", "row3"],
+            followers_surface_confirmed=True,
+            expected_target_confirmed=True,
+        )
+        self.assertTrue(verdict_a.verified)
+        self.assertTrue(run_a.commit_verified_progress(cursor_handle="row3"))
+        commit_a = next(
+            params for name, params in run_a_rpc.calls if name.startswith("commit_")
+        )
+        self.assertEqual(commit_a["p_last_safe_depth"], 1)
+
+        run_b_rpc = FakeRpc(
+            row=checkpoint_row(
+                shadow_last_safe_depth=1,
+                shadow_last_safe_anchor=resume.anchor_hash("row3"),
+                shadow_anchor_fingerprint=resume.viewport_fingerprint(["row2", "row3"]),
+                shadow_visible_anchor_hashes=list(
+                    resume.bounded_anchor_hashes(["row2", "row3"])
+                ),
+                last_run_id=RUN_A,
+            )
+        )
+        events = []
+        run_b = resume.build_runtime_controller(
+            account_id=ACCOUNT_A,
+            target_id=TARGET_A,
+            target_username="neutral.target",
+            run_id=RUN_B,
+            flags=flags,
+            rpc_call=run_b_rpc,
+            emit=lambda event, payload: events.append((event, payload)),
+        )
+        self.assertIsNotNone(run_b)
+        plan_b = run_b.load_and_plan()
+        self.assertTrue(plan_b.use_legacy_navigation)
+        self.assertEqual(plan_b.previous_depth, 1)
+        self.assertTrue(run_b.claim())
+        run_b.observe_viewport(
+            ["row2", "row3", "row4"],
+            followers_surface_confirmed=True,
+            expected_target_confirmed=True,
+        )
+        self.assertTrue(run_b.note_scroll_sent(previous_viewport_complete=True))
+        verdict_b = run_b.observe_viewport(
+            ["row3", "row4", "row5"],
+            followers_surface_confirmed=True,
+            expected_target_confirmed=True,
+        )
+        self.assertTrue(verdict_b.verified)
+        self.assertTrue(run_b.commit_verified_progress(cursor_handle="row5"))
+        self.assertEqual(run_b.navigation_mutations, 0)
+        self.assertTrue(any(event == "target_followers_checkpoint_loaded" for event, _ in events))
 
 
 if __name__ == "__main__":

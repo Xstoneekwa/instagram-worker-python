@@ -3487,9 +3487,9 @@ def fetch_unfollow_candidate_availability(
             "GET",
             "ig_unfollow_candidate_availability",
             query={
-                "select": "account_id,normalized_username,status,reason,first_not_found_at,last_checked_at,not_found_attempt_count,next_retry_at,terminal_at,source_run_id,created_at",
+                "select": "account_id,normalized_username,status,reason,first_not_found_at,last_checked_at,not_found_attempt_count,first_failure_at,last_failure_at,technical_attempt_count,next_retry_at,terminal_at,source_run_id,business_date_sast,created_at",
                 "account_id": f"eq.{aid}",
-                "status": "in.(temporary_unavailable,exhausted)",
+                "status": "in.(temporary_unavailable,exhausted,username_not_found_confirmed,search_surface_unhealthy)",
                 "created_at": f"lte.{snapshot_at}",
                 "order": "normalized_username.asc",
                 "limit": str(page_size),
@@ -3558,6 +3558,88 @@ def record_unfollow_candidate_not_found(
     )
     if not isinstance(result, dict) or not bool(result.get("ok")):
         raise RuntimeError("record_unfollow_candidate_not_found_failed")
+    return dict(result)
+
+
+def record_unfollow_candidate_availability_v2(
+    account_id: str,
+    normalized_username: str,
+    *,
+    source_run_id: str | None,
+    classification: str,
+    reason: str,
+    technical_cooldown_minutes: int = 30,
+) -> dict[str, Any]:
+    """Persist a terminal exact absence or a retryable technical hold."""
+
+    aid = str(account_id or "").strip()
+    username = _canonical_interaction_username(normalized_username)
+    classification_value = str(classification or "").strip()
+    if not aid or not username:
+        raise ValueError("account_id and normalized_username are required")
+    if classification_value not in {
+        "username_not_found_confirmed",
+        "search_surface_unhealthy",
+    }:
+        raise ValueError("unsupported_unfollow_candidate_availability_classification")
+    result = _call_rpc(
+        "record_unfollow_candidate_availability_v2",
+        {
+            "p_account_id": aid,
+            "p_normalized_username": username,
+            "p_source_run_id": str(source_run_id or "").strip() or None,
+            "p_classification": classification_value,
+            "p_reason": str(reason or classification_value).strip(),
+            "p_technical_cooldown_minutes": max(
+                5,
+                min(int(technical_cooldown_minutes), 24 * 60),
+            ),
+        },
+        timeout_seconds=5.0,
+        max_retries=1,
+    )
+    if not isinstance(result, dict) or not bool(result.get("ok")):
+        raise RuntimeError("record_unfollow_candidate_availability_v2_failed")
+    return dict(result)
+
+
+def record_unfollow_phase_circuit_breaker_v1(
+    account_id: str,
+    *,
+    source_run_id: str | None,
+    stable_reason: str,
+    technical_failure_count: int,
+    usernames: list[str],
+    cooldown_minutes: int = 30,
+) -> dict[str, Any]:
+    """Open a bounded Unfollow-only hold without disabling future Follow."""
+
+    aid = str(account_id or "").strip()
+    if not aid:
+        raise ValueError("account_id is required")
+    bounded_usernames = [
+        value
+        for value in (
+            _canonical_interaction_username(str(item or ""))
+            for item in list(usernames or [])[:10]
+        )
+        if value
+    ]
+    result = _call_rpc(
+        "record_unfollow_phase_circuit_breaker_v1",
+        {
+            "p_account_id": aid,
+            "p_source_run_id": str(source_run_id or "").strip() or None,
+            "p_stable_reason": str(stable_reason or "").strip(),
+            "p_technical_failure_count": max(1, int(technical_failure_count)),
+            "p_usernames": bounded_usernames,
+            "p_cooldown_minutes": max(5, min(int(cooldown_minutes), 24 * 60)),
+        },
+        timeout_seconds=5.0,
+        max_retries=1,
+    )
+    if not isinstance(result, dict) or not bool(result.get("ok")):
+        raise RuntimeError("record_unfollow_phase_circuit_breaker_v1_failed")
     return dict(result)
 
 

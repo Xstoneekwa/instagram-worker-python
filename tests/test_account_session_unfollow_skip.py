@@ -9,6 +9,55 @@ import outreach_session_orchestrator
 
 
 class AccountSessionUnfollowSkipTest(unittest.TestCase):
+    def test_authoritative_zero_follow_quota_hands_off_to_unfollow_only(self) -> None:
+        out = account_session._resolve_auto_restart_follow_phase_gate(
+            default_run_follow=True,
+            policy={
+                "phases_to_run": {
+                    "welcome": False,
+                    "follow": True,
+                    "unfollow": True,
+                },
+                "quota_remaining": {"follow": 0, "unfollow": 2},
+            },
+        )
+        self.assertFalse(out["run_follow"])
+        self.assertTrue(out["follow_quota_authoritative_zero"])
+        self.assertEqual(
+            out["follow_phase_skipped_reason"],
+            "global_follow_cap_reached",
+        )
+        self.assertTrue(out["unfollow_only_resume"])
+
+    def test_positive_follow_quota_keeps_follow_phase_enabled(self) -> None:
+        out = account_session._resolve_auto_restart_follow_phase_gate(
+            default_run_follow=True,
+            policy={
+                "phases_to_run": {
+                    "welcome": False,
+                    "follow": True,
+                    "unfollow": True,
+                },
+                "quota_remaining": {"follow": 1, "unfollow": 2},
+            },
+        )
+        self.assertTrue(out["run_follow"])
+        self.assertFalse(out["unfollow_only_resume"])
+
+    def test_disabled_follow_phase_hands_off_without_rewriting_plan_flags(self) -> None:
+        phases = {"welcome": False, "follow": False, "unfollow": True}
+        policy = {
+            "phases_to_run": dict(phases),
+            "quota_remaining": {"follow": 9, "unfollow": 2},
+        }
+        out = account_session._resolve_auto_restart_follow_phase_gate(
+            default_run_follow=True,
+            policy=policy,
+        )
+        self.assertFalse(out["run_follow"])
+        self.assertTrue(out["unfollow_only_resume"])
+        self.assertEqual(policy["phases_to_run"], phases)
+
     def test_unfollow_only_resume_diagnostic_does_not_require_local_follow(self) -> None:
         settings = SimpleNamespace(
             enabled=True,

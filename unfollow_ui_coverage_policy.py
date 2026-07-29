@@ -29,6 +29,10 @@ UNFOLLOW_PRE_RECOVERY_STAGNATION_LIMIT = 3
 UNFOLLOW_POST_RECOVERY_STAGNATION_LIMIT = 2
 UNFOLLOW_PRE_RECOVERY_SEARCH_SCROLL_LIMIT = 10
 UNFOLLOW_POST_RECOVERY_SEARCH_SCROLL_LIMIT = 5
+UNFOLLOW_PROGRESSIVE_SEARCH_SCROLL_LIMIT = (
+    UNFOLLOW_PRE_RECOVERY_SEARCH_SCROLL_LIMIT
+    + UNFOLLOW_POST_RECOVERY_SEARCH_SCROLL_LIMIT
+)
 
 
 def normalize_username(value: str) -> str:
@@ -175,6 +179,14 @@ def derive_adaptive_coverage_budget(
             int(time_bounded_viewports),
         ),
     )
+    if eligible and max_scroll_passes_absolute >= UNFOLLOW_PROGRESSIVE_SEARCH_SCROLL_LIMIT:
+        # Search is a fallback only.  When the deadline can afford it, reserve
+        # enough primary Following-list coverage for the full 10 + recovery +
+        # 5 contract instead of letting a small adaptive estimate pre-empt it.
+        max_scroll_passes = max(
+            max_scroll_passes,
+            UNFOLLOW_PROGRESSIVE_SEARCH_SCROLL_LIMIT,
+        )
     return AdaptiveCoverageBudget(
         max_scroll_passes=max_scroll_passes,
         max_scroll_passes_absolute=max_scroll_passes_absolute,
@@ -197,7 +209,7 @@ def derive_adaptive_coverage_budget(
         recent_candidates_found_per_viewport=round(recent_candidate_yield, 4),
         effective_candidate_yield_per_viewport=round(effective_candidate_yield, 4),
         observation_window_viewports=observation_window,
-        budget_formula_version="handoff_capacity_v3",
+        budget_formula_version="handoff_capacity_v4_progressive_floor",
         deadline_source=str(deadline_source or "fallback"),
         recovery_reserve_seconds=recovery_reserve,
         outreach_reserve_seconds=outreach_reserve,
@@ -256,6 +268,7 @@ class FollowingCoverageTracker:
     persisted_usernames: set[str] = field(default_factory=set)
     unavailable_usernames: set[str] = field(default_factory=set)
     retryable_usernames: set[str] = field(default_factory=set)
+    technical_hold_usernames: set[str] = field(default_factory=set)
     last_candidate_attempted: str = ""
     last_safe_checkpoint: str = "following_list_opened"
     progress_credit_pending: bool = False
@@ -620,6 +633,12 @@ class FollowingCoverageTracker:
         if normalized and normalized in self.remaining_planned_usernames:
             self.retryable_usernames.add(normalized)
 
+    def mark_candidate_technical_hold(self, username: str) -> None:
+        normalized = normalize_username(username)
+        if normalized and normalized in self.remaining_planned_usernames:
+            self.retryable_usernames.add(normalized)
+            self.technical_hold_usernames.add(normalized)
+
     def mark_safe_profile_return(self, username: str) -> None:
         normalized = normalize_username(username)
         if normalized not in self.persisted_usernames:
@@ -651,6 +670,7 @@ class FollowingCoverageTracker:
             "persisted_usernames": sorted(self.persisted_usernames),
             "unavailable_usernames": sorted(self.unavailable_usernames),
             "retryable_usernames": sorted(self.retryable_usernames),
+            "technical_hold_usernames": sorted(self.technical_hold_usernames),
             "remaining_usernames": sorted(remaining),
             "navigation_generation": self.navigation_generation,
             "navigation_generation_reason": self.navigation_generation_reason,
@@ -692,6 +712,7 @@ class FollowingCoverageTracker:
             "verified_unique_count": len(self.verified_usernames),
             "remaining_planned_count": len(self.remaining_planned_usernames),
             "retryable_candidates_count": len(self.retryable_usernames),
+            "technical_hold_candidates_count": len(self.technical_hold_usernames),
             "scroll_passes_used": self.scroll_passes_used,
             "consecutive_no_progress_viewports": self.consecutive_no_progress_viewports,
             "repeated_fingerprints_count": self.repeated_fingerprints_count,
@@ -786,7 +807,23 @@ def build_unfollow_outcome(
     else:
         phase_status = "partial_not_resumable"
 
-    resume_recommended = phase_status == "partial_resumable"
+    remaining_planned = (
+        set(tracker.remaining_planned_usernames) if tracker is not None else set()
+    )
+    technical_holds = (
+        set(tracker.technical_hold_usernames) if tracker is not None else set()
+    )
+    all_remaining_on_technical_hold = bool(
+        remaining_planned and remaining_planned.issubset(technical_holds)
+    )
+    phase_circuit_open = (
+        reason == "unfollow_search_surface_consecutive_failure_limit_reached"
+    )
+    resume_recommended = bool(
+        phase_status == "partial_resumable"
+        and not all_remaining_on_technical_hold
+        and not phase_circuit_open
+    )
     return {
         "phase_status": phase_status,
         "stable_reason": reason,
@@ -802,7 +839,15 @@ def build_unfollow_outcome(
         "remaining_count": remaining_count,
         "last_safe_checkpoint": safe_checkpoint or None,
         "resume_recommended": resume_recommended,
-        "resume_strategy": "recalculate_db_then_resume_remaining_plan" if resume_recommended else "none",
+        "resume_strategy": (
+            "recalculate_db_then_resume_remaining_plan"
+            if resume_recommended
+            else "wait_until_next_retry_at"
+            if all_remaining_on_technical_hold or phase_circuit_open
+            else "none"
+        ),
+        "all_remaining_on_technical_hold": all_remaining_on_technical_hold,
+        "phase_circuit_open": phase_circuit_open,
         "navigation_generation": int(tracker.navigation_generation) if tracker else 0,
         "recovery_attempts": int(tracker.viewport_recoveries_used) if tracker else 0,
         "consecutive_stagnation_count": int(tracker.consecutive_stagnation_count) if tracker else 0,

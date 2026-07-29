@@ -142,6 +142,13 @@ def _safe_text(value: Any, *, max_len: int = 1000) -> str | None:
     return text[:max_len]
 
 
+def _safe_count(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _redact_payload(value: Any) -> Any:
     redacted = redact_metadata(value, visibility="admin_only")
     if isinstance(redacted, dict):
@@ -274,6 +281,59 @@ def build_incident_notification_payload(incident: dict) -> dict:
         f"Account: {account_username or 'unknown'} ({_short_id(incident.get('account_id')) or 'no-account-id'})",
         f"Status: {status} | Occurrences: {occurrence_count}",
     ]
+    phase_summary = (
+        metadata.get("phase_summary")
+        if isinstance(metadata.get("phase_summary"), dict)
+        else {}
+    )
+    if phase_summary:
+        requested = phase_summary.get("requested_phases")
+        requested = requested if isinstance(requested, dict) else {}
+        requested_label = ",".join(
+            phase
+            for phase in ("welcome", "follow", "unfollow")
+            if requested.get(phase) is True
+        ) or "unknown"
+        auto_restart_label = (
+            "allowed"
+            if phase_summary.get("auto_restart_allowed") is True
+            else "blocked"
+            if phase_summary.get("auto_restart_blocked") is True
+            else "unknown"
+        )
+        message_parts.extend(
+            [
+                (
+                    "Phase: "
+                    f"{_safe_text(phase_summary.get('blocked_phase'), max_len=80) or 'unknown'}"
+                    f" | Requested: {requested_label}"
+                ),
+                (
+                    "Follow: target "
+                    f"{_safe_count(phase_summary.get('follow_target'))}"
+                    f" | remaining {_safe_count(phase_summary.get('follow_remaining'))}"
+                ),
+                (
+                    "Unfollow: actionable "
+                    f"{_safe_count(phase_summary.get('unfollow_actionable_remaining'))}"
+                    f" | hold {_safe_count(phase_summary.get('unfollow_candidates_on_hold'))}"
+                    f" | terminal {_safe_count(phase_summary.get('unfollow_terminally_unavailable'))}"
+                ),
+                (
+                    "Reason: "
+                    f"{_safe_text(phase_summary.get('stable_reason'), max_len=160) or 'unknown'}"
+                    f" ({_safe_text(phase_summary.get('reason_code'), max_len=160) or 'unclassified'})"
+                ),
+                f"Auto Restart: {auto_restart_label}",
+                (
+                    "Next: "
+                    f"{_safe_text(phase_summary.get('suggested_next_action'), max_len=160) or 'operator_review'}"
+                ),
+            ]
+        )
+        next_retry_at = _safe_text(phase_summary.get("next_retry_at"), max_len=80)
+        if next_retry_at:
+            message_parts.append(f"Next retry: {next_retry_at}")
     if last_seen_at:
         message_parts.append(f"Last seen: {last_seen_at}")
     if action_required:
@@ -295,6 +355,7 @@ def build_incident_notification_payload(incident: dict) -> dict:
         "assistant_message": assistant_message,
         "admin_message": admin_message,
         "run_id": run_id,
+        "phase_summary": phase_summary or None,
         "dashboard_url": dashboard_url,
     }
     return _redact_payload({k: v for k, v in payload.items() if v is not None})

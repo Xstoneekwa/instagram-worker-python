@@ -68,6 +68,7 @@ from unfollow_hybrid_strategy import (
     cursor_anchor_matches,
     open_exact_profile_for_unfollow,
 )
+from unfollow_search_health_policy import SearchSurfaceCircuitBreaker
 from instagram_navigation import return_to_search_from_profile
 
 _LAST_UNFOLLOW_SESSION_PROBE_SUMMARY: dict[str, Any] = {}
@@ -1347,7 +1348,7 @@ def _run_real_unfollow_multi_loop(
     direct_search_retryable_failures = 0
     candidate_availability_persistence_failures = 0
     candidate_availability_persistence_failure_usernames: list[str] = []
-    max_direct_search_retryable_failures = 2
+    search_surface_health = SearchSurfaceCircuitBreaker()
     direct_fallback_armed = False
 
     def coverage_elapsed_seconds() -> float:
@@ -1657,6 +1658,7 @@ def _run_real_unfollow_multi_loop(
             "direct_search_ambiguous_count": len(direct_search_ambiguous),
             "candidate_availability_persistence_failures": candidate_availability_persistence_failures,
             "candidate_availability_persistence_failure_usernames": candidate_availability_persistence_failure_usernames[:50],
+            **search_surface_health.as_dict(),
             "cleanup_reserve_seconds": SCHEDULED_SESSION_CLEANUP_RESERVE_SECONDS,
             "stop_reason": exploration_stop,
             "unfollow_outcome": canonical_outcome,
@@ -1808,6 +1810,7 @@ def _run_real_unfollow_multi_loop(
                         local_retry_count=int(direct_result.get("local_retry_count") or 0),
                     )
                     if bool(direct_result.get("ok")):
+                        search_surface_health.record("exact_result_visible")
                         direct_search_verified_profiles += 1
                         target_row = {
                             "username": target_username,
@@ -1821,87 +1824,123 @@ def _run_real_unfollow_multi_loop(
                         selection_reason = hybrid.reason
                         target_opened_directly = True
                         break
-                    direct_status = str(direct_result.get("status") or "retryable")
-                    if direct_status in {"unavailable", "ambiguous"}:
-                        if direct_status == "unavailable":
-                            availability_state: dict[str, Any] = {}
-                            try:
-                                availability_state = (
-                                    supabase_client.record_unfollow_candidate_not_found(
-                                        aid,
-                                        target_key,
-                                        source_run_id=run_id,
-                                        reason=str(
-                                            direct_result.get("reason")
-                                            or "unfollow_candidate_account_unavailable"
-                                        ),
-                                        cooldown_hours=24,
-                                        max_attempts=2,
-                                    )
-                                )
-                            except Exception as exc:
-                                candidate_availability_persistence_failures += 1
-                                if target_key not in candidate_availability_persistence_failure_usernames:
-                                    candidate_availability_persistence_failure_usernames.append(target_key)
-                                log(
-                                    "error",
-                                    "unfollow_candidate_not_found_persist_failed",
-                                    account_id=aid,
-                                    run_id=run_id,
-                                    username=target_username,
-                                    reason="unfollow_candidate_availability_persistence_failed",
-                                    error=str(exc)[:500],
-                                )
-                            coverage_tracker.mark_candidate_unavailable(target_key)
-                            direct_search_unavailable.add(target_key)
-                            log(
-                                "info",
-                                "unfollow_candidate_not_found_terminalized",
-                                account_id=aid,
-                                run_id=run_id,
-                                username=target_username,
-                                reason=str(
-                                    direct_result.get("reason")
-                                    or "unfollow_candidate_account_unavailable"
-                                ),
-                                local_retry_count=int(
-                                    direct_result.get("local_retry_count") or 0
-                                ),
-                                persisted=bool(availability_state.get("ok")),
-                                availability_status=str(
-                                    availability_state.get("status") or ""
-                                ),
-                                not_found_attempt_count=int(
-                                    availability_state.get("not_found_attempt_count") or 0
-                                ),
-                                next_retry_at=availability_state.get("next_retry_at"),
-                                backlog_actionable=False,
-                                unfollow_marked_success=False,
+                    direct_status = str(
+                        direct_result.get("status") or "search_surface_unhealthy"
+                    )
+                    stable_failure_reason = str(
+                        direct_result.get("reason") or "search_surface_unhealthy"
+                    )
+                    classification = (
+                        "username_not_found_confirmed"
+                        if direct_status == "username_not_found_confirmed"
+                        else "search_surface_unhealthy"
+                    )
+                    availability_state: dict[str, Any] = {}
+                    try:
+                        availability_state = (
+                            supabase_client.record_unfollow_candidate_availability_v2(
+                                aid,
+                                target_key,
+                                source_run_id=run_id,
+                                classification=classification,
+                                reason=stable_failure_reason,
+                                technical_cooldown_minutes=30,
                             )
-                        else:
-                            direct_search_ambiguous.add(target_key)
+                        )
+                    except Exception as exc:
+                        candidate_availability_persistence_failures += 1
+                        if target_key not in candidate_availability_persistence_failure_usernames:
+                            candidate_availability_persistence_failure_usernames.append(target_key)
+                        log(
+                            "error",
+                            "unfollow_candidate_availability_v2_persist_failed",
+                            account_id=aid,
+                            run_id=run_id,
+                            username=target_username,
+                            classification=classification,
+                            reason="unfollow_candidate_availability_persistence_failed",
+                            error=str(exc)[:500],
+                        )
+                        stop_reason = (
+                            "unfollow_candidate_availability_persistence_failed"
+                        )
+                        return emit_final("failed_unfollow_multi_action", stop_reason)
+                    if classification == "username_not_found_confirmed":
+                        search_surface_health.record(classification)
+                        coverage_tracker.mark_candidate_unavailable(target_key)
+                        direct_search_unavailable.add(target_key)
+                        log(
+                            "info",
+                            "unfollow_candidate_not_found_terminalized",
+                            account_id=aid,
+                            run_id=run_id,
+                            username=target_username,
+                            reason=stable_failure_reason,
+                            local_retry_count=int(
+                                direct_result.get("local_retry_count") or 0
+                            ),
+                            persisted=bool(availability_state.get("ok")),
+                            availability_status=str(
+                                availability_state.get("status") or ""
+                            ),
+                            terminal_at=availability_state.get("terminal_at"),
+                            backlog_actionable=False,
+                            unfollow_marked_success=False,
+                        )
                         continue
+
                     direct_search_retryable_failures += 1
-                    coverage_tracker.mark_candidate_retryable(target_key)
+                    if direct_status == "ambiguous":
+                        direct_search_ambiguous.add(target_key)
+                    coverage_tracker.mark_candidate_technical_hold(target_key)
+                    breaker_opened = search_surface_health.record(classification)
                     log(
                         "warning",
-                        "unfollow_direct_exact_retryable_candidate_skipped",
+                        "unfollow_direct_exact_technical_candidate_held",
                         username=target_username,
-                        reason=str(direct_result.get("reason") or ""),
+                        reason=stable_failure_reason,
                         retryable_failure_count=direct_search_retryable_failures,
-                        max_retryable_failures=max_direct_search_retryable_failures,
-                        continue_to_next_candidate=(
-                            direct_search_retryable_failures
-                            < max_direct_search_retryable_failures
+                        consecutive_technical_failures=(
+                            search_surface_health.consecutive_technical_failures
                         ),
+                        circuit_breaker_open=breaker_opened,
+                        continue_to_next_candidate=not breaker_opened,
+                        availability_status=str(
+                            availability_state.get("status") or ""
+                        ),
+                        next_retry_at=availability_state.get("next_retry_at"),
                     )
-                    if (
-                        direct_search_retryable_failures
-                        >= max_direct_search_retryable_failures
-                    ):
-                        stop_reason = (
-                            "direct_exact_search_retryable_failure_budget_exhausted"
-                        )
+                    if breaker_opened:
+                        stop_reason = search_surface_health.stable_reason
+                        try:
+                            supabase_client.record_unfollow_phase_circuit_breaker_v1(
+                                aid,
+                                source_run_id=run_id,
+                                stable_reason=stop_reason,
+                                technical_failure_count=(
+                                    search_surface_health.total_technical_failures
+                                ),
+                                usernames=sorted(direct_search_attempted),
+                                cooldown_minutes=30,
+                            )
+                        except Exception as exc:
+                            log(
+                                "error",
+                                "unfollow_phase_circuit_breaker_persist_failed",
+                                account_id=aid,
+                                run_id=run_id,
+                                reason=(
+                                    "unfollow_phase_circuit_breaker_persistence_failed"
+                                ),
+                                error=str(exc)[:500],
+                            )
+                            stop_reason = (
+                                "unfollow_phase_circuit_breaker_persistence_failed"
+                            )
+                            return emit_final(
+                                "failed_unfollow_multi_action",
+                                stop_reason,
+                            )
                         return emit_final(
                             "success_real_unfollow_multi_partial_exhausted",
                             stop_reason,
@@ -2182,6 +2221,30 @@ def _run_real_unfollow_multi_loop(
                     remaining_planned_count=remaining_planned_count,
                     adaptive_scroll_budget=current_scroll_budget,
                 )
+                if (
+                    coverage_tracker is not None
+                    and remaining_planned_count > 0
+                    and not direct_fallback_armed
+                    and coverage_tracker.search_recovery_attempted
+                    and coverage_tracker.post_recovery_search_scroll_count >= 5
+                ):
+                    stop_reason = (
+                        "ui_coverage_budget_exhausted_with_actionable_remaining"
+                    )
+                    if can_arm_direct_search_fallback(
+                        stop_reason,
+                        remaining_count=remaining_planned_count,
+                    ):
+                        direct_fallback_armed = True
+                        log(
+                            "info",
+                            "unfollow_direct_fallback_armed_after_coverage_budget",
+                            reason=stop_reason,
+                            remaining_count=remaining_planned_count,
+                            direct_batch_limit=DIRECT_SEARCH_FALLBACK_BATCH_LIMIT,
+                            progressive_primary_completed=True,
+                        )
+                        continue
                 status = (
                     "success_real_unfollow_multi_partial_exhausted"
                     if verified > 0

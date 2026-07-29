@@ -221,7 +221,10 @@ class UnfollowUiCoveragePolicyTests(unittest.TestCase):
             out.required_viewports + out.diagnostic_viewport_allowance - 1,
         )
         self.assertLessEqual(out.adaptive_scroll_budget, out.max_scroll_passes_absolute)
-        self.assertEqual(out.budget_formula_version, "handoff_capacity_v3")
+        self.assertEqual(
+            out.budget_formula_version,
+            "handoff_capacity_v4_progressive_floor",
+        )
 
     def test_mythyl_fixture_allows_first_scroll_without_all_or_nothing_reservation(self) -> None:
         old_fallback_seconds = 2454
@@ -240,6 +243,26 @@ class UnfollowUiCoveragePolicyTests(unittest.TestCase):
         self.assertGreater(out.adaptive_scroll_budget, 0)
         self.assertEqual(out.conservative_capacity, 1393)
         self.assertEqual(out.recovery_reserve_seconds, 75)
+
+    def test_progressive_primary_gets_full_ten_recovery_five_budget_when_affordable(self) -> None:
+        out = derive_adaptive_coverage_budget(
+            quota_remaining=1,
+            eligible_remaining=1,
+            session_remaining_seconds=3600,
+        )
+        self.assertGreaterEqual(out.adaptive_scroll_budget, 15)
+
+    def test_progressive_floor_never_overruns_absolute_deadline_capacity(self) -> None:
+        out = derive_adaptive_coverage_budget(
+            quota_remaining=1,
+            eligible_remaining=1,
+            session_remaining_seconds=640,
+        )
+        self.assertLess(out.max_scroll_passes_absolute, 15)
+        self.assertLessEqual(
+            out.adaptive_scroll_budget,
+            out.max_scroll_passes_absolute,
+        )
 
     def test_viewport_observation_does_not_recalculate_handoff_budget(self) -> None:
         budget = derive_adaptive_coverage_budget(

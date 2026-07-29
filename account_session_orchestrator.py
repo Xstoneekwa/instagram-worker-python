@@ -1792,6 +1792,72 @@ def _auto_restart_performance_projection(
     }
 
 
+def _resolve_auto_restart_follow_phase_gate(
+    *,
+    default_run_follow: bool,
+    policy: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Resolve an authoritative resume phase without treating zero as absent."""
+
+    if not policy:
+        return {
+            "run_follow": bool(default_run_follow),
+            "follow_phase_skipped_reason": None,
+            "follow_quota_authoritative_zero": False,
+            "unfollow_only_resume": False,
+        }
+    from auto_restart_runtime import phase_enabled
+
+    phases = dict(policy.get("phases_to_run") or {})
+    quota = dict(policy.get("quota_remaining") or {})
+    follow_planned = phase_enabled(
+        "follow",
+        default=default_run_follow,
+        policy=policy,
+    )
+    follow_remaining = (
+        _as_optional_int(quota.get("follow")) if "follow" in quota else None
+    )
+    follow_quota_authoritative_zero = bool(
+        follow_planned
+        and follow_remaining is not None
+        and follow_remaining <= 0
+    )
+    run_follow = bool(
+        default_run_follow
+        and follow_planned
+        and not follow_quota_authoritative_zero
+    )
+    skipped_reason = (
+        "global_follow_cap_reached"
+        if follow_quota_authoritative_zero
+        else "auto_restart_resume_skip_follow"
+        if not follow_planned
+        else None
+    )
+    unfollow_remaining = (
+        _as_optional_int(quota.get("unfollow")) if "unfollow" in quota else None
+    )
+    unfollow_planned = phase_enabled(
+        "unfollow",
+        default=False,
+        policy=policy,
+    )
+    unfollow_only_resume = bool(
+        not run_follow
+        and unfollow_planned
+        and (unfollow_remaining is None or unfollow_remaining > 0)
+    )
+    return {
+        "run_follow": run_follow,
+        "follow_phase_skipped_reason": skipped_reason,
+        "follow_quota_authoritative_zero": follow_quota_authoritative_zero,
+        "follow_remaining": follow_remaining,
+        "unfollow_only_resume": unfollow_only_resume,
+        "requested_phases": phases,
+    }
+
+
 def _phase_statuses(
     *,
     welcome_enabled: bool,
@@ -3526,11 +3592,11 @@ def run_account_session(
             phases_to_run=auto_restart_resume_policy.get("phases_to_run"),
         )
     resume_phases = dict((auto_restart_resume_policy or {}).get("phases_to_run") or {})
-    unfollow_only_resume = bool(
-        auto_restart_resume_policy
-        and resume_phases.get("follow") is False
-        and resume_phases.get("unfollow") is True
+    resume_phase_gate = _resolve_auto_restart_follow_phase_gate(
+        default_run_follow=True,
+        policy=auto_restart_resume_policy,
     )
+    unfollow_only_resume = bool(resume_phase_gate["unfollow_only_resume"])
     real_send_enabled, real_send_source = resolve_welcome_dm_real_send_enabled()
 
     welcome_phase_executed = False
@@ -3687,11 +3753,46 @@ def run_account_session(
         welcome_session_status=welcome_session_status,
     )
     if auto_restart_resume_policy:
-        from auto_restart_runtime import phase_enabled
-
-        if not phase_enabled("follow", default=run_follow, policy=auto_restart_resume_policy):
-            run_follow = False
-            follow_phase_skipped_reason = "auto_restart_resume_skip_follow"
+        resume_phase_gate = _resolve_auto_restart_follow_phase_gate(
+            default_run_follow=run_follow,
+            policy=auto_restart_resume_policy,
+        )
+        run_follow = bool(resume_phase_gate["run_follow"])
+        follow_phase_skipped_reason = resume_phase_gate[
+            "follow_phase_skipped_reason"
+        ]
+        unfollow_only_resume = bool(resume_phase_gate["unfollow_only_resume"])
+        if bool(resume_phase_gate["follow_quota_authoritative_zero"]):
+            follow_engine_summary.update(
+                {
+                    "follows_completed_count": 0,
+                    "follow_processed_count": 0,
+                    "follows_goal_effective": 0,
+                    "global_follows_goal_effective": 0,
+                    "follow_session_outcome": "global_follow_cap_reached",
+                    "follow_stop_reason": "global_follow_cap_reached",
+                    "candidates_not_scanned_due_to_cap": True,
+                }
+            )
+            merge_follow_outcome(
+                follow_engine_summary,
+                stable_reason="global_follow_cap_reached",
+                verified_actions=0,
+                target_actions=0,
+                current_target_id=tid or None,
+                remaining_target_ids=[],
+                safe_boundary=True,
+            )
+            log(
+                "info",
+                "account_session_follow_zero_quota_terminalized",
+                account_id=aid,
+                run_id=run_id,
+                stable_reason="global_follow_cap_reached",
+                no_follow_ui_action=True,
+                unfollow_only_resume=unfollow_only_resume,
+                phases_to_run=resume_phases,
+            )
 
     welcome_blocked_follow = not run_follow and welcome_enabled
 
@@ -4034,7 +4135,7 @@ def run_account_session(
             follow_exit_code=None,
             follow_total_ms=0.0,
             session_started_at=t0,
-            follow_outcome=None,
+            follow_outcome=dict(follow_engine_summary.get("follow_outcome") or {}),
             unfollow_only_resume_authorized=True,
         )
         real_enabled = _follow_to_unfollow_real_enabled(aid)

@@ -4517,7 +4517,10 @@ def tap_account_result(
             and center_x <= int(screen_w * 0.72)
             and center_y <= int(screen_h * 0.90)
             and 0.0 <= preverified_age_ms <= 1_250.0
-            and preverified_exact_result_method == "unfollow_direct_stable_exact_xml"
+            and preverified_exact_result_method in {
+                "unfollow_direct_stable_exact_xml",
+                "unfollow_direct_stable_exact_accessibility_live",
+            }
         )
         if not bounds_safe:
             preverified_bounds = {}
