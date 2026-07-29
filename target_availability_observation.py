@@ -21,27 +21,75 @@ ALLOWED_RECOVERY_OUTCOMES = frozenset({"not_attempted", "succeeded", "failed", "
 ALLOWED_EVIDENCE_QUALITY = frozenset({"unknown", "low", "medium", "high"})
 ALLOWED_NETWORK_STATES = frozenset({"unknown", "healthy", "degraded", "unavailable"})
 ALLOWED_SESSION_STATES = frozenset({"unknown", "healthy", "restricted", "logged_out"})
+ALLOWED_IDENTITY_SOURCES = frozenset(
+    {"unknown", "target_record", "existing_runtime_signal", "profile_surface", "accessibility_node"}
+)
+ALLOWED_OBSERVATION_STAGES = frozenset(
+    {
+        "unknown",
+        "target_loaded",
+        "username_lookup_started",
+        "username_lookup_completed",
+        "profile_resolution",
+        "identity_validation",
+        "profile_opened",
+        "followers_entry",
+        "followers_first_page",
+        "followers_pagination",
+        "target_return",
+        "target_rotation",
+        "recovery",
+        "terminal_exception",
+        "target_summary_completed",
+    }
+)
 
 TARGET_AVAILABILITY_REASON_CODES = frozenset(
     {
         "target_username_lookup_started",
+        "target_username_lookup_completed",
         "target_profile_found",
         "target_profile_not_found",
+        "target_profile_ambiguous",
         "target_stable_identity_observed",
+        "target_identity_conflict",
+        "target_source_profile_mismatch",
         "target_verified_status_detected",
+        "target_followers_surface_entered",
         "target_followers_surface_normal",
         "target_followers_entry_failed",
         "target_followers_surface_restricted",
         "target_followers_surface_terminally_limited",
+        "target_pagination_stalled",
         "target_repeated_first_profiles_detected",
         "target_navigation_retry_budget_exhausted",
         "target_navigation_timeout",
+        "target_recovery_attempted",
         "target_recovery_succeeded",
         "target_recovery_failed",
         "target_ui_ambiguity",
         "target_network_ambiguity",
+        "target_session_ambiguity",
     }
 )
+
+SENSITIVE_EVIDENCE_KEYS = frozenset(
+    {
+        "access_token",
+        "api_key",
+        "apikey",
+        "authorization",
+        "cookie",
+        "password",
+        "provider_payload",
+        "raw_screenshot",
+        "screenshot",
+        "secret",
+        "service_role_key",
+        "token",
+    }
+)
+MAX_EVIDENCE_JSON_BYTES = 4_096
 
 
 def _normalize_username(value: str) -> str:
@@ -66,7 +114,29 @@ def _iso_utc(value: datetime) -> str:
 
 def _safe_mapping(value: Optional[Mapping[str, Any]]) -> Mapping[str, Any]:
     payload = dict(value or {})
-    json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+    def validate(node: Any, path: str = "evidence_safe") -> None:
+        if node is None or isinstance(node, (bool, int, float, str)):
+            return
+        if isinstance(node, list):
+            for index, item in enumerate(node):
+                validate(item, "%s[%s]" % (path, index))
+            return
+        if isinstance(node, dict):
+            for key, item in node.items():
+                clean_key = str(key or "").strip().lower()
+                if clean_key in SENSITIVE_EVIDENCE_KEYS or any(
+                    token in clean_key for token in ("password", "secret", "token", "screenshot", "provider_payload")
+                ):
+                    raise ValueError("sensitive_evidence_key_forbidden:%s" % path)
+                validate(item, "%s.%s" % (path, clean_key))
+            return
+        raise TypeError("evidence_safe_not_json_serializable:%s" % path)
+
+    validate(payload)
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    if len(encoded.encode("utf-8")) > MAX_EVIDENCE_JSON_BYTES:
+        raise ValueError("evidence_safe_too_large")
     return payload
 
 
@@ -123,13 +193,22 @@ class TargetAvailabilityObservation:
     tenant_id: str
     account_id: str
     target_id: str
+    requested_username: str
+    normalized_username: str
     searched_username: str
     observed_username: Optional[str]
     observed_stable_platform_user_id: Optional[str]
     run_id: Optional[str]
+    request_id: Optional[str]
+    instance_id: Optional[str]
+    device_id: Optional[str]
     device_key: Optional[str]
+    worker_release: Optional[str]
     worker_version: Optional[str]
     instagram_version: Optional[str]
+    observation_stage: str
+    identity_source: str
+    identity_confidence: str
     lookup_result: str
     profile_found: Optional[bool]
     verified_badge: Optional[bool]
@@ -140,6 +219,18 @@ class TargetAvailabilityObservation:
     retry_count: int
     retry_budget_exhausted: bool
     navigation_timeout: bool
+    username_lookup_started: bool
+    username_lookup_completed: bool
+    profile_ambiguous: bool
+    followers_surface_entered: bool
+    followers_surface_entry_failed: bool
+    pagination_stalled: bool
+    recovery_attempted: bool
+    ui_ambiguous: bool
+    network_ambiguous: bool
+    session_ambiguous: bool
+    source_profile_mismatch: bool
+    identity_conflict: bool
     recovery_outcome: str
     ui_evidence_quality: str
     network_state: str
@@ -180,9 +271,26 @@ def build_target_availability_observation(
     network_state: str = "unknown",
     session_state: str = "unknown",
     run_id: Optional[str] = None,
+    request_id: Optional[str] = None,
+    instance_id: Optional[str] = None,
+    observation_stage: str = "unknown",
+    identity_source: str = "unknown",
+    identity_confidence: str = "unknown",
     device_key: Optional[str] = None,
     worker_version: Optional[str] = None,
     instagram_version: Optional[str] = None,
+    username_lookup_started: bool = False,
+    username_lookup_completed: bool = False,
+    profile_ambiguous: bool = False,
+    followers_surface_entered: bool = False,
+    followers_surface_entry_failed: bool = False,
+    pagination_stalled: bool = False,
+    recovery_attempted: bool = False,
+    ui_ambiguous: bool = False,
+    network_ambiguous: bool = False,
+    session_ambiguous: bool = False,
+    source_profile_mismatch: bool = False,
+    identity_conflict: bool = False,
     evidence_safe: Optional[Mapping[str, Any]] = None,
 ) -> TargetAvailabilityObservation:
     clean_event_key = _clean_optional_text(event_key)
@@ -200,6 +308,12 @@ def build_target_availability_observation(
         raise ValueError("network_state_invalid")
     if session_state not in ALLOWED_SESSION_STATES:
         raise ValueError("session_state_invalid")
+    if identity_source not in ALLOWED_IDENTITY_SOURCES:
+        raise ValueError("identity_source_invalid")
+    if identity_confidence not in ALLOWED_EVIDENCE_QUALITY:
+        raise ValueError("identity_confidence_invalid")
+    if observation_stage not in ALLOWED_OBSERVATION_STAGES:
+        raise ValueError("observation_stage_invalid")
     if accessible_profiles_count is not None and int(accessible_profiles_count) < 0:
         raise ValueError("accessible_profiles_count_invalid")
     if not 0 <= int(retry_count) <= 100:
@@ -234,13 +348,22 @@ def build_target_availability_observation(
         tenant_id=scope.tenant_id,
         account_id=scope.account_id,
         target_id=scope.target_id,
+        requested_username=scope.normalized_username,
+        normalized_username=scope.normalized_username,
         searched_username=scope.normalized_username,
         observed_username=normalized_observed_username,
         observed_stable_platform_user_id=stable_id,
         run_id=clean_run_id,
+        request_id=_clean_optional_text(request_id),
+        instance_id=_clean_optional_text(instance_id),
+        device_id=_clean_optional_text(device_key),
         device_key=_clean_optional_text(device_key),
+        worker_release=_clean_optional_text(worker_version),
         worker_version=_clean_optional_text(worker_version),
         instagram_version=_clean_optional_text(instagram_version),
+        observation_stage=observation_stage,
+        identity_source=identity_source,
+        identity_confidence=identity_confidence,
         lookup_result=lookup_result,
         profile_found=profile_found,
         verified_badge=verified_badge,
@@ -251,6 +374,18 @@ def build_target_availability_observation(
         retry_count=int(retry_count),
         retry_budget_exhausted=bool(retry_budget_exhausted),
         navigation_timeout=bool(navigation_timeout),
+        username_lookup_started=bool(username_lookup_started),
+        username_lookup_completed=bool(username_lookup_completed),
+        profile_ambiguous=bool(profile_ambiguous),
+        followers_surface_entered=bool(followers_surface_entered),
+        followers_surface_entry_failed=bool(followers_surface_entry_failed),
+        pagination_stalled=bool(pagination_stalled),
+        recovery_attempted=bool(recovery_attempted),
+        ui_ambiguous=bool(ui_ambiguous),
+        network_ambiguous=bool(network_ambiguous),
+        session_ambiguous=bool(session_ambiguous),
+        source_profile_mismatch=bool(source_profile_mismatch),
+        identity_conflict=bool(identity_conflict),
         recovery_outcome=recovery_outcome,
         ui_evidence_quality=ui_evidence_quality,
         network_state=network_state,
@@ -261,6 +396,8 @@ def build_target_availability_observation(
 
 
 __all__ = [
+    "MAX_EVIDENCE_JSON_BYTES",
+    "SENSITIVE_EVIDENCE_KEYS",
     "TARGET_AVAILABILITY_REASON_CODES",
     "TargetAvailabilityBudgets",
     "TargetAvailabilityObservation",
