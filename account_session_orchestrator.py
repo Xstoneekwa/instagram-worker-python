@@ -82,6 +82,54 @@ def _observe_target_availability(hook_name: str, **kwargs: Any) -> bool:
         return bool(hook(**kwargs))
     except Exception:
         return True
+
+
+def _resolve_target_availability_tenant_once(
+    account_id: str,
+    *,
+    run_id: str | None,
+    commercial_policy_revision: dict[str, Any],
+) -> tuple[str | None, str | None]:
+    """Resolve canonical ownership once per run; Availability alone fails closed."""
+    if not _target_availability_capture_requested(account_id):
+        return None, None
+    try:
+        from target_availability_ownership import resolve_target_availability_tenant
+
+        resolution = resolve_target_availability_tenant(
+            account_id,
+            commercial_policy_revision=commercial_policy_revision,
+        )
+    except Exception:
+        log(
+            "warning",
+            "target_availability_tenant_resolution_failed_closed",
+            account_id=account_id,
+            run_id=run_id,
+            reason="target_availability_tenant_ownership_lookup_failed",
+        )
+        return None, "target_availability_tenant_ownership_lookup_failed"
+    if not resolution.available:
+        log(
+            "warning",
+            "target_availability_tenant_resolution_failed_closed",
+            account_id=account_id,
+            run_id=run_id,
+            reason=resolution.reason_code,
+            ownership_source="client_instagram_accounts",
+            ownership_lookup_count=resolution.lookup_count,
+        )
+        return None, resolution.reason_code
+    log(
+        "info",
+        "target_availability_tenant_resolved",
+        account_id=account_id,
+        run_id=run_id,
+        ownership_source=resolution.ownership.source,
+        ownership_lookup_count=resolution.lookup_count,
+        ownership_active=resolution.ownership.is_active,
+    )
+    return resolution.tenant_id, None
 FOLLOW_TARGET_SAFE_PARTIAL_ROTATION_REASONS = frozenset(
     {
         "visible_window_exhausted_scroll_failed",
@@ -683,6 +731,7 @@ def _run_follow_target_rotation(
     account_username: str,
     run_id: str | None,
     tenant_id: str | None = None,
+    target_availability_scope_rejection_reason: str | None = None,
     follow_targets: list[dict[str, Any]],
     run_followers_list_engine_session: FollowEngineRunner,
     supabase_mode: bool,
@@ -872,6 +921,7 @@ def _run_follow_target_rotation(
             run_id=run_id,
             target_index=target_index,
             stable_platform_user_id=stable_platform_user_id,
+            scope_rejection_reason=target_availability_scope_rejection_reason,
         )
         follow_t0 = time.perf_counter()
         exit_code = int(run_followers_list_engine_session(d, **call_kwargs))
@@ -898,6 +948,7 @@ def _run_follow_target_rotation(
             target_index=target_index,
             stable_platform_user_id=stable_platform_user_id,
             summary=summary,
+            scope_rejection_reason=target_availability_scope_rejection_reason,
         )
         target_follows_completed = _as_optional_int(summary.get("follows_completed_count")) or 0
         global_follows_completed += target_follows_completed
@@ -3414,7 +3465,14 @@ def run_account_session(
 
     commercial_policy_revision = load_account_commercial_policy_revision(aid) or {}
     session_policy_revision = str(commercial_policy_revision.get("revision_token") or "").strip() or None
-    target_availability_tenant_id = str(commercial_policy_revision.get("client_id") or "").strip() or None
+    (
+        target_availability_tenant_id,
+        target_availability_scope_rejection_reason,
+    ) = _resolve_target_availability_tenant_once(
+        aid,
+        run_id=run_id,
+        commercial_policy_revision=commercial_policy_revision,
+    )
 
     t_settings_load = time.perf_counter()
     if not src:
@@ -3794,6 +3852,7 @@ def run_account_session(
                 account_username=uname,
                 run_id=run_id,
                 tenant_id=target_availability_tenant_id,
+                target_availability_scope_rejection_reason=target_availability_scope_rejection_reason,
                 follow_targets=rotation_targets,
                 run_followers_list_engine_session=run_followers_list_engine_session,
                 supabase_mode=supabase_mode,

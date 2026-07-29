@@ -234,6 +234,8 @@ def _request_json(
     body: dict[str, Any] | list[dict[str, Any]] | None = None,
     prefer_representation: bool = False,
     prefer_resolution: str | None = None,
+    request_timeout: float | None = None,
+    max_retries: int | None = None,
 ) -> Any:
     base = _base_url()
     key = _service_key()
@@ -259,7 +261,12 @@ def _request_json(
 
     req = request.Request(url=url, method=method, headers=headers, data=data)
     try:
-        raw = _request_urlopen(req, op=f"{method} {table}")
+        raw = _request_urlopen(
+            req,
+            op=f"{method} {table}",
+            timeout=request_timeout,
+            max_retries=max_retries,
+        )
         if not raw:
             return None
         return json.loads(raw.decode("utf-8"))
@@ -2992,6 +2999,26 @@ def get_account_commercial_policy_revision(account_id: str) -> dict[str, Any] | 
                 "revision_token": f"package:{code}:{updated}" if updated else f"package:{code}",
             }
     return None
+
+
+def get_active_client_instagram_account_ownership_rows(account_id: str) -> list[dict[str, Any]]:
+    """Read at most two active canonical ownership links for ambiguity checks."""
+    aid = str(account_id or "").strip()
+    if not aid:
+        return []
+    rows = _request_json(
+        "GET",
+        "client_instagram_accounts",
+        query={
+            "select": "account_id,client_id,active,updated_at",
+            "account_id": f"eq.{aid}",
+            "active": "eq.true",
+            "limit": "2",
+        },
+        request_timeout=3.0,
+        max_retries=0,
+    )
+    return [dict(row) for row in rows] if isinstance(rows, list) else []
 
 
 def get_follow_runtime_cap_inputs(account_id: str) -> dict[str, Any]:

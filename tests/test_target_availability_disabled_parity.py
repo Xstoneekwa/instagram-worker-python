@@ -16,6 +16,7 @@ PRODUCTION_BASE_SHA = "8f6d16c772236450b22d167239223ca3eae30e7d"
 ACCOUNT_ID = "22222222-2222-4222-8222-222222222222"
 REVIEWED_SUCCESSOR_RUNTIME_DELTAS = {
     "instagram_navigation.py",
+    "supabase_client.py",
     "unfollow_session_orchestrator.py",
 }
 
@@ -48,7 +49,7 @@ def _function(source: str, name: str) -> ast.FunctionDef:
 def _without_availability_hooks(node: ast.FunctionDef) -> ast.FunctionDef:
     normalized = copy.deepcopy(node)
     for index, argument in list(enumerate(normalized.args.kwonlyargs))[::-1]:
-        if argument.arg == "tenant_id":
+        if argument.arg in {"tenant_id", "target_availability_scope_rejection_reason"}:
             normalized.args.kwonlyargs.pop(index)
             normalized.args.kw_defaults.pop(index)
 

@@ -25,6 +25,19 @@ from target_availability_writer import (
 _WRITER: FailOpenTargetAvailabilityWriter | None = None
 _MEMORY_PROBE = None
 
+_SCOPE_REJECTION_REASONS = frozenset(
+    {
+        "target_availability_commercial_revision_client_id_malformed",
+        "target_availability_tenant_account_id_invalid",
+        "target_availability_tenant_ownership_ambiguous",
+        "target_availability_tenant_ownership_conflict",
+        "target_availability_tenant_ownership_inactive",
+        "target_availability_tenant_ownership_lookup_failed",
+        "target_availability_tenant_ownership_missing",
+        "target_availability_tenant_ownership_response_malformed",
+    }
+)
+
 
 def _text(value: object) -> str:
     return str(value or "").strip()
@@ -35,6 +48,11 @@ def _integer(value: object, default: int = 0) -> int:
         return max(0, int(value or default))
     except (TypeError, ValueError):
         return default
+
+
+def _scope_rejection_reason(value: object) -> str:
+    reason = _text(value)
+    return reason if reason in _SCOPE_REJECTION_REASONS else "invalid_observation_scope"
 
 
 def _scope(*, tenant_id: str, account_id: str, target_id: str, username: str, stable_id: str | None = None):
@@ -127,6 +145,7 @@ def observe_rotation_target_loaded(
     run_id: str | None,
     target_index: int,
     stable_platform_user_id: str | None = None,
+    scope_rejection_reason: str | None = None,
     flags: TargetAvailabilityFeatureFlags | None = None,
 ) -> bool:
     active = flags or TargetAvailabilityFeatureFlags.from_mapping()
@@ -143,7 +162,7 @@ def observe_rotation_target_loaded(
         scope = _scope(tenant_id=tenant_id, account_id=account_id, target_id=target_id, username=username, stable_id=stable_platform_user_id)
         if scope is None:
             if probe is not None:
-                probe.record_rejected("invalid_observation_scope")
+                probe.record_rejected(_scope_rejection_reason(scope_rejection_reason))
             return True
         observation = build_target_availability_observation(
             scope=scope,
@@ -331,6 +350,7 @@ def observation_from_rotation_summary(
 
 def observe_rotation_target_summary(**kwargs: Any) -> bool:
     flags = kwargs.pop("flags", None) or TargetAvailabilityFeatureFlags.from_mapping()
+    scope_rejection_reason = kwargs.pop("scope_rejection_reason", None)
     account_id = _text(kwargs.get("account_id"))
     if not flags.capture_allowed(account_id):
         return True
@@ -345,7 +365,7 @@ def observe_rotation_target_summary(**kwargs: Any) -> bool:
         observation = observation_from_rotation_summary(**kwargs)
         if observation is None:
             if probe is not None:
-                probe.record_rejected("invalid_observation_scope")
+                probe.record_rejected(_scope_rejection_reason(scope_rejection_reason))
             return True
         if probe is not None and not probe.record_observation(observation):
             del observation
