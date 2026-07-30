@@ -132,6 +132,15 @@ class FollowReviewPopupConfirmationTest(unittest.TestCase):
         record = MagicMock()
         with patch.object(
             nav, "_review_before_follow_popup_visible", return_value=True
+        ), patch.object(
+            nav,
+            "_capture_follow_review_popup_unhandled_evidence",
+            return_value={
+                "screenshot_path": "/redacted/follow_review.png",
+                "xml_path": "/redacted/follow_review.xml",
+                "foreground_package": "com.instagram.android",
+                "foreground_activity": ".MainActivity",
+            },
         ):
             outcome = nav._follow_review_popup_unhandled_abort(
                 MagicMock(),
@@ -151,6 +160,48 @@ class FollowReviewPopupConfirmationTest(unittest.TestCase):
             outcome["failure_code"],
             nav.FOLLOW_REVIEW_POPUP_UNHANDLED_FAILURE_CODE,
         )
+        self.assertEqual(
+            outcome["evidence"]["foreground_package"],
+            "com.instagram.android",
+        )
+        safe_stop_payload = next(
+            call.args[1]
+            for call in record.call_args_list
+            if call.args[0] == "follow_review_popup_unhandled_safe_stop"
+        )
+        self.assertEqual(
+            safe_stop_payload["evidence"]["screenshot_path"],
+            "/redacted/follow_review.png",
+        )
+
+    def test_evidence_capture_is_invoked_before_safe_stop_record(self) -> None:
+        order: list[str] = []
+
+        def capture(*_args, **_kwargs):
+            order.append("capture")
+            return {"screenshot_path": "/redacted/a.png", "xml_path": "/redacted/a.xml"}
+
+        def record(event, _payload):
+            order.append(str(event))
+
+        with patch.object(
+            nav, "_review_before_follow_popup_visible", return_value=True
+        ), patch.object(
+            nav, "_capture_follow_review_popup_unhandled_evidence", side_effect=capture
+        ):
+            nav._follow_review_popup_unhandled_abort(
+                MagicMock(),
+                target_username="family_a.6mad",
+                visual_candidate_id="vc-review",
+                events=[],
+                record=record,
+                state_before="follow",
+                state_after="follow",
+                reason="review_sheet_visible_after_initial_follow_tap",
+            )
+
+        self.assertEqual(order[0], "capture")
+        self.assertEqual(order[1], "follow_review_popup_unhandled_safe_stop")
 
 
 if __name__ == "__main__":
