@@ -409,6 +409,118 @@ class InstagramListContinuationContractTests(unittest.TestCase):
         self.assertEqual([call["target_id"] for call in engine.calls], ["target-1", "target-2"])
         self.assertEqual(result["exhausted_targets"][0]["target_id"], "target-1")
 
+    def test_15a_rotation_propagates_request_and_canonical_attempt_policy(self) -> None:
+        request_id = "30000000-0000-4000-8000-000000000002"
+        policy = {
+            "attempt_id": 2,
+            "retry_index": 1,
+            "phases_to_run": {"welcome": False, "follow": True, "unfollow": False},
+        }
+        engine = _FakeFollowersEngine(
+            [
+                (
+                    0,
+                    {
+                        "follows_completed_count": 1,
+                        "follow_session_outcome": "completed",
+                        "follow_stop_reason": "",
+                        "global_follows_goal_effective": 1,
+                    },
+                )
+            ]
+        )
+        session._run_follow_target_rotation(
+            object(),
+            account_id="account",
+            account_username="account",
+            run_id="run",
+            follow_targets=[_target(1)],
+            run_followers_list_engine_session=engine,
+            supabase_mode=False,
+            warm_session_used=False,
+            force_stop_used=False,
+            max_targets_per_run=1,
+            max_follows_per_target_per_run=1,
+            run_request_id=request_id,
+            auto_restart_resume_policy=policy,
+        )
+        self.assertEqual(engine.calls[0]["run_request_id"], request_id)
+        self.assertEqual(engine.calls[0]["auto_restart_resume_policy"], policy)
+        self.assertIsNot(engine.calls[0]["auto_restart_resume_policy"], policy)
+
+    def test_15b_dispatch_to_account_session_propagates_provenance_to_rotation(self) -> None:
+        request_id = "30000000-0000-4000-8000-000000000002"
+        policy = {
+            "attempt_id": 2,
+            "retry_index": 1,
+            "phases_to_run": {"welcome": False, "follow": True, "unfollow": False},
+            "quota_remaining": {"follow": 1, "unfollow": 0, "total": 1},
+        }
+        captured: dict = {}
+
+        def stop_after_capture(_device, **kwargs):
+            captured.update(kwargs)
+            raise RuntimeError("stop_after_provenance_capture")
+
+        with (
+            patch.object(session, "_abort_if_operator_stop_requested", return_value=None),
+            patch.object(session, "load_account_commercial_policy_revision", return_value={}),
+            patch.object(
+                session,
+                "_resolve_target_availability_tenant_once",
+                return_value=(None, None),
+            ),
+            patch.object(
+                session.supabase_client,
+                "get_account_dm_settings",
+                return_value={"welcome_enabled": False},
+            ),
+            patch.object(
+                session,
+                "resolve_welcome_dm_real_send_enabled",
+                return_value=(False, "test"),
+            ),
+            patch.object(session, "_transition_buffer_blocks_business_actions", return_value=False),
+            patch.object(session, "_operator_stop_cancel_requested", return_value=False),
+            patch.object(session, "commercial_policy_boundary_blocks_phase", return_value=False),
+            patch.object(session, "_follow_to_unfollow_real_enabled", return_value=False),
+            patch.object(
+                session,
+                "_follow_to_unfollow_real_max_actions_effective",
+                return_value=0,
+            ),
+            patch.object(
+                session,
+                "_resolve_follow_source_rotation_settings",
+                return_value={
+                    "max_follows_per_target_per_run": 1,
+                    "max_targets_per_run": 1,
+                    "settings_source": "test",
+                    "bounds": {},
+                },
+            ),
+            patch.object(session, "_run_follow_target_rotation", side_effect=stop_after_capture),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "stop_after_provenance_capture"):
+                session.dispatch_account_session(
+                    object(),
+                    account_id="00000000-0000-4000-8000-000000000001",
+                    account_username="account",
+                    run_id="20000000-0000-4000-8000-000000000001",
+                    source_profile_username="source-1",
+                    target_id="10000000-0000-4000-8000-000000000001",
+                    follow_targets=[_target(1)],
+                    run_followers_list_engine_session=_FakeFollowersEngine([]),
+                    supabase_mode=False,
+                    warm_session_used=False,
+                    force_stop_used=False,
+                    auto_restart_resume_policy=policy,
+                    run_request_id=request_id,
+                )
+
+        self.assertEqual(captured["run_request_id"], request_id)
+        self.assertEqual(captured["auto_restart_resume_policy"], policy)
+
     def test_16_eight_follows_and_see_more_does_not_rotate(self) -> None:
         engine = _FakeFollowersEngine([
             (0, {"follows_completed_count": 8, "follow_session_outcome": "follows_completed", "follow_stop_reason": "expand_primary_list_available"}),
@@ -580,6 +692,33 @@ class InstagramListContinuationContractTests(unittest.TestCase):
         self.assertEqual(diag["fully_visible_count"], 8)
         self.assertEqual(diag["partial_row_count"], 0)
         self.assertNotEqual(diag["scroll_distance_ratio"], 0.24)
+
+    def test_29a_stolm_shape_emits_primary_state_with_two_overlap_and_seven_new(self) -> None:
+        before = _surface(rows=[(f"stolm_row_{idx}", "Following") for idx in range(9)])
+        after = _surface(
+            rows=[(f"stolm_row_{idx}", "Following") for idx in range(7, 9)]
+            + [(f"stolm_row_{idx}", "Follow") for idx in range(9, 16)]
+        )
+        nav._followers_store_detect_hierarchy_xml(before)
+        device = _FakeScrollDevice()
+        diag: dict = {}
+        with (
+            patch.object(nav, "followers_refresh_detect_hierarchy_cache", return_value=after),
+            patch.object(nav, "_followers_log_scroll_or_swipe_about_to_run"),
+            patch.object(nav.time, "sleep", return_value=None),
+        ):
+            ok = nav._followers_scroll_list_forward(
+                device,
+                scroll_profile="canonical_adaptive",
+                bypass_post_tap_capture_gate=True,
+                bypass_scroll_xml_guards=True,
+                scroll_diag_out=diag,
+            )
+        self.assertTrue(ok)
+        self.assertTrue(diag["depth_advanced"])
+        self.assertEqual(diag["surface_state_after"], State.PRIMARY_ROWS_AVAILABLE.value)
+        self.assertEqual(diag["overlap_count"], 2)
+        self.assertEqual(diag["new_primary_row_count"], 7)
 
     def test_30_adaptive_failure_runs_short_fallback_and_reprobes(self) -> None:
         before = _surface(rows=[(f"row_{idx}", "Following") for idx in range(8)])
