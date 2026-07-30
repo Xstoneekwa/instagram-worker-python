@@ -369,7 +369,10 @@ class RuntimeCapsTest(unittest.TestCase):
         assert isinstance(query, dict)
         self.assertEqual(query["interaction_type"], "eq.follow")
         self.assertEqual(query["interaction_status"], "eq.success")
-        self.assertEqual(query["event_type"], "eq.follow_verified")
+        self.assertEqual(
+            query["event_type"],
+            "in.(follow_verified,follow_verified_persisted_v1)",
+        )
         self.assertEqual(query["run_id"], "not.is.null")
         self.assertIn("T22:00:00+00:00", query["event_at"])
 

@@ -1038,6 +1038,56 @@ class FollowTargetsRuntimeP1bTest(unittest.TestCase):
         self.assertEqual(result["summary"]["target_id"], "t2")
         self.assertIn("follow_target_switched", [event for _level, event, _kw in logs])
 
+    def test_resume_authorized_follow_quota_is_hard_bound_from_first_target(self) -> None:
+        engine = FakeFollowersEngine([
+            (0, {
+                "follows_completed_count": 1,
+                "global_follows_goal_effective": 1,
+                "follow_session_outcome": "global_follow_cap_reached",
+                "follow_stop_reason": "global_follow_cap_reached",
+                "candidates_not_scanned_due_to_cap": True,
+            }),
+        ])
+
+        result = session._run_follow_target_rotation(
+            object(),
+            account_id="acct",
+            account_username="account",
+            run_id="run",
+            follow_targets=[target("t1", "source_one", 0), target("t2", "source_two", 1)],
+            run_followers_list_engine_session=engine,
+            supabase_mode=True,
+            warm_session_used=False,
+            force_stop_used=False,
+            max_targets_per_run=2,
+            max_follows_per_target_per_run=30,
+            authorized_follow_quota=1,
+        )
+
+        self.assertEqual(len(engine.calls), 1)
+        self.assertEqual(engine.calls[0]["target_follow_budget"], 1)
+        self.assertEqual(engine.calls[0]["session_global_follow_cap"], 1)
+        self.assertEqual(result["reason"], "global_follow_cap_reached")
+
+    def test_resume_follow_quota_reads_only_validated_enabled_follow_phase(self) -> None:
+        self.assertEqual(
+            session._authorized_resume_follow_quota(
+                {
+                    "phases_to_run": {"follow": True, "unfollow": False},
+                    "quota_remaining": {"follow": 41},
+                }
+            ),
+            41,
+        )
+        self.assertIsNone(
+            session._authorized_resume_follow_quota(
+                {
+                    "phases_to_run": {"follow": False, "unfollow": True},
+                    "quota_remaining": {"follow": 41},
+                }
+            )
+        )
+
     def test_rotation_all_exhausted_returns_stable_stop_reason(self) -> None:
         engine = FakeFollowersEngine([
             (66, {
