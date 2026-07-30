@@ -17559,6 +17559,32 @@ def _stash_post_mute_sheet_closed_proof(
         "candidate_context": context,
     }
     try:
+        from follow_60s_canary import (
+            enabled as _follow_60s_canary_enabled,
+            stash as _stash_follow_60s_proof,
+        )
+
+        if _follow_60s_canary_enabled("mute_like_handoff"):
+            _stash_follow_60s_proof(
+                "post_mute_candidate_profile",
+                subject_username=src,
+                target_username=cand,
+                package=str(context.get("package") or ""),
+                activity=str(context.get("activity") or ""),
+                surface="candidate_profile_post_mute",
+                detection_source="post_mute_exact_action_bar_and_sheet_closed",
+                ttl_ms=3000.0,
+                metadata={
+                    "visual_candidate_id": str(visual_candidate_id or "").strip(),
+                    "action_bar_title": ab,
+                    "posts_verified": bool(context.get("posts_verified", True)),
+                    "stories_verified": bool(context.get("stories_verified", True)),
+                },
+            )
+    except Exception:
+        # The existing proof stash remains the Golden fallback.
+        pass
+    try:
         log(
             "info",
             "post_mute_sheet_closed_proof_stashed",
@@ -17617,6 +17643,26 @@ def _validate_post_mute_sheet_closed_proof(
     visual_candidate_id: str = "",
     candidate_context: dict[str, Any] | None = None,
 ) -> tuple[bool, dict[str, Any], float, str]:
+    try:
+        from follow_60s_canary import (
+            consume as _consume_follow_60s_proof,
+            enabled as _follow_60s_canary_enabled,
+        )
+
+        if _follow_60s_canary_enabled("mute_like_handoff"):
+            expected_context = dict(candidate_context or {})
+            central, central_age_ms, central_reject = _consume_follow_60s_proof(
+                "post_mute_candidate_profile",
+                subject_username=source_profile_username,
+                target_username=candidate_username,
+                package=str(expected_context.get("package") or ""),
+                activity=str(expected_context.get("activity") or ""),
+                surface="candidate_profile_post_mute",
+            )
+            if central is None:
+                return False, {}, central_age_ms, central_reject
+    except Exception as exc:
+        return False, {}, 0.0, f"central_proof_error:{type(exc).__name__}"
     stash = _post_mute_sheet_closed_proof_stash
     if not isinstance(stash, dict) or not stash:
         return False, {}, 0.0, "missing_proof"
@@ -40155,6 +40201,7 @@ def post_follow_controlled_return_to_followers_list(
     max_rounds: int = 4,
     compact_after_follow_verified_mute: bool = False,
     compact_reason: str | None = None,
+    immediate_candidate_back_proof: bool = False,
 ) -> tuple[bool, str, str | None]:
     """
     Return to the CT followers list after follow / mute.
@@ -40389,6 +40436,53 @@ def post_follow_controlled_return_to_followers_list(
         if not bool(ct_ok):
             return False, det_reuse, "ct_verify_failed", det_age_ms
         return True, det_reuse, "", det_age_ms
+
+    if compact and immediate_candidate_back_proof:
+        if not verify_app_foreground(d, pkg):
+            log(
+                "warning",
+                "follow_60s_return_candidate_proof_rejected",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                follower_username=cand or None,
+                rejection_reason="instagram_not_foreground",
+                fallback_used=True,
+            )
+        else:
+            try:
+                d.press("back")
+                try:
+                    from follow_60s_canary import invalidate as _invalidate_follow_60s_proofs
+
+                    _invalidate_follow_60s_proofs("planned_return_back")
+                except Exception:
+                    pass
+                time.sleep(0.28)
+                ok_fast, det_fast = _list_confirmed()
+            except Exception:
+                ok_fast, det_fast = False, {}
+            if ok_fast:
+                log(
+                    "info",
+                    "follow_60s_return_candidate_proof_used",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    follower_username=cand or None,
+                    final_ct_exact=True,
+                    action_bar_title=str(det_fast.get("action_bar_title") or "")[:120],
+                    back_count=1,
+                    fallback_used=False,
+                )
+                return True, "fresh_candidate_proof_one_back_then_exact_ct", None
+            log(
+                "warning",
+                "follow_60s_return_candidate_proof_fallback_golden",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                follower_username=cand or None,
+                rejection_reason="exact_ct_not_confirmed_after_one_back",
+                fallback_used=True,
+            )
 
     ok0, det0 = _list_confirmed()
     if ok0:
@@ -47083,6 +47177,134 @@ def run_post_follow_post_likes_phase(
                 except Exception:
                     return ""
 
+            # Loriele canary deliberately excludes d53's two-generation hybrid
+            # probe.  It uses one fresh capture, requires all independent
+            # identity/surface/grid/empty signals, and otherwise falls through
+            # to the unchanged Golden open path.
+            try:
+                from follow_60s_canary import enabled as _follow_60s_canary_enabled
+
+                _single_capture_canary = _follow_60s_canary_enabled(
+                    "single_capture_no_posts"
+                )
+            except Exception:
+                _single_capture_canary = False
+            if _single_capture_canary:
+                xml_single = _fresh_hierarchy()
+                xml_ev = _post_follow_fast_no_posts_xml_evidence(xml_single)
+                try:
+                    username_single = str(
+                        read_current_profile_username_for_follow_gate(d) or ""
+                    ).strip().lstrip("@")
+                except Exception:
+                    username_single = ""
+                meta_single = _followers_current_pkg_activity(d)
+                try:
+                    ww_single, wh_single = d.window_size()
+                except Exception:
+                    ww_single, wh_single = 1080, 2340
+                tabs_bottom_single, _tabs_source_single = (
+                    _followers_profile_tabs_bottom_y_px(
+                        d,
+                        window_h=int(wh_single),
+                    )
+                )
+                cells_single = (
+                    _post_follow_likes_collect_grid_thumbnail_cells(
+                        d,
+                        y_min_px=int(tabs_bottom_single) + 1,
+                        ww=int(ww_single),
+                        wh=int(wh_single),
+                        relaxed_probe=False,
+                    )
+                    if tabs_bottom_single is not None
+                    else []
+                )
+                blank_vision = False
+                screenshot_count = 0
+                if bool(xml_ev.get("empty_marker_xml")):
+                    try:
+                        _ensure_debug_dirs()
+                        shot_path = _SCREENSHOTS_DIR / (
+                            f"post_follow_single_capture_no_posts_{int(time.time() * 1000)}.png"
+                        )
+                        screenshot(d, str(shot_path))
+                        screenshot_count = 1
+                        from PIL import Image
+
+                        with Image.open(shot_path) as im_raw:
+                            im = im_raw.convert("RGB")
+                            blank_vision, _vision_conf = (
+                                _visual_profile_lower_grid_mostly_blank(
+                                    im, *im.size
+                                )
+                            )
+                    except Exception:
+                        blank_vision = False
+                signals = {
+                    "identity_exact": _normalize_handle(username_single)
+                    == _normalize_handle(cand),
+                    "package_exact": str(meta_single.get("current_package") or "")
+                    == pkg,
+                    "profile_state": st_prof
+                    in {
+                        NavigationEngineState.PROFILE.value,
+                        NavigationEngineState.CANDIDATE_PROFILE.value,
+                    },
+                    "post_mute_surface_stable": bool(
+                        not sheet_precheck.get("skip_like")
+                        and not sheet_precheck.get("sheet_visible")
+                        and surface_profile_ok
+                    ),
+                    "grid_tab": bool(
+                        grid_tab_visible
+                        and (
+                            xml_ev.get("grid_selected")
+                            or (
+                                xml_ev.get("profile_tabs_present")
+                                and not xml_ev.get("reels_or_tagged_selected")
+                            )
+                        )
+                    ),
+                    "zero_tappable_cells": len(cells_single) == 0,
+                    "empty_marker_xml": bool(xml_ev.get("empty_marker_xml")),
+                    "empty_region_visual": bool(blank_vision),
+                    "not_private": not bool(
+                        st_prof == NavigationEngineState.PRIVATE_PROFILE.value
+                        or xml_ev.get("private_profile_visible")
+                    ),
+                    "not_loading": not bool(xml_ev.get("loading_visible")),
+                }
+                detected_single = all(signals.values())
+                duration_single_ms = round(
+                    (time.perf_counter() - t_fast_np) * 1000.0, 2
+                )
+                log(
+                    "info" if detected_single else "warning",
+                    "post_follow_single_capture_no_posts_evaluated",
+                    source_profile_username=src,
+                    candidate_username=cand,
+                    visual_candidate_id=vcid,
+                    no_posts_detected=detected_single,
+                    signals=signals,
+                    dump_count=1,
+                    screenshot_count=screenshot_count,
+                    retries=0,
+                    duration_ms=duration_single_ms,
+                    fallback_used=not detected_single,
+                    rejection_reason=""
+                    if detected_single
+                    else "single_capture_multisignal_not_concordant",
+                )
+                return {
+                    "no_posts_detected": detected_single,
+                    "detection_method": "single_fresh_capture_multisignal_canary",
+                    "confidence": 1.0 if detected_single else 0.0,
+                    "signals": signals,
+                    "duration_ms": duration_single_ms,
+                    "fallback_used": not detected_single,
+                }
+
             try:
                 username_before = str(
                     read_current_profile_username_for_follow_gate(d) or ""
@@ -48414,6 +48636,78 @@ def run_post_follow_post_likes_phase(
         gps = grid_out.get("grid_probe_source")
         gpss = grid_out.get("grid_probe_screenshot_path")
         direct_cell = grid_out.get("direct_post_cell_under_suggested")
+        if isinstance(direct_cell, dict):
+            try:
+                from follow_60s_canary import (
+                    consume as _consume_follow_60s_proof,
+                    enabled as _follow_60s_canary_enabled,
+                    stash as _stash_follow_60s_proof,
+                )
+
+                if _follow_60s_canary_enabled("like_fresh_cell_bounds"):
+                    _cell_meta = _followers_current_pkg_activity(d)
+                    _cell_bounds = {
+                        key: int(direct_cell.get(key) or 0)
+                        for key in ("left", "top", "right", "bottom")
+                    }
+                    _cell_screen = d.window_size()
+                    _stash_follow_60s_proof(
+                        "like_post_cell",
+                        subject_username=src,
+                        target_username=cand,
+                        package=str(_cell_meta.get("current_package") or pkg),
+                        activity=str(_cell_meta.get("current_activity") or ""),
+                        surface="candidate_profile_post_grid",
+                        bounds=_cell_bounds,
+                        detection_source=str(
+                            grid_out.get("direct_post_cell_source") or ""
+                        ),
+                        ttl_ms=1250.0,
+                        metadata={
+                            "visual_candidate_id": vcid,
+                            "grid_exposure": grid_out.get(
+                                "direct_post_grid_exposure"
+                            ),
+                        },
+                    )
+                    _cell_proof, _cell_age_ms, _cell_reject = (
+                        _consume_follow_60s_proof(
+                            "like_post_cell",
+                            subject_username=src,
+                            target_username=cand,
+                            package=str(_cell_meta.get("current_package") or pkg),
+                            activity=str(_cell_meta.get("current_activity") or ""),
+                            surface="candidate_profile_post_grid",
+                            require_safe_bounds=True,
+                            screen_size=(int(_cell_screen[0]), int(_cell_screen[1])),
+                            consume_once=True,
+                        )
+                    )
+                    if _cell_proof is None:
+                        direct_cell = None
+                        log(
+                            "warning",
+                            "follow_60s_like_cell_proof_fallback_golden",
+                            source_profile_username=src,
+                            follower_username=cand,
+                            proof_age_ms=round(_cell_age_ms, 2),
+                            rejection_reason=_cell_reject,
+                            fallback_used=True,
+                            fallback="visual_open_recent_post_from_profile",
+                        )
+            except Exception as _cell_proof_exc:
+                direct_cell = None
+                log(
+                    "warning",
+                    "follow_60s_like_cell_proof_fallback_golden",
+                    source_profile_username=src,
+                    follower_username=cand,
+                    rejection_reason=(
+                        f"proof_contract_error:{type(_cell_proof_exc).__name__}"
+                    ),
+                    fallback_used=True,
+                    fallback="visual_open_recent_post_from_profile",
+                )
         if preopened_out is not None:
             open_out = dict(preopened_out)
         elif isinstance(direct_cell, dict):
@@ -48470,6 +48764,12 @@ def run_post_follow_post_likes_phase(
                         grid_exposure=grid_exposure,
                     )
                     d.click(tx, ty)
+                    try:
+                        from follow_60s_canary import invalidate as _invalidate_follow_60s_proofs
+
+                        _invalidate_follow_60s_proofs("planned_post_cell_tap")
+                    except Exception:
+                        pass
                     viewer_direct = _visual_wait_post_viewer_opened_after_tap(
                         d,
                         pkg=pkg,
@@ -49087,6 +49387,61 @@ def run_post_follow_post_likes_phase(
                 visual_candidate_id=vcid,
                 source_profile_username=src,
             )
+            try:
+                from follow_60s_canary import (
+                    enabled as _follow_60s_canary_enabled,
+                    stash as _stash_follow_60s_proof,
+                )
+
+                if _follow_60s_canary_enabled("return_candidate_handoff"):
+                    _return_ab = str(
+                        read_current_profile_username_for_follow_gate(d) or ""
+                    ).strip().lstrip("@")
+                    _return_meta = _followers_current_pkg_activity(d)
+                    if _normalize_handle(_return_ab) == _normalize_handle(cand):
+                        _stash_follow_60s_proof(
+                            "return_candidate_profile",
+                            subject_username=src,
+                            target_username=cand,
+                            package=str(
+                                _return_meta.get("current_package") or pkg
+                            ),
+                            activity=str(
+                                _return_meta.get("current_activity") or ""
+                            ),
+                            surface="candidate_profile_after_like",
+                            detection_source="exact_action_bar_after_like_return",
+                            ttl_ms=1800.0,
+                            metadata={
+                                "visual_candidate_id": vcid,
+                                "return_profile_fast_confirmed": bool(
+                                    ret_ok.get("return_profile_fast_confirmed")
+                                ),
+                            },
+                        )
+                    else:
+                        log(
+                            "warning",
+                            "follow_60s_return_candidate_proof_not_stashed",
+                            visual_candidate_id=vcid,
+                            source_profile_username=src,
+                            follower_username=cand,
+                            action_bar_title=_return_ab,
+                            rejection_reason="candidate_identity_not_exact",
+                            fallback_used=True,
+                        )
+            except Exception as _return_proof_exc:
+                log(
+                    "warning",
+                    "follow_60s_return_candidate_proof_not_stashed",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    follower_username=cand,
+                    rejection_reason=(
+                        f"proof_contract_error:{type(_return_proof_exc).__name__}"
+                    ),
+                    fallback_used=True,
+                )
         else:
             log(
                 "warning",
@@ -50279,6 +50634,49 @@ def run_visual_candidate_post_follow_phase(
             else "post_follow_likes_failure_return_ct_recovery_failed"
         )
     else:
+        immediate_candidate_back_proof = False
+        try:
+            from follow_60s_canary import (
+                consume as _consume_follow_60s_proof,
+                enabled as _follow_60s_canary_enabled,
+            )
+
+            if _follow_60s_canary_enabled("return_candidate_handoff"):
+                _ret_proof, _ret_proof_age, _ret_proof_reject = (
+                    _consume_follow_60s_proof(
+                        "return_candidate_profile",
+                        subject_username=src,
+                        target_username=cand,
+                        package=pkg,
+                        surface="candidate_profile_after_like",
+                        consume_once=True,
+                    )
+                )
+                immediate_candidate_back_proof = _ret_proof is not None
+                if _ret_proof is None:
+                    log(
+                        "info",
+                        "follow_60s_return_candidate_handoff_rejected",
+                        visual_candidate_id=vcid,
+                        source_profile_username=src,
+                        follower_username=cand,
+                        proof_age_ms=round(_ret_proof_age, 2),
+                        rejection_reason=_ret_proof_reject,
+                        fallback_used=True,
+                    )
+        except Exception as _ret_consume_exc:
+            immediate_candidate_back_proof = False
+            log(
+                "warning",
+                "follow_60s_return_candidate_handoff_rejected",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                follower_username=cand,
+                rejection_reason=(
+                    f"proof_contract_error:{type(_ret_consume_exc).__name__}"
+                ),
+                fallback_used=True,
+            )
         ok_ret, how_ret, fail_re = post_follow_controlled_return_to_followers_list(
             d,
             pkg=pkg,
@@ -50289,6 +50687,7 @@ def run_visual_candidate_post_follow_phase(
             max_rounds=1 if compact_post_follow_return else 4,
             compact_after_follow_verified_mute=compact_post_follow_return,
             compact_reason=compact_reason_str if compact_post_follow_return else None,
+            immediate_candidate_back_proof=immediate_candidate_back_proof,
         )
     likes_out["post_follow_likes_return_ct_recovery_used"] = bool(
         likes_return_recovery_used

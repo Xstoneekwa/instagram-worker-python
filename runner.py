@@ -3790,6 +3790,19 @@ def _return_with_cleanup(d, code: int) -> int:
     global _DEFER_TERMINAL_RUN_STATUS_UNTIL_CLEANUP
     global _RUNNER_SESSION_CLEANUP_COMPLETE, _PENDING_TERMINAL_RUN_STATUS
     set_wait_event_callback(None)
+    try:
+        from follow_60s_canary import stats as _follow_60s_canary_stats
+
+        _canary_stats = _follow_60s_canary_stats()
+        if bool(_canary_stats.get("enabled")):
+            log(
+                "info",
+                "follow_60s_canary_final_proof_summary",
+                exit_code=int(code),
+                **_canary_stats,
+            )
+    except Exception:
+        pass
     _cleanup_session_apps(d)
     _RUNNER_SESSION_CLEANUP_COMPLETE = True
     pending = _PENDING_TERMINAL_RUN_STATUS
@@ -12124,7 +12137,46 @@ def _run_followers_list_engine_session(
                 source_profile_username=source_profile_username,
                 snapshot_age_ms=_snapshot_reuse_age_ms,
             )
-            if _reuse_det is not None and processed == 0 and followers_engine_loop_iteration == 1:
+            _initial_snapshot_reuse = bool(
+                processed == 0 and followers_engine_loop_iteration == 1
+            )
+            _canary_post_return_reuse = False
+            _canary_post_return_reuse_reason = "canary_disabled"
+            try:
+                from follow_60s_canary import enabled as _follow_60s_canary_enabled
+
+                if _follow_60s_canary_enabled("post_return_snapshot_reuse"):
+                    (
+                        _canary_post_return_reuse,
+                        _canary_post_return_reuse_reason,
+                    ) = _ct_checkpoint_should_reuse_post_return_visible_window(
+                        ct_checkpoint,
+                        source_username=source_profile_username,
+                        account_id=str(account_id or ""),
+                        run_id=str(run_id or ""),
+                        scroll_used=int(scroll_used),
+                        visual_loop_state=visual_loop_state,
+                    )
+                    _post_return_meta = visual_loop_state.get(
+                        "post_return_picker_refresh_meta"
+                    )
+                    if _canary_post_return_reuse and (
+                        not isinstance(_post_return_meta, dict)
+                        or int(_post_return_meta.get("checkpoint_sequence") or -1)
+                        != int(ct_checkpoint.get("sequence") or 0)
+                    ):
+                        _canary_post_return_reuse = False
+                        _canary_post_return_reuse_reason = (
+                            "checkpoint_generation_mismatch"
+                        )
+            except Exception as _canary_snapshot_exc:
+                _canary_post_return_reuse = False
+                _canary_post_return_reuse_reason = (
+                    f"canary_check_failed:{type(_canary_snapshot_exc).__name__}"
+                )
+            if _reuse_det is not None and (
+                _initial_snapshot_reuse or _canary_post_return_reuse
+            ):
                 det = _reuse_det
                 det_xml_last_for_bypass = det
                 followers_xml_detect_skipped_this_iter = True
@@ -12141,7 +12193,11 @@ def _run_followers_list_engine_session(
                 log(
                     "info",
                     "candidate_selection_snapshot_reuse_accepted",
-                    reason="strong_open_success_snapshot",
+                    reason=(
+                        "same_ct_viewport_generation_no_navigation"
+                        if _canary_post_return_reuse and not _initial_snapshot_reuse
+                        else "strong_open_success_snapshot"
+                    ),
                     open_detection_method=open_detection_method,
                     candidate_username_count=int(det.get("candidate_username_count") or 0),
                     source_profile_username=source_profile_username,
@@ -12171,7 +12227,11 @@ def _run_followers_list_engine_session(
                 log(
                     "info",
                     "candidate_selection_snapshot_reuse_skipped",
-                    reason="not_first_iteration",
+                    reason=(
+                        _canary_post_return_reuse_reason
+                        if _canary_post_return_reuse_reason != "canary_disabled"
+                        else "not_first_iteration"
+                    ),
                     open_detection_method=str(open_list_meta.get("open_detection_method") or ""),
                     candidate_username_count=int(_reuse_det.get("candidate_username_count") or 0),
                     source_profile_username=source_profile_username,
@@ -18741,6 +18801,7 @@ def _run_followers_list_engine_session(
                             "return_method": str(how or ""),
                             "source_username": str(source_profile_username or ""),
                             "post_return_proof_at_mono": time.perf_counter(),
+                            "checkpoint_sequence": int(ct_checkpoint.get("sequence") or 0),
                         }
                         try:
                             log(
@@ -19536,6 +19597,31 @@ def _main_impl() -> int:
         worker_sha=str(os.environ.get("WORKER_GIT_SHA") or ""),
         release=str(os.environ.get("WORKER_RELEASE") or ""),
     )
+
+    # Account-scoped consolidated Follow latency canary.  Resume policy is read
+    # before any canary UI path can run so Auto Restart always remains Golden.
+    try:
+        from auto_restart_runtime import load_resume_policy_from_env as _load_canary_resume
+        from follow_60s_canary import configure as _configure_follow_60s_canary
+
+        _configure_follow_60s_canary(
+            account_id=account_id,
+            account_username=account_username,
+            run_id=run_id,
+            package=str(config.INSTAGRAM_PACKAGE or ""),
+            resume_policy=_load_canary_resume(),
+        )
+    except Exception as exc:
+        # Fail closed: an unavailable canary controller means unchanged Golden.
+        log(
+            "warning",
+            "follow_60s_canary_configuration_failed",
+            account_id=account_id or None,
+            run_id=run_id or None,
+            fallback_used=True,
+            fallback="golden_current",
+            error_type=type(exc).__name__,
+        )
 
     # P3: canonical resume plan created EARLY, before any device/UI action.
     # Covers every dispatched account_session regardless of trigger
