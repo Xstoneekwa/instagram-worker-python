@@ -9281,10 +9281,12 @@ def _review_before_follow_popup_visible(d: u2.Device) -> bool:
     return title_hit
 
 
-# Micro-fenêtre post-tap sheet : couvre ~2 s de convergence observée en run réel,
-# sans dupliquer le follow verify global (perform_follow_safe).
+# Fenêtre bornée post-tap : certaines lectures UI Samsung prennent près de 3 s.
+# Cette fenêtre ne valide jamais l'action métier à elle seule ; elle confirme seulement
+# que la sheet a disparu ou que l'état Follow a déjà convergé, puis rend la main au
+# verify global de ``perform_follow_safe``.
 _REVIEW_POPUP_DISMISS_POLL_INTERVAL_S = 0.12
-_REVIEW_POPUP_DISMISS_POLL_MAX_S = 2.2
+_REVIEW_POPUP_DISMISS_POLL_MAX_S = 6.0
 
 
 def _poll_review_sheet_dismissed_after_follow_tap(
@@ -9314,13 +9316,13 @@ def _poll_review_sheet_dismissed_after_follow_tap(
                 target_username=str(target_username or ""),
                 visual_candidate_id=str(visual_candidate_id or ""),
                 attempt=int(attempt),
-                dismissed=exit_via == "sheet_dismissed",
+                dismissed=exit_via.startswith("sheet_dismissed"),
                 exit_via=str(exit_via),
                 follow_state_after=str(follow_state_after or ""),
                 poll_count=polls,
                 elapsed_ms=elapsed_ms,
             )
-            if exit_via == "sheet_dismissed":
+            if exit_via.startswith("sheet_dismissed"):
                 log(
                     "info",
                     "follow_review_popup_dismissed_after_follow",
@@ -9363,6 +9365,13 @@ def _poll_review_sheet_dismissed_after_follow_tap(
         pass
     while (time.monotonic() - t0) < _REVIEW_POPUP_DISMISS_POLL_MAX_S:
         polls += 1
+        # Check the sheet before an expensive full UI snapshot.  On real Samsung
+        # devices the snapshot can take ~3 s, which previously consumed the whole
+        # 2.2 s budget and produced a false fatal stop after the sheet had vanished.
+        if not _review_before_follow_popup_visible(d):
+            return _poll_success(
+                exit_via="sheet_dismissed", follow_state_after=""
+            )
         try:
             follow_st = _follow_ui_state_snapshot(d)
         except Exception:
@@ -9379,6 +9388,12 @@ def _poll_review_sheet_dismissed_after_follow_tap(
         if remaining <= 0:
             break
         time.sleep(min(_REVIEW_POPUP_DISMISS_POLL_INTERVAL_S, remaining))
+    # One last boundary reconciliation is mandatory: a slow selector/snapshot can
+    # cross the deadline while Instagram is dismissing the sheet.
+    if not _review_before_follow_popup_visible(d):
+        return _poll_success(
+            exit_via="sheet_dismissed_at_deadline", follow_state_after=""
+        )
     elapsed_ms = round((time.monotonic() - t0) * 1000.0, 2)
     try:
         log(
@@ -9447,6 +9462,8 @@ def _try_review_before_follow_popup_confirm(
             pass
         return False
 
+    # Single-action contract: try alternate candidates only when a click could not
+    # be sent.  Once one sheet CTA tap is sent, never tap a second coordinate.
     for attempt_idx, cand in enumerate(candidates[:3]):
         cx = int(cand["center_x"])
         cy = int(cand["center_y"])
@@ -9509,6 +9526,7 @@ def _try_review_before_follow_popup_confirm(
             detection_method=str(cand.get("detection_method") or ""),
         ):
             return True
+        break
 
     try:
         log(
@@ -9537,34 +9555,47 @@ def _follow_review_popup_unhandled_abort(
 ) -> dict[str, Any] | None:
     """Safe-stop payload when the review sheet cannot be confirmed reliably.
 
-    Returns ``None`` when a late reconcile shows the sheet is gone and follow converged.
+    Returns ``None`` whenever a late reconcile shows the sheet is gone.  A
+    converged state is a success signal; an unchanged/unknown state is handed to
+    the normal bounded follow verifier and is never promoted to success here.
     """
     popup_still_visible = bool(_review_before_follow_popup_visible(d))
-    if not popup_still_visible and state_after in ("following", "requested"):
+    if not popup_still_visible:
+        follow_converged = state_after in ("following", "requested")
+        event_name = (
+            "follow_review_popup_late_success_reconciled"
+            if follow_converged
+            else "follow_review_popup_late_dismissal_verification_resumed"
+        )
+        reconcile_reason = (
+            "popup_dismissed_and_follow_converged"
+            if follow_converged
+            else "popup_dismissed_follow_verification_pending"
+        )
         try:
             log(
                 "info",
-                "follow_review_popup_late_success_reconciled",
+                event_name,
                 target_username=str(target_username or ""),
                 visual_candidate_id=str(visual_candidate_id or ""),
                 follow_state_before=state_before,
                 follow_state_after=state_after,
                 popup_still_visible=False,
-                reason="popup_dismissed_after_initial_sheet_visible_check",
+                reason=reconcile_reason,
                 original_abort_reason=str(reason or ""),
             )
         except Exception:
             pass
         try:
             record(
-                "follow_review_popup_late_success_reconciled",
+                event_name,
                 {
                     "target_username": target_username,
                     "visual_candidate_id": str(visual_candidate_id or ""),
                     "follow_state_before": state_before,
                     "follow_state_after": state_after,
                     "popup_still_visible": False,
-                    "reason": "popup_dismissed_after_initial_sheet_visible_check",
+                    "reason": reconcile_reason,
                     "original_abort_reason": str(reason or ""),
                 },
             )
