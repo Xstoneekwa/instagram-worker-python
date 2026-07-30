@@ -47,17 +47,49 @@ def _function(source: str, name: str) -> ast.FunctionDef:
     raise AssertionError("missing function %s" % name)
 
 
-def _without_availability_hooks(node: ast.FunctionDef) -> ast.FunctionDef:
+def _without_availability_or_provenance_hooks(node: ast.FunctionDef) -> ast.FunctionDef:
     normalized = copy.deepcopy(node)
     for index, argument in list(enumerate(normalized.args.kwonlyargs))[::-1]:
-        if argument.arg in {"tenant_id", "target_availability_scope_rejection_reason"}:
+        if argument.arg in {
+            "tenant_id",
+            "target_availability_scope_rejection_reason",
+            "run_request_id",
+            "auto_restart_resume_policy",
+        }:
             normalized.args.kwonlyargs.pop(index)
             normalized.args.kw_defaults.pop(index)
 
     class RemoveAvailability(ast.NodeTransformer):
+        @staticmethod
+        def _strip_provenance_keys(value):
+            if not isinstance(value, ast.Dict):
+                return
+            retained = [
+                (key, item_value)
+                for key, item_value in zip(value.keys, value.values)
+                if not (
+                    isinstance(key, ast.Constant)
+                    and key.value in {"run_request_id", "auto_restart_resume_policy"}
+                )
+            ]
+            value.keys = [key for key, _item_value in retained]
+            value.values = [item_value for _key, item_value in retained]
+
         def visit_Assign(self, item):
             if any(isinstance(target, ast.Name) and target.id == "stable_platform_user_id" for target in item.targets):
                 return None
+            if (
+                any(
+                    isinstance(target, ast.Name) and target.id == "call_kwargs"
+                    for target in item.targets
+                )
+            ):
+                self._strip_provenance_keys(item.value)
+            return self.generic_visit(item)
+
+        def visit_AnnAssign(self, item):
+            if isinstance(item.target, ast.Name) and item.target.id == "call_kwargs":
+                self._strip_provenance_keys(item.value)
             return self.generic_visit(item)
 
         def visit_Expr(self, item):
@@ -129,7 +161,7 @@ class TargetAvailabilityDisabledParityTests(unittest.TestCase):
         current_source = (root / "account_session_orchestrator.py").read_text(encoding="utf-8")
         expected = _function(baseline.stdout, "_run_follow_target_rotation")
         actual = _without_reviewed_resume_quota_bound(
-            _without_availability_hooks(
+            _without_availability_or_provenance_hooks(
                 _function(current_source, "_run_follow_target_rotation")
             )
         )

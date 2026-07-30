@@ -7,8 +7,10 @@ import unittest
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
+import runner
 import target_followers_progressive_resume_v2 as resume
 import supabase_client
 from target_followers_resume_replay import compare_legacy_to_theoretical_v2, load_redacted_corpus
@@ -21,6 +23,9 @@ TARGET_A = "10000000-0000-0000-0000-000000000001"
 TARGET_B = "10000000-0000-0000-0000-000000000002"
 RUN_A = "20000000-0000-0000-0000-000000000001"
 RUN_B = "20000000-0000-0000-0000-000000000002"
+REQUEST_A = "30000000-0000-4000-8000-000000000001"
+REQUEST_B = "30000000-0000-4000-8000-000000000002"
+FULL_RELEASE_SHA = "a" * 40
 TEST_HMAC_SECRET = "test-only-target-followers-resume-v2-secret-0001"
 os.environ[resume.HMAC_SECRET_FLAG] = TEST_HMAC_SECRET
 
@@ -69,11 +74,31 @@ def observation(handles, **overrides):
     return resume.ViewportObservation.build(handles, **args)
 
 
+def legacy_scroll_diag(before, after, *, surface_state="PRIMARY_ROWS_AVAILABLE"):
+    overlap, new_rows = resume.viewport_continuity_counts(before, after)
+    return {
+        "viewport_fingerprint_before": resume.legacy_viewport_fingerprint(before),
+        "viewport_fingerprint_after": resume.legacy_viewport_fingerprint(after),
+        "overlap_count": overlap,
+        "new_primary_row_count": new_rows,
+        "depth_advanced": bool(overlap > 0 and new_rows > 0),
+        "surface_state_after": surface_state,
+    }
+
+
 class FakeRpc:
-    def __init__(self, *, row=None, claim_ok=True, commit_ok=True):
+    def __init__(
+        self,
+        *,
+        row=None,
+        claim_ok=True,
+        commit_ok=True,
+        provenance_persisted=True,
+    ):
         self.row = row
         self.claim_ok = claim_ok
         self.commit_ok = commit_ok
+        self.provenance_persisted = provenance_persisted
         self.calls = []
         self.version = int((row or {}).get("optimistic_version") or 1)
 
@@ -96,7 +121,13 @@ class FakeRpc:
             if not self.commit_ok:
                 return {"ok": False, "reason": "optimistic_version_conflict", "optimistic_version": self.version + 1}
             self.version += 1
-            return {"ok": True, "reason": "committed", "optimistic_version": self.version}
+            return {
+                "ok": True,
+                "reason": "committed",
+                "optimistic_version": self.version,
+                "provenance_persisted": self.provenance_persisted,
+                "commit_event_id": "40000000-0000-4000-8000-000000000001",
+            }
         return {"ok": True, "reason": "ok", "optimistic_version": self.version + 1}
 
 
@@ -171,7 +202,12 @@ class HashAndCursorTests(unittest.TestCase):
 
 class TransitionTests(unittest.TestCase):
     def test_18_valid_transition(self):
-        self.assertTrue(resume.validate_depth_transition(observation(["a"]), observation(["b"])).verified)
+        self.assertTrue(
+            resume.validate_depth_transition(
+                observation(["a", "b"]),
+                observation(["b", "c"]),
+            ).verified
+        )
 
     def test_19_swipe_without_movement(self):
         out = resume.validate_depth_transition(observation(["a"]), observation(["b"], list_moved=False))
@@ -202,6 +238,22 @@ class TransitionTests(unittest.TestCase):
 
     def test_26_empty_fingerprint_rejected(self):
         self.assertEqual(resume.validate_depth_transition(observation([]), observation(["b"])).reason, "viewport_fingerprint_missing")
+
+    def test_26a_distinct_fingerprint_without_positional_overlap_rejected(self):
+        verdict = resume.validate_depth_transition(
+            observation(["a", "b"]),
+            observation(["c", "d"]),
+        )
+        self.assertFalse(verdict.verified)
+        self.assertEqual(verdict.reason, "viewport_overlap_missing")
+
+    def test_26b_overlap_without_new_unique_row_rejected(self):
+        verdict = resume.validate_depth_transition(
+            observation(["a", "b", "c"]),
+            observation(["b", "c", "a"]),
+        )
+        self.assertFalse(verdict.verified)
+        self.assertEqual(verdict.reason, "viewport_new_rows_missing")
 
 
 class CheckpointTests(unittest.TestCase):
@@ -266,6 +318,9 @@ class RepositoryAndControllerTests(unittest.TestCase):
             target_id=TARGET_A,
             target_username="neutral.target",
             run_id=RUN_A,
+            source_request_id=REQUEST_A,
+            source_attempt_id=1,
+            release_sha=FULL_RELEASE_SHA,
             hmac_secret=TEST_HMAC_SECRET,
             emit=lambda event, payload: sink.append((event, payload)),
         )
@@ -289,10 +344,12 @@ class RepositoryAndControllerTests(unittest.TestCase):
         self.assertIn("checkpoint_conflict", [e for e, _ in events])
 
     def test_41_two_runs_compare_and_swap(self):
-        rpc = FakeRpc(row=checkpoint_row(), commit_ok=False)
+        rpc = FakeRpc(row=checkpoint_row(shadow_last_safe_depth=0), commit_ok=False)
         ctl = self.controller(rpc)
         ctl.load_and_plan(); ctl.claim()
-        ctl.current_viewport = observation(["b"])
+        ctl.observe_viewport(["a", "b"], followers_surface_confirmed=True, expected_target_confirmed=True)
+        ctl.note_scroll_sent(previous_viewport_complete=True)
+        ctl.observe_viewport(["b", "c"], followers_surface_confirmed=True, expected_target_confirmed=True)
         self.assertFalse(ctl.commit_verified_progress())
 
     def test_42_worker_restart_loads_persisted_depth(self):
@@ -304,7 +361,7 @@ class RepositoryAndControllerTests(unittest.TestCase):
         ctl.load_and_plan(); ctl.claim()
         ctl.observe_viewport(["a", "b"], followers_surface_confirmed=True, expected_target_confirmed=True)
         ctl.note_scroll_sent(previous_viewport_complete=True)
-        verdict = ctl.observe_viewport(["c", "d"], followers_surface_confirmed=True, expected_target_confirmed=True)
+        verdict = ctl.observe_viewport(["b", "c"], followers_surface_confirmed=True, expected_target_confirmed=True)
         self.assertTrue(verdict.verified)
         self.assertEqual(ctl.reached_depth, 1)
         self.assertTrue(ctl.commit_verified_progress())
@@ -312,9 +369,9 @@ class RepositoryAndControllerTests(unittest.TestCase):
     def test_44_partial_viewport_never_advances(self):
         ctl = self.controller(FakeRpc(row=checkpoint_row(shadow_last_safe_depth=0)))
         ctl.load_and_plan(); ctl.claim()
-        ctl.observe_viewport(["a"], followers_surface_confirmed=True, expected_target_confirmed=True)
+        ctl.observe_viewport(["a", "b"], followers_surface_confirmed=True, expected_target_confirmed=True)
         ctl.note_scroll_sent(previous_viewport_complete=False)
-        verdict = ctl.observe_viewport(["b"], followers_surface_confirmed=True, expected_target_confirmed=True)
+        verdict = ctl.observe_viewport(["b", "c"], followers_surface_confirmed=True, expected_target_confirmed=True)
         self.assertEqual(verdict.reason, "previous_viewport_not_fully_evaluated")
         self.assertEqual(ctl.reached_depth, 0)
 
@@ -342,10 +399,19 @@ class RepositoryAndControllerTests(unittest.TestCase):
 
     def test_49_commit_uses_hashes_not_raw_handles(self):
         rpc = FakeRpc(row=checkpoint_row(shadow_last_safe_depth=0))
-        ctl = self.controller(rpc); ctl.load_and_plan(); ctl.claim(); ctl.current_viewport = observation(["sensitive.name"])
+        ctl = self.controller(rpc); ctl.load_and_plan(); ctl.claim()
+        ctl.observe_viewport(["before", "sensitive.name"], followers_surface_confirmed=True, expected_target_confirmed=True)
+        ctl.note_scroll_sent(previous_viewport_complete=True)
+        ctl.observe_viewport(["sensitive.name", "after"], followers_surface_confirmed=True, expected_target_confirmed=True)
         ctl.commit_verified_progress(cursor_handle="sensitive.name")
         params = [p for n, p in rpc.calls if n.startswith("commit_")][-1]
         self.assertNotIn("sensitive.name", json.dumps(params))
+        self.assertEqual(
+            [name for name, _ in rpc.calls if name.startswith("commit_")],
+            ["commit_target_followers_resume_checkpoint_v4"],
+        )
+        self.assertEqual(params["p_commit_context"]["source_request_id"], REQUEST_A)
+        self.assertEqual(params["p_commit_context"]["release_sha"], FULL_RELEASE_SHA)
 
     def test_50_repeated_no_progress_does_not_increment(self):
         ctl = self.controller(FakeRpc(row=checkpoint_row(shadow_last_safe_depth=0)))
@@ -411,8 +477,9 @@ class RepositoryAndControllerTests(unittest.TestCase):
         ctl = self.controller(rpc)
         ctl.load_and_plan(); ctl.claim()
         ctl.lease_expires_at = datetime.now(timezone.utc) + timedelta(seconds=5)
-        ctl.current_viewport = observation(["next"])
-        ctl.reached_depth = 1
+        ctl.observe_viewport(["first", "overlap"], followers_surface_confirmed=True, expected_target_confirmed=True)
+        ctl.note_scroll_sent(previous_viewport_complete=True)
+        ctl.observe_viewport(["overlap", "next"], followers_surface_confirmed=True, expected_target_confirmed=True)
         self.assertTrue(ctl.commit_verified_progress())
         self.assertEqual(sum(name.startswith("renew_") for name, _ in rpc.calls), 1)
 
@@ -420,8 +487,9 @@ class RepositoryAndControllerTests(unittest.TestCase):
         rpc = FakeRpc(row=checkpoint_row(shadow_last_safe_depth=0))
         ctl = self.controller(rpc)
         ctl.load_and_plan(); ctl.claim()
-        ctl.current_viewport = observation(["next"])
-        ctl.reached_depth = 1
+        ctl.observe_viewport(["first", "overlap"], followers_surface_confirmed=True, expected_target_confirmed=True)
+        ctl.note_scroll_sent(previous_viewport_complete=True)
+        ctl.observe_viewport(["overlap", "next"], followers_surface_confirmed=True, expected_target_confirmed=True)
         self.assertTrue(ctl.commit_verified_progress())
         self.assertEqual(sum(name.startswith("renew_") for name, _ in rpc.calls), 0)
 
@@ -450,16 +518,105 @@ class RepositoryAndControllerTests(unittest.TestCase):
                     self.commits += 1
                     if self.commits == 1:
                         return {"ok": False, "reason": "optimistic_version_conflict", "optimistic_version": 9}
-                    return {"ok": True, "reason": "committed", "optimistic_version": 10, "lease_expires_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()}
+                    return {
+                        "ok": True,
+                        "reason": "committed",
+                        "optimistic_version": 10,
+                        "lease_expires_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+                        "provenance_persisted": True,
+                        "commit_event_id": "40000000-0000-4000-8000-000000000001",
+                    }
                 raise AssertionError(name)
 
         rpc = CasOnceRpc()
         ctl = self.controller(rpc)
         ctl.load_and_plan(); ctl.claim()
-        ctl.current_viewport = observation(["next"])
-        ctl.reached_depth = 1
+        ctl.observe_viewport(["first", "overlap"], followers_surface_confirmed=True, expected_target_confirmed=True)
+        ctl.note_scroll_sent(previous_viewport_complete=True)
+        ctl.observe_viewport(["overlap", "next"], followers_surface_confirmed=True, expected_target_confirmed=True)
         self.assertTrue(ctl.commit_verified_progress())
         self.assertEqual((ctl.cas_reloads, ctl.cas_retries, rpc.commits), (1, 1, 2))
+        commit_contexts = [
+            params["p_commit_context"]
+            for name, params in rpc.calls
+            if name == "commit_target_followers_resume_checkpoint_v4"
+        ]
+        self.assertEqual(len(commit_contexts), 2)
+        self.assertEqual(commit_contexts[0], commit_contexts[1])
+
+    def test_52fa_repository_rejects_zero_scroll_index_without_rpc(self):
+        rpc = FakeRpc()
+        response = resume.ResumeRepository(rpc).commit(
+            account_id=ACCOUNT_A,
+            target_id=TARGET_A,
+            run_id=RUN_A,
+            mode="shadow",
+            expected_version=1,
+            depth=1,
+            observation=observation(["overlap", "next"]),
+            commit_context=resume.LegacyScrollEvidence(
+                observed_scroll_index=0,
+                overlap_count=1,
+                new_unique_rows=1,
+                fingerprint_before=resume.legacy_viewport_fingerprint(
+                    ["first", "overlap"]
+                ),
+                fingerprint_after=resume.legacy_viewport_fingerprint(
+                    ["overlap", "next"]
+                ),
+                surface_state_after="PRIMARY_ROWS_AVAILABLE",
+            ),
+            source_request_id=REQUEST_A,
+            source_attempt_id=1,
+            release_sha=FULL_RELEASE_SHA,
+            cursor_anchor=resume.anchor_hash("next"),
+            instagram_version="372.0.0.48.60",
+        )
+        self.assertEqual(response, {"ok": False, "reason": "commit_context_invalid"})
+        self.assertEqual(rpc.calls, [])
+
+    def test_52fb_commit_rpc_exception_safe_stops_only_v2(self):
+        class CommitExceptionRpc(FakeRpc):
+            def __call__(self, name, params):
+                if name.startswith("commit_"):
+                    self.calls.append((name, dict(params)))
+                    raise RuntimeError("v4 unavailable")
+                return super().__call__(name, params)
+
+        rpc = CommitExceptionRpc(row=checkpoint_row(shadow_last_safe_depth=0))
+        events = []
+        ctl = self.controller(rpc, events=events)
+        ctl.load_and_plan(); ctl.claim()
+        ctl.observe_viewport(
+            ["first", "overlap"],
+            followers_surface_confirmed=True,
+            expected_target_confirmed=True,
+        )
+        ctl.note_scroll_sent(previous_viewport_complete=True)
+        ctl.observe_viewport(
+            ["overlap", "next"],
+            followers_surface_confirmed=True,
+            expected_target_confirmed=True,
+        )
+
+        self.assertFalse(ctl.commit_verified_progress())
+        self.assertTrue(ctl._safe_stop)
+        self.assertIsNone(ctl.last_verified_commit_context)
+        reached_depth = ctl.reached_depth
+        verdict = ctl.observe_viewport(
+            ["next", "later"],
+            followers_surface_confirmed=True,
+            expected_target_confirmed=True,
+        )
+        self.assertFalse(verdict.verified)
+        self.assertEqual(ctl.reached_depth, reached_depth)
+        self.assertEqual(
+            sum(name.startswith("commit_") for name, _ in rpc.calls),
+            1,
+        )
+        self.assertTrue(ctl.release())
+        self.assertIsNone(ctl.last_verified_commit_context)
+        self.assertIn("v2_failed_open", [event for event, _ in events])
 
     def test_52g_worker_contract_contains_no_plaintext_checkpoint_field(self):
         source = Path(resume.__file__).read_text(encoding="utf-8")
@@ -467,7 +624,275 @@ class RepositoryAndControllerTests(unittest.TestCase):
 
     def test_52h_runner_releases_controller_in_session_finally(self):
         runner_source = (Path(resume.__file__).parent / "runner.py").read_text(encoding="utf-8")
+        self.assertIn("target_followers_resume_controller.flush_verified_progress(", runner_source)
         self.assertIn("target_followers_resume_controller.release()", runner_source)
+
+    def test_52i_stolm_two_legacy_scrolls_commit_two_safe_depths(self):
+        before = [f"stolm.row{i:02d}" for i in range(1, 9)]
+        after_one = before[-2:] + [f"stolm.row{i:02d}" for i in range(9, 16)]
+        after_two = after_one[-2:] + [f"stolm.row{i:02d}" for i in range(16, 23)]
+        rpc = FakeRpc(row=checkpoint_row(shadow_last_safe_depth=0))
+        events = []
+        ctl = self.controller(rpc, events=events)
+        ctl.source_request_id = REQUEST_A
+        ctl.source_attempt_id = 2
+        ctl.release_sha = FULL_RELEASE_SHA
+        ctl.load_and_plan(); ctl.claim()
+        ctl.observe_viewport(
+            before,
+            followers_surface_confirmed=True,
+            expected_target_confirmed=True,
+        )
+
+        staged_one = ctl.note_legacy_scroll_progress(
+            legacy_scroll_diag(before, after_one),
+            observed_scroll_index=1,
+            followers_surface_confirmed=True,
+            expected_target_confirmed=True,
+        )
+        self.assertEqual(staged_one.reason, "legacy_scroll_proof_staged")
+        self.assertTrue(
+            ctl.observe_viewport(
+                after_one,
+                followers_surface_confirmed=True,
+                expected_target_confirmed=True,
+            ).verified
+        )
+        self.assertTrue(ctl.commit_verified_progress(cursor_handle=after_one[-1]))
+
+        ctl.note_legacy_scroll_progress(
+            legacy_scroll_diag(after_one, after_two),
+            observed_scroll_index=2,
+            followers_surface_confirmed=True,
+            expected_target_confirmed=True,
+        )
+        self.assertTrue(
+            ctl.observe_viewport(
+                after_two,
+                followers_surface_confirmed=True,
+                expected_target_confirmed=True,
+            ).verified
+        )
+        self.assertTrue(ctl.commit_verified_progress(cursor_handle=after_two[-1]))
+        self.assertTrue(ctl.flush_verified_progress(boundary="target_rotation"))
+        self.assertTrue(ctl.release())
+
+        commits = [
+            params["p_last_safe_depth"]
+            for name, params in rpc.calls
+            if name.startswith("commit_")
+        ]
+        self.assertEqual(commits, [1, 2])
+        transitions = [
+            payload for event, payload in events if event == "depth_transition_verified"
+        ]
+        self.assertEqual(
+            [(item["overlap_count"], item["new_unique_rows"]) for item in transitions],
+            [(2, 7), (2, 7)],
+        )
+        committed_events = [
+            payload for event, payload in events if event == "checkpoint_committed"
+        ]
+        self.assertEqual(committed_events[-1]["checkpoint_depth_after"], 2)
+        self.assertEqual(committed_events[-1]["commit_status"], "committed")
+        self.assertEqual(committed_events[-1]["lease_status"], "active")
+        self.assertEqual(
+            committed_events[-1]["source_request_id"],
+            REQUEST_A,
+        )
+        self.assertEqual(committed_events[-1]["source_attempt_id"], 2)
+        self.assertEqual(committed_events[-1]["release_sha"], FULL_RELEASE_SHA)
+        commit_contexts = [
+            params["p_commit_context"]
+            for name, params in rpc.calls
+            if name == "commit_target_followers_resume_checkpoint_v4"
+        ]
+        self.assertEqual(
+            [
+                (item["overlap_count"], item["new_unique_rows"], item["observed_scroll_index"])
+                for item in commit_contexts
+            ],
+            [(2, 7, 1), (2, 7, 2)],
+        )
+        self.assertTrue(all(len(item["release_sha"]) == 40 for item in commit_contexts))
+        self.assertLess(
+            next(i for i, (name, _) in enumerate(rpc.calls) if name.startswith("commit_")),
+            next(i for i, (name, _) in enumerate(rpc.calls) if name.startswith("release_")),
+        )
+
+    def test_52j_legacy_scroll_without_overlap_never_commits(self):
+        before = ["a", "b"]
+        after = ["c", "d"]
+        rpc = FakeRpc(row=checkpoint_row(shadow_last_safe_depth=0))
+        events = []
+        ctl = self.controller(rpc, events=events)
+        ctl.load_and_plan(); ctl.claim()
+        ctl.observe_viewport(
+            before,
+            followers_surface_confirmed=True,
+            expected_target_confirmed=True,
+        )
+        verdict = ctl.note_legacy_scroll_progress(
+            legacy_scroll_diag(before, after),
+            observed_scroll_index=1,
+            followers_surface_confirmed=True,
+            expected_target_confirmed=True,
+        )
+        self.assertFalse(verdict.verified)
+        self.assertEqual(verdict.reason, "continuity_unproven")
+        self.assertFalse(ctl.flush_verified_progress(boundary="target_end"))
+        self.assertFalse(any(name.startswith("commit_") for name, _ in rpc.calls))
+        reasons = [
+            payload["reason"]
+            for event, payload in events
+            if event == "checkpoint_not_committed"
+        ]
+        self.assertIn("continuity_unproven", reasons)
+
+    def test_52k_suggestions_boundary_never_commits(self):
+        before = ["a", "b"]
+        after = ["b", "c"]
+        rpc = FakeRpc(row=checkpoint_row(shadow_last_safe_depth=0))
+        events = []
+        ctl = self.controller(rpc, events=events)
+        ctl.load_and_plan(); ctl.claim()
+        ctl.observe_viewport(
+            before,
+            followers_surface_confirmed=True,
+            expected_target_confirmed=True,
+        )
+        verdict = ctl.note_legacy_scroll_progress(
+            legacy_scroll_diag(
+                before,
+                after,
+                surface_state="SUGGESTIONS_BOUNDARY_CONFIRMED",
+            ),
+            observed_scroll_index=1,
+            followers_surface_confirmed=True,
+            expected_target_confirmed=True,
+        )
+        self.assertEqual(verdict.reason, "suggestions_boundary_reached")
+        self.assertFalse(ctl.flush_verified_progress(boundary="target_end"))
+        self.assertFalse(any(name.startswith("commit_") for name, _ in rpc.calls))
+
+    def test_52l_expired_lease_rejects_progress_and_commit(self):
+        before = ["a", "b"]
+        after = ["b", "c"]
+        rpc = FakeRpc(row=checkpoint_row(shadow_last_safe_depth=0))
+        events = []
+        ctl = self.controller(rpc, events=events)
+        ctl.load_and_plan(); ctl.claim()
+        ctl.observe_viewport(
+            before,
+            followers_surface_confirmed=True,
+            expected_target_confirmed=True,
+        )
+        ctl.lease_expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        verdict = ctl.note_legacy_scroll_progress(
+            legacy_scroll_diag(before, after),
+            observed_scroll_index=1,
+            followers_surface_confirmed=True,
+            expected_target_confirmed=True,
+        )
+        self.assertEqual(verdict.reason, "lease_invalid")
+        self.assertFalse(ctl.flush_verified_progress(boundary="target_rotation"))
+        self.assertFalse(any(name.startswith("commit_") for name, _ in rpc.calls))
+
+    def test_52m_clean_terminal_flush_commits_pending_safe_depth(self):
+        rpc = FakeRpc(row=checkpoint_row(shadow_last_safe_depth=0))
+        events = []
+        ctl = self.controller(rpc, events=events)
+        ctl.load_and_plan(); ctl.claim()
+        ctl.observe_viewport(
+            ["a", "b"],
+            followers_surface_confirmed=True,
+            expected_target_confirmed=True,
+        )
+        ctl.note_scroll_sent(previous_viewport_complete=True)
+        self.assertTrue(
+            ctl.observe_viewport(
+                ["b", "c"],
+                followers_surface_confirmed=True,
+                expected_target_confirmed=True,
+            ).verified
+        )
+        self.assertTrue(ctl.flush_verified_progress(boundary="clean_terminal"))
+        self.assertTrue(ctl.release())
+        self.assertEqual(
+            [p["p_last_safe_depth"] for n, p in rpc.calls if n.startswith("commit_")],
+            [1],
+        )
+        self.assertIn("checkpoint_flush_completed", [event for event, _ in events])
+
+    def test_52n_crash_abandons_pending_depth_without_commit_then_releases(self):
+        rpc = FakeRpc(row=checkpoint_row(shadow_last_safe_depth=0))
+        events = []
+        ctl = self.controller(rpc, events=events)
+        ctl.load_and_plan(); ctl.claim()
+        ctl.observe_viewport(
+            ["a", "b"],
+            followers_surface_confirmed=True,
+            expected_target_confirmed=True,
+        )
+        ctl.note_scroll_sent(previous_viewport_complete=True)
+        self.assertTrue(
+            ctl.observe_viewport(
+                ["b", "c"],
+                followers_surface_confirmed=True,
+                expected_target_confirmed=True,
+            ).verified
+        )
+        ctl.abandon_before_release(reason="run_terminal_before_checkpoint_flush")
+        self.assertTrue(ctl.release())
+        self.assertFalse(any(name.startswith("commit_") for name, _ in rpc.calls))
+        self.assertTrue(any(name.startswith("release_") for name, _ in rpc.calls))
+        reasons = [
+            payload["reason"]
+            for event, payload in events
+            if event == "checkpoint_not_committed"
+        ]
+        self.assertIn("run_terminal_before_checkpoint_flush", reasons)
+
+    def test_52o_exact_action_bar_proves_stolm_without_session_commit(self):
+        detection = {
+            "is_followers_list": True,
+            "action_bar_title": "stolm_",
+            "visible_header_texts": ["Followers"],
+        }
+        self.assertTrue(
+            resume.target_surface_identity_proved(
+                detection,
+                expected_target="stolm_",
+                session_committed=False,
+            )
+        )
+        self.assertFalse(
+            resume.target_surface_identity_proved(
+                {**detection, "action_bar_title": "foreign_target"},
+                expected_target="stolm_",
+                session_committed=True,
+            )
+        )
+        self.assertTrue(
+            resume.target_surface_identity_proved(
+                {**detection, "action_bar_title": "Followers"},
+                expected_target="stolm_",
+                session_committed=True,
+            )
+        )
+
+    def test_52p_runner_bridges_legacy_scroll_and_releases_after_flush(self):
+        runner_source = (Path(resume.__file__).parent / "runner.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("note_legacy_scroll_progress(", runner_source)
+        self.assertIn("_main_scroll_diag,", runner_source)
+        self.assertIn('boundary=_v2_flush_boundary', runner_source)
+        self.assertIn("abandon_before_release(", runner_source)
+        self.assertLess(
+            runner_source.index("target_followers_resume_controller.flush_verified_progress("),
+            runner_source.index("target_followers_resume_controller.release()"),
+        )
 
 
 class ReplayAndStaticSafetyTests(unittest.TestCase):
@@ -506,6 +931,204 @@ class ReplayAndStaticSafetyTests(unittest.TestCase):
             self.assertIsNone(resume.build_runtime_controller(account_id=ACCOUNT_A, target_id=TARGET_A, target_username="neutral.target", run_id=RUN_A))
 
 
+class RunnerResumeProvenanceTests(unittest.TestCase):
+    def test_active_root_short_commit_resolves_to_matching_full_sha(self):
+        full_sha = "a" * 40
+        module_root = str(Path(runner.__file__).resolve().parent)
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "PHONEFARM_ACTIVE_ROOT": module_root,
+                    "PHONEFARM_ACTIVE_COMMIT": full_sha[:7],
+                },
+                clear=False,
+            ),
+            patch.object(runner, "_full_git_commit_for_root", return_value=full_sha),
+        ):
+            self.assertEqual(runner._resolve_active_worker_release_sha(), full_sha)
+
+    def test_active_root_commit_mismatch_fails_closed(self):
+        full_sha = "a" * 40
+        module_root = str(Path(runner.__file__).resolve().parent)
+        invalid_runtime = SimpleNamespace(
+            ok=False,
+            resolved_root="",
+            commit="",
+        )
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "PHONEFARM_ACTIVE_ROOT": module_root,
+                    "PHONEFARM_ACTIVE_COMMIT": "b" * 7,
+                },
+                clear=False,
+            ),
+            patch.object(runner, "_full_git_commit_for_root", return_value=full_sha),
+            patch(
+                "phonefarm_runtime_control.resolve_runtime_root",
+                return_value=invalid_runtime,
+            ),
+        ):
+            self.assertEqual(runner._resolve_active_worker_release_sha(), "")
+
+    def test_auto_restart_attempt_two_is_used_from_explicit_policy(self):
+        full_sha = "c" * 40
+        with patch.object(
+            runner,
+            "_resolve_active_worker_release_sha",
+            return_value=full_sha,
+        ):
+            provenance, reason = runner._resolve_target_followers_resume_provenance(
+                run_request_id="30000000-0000-4000-8000-000000000002",
+                auto_restart_resume_policy={"attempt_id": 2, "retry_index": 1},
+            )
+        self.assertEqual(reason, "provenance_resolved")
+        self.assertEqual(provenance["source_attempt_id"], 2)
+        self.assertEqual(provenance["release_sha"], full_sha)
+
+    def test_auto_restart_missing_attempt_never_falls_back_to_one(self):
+        with patch.object(
+            runner,
+            "_resolve_active_worker_release_sha",
+            return_value="d" * 40,
+        ):
+            provenance, reason = runner._resolve_target_followers_resume_provenance(
+                run_request_id="30000000-0000-4000-8000-000000000002",
+                auto_restart_resume_policy={"phases_to_run": {"follow": True}},
+            )
+        self.assertIsNone(provenance)
+        self.assertEqual(reason, "canonical_request_attempt_missing_or_invalid")
+
+    def test_initial_non_restart_request_uses_attempt_one(self):
+        with patch.object(
+            runner,
+            "_resolve_active_worker_release_sha",
+            return_value="e" * 40,
+        ):
+            provenance, reason = runner._resolve_target_followers_resume_provenance(
+                run_request_id="30000000-0000-4000-8000-000000000001",
+                auto_restart_resume_policy=None,
+            )
+        self.assertEqual(reason, "provenance_resolved")
+        self.assertEqual(provenance["source_attempt_id"], 1)
+
+    def test_resolved_provenance_is_recorded_on_checkpoint_commit(self):
+        full_sha = "f" * 40
+        events = []
+        rpc = FakeRpc(row=checkpoint_row(shadow_last_safe_depth=0))
+        with patch.object(
+            runner,
+            "_resolve_active_worker_release_sha",
+            return_value=full_sha,
+        ):
+            provenance, reason = runner._resolve_target_followers_resume_provenance(
+                run_request_id="30000000-0000-4000-8000-000000000002",
+                auto_restart_resume_policy={"attempt_id": 2, "retry_index": 1},
+            )
+        self.assertEqual(reason, "provenance_resolved")
+        controller = resume.build_runtime_controller(
+            account_id=ACCOUNT_A,
+            target_id=TARGET_A,
+            target_username="neutral.target",
+            run_id=RUN_A,
+            **provenance,
+            flags=resume.ResumeFlags(True, False, (ACCOUNT_A,)),
+            rpc_call=rpc,
+            hmac_secret=TEST_HMAC_SECRET,
+            emit=lambda event, payload: events.append((event, payload)),
+        )
+        controller.load_and_plan()
+        controller.claim()
+        controller.observe_viewport(
+            ["first", "overlap"],
+            followers_surface_confirmed=True,
+            expected_target_confirmed=True,
+        )
+        controller.note_scroll_sent(previous_viewport_complete=True)
+        controller.observe_viewport(
+            ["overlap", "next"],
+            followers_surface_confirmed=True,
+            expected_target_confirmed=True,
+        )
+        self.assertTrue(controller.commit_verified_progress())
+        committed = [payload for event, payload in events if event == "checkpoint_committed"]
+        self.assertEqual(committed[-1]["source_request_id"], provenance["source_request_id"])
+        self.assertEqual(committed[-1]["source_attempt_id"], 2)
+        self.assertEqual(committed[-1]["release_sha"], full_sha)
+        commit = [params for name, params in rpc.calls if name.endswith("_v4")][-1]
+        self.assertEqual(commit["p_commit_context"]["source_request_id"], provenance["source_request_id"])
+        self.assertEqual(commit["p_commit_context"]["source_attempt_id"], 2)
+        self.assertEqual(commit["p_commit_context"]["release_sha"], full_sha)
+
+    def test_commit_response_without_atomic_provenance_fails_open_to_legacy(self):
+        events = []
+        rpc = FakeRpc(
+            row=checkpoint_row(shadow_last_safe_depth=0),
+            provenance_persisted=False,
+        )
+        controller = RepositoryAndControllerTests().controller(rpc, events=events)
+        controller.load_and_plan()
+        controller.claim()
+        controller.observe_viewport(
+            ["first", "overlap"],
+            followers_surface_confirmed=True,
+            expected_target_confirmed=True,
+        )
+        controller.note_scroll_sent(previous_viewport_complete=True)
+        controller.observe_viewport(
+            ["overlap", "next"],
+            followers_surface_confirmed=True,
+            expected_target_confirmed=True,
+        )
+        self.assertFalse(controller.commit_verified_progress())
+        self.assertTrue(controller._safe_stop)
+        self.assertIsNone(controller.last_verified_commit_context)
+        reached_depth = controller.reached_depth
+        controller.note_legacy_scroll_progress(
+            legacy_scroll_diag(["overlap", "next"], ["next", "later"]),
+            observed_scroll_index=2,
+            followers_surface_confirmed=True,
+            expected_target_confirmed=True,
+        )
+        verdict = controller.observe_viewport(
+            ["next", "later"],
+            followers_surface_confirmed=True,
+            expected_target_confirmed=True,
+        )
+        self.assertFalse(verdict.verified)
+        self.assertEqual(controller.reached_depth, reached_depth)
+        self.assertEqual(
+            sum(name.startswith("commit_") for name, _ in rpc.calls),
+            1,
+        )
+        self.assertTrue(controller.release())
+        self.assertIsNone(controller.last_verified_commit_context)
+        self.assertIn("v2_failed_open", [event for event, _ in events])
+
+    def test_builder_rejects_invalid_checkpoint_provenance_before_any_rpc(self):
+        events = []
+        rpc = FakeRpc()
+        controller = resume.build_runtime_controller(
+            account_id=ACCOUNT_A,
+            target_id=TARGET_A,
+            target_username="neutral.target",
+            run_id=RUN_A,
+            source_request_id="not-a-uuid",
+            source_attempt_id=0,
+            release_sha="short",
+            flags=resume.ResumeFlags(True, False, (ACCOUNT_A,)),
+            rpc_call=rpc,
+            hmac_secret=TEST_HMAC_SECRET,
+            emit=lambda event, payload: events.append((event, payload)),
+        )
+        self.assertIsNone(controller)
+        self.assertEqual(rpc.calls, [])
+        self.assertEqual(events[-1][0], "v2_failed_open")
+        self.assertEqual(events[-1][1]["reason"], "checkpoint_provenance_invalid")
+
+
 class ShadowAccountScopeTests(unittest.TestCase):
     def flags(self, *account_ids, shadow=True, enforce=False):
         return resume.ResumeFlags(shadow, enforce, tuple(account_ids))
@@ -516,6 +1139,9 @@ class ShadowAccountScopeTests(unittest.TestCase):
             target_id=TARGET_A,
             target_username="neutral.target",
             run_id=RUN_A,
+            source_request_id=REQUEST_A,
+            source_attempt_id=1,
+            release_sha=FULL_RELEASE_SHA,
             flags=flags,
             rpc_call=rpc,
             emit=lambda event, payload: events.append((event, payload)),
@@ -639,23 +1265,30 @@ class ShadowAccountScopeTests(unittest.TestCase):
 
     def test_73_same_ct_run_b_loads_run_a_shadow_checkpoint_and_progresses(self):
         flags = self.flags(ACCOUNT_A)
-        run_a_rpc = FakeRpc(
-            row=checkpoint_row(
-                shadow_last_safe_depth=0,
-                shadow_visible_anchor_hashes=[],
-                shadow_anchor_fingerprint="",
-            )
-        )
+        run_a_rpc = FakeRpc(row=None)
+        run_a_events = []
         run_a = resume.build_runtime_controller(
             account_id=ACCOUNT_A,
             target_id=TARGET_A,
             target_username="neutral.target",
             run_id=RUN_A,
+            source_request_id=REQUEST_A,
+            source_attempt_id=1,
+            release_sha=FULL_RELEASE_SHA,
             flags=flags,
             rpc_call=run_a_rpc,
+            emit=lambda event, payload: run_a_events.append((event, payload)),
         )
         self.assertIsNotNone(run_a)
         self.assertTrue(run_a.load_and_plan().use_legacy_navigation)
+        loaded_a = next(
+            payload
+            for event, payload in run_a_events
+            if event == "target_followers_checkpoint_loaded"
+        )
+        self.assertFalse(loaded_a["checkpoint_found"])
+        self.assertFalse(loaded_a["checkpoint_loaded"])
+        self.assertEqual(loaded_a["checkpoint_depth_before"], 0)
         self.assertTrue(run_a.claim())
         run_a.observe_viewport(
             ["row1", "row2"],
@@ -692,6 +1325,9 @@ class ShadowAccountScopeTests(unittest.TestCase):
             target_id=TARGET_A,
             target_username="neutral.target",
             run_id=RUN_B,
+            source_request_id=REQUEST_B,
+            source_attempt_id=1,
+            release_sha=FULL_RELEASE_SHA,
             flags=flags,
             rpc_call=run_b_rpc,
             emit=lambda event, payload: events.append((event, payload)),
@@ -700,22 +1336,136 @@ class ShadowAccountScopeTests(unittest.TestCase):
         plan_b = run_b.load_and_plan()
         self.assertTrue(plan_b.use_legacy_navigation)
         self.assertEqual(plan_b.previous_depth, 1)
+        self.assertEqual(run_b.reached_depth, 0)
+        self.assertEqual(run_b.last_committed_depth, 1)
+        loaded_b = next(
+            payload
+            for event, payload in events
+            if event == "target_followers_checkpoint_loaded"
+        )
+        self.assertTrue(loaded_b["checkpoint_found"])
+        self.assertTrue(loaded_b["checkpoint_loaded"])
+        self.assertEqual(loaded_b["checkpoint_depth_before"], 1)
+        self.assertEqual(loaded_b["proposed_resume_depth"], 1)
+        self.assertEqual(loaded_b["legacy_start_depth"], 0)
         self.assertTrue(run_b.claim())
         run_b.observe_viewport(
-            ["row2", "row3", "row4"],
+            ["row1", "row2"],
             followers_surface_confirmed=True,
             expected_target_confirmed=True,
         )
         self.assertTrue(run_b.note_scroll_sent(previous_viewport_complete=True))
-        verdict_b = run_b.observe_viewport(
-            ["row3", "row4", "row5"],
+        first_physical_scroll = run_b.observe_viewport(
+            ["row2", "row3"],
             followers_surface_confirmed=True,
             expected_target_confirmed=True,
         )
-        self.assertTrue(verdict_b.verified)
-        self.assertTrue(run_b.commit_verified_progress(cursor_handle="row5"))
+        self.assertTrue(first_physical_scroll.verified)
+        self.assertEqual(run_b.reached_depth, 1)
+        self.assertFalse(run_b.commit_verified_progress(cursor_handle="row3"))
+        self.assertFalse(any(name.startswith("commit_") for name, _ in run_b_rpc.calls))
+
+        self.assertTrue(run_b.note_scroll_sent(previous_viewport_complete=True))
+        second_physical_scroll = run_b.observe_viewport(
+            ["row3", "row4"],
+            followers_surface_confirmed=True,
+            expected_target_confirmed=True,
+        )
+        self.assertTrue(second_physical_scroll.verified)
+        self.assertEqual(run_b.reached_depth, 2)
+        self.assertTrue(run_b.commit_verified_progress(cursor_handle="row4"))
+        commit_b = next(
+            params for name, params in run_b_rpc.calls if name.startswith("commit_")
+        )
+        self.assertEqual(commit_b["p_last_safe_depth"], 2)
         self.assertEqual(run_b.navigation_mutations, 0)
         self.assertTrue(any(event == "target_followers_checkpoint_loaded" for event, _ in events))
+
+    def test_74_stolm_missing_checkpoint_two_legacy_scrolls_then_run_b_loads_depth_two(self):
+        flags = self.flags(ACCOUNT_A)
+        before = [f"stolm.row{i:02d}" for i in range(1, 9)]
+        after_one = before[-2:] + [f"stolm.row{i:02d}" for i in range(9, 16)]
+        after_two = after_one[-2:] + [f"stolm.row{i:02d}" for i in range(16, 23)]
+        run_a_rpc = FakeRpc(row=None)
+        run_a = resume.build_runtime_controller(
+            account_id=ACCOUNT_A,
+            target_id=TARGET_A,
+            target_username="stolm_",
+            run_id=RUN_A,
+            source_request_id=REQUEST_A,
+            source_attempt_id=1,
+            release_sha=FULL_RELEASE_SHA,
+            flags=flags,
+            rpc_call=run_a_rpc,
+        )
+        self.assertIsNotNone(run_a)
+        self.assertEqual(run_a.load_and_plan().previous_depth, 0)
+        self.assertTrue(run_a.claim())
+        run_a.observe_viewport(before, followers_surface_confirmed=True, expected_target_confirmed=True)
+        for index, (viewport_before, viewport_after) in enumerate(
+            ((before, after_one), (after_one, after_two)),
+            start=1,
+        ):
+            staged = run_a.note_legacy_scroll_progress(
+                legacy_scroll_diag(viewport_before, viewport_after),
+                observed_scroll_index=index,
+                followers_surface_confirmed=True,
+                expected_target_confirmed=True,
+            )
+            self.assertEqual(staged.reason, "legacy_scroll_proof_staged")
+            self.assertTrue(
+                run_a.observe_viewport(
+                    viewport_after,
+                    followers_surface_confirmed=True,
+                    expected_target_confirmed=True,
+                ).verified
+            )
+            self.assertTrue(run_a.commit_verified_progress(cursor_handle=viewport_after[-1]))
+        self.assertEqual(run_a.last_committed_depth, 2)
+        self.assertTrue(run_a.flush_verified_progress(boundary="target_end"))
+        self.assertTrue(run_a.release())
+
+        run_b_events = []
+        run_b = resume.build_runtime_controller(
+            account_id=ACCOUNT_A,
+            target_id=TARGET_A,
+            target_username="stolm_",
+            run_id=RUN_B,
+            source_request_id=REQUEST_B,
+            source_attempt_id=1,
+            release_sha=FULL_RELEASE_SHA,
+            flags=flags,
+            rpc_call=FakeRpc(
+                row=checkpoint_row(
+                    shadow_last_safe_depth=2,
+                    shadow_last_safe_anchor=resume.anchor_hash(after_two[-1]),
+                    shadow_anchor_fingerprint=resume.viewport_fingerprint(after_two),
+                    shadow_visible_anchor_hashes=list(resume.bounded_anchor_hashes(after_two)),
+                    last_run_id=RUN_A,
+                )
+            ),
+            emit=lambda event, payload: run_b_events.append((event, payload)),
+        )
+        self.assertIsNotNone(run_b)
+        plan_b = run_b.load_and_plan()
+        self.assertEqual(plan_b.previous_depth, 2)
+        self.assertEqual(run_b.reached_depth, 0)
+        loaded = next(
+            payload
+            for event, payload in run_b_events
+            if event == "target_followers_checkpoint_loaded"
+        )
+        self.assertTrue(loaded["checkpoint_found"])
+        self.assertTrue(loaded["checkpoint_loaded"])
+        self.assertEqual(loaded["checkpoint_depth_before"], 2)
+        self.assertEqual(loaded["proposed_resume_depth"], 2)
+        self.assertEqual(loaded["legacy_start_depth"], 0)
+        plan_event = next(
+            payload for event, payload in run_b_events if event == "resume_plan_built"
+        )
+        self.assertEqual(plan_event["theoretical_scrolls_avoided"], 2)
+        self.assertTrue(plan_b.use_legacy_navigation)
+        self.assertEqual(run_b.navigation_mutations, 0)
 
 
 if __name__ == "__main__":

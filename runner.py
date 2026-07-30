@@ -8,12 +8,15 @@ import random
 import re
 import signal
 import socket
+import subprocess
+import sys
 import threading
 import time
 import uuid
 from pathlib import Path
 from collections.abc import Callable
 from datetime import datetime, timezone
+from functools import lru_cache
 from typing import Any
 
 import social_memory
@@ -10561,6 +10564,103 @@ def _reenter_ct_followers_list_after_canonical_reset(
     return True
 
 
+_RELEASE_COMMIT_RE = re.compile(r"^[0-9a-f]{7,40}$")
+_FULL_RELEASE_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+@lru_cache(maxsize=4)
+def _full_git_commit_for_root(root: Path) -> str:
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except Exception:
+        return ""
+    commit = str(completed.stdout or "").strip().lower()
+    return commit if completed.returncode == 0 and _FULL_RELEASE_COMMIT_RE.fullmatch(commit) else ""
+
+
+def _resolve_active_worker_release_sha() -> str:
+    """Return the commit of the immutable release executing this module.
+
+    The dispatcher exports both the resolved runtime root and its commit.  We
+    accept that pair only when the root is this module's directory.  Direct
+    invocations without those variables use the same canonical runtime-root
+    resolver used by dispatcher control, with the same root equality check.
+    This prevents a test worktree or stale environment variable from being
+    labelled with the active production release.
+    """
+
+    module_root = Path(__file__).resolve().parent
+    env_root = str(os.environ.get("PHONEFARM_ACTIVE_ROOT") or "").strip()
+    env_commit = str(os.environ.get("PHONEFARM_ACTIVE_COMMIT") or "").strip().lower()
+    if env_root and _RELEASE_COMMIT_RE.fullmatch(env_commit):
+        try:
+            if Path(env_root).expanduser().resolve(strict=False) == module_root:
+                full_commit = _full_git_commit_for_root(module_root)
+                if full_commit.startswith(env_commit):
+                    return full_commit
+        except (OSError, RuntimeError):
+            pass
+
+    try:
+        from phonefarm_runtime_control import resolve_runtime_root
+
+        runtime_root = resolve_runtime_root()
+        resolved_commit = str(runtime_root.commit or "").strip().lower()
+        if (
+            runtime_root.ok
+            and _RELEASE_COMMIT_RE.fullmatch(resolved_commit)
+            and Path(runtime_root.resolved_root).resolve(strict=False) == module_root
+        ):
+            full_commit = _full_git_commit_for_root(module_root)
+            if full_commit.startswith(resolved_commit):
+                return full_commit
+    except Exception:
+        pass
+    return ""
+
+
+def _resolve_target_followers_resume_provenance(
+    *,
+    run_request_id: str | None,
+    auto_restart_resume_policy: dict[str, Any] | None,
+) -> tuple[dict[str, Any] | None, str]:
+    """Build fail-closed checkpoint provenance without reading the prior run."""
+
+    request_id = str(run_request_id or "").strip()
+    try:
+        request_id = str(uuid.UUID(request_id))
+    except (ValueError, AttributeError, TypeError):
+        return None, "source_request_id_missing_or_invalid"
+
+    if auto_restart_resume_policy is None:
+        attempt_id = 1
+    else:
+        raw_attempt_id = auto_restart_resume_policy.get("attempt_id")
+        if isinstance(raw_attempt_id, bool):
+            return None, "canonical_request_attempt_missing_or_invalid"
+        try:
+            attempt_id = int(raw_attempt_id)
+        except (TypeError, ValueError):
+            return None, "canonical_request_attempt_missing_or_invalid"
+        if attempt_id < 1:
+            return None, "canonical_request_attempt_missing_or_invalid"
+
+    release_sha = _resolve_active_worker_release_sha()
+    if not release_sha:
+        return None, "active_release_sha_unresolved"
+    return {
+        "source_request_id": request_id,
+        "source_attempt_id": attempt_id,
+        "release_sha": release_sha,
+    }, "provenance_resolved"
+
+
 def _run_followers_list_engine_session(
     d,
     *,
@@ -10576,6 +10676,7 @@ def _run_followers_list_engine_session(
     start_from_current_followers_list: bool = False,
     prevalidated_followers_list_meta: dict[str, Any] | None = None,
     run_request_id: str | None = None,
+    auto_restart_resume_policy: dict[str, Any] | None = None,
 ) -> int:
     """
     Source profile → source followers list → follower profile → FOLLOW SAFE V1 → return to list.
@@ -10638,27 +10739,51 @@ def _run_followers_list_engine_session(
         except Exception:
             pass
 
-    target_followers_resume_controller = target_followers_resume_v2.build_runtime_controller(
-        account_id=str(account_id or ""),
-        target_id=str(target_id or ""),
-        target_username=source_profile_username,
-        run_id=str(run_id or ""),
-        emit=_target_followers_resume_v2_emit,
-        flags=target_followers_resume_v2.ResumeFlags(
-            shadow_enabled=bool(
-                getattr(config, "TARGET_FOLLOWERS_RESUME_V2_SHADOW_ENABLED", False)
-            ),
-            enforce_enabled=bool(
-                getattr(config, "TARGET_FOLLOWERS_RESUME_V2_ENFORCE_ENABLED", False)
-            ),
-            shadow_account_ids=target_followers_resume_v2.parse_account_id_allowlist(
-                getattr(config, "TARGET_FOLLOWERS_RESUME_V2_SHADOW_ACCOUNT_IDS", "")
-            ),
+    _target_followers_resume_flags = target_followers_resume_v2.ResumeFlags(
+        shadow_enabled=bool(
+            getattr(config, "TARGET_FOLLOWERS_RESUME_V2_SHADOW_ENABLED", False)
         ),
-        hmac_secret=str(
-            getattr(config, "TARGET_FOLLOWERS_RESUME_V2_HMAC_SECRET", "") or ""
+        enforce_enabled=bool(
+            getattr(config, "TARGET_FOLLOWERS_RESUME_V2_ENFORCE_ENABLED", False)
+        ),
+        shadow_account_ids=target_followers_resume_v2.parse_account_id_allowlist(
+            getattr(config, "TARGET_FOLLOWERS_RESUME_V2_SHADOW_ACCOUNT_IDS", "")
         ),
     )
+    target_followers_resume_controller = None
+    if _target_followers_resume_flags.shadow_allowed_for(str(account_id or "")):
+        (
+            _target_followers_resume_provenance,
+            _target_followers_resume_provenance_reason,
+        ) = _resolve_target_followers_resume_provenance(
+            run_request_id=run_request_id,
+            auto_restart_resume_policy=auto_restart_resume_policy,
+        )
+        if _target_followers_resume_provenance is None:
+            _target_followers_resume_v2_emit(
+                "resume_fallback_legacy",
+                {
+                    "account_id": str(account_id or ""),
+                    "target_id_hash": target_followers_resume_v2.stable_id_hash(target_id),
+                    "run_id": str(run_id or ""),
+                    "reason": _target_followers_resume_provenance_reason,
+                    "shadow": True,
+                    "enforce": False,
+                },
+            )
+        else:
+            target_followers_resume_controller = target_followers_resume_v2.build_runtime_controller(
+                account_id=str(account_id or ""),
+                target_id=str(target_id or ""),
+                target_username=source_profile_username,
+                run_id=str(run_id or ""),
+                **_target_followers_resume_provenance,
+                emit=_target_followers_resume_v2_emit,
+                flags=_target_followers_resume_flags,
+                hmac_secret=str(
+                    getattr(config, "TARGET_FOLLOWERS_RESUME_V2_HMAC_SECRET", "") or ""
+                ),
+            )
     if target_followers_resume_controller is not None:
         try:
             target_followers_resume_controller.load_and_plan()
@@ -10676,6 +10801,20 @@ def _run_followers_list_engine_session(
                 },
             )
             target_followers_resume_controller = None
+
+    def _target_followers_resume_v2_surface_proof(
+        detection: dict[str, Any] | None,
+    ) -> tuple[bool, bool]:
+        det_safe = detection if isinstance(detection, dict) else {}
+        surface_confirmed = bool(det_safe.get("is_followers_list"))
+        target_confirmed = target_followers_resume_v2.target_surface_identity_proved(
+            det_safe,
+            expected_target=source_profile_username,
+            session_committed=followers_session_list_committed_open_for(
+                source_profile_username
+            ),
+        )
+        return surface_confirmed, target_confirmed
 
     def _publish_followers_session_summary(**updates: Any) -> None:
         if "rejection_reason_counts" not in updates:
@@ -13658,24 +13797,26 @@ def _run_followers_list_engine_session(
                         for item in candidates
                         if isinstance(item, dict)
                     ]
+                    (
+                        _v2_followers_surface_confirmed,
+                        _v2_expected_target_confirmed,
+                    ) = _target_followers_resume_v2_surface_proof(det)
                     _v2_verdict = target_followers_resume_controller.observe_viewport(
                         _v2_handles,
-                        followers_surface_confirmed=bool(
-                            isinstance(det, dict)
-                            and det.get("is_followers_list")
-                            and followers_session_list_committed_open_for(source_profile_username)
-                        ),
-                        expected_target_confirmed=bool(
-                            followers_session_list_committed_open_for(source_profile_username)
-                        ),
+                        followers_surface_confirmed=_v2_followers_surface_confirmed,
+                        expected_target_confirmed=_v2_expected_target_confirmed,
                         list_moved=bool(
                             target_followers_resume_controller.pending_scroll_before is not None
+                            or target_followers_resume_controller.pending_legacy_scroll is not None
                         ),
                         recoverable=True,
                         ambiguous_surface=False,
                     )
                     if _v2_verdict.verified:
                         target_followers_resume_controller.commit_verified_progress(
+                            cursor_handle=(
+                                _v2_handles[-1] if _v2_handles else ""
+                            ),
                             reason="validated_transition"
                         )
                 except Exception as exc:
@@ -15563,6 +15704,19 @@ def _run_followers_list_engine_session(
                 # adaptive geometry through instead of collapsing every normal
                 # Follow advance to the legacy 0.24-height short gesture.
                 _main_scroll_profile = "canonical_adaptive"
+                _v2_pre_scroll_surface_confirmed = False
+                _v2_pre_scroll_target_confirmed = False
+                if target_followers_resume_controller is not None:
+                    try:
+                        (
+                            _v2_pre_scroll_surface_confirmed,
+                            _v2_pre_scroll_target_confirmed,
+                        ) = _target_followers_resume_v2_surface_proof(det)
+                    except Exception:
+                        # Passive shadow evidence can fail closed without ever
+                        # interfering with the authoritative legacy gesture.
+                        _v2_pre_scroll_surface_confirmed = False
+                        _v2_pre_scroll_target_confirmed = False
                 try:
                     log(
                         "info",
@@ -15736,8 +15890,15 @@ def _run_followers_list_engine_session(
                     )
                     if target_followers_resume_controller is not None:
                         try:
-                            target_followers_resume_controller.note_scroll_sent(
-                                previous_viewport_complete=bool(_visible_window_scroll_required)
+                            target_followers_resume_controller.note_legacy_scroll_progress(
+                                _main_scroll_diag,
+                                observed_scroll_index=int(scroll_used),
+                                followers_surface_confirmed=bool(
+                                    _v2_pre_scroll_surface_confirmed
+                                ),
+                                expected_target_confirmed=bool(
+                                    _v2_pre_scroll_target_confirmed
+                                ),
                             )
                         except Exception:
                             pass
@@ -19435,6 +19596,45 @@ def _run_followers_list_engine_session(
         try:
             if target_followers_resume_controller is not None:
                 try:
+                    if sys.exc_info()[0] is not None:
+                        target_followers_resume_controller.abandon_before_release(
+                            reason="run_terminal_before_checkpoint_flush"
+                        )
+                    else:
+                        _v2_flush_boundary = "clean_terminal"
+                        if is_follow_target_rotation_pending(
+                            target_username=source_profile_username
+                        ):
+                            _v2_flush_boundary = "target_rotation"
+                        elif _followers_loop_finally_status in {
+                            "suggestions_boundary",
+                            "see_more_no_progress",
+                            "target_budget_reached",
+                        }:
+                            _v2_flush_boundary = "target_end"
+                        target_followers_resume_controller.flush_verified_progress(
+                            boundary=_v2_flush_boundary
+                        )
+                except Exception as exc:
+                    try:
+                        target_followers_resume_controller.abandon_before_release(
+                            reason="run_terminal_before_checkpoint_flush"
+                        )
+                    except Exception:
+                        pass
+                    _target_followers_resume_v2_emit(
+                        "v2_failed_open",
+                        {
+                            "account_id": str(account_id or ""),
+                            "target_id_hash": target_followers_resume_v2.stable_id_hash(target_id),
+                            "run_id": str(run_id or ""),
+                            "reason": "checkpoint_flush_exception",
+                            "error_type": type(exc).__name__,
+                            "shadow": True,
+                            "enforce": False,
+                        },
+                    )
+                try:
                     target_followers_resume_controller.release()
                 except Exception as exc:
                     _target_followers_resume_v2_emit(
@@ -21898,6 +22098,7 @@ def _main_impl() -> int:
             warm_session_used=warm_session_used,
             force_stop_used=force_stop_used,
             auto_restart_resume_policy=auto_restart_resume_policy,
+            run_request_id=run_request_id or None,
             business_action_deadline=str(
                 os.environ.get("BUSINESS_ACTION_DEADLINE") or ""
             ).strip() or None,

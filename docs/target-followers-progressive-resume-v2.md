@@ -35,9 +35,19 @@ navigation continues.
 
 One `depth_unit` is one verified transition between distinct viewports of the
 same expected CT's real Followers list. Both fingerprints must exist and
-differ. The surface must be confirmed, recoverable and unambiguous. A sent
-swipe, unchanged viewport, popup, Suggestions surface, wrong CT or incomplete
-viewport never advances depth. Depth is bounded to `0..80`.
+differ, a suffix of the previous viewport must be the prefix of the next one,
+and the next viewport must expose at least one new unique row. The surface must
+be confirmed, recoverable and unambiguous. A sent swipe, unchanged viewport,
+popup, Suggestions surface, wrong CT or incomplete viewport never advances
+depth. Depth is bounded to `0..80`.
+
+The legacy navigation remains authoritative, but its canonical scroll
+diagnostics are an accepted shadow evidence source. `depth_advanced`, positive
+positional overlap, positive new-row count, before/after fingerprints, the
+primary-list state and the fresh exact CT identity are staged after the legacy
+gesture. The next ordinary candidate collection must reproduce the after
+fingerprint before the shadow depth can advance. This bridge emits no gesture
+and changes no legacy navigation decision.
 
 Anchors are SHA-256-derived opaque tokens. At most 12 are stored; raw usernames,
 screenshots, XML and full Followers dumps are forbidden. The theoretical cursor
@@ -57,14 +67,51 @@ a checkpoint at depth zero. A transition is committed only after the complete
 viewport proof; crash, safe stop, stale version or lease conflict preserves the
 previous committed version. Invalidation and reset are explicit CAS operations.
 
+Every clean CT rotation, CT end or clean session terminal flushes any verified
+but uncommitted depth before releasing the lease. The flush is idempotent. A
+crash records `run_terminal_before_checkpoint_flush`, releases the lease and
+does not commit pending depth. Other stable no-commit reasons are
+`no_safe_progress`, `continuity_unproven`, `lease_invalid`,
+`target_identity_changed`, `suggestions_boundary_reached` and
+`commit_conflict`.
+
+In shadow, physical observation always starts at depth zero because V2 does not
+move the list. A positive checkpoint loaded by Run B is a theoretical proposal,
+not a physical offset: Run B never writes a lower depth and cannot add the
+loaded value to its physical scroll count. It may only commit after its newly
+proven physical depth exceeds the already stored shadow depth.
+
 ## Observability and incidents
 
 The V2 stream uses `target_followers_checkpoint_loaded`, `resume_plan_built`,
 `fast_forward_started`, `anchor_found`, `anchor_not_found`,
-`checkpoint_claimed`, `checkpoint_committed`, `checkpoint_conflict`,
-`checkpoint_invalidated`, `end_reached` and `resume_fallback_legacy`. Payloads
-contain UUID account/run context, a hashed target ID, stable reasons, depth,
-version and RPC duration; they contain no raw anchor source.
+`checkpoint_claimed`, `depth_transition_rejected`, `checkpoint_committed`,
+`checkpoint_flush_completed`, `checkpoint_not_committed`,
+`checkpoint_conflict`, `checkpoint_invalidated`, `end_reached` and
+`resume_fallback_legacy`. Payloads contain UUID account/run context, a hashed
+target ID, stable reasons, depth, version, RPC duration and, for legacy bridge
+proofs, scroll index, overlap, new-row count and fingerprints; they contain no
+raw anchor source.
+
+Checkpoint events also carry the exact `source_request_id`, the canonical
+request `source_attempt_id`, and the full 40-character commit of the immutable
+release root executing `runner.py`. A natural first request is attempt 1. An
+Auto Restart request must provide its positive attempt in the validated resume
+policy; the prior run projection is never used as a fallback. The dispatcher
+root and its short commit must resolve to this module's root and match the full
+Git commit. Missing or conflicting provenance emits a stable
+`resume_fallback_legacy` reason and disables only the V2 shadow controller;
+legacy navigation remains authoritative and unchanged.
+
+The checkpoint commit uses the distinct
+`commit_target_followers_resume_checkpoint_v4` RPC. The last validated scroll
+evidence is retained until that RPC atomically advances the checkpoint and
+persists the same request, attempt, release, overlap, new-row count, scroll
+index and before/after fingerprints on the immutable `committed` event. The
+controller accepts success only when the RPC returns
+`provenance_persisted=true`; a missing V4 function or incomplete response fails
+open to legacy without claiming a durable V2 commit. V4 must be installed
+before any Worker release containing this caller is activated.
 
 These events are distinct from legacy `follow_target_checkpoint_*`. A normal
 fallback does not block a campaign, create operator review, or notify
@@ -74,8 +121,9 @@ existing deduplicated incident lifecycle; Slack and Discord remain independent.
 ## Runbook
 
 1. Confirm Worker lineage, immutable release and canonical dispatcher root.
-2. Confirm the production migration registry, tables, RLS, RPC grants and zero
-   initial checkpoints.
+2. Confirm the production migration registry, tables, RLS, service-role-only
+   V4 RPC grants and atomic provenance tests before activating its Worker
+   caller.
 3. Certify a release with all V2 flags off; restart once; verify an empty queue,
    zero active request/run/lock and zero implicit run.
 4. Set the canonical runtime source to Mythyl UUID only and enforce false;
