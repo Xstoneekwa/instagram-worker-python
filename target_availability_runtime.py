@@ -190,7 +190,9 @@ def observe_rotation_target_loaded(
             run_id=run_id,
             instance_id=os.getenv("PHONEFARM_INSTANCE_ID") or os.getenv("WORKER_INSTANCE_ID"),
             device_key=os.getenv("PHONE_DEVICE_ID") or os.getenv("DEVICE_ID"),
-            worker_version=os.getenv("PHONEFARM_WORKER_RELEASE") or os.getenv("GIT_SHA"),
+            worker_version=os.getenv("PHONEFARM_WORKER_RELEASE")
+            or os.getenv("PHONEFARM_ACTIVE_COMMIT")
+            or os.getenv("GIT_SHA"),
             instagram_version=os.getenv("INSTAGRAM_VERSION"),
             evidence_safe={"target_index": int(target_index), "signal": "ct_rotation_target_loaded"},
         )
@@ -351,7 +353,9 @@ def observation_from_rotation_summary(
         request_id=_text(summary.get("request_id")) or None,
         instance_id=os.getenv("PHONEFARM_INSTANCE_ID") or os.getenv("WORKER_INSTANCE_ID"),
         device_key=os.getenv("PHONE_DEVICE_ID") or os.getenv("DEVICE_ID"),
-        worker_version=os.getenv("PHONEFARM_WORKER_RELEASE") or os.getenv("GIT_SHA"),
+        worker_version=os.getenv("PHONEFARM_WORKER_RELEASE")
+        or os.getenv("PHONEFARM_ACTIVE_COMMIT")
+        or os.getenv("GIT_SHA"),
         instagram_version=os.getenv("INSTAGRAM_VERSION"),
         evidence_safe={
             "target_index": int(target_index),

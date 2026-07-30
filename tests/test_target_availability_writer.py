@@ -136,6 +136,20 @@ class TargetAvailabilityWriterTests(unittest.TestCase):
         self.assertEqual(sent.headers["X-instagram-auto-restart-tick-token"], "private-token-value")
         self.assertEqual(transport._timeout, 3.0)
 
+    def test_backend_pipeline_transport_uses_canonical_runtime_commit(self):
+        environment = {
+            "INSTAGRAM_DASHBOARD_API_BASE_URL": "https://backend.example",
+            "INSTAGRAM_AUTO_RESTART_TICK_TOKEN": "private-token-value",
+            "RUN_CONTROL_DISPATCHER_WORKER_ID": "dispatcher-one",
+            "PHONEFARM_ACTIVE_COMMIT": "05c214979d8c7c56d73df6ed18371d7c47b13af8",
+        }
+        with patch.dict("os.environ", environment, clear=True):
+            transport = BackendPipelineTransport.from_environment()
+        self.assertEqual(
+            transport._worker_release,
+            "05c214979d8c7c56d73df6ed18371d7c47b13af8",
+        )
+
     def test_four_flags_default_off_and_kill_switch_wins(self):
         flags = TargetAvailabilityFeatureFlags.from_mapping({})
         self.assertFalse(flags.capture_allowed(ACCOUNT_ONE))

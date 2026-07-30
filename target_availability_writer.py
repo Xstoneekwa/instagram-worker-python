@@ -303,7 +303,10 @@ class BackendPipelineTransport:
             worker_id=os.getenv("RUN_CONTROL_DISPATCHER_WORKER_ID")
             or os.getenv("PHONEFARM_INSTANCE_ID")
             or "phonefarm-dispatcher",
-            worker_release=os.getenv("PHONEFARM_WORKER_RELEASE") or os.getenv("GIT_SHA") or "unknown-release",
+            worker_release=os.getenv("PHONEFARM_WORKER_RELEASE")
+            or os.getenv("PHONEFARM_ACTIVE_COMMIT")
+            or os.getenv("GIT_SHA")
+            or "unknown-release",
             timeout_seconds=float(os.getenv("TARGET_AVAILABILITY_WRITER_TIMEOUT_SECONDS") or "1.5"),
             max_retries=int(os.getenv("TARGET_AVAILABILITY_WRITER_MAX_RETRIES") or "1"),
         )
