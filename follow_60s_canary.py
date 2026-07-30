@@ -67,6 +67,7 @@ class _Runtime:
     subflags: dict[str, bool] = field(default_factory=dict)
     proofs: dict[str, FreshUiProof] = field(default_factory=dict)
     proof_stats: dict[str, dict[str, int]] = field(default_factory=dict)
+    optimization_stats: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 _RUNTIME = _Runtime()
@@ -207,6 +208,7 @@ def consume(
     require_safe_bounds: bool = False,
     screen_size: tuple[int, int] | None = None,
     consume_once: bool = False,
+    metadata_equals: dict[str, Any] | None = None,
 ) -> tuple[FreshUiProof | None, float, str]:
     proof = _RUNTIME.proofs.get(str(purpose)) if enabled() else None
     reason = ""
@@ -234,6 +236,13 @@ def consume(
             reason = "ttl_expired"
         if not reason and not proof.xml_generation.startswith(f"{_RUNTIME.ui_generation}:"):
             reason = "ui_generation_mismatch"
+        if not reason and metadata_equals:
+            for key, want in metadata_equals.items():
+                if want is None or str(want) == "":
+                    continue
+                if str(proof.metadata.get(key) or "") != str(want):
+                    reason = f"metadata_{key}_mismatch"
+                    break
         if not reason and require_safe_bounds:
             ok, bounds_reason = safe_bounds(proof.bounds, screen_size=screen_size)
             if not ok:
@@ -267,6 +276,64 @@ def consume(
         retries=0,
     )
     return proof, age_ms, ""
+
+
+def record_outcome(
+    feature: str,
+    status: str,
+    *,
+    age_ms: float | None = None,
+    reason: str = "",
+    fallback_used: bool = False,
+    dumps: int = 0,
+    screenshots: int = 0,
+    retries: int = 0,
+    estimated_gain_ms: float = 0.0,
+) -> None:
+    """Emit one account-scoped optimization decision and aggregate final stats."""
+    if not enabled(feature):
+        return
+    normalized = str(status or "rejected").strip().lower()
+    if normalized not in {"used", "rejected", "fallback"}:
+        normalized = "rejected"
+    bucket = _RUNTIME.optimization_stats.setdefault(
+        str(feature),
+        {
+            "used": 0,
+            "rejected": 0,
+            "fallback": 0,
+            "dumps": 0,
+            "screenshots": 0,
+            "retries": 0,
+            "estimated_gain_ms": 0.0,
+        },
+    )
+    bucket[normalized] = int(bucket.get(normalized) or 0) + 1
+    if fallback_used and normalized != "fallback":
+        bucket["fallback"] = int(bucket.get("fallback") or 0) + 1
+    bucket["dumps"] = int(bucket.get("dumps") or 0) + max(0, int(dumps))
+    bucket["screenshots"] = int(bucket.get("screenshots") or 0) + max(
+        0, int(screenshots)
+    )
+    bucket["retries"] = int(bucket.get("retries") or 0) + max(0, int(retries))
+    bucket["estimated_gain_ms"] = round(
+        float(bucket.get("estimated_gain_ms") or 0.0)
+        + max(0.0, float(estimated_gain_ms or 0.0)),
+        2,
+    )
+    log(
+        "info",
+        "follow_60s_optimization_status",
+        feature=str(feature),
+        status=normalized,
+        proof_age_ms=None if age_ms is None else round(float(age_ms), 2),
+        rejection_reason=str(reason or "") if normalized != "used" else "",
+        fallback_used=bool(fallback_used),
+        dumps=max(0, int(dumps)),
+        screenshots=max(0, int(screenshots)),
+        retries=max(0, int(retries)),
+        estimated_gain_ms=round(max(0.0, float(estimated_gain_ms or 0.0)), 2),
+    )
 
 
 def safe_bounds(
@@ -315,5 +382,8 @@ def stats() -> dict[str, Any]:
         "enabled": _RUNTIME.enabled,
         "ui_generation": _RUNTIME.ui_generation,
         "proof_counts": {key: dict(value) for key, value in _RUNTIME.proof_stats.items()},
+        "optimization_counts": {
+            key: dict(value) for key, value in _RUNTIME.optimization_stats.items()
+        },
         "live_proof_count": len(_RUNTIME.proofs),
     }

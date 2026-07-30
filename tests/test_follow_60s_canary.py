@@ -109,6 +109,82 @@ class Follow60sCanaryRuntimeTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(reason, "bounds_hit_region_unsafe")
 
+    def test_metadata_mismatch_rejects_fresh_proof(self) -> None:
+        self._configure_loriele()
+        canary.stash(
+            "opening_follow_composite",
+            subject_username="ct",
+            target_username="candidate",
+            package="com.instagram.android",
+            activity="",
+            surface="candidate_profile_follow_ready",
+            detection_source="composite",
+            ttl_ms=3500.0,
+            metadata={"navigation_token": "generation-1"},
+        )
+        proof, _, reason = canary.consume(
+            "opening_follow_composite",
+            subject_username="ct",
+            target_username="candidate",
+            package="com.instagram.android",
+            surface="candidate_profile_follow_ready",
+            metadata_equals={"navigation_token": "generation-2"},
+        )
+        self.assertIsNone(proof)
+        self.assertEqual(reason, "metadata_navigation_token_mismatch")
+
+    def test_optimization_outcomes_are_aggregated_separately(self) -> None:
+        self._configure_loriele()
+        canary.record_outcome(
+            "mute_known_depth",
+            "used",
+            estimated_gain_ms=1400.0,
+        )
+        canary.record_outcome(
+            "mute_known_depth",
+            "fallback",
+            reason="proof_missing",
+            fallback_used=True,
+            dumps=1,
+        )
+        stats = canary.stats()["optimization_counts"]["mute_known_depth"]
+        self.assertEqual(stats["used"], 1)
+        self.assertEqual(stats["fallback"], 1)
+        self.assertEqual(stats["dumps"], 1)
+        self.assertEqual(stats["estimated_gain_ms"], 1400.0)
+
+    def test_opening_composite_proof_contains_public_identity_and_cta(self) -> None:
+        self._configure_loriele()
+        proof_dict = nav.build_pre_follow_observation_proof(
+            follower_username="candidate",
+            source_profile_username="ct_source",
+            visual_candidate_id="vc-1",
+            action_bar_title="candidate",
+            navigation_state="CANDIDATE_PROFILE",
+            navigation_confidence=0.95,
+            follow_header_state="follow",
+            private_probe_payload={
+                "private_profile_detected": False,
+                "detection_method": "fresh_xml_no_private_markers",
+                "probe_ms": 120.0,
+            },
+            navigation_token="generation-1",
+        )
+        self.assertEqual(proof_dict["follow_header_state"], "follow")
+        proof, _, reason = canary.consume(
+            "opening_follow_composite",
+            subject_username="ct_source",
+            target_username="candidate",
+            package="com.instagram.android",
+            surface="candidate_profile_follow_ready",
+            metadata_equals={
+                "visual_candidate_id": "vc-1",
+                "navigation_token": "generation-1",
+            },
+        )
+        self.assertIsNotNone(proof)
+        self.assertEqual(reason, "")
+
 
 class Follow60sReturnHandoffTest(unittest.TestCase):
     def test_exact_candidate_proof_sends_one_back_then_keeps_exact_ct_gate(self) -> None:
@@ -150,6 +226,51 @@ class Follow60sReturnHandoffTest(unittest.TestCase):
         device.press.assert_called_once_with("back")
         detect.assert_called_once()
         exact_ct.assert_called_once()
+
+
+class Follow60sMuteKnownDepthTest(unittest.TestCase):
+    def tearDown(self) -> None:
+        canary.configure(
+            account_id="other",
+            account_username="other",
+            run_id="reset",
+            package="com.instagram.android",
+            resume_policy=None,
+        )
+
+    def test_following_options_depth_is_reused_before_final_profile_proof(self) -> None:
+        canary.configure(
+            account_id=canary.LORIELE_ACCOUNT_ID,
+            account_username="lorielebras_autom",
+            run_id="run-1",
+            package="com.instagram.android",
+            resume_policy=None,
+        )
+        device = MagicMock()
+        following_options = {
+            "reason": "following_options_still_visible",
+            "following_options_marker_visible": True,
+            "toggles_visible": False,
+        }
+        profile = {
+            "reason": "sheet_absent_profile_visible",
+            "profile_marker_visible": True,
+        }
+        with patch.object(
+            nav,
+            "_mute_engine_v2_fast_sheet_closed_profile_proof",
+            side_effect=[(False, following_options), (True, profile)],
+        ), patch.object(nav.time, "sleep", return_value=None), patch.object(nav, "log"):
+            ok, _ = nav._mute_engine_v2_dismiss_mute_sheets_level_aware(
+                device,
+                visual_candidate_id="vc-1",
+                source_profile_username="ct_source",
+                confirmed_sheet_level="mute_toggles",
+            )
+        self.assertTrue(ok)
+        self.assertEqual(device.press.call_count, 2)
+        stats = canary.stats()["optimization_counts"]["mute_known_depth"]
+        self.assertEqual(stats["used"], 1)
 
 
 if __name__ == "__main__":

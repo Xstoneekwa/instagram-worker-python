@@ -12181,6 +12181,18 @@ def _run_followers_list_engine_session(
                 det_xml_last_for_bypass = det
                 followers_xml_detect_skipped_this_iter = True
                 _snapshot_reuse_used = True
+                if _canary_post_return_reuse and not _initial_snapshot_reuse:
+                    try:
+                        from follow_60s_canary import record_outcome as _record_follow_60s_outcome
+
+                        _record_follow_60s_outcome(
+                            "post_return_snapshot_reuse",
+                            "used",
+                            age_ms=_snapshot_reuse_age_ms,
+                            estimated_gain_ms=1800.0,
+                        )
+                    except Exception:
+                        pass
                 open_detection_method = str(
                     det.get("open_detection_method") or open_detection_method or ""
                 )
@@ -12224,6 +12236,19 @@ def _run_followers_list_engine_session(
                     duration_ms=round((time.perf_counter() - _snapshot_reuse_t0) * 1000.0, 2),
                 )
             else:
+                if _canary_post_return_reuse_reason != "canary_disabled":
+                    try:
+                        from follow_60s_canary import record_outcome as _record_follow_60s_outcome
+
+                        _record_follow_60s_outcome(
+                            "post_return_snapshot_reuse",
+                            "fallback",
+                            age_ms=_snapshot_reuse_age_ms,
+                            reason=_canary_post_return_reuse_reason,
+                            fallback_used=True,
+                        )
+                    except Exception:
+                        pass
                 log(
                     "info",
                     "candidate_selection_snapshot_reuse_skipped",

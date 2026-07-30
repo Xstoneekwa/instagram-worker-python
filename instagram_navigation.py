@@ -10179,6 +10179,12 @@ def perform_follow_safe(
             d.click(tap_cx, tap_cy)
         else:
             btn.click()
+        try:
+            from follow_60s_canary import invalidate as _invalidate_follow_60s_proofs
+
+            _invalidate_follow_60s_proofs("planned_follow_tap")
+        except Exception:
+            pass
     except Exception as e:
         _record(
             "follow_verify_failed",
@@ -17573,7 +17579,7 @@ def _stash_post_mute_sheet_closed_proof(
                 activity=str(context.get("activity") or ""),
                 surface="candidate_profile_post_mute",
                 detection_source="post_mute_exact_action_bar_and_sheet_closed",
-                ttl_ms=3000.0,
+                ttl_ms=1200.0,
                 metadata={
                     "visual_candidate_id": str(visual_candidate_id or "").strip(),
                     "action_bar_title": ab,
@@ -17647,6 +17653,7 @@ def _validate_post_mute_sheet_closed_proof(
         from follow_60s_canary import (
             consume as _consume_follow_60s_proof,
             enabled as _follow_60s_canary_enabled,
+            record_outcome as _record_follow_60s_outcome,
         )
 
         if _follow_60s_canary_enabled("mute_like_handoff"):
@@ -17660,7 +17667,20 @@ def _validate_post_mute_sheet_closed_proof(
                 surface="candidate_profile_post_mute",
             )
             if central is None:
+                _record_follow_60s_outcome(
+                    "mute_like_handoff",
+                    "fallback",
+                    age_ms=central_age_ms,
+                    reason=central_reject,
+                    fallback_used=True,
+                )
                 return False, {}, central_age_ms, central_reject
+            _record_follow_60s_outcome(
+                "mute_like_handoff",
+                "used",
+                age_ms=central_age_ms,
+                estimated_gain_ms=3000.0,
+            )
     except Exception as exc:
         return False, {}, 0.0, f"central_proof_error:{type(exc).__name__}"
     stash = _post_mute_sheet_closed_proof_stash
@@ -23437,6 +23457,21 @@ def _visual_detect_post_viewer_opened_after_tap(
     if post_follow_fast:
         like_a2, reason_a2, a2_sigs, guard_res = _run_a2()
         if like_a2:
+            try:
+                from follow_60s_canary import (
+                    enabled as _follow_60s_canary_enabled,
+                    record_outcome as _record_follow_60s_outcome,
+                )
+
+                if _follow_60s_canary_enabled("viewer_a2_only"):
+                    _record_follow_60s_outcome(
+                        "viewer_a2_only",
+                        "used",
+                        age_ms=a2_elapsed_ms,
+                        estimated_gain_ms=1200.0,
+                    )
+            except Exception:
+                pass
             out_a2 = _a2_success_out(reason_a2, a2_sigs, guard_res)
             _log_post_follow_fast_strategy(
                 final_strategy="a2",
@@ -23444,6 +23479,22 @@ def _visual_detect_post_viewer_opened_after_tap(
                 snapshot_reused=bool(out_a2.get("post_open_snapshot_valid")),
             )
             return out_a2
+        try:
+            from follow_60s_canary import (
+                enabled as _follow_60s_canary_enabled,
+                record_outcome as _record_follow_60s_outcome,
+            )
+
+            if _follow_60s_canary_enabled("viewer_a2_only"):
+                _record_follow_60s_outcome(
+                    "viewer_a2_only",
+                    "fallback",
+                    age_ms=a2_elapsed_ms,
+                    reason=reason_a2 or guard_res or "a2_not_confirmed",
+                    fallback_used=True,
+                )
+        except Exception:
+            pass
         like_a1, reason_a1, _a1_sigs = _run_a1()
         if like_a1:
             out_a1 = _detect_success_out(
@@ -42433,6 +42484,34 @@ def _mute_engine_v2_dismiss_mute_sheets_level_aware(
     """Dismiss mute toggles sheet then Following options sheet if still open."""
     t0 = time.perf_counter()
     try:
+        from follow_60s_canary import enabled as _follow_60s_canary_enabled
+
+        canary_known_depth = _follow_60s_canary_enabled("mute_known_depth")
+    except Exception:
+        canary_known_depth = False
+
+    def _record_known_depth(
+        status: str,
+        *,
+        reason: str = "",
+        fallback_used: bool = False,
+        estimated_gain_ms: float = 0.0,
+    ) -> None:
+        if not canary_known_depth:
+            return
+        try:
+            from follow_60s_canary import record_outcome as _record_follow_60s_outcome
+
+            _record_follow_60s_outcome(
+                "mute_known_depth",
+                status,
+                reason=reason,
+                fallback_used=fallback_used,
+                estimated_gain_ms=estimated_gain_ms,
+            )
+        except Exception:
+            pass
+    try:
         log(
             "info",
             "mute_sheet_dismiss_started",
@@ -42548,6 +42627,11 @@ def _mute_engine_v2_dismiss_mute_sheets_level_aware(
         fast_ok, fast_meta = _mute_engine_v2_fast_sheet_closed_profile_proof(d)
         if fast_ok:
             ms = round((time.perf_counter() - t0) * 1000.0, 2)
+            _record_known_depth(
+                "used",
+                reason="single_back_profile_proven",
+                estimated_gain_ms=800.0,
+            )
             try:
                 log(
                     "info",
@@ -42634,6 +42718,11 @@ def _mute_engine_v2_dismiss_mute_sheets_level_aware(
             except Exception:
                 pass
         else:
+            _record_known_depth(
+                "rejected",
+                reason=str(fast_meta.get("reason") or "known_depth_not_proven"),
+                fallback_used=True,
+            )
             t_level2 = time.perf_counter()
             try:
                 log(
@@ -42716,6 +42805,12 @@ def _mute_engine_v2_dismiss_mute_sheets_level_aware(
         fast_ok_after_second, fast_meta_after_second = _mute_engine_v2_fast_sheet_closed_profile_proof(d)
         if fast_ok_after_second:
             ms = round((time.perf_counter() - t0) * 1000.0, 2)
+            if reused_following_options_after_first_back:
+                _record_known_depth(
+                    "used",
+                    reason="following_options_depth_reused_then_profile_proven",
+                    estimated_gain_ms=1400.0,
+                )
             try:
                 log(
                     "info",
@@ -42773,6 +42868,11 @@ def _mute_engine_v2_dismiss_mute_sheets_level_aware(
             return True, ms
         if reused_following_options_after_first_back:
             ms = round((time.perf_counter() - t0) * 1000.0, 2)
+            _record_known_depth(
+                "fallback",
+                reason="final_profile_proof_absent_after_known_depth",
+                fallback_used=True,
+            )
             try:
                 log(
                     "warning",
@@ -47296,6 +47396,23 @@ def run_post_follow_post_likes_phase(
                     if detected_single
                     else "single_capture_multisignal_not_concordant",
                 )
+                try:
+                    from follow_60s_canary import record_outcome as _record_follow_60s_outcome
+
+                    _record_follow_60s_outcome(
+                        "single_capture_no_posts",
+                        "used" if detected_single else "fallback",
+                        reason=""
+                        if detected_single
+                        else "single_capture_multisignal_not_concordant",
+                        fallback_used=not detected_single,
+                        dumps=1,
+                        screenshots=screenshot_count,
+                        retries=0,
+                        estimated_gain_ms=2200.0 if detected_single else 0.0,
+                    )
+                except Exception:
+                    pass
                 return {
                     "no_posts_detected": detected_single,
                     "detection_method": "single_fresh_capture_multisignal_canary",
@@ -48636,11 +48753,28 @@ def run_post_follow_post_likes_phase(
         gps = grid_out.get("grid_probe_source")
         gpss = grid_out.get("grid_probe_screenshot_path")
         direct_cell = grid_out.get("direct_post_cell_under_suggested")
+        if not isinstance(direct_cell, dict):
+            try:
+                from follow_60s_canary import (
+                    enabled as _follow_60s_canary_enabled,
+                    record_outcome as _record_follow_60s_outcome,
+                )
+
+                if _follow_60s_canary_enabled("like_fresh_cell_bounds"):
+                    _record_follow_60s_outcome(
+                        "like_fresh_cell_bounds",
+                        "fallback",
+                        reason="fresh_direct_post_cell_missing",
+                        fallback_used=True,
+                    )
+            except Exception:
+                pass
         if isinstance(direct_cell, dict):
             try:
                 from follow_60s_canary import (
                     consume as _consume_follow_60s_proof,
                     enabled as _follow_60s_canary_enabled,
+                    record_outcome as _record_follow_60s_outcome,
                     stash as _stash_follow_60s_proof,
                 )
 
@@ -48685,6 +48819,13 @@ def run_post_follow_post_likes_phase(
                     )
                     if _cell_proof is None:
                         direct_cell = None
+                        _record_follow_60s_outcome(
+                            "like_fresh_cell_bounds",
+                            "fallback",
+                            age_ms=_cell_age_ms,
+                            reason=_cell_reject,
+                            fallback_used=True,
+                        )
                         log(
                             "warning",
                             "follow_60s_like_cell_proof_fallback_golden",
@@ -48694,6 +48835,13 @@ def run_post_follow_post_likes_phase(
                             rejection_reason=_cell_reject,
                             fallback_used=True,
                             fallback="visual_open_recent_post_from_profile",
+                        )
+                    else:
+                        _record_follow_60s_outcome(
+                            "like_fresh_cell_bounds",
+                            "used",
+                            age_ms=_cell_age_ms,
+                            estimated_gain_ms=6500.0,
                         )
             except Exception as _cell_proof_exc:
                 direct_cell = None
@@ -49411,7 +49559,7 @@ def run_post_follow_post_likes_phase(
                             ),
                             surface="candidate_profile_after_like",
                             detection_source="exact_action_bar_after_like_return",
-                            ttl_ms=1800.0,
+                            ttl_ms=1200.0,
                             metadata={
                                 "visual_candidate_id": vcid,
                                 "return_profile_fast_confirmed": bool(
@@ -50639,6 +50787,7 @@ def run_visual_candidate_post_follow_phase(
             from follow_60s_canary import (
                 consume as _consume_follow_60s_proof,
                 enabled as _follow_60s_canary_enabled,
+                record_outcome as _record_follow_60s_outcome,
             )
 
             if _follow_60s_canary_enabled("return_candidate_handoff"):
@@ -50654,6 +50803,13 @@ def run_visual_candidate_post_follow_phase(
                 )
                 immediate_candidate_back_proof = _ret_proof is not None
                 if _ret_proof is None:
+                    _record_follow_60s_outcome(
+                        "return_candidate_handoff",
+                        "fallback",
+                        age_ms=_ret_proof_age,
+                        reason=_ret_proof_reject,
+                        fallback_used=True,
+                    )
                     log(
                         "info",
                         "follow_60s_return_candidate_handoff_rejected",
@@ -50663,6 +50819,13 @@ def run_visual_candidate_post_follow_phase(
                         proof_age_ms=round(_ret_proof_age, 2),
                         rejection_reason=_ret_proof_reject,
                         fallback_used=True,
+                    )
+                else:
+                    _record_follow_60s_outcome(
+                        "return_candidate_handoff",
+                        "used",
+                        age_ms=_ret_proof_age,
+                        estimated_gain_ms=7500.0,
                     )
         except Exception as _ret_consume_exc:
             immediate_candidate_back_proof = False
@@ -51363,7 +51526,7 @@ def build_pre_follow_observation_proof(
 ) -> dict[str, Any]:
     """Fresh, non-authoritative profile evidence reusable before the terminal selector."""
     header_state = str(follow_header_state or "")
-    return {
+    proof = {
         "kind": _PRE_FOLLOW_OBSERVATION_PROOF_KIND,
         "follower_username": str(follower_username or "").strip().lstrip("@"),
         "source_profile_username": str(source_profile_username or "").strip(),
@@ -51381,6 +51544,54 @@ def build_pre_follow_observation_proof(
             float(captured_at_mono) if captured_at_mono is not None else time.monotonic()
         ),
     }
+    try:
+        from follow_60s_canary import (
+            enabled as _follow_60s_canary_enabled,
+            record_outcome as _record_follow_60s_outcome,
+            runtime_context as _follow_60s_runtime_context,
+            stash as _stash_follow_60s_proof,
+        )
+
+        if _follow_60s_canary_enabled("opening_follow_composite"):
+            private_payload = dict(private_probe_payload or {})
+            strong_public = bool(
+                str(navigation_state or "") == "CANDIDATE_PROFILE"
+                and _norm_follow_username(action_bar_title)
+                == _norm_follow_username(follower_username)
+                and header_state == "follow"
+                and _is_reusable_prior_private_probe(private_payload)
+                and not bool(private_payload.get("private_profile_detected"))
+            )
+            if strong_public:
+                runtime = _follow_60s_runtime_context()
+                _stash_follow_60s_proof(
+                    "opening_follow_composite",
+                    subject_username=source_profile_username,
+                    target_username=follower_username,
+                    package=str(runtime.get("package") or ""),
+                    activity="",
+                    surface="candidate_profile_follow_ready",
+                    detection_source="exact_identity_public_profile_follow_cta",
+                    ttl_ms=3500.0,
+                    metadata={
+                        "visual_candidate_id": str(visual_candidate_id or ""),
+                        "navigation_token": str(navigation_token or ""),
+                        "private_detection_method": str(
+                            private_payload.get("detection_method") or ""
+                        ),
+                    },
+                )
+            else:
+                _record_follow_60s_outcome(
+                    "opening_follow_composite",
+                    "rejected",
+                    reason="composite_public_identity_follow_signals_incomplete",
+                    fallback_used=True,
+                )
+    except Exception:
+        # The existing complete pre-Follow gate is the authoritative fallback.
+        pass
+    return proof
 
 
 def _pre_follow_observation_proof_reuse_block_reason(
@@ -51751,6 +51962,55 @@ def visual_candidate_follow_pre_follow_screen_guard(
         source_profile_username=src_raw,
         navigation_token=navigation_token,
     )
+    try:
+        from follow_60s_canary import (
+            consume as _consume_follow_60s_proof,
+            enabled as _follow_60s_canary_enabled,
+            record_outcome as _record_follow_60s_outcome,
+            runtime_context as _follow_60s_runtime_context,
+        )
+
+        if _follow_60s_canary_enabled("opening_follow_composite"):
+            _runtime = _follow_60s_runtime_context()
+            _composite, _composite_age_ms, _composite_reject = (
+                _consume_follow_60s_proof(
+                    "opening_follow_composite",
+                    subject_username=src_raw,
+                    target_username=follower_hint,
+                    package=str(_runtime.get("package") or exp_pkg),
+                    surface="candidate_profile_follow_ready",
+                    metadata_equals={
+                        "visual_candidate_id": vcid,
+                        "navigation_token": navigation_token,
+                    },
+                )
+            )
+            if _composite is not None:
+                proof_reason = ""
+                _record_follow_60s_outcome(
+                    "opening_follow_composite",
+                    "used",
+                    age_ms=_composite_age_ms,
+                    estimated_gain_ms=2600.0,
+                )
+            else:
+                _record_follow_60s_outcome(
+                    "opening_follow_composite",
+                    "fallback",
+                    age_ms=_composite_age_ms,
+                    reason=_composite_reject,
+                    fallback_used=True,
+                )
+    except Exception as _composite_exc:
+        try:
+            _record_follow_60s_outcome(
+                "opening_follow_composite",
+                "fallback",
+                reason=f"proof_contract_error:{type(_composite_exc).__name__}",
+                fallback_used=True,
+            )
+        except Exception:
+            pass
     if not proof_reason and an != fn:
         proof_reason = "action_bar_username_mismatch"
     if not proof_reason:
