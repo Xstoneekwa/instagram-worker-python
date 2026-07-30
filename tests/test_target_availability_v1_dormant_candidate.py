@@ -7,7 +7,7 @@ from target_availability_writer import TargetAvailabilityFeatureFlags
 
 
 ACCOUNT_ID = "22222222-2222-4222-8222-222222222222"
-CURRENT_PRODUCTION_BASE = "cfaea18b2f6b6eaef18de7e5dac855f9bf292d0d"
+CURRENT_PRODUCTION_BASE = "fecf91dfe8e60535810cd99ad9c10d370022ab16"
 
 
 class TargetAvailabilityV1DormantCandidateTests(unittest.TestCase):
