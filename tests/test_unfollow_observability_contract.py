@@ -28,6 +28,23 @@ class UnfollowObservabilityContractTest(unittest.TestCase):
         self.assertIn('"unfollow_candidate_funnel"', source)
         self.assertIn('"unfollow_run_reconciliation"', source)
         self.assertIn("verified == persisted", source)
+        self.assertIn("persisted_outcomes_total=persisted_outcomes", source)
+
+    def test_failed_verification_is_an_audit_outcome_not_a_persisted_action(self) -> None:
+        delta = orchestrator.unfollow_persistence_count_delta(
+            verify_ok=False,
+            persist_ok=True,
+        )
+        self.assertEqual(delta["verified_persisted"], 0)
+        self.assertEqual(delta["outcome_persisted"], 1)
+
+    def test_verified_persisted_unfollow_counts_as_action_and_outcome(self) -> None:
+        delta = orchestrator.unfollow_persistence_count_delta(
+            verify_ok=True,
+            persist_ok=True,
+        )
+        self.assertEqual(delta["verified_persisted"], 1)
+        self.assertEqual(delta["outcome_persisted"], 1)
 
     def test_summary_exposes_partial_ui_coverage_with_canonical_resume_decision(self) -> None:
         source = inspect.getsource(orchestrator._run_real_unfollow_multi_loop)

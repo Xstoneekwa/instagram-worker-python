@@ -611,6 +611,7 @@ def _base_session_summary(
         "unfollow_actions_verified": 0,
         "unfollow_actions_failed": 0,
         "unfollow_results_persisted_count": 0,
+        "unfollow_outcomes_persisted_count": 0,
         "unfollow_action_verify_ok": False,
         "unfollow_persistence_ok": False,
         "unfollow_observed_success_count": 0,
@@ -1213,6 +1214,23 @@ def unfollow_quota_reached_after_persist(
     )
 
 
+def unfollow_persistence_count_delta(
+    *,
+    verify_ok: bool,
+    persist_ok: bool,
+) -> dict[str, int]:
+    """Separate persisted business actions from persisted audit outcomes.
+
+    A failed UI verification is still written as an audit outcome, but it must
+    never inflate the verified-and-persisted Unfollow counter used by the
+    checkpoint, reconciliation, quota, or BotApp.
+    """
+    return {
+        "verified_persisted": 1 if verify_ok and persist_ok else 0,
+        "outcome_persisted": 1 if persist_ok else 0,
+    }
+
+
 def _log_unfollow_success_observed(
     *,
     account_id: str,
@@ -1261,6 +1279,7 @@ def _run_real_unfollow_multi_loop(
     sent = 0
     failed = 0
     persisted = 0
+    persisted_outcomes = 0
     scroll_passes_used = 0
     scroll_stop_reason = ""
     stop_reason = ""
@@ -1625,6 +1644,7 @@ def _run_real_unfollow_multi_loop(
             "unfollow_actions_verified": verified,
             "unfollow_actions_failed": failed,
             "unfollow_results_persisted_count": persisted,
+            "unfollow_outcomes_persisted_count": persisted_outcomes,
             "attempted": sent,
             "verified": verified,
             "persisted": persisted,
@@ -1684,6 +1704,11 @@ def _run_real_unfollow_multi_loop(
             attempted_total=sent,
             verified_total=verified,
             persisted_total=persisted,
+            persisted_outcomes_total=persisted_outcomes,
+            failed_outcomes_persisted_total=max(
+                0,
+                persisted_outcomes - persisted,
+            ),
             remaining_eligible=global_remaining_count,
             planned_remaining=remaining_planned_count,
             query_limit=int(base_summary.get("query_limit") or 0),
@@ -1713,6 +1738,7 @@ def _run_real_unfollow_multi_loop(
             run_id=run_id,
             worker_verified=verified,
             persisted_actions=persisted,
+            persisted_outcomes=persisted_outcomes,
             summary_actions=int(summary.get("unfollow_results_persisted_count") or 0),
             botapp_displayed_actions=None,
             reconciliation_ok=(verified == persisted),
@@ -2763,8 +2789,13 @@ def _run_real_unfollow_multi_loop(
             failure_reason=str(verify_out.get("failure_reason") or tap_out.get("failure_reason") or ""),
         )
         persist_ok = bool(persist_out.get("ok"))
+        persistence_delta = unfollow_persistence_count_delta(
+            verify_ok=verify_ok,
+            persist_ok=persist_ok,
+        )
+        persisted += int(persistence_delta["verified_persisted"])
+        persisted_outcomes += int(persistence_delta["outcome_persisted"])
         if persist_ok:
-            persisted += 1
             if verify_ok and coverage_tracker is not None:
                 coverage_tracker.mark_action_persisted(target_key)
             if verify_ok:
@@ -3651,6 +3682,10 @@ def run_unfollow_session(
         failure_reason=str(verify_out.get("failure_reason") or tap_out.get("failure_reason") or ""),
     )
     persist_ok = bool(persist_out.get("ok"))
+    persistence_delta = unfollow_persistence_count_delta(
+        verify_ok=verify_ok,
+        persist_ok=persist_ok,
+    )
     unfollow_observed_successes: list[dict[str, Any]] = []
     if persist_ok:
         log(
@@ -3705,7 +3740,8 @@ def run_unfollow_session(
         "unfollow_actions_sent": 1,
         "unfollow_actions_verified": 1 if verify_ok else 0,
         "unfollow_actions_failed": 0 if verify_ok else 1,
-        "unfollow_results_persisted_count": 1 if persist_ok else 0,
+        "unfollow_results_persisted_count": persistence_delta["verified_persisted"],
+        "unfollow_outcomes_persisted_count": persistence_delta["outcome_persisted"],
         "unfollow_action_verify_ok": verify_ok,
         "unfollow_persistence_ok": persist_ok,
         "unfollow_observed_success_count": len(unfollow_observed_successes),

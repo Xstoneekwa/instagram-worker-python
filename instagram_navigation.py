@@ -4490,6 +4490,7 @@ def tap_account_result(
     follow_ct_search_context: bool = False,
     outreach_search_context: bool = False,
     preverified_exact_row_bounds: dict[str, int] | None = None,
+    preverified_exact_screen_bounds: dict[str, int] | None = None,
     preverified_exact_result_at_monotonic: float | None = None,
     preverified_exact_result_method: str = "",
 ) -> bool:
@@ -4498,34 +4499,74 @@ def tap_account_result(
     outreach_active = bool(outreach_search_context)
     preverified_bounds: dict[str, int] = {}
     preverified_age_ms: float | None = None
+    preverified_rejection_reason = ""
     try:
         raw_bounds = dict(preverified_exact_row_bounds or {})
         preverified_bounds = {
             key: int(raw_bounds.get(key, 0))
             for key in ("left", "top", "right", "bottom")
         }
-        screen_w, screen_h = d.window_size()
-        center_x = (preverified_bounds["left"] + preverified_bounds["right"]) // 2
-        center_y = (preverified_bounds["top"] + preverified_bounds["bottom"]) // 2
+        # Freeze freshness before any device RPC.  The natural J Automatise
+        # run showed window_size() consuming the last milliseconds of the
+        # 1.25 s budget and discarding otherwise valid two-poll evidence.
         observed_at = float(preverified_exact_result_at_monotonic or 0.0)
         preverified_age_ms = (time.monotonic() - observed_at) * 1000.0
-        bounds_safe = bool(
+        raw_screen_bounds = dict(preverified_exact_screen_bounds or {})
+        screen_w = int(raw_screen_bounds.get("right") or 0) - int(
+            raw_screen_bounds.get("left") or 0
+        )
+        screen_h = int(raw_screen_bounds.get("bottom") or 0) - int(
+            raw_screen_bounds.get("top") or 0
+        )
+        if screen_w <= 0 or screen_h <= 0:
+            screen_w, screen_h = d.window_size()
+        center_x = (preverified_bounds["left"] + preverified_bounds["right"]) // 2
+        center_y = (preverified_bounds["top"] + preverified_bounds["bottom"]) // 2
+        trusted_method = preverified_exact_result_method in {
+            "unfollow_direct_stable_exact_xml",
+            "unfollow_direct_stable_exact_accessibility_live",
+        }
+        geometry_valid = bool(
             preverified_bounds["right"] > preverified_bounds["left"]
             and preverified_bounds["bottom"] > preverified_bounds["top"]
             and 0 <= preverified_bounds["left"] < preverified_bounds["right"] <= int(screen_w)
             and 0 <= preverified_bounds["top"] < preverified_bounds["bottom"] <= int(screen_h)
-            and center_x <= int(screen_w * 0.72)
+        )
+        safe_hit_region = bool(
+            center_x <= int(screen_w * 0.72)
             and center_y <= int(screen_h * 0.90)
-            and 0.0 <= preverified_age_ms <= 1_250.0
-            and preverified_exact_result_method in {
-                "unfollow_direct_stable_exact_xml",
-                "unfollow_direct_stable_exact_accessibility_live",
-            }
+        )
+        fresh_evidence = bool(0.0 <= preverified_age_ms <= 1_250.0)
+        bounds_safe = bool(
+            geometry_valid and safe_hit_region and fresh_evidence and trusted_method
         )
         if not bounds_safe:
+            preverified_rejection_reason = (
+                "preverified_exact_method_untrusted"
+                if not trusted_method
+                else "preverified_exact_bounds_invalid"
+                if not geometry_valid
+                else "preverified_exact_hit_region_unsafe"
+                if not safe_hit_region
+                else "preverified_exact_evidence_expired"
+            )
             preverified_bounds = {}
-    except Exception:
+    except Exception as exc:
+        preverified_rejection_reason = f"preverified_exact_validation_failed:{type(exc).__name__}"
         preverified_bounds = {}
+    if preverified_exact_row_bounds and not preverified_bounds:
+        log(
+            "warning",
+            "unfollow_direct_preverified_exact_row_rejected",
+            username=username,
+            reason=preverified_rejection_reason or "preverified_exact_rejected",
+            evidence_age_ms=(
+                round(float(preverified_age_ms), 2)
+                if preverified_age_ms is not None
+                else None
+            ),
+            verification_method=preverified_exact_result_method,
+        )
     row_detect_trace_state: dict[str, Any] = {"first_raw_seen": False}
     row_detect_poll_index = 0
     try:

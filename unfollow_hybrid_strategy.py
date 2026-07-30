@@ -24,6 +24,7 @@ SEARCH_RESULT_POLL_INTERVAL_S = 0.35
 SEARCH_LOCAL_REFRESH_RETRY_LIMIT = 1
 SEARCH_RESULT_STABLE_EXACT_POLLS = 2
 SEARCH_RESULT_STABLE_NO_RESULTS_POLLS = 2
+SEARCH_ROW_TAP_RETRY_LIMIT = 1
 
 SEARCH_EXACT_RESULT_VISIBLE = "SEARCH_EXACT_RESULT_VISIBLE"
 SEARCH_NO_RESULTS_CONFIRMED = "SEARCH_NO_RESULTS_CONFIRMED"
@@ -157,6 +158,90 @@ def _clickable_ancestor_bounds(
     return fallback
 
 
+def _bounds_signature(bounds: dict[str, int]) -> str:
+    return ":".join(
+        str(int(bounds.get(key) or 0))
+        for key in ("left", "top", "right", "bottom")
+    )
+
+
+def _bounds_compatible(
+    previous: dict[str, int],
+    current: dict[str, int],
+) -> bool:
+    """Accept small layout motion while keeping distinct result rows separate."""
+    if not previous or not current:
+        return False
+    previous_width = int(previous["right"]) - int(previous["left"])
+    current_width = int(current["right"]) - int(current["left"])
+    previous_height = int(previous["bottom"]) - int(previous["top"])
+    current_height = int(current["bottom"]) - int(current["top"])
+    if min(previous_width, current_width, previous_height, current_height) <= 0:
+        return False
+    horizontal_overlap = max(
+        0,
+        min(int(previous["right"]), int(current["right"]))
+        - max(int(previous["left"]), int(current["left"])),
+    )
+    previous_center_y = (int(previous["top"]) + int(previous["bottom"])) / 2.0
+    current_center_y = (int(current["top"]) + int(current["bottom"])) / 2.0
+    max_center_delta = max(24.0, min(72.0, max(previous_height, current_height) * 0.75))
+    return bool(
+        horizontal_overlap >= min(previous_width, current_width) * 0.50
+        and abs(previous_center_y - current_center_y) <= max_center_delta
+    )
+
+
+def _surface_bounds(root: ET.Element) -> dict[str, int]:
+    """Derive the same-snapshot display bounds without another device RPC."""
+    parsed = [
+        bounds
+        for node in root.iter()
+        for bounds in [_parse_bounds(str(node.attrib.get("bounds") or ""))]
+        if bounds
+    ]
+    if not parsed:
+        return {}
+    return {
+        # Android hierarchy coordinates are absolute even when the snapshot
+        # omits status/navigation bar nodes at origin.
+        "left": 0,
+        "top": 0,
+        "right": max(int(bounds["right"]) for bounds in parsed),
+        "bottom": max(int(bounds["bottom"]) for bounds in parsed),
+    }
+
+
+def _logical_exact_result_rows(
+    matches: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Collapse duplicate XML representations of one physical Search row."""
+    logical_rows: list[dict[str, object]] = []
+    for match in matches:
+        bounds = dict(match.get("bounds") or {})
+        if not bounds:
+            continue
+        existing = next(
+            (
+                row
+                for row in logical_rows
+                if _bounds_compatible(dict(row.get("bounds") or {}), bounds)
+            ),
+            None,
+        )
+        if existing is None:
+            logical_rows.append(match)
+            continue
+        # Keep the latest canonical hit target.  Both members are already
+        # exact matches in the same row band, so this does not merge usernames.
+        if bool(match.get("canonical_username_rid")) and not bool(
+            existing.get("canonical_username_rid")
+        ):
+            existing.clear()
+            existing.update(match)
+    return logical_rows
+
+
 def classify_search_surface_xml(
     hierarchy_xml: str,
     expected_username: str,
@@ -217,7 +302,18 @@ def classify_search_surface_xml(
             continue
         bounds = _clickable_ancestor_bounds(node, parent_by_id)
         if bounds:
-            matches.append({"bounds": bounds})
+            resource_id = str(node.attrib.get("resource-id") or "")
+            matches.append(
+                {
+                    "bounds": bounds,
+                    "canonical_username_rid": bool(
+                        re.search(
+                            r"(?:^|[:/])id/row_search_user_username$",
+                            resource_id,
+                        )
+                    ),
+                }
+            )
 
     # Text and accessibility content can duplicate the same row.  Enforce one
     # unique clickable hit target, not one XML label node.
@@ -229,7 +325,7 @@ def classify_search_surface_xml(
             for name in ("left", "top", "right", "bottom")
         )
         by_bounds[key] = match
-    unique_matches = list(by_bounds.values())
+    unique_matches = _logical_exact_result_rows(list(by_bounds.values()))
     if len(unique_matches) == 1:
         bounds = dict(unique_matches[0].get("bounds") or {})
         return {
@@ -242,6 +338,7 @@ def classify_search_surface_xml(
                 f"{bounds.get('right')}:{bounds.get('bottom')}"
             ),
             "query_field_confirmed": True,
+            "screen_bounds": _surface_bounds(root),
         }
     if len(unique_matches) > 1:
         return {
@@ -250,6 +347,7 @@ def classify_search_surface_xml(
             "exact_match_count": len(unique_matches),
             "bounds": {},
             "query_field_confirmed": True,
+            "screen_bounds": _surface_bounds(root),
         }
 
     no_results_markers = {
@@ -357,6 +455,7 @@ def _wait_for_exact_search_result(device: object, expected: str) -> dict[str, ob
     stable_exact_poll_count = 0
     stable_no_results_poll_count = 0
     previous_exact_signature = ""
+    previous_exact_bounds: dict[str, int] = {}
     result_visible_at = ""
     result_visible_monotonic = 0.0
     last_state = SEARCH_RESULTS_LOADING
@@ -386,18 +485,22 @@ def _wait_for_exact_search_result(device: object, expected: str) -> dict[str, ob
         count = int(classification.get("exact_match_count") or 0)
         signature = str(classification.get("signature") or "")
         if state == SEARCH_EXACT_RESULT_VISIBLE and count == 1 and signature:
-            if not result_visible_at:
+            current_bounds = dict(classification.get("bounds") or {})
+            compatible = _bounds_compatible(previous_exact_bounds, current_bounds)
+            if not result_visible_at or (previous_exact_bounds and not compatible):
                 result_visible_at = _utc_now_iso()
                 result_visible_monotonic = time.monotonic()
             stable_exact_poll_count = (
                 stable_exact_poll_count + 1
-                if signature == previous_exact_signature
+                if signature == previous_exact_signature or compatible
                 else 1
             )
             previous_exact_signature = signature
+            previous_exact_bounds = current_bounds
         else:
             stable_exact_poll_count = 0
             previous_exact_signature = ""
+            previous_exact_bounds = {}
         stable_no_results_poll_count = (
             stable_no_results_poll_count + 1
             if state == SEARCH_NO_RESULTS_CONFIRMED
@@ -433,6 +536,7 @@ def _wait_for_exact_search_result(device: object, expected: str) -> dict[str, ob
             state == SEARCH_EXACT_RESULT_VISIBLE
             and stable_exact_poll_count >= SEARCH_RESULT_STABLE_EXACT_POLLS
         ):
+            result_stable_monotonic = time.monotonic()
             return {
                 "ok": True,
                 "status": "exact_result_visible",
@@ -442,9 +546,11 @@ def _wait_for_exact_search_result(device: object, expected: str) -> dict[str, ob
                 "confirmed_surface_count": committed_surface_count,
                 "poll_count": observed_poll_count,
                 "exact_row_bounds": dict(classification.get("bounds") or {}),
+                "screen_bounds": dict(classification.get("screen_bounds") or {}),
                 "result_visible_at": result_visible_at,
                 "result_visible_monotonic": result_visible_monotonic,
                 "result_stable_at": _utc_now_iso(),
+                "result_stable_monotonic": result_stable_monotonic,
                 "stable_exact_poll_count": stable_exact_poll_count,
             }
         if stable_no_results_poll_count >= SEARCH_RESULT_STABLE_NO_RESULTS_POLLS:
@@ -487,6 +593,7 @@ def _live_exact_accessibility_result(
 
     stable_count = 0
     previous_signature = ""
+    previous_bounds: dict[str, int] = {}
     first_visible_at = ""
     first_visible_monotonic = 0.0
     for probe_index in range(1, SEARCH_RESULT_STABLE_EXACT_POLLS + 1):
@@ -517,12 +624,18 @@ def _live_exact_accessibility_result(
             stable_count = 0
             previous_signature = ""
             break
-        signature = ":".join(str(bounds[key]) for key in ("left", "top", "right", "bottom"))
-        if not first_visible_at:
+        signature = _bounds_signature(bounds)
+        compatible = _bounds_compatible(previous_bounds, bounds)
+        if not first_visible_at or (previous_bounds and not compatible):
             first_visible_at = _utc_now_iso()
             first_visible_monotonic = time.monotonic()
-        stable_count = stable_count + 1 if signature == previous_signature else 1
+        stable_count = (
+            stable_count + 1
+            if signature == previous_signature or compatible
+            else 1
+        )
         previous_signature = signature
+        previous_bounds = bounds
         log(
             "info",
             "unfollow_direct_exact_accessibility_probe",
@@ -534,6 +647,7 @@ def _live_exact_accessibility_result(
         if probe_index < SEARCH_RESULT_STABLE_EXACT_POLLS:
             time.sleep(SEARCH_RESULT_POLL_INTERVAL_S)
     if stable_count >= SEARCH_RESULT_STABLE_EXACT_POLLS:
+        result_stable_monotonic = time.monotonic()
         return {
             "ok": True,
             "status": "exact_result_visible",
@@ -546,6 +660,7 @@ def _live_exact_accessibility_result(
             "result_visible_at": first_visible_at,
             "result_visible_monotonic": first_visible_monotonic,
             "result_stable_at": _utc_now_iso(),
+            "result_stable_monotonic": result_stable_monotonic,
             "stable_exact_poll_count": stable_count,
             "exact_result_method": "unfollow_direct_stable_exact_accessibility_live",
         }
@@ -719,27 +834,83 @@ def open_exact_profile_for_unfollow(device: object, username: str) -> dict[str, 
         stable_exact_poll_count=int(search_result.get("stable_exact_poll_count") or 0),
         exact_row_bounds_present=bool(search_result.get("exact_row_bounds")),
     )
+    profile: dict[str, object] | None = None
     row_click_started_at = _utc_now_iso()
     transition_started_at = row_click_started_at
-    if not tap_account_result(
-        device,
-        expected,
-        preverified_exact_row_bounds=dict(search_result.get("exact_row_bounds") or {}),
-        preverified_exact_result_at_monotonic=float(
-            search_result.get("result_visible_monotonic") or 0.0
-        ),
-        preverified_exact_result_method=str(
-            search_result.get("exact_result_method")
-            or "unfollow_direct_stable_exact_xml"
-        ),
-    ):
-        return {
-            "ok": False,
-            "status": "retryable",
-            "reason": "exact_account_row_tap_failed",
-            "exact_match_count": 1,
-            "local_retry_count": local_retry_count,
-        }
+    row_tap_retry_count = 0
+    while True:
+        tap_ok = tap_account_result(
+            device,
+            expected,
+            preverified_exact_row_bounds=dict(
+                search_result.get("exact_row_bounds") or {}
+            ),
+            preverified_exact_screen_bounds=dict(
+                search_result.get("screen_bounds") or {}
+            ),
+            preverified_exact_result_at_monotonic=float(
+                search_result.get("result_stable_monotonic") or 0.0
+            ),
+            preverified_exact_result_method=str(
+                search_result.get("exact_result_method")
+                or "unfollow_direct_stable_exact_xml"
+            ),
+        )
+        # A delayed transition may have completed after tap_account_result's
+        # bounded signal wait.  A reported tap success also needs exact profile
+        # proof: the natural failure returned True even though the Search row
+        # never transitioned.  Only retry while the exact Search surface can
+        # be freshly re-proven.
+        profile = verify_unfollow_target_profile_strict(
+            device,
+            expected_target_username=expected,
+        )
+        if bool(profile.get("ok")):
+            break
+        if row_tap_retry_count >= SEARCH_ROW_TAP_RETRY_LIMIT:
+            return {
+                "ok": False,
+                "status": "ambiguous" if tap_ok else "retryable",
+                "reason": (
+                    str(
+                        profile.get("failure_reason")
+                        or "profile_identity_unconfirmed"
+                    )
+                    if tap_ok
+                    else "search_exact_result_click_failed"
+                ),
+                "exact_match_count": 1,
+                "local_retry_count": local_retry_count,
+                "row_tap_retry_count": row_tap_retry_count,
+            }
+        row_tap_retry_count += 1
+        log(
+            "warning",
+            "unfollow_direct_exact_row_tap_retry_started",
+            username=expected,
+            retry_index=row_tap_retry_count,
+            max_retries=SEARCH_ROW_TAP_RETRY_LIMIT,
+        )
+        refreshed_result = _wait_for_exact_search_result(device, expected)
+        if not bool(refreshed_result.get("ok")):
+            return {
+                "ok": False,
+                "status": "ambiguous" if tap_ok else "retryable",
+                "reason": (
+                    str(
+                        profile.get("failure_reason")
+                        or "profile_identity_unconfirmed"
+                    )
+                    if tap_ok
+                    else "search_exact_result_bounds_stale"
+                ),
+                "exact_match_count": 1,
+                "local_retry_count": local_retry_count,
+                "row_tap_retry_count": row_tap_retry_count,
+                "refresh_reason": str(refreshed_result.get("reason") or ""),
+            }
+        search_result = refreshed_result
+        result_stable_at = str(search_result.get("result_stable_at") or "")
     profile_transition_completed_at = _utc_now_iso()
     log(
         "info",
@@ -751,10 +922,11 @@ def open_exact_profile_for_unfollow(device: object, username: str) -> dict[str, 
         transition_started_at=transition_started_at,
         profile_transition_completed_at=profile_transition_completed_at,
     )
-    profile = verify_unfollow_target_profile_strict(
-        device,
-        expected_target_username=expected,
-    )
+    if profile is None or not bool(profile.get("ok")):
+        profile = verify_unfollow_target_profile_strict(
+            device,
+            expected_target_username=expected,
+        )
     if not bool(profile.get("ok")):
         return {
             "ok": False,
@@ -762,6 +934,7 @@ def open_exact_profile_for_unfollow(device: object, username: str) -> dict[str, 
             "reason": str(profile.get("failure_reason") or "profile_identity_unconfirmed"),
             "exact_match_count": 1,
             "local_retry_count": local_retry_count,
+            "row_tap_retry_count": row_tap_retry_count,
         }
     profile_exact_confirmed_at = _utc_now_iso()
     log(
@@ -778,6 +951,7 @@ def open_exact_profile_for_unfollow(device: object, username: str) -> dict[str, 
         "reason": "exact_username_profile_verified",
         "exact_match_count": 1,
         "local_retry_count": local_retry_count,
+        "row_tap_retry_count": row_tap_retry_count,
         "result_visible_at": str(search_result.get("result_visible_at") or ""),
         "result_stable_at": result_stable_at,
         "row_click_at": row_click_started_at,

@@ -1,3 +1,4 @@
+import inspect
 import unittest
 import time
 from unittest.mock import ANY, patch
@@ -53,7 +54,7 @@ class UnfollowHybridStrategyTests(unittest.TestCase):
                 self.clicks = []
 
             def window_size(self):
-                return 1080, 2400
+                raise AssertionError("same-snapshot bounds must avoid window_size RPC")
 
             def click(self, x, y):
                 self.clicks.append((x, y))
@@ -76,6 +77,12 @@ class UnfollowHybridStrategyTests(unittest.TestCase):
                     "top": 300,
                     "right": 420,
                     "bottom": 380,
+                },
+                preverified_exact_screen_bounds={
+                    "left": 0,
+                    "top": 0,
+                    "right": 1080,
+                    "bottom": 2400,
                 },
                 preverified_exact_result_at_monotonic=time.monotonic(),
                 preverified_exact_result_method="unfollow_direct_stable_exact_xml",
@@ -120,6 +127,51 @@ class UnfollowHybridStrategyTests(unittest.TestCase):
             )
         self.assertTrue(ok)
         self.assertEqual(device.clicks, [(270, 340)])
+
+    def test_expired_preverified_evidence_is_rejected_fail_closed(self) -> None:
+        class Device:
+            def __init__(self) -> None:
+                self.clicks = []
+
+            def click(self, x, y):
+                self.clicks.append((x, y))
+
+        device = Device()
+        with patch.object(
+            nav,
+            "find_real_account_text_element",
+            return_value=None,
+        ), patch.object(nav, "_dump_no_real_account_row_debug"), patch.object(
+            nav.time,
+            "sleep",
+        ), patch.object(nav, "log") as log_mock:
+            ok = nav.tap_account_result(
+                device,
+                "target",
+                preverified_exact_row_bounds={
+                    "left": 120,
+                    "top": 300,
+                    "right": 420,
+                    "bottom": 380,
+                },
+                preverified_exact_screen_bounds={
+                    "left": 0,
+                    "top": 0,
+                    "right": 1080,
+                    "bottom": 2400,
+                },
+                preverified_exact_result_at_monotonic=time.monotonic() - 2.0,
+                preverified_exact_result_method="unfollow_direct_stable_exact_xml",
+            )
+        self.assertFalse(ok)
+        self.assertEqual(device.clicks, [])
+        self.assertTrue(
+            any(
+                call.args[1] == "unfollow_direct_preverified_exact_row_rejected"
+                and call.kwargs.get("reason") == "preverified_exact_evidence_expired"
+                for call in log_mock.call_args_list
+            )
+        )
 
     def test_one_remaining_keeps_progressive_primary_until_exhausted(self) -> None:
         out = choose_hybrid_selection(["one"])
@@ -236,6 +288,44 @@ class UnfollowHybridStrategyTests(unittest.TestCase):
             {"left": 20, "top": 120, "right": 540, "bottom": 220},
         )
 
+    def test_duplicate_xml_labels_for_one_canonical_row_are_not_ambiguous(self) -> None:
+        xml = (
+            '<hierarchy><node class="android.widget.EditText" '
+            'resource-id="com.instagram.android:id/action_bar_search_edit_text" '
+            'text="abbygracephoto.stl" bounds="[0,0][540,90]" />'
+            '<node clickable="true" content-desc="abbygracephoto.stl" '
+            'bounds="[0,120][540,230]">'
+            '<node resource-id="com.instagram.android:id/row_search_user_username" '
+            'text="abbygracephoto.stl" bounds="[110,145][430,205]" />'
+            '<node text="abbygracephoto.stl" bounds="[108,143][432,207]" />'
+            '</node></hierarchy>'
+        )
+        out = classify_search_surface_xml(xml, "abbygracephoto.stl")
+        self.assertEqual(out["state"], SEARCH_EXACT_RESULT_VISIBLE)
+        self.assertEqual(out["exact_match_count"], 1)
+        self.assertEqual(
+            out["bounds"],
+            {"left": 0, "top": 120, "right": 540, "bottom": 230},
+        )
+
+    def test_two_physically_distinct_canonical_rows_remain_fail_closed(self) -> None:
+        xml = (
+            '<hierarchy><node class="android.widget.EditText" '
+            'resource-id="com.instagram.android:id/action_bar_search_edit_text" '
+            'text="target" bounds="[0,0][540,90]" />'
+            '<node clickable="true" bounds="[0,120][540,220]">'
+            '<node resource-id="com.instagram.android:id/row_search_user_username" '
+            'text="target" bounds="[100,140][420,200]" /></node>'
+            '<node clickable="true" bounds="[0,300][540,400]">'
+            '<node resource-id="com.instagram.android:id/row_search_user_username" '
+            'text="target" bounds="[100,320][420,380]" /></node>'
+            '</hierarchy>'
+        )
+        out = classify_search_surface_xml(xml, "target")
+        self.assertEqual(out["state"], SEARCH_SURFACE_UNHEALTHY)
+        self.assertEqual(out["reason"], "multiple_exact_account_rows")
+        self.assertEqual(out["exact_match_count"], 2)
+
     def test_one_exact_among_approximate_results_is_selected(self) -> None:
         xml = _search_xml("faydesdjinns_backup", "faydesdjinns", query="faydesdjinns")
         out = classify_search_surface_xml(xml, "faydesdjinns")
@@ -346,13 +436,14 @@ class UnfollowHybridStrategyTests(unittest.TestCase):
                 "right": 420,
                 "bottom": 380,
             },
+            preverified_exact_screen_bounds={},
             preverified_exact_result_at_monotonic=ANY,
             preverified_exact_result_method=(
                 "unfollow_direct_stable_exact_accessibility_live"
             ),
         )
 
-    def test_stale_xml_never_accepts_one_unstable_live_accessibility_row(self) -> None:
+    def test_live_accessibility_accepts_small_compatible_bounds_shift(self) -> None:
         class Element:
             def __init__(self, left):
                 self.info = {
@@ -373,14 +464,20 @@ class UnfollowHybridStrategyTests(unittest.TestCase):
             "instagram_navigation.type_search", return_value=True
         ), patch(
             "instagram_navigation.find_real_account_text_element",
-            side_effect=[Element(120), Element(140), None, None],
-        ), patch("instagram_navigation.tap_account_result") as tap_mock, patch(
+            side_effect=[Element(120), Element(140)],
+        ), patch(
+            "instagram_navigation.tap_account_result",
+            return_value=True,
+        ) as tap_mock, patch(
+            "unfollow_profile_probe.verify_unfollow_target_profile_strict",
+            return_value={"ok": True},
+        ), patch(
             "unfollow_hybrid_strategy.time.sleep"
         ):
             out = open_exact_profile_for_unfollow(Device(), "target")
-        self.assertFalse(out["ok"])
-        self.assertEqual(out["status"], "search_surface_unhealthy")
-        tap_mock.assert_not_called()
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["status"], "profile_opened")
+        tap_mock.assert_called_once()
 
     def test_direct_search_requires_two_committed_missing_surfaces(self) -> None:
         class Device:
@@ -469,6 +566,12 @@ class UnfollowHybridStrategyTests(unittest.TestCase):
             ANY,
             "target",
             preverified_exact_row_bounds={"left": 0, "top": 100, "right": 500, "bottom": 180},
+            preverified_exact_screen_bounds={
+                "left": 0,
+                "top": 0,
+                "right": 500,
+                "bottom": 180,
+            },
             preverified_exact_result_at_monotonic=ANY,
             preverified_exact_result_method="unfollow_direct_stable_exact_xml",
         )
@@ -505,6 +608,107 @@ class UnfollowHybridStrategyTests(unittest.TestCase):
         self.assertFalse(out["ok"])
         self.assertEqual(out["status"], "ambiguous")
         self.assertEqual(out["reason"], "profile_identity_unconfirmed")
+
+    def test_slightly_moved_exact_bounds_are_stable_and_use_latest_bounds(self) -> None:
+        class Device:
+            def __init__(self) -> None:
+                self.dumps = iter(
+                    [
+                        _search_xml("target"),
+                        _search_xml("target").replace(
+                            'bounds="[0,100][500,180]"',
+                            'bounds="[0,108][500,188]"',
+                        ).replace(
+                            'bounds="[20,110][300,170]"',
+                            'bounds="[20,118][300,178]"',
+                        ),
+                    ]
+                )
+
+            def dump_hierarchy(self, compressed=False):
+                del compressed
+                return next(self.dumps)
+
+        with patch("instagram_navigation.open_search", return_value=True), patch(
+            "instagram_navigation.type_search", return_value=True
+        ), patch("instagram_navigation.tap_account_result", return_value=True) as tap_mock, patch(
+            "unfollow_profile_probe.verify_unfollow_target_profile_strict",
+            return_value={"ok": True},
+        ), patch("unfollow_hybrid_strategy.time.sleep"):
+            out = open_exact_profile_for_unfollow(Device(), "target")
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["row_tap_retry_count"], 0)
+        self.assertEqual(
+            tap_mock.call_args.kwargs["preverified_exact_row_bounds"],
+            {"left": 0, "top": 108, "right": 500, "bottom": 188},
+        )
+
+    def test_failed_first_row_tap_gets_one_bounded_local_retry(self) -> None:
+        class Device:
+            def dump_hierarchy(self, compressed=False):
+                del compressed
+                return _search_xml("annmarieplanning")
+
+        with patch("instagram_navigation.open_search", return_value=True), patch(
+            "instagram_navigation.type_search", return_value=True
+        ), patch(
+            "instagram_navigation.tap_account_result",
+            side_effect=[False, True],
+        ) as tap_mock, patch(
+            "unfollow_profile_probe.verify_unfollow_target_profile_strict",
+            side_effect=[{"ok": False}, {"ok": True}],
+        ), patch("unfollow_hybrid_strategy.time.sleep"):
+            out = open_exact_profile_for_unfollow(Device(), "annmarieplanning")
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["row_tap_retry_count"], 1)
+        self.assertEqual(tap_mock.call_count, 2)
+
+    def test_tap_without_profile_transition_gets_one_bounded_local_retry(self) -> None:
+        class Device:
+            def dump_hierarchy(self, compressed=False):
+                del compressed
+                return _search_xml("annmarieplanning")
+
+        with patch("instagram_navigation.open_search", return_value=True), patch(
+            "instagram_navigation.type_search", return_value=True
+        ), patch(
+            "instagram_navigation.tap_account_result",
+            side_effect=[True, True],
+        ) as tap_mock, patch(
+            "unfollow_profile_probe.verify_unfollow_target_profile_strict",
+            side_effect=[{"ok": False}, {"ok": True}],
+        ), patch("unfollow_hybrid_strategy.time.sleep"):
+            out = open_exact_profile_for_unfollow(Device(), "annmarieplanning")
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["row_tap_retry_count"], 1)
+        self.assertEqual(tap_mock.call_count, 2)
+
+    def test_ten_consecutive_exact_results_all_reach_safe_tap(self) -> None:
+        class Device:
+            def __init__(self, username: str) -> None:
+                self.username = username
+
+            def dump_hierarchy(self, compressed=False):
+                del compressed
+                return _search_xml(self.username)
+
+        with patch("instagram_navigation.open_search", return_value=True), patch(
+            "instagram_navigation.type_search", return_value=True
+        ), patch("instagram_navigation.tap_account_result", return_value=True) as tap_mock, patch(
+            "unfollow_profile_probe.verify_unfollow_target_profile_strict",
+            return_value={"ok": True},
+        ), patch("unfollow_hybrid_strategy.time.sleep"):
+            outcomes = [
+                open_exact_profile_for_unfollow(Device(f"target_{index}"), f"target_{index}")
+                for index in range(10)
+            ]
+        self.assertTrue(all(outcome["ok"] for outcome in outcomes))
+        self.assertEqual(tap_mock.call_count, 10)
+
+    def test_direct_exact_path_has_no_fixed_fifteen_second_sleep(self) -> None:
+        source = inspect.getsource(open_exact_profile_for_unfollow)
+        self.assertNotIn("sleep(15", source)
+        self.assertNotIn("sleep(15.0", source)
 
     def test_confirmed_removed_account_fixture_is_not_marked_success(self) -> None:
         class Device:
