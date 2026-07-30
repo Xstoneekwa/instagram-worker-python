@@ -450,11 +450,100 @@ class InstagramListContinuationContractTests(unittest.TestCase):
         self.assertIn('_main_scroll_profile = "canonical_adaptive"', main_scroll_handoff)
         self.assertNotIn('_main_scroll_profile = "canonical_controlled"', main_scroll_handoff)
 
-    def test_19_unfollow_business_scroll_remains_legacy(self) -> None:
+    def test_19_unfollow_business_scroll_uses_shared_adaptive_contract(self) -> None:
         source = inspect.getsource(unfollow._scroll_following_list_for_unfollow)
-        self.assertIn("y_start = int(h * 0.78)", source)
-        self.assertIn("y_end = int(h * 0.36)", source)
-        self.assertNotIn("canonical_controlled", source)
+        self.assertIn("adaptive_follow_scroll_geometry", source)
+        self.assertIn("compare_instagram_list_viewports", source)
+        self.assertIn('strategy = "canonical_adaptive_7_plus_1"', source)
+        self.assertNotIn("y_start = int(h * 0.78)", source)
+        loop_source = inspect.getsource(unfollow._run_real_unfollow_multi_loop)
+        self.assertIn(
+            "last_fields = {**last_fields, **progress_fields}",
+            loop_source,
+        )
+
+    def test_19b_unfollow_validates_seven_new_rows_and_one_overlap(self) -> None:
+        def row(username: str, center_y: int) -> dict:
+            return {
+                "username": username,
+                "username_normalized": username,
+                "row_center": [300, center_y],
+            }
+
+        before = [row(f"row_{idx}", 300 + idx * 120) for idx in range(8)]
+        after = [row("row_7", 300)] + [
+            row(f"row_{idx}", 300 + (idx - 7) * 120)
+            for idx in range(8, 15)
+        ]
+        device = _FakeScrollDevice()
+        with (
+            patch.object(
+                unfollow,
+                "harvest_visible_following_rows_for_unfollow",
+                return_value=(after, {"following_list_end_detected": False}),
+            ),
+            patch.object(
+                unfollow,
+                "detect_own_following_list_screen",
+                return_value={"is_following_list": True},
+            ),
+            patch.object(unfollow.time, "sleep", return_value=None),
+        ):
+            result = unfollow._scroll_following_list_for_unfollow(
+                device,
+                account_username="owner",
+                before_rows=before,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["depth_advanced"])
+        self.assertEqual(result["target_new_rows"], 7)
+        self.assertEqual(result["target_overlap_rows"], 1)
+        self.assertEqual(result["actual_new_rows"], 7)
+        self.assertEqual(result["actual_overlap"], 1)
+
+    def test_19c_unfollow_missing_overlap_uses_one_bounded_backstep(self) -> None:
+        def row(username: str, center_y: int) -> dict:
+            return {
+                "username": username,
+                "username_normalized": username,
+                "row_center": [300, center_y],
+            }
+
+        before = [row(f"row_{idx}", 300 + idx * 120) for idx in range(8)]
+        jumped = [row(f"row_{idx}", 300 + (idx - 20) * 120) for idx in range(20, 28)]
+        recovered = [row("row_7", 300)] + [
+            row(f"row_{idx}", 300 + (idx - 7) * 120)
+            for idx in range(8, 15)
+        ]
+        device = _FakeScrollDevice()
+        with (
+            patch.object(
+                unfollow,
+                "harvest_visible_following_rows_for_unfollow",
+                side_effect=[
+                    (jumped, {"following_list_end_detected": False}),
+                    (recovered, {"following_list_end_detected": False}),
+                ],
+            ),
+            patch.object(
+                unfollow,
+                "detect_own_following_list_screen",
+                return_value={"is_following_list": True},
+            ),
+            patch.object(unfollow.time, "sleep", return_value=None),
+        ):
+            result = unfollow._scroll_following_list_for_unfollow(
+                device,
+                account_username="owner",
+                before_rows=before,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["depth_advanced"])
+        self.assertTrue(result["corrective_backstep_used"])
+        self.assertEqual(result["actual_overlap"], 1)
+        self.assertEqual(len(device.swipes), 2)
 
     def test_20_welcome_uses_shared_classifier_without_business_change(self) -> None:
         xml = _surface(rows=[], suggestions=True)
