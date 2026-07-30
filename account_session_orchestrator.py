@@ -61,8 +61,21 @@ FOLLOW_TARGET_MAX_SAFE_PARTIAL_FAILURES_PER_RUN = 2
 
 
 def _target_availability_capture_requested(account_id: str) -> bool:
-    enabled = str(os.getenv("TARGET_AVAILABILITY_OBSERVATION_CAPTURE_ENABLED") or "").strip().lower()
-    if enabled != "true":
+    enabled = str(os.getenv("TARGET_AVAILABILITY_OBSERVATION_CAPTURE_ENABLED") or "").strip().lower() == "true"
+    if not enabled:
+        control_file = str(
+            os.getenv("TARGET_AVAILABILITY_CONTROL_FILE")
+            or "/Users/admin/phonefarm-runtime/control/target-availability-control.json"
+        ).strip()
+        try:
+            import json
+
+            with open(control_file, "r", encoding="utf-8") as handle:
+                control = json.load(handle)
+            enabled = isinstance(control, dict) and control.get("TARGET_AVAILABILITY_OBSERVATION_CAPTURE_ENABLED") is True
+        except (FileNotFoundError, OSError, TypeError, ValueError):
+            return False
+    if not enabled:
         return False
     try:
         from target_availability_writer import TargetAvailabilityFeatureFlags

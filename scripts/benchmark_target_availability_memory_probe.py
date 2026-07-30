@@ -17,7 +17,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import target_availability_runtime as runtime
-from target_availability_writer import TargetAvailabilityFeatureFlags
+from target_availability_writer import SCOPE_MODE_EXPLICIT, TargetAvailabilityFeatureFlags
 
 
 PILOT_ID = "22222222-2222-4222-8222-222222222222"
@@ -67,6 +67,7 @@ def main() -> int:
                 iterations,
                 TargetAvailabilityFeatureFlags(
                     target_availability_observation_capture_enabled=True,
+                    scope_mode=SCOPE_MODE_EXPLICIT,
                     account_allowlist=frozenset({PILOT_ID}),
                 ),
             )

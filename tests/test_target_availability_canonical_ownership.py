@@ -17,7 +17,7 @@ from target_availability_ownership import (
     OWNERSHIP_SOURCE,
     resolve_target_availability_tenant,
 )
-from target_availability_writer import TargetAvailabilityFeatureFlags
+from target_availability_writer import SCOPE_MODE_EXPLICIT, TargetAvailabilityFeatureFlags
 
 
 MYTHYL_ACCOUNT_ID = "0d299d1e-46ee-49d2-8a84-4f928f2bb182"
@@ -317,6 +317,7 @@ class TargetAvailabilityCanonicalOwnershipTests(unittest.TestCase):
             with patch.dict(os.environ, environment, clear=False):
                 flags = TargetAvailabilityFeatureFlags(
                     target_availability_observation_capture_enabled=True,
+                    scope_mode=SCOPE_MODE_EXPLICIT,
                     account_allowlist=frozenset({MYTHYL_ACCOUNT_ID}),
                 )
                 self.assertTrue(runtime.observe_rotation_target_loaded(

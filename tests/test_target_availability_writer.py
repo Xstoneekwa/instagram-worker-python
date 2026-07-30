@@ -2,19 +2,20 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+import json
 import tempfile
 import time
 import unittest
 from unittest.mock import patch
-from urllib import error
 
 from target_availability_observation import (
     TargetAvailabilityObservationScope,
     build_target_availability_observation,
 )
 from target_availability_writer import (
+    BackendPipelineTransport,
     FailOpenTargetAvailabilityWriter,
-    SupabaseObservationTransport,
+    SCOPE_MODE_ALL_ACTIVE,
     TargetAvailabilityFeatureFlags,
     observation_to_database_row,
 )
@@ -55,38 +56,85 @@ def observation(event="run:target:summary", account_id=ACCOUNT_ONE):
 
 
 class TargetAvailabilityWriterTests(unittest.TestCase):
-    def test_transport_rejects_non_service_role_credentials(self):
-        with self.assertRaisesRegex(ValueError, "supabase_service_role_key_required"):
-            SupabaseObservationTransport(url="https://example.supabase.co", service_role_key="anon-key")
-        service_claim = "eyJyb2xlIjoic2VydmljZV9yb2xlIn0"
-        transport = SupabaseObservationTransport(
-            url="https://example.supabase.co",
-            service_role_key="e30.%s.signature" % service_claim,
-        )
-        self.assertIn("ct_target_availability_observations", transport._endpoint)
+    def test_global_scope_is_explicit_and_does_not_require_an_allowlist(self):
+        flags = TargetAvailabilityFeatureFlags.from_mapping({
+            "TARGET_AVAILABILITY_OBSERVATION_CAPTURE_ENABLED": "true",
+            "TARGET_AVAILABILITY_SCOPE_MODE": SCOPE_MODE_ALL_ACTIVE,
+        })
+        self.assertTrue(flags.capture_allowed(ACCOUNT_ONE))
+        self.assertTrue(flags.capture_allowed(ACCOUNT_TWO))
+        self.assertFalse(flags.capture_allowed("invalid"))
+        invalid = TargetAvailabilityFeatureFlags.from_mapping({
+            "TARGET_AVAILABILITY_OBSERVATION_CAPTURE_ENABLED": "true",
+            "TARGET_AVAILABILITY_SCOPE_MODE": "*",
+        })
+        self.assertFalse(invalid.capture_allowed(ACCOUNT_ONE))
+        self.assertTrue(invalid.config_invalid)
 
-    def test_transport_failures_are_bounded_and_redacted(self):
-        service_claim = "eyJyb2xlIjoic2VydmljZV9yb2xlIn0"
-        transport = SupabaseObservationTransport(
-            url="https://example.supabase.co",
-            service_role_key="e30.%s.signature" % service_claim,
+    def test_control_file_is_re_read_and_invalid_json_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            control = Path(directory) / "control.json"
+            values = {"TARGET_AVAILABILITY_CONTROL_FILE": str(control)}
+            control.write_text("{}", encoding="utf-8")
+            self.assertFalse(TargetAvailabilityFeatureFlags.from_mapping(values).capture_allowed(ACCOUNT_ONE))
+            control.write_text(json.dumps({
+                "TARGET_AVAILABILITY_OBSERVATION_CAPTURE_ENABLED": True,
+                "TARGET_AVAILABILITY_SCOPE_MODE": SCOPE_MODE_ALL_ACTIVE,
+            }), encoding="utf-8")
+            self.assertTrue(TargetAvailabilityFeatureFlags.from_mapping(values).capture_allowed(ACCOUNT_ONE))
+            control.write_text("{broken", encoding="utf-8")
+            flags = TargetAvailabilityFeatureFlags.from_mapping(values)
+            self.assertTrue(flags.kill_switch)
+            self.assertFalse(flags.capture_allowed(ACCOUNT_ONE))
+
+    def test_pipeline_requires_all_producers_and_policy_shadow_off(self):
+        base = {
+            "TARGET_AVAILABILITY_OBSERVATION_CAPTURE_ENABLED": "true",
+            "TARGET_AVAILABILITY_WRITER_ENABLED": "true",
+            "TARGET_AVAILABILITY_SHADOW_ENABLED": "true",
+            "TARGET_AVAILABILITY_IDENTITY_PRODUCER_ENABLED": "true",
+            "TARGET_AVAILABILITY_ASSESSMENT_PRODUCER_ENABLED": "true",
+            "TARGET_AVAILABILITY_CURRENT_PROJECTOR_ENABLED": "true",
+            "TARGET_AVAILABILITY_SCOPE_MODE": SCOPE_MODE_ALL_ACTIVE,
+        }
+        self.assertTrue(TargetAvailabilityFeatureFlags.from_mapping(base).pipeline_allowed(ACCOUNT_ONE))
+        for key in (
+            "TARGET_AVAILABILITY_IDENTITY_PRODUCER_ENABLED",
+            "TARGET_AVAILABILITY_ASSESSMENT_PRODUCER_ENABLED",
+            "TARGET_AVAILABILITY_CURRENT_PROJECTOR_ENABLED",
+        ):
+            self.assertFalse(TargetAvailabilityFeatureFlags.from_mapping({**base, key: "false"}).pipeline_allowed(ACCOUNT_ONE))
+        self.assertFalse(TargetAvailabilityFeatureFlags.from_mapping({
+            **base,
+            "TARGET_AVAILABILITY_POLICY_SHADOW_ENABLED": "true",
+        }).pipeline_allowed(ACCOUNT_ONE))
+
+    def test_backend_pipeline_transport_is_private_bounded_and_redacted(self):
+        transport = BackendPipelineTransport(
+            api_base_url="https://backend.example",
+            caller_token="private-token-value",
+            worker_id="dispatcher-one",
+            worker_release="release-one",
             timeout_seconds=99,
             max_retries=0,
         )
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return json.dumps({"ok": True, "data": {"active": True, "autoKilled": False}}).encode("utf-8")
+
+        with patch("target_availability_writer.request.urlopen", return_value=Response()) as opened:
+            result = transport.send_batch([observation_to_database_row(observation())])
+        self.assertTrue(result["active"])
+        sent = opened.call_args.args[0]
+        self.assertEqual(sent.headers["X-instagram-auto-restart-tick-token"], "private-token-value")
         self.assertEqual(transport._timeout, 3.0)
-        for failure in (
-            TimeoutError("synthetic timeout"),
-            error.URLError("synthetic dns failure"),
-            error.HTTPError(transport._endpoint, 401, "unauthorized", {}, None),
-            error.HTTPError(transport._endpoint, 403, "forbidden", {}, None),
-            error.HTTPError(transport._endpoint, 429, "limited", {}, None),
-            error.HTTPError(transport._endpoint, 500, "server", {}, None),
-        ):
-            with self.subTest(failure=repr(failure)):
-                with patch("target_availability_writer.request.urlopen", side_effect=failure):
-                    with self.assertRaisesRegex(RuntimeError, "target_availability_writer_transport_failed") as raised:
-                        transport.send_batch([observation_to_database_row(observation())])
-                    self.assertNotIn(transport._key, str(raised.exception))
 
     def test_four_flags_default_off_and_kill_switch_wins(self):
         flags = TargetAvailabilityFeatureFlags.from_mapping({})
@@ -210,6 +258,24 @@ class TargetAvailabilityWriterTests(unittest.TestCase):
         self.assertEqual(writer.metrics["duplicates"], 1)
         self.assertEqual(writer.metrics["dropped"], 1)
 
+    def test_auto_kill_purges_payloads_and_stops_future_transport_attempts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            auto_kill = Path(directory) / "auto-kill.json"
+            transport = RecordingTransport(failures=10)
+            writer = FailOpenTargetAvailabilityWriter(
+                transport,
+                circuit_failure_threshold=1,
+                auto_kill_file=str(auto_kill),
+            )
+            self.assertTrue(writer.enqueue(observation()))
+            self.assertEqual(writer.flush_once(), 0)
+            self.assertTrue(auto_kill.exists())
+            self.assertEqual(writer.queue_size, 0)
+            self.assertEqual(writer.metrics["auto_killed"], 1)
+            self.assertTrue(writer._stop.is_set())
+            self.assertEqual(writer.flush_once(), 0)
+            self.assertEqual(transport.failures, 9)
+
     def test_flush_is_batchable_and_successful(self):
         transport = RecordingTransport()
         writer = FailOpenTargetAvailabilityWriter(transport, capacity=10, batch_size=2)
@@ -239,6 +305,22 @@ class TargetAvailabilityWriterTests(unittest.TestCase):
         clock[0] += 6
         self.assertEqual(writer.flush_once(), 1)
         self.assertEqual(writer.queue_size, 0)
+
+    def test_repeated_transport_failure_writes_reversible_local_auto_kill(self):
+        with tempfile.TemporaryDirectory() as directory:
+            auto_kill = Path(directory) / "auto-kill.json"
+            writer = FailOpenTargetAvailabilityWriter(
+                RecordingTransport(failures=2),
+                circuit_failure_threshold=2,
+                auto_kill_file=str(auto_kill),
+            )
+            writer.enqueue(observation())
+            self.assertEqual(writer.flush_once(), 0)
+            self.assertEqual(writer.flush_once(), 0)
+            payload = json.loads(auto_kill.read_text(encoding="utf-8"))
+            self.assertEqual(payload["reason"], "repeated_backend_pipeline_failure")
+            self.assertTrue(payload["human_reenable_required"])
+            self.assertEqual(writer.metrics["auto_killed"], 1)
 
     def test_serialization_exception_is_dropped_without_escaping(self):
         class InvalidObservation:

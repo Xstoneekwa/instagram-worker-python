@@ -16,8 +16,9 @@ from target_availability_observation import (
     build_target_availability_observation,
 )
 from target_availability_writer import (
+    BackendPipelineTransport,
+    DEFAULT_AUTO_KILL_FILE,
     FailOpenTargetAvailabilityWriter,
-    SupabaseObservationTransport,
     TargetAvailabilityFeatureFlags,
 )
 
@@ -72,11 +73,22 @@ def _scope(*, tenant_id: str, account_id: str, target_id: str, username: str, st
 
 def _writer(flags: TargetAvailabilityFeatureFlags) -> FailOpenTargetAvailabilityWriter | None:
     global _WRITER
-    if not flags.target_availability_writer_enabled or flags.kill_switch:
+    if (
+        not flags.target_availability_writer_enabled
+        or not flags.target_availability_shadow_enabled
+        or not flags.target_availability_identity_producer_enabled
+        or not flags.target_availability_assessment_producer_enabled
+        or not flags.target_availability_current_projector_enabled
+        or flags.target_availability_policy_shadow_enabled
+        or flags.kill_switch
+    ):
         return None
     if _WRITER is None:
         try:
-            candidate = FailOpenTargetAvailabilityWriter(SupabaseObservationTransport.from_environment())
+            candidate = FailOpenTargetAvailabilityWriter(
+                BackendPipelineTransport.from_environment(),
+                auto_kill_file=os.getenv("TARGET_AVAILABILITY_AUTO_KILL_FILE") or DEFAULT_AUTO_KILL_FILE,
+            )
             candidate.start()
             if not candidate.thread_alive:
                 return None
@@ -87,7 +99,7 @@ def _writer(flags: TargetAvailabilityFeatureFlags) -> FailOpenTargetAvailability
 
 
 def _capture(observation, *, flags: TargetAvailabilityFeatureFlags) -> bool:
-    if not flags.writer_allowed(str(getattr(observation, "account_id", "") or "")):
+    if not flags.pipeline_allowed(str(getattr(observation, "account_id", "") or "")):
         return True
     writer = _writer(flags)
     if writer is None:
@@ -96,15 +108,10 @@ def _capture(observation, *, flags: TargetAvailabilityFeatureFlags) -> bool:
 
 
 def _memory_probe(flags: TargetAvailabilityFeatureFlags, account_id: str):
-    """Resolve the local probe only for the capture-only Gate 4B boundary."""
+    """Resolve the fixed-cardinality probe independently of DB writer state."""
 
     global _MEMORY_PROBE
-    if (
-        not flags.capture_allowed(account_id)
-        or flags.target_availability_writer_enabled
-        or flags.target_availability_shadow_enabled
-        or flags.target_availability_policy_shadow_enabled
-    ):
+    if not flags.capture_allowed(account_id):
         return None
     if str(os.getenv("TARGET_AVAILABILITY_MEMORY_PROBE_ENABLED") or "").strip().lower() != "true":
         return None
@@ -115,6 +122,13 @@ def _memory_probe(flags: TargetAvailabilityFeatureFlags, account_id: str):
             _MEMORY_PROBE = TargetAvailabilityMemoryProbe.from_mapping()
         except Exception:
             return None
+    try:
+        _MEMORY_PROBE.set_runtime_state(
+            writer_enabled=flags.target_availability_writer_enabled,
+            shadow_enabled=flags.target_availability_shadow_enabled,
+        )
+    except Exception:
+        return None
     return _MEMORY_PROBE
 
 

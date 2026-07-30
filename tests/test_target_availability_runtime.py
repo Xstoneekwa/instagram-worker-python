@@ -15,6 +15,7 @@ from target_availability_runtime import (
     observe_rotation_target_summary,
 )
 from target_availability_writer import TargetAvailabilityFeatureFlags
+from target_availability_writer import SCOPE_MODE_EXPLICIT
 
 
 BASE = dict(
@@ -139,19 +140,21 @@ assert before == tuple(thread.name for thread in threading.enumerate())
     def test_writer_off_and_non_allowlisted_accounts_never_create_transport(self):
         capture_only = TargetAvailabilityFeatureFlags(
             target_availability_observation_capture_enabled=True,
+            scope_mode=SCOPE_MODE_EXPLICIT,
             account_allowlist=frozenset({BASE["account_id"]}),
         )
-        with patch.object(runtime.SupabaseObservationTransport, "from_environment", side_effect=AssertionError("transport created")):
+        with patch.object(runtime.BackendPipelineTransport, "from_environment", side_effect=AssertionError("transport created")):
             self.assertTrue(observe_rotation_target_loaded(**BASE, flags=capture_only))
         self.assertIsNone(runtime._WRITER)
 
         writer_on = TargetAvailabilityFeatureFlags(
             target_availability_observation_capture_enabled=True,
             target_availability_writer_enabled=True,
+            scope_mode=SCOPE_MODE_EXPLICIT,
             account_allowlist=frozenset({BASE["account_id"]}),
         )
         other = {**BASE, "account_id": "55555555-5555-4555-8555-555555555555"}
-        with patch.object(runtime.SupabaseObservationTransport, "from_environment", side_effect=AssertionError("transport created")):
+        with patch.object(runtime.BackendPipelineTransport, "from_environment", side_effect=AssertionError("transport created")):
             self.assertTrue(observe_rotation_target_loaded(**other, flags=writer_on))
         self.assertIsNone(runtime._WRITER)
 
@@ -159,9 +162,14 @@ assert before == tuple(thread.name for thread in threading.enumerate())
         flags = TargetAvailabilityFeatureFlags(
             target_availability_observation_capture_enabled=True,
             target_availability_writer_enabled=True,
+            target_availability_shadow_enabled=True,
+            target_availability_identity_producer_enabled=True,
+            target_availability_assessment_producer_enabled=True,
+            target_availability_current_projector_enabled=True,
+            scope_mode=SCOPE_MODE_EXPLICIT,
             account_allowlist=frozenset({BASE["account_id"]}),
         )
-        with patch.object(runtime.SupabaseObservationTransport, "from_environment", side_effect=RuntimeError("missing")):
+        with patch.object(runtime.BackendPipelineTransport, "from_environment", side_effect=RuntimeError("missing")):
             self.assertTrue(observe_rotation_target_loaded(**BASE, flags=flags))
         self.assertIsNone(runtime._WRITER)
 
@@ -179,6 +187,11 @@ assert before == tuple(thread.name for thread in threading.enumerate())
         flags = TargetAvailabilityFeatureFlags(
             target_availability_observation_capture_enabled=True,
             target_availability_writer_enabled=True,
+            target_availability_shadow_enabled=True,
+            target_availability_identity_producer_enabled=True,
+            target_availability_assessment_producer_enabled=True,
+            target_availability_current_projector_enabled=True,
+            scope_mode=SCOPE_MODE_EXPLICIT,
             account_allowlist=frozenset({BASE["account_id"]}),
         )
         self.assertTrue(observe_rotation_target_loaded(**BASE, flags=flags))

@@ -14,6 +14,8 @@ import json
 import os
 from pathlib import Path
 import re
+import resource
+import sys
 import tempfile
 import time
 from typing import Any, Mapping, Optional
@@ -22,7 +24,7 @@ from typing import Any, Mapping, Optional
 PROBE_FLAG = "TARGET_AVAILABILITY_MEMORY_PROBE_ENABLED"
 STATUS_FILE_KEY = "TARGET_AVAILABILITY_MEMORY_PROBE_STATUS_FILE"
 DEFAULT_STATUS_FILE = "/private/tmp/phonefarm-target-availability-gate4b-status.json"
-SNAPSHOT_SCHEMA_VERSION = "target-availability-memory-probe-v1"
+SNAPSHOT_SCHEMA_VERSION = "target-availability-memory-probe-v2"
 MAX_SNAPSHOT_BYTES = 4_096
 _SAFE_CODE_RE = re.compile(r"[^a-z0-9_.:-]+")
 
@@ -45,6 +47,14 @@ def _safe_code(value: object, fallback: str = "") -> str:
     return (normalized or fallback)[:80]
 
 
+def _peak_rss_bytes() -> int:
+    try:
+        value = max(0, int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss))
+        return value if sys.platform == "darwin" else value * 1024
+    except (OSError, TypeError, ValueError):
+        return 0
+
+
 def _empty_summary() -> dict[str, Any]:
     return {
         "capture_attempt_count": 0,
@@ -55,6 +65,11 @@ def _empty_summary() -> dict[str, Any]:
         "payload_retained_count": 0,
         "hook_total_duration_ns": 0,
         "hook_max_duration_ns": 0,
+        "cpu_total_duration_ns": 0,
+        "cpu_max_duration_ns": 0,
+        "memory_before_bytes": 0,
+        "memory_peak_bytes": 0,
+        "memory_after_bytes": 0,
         "last_run_id_hash": "",
         "last_account_id": "",
         "last_stage": "",
@@ -76,6 +91,10 @@ class TargetAvailabilityMemoryProbe:
         self._previous = _empty_summary()
         self._snapshot_written = False
         self._snapshot_error_count = 0
+        self._hook_cpu_started_ns = 0
+        self._hook_memory_before_bytes = 0
+        self._writer_enabled = False
+        self._shadow_enabled = False
         self._restore_previous_aggregate()
 
     @classmethod
@@ -95,6 +114,10 @@ class TargetAvailabilityMemoryProbe:
     @property
     def status_file(self) -> Path:
         return self._status_file
+
+    def set_runtime_state(self, *, writer_enabled: bool, shadow_enabled: bool) -> None:
+        self._writer_enabled = bool(writer_enabled)
+        self._shadow_enabled = bool(shadow_enabled)
 
     def _restore_previous_aggregate(self) -> None:
         """Carry only the prior fixed summary across one-run subprocesses."""
@@ -139,6 +162,8 @@ class TargetAvailabilityMemoryProbe:
         self._current["last_run_id_hash"] = run_hash
         self._current["last_account_id"] = account
         self._current["last_stage"] = _safe_code(stage, "unknown")
+        self._hook_cpu_started_ns = time.process_time_ns()
+        self._hook_memory_before_bytes = _peak_rss_bytes()
         return time.perf_counter_ns()
 
     def record_observation(self, observation: object) -> bool:
@@ -179,10 +204,19 @@ class TargetAvailabilityMemoryProbe:
 
     def finish_hook(self, started_ns: int) -> None:
         elapsed = max(0, time.perf_counter_ns() - int(started_ns))
+        cpu_elapsed = max(0, time.process_time_ns() - self._hook_cpu_started_ns)
+        memory_after = _peak_rss_bytes()
         self._current["hook_total_duration_ns"] += elapsed
         self._current["hook_max_duration_ns"] = max(
             self._current["hook_max_duration_ns"], elapsed
         )
+        self._current["cpu_total_duration_ns"] += cpu_elapsed
+        self._current["cpu_max_duration_ns"] = max(self._current["cpu_max_duration_ns"], cpu_elapsed)
+        self._current["memory_before_bytes"] = self._hook_memory_before_bytes
+        self._current["memory_peak_bytes"] = max(
+            self._current["memory_peak_bytes"], self._hook_memory_before_bytes, memory_after
+        )
+        self._current["memory_after_bytes"] = memory_after
         # The probe never owns observation references. This invariant is not an
         # estimate: its retention capacity is structurally zero.
         self._current["payload_retained_count"] = 0
@@ -205,7 +239,8 @@ class TargetAvailabilityMemoryProbe:
             "schema_version": SNAPSHOT_SCHEMA_VERSION,
             "captured_at": _utc_now(),
             "probe_enabled": True,
-            "writer_enabled": False,
+            "writer_enabled": self._writer_enabled,
+            "shadow_enabled": self._shadow_enabled,
             "payload_retention_capacity": 0,
             "aggregate_memory_bytes": aggregate_memory_bytes,
             "max_snapshot_bytes": MAX_SNAPSHOT_BYTES,

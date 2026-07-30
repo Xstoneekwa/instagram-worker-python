@@ -18,7 +18,7 @@ from target_availability_memory_probe import (
     TargetAvailabilityMemoryProbe,
     _main as memory_probe_main,
 )
-from target_availability_writer import TargetAvailabilityFeatureFlags
+from target_availability_writer import SCOPE_MODE_EXPLICIT, TargetAvailabilityFeatureFlags
 
 
 PILOT_ID = "22222222-2222-4222-8222-222222222222"
@@ -66,6 +66,7 @@ class TargetAvailabilityMemoryProbeTests(unittest.TestCase):
     def _capture_flags(self, account_id=PILOT_ID):
         return TargetAvailabilityFeatureFlags(
             target_availability_observation_capture_enabled=True,
+            scope_mode=SCOPE_MODE_EXPLICIT,
             account_allowlist=frozenset({account_id}),
         )
 
@@ -122,6 +123,10 @@ class TargetAvailabilityMemoryProbeTests(unittest.TestCase):
         self.assertEqual(current["last_stage"], "target_summary_completed")
         self.assertGreater(current["hook_total_duration_ns"], 0)
         self.assertGreater(current["hook_max_duration_ns"], 0)
+        self.assertGreaterEqual(current["cpu_total_duration_ns"], 0)
+        self.assertGreaterEqual(current["memory_before_bytes"], 0)
+        self.assertGreaterEqual(current["memory_peak_bytes"], current["memory_before_bytes"])
+        self.assertGreaterEqual(current["memory_peak_bytes"], current["memory_after_bytes"])
         self.assertEqual(len(current["last_run_id_hash"]), 24)
 
     def test_invalid_scope_is_rejected_and_exception_is_counted_fail_open(self):
@@ -205,7 +210,7 @@ class TargetAvailabilityMemoryProbeTests(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(self.status.stat().st_mode), 0o600)
         self.assertLessEqual(len(raw.encode("utf-8")), MAX_SNAPSHOT_BYTES)
 
-    def test_writer_shadow_or_policy_shadow_disables_probe(self):
+    def test_writer_shadow_or_policy_shadow_does_not_disable_fixed_probe(self):
         with patch.dict(os.environ, self.environment, clear=False):
             for field in (
                 "target_availability_writer_enabled",
@@ -214,16 +219,22 @@ class TargetAvailabilityMemoryProbeTests(unittest.TestCase):
             ):
                 flags = TargetAvailabilityFeatureFlags(
                     target_availability_observation_capture_enabled=True,
+                    scope_mode=SCOPE_MODE_EXPLICIT,
                     account_allowlist=frozenset({PILOT_ID}),
                     **{field: True},
                 )
                 self.assertTrue(runtime.observe_rotation_target_loaded(**BASE, flags=flags))
-                self.assertFalse(self.status.exists())
+                self.assertTrue(self.status.exists())
+                payload = self._payload()
+                self.assertEqual(payload["writer_enabled"], field == "target_availability_writer_enabled")
+                self.assertEqual(payload["shadow_enabled"], field == "target_availability_shadow_enabled")
+                runtime._MEMORY_PROBE.cleanup()
+                runtime._MEMORY_PROBE = None
 
     def test_writer_off_probe_starts_no_thread_transport_network_or_queue(self):
         before = tuple(thread.ident for thread in threading.enumerate())
         with patch.dict(os.environ, self.environment, clear=False), patch.object(
-            runtime.SupabaseObservationTransport,
+            runtime.BackendPipelineTransport,
             "from_environment",
             side_effect=AssertionError("transport must stay dormant"),
         ):
