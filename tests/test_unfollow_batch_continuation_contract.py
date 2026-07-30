@@ -23,6 +23,8 @@ class UnfollowBatchContinuationContractTests(unittest.TestCase):
         self.assertIn('"username_not_found_confirmed"', self.source)
         self.assertIn('"search_surface_unhealthy"', self.source)
         self.assertIn("mark_candidate_technical_hold", self.source)
+        self.assertIn("unfollow_candidate_not_found_terminalized", self.source)
+        self.assertIn("backlog_actionable=False", self.source)
 
     def test_only_three_consecutive_technical_failures_open_phase_breaker(self) -> None:
         self.assertIn("SearchSurfaceCircuitBreaker", self.source)
