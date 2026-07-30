@@ -322,16 +322,19 @@ def plan_unfollow_targets(
 
         availability = availability_by_username.get(username_key) or {}
         availability_status = str(availability.get("status") or "").strip()
-        if availability_status == "exhausted":
+        if availability_status in {"exhausted", "username_not_found_confirmed"}:
             skipped["candidate_unavailable_exhausted"] = int(
                 skipped.get("candidate_unavailable_exhausted", 0)
             ) + 1
             continue
-        if availability_status == "temporary_unavailable":
+        if availability_status in {"temporary_unavailable", "search_surface_unhealthy"}:
             next_retry_at = supabase_client.parse_utc_iso_timestamp(
                 availability.get("next_retry_at")
             )
-            if next_retry_at is None or next_retry_at > now:
+            # Match auto_restart_unfollow_backlog_v2 exactly: a technical
+            # state is a hold only while next_retry_at is strictly in the
+            # future. Missing/expired cooldowns are actionable again.
+            if next_retry_at is not None and next_retry_at > now:
                 skipped["candidate_unavailable_cooldown"] = int(
                     skipped.get("candidate_unavailable_cooldown", 0)
                 ) + 1

@@ -412,6 +412,74 @@ class UnfollowCandidateLedgerTests(unittest.TestCase):
         self.assertEqual(plan["backlog_unavailable_remaining"], 1)
         self.assertEqual(plan["skipped_counts"]["candidate_unavailable_exhausted"], 1)
 
+    def test_confirmed_not_found_is_terminal_for_legacy_and_v2_backlog(self) -> None:
+        with patch(
+            "supabase_client.fetch_unfollow_strict_candidate_rows",
+            return_value=[_row(1, username="confirmed.missing")],
+        ), patch(
+            "supabase_client.fetch_unfollow_candidate_availability",
+            return_value={
+                "confirmed.missing": {"status": "username_not_found_confirmed"}
+            },
+        ):
+            plan = plan_unfollow_targets(
+                "account-1",
+                settings=_settings(),
+                as_of=AS_OF,
+            )
+        self.assertEqual(plan["eligible_total"], 0)
+        self.assertEqual(plan["backlog_unavailable_remaining"], 1)
+        self.assertEqual(plan["skipped_counts"]["candidate_unavailable_exhausted"], 1)
+
+    def test_search_surface_hold_is_excluded_only_until_retry_time(self) -> None:
+        rows = [_row(1, username="held.search"), _row(2, username="due.search")]
+        with patch(
+            "supabase_client.fetch_unfollow_strict_candidate_rows",
+            return_value=rows,
+        ), patch(
+            "supabase_client.fetch_unfollow_candidate_availability",
+            return_value={
+                "held.search": {
+                    "status": "search_surface_unhealthy",
+                    "next_retry_at": (AS_OF + timedelta(hours=1)).isoformat(),
+                },
+                "due.search": {
+                    "status": "search_surface_unhealthy",
+                    "next_retry_at": (AS_OF - timedelta(microseconds=1)).isoformat(),
+                },
+            },
+        ):
+            plan = plan_unfollow_targets(
+                "account-1",
+                settings=_settings(),
+                as_of=AS_OF,
+            )
+        self.assertEqual(plan["eligible_total"], 1)
+        self.assertEqual(plan["candidates"][0]["username"], "due.search")
+        self.assertEqual(plan["backlog_unavailable_remaining"], 1)
+        self.assertEqual(plan["skipped_counts"]["candidate_unavailable_cooldown"], 1)
+
+    def test_missing_retry_timestamp_does_not_invent_a_technical_hold(self) -> None:
+        with patch(
+            "supabase_client.fetch_unfollow_strict_candidate_rows",
+            return_value=[_row(1, username="retry.unknown")],
+        ), patch(
+            "supabase_client.fetch_unfollow_candidate_availability",
+            return_value={
+                "retry.unknown": {
+                    "status": "temporary_unavailable",
+                    "next_retry_at": None,
+                }
+            },
+        ):
+            plan = plan_unfollow_targets(
+                "account-1",
+                settings=_settings(),
+                as_of=AS_OF,
+            )
+        self.assertEqual(plan["eligible_total"], 1)
+        self.assertEqual(plan["backlog_unavailable_remaining"], 0)
+
     def test_due_cooldown_allows_one_future_retry(self) -> None:
         with patch(
             "supabase_client.fetch_unfollow_strict_candidate_rows",
