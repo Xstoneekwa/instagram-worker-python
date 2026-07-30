@@ -11,12 +11,15 @@ import hashlib
 import os
 import time
 from dataclasses import asdict, dataclass, field, replace
+from datetime import datetime, timezone
 from typing import Any
 
 from logs import log
 
 
 REX_ACCOUNT_ID = "b024e94e-395d-4f02-9787-81ddc679b014"
+REX_ONE_SHOT_SOURCE_RUN_ID = "ede26eac-c1a7-4e6a-b581-c6e459388d78"
+REX_ONE_SHOT_EXPIRES_AT = "2026-07-31T04:00:00+00:00"
 
 _SUBFLAG_NAMES = (
     "opening_follow_composite",
@@ -35,6 +38,32 @@ def _env_bool(name: str, default: bool) -> bool:
     if not raw:
         return default
     return raw in {"1", "true", "yes", "on"}
+
+
+def _one_shot_resume_allowed(policy: dict[str, Any]) -> tuple[bool, str]:
+    """Authorize exactly Rex's next natural Auto Restart attempt in this window."""
+    if not policy:
+        return False, "not_auto_restart_resume"
+    if str(policy.get("prior_run_id") or "") != REX_ONE_SHOT_SOURCE_RUN_ID:
+        return False, "source_run_mismatch"
+    if policy.get("restart_allowed") is not True:
+        return False, "restart_not_allowed"
+    request_meta = dict(policy.get("request_metadata") or {})
+    if str(request_meta.get("source") or "") != "auto_restart_tick":
+        return False, "source_not_auto_restart_tick"
+    phases = dict(policy.get("phases_to_run") or {})
+    if phases.get("follow") is not True or phases.get("welcome") is not False or phases.get("unfollow") is not False:
+        return False, "phase_scope_mismatch"
+    quota = dict(policy.get("quota_remaining") or {})
+    try:
+        if int(quota.get("follow") or 0) <= 0:
+            return False, "no_remaining_follow_quota"
+    except (TypeError, ValueError):
+        return False, "invalid_remaining_follow_quota"
+    expires_at = datetime.fromisoformat(REX_ONE_SHOT_EXPIRES_AT)
+    if datetime.now(timezone.utc) >= expires_at:
+        return False, "one_shot_expired"
+    return True, ""
 
 
 @dataclass(frozen=True)
@@ -136,14 +165,14 @@ def configure(
     """Enable only Rex's first natural business-session attempt."""
     global _RUNTIME
     policy = dict(resume_policy or {})
-    attempt_id = int(policy.get("attempt_id") or 1)
+    one_shot_resume, one_shot_reject = _one_shot_resume_allowed(policy)
+    attempt_id = int(policy.get("attempt_id") or (2 if one_shot_resume else 1))
     natural = not bool(policy)
     parent = _env_bool("FOLLOW_60S_CANARY_ENABLED", True)
     enabled = bool(
         parent
         and str(account_id or "").strip() == REX_ACCOUNT_ID
-        and natural
-        and attempt_id == 1
+        and ((natural and attempt_id == 1) or one_shot_resume)
     )
     subflags = {
         name: _env_bool(f"FOLLOW_60S_CANARY_{name.upper()}", True)
@@ -169,6 +198,10 @@ def configure(
         attempt_id=attempt_id,
         natural_attempt=natural,
         auto_restart_resume=bool(policy),
+        one_shot_canary_resume=one_shot_resume,
+        one_shot_source_run_id=(REX_ONE_SHOT_SOURCE_RUN_ID if one_shot_resume else None),
+        one_shot_expires_at=(REX_ONE_SHOT_EXPIRES_AT if one_shot_resume else None),
+        one_shot_rejection_reason=(one_shot_reject if policy and not one_shot_resume else None),
         package=_RUNTIME.package or None,
         subflags=subflags,
         fallback="golden_current" if not enabled else None,
@@ -544,6 +577,8 @@ def consume_post_grid_evidence(
                 break
         if not reason and age_ms > ev.ttl_ms:
             reason = "ttl_expired"
+        if not reason and ev.outcome == "ambiguous":
+            reason = "ambiguous_outcome"
         if not reason and ev.outcome == "safe_post":
             ok, bounds_reason = safe_bounds(ev.post_bounds, screen_size=screen_size)
             if not ok:

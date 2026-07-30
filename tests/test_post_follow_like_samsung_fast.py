@@ -8,6 +8,7 @@ from unittest import mock
 
 import instagram_navigation as nav
 import config
+import follow_60s_canary as canary
 
 _SURFACE_PRECHECK_OK: dict[str, object] = {
     "skip_like": False,
@@ -1839,6 +1840,166 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
             logs,
         )
         self.assertNotIn("post_follow_post_like_open_skipped_no_post_grid", logs)
+
+    def test_canary_ambiguous_grid_evidence_falls_directly_to_golden_and_likes(self) -> None:
+        device = mock.MagicMock()
+        device.window_size.return_value = (1080, 2340)
+        device.dump_hierarchy.return_value = "<hierarchy/>"
+        contract_ctx = _like_phase_contract_ctx()
+        logs: list[tuple[str, dict[str, object]]] = []
+        canary.configure(
+            account_id=canary.REX_ACCOUNT_ID,
+            account_username="rex_gen_boost_ai",
+            run_id="canary-ambiguous-fallback",
+            package="com.instagram.android",
+            resume_policy=None,
+        )
+        try:
+            with ExitStack() as stack:
+                _patch_like_phase_common(stack, contract_ctx=contract_ctx)
+                stack.enter_context(
+                    mock.patch.object(
+                        canary,
+                        "log",
+                        side_effect=lambda _level, event, **kw: logs.append((str(event), kw)),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        nav,
+                        "_post_follow_post_grid_evidence_from_xml",
+                        return_value={
+                            "outcome": "ambiguous",
+                            "post_bounds": None,
+                            "viewport_fingerprint": "same-viewport",
+                            "identity_exact": True,
+                        },
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        nav,
+                        "_visual_profile_no_posts_tier1_direct_check",
+                        return_value={
+                            "no_posts_detected": False,
+                            "detection_method": "none",
+                            "confidence": 0.0,
+                        },
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        nav,
+                        "visual_profile_has_no_posts",
+                        return_value={
+                            "no_posts_detected": False,
+                            "detection_method": "none",
+                            "confidence": 0.0,
+                        },
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        nav,
+                        "_followers_profile_tabs_bottom_y_px",
+                        return_value=(900, "unit"),
+                    )
+                )
+                legacy_open = stack.enter_context(
+                    mock.patch.object(
+                        nav,
+                        "_post_follow_likes_open_top_left_legacy_visual_safe",
+                        return_value={
+                            "ok": True,
+                            "post_detected": True,
+                            "failure_reason": "",
+                            "open_strategy": "vision_open_top_left_legacy_safe",
+                            "viewer_detect_path": "phase_a2_exact_like_desc_fast",
+                            "likes_perf_post_open": {},
+                        },
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        nav,
+                        "visual_post_already_liked",
+                        return_value={
+                            "already_liked": False,
+                            "detection_method": "hierarchy_like_hint",
+                        },
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        nav,
+                        "visual_like_open_post",
+                        return_value={
+                            "ok": True,
+                            "already_liked": False,
+                            "real_tap_sent": True,
+                            "likes_perf_like": {},
+                        },
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        nav,
+                        "visual_verify_post_liked",
+                        return_value={
+                            "liked_verified": True,
+                            "verification_method": "visual",
+                            "verify_attempts_count": 1,
+                        },
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        nav,
+                        "visual_return_to_profile_from_post",
+                        return_value={"ok": True},
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        nav,
+                        "log",
+                        side_effect=lambda _level, event, **kw: logs.append((str(event), kw)),
+                    )
+                )
+                outputs = []
+                for cycle in range(10):
+                    outputs.append(nav.run_post_follow_post_likes_phase(
+                        device,
+                        pkg="com.instagram.android",
+                        source_profile_username="ct",
+                        follower_username="cand",
+                        visual_candidate_id=f"vc-{cycle}",
+                        follow_success_verified=True,
+                        follow_state_after="following",
+                        skipped_tap=False,
+                    ))
+        finally:
+            canary.configure(
+                account_id="other",
+                account_username="other",
+                run_id="reset",
+                package="com.instagram.android",
+                resume_policy=None,
+            )
+
+        self.assertEqual(legacy_open.call_count, 10)
+        self.assertTrue(all(out.get("phase_outcome") == "success" for out in outputs))
+        self.assertTrue(all(out.get("liked_count") == 1 for out in outputs))
+        fallback_rows = [
+            kw for event, kw in logs
+            if event == "follow_60s_optimization_status"
+            and kw.get("feature") == "like_fresh_cell_bounds"
+        ]
+        self.assertTrue(any(row.get("status") == "fallback" for row in fallback_rows))
+        self.assertNotIn(
+            "post_follow_post_like_open_skipped_no_post_grid",
+            [event for event, _ in logs],
+        )
 
     def test_strict_no_post_grid_confirmed_absent_cells_skips_without_grid_probe(self) -> None:
         device = mock.MagicMock()

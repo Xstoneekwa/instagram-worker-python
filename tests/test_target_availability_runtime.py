@@ -107,6 +107,8 @@ import threading
 for key in tuple(os.environ):
     if key.startswith("TARGET_AVAILABILITY_"):
         os.environ.pop(key, None)
+os.environ["TARGET_AVAILABILITY_CONTROL_FILE"] = "/private/tmp/target-availability-test-no-control"
+os.environ["TARGET_AVAILABILITY_AUTO_KILL_FILE"] = "/private/tmp/target-availability-test-no-kill"
 import account_session_orchestrator as module
 assert "target_availability_runtime" not in sys.modules
 assert "target_availability_writer" not in sys.modules

@@ -352,6 +352,48 @@ class Follow60sImmutableEvidenceContractsTest(unittest.TestCase):
             "missing_evidence",
         )
 
+    def test_ambiguous_post_grid_evidence_is_rejected_for_golden_fallback(self) -> None:
+        canary.stash_post_grid_evidence(
+            candidate_username="candidate", package="pkg", activity="act",
+            navigation_generation="g1", viewport_fingerprint="v1",
+            outcome="ambiguous", metadata={"identity_exact": True},
+        )
+        ev, _, reason = canary.consume_post_grid_evidence(
+            candidate_username="candidate", package="pkg", activity="act",
+            navigation_generation="g1", viewport_fingerprint="v1",
+            screen_size=(1080, 2340),
+        )
+        self.assertIsNone(ev)
+        self.assertEqual(reason, "ambiguous_outcome")
+
+    def test_rex_one_shot_resume_requires_exact_source_phase_and_quota(self) -> None:
+        policy = {
+            "prior_run_id": canary.REX_ONE_SHOT_SOURCE_RUN_ID,
+            "restart_allowed": True,
+            "request_metadata": {"source": "auto_restart_tick"},
+            "phases_to_run": {"follow": True, "welcome": False, "unfollow": False},
+            "quota_remaining": {"follow": 41, "welcome": 0, "unfollow": 0},
+        }
+        with patch.object(canary, "REX_ONE_SHOT_EXPIRES_AT", "2999-01-01T00:00:00+00:00"):
+            self.assertTrue(canary._one_shot_resume_allowed(policy)[0])
+            self.assertTrue(canary.configure(
+                account_id=canary.REX_ACCOUNT_ID,
+                account_username="rex_gen_boost_ai",
+                run_id="resume-run",
+                package="com.instagram.androig",
+                resume_policy=policy,
+            ))
+            self.assertFalse(canary._one_shot_resume_allowed({
+                **policy, "prior_run_id": "different-run"
+            })[0])
+            self.assertFalse(canary._one_shot_resume_allowed({
+                **policy,
+                "phases_to_run": {"follow": True, "welcome": False, "unfollow": True},
+            })[0])
+            self.assertFalse(canary._one_shot_resume_allowed({
+                **policy, "quota_remaining": {"follow": 0}
+            })[0])
+
     def test_snapshot_is_single_consume_and_invalidated_by_viewport_change(self) -> None:
         canary.stash_next_candidate_snapshot(
             source_profile_username="ct", package="pkg", activity="act",
