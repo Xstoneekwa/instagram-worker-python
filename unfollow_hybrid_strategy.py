@@ -158,6 +158,82 @@ def _clickable_ancestor_bounds(
     return fallback
 
 
+def _clickable_ancestor_node(
+    node: ET.Element,
+    parent_by_id: dict[int, ET.Element],
+) -> ET.Element | None:
+    """Return the bounded clickable row represented by one exact label."""
+    current: ET.Element | None = node
+    for _ in range(5):
+        if current is None:
+            break
+        bounds = _parse_bounds(str(current.attrib.get("bounds") or ""))
+        if bounds and str(current.attrib.get("clickable") or "").casefold() == "true":
+            return current
+        current = parent_by_id.get(id(current))
+    return None
+
+
+def _row_semantics(node: ET.Element | None) -> dict[str, bool]:
+    """Separate account rows from exact-query suggestion rows fail closed."""
+    if node is None:
+        return {"account_signal": False, "suggestion_signal": False}
+    tokens = " ".join(
+        str(value or "").casefold()
+        for member in node.iter()
+        for value in (
+            member.attrib.get("resource-id"),
+            member.attrib.get("class"),
+            member.attrib.get("content-desc"),
+        )
+    )
+    account_signal = any(
+        token in tokens
+        for token in (
+            "row_search_user",
+            "search_user_username",
+            "search_user_avatar",
+            "user_search_result",
+        )
+    )
+    suggestion_signal = any(
+        token in tokens
+        for token in (
+            "search_suggestion",
+            "search_typeahead",
+            "search_query_suggestion",
+            "search_recent_query",
+            "search_icon",
+            "magnifying",
+        )
+    )
+    return {
+        "account_signal": account_signal,
+        "suggestion_signal": suggestion_signal and not account_signal,
+    }
+
+
+def _is_no_results_label(value: str) -> bool:
+    """Recognize static and username-qualified empty Search states."""
+    label = _normalized_ui_label(value)
+    exact_markers = {
+        "no results",
+        "no results found",
+        "aucun résultat",
+        "aucun resultat",
+        "sin resultados",
+        "nenhum resultado",
+    }
+    dynamic_prefixes = (
+        "no results found for ",
+        "aucun résultat pour ",
+        "aucun resultat pour ",
+        "sin resultados para ",
+        "nenhum resultado para ",
+    )
+    return label in exact_markers or any(label.startswith(prefix) for prefix in dynamic_prefixes)
+
+
 def _bounds_signature(bounds: dict[str, int]) -> str:
     return ":".join(
         str(int(bounds.get(key) or 0))
@@ -290,6 +366,18 @@ def classify_search_surface_xml(
         ),
         default=0,
     )
+    # An explicit empty state is stronger than an exact type-ahead suggestion.
+    # Instagram can keep the exact suggestion row visible while the committed
+    # result surface already says `No results found for "username"`.
+    if any(_is_no_results_label(_node_value(node)) for node in root.iter()):
+        return {
+            "state": SEARCH_NO_RESULTS_CONFIRMED,
+            "reason": "username_not_found_confirmed",
+            "exact_match_count": 0,
+            "bounds": {},
+            "query_field_confirmed": True,
+        }
+
     matches: list[dict[str, object]] = []
     query_node_ids = {id(node) for node in query_nodes}
     for node in root.iter():
@@ -300,9 +388,11 @@ def classify_search_surface_xml(
         own_bounds = _parse_bounds(str(node.attrib.get("bounds") or ""))
         if query_bottom and own_bounds and int(own_bounds.get("top") or 0) < query_bottom:
             continue
+        clickable_ancestor = _clickable_ancestor_node(node, parent_by_id)
         bounds = _clickable_ancestor_bounds(node, parent_by_id)
         if bounds:
             resource_id = str(node.attrib.get("resource-id") or "")
+            semantics = _row_semantics(clickable_ancestor)
             matches.append(
                 {
                     "bounds": bounds,
@@ -312,6 +402,8 @@ def classify_search_surface_xml(
                             resource_id,
                         )
                     ),
+                    "account_signal": bool(semantics["account_signal"]),
+                    "suggestion_signal": bool(semantics["suggestion_signal"]),
                 }
             )
 
@@ -326,6 +418,22 @@ def classify_search_surface_xml(
         )
         by_bounds[key] = match
     unique_matches = _logical_exact_result_rows(list(by_bounds.values()))
+    canonical_matches = [
+        match for match in unique_matches if bool(match.get("canonical_username_rid"))
+    ]
+    if canonical_matches:
+        # A canonical account row wins over a same-text Search suggestion. Two
+        # physically distinct canonical rows remain ambiguous and fail closed.
+        unique_matches = canonical_matches
+    else:
+        non_suggestion_matches = [
+            match for match in unique_matches if not bool(match.get("suggestion_signal"))
+        ]
+        if non_suggestion_matches:
+            unique_matches = non_suggestion_matches
+        elif unique_matches:
+            # Suggestion-only proof cannot authorize a profile tap.
+            unique_matches = []
     if len(unique_matches) == 1:
         bounds = dict(unique_matches[0].get("bounds") or {})
         return {
@@ -350,22 +458,6 @@ def classify_search_surface_xml(
             "screen_bounds": _surface_bounds(root),
         }
 
-    no_results_markers = {
-        "no results",
-        "no results found",
-        "aucun résultat",
-        "aucun resultat",
-        "sin resultados",
-        "nenhum resultado",
-    }
-    if any(_normalized_ui_label(_node_value(node)) in no_results_markers for node in root.iter()):
-        return {
-            "state": SEARCH_NO_RESULTS_CONFIRMED,
-            "reason": "username_not_found_confirmed",
-            "exact_match_count": 0,
-            "bounds": {},
-            "query_field_confirmed": True,
-        }
     return {
         "state": SEARCH_RESULTS_LOADING,
         "reason": "search_results_loading",
@@ -440,6 +532,8 @@ def _search_surface_committed(hierarchy_xml: str) -> bool:
         or "no results" in lowered
         or "aucun résultat" in lowered
         or "aucun resultat" in lowered
+        or "sin resultados" in lowered
+        or "nenhum resultado" in lowered
     )
 
 

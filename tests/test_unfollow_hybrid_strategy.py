@@ -260,6 +260,44 @@ class UnfollowHybridStrategyTests(unittest.TestCase):
         self.assertEqual(out["state"], SEARCH_NO_RESULTS_CONFIRMED)
         self.assertEqual(out["reason"], "username_not_found_confirmed")
 
+    def test_username_qualified_no_results_wins_over_exact_search_suggestion(self) -> None:
+        xml = (
+            '<hierarchy><node class="android.widget.EditText" '
+            'resource-id="com.instagram.android:id/action_bar_search_edit_text" '
+            'text="comoraisoncielesteart" bounds="[0,0][540,90]" />'
+            '<node clickable="true" '
+            'resource-id="com.instagram.android:id/search_query_suggestion" '
+            'bounds="[0,100][540,200]">'
+            '<node text="comoraisoncielesteart" bounds="[100,120][480,180]" />'
+            '</node><node text="No results found for &quot;comoraisoncielesteart&quot;" '
+            'bounds="[0,240][540,310]" /></hierarchy>'
+        )
+        out = classify_search_surface_xml(xml, "comoraisoncielesteart")
+        self.assertEqual(out["state"], SEARCH_NO_RESULTS_CONFIRMED)
+        self.assertEqual(out["reason"], "username_not_found_confirmed")
+        self.assertEqual(out["exact_match_count"], 0)
+
+    def test_canonical_account_row_wins_over_same_text_search_suggestion(self) -> None:
+        xml = (
+            '<hierarchy><node class="android.widget.EditText" '
+            'resource-id="com.instagram.android:id/action_bar_search_edit_text" '
+            'text="target" bounds="[0,0][540,90]" />'
+            '<node clickable="true" '
+            'resource-id="com.instagram.android:id/search_query_suggestion" '
+            'bounds="[0,100][540,190]">'
+            '<node text="target" bounds="[100,115][430,175]" /></node>'
+            '<node clickable="true" bounds="[0,240][540,350]">'
+            '<node resource-id="com.instagram.android:id/row_search_user_username" '
+            'text="target" bounds="[100,260][430,330]" /></node></hierarchy>'
+        )
+        out = classify_search_surface_xml(xml, "target")
+        self.assertEqual(out["state"], SEARCH_EXACT_RESULT_VISIBLE)
+        self.assertEqual(out["exact_match_count"], 1)
+        self.assertEqual(
+            out["bounds"],
+            {"left": 0, "top": 240, "right": 540, "bottom": 350},
+        )
+
     def test_query_mismatch_is_unhealthy_not_not_found(self) -> None:
         out = classify_search_surface_xml(
             _no_results_xml("someone_else", "Aucun résultat"),
@@ -723,6 +761,28 @@ class UnfollowHybridStrategyTests(unittest.TestCase):
         self.assertFalse(out["ok"])
         self.assertEqual(out["status"], "username_not_found_confirmed")
         self.assertEqual(out["exact_match_count"], 0)
+
+    def test_dynamic_removed_account_is_terminal_without_any_row_tap(self) -> None:
+        dynamic_empty = _no_results_xml(
+            "comoraisoncielesteart",
+            'No results found for &quot;comoraisoncielesteart&quot;',
+        )
+
+        class Device:
+            def dump_hierarchy(self, compressed=False):
+                del compressed
+                return dynamic_empty
+
+        with patch("instagram_navigation.open_search", return_value=True), patch(
+            "instagram_navigation.type_search", return_value=True
+        ), patch("instagram_navigation.tap_account_result") as tap_mock, patch(
+            "unfollow_hybrid_strategy.time.sleep"
+        ):
+            out = open_exact_profile_for_unfollow(Device(), "comoraisoncielesteart")
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["status"], "username_not_found_confirmed")
+        self.assertEqual(out["reason"], "username_not_found_confirmed")
+        tap_mock.assert_not_called()
 
     def test_search_remains_fallback_after_progressive_scan(self) -> None:
         before_exhaustion = choose_hybrid_selection(
