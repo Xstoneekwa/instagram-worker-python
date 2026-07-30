@@ -17597,6 +17597,8 @@ def _stash_post_mute_sheet_closed_proof(
     }
     try:
         from follow_60s_canary import (
+            consume as _consume_follow_60s_proof,
+            create_candidate_profile_verdict as _create_candidate_profile_verdict,
             enabled as _follow_60s_canary_enabled,
             stash as _stash_follow_60s_proof,
         )
@@ -17618,6 +17620,31 @@ def _stash_post_mute_sheet_closed_proof(
                     "stories_verified": bool(context.get("stories_verified", True)),
                 },
             )
+            # Consume the volatile UI proof exactly once, while it is still fresh,
+            # and publish an immutable verdict for all downstream Like guards.
+            _fresh, _age_ms, _reason = _consume_follow_60s_proof(
+                "post_mute_candidate_profile",
+                subject_username=src,
+                target_username=cand,
+                package=str(context.get("package") or ""),
+                activity=str(context.get("activity") or ""),
+                surface="candidate_profile_post_mute",
+                consume_once=True,
+            )
+            if _fresh is not None:
+                _create_candidate_profile_verdict(
+                    candidate_username=cand,
+                    package=str(context.get("package") or ""),
+                    activity=str(context.get("activity") or ""),
+                    navigation_generation=str(
+                        context.get("navigation_generation") or ""
+                    ),
+                    exact_identity=True,
+                    sheet_closed=True,
+                    mute_posts_verified=bool(context.get("posts_verified", True)),
+                    mute_stories_verified=bool(context.get("stories_verified", True)),
+                    ttl_ms=3000.0,
+                )
     except Exception:
         # The existing proof stash remains the Golden fallback.
         pass
@@ -17682,20 +17709,20 @@ def _validate_post_mute_sheet_closed_proof(
 ) -> tuple[bool, dict[str, Any], float, str]:
     try:
         from follow_60s_canary import (
-            consume as _consume_follow_60s_proof,
             enabled as _follow_60s_canary_enabled,
+            get_candidate_profile_verdict as _get_candidate_profile_verdict,
             record_outcome as _record_follow_60s_outcome,
         )
 
         if _follow_60s_canary_enabled("mute_like_handoff"):
             expected_context = dict(candidate_context or {})
-            central, central_age_ms, central_reject = _consume_follow_60s_proof(
-                "post_mute_candidate_profile",
-                subject_username=source_profile_username,
-                target_username=candidate_username,
+            central, central_age_ms, central_reject = _get_candidate_profile_verdict(
+                candidate_username=candidate_username,
                 package=str(expected_context.get("package") or ""),
                 activity=str(expected_context.get("activity") or ""),
-                surface="candidate_profile_post_mute",
+                navigation_generation=str(
+                    expected_context.get("navigation_generation") or ""
+                ),
             )
             if central is None:
                 _record_follow_60s_outcome(
@@ -17706,12 +17733,17 @@ def _validate_post_mute_sheet_closed_proof(
                     fallback_used=True,
                 )
                 return False, {}, central_age_ms, central_reject
-            _record_follow_60s_outcome(
-                "mute_like_handoff",
-                "used",
-                age_ms=central_age_ms,
-                estimated_gain_ms=3000.0,
-            )
+            # The immutable verdict is the canary authority. Do not reread the
+            # mutable legacy stash below; that path remains Golden-only.
+            _record_follow_60s_outcome("mute_like_handoff", "used", age_ms=central_age_ms,
+                                       estimated_gain_ms=3000.0)
+            return True, {
+                "candidate_username": central.candidate_username,
+                "sheet_closed": central.sheet_closed,
+                "action_bar_title": central.candidate_username,
+                "candidate_context": expected_context,
+                "immutable_verdict": True,
+            }, central_age_ms, ""
     except Exception as exc:
         return False, {}, 0.0, f"central_proof_error:{type(exc).__name__}"
     stash = _post_mute_sheet_closed_proof_stash
@@ -21902,6 +21934,78 @@ def _post_follow_fast_no_posts_xml_evidence(hierarchy_xml: str) -> dict[str, Any
             )
         ):
             out["reels_or_tagged_selected"] = True
+    return out
+
+
+def _post_follow_post_grid_evidence_from_xml(
+    hierarchy_xml: str,
+    *,
+    candidate_username: str,
+    ww: int,
+    wh: int,
+) -> dict[str, Any]:
+    """Derive the Like branch from one immutable profile hierarchy."""
+    xml = str(hierarchy_xml or "")
+    base = _post_follow_fast_no_posts_xml_evidence(xml)
+    out: dict[str, Any] = {
+        "outcome": "ambiguous", "post_bounds": None,
+        "viewport_fingerprint": hashlib.sha256(
+            xml.encode("utf-8", errors="replace")
+        ).hexdigest()[:20] if xml else "",
+        **base,
+    }
+    if not xml or bool(base.get("loading_visible")) or bool(base.get("private_profile_visible")):
+        return out
+    try:
+        root = ET.fromstring(xml)
+    except Exception:
+        return out
+    expected = _normalize_handle(candidate_username)
+    identity_exact = False
+    tabs_bottom = 0
+    cells: list[dict[str, int]] = []
+    for node in root.iter():
+        attrs = node.attrib or {}
+        label = " ".join(str(attrs.get(k) or "") for k in ("text", "content-desc"))
+        if expected and _normalize_handle(label) == expected:
+            identity_exact = True
+        bounds = _parse_ui_bounds_str(attrs.get("bounds"))
+        label_l = label.lower()
+        if bounds and any(token in label_l for token in ("profile tab grid", "posts tab", "profile_tab_grid")):
+            tabs_bottom = max(tabs_bottom, int(bounds["bottom"]))
+        if not bounds or str(attrs.get("class") or "") not in {
+            "android.widget.ImageView", "android.widget.ImageButton"
+        }:
+            continue
+        width = int(bounds["right"]) - int(bounds["left"])
+        height = int(bounds["bottom"]) - int(bounds["top"])
+        if width < int(ww * 0.18) or width > int(ww * 0.42):
+            continue
+        if height < int(ww * 0.18) or height > int(ww * 0.48):
+            continue
+        cells.append({**bounds, "center_x": (bounds["left"] + bounds["right"]) // 2,
+                      "center_y": (bounds["top"] + bounds["bottom"]) // 2})
+    out["identity_exact"] = identity_exact
+    out["tabs_bottom"] = tabs_bottom
+    if identity_exact and bool(base.get("profile_tabs_present")) and bool(base.get("empty_marker_xml")):
+        out["outcome"] = "no_posts"
+        return out
+    if not (identity_exact and tabs_bottom > 0):
+        return out
+    below = [cell for cell in cells if int(cell["top"]) >= tabs_bottom + 16]
+    below.sort(key=lambda cell: (int(cell["top"]), int(cell["left"])))
+    if not below:
+        return out
+    candidate = below[0]
+    safe = _post_follow_likes_evaluate_top_left_post_target(
+        candidate, reason="xml_thumbnail_top_left", ww=int(ww), wh=int(wh),
+        y_min_px=int(tabs_bottom),
+    )
+    if bool(safe.get("top_left_post_tap_safe")):
+        out["outcome"] = "safe_post"
+        out["post_bounds"] = candidate
+        out["tap_safe"] = True
+        out["grid_exposure"] = safe.get("grid_exposure")
     return out
 
 
@@ -40544,6 +40648,47 @@ def post_follow_controlled_return_to_followers_list(
             except Exception:
                 ok_fast, det_fast = False, {}
             if ok_fast:
+                try:
+                    from follow_60s_canary import (
+                        runtime_context as _follow_60s_runtime_context,
+                        stash_next_candidate_snapshot as _stash_next_candidate_snapshot,
+                    )
+                    _snap_runtime = _follow_60s_runtime_context()
+                    _snap_generation = str(_snap_runtime.get("ui_generation") or 0)
+                    _snap_viewport = hashlib.sha256(
+                        json.dumps(
+                            {
+                                "action_bar_title": det_fast.get("action_bar_title"),
+                                "visible_usernames": det_fast.get("visible_usernames_sample") or [],
+                                "signals": det_fast.get("signals") or [],
+                            },
+                            sort_keys=True,
+                            default=str,
+                        ).encode("utf-8")
+                    ).hexdigest()[:20]
+                    _stash_next_candidate_snapshot(
+                        source_profile_username=src,
+                        package=str(det_fast.get("current_package") or pkg),
+                        activity=str(det_fast.get("current_activity") or ""),
+                        navigation_generation=_snap_generation,
+                        viewport_fingerprint=_snap_viewport,
+                        detection=dict(det_fast),
+                        ttl_ms=3000.0,
+                    )
+                    _POST_FOLLOW_RETURN_PENDING_VISUAL_EVIDENCE_FOR_RUNNER[
+                        "return_snapshot_navigation_generation"
+                    ] = _snap_generation
+                    _POST_FOLLOW_RETURN_PENDING_VISUAL_EVIDENCE_FOR_RUNNER[
+                        "return_snapshot_viewport_fingerprint"
+                    ] = _snap_viewport
+                except Exception:
+                    pass
+                _POST_FOLLOW_RETURN_PENDING_VISUAL_EVIDENCE_FOR_RUNNER[
+                    "return_list_detection"
+                ] = dict(det_fast)
+                _POST_FOLLOW_RETURN_PENDING_VISUAL_EVIDENCE_FOR_RUNNER[
+                    "return_list_detection_created_at_monotonic"
+                ] = time.monotonic()
                 log(
                     "info",
                     "follow_60s_return_candidate_proof_used",
@@ -42086,6 +42231,26 @@ def _mute_engine_v2_is_following_options_sheet(d: u2.Device) -> bool:
 
 
 def _mute_engine_v2_detect_sheet_level(d: u2.Device) -> tuple[str, dict[str, Any]]:
+    try:
+        from follow_60s_canary import enabled as _follow_60s_canary_enabled
+
+        if _follow_60s_canary_enabled("mute_known_depth"):
+            t0 = time.perf_counter()
+            xml = str(d.dump_hierarchy(compressed=False) or "")
+            level, meta = _mute_engine_v2_detect_sheet_level_from_xml(xml)
+            meta["detect_duration_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
+            meta["dump_count"] = 1
+            meta["probe_count"] = 1
+            meta["probe_timings"] = [{"name": "single_xml", "ok": bool(xml),
+                                      "duration_ms": meta["detect_duration_ms"]}]
+            return level, meta
+    except Exception as exc:
+        try:
+            log("info", "follow_60s_mute_single_xml_fallback",
+                rejection_reason=f"single_xml_error:{type(exc).__name__}",
+                fallback_used=True, dumps=1)
+        except Exception:
+            pass
     t0 = time.perf_counter()
     probe_timings: list[dict[str, Any]] = []
 
@@ -42146,6 +42311,67 @@ def _mute_engine_v2_detect_sheet_level(d: u2.Device) -> tuple[str, dict[str, Any
         "detect_duration_ms": round((time.perf_counter() - t0) * 1000.0, 2),
     }
     return level, meta
+
+
+def _mute_engine_v2_detect_sheet_level_from_xml(xml: str) -> tuple[str, dict[str, Any]]:
+    """Classify one Mute sheet level from one immutable hierarchy snapshot."""
+    labels: set[str] = set()
+    switch_index: dict[str, dict[str, Any]] = {}
+    try:
+        root = ET.fromstring(str(xml or ""))
+        for node in root.iter():
+            for attr in ("text", "content-desc"):
+                value = str(node.attrib.get(attr) or "").strip()
+                if value:
+                    labels.add(value)
+        for node in root.iter():
+            axis_label = str(node.attrib.get("text") or "").strip().lower()
+            axis = "posts" if axis_label in {"posts", "publications"} else (
+                "stories" if axis_label in {"stories", "historias", "storie"} else ""
+            )
+            if not axis:
+                continue
+            candidates = [node, *list(node.iter())]
+            for candidate in candidates:
+                attrs = candidate.attrib or {}
+                if (
+                    str(attrs.get("class") or "").endswith("Switch")
+                    or str(attrs.get("checkable") or "").lower() == "true"
+                ):
+                    bounds = _parse_ui_bounds_str(attrs.get("bounds"))
+                    if bounds:
+                        switch_index[axis] = {
+                            "bounds": bounds,
+                            "checked": str(attrs.get("checked") or "").lower() == "true",
+                            "enabled": str(attrs.get("enabled") or "true").lower() == "true",
+                        }
+                        break
+    except Exception:
+        return "unknown", {"xml_parse_failed": True, "labels": []}
+    posts = "Posts" in labels or "Publications" in labels
+    stories = "Stories" in labels
+    notes = "Notes" in labels
+    unfollow = "Unfollow" in labels
+    close_friend = any("Close friend" in value for value in labels)
+    favorites = "Add to favorites" in labels
+    mute_exact = "Mute" in labels
+    mute_contains = any("Mute" in value for value in labels)
+    restrict = "Restrict" in labels
+    toggles = bool(posts and stories and (notes or (mute_exact and not (close_friend and unfollow))))
+    following_options = bool(
+        not toggles and unfollow and (mute_exact or mute_contains)
+        and (close_friend or favorites or restrict)
+    )
+    level = "mute_toggles" if toggles else ("following_options" if following_options else "unknown")
+    return level, {
+        "posts_label": posts, "stories_label": stories, "notes_label": notes,
+        "unfollow_visible": unfollow, "close_friend_visible": close_friend,
+        "favorites_visible": favorites, "mute_exact_visible": mute_exact,
+        "mute_contains_visible": mute_contains, "restrict_visible": restrict,
+        "single_xml": True, "xml_fingerprint": hashlib.sha256(
+            str(xml or "").encode("utf-8", errors="replace")
+        ).hexdigest()[:20], "switch_index": switch_index,
+    }
 
 
 def _mute_engine_v2_log_sheet_detect_timing(
@@ -45385,7 +45611,14 @@ def run_mute_engine_v2(
 
     timings["mute_sheet_open_ms"] = round((time.perf_counter() - t_sheet) * 1000, 2)
 
-    if sheet_level != "mute_toggles" or not _mute_engine_v2_is_mute_toggles_sheet(d):
+    _canary_single_xml_sheet_confirmed = bool(
+        sheet_level == "mute_toggles" and sheet_meta.get("single_xml")
+        and sheet_meta.get("posts_label") and sheet_meta.get("stories_label")
+    )
+    if sheet_level != "mute_toggles" or (
+        not _canary_single_xml_sheet_confirmed
+        and not _mute_engine_v2_is_mute_toggles_sheet(d)
+    ):
         return _abort(
             "mute_toggles_sheet_not_confirmed",
             fr="mute_toggles_sheet_not_confirmed",
@@ -46770,17 +47003,20 @@ def run_post_follow_post_likes_phase(
             and expected_activity != cur_activity
         ):
             reject_reason = "candidate_context_activity_mismatch"
-        try:
-            ab = str(read_current_profile_username_for_follow_gate(d) or "").strip().lstrip("@")
-        except Exception:
-            ab = ""
+        if bool(proof.get("immutable_verdict")):
+            ab = cand
+        else:
+            try:
+                ab = str(read_current_profile_username_for_follow_gate(d) or "").strip().lstrip("@")
+            except Exception:
+                ab = ""
         if not reject_reason and (
             not ab or _normalize_handle(ab) != _normalize_handle(cand)
         ):
             reject_reason = "action_bar_mismatch"
             profile_guard_live_mismatch = bool(ab)
         followers_quick = False
-        if not reject_reason:
+        if not reject_reason and not bool(proof.get("immutable_verdict")):
             try:
                 followers_quick = bool(
                     is_followers_list_surface_quick(d, source_profile_username=src)
@@ -46904,6 +47140,63 @@ def run_post_follow_post_likes_phase(
             ),
         )
 
+    _canary_grid_evidence: dict[str, Any] | None = None
+    try:
+        from follow_60s_canary import (
+            consume_post_grid_evidence as _consume_post_grid_evidence,
+            enabled as _follow_60s_canary_enabled,
+            record_outcome as _record_follow_60s_outcome,
+            stash_post_grid_evidence as _stash_post_grid_evidence,
+        )
+
+        if _follow_60s_canary_enabled("like_fresh_cell_bounds"):
+            _grid_ww, _grid_wh = d.window_size()
+            _grid_xml = str(d.dump_hierarchy(compressed=False) or "")
+            _grid_raw = _post_follow_post_grid_evidence_from_xml(
+                _grid_xml, candidate_username=cand,
+                ww=int(_grid_ww), wh=int(_grid_wh),
+            )
+            _expected_ctx = dict(candidate_profile_context or {})
+            _stash_post_grid_evidence(
+                candidate_username=cand, package=str(_expected_ctx.get("package") or pkg),
+                activity=str(_expected_ctx.get("activity") or ""),
+                navigation_generation=str(_expected_ctx.get("navigation_generation") or ""),
+                viewport_fingerprint=str(_grid_raw.get("viewport_fingerprint") or ""),
+                outcome=str(_grid_raw.get("outcome") or "ambiguous"),
+                post_bounds=_grid_raw.get("post_bounds"), metadata=_grid_raw,
+            )
+            _grid_ev, _grid_age, _grid_reject = _consume_post_grid_evidence(
+                candidate_username=cand, package=str(_expected_ctx.get("package") or pkg),
+                activity=str(_expected_ctx.get("activity") or ""),
+                navigation_generation=str(_expected_ctx.get("navigation_generation") or ""),
+                viewport_fingerprint=str(_grid_raw.get("viewport_fingerprint") or ""),
+                screen_size=(int(_grid_ww), int(_grid_wh)),
+            )
+            if _grid_ev is not None:
+                _canary_grid_evidence = {**dict(_grid_ev.metadata),
+                                         "outcome": _grid_ev.outcome,
+                                         "post_bounds": _grid_ev.post_bounds,
+                                         "proof_age_ms": _grid_age}
+                _record_follow_60s_outcome(
+                    "like_fresh_cell_bounds", "used", age_ms=_grid_age,
+                    dumps=1, estimated_gain_ms=6500.0,
+                )
+            else:
+                _record_follow_60s_outcome(
+                    "like_fresh_cell_bounds", "fallback", age_ms=_grid_age,
+                    reason=_grid_reject, fallback_used=True, dumps=1,
+                )
+    except Exception as _grid_exc:
+        _canary_grid_evidence = None
+        try:
+            _record_follow_60s_outcome(
+                "like_fresh_cell_bounds", "fallback",
+                reason=f"single_capture_error:{type(_grid_exc).__name__}",
+                fallback_used=True, dumps=1,
+            )
+        except Exception:
+            pass
+
     per_post: list[dict[str, Any]] = []
     liked_count = 0
     skipped_already = 0
@@ -46935,15 +47228,24 @@ def run_post_follow_post_likes_phase(
             follower_username=cand,
             post_index=post_idx,
         )
-        sheet_precheck = _post_follow_like_precheck_mute_sheet(
-            d,
-            visual_candidate_id=vcid,
-            source_profile_username=src,
-            follower_username=cand,
-        )
+        if _canary_grid_evidence is not None:
+            sheet_precheck = {"skip_like": False, "sheet_visible": False,
+                              "precheck_ms": 0.0, "immutable_verdict_reused": True}
+        else:
+            sheet_precheck = _post_follow_like_precheck_mute_sheet(
+                d, visual_candidate_id=vcid, source_profile_username=src,
+                follower_username=cand,
+            )
         timings["sheet_precheck_ms"] = float(sheet_precheck.get("precheck_ms") or 0.0)
         surface_precheck: dict[str, Any] = {}
-        if not bool(sheet_precheck.get("skip_like")):
+        if _canary_grid_evidence is not None:
+            surface_precheck = {
+                "profile_candidate_visible": True, "followers_list_visible": False,
+                "grid_tab_visible": True,
+                "post_cells_visible": str(_canary_grid_evidence.get("outcome")) == "safe_post",
+                "precheck_ms": 0.0, "immutable_evidence_reused": True,
+            }
+        elif not bool(sheet_precheck.get("skip_like")):
             surface_precheck = _post_follow_like_precheck_surface(
                 d,
                 visual_candidate_id=vcid,
@@ -47665,10 +47967,15 @@ def run_post_follow_post_likes_phase(
             )
         except Exception:
             pass
-        tier1_check = _visual_profile_no_posts_tier1_direct_check(
-            d,
-            source_profile_username=src,
-        )
+        if _canary_grid_evidence is not None:
+            tier1_check = {
+                "no_posts_detected": str(_canary_grid_evidence.get("outcome")) == "no_posts",
+                "detection_method": "single_post_grid_evidence",
+            }
+        else:
+            tier1_check = _visual_profile_no_posts_tier1_direct_check(
+                d, source_profile_username=src,
+            )
         tier1_duration_ms = round((time.perf_counter() - t_np_tier1) * 1000.0, 2)
         try:
             log(
@@ -47852,6 +48159,17 @@ def run_post_follow_post_likes_phase(
                 and post_cells_confirmed_absent_before_open
             )
 
+        if (
+            _canary_grid_evidence is not None
+            and str(_canary_grid_evidence.get("outcome") or "") == "no_posts"
+        ):
+            return _skip_no_posts(
+                {
+                    "no_posts_detected": True,
+                    "detection_method": "single_post_grid_evidence",
+                    "confidence": 1.0,
+                }
+            )
         if _hard_skip_no_post_grid_allowed():
             return _skip_no_post_grid_open(
                 "grid_tab_visible_without_post_cells",
@@ -47912,6 +48230,50 @@ def run_post_follow_post_likes_phase(
         except Exception:
             pass
         pre_reveal_out: dict[str, Any] = {}
+        _canary_preopened_out: dict[str, Any] | None = None
+        if (
+            _canary_grid_evidence is not None
+            and str(_canary_grid_evidence.get("outcome") or "") == "safe_post"
+            and isinstance(_canary_grid_evidence.get("post_bounds"), dict)
+        ):
+            _fresh_bounds = dict(_canary_grid_evidence.get("post_bounds") or {})
+            _tx = int(_fresh_bounds.get("center_x") or (
+                int(_fresh_bounds.get("left") or 0) + int(_fresh_bounds.get("right") or 0)
+            ) // 2)
+            _ty = int(_fresh_bounds.get("center_y") or (
+                int(_fresh_bounds.get("top") or 0) + int(_fresh_bounds.get("bottom") or 0)
+            ) // 2)
+            _meta_before = _followers_current_pkg_activity(d)
+            d.click(_tx, _ty)
+            try:
+                from follow_60s_canary import invalidate as _invalidate_follow_60s_proofs
+                _invalidate_follow_60s_proofs("planned_post_cell_tap")
+            except Exception:
+                pass
+            _viewer = _visual_wait_post_viewer_opened_after_tap(
+                d, pkg=pkg, expected_follower_username=cand,
+                act_before=_meta_before.get("current_activity"), post_follow_fast=True,
+            )
+            if bool(_viewer.get("post_detected")):
+                _stash_post_follow_open_like_proof(
+                    _viewer, source_profile_username=src, follower_username=cand,
+                    proof_source="single_post_grid_evidence",
+                )
+            _canary_preopened_out = {
+                "ok": bool(_viewer.get("post_detected")),
+                "post_detected": bool(_viewer.get("post_detected")),
+                "failure_reason": "" if bool(_viewer.get("post_detected"))
+                else "post_viewer_not_detected_after_fresh_bounds_tap",
+                "open_strategy": "single_post_grid_evidence",
+                "tap_to_viewer_detected_ms": _viewer.get("viewer_detect_total_ms"),
+                "viewer_detect_path": _viewer.get("viewer_detect_path"),
+                "post_open_snapshot_xml": _viewer.get("post_open_snapshot_xml"),
+                "post_open_snapshot_captured_at_monotonic": _viewer.get(
+                    "post_open_snapshot_captured_at_monotonic"
+                ),
+                "post_open_snapshot_valid": bool(_viewer.get("post_open_snapshot_valid")),
+                "likes_perf_post_open": dict(_viewer),
+            }
 
         def _run_pre_reveal_guard_before_legacy_safe() -> dict[str, Any]:
             t_pre_reveal = time.perf_counter()
@@ -48147,7 +48509,12 @@ def run_post_follow_post_likes_phase(
                 pass
             return out
 
-        pre_reveal_out = _run_pre_reveal_guard_before_legacy_safe()
+        pre_reveal_out = (
+            {"pre_reveal_used": False, "reason": "single_post_grid_evidence_opened",
+             "duration_ms": 0.0}
+            if _canary_preopened_out is not None
+            else _run_pre_reveal_guard_before_legacy_safe()
+        )
         if bool(pre_reveal_out.get("pre_reveal_used")):
             timings[f"pre_reveal_{post_idx}_ms"] = float(
                 pre_reveal_out.get("duration_ms") or 0.0
@@ -48176,7 +48543,9 @@ def run_post_follow_post_likes_phase(
             and not bool(pre_reveal_out.get("pre_reveal_used"))
         )
         t_open_legacy_first = time.perf_counter()
-        if scroll_first_unknown_tabs:
+        if _canary_preopened_out is not None:
+            legacy_first_out = dict(_canary_preopened_out)
+        elif scroll_first_unknown_tabs:
             legacy_first_out = {
                 "ok": False,
                 "post_detected": False,
@@ -50992,7 +51361,14 @@ def run_visual_candidate_post_follow_phase(
             likes_out.get("post_follow_likes_return_ct_recovery_ok")
         ),
     }
-    for _k in ("return_list_screenshot_path", "return_visual_fallback_detail"):
+    for _k in (
+        "return_list_screenshot_path",
+        "return_visual_fallback_detail",
+        "return_list_detection",
+        "return_list_detection_created_at_monotonic",
+        "return_snapshot_navigation_generation",
+        "return_snapshot_viewport_fingerprint",
+    ):
         if _k in _vf_ev_out:
             _out[_k] = _vf_ev_out[_k]
     return _out
@@ -51540,6 +51916,67 @@ _PRE_FOLLOW_OBSERVATION_PROOF_KIND = "pre_follow_observation_proof_v1"
 
 def _norm_follow_username(username: str | None) -> str:
     return str(username or "").strip().lstrip("@").lower()
+
+
+def acquire_pre_follow_mono_capture(
+    d: u2.Device,
+    *,
+    follower_username: str,
+) -> dict[str, Any]:
+    """One XML capture deriving identity, profile, CTA and private signals.
+
+    Absence of a private marker is never sufficient: the public verdict also
+    requires exact identity, a profile stats surface and an exact Follow CTA.
+    """
+    t0 = time.perf_counter()
+    xml = str(d.dump_hierarchy(compressed=False) or "")
+    labels: list[str] = []
+    try:
+        root = ET.fromstring(xml)
+        for node in root.iter():
+            for attr in ("text", "content-desc"):
+                value = str(node.attrib.get(attr) or "").strip()
+                if value:
+                    labels.append(value)
+    except Exception:
+        return {"ok": False, "reason": "xml_parse_failed", "dump_count": 1,
+                "duration_ms": round((time.perf_counter() - t0) * 1000.0, 2)}
+    expected = _norm_follow_username(follower_username)
+    normalized = {_norm_follow_username(value) for value in labels}
+    exact_identity = bool(expected and expected in normalized)
+    follow_cta = "Follow" in labels or "Suivre" in labels
+    profile_surface = (
+        ("Followers" in labels or "Abonnés" in labels)
+        and ("Following" in labels or "Abonnements" in labels)
+        and ("Posts" in labels or "Publications" in labels)
+    )
+    private_markers = (
+        "This account is private", "Ce compte est privé",
+        "Follow this account to see their photos and videos",
+    )
+    private_detected = any(
+        marker.lower() in value.lower() for marker in private_markers for value in labels
+    )
+    public_ready = bool(exact_identity and profile_surface and follow_cta and not private_detected)
+    return {
+        "ok": public_ready,
+        "reason": "mono_capture_public_ready" if public_ready else "mono_capture_incomplete",
+        "xml": xml,
+        "xml_fingerprint": hashlib.sha256(xml.encode("utf-8", errors="replace")).hexdigest()[:20],
+        "dump_count": 1,
+        "duration_ms": round((time.perf_counter() - t0) * 1000.0, 2),
+        "exact_identity": exact_identity,
+        "profile_surface": profile_surface,
+        "follow_header_state": "follow" if follow_cta else "unknown",
+        "action_bar_title": follower_username if exact_identity else "",
+        "private_probe_payload": {
+            "private_profile_detected": private_detected,
+            "detection_method": "single_xml_positive_profile_surface",
+            "confidence": 1.0 if private_detected or public_ready else 0.0,
+            "probe_ms": round((time.perf_counter() - t0) * 1000.0, 2),
+            "hierarchy_fallback_used": False,
+        },
+    }
 
 
 def build_pre_follow_observation_proof(

@@ -22,20 +22,20 @@ class Follow60sCanaryRuntimeTest(unittest.TestCase):
             resume_policy=None,
         )
 
-    def _configure_loriele(self, resume_policy=None) -> bool:
+    def _configure_rex(self, resume_policy=None) -> bool:
         return canary.configure(
-            account_id=canary.LORIELE_ACCOUNT_ID,
-            account_username="lorielebras_autom",
+            account_id=canary.REX_ACCOUNT_ID,
+            account_username="rex_gen_boost_ai",
             run_id="run-1",
             package="com.instagram.android",
             resume_policy=resume_policy,
         )
 
-    def test_only_loriele_first_natural_attempt_is_enabled(self) -> None:
-        self.assertTrue(self._configure_loriele())
+    def test_only_rex_first_natural_attempt_is_enabled(self) -> None:
+        self.assertTrue(self._configure_rex())
         self.assertTrue(canary.enabled("mute_like_handoff"))
 
-        self.assertFalse(self._configure_loriele({"attempt_id": 2}))
+        self.assertFalse(self._configure_rex({"attempt_id": 2}))
         self.assertFalse(canary.enabled())
 
         self.assertFalse(
@@ -49,7 +49,7 @@ class Follow60sCanaryRuntimeTest(unittest.TestCase):
         )
 
     def test_matching_fresh_safe_bounds_proof_reuses(self) -> None:
-        self._configure_loriele()
+        self._configure_rex()
         canary.stash(
             "cell",
             subject_username="ct",
@@ -77,7 +77,7 @@ class Follow60sCanaryRuntimeTest(unittest.TestCase):
         self.assertEqual(reason, "")
 
     def test_mismatch_or_navigation_invalidates_and_falls_back(self) -> None:
-        self._configure_loriele()
+        self._configure_rex()
         canary.stash(
             "profile",
             subject_username="ct",
@@ -110,7 +110,7 @@ class Follow60sCanaryRuntimeTest(unittest.TestCase):
         self.assertEqual(reason, "bounds_hit_region_unsafe")
 
     def test_metadata_mismatch_rejects_fresh_proof(self) -> None:
-        self._configure_loriele()
+        self._configure_rex()
         canary.stash(
             "opening_follow_composite",
             subject_username="ct",
@@ -134,7 +134,7 @@ class Follow60sCanaryRuntimeTest(unittest.TestCase):
         self.assertEqual(reason, "metadata_navigation_token_mismatch")
 
     def test_optimization_outcomes_are_aggregated_separately(self) -> None:
-        self._configure_loriele()
+        self._configure_rex()
         canary.record_outcome(
             "mute_known_depth",
             "used",
@@ -154,7 +154,7 @@ class Follow60sCanaryRuntimeTest(unittest.TestCase):
         self.assertEqual(stats["estimated_gain_ms"], 1400.0)
 
     def test_opening_composite_proof_contains_public_identity_and_cta(self) -> None:
-        self._configure_loriele()
+        self._configure_rex()
         proof_dict = nav.build_pre_follow_observation_proof(
             follower_username="candidate",
             source_profile_username="ct_source",
@@ -188,6 +188,7 @@ class Follow60sCanaryRuntimeTest(unittest.TestCase):
 
 class Follow60sReturnHandoffTest(unittest.TestCase):
     def test_exact_candidate_proof_sends_one_back_then_keeps_exact_ct_gate(self) -> None:
+        nav._post_follow_return_take_pending_visual_evidence_for_runner()
         device = MagicMock()
         det = {
             "is_followers_list": True,
@@ -226,6 +227,13 @@ class Follow60sReturnHandoffTest(unittest.TestCase):
         device.press.assert_called_once_with("back")
         detect.assert_called_once()
         exact_ct.assert_called_once()
+        pending = nav._post_follow_return_take_pending_visual_evidence_for_runner()
+        self.assertEqual(
+            pending["return_list_detection"]["action_bar_title"], "ct_source"
+        )
+        self.assertGreater(
+            pending["return_list_detection_created_at_monotonic"], 0.0
+        )
 
 
 class Follow60sMuteKnownDepthTest(unittest.TestCase):
@@ -240,8 +248,8 @@ class Follow60sMuteKnownDepthTest(unittest.TestCase):
 
     def test_following_options_depth_is_reused_before_final_profile_proof(self) -> None:
         canary.configure(
-            account_id=canary.LORIELE_ACCOUNT_ID,
-            account_username="lorielebras_autom",
+            account_id=canary.REX_ACCOUNT_ID,
+            account_username="rex_gen_boost_ai",
             run_id="run-1",
             package="com.instagram.android",
             resume_policy=None,
@@ -271,6 +279,189 @@ class Follow60sMuteKnownDepthTest(unittest.TestCase):
         self.assertEqual(device.press.call_count, 2)
         stats = canary.stats()["optimization_counts"]["mute_known_depth"]
         self.assertEqual(stats["used"], 1)
+
+
+class Follow60sImmutableEvidenceContractsTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.log_patch = patch.object(canary, "log")
+        self.log_patch.start()
+        canary.configure(
+            account_id=canary.REX_ACCOUNT_ID,
+            account_username="rex_gen_boost_ai",
+            run_id="run-rex",
+            package="com.instagram.android",
+            resume_policy=None,
+        )
+
+    def tearDown(self) -> None:
+        self.log_patch.stop()
+        canary.configure(
+            account_id="other", account_username="other", run_id="reset",
+            package="com.instagram.android", resume_policy=None,
+        )
+
+    def test_candidate_verdict_is_reusable_without_rereading_ui_proof(self) -> None:
+        verdict = canary.create_candidate_profile_verdict(
+            candidate_username="candidate", package="com.instagram.android",
+            activity="ProfileActivity", navigation_generation="g1",
+            exact_identity=True, sheet_closed=True,
+            mute_posts_verified=True, mute_stories_verified=True,
+        )
+        self.assertIsNotNone(verdict)
+        for _ in range(3):
+            reused, _, reason = canary.get_candidate_profile_verdict(
+                candidate_username="candidate", package="com.instagram.android",
+                activity="ProfileActivity", navigation_generation="g1",
+            )
+            self.assertIsNotNone(reused)
+            self.assertEqual(reason, "")
+
+    def test_candidate_verdict_rejects_candidate_or_generation_mismatch(self) -> None:
+        canary.create_candidate_profile_verdict(
+            candidate_username="candidate", package="pkg", activity="act",
+            navigation_generation="g1", exact_identity=True, sheet_closed=True,
+            mute_posts_verified=True, mute_stories_verified=True,
+        )
+        self.assertEqual(
+            canary.get_candidate_profile_verdict(candidate_username="other")[2],
+            "missing_verdict",
+        )
+        self.assertEqual(
+            canary.get_candidate_profile_verdict(
+                candidate_username="candidate", navigation_generation="g2"
+            )[2],
+            "navigation_generation_mismatch",
+        )
+
+    def test_post_grid_evidence_is_single_consume_and_bounds_safe(self) -> None:
+        canary.stash_post_grid_evidence(
+            candidate_username="candidate", package="pkg", activity="act",
+            navigation_generation="g1", viewport_fingerprint="v1",
+            outcome="safe_post",
+            post_bounds={"left": 10, "top": 300, "right": 300, "bottom": 650},
+        )
+        ev, _, reason = canary.consume_post_grid_evidence(
+            candidate_username="candidate", package="pkg", activity="act",
+            navigation_generation="g1", viewport_fingerprint="v1",
+            screen_size=(1080, 2340),
+        )
+        self.assertIsNotNone(ev)
+        self.assertEqual(reason, "")
+        self.assertEqual(
+            canary.consume_post_grid_evidence(candidate_username="candidate")[2],
+            "missing_evidence",
+        )
+
+    def test_snapshot_is_single_consume_and_invalidated_by_viewport_change(self) -> None:
+        canary.stash_next_candidate_snapshot(
+            source_profile_username="ct", package="pkg", activity="act",
+            navigation_generation="g1", viewport_fingerprint="v1",
+            detection={"is_followers_list": True, "action_bar_title": "ct"},
+        )
+        snap, _, reason = canary.consume_next_candidate_snapshot(
+            source_profile_username="ct", package="pkg", activity="act",
+            navigation_generation="g1", viewport_fingerprint="v2",
+        )
+        self.assertIsNone(snap)
+        self.assertEqual(reason, "viewport_mismatch")
+        self.assertEqual(
+            canary.consume_next_candidate_snapshot(source_profile_username="ct")[2],
+            "missing_snapshot",
+        )
+
+    def test_navigation_invalidation_clears_all_structured_evidence(self) -> None:
+        canary.create_candidate_profile_verdict(
+            candidate_username="candidate", package="pkg", activity="act",
+            navigation_generation="g1", exact_identity=True, sheet_closed=True,
+            mute_posts_verified=True, mute_stories_verified=True,
+        )
+        canary.stash_post_grid_evidence(
+            candidate_username="candidate", package="pkg", activity="act",
+            navigation_generation="g1", viewport_fingerprint="v1",
+            outcome="no_posts",
+        )
+        canary.stash_next_candidate_snapshot(
+            source_profile_username="ct", package="pkg", activity="act",
+            navigation_generation="g1", viewport_fingerprint="v1",
+            detection={"is_followers_list": True},
+        )
+        canary.invalidate("scroll")
+        stats = canary.stats()
+        self.assertEqual(stats["live_candidate_verdict_count"], 0)
+        self.assertEqual(stats["live_post_grid_evidence_count"], 0)
+        self.assertFalse(stats["live_next_candidate_snapshot"])
+
+
+class Follow60sSingleCaptureClassifiersTest(unittest.TestCase):
+    def test_mute_sheet_levels_use_one_xml_classification(self) -> None:
+        level1_xml = """<hierarchy><node text="Close friends"/><node text="Mute"/>
+        <node text="Restrict"/><node text="Unfollow"/></hierarchy>"""
+        level2_xml = """<hierarchy><node text="Mute"/><node text="Posts"/>
+        <node text="Stories"/><node text="Notes"/></hierarchy>"""
+        self.assertEqual(
+            nav._mute_engine_v2_detect_sheet_level_from_xml(level1_xml)[0],
+            "following_options",
+        )
+        self.assertEqual(
+            nav._mute_engine_v2_detect_sheet_level_from_xml(level2_xml)[0],
+            "mute_toggles",
+        )
+
+    def test_mute_sheet_single_xml_indexes_posts_and_stories_switches(self) -> None:
+        xml = """<hierarchy><node text="Mute"/><node text="Notes"/>
+        <node text="Posts"><node class="android.widget.Switch" checkable="true"
+        checked="false" bounds="[800,900][1020,1040]"/></node>
+        <node text="Stories"><node class="android.widget.Switch" checkable="true"
+        checked="true" bounds="[800,1050][1020,1190]"/></node></hierarchy>"""
+        level, meta = nav._mute_engine_v2_detect_sheet_level_from_xml(xml)
+        self.assertEqual(level, "mute_toggles")
+        self.assertEqual(meta["switch_index"]["posts"]["checked"], False)
+        self.assertEqual(meta["switch_index"]["stories"]["checked"], True)
+
+    def test_pre_follow_mono_capture_requires_positive_public_surface(self) -> None:
+        device = MagicMock()
+        device.dump_hierarchy.return_value = """<hierarchy>
+        <node text="candidate"/><node text="Posts"/><node text="Followers"/>
+        <node text="Following"/><node text="Follow"/></hierarchy>"""
+        out = nav.acquire_pre_follow_mono_capture(
+            device, follower_username="candidate"
+        )
+        self.assertTrue(out["ok"])
+        self.assertFalse(out["private_probe_payload"]["private_profile_detected"])
+        device.dump_hierarchy.assert_called_once()
+
+    def test_pre_follow_mono_capture_rejects_private_even_with_follow_cta(self) -> None:
+        device = MagicMock()
+        device.dump_hierarchy.return_value = """<hierarchy>
+        <node text="candidate"/><node text="Posts"/><node text="Followers"/>
+        <node text="Following"/><node text="Follow"/>
+        <node text="This account is private"/></hierarchy>"""
+        out = nav.acquire_pre_follow_mono_capture(
+            device, follower_username="candidate"
+        )
+        self.assertFalse(out["ok"])
+        self.assertTrue(out["private_probe_payload"]["private_profile_detected"])
+
+    def test_post_grid_single_xml_yields_safe_top_left_bounds(self) -> None:
+        xml = """<hierarchy>
+        <node text="candidate" bounds="[0,80][500,160]"/>
+        <node content-desc="Profile tab grid" selected="true" bounds="[0,700][360,820]"/>
+        <node class="android.widget.ImageView" bounds="[0,900][350,1250]"/>
+        </hierarchy>"""
+        out = nav._post_follow_post_grid_evidence_from_xml(
+            xml, candidate_username="candidate", ww=1080, wh=2340
+        )
+        self.assertEqual(out["outcome"], "safe_post")
+        self.assertEqual(out["post_bounds"]["left"], 0)
+
+    def test_post_grid_single_xml_no_posts_requires_identity_and_tabs(self) -> None:
+        xml = """<hierarchy><node text="candidate"/>
+        <node content-desc="Profile tab grid" selected="true" bounds="[0,700][360,820]"/>
+        <node text="No Posts Yet"/></hierarchy>"""
+        out = nav._post_follow_post_grid_evidence_from_xml(
+            xml, candidate_username="candidate", ww=1080, wh=2340
+        )
+        self.assertEqual(out["outcome"], "no_posts")
 
 
 if __name__ == "__main__":

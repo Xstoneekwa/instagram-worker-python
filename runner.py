@@ -175,6 +175,7 @@ from instagram_navigation import (
     visual_candidate_pre_follow_private_gate,
     build_pre_follow_tap_context,
     build_pre_follow_observation_proof,
+    acquire_pre_follow_mono_capture,
     _pre_follow_observation_proof_reuse_block_reason,
     _pre_follow_observation_proof_age_ms,
     _log_pre_follow_observation_proof_decision,
@@ -1238,6 +1239,7 @@ _CT_CHECKPOINT_POST_RETURN_SAFE_METHODS = frozenset(
         "foreign_profile_one_safe_back_then_list",
         "compact_initial_list_confirmed",
         "already_on_followers_list",
+        "fresh_candidate_proof_one_back_then_exact_ct",
     )
 )
 
@@ -11406,6 +11408,22 @@ def _run_followers_list_engine_session(
             )
 
         _private_profile_detected = False
+        _pre_follow_mono_capture: dict[str, Any] | None = None
+        if not _xml_list_fast_trace:
+            try:
+                from follow_60s_canary import enabled as _follow_60s_canary_enabled
+
+                if _follow_60s_canary_enabled("opening_follow_composite"):
+                    _pre_follow_mono_capture = acquire_pre_follow_mono_capture(
+                        d,
+                        follower_username=str(
+                            follower_un_so_far
+                            or pick_ctx.get("resolved_username_hint")
+                            or ""
+                        ),
+                    )
+            except Exception:
+                _pre_follow_mono_capture = None
         if _xml_list_fast_trace:
             _pre_follow_gap_log(
                 "pre_follow_private_gate_started",
@@ -11439,6 +11457,23 @@ def _run_followers_list_engine_session(
                 surface_type="candidate_profile",
                 is_private=False,
                 reason="deferred_to_pre_follow_private_gate",
+            )
+        elif bool((_pre_follow_mono_capture or {}).get("ok")):
+            _priv = dict(
+                (_pre_follow_mono_capture or {}).get("private_probe_payload") or {}
+            )
+            _private_profile_detected = bool(_priv.get("private_profile_detected"))
+            _pre_follow_gap_log(
+                "pre_follow_private_gate_completed",
+                target_username=source_profile_username,
+                candidate_username=str(follower_un_so_far or pick_ctx.get("resolved_username_hint") or ""),
+                source_profile_username=source_profile_username,
+                visual_candidate_id=str(pick_ctx.get("visual_candidate_id") or ""),
+                phase="private_gate", blocking_step="mono_capture",
+                duration_ms=float((_pre_follow_mono_capture or {}).get("duration_ms") or 0.0),
+                probe_count=1, used_cached_context=True,
+                surface_type="candidate_profile", is_private=False,
+                reason="mono_capture_public_ready",
             )
         else:
             try:
@@ -11533,6 +11568,20 @@ def _run_followers_list_engine_session(
                 private_probe_payload=prior_private_probe,
                 navigation_token=navigation_token,
                 captured_at_mono=_hdr_fast_captured_at_mono,
+            )
+        elif bool((_pre_follow_mono_capture or {}).get("ok")):
+            _hdr = str((_pre_follow_mono_capture or {}).get("follow_header_state") or "unknown")
+            _pre_follow_observation_proof = build_pre_follow_observation_proof(
+                follower_username=str(follower_un_so_far or pick_ctx.get("resolved_username_hint") or ""),
+                source_profile_username=source_profile_username,
+                visual_candidate_id=str(pick_ctx.get("visual_candidate_id") or ""),
+                action_bar_title=str((_pre_follow_mono_capture or {}).get("action_bar_title") or ""),
+                navigation_state=str(nav_obs_local.get("state") or ""),
+                navigation_confidence=float(nav_obs_local.get("confidence") or 0.0),
+                follow_header_state=_hdr,
+                private_probe_payload=dict((_pre_follow_mono_capture or {}).get("private_probe_payload") or {}),
+                navigation_token=navigation_token,
+                captured_at_mono=time.monotonic(),
             )
         try:
             _follow_state_probe_t0 = time.perf_counter()
@@ -18768,6 +18817,7 @@ def _run_followers_list_engine_session(
                     "compact_foreign_profile_back_visual_followers_list_confirmed",
                     "compact_foreign_profile_fallback_then_list",
                     "compact_safe_back_then_list",
+                    "fresh_candidate_proof_one_back_then_exact_ct",
                 ):
                     followers_session_mark_list_committed_open(
                         source_profile_username,
@@ -18782,6 +18832,65 @@ def _run_followers_list_engine_session(
                         return_method=str(how or ""),
                         committed_source="post_follow_compact_visual_return",
                     )
+                    _exact_return_det = (
+                        dict(_pf.get("return_list_detection") or {})
+                        if isinstance(_pf.get("return_list_detection"), dict)
+                        else {}
+                    )
+                    if (
+                        str(how or "") == "fresh_candidate_proof_one_back_then_exact_ct"
+                        and _exact_return_det
+                    ):
+                        try:
+                            from follow_60s_canary import (
+                                consume_next_candidate_snapshot as _consume_next_candidate_snapshot,
+                                record_outcome as _record_follow_60s_outcome,
+                            )
+                            _snap_obj, _snap_age_ms, _snap_reject = (
+                                _consume_next_candidate_snapshot(
+                                    source_profile_username=source_profile_username,
+                                    package=str(_exact_return_det.get("current_package") or pkg),
+                                    activity=str(_exact_return_det.get("current_activity") or ""),
+                                    navigation_generation=str(
+                                        _pf.get("return_snapshot_navigation_generation") or ""
+                                    ),
+                                    viewport_fingerprint=str(
+                                        _pf.get("return_snapshot_viewport_fingerprint") or ""
+                                    ),
+                                )
+                            )
+                            if _snap_obj is None:
+                                _record_follow_60s_outcome(
+                                    "post_return_snapshot_reuse", "fallback",
+                                    age_ms=_snap_age_ms, reason=_snap_reject,
+                                    fallback_used=True,
+                                )
+                                _exact_return_det = {}
+                            else:
+                                _exact_return_det = dict(_snap_obj.detection)
+                                _record_follow_60s_outcome(
+                                    "post_return_snapshot_reuse", "used",
+                                    age_ms=_snap_age_ms, estimated_gain_ms=1800.0,
+                                )
+                        except Exception:
+                            _exact_return_det = {}
+                    if (
+                        str(how or "") == "fresh_candidate_proof_one_back_then_exact_ct"
+                        and _exact_return_det
+                    ):
+                        _exact_return_det["open_detection_method"] = str(
+                            _exact_return_det.get("open_detection_method")
+                            or "own_unified_follow_list"
+                        )
+                        open_list_meta["last_poll_snapshot"] = dict(_exact_return_det)
+                        open_list_meta["source_profile_username"] = source_profile_username
+                        open_list_meta["open_detection_method"] = str(
+                            _exact_return_det.get("open_detection_method")
+                        )
+                        open_list_meta["post_return_snapshot_created_at_monotonic"] = float(
+                            _pf.get("return_list_detection_created_at_monotonic")
+                            or time.monotonic()
+                        )
                     _promo_shot = str(_pf.get("return_list_screenshot_path") or "").strip()
                     _promo_vf = (
                         _pf.get("return_visual_fallback_detail")
