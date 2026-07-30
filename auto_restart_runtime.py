@@ -80,6 +80,63 @@ def _as_int(value: Any) -> int | None:
         return None
 
 
+def _canonical_request_attempt_context(
+    meta: dict[str, Any],
+    embedded: dict[str, Any],
+) -> dict[str, int] | None:
+    """Resolve attempt identity exclusively from the claimed request.
+
+    A prior run projection is deliberately not a fallback: it describes the
+    run being resumed and can therefore still say attempt 1 while the newly
+    claimed Auto Restart request is attempt 2.  Explicit top-level request
+    identity wins over the embedded plan; duplicate fields at the selected
+    request layer are accepted only when they agree.
+    """
+
+    top_level_attempts = [meta.get("attempt_id"), meta.get("current_attempt_id")]
+    embedded_attempts = [embedded.get("attempt_id"), embedded.get("current_attempt_id")]
+    raw_attempts = (
+        top_level_attempts
+        if any(raw is not None and raw != "" for raw in top_level_attempts)
+        else embedded_attempts
+    )
+    attempts: list[int] = []
+    for raw in raw_attempts:
+        if raw is None or raw == "":
+            continue
+        if isinstance(raw, bool):
+            return None
+        parsed = _as_int(raw)
+        if parsed is None or parsed < 1:
+            return None
+        attempts.append(parsed)
+    if not attempts or len(set(attempts)) != 1:
+        return None
+
+    attempt_id = attempts[0]
+    raw_retry_indexes = (
+        [meta.get("retry_index")]
+        if any(raw is not None and raw != "" for raw in top_level_attempts)
+        else [embedded.get("retry_index")]
+    )
+    retry_indexes: list[int] = []
+    for raw in raw_retry_indexes:
+        if raw is None or raw == "":
+            continue
+        if isinstance(raw, bool):
+            return None
+        parsed = _as_int(raw)
+        if parsed is None or parsed < 0:
+            return None
+        retry_indexes.append(parsed)
+    if len(set(retry_indexes)) > 1:
+        return None
+    retry_index = retry_indexes[0] if retry_indexes else attempt_id - 1
+    if attempt_id != retry_index + 1:
+        return None
+    return {"attempt_id": attempt_id, "retry_index": retry_index}
+
+
 def _extract_resume_plan_from_run_row(row: dict[str, Any] | None) -> dict[str, Any]:
     if not row:
         return {}
@@ -300,21 +357,22 @@ def validate_auto_restart_request_at_claim(
     if schema_reason:
         return False, schema_reason, None
 
+    request_attempt_context = _canonical_request_attempt_context(meta, embedded)
+    if request_attempt_context is None:
+        return False, "resume_plan_invalid", None
+    attempt_id = request_attempt_context["attempt_id"]
+    retry_index = request_attempt_context["retry_index"]
+
     recoverable_python_retry = (
         str(meta.get("failure_category") or embedded.get("failure_category") or "")
         == "recoverable_python_runtime_failure"
     )
-    retry_context: dict[str, Any] = {}
+    retry_context: dict[str, Any] = dict(request_attempt_context)
     if recoverable_python_retry:
         business_session_id = str(meta.get("business_session_id") or "").strip()
         previous_run_id = str(
             meta.get("previous_run_id") or meta.get("prior_run_id") or ""
         ).strip()
-        try:
-            attempt_id = int(meta.get("attempt_id"))
-            retry_index = int(meta.get("retry_index"))
-        except (TypeError, ValueError):
-            return False, "resume_plan_invalid", None
         if (
             not business_session_id
             or previous_run_id != prior_run_id
