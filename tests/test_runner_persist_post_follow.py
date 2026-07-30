@@ -12,6 +12,9 @@ class RunnerPersistPostFollowTest(unittest.TestCase):
             runner._SESSION_COUNTERS,
             {"follows": 1, "likes": 0, "interactions": 1, "successful_interactions": 1},
             clear=False,
+        ), mock.patch(
+            "account_session_orchestrator.get_last_account_session_summary",
+            return_value={"unfollow_actions_verified": 0},
         ):
             summary = runner._build_account_session_completion_performance_summary(
                 exit_code=0,
@@ -24,6 +27,58 @@ class RunnerPersistPostFollowTest(unittest.TestCase):
         self.assertEqual(summary["run_type"], "account_session")
         self.assertEqual(summary["session_counters"]["follows"], 1)
         self.assertEqual(summary["session_counters"]["likes"], 0)
+
+    def test_account_session_performance_summary_reconciles_verified_unfollows(self) -> None:
+        with mock.patch.dict(
+            runner._SESSION_COUNTERS,
+            {
+                "follows": 50,
+                "unfollows": 0,
+                "likes": 49,
+                "interactions": 99,
+                "successful_interactions": 50,
+            },
+            clear=False,
+        ), mock.patch(
+            "account_session_orchestrator.get_last_account_session_summary",
+            return_value={"unfollow_actions_verified": 36},
+        ):
+            summary = runner._build_account_session_completion_performance_summary(
+                exit_code=0,
+                account_username="j_automatise_pour_toi",
+                followers_source_username="caseykingphoto",
+                target_id="target-1",
+                target_selection_source="ig_targets",
+            )
+
+        self.assertEqual(summary["session_counters"]["unfollows"], 36)
+        self.assertEqual(summary["session_counters"]["interactions"], 135)
+        self.assertEqual(summary["session_counters"]["successful_interactions"], 86)
+
+    def test_account_session_performance_summary_does_not_double_count_unfollows(self) -> None:
+        with mock.patch.dict(
+            runner._SESSION_COUNTERS,
+            {
+                "unfollows": 6,
+                "interactions": 12,
+                "successful_interactions": 8,
+            },
+            clear=False,
+        ), mock.patch(
+            "account_session_orchestrator.get_last_account_session_summary",
+            return_value={"unfollow_actions_verified": 6},
+        ):
+            summary = runner._build_account_session_completion_performance_summary(
+                exit_code=0,
+                account_username="account",
+                followers_source_username=None,
+                target_id=None,
+                target_selection_source=None,
+            )
+
+        self.assertEqual(summary["session_counters"]["unfollows"], 6)
+        self.assertEqual(summary["session_counters"]["interactions"], 12)
+        self.assertEqual(summary["session_counters"]["successful_interactions"], 8)
 
     def test_account_session_persists_exact_welcome_surface_failure(self) -> None:
         with mock.patch(

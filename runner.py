@@ -994,6 +994,25 @@ def _build_account_session_completion_performance_summary(
         summary.update(get_last_account_session_summary())
     except Exception as exc:
         summary["phase_summary_error"] = str(exc)[:300]
+    else:
+        # The account-session orchestrator owns the verified Unfollow count.
+        # Reconcile the generic counters at publication time because the
+        # Unfollow phase runs outside the legacy per-target counter loop.
+        # This is telemetry-only: it happens after every business phase and
+        # cannot increase a live quota or trigger another action.
+        phase_unfollows = max(0, int(summary.get("unfollow_actions_verified") or 0))
+        counters = dict(summary.get("session_counters") or {})
+        counted_unfollows = max(0, int(counters.get("unfollows") or 0))
+        if phase_unfollows > counted_unfollows:
+            missing_unfollows = phase_unfollows - counted_unfollows
+            counters["unfollows"] = phase_unfollows
+            counters["interactions"] = max(
+                0, int(counters.get("interactions") or 0)
+            ) + missing_unfollows
+            counters["successful_interactions"] = max(
+                0, int(counters.get("successful_interactions") or 0)
+            ) + missing_unfollows
+            summary["session_counters"] = counters
     if int(exit_code) != 0:
         from welcome_list_sender import get_last_welcome_list_sender_summary
         from welcome_scan_producer import get_last_welcome_scan_summary
