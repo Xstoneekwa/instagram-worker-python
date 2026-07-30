@@ -753,6 +753,8 @@ def _run_follow_target_rotation(
     max_targets_per_run: int | None = None,
     max_follows_per_target_per_run: int | None = None,
     fast_rotate_to_next_target_from_followers: FastRotationRunner | None = None,
+    run_request_id: str | None = None,
+    auto_restart_resume_policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     total_targets = len(follow_targets)
     max_targets = _resolve_max_follow_targets_per_run(total_targets, max_targets_per_run)
@@ -919,6 +921,12 @@ def _run_follow_target_rotation(
             "force_stop_used": force_stop_used,
             "target_follow_budget": target_budget,
             "session_global_follow_cap": global_follow_goal,
+            "run_request_id": str(run_request_id or "") or None,
+            "auto_restart_resume_policy": (
+                dict(auto_restart_resume_policy)
+                if isinstance(auto_restart_resume_policy, dict)
+                else None
+            ),
         }
         if start_from_current_followers_list:
             call_kwargs["start_from_current_followers_list"] = True
@@ -3508,6 +3516,7 @@ def run_account_session(
     max_follows_per_target_per_run: int | None = None,
     fast_rotate_to_next_target_from_followers: FastRotationRunner | None = None,
     auto_restart_resume_policy: dict[str, Any] | None = None,
+    run_request_id: str | None = None,
     business_action_deadline: str | None = None,
 ) -> int:
     global _LAST_ACCOUNT_SESSION_SUMMARY
@@ -3983,6 +3992,8 @@ def run_account_session(
                     else int(rotation_settings["max_follows_per_target_per_run"])
                 ),
                 fast_rotate_to_next_target_from_followers=fast_rotate_to_next_target_from_followers,
+                run_request_id=run_request_id,
+                auto_restart_resume_policy=auto_restart_resume_policy,
             )
             follow_t1 = time.perf_counter()
             follow_phase_executed = True
@@ -4918,6 +4929,7 @@ def dispatch_account_session(
     max_follows_per_target_per_run: int | None = None,
     fast_rotate_to_next_target_from_followers: FastRotationRunner | None = None,
     auto_restart_resume_policy: dict[str, Any] | None = None,
+    run_request_id: str | None = None,
     business_action_deadline: str | None = None,
 ) -> int:
     return run_account_session(
@@ -4936,5 +4948,6 @@ def dispatch_account_session(
         warm_session_used=warm_session_used,
         force_stop_used=force_stop_used,
         auto_restart_resume_policy=auto_restart_resume_policy,
+        run_request_id=run_request_id,
         business_action_deadline=business_action_deadline,
     )

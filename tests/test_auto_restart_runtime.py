@@ -124,11 +124,13 @@ class AutoRestartRuntimeTests(unittest.TestCase):
             metadata={
                 "auto_restart": True,
                 "source": "auto_restart_tick",
+                "attempt_id": 2,
                 "resume_plan_version": 1,
                 "resume_plan_schema": "AUTO_RESTART_RESUME_PLAN_V1",
                 "prior_run_id": "22222222-2222-4222-8222-222222222222",
                 "resume_plan": {
                     "schema": "AUTO_RESTART_RESUME_PLAN_V1",
+                    "attempt_id": 1,
                     "restart_allowed": True,
                     "phases_to_run": {"welcome": False, "follow": True, "unfollow": False},
                 },
@@ -156,6 +158,7 @@ class AutoRestartRuntimeTests(unittest.TestCase):
             metadata={
                 "auto_restart": True,
                 "source": "auto_restart_tick",
+                "attempt_id": 1,
                 "resume_plan_version": 1,
                 "resume_plan_schema": "AUTO_RESTART_RESUME_PLAN_V1",
                 "prior_run_id": "22222222-2222-4222-8222-222222222222",
@@ -198,6 +201,7 @@ class AutoRestartRuntimeTests(unittest.TestCase):
             metadata={
                 "auto_restart": True,
                 "source": "auto_restart_tick",
+                "attempt_id": 2,
                 "resume_plan_version": 1,
                 "resume_plan_schema": "AUTO_RESTART_RESUME_PLAN_V1",
                 "prior_run_id": "22222222-2222-4222-8222-222222222222",
@@ -211,6 +215,9 @@ class AutoRestartRuntimeTests(unittest.TestCase):
         self.assertIsNotNone(policy)
         self.assertEqual(policy["prior_run_id"], "22222222-2222-4222-8222-222222222222")
         self.assertEqual(policy["unfollow_checkpoint"]["depth"], 4)
+        self.assertEqual(policy["attempt_id"], 2)
+        self.assertEqual(policy["retry_index"], 1)
+        self.assertEqual(policy["request_metadata"]["attempt_id"], 2)
 
     @patch("auto_restart_runtime.load_prior_run_summary")
     def test_embedded_request_cannot_erase_canonical_unfollow_cursor(self, load_summary) -> None:
@@ -243,6 +250,7 @@ class AutoRestartRuntimeTests(unittest.TestCase):
             metadata={
                 "auto_restart": True,
                 "source": "auto_restart_tick",
+                "attempt_id": 2,
                 "resume_plan_version": 1,
                 "resume_plan_schema": "AUTO_RESTART_RESUME_PLAN_V1",
                 "prior_run_id": prior_run_id,
@@ -265,6 +273,94 @@ class AutoRestartRuntimeTests(unittest.TestCase):
         self.assertTrue(ok, reason)
         self.assertEqual(policy["unfollow_checkpoint"], checkpoint)
         self.assertEqual(policy["phases_to_run"], {"welcome": False, "follow": False, "unfollow": True})
+
+    @patch("auto_restart_runtime.load_prior_run_summary")
+    def test_request_attempt_two_wins_over_stale_prior_run_attempt_one(self, load_summary) -> None:
+        account_id = "11111111-1111-4111-8111-111111111111"
+        prior_run_id = "22222222-2222-4222-8222-222222222222"
+        load_summary.return_value = {
+            "account_id": account_id,
+            "account_username": "fixture_user",
+            "run_id": prior_run_id,
+            "attempt_id": 1,
+            "session_termination_class": "partial_resumable",
+            "restart_eligibility": "eligible",
+            "auto_restart_resume_plan": {
+                "attempt_id": 1,
+                "restart_allowed": True,
+                "phases_to_run": {"welcome": False, "follow": True, "unfollow": False},
+                "quota_remaining": {"follow": 2, "unfollow": 0, "total": 2},
+            },
+            "follow_quota_remaining": 2,
+            "follows_completed_count": 8,
+            "follow_quota_target": 10,
+        }
+        ok, reason, policy = validate_auto_restart_request_at_claim(
+            account_id=account_id,
+            metadata={
+                "auto_restart": True,
+                "source": "auto_restart_tick",
+                "attempt_id": 2,
+                "retry_index": 1,
+                "resume_plan_version": 1,
+                "resume_plan_schema": "AUTO_RESTART_RESUME_PLAN_V1",
+                "prior_run_id": prior_run_id,
+                "resume_plan": {
+                    "schema": "AUTO_RESTART_RESUME_PLAN_V1",
+                    "attempt_id": 1,
+                    "restart_allowed": True,
+                    "phases_to_run": {"welcome": False, "follow": True, "unfollow": False},
+                    "quota_remaining": {"follow": 2, "unfollow": 0, "total": 2},
+                },
+            },
+        )
+        self.assertTrue(ok, reason)
+        self.assertEqual(policy["attempt_id"], 2)
+        self.assertEqual(policy["request_metadata"]["attempt_id"], 2)
+
+    @patch("auto_restart_runtime.load_prior_run_summary")
+    def test_auto_restart_request_without_canonical_attempt_fails_closed(self, load_summary) -> None:
+        ok, reason, policy = validate_auto_restart_request_at_claim(
+            account_id="11111111-1111-4111-8111-111111111111",
+            metadata={
+                "auto_restart": True,
+                "source": "auto_restart_tick",
+                "resume_plan_version": 1,
+                "resume_plan_schema": "AUTO_RESTART_RESUME_PLAN_V1",
+                "prior_run_id": "22222222-2222-4222-8222-222222222222",
+                "resume_plan": {
+                    "schema": "AUTO_RESTART_RESUME_PLAN_V1",
+                    "restart_allowed": True,
+                },
+            },
+        )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "resume_plan_invalid")
+        self.assertIsNone(policy)
+        load_summary.assert_not_called()
+
+    @patch("auto_restart_runtime.load_prior_run_summary")
+    def test_conflicting_request_attempt_fields_fail_closed(self, load_summary) -> None:
+        ok, reason, policy = validate_auto_restart_request_at_claim(
+            account_id="11111111-1111-4111-8111-111111111111",
+            metadata={
+                "auto_restart": True,
+                "source": "auto_restart_tick",
+                "attempt_id": 2,
+                "current_attempt_id": 1,
+                "resume_plan_version": 1,
+                "resume_plan_schema": "AUTO_RESTART_RESUME_PLAN_V1",
+                "prior_run_id": "22222222-2222-4222-8222-222222222222",
+                "resume_plan": {
+                    "schema": "AUTO_RESTART_RESUME_PLAN_V1",
+                    "restart_allowed": True,
+                },
+            },
+        )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "resume_plan_invalid")
+        self.assertIsNone(policy)
+        load_summary.assert_not_called()
 
     def test_resume_plan_default_cooldown_is_ten_minutes(self) -> None:
         with patch("account_session_resume_engine.config.AUTO_RESTART_DELAY_MINUTES", 10):

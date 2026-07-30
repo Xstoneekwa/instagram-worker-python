@@ -19,6 +19,7 @@ import supabase_client
 from account_identity_guard import verify_active_instagram_account_matches_expected
 from instagram_list_continuation import (
     InstagramListContinuationSignals,
+    adaptive_follow_scroll_geometry,
     classify_instagram_list_continuation,
     compare_instagram_list_viewports,
 )
@@ -1075,36 +1076,45 @@ def _aggregate_visible_perf_totals(totals: dict[str, Any], visible_eval: dict[st
     )
 
 
-def _scroll_following_list_for_unfollow(d: u2.Device, *, account_username: str) -> dict[str, Any]:
-    v2_enabled = _scroll_v2_lite_enabled()
-    strategy = "v2_lite" if v2_enabled else "legacy"
-    settle_s = _scroll_v2_lite_settle_s() if v2_enabled else 0.55
+def _scroll_following_list_for_unfollow(
+    d: u2.Device,
+    *,
+    account_username: str,
+    before_rows: list[dict[str, Any]] | None = None,
+    previous_actual_overlap: int | None = None,
+) -> dict[str, Any]:
+    """Advance Following with the shared Follow 7+1 continuity contract."""
+    strategy = "canonical_adaptive_7_plus_1"
+    settle_s = max(0.45, _scroll_v2_lite_settle_s())
     try:
         w, h = d.window_size()
     except Exception:
         w, h = 1080, 2400
-    x = int(w * 0.50)
-    if v2_enabled:
-        distance_ratio = _scroll_v2_lite_distance_ratio()
-        y_start_ratio = 0.86
-        y_end_ratio = max(0.10, y_start_ratio - distance_ratio)
-        distance_ratio = y_start_ratio - y_end_ratio
-        y_start = int(h * y_start_ratio)
-        y_end = int(h * y_end_ratio)
-        log(
-            "info",
-            "unfollow_scroll_v2_lite_started",
-            scroll_strategy=strategy,
-            scroll_distance_ratio=round(float(y_start_ratio - y_end_ratio), 4),
-            scroll_settle_s=round(float(settle_s), 3),
-            tap_x=x,
-            start_y=y_start,
-            end_y=y_end,
+    if before_rows is None:
+        before_rows, _ = harvest_visible_following_rows_for_unfollow(
+            d,
+            account_username=account_username,
         )
-    else:
-        y_start = int(h * 0.78)
-        y_end = int(h * 0.36)
-        distance_ratio = 0.42
+    before_rows = list(before_rows or [])
+    before_ids = _visible_username_keys(
+        [str(row.get("username_normalized") or row.get("username") or "") for row in before_rows]
+    )
+    row_centers_y = [
+        int(list(row.get("row_center") or [0, 0])[1])
+        for row in before_rows
+        if len(list(row.get("row_center") or [])) >= 2
+        and int(list(row.get("row_center") or [0, 0])[1]) > 0
+    ]
+    geometry = adaptive_follow_scroll_geometry(
+        w,
+        h,
+        row_centers_y,
+        previous_actual_overlap=previous_actual_overlap,
+    )
+    x = int(geometry["x"])
+    y_start = int(geometry["y_start"])
+    y_end = int(geometry["y_end"])
+    distance_ratio = float(geometry["distance_ratio"])
     out = {
         "ok": False,
         "failure_reason": "",
@@ -1112,35 +1122,140 @@ def _scroll_following_list_for_unfollow(d: u2.Device, *, account_username: str) 
         "start_y": y_start,
         "end_y": y_end,
         "scroll_strategy": strategy,
-        "scroll_v2_lite_enabled": v2_enabled,
+        "scroll_v2_lite_enabled": False,
         "scroll_distance_ratio": round(float(distance_ratio), 4),
         "scroll_settle_s": round(float(settle_s), 3),
         "scroll_duration_ms": 0.0,
+        "target_new_rows": int(geometry.get("target_new_rows") or 0),
+        "target_overlap_rows": int(geometry.get("target_overlap_rows") or 0),
+        "median_row_spacing_px": int(geometry.get("median_row_spacing_px") or 0),
+        "adaptive": bool(geometry.get("adaptive")),
+        "viewport_fingerprint_before": "",
+        "viewport_fingerprint_after": "",
+        "actual_new_rows": 0,
+        "actual_overlap": 0,
+        "depth_advanced": False,
+        "corrective_backstep_used": False,
     }
+
+    def safe_log_fields() -> dict[str, Any]:
+        # Viewport fingerprints and counts are sufficient for continuity
+        # forensics; never emit the harvested username rows as one log payload.
+        return {
+            key: value
+            for key, value in out.items()
+            if key not in {"rows_after", "harvest_meta_after", "surface_detection"}
+        }
+    log(
+        "info",
+        "unfollow_scroll_7_plus_1_started",
+        scroll_strategy=strategy,
+        target_new_rows=out["target_new_rows"],
+        target_overlap_rows=out["target_overlap_rows"],
+        visible_primary_row_count=len(before_ids),
+        scroll_distance_ratio=out["scroll_distance_ratio"],
+        start_y=y_start,
+        end_y=y_end,
+    )
     scroll_t0 = time.perf_counter()
     try:
-        d.swipe(x, y_start, x, y_end, 0.10)
+        d.swipe(x, y_start, x, y_end, float(geometry["duration_s"]))
     except Exception as exc:
         out["failure_reason"] = "swipe_failed"
         out["error"] = str(exc)[:200]
         out["scroll_duration_ms"] = round((time.perf_counter() - scroll_t0) * 1000.0, 2)
-        if v2_enabled:
-            log("info", "unfollow_scroll_v2_lite_fallback", **out)
         return out
     time.sleep(settle_s)
     out["scroll_duration_ms"] = round((time.perf_counter() - scroll_t0) * 1000.0, 2)
+    after_rows, after_meta = harvest_visible_following_rows_for_unfollow(
+        d,
+        account_username=account_username,
+    )
+    after_ids = _visible_username_keys(
+        [str(row.get("username_normalized") or row.get("username") or "") for row in after_rows]
+    )
+    continuity = compare_instagram_list_viewports(before_ids, after_ids)
+    out.update(
+        {
+            "rows_after": after_rows,
+            "harvest_meta_after": after_meta,
+            "viewport_fingerprint_before": continuity.fingerprint_before,
+            "viewport_fingerprint_after": continuity.fingerprint_after,
+            "actual_new_rows": continuity.new_row_count,
+            "actual_overlap": continuity.overlap_count,
+            "continuity_reason": continuity.reason,
+            "scroll_excessive": continuity.excessive,
+            "viewport_unchanged": continuity.unchanged,
+            "depth_advanced": continuity.continuity_proved,
+        }
+    )
     det = detect_own_following_list_screen(d, account_username=account_username)
     out["surface_detection"] = det
     out["surface_ok_after_scroll"] = bool(det.get("is_following_list"))
-    out["end_of_list_detected"] = bool(det.get("following_list_end_detected"))
+    out["end_of_list_detected"] = bool(
+        det.get("following_list_end_detected")
+        or after_meta.get("following_list_end_detected")
+    )
     if not det.get("is_following_list"):
         out["failure_reason"] = str(det.get("failure_reason") or "following_surface_lost_after_scroll")
-        if v2_enabled:
-            log("info", "unfollow_scroll_v2_lite_fallback", **out)
         return out
-    out["ok"] = True
-    if v2_enabled:
-        log("info", "unfollow_scroll_v2_lite_completed", **out)
+    if continuity.continuity_proved:
+        out["ok"] = True
+        log("info", "unfollow_scroll_7_plus_1_overlap_verified", **safe_log_fields())
+        return out
+    if out["end_of_list_detected"]:
+        # Suggestions are a safe boundary, never primary rows and never a
+        # validated progressive scroll depth.
+        out["ok"] = True
+        out["safe_boundary"] = True
+        log("info", "unfollow_scroll_7_plus_1_boundary_reached", **safe_log_fields())
+        return out
+    if continuity.excessive:
+        out["corrective_backstep_used"] = True
+        try:
+            correction_distance = min(int(h * 0.18), int(geometry["distance_px"]))
+            correction_start = int(h * 0.38)
+            correction_end = min(int(h * 0.62), correction_start + correction_distance)
+            d.swipe(x, correction_start, x, correction_end, 0.34)
+            time.sleep(settle_s)
+            corrected_rows, corrected_meta = harvest_visible_following_rows_for_unfollow(
+                d,
+                account_username=account_username,
+            )
+            corrected_ids = _visible_username_keys(
+                [str(row.get("username_normalized") or row.get("username") or "") for row in corrected_rows]
+            )
+            corrected = compare_instagram_list_viewports(before_ids, corrected_ids)
+            out.update(
+                {
+                    "rows_after": corrected_rows,
+                    "harvest_meta_after": corrected_meta,
+                    "viewport_fingerprint_after": corrected.fingerprint_after,
+                    "actual_new_rows": corrected.new_row_count,
+                    "actual_overlap": corrected.overlap_count,
+                    "continuity_reason": corrected.reason,
+                    "scroll_excessive": corrected.excessive,
+                    "viewport_unchanged": corrected.unchanged,
+                    "depth_advanced": corrected.continuity_proved,
+                }
+            )
+            if corrected.continuity_proved:
+                out["ok"] = True
+                log("info", "unfollow_scroll_7_plus_1_overlap_recovered", **safe_log_fields())
+                return out
+        except Exception as exc:
+            out["corrective_backstep_error"] = str(exc)[:200]
+        out["failure_reason"] = "unfollow_scroll_overlap_not_recovered"
+        log("warning", "unfollow_scroll_7_plus_1_overlap_failed", **safe_log_fields())
+        return out
+    # An unchanged viewport is valid stagnation evidence but not progressive
+    # depth. It must not consume one of the 10+recovery+5 scrolls.
+    if continuity.unchanged:
+        out["ok"] = True
+        log("info", "unfollow_scroll_7_plus_1_no_progress", **safe_log_fields())
+        return out
+    out["failure_reason"] = "unfollow_scroll_continuity_unproved"
+    log("warning", "unfollow_scroll_7_plus_1_continuity_unproved", **safe_log_fields())
     return out
 
 
@@ -2289,7 +2404,16 @@ def _run_real_unfollow_multi_loop(
             before_scroll_keys = _visible_username_keys(
                 [str(row.get("username") or "") for row in rows]
             )
-            scroll = _scroll_following_list_for_unfollow(d, account_username=uname)
+            scroll = _scroll_following_list_for_unfollow(
+                d,
+                account_username=uname,
+                before_rows=rows,
+                previous_actual_overlap=(
+                    int(last_fields.get("unfollow_scroll_actual_overlap") or 0)
+                    if last_fields
+                    else None
+                ),
+            )
             if not scroll.get("ok"):
                 scroll_stop_reason = str(scroll.get("failure_reason") or "following_surface_lost_after_scroll")
                 stop_reason = "scroll_surface_lost"
@@ -2320,8 +2444,16 @@ def _run_real_unfollow_multi_loop(
                     return emit_final("failed_unfollow_multi_action", stop_reason)
                 stop_reason = "scroll_surface_lost"
                 return emit_final("failed_unfollow_multi_action", scroll_stop_reason)
-            scroll_passes_used += 1
-            rows, harvest_meta = harvest_visible_following_rows_for_unfollow(d, account_username=uname)
+            if bool(scroll.get("depth_advanced")):
+                scroll_passes_used += 1
+            if "rows_after" in scroll:
+                rows = list(scroll.get("rows_after") or [])
+                harvest_meta = dict(scroll.get("harvest_meta_after") or {})
+            else:
+                rows, harvest_meta = harvest_visible_following_rows_for_unfollow(
+                    d,
+                    account_username=uname,
+                )
             after_scroll_keys = _visible_username_keys(
                 [str(row.get("username") or "") for row in rows]
             )
@@ -2344,7 +2476,7 @@ def _run_real_unfollow_multi_loop(
                 unchanged_scroll_streak = 0
             if coverage_tracker is not None:
                 coverage_tracker.mark_scroll(
-                    moved=bool(after_scroll_keys and after_scroll_keys != before_scroll_keys)
+                    moved=bool(scroll.get("depth_advanced"))
                 )
                 refresh_coverage_summary_totals()
             unchanged_scroll_streak_max = max(unchanged_scroll_streak_max, unchanged_scroll_streak)
@@ -2384,6 +2516,15 @@ def _run_real_unfollow_multi_loop(
                     else 1
                 ),
                 "surface_ok_after_scroll": bool(scroll.get("surface_ok_after_scroll")),
+                "target_new_rows": int(scroll.get("target_new_rows") or 0),
+                "target_overlap_rows": int(scroll.get("target_overlap_rows") or 0),
+                "unfollow_scroll_actual_new_rows": int(scroll.get("actual_new_rows") or 0),
+                "unfollow_scroll_actual_overlap": int(scroll.get("actual_overlap") or 0),
+                "unfollow_scroll_depth_advanced": bool(scroll.get("depth_advanced")),
+                "unfollow_scroll_continuity_reason": str(scroll.get("continuity_reason") or ""),
+                "unfollow_scroll_corrective_backstep_used": bool(
+                    scroll.get("corrective_backstep_used")
+                ),
                 "end_of_list_detected": bool(
                     scroll.get("end_of_list_detected")
                     or harvest_meta.get("following_list_end_detected")
@@ -2407,6 +2548,10 @@ def _run_real_unfollow_multi_loop(
                 after_scroll_usernames=after_scroll_keys[:20],
                 **progress_fields,
             )
+            # Feed the measured overlap into the next adaptive 7+1 scroll.
+            # Without this state carry-over every pass was recalculated as if
+            # no prior overlap had been observed.
+            last_fields = {**last_fields, **progress_fields}
             if coverage_tracker is None and bool(harvest_meta.get("following_list_end_detected")) and (
                 not after_scroll_keys or after_scroll_keys == before_scroll_keys
             ):
@@ -3352,17 +3497,35 @@ def run_unfollow_session(
                     break
                 if restore_index >= restore_limit:
                     break
-                scroll = _scroll_following_list_for_unfollow(d, account_username=uname)
+                scroll = _scroll_following_list_for_unfollow(
+                    d,
+                    account_username=uname,
+                    before_rows=rows,
+                )
                 if not bool(scroll.get("ok")):
                     cursor_restore_fields["cursor_restore_reason"] = str(
                         scroll.get("failure_reason") or "cursor_restore_scroll_failed"
                     )
                     break
+                if not bool(scroll.get("depth_advanced")):
+                    cursor_restore_fields["cursor_restore_reason"] = str(
+                        scroll.get("continuity_reason")
+                        or (
+                            "following_list_end_reached"
+                            if scroll.get("end_of_list_detected")
+                            else "cursor_restore_scroll_not_validated"
+                        )
+                    )
+                    break
                 cursor_restore_fields["cursor_restore_scrolls"] = restore_index + 1
-                rows, harvest_meta = harvest_visible_following_rows_for_unfollow(
-                    d,
-                    account_username=uname,
-                )
+                if "rows_after" in scroll:
+                    rows = list(scroll.get("rows_after") or [])
+                    harvest_meta = dict(scroll.get("harvest_meta_after") or {})
+                else:
+                    rows, harvest_meta = harvest_visible_following_rows_for_unfollow(
+                        d,
+                        account_username=uname,
+                    )
             log(
                 "info",
                 "unfollow_cursor_restore_completed",

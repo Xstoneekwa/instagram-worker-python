@@ -9542,6 +9542,50 @@ def _try_review_before_follow_popup_confirm(
     return False
 
 
+def _capture_follow_review_popup_unhandled_evidence(
+    d: u2.Device,
+    *,
+    target_username: str,
+) -> dict[str, Any]:
+    """Capture redacted local evidence before any critical-action cleanup."""
+    _ensure_debug_dirs()
+    username_key = hashlib.sha256(
+        str(target_username or "unknown").strip().casefold().encode("utf-8")
+    ).hexdigest()[:12]
+    stem = f"follow_review_popup_unhandled_{int(time.time() * 1000)}_{username_key}"
+    shot_path = _SCREENSHOTS_DIR / f"{stem}.png"
+    xml_path = _XML_DIR / f"{stem}.xml"
+    out: dict[str, Any] = {
+        "artifact_stem": stem,
+        "screenshot_path": None,
+        "xml_path": None,
+        "foreground_package": "",
+        "foreground_activity": "",
+    }
+    try:
+        screenshot(d, str(shot_path))
+        out["screenshot_path"] = str(shot_path)
+    except Exception as exc:
+        out["screenshot_error"] = str(exc)[:200]
+    try:
+        try:
+            hierarchy = str(d.dump_hierarchy(compressed=False) or "")
+        except TypeError:
+            hierarchy = str(d.dump_hierarchy() or "")
+        xml_path.write_text(hierarchy, encoding="utf-8")
+        out["xml_path"] = str(xml_path)
+        _bump_xml_fetch()
+    except Exception as exc:
+        out["xml_error"] = str(exc)[:200]
+    try:
+        current = dict(d.app_current() or {})
+        out["foreground_package"] = str(current.get("package") or "")[:160]
+        out["foreground_activity"] = str(current.get("activity") or "")[:200]
+    except Exception as exc:
+        out["foreground_error"] = str(exc)[:200]
+    return out
+
+
 def _follow_review_popup_unhandled_abort(
     d: u2.Device,
     *,
@@ -9602,6 +9646,10 @@ def _follow_review_popup_unhandled_abort(
         except Exception:
             pass
         return None
+    evidence = _capture_follow_review_popup_unhandled_evidence(
+        d,
+        target_username=target_username,
+    )
     try:
         log(
             "error",
@@ -9612,6 +9660,13 @@ def _follow_review_popup_unhandled_abort(
             follow_state_before=state_before,
             follow_state_after=state_after,
             popup_still_visible=popup_still_visible,
+            evidence_captured=bool(
+                evidence.get("screenshot_path") or evidence.get("xml_path")
+            ),
+            screenshot_path=evidence.get("screenshot_path"),
+            xml_path=evidence.get("xml_path"),
+            foreground_package=evidence.get("foreground_package"),
+            foreground_activity=evidence.get("foreground_activity"),
         )
     except Exception:
         pass
@@ -9624,6 +9679,7 @@ def _follow_review_popup_unhandled_abort(
             "follow_state_before": state_before,
             "follow_state_after": state_after,
             "failure_code": FOLLOW_REVIEW_POPUP_UNHANDLED_FAILURE_CODE,
+            "evidence": evidence,
         },
     )
     record(
@@ -9635,6 +9691,7 @@ def _follow_review_popup_unhandled_abort(
             "follow_state_before": state_before,
             "follow_state_after": state_after,
             "navigation_state": "profile",
+            "evidence": evidence,
         },
     )
     return {
@@ -9645,6 +9702,7 @@ def _follow_review_popup_unhandled_abort(
         "follow_state_before": state_before,
         "follow_state_after": state_after,
         "verify_attempts": 0,
+        "evidence": evidence,
         "events": events,
     }
 
