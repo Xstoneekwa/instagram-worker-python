@@ -3272,6 +3272,35 @@ class DeferredPostReturnPersistTests(unittest.TestCase):
         self._outbox_env.stop()
         self._outbox_tmp.cleanup()
 
+    def test_follow_settings_revision_retries_then_returns_canonical_updated_at(self) -> None:
+        with patch.object(
+            runner.supabase_client,
+            "get_account_unfollow_settings",
+            side_effect=[RuntimeError("transient"), {"updated_at": "2026-07-28T23:57:34+00:00"}],
+        ) as load, patch.object(runner.time, "sleep") as sleep, patch.object(
+            runner, "log"
+        ):
+            revision = runner._load_follow_persistence_settings_revision(
+                runner.REX_FOLLOW_60S_ACCOUNT_ID
+            )
+
+        self.assertEqual(revision, "2026-07-28T23:57:34+00:00")
+        self.assertEqual(load.call_count, 2)
+        sleep.assert_called_once_with(0.15)
+
+    def test_follow_settings_revision_missing_fails_closed(self) -> None:
+        with patch.object(
+            runner.supabase_client,
+            "get_account_unfollow_settings",
+            return_value={"unfollow_enabled": True},
+        ), patch.object(runner.time, "sleep"), patch.object(runner, "log"):
+            revision = runner._load_follow_persistence_settings_revision(
+                runner.REX_FOLLOW_60S_ACCOUNT_ID,
+                max_attempts=2,
+            )
+
+        self.assertIsNone(revision)
+
     def test_deferred_action_logs_spool_before_completed_status(self) -> None:
         logs: list[tuple[str, str, dict]] = []
         runner._schedule_deferred_follow_action_log_flush(

@@ -84,6 +84,7 @@ def _run_follow(
     username: str = "public_user",
     *,
     return_review_mocks: bool = False,
+    prepare_before_follow_tap=None,
 ) -> dict | tuple[dict, MagicMock, MagicMock]:
     with patch(
         "follow_action_engine.follow_action_surface_wait_and_select_element",
@@ -111,6 +112,7 @@ def _run_follow(
             visual_candidate_id="vc-1",
             dont_follow_private_accounts=False,
             pre_follow_context=_context(username),
+            prepare_before_follow_tap=prepare_before_follow_tap,
         )
     if return_review_mocks:
         return out, mock_review_confirm, mock_review_visible
@@ -139,6 +141,49 @@ class FollowPostTapVerifyFastTest(unittest.TestCase):
         mock_snapshot.assert_not_called()
         mock_review_confirm.assert_not_called()
         mock_review_visible.assert_not_called()
+
+    def test_durable_prepare_runs_after_exact_bounds_and_before_tap(self) -> None:
+        device = _Device([self._state_info("Following")])
+        ordering: list[str] = []
+        device.click.side_effect = lambda *_args: ordering.append("tap")
+
+        def prepare(payload: dict) -> dict:
+            ordering.append("prepare")
+            self.assertTrue(payload["safe_to_tap"])
+            self.assertTrue(payload["follow_control_selected"])
+            self.assertTrue(payload["exact_follow_fast_path"])
+            self.assertTrue(payload["tap_coords_ready"])
+            self.assertEqual(
+                payload["bounds"],
+                {"left": 20, "top": 100, "right": 220, "bottom": 180},
+            )
+            return {"action_id": "durable-intent"}
+
+        out = _run_follow(device, prepare_before_follow_tap=prepare)
+
+        self.assertTrue(out["ok"])
+        self.assertEqual(ordering, ["prepare", "tap"])
+        self.assertIn(
+            "follow_pre_tap_prepare_completed",
+            [event for event, _payload in out["events"]],
+        )
+
+    def test_failed_durable_prepare_blocks_tap(self) -> None:
+        device = _Device([self._state_info("Following")])
+
+        def prepare(_payload: dict) -> dict:
+            raise RuntimeError("journal unavailable")
+
+        out = _run_follow(device, prepare_before_follow_tap=prepare)
+
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["failure_code"], 72)
+        self.assertFalse(out["tapped"])
+        device.click.assert_not_called()
+        self.assertIn(
+            "follow_pre_tap_prepare_failed",
+            [event for event, _payload in out["events"]],
+        )
 
     def test_rid_requested_succeeds_without_full_snapshot(self) -> None:
         device = _Device([self._state_info("Requested")])

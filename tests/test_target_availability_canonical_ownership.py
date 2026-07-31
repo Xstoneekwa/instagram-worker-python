@@ -33,11 +33,29 @@ def _row(account_id=MYTHYL_ACCOUNT_ID, client_id=MYTHYL_CLIENT_ID, active=True):
 
 
 class TargetAvailabilityCanonicalOwnershipTests(unittest.TestCase):
+    def setUp(self):
+        self._runtime_control_tmp = tempfile.TemporaryDirectory()
+        self._runtime_control_env = patch.dict(
+            os.environ,
+            {
+                "TARGET_AVAILABILITY_CONTROL_FILE": str(
+                    Path(self._runtime_control_tmp.name) / "absent-control"
+                ),
+                "TARGET_AVAILABILITY_AUTO_KILL_FILE": str(
+                    Path(self._runtime_control_tmp.name) / "absent-auto-kill"
+                ),
+            },
+            clear=False,
+        )
+        self._runtime_control_env.start()
+
     def tearDown(self):
         probe = runtime._MEMORY_PROBE
         runtime._MEMORY_PROBE = None
         if probe is not None:
             probe.cleanup()
+        self._runtime_control_env.stop()
+        self._runtime_control_tmp.cleanup()
 
     def test_active_package_without_revision_resolves_canonical_tenant(self):
         result = resolve_target_availability_tenant(

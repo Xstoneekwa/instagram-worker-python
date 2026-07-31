@@ -9659,6 +9659,7 @@ def perform_follow_safe(
     source_profile_username: str | None = None,
     dont_follow_private_accounts: bool = False,
     pre_follow_context: dict[str, Any] | None = None,
+    prepare_before_follow_tap: Callable[[dict[str, Any]], Any] | None = None,
 ) -> dict[str, Any]:
     """
     Single-tap follow with bounded verification (Following or Requested). No retries / multi-tap.
@@ -10204,6 +10205,52 @@ def perform_follow_safe(
         phase="follow",
         preceding_action="follow_pre_tap",
     )
+
+    if prepare_before_follow_tap is not None:
+        _prepare_payload = {
+            "safe_to_tap": True,
+            "follow_control_selected": True,
+            "target_username": str(username or ""),
+            "source_profile_username": str(source_profile_username or ""),
+            "visual_candidate_id": str(visual_candidate_id or ""),
+            "follow_state_before": str(state_before or ""),
+            "exact_follow_fast_path": bool(tap_exact),
+            "tap_coords_ready": bool(tap_coords_ready),
+            "bounds": dict(_follow_safe_info(btn).get("bounds") or {}),
+        }
+        try:
+            _prepared = prepare_before_follow_tap(dict(_prepare_payload))
+            if not _prepared:
+                raise RuntimeError("follow_pre_tap_prepare_not_durable")
+        except Exception as exc:
+            _record(
+                "follow_pre_tap_prepare_failed",
+                {
+                    **_prepare_payload,
+                    "safe_to_tap": False,
+                    "error_type": type(exc).__name__,
+                    "reason": str(exc)[:200],
+                },
+            )
+            return {
+                "ok": False,
+                "failure_code": 72,
+                "failure_reason": "follow_pre_tap_prepare_failed",
+                "visual_follow_failure_reason": "follow_pre_tap_prepare_failed",
+                "tapped": False,
+                "follow_tap_sent": False,
+                "follow_state_before": state_before,
+                "follow_state_after": state_before,
+                "verify_attempts": 0,
+                "events": events,
+            }
+        _record(
+            "follow_pre_tap_prepare_completed",
+            {
+                **_prepare_payload,
+                "reason": "durable_pre_tap_context_ready",
+            },
+        )
 
     try:
         if tap_exact and tap_coords_ready:

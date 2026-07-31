@@ -56,6 +56,18 @@ def observation(event="run:target:summary", account_id=ACCOUNT_ONE):
 
 
 class TargetAvailabilityWriterTests(unittest.TestCase):
+    def setUp(self):
+        self._runtime_control_tmp = tempfile.TemporaryDirectory()
+        self._default_auto_kill_patch = patch(
+            "target_availability_writer.DEFAULT_AUTO_KILL_FILE",
+            str(Path(self._runtime_control_tmp.name) / "absent-auto-kill"),
+        )
+        self._default_auto_kill_patch.start()
+
+    def tearDown(self):
+        self._default_auto_kill_patch.stop()
+        self._runtime_control_tmp.cleanup()
+
     def test_global_scope_is_explicit_and_does_not_require_an_allowlist(self):
         flags = TargetAvailabilityFeatureFlags.from_mapping({
             "TARGET_AVAILABILITY_OBSERVATION_CAPTURE_ENABLED": "true",

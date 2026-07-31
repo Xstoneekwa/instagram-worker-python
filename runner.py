@@ -3262,6 +3262,49 @@ def _follow_persistence_intent_enabled_for_account(account_id: str | None) -> bo
     )
 
 
+def _load_follow_persistence_settings_revision(
+    account_id: str,
+    *,
+    max_attempts: int = 3,
+) -> str | None:
+    """Load the canonical settings revision before any candidate can be tapped."""
+    attempts = max(1, int(max_attempts or 1))
+    for attempt in range(1, attempts + 1):
+        result = _timed_safe_supabase_call(
+            "follow_persistence_settings_revision_loaded",
+            "get_account_unfollow_settings",
+            account_id,
+            log_account_id=account_id,
+            log_attempt=attempt,
+            return_status=True,
+        )
+        row = (result or {}).get("value") if isinstance(result, dict) else None
+        revision = str((row or {}).get("updated_at") or "").strip()
+        if bool((result or {}).get("_supabase_call_ok")) and revision:
+            log(
+                "info",
+                "follow_persistence_settings_revision_ready",
+                account_id=account_id,
+                attempt=attempt,
+                settings_revision=revision,
+                safe_to_tap=True,
+            )
+            return revision
+        log(
+            "warning",
+            "follow_persistence_settings_revision_retry",
+            account_id=account_id,
+            attempt=attempt,
+            max_attempts=attempts,
+            row_available=isinstance(row, dict),
+            revision_available=bool(revision),
+            safe_to_tap=False,
+        )
+        if attempt < attempts:
+            time.sleep(0.15 * attempt)
+    return None
+
+
 def _flush_deferred_persists_for_manual_stop(
     *,
     run_id: str = "",
@@ -10481,15 +10524,24 @@ def _run_followers_list_engine_session(
         except Exception:
             session_commercial_policy_revision = None
     if account_id and _follow_persistence_intent_enabled_for_account(account_id):
-        try:
-            session_follow_persistence_settings_revision = str(
-                (supabase_client.get_account_unfollow_settings(account_id) or {}).get(
-                    "updated_at"
-                )
-                or ""
-            ).strip() or None
-        except Exception:
-            session_follow_persistence_settings_revision = None
+        session_follow_persistence_settings_revision = (
+            _load_follow_persistence_settings_revision(account_id)
+        )
+        if not session_follow_persistence_settings_revision:
+            log(
+                "error",
+                "follow_persistence_settings_revision_unavailable",
+                account_id=account_id,
+                run_id=run_id,
+                safe_to_tap=False,
+                reason="canonical_settings_revision_unavailable_before_candidate_loop",
+            )
+            _publish_followers_session_summary(
+                follow_session_outcome="failed",
+                follow_stop_reason="follow_persistence_settings_revision_unavailable",
+                exit_code=1,
+            )
+            return 1
 
     def _eng_log(action_type: str, status: str, message: str, payload: dict) -> None:
         if not (supabase_mode and run_id and account_id):
@@ -17549,16 +17601,28 @@ def _run_followers_list_engine_session(
                     is_private=bool(_pre_follow_private_detected),
                     reason="perform_follow_safe",
                 )
-                _follow_persistence_ctx: dict[str, Any] | None = None
-                if _follow_persistence_intent_enabled_for_account(account_id):
+                _follow_persistence_holder: dict[str, Any] = {}
+
+                def _prepare_follow_persistence_before_tap(
+                    pre_tap: dict[str, Any],
+                ) -> dict[str, Any]:
                     try:
                         _settings_revision = str(
                             session_follow_persistence_settings_revision or ""
                         ).strip()
-                        if not _settings_revision or not str(run_request_id or "").strip():
+                        if (
+                            not _settings_revision
+                            or not str(run_request_id or "").strip()
+                            or pre_tap.get("safe_to_tap") is not True
+                            or pre_tap.get("follow_control_selected") is not True
+                        ):
                             raise RuntimeError("follow_persistence_pre_tap_context_missing")
+                        if bool(pre_tap.get("exact_follow_fast_path")) and not bool(
+                            pre_tap.get("tap_coords_ready")
+                        ):
+                            raise RuntimeError("follow_persistence_exact_bounds_missing")
                         _action_id = deterministic_action_id(account_id, run_id, follower_un)
-                        _follow_persistence_ctx = follow_persistence_intent.create_prepared_intent(
+                        intent = follow_persistence_intent.create_prepared_intent(
                             action_id=_action_id,
                             account_id=account_id,
                             run_id=run_id,
@@ -17578,7 +17642,28 @@ def _run_followers_list_engine_session(
                             reason=str(exc)[:200],
                             safe_to_tap=False,
                         )
-                        return 1
+                        raise
+                    _follow_persistence_holder["ctx"] = intent
+                    log(
+                        "info",
+                        "follow_persistence_intent_prepared_at_tap_ready",
+                        account_id=account_id,
+                        run_id=run_id,
+                        candidate_username=follower_un,
+                        action_id_hash=action_id_hash(str(intent.get("action_id") or "")),
+                        exact_follow_fast_path=bool(
+                            pre_tap.get("exact_follow_fast_path")
+                        ),
+                        tap_coords_ready=bool(pre_tap.get("tap_coords_ready")),
+                        safe_to_tap=True,
+                    )
+                    return intent
+
+                _prepare_before_tap = (
+                    _prepare_follow_persistence_before_tap
+                    if _follow_persistence_intent_enabled_for_account(account_id)
+                    else None
+                )
                 follow_out = perform_follow_safe(
                     d,
                     follower_un,
@@ -17588,6 +17673,12 @@ def _run_followers_list_engine_session(
                     source_profile_username=source_profile_username,
                     dont_follow_private_accounts=_dont_follow_private_pre,
                     pre_follow_context=_pre_follow_tap_ctx,
+                    prepare_before_follow_tap=_prepare_before_tap,
+                )
+                _follow_persistence_ctx: dict[str, Any] | None = (
+                    _follow_persistence_holder.get("ctx")
+                    if isinstance(_follow_persistence_holder.get("ctx"), dict)
+                    else None
                 )
                 _follow_action_events_for_prefollow = list(follow_out.get("events") or [])
                 _surface_event = next(
