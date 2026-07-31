@@ -778,6 +778,7 @@ def _run_follow_target_rotation(
     follow60_canary_control: dict[str, Any] | None = None,
     follow60_attempt_id: int = 1,
     business_session_id: str | None = None,
+    target_followers_resume_source_request_id: str | None = None,
     auto_restart_resume_policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     total_targets = len(follow_targets)
@@ -964,6 +965,13 @@ def _run_follow_target_rotation(
             "follow60_canary_control": dict(follow60_canary_control or {}),
             "follow60_attempt_id": int(follow60_attempt_id or 1),
             "business_session_id": str(business_session_id or "") or None,
+            # Checkpoint provenance and Follow persistence have independent
+            # safety contracts; never populate the engine's run_request_id
+            # implicitly from this CT Resume channel.
+            "target_followers_resume_source_request_id": str(
+                target_followers_resume_source_request_id or ""
+            )
+            or None,
             "auto_restart_resume_policy": (
                 dict(auto_restart_resume_policy)
                 if isinstance(auto_restart_resume_policy, dict)
@@ -3558,6 +3566,7 @@ def run_account_session(
     max_follows_per_target_per_run: int | None = None,
     fast_rotate_to_next_target_from_followers: FastRotationRunner | None = None,
     auto_restart_resume_policy: dict[str, Any] | None = None,
+    target_followers_resume_source_request_id: str | None = None,
     business_action_deadline: str | None = None,
     run_request_id: str | None = None,
     follow60_canary_active: bool = False,
@@ -4046,6 +4055,9 @@ def run_account_session(
                 follow60_canary_control=follow60_canary_control,
                 follow60_attempt_id=follow60_attempt_id,
                 business_session_id=business_session_id,
+                target_followers_resume_source_request_id=(
+                    target_followers_resume_source_request_id
+                ),
                 auto_restart_resume_policy=auto_restart_resume_policy,
             )
             follow_t1 = time.perf_counter()
@@ -4982,6 +4994,7 @@ def dispatch_account_session(
     max_follows_per_target_per_run: int | None = None,
     fast_rotate_to_next_target_from_followers: FastRotationRunner | None = None,
     auto_restart_resume_policy: dict[str, Any] | None = None,
+    target_followers_resume_source_request_id: str | None = None,
     business_action_deadline: str | None = None,
     run_request_id: str | None = None,
     follow60_canary_active: bool = False,
@@ -5005,6 +5018,9 @@ def dispatch_account_session(
         warm_session_used=warm_session_used,
         force_stop_used=force_stop_used,
         auto_restart_resume_policy=auto_restart_resume_policy,
+        target_followers_resume_source_request_id=(
+            target_followers_resume_source_request_id
+        ),
         business_action_deadline=business_action_deadline,
         run_request_id=run_request_id,
         follow60_canary_active=follow60_canary_active,

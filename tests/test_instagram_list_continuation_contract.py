@@ -409,7 +409,7 @@ class InstagramListContinuationContractTests(unittest.TestCase):
         self.assertEqual([call["target_id"] for call in engine.calls], ["target-1", "target-2"])
         self.assertEqual(result["exhausted_targets"][0]["target_id"], "target-1")
 
-    def test_15a_rotation_propagates_request_and_canonical_attempt_policy(self) -> None:
+    def test_15a_rotation_keeps_rex_request_unset_and_propagates_ct_provenance(self) -> None:
         request_id = "30000000-0000-4000-8000-000000000002"
         policy = {
             "attempt_id": 2,
@@ -441,10 +441,14 @@ class InstagramListContinuationContractTests(unittest.TestCase):
             force_stop_used=False,
             max_targets_per_run=1,
             max_follows_per_target_per_run=1,
-            run_request_id=request_id,
+            target_followers_resume_source_request_id=request_id,
             auto_restart_resume_policy=policy,
         )
-        self.assertEqual(engine.calls[0]["run_request_id"], request_id)
+        self.assertNotIn("run_request_id", engine.calls[0])
+        self.assertEqual(
+            engine.calls[0]["target_followers_resume_source_request_id"],
+            request_id,
+        )
         self.assertEqual(engine.calls[0]["auto_restart_resume_policy"], policy)
         self.assertIsNot(engine.calls[0]["auto_restart_resume_policy"], policy)
 
@@ -515,10 +519,14 @@ class InstagramListContinuationContractTests(unittest.TestCase):
                     warm_session_used=False,
                     force_stop_used=False,
                     auto_restart_resume_policy=policy,
-                    run_request_id=request_id,
+                    target_followers_resume_source_request_id=request_id,
                 )
 
-        self.assertEqual(captured["run_request_id"], request_id)
+        self.assertNotIn("run_request_id", captured)
+        self.assertEqual(
+            captured["target_followers_resume_source_request_id"],
+            request_id,
+        )
         self.assertEqual(captured["auto_restart_resume_policy"], policy)
 
     def test_16_eight_follows_and_see_more_does_not_rotate(self) -> None:

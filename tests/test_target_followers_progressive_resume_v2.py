@@ -983,7 +983,7 @@ class RunnerResumeProvenanceTests(unittest.TestCase):
             return_value=full_sha,
         ):
             provenance, reason = runner._resolve_target_followers_resume_provenance(
-                run_request_id="30000000-0000-4000-8000-000000000002",
+                target_followers_resume_source_request_id="30000000-0000-4000-8000-000000000002",
                 auto_restart_resume_policy={"attempt_id": 2, "retry_index": 1},
             )
         self.assertEqual(reason, "provenance_resolved")
@@ -997,7 +997,7 @@ class RunnerResumeProvenanceTests(unittest.TestCase):
             return_value="d" * 40,
         ):
             provenance, reason = runner._resolve_target_followers_resume_provenance(
-                run_request_id="30000000-0000-4000-8000-000000000002",
+                target_followers_resume_source_request_id="30000000-0000-4000-8000-000000000002",
                 auto_restart_resume_policy={"phases_to_run": {"follow": True}},
             )
         self.assertIsNone(provenance)
@@ -1010,7 +1010,7 @@ class RunnerResumeProvenanceTests(unittest.TestCase):
             return_value="e" * 40,
         ):
             provenance, reason = runner._resolve_target_followers_resume_provenance(
-                run_request_id="30000000-0000-4000-8000-000000000001",
+                target_followers_resume_source_request_id="30000000-0000-4000-8000-000000000001",
                 auto_restart_resume_policy=None,
             )
         self.assertEqual(reason, "provenance_resolved")
@@ -1026,7 +1026,7 @@ class RunnerResumeProvenanceTests(unittest.TestCase):
             return_value=full_sha,
         ):
             provenance, reason = runner._resolve_target_followers_resume_provenance(
-                run_request_id="30000000-0000-4000-8000-000000000002",
+                target_followers_resume_source_request_id="30000000-0000-4000-8000-000000000002",
                 auto_restart_resume_policy={"attempt_id": 2, "retry_index": 1},
             )
         self.assertEqual(reason, "provenance_resolved")
