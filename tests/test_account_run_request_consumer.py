@@ -504,6 +504,44 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
         self.assertEqual(other, (0, False))
         terminate.assert_called_once_with(canceled_proc)
 
+    def test_rex_manual_stop_gets_extended_verified_follow_flush_grace(self) -> None:
+        cfg = consumer.DispatcherConfig(
+            enabled=True,
+            health_only=False,
+            launch_enabled=True,
+            worker_id="run-dispatcher:test",
+            poll_seconds=5.0,
+            lease_seconds=120,
+            heartbeat_seconds=20.0,
+            allowed_run_types=["account_session"],
+            test_account_ids=set(),
+            subprocess_timeout_seconds=7200,
+            require_assignment=False,
+            enforce_assignment_window=False,
+        )
+        proc = MagicMock()
+        proc.poll.return_value = None
+        with (
+            patch.object(
+                consumer,
+                "get_account_run_request",
+                return_value={
+                    "status": "running",
+                    "cancel_requested_at": "2026-07-31T00:00:00Z",
+                },
+            ),
+            patch.object(consumer, "_terminate_subprocess", return_value=143) as terminate,
+        ):
+            result = consumer._wait_for_subprocess(
+                cfg,
+                proc,
+                request_id=TEST_REQUEST_ID,
+                account_id=consumer.REX_FOLLOW_60S_ACCOUNT_ID,
+            )
+
+        self.assertEqual(result, (143, False))
+        terminate.assert_called_once_with(proc, graceful_timeout_seconds=90.0)
+
     def test_wait_for_subprocess_keeps_ownership_on_control_plane_read_failure(self) -> None:
         cfg = consumer.DispatcherConfig(
             enabled=True,

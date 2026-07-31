@@ -3606,6 +3606,157 @@ class DeferredPostReturnPersistTests(unittest.TestCase):
         self.assertIn("manual_stop_graceful_flush_completed", events)
         self.assertIn("post_like_verified_persisted_before_stop", events)
 
+    def test_manual_stop_replays_only_physically_verified_follow_intent(self) -> None:
+        intents = [
+            {
+                "stage": "follow_physically_verified",
+                "action_id": "action-verified",
+                "candidate_username": "cand_verified",
+                "source_ct_username": "ct_one",
+                "source_target_id": "target-one",
+                "request_id": "request-one",
+                "settings_revision": "revision-one",
+                "followed_at": "2026-07-31T00:00:00+00:00",
+            },
+            {
+                "stage": "prepared_before_follow_tap",
+                "action_id": "action-prepared",
+                "candidate_username": "cand_not_verified",
+            },
+        ]
+        with patch.object(
+            runner.follow_persistence_intent,
+            "load_nonterminal_intents",
+            return_value=intents,
+        ), patch.object(
+            runner,
+            "_persist_verified_follow_success_to_supabase",
+            return_value=True,
+        ) as persist, patch.object(runner, "log"):
+            ok = runner._persist_verified_follow_intents_for_manual_stop(
+                supabase_mode=True,
+                run_id="run",
+                account_id=runner.REX_FOLLOW_60S_ACCOUNT_ID,
+            )
+
+        self.assertTrue(ok)
+        persist.assert_called_once()
+        self.assertEqual(persist.call_args.kwargs["follower_un"], "cand_verified")
+        self.assertEqual(
+            persist.call_args.kwargs["phase"], "manual_stop_before_terminal_status"
+        )
+        self.assertTrue(persist.call_args.kwargs["defer_source_follow_success"])
+
+    def test_manual_stop_verified_follow_replay_failure_is_not_reported_safe(self) -> None:
+        with patch.object(
+            runner.follow_persistence_intent,
+            "load_nonterminal_intents",
+            return_value=[
+                {
+                    "stage": "follow_physically_verified",
+                    "action_id": "action-verified",
+                    "candidate_username": "cand_verified",
+                    "source_ct_username": "ct_one",
+                }
+            ],
+        ), patch.object(
+            runner,
+            "_persist_verified_follow_success_to_supabase",
+            return_value=False,
+        ), patch.object(runner, "log"):
+            ok = runner._persist_verified_follow_intents_for_manual_stop(
+                supabase_mode=True,
+                run_id="run",
+                account_id=runner.REX_FOLLOW_60S_ACCOUNT_ID,
+            )
+
+        self.assertFalse(ok)
+
+    def test_rex_keeps_local_follow_intent_when_rpc_v1_is_off(self) -> None:
+        with patch.object(
+            runner, "follow_persistence_rpc_v1_enabled", return_value=False
+        ):
+            self.assertTrue(
+                runner._follow_persistence_intent_enabled_for_account(
+                    runner.REX_FOLLOW_60S_ACCOUNT_ID
+                )
+            )
+            self.assertFalse(
+                runner._follow_persistence_intent_enabled_for_account("other-account")
+            )
+
+    def test_rex_manual_stop_rpc_replay_closes_verified_intent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ,
+            {
+                "FOLLOW_PERSISTENCE_INTENT_ROOT": tmp,
+                "FOLLOW_PERSISTENCE_RPC_V1_ENABLED": "false",
+            },
+        ):
+            action_id = runner.deterministic_action_id(
+                runner.REX_FOLLOW_60S_ACCOUNT_ID, "run-rex", "cand_verified"
+            )
+            runner.follow_persistence_intent.create_prepared_intent(
+                action_id=action_id,
+                account_id=runner.REX_FOLLOW_60S_ACCOUNT_ID,
+                run_id="run-rex",
+                request_id="request-rex",
+                candidate_username="cand_verified",
+                source_target_id="target-one",
+                source_ct_username="ct_one",
+                settings_revision="revision-one",
+            )
+            runner.follow_persistence_intent.update_intent_stage(
+                run_id="run-rex",
+                action_id=action_id,
+                stage="follow_physically_verified",
+                followed_at="2026-07-31T00:00:00+00:00",
+            )
+            rpc_result = {
+                "ok": True,
+                "status": "created",
+                "action_id": action_id,
+                "interaction_id": "interaction-rex",
+                "follow_persisted": True,
+                "eligible_unfollow_at": "2026-08-03T00:00:00+00:00",
+                "audit_persisted": True,
+                "counter_applied": True,
+                "settings_revision_match": True,
+                "invariants_confirmed": [
+                    "account_request_run_consistent",
+                    "canonical_username_confirmed",
+                    "settings_locked_revision_match",
+                    "interaction_persisted",
+                    "audit_persisted",
+                    "counter_applied_or_not_applicable",
+                ],
+                "failure_reason": None,
+            }
+            with patch.object(
+                runner.supabase_client,
+                "persist_verified_follow_success_rpc",
+                return_value=rpc_result,
+            ) as rpc, patch.object(
+                runner, "_timed_safe_supabase_call"
+            ) as legacy, patch.object(runner, "log"):
+                ok = runner._persist_verified_follow_intents_for_manual_stop(
+                    supabase_mode=True,
+                    run_id="run-rex",
+                    account_id=runner.REX_FOLLOW_60S_ACCOUNT_ID,
+                )
+
+            self.assertTrue(ok)
+            rpc.assert_called_once()
+            legacy.assert_not_called()
+            self.assertEqual(
+                runner.follow_persistence_intent.load_nonterminal_intents(
+                    account_id=runner.REX_FOLLOW_60S_ACCOUNT_ID,
+                    run_id="run-rex",
+                ),
+                [],
+            )
+            self.assertEqual(len(runner._DEFERRED_POST_RETURN_PERSIST_STEPS), 0)
+
     def test_follow_source_success_is_deferred_until_completed_flush(self) -> None:
         logs: list[tuple[str, str, dict]] = []
         follow_out = {"ok": True, "skipped_tap": False}

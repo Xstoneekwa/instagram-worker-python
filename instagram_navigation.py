@@ -18562,10 +18562,10 @@ def _dynamic_first_post_grid_row_from_image(
     if y_hi <= y_lo + step:
         return {"ok": False}
 
-    ranked: list[tuple[int, int]] = []
+    ranked: list[tuple[int, int, tuple[int, ...]]] = []
     gy = y_lo
     while gy <= y_hi:
-        solids = 0
+        solid_columns: list[int] = []
         for col in (0, 1, 2):
             x0 = col * cell_w
             if x0 + cell_w > iw:
@@ -18575,19 +18575,27 @@ def _dynamic_first_post_grid_row_from_image(
             except Exception:
                 v = 0.0
             if float(v) >= float(var_thr):
-                solids += 1
-        if solids >= 1:
-            ranked.append((solids, gy))
+                solid_columns.append(int(col))
+        if solid_columns:
+            ranked.append((len(solid_columns), gy, tuple(solid_columns)))
         gy += step
     if not ranked:
         return {"ok": False}
+    topmost_solid, gy_topmost, topmost_solid_columns = min(
+        ranked, key=lambda t: t[1]
+    )
     ranked.sort(key=lambda t: (-t[0], t[1]))
-    best_solid, gy_best = ranked[0]
+    best_solid, gy_best, best_solid_columns = ranked[0]
     return {
         "ok": True,
         "first_row_top": int(gy_best),
         "first_row_bottom": int(gy_best + cell_h),
         "solid_count": int(best_solid),
+        "solid_columns": list(best_solid_columns),
+        "topmost_row_top": int(gy_topmost),
+        "topmost_row_bottom": int(gy_topmost + cell_h),
+        "topmost_solid_count": int(topmost_solid),
+        "topmost_solid_columns": list(topmost_solid_columns),
         "cell_h": int(cell_h),
     }
 
@@ -19127,6 +19135,7 @@ def _post_follow_likes_probe_top_left_vision_cell_meta(
     wh: int,
     y_min_px: int,
     budget_deadline: float | None = None,
+    dynamic_single_row_only: bool = False,
 ) -> dict[str, Any]:
     """Fast fail-closed screenshot probe for only the top-left grid thumbnail."""
     out: dict[str, Any] = {
@@ -19169,8 +19178,65 @@ def _post_follow_likes_probe_top_left_vision_cell_meta(
         out["reason"] = "vision_probe_image_too_small"
         return out
     cell_w_i = max(24, int(iw) // 3)
-    top_dev = max(0, int(y_min_px) + 16)
-    top_i = max(0, min(int(ih) - cell_w_i - 1, int(top_dev * int(ih) / max(1, int(wh)))))
+    dynamic_row: dict[str, Any] = {}
+    dynamic_solid_count = 0
+    dynamic_columns: list[int] = []
+    y_min_i = max(
+        0,
+        min(
+            int(ih) - cell_w_i - 1,
+            int(int(y_min_px) * int(ih) / max(1, int(wh))),
+        ),
+    )
+    if dynamic_single_row_only:
+        dynamic_row = _dynamic_first_post_grid_row_from_image(
+            im,
+            int(iw),
+            int(ih),
+            var_thr=float(_POST_FOLLOW_LIKES_GRID_PARTIAL_VAR_THR),
+            search_y_min_px=int(y_min_i),
+        )
+        dynamic_solid_count = int(
+            dynamic_row.get("topmost_solid_count")
+            or dynamic_row.get("solid_count")
+            or 0
+        )
+        dynamic_columns = [
+            int(value)
+            for value in list(
+                dynamic_row.get("topmost_solid_columns")
+                or dynamic_row.get("solid_columns")
+                or list(range(dynamic_solid_count))
+            )
+            if isinstance(value, int) or str(value).isdigit()
+        ]
+        out["dynamic_first_row_probe_ok"] = bool(dynamic_row.get("ok"))
+        out["dynamic_first_row_solid_count"] = dynamic_solid_count
+        out["dynamic_first_row_solid_columns"] = dynamic_columns
+        if bool(dynamic_row.get("ok")) and 0 in dynamic_columns:
+            top_i = int(
+                dynamic_row.get("topmost_row_top")
+                or dynamic_row.get("first_row_top")
+                or y_min_i
+            )
+        else:
+            top_i = max(
+                0,
+                min(
+                    int(ih) - cell_w_i - 1,
+                    int((int(y_min_px) + 16) * int(ih) / max(1, int(wh))),
+                ),
+            )
+    else:
+        top_dev_default = max(0, int(y_min_px) + 16)
+        top_i = max(
+            0,
+            min(
+                int(ih) - cell_w_i - 1,
+                int(top_dev_default * int(ih) / max(1, int(wh))),
+            ),
+        )
+    top_dev = int(round(float(top_i) * float(wh) / float(max(1, int(ih)))))
     left_i = 0
     try:
         variance = _visual_image_cell_luma_variance(im, left_i, top_i, cell_w_i, cell_w_i)
@@ -19183,7 +19249,19 @@ def _post_follow_likes_probe_top_left_vision_cell_meta(
         "right": int(max(24, int(ww) // 3)),
         "bottom": int(top_dev + max(24, int(ww) // 3)),
     }
-    if float(variance) < float(_POST_FOLLOW_LIKES_GRID_PARTIAL_VAR_THR):
+    dynamic_single_row_rejected = bool(
+        dynamic_single_row_only
+        and (
+            not bool(dynamic_row.get("ok"))
+            or 0 not in dynamic_columns
+            or not (1 <= dynamic_solid_count <= 3)
+            or int(top_i) > int(y_min_i) + max(12, int(cell_w_i * 0.45))
+        )
+    )
+    if (
+        float(variance) < float(_POST_FOLLOW_LIKES_GRID_PARTIAL_VAR_THR)
+        or dynamic_single_row_rejected
+    ):
         out["reason"] = "vision_thumbnail_top_left_not_found"
         return out
     cell_w_d = max(24, int(ww) // 3)
@@ -19323,6 +19401,8 @@ def _post_follow_likes_run_top_left_xml_probe_sequence(
     grid_cap_deadline: float | None = None,
     xml_probe_budget_ms: float | None = None,
     skip_estimate_fallback: bool = False,
+    prefer_fresh_single_row_vision: bool = False,
+    expected_follower_username: str = "",
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Short settle + bounded XML reprobes for the top-left post cell after grid reveal."""
     hints = dict(ui_hints)
@@ -19337,6 +19417,91 @@ def _post_follow_likes_run_top_left_xml_probe_sequence(
     reveal_state = _post_follow_likes_assess_reveal_cell_state(
         last_cell, ww=int(ww), wh=int(wh)
     )
+    if prefer_fresh_single_row_vision:
+        expected_norm = _normalize_handle(expected_follower_username)
+        try:
+            live_norm = _normalize_handle(
+                str(read_current_profile_username_for_follow_gate(d) or "")
+            )
+        except Exception:
+            live_norm = ""
+        identity_exact = bool(expected_norm and live_norm == expected_norm)
+        try:
+            tabs_bottom, _tabs_source = _followers_profile_tabs_bottom_y_px(
+                d, window_h=int(wh)
+            )
+        except Exception:
+            tabs_bottom, _tabs_source = None, ""
+        vision_meta: dict[str, Any] = {
+            "reliable": False,
+            "reason": "fresh_single_row_identity_not_exact",
+            "cell": None,
+        }
+        if identity_exact and tabs_bottom is not None:
+            vision_meta = _post_follow_likes_probe_top_left_vision_cell_meta(
+                d,
+                ww=int(ww),
+                wh=int(wh),
+                y_min_px=int(tabs_bottom) + int(_POST_FOLLOW_PROFILE_TABS_GRID_MARGIN_PX),
+                budget_deadline=budget_deadline,
+                dynamic_single_row_only=True,
+            )
+            reveal_state = _post_follow_likes_assess_reveal_cell_state(
+                vision_meta, ww=int(ww), wh=int(wh)
+            )
+        try:
+            log(
+                "info",
+                "like_fresh_single_row_probe_after_first_scroll",
+                visual_candidate_id=visual_candidate_id,
+                source_profile_username=source_profile_username,
+                follower_username=follower_username,
+                identity_exact=identity_exact,
+                live_profile_username=live_norm,
+                profile_tabs_bottom_y_px=tabs_bottom,
+                profile_tabs_bottom_source=str(_tabs_source or ""),
+                cell_reliable=bool(vision_meta.get("reliable")),
+                cell_source=str(vision_meta.get("reason") or ""),
+                dynamic_first_row_solid_count=vision_meta.get(
+                    "dynamic_first_row_solid_count"
+                ),
+                dynamic_first_row_solid_columns=vision_meta.get(
+                    "dynamic_first_row_solid_columns"
+                ),
+                top_left_post_tap_safe=bool(
+                    reveal_state.get("top_left_post_tap_safe")
+                ),
+                fallback_required=not bool(
+                    reveal_state.get("top_left_post_tap_safe")
+                ),
+            )
+        except Exception:
+            pass
+        if bool(reveal_state.get("top_left_post_tap_safe")):
+            try:
+                from follow_60s_canary import record_outcome as _record_follow_60s_outcome
+
+                _record_follow_60s_outcome(
+                    "like_single_row_first_scroll",
+                    "used",
+                    screenshots=1,
+                    estimated_gain_ms=7000.0,
+                )
+            except Exception:
+                pass
+            return dict(vision_meta), dict(reveal_state)
+        try:
+            from follow_60s_canary import record_outcome as _record_follow_60s_outcome
+
+            _record_follow_60s_outcome(
+                "like_single_row_first_scroll",
+                "fallback",
+                reason=str(vision_meta.get("reason") or "fresh_single_row_rejected"),
+                fallback_used=True,
+                screenshots=(1 if identity_exact and tabs_bottom is not None else 0),
+            )
+        except Exception:
+            pass
     max_attempts = int(_POST_FOLLOW_LIKE_TOP_LEFT_XML_PROBE_MAX_ATTEMPTS)
     for probe_attempt in range(1, max_attempts + 1):
         grid_cap_remaining_ms = _post_follow_likes_grid_cap_remaining_ms(grid_cap_deadline)
@@ -19642,6 +19807,14 @@ def _post_follow_likes_stabilize_grid_under_suggested_overlay(
     reveal_state: dict[str, Any] = _post_follow_likes_assess_reveal_cell_state(
         last_cell, ww=int(ww), wh=int(wh)
     )
+    try:
+        from follow_60s_canary import enabled as _follow_60s_canary_enabled
+
+        single_row_first_scroll_enabled = bool(
+            _follow_60s_canary_enabled("like_single_row_first_scroll")
+        )
+    except Exception:
+        single_row_first_scroll_enabled = False
 
     def _reprobe_after_scroll(
         *,
@@ -19666,6 +19839,10 @@ def _post_follow_likes_stabilize_grid_under_suggested_overlay(
             source_profile_username=source_profile_username,
             follower_username=follower_username,
             after_reveal_scroll=True,
+            prefer_fresh_single_row_vision=bool(
+                single_row_first_scroll_enabled and int(scroll_attempt_index) == 1
+            ),
+            expected_follower_username=follower_username,
         )
         tap_safe = bool(reveal_state.get("top_left_post_tap_safe"))
         tap_safe_reason = str(

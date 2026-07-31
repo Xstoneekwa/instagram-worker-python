@@ -132,16 +132,28 @@ class TargetAvailabilityCanonicalOwnershipTests(unittest.TestCase):
                 self.assertEqual(result.tenant_id, client_id)
 
     def test_flags_off_and_kill_switch_avoid_ownership_read(self):
-        with patch.dict(os.environ, {"TARGET_AVAILABILITY_OBSERVATION_CAPTURE_ENABLED": "false"}, clear=False), patch(
-            "target_availability_ownership.resolve_target_availability_tenant",
-            side_effect=AssertionError("ownership read forbidden"),
-        ):
-            self.assertEqual(
-                orchestrator._resolve_target_availability_tenant_once(
-                    MYTHYL_ACCOUNT_ID, run_id="run-off", commercial_policy_revision={}
+        with tempfile.TemporaryDirectory() as directory:
+            environment = {
+                "TARGET_AVAILABILITY_OBSERVATION_CAPTURE_ENABLED": "false",
+                "TARGET_AVAILABILITY_CONTROL_FILE": str(
+                    Path(directory) / "absent-control"
                 ),
-                (None, None),
-            )
+                "TARGET_AVAILABILITY_AUTO_KILL_FILE": str(
+                    Path(directory) / "absent-auto-kill"
+                ),
+            }
+            with patch.dict(os.environ, environment, clear=False), patch(
+                "target_availability_ownership.resolve_target_availability_tenant",
+                side_effect=AssertionError("ownership read forbidden"),
+            ):
+                self.assertEqual(
+                    orchestrator._resolve_target_availability_tenant_once(
+                        MYTHYL_ACCOUNT_ID,
+                        run_id="run-off",
+                        commercial_policy_revision={},
+                    ),
+                    (None, None),
+                )
         with tempfile.TemporaryDirectory() as directory:
             kill_switch = Path(directory) / "kill-switch"
             kill_switch.write_text("ON\n", encoding="utf-8")
@@ -149,6 +161,12 @@ class TargetAvailabilityCanonicalOwnershipTests(unittest.TestCase):
                 "TARGET_AVAILABILITY_OBSERVATION_CAPTURE_ENABLED": "true",
                 "TARGET_AVAILABILITY_ACCOUNT_ALLOWLIST": MYTHYL_ACCOUNT_ID,
                 "TARGET_AVAILABILITY_KILL_SWITCH_FILE": str(kill_switch),
+                "TARGET_AVAILABILITY_CONTROL_FILE": str(
+                    Path(directory) / "absent-control"
+                ),
+                "TARGET_AVAILABILITY_AUTO_KILL_FILE": str(
+                    Path(directory) / "absent-auto-kill"
+                ),
             }
             with patch.dict(os.environ, environment, clear=False), patch(
                 "target_availability_ownership.resolve_target_availability_tenant",
@@ -274,30 +292,44 @@ class TargetAvailabilityCanonicalOwnershipTests(unittest.TestCase):
             self.assertIsNone(runtime._WRITER)
 
     def test_nonpilot_never_resolves_or_executes_hook(self):
-        environment = {
-            "TARGET_AVAILABILITY_OBSERVATION_CAPTURE_ENABLED": "true",
-            "TARGET_AVAILABILITY_ACCOUNT_ALLOWLIST": MYTHYL_ACCOUNT_ID,
-        }
-        with patch.dict(os.environ, environment, clear=False), patch(
-            "target_availability_ownership.resolve_target_availability_tenant",
-            side_effect=AssertionError("nonpilot lookup"),
-        ):
-            self.assertEqual(
-                orchestrator._resolve_target_availability_tenant_once(
-                    LORIELE_ACCOUNT_ID, run_id="control", commercial_policy_revision={}
+        with tempfile.TemporaryDirectory() as directory:
+            environment = {
+                "TARGET_AVAILABILITY_OBSERVATION_CAPTURE_ENABLED": "true",
+                "TARGET_AVAILABILITY_ACCOUNT_ALLOWLIST": MYTHYL_ACCOUNT_ID,
+                "TARGET_AVAILABILITY_CONTROL_FILE": str(
+                    Path(directory) / "absent-control"
                 ),
-                (None, None),
-            )
-            with patch("target_availability_runtime.observe_rotation_target_loaded", side_effect=AssertionError("nonpilot hook")):
-                self.assertTrue(orchestrator._observe_target_availability(
-                    "loaded",
-                    tenant_id=LORIELE_CLIENT_ID,
-                    account_id=LORIELE_ACCOUNT_ID,
-                    target_id=TARGET_ONE,
-                    username="target.one",
-                    run_id="control",
-                    target_index=0,
-                ))
+                "TARGET_AVAILABILITY_AUTO_KILL_FILE": str(
+                    Path(directory) / "absent-auto-kill"
+                ),
+            }
+            with patch.dict(os.environ, environment, clear=False), patch(
+                "target_availability_ownership.resolve_target_availability_tenant",
+                side_effect=AssertionError("nonpilot lookup"),
+            ):
+                self.assertEqual(
+                    orchestrator._resolve_target_availability_tenant_once(
+                        LORIELE_ACCOUNT_ID,
+                        run_id="control",
+                        commercial_policy_revision={},
+                    ),
+                    (None, None),
+                )
+                with patch(
+                    "target_availability_runtime.observe_rotation_target_loaded",
+                    side_effect=AssertionError("nonpilot hook"),
+                ):
+                    self.assertTrue(
+                        orchestrator._observe_target_availability(
+                            "loaded",
+                            tenant_id=LORIELE_CLIENT_ID,
+                            account_id=LORIELE_ACCOUNT_ID,
+                            target_id=TARGET_ONE,
+                            username="target.one",
+                            run_id="control",
+                            target_index=0,
+                        )
+                    )
 
     def test_scope_remains_strict_and_explicit_conflict_reason_reaches_probe(self):
         self.assertIsNone(runtime._scope(

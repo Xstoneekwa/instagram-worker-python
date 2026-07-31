@@ -3678,6 +3678,81 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
         self.assertTrue(stab.get("tap_safe"))
         self.assertEqual(stab.get("grid_exposure"), "stable")
 
+    def test_single_row_first_scroll_fast_path_is_follow_60s_subflag_scoped(self) -> None:
+        device = mock.MagicMock()
+        unsafe_meta = {
+            "reliable": True,
+            "cell": {
+                "left": 0,
+                "top": 1972,
+                "bottom": 2332,
+                "center_x": 180,
+                "center_y": 2152,
+            },
+            "reason": "profile_tabs_grid_cell_estimate",
+            "y_min_px": 1500,
+        }
+        safe_meta = {
+            "reliable": True,
+            "cell": {
+                "left": 0,
+                "top": 1000,
+                "bottom": 1360,
+                "center_x": 180,
+                "center_y": 1180,
+            },
+            "reason": "vision_thumbnail_top_left",
+            "y_min_px": 984,
+            "target_cell": "top_left",
+        }
+        safe_state = nav._post_follow_likes_assess_reveal_cell_state(
+            safe_meta, ww=1080, wh=2340
+        )
+
+        for enabled, expected_prefer in ((False, False), (True, True)):
+            with self.subTest(enabled=enabled), mock.patch.object(
+                canary,
+                "enabled",
+                side_effect=lambda feature=None, value=enabled: bool(
+                    value and feature == "like_single_row_first_scroll"
+                ),
+            ), mock.patch.object(
+                nav,
+                "_post_follow_likes_visible_grid_cell_under_suggested",
+                return_value=unsafe_meta,
+            ), mock.patch.object(
+                nav,
+                "_post_follow_likes_profile_scroll_swipe",
+                return_value={"swipe_ok": True},
+            ), mock.patch.object(
+                nav,
+                "_post_follow_likes_run_top_left_xml_probe_sequence",
+                return_value=(safe_meta, safe_state),
+            ) as sequence, mock.patch.object(
+                nav,
+                "_post_follow_likes_grid_ui_surface_hints",
+                return_value={"suggested_for_you": False, "profile_tabs_visible": True},
+            ), mock.patch.object(nav, "log"), mock.patch.object(nav, "time") as tmock:
+                tmock.perf_counter = time.perf_counter
+                tmock.sleep = lambda *_a, **_k: None
+                result = nav._post_follow_likes_stabilize_grid_under_suggested_overlay(
+                    device,
+                    ui_hints={"suggested_for_you": True, "profile_tabs_visible": True},
+                    budget_deadline=time.perf_counter() + 5.0,
+                    ww=1080,
+                    wh=2340,
+                    follower_username="cand",
+                )
+
+            self.assertTrue(result.get("tap_safe"))
+            self.assertEqual(
+                sequence.call_args.kwargs.get("prefer_fresh_single_row_vision"),
+                expected_prefer,
+            )
+            self.assertEqual(
+                sequence.call_args.kwargs.get("expected_follower_username"), "cand"
+            )
+
     def test_stabilize_uses_reveal_moderate_when_top_left_already_safe(self) -> None:
         device = mock.MagicMock()
         device.window_size.return_value = (1080, 2340)
@@ -4031,6 +4106,141 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
             )
         self.assertTrue(state.get("top_left_post_tap_safe"))
         self.assertEqual(meta.get("reason"), "xml_thumbnail_top_left")
+
+    def test_first_reveal_scroll_uses_fresh_single_row_vision_before_xml(self) -> None:
+        device = mock.MagicMock()
+        vision_meta = {
+            "reliable": True,
+            "reason": "vision_thumbnail_top_left",
+            "cell": {
+                "left": 0,
+                "top": 1000,
+                "right": 360,
+                "bottom": 1360,
+                "center_x": 180,
+                "center_y": 1180,
+            },
+            "y_min_px": 984,
+            "target_cell": "top_left",
+            "dynamic_first_row_solid_count": 1,
+            "dynamic_first_row_solid_columns": [0],
+        }
+        with mock.patch.object(
+            nav, "read_current_profile_username_for_follow_gate", return_value="cand"
+        ), mock.patch.object(
+            nav, "_followers_profile_tabs_bottom_y_px", return_value=(900, "tabs")
+        ), mock.patch.object(
+            nav,
+            "_post_follow_likes_probe_top_left_vision_cell_meta",
+            return_value=vision_meta,
+        ) as vision_probe, mock.patch.object(
+            nav, "_post_follow_likes_probe_top_left_xml_cell_meta"
+        ) as xml_probe, mock.patch.object(nav, "log"):
+            meta, state = nav._post_follow_likes_run_top_left_xml_probe_sequence(
+                device,
+                ui_hints={"profile_tabs_visible": True},
+                budget_deadline=time.perf_counter() + 2.0,
+                ww=1080,
+                wh=2340,
+                after_reveal_scroll=True,
+                prefer_fresh_single_row_vision=True,
+                expected_follower_username="cand",
+            )
+
+        self.assertEqual(meta.get("reason"), "vision_thumbnail_top_left")
+        self.assertTrue(state.get("top_left_post_tap_safe"))
+        vision_probe.assert_called_once()
+        xml_probe.assert_not_called()
+
+    def test_first_reveal_scroll_identity_mismatch_falls_back_to_xml(self) -> None:
+        device = mock.MagicMock()
+        xml_meta = {
+            "reliable": True,
+            "reason": "xml_thumbnail_top_left",
+            "cell": {
+                "left": 0,
+                "top": 1000,
+                "right": 360,
+                "bottom": 1360,
+                "center_x": 180,
+                "center_y": 1180,
+            },
+            "y_min_px": 900,
+            "target_cell": "top_left",
+        }
+        with mock.patch.object(
+            nav,
+            "read_current_profile_username_for_follow_gate",
+            return_value="different_candidate",
+        ), mock.patch.object(
+            nav, "_followers_profile_tabs_bottom_y_px", return_value=(900, "tabs")
+        ), mock.patch.object(
+            nav, "_post_follow_likes_probe_top_left_vision_cell_meta"
+        ) as vision_probe, mock.patch.object(
+            nav,
+            "_post_follow_likes_probe_top_left_xml_cell_meta",
+            return_value=xml_meta,
+        ) as xml_probe, mock.patch.object(nav, "log"), mock.patch.object(
+            nav, "time"
+        ) as tmock:
+            tmock.perf_counter = time.perf_counter
+            tmock.sleep = lambda *_a, **_k: None
+            meta, state = nav._post_follow_likes_run_top_left_xml_probe_sequence(
+                device,
+                ui_hints={"profile_tabs_visible": True},
+                budget_deadline=time.perf_counter() + 2.0,
+                ww=1080,
+                wh=2340,
+                after_reveal_scroll=True,
+                prefer_fresh_single_row_vision=True,
+                expected_follower_username="cand",
+            )
+
+        vision_probe.assert_not_called()
+        xml_probe.assert_called_once()
+        self.assertEqual(meta.get("reason"), "xml_thumbnail_top_left")
+        self.assertTrue(state.get("top_left_post_tap_safe"))
+
+    def test_fresh_single_row_vision_rejects_non_top_left_solid_column(self) -> None:
+        device = mock.MagicMock()
+
+        def _fake_screenshot(_d: object, path: str) -> None:
+            from PIL import Image
+
+            Image.new("RGB", (1080, 2340), "black").save(path)
+
+        with mock.patch.object(
+            nav, "screenshot", side_effect=_fake_screenshot
+        ), mock.patch.object(
+            nav,
+            "_dynamic_first_post_grid_row_from_image",
+            return_value={
+                "ok": True,
+                "first_row_top": 1000,
+                "first_row_bottom": 1360,
+                "solid_count": 1,
+                "solid_columns": [1],
+                "topmost_row_top": 1000,
+                "topmost_row_bottom": 1360,
+                "topmost_solid_count": 1,
+                "topmost_solid_columns": [1],
+                "cell_h": 360,
+            },
+        ), mock.patch.object(
+            nav, "_visual_image_cell_luma_variance", return_value=500.0
+        ):
+            meta = nav._post_follow_likes_probe_top_left_vision_cell_meta(
+                device,
+                ww=1080,
+                wh=2340,
+                y_min_px=984,
+                budget_deadline=time.perf_counter() + 2.0,
+                dynamic_single_row_only=True,
+            )
+
+        self.assertFalse(meta.get("reliable"))
+        self.assertEqual(meta.get("reason"), "vision_thumbnail_top_left_not_found")
+        self.assertEqual(meta.get("dynamic_first_row_solid_columns"), [1])
 
     def test_top_left_xml_relaxed_probe_finds_top_left_when_standard_absent(self) -> None:
         device = mock.MagicMock()

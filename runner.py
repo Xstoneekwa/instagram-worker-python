@@ -184,7 +184,11 @@ from instagram_navigation import (
     _visual_follow_request_pending_state,
     runner_invalidate_visual_followers_session_after_safe_stop,
 )
+
 from logs import get_run_log_file_path, init_run_file_logging, log
+
+
+REX_FOLLOW_60S_ACCOUNT_ID = "b024e94e-395d-4f02-9787-81ddc679b014"
 
 
 def _pre_follow_gap_log(
@@ -3162,6 +3166,102 @@ def _spool_noncritical_deferred_projections(*, reason: str) -> dict[str, int]:
     return spooled
 
 
+def _persist_verified_follow_intents_for_manual_stop(
+    *,
+    supabase_mode: bool,
+    run_id: str,
+    account_id: str,
+) -> bool:
+    """Persist locally verified Follow intents before a manual-stop terminal write.
+
+    The intent stage is written synchronously only after the exact Following state
+    has been observed.  Replaying the account-scoped idempotent RPC here protects a
+    candidate whose post-follow phase was interrupted before the normal
+    post-return critical-persist point.
+    """
+    if not (supabase_mode and run_id and account_id):
+        return True
+    if str(account_id or "") != REX_FOLLOW_60S_ACCOUNT_ID:
+        return True
+    try:
+        intents = follow_persistence_intent.load_nonterminal_intents(
+            account_id=account_id,
+            run_id=run_id,
+        )
+    except Exception as exc:
+        log(
+            "error",
+            "manual_stop_verified_follow_intent_load_failed",
+            run_id=run_id,
+            account_id=account_id,
+            error_type=type(exc).__name__,
+            safe_to_continue_ui=False,
+        )
+        return False
+
+    ok_all = True
+    for intent in intents:
+        stage = str(intent.get("stage") or "")
+        action_id = str(intent.get("action_id") or "")
+        if stage != "follow_physically_verified":
+            log(
+                "warning",
+                "manual_stop_follow_intent_not_replayed",
+                run_id=run_id,
+                account_id=account_id,
+                action_id_hash=action_id_hash(action_id),
+                intent_stage=stage,
+                reason="intent_not_physically_verified",
+            )
+            continue
+        persisted = _persist_verified_follow_success_to_supabase(
+            supabase_mode=True,
+            account_id=account_id,
+            follower_un=str(intent.get("candidate_username") or ""),
+            source_profile_username=str(intent.get("source_ct_username") or ""),
+            run_id=run_id,
+            follow_out={"skipped_tap": False},
+            fs_af="following",
+            f_st="following",
+            target_id=str(intent.get("source_target_id") or "") or None,
+            phase="manual_stop_before_terminal_status",
+            defer_source_follow_success=True,
+            request_id=str(intent.get("request_id") or "") or None,
+            action_id=action_id or None,
+            settings_revision_expected=str(
+                intent.get("settings_revision") or ""
+            )
+            or None,
+            followed_at=str(intent.get("followed_at") or "") or None,
+        )
+        log(
+            "info" if persisted else "error",
+            "manual_stop_verified_follow_intent_replayed",
+            run_id=run_id,
+            account_id=account_id,
+            candidate_username=str(intent.get("candidate_username") or ""),
+            action_id_hash=action_id_hash(action_id),
+            persisted=bool(persisted),
+            safe_to_continue_ui=bool(persisted),
+        )
+        if not persisted:
+            ok_all = False
+    return ok_all
+
+
+def _follow_persistence_intent_enabled_for_account(account_id: str | None) -> bool:
+    """Keep a crash-safe Follow intent for RPC V1 or the scoped Rex canary.
+
+    Rex forces the canonical idempotent RPC even while the global RPC V1 flag is
+    disabled, and keeps the same local proof journal so a Follow verified during
+    post-follow cannot disappear before the critical DB write.
+    """
+    return bool(
+        follow_persistence_rpc_v1_enabled()
+        or str(account_id or "") == REX_FOLLOW_60S_ACCOUNT_ID
+    )
+
+
 def _flush_deferred_persists_for_manual_stop(
     *,
     run_id: str = "",
@@ -3276,8 +3376,10 @@ def _persist_verified_follow_success_to_supabase(
         )
         return True
     t_persist = time.perf_counter()
-    rpc_enabled = follow_persistence_rpc_v1_enabled()
-    rpc_fallback_used = False
+    rpc_enabled = bool(
+        follow_persistence_rpc_v1_enabled()
+        or str(account_id or "") == REX_FOLLOW_60S_ACCOUNT_ID
+    )
     if rpc_enabled and bool(follow_out.get("skipped_tap")):
         if action_id and run_id:
             try:
@@ -3404,7 +3506,6 @@ def _persist_verified_follow_success_to_supabase(
                     elapsed_ms_before_fallback=round((time.perf_counter() - rpc_t0) * 1000.0, 2),
                 )
                 rpc_enabled = False
-                rpc_fallback_used = True
             else:
                 return False
         elif rpc_error is not None and rpc_value is None:
@@ -3571,7 +3672,7 @@ def _persist_verified_follow_success_to_supabase(
         mode="legacy",
         total_elapsed_ms=round((time.perf_counter() - t_persist) * 1000.0, 2),
     )
-    if ok_all and rpc_fallback_used and action_id and run_id:
+    if ok_all and action_id and run_id:
         try:
             follow_persistence_intent.update_intent_stage(
                 run_id=str(run_id), action_id=str(action_id), stage="persisted"
@@ -3595,7 +3696,10 @@ def _recover_verified_follow_persistence_intents(
     run_id: str,
     supabase_mode: bool,
 ) -> bool:
-    if not (supabase_mode and follow_persistence_rpc_v1_enabled()):
+    if not (
+        supabase_mode
+        and _follow_persistence_intent_enabled_for_account(account_id)
+    ):
         return True
     try:
         intents = follow_persistence_intent.load_nonterminal_intents(
@@ -10376,7 +10480,7 @@ def _run_followers_list_engine_session(
             ).strip() or None
         except Exception:
             session_commercial_policy_revision = None
-    if account_id and follow_persistence_rpc_v1_enabled():
+    if account_id and _follow_persistence_intent_enabled_for_account(account_id):
         try:
             session_follow_persistence_settings_revision = str(
                 (supabase_client.get_account_unfollow_settings(account_id) or {}).get(
@@ -17446,7 +17550,7 @@ def _run_followers_list_engine_session(
                     reason="perform_follow_safe",
                 )
                 _follow_persistence_ctx: dict[str, Any] | None = None
-                if follow_persistence_rpc_v1_enabled():
+                if _follow_persistence_intent_enabled_for_account(account_id):
                     try:
                         _settings_revision = str(
                             session_follow_persistence_settings_revision or ""
@@ -19510,11 +19614,17 @@ def _main_impl() -> int:
             account_id=account_id or None,
             pending_deferred_count=_pending_deferred_follow_action_log_count(),
         )
-        flush_ok = _flush_deferred_persists_for_manual_stop(
+        verified_follow_ok = _persist_verified_follow_intents_for_manual_stop(
+            supabase_mode=supabase_mode,
+            run_id=run_id or "",
+            account_id=account_id or "",
+        )
+        deferred_flush_ok = _flush_deferred_persists_for_manual_stop(
             run_id=run_id or "",
             account_id=account_id or "",
             signal_number=signum,
         )
+        flush_ok = bool(verified_follow_ok and deferred_flush_ok)
         if supabase_mode and run_id:
             perf_summary = _build_run_perf_summary()
             perf_summary["reason"] = (

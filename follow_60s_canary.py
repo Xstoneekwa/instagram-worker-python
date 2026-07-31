@@ -18,8 +18,8 @@ from logs import log
 
 
 REX_ACCOUNT_ID = "b024e94e-395d-4f02-9787-81ddc679b014"
-REX_ONE_SHOT_SOURCE_RUN_ID = "c1d63950-31ee-4fe5-858f-bc3a604369a3"
-REX_ONE_SHOT_EXPECTED_FOLLOW_QUOTA = 40
+REX_ONE_SHOT_SOURCE_RUN_ID = "2575d30f-53f1-4c3c-bbb8-b6ef9edf02c9"
+REX_ONE_SHOT_EXPECTED_FOLLOW_QUOTA = 29
 REX_ONE_SHOT_CONTRACT_SCHEMA = "REX_FOLLOW_60S_ONE_SHOT_V2"
 REX_ONE_SHOT_EXPIRES_AT = "2026-07-31T04:00:00+00:00"
 
@@ -28,6 +28,7 @@ _SUBFLAG_NAMES = (
     "mute_known_depth",
     "mute_like_handoff",
     "like_fresh_cell_bounds",
+    "like_single_row_first_scroll",
     "viewer_a2_only",
     "single_capture_no_posts",
     "return_candidate_handoff",

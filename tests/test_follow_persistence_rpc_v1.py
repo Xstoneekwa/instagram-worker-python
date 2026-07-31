@@ -198,6 +198,70 @@ class FollowPersistenceWorkerTest(unittest.TestCase):
             "record_follow_interaction_outcome",
             [call.args[1] for call in legacy.call_args_list],
         )
+        self.assertEqual(
+            follow_persistence_intent.load_nonterminal_intents(
+                account_id=ACCOUNT_ID, run_id=RUN_ID
+            ),
+            [],
+        )
+
+    def test_rex_flag_off_forces_account_scoped_idempotent_rpc(self) -> None:
+        rex_account_id = runner.REX_FOLLOW_60S_ACCOUNT_ID
+        rex_run_id = "77777777-7777-4777-8777-777777777777"
+        action_id = follow_persistence_rpc.deterministic_action_id(
+            rex_account_id, rex_run_id, "candidate"
+        )
+        follow_persistence_intent.create_prepared_intent(
+            action_id=action_id,
+            account_id=rex_account_id,
+            run_id=rex_run_id,
+            request_id=REQUEST_ID,
+            candidate_username="candidate",
+            source_target_id=TARGET_ID,
+            source_ct_username="source",
+            settings_revision=SETTINGS_REVISION,
+        )
+        follow_persistence_intent.update_intent_stage(
+            run_id=rex_run_id,
+            action_id=action_id,
+            stage="follow_physically_verified",
+            followed_at=FOLLOWED_AT,
+        )
+        with mock.patch.dict(
+            os.environ, {"FOLLOW_PERSISTENCE_RPC_V1_ENABLED": "false"}
+        ), mock.patch.object(
+            supabase_client,
+            "persist_verified_follow_success_rpc",
+            return_value=rpc_success(action_id),
+        ) as rpc, mock.patch.object(
+            runner, "_timed_safe_supabase_call"
+        ) as legacy:
+            ok = runner._persist_verified_follow_success_to_supabase(
+                supabase_mode=True,
+                account_id=rex_account_id,
+                follower_un="candidate",
+                source_profile_username="source",
+                run_id=rex_run_id,
+                follow_out={"skipped_tap": False},
+                fs_af="following",
+                f_st="following",
+                target_id=TARGET_ID,
+                phase="manual_stop_before_terminal_status",
+                request_id=REQUEST_ID,
+                action_id=action_id,
+                settings_revision_expected=SETTINGS_REVISION,
+                followed_at=FOLLOWED_AT,
+            )
+
+        self.assertTrue(ok)
+        rpc.assert_called_once()
+        legacy.assert_not_called()
+        self.assertEqual(
+            follow_persistence_intent.load_nonterminal_intents(
+                account_id=rex_account_id, run_id=rex_run_id
+            ),
+            [],
+        )
 
     def test_created_and_replay_contract_resume(self) -> None:
         for status in ("created", "idempotent_replay"):

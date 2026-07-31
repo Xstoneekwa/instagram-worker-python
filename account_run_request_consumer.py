@@ -82,6 +82,7 @@ DEVICE_BOUND_RUN_TYPES = frozenset({
     "login_orphan_challenge_recovery",
 })
 PREFLIGHT_RUN_TYPE = "scheduled_session_preflight"
+REX_FOLLOW_60S_ACCOUNT_ID = "b024e94e-395d-4f02-9787-81ddc679b014"
 _last_integration_noop_proof: dict[str, Any] | None = None
 
 
@@ -2031,10 +2032,12 @@ def _finalize_manual_run_after_subprocess(
     )
 
 
-def _terminate_subprocess(proc: subprocess.Popen[Any]) -> int:
+def _terminate_subprocess(
+    proc: subprocess.Popen[Any], *, graceful_timeout_seconds: float = 30.0
+) -> int:
     proc.send_signal(signal.SIGTERM)
     try:
-        return int(proc.wait(timeout=30))
+        return int(proc.wait(timeout=max(1.0, float(graceful_timeout_seconds))))
     except subprocess.TimeoutExpired:
         proc.kill()
         return int(proc.wait(timeout=10))
@@ -2088,6 +2091,13 @@ def _wait_for_subprocess(
                 request_id=request_id,
                 worker_id=cfg.worker_id,
             )
+            # Rex Follow 60s may need to replay one verified Follow intent and
+            # flush bounded deferred projections. Keep every other account on
+            # the exact Golden 30-second termination contract.
+            if str(account_id or "") == REX_FOLLOW_60S_ACCOUNT_ID:
+                return _terminate_subprocess(
+                    proc, graceful_timeout_seconds=90.0
+                ), False
             return _terminate_subprocess(proc), False
 
         if device_lock_renewal and device_id and time.monotonic() >= next_lock_renew:

@@ -47,6 +47,12 @@ class TargetAvailabilityMemoryProbeTests(unittest.TestCase):
             "TARGET_AVAILABILITY_MEMORY_PROBE_ENABLED": "true",
             "TARGET_AVAILABILITY_MEMORY_PROBE_STATUS_FILE": str(self.status),
             "TARGET_AVAILABILITY_KILL_SWITCH_FILE": str(self.kill_switch),
+            "TARGET_AVAILABILITY_CONTROL_FILE": str(
+                Path(self.temp.name) / "absent-control"
+            ),
+            "TARGET_AVAILABILITY_AUTO_KILL_FILE": str(
+                Path(self.temp.name) / "absent-auto-kill"
+            ),
         }
 
     def tearDown(self):
