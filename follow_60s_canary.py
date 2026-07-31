@@ -20,6 +20,7 @@ from logs import log
 CANARY_ACCOUNT_ID = "ba73eda4-d22a-4b93-9683-2af7b8aab764"
 CANARY_ACCOUNT_USERNAME = "j_automatise_pour_toi"
 ONE_SHOT_CONTRACT_SCHEMA = "J_AUTOMATISE_FOLLOW_60S_ONE_SHOT_V1"
+ROLLBACK_CANARY_DISABLED = True
 
 _SUBFLAG_NAMES = (
     "opening_follow_composite",
@@ -224,7 +225,10 @@ def configure(
     one_shot_resume, one_shot_reject = _one_shot_resume_allowed(policy)
     attempt_id = int(policy.get("attempt_id") or (2 if one_shot_resume else 1))
     natural = not bool(policy)
-    parent = _env_bool("FOLLOW_60S_CANARY_ENABLED", True)
+    parent = bool(
+        not ROLLBACK_CANARY_DISABLED
+        and _env_bool("FOLLOW_60S_CANARY_ENABLED", True)
+    )
     enabled = bool(
         parent
         and str(account_id or "").strip() == CANARY_ACCOUNT_ID
