@@ -1,4 +1,4 @@
-"""Crash-safe local outbox for Loriele Follow 60 post-follow receipts.
+"""Crash-safe local outbox for the account-scoped Follow 60 post-follow receipts.
 
 The UI thread journals each physically verified stage locally.  A single
 composite RPC flushes the candidate before any next-candidate UI action.  The
