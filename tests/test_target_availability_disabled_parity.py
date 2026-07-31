@@ -54,7 +54,7 @@ def _without_availability_or_provenance_hooks(node: ast.FunctionDef) -> ast.Func
         if argument.arg in {
             "tenant_id",
             "target_availability_scope_rejection_reason",
-            "run_request_id",
+            "target_followers_resume_source_request_id",
             "auto_restart_resume_policy",
         }:
             normalized.args.kwonlyargs.pop(index)
@@ -70,7 +70,11 @@ def _without_availability_or_provenance_hooks(node: ast.FunctionDef) -> ast.Func
                 for key, item_value in zip(value.keys, value.values)
                 if not (
                     isinstance(key, ast.Constant)
-                    and key.value in {"run_request_id", "auto_restart_resume_policy"}
+                    and key.value
+                    in {
+                        "target_followers_resume_source_request_id",
+                        "auto_restart_resume_policy",
+                    }
                 )
             ]
             value.keys = [key for key, _item_value in retained]

@@ -773,7 +773,7 @@ def _run_follow_target_rotation(
     max_follows_per_target_per_run: int | None = None,
     authorized_follow_quota: int | None = None,
     fast_rotate_to_next_target_from_followers: FastRotationRunner | None = None,
-    run_request_id: str | None = None,
+    target_followers_resume_source_request_id: str | None = None,
     auto_restart_resume_policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     total_targets = len(follow_targets)
@@ -955,7 +955,13 @@ def _run_follow_target_rotation(
             "force_stop_used": force_stop_used,
             "target_follow_budget": target_budget,
             "session_global_follow_cap": global_follow_goal,
-            "run_request_id": str(run_request_id or "") or None,
+            # Checkpoint provenance and Follow persistence have independent
+            # safety contracts; never populate the engine's run_request_id
+            # implicitly from this CT Resume channel.
+            "target_followers_resume_source_request_id": str(
+                target_followers_resume_source_request_id or ""
+            )
+            or None,
             "auto_restart_resume_policy": (
                 dict(auto_restart_resume_policy)
                 if isinstance(auto_restart_resume_policy, dict)
@@ -3550,7 +3556,7 @@ def run_account_session(
     max_follows_per_target_per_run: int | None = None,
     fast_rotate_to_next_target_from_followers: FastRotationRunner | None = None,
     auto_restart_resume_policy: dict[str, Any] | None = None,
-    run_request_id: str | None = None,
+    target_followers_resume_source_request_id: str | None = None,
     business_action_deadline: str | None = None,
 ) -> int:
     global _LAST_ACCOUNT_SESSION_SUMMARY
@@ -4029,7 +4035,9 @@ def run_account_session(
                     auto_restart_resume_policy
                 ),
                 fast_rotate_to_next_target_from_followers=fast_rotate_to_next_target_from_followers,
-                run_request_id=run_request_id,
+                target_followers_resume_source_request_id=(
+                    target_followers_resume_source_request_id
+                ),
                 auto_restart_resume_policy=auto_restart_resume_policy,
             )
             follow_t1 = time.perf_counter()
@@ -4966,7 +4974,7 @@ def dispatch_account_session(
     max_follows_per_target_per_run: int | None = None,
     fast_rotate_to_next_target_from_followers: FastRotationRunner | None = None,
     auto_restart_resume_policy: dict[str, Any] | None = None,
-    run_request_id: str | None = None,
+    target_followers_resume_source_request_id: str | None = None,
     business_action_deadline: str | None = None,
 ) -> int:
     return run_account_session(
@@ -4985,6 +4993,8 @@ def dispatch_account_session(
         warm_session_used=warm_session_used,
         force_stop_used=force_stop_used,
         auto_restart_resume_policy=auto_restart_resume_policy,
-        run_request_id=run_request_id,
+        target_followers_resume_source_request_id=(
+            target_followers_resume_source_request_id
+        ),
         business_action_deadline=business_action_deadline,
     )

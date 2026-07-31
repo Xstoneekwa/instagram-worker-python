@@ -10627,12 +10627,12 @@ def _resolve_active_worker_release_sha() -> str:
 
 def _resolve_target_followers_resume_provenance(
     *,
-    run_request_id: str | None,
+    target_followers_resume_source_request_id: str | None,
     auto_restart_resume_policy: dict[str, Any] | None,
 ) -> tuple[dict[str, Any] | None, str]:
     """Build fail-closed checkpoint provenance without reading the prior run."""
 
-    request_id = str(run_request_id or "").strip()
+    request_id = str(target_followers_resume_source_request_id or "").strip()
     try:
         request_id = str(uuid.UUID(request_id))
     except (ValueError, AttributeError, TypeError):
@@ -10676,6 +10676,7 @@ def _run_followers_list_engine_session(
     start_from_current_followers_list: bool = False,
     prevalidated_followers_list_meta: dict[str, Any] | None = None,
     run_request_id: str | None = None,
+    target_followers_resume_source_request_id: str | None = None,
     auto_restart_resume_policy: dict[str, Any] | None = None,
 ) -> int:
     """
@@ -10756,7 +10757,9 @@ def _run_followers_list_engine_session(
             _target_followers_resume_provenance,
             _target_followers_resume_provenance_reason,
         ) = _resolve_target_followers_resume_provenance(
-            run_request_id=run_request_id,
+            target_followers_resume_source_request_id=(
+                target_followers_resume_source_request_id
+            ),
             auto_restart_resume_policy=auto_restart_resume_policy,
         )
         if _target_followers_resume_provenance is None:
@@ -22098,7 +22101,7 @@ def _main_impl() -> int:
             warm_session_used=warm_session_used,
             force_stop_used=force_stop_used,
             auto_restart_resume_policy=auto_restart_resume_policy,
-            run_request_id=run_request_id or None,
+            target_followers_resume_source_request_id=run_request_id or None,
             business_action_deadline=str(
                 os.environ.get("BUSINESS_ACTION_DEADLINE") or ""
             ).strip() or None,
