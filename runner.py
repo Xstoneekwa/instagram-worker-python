@@ -3262,6 +3262,16 @@ def _follow_persistence_intent_enabled_for_account(account_id: str | None) -> bo
     )
 
 
+def _resolve_follow_persistence_request_id(local_request_id: str | None) -> str:
+    """Return the dispatcher-bound request id for a Follow persistence intent.
+
+    Account-session rotation calls the injected followers engine without its
+    optional request-id keyword, while runner startup has already bound the
+    same canonical request globally.  The explicit engine value still wins.
+    """
+    return str(local_request_id or _CURRENT_RUN_REQUEST_ID or "").strip()
+
+
 def _load_follow_persistence_settings_revision(
     account_id: str,
     *,
@@ -17610,9 +17620,18 @@ def _run_followers_list_engine_session(
                         _settings_revision = str(
                             session_follow_persistence_settings_revision or ""
                         ).strip()
+                        # Account-session rotation invokes the injected Follow
+                        # engine without the optional run_request_id keyword.
+                        # The dispatcher request is nevertheless bound once at
+                        # runner startup in _CURRENT_RUN_REQUEST_ID.  Resolve
+                        # that canonical binding here at the final tap boundary
+                        # instead of failing every rotated candidate closed.
+                        _persistence_request_id = _resolve_follow_persistence_request_id(
+                            run_request_id
+                        )
                         if (
                             not _settings_revision
-                            or not str(run_request_id or "").strip()
+                            or not _persistence_request_id
                             or pre_tap.get("safe_to_tap") is not True
                             or pre_tap.get("follow_control_selected") is not True
                         ):
@@ -17626,7 +17645,7 @@ def _run_followers_list_engine_session(
                             action_id=_action_id,
                             account_id=account_id,
                             run_id=run_id,
-                            request_id=str(run_request_id),
+                            request_id=_persistence_request_id,
                             candidate_username=follower_un,
                             source_target_id=target_id,
                             source_ct_username=source_profile_username,

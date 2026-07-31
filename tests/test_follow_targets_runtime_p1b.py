@@ -3301,6 +3301,24 @@ class DeferredPostReturnPersistTests(unittest.TestCase):
 
         self.assertIsNone(revision)
 
+    def test_follow_persistence_request_id_uses_explicit_engine_binding(self) -> None:
+        with patch.object(runner, "_CURRENT_RUN_REQUEST_ID", "dispatcher-request"):
+            request_id = runner._resolve_follow_persistence_request_id("engine-request")
+
+        self.assertEqual(request_id, "engine-request")
+
+    def test_follow_persistence_request_id_falls_back_to_dispatcher_binding(self) -> None:
+        with patch.object(runner, "_CURRENT_RUN_REQUEST_ID", "dispatcher-request"):
+            request_id = runner._resolve_follow_persistence_request_id(None)
+
+        self.assertEqual(request_id, "dispatcher-request")
+
+    def test_follow_persistence_request_id_missing_still_fails_closed(self) -> None:
+        with patch.object(runner, "_CURRENT_RUN_REQUEST_ID", None):
+            request_id = runner._resolve_follow_persistence_request_id(None)
+
+        self.assertEqual(request_id, "")
+
     def test_deferred_action_logs_spool_before_completed_status(self) -> None:
         logs: list[tuple[str, str, dict]] = []
         runner._schedule_deferred_follow_action_log_flush(
