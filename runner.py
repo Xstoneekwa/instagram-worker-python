@@ -191,7 +191,7 @@ from instagram_navigation import (
 from logs import get_run_log_file_path, init_run_file_logging, log
 
 
-FOLLOW_60S_CANARY_ACCOUNT_ID = "dfe78a92-3a51-435e-8911-ed10c93a4d82"
+FOLLOW_60S_CANARY_ACCOUNT_ID = "b024e94e-395d-4f02-9787-81ddc679b014"
 
 
 def _pre_follow_gap_log(

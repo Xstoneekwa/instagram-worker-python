@@ -31,7 +31,7 @@ class Follow60sCanaryRuntimeTest(unittest.TestCase):
             resume_policy=resume_policy,
         )
 
-    def test_only_loriele_first_natural_attempt_is_enabled(self) -> None:
+    def test_only_rex_first_natural_attempt_is_enabled(self) -> None:
         self.assertTrue(self._configure_canary())
         self.assertTrue(canary.enabled("mute_like_handoff"))
 
@@ -44,6 +44,16 @@ class Follow60sCanaryRuntimeTest(unittest.TestCase):
                 account_username="another",
                 run_id="run-2",
                 package="com.instagram.android",
+                resume_policy=None,
+            )
+        )
+
+        self.assertFalse(
+            canary.configure(
+                account_id="dfe78a92-3a51-435e-8911-ed10c93a4d82",
+                account_username="lorielebras_autom",
+                run_id="run-loriele-mainline",
+                package="com.instagram.androig",
                 resume_policy=None,
             )
         )

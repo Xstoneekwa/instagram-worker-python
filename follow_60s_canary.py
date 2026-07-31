@@ -17,9 +17,9 @@ from typing import Any
 from logs import log
 
 
-CANARY_ACCOUNT_ID = "dfe78a92-3a51-435e-8911-ed10c93a4d82"
-CANARY_ACCOUNT_USERNAME = "lorielebras_autom"
-ONE_SHOT_CONTRACT_SCHEMA = "LORIELE_FOLLOW_60S_ONE_SHOT_V1"
+CANARY_ACCOUNT_ID = "b024e94e-395d-4f02-9787-81ddc679b014"
+CANARY_ACCOUNT_USERNAME = "rex_gen_boost_ai"
+ONE_SHOT_CONTRACT_SCHEMA = "REX_FOLLOW_60S_ONE_SHOT_V2"
 
 POST_ROW_POSITIVE_SAFE = "POST_ROW_POSITIVE_SAFE"
 POST_ROW_POSITIVE_BUT_CLIPPED = "POST_ROW_POSITIVE_BUT_CLIPPED"
@@ -272,7 +272,7 @@ def configure(
     package: str,
     resume_policy: dict[str, Any] | None,
 ) -> bool:
-    """Enable only lorielebras_autom's first natural attempt or frozen retry."""
+    """Enable only rex_gen_boost_ai's first natural attempt or frozen retry."""
     global _RUNTIME
     policy = dict(resume_policy or {})
     one_shot_resume, one_shot_reject = _one_shot_resume_allowed(policy)

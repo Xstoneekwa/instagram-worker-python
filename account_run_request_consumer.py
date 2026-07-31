@@ -83,7 +83,7 @@ DEVICE_BOUND_RUN_TYPES = frozenset({
     "login_orphan_challenge_recovery",
 })
 PREFLIGHT_RUN_TYPE = "scheduled_session_preflight"
-FOLLOW_60S_CANARY_ACCOUNT_ID = "dfe78a92-3a51-435e-8911-ed10c93a4d82"
+FOLLOW_60S_CANARY_ACCOUNT_ID = "b024e94e-395d-4f02-9787-81ddc679b014"
 _last_integration_noop_proof: dict[str, Any] | None = None
 
 

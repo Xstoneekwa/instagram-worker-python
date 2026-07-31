@@ -102,9 +102,9 @@ Principes documentés côté implémentation :
 
 Voir aussi [recovery-engine.md](recovery-engine.md).
 
-## Loriele Follow 60 — PostGridEvidence V2 et reçus durables
+## Rex Follow 60 — PostGridEvidence V2 et reçus durables
 
-Le canary `lorielebras_autom` peut produire, à la fermeture finale de la feuille
+Le canary `rex_gen_boost_ai` peut produire, à la fermeture finale de la feuille
 Mute, une preuve immuable `PostGridEvidence` entièrement typée. Le producteur
 croise identité exacte du profil, package/activity, état Grid/Reels/Tagged,
 géométrie physique, génération navigation/scroll, viewport et vérification des
