@@ -1672,6 +1672,69 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
         reconcile.assert_called_once()
         self.assertIsNone(reconcile.call_args.kwargs.get("run_id"))
 
+    def test_follow60_terminal_summary_precedes_single_atomic_terminal_patch(self) -> None:
+        call_order: list[str] = []
+
+        def request_json(method, endpoint, **_kwargs):
+            if endpoint == "ig_interaction_events":
+                call_order.append("canonical_events_read")
+                return [
+                    {
+                        "id": "event-follow",
+                        "event_type": "follow_verified_persisted_v1",
+                        "event_status": "success",
+                        "username": "candidate",
+                        "payload": {},
+                        "stage_idempotency_key": None,
+                    },
+                    {
+                        "id": "event-like",
+                        "event_type": "post_like_success",
+                        "event_status": "success",
+                        "username": "candidate",
+                        "payload": {"liked_count": 1},
+                        "stage_idempotency_key": "action:like_verified",
+                    },
+                ]
+            if endpoint == "ig_runs":
+                call_order.append("active_run_read")
+                return [
+                    {
+                        "id": TEST_RUN_ID,
+                        "account_id": "ba73eda4-d22a-4b93-9683-2af7b8aab764",
+                        "status": "running",
+                    }
+                ]
+            raise AssertionError((method, endpoint))
+
+        def update_run_status(_run_id, status, totals, summary):
+            call_order.append("atomic_terminal_patch")
+            self.assertEqual(status, "stopped")
+            self.assertEqual(totals["total"], 2)
+            self.assertEqual(summary["session_counters"]["follows"], 1)
+            self.assertTrue(summary["terminalized_after_worker_exit"])
+
+        with (
+            patch.object(consumer.supabase_client, "_request_json", side_effect=request_json),
+            patch.object(consumer.supabase_client, "update_run_status", side_effect=update_run_status),
+            patch.object(consumer, "reconcile_linked_ig_run_terminal") as generic_reconcile,
+            patch.object(consumer, "_audit"),
+        ):
+            result = consumer._reconcile_linked_run(
+                account_id="ba73eda4-d22a-4b93-9683-2af7b8aab764",
+                run_id=TEST_RUN_ID,
+                terminal_status="canceled",
+                request_id=TEST_REQUEST_ID,
+                exit_code=-15,
+            )
+
+        self.assertTrue(result["reconciled"])
+        self.assertEqual(
+            call_order,
+            ["canonical_events_read", "active_run_read", "atomic_terminal_patch"],
+        )
+        generic_reconcile.assert_not_called()
+
     def test_wait_for_subprocess_terminates_on_cancel_request(self) -> None:
         cfg = consumer.DispatcherConfig(
             enabled=True,

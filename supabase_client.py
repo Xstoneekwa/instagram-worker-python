@@ -1492,7 +1492,7 @@ def update_run_status(
     if status == "completed":
         body["finished_at"] = now
         body["completed_at"] = now
-    elif status == "failed":
+    elif status in {"failed", "stopped", "canceled"}:
         body["finished_at"] = now
     _request_json(
         "PATCH",
@@ -2711,6 +2711,73 @@ def record_post_like_interaction_success(
             },
         )
     return mout
+
+
+def persist_follow_60s_stage_v1(
+    *,
+    account_id: str,
+    run_id: str,
+    request_id: str,
+    action_id: str,
+    username: str,
+    source_profile: str,
+    stage: str,
+    stage_idempotency_key: str,
+    event_at: str,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Persist one irreversible canary stage through the idempotent RPC."""
+    out = call_rpc(
+        "persist_follow_60s_stage_v1",
+        {
+            "p_account_id": str(account_id),
+            "p_run_id": str(run_id),
+            "p_request_id": str(request_id),
+            "p_action_id": str(action_id),
+            "p_username": _canonical_interaction_username(username),
+            "p_source_profile": str(source_profile or ""),
+            "p_stage": str(stage),
+            "p_stage_idempotency_key": str(stage_idempotency_key),
+            "p_event_at": str(event_at),
+            "p_payload": dict(payload or {}),
+        },
+    )
+    return dict(out or {}) if isinstance(out, dict) else {"ok": False, "raw": out}
+
+
+def get_follow_60s_canary_control_v1(account_id: str) -> dict[str, Any]:
+    out = call_rpc("get_follow_60s_canary_control_v1", {"p_account_id": str(account_id)})
+    return dict(out or {}) if isinstance(out, dict) else {}
+
+
+def mark_follow_60s_canary_barrier_v1(
+    *, account_id: str, run_id: str, request_id: str, canonical_follow_count: int
+) -> dict[str, Any]:
+    out = call_rpc(
+        "mark_follow_60s_canary_barrier_v1",
+        {
+            "p_account_id": str(account_id),
+            "p_run_id": str(run_id),
+            "p_request_id": str(request_id),
+            "p_canonical_follow_count": int(canonical_follow_count),
+        },
+    )
+    return dict(out or {}) if isinstance(out, dict) else {"ok": False, "raw": out}
+
+
+def mark_follow_60s_canary_evaluation_hold_v1(
+    *, account_id: str, run_id: str, request_id: str, metadata_safe: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    out = call_rpc(
+        "mark_follow_60s_canary_evaluation_hold_v1",
+        {
+            "p_account_id": str(account_id),
+            "p_run_id": str(run_id),
+            "p_request_id": str(request_id),
+            "p_metadata_safe": dict(metadata_safe or {}),
+        },
+    )
+    return dict(out or {}) if isinstance(out, dict) else {"ok": False, "raw": out}
 
 
 def _call_rpc(

@@ -463,7 +463,7 @@ class Follow60sImmutableEvidenceContractsTest(unittest.TestCase):
             "missing_evidence",
         )
 
-    def test_ambiguous_post_grid_evidence_is_rejected_for_golden_fallback(self) -> None:
+    def test_ambiguous_post_grid_evidence_is_returned_for_one_direct_golden_decision(self) -> None:
         canary.stash_post_grid_evidence(
             candidate_username="candidate", package="pkg", activity="act",
             navigation_generation="g1", viewport_fingerprint="v1",
@@ -474,8 +474,27 @@ class Follow60sImmutableEvidenceContractsTest(unittest.TestCase):
             navigation_generation="g1", viewport_fingerprint="v1",
             screen_size=(1080, 2340),
         )
-        self.assertIsNone(ev)
-        self.assertEqual(reason, "ambiguous_outcome")
+        self.assertIsNotNone(ev)
+        self.assertEqual(ev.outcome, "ambiguous")
+        self.assertEqual(reason, "")
+
+    def test_clipped_positive_row_survives_contract_for_single_reveal(self) -> None:
+        canary.stash_post_grid_evidence(
+            candidate_username="candidate", package="pkg", activity="act",
+            navigation_generation="g1", viewport_fingerprint="v1",
+            outcome="clipped_post",
+            post_bounds={"left": 10, "top": 2100, "right": 350, "bottom": 2340},
+            metadata={"identity_exact": True, "profile_tabs_present": True,
+                      "grid_selected": True},
+        )
+        ev, _, reason = canary.consume_post_grid_evidence(
+            candidate_username="candidate", package="pkg", activity="act",
+            navigation_generation="g1", viewport_fingerprint="v1",
+            screen_size=(1080, 2340),
+        )
+        self.assertIsNotNone(ev)
+        self.assertEqual(ev.outcome, "clipped_post")
+        self.assertEqual(reason, "")
 
     def test_canary_one_shot_resume_requires_exact_source_phase_and_quota(self) -> None:
         source_run_id = "rotated-source-run"
@@ -566,7 +585,7 @@ class Follow60sImmutableEvidenceContractsTest(unittest.TestCase):
             "missing_snapshot",
         )
 
-    def test_navigation_invalidation_clears_all_structured_evidence(self) -> None:
+    def test_scroll_preserves_semantic_verdict_but_clears_geometry(self) -> None:
         canary.create_candidate_profile_verdict(
             candidate_username="candidate", package="pkg", activity="act",
             navigation_generation="g1", exact_identity=True, sheet_closed=True,
@@ -584,9 +603,25 @@ class Follow60sImmutableEvidenceContractsTest(unittest.TestCase):
         )
         canary.invalidate("scroll")
         stats = canary.stats()
-        self.assertEqual(stats["live_candidate_verdict_count"], 0)
+        self.assertEqual(stats["live_candidate_verdict_count"], 1)
         self.assertEqual(stats["live_post_grid_evidence_count"], 0)
         self.assertFalse(stats["live_next_candidate_snapshot"])
+        verdict, _, reason = canary.get_candidate_profile_verdict(
+            candidate_username="candidate", package="pkg", activity="act",
+            navigation_generation="g2",
+        )
+        self.assertIsNotNone(verdict)
+        self.assertEqual(reason, "")
+        self.assertIsNone(verdict.post_bounds)
+
+    def test_navigation_invalidation_clears_semantic_verdict(self) -> None:
+        canary.create_candidate_profile_verdict(
+            candidate_username="candidate", package="pkg", activity="act",
+            navigation_generation="g1", exact_identity=True, sheet_closed=True,
+            mute_posts_verified=True, mute_stories_verified=True,
+        )
+        canary.invalidate("planned_post_cell_tap")
+        self.assertEqual(canary.stats()["live_candidate_verdict_count"], 0)
 
 
 class Follow60sSingleCaptureClassifiersTest(unittest.TestCase):

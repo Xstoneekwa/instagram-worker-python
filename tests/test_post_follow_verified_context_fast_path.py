@@ -49,6 +49,7 @@ def _run_phase(
     follow_success_verified: bool = True,
     skipped_tap: bool = False,
     follow_private_accounts: bool = False,
+    stage_persist_callback=None,
 ) -> tuple[dict, dict]:
     logs: list[tuple[str, str, dict]] = []
     ctx = FollowContext.from_follow_verified(
@@ -94,7 +95,7 @@ def _run_phase(
         nav,
         "run_post_follow_post_likes_phase",
         return_value=_likes_out(),
-    ), patch.object(
+    ) as mock_likes, patch.object(
         nav,
         "post_follow_controlled_return_to_followers_list",
         return_value=(True, "unit", None),
@@ -114,6 +115,7 @@ def _run_phase(
             skipped_tap=skipped_tap,
             det={},
             follow_context=ctx,
+            stage_persist_callback=stage_persist_callback,
         )
     probes = {
         "logs": logs,
@@ -121,6 +123,7 @@ def _run_phase(
         "overlay_calls": mock_overlay.call_count,
         "mute_calls": mock_mute.call_count,
         "mute_kwargs": mock_mute.call_args.kwargs if mock_mute.call_args else {},
+        "like_calls": mock_likes.call_count,
     }
     return out, probes
 
@@ -167,6 +170,25 @@ class PostFollowVerifiedContextFastPathTest(unittest.TestCase):
         self.assertEqual(out["mute"]["skipped_reason"], "already_following_skipped_tap")
         self.assertGreaterEqual(probes["detect_calls"], 1)
         self.assertEqual(probes["mute_calls"], 0)
+
+    def test_failed_mute_receipt_blocks_like_but_keeps_safe_return(self) -> None:
+        persisted: list[str] = []
+
+        def persist(stage: str, _payload: dict) -> bool:
+            persisted.append(stage)
+            return stage != "mute_posts_verified"
+
+        out, probes = _run_phase(
+            device=_Device(action_bar_title="candidate"),
+            stage_persist_callback=persist,
+        )
+
+        self.assertIn("mute_posts_verified", persisted)
+        self.assertIn("mute_stories_verified", persisted)
+        self.assertEqual(probes["like_calls"], 0)
+        self.assertEqual(out["likes"]["skipped_reason"], "critical_stage_persist_failed")
+        self.assertFalse(out["stage_persist_ok"])
+        self.assertTrue(out["return_ok"])
 
 
 if __name__ == "__main__":

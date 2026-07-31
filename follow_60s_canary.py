@@ -523,7 +523,8 @@ def invalidate(reason: str, *, bump_generation: bool = True) -> None:
         _RUNTIME.ui_generation += 1
     _RUNTIME.invalidation_counter += 1
     lowered_reason = reason_s.lower()
-    if "scroll" in lowered_reason or "swipe" in lowered_reason:
+    geometry_only = "scroll" in lowered_reason or "swipe" in lowered_reason
+    if geometry_only:
         _RUNTIME.scroll_counter += 1
     else:
         _RUNTIME.navigation_counter += 1
@@ -532,7 +533,22 @@ def invalidate(reason: str, *, bump_generation: bool = True) -> None:
         purpose: replace(proof, invalidation_reason=reason_s)
         for purpose, proof in _RUNTIME.proofs.items()
     }
-    _RUNTIME.candidate_verdicts.clear()
+    if geometry_only:
+        # A same-profile scroll invalidates geometry, not the already proven
+        # identity and Mute semantics for this candidate.
+        _RUNTIME.candidate_verdicts = {
+            key: replace(
+                verdict,
+                navigation_generation="",
+                viewport_fingerprint="",
+                post_grid_outcome="",
+                post_bounds=None,
+                invalidation_counter=_RUNTIME.invalidation_counter,
+            )
+            for key, verdict in _RUNTIME.candidate_verdicts.items()
+        }
+    else:
+        _RUNTIME.candidate_verdicts.clear()
     _RUNTIME.post_grid_evidence.clear()
     _RUNTIME.next_candidate_snapshot = None
     log(
@@ -608,13 +624,19 @@ def get_candidate_profile_verdict(
         checks = ((verdict.account_id, _RUNTIME.account_id, "account"),
                   (verdict.candidate_username, candidate, "candidate"),
                   (verdict.package, str(package or ""), "package"),
-                  (verdict.activity, str(activity or ""), "activity"),
-                  (verdict.navigation_generation, str(navigation_generation or ""), "navigation_generation"))
+                  (verdict.activity, str(activity or ""), "activity"))
         reason = ""
         for got, want, name in checks:
             if want and got != want:
                 reason = f"{name}_mismatch"
                 break
+        if (
+            not reason
+            and verdict.navigation_generation
+            and str(navigation_generation or "")
+            and verdict.navigation_generation != str(navigation_generation or "")
+        ):
+            reason = "navigation_generation_mismatch"
         if not reason and age_ms > verdict.ttl_ms:
             reason = "ttl_expired"
         if not reason and verdict.invalidation_counter != _RUNTIME.invalidation_counter:
@@ -633,7 +655,7 @@ def stash_post_grid_evidence(
         return None
     candidate = str(candidate_username or "").strip().lstrip("@").lower()
     normalized = str(outcome or "").strip()
-    if not candidate or normalized not in {"safe_post", "no_posts", "ambiguous"}:
+    if not candidate or normalized not in {"safe_post", "clipped_post", "no_posts", "ambiguous"}:
         return None
     evidence = PostGridEvidence(
         account_id=_RUNTIME.account_id, candidate_username=candidate,
@@ -688,8 +710,6 @@ def consume_post_grid_evidence(
             reason = "invalidation_counter_mismatch"
         if not reason and ev.navigation_counter != _RUNTIME.navigation_counter:
             reason = "navigation_counter_mismatch"
-        if not reason and ev.outcome == "ambiguous":
-            reason = "ambiguous_outcome"
         if not reason and ev.outcome == "no_posts" and not ev.no_posts_positive:
             reason = "no_posts_not_positive"
         if not reason and ev.outcome == "safe_post":

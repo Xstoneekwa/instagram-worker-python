@@ -17765,7 +17765,7 @@ def _stash_post_mute_sheet_closed_proof(
                 )
                 if _verdict is not None and str(
                     context.get("post_grid_outcome") or ""
-                ) in {"safe_post", "no_posts", "ambiguous"}:
+                ) in {"safe_post", "clipped_post", "no_posts", "ambiguous"}:
                     _stash_post_grid_evidence(
                         candidate_username=cand,
                         package=str(context.get("package") or ""),
@@ -22426,6 +22426,7 @@ def _post_follow_post_grid_evidence_from_xml(
     base = _post_follow_fast_no_posts_xml_evidence(xml)
     out: dict[str, Any] = {
         "outcome": "ambiguous", "post_bounds": None,
+        "evidence_status": "NO_POST_EVIDENCE",
         "viewport_fingerprint": hashlib.sha256(
             xml.encode("utf-8", errors="replace")
         ).hexdigest()[:20] if xml else "",
@@ -22532,6 +22533,7 @@ def _post_follow_post_grid_evidence_from_xml(
     out["grid_tab_marker"] = grid_tab_marker
     if identity_exact and bool(base.get("profile_tabs_present")) and bool(base.get("empty_marker_xml")):
         out["outcome"] = "no_posts"
+        out["evidence_status"] = "NO_POSTS_POSITIVE"
         out["grid_tab_state"] = "empty_grid_positive"
         out["visible_post_count"] = 0
         out["physical_cells"] = []
@@ -22562,6 +22564,7 @@ def _post_follow_post_grid_evidence_from_xml(
     out["physical_cells"] = [dict(cell) for cell in below]
     out["visible_post_count"] = len(below)
     if not below:
+        out["evidence_status"] = "NO_POST_EVIDENCE"
         return out
     # A physical post row below the canonical tabs container is a positive grid
     # state even when this Instagram build omits selected=true on the grid icon.
@@ -22576,6 +22579,7 @@ def _post_follow_post_grid_evidence_from_xml(
     out["grid_selected"] = grid_selected
     out["grid_tab_state"] = "selected_or_physical_row" if grid_selected else "unproven"
     if not grid_selected:
+        out["evidence_status"] = "POST_GRID_AMBIGUOUS"
         return out
     candidate = below[0]
     safe = _post_follow_likes_evaluate_top_left_post_target(
@@ -22584,6 +22588,7 @@ def _post_follow_post_grid_evidence_from_xml(
     )
     if bool(safe.get("top_left_post_tap_safe")):
         out["outcome"] = "safe_post"
+        out["evidence_status"] = "POST_ROW_POSITIVE_SAFE"
         out["post_bounds"] = candidate
         out["tap_safe"] = True
         out["grid_exposure"] = safe.get("grid_exposure")
@@ -22592,6 +22597,17 @@ def _post_follow_post_grid_evidence_from_xml(
                 int(cell["top"]) // max(1, int(ww * 0.12))
                 for cell in below
             }
+        )
+    else:
+        # A physical row below the exact profile tabs is positive evidence even
+        # when a 1-3-post profile clips its only row at the viewport edge.
+        out["outcome"] = "clipped_post"
+        out["evidence_status"] = "POST_ROW_POSITIVE_BUT_CLIPPED"
+        out["post_bounds"] = candidate
+        out["tap_safe"] = False
+        out["grid_exposure"] = safe.get("grid_exposure")
+        out["clipped_reason"] = str(
+            safe.get("failure_reason") or "positive_post_row_clipped"
         )
     return out
 
@@ -22607,7 +22623,7 @@ def _post_follow_promote_ambiguous_grid_evidence_with_fresh_vision(
     """Promote only a strictly identified grid using one fresh top-left screenshot proof."""
     out = dict(evidence or {})
     out.setdefault("fast_vision_probe_attempted", False)
-    if str(out.get("outcome") or "") != "ambiguous":
+    if str(out.get("outcome") or "") not in {"ambiguous", "clipped_post"}:
         return out
     if not bool(out.get("identity_exact")):
         out["fast_vision_probe_rejection_reason"] = "candidate_identity_not_exact"
@@ -22632,6 +22648,25 @@ def _post_follow_promote_ambiguous_grid_evidence_with_fresh_vision(
         out["fast_vision_probe_rejection_reason"] = "profile_tabs_bounds_missing"
         return out
 
+    if str(out.get("outcome") or "") == "clipped_post":
+        out["reveal_scroll_attempted"] = True
+        try:
+            reveal = _post_follow_likes_profile_scroll_swipe(
+                d,
+                scroll_profile="reveal_moderate",
+                ww=int(ww),
+                wh=int(wh),
+            )
+            out["reveal_scroll_ok"] = bool(reveal.get("swipe_ok"))
+            if not out["reveal_scroll_ok"]:
+                out["fast_vision_probe_rejection_reason"] = (
+                    "clipped_reveal_scroll_failed"
+                )
+                return out
+            time.sleep(0.18)
+        except Exception:
+            out["fast_vision_probe_rejection_reason"] = "clipped_reveal_scroll_error"
+            return out
     out["fast_vision_probe_attempted"] = True
     deadline = time.perf_counter() + max(0.25, float(budget_s))
     vision = _post_follow_likes_probe_top_left_vision_cell_meta(
@@ -48202,6 +48237,7 @@ def run_post_follow_post_likes_phase(
         )
 
     _canary_grid_evidence: dict[str, Any] | None = None
+    _canary_grid_decision_consumed = False
     try:
         from follow_60s_canary import (
             consume_post_grid_evidence as _consume_post_grid_evidence,
@@ -48222,14 +48258,49 @@ def run_post_follow_post_likes_phase(
                 screen_size=(int(_grid_ww), int(_grid_wh)),
             )
             if _grid_ev is not None:
-                _canary_grid_evidence = {**dict(_grid_ev.metadata),
-                                         "outcome": _grid_ev.outcome,
-                                         "post_bounds": _grid_ev.post_bounds,
-                                         "proof_age_ms": _grid_age}
-                _record_follow_60s_outcome(
-                    "like_fresh_cell_bounds", "used", age_ms=_grid_age,
-                    dumps=0, estimated_gain_ms=6500.0,
-                )
+                _canary_grid_decision_consumed = True
+                _candidate_grid = {
+                    **dict(_grid_ev.metadata),
+                    "outcome": _grid_ev.outcome,
+                    "post_bounds": _grid_ev.post_bounds,
+                    "proof_age_ms": _grid_age,
+                }
+                if _grid_ev.outcome == "clipped_post":
+                    _candidate_grid = (
+                        _post_follow_promote_ambiguous_grid_evidence_with_fresh_vision(
+                            d, _candidate_grid, ww=int(_grid_ww), wh=int(_grid_wh), budget_s=1.5
+                        )
+                    )
+                if str(_candidate_grid.get("outcome") or "") in {"safe_post", "no_posts"}:
+                    _canary_grid_evidence = _candidate_grid
+                    _record_follow_60s_outcome(
+                        "like_fresh_cell_bounds", "used", age_ms=_grid_age,
+                        dumps=0,
+                        screenshots=1 if _grid_ev.outcome == "clipped_post" else 0,
+                        retries=1 if _grid_ev.outcome == "clipped_post" else 0,
+                        estimated_gain_ms=6500.0,
+                    )
+                else:
+                    _canary_grid_evidence = None
+                    _grid_reject = str(
+                        _candidate_grid.get("fast_vision_probe_rejection_reason")
+                        or "post_grid_ambiguous"
+                    )
+                    _record_follow_60s_outcome(
+                        "like_fresh_cell_bounds", "fallback", age_ms=_grid_age,
+                        reason=_grid_reject, fallback_used=True,
+                        screenshots=1 if _grid_ev.outcome == "clipped_post" else 0,
+                        retries=1 if _grid_ev.outcome == "clipped_post" else 0,
+                    )
+                    log(
+                        "info", "follow_60s_post_grid_evidence_fallback_golden_direct",
+                        visual_candidate_id=vcid, source_profile_username=src,
+                        follower_username=cand, rejection_reason=_grid_reject,
+                        proof_age_ms=round(float(_grid_age or 0.0), 2),
+                        fast_diagnostic_attempted=bool(_grid_ev.outcome == "clipped_post"),
+                        dumps=0, screenshots=1 if _grid_ev.outcome == "clipped_post" else 0,
+                        retries=1 if _grid_ev.outcome == "clipped_post" else 0,
+                    )
             else:
                 _record_follow_60s_outcome(
                     "like_fresh_cell_bounds", "fallback", age_ms=_grid_age,
@@ -48660,6 +48731,18 @@ def run_post_follow_post_likes_phase(
 
         def _run_fast_no_posts_hybrid_probe() -> dict[str, Any]:
             t_fast_np = time.perf_counter()
+
+            if _canary_grid_decision_consumed:
+                # The mono-capture already decided positive row, positive empty
+                # marker, or true ambiguity. Do not rebuild a second No Posts
+                # proof before the Golden open fallback.
+                return {
+                    "no_posts_detected": False,
+                    "detection_method": "post_grid_evidence_already_consumed",
+                    "confidence": 0.0,
+                    "duration_ms": 0.0,
+                    "fallback_used": True,
+                }
 
             def _fresh_hierarchy() -> str:
                 try:
@@ -51436,6 +51519,7 @@ def run_visual_candidate_post_follow_phase(
     follow_context: Any | None = None,
     candidate_pick: dict[str, Any] | None = None,
     bound_commercial_policy_revision: str | None = None,
+    stage_persist_callback: Callable[[str, dict[str, Any]], bool] | None = None,
 ) -> dict[str, Any]:
     """
     Post-follow: observe UI, optional real mute, controlled return to CT followers list.
@@ -51450,6 +51534,26 @@ def run_visual_candidate_post_follow_phase(
     src = str(source_profile_username or "").strip()
     cand = str(follower_username or "").strip()
     fs_after = str(follow_state_after or "").strip()
+    stage_persist_results: dict[str, bool] = {}
+    critical_stage_persist_failed = False
+
+    def _persist_verified_stage(stage: str, payload: dict[str, Any]) -> bool:
+        nonlocal critical_stage_persist_failed
+        if stage_persist_callback is None:
+            return True
+        try:
+            ok = bool(stage_persist_callback(stage, dict(payload or {})))
+        except Exception as exc:
+            ok = False
+            log(
+                "error", "follow_60s_stage_persist_callback_failed",
+                stage=stage, follower_username=cand,
+                source_profile_username=src, reason=str(exc)[:200],
+            )
+        stage_persist_results[stage] = ok
+        if not ok:
+            critical_stage_persist_failed = True
+        return ok
 
     mute_out: dict[str, Any] = {
         "ok": False,
@@ -51975,6 +52079,18 @@ def run_visual_candidate_post_follow_phase(
             "posts_verified": bool(v2.get("posts_verified")),
             "stories_verified": bool(v2.get("stories_verified")),
         }
+        if bool(v2.get("posts_verified")):
+            _persist_verified_stage(
+                "mute_posts_verified",
+                {"muted_posts": True, "muted_stories": bool(v2.get("stories_verified")),
+                 "timings_ms": v2.get("timings_ms") or {}},
+            )
+        if bool(v2.get("stories_verified")):
+            _persist_verified_stage(
+                "mute_stories_verified",
+                {"muted_posts": bool(v2.get("posts_verified")), "muted_stories": True,
+                 "timings_ms": v2.get("timings_ms") or {}},
+            )
         if outcome == "success":
             post_follow_ctx.mark_mute_done_or_skipped(reason="mute_success")
             log(
@@ -52033,7 +52149,28 @@ def run_visual_candidate_post_follow_phase(
             )
 
     likes_out: dict[str, Any] = _post_follow_post_likes_out_template()
-    if candidate_profile_lost:
+    if critical_stage_persist_failed:
+        post_follow_ctx.mark_post_grid_blocked(reason="critical_stage_persist_failed")
+        post_follow_ctx.mark_like_done_or_skipped(reason="critical_stage_persist_failed")
+        likes_out.update(
+            {
+                "ok": False,
+                "skipped": True,
+                "phase_outcome": "skipped",
+                "skipped_reason": "critical_stage_persist_failed",
+                "likes_failure_kind": "critical_stage_persist_failed",
+            }
+        )
+        log(
+            "error",
+            "post_follow_like_skipped_critical_stage_persist_failed",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            follower_username=cand,
+            stage_persist_results=dict(stage_persist_results),
+            safety_return_ct_still_required=True,
+        )
+    elif candidate_profile_lost:
         post_follow_ctx.mark_post_grid_blocked(reason="post_follow_candidate_profile_lost")
         post_follow_ctx.mark_like_done_or_skipped(reason="post_follow_candidate_profile_lost")
         likes_out.update(
@@ -52126,6 +52263,16 @@ def run_visual_candidate_post_follow_phase(
                     else candidate_profile_context
                 ),
             )
+            if int(likes_out.get("liked_count") or 0) > 0:
+                _persist_verified_stage(
+                    "like_verified",
+                    {
+                        "liked_count": int(likes_out.get("liked_count") or 0),
+                        "phase_outcome": str(likes_out.get("phase_outcome") or ""),
+                        "post_like_mode": str(likes_out.get("post_like_mode") or ""),
+                        "timings_ms": likes_out.get("timings_ms") or {},
+                    },
+                )
     likes_recoverable_failure = bool(
         str(likes_out.get("phase_outcome") or "") == "failed_safe_continue"
         or int(likes_out.get("post_follow_likes_recoverable_failure_count") or 0) > 0
@@ -52360,6 +52507,10 @@ def run_visual_candidate_post_follow_phase(
     except Exception:
         pass
     if ok_ret:
+        _persist_verified_stage(
+            "return_ct_exact",
+            {"return_how": str(how_ret or ""), "return_ok": True},
+        )
         log(
             "info",
             "post_follow_return_ct_success",
@@ -52427,6 +52578,8 @@ def run_visual_candidate_post_follow_phase(
         "post_follow_likes_return_ct_recovery_ok": bool(
             likes_out.get("post_follow_likes_return_ct_recovery_ok")
         ),
+        "stage_persist_results": dict(stage_persist_results),
+        "stage_persist_ok": all(stage_persist_results.values()),
     }
     for _k in (
         "return_list_screenshot_path",

@@ -15,6 +15,7 @@ import socket
 import subprocess
 import sys
 import time
+from pathlib import Path
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -1192,11 +1193,157 @@ def _reconcile_linked_run(
     request_id: str,
     exit_code: int | None = None,
 ) -> dict[str, Any]:
-    result = reconcile_linked_ig_run_terminal(
-        run_id=run_id,
-        terminal_status=terminal_status,
-        account_id=account_id,
+    is_follow60_canary = bool(
+        account_id == "ba73eda4-d22a-4b93-9683-2af7b8aab764" and run_id
     )
+    canary_terminal_payload: dict[str, Any] | None = None
+    if is_follow60_canary:
+        try:
+            events = supabase_client._request_json(
+                "GET",
+                "ig_interaction_events",
+                query={
+                    "select": "id,event_type,event_status,username,payload,stage_idempotency_key,event_at",
+                    "account_id": f"eq.{account_id}",
+                    "run_id": f"eq.{run_id}",
+                    "event_status": "in.(success,partial)",
+                    "limit": "10000",
+                },
+            ) or []
+            follows: set[str] = set()
+            likes: dict[str, int] = {}
+            stages: set[str] = set()
+            for row in events if isinstance(events, list) else []:
+                event_type = str(row.get("event_type") or "")
+                username = str(row.get("username") or "").strip().lower()
+                payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+                if event_type in {"follow_verified", "follow_verified_persisted_v1"} and username:
+                    follows.add(username)
+                if event_type in {"post_like_success", "post_like_verified"}:
+                    key = str(row.get("stage_idempotency_key") or row.get("id") or "")
+                    likes[key] = max(1, int(payload.get("liked_count") or 1))
+                stage_key = str(row.get("stage_idempotency_key") or "")
+                if stage_key:
+                    stages.add(stage_key)
+            trace_path = Path("/tmp/phonefarm-follow60-stop-traces") / f"{run_id}.json"
+            stop_trace: dict[str, Any] = {}
+            if trace_path.is_file():
+                stop_trace = json.loads(trace_path.read_text(encoding="utf-8"))
+            summary = {
+                "reason": "canonical_follow60_terminal_reconciliation_v1",
+                "session_counters": {
+                    "follows": len(follows),
+                    "likes": sum(likes.values()),
+                    "stages_persisted": len(stages),
+                },
+                "stop_trace": stop_trace,
+                "terminalized_after_worker_exit": True,
+            }
+            canary_terminal_payload = {
+                "totals": {
+                    "total": len(follows) + sum(likes.values()),
+                    "success": len(follows) + sum(likes.values()),
+                    "failed": 0,
+                },
+                "summary": summary,
+                "total_follow": len(follows),
+                "total_like": sum(likes.values()),
+            }
+            log(
+                "info", "follow_60s_terminal_summary_rebuilt_before_db_terminal",
+                account_id=account_id, request_id=request_id, run_id=run_id,
+                total_follow=len(follows), total_like=sum(likes.values()),
+                stop_trace=stop_trace,
+            )
+        except Exception as exc:
+            log(
+                "error", "follow_60s_terminal_totals_rebuild_failed",
+                account_id=account_id, request_id=request_id, run_id=run_id,
+                reason=str(exc)[:240],
+            )
+            # Fail closed: never claim DB terminalization for this canary until
+            # canonical receipts and the post-exit stop trace are readable.
+            return {
+                "reconciled": False,
+                "reason": "follow_60s_canonical_summary_unavailable",
+                "run_id": run_id,
+                "terminal_status": None,
+                "previous_status": None,
+            }
+
+    if is_follow60_canary and canary_terminal_payload is not None:
+        rows = supabase_client._request_json(
+            "GET",
+            "ig_runs",
+            query={
+                "select": "id,account_id,status",
+                "id": f"eq.{run_id}",
+                "limit": "1",
+            },
+        ) or []
+        row = dict(rows[0]) if isinstance(rows, list) and rows else {}
+        previous_status = str(row.get("status") or "").strip().lower()
+        if not row:
+            result = {
+                "reconciled": False,
+                "reason": "run_not_found",
+                "run_id": run_id,
+                "terminal_status": None,
+                "previous_status": None,
+            }
+        elif str(row.get("account_id") or "") != account_id:
+            result = {
+                "reconciled": False,
+                "reason": "account_mismatch",
+                "run_id": run_id,
+                "terminal_status": None,
+                "previous_status": previous_status or None,
+            }
+        elif previous_status in {"completed", "failed", "stopped", "canceled", "blocked", "aborted"}:
+            result = {
+                "reconciled": False,
+                "reason": "already_terminal",
+                "run_id": run_id,
+                "terminal_status": previous_status,
+                "previous_status": previous_status,
+            }
+        else:
+            mapped_status = (
+                "stopped"
+                if str(terminal_status or "").strip().lower() in {"canceled", "cancelled"}
+                else str(terminal_status or "").strip().lower()
+            )
+            if mapped_status not in {"completed", "failed", "stopped", "canceled", "blocked", "aborted"}:
+                mapped_status = "failed"
+            # One PATCH writes canonical totals, stop trace and the terminal
+            # status together.  This is deliberately not preceded by the
+            # generic status-only reconciler.
+            supabase_client.update_run_status(
+                str(run_id),
+                mapped_status,
+                dict(canary_terminal_payload["totals"]),
+                dict(canary_terminal_payload["summary"]),
+            )
+            result = {
+                "reconciled": True,
+                "reason": "follow_60s_atomic_terminal_reconciliation",
+                "run_id": run_id,
+                "terminal_status": mapped_status,
+                "previous_status": previous_status or None,
+            }
+            log(
+                "info", "follow_60s_terminal_totals_rebuilt_from_canonical_events",
+                account_id=account_id, request_id=request_id, run_id=run_id,
+                total_follow=canary_terminal_payload["total_follow"],
+                total_like=canary_terminal_payload["total_like"],
+                db_terminal_status=mapped_status,
+            )
+    else:
+        result = reconcile_linked_ig_run_terminal(
+            run_id=run_id,
+            terminal_status=terminal_status,
+            account_id=account_id,
+        )
     if result.get("reconciled"):
         payload: dict[str, Any] = {
             "request_id": request_id,
