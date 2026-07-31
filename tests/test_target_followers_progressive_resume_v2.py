@@ -94,11 +94,13 @@ class FakeRpc:
         claim_ok=True,
         commit_ok=True,
         provenance_persisted=True,
+        commit_event_id="40000000-0000-4000-8000-000000000001",
     ):
         self.row = row
         self.claim_ok = claim_ok
         self.commit_ok = commit_ok
         self.provenance_persisted = provenance_persisted
+        self.commit_event_id = commit_event_id
         self.calls = []
         self.version = int((row or {}).get("optimistic_version") or 1)
 
@@ -126,7 +128,7 @@ class FakeRpc:
                 "reason": "committed",
                 "optimistic_version": self.version,
                 "provenance_persisted": self.provenance_persisted,
-                "commit_event_id": "40000000-0000-4000-8000-000000000001",
+                "commit_event_id": self.commit_event_id,
             }
         return {"ok": True, "reason": "ok", "optimistic_version": self.version + 1}
 
@@ -1106,6 +1108,51 @@ class RunnerResumeProvenanceTests(unittest.TestCase):
         self.assertTrue(controller.release())
         self.assertIsNone(controller.last_verified_commit_context)
         self.assertIn("v2_failed_open", [event for event, _ in events])
+
+    def test_commit_response_requires_valid_atomic_provenance_event_id(self):
+        for commit_event_id in (None, "", "not-a-uuid"):
+            with self.subTest(commit_event_id=commit_event_id):
+                events = []
+                rpc = FakeRpc(
+                    row=checkpoint_row(shadow_last_safe_depth=0),
+                    provenance_persisted=True,
+                    commit_event_id=commit_event_id,
+                )
+                controller = RepositoryAndControllerTests().controller(rpc, events=events)
+                controller.load_and_plan()
+                controller.claim()
+                controller.observe_viewport(
+                    ["first", "overlap"],
+                    followers_surface_confirmed=True,
+                    expected_target_confirmed=True,
+                )
+                controller.note_scroll_sent(previous_viewport_complete=True)
+                controller.observe_viewport(
+                    ["overlap", "next"],
+                    followers_surface_confirmed=True,
+                    expected_target_confirmed=True,
+                )
+                claimed_version_before = controller.claimed_version
+                committed_depth_before = controller.last_committed_depth
+
+                self.assertFalse(controller.commit_verified_progress())
+                self.assertTrue(controller._safe_stop)
+                self.assertEqual(controller.claimed_version, claimed_version_before)
+                self.assertEqual(controller.last_committed_depth, committed_depth_before)
+                self.assertEqual(controller.commit_count, 0)
+                self.assertIsNone(controller.last_verified_commit_context)
+                reasons = [
+                    payload.get("reason")
+                    for event, payload in events
+                    if event in {"checkpoint_conflict", "v2_failed_open"}
+                ]
+                self.assertEqual(
+                    reasons[-2:],
+                    [
+                        "commit_provenance_event_missing_or_invalid",
+                        "commit_provenance_event_missing_or_invalid",
+                    ],
+                )
 
     def test_builder_rejects_invalid_checkpoint_provenance_before_any_rpc(self):
         events = []
