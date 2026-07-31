@@ -367,8 +367,9 @@ class Follow60sImmutableEvidenceContractsTest(unittest.TestCase):
         self.assertEqual(reason, "ambiguous_outcome")
 
     def test_rex_one_shot_resume_requires_exact_source_phase_and_quota(self) -> None:
+        source_run_id = "rotated-source-run"
         policy = {
-            "prior_run_id": canary.REX_ONE_SHOT_SOURCE_RUN_ID,
+            "prior_run_id": source_run_id,
             "restart_allowed": True,
             "resume_plan_id": "resume-plan-v2",
             "incident_id": "reviewed-incident-v2",
@@ -388,7 +389,7 @@ class Follow60sImmutableEvidenceContractsTest(unittest.TestCase):
                 "package_contract_ready": True,
                 "follow_60s_canary_contract": {
                     "schema": canary.REX_ONE_SHOT_CONTRACT_SCHEMA,
-                    "source_run_id": canary.REX_ONE_SHOT_SOURCE_RUN_ID,
+                    "source_run_id": source_run_id,
                     "follow_quota": canary.REX_ONE_SHOT_EXPECTED_FOLLOW_QUOTA,
                     "golden_fallback_policy": "proof_rejection_only",
                 },
@@ -403,9 +404,14 @@ class Follow60sImmutableEvidenceContractsTest(unittest.TestCase):
                 package="com.instagram.androig",
                 resume_policy=policy,
             ))
-            self.assertFalse(canary._one_shot_resume_allowed({
-                **policy, "prior_run_id": "different-run"
-            })[0])
+            mismatched_source = {
+                **policy,
+                "prior_run_id": "different-run",
+            }
+            self.assertEqual(
+                canary._one_shot_resume_allowed(mismatched_source),
+                (False, "canary_contract_source_mismatch"),
+            )
             self.assertFalse(canary._one_shot_resume_allowed({
                 **policy,
                 "phases_to_run": {"follow": True, "welcome": False, "unfollow": True},

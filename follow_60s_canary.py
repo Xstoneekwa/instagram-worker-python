@@ -18,7 +18,6 @@ from logs import log
 
 
 REX_ACCOUNT_ID = "b024e94e-395d-4f02-9787-81ddc679b014"
-REX_ONE_SHOT_SOURCE_RUN_ID = "8bfad671-a8a8-4754-93ef-6b94789f6934"
 REX_ONE_SHOT_EXPECTED_FOLLOW_QUOTA = 27
 REX_ONE_SHOT_CONTRACT_SCHEMA = "REX_FOLLOW_60S_ONE_SHOT_V2"
 REX_ONE_SHOT_EXPIRES_AT = "2026-07-31T04:00:00+00:00"
@@ -47,8 +46,9 @@ def _one_shot_resume_allowed(policy: dict[str, Any]) -> tuple[bool, str]:
     """Authorize exactly Rex's marked, Follow-only V2 Auto Restart attempt."""
     if not policy:
         return False, "not_auto_restart_resume"
-    if str(policy.get("prior_run_id") or "") != REX_ONE_SHOT_SOURCE_RUN_ID:
-        return False, "source_run_mismatch"
+    source_run_id = str(policy.get("prior_run_id") or "").strip()
+    if not source_run_id:
+        return False, "source_run_missing"
     if policy.get("restart_allowed") is not True:
         return False, "restart_not_allowed"
     request_meta = dict(policy.get("request_metadata") or {})
@@ -80,7 +80,7 @@ def _one_shot_resume_allowed(policy: dict[str, Any]) -> tuple[bool, str]:
         return False, "package_contract_not_ready"
     if str(contract.get("schema") or "") != REX_ONE_SHOT_CONTRACT_SCHEMA:
         return False, "canary_contract_missing"
-    if str(contract.get("source_run_id") or "") != REX_ONE_SHOT_SOURCE_RUN_ID:
+    if str(contract.get("source_run_id") or "").strip() != source_run_id:
         return False, "canary_contract_source_mismatch"
     try:
         contract_quota = int(contract.get("follow_quota") or 0)
@@ -229,7 +229,7 @@ def configure(
         natural_attempt=natural,
         auto_restart_resume=bool(policy),
         one_shot_canary_resume=one_shot_resume,
-        one_shot_source_run_id=(REX_ONE_SHOT_SOURCE_RUN_ID if one_shot_resume else None),
+        one_shot_source_run_id=(str(policy.get("prior_run_id") or "").strip() if one_shot_resume else None),
         one_shot_expires_at=(REX_ONE_SHOT_EXPIRES_AT if one_shot_resume else None),
         one_shot_rejection_reason=(one_shot_reject if policy and not one_shot_resume else None),
         package=_RUNTIME.package or None,
