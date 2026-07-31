@@ -20,6 +20,33 @@ _SURFACE_PRECHECK_OK: dict[str, object] = {
 }
 
 
+def _test_post_identity_contract(*_args: object, **kwargs: object) -> dict[str, object]:
+    story_detected = bool(kwargs.get("story_detected"))
+    like_surface_ok = bool(kwargs.get("like_surface_ok"))
+    missing: list[str] = []
+    if not like_surface_ok:
+        missing.append("trusted_like_control")
+    if story_detected:
+        missing.append("story_highlight_absent")
+    return {
+        "post_identity_confirmed": not missing,
+        "post_identity_missing_signals": missing,
+        "story_or_highlight_detected": story_detected,
+        "story_or_highlight_method": str(kwargs.get("story_method") or ""),
+        "current_package": str(kwargs.get("pkg") or "com.instagram.android"),
+        "current_activity": "com.instagram.mainactivity.InstagramMainActivity",
+        "package_exact": True,
+        "instagram_main_activity": True,
+        "posts_action_bar": True,
+        "action_bar_title": "Posts",
+        "candidate_header_exact": True,
+        "candidate_header_username": str(kwargs.get("expected_username") or "cand"),
+        "candidate_header_method": "test_exact_header",
+        "like_surface_ok": like_surface_ok,
+        "snapshot_valid": True,
+    }
+
+
 def _like_phase_contract_ctx() -> mock.MagicMock:
     contract_ctx = mock.MagicMock()
     contract_ctx.current_state.value = "sheet_dismissed"
@@ -49,6 +76,13 @@ def _patch_post_viewer_like_surface_gates_normal(stack: ExitStack) -> None:
             return_value=(False, ""),
         )
     )
+    stack.enter_context(
+        mock.patch.object(
+            nav,
+            "_post_open_live_positive_identity_contract",
+            side_effect=_test_post_identity_contract,
+        )
+    )
 
 
 @contextlib.contextmanager
@@ -65,6 +99,10 @@ def _normal_post_viewer_surface_gates():
         nav,
         "_ui_story_or_highlight_viewer_detected",
         return_value=(False, ""),
+    ), mock.patch.object(
+        nav,
+        "_post_open_live_positive_identity_contract",
+        side_effect=_test_post_identity_contract,
     ):
         yield
 
@@ -2052,6 +2090,267 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
             "follow_60s_post_grid_evidence_fallback_golden_direct",
             [event for event, _kw in logs],
         )
+
+    def test_canary_cell_proof_expired_at_tap_uses_one_golden_without_direct_tap(self) -> None:
+        device = mock.MagicMock()
+        device.window_size.return_value = (1080, 2340)
+        device.dump_hierarchy.return_value = "<hierarchy/>"
+        contract_ctx = _like_phase_contract_ctx()
+        canary_logs: list[tuple[str, dict[str, object]]] = []
+        nav_logs: list[tuple[str, dict[str, object]]] = []
+        freshness_rows: list[dict[str, object]] = []
+        canary.configure(
+            account_id=canary.CANARY_ACCOUNT_ID,
+            account_username=canary.CANARY_ACCOUNT_USERNAME,
+            run_id="canary-stale-at-tap",
+            package="com.instagram.android",
+            resume_policy=None,
+        )
+        proof = canary.FreshUiProof(
+            account_id=canary.CANARY_ACCOUNT_ID,
+            subject_username="ct",
+            target_username="cand",
+            package="com.instagram.android",
+            activity="profile",
+            surface="candidate_profile_post_grid",
+            bounds={"left": 0, "top": 900, "right": 360, "bottom": 1260},
+            xml_generation="1:fresh",
+            created_at_monotonic=98.0,
+            detection_source="fresh_canary_post_grid_evidence",
+            ttl_ms=1250.0,
+        )
+        try:
+            with ExitStack() as stack:
+                _patch_like_phase_common(stack, contract_ctx=contract_ctx)
+                stack.enter_context(
+                    mock.patch.object(
+                        nav,
+                        "_visual_profile_no_posts_tier1_direct_check",
+                        return_value={
+                            "no_posts_detected": False,
+                            "detection_method": "none",
+                            "confidence": 0.0,
+                        },
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        nav,
+                        "visual_profile_has_no_posts",
+                        return_value={
+                            "no_posts_detected": False,
+                            "detection_method": "none",
+                            "confidence": 0.0,
+                        },
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        nav,
+                        "_followers_profile_tabs_bottom_y_px",
+                        return_value=(900, "unit"),
+                    )
+                )
+                grid_probe = stack.enter_context(
+                    mock.patch.object(
+                        nav,
+                        "ensure_post_grid_visible_for_post_follow_likes",
+                        return_value={
+                            "ok": True,
+                            "grid_state_after": "visible",
+                            "direct_post_cell_under_suggested": {
+                                "left": 0,
+                                "top": 900,
+                                "right": 360,
+                                "bottom": 1260,
+                                "center_x": 180,
+                                "center_y": 1080,
+                            },
+                            "direct_post_cell_source": "vision_thumbnail_top_left",
+                            "direct_post_cell_tap_safe": True,
+                            "direct_post_cell_scroll_attempts": 0,
+                            "suggested_overlay_visible": False,
+                            "direct_post_grid_exposure": "safe",
+                            "viewport_fingerprint": "vp-stale-at-tap",
+                            "grid_probe_screenshot_path": "/tmp/stale-at-tap-grid.png",
+                            "likes_perf_grid": {},
+                        },
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        nav,
+                        "_followers_current_pkg_activity",
+                        return_value={
+                            "current_package": "com.instagram.android",
+                            "current_activity": "profile",
+                        },
+                    )
+                )
+                consume_proof = stack.enter_context(
+                    mock.patch.object(
+                        canary,
+                        "consume",
+                        return_value=(proof, 1000.0, ""),
+                    )
+                )
+                original_freshness = nav._fresh_ui_proof_age_at_tap
+
+                def _capture_stale_at_tap(
+                    current_proof: object | None,
+                ) -> dict[str, object]:
+                    result = original_freshness(
+                        current_proof,
+                        now_monotonic=100.0,
+                    )
+                    freshness_rows.append(dict(result))
+                    return result
+
+                stack.enter_context(
+                    mock.patch.object(
+                        nav,
+                        "_fresh_ui_proof_age_at_tap",
+                        side_effect=_capture_stale_at_tap,
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        canary,
+                        "log",
+                        side_effect=lambda _level, event, **kw: canary_logs.append(
+                            (str(event), dict(kw))
+                        ),
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        nav,
+                        "log",
+                        side_effect=lambda _level, event, **kw: nav_logs.append(
+                            (str(event), dict(kw))
+                        ),
+                    )
+                )
+                golden_open = stack.enter_context(
+                    mock.patch.object(
+                        nav,
+                        "visual_open_recent_post_from_profile",
+                        return_value={
+                            "ok": True,
+                            "post_detected": True,
+                            "failure_reason": "",
+                            "open_strategy": "vision_open_top_left_legacy_safe",
+                            "likes_perf_post_open": {},
+                        },
+                    )
+                )
+                legacy_open = stack.enter_context(
+                    mock.patch.object(
+                        nav,
+                        "_post_follow_likes_open_top_left_legacy_visual_safe",
+                        return_value={
+                            "ok": False,
+                            "post_detected": False,
+                            "failure_reason": "legacy_visual_top_left_failed",
+                            "strict_grid_proof_ok": False,
+                        },
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        nav,
+                        "_post_open_surface_audits",
+                        return_value={
+                            "story_detected": False,
+                            "story_method": "snapshot_clear",
+                            "like_surface_ok": True,
+                            "like_surface_method": "ui_description_exact_like",
+                            "post_identity_confirmed": True,
+                            "post_identity_missing_signals": [],
+                        },
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        nav,
+                        "visual_post_already_liked",
+                        return_value={
+                            "already_liked": False,
+                            "detection_method": "hierarchy_like_hint",
+                        },
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        nav,
+                        "visual_like_open_post",
+                        return_value={
+                            "ok": True,
+                            "already_liked": False,
+                            "real_tap_sent": True,
+                            "likes_perf_like": {},
+                        },
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        nav,
+                        "visual_verify_post_liked",
+                        return_value={
+                            "liked_verified": True,
+                            "verification_method": "visual",
+                            "verify_attempts_count": 1,
+                        },
+                    )
+                )
+                stack.enter_context(
+                    mock.patch.object(
+                        nav,
+                        "visual_return_to_profile_from_post",
+                        return_value={"ok": True},
+                    )
+                )
+
+                out = nav.run_post_follow_post_likes_phase(
+                    device,
+                    pkg="com.instagram.android",
+                    source_profile_username="ct",
+                    follower_username="cand",
+                    visual_candidate_id="vc-stale-at-tap",
+                    follow_success_verified=True,
+                    follow_state_after="following",
+                    skipped_tap=False,
+                )
+        finally:
+            canary.configure(
+                account_id="other",
+                account_username="other",
+                run_id="reset",
+                package="com.instagram.android",
+                resume_policy=None,
+            )
+
+        consume_proof.assert_called_once()
+        self.assertEqual(len(freshness_rows), 1)
+        self.assertFalse(freshness_rows[0]["valid"])
+        self.assertEqual(freshness_rows[0]["age_ms"], 2000.0)
+        grid_probe.assert_called_once()
+        legacy_open.assert_called_once()
+        device.click.assert_not_called()
+        golden_open.assert_called_once()
+        self.assertEqual(out.get("phase_outcome"), "success")
+        statuses = [
+            row
+            for event, row in canary_logs
+            if event == "follow_60s_optimization_status"
+            and row.get("feature") == "like_fresh_cell_bounds"
+        ]
+        self.assertEqual([row.get("status") for row in statuses], ["fallback"])
+        self.assertEqual(
+            statuses[0].get("rejection_reason"),
+            "fresh_ui_proof_stale_at_tap",
+        )
+        self.assertTrue(statuses[0].get("fallback_used"))
 
     def test_canary_ambiguous_grid_evidence_falls_directly_to_golden_and_likes(self) -> None:
         device = mock.MagicMock()
@@ -6567,6 +6866,8 @@ class PostViewerUnusableSurfaceTests(unittest.TestCase):
             "viewer_detect_path": "phase_a2_exact_like_desc_fast",
             "proof_method": "ui_description_exact_like",
             "posts_action_bar": True,
+            "current_package": "com.instagram.android",
+            "current_activity": "com.instagram.mainactivity.InstagramMainActivity",
             "stashed_at_monotonic": time.perf_counter(),
             "post_open_snapshot_captured_at_monotonic": time.perf_counter(),
             "post_open_snapshot_xml": snapshot_xml,
@@ -6578,7 +6879,9 @@ class PostViewerUnusableSurfaceTests(unittest.TestCase):
         device = mock.MagicMock()
         device.window_size.return_value = (1080, 2400)
         self._stash_fresh_post_open_snapshot(
-            '<hierarchy><node content-desc="Like" bounds="[50,1700][110,1800]" '
+            '<hierarchy><node text="Posts" />'
+            '<node text="cand" />'
+            '<node content-desc="Like" bounds="[50,1700][110,1800]" '
             'clickable="true" /></hierarchy>'
         )
         with mock.patch.object(nav, "_ui_story_or_highlight_viewer_detected") as story, \
@@ -6838,6 +7141,10 @@ class PostViewerUnusableSurfaceTests(unittest.TestCase):
         self.assertEqual(
             out.get("skipped_reason"),
             "post_like_wrong_surface_story_highlight_recovered",
+        )
+        self.assertEqual(
+            out.get("stable_reason"),
+            "story_or_highlight_opened_instead_of_post",
         )
         like_open.assert_not_called()
         verify.assert_not_called()

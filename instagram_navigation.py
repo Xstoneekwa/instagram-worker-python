@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import html
 import json
+import math
 import os
 import random
 import re
@@ -23237,6 +23238,82 @@ def _visual_wait_profile_after_back(
     }
 
 
+def _post_open_boundary_screenshot_evidence(
+    d: u2.Device,
+    *,
+    stage: str,
+    source_profile_username: str = "",
+    follower_username: str = "",
+    visual_candidate_id: str = "",
+    post_index: int | None = None,
+    existing_path: str | None = None,
+    capture_if_missing: bool = False,
+) -> dict[str, Any]:
+    """Fingerprint existing evidence, or capture only on a rejected boundary."""
+    _ensure_debug_dirs()
+    path = str(existing_path or "").strip()
+    captured = False
+    try:
+        if not path and capture_if_missing:
+            path = str(
+                _SCREENSHOTS_DIR
+                / f"post_open_{str(stage or 'boundary')}_{int(time.time() * 1000)}.png"
+            )
+            screenshot(d, path)
+            captured = True
+        if not path:
+            return {
+                "ok": False,
+                "stage": str(stage or "boundary"),
+                "screenshot_path": "",
+                "screenshot_sha256": "",
+                "captured_now": False,
+                "failure_reason": "evidence_path_missing",
+            }
+        payload = Path(path).read_bytes()
+        checksum = hashlib.sha256(payload).hexdigest()
+        out = {
+            "ok": True,
+            "stage": str(stage or "boundary"),
+            "screenshot_path": path,
+            "screenshot_sha256": checksum,
+            "captured_now": bool(captured),
+            "size_bytes": len(payload),
+        }
+        log(
+            "info",
+            "post_open_boundary_evidence_captured",
+            source_profile_username=str(source_profile_username or ""),
+            follower_username=str(follower_username or ""),
+            visual_candidate_id=str(visual_candidate_id or ""),
+            post_index=int(post_index) if post_index is not None else None,
+            **out,
+        )
+        return out
+    except Exception as exc:
+        out = {
+            "ok": False,
+            "stage": str(stage or "boundary"),
+            "screenshot_path": path,
+            "screenshot_sha256": "",
+            "captured_now": bool(captured),
+            "failure_reason": f"evidence_capture_failed:{type(exc).__name__}",
+        }
+        try:
+            log(
+                "warning",
+                "post_open_boundary_evidence_capture_failed",
+                source_profile_username=str(source_profile_username or ""),
+                follower_username=str(follower_username or ""),
+                visual_candidate_id=str(visual_candidate_id or ""),
+                post_index=int(post_index) if post_index is not None else None,
+                **out,
+            )
+        except Exception:
+            pass
+        return out
+
+
 def _visual_wait_post_viewer_opened_after_tap(
     d: u2.Device,
     *,
@@ -27125,9 +27202,18 @@ def _post_follow_open_like_proof_from_viewer_detect(
                 "viewer_detect_path": path,
                 "proof_method": positive_rid,
                 "posts_action_bar": posts_bar,
+                "current_package": det.get("current_package"),
+                "current_activity": det.get("current_activity"),
+                "action_bar_title": det.get("action_bar_title"),
+                "post_header_username_detected": det.get(
+                    "post_header_username_detected"
+                ),
                 "post_open_snapshot_xml": det.get("post_open_snapshot_xml"),
                 "post_open_snapshot_captured_at_monotonic": det.get(
                     "post_open_snapshot_captured_at_monotonic"
+                ),
+                "post_open_stage_provenance": det.get(
+                    "post_open_stage_provenance"
                 ),
             }
         return None
@@ -27141,9 +27227,18 @@ def _post_follow_open_like_proof_from_viewer_detect(
             "viewer_detect_path": path,
             "proof_method": exact_sig,
             "posts_action_bar": True,
+            "current_package": det.get("current_package"),
+            "current_activity": det.get("current_activity"),
+            "action_bar_title": det.get("action_bar_title"),
+            "post_header_username_detected": det.get(
+                "post_header_username_detected"
+            ),
             "post_open_snapshot_xml": det.get("post_open_snapshot_xml"),
             "post_open_snapshot_captured_at_monotonic": det.get(
                 "post_open_snapshot_captured_at_monotonic"
+            ),
+            "post_open_stage_provenance": det.get(
+                "post_open_stage_provenance"
             ),
         }
 
@@ -47426,11 +47521,366 @@ def _ui_story_or_highlight_viewer_detected(d: u2.Device) -> tuple[bool, str]:
     return False, ""
 
 
+_POST_OPEN_STORY_RESOURCE_MARKERS = (
+    "story_viewer",
+    "reel_viewer",
+    "reel_tray",
+    "highlight_viewer",
+    "story_controls",
+)
+
+
+def _post_open_hierarchy_identity_signals(
+    snapshot_xml: str,
+    *,
+    expected_username: str,
+) -> dict[str, Any]:
+    """Pure, fail-closed identity signals for POST versus STORY/HIGHLIGHT."""
+    try:
+        root = ET.fromstring(str(snapshot_xml or ""))
+    except ET.ParseError:
+        return {
+            "snapshot_valid": False,
+            "story_or_highlight_detected": False,
+            "story_or_highlight_method": "",
+            "posts_action_bar_in_snapshot": False,
+            "candidate_username_exact_in_snapshot": False,
+        }
+
+    expected = _normalize_handle(expected_username)
+    story_detected = False
+    story_method = ""
+    posts_title = False
+    candidate_exact = False
+    candidate_method = ""
+    for el in root.iter():
+        text_raw = str(el.attrib.get("text") or "").strip()
+        desc_raw = str(el.attrib.get("content-desc") or "").strip()
+        rid_raw = str(el.attrib.get("resource-id") or "").strip()
+        values = tuple(value for value in (text_raw, desc_raw) if value)
+        rid_lower = rid_raw.lower()
+        lowered = tuple(value.lower() for value in values)
+
+        if any(marker in rid_lower for marker in _POST_OPEN_STORY_RESOURCE_MARKERS):
+            story_detected = True
+            story_method = "snapshot_story_highlight_resource_id"
+        if any(
+            value in ("reply", "send message", "message")
+            or "story controls" in value
+            or "story viewer" in value
+            or "highlight viewer" in value
+            for value in lowered
+        ):
+            story_detected = True
+            if not story_method:
+                story_method = "snapshot_story_highlight_marker"
+
+        if any(value.lower() in _POST_VIEWER_ACTION_BAR_TITLES_NORM for value in values):
+            posts_title = True
+        if expected:
+            for field_name, value in (("text", text_raw), ("content_desc", desc_raw)):
+                if value and _normalize_handle(value) == expected:
+                    candidate_exact = True
+                    candidate_method = f"snapshot_exact_{field_name}"
+                    break
+
+    return {
+        "snapshot_valid": True,
+        "story_or_highlight_detected": bool(story_detected),
+        "story_or_highlight_method": story_method,
+        "posts_action_bar_in_snapshot": bool(posts_title),
+        "candidate_username_exact_in_snapshot": bool(candidate_exact),
+        "candidate_username_method": candidate_method,
+    }
+
+
+def _post_open_stage_provenance_contract(
+    provenance: dict[str, Any] | None,
+    *,
+    expected_username: str,
+    expected_package: str,
+    current_activity: str,
+    snapshot_captured_at_monotonic: float | None = None,
+    now_monotonic: float | None = None,
+) -> dict[str, Any]:
+    """Validate a one-tap, stage-scoped profile-grid identity proof."""
+    proof = dict(provenance or {})
+    now = float(now_monotonic if now_monotonic is not None else time.perf_counter())
+    created_at = float(proof.get("created_at_monotonic") or 0.0)
+    age_ms = max(0.0, (now - created_at) * 1000.0) if created_at > 0 else 0.0
+    try:
+        cell_proof_age_at_tap_ms = max(
+            0.0, float(proof.get("cell_proof_age_at_tap_ms") or 0.0)
+        )
+    except (TypeError, ValueError):
+        cell_proof_age_at_tap_ms = 0.0
+    try:
+        cell_proof_ttl_ms = max(
+            1.0, float(proof.get("cell_proof_ttl_ms") or 1250.0)
+        )
+    except (TypeError, ValueError):
+        cell_proof_ttl_ms = 1250.0
+    tap_dispatched_at = float(proof.get("tap_dispatched_at_monotonic") or 0.0)
+    tap_to_audit_ms = (
+        max(0.0, (now - tap_dispatched_at) * 1000.0)
+        if tap_dispatched_at > 0
+        else 0.0
+    )
+    try:
+        max_tap_to_audit_ms = max(
+            1.0, float(proof.get("max_tap_to_audit_ms") or 3000.0)
+        )
+    except (TypeError, ValueError):
+        max_tap_to_audit_ms = 3000.0
+    snapshot_captured_at = float(snapshot_captured_at_monotonic or 0.0)
+    snapshot_age_ms = (
+        max(0.0, (now - snapshot_captured_at) * 1000.0)
+        if snapshot_captured_at > 0
+        else 0.0
+    )
+    snapshot_after_tap = bool(
+        snapshot_captured_at > 0
+        and tap_dispatched_at > 0
+        and snapshot_captured_at >= tap_dispatched_at
+    )
+    bounds = proof.get("post_bounds")
+    bounds_valid = False
+    if isinstance(bounds, dict):
+        try:
+            bounds_valid = bool(
+                int(bounds.get("right") or 0) > int(bounds.get("left") or 0)
+                and int(bounds.get("bottom") or 0) > int(bounds.get("top") or 0)
+            )
+        except (TypeError, ValueError):
+            bounds_valid = False
+    expected = _normalize_handle(expected_username)
+    candidate_exact = bool(
+        expected
+        and _normalize_handle(str(proof.get("candidate_username") or "")) == expected
+    )
+    package_exact = bool(
+        str(expected_package or "")
+        and str(proof.get("package") or "") == str(expected_package or "")
+    )
+    activity_before = str(proof.get("activity") or "")
+    activity_exact = bool(
+        activity_before
+        and (
+            not str(current_activity or "")
+            or activity_before == str(current_activity or "")
+        )
+    )
+    nav_before = str(proof.get("navigation_generation_before") or "")
+    nav_at_tap = str(proof.get("navigation_generation_at_tap") or "")
+    scroll_before = str(proof.get("scroll_generation_before") or "")
+    scroll_at_tap = str(proof.get("scroll_generation_at_tap") or "")
+    generation_stable = bool(
+        nav_before
+        and nav_before == nav_at_tap
+        and scroll_before
+        and scroll_before == scroll_at_tap
+    )
+    trusted_kind = str(proof.get("evidence_kind") or "") in {
+        "post_grid_evidence_bounds",
+        "fresh_post_cell_proof_bounds",
+    }
+    missing: list[str] = []
+    if not trusted_kind:
+        missing.append("trusted_post_grid_evidence")
+    if not candidate_exact:
+        missing.append("candidate_profile_exact")
+    if not bounds_valid:
+        missing.append("post_bounds_valid")
+    if not package_exact:
+        missing.append("package_exact")
+    if not activity_exact:
+        missing.append("activity_exact")
+    if not bool(proof.get("cell_proof_valid_at_tap")):
+        missing.append("cell_proof_valid_at_tap")
+    if cell_proof_age_at_tap_ms > cell_proof_ttl_ms:
+        missing.append("cell_proof_fresh_at_tap")
+    if tap_dispatched_at <= 0 or tap_to_audit_ms > max_tap_to_audit_ms:
+        missing.append("tap_to_audit_within_bound")
+    if not snapshot_after_tap or snapshot_age_ms > max_tap_to_audit_ms:
+        missing.append("fresh_post_open_snapshot")
+    if not bool(proof.get("same_stage_no_navigation_before_tap")):
+        missing.append("same_stage_no_navigation")
+    if not generation_stable:
+        missing.append("navigation_scroll_generation_stable")
+    if bool(proof.get("invalidated")):
+        missing.append("provenance_not_invalidated")
+    return {
+        "stage_provenance_confirmed": not missing,
+        "stage_provenance_missing_signals": missing,
+        "stage_provenance_age_ms": round(age_ms, 2),
+        "cell_proof_age_at_tap_ms": round(cell_proof_age_at_tap_ms, 2),
+        "tap_to_audit_ms": round(tap_to_audit_ms, 2),
+        "snapshot_age_ms": round(snapshot_age_ms, 2),
+        "stage_provenance_kind": str(proof.get("evidence_kind") or ""),
+        "candidate_profile_exact": candidate_exact,
+        "post_bounds_valid": bounds_valid,
+        "generation_stable": generation_stable,
+        "package_exact": package_exact,
+        "activity_exact": activity_exact,
+    }
+
+
+def _fresh_ui_proof_age_at_tap(
+    proof: Any | None,
+    *,
+    now_monotonic: float | None = None,
+) -> dict[str, Any]:
+    """Freeze FreshUiProof freshness immediately before a physical tap."""
+    now = float(now_monotonic if now_monotonic is not None else time.monotonic())
+    try:
+        created_at = float(getattr(proof, "created_at_monotonic", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        created_at = 0.0
+    try:
+        ttl_ms = max(1.0, float(getattr(proof, "ttl_ms", 1250.0) or 1250.0))
+    except (TypeError, ValueError):
+        ttl_ms = 1250.0
+    age_ms = (
+        max(0.0, (now - created_at) * 1000.0)
+        if proof is not None and created_at > 0.0
+        else float("inf")
+    )
+    valid = bool(proof is not None and created_at > 0.0 and age_ms <= ttl_ms)
+    return {
+        "valid": valid,
+        "age_ms": round(age_ms, 2) if math.isfinite(age_ms) else None,
+        "ttl_ms": ttl_ms,
+        "created_at_monotonic": created_at,
+        "checked_at_monotonic": now,
+    }
+
+
+def _post_open_live_positive_identity_contract(
+    d: u2.Device,
+    *,
+    pkg: str,
+    expected_username: str,
+    snapshot_xml: str,
+    story_detected: bool,
+    story_method: str,
+    like_surface_ok: bool,
+    stage_provenance: dict[str, Any] | None = None,
+    snapshot_captured_at_monotonic: float | None = None,
+) -> dict[str, Any]:
+    """Require positive post identity before any Like can be dispatched."""
+    hierarchy_signals = _post_open_hierarchy_identity_signals(
+        snapshot_xml,
+        expected_username=expected_username,
+    )
+    story_from_hierarchy = bool(
+        hierarchy_signals.get("story_or_highlight_detected")
+    )
+    story_final = bool(story_detected or story_from_hierarchy)
+    story_final_method = str(
+        story_method
+        or hierarchy_signals.get("story_or_highlight_method")
+        or ""
+    )
+
+    meta = _followers_current_pkg_activity(d)
+    current_package = str(meta.get("current_package") or "")
+    current_activity = str(meta.get("current_activity") or "")
+    package_exact = bool(str(pkg or "") and current_package == str(pkg or ""))
+    activity_lower = current_activity.lower()
+    instagram_main_activity = bool(
+        "instagram" in activity_lower and "mainactivity" in activity_lower
+    )
+
+    try:
+        action_bar_title = str(_visual_read_action_bar_username(d) or "").strip()
+    except Exception:
+        action_bar_title = ""
+    posts_action_bar = _visual_post_viewer_action_bar_is_post_viewer_mode(
+        action_bar_title
+    ) or bool(hierarchy_signals.get("posts_action_bar_in_snapshot"))
+
+    expected = _normalize_handle(expected_username)
+    try:
+        header_username, header_method = _visual_post_viewer_header_username_from_ui(
+            d,
+            expected_username=expected,
+            allow_hierarchy_fallback=True,
+        )
+    except Exception:
+        header_username, header_method = "", ""
+    header_exact = bool(
+        expected
+        and _normalize_handle(header_username) == expected
+    ) or bool(hierarchy_signals.get("candidate_username_exact_in_snapshot"))
+    provenance_contract = _post_open_stage_provenance_contract(
+        stage_provenance,
+        expected_username=expected_username,
+        expected_package=pkg,
+        current_activity=current_activity,
+        snapshot_captured_at_monotonic=snapshot_captured_at_monotonic,
+    )
+    identity_continuity = bool(
+        header_exact or provenance_contract.get("stage_provenance_confirmed")
+    )
+
+    missing: list[str] = []
+    if not package_exact:
+        missing.append("package_exact")
+    if not instagram_main_activity:
+        missing.append("instagram_main_activity")
+    if not posts_action_bar:
+        missing.append("posts_action_bar")
+    if not identity_continuity:
+        missing.append("candidate_identity_continuity")
+    if not like_surface_ok:
+        missing.append("trusted_like_control")
+    if story_final:
+        missing.append("story_highlight_absent")
+    confirmed = not missing
+    return {
+        "post_identity_confirmed": bool(confirmed),
+        "post_identity_missing_signals": missing,
+        "story_or_highlight_detected": bool(story_final),
+        "story_or_highlight_method": story_final_method,
+        "current_package": current_package,
+        "current_activity": current_activity,
+        "package_exact": bool(package_exact),
+        "instagram_main_activity": bool(instagram_main_activity),
+        "posts_action_bar": bool(posts_action_bar),
+        "action_bar_title": action_bar_title,
+        "candidate_header_exact": bool(header_exact),
+        "candidate_header_username": str(header_username or ""),
+        "candidate_header_method": str(
+            header_method
+            or hierarchy_signals.get("candidate_username_method")
+            or ""
+        ),
+        "like_surface_ok": bool(like_surface_ok),
+        "snapshot_valid": bool(hierarchy_signals.get("snapshot_valid")),
+        "stage_provenance_confirmed": bool(
+            provenance_contract.get("stage_provenance_confirmed")
+        ),
+        "stage_provenance_missing_signals": list(
+            provenance_contract.get("stage_provenance_missing_signals") or []
+        ),
+        "stage_provenance_age_ms": provenance_contract.get(
+            "stage_provenance_age_ms"
+        ),
+    }
+
+
 def _post_open_snapshot_audit_signals(
     d: u2.Device,
     *,
     snapshot_xml: str,
     proof_method: str,
+    expected_username: str,
+    posts_action_bar_hint: bool,
+    current_package: str,
+    expected_package: str,
+    current_activity: str,
+    stage_provenance: dict[str, Any] | None = None,
+    snapshot_captured_at_monotonic: float | None = None,
 ) -> dict[str, Any]:
     """Resolve post-open safety signals from one fresh hierarchy snapshot."""
     try:
@@ -47438,24 +47888,20 @@ def _post_open_snapshot_audit_signals(
     except ET.ParseError:
         return {"ok": False, "reason": "snapshot_xml_invalid"}
 
-    story_detected = False
-    story_method = "snapshot_clear"
+    identity_signals = _post_open_hierarchy_identity_signals(
+        snapshot_xml,
+        expected_username=expected_username,
+    )
+    story_detected = bool(identity_signals.get("story_or_highlight_detected"))
+    story_method = str(
+        identity_signals.get("story_or_highlight_method") or "snapshot_clear"
+    )
     facebook_detected = False
     facebook_method = "snapshot_clear"
     for el in root.iter():
         text_raw = str(el.attrib.get("text") or "").strip().lower()
         desc_raw = str(el.attrib.get("content-desc") or "").strip().lower()
         values = (text_raw, desc_raw)
-        if any(
-            value in ("reply", "send message", "message")
-            or "story controls" in value
-            or "story viewer" in value
-            or "highlight viewer" in value
-            for value in values
-            if value
-        ):
-            story_detected = True
-            story_method = "snapshot_story_highlight_marker"
         if any(
             marker in value
             for value in values
@@ -47464,6 +47910,61 @@ def _post_open_snapshot_audit_signals(
         ):
             facebook_detected = True
             facebook_method = "snapshot_facebook_shared_banner"
+
+    package_exact = bool(
+        str(expected_package or "")
+        and str(current_package or "") == str(expected_package or "")
+    )
+    activity_lower = str(current_activity or "").lower()
+    instagram_main_activity = bool(
+        "instagram" in activity_lower and "mainactivity" in activity_lower
+    )
+    posts_action_bar = bool(posts_action_bar_hint) or bool(
+        identity_signals.get("posts_action_bar_in_snapshot")
+    )
+    candidate_exact = bool(
+        identity_signals.get("candidate_username_exact_in_snapshot")
+    )
+    provenance_contract = _post_open_stage_provenance_contract(
+        stage_provenance,
+        expected_username=expected_username,
+        expected_package=expected_package,
+        current_activity=current_activity,
+        snapshot_captured_at_monotonic=snapshot_captured_at_monotonic,
+    )
+    identity_continuity = bool(
+        candidate_exact or provenance_contract.get("stage_provenance_confirmed")
+    )
+
+    if story_detected:
+        return {
+            "ok": True,
+            "story_detected": True,
+            "story_method": story_method,
+            "facebook_detected": facebook_detected,
+            "facebook_method": facebook_method,
+            "like_surface_ok": False,
+            "like_surface_method": "story_highlight_surface_rejected",
+            "post_identity_confirmed": False,
+            "post_identity_missing_signals": ["story_highlight_absent"],
+        }
+
+    identity_missing: list[str] = []
+    if not package_exact:
+        identity_missing.append("package_exact")
+    if not instagram_main_activity:
+        identity_missing.append("instagram_main_activity")
+    if not posts_action_bar:
+        identity_missing.append("posts_action_bar")
+    if not identity_continuity:
+        identity_missing.append("candidate_identity_continuity")
+    if identity_missing:
+        return {
+            "ok": False,
+            "reason": "snapshot_post_identity_unconfirmed",
+            "post_identity_confirmed": False,
+            "post_identity_missing_signals": identity_missing,
+        }
 
     semantic_nodes = _hierarchy_collect_like_semantic_nodes(snapshot_xml)
     trusted_liked = any(_ui_proof_trusted_action_button_liked(node, d) for node in semantic_nodes)
@@ -47493,6 +47994,21 @@ def _post_open_snapshot_audit_signals(
         "like_signal": "not_liked" if proof_is_not_liked else "like_action_available",
         "story_signal": "detected" if story_detected else "clear",
         "facebook_signal": "detected" if facebook_detected else "clear",
+        "post_identity_confirmed": True,
+        "post_identity_missing_signals": [],
+        "package_exact": True,
+        "instagram_main_activity": True,
+        "posts_action_bar": True,
+        "candidate_header_exact": bool(candidate_exact),
+        "stage_provenance_confirmed": bool(
+            provenance_contract.get("stage_provenance_confirmed")
+        ),
+        "stage_provenance_missing_signals": list(
+            provenance_contract.get("stage_provenance_missing_signals") or []
+        ),
+        "stage_provenance_age_ms": provenance_contract.get(
+            "stage_provenance_age_ms"
+        ),
     }
 
 
@@ -47523,6 +48039,13 @@ def _post_open_surface_audits(
                 d,
                 snapshot_xml=str(stash.get("post_open_snapshot_xml") or ""),
                 proof_method=str(stash.get("proof_method") or ""),
+                expected_username=follower_username,
+                posts_action_bar_hint=bool(stash.get("posts_action_bar")),
+                current_package=str(stash.get("current_package") or ""),
+                expected_package=pkg,
+                current_activity=str(stash.get("current_activity") or ""),
+                stage_provenance=stash.get("post_open_stage_provenance"),
+                snapshot_captured_at_monotonic=captured_at,
             )
             if not bool(snapshot_signals.get("ok")):
                 reject_reason = str(snapshot_signals.get("reason") or "snapshot_ambiguous")
@@ -47552,11 +48075,69 @@ def _post_open_surface_audits(
             conflicting_signals=snapshot_signals.get("conflicting_signals") or [],
         )
         story_detected, story_method = _ui_story_or_highlight_viewer_detected(d)
-        like_surface_ok, like_surface_method = _ui_post_viewer_like_action_bar_exploitable(
+        like_surface_ok_raw, like_surface_method_raw = _ui_post_viewer_like_action_bar_exploitable(
             d,
             pkg=pkg,
         )
         fresh_hierarchy = _dump_post_viewer_hierarchy(d)
+        identity_contract = _post_open_live_positive_identity_contract(
+            d,
+            pkg=pkg,
+            expected_username=follower_username,
+            snapshot_xml=fresh_hierarchy,
+            story_detected=story_detected,
+            story_method=story_method,
+            like_surface_ok=like_surface_ok_raw,
+            stage_provenance=(stash or {}).get("post_open_stage_provenance"),
+            snapshot_captured_at_monotonic=time.perf_counter(),
+        )
+        story_detected = bool(
+            identity_contract.get("story_or_highlight_detected")
+        )
+        story_method = str(
+            identity_contract.get("story_or_highlight_method") or story_method
+        )
+        like_surface_ok = bool(identity_contract.get("post_identity_confirmed"))
+        like_surface_method = (
+            str(like_surface_method_raw or "")
+            if like_surface_ok
+            else "post_identity_contract_failed:"
+            + ",".join(identity_contract.get("post_identity_missing_signals") or [])
+        )
+        try:
+            log(
+                "info" if like_surface_ok else "warning",
+                "post_open_positive_identity_contract_evaluated",
+                source_profile_username=source_profile_username,
+                follower_username=follower_username,
+                post_identity_confirmed=like_surface_ok,
+                missing_signals=list(
+                    identity_contract.get("post_identity_missing_signals") or []
+                ),
+                story_or_highlight_detected=story_detected,
+                story_or_highlight_method=story_method,
+                current_package=identity_contract.get("current_package"),
+                current_activity=identity_contract.get("current_activity"),
+                package_exact=identity_contract.get("package_exact"),
+                instagram_main_activity=identity_contract.get(
+                    "instagram_main_activity"
+                ),
+                posts_action_bar=identity_contract.get("posts_action_bar"),
+                action_bar_title=identity_contract.get("action_bar_title"),
+                candidate_header_exact=identity_contract.get(
+                    "candidate_header_exact"
+                ),
+                candidate_header_username=identity_contract.get(
+                    "candidate_header_username"
+                ),
+                candidate_header_method=identity_contract.get(
+                    "candidate_header_method"
+                ),
+                trusted_like_control=bool(like_surface_ok_raw),
+                trusted_like_method=str(like_surface_method_raw or ""),
+            )
+        except Exception:
+            pass
         facebook_detected, facebook_method = (
             _ui_post_viewer_facebook_shared_content_detected(
                 d,
@@ -47573,6 +48154,10 @@ def _post_open_surface_audits(
             "reused_snapshot": False,
             "extra_dump_count": 1,
             "snapshot_age_ms": snapshot_age_ms,
+            "post_identity_confirmed": like_surface_ok,
+            "post_identity_missing_signals": list(
+                identity_contract.get("post_identity_missing_signals") or []
+            ),
         }
 
     out["elapsed_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
@@ -48302,19 +48887,15 @@ def run_post_follow_post_likes_phase(
                         retries=1 if _grid_ev.outcome == "clipped_post" else 0,
                     )
             else:
-                _record_follow_60s_outcome(
-                    "like_fresh_cell_bounds", "fallback", age_ms=_grid_age,
-                    reason=_grid_reject, fallback_used=True, dumps=0,
-                )
                 log(
                     "info",
-                    "follow_60s_post_grid_evidence_fallback_golden_direct",
+                    "follow_60s_post_grid_evidence_missing_continue_standard",
                     visual_candidate_id=vcid,
                     source_profile_username=src,
                     follower_username=cand,
                     rejection_reason=_grid_reject,
                     proof_age_ms=round(float(_grid_age or 0.0), 2),
-                    fast_diagnostic_attempted=False,
+                    final_outcome_deferred=True,
                     dumps=0,
                     screenshots=0,
                     retries=0,
@@ -50298,6 +50879,8 @@ def run_post_follow_post_likes_phase(
         gps = grid_out.get("grid_probe_source")
         gpss = grid_out.get("grid_probe_screenshot_path")
         direct_cell = grid_out.get("direct_post_cell_under_suggested")
+        direct_cell_proof: Any | None = None
+        direct_cell_proof_age_ms = 0.0
         if not isinstance(direct_cell, dict):
             try:
                 from follow_60s_canary import (
@@ -50382,12 +50965,8 @@ def run_post_follow_post_likes_phase(
                             fallback="visual_open_recent_post_from_profile",
                         )
                     else:
-                        _record_follow_60s_outcome(
-                            "like_fresh_cell_bounds",
-                            "used",
-                            age_ms=_cell_age_ms,
-                            estimated_gain_ms=6500.0,
-                        )
+                        direct_cell_proof = _cell_proof
+                        direct_cell_proof_age_ms = float(_cell_age_ms or 0.0)
             except Exception as _cell_proof_exc:
                 direct_cell = None
                 log(
@@ -50401,6 +50980,26 @@ def run_post_follow_post_likes_phase(
                     fallback_used=True,
                     fallback="visual_open_recent_post_from_profile",
                 )
+        def _open_recent_post_via_golden() -> dict[str, Any]:
+            return visual_open_recent_post_from_profile(
+                d,
+                source_profile_username=src,
+                expected_follower_username=cand,
+                grid_y0_ratio=_POST_FOLLOW_LIKES_GRID_Y0_RATIO,
+                grid_y1_ratio=_POST_FOLLOW_LIKES_GRID_Y1_RATIO,
+                selection_policy=_VISUAL_POST_OPEN_SELECTION_FIRST_ROW_LTR,
+                dynamic_grid_first_row_top_px=(
+                    int(dr_top) if isinstance(dr_top, (int, float)) else None
+                ),
+                dynamic_grid_first_row_bottom_px=(
+                    int(dr_bottom) if isinstance(dr_bottom, (int, float)) else None
+                ),
+                grid_probe_source=str(gps).strip() if gps else None,
+                grid_probe_screenshot_path=str(gpss).strip() if gpss else None,
+                likes_perf_phase_t0=_likes_perf_ctx.get("phase_t0"),
+                post_follow_stash_open_like_proof=True,
+            )
+
         if preopened_out is not None:
             open_out = dict(preopened_out)
         elif isinstance(direct_cell, dict):
@@ -50442,63 +51041,199 @@ def run_post_follow_post_likes_phase(
             else:
                 try:
                     meta_before_direct = _followers_current_pkg_activity(d)
-                    log(
-                        "info",
-                        "like_post_open_attempted",
-                        visual_candidate_id=vcid,
+                    direct_pre_tap_evidence = _post_open_boundary_screenshot_evidence(
+                        d,
+                        stage="before_tap_direct_cell",
                         source_profile_username=src,
                         follower_username=cand,
+                        visual_candidate_id=vcid,
                         post_index=post_idx,
-                        tap_x=tx,
-                        tap_y=ty,
-                        action="direct_tap",
-                        cell_source=cell_source,
-                        scroll_attempts=scroll_attempts,
-                        grid_exposure=grid_exposure,
+                        existing_path=str(gpss or ""),
+                        capture_if_missing=False,
                     )
-                    d.click(tx, ty)
-                    try:
-                        from follow_60s_canary import invalidate as _invalidate_follow_60s_proofs
-
-                        _invalidate_follow_60s_proofs("planned_post_cell_tap")
-                    except Exception:
-                        pass
-                    viewer_direct = _visual_wait_post_viewer_opened_after_tap(
-                        d,
-                        pkg=pkg,
-                        expected_follower_username=cand,
-                        act_before=meta_before_direct.get("current_activity"),
-                        post_follow_fast=True,
+                    navigation_token = str(
+                        getattr(direct_cell_proof, "xml_generation", "") or ""
+                    ).strip()
+                    if not navigation_token:
+                        navigation_token = hashlib.sha256(
+                            (
+                                f"{vcid}\0{cand}\0{cell_source}\0"
+                                f"{direct_cell.get('left')}\0{direct_cell.get('top')}"
+                            ).encode("utf-8", errors="replace")
+                        ).hexdigest()[:20]
+                    scroll_token = hashlib.sha256(
+                        (
+                            f"{str(grid_out.get('viewport_fingerprint') or '')}\0"
+                            f"{cell_source}\0{direct_cell.get('left')}\0"
+                            f"{direct_cell.get('top')}\0{direct_cell.get('right')}\0"
+                            f"{direct_cell.get('bottom')}"
+                        ).encode("utf-8", errors="replace")
+                    ).hexdigest()[:20]
+                    stage_provenance = {
+                        "evidence_kind": (
+                            "fresh_post_cell_proof_bounds"
+                            if direct_cell_proof is not None
+                            else ""
+                        ),
+                        "candidate_username": cand,
+                        "source_profile_username": src,
+                        "visual_candidate_id": vcid,
+                        "post_bounds": {
+                            key: int(direct_cell.get(key) or 0)
+                            for key in ("left", "top", "right", "bottom")
+                        },
+                        "package": str(
+                            meta_before_direct.get("current_package") or pkg
+                        ),
+                        "activity": str(
+                            meta_before_direct.get("current_activity") or ""
+                        ),
+                        "created_at_monotonic": float(
+                            getattr(
+                                direct_cell_proof,
+                                "created_at_monotonic",
+                                0.0,
+                            )
+                            or 0.0
+                        ),
+                        "cell_proof_valid_at_tap": False,
+                        "cell_proof_age_at_tap_ms": None,
+                        "cell_proof_age_at_consume_ms": round(
+                            max(0.0, direct_cell_proof_age_ms), 2
+                        ),
+                        "cell_proof_ttl_ms": float(
+                            getattr(direct_cell_proof, "ttl_ms", 1250.0)
+                            if direct_cell_proof is not None
+                            else 1250.0
+                        ),
+                        "tap_dispatched_at_monotonic": 0.0,
+                        "max_tap_to_audit_ms": 3000.0,
+                        "same_stage_no_navigation_before_tap": True,
+                        "navigation_generation_before": navigation_token,
+                        "navigation_generation_at_tap": "",
+                        "scroll_generation_before": scroll_token,
+                        "scroll_generation_at_tap": "",
+                        "invalidated": False,
+                        "pre_tap_evidence": direct_pre_tap_evidence,
+                    }
+                    freshness_at_tap = _fresh_ui_proof_age_at_tap(
+                        direct_cell_proof
                     )
-                    if bool(viewer_direct.get("post_detected")):
-                        _stash_post_follow_open_like_proof(
-                            viewer_direct,
+                    stage_provenance["created_at_monotonic"] = float(
+                        freshness_at_tap.get("created_at_monotonic") or 0.0
+                    )
+                    stage_provenance["cell_proof_valid_at_tap"] = bool(
+                        freshness_at_tap.get("valid")
+                    )
+                    stage_provenance["cell_proof_age_at_tap_ms"] = (
+                        freshness_at_tap.get("age_ms")
+                    )
+                    stage_provenance["cell_proof_ttl_ms"] = float(
+                        freshness_at_tap.get("ttl_ms") or 1250.0
+                    )
+                    if direct_cell_proof is not None and not bool(
+                        freshness_at_tap.get("valid")
+                    ):
+                        _record_follow_60s_outcome(
+                            "like_fresh_cell_bounds",
+                            "fallback",
+                            age_ms=freshness_at_tap.get("age_ms"),
+                            reason="fresh_ui_proof_stale_at_tap",
+                            fallback_used=True,
+                        )
+                        log(
+                            "warning",
+                            "follow_60s_like_cell_proof_stale_at_tap_fallback_golden",
                             source_profile_username=src,
                             follower_username=cand,
-                            proof_source="direct_cell_under_suggested",
+                            proof_age_at_consume_ms=round(
+                                max(0.0, direct_cell_proof_age_ms), 2
+                            ),
+                            proof_age_at_tap_ms=freshness_at_tap.get("age_ms"),
+                            proof_ttl_ms=freshness_at_tap.get("ttl_ms"),
+                            fallback_used=True,
+                            fallback="visual_open_recent_post_from_profile",
                         )
-                    open_out = {
-                        "ok": bool(viewer_direct.get("post_detected")),
-                        "post_detected": bool(viewer_direct.get("post_detected")),
-                        "failure_reason": ""
-                        if bool(viewer_direct.get("post_detected"))
-                        else "post_viewer_not_detected_after_direct_cell_tap",
-                        "open_strategy": "direct_cell_under_suggested",
-                        "tap_to_viewer_detected_ms": viewer_direct.get(
-                            "viewer_detect_total_ms"
-                        ),
-                        "viewer_detect_path": viewer_direct.get("viewer_detect_path"),
-                        "post_open_snapshot_xml": viewer_direct.get(
-                            "post_open_snapshot_xml"
-                        ),
-                        "post_open_snapshot_captured_at_monotonic": viewer_direct.get(
-                            "post_open_snapshot_captured_at_monotonic"
-                        ),
-                        "post_open_snapshot_valid": bool(
-                            viewer_direct.get("post_open_snapshot_valid")
-                        ),
-                        "likes_perf_post_open": dict(viewer_direct),
-                    }
+                        open_out = _open_recent_post_via_golden()
+                    else:
+                        if direct_cell_proof is not None:
+                            _record_follow_60s_outcome(
+                                "like_fresh_cell_bounds",
+                                "used",
+                                age_ms=freshness_at_tap.get("age_ms"),
+                                estimated_gain_ms=6500.0,
+                            )
+                        log(
+                            "info",
+                            "like_post_open_attempted",
+                            visual_candidate_id=vcid,
+                            source_profile_username=src,
+                            follower_username=cand,
+                            post_index=post_idx,
+                            tap_x=tx,
+                            tap_y=ty,
+                            action="direct_tap",
+                            cell_source=cell_source,
+                            scroll_attempts=scroll_attempts,
+                            grid_exposure=grid_exposure,
+                            proof_age_at_tap_ms=freshness_at_tap.get("age_ms"),
+                            proof_ttl_ms=freshness_at_tap.get("ttl_ms"),
+                        )
+                        stage_provenance["tap_dispatched_at_monotonic"] = (
+                            time.perf_counter()
+                        )
+                        stage_provenance["navigation_generation_at_tap"] = (
+                            navigation_token
+                        )
+                        stage_provenance["scroll_generation_at_tap"] = scroll_token
+                        d.click(tx, ty)
+                        try:
+                            from follow_60s_canary import invalidate as _invalidate_follow_60s_proofs
+
+                            _invalidate_follow_60s_proofs("planned_post_cell_tap")
+                        except Exception:
+                            pass
+                        viewer_direct = _visual_wait_post_viewer_opened_after_tap(
+                            d,
+                            pkg=pkg,
+                            expected_follower_username=cand,
+                            act_before=meta_before_direct.get("current_activity"),
+                            post_follow_fast=True,
+                        )
+                        viewer_direct["post_open_stage_provenance"] = stage_provenance
+                        if bool(viewer_direct.get("post_detected")):
+                            _stash_post_follow_open_like_proof(
+                                viewer_direct,
+                                source_profile_username=src,
+                                follower_username=cand,
+                                proof_source="direct_cell_under_suggested",
+                            )
+                        open_out = {
+                            "ok": bool(viewer_direct.get("post_detected")),
+                            "post_detected": bool(viewer_direct.get("post_detected")),
+                            "failure_reason": ""
+                            if bool(viewer_direct.get("post_detected"))
+                            else "post_viewer_not_detected_after_direct_cell_tap",
+                            "open_strategy": "direct_cell_under_suggested",
+                            "tap_to_viewer_detected_ms": viewer_direct.get(
+                                "viewer_detect_total_ms"
+                            ),
+                            "viewer_detect_path": viewer_direct.get(
+                                "viewer_detect_path"
+                            ),
+                            "post_open_snapshot_xml": viewer_direct.get(
+                                "post_open_snapshot_xml"
+                            ),
+                            "post_open_snapshot_captured_at_monotonic": viewer_direct.get(
+                                "post_open_snapshot_captured_at_monotonic"
+                            ),
+                            "post_open_snapshot_valid": bool(
+                                viewer_direct.get("post_open_snapshot_valid")
+                            ),
+                            "post_open_pre_tap_evidence": direct_pre_tap_evidence,
+                            "post_open_stage_provenance": stage_provenance,
+                            "likes_perf_post_open": dict(viewer_direct),
+                        }
                 except Exception as e:
                     open_out = {
                         "ok": False,
@@ -50507,24 +51242,7 @@ def run_post_follow_post_likes_phase(
                         "open_strategy": "direct_cell_under_suggested",
                     }
         else:
-            open_out = visual_open_recent_post_from_profile(
-                d,
-                source_profile_username=src,
-                expected_follower_username=cand,
-                grid_y0_ratio=_POST_FOLLOW_LIKES_GRID_Y0_RATIO,
-                grid_y1_ratio=_POST_FOLLOW_LIKES_GRID_Y1_RATIO,
-                selection_policy=_VISUAL_POST_OPEN_SELECTION_FIRST_ROW_LTR,
-                dynamic_grid_first_row_top_px=(
-                    int(dr_top) if isinstance(dr_top, (int, float)) else None
-                ),
-                dynamic_grid_first_row_bottom_px=(
-                    int(dr_bottom) if isinstance(dr_bottom, (int, float)) else None
-                ),
-                grid_probe_source=str(gps).strip() if gps else None,
-                grid_probe_screenshot_path=str(gpss).strip() if gpss else None,
-                likes_perf_phase_t0=_likes_perf_ctx.get("phase_t0"),
-                post_follow_stash_open_like_proof=True,
-            )
+            open_out = _open_recent_post_via_golden()
         if preopened_out is None:
             timings[f"open_post_{post_idx}_ms"] = round(
                 (time.perf_counter() - t_open) * 1000, 2
@@ -50626,9 +51344,29 @@ def run_post_follow_post_likes_phase(
             skipped_reason: str,
             detection_method: str,
             outcome: str,
+            stable_reason: str | None = None,
         ) -> dict[str, Any]:
+            _clear_post_follow_open_like_proof_stash()
             post_rec["outcome"] = outcome
             post_rec["failure_reason"] = skipped_reason
+            if stable_reason:
+                post_rec["stable_reason"] = str(stable_reason)
+                out["stable_reason"] = str(stable_reason)
+            if stable_reason in {
+                "story_or_highlight_opened_instead_of_post",
+                "post_surface_identity_unconfirmed_after_tap",
+            }:
+                post_rec["post_open_rejection_evidence"] = (
+                    _post_open_boundary_screenshot_evidence(
+                        d,
+                        stage="rejected_surface_before_recovery",
+                        source_profile_username=src,
+                        follower_username=cand,
+                        visual_candidate_id=vcid,
+                        post_index=post_idx,
+                        capture_if_missing=True,
+                    )
+                )
             per_post.append(post_rec)
             _likes_perf_ctx["failure_reason"] = skipped_reason
             _likes_perf_ctx["likes_failure_kind"] = detection_method
@@ -50640,6 +51378,7 @@ def run_post_follow_post_likes_phase(
                 follower_username=cand,
                 reason=skipped_reason,
                 detection_method=detection_method,
+                stable_reason=str(stable_reason or skipped_reason),
             )
             _t_ret_skip0 = time.perf_counter()
             ret_skip = visual_return_to_profile_from_post(d, source_profile_username=src)
@@ -50686,6 +51425,12 @@ def run_post_follow_post_likes_phase(
         story_method = str(post_open_audit.get("story_method") or "")
         like_surface_ok = bool(post_open_audit.get("like_surface_ok"))
         like_surface_method = str(post_open_audit.get("like_surface_method") or "")
+        post_identity_confirmed = bool(
+            post_open_audit.get("post_identity_confirmed")
+        )
+        post_identity_missing_signals = list(
+            post_open_audit.get("post_identity_missing_signals") or []
+        )
         opened_surface_kind = "unknown"
         if story_detected:
             opened_surface_kind = (
@@ -50720,6 +51465,7 @@ def run_post_follow_post_likes_phase(
                 source_profile_username=src,
                 follower_username=cand,
                 detection_method=story_method,
+                stable_reason="story_or_highlight_opened_instead_of_post",
                 tap_x=open_out.get("tap_x"),
                 tap_y=open_out.get("tap_y"),
             )
@@ -50727,6 +51473,7 @@ def run_post_follow_post_likes_phase(
                 skipped_reason="post_like_wrong_surface_story_highlight_recovered",
                 detection_method=story_method,
                 outcome="wrong_surface_story_highlight_recovered",
+                stable_reason="story_or_highlight_opened_instead_of_post",
             )
 
         fb_detected = bool(post_open_audit.get("facebook_detected"))
@@ -50739,6 +51486,34 @@ def run_post_follow_post_likes_phase(
             )
 
         if not like_surface_ok:
+            identity_boundary_failed = bool(
+                not post_identity_confirmed
+                and any(
+                    signal != "trusted_like_control"
+                    for signal in post_identity_missing_signals
+                )
+            )
+            if identity_boundary_failed:
+                log(
+                    "warning",
+                    "post_follow_post_like_wrong_surface_identity_unconfirmed",
+                    visual_candidate_id=vcid,
+                    source_profile_username=src,
+                    follower_username=cand,
+                    stable_reason="post_like_wrong_surface_identity_unconfirmed_recovered",
+                    missing_signals=post_identity_missing_signals,
+                    detection_method=like_surface_method,
+                    tap_x=open_out.get("tap_x"),
+                    tap_y=open_out.get("tap_y"),
+                )
+                return _skip_unusable_post_like_surface(
+                    skipped_reason=(
+                        "post_like_wrong_surface_identity_unconfirmed_recovered"
+                    ),
+                    detection_method=like_surface_method,
+                    outcome="wrong_surface_identity_unconfirmed_recovered",
+                    stable_reason="post_surface_identity_unconfirmed_after_tap",
+                )
             return _skip_unusable_post_like_surface(
                 skipped_reason="post_like_skipped_no_like_button",
                 detection_method=like_surface_method,
