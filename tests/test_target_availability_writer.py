@@ -8,6 +8,8 @@ import time
 import unittest
 from unittest.mock import patch
 
+import target_availability_writer as target_availability_writer_module
+
 from target_availability_observation import (
     TargetAvailabilityObservationScope,
     build_target_availability_observation,
@@ -56,6 +58,20 @@ def observation(event="run:target:summary", account_id=ACCOUNT_ONE):
 
 
 class TargetAvailabilityWriterTests(unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        isolation_directory = tempfile.TemporaryDirectory(
+            prefix="target-availability-writer-test-"
+        )
+        self.addCleanup(isolation_directory.cleanup)
+        auto_kill_patch = patch.object(
+            target_availability_writer_module,
+            "DEFAULT_AUTO_KILL_FILE",
+            str(Path(isolation_directory.name) / "absent-auto-kill.json"),
+        )
+        auto_kill_patch.start()
+        self.addCleanup(auto_kill_patch.stop)
+
     def test_global_scope_is_explicit_and_does_not_require_an_allowlist(self):
         flags = TargetAvailabilityFeatureFlags.from_mapping({
             "TARGET_AVAILABILITY_OBSERVATION_CAPTURE_ENABLED": "true",

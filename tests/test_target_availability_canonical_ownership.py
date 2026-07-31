@@ -33,6 +33,27 @@ def _row(account_id=MYTHYL_ACCOUNT_ID, client_id=MYTHYL_CLIENT_ID, active=True):
 
 
 class TargetAvailabilityCanonicalOwnershipTests(unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        isolation_directory = tempfile.TemporaryDirectory(
+            prefix="target-availability-ownership-test-"
+        )
+        self.addCleanup(isolation_directory.cleanup)
+        environment_patch = patch.dict(
+            os.environ,
+            {
+                "TARGET_AVAILABILITY_CONTROL_FILE": str(
+                    Path(isolation_directory.name) / "absent-control.json"
+                ),
+                "TARGET_AVAILABILITY_AUTO_KILL_FILE": str(
+                    Path(isolation_directory.name) / "absent-auto-kill.json"
+                ),
+            },
+            clear=False,
+        )
+        environment_patch.start()
+        self.addCleanup(environment_patch.stop)
+
     def tearDown(self):
         probe = runtime._MEMORY_PROBE
         runtime._MEMORY_PROBE = None
