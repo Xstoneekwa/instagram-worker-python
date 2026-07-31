@@ -31,7 +31,7 @@ class Follow60sCanaryRuntimeTest(unittest.TestCase):
             resume_policy=resume_policy,
         )
 
-    def test_only_j_automatise_first_natural_attempt_is_enabled(self) -> None:
+    def test_only_loriele_first_natural_attempt_is_enabled(self) -> None:
         self.assertTrue(self._configure_canary())
         self.assertTrue(canary.enabled("mute_like_handoff"))
 

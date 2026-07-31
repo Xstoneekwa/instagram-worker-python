@@ -191,7 +191,7 @@ from instagram_navigation import (
 from logs import get_run_log_file_path, init_run_file_logging, log
 
 
-FOLLOW_60S_CANARY_ACCOUNT_ID = "ba73eda4-d22a-4b93-9683-2af7b8aab764"
+FOLLOW_60S_CANARY_ACCOUNT_ID = "dfe78a92-3a51-435e-8911-ed10c93a4d82"
 
 
 def _pre_follow_gap_log(
@@ -19008,7 +19008,7 @@ def _run_followers_list_engine_session(
                 try:
                     from follow_60s_canary import enabled as _follow60_enabled
                     _follow60_stage_receipts = bool(
-                        account_id == "ba73eda4-d22a-4b93-9683-2af7b8aab764"
+                        account_id == FOLLOW_60S_CANARY_ACCOUNT_ID
                         and _follow60_enabled()
                     )
                 except Exception:
@@ -20441,7 +20441,7 @@ def _main_impl() -> int:
         except Exception as exc:
             spooled = {"error": str(exc)[:200]}
         if (
-            account_id == "ba73eda4-d22a-4b93-9683-2af7b8aab764"
+            account_id == FOLLOW_60S_CANARY_ACCOUNT_ID
             and run_id
             and run_request_id
         ):
@@ -20723,7 +20723,7 @@ def _main_impl() -> int:
             fallback="golden_current",
             error_type=type(exc).__name__,
         )
-        if account_id == "ba73eda4-d22a-4b93-9683-2af7b8aab764":
+        if account_id == FOLLOW_60S_CANARY_ACCOUNT_ID:
             return 94
 
     # P3: canonical resume plan created EARLY, before any device/UI action.
@@ -20795,7 +20795,7 @@ def _main_impl() -> int:
     _t_device_ready = time.perf_counter()
     d = connect_device(device_serial)
     device_action_latch.configure(
-        enabled=bool(account_id == "ba73eda4-d22a-4b93-9683-2af7b8aab764"),
+        enabled=bool(account_id == FOLLOW_60S_CANARY_ACCOUNT_ID),
         account_id=account_id or "",
         run_id=run_id or "",
     )

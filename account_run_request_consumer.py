@@ -83,7 +83,7 @@ DEVICE_BOUND_RUN_TYPES = frozenset({
     "login_orphan_challenge_recovery",
 })
 PREFLIGHT_RUN_TYPE = "scheduled_session_preflight"
-FOLLOW_60S_CANARY_ACCOUNT_ID = "ba73eda4-d22a-4b93-9683-2af7b8aab764"
+FOLLOW_60S_CANARY_ACCOUNT_ID = "dfe78a92-3a51-435e-8911-ed10c93a4d82"
 _last_integration_noop_proof: dict[str, Any] | None = None
 
 
@@ -1194,7 +1194,7 @@ def _reconcile_linked_run(
     exit_code: int | None = None,
 ) -> dict[str, Any]:
     is_follow60_canary = bool(
-        account_id == "ba73eda4-d22a-4b93-9683-2af7b8aab764" and run_id
+        account_id == FOLLOW_60S_CANARY_ACCOUNT_ID and run_id
     )
     canary_terminal_payload: dict[str, Any] | None = None
     if is_follow60_canary:

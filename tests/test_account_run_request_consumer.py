@@ -1701,7 +1701,7 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
                 return [
                     {
                         "id": TEST_RUN_ID,
-                        "account_id": "ba73eda4-d22a-4b93-9683-2af7b8aab764",
+                        "account_id": consumer.FOLLOW_60S_CANARY_ACCOUNT_ID,
                         "status": "running",
                     }
                 ]
@@ -1721,7 +1721,7 @@ class AccountRunRequestConsumerTest(unittest.TestCase):
             patch.object(consumer, "_audit"),
         ):
             result = consumer._reconcile_linked_run(
-                account_id="ba73eda4-d22a-4b93-9683-2af7b8aab764",
+                account_id=consumer.FOLLOW_60S_CANARY_ACCOUNT_ID,
                 run_id=TEST_RUN_ID,
                 terminal_status="canceled",
                 request_id=TEST_REQUEST_ID,

@@ -17,9 +17,9 @@ from typing import Any
 from logs import log
 
 
-CANARY_ACCOUNT_ID = "ba73eda4-d22a-4b93-9683-2af7b8aab764"
-CANARY_ACCOUNT_USERNAME = "j_automatise_pour_toi"
-ONE_SHOT_CONTRACT_SCHEMA = "J_AUTOMATISE_FOLLOW_60S_ONE_SHOT_V1"
+CANARY_ACCOUNT_ID = "dfe78a92-3a51-435e-8911-ed10c93a4d82"
+CANARY_ACCOUNT_USERNAME = "lorielebras_autom"
+ONE_SHOT_CONTRACT_SCHEMA = "LORIELE_FOLLOW_60S_ONE_SHOT_V1"
 
 _SUBFLAG_NAMES = (
     "opening_follow_composite",
@@ -218,7 +218,7 @@ def configure(
     package: str,
     resume_policy: dict[str, Any] | None,
 ) -> bool:
-    """Enable only j_automatise_pour_toi's first natural attempt or frozen retry."""
+    """Enable only lorielebras_autom's first natural attempt or frozen retry."""
     global _RUNTIME
     policy = dict(resume_policy or {})
     one_shot_resume, one_shot_reject = _one_shot_resume_allowed(policy)
