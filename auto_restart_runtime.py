@@ -256,6 +256,18 @@ def _validate_human_confirmed_resume_at_claim(
     embedded = _read_record(meta.get("resume_plan"))
     if _validate_resume_plan_schema(meta, embedded):
         return False, "resume_plan_invalid", None
+    attempt_fields_present = any(
+        record.get(field) not in (None, "")
+        for record in (meta, embedded)
+        for field in ("attempt_id", "current_attempt_id", "retry_index")
+    )
+    request_attempt_context = (
+        _canonical_request_attempt_context(meta, embedded)
+        if attempt_fields_present
+        else None
+    )
+    if attempt_fields_present and request_attempt_context is None:
+        return False, "resume_plan_invalid", None
     if str(embedded.get("schema") or "") != CANONICAL_RESUME_PLAN_SCHEMA_V2:
         return False, "resume_plan_invalid", None
     if str(embedded.get("account_id") or "").strip() != str(account_id or "").strip():
@@ -323,11 +335,13 @@ def _validate_human_confirmed_resume_at_claim(
         "retry_generation": _as_int(embedded.get("retry_generation")) or 0,
         "frozen_phase_plan": embedded,
         "restart_allowed": True,
+        **(request_attempt_context or {}),
         "request_metadata": {
             "source": AUTO_RESTART_TICK_SOURCE,
             "recovery_mode": HUMAN_CONFIRMED_RESUME_MODE,
             "trigger_source": meta.get("trigger_source"),
             "execution_worker_id": meta.get("execution_worker_id"),
+            **(request_attempt_context or {}),
         },
     }
     return True, "", policy
