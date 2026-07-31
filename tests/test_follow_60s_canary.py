@@ -193,7 +193,7 @@ class Follow60sCanaryRuntimeTest(unittest.TestCase):
                 mute_posts_verified=True,
                 mute_stories_verified=True,
                 viewport_fingerprint=f"viewport-{index}",
-                post_grid_outcome="safe_post",
+            post_grid_outcome="POST_ROW_POSITIVE_SAFE",
                 post_bounds={"left": 10, "top": 900, "right": 330, "bottom": 1220},
             )
             verdict, verdict_age, verdict_reason = canary.get_candidate_profile_verdict(
@@ -208,18 +208,28 @@ class Follow60sCanaryRuntimeTest(unittest.TestCase):
 
             canary.stash_post_grid_evidence(
                 candidate_username=candidate,
-                package="com.instagram.android",
-                activity="ProfileActivity",
+                package_name="com.instagram.android",
+                activity_name="com.instagram.mainactivity.InstagramMainActivity",
                 navigation_generation=generation,
                 viewport_fingerprint=f"viewport-{index}",
-                outcome="safe_post",
-                post_bounds={"left": 10, "top": 900, "right": 330, "bottom": 1220},
+                outcome="POST_ROW_POSITIVE_SAFE",
+                mute_sheet_closed=True,
+                mute_posts_verified=True,
+                mute_stories_verified=True,
+                profile_identity_method="test_exact_profile",
+                screen_width=1080,
+                screen_height=2340,
+                grid_tab_state="selected_or_physical_row",
+                post_count_positive=True,
+                physical_post_cells=[{"left": 10, "top": 900, "right": 330, "bottom": 1220}],
+                first_post_bounds={"left": 10, "top": 900, "right": 330, "bottom": 1220},
+                first_post_cell_source="test_fresh_xml",
                 ttl_ms=3000.0,
             )
             grid, grid_age, grid_reason = canary.consume_post_grid_evidence(
                 candidate_username=candidate,
                 package="com.instagram.android",
-                activity="ProfileActivity",
+                activity="com.instagram.mainactivity.InstagramMainActivity",
                 navigation_generation=generation,
                 viewport_fingerprint=f"viewport-{index}",
                 screen_size=(1080, 2340),
@@ -446,13 +456,21 @@ class Follow60sImmutableEvidenceContractsTest(unittest.TestCase):
 
     def test_post_grid_evidence_is_single_consume_and_bounds_safe(self) -> None:
         canary.stash_post_grid_evidence(
-            candidate_username="candidate", package="pkg", activity="act",
+            candidate_username="candidate", package_name="com.instagram.android",
+            activity_name="com.instagram.mainactivity.InstagramMainActivity",
             navigation_generation="g1", viewport_fingerprint="v1",
-            outcome="safe_post",
-            post_bounds={"left": 10, "top": 300, "right": 300, "bottom": 650},
+            outcome="POST_ROW_POSITIVE_SAFE",
+            mute_sheet_closed=True, mute_posts_verified=True,
+            mute_stories_verified=True, profile_identity_method="test_exact_profile",
+            screen_width=1080, screen_height=2340,
+            grid_tab_state="selected_or_physical_row", post_count_positive=True,
+            physical_post_cells=[{"left": 10, "top": 300, "right": 300, "bottom": 650}],
+            first_post_bounds={"left": 10, "top": 300, "right": 300, "bottom": 650},
+            first_post_cell_source="test_fresh_xml",
         )
         ev, _, reason = canary.consume_post_grid_evidence(
-            candidate_username="candidate", package="pkg", activity="act",
+            candidate_username="candidate", package="com.instagram.android",
+            activity="com.instagram.mainactivity.InstagramMainActivity",
             navigation_generation="g1", viewport_fingerprint="v1",
             screen_size=(1080, 2340),
         )
@@ -465,35 +483,47 @@ class Follow60sImmutableEvidenceContractsTest(unittest.TestCase):
 
     def test_ambiguous_post_grid_evidence_is_returned_for_one_direct_golden_decision(self) -> None:
         canary.stash_post_grid_evidence(
-            candidate_username="candidate", package="pkg", activity="act",
+            candidate_username="candidate", package_name="com.instagram.android",
+            activity_name="com.instagram.mainactivity.InstagramMainActivity",
             navigation_generation="g1", viewport_fingerprint="v1",
-            outcome="ambiguous", metadata={"identity_exact": True},
+            outcome="POST_GRID_AMBIGUOUS_FINAL",
+            mute_sheet_closed=True, mute_posts_verified=True,
+            mute_stories_verified=True, profile_identity_method="test_exact_profile",
+            screen_width=1080, screen_height=2340,
+            grid_tab_state="ambiguous",
         )
         ev, _, reason = canary.consume_post_grid_evidence(
-            candidate_username="candidate", package="pkg", activity="act",
+            candidate_username="candidate", package="com.instagram.android",
+            activity="com.instagram.mainactivity.InstagramMainActivity",
             navigation_generation="g1", viewport_fingerprint="v1",
             screen_size=(1080, 2340),
         )
         self.assertIsNotNone(ev)
-        self.assertEqual(ev.outcome, "ambiguous")
+        self.assertEqual(ev.outcome, "POST_GRID_AMBIGUOUS_FINAL")
         self.assertEqual(reason, "")
 
     def test_clipped_positive_row_survives_contract_for_single_reveal(self) -> None:
         canary.stash_post_grid_evidence(
-            candidate_username="candidate", package="pkg", activity="act",
+            candidate_username="candidate", package_name="com.instagram.android",
+            activity_name="com.instagram.mainactivity.InstagramMainActivity",
             navigation_generation="g1", viewport_fingerprint="v1",
-            outcome="clipped_post",
-            post_bounds={"left": 10, "top": 2100, "right": 350, "bottom": 2340},
-            metadata={"identity_exact": True, "profile_tabs_present": True,
-                      "grid_selected": True},
+            outcome="POST_ROW_POSITIVE_BUT_CLIPPED",
+            mute_sheet_closed=True, mute_posts_verified=True,
+            mute_stories_verified=True, profile_identity_method="test_exact_profile",
+            screen_width=1080, screen_height=2340,
+            grid_tab_state="selected_or_physical_row", post_count_positive=True,
+            physical_post_cells=[{"left": 10, "top": 2100, "right": 350, "bottom": 2340}],
+            first_post_bounds={"left": 10, "top": 2100, "right": 350, "bottom": 2340},
+            first_post_cell_source="test_clipped_xml",
         )
         ev, _, reason = canary.consume_post_grid_evidence(
-            candidate_username="candidate", package="pkg", activity="act",
+            candidate_username="candidate", package="com.instagram.android",
+            activity="com.instagram.mainactivity.InstagramMainActivity",
             navigation_generation="g1", viewport_fingerprint="v1",
             screen_size=(1080, 2340),
         )
         self.assertIsNotNone(ev)
-        self.assertEqual(ev.outcome, "clipped_post")
+        self.assertEqual(ev.outcome, "POST_ROW_POSITIVE_BUT_CLIPPED")
         self.assertEqual(reason, "")
 
     def test_canary_one_shot_resume_requires_exact_source_phase_and_quota(self) -> None:
@@ -592,9 +622,14 @@ class Follow60sImmutableEvidenceContractsTest(unittest.TestCase):
             mute_posts_verified=True, mute_stories_verified=True,
         )
         canary.stash_post_grid_evidence(
-            candidate_username="candidate", package="pkg", activity="act",
+            candidate_username="candidate", package_name="com.instagram.android",
+            activity_name="com.instagram.mainactivity.InstagramMainActivity",
             navigation_generation="g1", viewport_fingerprint="v1",
-            outcome="no_posts",
+            outcome="NO_POSTS_POSITIVE",
+            mute_sheet_closed=True, mute_posts_verified=True,
+            mute_stories_verified=True, profile_identity_method="test_exact_profile",
+            screen_width=1080, screen_height=2340,
+            grid_tab_state="selected_no_posts", no_posts_positive=True,
         )
         canary.stash_next_candidate_snapshot(
             source_profile_username="ct", package="pkg", activity="act",
@@ -747,7 +782,7 @@ class Follow60sSingleCaptureClassifiersTest(unittest.TestCase):
         out = nav._post_follow_post_grid_evidence_from_xml(
             xml, candidate_username="candidate", ww=1080, wh=2340
         )
-        self.assertEqual(out["outcome"], "safe_post")
+        self.assertEqual(out["outcome"], "POST_ROW_POSITIVE_SAFE")
         self.assertEqual(out["post_bounds"]["left"], 0)
 
     def test_post_grid_one_to_three_visible_posts_are_positive_without_scroll(self) -> None:
@@ -769,7 +804,7 @@ class Follow60sSingleCaptureClassifiersTest(unittest.TestCase):
                 out = nav._post_follow_post_grid_evidence_from_xml(
                     xml, candidate_username="candidate", ww=1080, wh=2340
                 )
-                self.assertEqual(out["outcome"], "safe_post")
+                self.assertEqual(out["outcome"], "POST_ROW_POSITIVE_SAFE")
                 self.assertEqual(out["visible_post_count"], count)
                 self.assertEqual(len(out["physical_cells"]), count)
                 self.assertEqual(out["grid_tab_state"], "selected_or_physical_row")
@@ -787,7 +822,7 @@ class Follow60sSingleCaptureClassifiersTest(unittest.TestCase):
         out = nav._post_follow_post_grid_evidence_from_xml(
             xml, candidate_username="candidate", ww=1080, wh=2340
         )
-        self.assertEqual(out["outcome"], "safe_post")
+        self.assertEqual(out["outcome"], "POST_ROW_POSITIVE_SAFE")
         self.assertEqual(out["visible_post_count"], 1)
 
     def test_post_grid_rejects_generic_square_view_without_media_semantics(self) -> None:
@@ -801,7 +836,7 @@ class Follow60sSingleCaptureClassifiersTest(unittest.TestCase):
         out = nav._post_follow_post_grid_evidence_from_xml(
             xml, candidate_username="candidate", ww=1080, wh=2340
         )
-        self.assertEqual(out["outcome"], "ambiguous")
+        self.assertEqual(out["outcome"], "POST_GRID_AMBIGUOUS_FINAL")
         self.assertEqual(out["visible_post_count"], 0)
 
     def test_final_mute_close_uses_one_xml_for_identity_verdict_and_grid(self) -> None:
@@ -848,7 +883,7 @@ class Follow60sSingleCaptureClassifiersTest(unittest.TestCase):
                 started_at=0.0,
             )
         self.assertIsNotNone(out)
-        self.assertEqual(out["post_grid_outcome"], "safe_post")
+        self.assertEqual(out["post_grid_outcome"], "POST_ROW_POSITIVE_SAFE")
         device.dump_hierarchy.assert_called_once_with(compressed=False)
 
     def test_post_grid_accepts_clipped_visible_cell_but_rejects_reels_tab(self) -> None:
@@ -862,7 +897,7 @@ class Follow60sSingleCaptureClassifiersTest(unittest.TestCase):
         clipped = nav._post_follow_post_grid_evidence_from_xml(
             base.format(extra=""), candidate_username="candidate", ww=1080, wh=1800
         )
-        self.assertEqual(clipped["outcome"], "safe_post")
+        self.assertEqual(clipped["outcome"], "POST_ROW_POSITIVE_SAFE")
         reels = nav._post_follow_post_grid_evidence_from_xml(
             base.format(
                 extra='<node content-desc="Profile tab reels" selected="true" '
@@ -872,7 +907,7 @@ class Follow60sSingleCaptureClassifiersTest(unittest.TestCase):
             ww=1080,
             wh=1800,
         )
-        self.assertEqual(reels["outcome"], "ambiguous")
+        self.assertEqual(reels["outcome"], "POST_GRID_AMBIGUOUS_FINAL")
 
     def test_post_grid_single_xml_no_posts_requires_identity_and_tabs(self) -> None:
         xml = """<hierarchy><node text="candidate"/>
@@ -881,9 +916,9 @@ class Follow60sSingleCaptureClassifiersTest(unittest.TestCase):
         out = nav._post_follow_post_grid_evidence_from_xml(
             xml, candidate_username="candidate", ww=1080, wh=2340
         )
-        self.assertEqual(out["outcome"], "no_posts")
+        self.assertEqual(out["outcome"], "NO_POSTS_POSITIVE")
 
-    def test_ambiguous_xml_promotes_with_one_fresh_safe_vision_cell(self) -> None:
+    def test_ambiguous_xml_goes_directly_to_golden_without_vision(self) -> None:
         device = MagicMock()
         xml = """<hierarchy><node text="candidate"/>
         <node content-desc="Profile tab grid" selected="true"
@@ -891,7 +926,7 @@ class Follow60sSingleCaptureClassifiersTest(unittest.TestCase):
         raw = nav._post_follow_post_grid_evidence_from_xml(
             xml, candidate_username="candidate", ww=1080, wh=2340
         )
-        self.assertEqual(raw["outcome"], "ambiguous")
+        self.assertEqual(raw["outcome"], "POST_GRID_AMBIGUOUS_FINAL")
         with patch.object(
             nav,
             "_post_follow_likes_probe_top_left_vision_cell_meta",
@@ -913,15 +948,14 @@ class Follow60sSingleCaptureClassifiersTest(unittest.TestCase):
             out = nav._post_follow_promote_ambiguous_grid_evidence_with_fresh_vision(
                 device, raw, ww=1080, wh=2340
             )
-        probe.assert_called_once()
-        self.assertEqual(out["outcome"], "safe_post")
-        self.assertTrue(out["tap_safe"])
-        self.assertEqual(out["post_bounds_source"], "fresh_vision_thumbnail_top_left")
+        probe.assert_not_called()
+        self.assertEqual(out["outcome"], "POST_GRID_AMBIGUOUS_FINAL")
+        self.assertFalse(out["fast_vision_probe_attempted"])
 
     def test_ambiguous_xml_keeps_golden_fallback_when_vision_is_not_safe(self) -> None:
         device = MagicMock()
         raw = {
-            "outcome": "ambiguous",
+            "outcome": "POST_GRID_AMBIGUOUS_FINAL",
             "identity_exact": True,
             "profile_tabs_present": True,
             "grid_selected": True,
@@ -942,16 +976,13 @@ class Follow60sSingleCaptureClassifiersTest(unittest.TestCase):
             out = nav._post_follow_promote_ambiguous_grid_evidence_with_fresh_vision(
                 device, raw, ww=1080, wh=2340
             )
-        self.assertEqual(out["outcome"], "ambiguous")
-        self.assertEqual(
-            out["fast_vision_probe_rejection_reason"],
-            "vision_thumbnail_top_left_not_found",
-        )
+        self.assertEqual(out["outcome"], "POST_GRID_AMBIGUOUS_FINAL")
+        self.assertFalse(out["fast_vision_probe_attempted"])
 
     def test_suggested_overlay_never_promotes_to_direct_post_tap(self) -> None:
         device = MagicMock()
         raw = {
-            "outcome": "ambiguous",
+            "outcome": "POST_GRID_AMBIGUOUS_FINAL",
             "identity_exact": True,
             "profile_tabs_present": True,
             "grid_selected": True,
@@ -968,11 +999,8 @@ class Follow60sSingleCaptureClassifiersTest(unittest.TestCase):
                 device, raw, ww=1080, wh=2340
             )
         probe.assert_not_called()
-        self.assertEqual(out["outcome"], "ambiguous")
-        self.assertEqual(
-            out["fast_vision_probe_rejection_reason"],
-            "suggested_overlay_visible",
-        )
+        self.assertEqual(out["outcome"], "POST_GRID_AMBIGUOUS_FINAL")
+        self.assertFalse(out["fast_vision_probe_attempted"])
 
 
 if __name__ == "__main__":

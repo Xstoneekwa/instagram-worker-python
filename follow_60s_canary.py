@@ -21,6 +21,19 @@ CANARY_ACCOUNT_ID = "dfe78a92-3a51-435e-8911-ed10c93a4d82"
 CANARY_ACCOUNT_USERNAME = "lorielebras_autom"
 ONE_SHOT_CONTRACT_SCHEMA = "LORIELE_FOLLOW_60S_ONE_SHOT_V1"
 
+POST_ROW_POSITIVE_SAFE = "POST_ROW_POSITIVE_SAFE"
+POST_ROW_POSITIVE_BUT_CLIPPED = "POST_ROW_POSITIVE_BUT_CLIPPED"
+POST_GRID_AMBIGUOUS_FINAL = "POST_GRID_AMBIGUOUS_FINAL"
+NO_POSTS_POSITIVE = "NO_POSTS_POSITIVE"
+POST_GRID_CANONICAL_OUTCOMES = frozenset(
+    {
+        POST_ROW_POSITIVE_SAFE,
+        POST_ROW_POSITIVE_BUT_CLIPPED,
+        POST_GRID_AMBIGUOUS_FINAL,
+        NO_POSTS_POSITIVE,
+    }
+)
+
 _SUBFLAG_NAMES = (
     "opening_follow_composite",
     "mute_known_depth",
@@ -144,26 +157,67 @@ class CandidateProfileVerdict:
 
 @dataclass(frozen=True)
 class PostGridEvidence:
-    """One-capture decision for the post-grid branch."""
+    """Immutable, fully typed final decision produced at Mute-sheet close."""
 
     account_id: str
     candidate_username: str
-    package: str
-    activity: str
+    package_name: str
+    activity_name: str
+    mute_sheet_closed: bool
+    mute_posts_verified: bool
+    mute_stories_verified: bool
+    profile_identity_method: str
     navigation_generation: str
-    viewport_fingerprint: str
-    outcome: str
-    post_bounds: dict[str, int] | None
-    grid_visible: bool
-    grid_tab_state: str
-    visible_post_count: int
-    physical_cells: tuple[dict[str, int], ...]
-    no_posts_positive: bool
     navigation_counter: int
+    scroll_generation: int
+    viewport_fingerprint: str
+    screen_width: int
+    screen_height: int
+    grid_tab_state: str
+    reels_tab_state: str
+    tagged_tab_state: str
+    post_count_positive: bool
+    physical_post_cells: tuple[dict[str, int], ...]
+    first_post_bounds: dict[str, int] | None
+    first_post_cell_source: str
+    outcome: str
+    no_posts_positive: bool
     invalidation_counter: int
     created_at_monotonic: float
     ttl_ms: float
-    metadata: dict[str, Any] = field(default_factory=dict)
+    invalidation_reason: str = ""
+    rejection_reason: str = ""
+
+    @property
+    def post_bounds(self) -> dict[str, int] | None:
+        return self.first_post_bounds
+
+    @property
+    def package(self) -> str:
+        return self.package_name
+
+    @property
+    def activity(self) -> str:
+        return self.activity_name
+
+    @property
+    def physical_cells(self) -> tuple[dict[str, int], ...]:
+        return self.physical_post_cells
+
+    @property
+    def first_post_cell_bounds(self) -> dict[str, int] | None:
+        return self.first_post_bounds
+
+    @property
+    def grid_visible(self) -> bool:
+        return self.outcome in {
+            POST_ROW_POSITIVE_SAFE,
+            POST_ROW_POSITIVE_BUT_CLIPPED,
+        }
+
+    @property
+    def visible_post_count(self) -> int:
+        return len(self.physical_post_cells)
 
 
 @dataclass(frozen=True)
@@ -646,38 +700,66 @@ def get_candidate_profile_verdict(
 
 
 def stash_post_grid_evidence(
-    *, candidate_username: str, package: str, activity: str,
+    *, candidate_username: str, package_name: str, activity_name: str,
     navigation_generation: str, viewport_fingerprint: str, outcome: str,
-    post_bounds: dict[str, int] | None = None, ttl_ms: float = 1500.0,
-    metadata: dict[str, Any] | None = None,
+    mute_sheet_closed: bool, mute_posts_verified: bool,
+    mute_stories_verified: bool, profile_identity_method: str,
+    screen_width: int, screen_height: int, grid_tab_state: str,
+    reels_tab_state: str = "not_selected", tagged_tab_state: str = "not_selected",
+    post_count_positive: bool = False,
+    physical_post_cells: list[dict[str, int]] | tuple[dict[str, int], ...] = (),
+    first_post_bounds: dict[str, int] | None = None,
+    first_post_cell_source: str = "", no_posts_positive: bool = False,
+    rejection_reason: str = "", ttl_ms: float = 3000.0,
 ) -> PostGridEvidence | None:
     if not enabled("like_fresh_cell_bounds"):
         return None
     candidate = str(candidate_username or "").strip().lstrip("@").lower()
     normalized = str(outcome or "").strip()
-    if not candidate or normalized not in {"safe_post", "clipped_post", "no_posts", "ambiguous"}:
+    if not candidate or normalized not in POST_GRID_CANONICAL_OUTCOMES:
         return None
+    package_exact = str(package_name or "").strip() == str(_RUNTIME.package or "").strip()
+    activity_compatible = "InstagramMainActivity" in str(activity_name or "")
+    if not package_exact or not activity_compatible:
+        return None
+    if not all((mute_sheet_closed, mute_posts_verified, mute_stories_verified)):
+        return None
+    cells = tuple(
+        dict(cell) for cell in physical_post_cells if isinstance(cell, dict)
+    )
+    bounds = (
+        dict(first_post_bounds)
+        if isinstance(first_post_bounds, dict)
+        else None
+    )
+    post_count_positive = bool(post_count_positive or cells)
     evidence = PostGridEvidence(
         account_id=_RUNTIME.account_id, candidate_username=candidate,
-        package=str(package or ""), activity=str(activity or ""),
+        package_name=str(package_name or ""), activity_name=str(activity_name or ""),
+        mute_sheet_closed=True,
+        mute_posts_verified=True,
+        mute_stories_verified=True,
+        profile_identity_method=str(profile_identity_method or ""),
         navigation_generation=str(navigation_generation or ""),
-        viewport_fingerprint=str(viewport_fingerprint or ""), outcome=normalized,
-        post_bounds=dict(post_bounds) if isinstance(post_bounds, dict) else None,
-        grid_visible=bool(normalized == "safe_post" and post_bounds),
-        grid_tab_state=str((metadata or {}).get("grid_tab_state") or ""),
-        visible_post_count=max(0, int((metadata or {}).get("visible_post_count") or 0)),
-        physical_cells=tuple(
-            dict(cell)
-            for cell in ((metadata or {}).get("physical_cells") or [])
-            if isinstance(cell, dict)
-        ),
-        no_posts_positive=bool(
-            normalized == "no_posts" and bool((metadata or {}).get("no_posts_positive"))
-        ),
         navigation_counter=_RUNTIME.navigation_counter,
+        scroll_generation=_RUNTIME.scroll_counter,
+        viewport_fingerprint=str(viewport_fingerprint or ""),
+        screen_width=max(1, int(screen_width)),
+        screen_height=max(1, int(screen_height)),
+        grid_tab_state=str(grid_tab_state or ""),
+        reels_tab_state=str(reels_tab_state or ""),
+        tagged_tab_state=str(tagged_tab_state or ""),
+        post_count_positive=bool(post_count_positive),
+        physical_post_cells=cells,
+        first_post_bounds=bounds,
+        first_post_cell_source=str(first_post_cell_source or ""),
+        outcome=normalized,
+        no_posts_positive=bool(
+            normalized == NO_POSTS_POSITIVE and no_posts_positive
+        ),
         invalidation_counter=_RUNTIME.invalidation_counter,
         created_at_monotonic=time.monotonic(), ttl_ms=max(1.0, float(ttl_ms)),
-        metadata=dict(metadata or {}),
+        rejection_reason=str(rejection_reason or ""),
     )
     _RUNTIME.post_grid_evidence[candidate] = evidence
     _count("post_grid_evidence", "created")
@@ -704,16 +786,29 @@ def consume_post_grid_evidence(
             if want and got != want:
                 reason = f"{name}_mismatch"
                 break
+        if not reason and ev.package_name != str(_RUNTIME.package or ""):
+            reason = "package_not_instagram_exact"
+        if not reason and "InstagramMainActivity" not in ev.activity_name:
+            reason = "activity_not_instagram_main"
         if not reason and age_ms > ev.ttl_ms:
             reason = "ttl_expired"
         if not reason and ev.invalidation_counter != _RUNTIME.invalidation_counter:
             reason = "invalidation_counter_mismatch"
         if not reason and ev.navigation_counter != _RUNTIME.navigation_counter:
             reason = "navigation_counter_mismatch"
-        if not reason and ev.outcome == "no_posts" and not ev.no_posts_positive:
+        if not reason and ev.scroll_generation != _RUNTIME.scroll_counter:
+            reason = "scroll_generation_mismatch"
+        if not reason and screen_size is not None and (
+            ev.screen_width != int(screen_size[0])
+            or ev.screen_height != int(screen_size[1])
+        ):
+            reason = "screen_dimensions_mismatch"
+        if not reason and ev.outcome == NO_POSTS_POSITIVE and not ev.no_posts_positive:
             reason = "no_posts_not_positive"
-        if not reason and ev.outcome == "safe_post":
-            ok, bounds_reason = safe_bounds(ev.post_bounds, screen_size=screen_size)
+        if not reason and ev.outcome == POST_ROW_POSITIVE_SAFE:
+            ok, bounds_reason = safe_bounds(
+                ev.first_post_cell_bounds, screen_size=screen_size
+            )
             if not ok:
                 reason = bounds_reason
     _count("post_grid_evidence", "rejected" if reason else "reused")

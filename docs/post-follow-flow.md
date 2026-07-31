@@ -101,3 +101,35 @@ Principes documentés côté implémentation :
 - réouverture profil + liste via **taps** uniquement si la config l’autorise explicitement (sinon désactivée par défaut pour limiter la dérive).
 
 Voir aussi [recovery-engine.md](recovery-engine.md).
+
+## Loriele Follow 60 — PostGridEvidence V2 et reçus durables
+
+Le canary `lorielebras_autom` peut produire, à la fermeture finale de la feuille
+Mute, une preuve immuable `PostGridEvidence` entièrement typée. Le producteur
+croise identité exacte du profil, package/activity, état Grid/Reels/Tagged,
+géométrie physique, génération navigation/scroll, viewport et vérification des
+deux Mutes. Ses seuls verdicts sont `POST_ROW_POSITIVE_SAFE`,
+`POST_ROW_POSITIVE_BUT_CLIPPED`, `POST_GRID_AMBIGUOUS_FINAL` et
+`NO_POSTS_POSITIVE`.
+
+Une ligne coupée autorise au producteur un reveal borné, une seule nouvelle
+acquisition XML, puis au plus une Vision si le profil, la grille et le nombre de
+posts sont déjà positivement prouvés mais que les bounds restent absentes. Le
+consommateur ne relance aucune investigation : une ambiguïté finale part
+directement vers Golden une fois. Avant un tap direct, une `FreshUiProof`
+tap-scoped est créée puis revalidée. Après toute ouverture, rapide ou Golden,
+le garde Story/Highlight V5 reste obligatoire ; une capture supplémentaire
+n'est permise que sur rejet avant l'unique Back/recovery.
+
+Chaque stage physique vérifié (`mute_posts_verified`,
+`mute_stories_verified`, `like_verified`, `return_ct_exact`) est journalisé
+dans un outbox SQLite local crash-safe, sans XML, screenshot ni secret. La clé
+est `(account_id, original_run_id, action_id_hash, stage)`. Une RPC composite
+idempotente projette les reçus sous binding exact account/run/request/action,
+et le candidat suivant reste bloqué jusqu'à confirmation de tous les stages du
+cycle. Stop pose d'abord le latch UI, puis tente un flush partiel borné ; après
+crash, le replay est DB-only et précède toute connexion au téléphone.
+
+Ce contrat est account-scoped : tous les autres comptes conservent le chemin
+Golden normal. L'absence ou la contradiction du binding canary échoue avant
+toute action Post-Follow avec `follow60_stage_binding_missing_or_invalid`.

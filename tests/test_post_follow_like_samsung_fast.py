@@ -400,7 +400,7 @@ class PostMuteGapTrackingTest(unittest.TestCase):
                     "candidate_context": {
                         "username": "cand",
                         "viewport_fingerprint": "viewport-1",
-                        "post_grid_outcome": "safe_post",
+                        "post_grid_outcome": "POST_ROW_POSITIVE_SAFE",
                     },
                 },
                 25.0,
@@ -1943,12 +1943,28 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
         )
         canary.stash_post_grid_evidence(
             candidate_username="cand",
-            package="com.instagram.android",
-            activity="",
+            package_name="com.instagram.android",
+            activity_name="com.instagram.mainactivity.InstagramMainActivity",
             navigation_generation="",
             viewport_fingerprint="",
-            outcome="safe_post",
-            post_bounds={
+            outcome="POST_ROW_POSITIVE_SAFE",
+            mute_sheet_closed=True,
+            mute_posts_verified=True,
+            mute_stories_verified=True,
+            profile_identity_method="test_exact_profile",
+            screen_width=1080,
+            screen_height=2340,
+            grid_tab_state="selected_or_physical_row",
+            post_count_positive=True,
+            physical_post_cells=[{
+                "left": 0,
+                "top": 900,
+                "right": 360,
+                "bottom": 1260,
+                "center_x": 180,
+                "center_y": 1080,
+            }],
+            first_post_bounds={
                 "left": 0,
                 "top": 900,
                 "right": 360,
@@ -1956,6 +1972,7 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
                 "center_x": 180,
                 "center_y": 1080,
             },
+            first_post_cell_source="test_fresh_xml",
             ttl_ms=3000.0,
         )
         try:

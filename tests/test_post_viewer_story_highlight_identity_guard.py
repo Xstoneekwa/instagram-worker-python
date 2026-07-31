@@ -571,7 +571,7 @@ class PostViewerStoryHighlightIdentityGuardTests(unittest.TestCase):
                     ww=1080,
                     wh=2340,
                 )
-                self.assertEqual(out["outcome"], "safe_post")
+                self.assertEqual(out["outcome"], "POST_ROW_POSITIVE_SAFE")
                 self.assertEqual(out["visible_post_count"], 3)
                 self.assertGreaterEqual(out["post_bounds"]["top"], post_top)
                 self.assertGreater(out["post_bounds"]["top"], highlight_top + 220)
@@ -592,7 +592,7 @@ class PostViewerStoryHighlightIdentityGuardTests(unittest.TestCase):
             ww=1080,
             wh=2340,
         )
-        self.assertNotEqual(out["outcome"], "safe_post")
+        self.assertNotEqual(out["outcome"], "POST_ROW_POSITIVE_SAFE")
         self.assertIsNone(out.get("post_bounds"))
 
 

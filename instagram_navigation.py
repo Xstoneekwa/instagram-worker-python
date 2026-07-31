@@ -17766,25 +17766,55 @@ def _stash_post_mute_sheet_closed_proof(
                 )
                 if _verdict is not None and str(
                     context.get("post_grid_outcome") or ""
-                ) in {"safe_post", "clipped_post", "no_posts", "ambiguous"}:
+                ) in {
+                    "POST_ROW_POSITIVE_SAFE",
+                    "POST_ROW_POSITIVE_BUT_CLIPPED",
+                    "POST_GRID_AMBIGUOUS_FINAL",
+                    "NO_POSTS_POSITIVE",
+                }:
+                    _grid = dict(context.get("post_grid_metadata") or {})
                     _stash_post_grid_evidence(
                         candidate_username=cand,
-                        package=str(context.get("package") or ""),
-                        activity=str(context.get("activity") or ""),
+                        package_name=str(context.get("package") or ""),
+                        activity_name=str(context.get("activity") or ""),
                         navigation_generation=str(
                             context.get("navigation_generation") or ""
                         ),
                         viewport_fingerprint=str(
                             context.get("post_grid_viewport_fingerprint") or ""
                         ),
-                        outcome=str(context.get("post_grid_outcome") or "ambiguous"),
-                        post_bounds=(
+                        outcome=str(
+                            context.get("post_grid_outcome")
+                            or "POST_GRID_AMBIGUOUS_FINAL"
+                        ),
+                        mute_sheet_closed=True,
+                        mute_posts_verified=bool(context.get("posts_verified")),
+                        mute_stories_verified=bool(context.get("stories_verified")),
+                        profile_identity_method="final_mute_close_exact_action_bar_xml",
+                        screen_width=int(_grid.get("screen_width") or 1),
+                        screen_height=int(_grid.get("screen_height") or 1),
+                        grid_tab_state=str(_grid.get("grid_tab_state") or ""),
+                        reels_tab_state=str(_grid.get("reels_tab_state") or ""),
+                        tagged_tab_state=str(_grid.get("tagged_tab_state") or ""),
+                        post_count_positive=bool(_grid.get("post_count_positive")),
+                        physical_post_cells=list(_grid.get("physical_cells") or []),
+                        first_post_bounds=(
                             dict(context.get("post_grid_bounds") or {})
                             if isinstance(context.get("post_grid_bounds"), dict)
                             else None
                         ),
+                        first_post_cell_source=str(
+                            _grid.get("post_bounds_source") or ""
+                        ),
+                        no_posts_positive=bool(
+                            context.get("post_grid_no_posts_positive")
+                        ),
+                        rejection_reason=str(
+                            _grid.get("fast_vision_probe_rejection_reason")
+                            or _grid.get("rejection_reason")
+                            or ""
+                        ),
                         ttl_ms=3000.0,
-                        metadata=dict(context.get("post_grid_metadata") or {}),
                     )
     except Exception:
         # The existing proof stash remains the Golden fallback.
@@ -17875,8 +17905,29 @@ def _publish_post_mute_verdict_at_final_sheet_close(
                 ww=int(profile_ww),
                 wh=int(profile_wh),
             )
+            profile_grid["candidate_username"] = cand
+            profile_grid["screen_width"] = int(profile_ww)
+            profile_grid["screen_height"] = int(profile_wh)
+            if str(profile_grid.get("outcome") or "") == "POST_ROW_POSITIVE_BUT_CLIPPED":
+                profile_grid = (
+                    _post_follow_promote_ambiguous_grid_evidence_with_fresh_vision(
+                        d,
+                        profile_grid,
+                        ww=int(profile_ww),
+                        wh=int(profile_wh),
+                        candidate_username=cand,
+                        budget_s=1.5,
+                    )
+                )
+                profile_grid["candidate_username"] = cand
+                profile_grid["screen_width"] = int(profile_ww)
+                profile_grid["screen_height"] = int(profile_wh)
+                runtime = _follow_60s_runtime_context()
+                context_out["navigation_generation"] = str(
+                    runtime.get("ui_generation") or "0"
+                )
             profile_grid["no_posts_positive"] = bool(
-                profile_grid.get("outcome") == "no_posts"
+                profile_grid.get("outcome") == "NO_POSTS_POSITIVE"
                 and profile_grid.get("identity_exact")
                 and profile_grid.get("profile_tabs_present")
                 and profile_grid.get("empty_marker_xml")
@@ -17889,7 +17940,8 @@ def _publish_post_mute_verdict_at_final_sheet_close(
                         profile_grid.get("viewport_fingerprint") or ""
                     ),
                     "post_grid_outcome": str(
-                        profile_grid.get("outcome") or "ambiguous"
+                        profile_grid.get("outcome")
+                        or "POST_GRID_AMBIGUOUS_FINAL"
                     ),
                     "post_grid_bounds": profile_grid.get("post_bounds"),
                     "post_grid_no_posts_positive": bool(
@@ -17908,19 +17960,23 @@ def _publish_post_mute_verdict_at_final_sheet_close(
                 grid_tab_state=str(profile_grid.get("grid_tab_state") or ""),
                 visible_post_count=int(profile_grid.get("visible_post_count") or 0),
                 physical_cell_count=len(profile_grid.get("physical_cells") or []),
-                grid_visible=bool(context_out["post_grid_outcome"] == "safe_post"),
+                grid_visible=bool(
+                    context_out["post_grid_outcome"]
+                    in {"POST_ROW_POSITIVE_SAFE", "POST_ROW_POSITIVE_BUT_CLIPPED"}
+                ),
                 no_posts_positive=bool(context_out["post_grid_no_posts_positive"]),
-                dumps=1,
-                screenshots=0,
-                retries=0,
+                dumps=1 + int(profile_grid.get("reacquire_dump_count") or 0),
+                screenshots=1 if profile_grid.get("fast_vision_probe_attempted") else 0,
+                retries=1 if profile_grid.get("reveal_scroll_attempted") else 0,
                 fallback_required=bool(
-                    context_out["post_grid_outcome"] == "ambiguous"
+                    context_out["post_grid_outcome"]
+                    == "POST_GRID_AMBIGUOUS_FINAL"
                 ),
             )
     except Exception as exc:
         context_out.update(
             {
-                "post_grid_outcome": "ambiguous",
+                "post_grid_outcome": "POST_GRID_AMBIGUOUS_FINAL",
                 "post_grid_metadata": {
                     "capture_error": type(exc).__name__,
                     "no_posts_positive": False,
@@ -17944,7 +18000,9 @@ def _publish_post_mute_verdict_at_final_sheet_close(
         candidate_username=cand,
         visual_candidate_id=visual_candidate_id,
         duration_ms=duration_ms,
-        post_grid_outcome=str(context_out.get("post_grid_outcome") or "ambiguous"),
+        post_grid_outcome=str(
+            context_out.get("post_grid_outcome") or "POST_GRID_AMBIGUOUS_FINAL"
+        ),
         fallback_used=False,
     )
     return context_out
@@ -22324,6 +22382,8 @@ def _post_follow_fast_no_posts_xml_evidence(hierarchy_xml: str) -> dict[str, Any
         "empty_marker_xml": False,
         "profile_tabs_present": False,
         "grid_selected": False,
+        "reels_selected": False,
+        "tagged_selected": False,
         "reels_or_tagged_selected": False,
         "loading_visible": False,
         "private_profile_visible": False,
@@ -22382,15 +22442,15 @@ def _post_follow_fast_no_posts_xml_evidence(hierarchy_xml: str) -> dict[str, Any
             for token in ("profile_tab_grid", "profile tab grid", "grid tab", "posts tab")
         ):
             out["profile_tabs_present"] = True
-        if any(
+        is_reels_tab = any(
             token in label
-            for token in (
-                "profile_tab_reels",
-                "profile tab reels",
-                "reels tab",
-                "tagged tab",
-            )
-        ):
+            for token in ("profile_tab_reels", "profile tab reels", "reels tab")
+        )
+        is_tagged_tab = any(
+            token in label
+            for token in ("profile_tab_tagged", "profile tab tagged", "tagged tab")
+        )
+        if is_reels_tab or is_tagged_tab:
             out["profile_tabs_present"] = True
         selected = str(attrs.get("selected") or "").lower() == "true" or str(
             attrs.get("checked") or ""
@@ -22402,15 +22462,11 @@ def _post_follow_fast_no_posts_xml_evidence(hierarchy_xml: str) -> dict[str, Any
             for token in ("profile_tab_grid", "profile tab grid", "grid tab", "posts tab")
         ):
             out["grid_selected"] = True
-        if any(
-            token in label
-            for token in (
-                "profile_tab_reels",
-                "profile tab reels",
-                "reels tab",
-                "tagged tab",
-            )
-        ):
+        if is_reels_tab:
+            out["reels_selected"] = True
+        if is_tagged_tab:
+            out["tagged_selected"] = True
+        if is_reels_tab or is_tagged_tab:
             out["reels_or_tagged_selected"] = True
     return out
 
@@ -22426,18 +22482,27 @@ def _post_follow_post_grid_evidence_from_xml(
     xml = str(hierarchy_xml or "")
     base = _post_follow_fast_no_posts_xml_evidence(xml)
     out: dict[str, Any] = {
-        "outcome": "ambiguous", "post_bounds": None,
-        "evidence_status": "NO_POST_EVIDENCE",
+        "outcome": "POST_GRID_AMBIGUOUS_FINAL", "post_bounds": None,
+        "evidence_status": "POST_GRID_AMBIGUOUS_FINAL",
+        "rejection_reason": "post_grid_ambiguous",
         "viewport_fingerprint": hashlib.sha256(
             xml.encode("utf-8", errors="replace")
         ).hexdigest()[:20] if xml else "",
         **base,
     }
-    if not xml or bool(base.get("loading_visible")) or bool(base.get("private_profile_visible")):
+    if not xml:
+        out["rejection_reason"] = "final_mute_close_xml_missing"
+        return out
+    if bool(base.get("loading_visible")):
+        out["rejection_reason"] = "profile_grid_loading"
+        return out
+    if bool(base.get("private_profile_visible")):
+        out["rejection_reason"] = "private_profile_surface"
         return out
     try:
         root = ET.fromstring(xml)
     except Exception:
+        out["rejection_reason"] = "final_mute_close_xml_parse_failed"
         return out
     expected = _normalize_handle(candidate_username)
     identity_exact = False
@@ -22445,6 +22510,7 @@ def _post_follow_post_grid_evidence_from_xml(
     raw_cells: list[dict[str, int]] = []
     grid_tab_marker = False
     grid_selected = bool(base.get("grid_selected"))
+    post_count_positive = False
 
     def _label_has_exact_handle(value: str) -> bool:
         for token in re.split(r"[^A-Za-z0-9._]+", str(value or "")):
@@ -22474,6 +22540,8 @@ def _post_follow_post_grid_evidence_from_xml(
             identity_exact = True
         bounds = _parse_ui_bounds_str(attrs.get("bounds"))
         label_l = label.lower()
+        if re.search(r"\b([1-9][0-9.,]*)\s+(posts?|publications?)\b", label_l):
+            post_count_positive = True
         is_tabs_container = "profile_tabs_container" in label_l
         is_grid_tab = any(
             token in label_l
@@ -22532,14 +22600,26 @@ def _post_follow_post_grid_evidence_from_xml(
     out["identity_exact"] = identity_exact
     out["tabs_bottom"] = tabs_bottom
     out["grid_tab_marker"] = grid_tab_marker
+    out["post_count_positive"] = bool(post_count_positive)
+    out["reels_tab_state"] = (
+        "selected" if bool(base.get("reels_selected")) else "not_selected"
+    )
+    out["tagged_tab_state"] = (
+        "selected" if bool(base.get("tagged_selected")) else "not_selected"
+    )
     if identity_exact and bool(base.get("profile_tabs_present")) and bool(base.get("empty_marker_xml")):
-        out["outcome"] = "no_posts"
+        out["outcome"] = "NO_POSTS_POSITIVE"
         out["evidence_status"] = "NO_POSTS_POSITIVE"
         out["grid_tab_state"] = "empty_grid_positive"
+        out["rejection_reason"] = ""
         out["visible_post_count"] = 0
         out["physical_cells"] = []
         return out
     if not (identity_exact and tabs_bottom > 0):
+        out["rejection_reason"] = (
+            "candidate_identity_not_exact" if not identity_exact
+            else "profile_tabs_bounds_missing"
+        )
         return out
     below = [cell for cell in raw_cells if int(cell["top"]) >= tabs_bottom - 4]
     below.sort(key=lambda cell: (int(cell["top"]), int(cell["left"])))
@@ -22564,8 +22644,14 @@ def _post_follow_post_grid_evidence_from_xml(
     below = deduped
     out["physical_cells"] = [dict(cell) for cell in below]
     out["visible_post_count"] = len(below)
+    out["post_count_positive"] = bool(post_count_positive or below)
     if not below:
         out["evidence_status"] = "NO_POST_EVIDENCE"
+        out["rejection_reason"] = (
+            "fresh_direct_post_cell_missing"
+            if post_count_positive and bool(base.get("profile_tabs_present"))
+            else "post_grid_ambiguous"
+        )
         return out
     # A physical post row below the canonical tabs container is a positive grid
     # state even when this Instagram build omits selected=true on the grid icon.
@@ -22580,7 +22666,8 @@ def _post_follow_post_grid_evidence_from_xml(
     out["grid_selected"] = grid_selected
     out["grid_tab_state"] = "selected_or_physical_row" if grid_selected else "unproven"
     if not grid_selected:
-        out["evidence_status"] = "POST_GRID_AMBIGUOUS"
+        out["evidence_status"] = "POST_GRID_AMBIGUOUS_FINAL"
+        out["rejection_reason"] = "selected_grid_not_proven"
         return out
     candidate = below[0]
     safe = _post_follow_likes_evaluate_top_left_post_target(
@@ -22588,9 +22675,11 @@ def _post_follow_post_grid_evidence_from_xml(
         y_min_px=int(tabs_bottom),
     )
     if bool(safe.get("top_left_post_tap_safe")):
-        out["outcome"] = "safe_post"
+        out["outcome"] = "POST_ROW_POSITIVE_SAFE"
         out["evidence_status"] = "POST_ROW_POSITIVE_SAFE"
         out["post_bounds"] = candidate
+        out["post_bounds_source"] = "fresh_final_mute_close_xml_physical_cell"
+        out["rejection_reason"] = ""
         out["tap_safe"] = True
         out["grid_exposure"] = safe.get("grid_exposure")
         out["physical_row_count"] = len(
@@ -22602,9 +22691,11 @@ def _post_follow_post_grid_evidence_from_xml(
     else:
         # A physical row below the exact profile tabs is positive evidence even
         # when a 1-3-post profile clips its only row at the viewport edge.
-        out["outcome"] = "clipped_post"
+        out["outcome"] = "POST_ROW_POSITIVE_BUT_CLIPPED"
         out["evidence_status"] = "POST_ROW_POSITIVE_BUT_CLIPPED"
         out["post_bounds"] = candidate
+        out["post_bounds_source"] = "fresh_final_mute_close_xml_physical_cell"
+        out["rejection_reason"] = "positive_post_row_clipped"
         out["tap_safe"] = False
         out["grid_exposure"] = safe.get("grid_exposure")
         out["clipped_reason"] = str(
@@ -22619,12 +22710,19 @@ def _post_follow_promote_ambiguous_grid_evidence_with_fresh_vision(
     *,
     ww: int,
     wh: int,
+    candidate_username: str = "",
     budget_s: float = 1.5,
 ) -> dict[str, Any]:
-    """Promote only a strictly identified grid using one fresh top-left screenshot proof."""
+    """Finalize one clipped row at the producer boundary, never in the consumer.
+
+    Ambiguous evidence returns immediately to Golden without a diagnostic. A
+    positively identified clipped row gets exactly one reveal and one fresh XML
+    reacquisition. Vision is allowed once only when the new XML still proves the
+    exact profile/grid/post-count but cannot expose safe physical bounds.
+    """
     out = dict(evidence or {})
     out.setdefault("fast_vision_probe_attempted", False)
-    if str(out.get("outcome") or "") not in {"ambiguous", "clipped_post"}:
+    if str(out.get("outcome") or "") != "POST_ROW_POSITIVE_BUT_CLIPPED":
         return out
     if not bool(out.get("identity_exact")):
         out["fast_vision_probe_rejection_reason"] = "candidate_identity_not_exact"
@@ -22649,25 +22747,60 @@ def _post_follow_promote_ambiguous_grid_evidence_with_fresh_vision(
         out["fast_vision_probe_rejection_reason"] = "profile_tabs_bounds_missing"
         return out
 
-    if str(out.get("outcome") or "") == "clipped_post":
-        out["reveal_scroll_attempted"] = True
-        try:
-            reveal = _post_follow_likes_profile_scroll_swipe(
-                d,
-                scroll_profile="reveal_moderate",
-                ww=int(ww),
-                wh=int(wh),
-            )
-            out["reveal_scroll_ok"] = bool(reveal.get("swipe_ok"))
-            if not out["reveal_scroll_ok"]:
-                out["fast_vision_probe_rejection_reason"] = (
-                    "clipped_reveal_scroll_failed"
-                )
-                return out
-            time.sleep(0.18)
-        except Exception:
-            out["fast_vision_probe_rejection_reason"] = "clipped_reveal_scroll_error"
+    out["reveal_scroll_attempted"] = True
+    try:
+        reveal = _post_follow_likes_profile_scroll_swipe(
+            d,
+            scroll_profile="reveal_moderate",
+            ww=int(ww),
+            wh=int(wh),
+        )
+        out["reveal_scroll_ok"] = bool(reveal.get("swipe_ok"))
+        if not out["reveal_scroll_ok"]:
+            out["outcome"] = "POST_GRID_AMBIGUOUS_FINAL"
+            out["fast_vision_probe_rejection_reason"] = "clipped_reveal_scroll_failed"
             return out
+        try:
+            from follow_60s_canary import invalidate as _invalidate_follow_60s_proofs
+
+            _invalidate_follow_60s_proofs("post_grid_v2_single_reveal_scroll")
+        except Exception:
+            pass
+        time.sleep(0.18)
+        fresh_xml = str(d.dump_hierarchy(compressed=False) or "")
+        out["reacquire_dump_count"] = 1
+        reacquired = _post_follow_post_grid_evidence_from_xml(
+            fresh_xml,
+            candidate_username=(candidate_username or str(out.get("candidate_username") or "")),
+            ww=int(ww),
+            wh=int(wh),
+        )
+        reacquired["reveal_scroll_attempted"] = True
+        reacquired["reveal_scroll_ok"] = True
+        reacquired["reacquire_dump_count"] = 1
+        out = reacquired
+    except Exception:
+        out["outcome"] = "POST_GRID_AMBIGUOUS_FINAL"
+        out["fast_vision_probe_rejection_reason"] = "clipped_reveal_reacquire_error"
+        return out
+    if str(out.get("outcome") or "") == "POST_ROW_POSITIVE_SAFE":
+        out["post_bounds_source"] = "single_reveal_fresh_xml_physical_cell"
+        return out
+    if not (
+        bool(out.get("identity_exact"))
+        and bool(out.get("profile_tabs_present"))
+        and bool(out.get("grid_selected"))
+        and bool(out.get("post_count_positive"))
+        and not bool(out.get("reels_or_tagged_selected"))
+        and not bool(out.get("loading_visible"))
+        and not bool(out.get("private_profile_visible"))
+    ):
+        out["outcome"] = "POST_GRID_AMBIGUOUS_FINAL"
+        out["fast_vision_probe_rejection_reason"] = (
+            str(out.get("rejection_reason") or "fresh_direct_post_cell_missing")
+        )
+        return out
+
     out["fast_vision_probe_attempted"] = True
     deadline = time.perf_counter() + max(0.25, float(budget_s))
     vision = _post_follow_likes_probe_top_left_vision_cell_meta(
@@ -22682,6 +22815,7 @@ def _post_follow_promote_ambiguous_grid_evidence_with_fresh_vision(
     out["fast_vision_probe_variance"] = vision.get("vision_top_left_variance")
     cell = vision.get("cell")
     if not bool(vision.get("reliable")) or not isinstance(cell, dict):
+        out["outcome"] = "POST_GRID_AMBIGUOUS_FINAL"
         out["fast_vision_probe_rejection_reason"] = str(
             vision.get("reason") or "vision_thumbnail_top_left_not_found"
         )
@@ -22694,17 +22828,18 @@ def _post_follow_promote_ambiguous_grid_evidence_with_fresh_vision(
         y_min_px=int(tabs_bottom),
     )
     if not bool(safe.get("top_left_post_tap_safe")):
+        out["outcome"] = "POST_GRID_AMBIGUOUS_FINAL"
         out["fast_vision_probe_rejection_reason"] = str(
             safe.get("failure_reason") or "vision_thumbnail_top_left_not_safe"
         )
         return out
     out.update(
         {
-            "outcome": "safe_post",
+            "outcome": "POST_ROW_POSITIVE_SAFE",
             "post_bounds": dict(cell),
             "tap_safe": True,
             "grid_exposure": safe.get("grid_exposure"),
-            "post_bounds_source": "fresh_vision_thumbnail_top_left",
+            "post_bounds_source": "single_reveal_fresh_vision_thumbnail_top_left",
             "fast_vision_probe_rejection_reason": "",
         }
     )
@@ -40887,75 +41022,19 @@ def _post_mute_state_checkpoint(
                     "sheet_closed": True,
                     "validated_at_monotonic": time.perf_counter(),
                 }
-                try:
-                    from follow_60s_canary import enabled as _follow_60s_canary_enabled
-
-                    if _follow_60s_canary_enabled("like_fresh_cell_bounds"):
-                        _profile_ww, _profile_wh = d.window_size()
-                        _profile_xml = str(d.dump_hierarchy(compressed=False) or "")
-                        _profile_grid = _post_follow_post_grid_evidence_from_xml(
-                            _profile_xml,
-                            candidate_username=cand,
-                            ww=int(_profile_ww),
-                            wh=int(_profile_wh),
-                        )
-                        _profile_grid["no_posts_positive"] = bool(
-                            _profile_grid.get("outcome") == "no_posts"
-                            and _profile_grid.get("identity_exact")
-                            and _profile_grid.get("profile_tabs_present")
-                            and _profile_grid.get("empty_marker_xml")
-                            and not _profile_grid.get("private_profile_visible")
-                            and not _profile_grid.get("loading_visible")
-                        )
-                        context_out.update(
-                            {
-                                "post_grid_viewport_fingerprint": str(
-                                    _profile_grid.get("viewport_fingerprint") or ""
-                                ),
-                                "post_grid_outcome": str(
-                                    _profile_grid.get("outcome") or "ambiguous"
-                                ),
-                                "post_grid_bounds": _profile_grid.get("post_bounds"),
-                                "post_grid_no_posts_positive": bool(
-                                    _profile_grid.get("no_posts_positive")
-                                ),
-                                "post_grid_metadata": dict(_profile_grid),
-                                "post_grid_dump_count": 1,
-                            }
-                        )
-                        log(
-                            "info",
-                            "follow_60s_post_grid_evidence_created_at_post_mute",
-                            source_profile_username=src,
-                            candidate_username=cand,
-                            outcome=context_out["post_grid_outcome"],
-                            viewport_fingerprint=context_out[
-                                "post_grid_viewport_fingerprint"
-                            ],
-                            grid_visible=bool(
-                                context_out["post_grid_outcome"] == "safe_post"
-                            ),
-                            no_posts_positive=bool(
-                                context_out["post_grid_no_posts_positive"]
-                            ),
-                            dumps=1,
-                            screenshots=0,
-                            retries=0,
-                            fallback_required=bool(
-                                context_out["post_grid_outcome"] == "ambiguous"
-                            ),
-                        )
-                except Exception as exc:
-                    context_out.update(
-                        {
-                            "post_grid_outcome": "ambiguous",
-                            "post_grid_metadata": {
-                                "capture_error": type(exc).__name__,
-                                "no_posts_positive": False,
-                            },
-                            "post_grid_dump_count": 0,
-                        }
-                    )
+                # PostGridEvidence V2 is produced only at the exact final Mute
+                # close. Reaching this later Golden checkpoint must not start a
+                # second diagnostic capture/reveal/screenshot sequence.
+                context_out.update(
+                    {
+                        "post_grid_outcome": "POST_GRID_AMBIGUOUS_FINAL",
+                        "post_grid_metadata": {
+                            "rejection_reason": "final_mute_close_proof_missing",
+                            "no_posts_positive": False,
+                        },
+                        "post_grid_dump_count": 0,
+                    }
+                )
                 total_ms = round((time.perf_counter() - checkpoint_t0) * 1000.0, 2)
                 _stash_post_mute_sheet_closed_proof(
                     source_profile_username=src,
@@ -48845,46 +48924,51 @@ def run_post_follow_post_likes_phase(
             if _grid_ev is not None:
                 _canary_grid_decision_consumed = True
                 _candidate_grid = {
-                    **dict(_grid_ev.metadata),
                     "outcome": _grid_ev.outcome,
-                    "post_bounds": _grid_ev.post_bounds,
+                    "package": _grid_ev.package,
+                    "activity": _grid_ev.activity,
+                    "post_bounds": _grid_ev.first_post_cell_bounds,
+                    "post_bounds_source": _grid_ev.first_post_cell_source,
+                    "grid_tab_state": _grid_ev.grid_tab_state,
+                    "reels_tab_state": _grid_ev.reels_tab_state,
+                    "tagged_tab_state": _grid_ev.tagged_tab_state,
+                    "post_count_positive": _grid_ev.post_count_positive,
+                    "physical_cells": [dict(cell) for cell in _grid_ev.physical_cells],
+                    "no_posts_positive": _grid_ev.no_posts_positive,
+                    "rejection_reason": _grid_ev.rejection_reason,
                     "proof_age_ms": _grid_age,
                 }
-                if _grid_ev.outcome == "clipped_post":
-                    _candidate_grid = (
-                        _post_follow_promote_ambiguous_grid_evidence_with_fresh_vision(
-                            d, _candidate_grid, ww=int(_grid_ww), wh=int(_grid_wh), budget_s=1.5
-                        )
-                    )
-                if str(_candidate_grid.get("outcome") or "") in {"safe_post", "no_posts"}:
+                if str(_candidate_grid.get("outcome") or "") in {
+                    "POST_ROW_POSITIVE_SAFE",
+                    "NO_POSTS_POSITIVE",
+                }:
                     _canary_grid_evidence = _candidate_grid
                     _record_follow_60s_outcome(
                         "like_fresh_cell_bounds", "used", age_ms=_grid_age,
                         dumps=0,
-                        screenshots=1 if _grid_ev.outcome == "clipped_post" else 0,
-                        retries=1 if _grid_ev.outcome == "clipped_post" else 0,
+                        screenshots=0,
+                        retries=0,
                         estimated_gain_ms=6500.0,
                     )
                 else:
                     _canary_grid_evidence = None
                     _grid_reject = str(
-                        _candidate_grid.get("fast_vision_probe_rejection_reason")
+                        _candidate_grid.get("rejection_reason")
                         or "post_grid_ambiguous"
                     )
                     _record_follow_60s_outcome(
                         "like_fresh_cell_bounds", "fallback", age_ms=_grid_age,
                         reason=_grid_reject, fallback_used=True,
-                        screenshots=1 if _grid_ev.outcome == "clipped_post" else 0,
-                        retries=1 if _grid_ev.outcome == "clipped_post" else 0,
+                        screenshots=0,
+                        retries=0,
                     )
                     log(
                         "info", "follow_60s_post_grid_evidence_fallback_golden_direct",
                         visual_candidate_id=vcid, source_profile_username=src,
                         follower_username=cand, rejection_reason=_grid_reject,
                         proof_age_ms=round(float(_grid_age or 0.0), 2),
-                        fast_diagnostic_attempted=bool(_grid_ev.outcome == "clipped_post"),
-                        dumps=0, screenshots=1 if _grid_ev.outcome == "clipped_post" else 0,
-                        retries=1 if _grid_ev.outcome == "clipped_post" else 0,
+                        fast_diagnostic_attempted=False,
+                        dumps=0, screenshots=0, retries=0,
                     )
             else:
                 log(
@@ -48956,7 +49040,7 @@ def run_post_follow_post_likes_phase(
             surface_precheck = {
                 "profile_candidate_visible": True, "followers_list_visible": False,
                 "grid_tab_visible": True,
-                "post_cells_visible": str(_canary_grid_evidence.get("outcome")) == "safe_post",
+                "post_cells_visible": str(_canary_grid_evidence.get("outcome")) == "POST_ROW_POSITIVE_SAFE",
                 "precheck_ms": 0.0, "immutable_evidence_reused": True,
             }
         elif not bool(sheet_precheck.get("skip_like")):
@@ -49695,7 +49779,7 @@ def run_post_follow_post_likes_phase(
             pass
         if _canary_grid_evidence is not None:
             tier1_check = {
-                "no_posts_detected": str(_canary_grid_evidence.get("outcome")) == "no_posts",
+                "no_posts_detected": str(_canary_grid_evidence.get("outcome")) == "NO_POSTS_POSITIVE",
                 "detection_method": "single_post_grid_evidence",
             }
         else:
@@ -49887,7 +49971,7 @@ def run_post_follow_post_likes_phase(
 
         if (
             _canary_grid_evidence is not None
-            and str(_canary_grid_evidence.get("outcome") or "") == "no_posts"
+            and str(_canary_grid_evidence.get("outcome") or "") == "NO_POSTS_POSITIVE"
         ):
             return _skip_no_posts(
                 {
@@ -49959,7 +50043,7 @@ def run_post_follow_post_likes_phase(
         _canary_preopened_out: dict[str, Any] | None = None
         if (
             _canary_grid_evidence is not None
-            and str(_canary_grid_evidence.get("outcome") or "") == "safe_post"
+            and str(_canary_grid_evidence.get("outcome") or "") == "POST_ROW_POSITIVE_SAFE"
             and isinstance(_canary_grid_evidence.get("post_bounds"), dict)
         ):
             _fresh_bounds = dict(_canary_grid_evidence.get("post_bounds") or {})
@@ -49970,36 +50054,98 @@ def run_post_follow_post_likes_phase(
                 int(_fresh_bounds.get("top") or 0) + int(_fresh_bounds.get("bottom") or 0)
             ) // 2)
             _meta_before = _followers_current_pkg_activity(d)
-            d.click(_tx, _ty)
+            _tap_proof = None
+            _tap_proof_age_ms = 0.0
+            _tap_proof_reject = "fresh_ui_proof_missing"
             try:
-                from follow_60s_canary import invalidate as _invalidate_follow_60s_proofs
-                _invalidate_follow_60s_proofs("planned_post_cell_tap")
-            except Exception:
-                pass
-            _viewer = _visual_wait_post_viewer_opened_after_tap(
-                d, pkg=pkg, expected_follower_username=cand,
-                act_before=_meta_before.get("current_activity"), post_follow_fast=True,
-            )
-            if bool(_viewer.get("post_detected")):
-                _stash_post_follow_open_like_proof(
-                    _viewer, source_profile_username=src, follower_username=cand,
-                    proof_source="single_post_grid_evidence",
+                from follow_60s_canary import (
+                    consume as _consume_follow_60s_tap_proof,
+                    stash as _stash_follow_60s_tap_proof,
                 )
-            _canary_preopened_out = {
-                "ok": bool(_viewer.get("post_detected")),
-                "post_detected": bool(_viewer.get("post_detected")),
-                "failure_reason": "" if bool(_viewer.get("post_detected"))
-                else "post_viewer_not_detected_after_fresh_bounds_tap",
-                "open_strategy": "single_post_grid_evidence",
-                "tap_to_viewer_detected_ms": _viewer.get("viewer_detect_total_ms"),
-                "viewer_detect_path": _viewer.get("viewer_detect_path"),
-                "post_open_snapshot_xml": _viewer.get("post_open_snapshot_xml"),
-                "post_open_snapshot_captured_at_monotonic": _viewer.get(
-                    "post_open_snapshot_captured_at_monotonic"
-                ),
-                "post_open_snapshot_valid": bool(_viewer.get("post_open_snapshot_valid")),
-                "likes_perf_post_open": dict(_viewer),
-            }
+
+                _stash_follow_60s_tap_proof(
+                    "post_grid_direct_cell_tap",
+                    subject_username=src,
+                    target_username=cand,
+                    package=str(_meta_before.get("current_package") or pkg),
+                    activity=str(_meta_before.get("current_activity") or ""),
+                    surface="candidate_profile_post_grid",
+                    detection_source=str(
+                        _canary_grid_evidence.get("post_bounds_source")
+                        or "post_grid_evidence_v2"
+                    ),
+                    ttl_ms=450.0,
+                    bounds=_fresh_bounds,
+                    metadata={"canonical_outcome": "POST_ROW_POSITIVE_SAFE"},
+                )
+                _tap_proof, _tap_proof_age_ms, _tap_proof_reject = (
+                    _consume_follow_60s_tap_proof(
+                        "post_grid_direct_cell_tap",
+                        subject_username=src,
+                        target_username=cand,
+                        package=str(_meta_before.get("current_package") or pkg),
+                        activity=str(_meta_before.get("current_activity") or ""),
+                        surface="candidate_profile_post_grid",
+                        consume_once=True,
+                    )
+                )
+            except Exception as _tap_proof_exc:
+                _tap_proof_reject = (
+                    f"fresh_ui_proof_error:{type(_tap_proof_exc).__name__}"
+                )
+            if _tap_proof is None or not isinstance(_tap_proof.bounds, dict):
+                _canary_grid_evidence = None
+                try:
+                    _record_follow_60s_outcome(
+                        "like_fresh_cell_bounds",
+                        "fallback",
+                        age_ms=_tap_proof_age_ms,
+                        reason=_tap_proof_reject,
+                        fallback_used=True,
+                        dumps=0,
+                        screenshots=0,
+                        retries=0,
+                    )
+                except Exception:
+                    pass
+            else:
+                _fresh_bounds = dict(_tap_proof.bounds)
+                _tx = int(_fresh_bounds.get("center_x") or (
+                    int(_fresh_bounds.get("left") or 0) + int(_fresh_bounds.get("right") or 0)
+                ) // 2)
+                _ty = int(_fresh_bounds.get("center_y") or (
+                    int(_fresh_bounds.get("top") or 0) + int(_fresh_bounds.get("bottom") or 0)
+                ) // 2)
+                d.click(_tx, _ty)
+                try:
+                    from follow_60s_canary import invalidate as _invalidate_follow_60s_proofs
+                    _invalidate_follow_60s_proofs("planned_post_cell_tap")
+                except Exception:
+                    pass
+                _viewer = _visual_wait_post_viewer_opened_after_tap(
+                    d, pkg=pkg, expected_follower_username=cand,
+                    act_before=_meta_before.get("current_activity"), post_follow_fast=True,
+                )
+                if bool(_viewer.get("post_detected")):
+                    _stash_post_follow_open_like_proof(
+                        _viewer, source_profile_username=src, follower_username=cand,
+                        proof_source="single_post_grid_evidence",
+                    )
+                _canary_preopened_out = {
+                    "ok": bool(_viewer.get("post_detected")),
+                    "post_detected": bool(_viewer.get("post_detected")),
+                    "failure_reason": "" if bool(_viewer.get("post_detected"))
+                    else "post_viewer_not_detected_after_fresh_bounds_tap",
+                    "open_strategy": "single_post_grid_evidence",
+                    "tap_to_viewer_detected_ms": _viewer.get("viewer_detect_total_ms"),
+                    "viewer_detect_path": _viewer.get("viewer_detect_path"),
+                    "post_open_snapshot_xml": _viewer.get("post_open_snapshot_xml"),
+                    "post_open_snapshot_captured_at_monotonic": _viewer.get(
+                        "post_open_snapshot_captured_at_monotonic"
+                    ),
+                    "post_open_snapshot_valid": bool(_viewer.get("post_open_snapshot_valid")),
+                    "likes_perf_post_open": dict(_viewer),
+                }
 
         def _run_pre_reveal_guard_before_legacy_safe() -> dict[str, Any]:
             t_pre_reveal = time.perf_counter()
