@@ -82,6 +82,31 @@ class HumanConfirmedResumeClaimTest(unittest.TestCase):
         self.assertEqual(policy["quota_remaining"]["follow"], 10)
         self.assertEqual(policy["retry_generation"], 1)
 
+    def test_canonical_request_attempt_is_propagated_for_checkpoint_provenance(self) -> None:
+        meta = _metadata(attempt_id=2, retry_index=1)
+        meta["resume_plan"]["attempt_id"] = 1
+        with patch.object(store, "load_resume_plan", return_value=_plan_row()):
+            ok, reason, policy = validate_auto_restart_request_at_claim(
+                account_id=ACCOUNT_ID,
+                metadata=meta,
+            )
+        self.assertTrue(ok, reason)
+        self.assertIsNotNone(policy)
+        self.assertEqual(policy["attempt_id"], 2)
+        self.assertEqual(policy["retry_index"], 1)
+        self.assertEqual(policy["request_metadata"]["attempt_id"], 2)
+        self.assertEqual(policy["request_metadata"]["retry_index"], 1)
+
+    def test_invalid_present_attempt_contract_fails_closed(self) -> None:
+        with patch.object(store, "load_resume_plan", return_value=_plan_row()):
+            ok, reason, policy = validate_auto_restart_request_at_claim(
+                account_id=ACCOUNT_ID,
+                metadata=_metadata(attempt_id=2, retry_index=0),
+            )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "resume_plan_invalid")
+        self.assertIsNone(policy)
+
     def test_zero_action_restriction_preflight_passes_only_with_exact_contract(self) -> None:
         meta = _metadata(restriction_preflight_only=True)
         meta["resume_plan"] = {
