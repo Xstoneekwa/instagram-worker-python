@@ -590,6 +590,15 @@ class Follow60sImmutableEvidenceContractsTest(unittest.TestCase):
 
 
 class Follow60sSingleCaptureClassifiersTest(unittest.TestCase):
+    def tearDown(self) -> None:
+        canary.configure(
+            account_id="other",
+            account_username="other",
+            run_id="reset",
+            package="com.instagram.android",
+            resume_policy=None,
+        )
+
     def test_mute_sheet_levels_use_one_xml_classification(self) -> None:
         level1_xml = """<hierarchy><node text="Close friends"/><node text="Mute"/>
         <node text="Restrict"/><node text="Unfollow"/></hierarchy>"""
@@ -619,10 +628,22 @@ class Follow60sSingleCaptureClassifiersTest(unittest.TestCase):
         device = MagicMock()
         device.dump_hierarchy.return_value = """<hierarchy>
         <node text="candidate"/><node text="Posts"/><node text="Followers"/>
-        <node text="Following"/><node text="Follow"/></hierarchy>"""
-        out = nav.acquire_pre_follow_mono_capture(
-            device, follower_username="candidate"
-        )
+        <node text="Following"/><node text="Follow"
+        resource-id="com.instagram.android:id/profile_header_follow_button"
+        bounds="[700,420][1040,560]"/></hierarchy>"""
+        with patch.object(
+            nav,
+            "_followers_current_pkg_activity",
+            return_value={
+                "current_package": "com.instagram.android",
+                "current_activity": "ProfileActivity",
+            },
+        ):
+            out = nav.acquire_pre_follow_mono_capture(
+                device,
+                follower_username="candidate",
+                expected_package="com.instagram.android",
+            )
         self.assertTrue(out["ok"])
         self.assertFalse(out["private_probe_payload"]["private_profile_detected"])
         device.dump_hierarchy.assert_called_once()
@@ -639,6 +660,49 @@ class Follow60sSingleCaptureClassifiersTest(unittest.TestCase):
         self.assertFalse(out["ok"])
         self.assertTrue(out["private_probe_payload"]["private_profile_detected"])
 
+    def test_pre_follow_mono_capture_rejects_missing_cta_or_package_mismatch(self) -> None:
+        device = MagicMock()
+        public_without_cta = """<hierarchy><node text="candidate"/>
+        <node text="Posts"/><node text="Followers"/><node text="Following"/>
+        </hierarchy>"""
+        device.dump_hierarchy.return_value = public_without_cta
+        with patch.object(
+            nav,
+            "_followers_current_pkg_activity",
+            return_value={
+                "current_package": "com.instagram.android",
+                "current_activity": "ProfileActivity",
+            },
+        ):
+            no_cta = nav.acquire_pre_follow_mono_capture(
+                device,
+                follower_username="candidate",
+                expected_package="com.instagram.android",
+            )
+        self.assertFalse(no_cta["ok"])
+        self.assertFalse(no_cta["follow_cta_positive"])
+
+        device.dump_hierarchy.return_value = """<hierarchy>
+        <node text="candidate"/><node text="Posts"/><node text="Followers"/>
+        <node text="Following"/><node text="Follow"
+        resource-id="com.instagram.android:id/profile_header_follow_button"
+        bounds="[700,420][1040,560]"/></hierarchy>"""
+        with patch.object(
+            nav,
+            "_followers_current_pkg_activity",
+            return_value={
+                "current_package": "other.package",
+                "current_activity": "ProfileActivity",
+            },
+        ):
+            wrong_package = nav.acquire_pre_follow_mono_capture(
+                device,
+                follower_username="candidate",
+                expected_package="com.instagram.android",
+            )
+        self.assertFalse(wrong_package["ok"])
+        self.assertFalse(wrong_package["package_exact"])
+
     def test_post_grid_single_xml_yields_safe_top_left_bounds(self) -> None:
         xml = """<hierarchy>
         <node text="candidate" bounds="[0,80][500,160]"/>
@@ -650,6 +714,130 @@ class Follow60sSingleCaptureClassifiersTest(unittest.TestCase):
         )
         self.assertEqual(out["outcome"], "safe_post")
         self.assertEqual(out["post_bounds"]["left"], 0)
+
+    def test_post_grid_one_to_three_visible_posts_are_positive_without_scroll(self) -> None:
+        for count in (1, 2, 3):
+            cells = "".join(
+                f'<node class="android.widget.ImageView" '
+                f'content-desc="Post thumbnail {index + 1}" '
+                f'bounds="[{index * 360},900][{(index + 1) * 360},1260]"/>'
+                for index in range(count)
+            )
+            xml = (
+                '<hierarchy><node text="candidate"/>'
+                '<node resource-id="com.instagram.android:id/profile_tabs_container" '
+                'bounds="[0,700][1080,820]"/>'
+                '<node content-desc="Profile tab grid" bounds="[0,700][360,820]"/>'
+                f'{cells}</hierarchy>'
+            )
+            with self.subTest(visible_posts=count):
+                out = nav._post_follow_post_grid_evidence_from_xml(
+                    xml, candidate_username="candidate", ww=1080, wh=2340
+                )
+                self.assertEqual(out["outcome"], "safe_post")
+                self.assertEqual(out["visible_post_count"], count)
+                self.assertEqual(len(out["physical_cells"]), count)
+                self.assertEqual(out["grid_tab_state"], "selected_or_physical_row")
+
+    def test_post_grid_deduplicates_nested_physical_cell_nodes(self) -> None:
+        xml = """<hierarchy><node text="candidate"/>
+        <node resource-id="com.instagram.android:id/profile_tabs_container"
+              bounds="[0,700][1080,820]"/>
+        <node content-desc="Profile tab grid" bounds="[0,700][360,820]"/>
+        <node class="android.widget.FrameLayout" content-desc="Post thumbnail"
+              bounds="[0,900][360,1260]">
+          <node class="android.widget.ImageView" content-desc="Post image"
+                bounds="[2,902][358,1258]"/>
+        </node></hierarchy>"""
+        out = nav._post_follow_post_grid_evidence_from_xml(
+            xml, candidate_username="candidate", ww=1080, wh=2340
+        )
+        self.assertEqual(out["outcome"], "safe_post")
+        self.assertEqual(out["visible_post_count"], 1)
+
+    def test_post_grid_rejects_generic_square_view_without_media_semantics(self) -> None:
+        xml = """<hierarchy><node text="candidate"/>
+        <node resource-id="com.instagram.android:id/profile_tabs_container"
+              bounds="[0,700][1080,820]"/>
+        <node content-desc="Profile tab grid" selected="true"
+              bounds="[0,700][360,820]"/>
+        <node class="android.view.ViewGroup" content-desc="Suggested account"
+              bounds="[0,900][360,1260]"/></hierarchy>"""
+        out = nav._post_follow_post_grid_evidence_from_xml(
+            xml, candidate_username="candidate", ww=1080, wh=2340
+        )
+        self.assertEqual(out["outcome"], "ambiguous")
+        self.assertEqual(out["visible_post_count"], 0)
+
+    def test_final_mute_close_uses_one_xml_for_identity_verdict_and_grid(self) -> None:
+        self.assertTrue(
+            canary.configure(
+                account_id=canary.CANARY_ACCOUNT_ID,
+                account_username=canary.CANARY_ACCOUNT_USERNAME,
+                run_id="mono-final-close",
+                package="com.instagram.android",
+                resume_policy=None,
+            )
+        )
+        device = MagicMock()
+        device.window_size.return_value = (1080, 2340)
+        device.dump_hierarchy.return_value = """<hierarchy>
+        <node text="candidate"
+              resource-id="com.instagram.android:id/action_bar_title"/>
+        <node resource-id="com.instagram.android:id/profile_tabs_container"
+              bounds="[0,700][1080,820]"/>
+        <node content-desc="Profile tab grid" selected="true"
+              bounds="[0,700][360,820]"/>
+        <node class="android.widget.ImageView" content-desc="Post thumbnail"
+              bounds="[0,900][360,1260]"/></hierarchy>"""
+        with patch.object(
+            nav,
+            "_followers_current_pkg_activity",
+            return_value={
+                "current_package": "com.instagram.android",
+                "current_activity": "ProfileActivity",
+            },
+        ), patch.object(
+            nav,
+            "read_current_profile_username_for_follow_gate",
+            side_effect=AssertionError("identity must come from the mono XML"),
+        ):
+            out = nav._publish_post_mute_verdict_at_final_sheet_close(
+                device,
+                source_profile_username="ct",
+                candidate_username="candidate",
+                visual_candidate_id="vc-1",
+                candidate_context={},
+                mute_posts_verified=True,
+                mute_stories_verified=True,
+                started_at=0.0,
+            )
+        self.assertIsNotNone(out)
+        self.assertEqual(out["post_grid_outcome"], "safe_post")
+        device.dump_hierarchy.assert_called_once_with(compressed=False)
+
+    def test_post_grid_accepts_clipped_visible_cell_but_rejects_reels_tab(self) -> None:
+        base = """<hierarchy><node text="candidate"/>
+        <node resource-id="com.instagram.android:id/profile_tabs_container"
+              bounds="[0,700][1080,820]"/>
+        <node content-desc="Profile tab grid" bounds="[0,700][360,820]"/>
+        {extra}
+        <node class="android.widget.ImageView" content-desc="Post thumbnail"
+              bounds="[0,850][360,1050]"/></hierarchy>"""
+        clipped = nav._post_follow_post_grid_evidence_from_xml(
+            base.format(extra=""), candidate_username="candidate", ww=1080, wh=1800
+        )
+        self.assertEqual(clipped["outcome"], "safe_post")
+        reels = nav._post_follow_post_grid_evidence_from_xml(
+            base.format(
+                extra='<node content-desc="Profile tab reels" selected="true" '
+                'bounds="[360,700][720,820]"/>'
+            ),
+            candidate_username="candidate",
+            ww=1080,
+            wh=1800,
+        )
+        self.assertEqual(reels["outcome"], "ambiguous")
 
     def test_post_grid_single_xml_no_posts_requires_identity_and_tabs(self) -> None:
         xml = """<hierarchy><node text="candidate"/>

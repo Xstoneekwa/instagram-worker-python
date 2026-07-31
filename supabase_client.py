@@ -3253,12 +3253,30 @@ def get_follow_persistence_event(action_id: str) -> dict[str, Any] | None:
         "GET",
         "ig_interaction_events",
         query={
-            "select": "id,account_id,run_id,request_id,username,event_type,event_status,payload",
+            "select": (
+                "id,account_id,run_id,request_id,username,event_type,event_status,"
+                "interaction_type,interaction_status,event_at,payload"
+            ),
             "id": f"eq.{str(action_id)}",
             "limit": "1",
         },
     )
     return rows[0] if isinstance(rows, list) and rows else None
+
+
+def get_follow_persistence_canonical_evidence(
+    *, action_id: str, account_id: str, username: str
+) -> dict[str, Any]:
+    """Read the three canonical records used to reconcile a committed Follow.
+
+    This is deliberately a read-only recovery path and is called only after a
+    strict RPC response failure or an ambiguous network result.
+    """
+    return {
+        "event": get_follow_persistence_event(str(action_id)),
+        "interaction": load_interacted_user(str(account_id), str(username)),
+        "unfollow_settings": get_account_unfollow_settings(str(account_id)),
+    }
 
 
 def get_account_follow_settings(account_id: str) -> dict[str, Any] | None:

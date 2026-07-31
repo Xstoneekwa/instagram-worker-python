@@ -47,7 +47,9 @@ import target_followers_progressive_resume_v2 as target_followers_resume_v2
 from follow_persistence_rpc import (
     action_id_hash,
     deterministic_action_id,
+    rpc_response_shape,
     rpc_v1_enabled as follow_persistence_rpc_v1_enabled,
+    validate_canonical_persistence_evidence,
     validate_rpc_response,
 )
 from runtime_caps import resolve_follow_runtime_limits
@@ -329,36 +331,93 @@ def _private_skip_fast_path_handle(
         _emit("private_skip_fast_path_completed", reason=reason, fallback_used=True)
         return {"handled": False, "reason": reason}
 
-    probe = visual_candidate_pre_follow_private_gate(
-        d,
-        source_profile_username=src or None,
-        dont_follow_private_accounts=True,
-        follower_username=cand,
-        visual_candidate_id=vcid,
-        prior_private_probe=None,
+    mono_capture: dict[str, Any] | None = None
+    try:
+        from follow_60s_canary import enabled as _follow_60s_canary_enabled
+
+        if _follow_60s_canary_enabled("opening_follow_composite"):
+            mono_capture = acquire_pre_follow_mono_capture(
+                d,
+                follower_username=cand,
+                expected_package=str(pkg or ""),
+            )
+    except Exception:
+        mono_capture = None
+    mono_private = dict((mono_capture or {}).get("private_probe_payload") or {})
+    mono_positive_surface = bool(
+        (mono_capture or {}).get("exact_identity")
+        and (mono_capture or {}).get("profile_surface")
+        and (mono_capture or {}).get("follow_cta_positive")
+        and (mono_capture or {}).get("package_exact")
+        and str((mono_capture or {}).get("activity") or "").strip()
     )
+    if mono_positive_surface:
+        probe = {
+            **mono_private,
+            "private_profile_detected": bool(
+                mono_private.get("private_profile_detected")
+            ),
+            "reject": bool(mono_private.get("private_profile_detected")),
+            "reason": (
+                "candidate_rejected_private_account"
+                if mono_private.get("private_profile_detected")
+                else "mono_capture_public_ready"
+            ),
+            "probe_ms": float((mono_capture or {}).get("duration_ms") or 0.0),
+            "hierarchy_fallback_used": False,
+        }
+    else:
+        probe = visual_candidate_pre_follow_private_gate(
+            d,
+            source_profile_username=src or None,
+            dont_follow_private_accounts=True,
+            follower_username=cand,
+            visual_candidate_id=vcid,
+            prior_private_probe=None,
+        )
     private_signal = str(probe.get("detection_method") or "none")
-    proof_method = "visual_candidate_pre_follow_private_gate"
+    proof_method = (
+        "pre_follow_mono_capture"
+        if mono_positive_surface
+        else "visual_candidate_pre_follow_private_gate"
+    )
     safe_to_skip = bool(probe.get("reject")) and bool(probe.get("private_profile_detected"))
     if not safe_to_skip:
-        _emit(
-            "private_skip_fast_path_rejected",
-            private_signal=private_signal,
-            proof_method=proof_method,
-            fallback_used=True,
-            reason=str(probe.get("reason") or "private_not_detected"),
+        used_public_mono = bool(
+            mono_positive_surface
+            and not bool(probe.get("private_profile_detected"))
         )
+        if used_public_mono:
+            _emit(
+                "pre_follow_mono_capture_public_reused",
+                private_signal=private_signal,
+                proof_method=proof_method,
+                fallback_used=False,
+                reason="mono_capture_public_ready",
+                dump_count=1,
+                screenshots=0,
+                retries=0,
+            )
+        else:
+            _emit(
+                "private_skip_fast_path_rejected",
+                private_signal=private_signal,
+                proof_method=proof_method,
+                fallback_used=True,
+                reason=str(probe.get("reason") or "private_not_detected"),
+            )
         _emit(
             "private_skip_fast_path_completed",
             private_signal=private_signal,
             proof_method=proof_method,
-            fallback_used=True,
+            fallback_used=not used_public_mono,
             reason=str(probe.get("reason") or "private_not_detected"),
         )
         return {
             "handled": False,
             "reason": str(probe.get("reason") or "private_not_detected"),
             "probe": probe,
+            "mono_capture": mono_capture,
         }
 
     _emit(
@@ -3501,6 +3560,87 @@ def _flush_deferred_persists_for_manual_stop(
         _MANUAL_STOP_FLUSH_IN_PROGRESS = False
 
 
+def _reconcile_follow_persistence_from_canonical_rows(
+    *,
+    action_id: str,
+    account_id: str,
+    request_id: str,
+    run_id: str,
+    username: str,
+    settings_revision_expected: str,
+    trigger_reason: str,
+) -> dict[str, Any] | None:
+    reread_t0 = time.perf_counter()
+    log(
+        "warning",
+        "follow_persistence_canonical_reread_attempted",
+        action_id=str(action_id),
+        action_id_hash=action_id_hash(action_id),
+        trigger_reason=str(trigger_reason),
+        canonical_reread_attempted=True,
+    )
+    try:
+        evidence = supabase_client.get_follow_persistence_canonical_evidence(
+            action_id=action_id,
+            account_id=account_id,
+            username=username,
+        )
+    except Exception as exc:
+        log(
+            "error",
+            "follow_persistence_canonical_reconciliation_failed",
+            action_id=str(action_id),
+            action_id_hash=action_id_hash(action_id),
+            trigger_reason=str(trigger_reason),
+            canonical_match_status="reread_error",
+            mismatch_fields=["canonical_reread"],
+            reconciliation_latency_ms=round(
+                (time.perf_counter() - reread_t0) * 1000.0, 2
+            ),
+            final_verdict="fail_closed",
+            reason=type(exc).__name__,
+            safe_to_continue_ui=False,
+        )
+        return None
+    matched, reason, mismatches, reconciled = validate_canonical_persistence_evidence(
+        evidence,
+        expected_action_id=action_id,
+        expected_account_id=account_id,
+        expected_request_id=request_id,
+        expected_run_id=run_id,
+        expected_username=username,
+        expected_settings_revision=settings_revision_expected,
+    )
+    latency_ms = round((time.perf_counter() - reread_t0) * 1000.0, 2)
+    if not matched or reconciled is None:
+        log(
+            "error",
+            "follow_persistence_canonical_reconciliation_failed",
+            action_id=str(action_id),
+            action_id_hash=action_id_hash(action_id),
+            trigger_reason=str(trigger_reason),
+            canonical_match_status="mismatch",
+            mismatch_fields=list(mismatches),
+            reconciliation_latency_ms=latency_ms,
+            final_verdict="fail_closed",
+            reason=str(reason),
+            safe_to_continue_ui=False,
+        )
+        return None
+    log(
+        "info",
+        "follow_persistence_rpc_response_reconciled",
+        action_id=str(action_id),
+        action_id_hash=action_id_hash(action_id),
+        trigger_reason=str(trigger_reason),
+        canonical_match_status="exact",
+        mismatch_fields=[],
+        reconciliation_latency_ms=latency_ms,
+        final_verdict="success",
+    )
+    return reconciled
+
+
 def _persist_verified_follow_success_to_supabase(
     *,
     supabase_mode: bool,
@@ -3593,7 +3733,7 @@ def _persist_verified_follow_success_to_supabase(
             action_id_hash=action_id_hash(str(action_id)),
             settings_revision=str(settings_revision_expected),
         )
-        rpc_value: dict[str, Any] | None = None
+        rpc_value: Any = None
         rpc_error: supabase_client.SupabaseRestError | None = None
         try:
             rpc_value = supabase_client.persist_verified_follow_success_rpc(
@@ -3613,32 +3753,39 @@ def _persist_verified_follow_success_to_supabase(
         except supabase_client.SupabaseRestError as exc:
             rpc_error = exc
 
+        response_shape = rpc_response_shape(rpc_value)
+        log(
+            "info",
+            "follow_persistence_rpc_response_shape",
+            action_id=str(action_id),
+            action_id_hash=action_id_hash(str(action_id)),
+            response_field_present=response_shape.get("field_present"),
+            response_field_types=response_shape.get("field_types"),
+            response_type=response_shape.get("response_type"),
+            eligible_unfollow_at_parse_status=response_shape.get(
+                "eligible_unfollow_at_parse_status"
+            ),
+            canonical_reread_attempted=False,
+            rpc_error_reason=(rpc_error.reason if rpc_error is not None else None),
+        )
+
         if rpc_error is not None and rpc_error.reason in {
             "supabase_rest_timeout",
             "supabase_network_timeout",
             "supabase_dns_failed",
             "supabase_tls_failed",
+            "supabase_rpc_response_invalid",
         }:
-            try:
-                event = supabase_client.get_follow_persistence_event(str(action_id))
-            except Exception:
-                event = None
-            payload = event.get("payload") if isinstance(event, dict) else None
-            if isinstance(event, dict) and event.get("event_status") == "success" and isinstance(payload, dict):
-                rpc_value = {
-                    "ok": True,
-                    "status": "idempotent_replay",
-                    "action_id": str(action_id),
-                    "interaction_id": payload.get("interaction_id"),
-                    "follow_persisted": payload.get("follow_persisted"),
-                    "eligible_unfollow_at": payload.get("eligible_unfollow_at"),
-                    "audit_persisted": payload.get("audit_persisted"),
-                    "counter_applied": payload.get("counter_applied"),
-                    "settings_revision_match": payload.get("settings_revision_match"),
-                    "invariants_confirmed": payload.get("invariants_confirmed"),
-                    "failure_reason": None,
-                }
-            else:
+            rpc_value = _reconcile_follow_persistence_from_canonical_rows(
+                action_id=str(action_id),
+                account_id=str(account_id),
+                request_id=str(request_id),
+                run_id=str(run_id),
+                username=str(follower_un),
+                settings_revision_expected=str(settings_revision_expected),
+                trigger_reason=str(rpc_error.reason),
+            )
+            if rpc_value is None:
                 log(
                     "error",
                     "follow_persistence_rpc_ambiguous",
@@ -3647,6 +3794,7 @@ def _persist_verified_follow_success_to_supabase(
                     safe_to_continue_ui=False,
                 )
                 return False
+            rpc_error = None
 
         if rpc_error is not None and rpc_value is None and rpc_error.reason in {
             "supabase_rpc_not_available",
@@ -3666,7 +3814,18 @@ def _persist_verified_follow_success_to_supabase(
                 )
                 rpc_enabled = False
             else:
-                return False
+                rpc_value = _reconcile_follow_persistence_from_canonical_rows(
+                    action_id=str(action_id),
+                    account_id=str(account_id),
+                    request_id=str(request_id),
+                    run_id=str(run_id),
+                    username=str(follower_un),
+                    settings_revision_expected=str(settings_revision_expected),
+                    trigger_reason=str(rpc_error.reason),
+                )
+                if rpc_value is None:
+                    return False
+                rpc_error = None
         elif rpc_error is not None and rpc_value is None:
             log(
                 "error",
@@ -3684,14 +3843,41 @@ def _persist_verified_follow_success_to_supabase(
             elapsed_ms = round((time.perf_counter() - rpc_t0) * 1000.0, 2)
             if not valid:
                 log(
-                    "error",
+                    "warning",
                     "follow_persistence_rpc_partial_response",
                     reason=validation_reason,
+                    action_id=str(action_id),
                     action_id_hash=action_id_hash(str(action_id)),
                     elapsed_ms=elapsed_ms,
-                    safe_to_continue_ui=False,
+                    canonical_reread_attempted=True,
                 )
-                return False
+                rpc_value = _reconcile_follow_persistence_from_canonical_rows(
+                    action_id=str(action_id),
+                    account_id=str(account_id),
+                    request_id=str(request_id),
+                    run_id=str(run_id),
+                    username=str(follower_un),
+                    settings_revision_expected=str(settings_revision_expected),
+                    trigger_reason=str(validation_reason),
+                )
+                if rpc_value is None:
+                    return False
+                valid, validation_reason = validate_rpc_response(
+                    rpc_value, expected_action_id=str(action_id)
+                )
+                if not valid:
+                    log(
+                        "error",
+                        "follow_persistence_canonical_reconciliation_failed",
+                        reason=validation_reason,
+                        action_id=str(action_id),
+                        action_id_hash=action_id_hash(str(action_id)),
+                        canonical_match_status="invalid_projection",
+                        mismatch_fields=["reconciled_response"],
+                        final_verdict="fail_closed",
+                        safe_to_continue_ui=False,
+                    )
+                    return False
             try:
                 follow_persistence_intent.update_intent_stage(
                     run_id=str(run_id), action_id=str(action_id), stage="persisted"
@@ -3913,14 +4099,17 @@ def _persist_verified_follow_from_durable_intent(
             or str(likes.get("phase_outcome") or "") == "success"
         ),
         "return_ct_exact": bool(
-            pf.get("return_ok")
-            and str(pf.get("return_method") or "")
-            in {
-                "fresh_candidate_proof_one_back_then_exact_ct",
-                "compact_foreign_profile_back_visual_followers_list_confirmed",
-                "compact_foreign_profile_fallback_then_list",
-                "compact_safe_back_then_list",
-            }
+            pf.get("final_ct_exact") is True
+            or (
+                pf.get("return_ok")
+                and str(pf.get("return_method") or "")
+                in {
+                    "fresh_candidate_proof_one_back_then_exact_ct",
+                    "compact_foreign_profile_back_visual_followers_list_confirmed",
+                    "compact_foreign_profile_fallback_then_list",
+                    "compact_safe_back_then_list",
+                }
+            )
         ),
     }
     log(
@@ -11612,6 +11801,7 @@ def _run_followers_list_engine_session(
         det_ctx: dict[str, Any] | None,
         open_det_method: str,
         prior_private_probe: dict[str, Any] | None,
+        prior_mono_capture: dict[str, Any] | None,
         navigation_token: str,
     ) -> dict[str, Any]:
         """
@@ -11785,8 +11975,10 @@ def _run_followers_list_engine_session(
             )
 
         _private_profile_detected = False
-        _pre_follow_mono_capture: dict[str, Any] | None = None
-        if not _xml_list_fast_trace:
+        _pre_follow_mono_capture: dict[str, Any] | None = (
+            dict(prior_mono_capture) if isinstance(prior_mono_capture, dict) else None
+        )
+        if _pre_follow_mono_capture is None:
             try:
                 from follow_60s_canary import enabled as _follow_60s_canary_enabled
 
@@ -11802,7 +11994,24 @@ def _run_followers_list_engine_session(
                     )
             except Exception:
                 _pre_follow_mono_capture = None
-        if _xml_list_fast_trace:
+        if bool((_pre_follow_mono_capture or {}).get("ok")):
+            _priv = dict(
+                (_pre_follow_mono_capture or {}).get("private_probe_payload") or {}
+            )
+            _private_profile_detected = bool(_priv.get("private_profile_detected"))
+            _pre_follow_gap_log(
+                "pre_follow_private_gate_completed",
+                target_username=source_profile_username,
+                candidate_username=str(follower_un_so_far or pick_ctx.get("resolved_username_hint") or ""),
+                source_profile_username=source_profile_username,
+                visual_candidate_id=str(pick_ctx.get("visual_candidate_id") or ""),
+                phase="private_gate", blocking_step="mono_capture",
+                duration_ms=float((_pre_follow_mono_capture or {}).get("duration_ms") or 0.0),
+                probe_count=1, used_cached_context=True,
+                surface_type="candidate_profile", is_private=False,
+                reason="mono_capture_public_ready",
+            )
+        elif _xml_list_fast_trace:
             _pre_follow_gap_log(
                 "pre_follow_private_gate_started",
                 target_username=source_profile_username,
@@ -11835,23 +12044,6 @@ def _run_followers_list_engine_session(
                 surface_type="candidate_profile",
                 is_private=False,
                 reason="deferred_to_pre_follow_private_gate",
-            )
-        elif bool((_pre_follow_mono_capture or {}).get("ok")):
-            _priv = dict(
-                (_pre_follow_mono_capture or {}).get("private_probe_payload") or {}
-            )
-            _private_profile_detected = bool(_priv.get("private_profile_detected"))
-            _pre_follow_gap_log(
-                "pre_follow_private_gate_completed",
-                target_username=source_profile_username,
-                candidate_username=str(follower_un_so_far or pick_ctx.get("resolved_username_hint") or ""),
-                source_profile_username=source_profile_username,
-                visual_candidate_id=str(pick_ctx.get("visual_candidate_id") or ""),
-                phase="private_gate", blocking_step="mono_capture",
-                duration_ms=float((_pre_follow_mono_capture or {}).get("duration_ms") or 0.0),
-                probe_count=1, used_cached_context=True,
-                surface_type="candidate_profile", is_private=False,
-                reason="mono_capture_public_ready",
             )
         else:
             try:
@@ -11926,7 +12118,21 @@ def _run_followers_list_engine_session(
 
         _hdr = "unknown"
         _pre_follow_observation_proof: dict[str, Any] | None = None
-        if _xml_list_fast_trace:
+        if bool((_pre_follow_mono_capture or {}).get("ok")):
+            _hdr = str((_pre_follow_mono_capture or {}).get("follow_header_state") or "unknown")
+            _pre_follow_observation_proof = build_pre_follow_observation_proof(
+                follower_username=str(follower_un_so_far or pick_ctx.get("resolved_username_hint") or ""),
+                source_profile_username=source_profile_username,
+                visual_candidate_id=str(pick_ctx.get("visual_candidate_id") or ""),
+                action_bar_title=str((_pre_follow_mono_capture or {}).get("action_bar_title") or ""),
+                navigation_state=str(nav_obs_local.get("state") or ""),
+                navigation_confidence=float(nav_obs_local.get("confidence") or 0.0),
+                follow_header_state=_hdr,
+                private_probe_payload=dict((_pre_follow_mono_capture or {}).get("private_probe_payload") or {}),
+                navigation_token=navigation_token,
+                captured_at_mono=time.monotonic(),
+            )
+        elif _xml_list_fast_trace:
             try:
                 _hdr = str(_hdr_fast or "unknown")
             except NameError:
@@ -11946,20 +12152,6 @@ def _run_followers_list_engine_session(
                 private_probe_payload=prior_private_probe,
                 navigation_token=navigation_token,
                 captured_at_mono=_hdr_fast_captured_at_mono,
-            )
-        elif bool((_pre_follow_mono_capture or {}).get("ok")):
-            _hdr = str((_pre_follow_mono_capture or {}).get("follow_header_state") or "unknown")
-            _pre_follow_observation_proof = build_pre_follow_observation_proof(
-                follower_username=str(follower_un_so_far or pick_ctx.get("resolved_username_hint") or ""),
-                source_profile_username=source_profile_username,
-                visual_candidate_id=str(pick_ctx.get("visual_candidate_id") or ""),
-                action_bar_title=str((_pre_follow_mono_capture or {}).get("action_bar_title") or ""),
-                navigation_state=str(nav_obs_local.get("state") or ""),
-                navigation_confidence=float(nav_obs_local.get("confidence") or 0.0),
-                follow_header_state=_hdr,
-                private_probe_payload=dict((_pre_follow_mono_capture or {}).get("private_probe_payload") or {}),
-                navigation_token=navigation_token,
-                captured_at_mono=time.monotonic(),
             )
         try:
             _follow_state_probe_t0 = time.perf_counter()
@@ -16461,6 +16653,7 @@ def _run_followers_list_engine_session(
                 account_id
             )
             _early_private_probe_for_terminal: dict[str, Any] | None = None
+            _early_pre_follow_mono_capture: dict[str, Any] | None = None
             if _profile_follow_already_open:
                 try:
                     _private_fast_path = _private_skip_fast_path_handle(
@@ -16497,6 +16690,9 @@ def _run_followers_list_engine_session(
                 _early_probe = _private_fast_path.get("probe")
                 if isinstance(_early_probe, dict) and "private_profile_detected" in _early_probe:
                     _early_private_probe_for_terminal = dict(_early_probe)
+                _early_mono = _private_fast_path.get("mono_capture")
+                if isinstance(_early_mono, dict):
+                    _early_pre_follow_mono_capture = dict(_early_mono)
                 if bool(_private_fast_path.get("handled")):
                     _target_rejection_record(
                         target_scan_tracker,
@@ -16596,6 +16792,7 @@ def _run_followers_list_engine_session(
                 det_ctx=det if isinstance(det, dict) else None,
                 open_det_method=open_detection_method,
                 prior_private_probe=_early_private_probe_for_terminal,
+                prior_mono_capture=_early_pre_follow_mono_capture,
                 navigation_token=_pre_follow_navigation_token,
             )
             _pre_follow_observation_proof = (

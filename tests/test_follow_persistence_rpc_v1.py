@@ -40,6 +40,52 @@ def rpc_success(action_id: str, status: str = "created") -> dict:
     }
 
 
+def canonical_evidence(action_id: str) -> dict:
+    eligible = "2026-07-22 10:01:00.00000+00:00"
+    return {
+        "event": {
+            "id": action_id,
+            "account_id": ACCOUNT_ID,
+            "run_id": RUN_ID,
+            "request_id": REQUEST_ID,
+            "username": "candidate",
+            "event_type": "follow_verified_persisted_v1",
+            "event_status": "success",
+            "interaction_type": "follow",
+            "interaction_status": "success",
+            "payload": {
+                "interaction_id": INTERACTION_ID,
+                "follow_persisted": True,
+                "eligible_unfollow_at": eligible,
+                "audit_persisted": True,
+                "counter_applied": True,
+                "settings_revision_match": True,
+                "settings_revision": SETTINGS_REVISION,
+                "invariants_confirmed": sorted(
+                    follow_persistence_rpc.REQUIRED_INVARIANTS
+                ),
+            },
+        },
+        "interaction": {
+            "id": INTERACTION_ID,
+            "account_id": ACCOUNT_ID,
+            "username": "candidate",
+            "followed_at": "2026-07-19 10:01:00+00:00",
+            "eligible_unfollow_at": eligible,
+            "was_successful": True,
+            "followed_by_bot": True,
+            "follow_status": "following",
+            "interaction_status": "success",
+            "payload": {"action_id": action_id},
+        },
+        "unfollow_settings": {
+            "account_id": ACCOUNT_ID,
+            "unfollow_after_days": 3,
+            "updated_at": SETTINGS_REVISION,
+        },
+    }
+
+
 class FollowPersistenceContractTest(unittest.TestCase):
     def test_flag_defaults_off_and_accepts_explicit_true(self) -> None:
         with mock.patch.dict(os.environ, {}, clear=True):
@@ -71,6 +117,98 @@ class FollowPersistenceContractTest(unittest.TestCase):
             follow_persistence_rpc.validate_rpc_response(partial, expected_action_id=action_id)[1],
             "response_audit_persisted_false",
         )
+
+    def test_postgres_timestamp_shapes_are_strictly_parseable(self) -> None:
+        for timestamp in (
+            "2026-07-22T10:01:00.12345+00:00",
+            "2026-07-22T10:01:00.123456+00:00",
+            "2026-07-22T10:01:00.12345Z",
+        ):
+            with self.subTest(timestamp=timestamp):
+                value = rpc_success("action")
+                value["eligible_unfollow_at"] = timestamp
+                self.assertEqual(
+                    follow_persistence_rpc.validate_rpc_response(
+                        value, expected_action_id="action"
+                    ),
+                    (True, "ok"),
+                )
+        value = rpc_success("action")
+        value["eligible_unfollow_at"] = "2026-07-22 10:01:00"
+        self.assertEqual(
+            follow_persistence_rpc.validate_rpc_response(
+                value, expected_action_id="action"
+            )[1],
+            "response_eligible_unfollow_at_invalid",
+        )
+
+    def test_canonical_evidence_requires_every_identity_and_business_invariant(self) -> None:
+        action_id = follow_persistence_rpc.deterministic_action_id(
+            ACCOUNT_ID, RUN_ID, "candidate"
+        )
+        valid = canonical_evidence(action_id)
+        self.assertTrue(
+            follow_persistence_rpc.validate_canonical_persistence_evidence(
+                valid,
+                expected_action_id=action_id,
+                expected_account_id=ACCOUNT_ID,
+                expected_request_id=REQUEST_ID,
+                expected_run_id=RUN_ID,
+                expected_username="@Candidate",
+                expected_settings_revision=SETTINGS_REVISION,
+            )[0]
+        )
+        mutations = {
+            "event_missing": lambda value: value.update(event=None),
+            "request_id": lambda value: value["event"].update(request_id="wrong"),
+            "run_id": lambda value: value["event"].update(run_id="wrong"),
+            "settings_account_id": lambda value: value["unfollow_settings"].update(
+                account_id="wrong"
+            ),
+            "username": lambda value: value["interaction"].update(username="wrong"),
+            "action_id": lambda value: value["interaction"]["payload"].update(
+                action_id="wrong"
+            ),
+            "timestamp": lambda value: value["interaction"].update(
+                eligible_unfollow_at="invalid"
+            ),
+            "counter": lambda value: value["event"]["payload"].update(
+                counter_applied=False
+            ),
+            "audit": lambda value: value["event"]["payload"].update(
+                audit_persisted=False
+            ),
+            "was_successful": lambda value: value["interaction"].update(
+                was_successful=False
+            ),
+            "followed_by_bot": lambda value: value["interaction"].update(
+                followed_by_bot=False
+            ),
+            "follow_status": lambda value: value["interaction"].update(
+                follow_status="unfollowed"
+            ),
+            "eligible_contract": lambda value: value["unfollow_settings"].update(
+                unfollow_after_days=4
+            ),
+        }
+        for case, mutate in mutations.items():
+            value = json.loads(json.dumps(valid))
+            mutate(value)
+            with self.subTest(case=case):
+                matched, _reason, mismatches, reconciled = (
+                    follow_persistence_rpc.validate_canonical_persistence_evidence(
+                        value,
+                        expected_action_id=action_id,
+                        expected_account_id=ACCOUNT_ID,
+                        expected_request_id=REQUEST_ID,
+                        expected_run_id=RUN_ID,
+                        expected_username="candidate",
+                        expected_settings_revision=SETTINGS_REVISION,
+                    )
+                )
+                self.assertFalse(matched)
+                self.assertTrue(mismatches)
+                self.assertIsNone(reconciled)
 
 
 class FollowPersistenceIntentTest(unittest.TestCase):
@@ -263,8 +401,8 @@ class FollowPersistenceWorkerTest(unittest.TestCase):
             [],
         )
 
-    def test_dispatcher_to_post_follow_rpc_uses_one_durable_request_context(self) -> None:
-        account_id = runner.FOLLOW_60S_CANARY_ACCOUNT_ID
+    def test_end_to_end_partial_rpc_reconciles_before_next_candidate(self) -> None:
+        account_id = ACCOUNT_ID
         action_id = follow_persistence_rpc.deterministic_action_id(
             account_id, RUN_ID, "candidate"
         )
@@ -284,23 +422,50 @@ class FollowPersistenceWorkerTest(unittest.TestCase):
             stage="follow_physically_verified",
             followed_at=FOLLOWED_AT,
         )
-        binding = {
-            "account_id": account_id,
-            "run_id": RUN_ID,
-            "request_id": REQUEST_ID,
-        }
+        partial = rpc_success(action_id)
+        partial.pop("eligible_unfollow_at")
         logs: list[tuple[str, str, dict]] = []
-        with mock.patch.dict(
-            os.environ, {"FOLLOW_PERSISTENCE_RPC_V1_ENABLED": "false"}
+        next_candidate = mock.Mock(return_value="candidate_2")
+        with mock.patch(
+            "account_run_control.get_account_run_request",
+            return_value={
+                "id": REQUEST_ID,
+                "account_id": account_id,
+                "run_id": RUN_ID,
+                "requested_run_type": "account_session",
+            },
+        ), mock.patch(
+            "account_run_control.get_ig_run_by_id",
+            return_value={
+                "id": RUN_ID,
+                "account_id": account_id,
+                "status": "running",
+            },
         ), mock.patch.object(
+            runner,
+            "log",
+            side_effect=lambda level, event, **fields: logs.append(
+                (level, event, fields)
+            ),
+        ):
+            binding = runner._establish_follow_persistence_run_binding(
+                account_id=account_id,
+                run_id=RUN_ID,
+                request_id=REQUEST_ID,
+            )
+        with mock.patch.object(
             runner, "_CURRENT_FOLLOW_PERSISTENCE_RUN_BINDING", binding
         ), mock.patch.object(
             runner, "_CURRENT_RUN_REQUEST_ID", REQUEST_ID
         ), mock.patch.object(
             supabase_client,
             "persist_verified_follow_success_rpc",
-            return_value=rpc_success(action_id),
+            return_value=partial,
         ) as rpc, mock.patch.object(
+            supabase_client,
+            "get_follow_persistence_canonical_evidence",
+            return_value=canonical_evidence(action_id),
+        ) as canonical_reread, mock.patch.object(
             runner,
             "log",
             side_effect=lambda level, event, **fields: logs.append(
@@ -328,18 +493,44 @@ class FollowPersistenceWorkerTest(unittest.TestCase):
                     },
                     "likes": {"phase_outcome": "success", "liked_count": 1},
                     "return_ok": True,
-                    "return_method": "fresh_candidate_proof_one_back_then_exact_ct",
+                    "return_method": "new_safe_method_label_not_in_legacy_allowlist",
+                    "final_ct_exact": True,
                 },
             )
+            if ok:
+                next_candidate()
 
         self.assertTrue(ok)
         self.assertEqual(rpc.call_args.kwargs["request_id"], REQUEST_ID)
+        rpc.assert_called_once()
+        canonical_reread.assert_called_once_with(
+            action_id=action_id,
+            account_id=account_id,
+            username="candidate",
+        )
+        next_candidate.assert_called_once_with()
+        self.assertEqual(
+            follow_persistence_intent.load_nonterminal_intents(
+                account_id=account_id, run_id=RUN_ID
+            ),
+            [],
+        )
         trace = next(
             fields["phase_trace"]
             for _level, event, fields in logs
             if event == "follow_persistence_end_to_end_phase_trace"
         )
         self.assertTrue(all(trace.values()))
+        self.assertIn(
+            "follow_persistence_rpc_response_reconciled",
+            [event for _level, event, _fields in logs],
+        )
+        source = Path(runner.__file__).read_text(encoding="utf-8")
+        persist_pos = source.index("_critical_persist_ok = _persist_verified_follow_from_durable_intent")
+        resume_pos = source.index('"post_return_ui_resume_allowed"', persist_pos)
+        next_action_pos = source.index('"post_return_next_ui_action_started"', resume_pos)
+        self.assertLess(persist_pos, resume_pos)
+        self.assertLess(resume_pos, next_action_pos)
 
     def test_canonical_request_run_account_binding_is_certified_once(self) -> None:
         account_id = runner.FOLLOW_60S_CANARY_ACCOUNT_ID
@@ -418,15 +609,14 @@ class FollowPersistenceWorkerTest(unittest.TestCase):
                 self.assertTrue(self._persist())
 
     def test_timeout_after_commit_uses_status_lookup(self) -> None:
-        payload = dict(rpc_success(self.action_id, "idempotent_replay"))
         with mock.patch.object(
             supabase_client,
             "persist_verified_follow_success_rpc",
             side_effect=supabase_client.SupabaseRestError("supabase_rest_timeout"),
         ), mock.patch.object(
             supabase_client,
-            "get_follow_persistence_event",
-            return_value={"event_status": "success", "payload": payload},
+            "get_follow_persistence_canonical_evidence",
+            return_value=canonical_evidence(self.action_id),
         ), mock.patch.object(runner, "_timed_safe_supabase_call") as legacy:
             self.assertTrue(self._persist())
         legacy.assert_not_called()
@@ -437,7 +627,9 @@ class FollowPersistenceWorkerTest(unittest.TestCase):
             "persist_verified_follow_success_rpc",
             side_effect=supabase_client.SupabaseRestError("supabase_rest_timeout"),
         ), mock.patch.object(
-            supabase_client, "get_follow_persistence_event", return_value=None
+            supabase_client,
+            "get_follow_persistence_canonical_evidence",
+            return_value={"event": None, "interaction": None, "unfollow_settings": None},
         ), mock.patch.object(runner, "_timed_safe_supabase_call") as legacy:
             self.assertFalse(self._persist())
         legacy.assert_not_called()
@@ -458,11 +650,59 @@ class FollowPersistenceWorkerTest(unittest.TestCase):
             [call.args[1] for call in legacy.call_args_list],
         )
 
-    def test_partial_response_safe_stops(self) -> None:
+    def test_partial_response_reconciles_only_from_exact_canonical_evidence(self) -> None:
         partial = rpc_success(self.action_id)
-        partial["counter_applied"] = False
+        partial["eligible_unfollow_at"] = None
         with mock.patch.object(
             supabase_client, "persist_verified_follow_success_rpc", return_value=partial
+        ), mock.patch.object(
+            supabase_client,
+            "get_follow_persistence_canonical_evidence",
+            return_value=canonical_evidence(self.action_id),
+        ), mock.patch.object(runner, "_timed_safe_supabase_call") as legacy:
+            self.assertTrue(self._persist())
+        legacy.assert_not_called()
+
+    def test_missing_null_and_mistyped_responses_reconcile_without_second_rpc(self) -> None:
+        cases = []
+        missing = rpc_success(self.action_id)
+        missing.pop("eligible_unfollow_at")
+        cases.append(("missing", missing))
+        null = rpc_success(self.action_id)
+        null["eligible_unfollow_at"] = None
+        cases.append(("null", null))
+        cases.append(("mistyped", ["unexpected"]))
+        for case, response in cases:
+            follow_persistence_intent.update_intent_stage(
+                run_id=RUN_ID,
+                action_id=self.action_id,
+                stage="follow_physically_verified",
+                followed_at=FOLLOWED_AT,
+            )
+            with self.subTest(case=case), mock.patch.object(
+                supabase_client,
+                "persist_verified_follow_success_rpc",
+                return_value=response,
+            ) as rpc, mock.patch.object(
+                supabase_client,
+                "get_follow_persistence_canonical_evidence",
+                return_value=canonical_evidence(self.action_id),
+            ) as reread:
+                self.assertTrue(self._persist())
+            rpc.assert_called_once()
+            reread.assert_called_once()
+
+    def test_partial_response_fails_closed_when_canonical_counter_is_not_applied(self) -> None:
+        partial = rpc_success(self.action_id)
+        partial["eligible_unfollow_at"] = None
+        evidence = canonical_evidence(self.action_id)
+        evidence["event"]["payload"]["counter_applied"] = False
+        with mock.patch.object(
+            supabase_client, "persist_verified_follow_success_rpc", return_value=partial
+        ), mock.patch.object(
+            supabase_client,
+            "get_follow_persistence_canonical_evidence",
+            return_value=evidence,
         ), mock.patch.object(runner, "_timed_safe_supabase_call") as legacy:
             self.assertFalse(self._persist())
         legacy.assert_not_called()

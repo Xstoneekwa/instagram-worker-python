@@ -350,6 +350,55 @@ class PostMuteGapTrackingTest(unittest.TestCase):
         self.assertTrue(completed["safe_to_continue_ui"])
         self.assertTrue(completed["used_cached_context"])
 
+    def test_post_mute_checkpoint_reuses_atomic_verdict_without_ui_probe(self) -> None:
+        device = mock.MagicMock()
+        with mock.patch.object(
+            nav,
+            "_validate_post_mute_sheet_closed_proof",
+            return_value=(
+                True,
+                {
+                    "immutable_verdict": True,
+                    "candidate_context": {
+                        "username": "cand",
+                        "viewport_fingerprint": "viewport-1",
+                        "post_grid_outcome": "safe_post",
+                    },
+                },
+                25.0,
+                "",
+            ),
+        ), mock.patch.object(
+            nav,
+            "_post_follow_like_precheck_mute_sheet",
+            side_effect=AssertionError("atomic verdict must skip sheet probe"),
+        ), mock.patch.object(
+            nav,
+            "read_current_profile_username_for_follow_gate",
+            side_effect=AssertionError("atomic verdict must skip identity reread"),
+        ), mock.patch.object(
+            nav,
+            "detect_followers_list_screen",
+            side_effect=AssertionError("atomic verdict must skip heavy detection"),
+        ), mock.patch(
+            "navigation_engine.observe_instagram_state",
+            side_effect=AssertionError("atomic verdict must skip navigation observation"),
+        ), mock.patch.object(nav, "log"):
+            out = nav._post_mute_state_checkpoint(
+                device,
+                pkg="com.instagram.android",
+                source_profile_username="source",
+                visual_candidate_id="vc-1",
+                candidate_username="cand",
+                sheet_dismiss_ok=True,
+                allow_fast_profile_proof=True,
+                candidate_context={"username": "cand"},
+            )
+
+        self.assertTrue(out["ok"])
+        self.assertTrue(out["immutable_verdict"])
+        self.assertEqual(out["candidate_context"]["viewport_fingerprint"], "viewport-1")
+
     def test_candidate_context_reuses_identity_but_keeps_fresh_grid_hint_probe(self) -> None:
         device = mock.MagicMock()
         with mock.patch.object(
@@ -1922,6 +1971,9 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
                 golden_open = stack.enter_context(
                     mock.patch.object(nav, "visual_open_recent_post_from_profile")
                 )
+                reveal_scroll = stack.enter_context(
+                    mock.patch.object(nav, "_post_follow_likes_profile_scroll_swipe")
+                )
                 stack.enter_context(
                     mock.patch.object(
                         nav,
@@ -1993,6 +2045,7 @@ class PostFollowLikeSamsungFastTest(unittest.TestCase):
         device.click.assert_called_once_with(180, 1080)
         legacy_open.assert_not_called()
         golden_open.assert_not_called()
+        reveal_scroll.assert_not_called()
         self.assertEqual(out.get("phase_outcome"), "success")
         self.assertEqual(out.get("liked_count"), 1)
         self.assertNotIn(

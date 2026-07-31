@@ -8,6 +8,59 @@ import instagram_navigation as nav
 
 
 class MuteEngineV2SheetLevelsTest(unittest.TestCase):
+    def test_known_depth_uses_light_unfollow_marker_before_final_profile_proof(self) -> None:
+        d = mock.MagicMock()
+        logs: list[str] = []
+        with mock.patch.object(
+            nav, "_mute_engine_v2_fast_following_options_marker",
+            return_value=(
+                True,
+                {
+                    "following_options_marker_visible": True,
+                    "selector": "exact_text_unfollow",
+                    "duration_ms": 2.0,
+                    "reason": "following_options_exact_unfollow_visible",
+                },
+            ),
+        ) as light_proof, mock.patch.object(
+            nav,
+            "_mute_engine_v2_fast_sheet_closed_profile_proof",
+            return_value=(
+                True,
+                {
+                    "duration_ms": 10.0,
+                    "toggles_visible": False,
+                    "following_options_marker_visible": False,
+                    "profile_marker_visible": True,
+                    "action_bar_visible": True,
+                    "profile_tabs_visible": False,
+                    "reason": "sheet_absent_profile_visible",
+                },
+            ),
+        ) as final_profile, mock.patch.object(
+            nav, "_publish_post_mute_verdict_at_final_sheet_close", return_value={}
+        ), mock.patch.object(
+            nav, "log", side_effect=lambda _level, event, **_kw: logs.append(str(event))
+        ), mock.patch.object(nav, "time") as tmock:
+            tmock.perf_counter = time.perf_counter
+            tmock.sleep = lambda *_a, **_k: None
+            ok, _ms = nav._mute_engine_v2_dismiss_mute_sheets_level_aware(
+                d,
+                visual_candidate_id="vc-1",
+                source_profile_username="ct",
+                confirmed_sheet_level="mute_toggles",
+                candidate_username="cand",
+                mute_posts_verified=True,
+                mute_stories_verified=True,
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(d.press.call_count, 2)
+        light_proof.assert_called_once()
+        final_profile.assert_called_once()
+        self.assertIn("mute_dismiss_following_options_light_proof_used", logs)
+        self.assertNotIn("mute_sheet_dismiss_full_fallback_used", logs)
+
     def test_level_aware_dismiss_fast_path_stops_after_first_back(self) -> None:
         d = mock.MagicMock()
         logs: list[tuple[str, dict[str, object]]] = []

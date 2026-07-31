@@ -2900,6 +2900,55 @@ class FollowTargetRotationPendingTests(unittest.TestCase):
         self.assertTrue(rejected["fallback_used"])
         self.assertFalse(rejected["safe_to_skip"])
 
+    def test_private_skip_fast_path_public_mono_capture_avoids_golden_probe(self) -> None:
+        logs: list[tuple[str, str, dict]] = []
+        mono = {
+            "ok": True,
+            "duration_ms": 25.0,
+            "exact_identity": True,
+            "profile_surface": True,
+            "follow_cta_positive": True,
+            "package_exact": True,
+            "activity": "ProfileActivity",
+            "private_probe_payload": {
+                "private_profile_detected": False,
+                "detection_method": "single_xml_positive_profile_surface",
+            },
+        }
+        with patch(
+            "follow_60s_canary.enabled", return_value=True
+        ), patch.object(
+            runner, "acquire_pre_follow_mono_capture", return_value=mono
+        ) as capture, patch.object(
+            runner,
+            "visual_candidate_pre_follow_private_gate",
+            side_effect=AssertionError("Golden private probe must not run"),
+        ), patch.object(
+            runner,
+            "log",
+            side_effect=lambda level, event, **kw: logs.append((level, event, kw)),
+        ):
+            out = runner._private_skip_fast_path_handle(
+                FakeDevice(),
+                target_username="ct_one",
+                candidate_username="public_user",
+                source_profile_username="ct_one",
+                visual_candidate_id="vc-1",
+                dont_follow_private_accounts=True,
+                profile_already_open=True,
+                pkg="com.instagram.android",
+            )
+
+        self.assertFalse(out["handled"])
+        self.assertIs(out["mono_capture"], mono)
+        capture.assert_called_once()
+        used = [
+            kw
+            for _level, event, kw in logs
+            if event == "pre_follow_mono_capture_public_reused"
+        ][-1]
+        self.assertFalse(used["fallback_used"])
+
     def test_private_skip_fast_path_ambiguous_signal_falls_back(self) -> None:
         with patch.object(
             runner,

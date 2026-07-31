@@ -155,7 +155,11 @@ class PostGridEvidence:
     outcome: str
     post_bounds: dict[str, int] | None
     grid_visible: bool
+    grid_tab_state: str
+    visible_post_count: int
+    physical_cells: tuple[dict[str, int], ...]
     no_posts_positive: bool
+    navigation_counter: int
     invalidation_counter: int
     created_at_monotonic: float
     ttl_ms: float
@@ -638,9 +642,17 @@ def stash_post_grid_evidence(
         viewport_fingerprint=str(viewport_fingerprint or ""), outcome=normalized,
         post_bounds=dict(post_bounds) if isinstance(post_bounds, dict) else None,
         grid_visible=bool(normalized == "safe_post" and post_bounds),
+        grid_tab_state=str((metadata or {}).get("grid_tab_state") or ""),
+        visible_post_count=max(0, int((metadata or {}).get("visible_post_count") or 0)),
+        physical_cells=tuple(
+            dict(cell)
+            for cell in ((metadata or {}).get("physical_cells") or [])
+            if isinstance(cell, dict)
+        ),
         no_posts_positive=bool(
             normalized == "no_posts" and bool((metadata or {}).get("no_posts_positive"))
         ),
+        navigation_counter=_RUNTIME.navigation_counter,
         invalidation_counter=_RUNTIME.invalidation_counter,
         created_at_monotonic=time.monotonic(), ttl_ms=max(1.0, float(ttl_ms)),
         metadata=dict(metadata or {}),
@@ -674,6 +686,8 @@ def consume_post_grid_evidence(
             reason = "ttl_expired"
         if not reason and ev.invalidation_counter != _RUNTIME.invalidation_counter:
             reason = "invalidation_counter_mismatch"
+        if not reason and ev.navigation_counter != _RUNTIME.navigation_counter:
+            reason = "navigation_counter_mismatch"
         if not reason and ev.outcome == "ambiguous":
             reason = "ambiguous_outcome"
         if not reason and ev.outcome == "no_posts" and not ev.no_posts_positive:

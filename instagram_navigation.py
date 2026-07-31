@@ -17808,6 +17808,147 @@ def _stash_post_mute_sheet_closed_proof(
         pass
 
 
+def _publish_post_mute_verdict_at_final_sheet_close(
+    d: u2.Device,
+    *,
+    source_profile_username: str,
+    candidate_username: str,
+    visual_candidate_id: str,
+    candidate_context: dict[str, Any] | None,
+    mute_posts_verified: bool,
+    mute_stories_verified: bool,
+    started_at: float,
+) -> dict[str, Any] | None:
+    """Create the immutable Mute->Like verdict at the exact close boundary."""
+    try:
+        from follow_60s_canary import enabled as _follow_60s_canary_enabled
+
+        if not (
+            _follow_60s_canary_enabled("mute_like_handoff")
+            or _follow_60s_canary_enabled("like_fresh_cell_bounds")
+        ):
+            return None
+    except Exception:
+        return None
+    cand = str(candidate_username or "").strip().lstrip("@")
+    if not cand or not (mute_posts_verified and mute_stories_verified):
+        return None
+    try:
+        # Identity and post-grid evidence must share this exact final-sheet-close
+        # observation.  Missing XML/title rejects the fast proof and leaves the
+        # existing Golden checkpoint in charge.
+        profile_xml = str(d.dump_hierarchy(compressed=False) or "")
+        action_bar_title = str(
+            _followers_entry_v2_action_bar_title_from_hierarchy_xml(profile_xml)
+            or ""
+        ).strip().lstrip("@")
+    except Exception:
+        profile_xml = ""
+        action_bar_title = ""
+    if _normalize_handle(action_bar_title) != _normalize_handle(cand):
+        return None
+    live_meta = _followers_current_pkg_activity(d)
+    context_out = {
+        **dict(candidate_context or {}),
+        "username": cand,
+        "package": str(live_meta.get("current_package") or ""),
+        "activity": str(live_meta.get("current_activity") or ""),
+        "identity_confirmed": True,
+        "sheet_closed": True,
+        "posts_verified": True,
+        "stories_verified": True,
+        "validated_at_monotonic": time.perf_counter(),
+    }
+    try:
+        from follow_60s_canary import runtime_context as _follow_60s_runtime_context
+
+        runtime = _follow_60s_runtime_context()
+        context_out.setdefault(
+            "navigation_generation", str(runtime.get("ui_generation") or "0")
+        )
+        if _follow_60s_canary_enabled("like_fresh_cell_bounds"):
+            profile_ww, profile_wh = d.window_size()
+            profile_grid = _post_follow_post_grid_evidence_from_xml(
+                profile_xml,
+                candidate_username=cand,
+                ww=int(profile_ww),
+                wh=int(profile_wh),
+            )
+            profile_grid["no_posts_positive"] = bool(
+                profile_grid.get("outcome") == "no_posts"
+                and profile_grid.get("identity_exact")
+                and profile_grid.get("profile_tabs_present")
+                and profile_grid.get("empty_marker_xml")
+                and not profile_grid.get("private_profile_visible")
+                and not profile_grid.get("loading_visible")
+            )
+            context_out.update(
+                {
+                    "post_grid_viewport_fingerprint": str(
+                        profile_grid.get("viewport_fingerprint") or ""
+                    ),
+                    "post_grid_outcome": str(
+                        profile_grid.get("outcome") or "ambiguous"
+                    ),
+                    "post_grid_bounds": profile_grid.get("post_bounds"),
+                    "post_grid_no_posts_positive": bool(
+                        profile_grid.get("no_posts_positive")
+                    ),
+                    "post_grid_metadata": dict(profile_grid),
+                    "post_grid_dump_count": 1,
+                }
+            )
+            log(
+                "info",
+                "follow_60s_post_grid_evidence_created_at_final_mute_close",
+                source_profile_username=source_profile_username,
+                candidate_username=cand,
+                outcome=context_out["post_grid_outcome"],
+                grid_tab_state=str(profile_grid.get("grid_tab_state") or ""),
+                visible_post_count=int(profile_grid.get("visible_post_count") or 0),
+                physical_cell_count=len(profile_grid.get("physical_cells") or []),
+                grid_visible=bool(context_out["post_grid_outcome"] == "safe_post"),
+                no_posts_positive=bool(context_out["post_grid_no_posts_positive"]),
+                dumps=1,
+                screenshots=0,
+                retries=0,
+                fallback_required=bool(
+                    context_out["post_grid_outcome"] == "ambiguous"
+                ),
+            )
+    except Exception as exc:
+        context_out.update(
+            {
+                "post_grid_outcome": "ambiguous",
+                "post_grid_metadata": {
+                    "capture_error": type(exc).__name__,
+                    "no_posts_positive": False,
+                },
+                "post_grid_dump_count": 0,
+            }
+        )
+    duration_ms = round((time.perf_counter() - started_at) * 1000.0, 2)
+    _stash_post_mute_sheet_closed_proof(
+        source_profile_username=source_profile_username,
+        candidate_username=cand,
+        visual_candidate_id=visual_candidate_id,
+        action_bar_title=action_bar_title,
+        duration_ms=duration_ms,
+        candidate_context=context_out,
+    )
+    log(
+        "info",
+        "mute_to_like_verdict_created_at_final_sheet_close",
+        source_profile_username=source_profile_username,
+        candidate_username=cand,
+        visual_candidate_id=visual_candidate_id,
+        duration_ms=duration_ms,
+        post_grid_outcome=str(context_out.get("post_grid_outcome") or "ambiguous"),
+        fallback_used=False,
+    )
+    return context_out
+
+
 def _post_mute_sheet_closed_proof_reject(
     *,
     event: str,
@@ -22299,38 +22440,142 @@ def _post_follow_post_grid_evidence_from_xml(
     expected = _normalize_handle(candidate_username)
     identity_exact = False
     tabs_bottom = 0
-    cells: list[dict[str, int]] = []
+    raw_cells: list[dict[str, int]] = []
+    grid_tab_marker = False
+    grid_selected = bool(base.get("grid_selected"))
+
+    def _label_has_exact_handle(value: str) -> bool:
+        for token in re.split(r"[^A-Za-z0-9._]+", str(value or "")):
+            if token and _normalize_handle(token) == expected:
+                return True
+        return False
+
+    def _overlap_ratio(a: dict[str, int], b: dict[str, int]) -> float:
+        left = max(int(a["left"]), int(b["left"]))
+        top = max(int(a["top"]), int(b["top"]))
+        right = min(int(a["right"]), int(b["right"]))
+        bottom = min(int(a["bottom"]), int(b["bottom"]))
+        if right <= left or bottom <= top:
+            return 0.0
+        intersection = float((right - left) * (bottom - top))
+        area_a = float((int(a["right"]) - int(a["left"])) * (int(a["bottom"]) - int(a["top"])))
+        area_b = float((int(b["right"]) - int(b["left"])) * (int(b["bottom"]) - int(b["top"])))
+        return intersection / max(1.0, min(area_a, area_b))
+
     for node in root.iter():
         attrs = node.attrib or {}
-        label = " ".join(str(attrs.get(k) or "") for k in ("text", "content-desc"))
-        if expected and _normalize_handle(label) == expected:
+        label = " ".join(
+            str(attrs.get(k) or "")
+            for k in ("text", "content-desc", "resource-id")
+        )
+        if expected and _label_has_exact_handle(label):
             identity_exact = True
         bounds = _parse_ui_bounds_str(attrs.get("bounds"))
         label_l = label.lower()
-        if bounds and any(token in label_l for token in ("profile tab grid", "posts tab", "profile_tab_grid")):
+        is_tabs_container = "profile_tabs_container" in label_l
+        is_grid_tab = any(
+            token in label_l
+            for token in (
+                "profile tab grid",
+                "posts tab",
+                "profile_tab_grid",
+                "profile_tab_icon_grid",
+            )
+        )
+        if is_tabs_container or is_grid_tab:
+            base["profile_tabs_present"] = True
+        if is_grid_tab:
+            grid_tab_marker = True
+            selected = str(attrs.get("selected") or "").lower() == "true" or str(
+                attrs.get("checked") or ""
+            ).lower() == "true"
+            grid_selected = bool(grid_selected or selected)
+        if bounds and (is_tabs_container or is_grid_tab):
             tabs_bottom = max(tabs_bottom, int(bounds["bottom"]))
-        if not bounds or str(attrs.get("class") or "") not in {
-            "android.widget.ImageView", "android.widget.ImageButton"
-        }:
+        if not bounds:
             continue
         width = int(bounds["right"]) - int(bounds["left"])
         height = int(bounds["bottom"]) - int(bounds["top"])
-        if width < int(ww * 0.18) or width > int(ww * 0.42):
+        if width < int(ww * 0.24) or width > int(ww * 0.38):
             continue
-        if height < int(ww * 0.18) or height > int(ww * 0.48):
+        # The bottom row can be clipped by the viewport on 1-3-post profiles.
+        # Bounds still originate from the XML node; no fixed tap coordinate is
+        # invented here.
+        if height < int(ww * 0.08) or height > int(ww * 0.48):
             continue
-        cells.append({**bounds, "center_x": (bounds["left"] + bounds["right"]) // 2,
-                      "center_y": (bounds["top"] + bounds["bottom"]) // 2})
+        class_name = str(attrs.get("class") or "")
+        resource_id = str(attrs.get("resource-id") or "").lower()
+        content_desc = str(attrs.get("content-desc") or "").lower()
+        post_semantic = any(
+            token in resource_id or token in content_desc
+            for token in ("media", "photo", "post", "thumbnail", "image")
+        )
+        image_class = class_name in {
+            "android.widget.ImageView",
+            "android.widget.ImageButton",
+        }
+        # Generic View/ViewGroup/FrameLayout nodes are common below the tabs
+        # (suggestions, buttons, placeholders).  They are accepted only when
+        # Instagram itself labels them as media/post thumbnails; image classes
+        # are already a positive physical-media signal.
+        if not image_class and not post_semantic:
+            continue
+        raw_cells.append(
+            {
+                **bounds,
+                "center_x": (bounds["left"] + bounds["right"]) // 2,
+                "center_y": (bounds["top"] + bounds["bottom"]) // 2,
+            }
+        )
     out["identity_exact"] = identity_exact
     out["tabs_bottom"] = tabs_bottom
+    out["grid_tab_marker"] = grid_tab_marker
     if identity_exact and bool(base.get("profile_tabs_present")) and bool(base.get("empty_marker_xml")):
         out["outcome"] = "no_posts"
+        out["grid_tab_state"] = "empty_grid_positive"
+        out["visible_post_count"] = 0
+        out["physical_cells"] = []
         return out
     if not (identity_exact and tabs_bottom > 0):
         return out
-    below = [cell for cell in cells if int(cell["top"]) >= tabs_bottom + 16]
+    below = [cell for cell in raw_cells if int(cell["top"]) >= tabs_bottom - 4]
     below.sort(key=lambda cell: (int(cell["top"]), int(cell["left"])))
+    deduped: list[dict[str, int]] = []
+    for cell in below:
+        duplicate_index = next(
+            (
+                index
+                for index, prior in enumerate(deduped)
+                if _overlap_ratio(cell, prior) >= 0.82
+            ),
+            None,
+        )
+        if duplicate_index is None:
+            deduped.append(cell)
+            continue
+        prior = deduped[duplicate_index]
+        prior_area = (prior["right"] - prior["left"]) * (prior["bottom"] - prior["top"])
+        cell_area = (cell["right"] - cell["left"]) * (cell["bottom"] - cell["top"])
+        if cell_area > prior_area:
+            deduped[duplicate_index] = cell
+    below = deduped
+    out["physical_cells"] = [dict(cell) for cell in below]
+    out["visible_post_count"] = len(below)
     if not below:
+        return out
+    # A physical post row below the canonical tabs container is a positive grid
+    # state even when this Instagram build omits selected=true on the grid icon.
+    grid_selected = bool(
+        grid_selected
+        or (
+            bool(base.get("profile_tabs_present"))
+            and not bool(base.get("reels_or_tagged_selected"))
+            and len(below) >= 1
+        )
+    )
+    out["grid_selected"] = grid_selected
+    out["grid_tab_state"] = "selected_or_physical_row" if grid_selected else "unproven"
+    if not grid_selected:
         return out
     candidate = below[0]
     safe = _post_follow_likes_evaluate_top_left_post_target(
@@ -22342,6 +22587,12 @@ def _post_follow_post_grid_evidence_from_xml(
         out["post_bounds"] = candidate
         out["tap_safe"] = True
         out["grid_exposure"] = safe.get("grid_exposure")
+        out["physical_row_count"] = len(
+            {
+                int(cell["top"]) // max(1, int(ww * 0.12))
+                for cell in below
+            }
+        )
     return out
 
 
@@ -40313,6 +40564,75 @@ def _post_mute_state_checkpoint(
         safe_to_continue_ui=False,
     )
     if allow_fast_profile_proof and sheet_dismiss_ok is True and cand:
+        proof_ok, proof, proof_age_ms, proof_reject = (
+            _validate_post_mute_sheet_closed_proof(
+                source_profile_username=src,
+                candidate_username=cand,
+                visual_candidate_id=vcid,
+                candidate_context=candidate_context,
+            )
+        )
+        if proof_ok and bool(proof.get("immutable_verdict")):
+            proof_context = {
+                **dict(candidate_context or {}),
+                **dict(proof.get("candidate_context") or {}),
+            }
+            total_ms = round((time.perf_counter() - checkpoint_t0) * 1000.0, 2)
+            log(
+                "info",
+                "post_mute_atomic_verdict_reused",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                candidate_username=cand,
+                proof_age_ms=round(float(proof_age_ms or 0.0), 2),
+                duration_ms=total_ms,
+                dumps=0,
+                screenshots=0,
+                retries=0,
+                fallback_used=False,
+            )
+            log(
+                "info",
+                "post_mute_gap_completed",
+                visual_candidate_id=vcid,
+                source_profile_username=src,
+                target_username=cand,
+                candidate_username=cand,
+                phase="post_mute_checkpoint",
+                blocking_step="immutable_candidate_profile_verdict",
+                surface_type="candidate_profile",
+                action_taken="reuse_atomic_final_mute_close_verdict",
+                duration_ms=total_ms,
+                poll_count=0,
+                sleep_ms=0.0,
+                used_cached_context=True,
+                safe_to_continue_ui=True,
+            )
+            return {
+                "ok": True,
+                "overlay_presses": 0,
+                "navigation_observed": {
+                    "state": NavigationEngineState.CANDIDATE_PROFILE.value,
+                    "confidence": 0.98,
+                    "reason": "atomic_final_mute_close_verdict",
+                },
+                "mute_sheet_still_visible": False,
+                "fast_profile_proof": True,
+                "immutable_verdict": True,
+                "duration_ms": total_ms,
+                "candidate_context": proof_context,
+            }
+        log(
+            "info",
+            "post_mute_atomic_verdict_rejected_fallback_golden",
+            visual_candidate_id=vcid,
+            source_profile_username=src,
+            candidate_username=cand,
+            proof_age_ms=round(float(proof_age_ms or 0.0), 2),
+            rejection_reason=str(proof_reject or ""),
+            fallback_used=True,
+        )
+    if allow_fast_profile_proof and sheet_dismiss_ok is True and cand:
         fast_t0 = time.perf_counter()
         sheet_probe_t0 = time.perf_counter()
         try:
@@ -43341,6 +43661,10 @@ def _mute_engine_v2_dismiss_mute_sheets_level_aware(
     visual_candidate_id: str = "",
     source_profile_username: str = "",
     confirmed_sheet_level: str = "",
+    candidate_username: str = "",
+    candidate_context: dict[str, Any] | None = None,
+    mute_posts_verified: bool = False,
+    mute_stories_verified: bool = False,
 ) -> tuple[bool, float]:
     """Dismiss mute toggles sheet then Following options sheet if still open."""
     t0 = time.perf_counter()
@@ -43485,81 +43809,116 @@ def _mute_engine_v2_dismiss_mute_sheets_level_aware(
             time.sleep(0.22)
         except Exception:
             ok = False
-        fast_ok, fast_meta = _mute_engine_v2_fast_sheet_closed_profile_proof(d)
-        if fast_ok:
-            ms = round((time.perf_counter() - t0) * 1000.0, 2)
+        following_options_fast, following_options_meta = (
+            _mute_engine_v2_fast_following_options_marker(d)
+        )
+        fast_meta = dict(following_options_meta)
+        if following_options_fast:
+            level_after = "following_options"
+            reused_following_options_after_first_back = True
             _record_known_depth(
                 "used",
-                reason="single_back_profile_proven",
-                estimated_gain_ms=800.0,
+                reason="following_options_exact_unfollow_reused",
+                estimated_gain_ms=1200.0,
             )
             try:
                 log(
                     "info",
-                    "mute_sheet_dismiss_sheet_closed_fast_detected",
+                    "mute_dismiss_following_options_light_proof_used",
                     visual_candidate_id=visual_candidate_id,
                     source_profile_username=source_profile_username,
-                    stage="after_first_back",
-                    elapsed_ms=ms,
-                    **fast_meta,
-                )
-                log(
-                    "info",
-                    "mute_sheet_dismiss_fast_path_used",
-                    visual_candidate_id=visual_candidate_id,
-                    source_profile_username=source_profile_username,
-                    stage="after_first_back",
-                    elapsed_ms=ms,
-                    **fast_meta,
-                )
-                log(
-                    "info",
-                    "mute_sheet_dismiss_completed",
-                    visual_candidate_id=visual_candidate_id,
-                    source_profile_username=source_profile_username,
-                    elapsed_ms=ms,
-                    fast_path_used=True,
-                )
-                log(
-                    "info",
-                    "post_mute_sheet_dismiss_completed",
-                    visual_candidate_id=visual_candidate_id,
-                    source_profile_username=source_profile_username,
-                    phase="mute_sheet_dismiss",
-                    blocking_step="dismiss_mute_sheets",
-                    surface_type="candidate_profile",
-                    action_taken="level_aware_back_fast_path",
-                    duration_ms=ms,
-                    poll_count=1,
-                    sleep_ms=220.0,
-                    used_cached_context=False,
-                    safe_to_continue_ui=True,
-                    fast_path_used=True,
+                    sheet_level=level_after,
+                    elapsed_ms=round((time.perf_counter() - t0) * 1000.0, 2),
+                    **following_options_meta,
                 )
             except Exception:
                 pass
-            return True, ms
-        try:
-            log(
-                "info",
-                "mute_sheet_dismiss_fast_path_rejected",
-                visual_candidate_id=visual_candidate_id,
-                source_profile_username=source_profile_username,
-                stage="after_first_back",
-                elapsed_ms=round((time.perf_counter() - t0) * 1000.0, 2),
-                **fast_meta,
-            )
-            log(
-                "info",
-                "mute_sheet_dismiss_full_fallback_used",
-                visual_candidate_id=visual_candidate_id,
-                source_profile_username=source_profile_username,
-                stage="after_first_back",
-                reason=str(fast_meta.get("reason") or "fast_path_not_proven"),
-            )
-        except Exception:
-            pass
-        if (
+        else:
+            fast_ok, fast_meta = _mute_engine_v2_fast_sheet_closed_profile_proof(d)
+            if fast_ok:
+                ms = round((time.perf_counter() - t0) * 1000.0, 2)
+                _record_known_depth(
+                    "used",
+                    reason="single_back_profile_proven",
+                    estimated_gain_ms=800.0,
+                )
+                try:
+                    log(
+                        "info",
+                        "mute_sheet_dismiss_sheet_closed_fast_detected",
+                        visual_candidate_id=visual_candidate_id,
+                        source_profile_username=source_profile_username,
+                        stage="after_first_back",
+                        elapsed_ms=ms,
+                        **fast_meta,
+                    )
+                    log(
+                        "info",
+                        "mute_sheet_dismiss_fast_path_used",
+                        visual_candidate_id=visual_candidate_id,
+                        source_profile_username=source_profile_username,
+                        stage="after_first_back",
+                        elapsed_ms=ms,
+                        **fast_meta,
+                    )
+                    log(
+                        "info",
+                        "mute_sheet_dismiss_completed",
+                        visual_candidate_id=visual_candidate_id,
+                        source_profile_username=source_profile_username,
+                        elapsed_ms=ms,
+                        fast_path_used=True,
+                    )
+                    log(
+                        "info",
+                        "post_mute_sheet_dismiss_completed",
+                        visual_candidate_id=visual_candidate_id,
+                        source_profile_username=source_profile_username,
+                        phase="mute_sheet_dismiss",
+                        blocking_step="dismiss_mute_sheets",
+                        surface_type="candidate_profile",
+                        action_taken="level_aware_back_fast_path",
+                        duration_ms=ms,
+                        poll_count=1,
+                        sleep_ms=220.0,
+                        used_cached_context=False,
+                        safe_to_continue_ui=True,
+                        fast_path_used=True,
+                    )
+                except Exception:
+                    pass
+                _publish_post_mute_verdict_at_final_sheet_close(
+                    d,
+                    source_profile_username=source_profile_username,
+                    candidate_username=candidate_username,
+                    visual_candidate_id=visual_candidate_id,
+                    candidate_context=candidate_context,
+                    mute_posts_verified=mute_posts_verified,
+                    mute_stories_verified=mute_stories_verified,
+                    started_at=t0,
+                )
+                return True, ms
+            try:
+                log(
+                    "info",
+                    "mute_sheet_dismiss_fast_path_rejected",
+                    visual_candidate_id=visual_candidate_id,
+                    source_profile_username=source_profile_username,
+                    stage="after_first_back",
+                    elapsed_ms=round((time.perf_counter() - t0) * 1000.0, 2),
+                    **fast_meta,
+                )
+                log(
+                    "info",
+                    "mute_sheet_dismiss_full_fallback_used",
+                    visual_candidate_id=visual_candidate_id,
+                    source_profile_username=source_profile_username,
+                    stage="after_first_back",
+                    reason=str(fast_meta.get("reason") or "fast_path_not_proven"),
+                )
+            except Exception:
+                pass
+        if level_after is None and (
             str(fast_meta.get("reason") or "") == "following_options_still_visible"
             and bool(fast_meta.get("following_options_marker_visible"))
             and not bool(fast_meta.get("toggles_visible"))
@@ -43578,7 +43937,7 @@ def _mute_engine_v2_dismiss_mute_sheets_level_aware(
                 )
             except Exception:
                 pass
-        else:
+        elif level_after is None:
             _record_known_depth(
                 "rejected",
                 reason=str(fast_meta.get("reason") or "known_depth_not_proven"),
@@ -43726,6 +44085,16 @@ def _mute_engine_v2_dismiss_mute_sheets_level_aware(
                 )
             except Exception:
                 pass
+            _publish_post_mute_verdict_at_final_sheet_close(
+                d,
+                source_profile_username=source_profile_username,
+                candidate_username=candidate_username,
+                visual_candidate_id=visual_candidate_id,
+                candidate_context=candidate_context,
+                mute_posts_verified=mute_posts_verified,
+                mute_stories_verified=mute_stories_verified,
+                started_at=t0,
+            )
             return True, ms
         if reused_following_options_after_first_back:
             ms = round((time.perf_counter() - t0) * 1000.0, 2)
@@ -44594,6 +44963,29 @@ def _mute_engine_v2_fast_sheet_closed_profile_proof(d: u2.Device) -> tuple[bool,
     return True, out
 
 
+def _mute_engine_v2_fast_following_options_marker(
+    d: u2.Device,
+) -> tuple[bool, dict[str, Any]]:
+    """Cheap exact proof for the known intermediate sheet after the first Back."""
+    t0 = time.perf_counter()
+    try:
+        # Require a literal boolean from uiautomator2. Mock-like/truthy objects
+        # must never be promoted to a production UI proof.
+        visible = d(text="Unfollow").exists(timeout=0.02) is True
+    except Exception:
+        visible = False
+    return bool(visible), {
+        "following_options_marker_visible": bool(visible),
+        "selector": "exact_text_unfollow",
+        "duration_ms": round((time.perf_counter() - t0) * 1000.0, 2),
+        "reason": (
+            "following_options_exact_unfollow_visible"
+            if visible
+            else "following_options_exact_unfollow_absent"
+        ),
+    }
+
+
 def _mute_engine_v2_dismiss_mute_sheet(
     d: u2.Device,
     *,
@@ -45404,6 +45796,7 @@ def run_mute_engine_v2(
     follower_username: str,
     follow_state_after: str,
     det_hint: dict[str, Any] | None,
+    candidate_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Short, non-exploratory mute after verified follow. No return_to_followers_list,
@@ -45460,6 +45853,8 @@ def run_mute_engine_v2(
         result: str,
         skip_reason: str | None = None,
         confirmed_sheet_level: str = "",
+        mute_posts_verified: bool = False,
+        mute_stories_verified: bool = False,
     ) -> None:
         try:
             _dismiss_ok, _dismiss_ms = _mute_engine_v2_dismiss_mute_sheets_level_aware(
@@ -45467,6 +45862,10 @@ def run_mute_engine_v2(
                 visual_candidate_id=vcid,
                 source_profile_username=src,
                 confirmed_sheet_level=confirmed_sheet_level,
+                candidate_username=str(follower_username or "").strip(),
+                candidate_context=candidate_context,
+                mute_posts_verified=mute_posts_verified,
+                mute_stories_verified=mute_stories_verified,
             )
             timings["sheet_dismiss_ms"] = _dismiss_ms
             timings["mute_sheet_dismiss_ok"] = bool(_dismiss_ok)
@@ -46689,6 +47088,8 @@ def run_mute_engine_v2(
                 result="success",
                 skip_reason="",
                 confirmed_sheet_level="mute_toggles",
+                mute_posts_verified=True,
+                mute_stories_verified=True,
             )
             _emit_final_mute_state("final_mute_state_verified")
             log(
@@ -46853,6 +47254,8 @@ def run_mute_engine_v2(
             result="success",
             skip_reason="",
             confirmed_sheet_level="mute_toggles",
+            mute_posts_verified=bool(posts_ok),
+            mute_stories_verified=bool(stories_ok),
         )
         _emit_final_mute_state("final_mute_state_verified")
         log(
@@ -51555,6 +51958,7 @@ def run_visual_candidate_post_follow_phase(
             follower_username=cand,
             follow_state_after=fs_after,
             det_hint=det_use if isinstance(det_use, dict) else None,
+            candidate_context=candidate_profile_context,
         )
         outcome = str(v2.get("outcome") or "")
         mute_out = {
@@ -52651,6 +53055,7 @@ def acquire_pre_follow_mono_capture(
     t0 = time.perf_counter()
     xml = str(d.dump_hierarchy(compressed=False) or "")
     labels: list[str] = []
+    resource_ids: list[str] = []
     follow_bounds: dict[str, int] | None = None
     try:
         root = ET.fromstring(xml)
@@ -52659,21 +53064,52 @@ def acquire_pre_follow_mono_capture(
                 value = str(node.attrib.get(attr) or "").strip()
                 if value:
                     labels.append(value)
-                    if value in {"Follow", "Suivre"} and follow_bounds is None:
+                    if value.strip() in {"Follow", "Suivre"} and follow_bounds is None:
                         follow_bounds = _parse_ui_bounds_str(
                             str(node.attrib.get("bounds") or "")
                         )
+            rid = str(node.attrib.get("resource-id") or "").strip()
+            if rid:
+                resource_ids.append(rid)
+                if (
+                    rid.endswith(":id/profile_header_follow_button")
+                    and follow_bounds is None
+                ):
+                    follow_bounds = _parse_ui_bounds_str(
+                        str(node.attrib.get("bounds") or "")
+                    )
     except Exception:
         return {"ok": False, "reason": "xml_parse_failed", "dump_count": 1,
                 "duration_ms": round((time.perf_counter() - t0) * 1000.0, 2)}
     expected = _norm_follow_username(follower_username)
-    normalized = {_norm_follow_username(value) for value in labels}
-    exact_identity = bool(expected and expected in normalized)
-    follow_cta = "Follow" in labels or "Suivre" in labels
-    profile_surface = (
-        ("Followers" in labels or "Abonnés" in labels)
-        and ("Following" in labels or "Abonnements" in labels)
-        and ("Posts" in labels or "Publications" in labels)
+    normalized_tokens = {
+        _norm_follow_username(token)
+        for value in labels
+        for token in re.split(r"[^A-Za-z0-9._]+", value)
+        if token
+    }
+    exact_identity = bool(expected and expected in normalized_tokens)
+    labels_lower = [value.lower() for value in labels]
+    resource_lower = [value.lower() for value in resource_ids]
+    exact_follow_label = any(value.strip() in {"Follow", "Suivre"} for value in labels)
+    follow_button_rid = any(
+        value.endswith(":id/profile_header_follow_button") for value in resource_ids
+    )
+    follow_cta = bool(exact_follow_label and (follow_bounds or follow_button_rid))
+    stat_kinds = {
+        kind
+        for kind, tokens in {
+            "posts": ("posts", "publications"),
+            "followers": ("followers", "abonnés", "abonnes"),
+            "following": ("following", "abonnements"),
+        }.items()
+        if any(any(token in label for token in tokens) for label in labels_lower)
+    }
+    profile_header_rid = any("profile_header" in value for value in resource_lower)
+    profile_tabs_rid = any("profile_tabs_container" in value for value in resource_lower)
+    profile_surface = bool(
+        len(stat_kinds) >= 2
+        or (profile_header_rid and (follow_button_rid or profile_tabs_rid))
     )
     private_markers = (
         "This account is private", "Ce compte est privé",
@@ -52711,6 +53147,11 @@ def acquire_pre_follow_mono_capture(
         "duration_ms": round((time.perf_counter() - t0) * 1000.0, 2),
         "exact_identity": exact_identity,
         "profile_surface": profile_surface,
+        "profile_surface_signals": {
+            "stat_kinds": sorted(stat_kinds),
+            "profile_header_resource": profile_header_rid,
+            "profile_tabs_resource": profile_tabs_rid,
+        },
         "follow_cta_positive": follow_cta,
         "follow_cta_bounds": follow_bounds,
         "package": current_package,
